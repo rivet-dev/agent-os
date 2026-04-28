@@ -223,10 +223,16 @@ struct JsBridgeVirtualStat {
     is_symbolic_link: bool,
     #[serde(alias = "atime_ms")]
     atime_ms: u64,
+    #[serde(default, alias = "atime_nsec")]
+    atime_nsec: u32,
     #[serde(alias = "mtime_ms")]
     mtime_ms: u64,
+    #[serde(default, alias = "mtime_nsec")]
+    mtime_nsec: u32,
     #[serde(alias = "ctime_ms")]
     ctime_ms: u64,
+    #[serde(default, alias = "ctime_nsec")]
+    ctime_nsec: u32,
     #[serde(alias = "birthtime_ms")]
     birthtime_ms: u64,
     ino: u64,
@@ -246,8 +252,11 @@ impl From<JsBridgeVirtualStat> for VirtualStat {
             is_directory: stat.is_directory,
             is_symbolic_link: stat.is_symbolic_link,
             atime_ms: stat.atime_ms,
+            atime_nsec: stat.atime_nsec,
             mtime_ms: stat.mtime_ms,
+            mtime_nsec: stat.mtime_nsec,
             ctime_ms: stat.ctime_ms,
+            ctime_nsec: stat.ctime_nsec,
             birthtime_ms: stat.birthtime_ms,
             ino: stat.ino,
             nlink: stat.nlink,

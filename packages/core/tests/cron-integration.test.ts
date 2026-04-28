@@ -41,7 +41,6 @@ class MockScheduleDriver implements ScheduleDriver {
 // ---------------------------------------------------------------------------
 
 import {
-	hasRegistryCommands,
 	REGISTRY_SOFTWARE,
 } from "./helpers/registry-commands.js";
 
@@ -53,7 +52,7 @@ describe("cron integration via AgentOs API", () => {
 		driver = new MockScheduleDriver();
 		vm = await AgentOs.create({
 			scheduleDriver: driver,
-			...(hasRegistryCommands ? { software: REGISTRY_SOFTWARE } : {}),
+			software: REGISTRY_SOFTWARE,
 		});
 	});
 
@@ -61,9 +60,7 @@ describe("cron integration via AgentOs API", () => {
 		await vm.dispose();
 	});
 
-	it.skipIf(!hasRegistryCommands)(
-		"scheduleCron with exec action writes file inside VM on schedule",
-		async () => {
+	it("scheduleCron with exec action writes file inside VM on schedule", async () => {
 			vm.scheduleCron({
 				id: "exec-job",
 				schedule: "* * * * *",
@@ -78,12 +75,9 @@ describe("cron integration via AgentOs API", () => {
 			const data = await vm.readFile("/tmp/cron-marker");
 			const text = new TextDecoder().decode(data);
 			expect(text).toContain("cron-wrote-this");
-		},
-	);
+	});
 
-	it.skipIf(!hasRegistryCommands)(
-		"scheduleCron with exec action preserves shell cwd semantics",
-		async () => {
+	it("scheduleCron with exec action preserves shell cwd semantics", async () => {
 			vm.scheduleCron({
 				id: "exec-cwd-job",
 				schedule: "* * * * *",
@@ -99,8 +93,7 @@ describe("cron integration via AgentOs API", () => {
 			const data = await vm.readFile("/tmp/cron-cwd/marker.txt");
 			const text = new TextDecoder().decode(data);
 			expect(text).toBe("from-cron");
-		},
-	);
+	});
 
 	it("scheduleCron with callback action invokes function", async () => {
 		const fn = vi.fn();

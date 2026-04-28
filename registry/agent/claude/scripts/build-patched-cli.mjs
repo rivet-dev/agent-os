@@ -187,10 +187,10 @@ const patches = [
 			'else if(w7.isSandboxingEnabled())if(process.env.CLAUDE_CODE_SKIP_SANDBOX_INIT==="1")process.stderr.write("[agent-os-claude] sandbox_init_skipped\\n");else try{process.stderr.write("[agent-os-claude] before_sandbox_init\\n");await w7.initialize(w.createSandboxAskCallback());process.stderr.write("[agent-os-claude] after_sandbox_init\\n")}catch(x){process.stderr.write(`\n❌ Sandbox Error: ${i6(x)}\n`),iK(1,"other");return}',
 	},
 	{
-		name: "disable stream-json hook event forwarding when requested",
+		name: "gate stream-json hook event forwarding behind opt-out env var",
 		needle: 'if($.outputFormat==="stream-json"&&$.verbose)JMK((x)=>{',
 		replacement:
-			'if($.outputFormat==="stream-json"&&$.verbose&&false)JMK((x)=>{',
+			'if($.outputFormat==="stream-json"&&$.verbose&&process.env.AGENT_OS_CLAUDE_DISABLE_HOOK_EVENTS!=="1")JMK((x)=>{',
 	},
 	{
 		name: "trace before loadInitialMessages",
@@ -293,6 +293,19 @@ patched = patched.replace(
 	"__agentOsTrimStderr($1)",
 );
 patched = patched.replace(/\bNkq\(/g, "__agentOsRealpath(");
+
+const streamJsonHookGuard =
+	'if($.outputFormat==="stream-json"&&$.verbose&&process.env.AGENT_OS_CLAUDE_DISABLE_HOOK_EVENTS!=="1")JMK((x)=>{';
+if (!patched.includes(streamJsonHookGuard)) {
+	throw new Error(
+		"Patched Claude CLI is missing the AGENT_OS_CLAUDE_DISABLE_HOOK_EVENTS guard",
+	);
+}
+if (patched.includes('if($.outputFormat==="stream-json"&&$.verbose&&false)JMK((x)=>{')) {
+	throw new Error(
+		"Patched Claude CLI still contains the disabled stream-json hook-event kill-switch",
+	);
+}
 
 const sdkNeedle =
 	'function y1($=AL){let X=new AbortController;return ML($,X.signal),X}';

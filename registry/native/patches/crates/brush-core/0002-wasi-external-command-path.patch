@@ -1,0 +1,13 @@
+--- a/src/commands.rs
++++ b/src/commands.rs
+@@ -348,9 +348,6 @@
+         };
+ 
+         if let Some(path) = path {
+-            #[cfg(target_os = "wasi")]
+-            let executable_path = cmd_context.command_name.clone();
+-            #[cfg(not(target_os = "wasi"))]
+             let executable_path = {
+                 let resolved_path = path.to_string_lossy();
+                 resolved_path.into_owned()
+             };

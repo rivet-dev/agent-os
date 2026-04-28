@@ -1,10 +1,10 @@
 /**
  * E2E test: Next.js build through kernel.
  *
- * Verifies that 'next build' completes through the kernel on a minimal
- * Next.js project, proving the kernel can handle a complex real-world
+ * Verifies that 'next build' completes through the kernel on the repo-owned
+ * Next.js fixture, proving the kernel can handle a complex real-world
  * build pipeline:
- *   1. Host-side npm install populates node_modules
+ *   1. Host-side package install populates node_modules
  *   2. NodeFileSystem mounts the project into the kernel
  *   3. kernel.exec('npx next build') runs Next.js through kernel
  *   4. Build output directory exists after completion
@@ -12,15 +12,17 @@
  * Known workarounds applied:
  *   - NEXT_DISABLE_SWC=1: SWC is a native .node addon that the sandbox
  *     blocks (ERR_MODULE_ACCESS_NATIVE_ADDON), so we force Babel fallback
- *   - output:'export' in next.config: produces static output for simpler build
+ *   - The checked-in fixture writes normal Next.js build output to `.next`
  */
 
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { cp, mkdtemp, rm } from 'node:fs/promises';
 import { execSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  describeIf,
   COMMANDS_DIR,
   createKernel,
   NodeFileSystem,
@@ -30,6 +32,8 @@ import {
 } from './helpers.ts';
 
 const wasmSkip = skipUnlessWasmBuilt();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const NEXTJS_FIXTURE_DIR = path.resolve(__dirname, '../projects/nextjs-pass');
 
 /** Check if npm registry is reachable (5s timeout). */
 async function checkNetwork(): Promise<string | false> {
@@ -49,69 +53,21 @@ async function checkNetwork(): Promise<string | false> {
 
 const skipReason = wasmSkip || (await checkNetwork());
 
-describe.skipIf(skipReason)('e2e Next.js build through kernel', () => {
+describeIf(!skipReason, 'e2e Next.js build through kernel', () => {
   let tempDir: string;
 
-  // Set up minimal Next.js project and install dependencies on host
+  // Copy the checked-in fixture so the build can mutate /.next without touching the repo.
   beforeAll(async () => {
     tempDir = await mkdtemp(path.join(tmpdir(), 'kernel-nextjs-build-'));
+    await cp(NEXTJS_FIXTURE_DIR, tempDir, { recursive: true });
 
-    // Minimal package.json with Next.js
-    await writeFile(
-      path.join(tempDir, 'package.json'),
-      JSON.stringify({
-        name: 'test-nextjs-build',
-        private: true,
-        dependencies: {
-          next: '^14',
-          react: '^18',
-          'react-dom': '^18',
-        },
-      }),
-    );
-
-    // next.config.js with static export mode
-    await writeFile(
-      path.join(tempDir, 'next.config.js'),
-      `/** @type {import('next').NextConfig} */
-module.exports = {
-  output: 'export',
-};
-`,
-    );
-
-    // Minimal App Router structure
-    await mkdir(path.join(tempDir, 'app'), { recursive: true });
-
-    // Root layout (required by App Router)
-    await writeFile(
-      path.join(tempDir, 'app', 'layout.tsx'),
-      `export default function RootLayout({ children }: { children: React.ReactNode }) {
-  return (
-    <html lang="en">
-      <body>{children}</body>
-    </html>
-  );
-}
-`,
-    );
-
-    // Simple page component
-    await writeFile(
-      path.join(tempDir, 'app', 'page.tsx'),
-      `export default function Home() {
-  return <h1>Hello World</h1>;
-}
-`,
-    );
-
-    // Host-side npm install to populate node_modules
-    execSync('npm install --ignore-scripts', {
+    // Match the registry fixture install path instead of doing a slow ad hoc npm install.
+    execSync('pnpm install --ignore-workspace --prefer-offline', {
       cwd: tempDir,
       stdio: 'pipe',
-      timeout: 120_000,
+      timeout: 60_000,
     });
-  }, 180_000);
+  }, 90_000);
 
   afterAll(async () => {
     if (tempDir) {
@@ -145,7 +101,8 @@ module.exports = {
 
         expect(result.exitCode).toBe(0);
 
-        // Static export mode writes to out/ directory
+        // Some fixtures may emit a static export, but the checked-in Next.js
+        // kernel fixture currently writes its build artifacts to `.next`.
         const outExists = await vfs
           .stat('/out')
           .then(() => true)

@@ -84,7 +84,13 @@ export type NetworkPermissions =
 export type ChildProcessPermissions =
 	| PermissionMode
 	| RulePermissions<PatternPermissionRule>;
+export type ProcessPermissions =
+	| PermissionMode
+	| RulePermissions<PatternPermissionRule>;
 export type EnvPermissions =
+	| PermissionMode
+	| RulePermissions<PatternPermissionRule>;
+export type ToolPermissions =
 	| PermissionMode
 	| RulePermissions<PatternPermissionRule>;
 
@@ -179,7 +185,9 @@ export interface Permissions {
 	fs?: FsPermissions;
 	network?: NetworkPermissions;
 	childProcess?: ChildProcessPermissions;
+	process?: ProcessPermissions;
 	env?: EnvPermissions;
+	tool?: ToolPermissions;
 }
 
 export interface ResourceBudgets {

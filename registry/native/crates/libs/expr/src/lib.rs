@@ -26,11 +26,18 @@ pub fn main(args: Vec<OsString>) -> i32 {
     match parser.parse_or() {
         Ok(val) => {
             if parser.pos < parser.tokens.len() {
-                eprintln!("expr: syntax error: unexpected argument '{}'", parser.tokens[parser.pos]);
+                eprintln!(
+                    "expr: syntax error: unexpected argument '{}'",
+                    parser.tokens[parser.pos]
+                );
                 return 2;
             }
             println!("{}", val);
-            if val.is_null() { 1 } else { 0 }
+            if val.is_null() {
+                1
+            } else {
+                0
+            }
         }
         Err(msg) => {
             eprintln!("expr: {}", msg);
@@ -101,7 +108,10 @@ impl Parser {
     fn expect(&mut self, expected: &str) -> Result<(), String> {
         match self.next() {
             Some(tok) if tok == expected => Ok(()),
-            Some(tok) => Err(format!("syntax error: expected '{}', got '{}'", expected, tok)),
+            Some(tok) => Err(format!(
+                "syntax error: expected '{}', got '{}'",
+                expected, tok
+            )),
             None => Err(format!("syntax error: expected '{}'", expected)),
         }
     }

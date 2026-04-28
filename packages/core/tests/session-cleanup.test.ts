@@ -1,7 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { createServer } from "node:http";
+import {
+	createServer,
+	type IncomingMessage,
+	type ServerResponse,
+} from "node:http";
 import { readlink, readdir } from "node:fs/promises";
-import type { AddressInfo, Socket } from "node:net";
 import { resolve } from "node:path";
 import claude from "@rivet-dev/agent-os-claude";
 import codex from "@rivet-dev/agent-os-codex-agent";
@@ -10,6 +13,7 @@ import pi from "@rivet-dev/agent-os-pi";
 import piCli from "@rivet-dev/agent-os-pi-cli";
 import { describe, expect, test } from "vitest";
 import { AgentOs } from "../src/agent-os.js";
+import { NativeSidecarKernelProxy } from "../src/sidecar/rpc-client.js";
 import { getAgentOsKernel } from "../src/test/runtime.js";
 import type { SidecarSessionState } from "../src/sidecar/rpc-client.js";
 import {
@@ -27,7 +31,6 @@ import {
 } from "./helpers/openai-responses-mock.js";
 import {
 	REGISTRY_SOFTWARE,
-	registrySkipReason,
 } from "./helpers/registry-commands.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
@@ -170,27 +173,12 @@ const REGISTRY_AGENTS: SessionCleanupAgent[] = [
 	},
 ];
 
-async function waitFor<T>(
-	read: () => Promise<T> | T,
-	options?: {
-		timeoutMs?: number;
-		intervalMs?: number;
-		isReady?: (value: T) => boolean;
-	},
-): Promise<T> {
-	const timeoutMs = options?.timeoutMs ?? 20_000;
-	const intervalMs = options?.intervalMs ?? 50;
-	const isReady = options?.isReady ?? ((value: T) => Boolean(value));
-	const deadline = Date.now() + timeoutMs;
-	let lastValue = await read();
-	while (!isReady(lastValue)) {
-		if (Date.now() >= deadline) {
-			throw new Error("timed out waiting for expected state");
-		}
-		await new Promise((resolve) => setTimeout(resolve, intervalMs));
-		lastValue = await read();
-	}
-	return lastValue;
+const CODEX_CLEANUP_AGENT = REGISTRY_AGENTS.find(
+	(agent) => agent.agentType === "codex",
+);
+
+if (!CODEX_CLEANUP_AGENT) {
+	throw new Error("missing Codex cleanup agent fixture");
 }
 
 async function createVmPiHome(vm: AgentOs, mockUrl: string): Promise<string> {
@@ -227,8 +215,34 @@ type SidecarBackdoor = AgentOs & {
 			vm: unknown,
 			sessionId: string,
 		): Promise<SidecarSessionState>;
+		getProcessSnapshot(
+			session: unknown,
+			vm: unknown,
+		): Promise<
+			Array<{
+				pid: number;
+				ppid: number;
+				status: "running" | "exited" | "stopped";
+			}>
+		>;
+		getZombieTimerCount(
+			session: unknown,
+			vm: unknown,
+		): Promise<{ count: number }>;
+		closeAgentSession(
+			session: unknown,
+			vm: unknown,
+			sessionId: string,
+		): Promise<void>;
 	};
+	_closedSessionIds: {
+		has(sessionId: string): boolean;
+		size: number;
+		limit: number;
+	};
+	_sessions: Map<string, unknown>;
 	_sessionClosePromises: Map<string, Promise<void>>;
+	_closeSessionInternal(sessionId: string): Promise<void>;
 	_sidecarSession: unknown;
 	_sidecarVm: unknown;
 };
@@ -237,6 +251,26 @@ type HostProcessRow = {
 	pid: number;
 	ppid: number;
 };
+
+function stubSessionEntry(sessionId: string): Record<string, unknown> {
+	return {
+		sessionId,
+		agentType: "stub-agent",
+		processId: "",
+		pid: null,
+		closed: false,
+		modes: null,
+		configOptions: [],
+		capabilities: {},
+		agentInfo: null,
+		highestSequenceNumber: null,
+		events: [],
+		eventHandlers: new Set(),
+		permissionHandlers: new Set(),
+		configOverrides: new Map(),
+		pendingPermissionReplies: new Map(),
+	};
+}
 
 async function getSessionState(
 	vm: AgentOs,
@@ -255,6 +289,13 @@ async function closeSessionAndWait(
 	sessionId: string,
 ): Promise<void> {
 	vm.closeSession(sessionId);
+	await waitForTrackedSessionClose(vm, sessionId);
+}
+
+async function waitForTrackedSessionClose(
+	vm: AgentOs,
+	sessionId: string,
+): Promise<void> {
 	const backdoor = vm as SidecarBackdoor;
 	const closePromise = backdoor._sessionClosePromises.get(sessionId);
 	if (closePromise) {
@@ -282,7 +323,13 @@ function readHostProcesses(): HostProcessRow[] {
 }
 
 function collectHostProcessTree(rootPid: number): number[] {
-	const rows = readHostProcesses();
+	return collectProcessTree(readHostProcesses(), rootPid);
+}
+
+function collectProcessTree(
+	rows: HostProcessRow[],
+	rootPid: number,
+): number[] {
 	const byParent = new Map<number, number[]>();
 	for (const row of rows) {
 		const children = byParent.get(row.ppid);
@@ -310,6 +357,50 @@ function collectHostProcessTree(rootPid: number): number[] {
 	return discovered.sort((left, right) => left - right);
 }
 
+async function readKernelProcesses(vm: AgentOs): Promise<HostProcessRow[]> {
+	if (!(getAgentOsKernel(vm) instanceof NativeSidecarKernelProxy)) {
+		return vm.allProcesses().map(({ pid, ppid }) => ({ pid, ppid }));
+	}
+
+	const backdoor = vm as SidecarBackdoor;
+	return (
+		await backdoor._sidecarClient.getProcessSnapshot(
+			backdoor._sidecarSession,
+			backdoor._sidecarVm,
+		)
+	)
+		.filter((process) => process.status !== "exited")
+		.map(({ pid, ppid }) => ({ pid, ppid }));
+}
+
+async function collectKernelProcessTree(
+	vm: AgentOs,
+	rootPid: number,
+): Promise<number[]> {
+	return collectProcessTree(await readKernelProcesses(vm), rootPid);
+}
+
+type SessionProcessTree =
+	| { kind: "kernel"; pids: number[] }
+	| { kind: "host"; pids: number[] };
+
+async function collectSessionProcessTree(
+	vm: AgentOs,
+	rootPid: number,
+): Promise<SessionProcessTree> {
+	const kernelPids = await collectKernelProcessTree(vm, rootPid);
+	if (
+		kernelPids.length > 0 ||
+		getAgentOsKernel(vm) instanceof NativeSidecarKernelProxy
+	) {
+		return { kind: "kernel", pids: kernelPids };
+	}
+	return {
+		kind: "host",
+		pids: collectHostProcessTree(rootPid),
+	};
+}
+
 async function listFdLinks(pid: number): Promise<string[]> {
 	try {
 		const fds = await readdir(`/proc/${pid}/fd`);
@@ -328,7 +419,43 @@ async function listFdLinks(pid: number): Promise<string[]> {
 	}
 }
 
-async function snapshotSessionResources(rootPid: number): Promise<{
+async function snapshotSessionResources(
+	vm: AgentOs,
+	rootPid: number,
+): Promise<{
+	kind: "kernel" | "host";
+	pids: number[];
+	fdLinks: string[];
+	socketLinks: string[];
+}> {
+	const tree = await collectSessionProcessTree(vm, rootPid);
+	const pids = tree.pids;
+	const links = (await Promise.all(pids.map((pid) => listFdLinks(pid)))).flat();
+	return {
+		kind: tree.kind,
+		pids,
+		fdLinks: links,
+		socketLinks: links.filter((link) => link.startsWith("socket:[")),
+	};
+}
+
+async function snapshotVmResources(vm: AgentOs): Promise<{
+	pids: number[];
+	processCount: number;
+	fdCount: number;
+	socketCount: number;
+}> {
+	const pids = [...new Set((await readKernelProcesses(vm)).map(({ pid }) => pid))];
+	const links = (await Promise.all(pids.map((pid) => listFdLinks(pid)))).flat();
+	return {
+		pids,
+		processCount: pids.length,
+		fdCount: links.length,
+		socketCount: links.filter((link) => link.startsWith("socket:[")).length,
+	};
+}
+
+async function snapshotHostProcessResources(rootPid: number): Promise<{
 	pids: number[];
 	fdLinks: string[];
 	socketLinks: string[];
@@ -342,26 +469,43 @@ async function snapshotSessionResources(rootPid: number): Promise<{
 	};
 }
 
-function zombieTimerCount(vm: AgentOs): number {
-	return getAgentOsKernel(vm).zombieTimerCount;
+async function zombieTimerCount(vm: AgentOs): Promise<number> {
+	if (!(getAgentOsKernel(vm) instanceof NativeSidecarKernelProxy)) {
+		return getAgentOsKernel(vm).zombieTimerCount;
+	}
+
+	const backdoor = vm as SidecarBackdoor;
+	return (
+		await backdoor._sidecarClient.getZombieTimerCount(
+			backdoor._sidecarSession,
+			backdoor._sidecarVm,
+		)
+	).count;
 }
 
-async function waitForSessionResources(
+async function assertSessionResourcesReleased(
 	rootPids: number[],
 	baselineZombieTimers: number,
 	vm: AgentOs,
+	baselineVmResources: {
+		processCount: number;
+		fdCount: number;
+		socketCount: number;
+	},
 ): Promise<void> {
-	return waitFor(
-		() => ({
-			pids: rootPids.filter((pid) => collectHostProcessTree(pid).length > 0),
-			zombieTimers: zombieTimerCount(vm),
-		}),
-		{
-			timeoutMs: 30_000,
-			isReady: ({ pids, zombieTimers }) =>
-				pids.length === 0 && zombieTimers === baselineZombieTimers,
-		},
-	).then(() => undefined);
+	const snapshots = await Promise.all(
+		rootPids.map((pid) => snapshotSessionResources(vm, pid)),
+	);
+	for (const snapshot of snapshots) {
+		expect(snapshot.pids).toHaveLength(0);
+		expect(snapshot.fdLinks).toHaveLength(0);
+		expect(snapshot.socketLinks).toHaveLength(0);
+	}
+	const vmResources = await snapshotVmResources(vm);
+	expect(vmResources.processCount).toBe(baselineVmResources.processCount);
+	expect(vmResources.fdCount).toBe(baselineVmResources.fdCount);
+	expect(vmResources.socketCount).toBe(baselineVmResources.socketCount);
+	expect(await zombieTimerCount(vm)).toBe(baselineZombieTimers);
 }
 
 function uniqueSessionRootPids(sessionStates: Array<{ pid?: number }>): number[] {
@@ -390,6 +534,27 @@ function isSharedRuntimeCloseRaceError(error: unknown): boolean {
 		"Broken pipe (os error 32)",
 		"timed out waiting for sidecar protocol frame for close_agent_session",
 	].some((fragment) => error.message.includes(fragment));
+}
+
+function createDeferredSignal(): {
+	resolve: () => void;
+	wait: () => Promise<void>;
+} {
+	let ready = false;
+	let resolvePromise!: () => void;
+	const promise = new Promise<void>((resolve) => {
+		resolvePromise = () => {
+			if (ready) {
+				return;
+			}
+			ready = true;
+			resolve();
+		};
+	});
+	return {
+		resolve: resolvePromise,
+		wait: () => (ready ? Promise.resolve() : promise),
+	};
 }
 
 async function createTextMock(mockKind: MockKind): Promise<{
@@ -434,50 +599,167 @@ async function createTextMock(mockKind: MockKind): Promise<{
 	};
 }
 
+async function readJsonBody(
+	req: IncomingMessage,
+): Promise<Record<string, unknown>> {
+	const chunks: Buffer[] = [];
+	for await (const chunk of req) {
+		chunks.push(Buffer.from(chunk));
+	}
+	return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<
+		string,
+		unknown
+	>;
+}
+
+function anthropicTextContent(content: unknown): string {
+	if (typeof content === "string") {
+		return content;
+	}
+	if (!Array.isArray(content)) {
+		return "";
+	}
+	return content
+		.map((block) => {
+			if (!block || typeof block !== "object") {
+				return "";
+			}
+			const textBlock = block as { type?: unknown; text?: unknown };
+			return textBlock.type === "text" && typeof textBlock.text === "string"
+				? textBlock.text
+				: "";
+		})
+		.join("");
+}
+
+function getLastAnthropicUserText(body: Record<string, unknown>): string {
+	const messages = body.messages;
+	if (!Array.isArray(messages)) {
+		return "";
+	}
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index];
+		if (!message || typeof message !== "object") {
+			continue;
+		}
+		const chatMessage = message as { role?: unknown; content?: unknown };
+		if (chatMessage.role === "user") {
+			return anthropicTextContent(chatMessage.content);
+		}
+	}
+	return "";
+}
+
+function writeAnthropicTextResponse(
+	res: ServerResponse,
+	content: string,
+): void {
+	const body = JSON.stringify({
+		id: "msg_cleanup_text",
+		type: "message",
+		role: "assistant",
+		content: [
+			{
+				type: "text",
+				text: content,
+			},
+		],
+		model: "claude-sonnet-4-20250514",
+		stop_reason: "end_turn",
+		stop_sequence: null,
+		usage: {
+			input_tokens: 0,
+			output_tokens: 0,
+		},
+	});
+	res.writeHead(200, {
+		"content-type": "application/json",
+		"content-length": Buffer.byteLength(body),
+	});
+	res.end(body);
+}
+
+function writeJson(
+	res: ServerResponse,
+	statusCode: number,
+	body: Record<string, unknown>,
+): void {
+	const payload = JSON.stringify(body);
+	res.writeHead(statusCode, {
+		"content-type": "application/json",
+		"content-length": Buffer.byteLength(payload),
+	});
+	res.end(payload);
+}
+
+function writeJsonError(
+	res: ServerResponse,
+	statusCode: number,
+	body: Record<string, unknown>,
+): void {
+	const payload = JSON.stringify(body);
+	res.writeHead(statusCode, {
+		"content-type": "application/json",
+		"content-length": Buffer.byteLength(payload),
+	});
+	res.end(payload);
+}
+
 async function createHangingAnthropicServer(): Promise<{
 	url: string;
 	stop: () => Promise<void>;
 	waitForRequest: () => Promise<void>;
 }> {
-	const sockets = new Set<Socket>();
-	let requestCount = 0;
-	const server = createServer((req) => {
-		requestCount += 1;
-		req.on("data", () => {});
-		req.on("error", () => {});
+	const pendingResponses = new Set<ServerResponse>();
+	const requestSignal = createDeferredSignal();
+	const server = createServer(async (req, res) => {
+		if (req.method !== "POST" || req.url !== "/v1/messages") {
+			writeJsonError(res, 404, { error: "not_found" });
+			return;
+		}
+
+		try {
+			const body = await readJsonBody(req);
+
+			if (getLastAnthropicUserText(body).includes(PROMPT_TEXT)) {
+				requestSignal.resolve();
+				pendingResponses.add(res);
+				const clearPending = () => pendingResponses.delete(res);
+				req.on("close", clearPending);
+				res.on("close", clearPending);
+				return;
+			}
+
+			writeAnthropicTextResponse(res, PROMPT_RESPONSE);
+		} catch (error) {
+			writeJsonError(res, 500, {
+				error: "invalid_request",
+				message: error instanceof Error ? error.message : String(error),
+			});
+		}
 	});
-	server.on("connection", (socket) => {
-		sockets.add(socket);
-		socket.on("close", () => {
-			sockets.delete(socket);
-		});
+
+	await new Promise<void>((resolve) => {
+		server.listen(0, "127.0.0.1", () => resolve());
 	});
-	await new Promise<void>((resolve, reject) => {
-		server.once("error", reject);
-		server.listen(0, "127.0.0.1", () => {
-			server.off("error", reject);
-			resolve();
-		});
-	});
-	const address = server.address() as AddressInfo;
+	server.unref();
+	const address = server.address();
+	if (!address || typeof address === "string") {
+		throw new Error("mock server did not expose a TCP port");
+	}
+
 	return {
 		url: `http://127.0.0.1:${address.port}`,
-		waitForRequest: () =>
-			waitFor(() => requestCount, {
-				timeoutMs: 15_000,
-				isReady: (count) => count > 0,
-			}).then(() => undefined),
+		waitForRequest: requestSignal.wait,
 		stop: async () => {
-			for (const socket of sockets) {
-				socket.destroy();
+			for (const res of pendingResponses) {
+				res.destroy();
 			}
+			server.closeAllConnections?.();
 			await new Promise<void>((resolve, reject) => {
 				server.close((error) => {
-					if (error) {
-						reject(error);
-						return;
-					}
-					resolve();
+					if (error) reject(error);
+					else resolve();
 				});
 			});
 		},
@@ -493,12 +775,18 @@ async function createSlowResponseMock(mockKind: MockKind): Promise<{
 		throw new Error(`slow-response mock is unsupported for ${mockKind}`);
 	}
 
-	const mock = await startResponsesMock([
-		{
-			name: "slow-cleanup-response",
-			predicate: () => true,
-			delayMs: 60_000,
-			response: {
+	const requestSignal = createDeferredSignal();
+	const server = createServer(async (req, res) => {
+		if (req.method !== "POST" || req.url !== "/v1/responses") {
+			writeJson(res, 404, { error: "not_found" });
+			return;
+		}
+
+		try {
+			await readJsonBody(req);
+			requestSignal.resolve();
+			await new Promise((resolve) => setTimeout(resolve, 60_000));
+			writeJson(res, 200, {
 				id: "resp_cleanup_slow",
 				output: [
 					{
@@ -512,18 +800,37 @@ async function createSlowResponseMock(mockKind: MockKind): Promise<{
 						],
 					},
 				],
-			},
-		},
-	]);
+			});
+		} catch (error) {
+			writeJson(res, 500, {
+				error: "invalid_request",
+				message: error instanceof Error ? error.message : String(error),
+			});
+		}
+	});
+
+	await new Promise<void>((resolve) => {
+		server.listen(0, "127.0.0.1", () => resolve());
+	});
+	server.unref();
+
+	const address = server.address();
+	if (!address || typeof address === "string") {
+		throw new Error("mock server did not expose a TCP port");
+	}
 
 	return {
-		url: mock.url,
-		stop: mock.stop,
-		waitForRequest: () =>
-			waitFor(() => mock.requests.length, {
-				timeoutMs: 15_000,
-				isReady: (count) => count > 0,
-			}).then(() => undefined),
+		url: `http://127.0.0.1:${address.port}`,
+		waitForRequest: requestSignal.wait,
+		stop: async () => {
+			server.closeAllConnections?.();
+			await new Promise<void>((resolve, reject) => {
+				server.close((error) => {
+					if (error) reject(error);
+					else resolve();
+				});
+			});
+		},
 	};
 }
 
@@ -540,6 +847,78 @@ async function createActivePromptMock(
 	return createHangingAnthropicServer();
 }
 
+async function assertActivePromptCleanup(
+	agent: SessionCleanupAgent,
+): Promise<void> {
+	const promptMock = await createActivePromptMock(agent);
+	const vm = await agent.createVm(promptMock.url);
+	try {
+		const baselineSessionCount = vm.listSessions().length;
+		const baselineZombieTimers = await zombieTimerCount(vm);
+		const baselineVmResources = await snapshotVmResources(vm);
+		const { sessionId } = await agent.createSession(vm, promptMock.url);
+		const sessionState = await getSessionState(vm, sessionId);
+		expect(sessionState.pid).toBeTypeOf("number");
+
+		const promptPromise = vm.prompt(sessionId, PROMPT_TEXT);
+		await promptMock.waitForRequest();
+		const resourcesBeforeClose = await snapshotHostProcessResources(
+			sessionState.pid!,
+		);
+		expect(resourcesBeforeClose.pids).toContain(sessionState.pid!);
+		expect(resourcesBeforeClose.fdLinks.length).toBeGreaterThan(0);
+		expect(resourcesBeforeClose.socketLinks.length).toBeGreaterThan(0);
+
+		if (agent.activePromptTermination === "cancel_then_close") {
+			const cancelResponse = await vm.cancelSession(sessionId);
+			expect(cancelResponse.error).toBeUndefined();
+		} else {
+			vm.closeSession(sessionId);
+		}
+
+		const promptOutcome = await Promise.race([
+			promptPromise.then(
+				(result) => ({ kind: "resolved" as const, result }),
+				(error) => ({ kind: "rejected" as const, error }),
+			),
+			new Promise<{ kind: "timeout" }>((resolve) =>
+				setTimeout(() => resolve({ kind: "timeout" }), 15_000),
+			),
+		]);
+		expect(promptOutcome.kind).not.toBe("timeout");
+		if (promptOutcome.kind === "resolved") {
+			const stopReason = (
+				promptOutcome.result.response.result as
+					| { stopReason?: string }
+					| undefined
+			)?.stopReason;
+			expect(
+				promptOutcome.result.response.error !== undefined ||
+					stopReason === "cancelled",
+			).toBe(true);
+		} else {
+			expect(promptOutcome.error).toBeInstanceOf(Error);
+		}
+
+		if (agent.activePromptTermination === "cancel_then_close") {
+			await closeSessionAndWait(vm, sessionId);
+		}
+		expect(vm.listSessions()).toHaveLength(baselineSessionCount);
+		expect(
+			vm.listSessions().some((entry) => entry.sessionId === sessionId),
+		).toBe(false);
+		await assertSessionResourcesReleased(
+			[sessionState.pid!],
+			baselineZombieTimers,
+			vm,
+			baselineVmResources,
+		);
+	} finally {
+		await vm.dispose();
+		await promptMock.stop();
+	}
+}
+
 function registerSharedCleanupCoverage(agents: SessionCleanupAgent[]): void {
 	test.each(agents)(
 		"$label closeSession() frees session resources after a completed prompt and is idempotent",
@@ -547,7 +926,9 @@ function registerSharedCleanupCoverage(agents: SessionCleanupAgent[]): void {
 			const mock = await createTextMock(agent.mockKind);
 			const vm = await agent.createVm(mock.url);
 			try {
-				const baselineZombieTimers = zombieTimerCount(vm);
+				const baselineSessionCount = vm.listSessions().length;
+				const baselineZombieTimers = await zombieTimerCount(vm);
+				const baselineVmResources = await snapshotVmResources(vm);
 				const { sessionId } = await agent.createSession(vm, mock.url);
 				const sessionState = await getSessionState(vm, sessionId);
 				expect(sessionState.pid).toBeTypeOf("number");
@@ -555,114 +936,101 @@ function registerSharedCleanupCoverage(agents: SessionCleanupAgent[]): void {
 				const { response, text } = await vm.prompt(sessionId, PROMPT_TEXT);
 				expect(response.error).toBeUndefined();
 				expect(text).toContain(PROMPT_RESPONSE);
+				const resourcesBeforeClose = await snapshotSessionResources(
+					vm,
+					sessionState.pid!,
+				);
+				expect(resourcesBeforeClose.pids).toContain(sessionState.pid!);
+				expect(resourcesBeforeClose.fdLinks.length).toBeGreaterThan(0);
+				const vmResourcesBeforeClose = await snapshotVmResources(vm);
+				expect(vmResourcesBeforeClose.processCount).toBeGreaterThanOrEqual(
+					baselineVmResources.processCount + 1,
+				);
+				expect(vmResourcesBeforeClose.fdCount).toBeGreaterThan(
+					baselineVmResources.fdCount,
+				);
 
 				await closeSessionAndWait(vm, sessionId);
-				await waitForSessionResources(
+				expect(vm.listSessions()).toHaveLength(baselineSessionCount);
+				await assertSessionResourcesReleased(
 					[sessionState.pid!],
 					baselineZombieTimers,
 					vm,
+					baselineVmResources,
 				);
 
 				await expect(closeSessionAndWait(vm, sessionId)).resolves.toBeUndefined();
-				await waitForSessionResources(
+				expect(vm.listSessions()).toHaveLength(baselineSessionCount);
+				await assertSessionResourcesReleased(
 					[sessionState.pid!],
 					baselineZombieTimers,
 					vm,
+					baselineVmResources,
 				);
 			} finally {
 				await vm.dispose();
 				await mock.stop();
 			}
 		},
-		120_000,
+		300_000,
 	);
 
 	test.each(agents)(
 		"$label active-prompt cleanup frees sockets, FDs, and processes",
-		async (agent) => {
-			const promptMock = await createActivePromptMock(agent);
-			const vm = await agent.createVm(promptMock.url);
-			try {
-				const baselineZombieTimers = zombieTimerCount(vm);
-				const { sessionId } = await agent.createSession(vm, promptMock.url);
-				const sessionState = await getSessionState(vm, sessionId);
-				expect(sessionState.pid).toBeTypeOf("number");
-
-				const promptPromise = vm.prompt(sessionId, PROMPT_TEXT);
-				await promptMock.waitForRequest();
-
-				const sessionPids = await waitFor(
-					() => collectHostProcessTree(sessionState.pid!),
-					{
-						isReady: (pids) => pids.length > 0,
-					},
-				);
-				const resourcesBeforeClose = await waitFor(
-					() => snapshotSessionResources(sessionState.pid!),
-					{
-						isReady: (snapshot) => snapshot.socketLinks.length > 0,
-					},
-				);
-				expect(resourcesBeforeClose.pids).toEqual(sessionPids);
-				expect(resourcesBeforeClose.fdLinks.length).toBeGreaterThan(0);
-
-				if (agent.activePromptTermination === "cancel_then_close") {
-					const cancelResponse = await vm.cancelSession(sessionId);
-					expect(cancelResponse.error).toBeUndefined();
-				} else {
-					vm.closeSession(sessionId);
-				}
-
-				const promptOutcome = await Promise.race([
-					promptPromise.then(
-						(result) => ({ kind: "resolved" as const, result }),
-						(error) => ({ kind: "rejected" as const, error }),
-					),
-					new Promise<{ kind: "timeout" }>((resolve) =>
-						setTimeout(() => resolve({ kind: "timeout" }), 15_000),
-					),
-				]);
-				expect(promptOutcome.kind).not.toBe("timeout");
-				if (promptOutcome.kind === "resolved") {
-					const stopReason = (
-						promptOutcome.result.response.result as
-							| { stopReason?: string }
-							| undefined
-					)?.stopReason;
-					expect(
-						promptOutcome.result.response.error !== undefined ||
-							stopReason === "cancelled",
-					).toBe(true);
-				} else {
-					expect(promptOutcome.error).toBeInstanceOf(Error);
-				}
-
-				if (agent.activePromptTermination === "cancel_then_close") {
-					await closeSessionAndWait(vm, sessionId);
-				}
-				await waitForSessionResources(
-					sessionPids,
-					baselineZombieTimers,
-					vm,
-				);
-			} finally {
-				await vm.dispose();
-				await promptMock.stop();
-			}
-		},
-		120_000,
+		async (agent) => assertActivePromptCleanup(agent),
+		300_000,
 	);
 }
 
 describe("session cleanup", () => {
 	registerSharedCleanupCoverage(PI_AGENTS);
 
+	test("closed session tombstones stay bounded across 10,000 sequential closes", async () => {
+		const vm = await AgentOs.create();
+		const backdoor = vm as SidecarBackdoor;
+		const originalCloseAgentSession =
+			backdoor._sidecarClient.closeAgentSession.bind(backdoor._sidecarClient);
+		backdoor._sidecarClient.closeAgentSession = async () => {};
+
+		try {
+			const retentionLimit = backdoor._closedSessionIds.limit;
+			const closedSessionCount = 10_000;
+			expect(retentionLimit).toBeGreaterThan(0);
+			expect(closedSessionCount).toBeGreaterThan(retentionLimit);
+
+			for (let index = 0; index < closedSessionCount; index += 1) {
+				const sessionId = `synthetic-session-${index}`;
+				backdoor._sessions.set(sessionId, stubSessionEntry(sessionId));
+				await backdoor._closeSessionInternal(sessionId);
+			}
+
+			expect(backdoor._closedSessionIds.size).toBeLessThanOrEqual(
+				retentionLimit,
+			);
+
+			const recentSessionId = `synthetic-session-${closedSessionCount - 1}`;
+			expect(backdoor._closedSessionIds.has(recentSessionId)).toBe(true);
+			expect(() => vm.closeSession(recentSessionId)).not.toThrow();
+
+			const evictedSessionId = "synthetic-session-0";
+			expect(backdoor._closedSessionIds.has(evictedSessionId)).toBe(false);
+			expect(() => vm.closeSession(evictedSessionId)).toThrow(
+				`Session not found: ${evictedSessionId}`,
+			);
+		} finally {
+			backdoor._sidecarClient.closeAgentSession = originalCloseAgentSession;
+			await vm.dispose();
+		}
+	}, 30_000);
+
 	test("Pi SDK returns to baseline after five sequential createSession()/closeSession() cycles", async () => {
 		const agent = PI_AGENTS[0];
 		const mock = await createTextMock(agent.mockKind);
 		const vm = await agent.createVm(mock.url);
 		try {
-			const baselineZombieTimers = zombieTimerCount(vm);
+			const baselineSessionCount = vm.listSessions().length;
+			const baselineZombieTimers = await zombieTimerCount(vm);
+			const baselineVmResources = await snapshotVmResources(vm);
 
 			for (let index = 0; index < 5; index += 1) {
 				const { sessionId } = await agent.createSession(vm, mock.url);
@@ -673,10 +1041,12 @@ describe("session cleanup", () => {
 				expect(text).toContain(PROMPT_RESPONSE);
 
 				await closeSessionAndWait(vm, sessionId);
-				await waitForSessionResources(
+				expect(vm.listSessions()).toHaveLength(baselineSessionCount);
+				await assertSessionResourcesReleased(
 					[sessionState.pid!],
 					baselineZombieTimers,
 					vm,
+					baselineVmResources,
 				);
 			}
 		} finally {
@@ -690,7 +1060,9 @@ describe("session cleanup", () => {
 		const mock = await createTextMock(agent.mockKind);
 		const vm = await agent.createVm(mock.url);
 		try {
-			const baselineZombieTimers = zombieTimerCount(vm);
+			const baselineSessionCount = vm.listSessions().length;
+			const baselineZombieTimers = await zombieTimerCount(vm);
+			const baselineVmResources = await snapshotVmResources(vm);
 			const sessions = await Promise.all(
 				Array.from({ length: 3 }, () => agent.createSession(vm, mock.url)),
 			);
@@ -713,14 +1085,28 @@ describe("session cleanup", () => {
 					expect(isSharedRuntimeCloseRaceError(result.reason)).toBe(true);
 				}
 			}
-			await waitForSessionResources(dedicatedSessionPids, baselineZombieTimers, vm);
+			expect(vm.listSessions()).toHaveLength(baselineSessionCount);
+			await assertSessionResourcesReleased(
+				dedicatedSessionPids,
+				baselineZombieTimers,
+				vm,
+				baselineVmResources,
+			);
 		} finally {
 			await vm.dispose();
 			await mock.stop();
 		}
-	}, 120_000);
+	}, 300_000);
 });
 
-describe.skipIf(registrySkipReason)("session cleanup with registry-backed agents", () => {
+describe("session cleanup with registry-backed agents", () => {
 	registerSharedCleanupCoverage(REGISTRY_AGENTS);
+
+	test(
+		"Codex active-prompt cleanup frees sockets, FDs, and processes",
+		async () => {
+			await assertActivePromptCleanup(CODEX_CLEANUP_AGENT);
+		},
+		300_000,
+	);
 });

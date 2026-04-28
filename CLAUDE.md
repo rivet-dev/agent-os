@@ -20,11 +20,14 @@ Agent OS is a **fully virtualized operating system**. The kernel, written as a R
 - **Core package**: `@rivet-dev/agent-os-core` in `packages/core/` -- contains everything (VM ops, ACP client, session management)
 - **Use the renamed core package everywhere**: workspace dependencies and TypeScript subpath imports must reference `@rivet-dev/agent-os-core` (including `@rivet-dev/agent-os-core/internal/runtime-compat` and `@rivet-dev/agent-os-core/test/*`). The legacy `@rivet-dev/agent-os` name is stale and breaks pnpm workspace resolution.
 - **Registry types**: `@rivet-dev/agent-os-registry-types` in `packages/registry-types/` -- shared type definitions for WASM command package descriptors. The registry software packages link to this package. When changing descriptor types, update here and rebuild the registry.
+- **`crates/bridge/` is the browser/native portability seam.** Shared contracts like `ExecutionBridge` and `HostBridge` belong there. Do not treat native-only V8 embedding interfaces as cross-environment portability abstractions.
+- **`crates/execution/` is the native execution implementation, not the portability layer.** Keep browser/native sharing at the `agent-os-bridge` boundary; `crates/sidecar-browser/` should not depend on `crates/execution/`.
 - **npm scope**: `@rivet-dev/agent-os-*`
 - **Actor integration** lives in the Rivet repo at `rivetkit-typescript/packages/rivetkit/src/agent-os/`, not as a separate package
 - **The actor layer must maintain 1:1 feature parity with AgentOs.** Every public method on the `AgentOs` class (`packages/core/src/agent-os.ts`) must have a corresponding actor action in the Rivet repo's `rivetkit-typescript/packages/rivetkit/src/agent-os/`. Subscription methods are wired through actor events. Lifecycle methods are handled by the actor's onSleep/onDestroy hooks. This includes changes to method signatures, option types, return types, and configuration interfaces. **Always ask the user which Rivet repo/path to update** (e.g., `~/r-aos`, `~/r16`, etc.) before making changes there.
 - **The RivetKit driver test suite must have full feature coverage of all agent-os actor actions.** Tests live in the Rivet repo's `rivetkit-typescript/packages/rivetkit/src/driver-test-suite/tests/`. When adding a new actor action, add a corresponding driver test in the same change.
 - **The core quickstart (`examples/quickstart/`) and the RivetKit example (in the Rivet repo at `examples/agent-os/`) must stay in sync.** Both cover the same set of features with identical behavior, just different APIs.
+- **Every quickstart must have a matching automated test landed in parallel.** When adding or changing a quickstart under `examples/quickstart/`, add or update the corresponding test in the same change so the documented path stays truthful.
 
 ## Terminology
 
@@ -114,5 +117,6 @@ pnpm check-types  # turbo run check-types
 pnpm lint         # biome check
 ```
 
-- When changing V8 bridge registration or snapshot bootstrap code under `crates/v8-runtime/`, rebuild `agent-os-v8` before rerunning sidecar V8 integration tests. `cargo test -p agent-os-sidecar` can reuse an older `target/debug/agent-os-v8` binary.
+- CI and release automation must install the pnpm workspace with `--frozen-lockfile`, and any job that runs Rust tests against generated JS assets (for example `v8-bridge.js`) must run `pnpm build` before those cargo steps. Fork pull requests should run the same `pnpm test` command without `AGENTOS_E2E_NETWORK=1`.
+- When changing V8 bridge registration or snapshot bootstrap code under `crates/v8-runtime/`, rebuild `agent-os-v8-runtime` before rerunning sidecar V8 integration tests. `cargo test -p agent-os-sidecar` can otherwise reuse stale embedded-runtime objects from `target/`.
 - The `crates/v8-runtime` snapshot test (`snapshot::tests::snapshot_consolidated_tests`) currently has to run in isolation: use `cargo test -p agent-os-v8-runtime -- --test-threads=1` for the main suite and `cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored` separately until the shared test binary teardown SIGSEGV is fixed.

@@ -44,15 +44,13 @@ pub fn main(args: Vec<OsString>) -> i32 {
                     }
                 }
             }
-            s if s.starts_with("-d") && s.len() > 2 => {
-                match s[2..].parse::<usize>() {
-                    Ok(d) => max_depth = Some(d),
-                    Err(_) => {
-                        eprintln!("du: invalid maximum depth '{}'", &s[2..]);
-                        return 1;
-                    }
+            s if s.starts_with("-d") && s.len() > 2 => match s[2..].parse::<usize>() {
+                Ok(d) => max_depth = Some(d),
+                Err(_) => {
+                    eprintln!("du: invalid maximum depth '{}'", &s[2..]);
+                    return 1;
                 }
-            }
+            },
             // Combined short flags like -sh, -shc
             s if s.starts_with('-') && s.len() > 1 && !s.starts_with("--") => {
                 for ch in s[1..].chars() {
@@ -143,7 +141,14 @@ fn walk_du<W: Write>(
                             };
 
                             if child_meta.is_dir() {
-                                match walk_du(&child_path, depth + 1, max_depth, all_files, human, out) {
+                                match walk_du(
+                                    &child_path,
+                                    depth + 1,
+                                    max_depth,
+                                    all_files,
+                                    human,
+                                    out,
+                                ) {
                                     Ok(sub) => dir_total += sub,
                                     Err(err) => {
                                         eprintln!("du: {}: {}", child_path.display(), err);
@@ -156,10 +161,20 @@ fn walk_du<W: Write>(
                                 if all_files {
                                     if let Some(md) = max_depth {
                                         if depth + 1 <= md {
-                                            print_size(out, blocks, human, &child_path.to_string_lossy());
+                                            print_size(
+                                                out,
+                                                blocks,
+                                                human,
+                                                &child_path.to_string_lossy(),
+                                            );
                                         }
                                     } else {
-                                        print_size(out, blocks, human, &child_path.to_string_lossy());
+                                        print_size(
+                                            out,
+                                            blocks,
+                                            human,
+                                            &child_path.to_string_lossy(),
+                                        );
                                     }
                                 }
                             }

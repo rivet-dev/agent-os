@@ -25,7 +25,8 @@ const pkg = {
 		// File operations (read-write)
 		{ name: "chmod", permissionTier: "read-write" as const },
 		{ name: "cp", permissionTier: "read-write" as const },
-		{ name: "dd", permissionTier: "read-write" as const },
+		// These binaries import `host_process` in the shipped Wasm artifacts.
+		{ name: "dd", permissionTier: "full" as const },
 		{ name: "link", permissionTier: "read-write" as const },
 		{ name: "ln", permissionTier: "read-write" as const },
 		{ name: "mkdir", permissionTier: "read-write" as const },
@@ -33,7 +34,7 @@ const pkg = {
 		{ name: "mv", permissionTier: "read-write" as const },
 		{ name: "rm", permissionTier: "read-write" as const },
 		{ name: "rmdir", permissionTier: "read-write" as const },
-		{ name: "shred", permissionTier: "read-write" as const },
+		{ name: "shred", permissionTier: "full" as const },
 		{ name: "split", permissionTier: "read-write" as const },
 		{ name: "touch", permissionTier: "read-write" as const },
 		{ name: "truncate", permissionTier: "read-write" as const },
@@ -59,7 +60,7 @@ const pkg = {
 		{ name: "echo", permissionTier: "read-only" as const },
 		{ name: "printf", permissionTier: "read-only" as const },
 		{ name: "wc", permissionTier: "read-only" as const },
-		{ name: "sort", permissionTier: "read-only" as const },
+		{ name: "sort", permissionTier: "full" as const },
 		{ name: "uniq", permissionTier: "read-only" as const },
 		{ name: "cut", permissionTier: "read-only" as const },
 		{ name: "tr", permissionTier: "read-only" as const },
@@ -106,7 +107,7 @@ const pkg = {
 		{ name: "dirname", permissionTier: "read-only" as const },
 		{ name: "xu", permissionTier: "read-only" as const },
 		{ name: "which", permissionTier: "read-only" as const },
-		{ name: "sleep", permissionTier: "read-only" as const },
+		{ name: "sleep", permissionTier: "full" as const },
 
 		// Checksums and encoding
 		{ name: "md5sum", permissionTier: "read-only" as const },

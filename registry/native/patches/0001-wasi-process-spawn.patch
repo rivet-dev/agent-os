@@ -14,7 +14,7 @@
 
 --- /dev/null
 +++ b/library/std/src/sys/process/wasi.rs
-@@ -0,0 +1,627 @@
+@@ -0,0 +1,654 @@
 +// WASI process implementation using wasmVM host_process syscalls.
 +//
 +// Replaces the unsupported() stubs with real process management
@@ -182,7 +182,7 @@
 +
 +impl From<crate::sys::pipe::Pipe> for Stdio {
 +    fn from(pipe: crate::sys::pipe::Pipe) -> Stdio {
-+        pipe.diverge()
++        Stdio::InheritFile(File::from_inner(pipe))
 +    }
 +}
 +

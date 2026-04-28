@@ -36,7 +36,11 @@ pub fn main(args: Vec<OsString>) -> i32 {
     let mut files: Vec<String> = Vec::new();
 
     // Parse arguments
-    let str_args: Vec<String> = args.iter().skip(1).map(|a| a.to_string_lossy().to_string()).collect();
+    let str_args: Vec<String> = args
+        .iter()
+        .skip(1)
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
     let mut i = 0;
     while i < str_args.len() {
         let arg = &str_args[i];
@@ -108,7 +112,9 @@ pub fn main(args: Vec<OsString>) -> i32 {
                     exit_code = 1;
                 }
             } else {
-                if let Err(e) = compress_file(progname, filename, to_stdout, keep, force, compression) {
+                if let Err(e) =
+                    compress_file(progname, filename, to_stdout, keep, force, compression)
+                {
                     eprintln!("{}: {}", progname, e);
                     exit_code = 1;
                 }

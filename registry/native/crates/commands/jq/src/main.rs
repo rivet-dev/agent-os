@@ -1,4 +1,10 @@
 fn main() {
+    use std::io::Write;
+
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    std::process::exit(secureexec_jq::main(args));
+    let code = secureexec_jq::main(args);
+    if let Err(error) = std::io::stdout().flush() {
+        eprintln!("Error flushing stdout: {error}");
+    }
+    std::process::exit(code);
 }

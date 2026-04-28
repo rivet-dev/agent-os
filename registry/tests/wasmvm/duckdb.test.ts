@@ -21,6 +21,8 @@ import {
   createKernel,
   createNodeHostNetworkAdapter,
   createWasmVmRuntime,
+  describeIf,
+  itIf,
 } from '../helpers.js';
 import type { Kernel } from '../helpers.js';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -78,7 +80,7 @@ async function waitForText(
   }
 }
 
-describe.skipIf(!hasWasmDuckDB)('duckdb command', { timeout: 120_000 }, () => {
+describeIf(hasWasmDuckDB, 'duckdb command', { timeout: 120_000 }, () => {
   let kernel: Kernel | undefined;
 
   afterEach(async () => {
@@ -212,7 +214,8 @@ describe.skipIf(!hasWasmDuckDB)('duckdb command', { timeout: 120_000 }, () => {
     expect((await filesystem.stat('/tmp/spilled.csv')).size).toBeGreaterThan(50_000_000);
   });
 
-  it.skipIf(!hasWasmCurl && !hasWasmHttpGet)(
+  itIf(
+    hasWasmCurl || hasWasmHttpGet,
     'queries data fetched over the network through the shared VFS',
     async () => {
       const filesystem = createInMemoryFileSystem();

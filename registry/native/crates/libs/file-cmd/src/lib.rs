@@ -74,15 +74,36 @@ pub fn main(args: Vec<OsString>) -> i32 {
             match fs::metadata(filename) {
                 Ok(meta) => {
                     if meta.is_dir() {
-                        print_result(&mut out, filename, brief, "directory", if mime { "inode/directory" } else { "" }, mime);
+                        print_result(
+                            &mut out,
+                            filename,
+                            brief,
+                            "directory",
+                            if mime { "inode/directory" } else { "" },
+                            mime,
+                        );
                         continue;
                     }
                     if meta.is_symlink() {
-                        print_result(&mut out, filename, brief, "symbolic link", if mime { "inode/symlink" } else { "" }, mime);
+                        print_result(
+                            &mut out,
+                            filename,
+                            brief,
+                            "symbolic link",
+                            if mime { "inode/symlink" } else { "" },
+                            mime,
+                        );
                         continue;
                     }
                     if meta.len() == 0 {
-                        print_result(&mut out, filename, brief, "empty", if mime { "inode/x-empty" } else { "" }, mime);
+                        print_result(
+                            &mut out,
+                            filename,
+                            brief,
+                            "empty",
+                            if mime { "inode/x-empty" } else { "" },
+                            mime,
+                        );
                         continue;
                     }
                     // Read file data (up to 8KB for detection)
@@ -123,7 +144,14 @@ fn read_head(path: &str, max: usize) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn print_result<W: Write>(out: &mut W, filename: &str, brief: bool, desc: &str, mime_type: &str, use_mime: bool) {
+fn print_result<W: Write>(
+    out: &mut W,
+    filename: &str,
+    brief: bool,
+    desc: &str,
+    mime_type: &str,
+    use_mime: bool,
+) {
     if use_mime && !mime_type.is_empty() {
         if brief {
             let _ = writeln!(out, "{}", mime_type);
@@ -181,7 +209,8 @@ fn identify(data: &[u8]) -> (String, String) {
 
     // Check for shebang scripts
     if data.len() >= 2 && data[0] == b'#' && data[1] == b'!' {
-        let first_line = data.iter()
+        let first_line = data
+            .iter()
             .take(128)
             .take_while(|&&b| b != b'\n')
             .copied()
@@ -264,13 +293,19 @@ fn is_xml(data: &[u8]) -> bool {
 
 fn is_html(data: &[u8]) -> bool {
     let trimmed = skip_whitespace(data);
-    let lower: Vec<u8> = trimmed.iter().take(64).map(|b| b.to_ascii_lowercase()).collect();
+    let lower: Vec<u8> = trimmed
+        .iter()
+        .take(64)
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
     lower.starts_with(b"<!doctype html") || lower.starts_with(b"<html")
 }
 
 fn skip_whitespace(data: &[u8]) -> &[u8] {
     let mut i = 0;
-    while i < data.len() && (data[i] == b' ' || data[i] == b'\t' || data[i] == b'\n' || data[i] == b'\r') {
+    while i < data.len()
+        && (data[i] == b' ' || data[i] == b'\t' || data[i] == b'\n' || data[i] == b'\r')
+    {
         i += 1;
     }
     &data[i..]

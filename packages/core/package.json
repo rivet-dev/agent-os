@@ -30,6 +30,16 @@
 			"import": "./dist/test/docker.js",
 			"default": "./dist/test/docker.js"
 		},
+		"./test/mock-s3": {
+			"types": "./dist/test/mock-s3.d.ts",
+			"import": "./dist/test/mock-s3.js",
+			"default": "./dist/test/mock-s3.js"
+		},
+		"./test/sandbox-agent": {
+			"types": "./dist/test/sandbox-agent.d.ts",
+			"import": "./dist/test/sandbox-agent.js",
+			"default": "./dist/test/sandbox-agent.js"
+		},
 		"./test/runtime": {
 			"types": "./dist/test/runtime.d.ts",
 			"import": "./dist/test/runtime.js",
@@ -42,7 +52,7 @@
 		"build:base-filesystem": "node ./scripts/build-base-filesystem.mjs",
 		"build:v8-bridge": "node ./scripts/build-v8-bridge.mjs",
 		"snapshot:alpine-defaults": "node ./scripts/snapshot-alpine-defaults.mjs",
-		"test": "vitest run"
+		"test": "vitest run --reporter=verbose"
 	},
 	"dependencies": {
 		"@aws-sdk/client-s3": "^3.1019.0",
@@ -61,14 +71,15 @@
 	"devDependencies": {
 		"@anthropic-ai/claude-agent-sdk": "^0.2.87",
 		"@anthropic-ai/claude-code": "^2.1.86",
+		"@browserbasehq/browse-cli": "0.5.0",
+		"@browserbasehq/cli": "0.5.4",
 		"@copilotkit/llmock": "^1.6.0",
+		"@rivet-dev/agent-os-git": "link:../../registry/software/git",
+		"@rivet-dev/agent-os-s3": "link:../../registry/file-system/s3",
 		"@mariozechner/pi-coding-agent": "^0.60.0",
 		"@rivet-dev/agent-os-claude": "link:../../registry/agent/claude",
-		"@rivet-dev/agent-os-codex-agent": "link:../../registry/agent/codex",
-		"@rivet-dev/agent-os-opencode": "link:../../registry/agent/opencode",
-		"@rivet-dev/agent-os-pi": "link:../../registry/agent/pi",
-		"@rivet-dev/agent-os-pi-cli": "link:../../registry/agent/pi-cli",
 		"@rivet-dev/agent-os-codex": "link:../../registry/software/codex",
+		"@rivet-dev/agent-os-codex-agent": "link:../../registry/agent/codex",
 		"@rivet-dev/agent-os-coreutils": "link:../../registry/software/coreutils",
 		"@rivet-dev/agent-os-curl": "link:../../registry/software/curl",
 		"@rivet-dev/agent-os-diffutils": "link:../../registry/software/diffutils",
@@ -79,6 +90,9 @@
 		"@rivet-dev/agent-os-grep": "link:../../registry/software/grep",
 		"@rivet-dev/agent-os-gzip": "link:../../registry/software/gzip",
 		"@rivet-dev/agent-os-jq": "link:../../registry/software/jq",
+		"@rivet-dev/agent-os-opencode": "link:../../registry/agent/opencode",
+		"@rivet-dev/agent-os-pi": "link:../../registry/agent/pi",
+		"@rivet-dev/agent-os-pi-cli": "link:../../registry/agent/pi-cli",
 		"@rivet-dev/agent-os-ripgrep": "link:../../registry/software/ripgrep",
 		"@rivet-dev/agent-os-sed": "link:../../registry/software/sed",
 		"@rivet-dev/agent-os-tar": "link:../../registry/software/tar",
@@ -89,6 +103,7 @@
 		"sandbox-agent": "^0.4.2",
 		"typescript": "^5.7.2",
 		"vitest": "^2.1.8",
+		"ws": "^8.18.0",
 		"zod": "^4.1.11"
 	}
 }

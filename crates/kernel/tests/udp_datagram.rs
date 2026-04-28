@@ -1,7 +1,9 @@
 use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{KernelProcessHandle, KernelVm, KernelVmConfig, SpawnOptions};
 use agent_os_kernel::permissions::Permissions;
-use agent_os_kernel::socket_table::{InetSocketAddress, SocketSpec};
+use agent_os_kernel::socket_table::{
+    DatagramSocketOption, InetSocketAddress, SocketMulticastMembership, SocketSpec,
+};
 use agent_os_kernel::vfs::MemoryFileSystem;
 
 fn spawn_shell(kernel: &mut KernelVm<MemoryFileSystem>) -> KernelProcessHandle {
@@ -162,4 +164,125 @@ fn udp_send_and_receive_require_bound_sockets_and_bound_targets() {
         .socket_recv_datagram("shell", receiver.pid(), receiver_socket, 64)
         .expect_err("unbound receiver should fail");
     assert_eq!(unbound_recv_error.code(), "EINVAL");
+}
+
+#[test]
+fn udp_reuseport_allows_two_sockets_to_bind_the_same_port() {
+    let mut kernel = new_kernel("vm-udp-reuseport");
+    let first = spawn_shell(&mut kernel);
+    let second = spawn_shell(&mut kernel);
+
+    let first_socket = kernel
+        .socket_create("shell", first.pid(), SocketSpec::udp())
+        .expect("create first UDP socket");
+    kernel
+        .socket_set_datagram_option(
+            "shell",
+            first.pid(),
+            first_socket,
+            DatagramSocketOption::ReusePort,
+            true,
+        )
+        .expect("enable REUSEPORT on first socket");
+
+    let second_socket = kernel
+        .socket_create("shell", second.pid(), SocketSpec::udp())
+        .expect("create second UDP socket");
+    kernel
+        .socket_set_datagram_option(
+            "shell",
+            second.pid(),
+            second_socket,
+            DatagramSocketOption::ReusePort,
+            true,
+        )
+        .expect("enable REUSEPORT on second socket");
+
+    let shared_address = InetSocketAddress::new("127.0.0.1", 43153);
+    kernel
+        .socket_bind_inet("shell", first.pid(), first_socket, shared_address.clone())
+        .expect("bind first socket");
+    kernel
+        .socket_bind_inet("shell", second.pid(), second_socket, shared_address)
+        .expect("bind second socket to the same port");
+
+    assert!(kernel
+        .socket_get(first_socket)
+        .expect("first socket state")
+        .reuse_port());
+    assert!(kernel
+        .socket_get(second_socket)
+        .expect("second socket state")
+        .reuse_port());
+}
+
+#[test]
+fn udp_broadcast_option_is_tracked_in_kernel_socket_state() {
+    let mut kernel = new_kernel("vm-udp-broadcast");
+    let process = spawn_shell(&mut kernel);
+    let socket_id = kernel
+        .socket_create("shell", process.pid(), SocketSpec::udp())
+        .expect("create UDP socket");
+
+    kernel
+        .socket_bind_inet(
+            "shell",
+            process.pid(),
+            socket_id,
+            InetSocketAddress::new("0.0.0.0", 43154),
+        )
+        .expect("bind UDP socket");
+    kernel
+        .socket_set_datagram_option(
+            "shell",
+            process.pid(),
+            socket_id,
+            DatagramSocketOption::Broadcast,
+            true,
+        )
+        .expect("enable broadcast");
+
+    assert!(kernel
+        .socket_get(socket_id)
+        .expect("socket state after broadcast enable")
+        .broadcast_enabled());
+}
+
+#[test]
+fn udp_multicast_memberships_are_added_and_removed_from_socket_state() {
+    let mut kernel = new_kernel("vm-udp-multicast-membership");
+    let process = spawn_shell(&mut kernel);
+    let socket_id = kernel
+        .socket_create("shell", process.pid(), SocketSpec::udp())
+        .expect("create UDP socket");
+
+    kernel
+        .socket_bind_inet(
+            "shell",
+            process.pid(),
+            socket_id,
+            InetSocketAddress::new("0.0.0.0", 43155),
+        )
+        .expect("bind UDP socket");
+
+    let membership = SocketMulticastMembership::new("239.1.2.3", None);
+    kernel
+        .socket_add_membership("shell", process.pid(), socket_id, membership.clone())
+        .expect("join multicast group");
+
+    let joined = kernel
+        .socket_get(socket_id)
+        .expect("socket state after join");
+    assert_eq!(joined.multicast_membership_count(), 1);
+    assert!(joined.has_multicast_membership(&membership));
+
+    kernel
+        .socket_drop_membership("shell", process.pid(), socket_id, membership.clone())
+        .expect("leave multicast group");
+
+    let left = kernel
+        .socket_get(socket_id)
+        .expect("socket state after leave");
+    assert_eq!(left.multicast_membership_count(), 0);
+    assert!(!left.has_multicast_membership(&membership));
 }

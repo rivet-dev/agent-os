@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  describeIf,
   COMMANDS_DIR,
   createKernel,
   NodeFileSystem,
@@ -43,7 +44,7 @@ async function checkNetwork(): Promise<string | false> {
 
 const skipReason = wasmSkip || (await checkNetwork());
 
-describe.skipIf(skipReason)('e2e npm install through kernel', () => {
+describeIf(!skipReason, 'e2e npm install through kernel', () => {
   it(
     'npm install installs left-pad and it is usable by node',
     async () => {
@@ -87,7 +88,7 @@ describe.skipIf(skipReason)('e2e npm install through kernel', () => {
             `node -e "console.log(require('left-pad')('hi', 10))"`,
             { cwd: '/' },
           );
-          expect(result.stdout.trim()).toBe('        hi');
+          expect(result.stdout.trimEnd()).toBe('        hi');
         } finally {
           await kernel.dispose();
         }

@@ -225,12 +225,10 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                             .map_err(|_| format!("invalid number: '{}'", &arg[12..]))?,
                     );
                 }
-                _ if arg.starts_with("--sort=") => {
-                    match &arg[7..] {
-                        "modified" => opts.sort_modified = true,
-                        value => return Err(format!("unsupported sort: '{}'", value)),
-                    }
-                }
+                _ if arg.starts_with("--sort=") => match &arg[7..] {
+                    "modified" => opts.sort_modified = true,
+                    value => return Err(format!("unsupported sort: '{}'", value)),
+                },
                 _ if arg.starts_with("--threads=") => {}
                 _ if arg.starts_with("--regexp=") => {
                     opts.patterns.push(arg[9..].to_string());
@@ -270,8 +268,8 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                     opts.type_exclude.push(arg[11..].to_string());
                 }
                 "--regexp" | "--max-count" | "--after-context" | "--before-context"
-                | "--context" | "--glob" | "--type" | "--type-not" | "--file"
-                | "--color" | "--max-depth" | "--threads" => {
+                | "--context" | "--glob" | "--type" | "--type-not" | "--file" | "--color"
+                | "--max-depth" | "--threads" => {
                     i += 1;
                     if i >= args.len() {
                         return Err(format!("{} requires an argument", arg));
@@ -844,7 +842,9 @@ fn search_stream<R: BufRead>(reader: R, regex: &Regex, opts: &Options) -> FileRe
                 // Emit match
                 if opts.only_matching && !opts.invert_match {
                     for mat in regex.find_iter(&line) {
-                        result.lines.push(ResultLine::Match(lineno, mat.as_str().to_string()));
+                        result
+                            .lines
+                            .push(ResultLine::Match(lineno, mat.as_str().to_string()));
                     }
                 } else {
                     result.lines.push(ResultLine::Match(lineno, line));

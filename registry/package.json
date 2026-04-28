@@ -11,7 +11,7 @@
   "scripts": {
     "build": "pnpm -r run build",
     "check-types": "pnpm -r run check-types",
-    "test": "vitest run"
+    "test": "node ./scripts/run-vitest.mjs"
   },
   "devDependencies": {
     "@rivet-dev/agent-os-common": "link:software/common",

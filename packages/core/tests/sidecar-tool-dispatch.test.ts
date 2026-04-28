@@ -2,6 +2,7 @@ import common from "@rivet-dev/agent-os-common";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { z } from "zod";
 import { AgentOs, hostTool, toolKit } from "../src/index.js";
+import { ALLOW_ALL_VM_PERMISSIONS } from "./helpers/permissions.js";
 
 const mathToolKit = toolKit({
 	name: "math",
@@ -44,6 +45,7 @@ describe("native sidecar tool dispatch", () => {
 		vm = await AgentOs.create({
 			software: [common],
 			toolKits: [mathToolKit],
+			permissions: ALLOW_ALL_VM_PERMISSIONS,
 		});
 	}, 20_000);
 
@@ -93,7 +95,9 @@ describe("native sidecar tool dispatch", () => {
 			].join("\n"),
 		);
 
-		const result = await vm.exec("sh /tmp/run-tool.sh && cat /tmp/tool-output.json");
+		const result = await vm.exec(
+			"sh /tmp/run-tool.sh && cat /tmp/tool-output.json",
+		);
 		expect(result.exitCode).toBe(0);
 		expect(JSON.parse(result.stdout)).toEqual({
 			ok: true,

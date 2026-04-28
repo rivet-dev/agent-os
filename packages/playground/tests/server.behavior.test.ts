@@ -1,5 +1,4 @@
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,7 +10,7 @@ const vendorDir = resolve(playgroundDir, "vendor");
 let tempDir: string | null = null;
 
 async function createVendorFixture(): Promise<string> {
-	tempDir = await mkdtemp(resolve(tmpdir(), "playground-vendor-"));
+	tempDir = await mkdtemp(resolve(playgroundDir, ".playground-vendor-"));
 	const sourcePath = resolve(tempDir, "fixture.js");
 	const linkPath = resolve(vendorDir, "test-fixture.js");
 
@@ -21,6 +20,16 @@ async function createVendorFixture(): Promise<string> {
 	await symlink(sourcePath, linkPath);
 
 	return "/vendor/test-fixture.js";
+}
+
+async function createEscapingVendorSymlink(): Promise<string> {
+	const linkPath = resolve(vendorDir, "test-escape.js");
+
+	await mkdir(vendorDir, { recursive: true });
+	await rm(linkPath, { force: true });
+	await symlink("/etc/passwd", linkPath);
+
+	return "/vendor/test-escape.js";
 }
 
 function listenOnRandomPort(
@@ -53,6 +62,7 @@ afterEach(async () => {
 		server = null;
 	}
 	await rm(resolve(vendorDir, "test-fixture.js"), { force: true });
+	await rm(resolve(vendorDir, "test-escape.js"), { force: true });
 	if (tempDir) {
 		await rm(tempDir, { recursive: true, force: true });
 		tempDir = null;
@@ -79,6 +89,17 @@ describe("browser playground server", () => {
 		);
 		const body = await response.text();
 		expect(body.length).toBeGreaterThan(0);
+	});
+
+	it("rejects symlinks that resolve outside the playground", async () => {
+		server = createBrowserPlaygroundServer();
+		const port = await listenOnRandomPort(server);
+		const assetPath = await createEscapingVendorSymlink();
+
+		const response = await fetch(`http://127.0.0.1:${port}${assetPath}`);
+
+		expect(response.status).toBe(403);
+		expect(await response.text()).toContain("escapes playground directory");
 	});
 
 	it("redirects directory requests to a trailing slash", async () => {

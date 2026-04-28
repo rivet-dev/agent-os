@@ -8,14 +8,18 @@ use agent_os_bridge::{
     LifecycleEventRecord, LifecycleState, PollExecutionEventRequest, StartExecutionRequest,
     StartedExecution, StructuredEventRecord, WriteExecutionStdinRequest,
 };
-use agent_os_kernel::kernel::{KernelVm, KernelVmConfig};
+use agent_os_kernel::bridge::LifecycleState as KernelLifecycleState;
+use agent_os_kernel::kernel::{KernelError, KernelVm, KernelVmConfig, VirtualProcessOptions};
+use agent_os_kernel::permissions::Permissions;
 use agent_os_kernel::vfs::MemoryFileSystem;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+use std::time::Duration;
 
 type BridgeError<B> = <B as BridgeTypes>::Error;
 type BrowserKernel = KernelVm<MemoryFileSystem>;
+const BROWSER_WORKER_DRIVER: &str = "browser.worker";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserSidecarConfig {
@@ -33,13 +37,16 @@ impl Default for BrowserSidecarConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserSidecarError {
     InvalidState(String),
+    Kernel(String),
     Bridge(String),
 }
 
 impl fmt::Display for BrowserSidecarError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidState(message) | Self::Bridge(message) => f.write_str(message),
+            Self::InvalidState(message) | Self::Kernel(message) | Self::Bridge(message) => {
+                f.write_str(message)
+            }
         }
     }
 }
@@ -47,7 +54,6 @@ impl fmt::Display for BrowserSidecarError {
 impl Error for BrowserSidecarError {}
 
 struct VmState {
-    #[allow(dead_code)]
     kernel: BrowserKernel,
     contexts: BTreeSet<String>,
     active_executions: BTreeSet<String>,
@@ -64,6 +70,8 @@ struct ContextState {
 struct ExecutionState {
     vm_id: String,
     worker: BrowserWorkerHandle,
+    kernel_pid: u32,
+    stdin_write_fd: u32,
 }
 
 pub struct BrowserSidecar<B> {
@@ -123,13 +131,18 @@ where
             .unwrap_or_default()
     }
 
-    pub fn create_vm(&mut self, config: KernelVmConfig) -> Result<(), BrowserSidecarError> {
+    pub fn create_vm(&mut self, mut config: KernelVmConfig) -> Result<(), BrowserSidecarError> {
         let vm_id = config.vm_id.clone();
         if self.vms.contains_key(&vm_id) {
             return Err(BrowserSidecarError::InvalidState(format!(
                 "browser sidecar VM already exists: {vm_id}"
             )));
         }
+
+        // Browser-side host capabilities are already mediated at the JS host-bridge
+        // boundary, so the in-browser kernel stays permissive and remains the single
+        // source of truth for VM-local filesystem, process, and socket state.
+        config.permissions = Permissions::allow_all();
 
         self.emit_lifecycle(
             &vm_id,
@@ -154,6 +167,71 @@ where
             )),
         )?;
         Ok(())
+    }
+
+    pub fn write_file(
+        &mut self,
+        vm_id: &str,
+        path: &str,
+        contents: impl Into<Vec<u8>>,
+    ) -> Result<(), BrowserSidecarError> {
+        let vm = self.vm_mut(vm_id)?;
+        vm.kernel
+            .write_file(path, contents)
+            .map_err(Self::kernel_error)
+    }
+
+    pub fn read_file(&mut self, vm_id: &str, path: &str) -> Result<Vec<u8>, BrowserSidecarError> {
+        let vm = self.vm_mut(vm_id)?;
+        vm.kernel.read_file(path).map_err(Self::kernel_error)
+    }
+
+    pub fn mkdir(
+        &mut self,
+        vm_id: &str,
+        path: &str,
+        recursive: bool,
+    ) -> Result<(), BrowserSidecarError> {
+        let vm = self.vm_mut(vm_id)?;
+        vm.kernel.mkdir(path, recursive).map_err(Self::kernel_error)
+    }
+
+    pub fn read_dir(
+        &mut self,
+        vm_id: &str,
+        path: &str,
+    ) -> Result<Vec<String>, BrowserSidecarError> {
+        let vm = self.vm_mut(vm_id)?;
+        vm.kernel.read_dir(path).map_err(Self::kernel_error)
+    }
+
+    pub fn kernel_state(&self, vm_id: &str) -> Result<LifecycleState, BrowserSidecarError> {
+        let vm = self.vm(vm_id)?;
+        Ok(match vm.kernel.state() {
+            KernelLifecycleState::Starting => LifecycleState::Starting,
+            KernelLifecycleState::Ready => LifecycleState::Ready,
+            KernelLifecycleState::Busy => LifecycleState::Busy,
+            KernelLifecycleState::Terminated => LifecycleState::Terminated,
+        })
+    }
+
+    pub fn read_execution_stdin(
+        &mut self,
+        vm_id: &str,
+        execution_id: &str,
+        length: usize,
+        timeout: Duration,
+    ) -> Result<Option<Vec<u8>>, BrowserSidecarError> {
+        let execution = self.ensure_execution_state(vm_id, execution_id)?;
+        let vm = self.vm_mut(vm_id)?;
+        vm.kernel
+            .read_process_stdin(
+                BROWSER_WORKER_DRIVER,
+                execution.kernel_pid,
+                length,
+                Some(timeout),
+            )
+            .map_err(Self::kernel_error)
     }
 
     pub fn dispose_vm(&mut self, vm_id: &str) -> Result<(), BrowserSidecarError> {
@@ -257,6 +335,52 @@ where
             )));
         }
 
+        let guest_cwd = request.cwd.clone();
+        let (kernel_pid, stdin_write_fd) = {
+            let vm = self.vm_mut(&request.vm_id)?;
+            let kernel_handle = vm
+                .kernel
+                .create_virtual_process(
+                    BROWSER_WORKER_DRIVER,
+                    BROWSER_WORKER_DRIVER,
+                    request
+                        .argv
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("browser-worker"),
+                    request.argv.clone(),
+                    VirtualProcessOptions {
+                        env: request.env.clone(),
+                        cwd: Some(guest_cwd.clone()),
+                        ..VirtualProcessOptions::default()
+                    },
+                )
+                .map_err(Self::kernel_error)?;
+            let kernel_pid = kernel_handle.pid();
+            let (stdin_read_fd, stdin_write_fd) = vm
+                .kernel
+                .open_pipe(BROWSER_WORKER_DRIVER, kernel_pid)
+                .map_err(Self::kernel_error)?;
+            vm.kernel
+                .fd_dup2(BROWSER_WORKER_DRIVER, kernel_pid, stdin_read_fd, 0)
+                .map_err(Self::kernel_error)?;
+            let (_stdout_read_fd, stdout_write_fd) = vm
+                .kernel
+                .open_pipe(BROWSER_WORKER_DRIVER, kernel_pid)
+                .map_err(Self::kernel_error)?;
+            vm.kernel
+                .fd_dup2(BROWSER_WORKER_DRIVER, kernel_pid, stdout_write_fd, 1)
+                .map_err(Self::kernel_error)?;
+            let (_stderr_read_fd, stderr_write_fd) = vm
+                .kernel
+                .open_pipe(BROWSER_WORKER_DRIVER, kernel_pid)
+                .map_err(Self::kernel_error)?;
+            vm.kernel
+                .fd_dup2(BROWSER_WORKER_DRIVER, kernel_pid, stderr_write_fd, 2)
+                .map_err(Self::kernel_error)?;
+            (kernel_pid, stdin_write_fd)
+        };
+
         let worker = self
             .bridge
             .create_worker(BrowserWorkerSpawnRequest {
@@ -286,6 +410,8 @@ where
             ExecutionState {
                 vm_id: request.vm_id.clone(),
                 worker: worker.clone(),
+                kernel_pid,
+                stdin_write_fd,
             },
         );
         let vm_state = self
@@ -325,6 +451,18 @@ where
         request: WriteExecutionStdinRequest,
     ) -> Result<(), BrowserSidecarError> {
         self.ensure_execution(&request.vm_id, &request.execution_id)?;
+        let execution = self.ensure_execution_state(&request.vm_id, &request.execution_id)?;
+        {
+            let vm = self.vm_mut(&request.vm_id)?;
+            vm.kernel
+                .fd_write(
+                    BROWSER_WORKER_DRIVER,
+                    execution.kernel_pid,
+                    execution.stdin_write_fd,
+                    &request.chunk,
+                )
+                .map_err(Self::kernel_error)?;
+        }
         self.bridge.write_stdin(request).map_err(Self::bridge_error)
     }
 
@@ -333,6 +471,17 @@ where
         request: ExecutionHandleRequest,
     ) -> Result<(), BrowserSidecarError> {
         self.ensure_execution(&request.vm_id, &request.execution_id)?;
+        let execution = self.ensure_execution_state(&request.vm_id, &request.execution_id)?;
+        {
+            let vm = self.vm_mut(&request.vm_id)?;
+            vm.kernel
+                .fd_close(
+                    BROWSER_WORKER_DRIVER,
+                    execution.kernel_pid,
+                    execution.stdin_write_fd,
+                )
+                .map_err(Self::kernel_error)?;
+        }
         self.bridge.close_stdin(request).map_err(Self::bridge_error)
     }
 
@@ -341,6 +490,17 @@ where
         request: KillExecutionRequest,
     ) -> Result<(), BrowserSidecarError> {
         self.ensure_execution(&request.vm_id, &request.execution_id)?;
+        let execution = self.ensure_execution_state(&request.vm_id, &request.execution_id)?;
+        {
+            let vm = self.vm_mut(&request.vm_id)?;
+            vm.kernel
+                .kill_process(
+                    BROWSER_WORKER_DRIVER,
+                    execution.kernel_pid,
+                    execution_signal_to_kernel(request.signal),
+                )
+                .map_err(Self::kernel_error)?;
+        }
         self.bridge
             .kill_execution(request)
             .map_err(Self::bridge_error)
@@ -357,8 +517,36 @@ where
             .poll_execution_event(request)
             .map_err(Self::bridge_error)?;
 
-        if let Some(ExecutionEvent::Exited(exited)) = &event {
-            self.release_execution(&exited.execution_id, "browser.worker.reaped")?;
+        match &event {
+            Some(ExecutionEvent::Stdout(chunk)) => {
+                let execution = self.ensure_execution_state(&chunk.vm_id, &chunk.execution_id)?;
+                let vm = self.vm_mut(&chunk.vm_id)?;
+                vm.kernel
+                    .write_process_stdout(BROWSER_WORKER_DRIVER, execution.kernel_pid, &chunk.chunk)
+                    .map_err(Self::kernel_error)?;
+            }
+            Some(ExecutionEvent::Stderr(chunk)) => {
+                let execution = self.ensure_execution_state(&chunk.vm_id, &chunk.execution_id)?;
+                let vm = self.vm_mut(&chunk.vm_id)?;
+                vm.kernel
+                    .write_process_stderr(BROWSER_WORKER_DRIVER, execution.kernel_pid, &chunk.chunk)
+                    .map_err(Self::kernel_error)?;
+            }
+            Some(ExecutionEvent::Exited(exited)) => {
+                let execution = self.ensure_execution_state(&exited.vm_id, &exited.execution_id)?;
+                {
+                    let vm = self.vm_mut(&exited.vm_id)?;
+                    vm.kernel
+                        .exit_process(
+                            BROWSER_WORKER_DRIVER,
+                            execution.kernel_pid,
+                            exited.exit_code,
+                        )
+                        .map_err(Self::kernel_error)?;
+                }
+                self.release_execution(&exited.execution_id, "browser.worker.reaped")?;
+            }
+            Some(ExecutionEvent::GuestRequest(_)) | None => {}
         }
 
         Ok(event)
@@ -472,6 +660,39 @@ where
         }
     }
 
+    fn ensure_execution_state(
+        &self,
+        vm_id: &str,
+        execution_id: &str,
+    ) -> Result<ExecutionState, BrowserSidecarError> {
+        let execution = self.executions.get(execution_id).cloned().ok_or_else(|| {
+            BrowserSidecarError::InvalidState(format!(
+                "unknown browser sidecar execution: {execution_id}"
+            ))
+        })?;
+
+        if execution.vm_id == vm_id {
+            Ok(execution)
+        } else {
+            Err(BrowserSidecarError::InvalidState(format!(
+                "browser sidecar execution {execution_id} belongs to vm {}, not {vm_id}",
+                execution.vm_id
+            )))
+        }
+    }
+
+    fn vm(&self, vm_id: &str) -> Result<&VmState, BrowserSidecarError> {
+        self.vms.get(vm_id).ok_or_else(|| {
+            BrowserSidecarError::InvalidState(format!("unknown browser sidecar VM: {vm_id}"))
+        })
+    }
+
+    fn vm_mut(&mut self, vm_id: &str) -> Result<&mut VmState, BrowserSidecarError> {
+        self.vms.get_mut(vm_id).ok_or_else(|| {
+            BrowserSidecarError::InvalidState(format!("unknown browser sidecar VM: {vm_id}"))
+        })
+    }
+
     fn emit_lifecycle(
         &mut self,
         vm_id: &str,
@@ -505,11 +726,23 @@ where
     fn bridge_error(error: BridgeError<B>) -> BrowserSidecarError {
         BrowserSidecarError::Bridge(format!("{error:?}"))
     }
+
+    fn kernel_error(error: KernelError) -> BrowserSidecarError {
+        BrowserSidecarError::Kernel(error.to_string())
+    }
 }
 
 fn runtime_label(runtime: GuestRuntime) -> &'static str {
     match runtime {
         GuestRuntime::JavaScript => "javascript",
         GuestRuntime::WebAssembly => "webassembly",
+    }
+}
+
+fn execution_signal_to_kernel(signal: agent_os_bridge::ExecutionSignal) -> i32 {
+    match signal {
+        agent_os_bridge::ExecutionSignal::Terminate => 15,
+        agent_os_bridge::ExecutionSignal::Interrupt => 2,
+        agent_os_bridge::ExecutionSignal::Kill => 9,
     }
 }

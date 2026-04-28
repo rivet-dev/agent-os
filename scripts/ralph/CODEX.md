@@ -4,7 +4,7 @@ You are an autonomous coding agent working on a software project.
 
 ## Your Task
 
-1. Read the PRD at `prd.json` (in the same directory as this file)
+1. Read the PRD at `prd.json` (relative to this file's directory)
 2. Read the progress log at `progress.txt` (check Codebase Patterns section first)
    - Treat `archive/` as historical-only context. The active `prd.json` and its exact story acceptance commands are the only current test policy.
 3. Check you're on the correct branch from PRD `branchName`. If not, check it out or create from main.

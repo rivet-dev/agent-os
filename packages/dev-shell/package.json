@@ -5,12 +5,12 @@
   "bin": {
     "agent-os-dev-shell": "./dist/shell.js"
   },
-  "scripts": {
-    "build": "tsc",
-    "check-types": "tsc --noEmit",
-    "dev-shell": "tsx src/shell.ts",
-    "test": "NODE_OPTIONS=--max-old-space-size=256 vitest run --fileParallelism=false"
-  },
+	"scripts": {
+		"build": "tsc",
+		"check-types": "tsc --noEmit",
+		"dev-shell": "pnpm exec tsx src/shell.ts",
+		"test": "NODE_OPTIONS=--max-old-space-size=256 pnpm exec vitest run --fileParallelism=false --reporter=verbose"
+	},
   "dependencies": {
     "@rivet-dev/agent-os-core": "workspace:*",
     "pino": "^10.3.1"

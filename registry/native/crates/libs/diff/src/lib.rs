@@ -34,7 +34,10 @@ impl Default for Options {
 }
 
 pub fn main(args: Vec<OsString>) -> i32 {
-    let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().to_string()).collect();
+    let args: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
     let mut opts = Options::default();
     let mut files: Vec<String> = Vec::new();
     let mut i = 1;
@@ -82,7 +85,11 @@ pub fn main(args: Vec<OsString>) -> i32 {
 
     match diff_paths(path_a, path_b, &opts) {
         Ok(has_diff) => {
-            if has_diff { 1 } else { 0 }
+            if has_diff {
+                1
+            } else {
+                0
+            }
         }
         Err(e) => {
             eprintln!("diff: {}", e);
@@ -252,13 +259,21 @@ fn diff_files(path_a: &Path, path_b: &Path, opts: &Options) -> Result<bool, Stri
     if opts.unified {
         let _ = writeln!(out, "--- {}", label_a);
         let _ = writeln!(out, "+++ {}", label_b);
-        for hunk in diff.unified_diff().context_radius(opts.context_lines).iter_hunks() {
+        for hunk in diff
+            .unified_diff()
+            .context_radius(opts.context_lines)
+            .iter_hunks()
+        {
             let _ = write!(out, "{}", hunk);
         }
     } else if opts.context_fmt {
         let _ = writeln!(out, "*** {}", label_a);
         let _ = writeln!(out, "--- {}", label_b);
-        for hunk in diff.unified_diff().context_radius(opts.context_lines).iter_hunks() {
+        for hunk in diff
+            .unified_diff()
+            .context_radius(opts.context_lines)
+            .iter_hunks()
+        {
             let mut old_lines: Vec<(ChangeTag, String)> = Vec::new();
             let mut new_lines: Vec<(ChangeTag, String)> = Vec::new();
             let mut old_start = 0usize;
@@ -326,7 +341,12 @@ fn diff_files(path_a: &Path, path_b: &Path, opts: &Options) -> Result<bool, Stri
                     old_len,
                     new_index,
                 } => {
-                    let _ = writeln!(out, "{}d{}", format_range(*old_index + 1, *old_len), new_index);
+                    let _ = writeln!(
+                        out,
+                        "{}d{}",
+                        format_range(*old_index + 1, *old_len),
+                        new_index
+                    );
                     for i in *old_index..*old_index + old_len {
                         if i < old_lines.len() {
                             let _ = writeln!(out, "< {}", old_lines[i]);
@@ -338,7 +358,12 @@ fn diff_files(path_a: &Path, path_b: &Path, opts: &Options) -> Result<bool, Stri
                     new_index,
                     new_len,
                 } => {
-                    let _ = writeln!(out, "{}a{}", old_index, format_range(*new_index + 1, *new_len));
+                    let _ = writeln!(
+                        out,
+                        "{}a{}",
+                        old_index,
+                        format_range(*new_index + 1, *new_len)
+                    );
                     for i in *new_index..*new_index + new_len {
                         if i < new_lines.len() {
                             let _ = writeln!(out, "> {}", new_lines[i]);

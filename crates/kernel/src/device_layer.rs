@@ -1,4 +1,6 @@
-use crate::vfs::{VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat};
+use crate::vfs::{
+    VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat, VirtualUtimeSpec,
+};
 use getrandom::getrandom;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -108,7 +110,7 @@ impl<V: VirtualFileSystem> VirtualFileSystem for DeviceLayer<V> {
     }
 
     fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
-        if matches!(path, "/dev/null" | "/dev/zero" | "/dev/urandom") {
+        if is_sink_device_path(path) {
             let _ = content.into();
             return Ok(());
         }
@@ -127,9 +129,8 @@ impl<V: VirtualFileSystem> VirtualFileSystem for DeviceLayer<V> {
     }
 
     fn append_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<u64> {
-        if matches!(path, "/dev/null" | "/dev/zero" | "/dev/urandom") {
-            let _ = content.into();
-            return Ok(0);
+        if is_sink_device_path(path) {
+            return Ok(content.into().len() as u64);
         }
         self.inner.append_file(path, content)
     }
@@ -239,8 +240,22 @@ impl<V: VirtualFileSystem> VirtualFileSystem for DeviceLayer<V> {
         self.inner.utimes(path, atime_ms, mtime_ms)
     }
 
+    fn utimes_spec(
+        &mut self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        if is_device_path(path) {
+            return Ok(());
+        }
+        self.inner.utimes_spec(path, atime, mtime, follow_symlinks)
+    }
+
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {
-        if path == "/dev/null" {
+        if is_sink_device_path(path) {
+            let _ = length;
             return Ok(());
         }
         self.inner.truncate(path, length)
@@ -259,6 +274,13 @@ fn is_device_path(path: &str) -> bool {
     DEVICE_PATHS.contains(&path) || path.starts_with("/dev/fd/") || path.starts_with("/dev/pts/")
 }
 
+fn is_sink_device_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/dev/null" | "/dev/zero" | "/dev/stdout" | "/dev/stderr" | "/dev/urandom"
+    )
+}
+
 fn is_device_dir(path: &str) -> bool {
     path == "/dev" || DEVICE_DIRS.contains(&path)
 }
@@ -274,8 +296,11 @@ fn device_stat(path: &str) -> VirtualStat {
         is_directory: false,
         is_symbolic_link: false,
         atime_ms: now,
+        atime_nsec: 0,
         mtime_ms: now,
+        mtime_nsec: 0,
         ctime_ms: now,
+        ctime_nsec: 0,
         birthtime_ms: now,
         ino: device_ino(path),
         nlink: 1,
@@ -295,8 +320,11 @@ fn device_dir_stat(path: &str) -> VirtualStat {
         is_directory: true,
         is_symbolic_link: false,
         atime_ms: now,
+        atime_nsec: 0,
         mtime_ms: now,
+        mtime_nsec: 0,
         ctime_ms: now,
+        ctime_nsec: 0,
         birthtime_ms: now,
         ino: device_ino(path),
         nlink: 2,

@@ -1,10 +1,11 @@
 use agent_os_sidecar::protocol::{
     validate_frame, AuthenticateRequest, AuthenticatedResponse, CreateVmRequest, EventFrame,
-    GetZombieTimerCountRequest, GuestRuntimeKind, NativeFrameCodec, NativePayloadCodec,
-    OpenSessionRequest, OwnershipScope, PatternPermissionScope, PermissionMode, PermissionsPolicy,
-    ProcessStartedResponse, ProjectedModuleDescriptor, ProtocolCodecError, ProtocolFrame,
-    RequestFrame, RequestPayload, ResponseFrame, ResponsePayload, ResponseTracker,
-    ResponseTrackerError, RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryKind,
+    GetZombieTimerCountRequest, GuestFilesystemCallRequest, GuestFilesystemOperation,
+    GuestRuntimeKind, NativeFrameCodec, NativePayloadCodec, OpenSessionRequest, OwnershipScope,
+    PatternPermissionScope, PermissionMode, PermissionsPolicy, ProcessStartedResponse,
+    ProjectedModuleDescriptor, ProtocolCodecError, ProtocolFrame, RequestFrame, RequestPayload,
+    ResponseFrame, ResponsePayload, ResponseTracker, ResponseTrackerError,
+    RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryKind,
     RootFilesystemLowerDescriptor, SidecarPlacement, SidecarRequestFrame, SidecarRequestPayload,
     SidecarResponseFrame, SidecarResponsePayload, SidecarResponseTracker,
     SidecarResponseTrackerError, SoftwareDescriptor, StructuredEvent, ToolInvocationRequest,
@@ -35,6 +36,7 @@ fn codec_round_trips_authenticated_setup_and_session_messages() {
         RequestPayload::Authenticate(AuthenticateRequest {
             client_name: "packages/core".to_string(),
             auth_token: "signed-token".to_string(),
+            bridge_version: agent_os_bridge::bridge_contract().version,
         }),
     ));
 
@@ -155,6 +157,7 @@ fn bare_codec_round_trips_authenticate_request_frames() {
         RequestPayload::Authenticate(AuthenticateRequest {
             client_name: "packages-core-vitest".to_string(),
             auth_token: "packages-core-vitest-token".to_string(),
+            bridge_version: agent_os_bridge::bridge_contract().version,
         }),
     ));
 
@@ -164,6 +167,72 @@ fn bare_codec_round_trips_authenticate_request_frames() {
     let decoded = codec
         .decode(&encoded)
         .expect("decode bare authenticate request");
+
+    assert_eq!(decoded, frame);
+}
+
+#[test]
+fn json_codec_round_trips_guest_filesystem_requests_with_optional_fields() {
+    let codec = NativeFrameCodec::default();
+    let frame = ProtocolFrame::Request(RequestFrame::new(
+        17,
+        OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+        RequestPayload::GuestFilesystemCall(GuestFilesystemCallRequest {
+            operation: GuestFilesystemOperation::Truncate,
+            path: String::from("/workspace/hard.txt"),
+            destination_path: Some(String::from("/workspace/note.txt")),
+            target: Some(String::from("/workspace/target.txt")),
+            content: Some(String::from("stdio-sidecar-fs")),
+            encoding: None,
+            recursive: true,
+            mode: Some(0o644),
+            uid: Some(1000),
+            gid: Some(1000),
+            atime_ms: Some(1_700_000_000_000),
+            mtime_ms: Some(1_710_000_000_000),
+            len: Some(5),
+        }),
+    ));
+
+    let encoded = codec
+        .encode(&frame)
+        .expect("encode json guest filesystem request");
+    let decoded = codec
+        .decode(&encoded)
+        .expect("decode json guest filesystem request");
+
+    assert_eq!(decoded, frame);
+}
+
+#[test]
+fn bare_codec_round_trips_guest_filesystem_requests_with_optional_fields() {
+    let codec = NativeFrameCodec::with_payload_codec(1024 * 1024, NativePayloadCodec::Bare);
+    let frame = ProtocolFrame::Request(RequestFrame::new(
+        17,
+        OwnershipScope::vm("conn-1", "session-1", "vm-1"),
+        RequestPayload::GuestFilesystemCall(GuestFilesystemCallRequest {
+            operation: GuestFilesystemOperation::Truncate,
+            path: String::from("/workspace/hard.txt"),
+            destination_path: Some(String::from("/workspace/note.txt")),
+            target: Some(String::from("/workspace/target.txt")),
+            content: Some(String::from("stdio-sidecar-fs")),
+            encoding: None,
+            recursive: true,
+            mode: Some(0o644),
+            uid: Some(1000),
+            gid: Some(1000),
+            atime_ms: Some(1_700_000_000_000),
+            mtime_ms: Some(1_710_000_000_000),
+            len: Some(5),
+        }),
+    ));
+
+    let encoded = codec
+        .encode(&frame)
+        .expect("encode bare guest filesystem request");
+    let decoded = codec
+        .decode(&encoded)
+        .expect("decode bare guest filesystem request");
 
     assert_eq!(decoded, frame);
 }
@@ -430,6 +499,7 @@ fn response_tracker_caps_completed_entries() {
             RequestPayload::Authenticate(AuthenticateRequest {
                 client_name: "packages/core".to_string(),
                 auth_token: format!("token-{request_id}"),
+                bridge_version: agent_os_bridge::bridge_contract().version,
             }),
         );
         tracker
@@ -562,7 +632,9 @@ fn schema_supports_configuration_and_structured_events() {
                 fs: None,
                 network: Some(PatternPermissionScope::Mode(PermissionMode::Ask)),
                 child_process: None,
+                process: None,
                 env: None,
+                tool: None,
             }),
             module_access_cwd: None,
             instructions: vec!["keep timing mitigation enabled".to_string()],

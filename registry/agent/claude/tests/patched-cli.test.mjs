@@ -75,3 +75,45 @@ test("patched-path helpers resolve custom manifest entries from dist", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	}
 });
+
+test("patched CLI keeps stream-json hook events enabled by default", () => {
+	const patchedCliPath = resolveClaudeCliPath({ packageDir, sdkPath });
+	const patchedCliSource = readFileSync(patchedCliPath, "utf-8");
+	const hookForwardingGuard =
+		'if($.outputFormat==="stream-json"&&$.verbose&&process.env.AGENT_OS_CLAUDE_DISABLE_HOOK_EVENTS!=="1")JMK((x)=>{';
+
+	assert.ok(
+		patchedCliSource.includes(hookForwardingGuard),
+		"expected patched CLI to guard stream-json hook events with AGENT_OS_CLAUDE_DISABLE_HOOK_EVENTS",
+	);
+	assert.ok(
+		!patchedCliSource.includes(
+			'if($.outputFormat==="stream-json"&&$.verbose&&false)JMK((x)=>{',
+		),
+		"expected patched CLI to remove the unconditional && false kill-switch",
+	);
+
+	const hookEvents = [];
+	const maybeRegisterHookEvents = (env, options, onHookEvent) => {
+		if (
+			options.outputFormat === "stream-json" &&
+			options.verbose &&
+			env.AGENT_OS_CLAUDE_DISABLE_HOOK_EVENTS !== "1"
+		) {
+			onHookEvent({ type: "hook_event" });
+		}
+	};
+
+	maybeRegisterHookEvents({}, { outputFormat: "stream-json", verbose: true }, (event) =>
+		hookEvents.push(event.type),
+	);
+	assert.deepEqual(hookEvents, ["hook_event"]);
+
+	const disabledHookEvents = [];
+	maybeRegisterHookEvents(
+		{ AGENT_OS_CLAUDE_DISABLE_HOOK_EVENTS: "1" },
+		{ outputFormat: "stream-json", verbose: true },
+		(event) => disabledHookEvents.push(event.type),
+	);
+	assert.deepEqual(disabledHookEvents, []);
+});

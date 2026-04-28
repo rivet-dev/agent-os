@@ -185,12 +185,8 @@ fn detect_format(input: &str) -> Format {
 
 fn parse_input(input: &str, format: Format) -> Result<serde_json::Value, String> {
     match format {
-        Format::Json => {
-            serde_json::from_str(input).map_err(|e| format!("invalid JSON: {}", e))
-        }
-        Format::Yaml => {
-            serde_yaml::from_str(input).map_err(|e| format!("invalid YAML: {}", e))
-        }
+        Format::Json => serde_json::from_str(input).map_err(|e| format!("invalid JSON: {}", e)),
+        Format::Yaml => serde_yaml::from_str(input).map_err(|e| format!("invalid YAML: {}", e)),
         Format::Toml => {
             let toml_val: toml::Value =
                 toml::from_str(input).map_err(|e| format!("invalid TOML: {}", e))?;
@@ -225,9 +221,7 @@ fn toml_to_json(val: toml::Value) -> Result<serde_json::Value, String> {
 
 fn json_to_toml(val: &serde_json::Value) -> Result<toml::Value, String> {
     Ok(match val {
-        serde_json::Value::Null => {
-            return Err("TOML does not support null values".to_string())
-        }
+        serde_json::Value::Null => return Err("TOML does not support null values".to_string()),
         serde_json::Value::Bool(b) => toml::Value::Boolean(*b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
@@ -296,10 +290,7 @@ fn xml_to_json(input: &str) -> Result<serde_json::Value, String> {
                 } else {
                     let mut obj = entry.children;
                     if !text.is_empty() {
-                        obj.insert(
-                            "#text".to_string(),
-                            serde_json::Value::String(text),
-                        );
+                        obj.insert("#text".to_string(), serde_json::Value::String(text));
                     }
                     serde_json::Value::Object(obj)
                 };
@@ -463,11 +454,7 @@ fn write_xml_element<W: io::Write>(
 
 // --- Output formatting ---
 
-fn format_val_output(
-    val: &Val,
-    opts: &YqOptions,
-    out_format: Format,
-) -> Result<String, String> {
+fn format_val_output(val: &Val, opts: &YqOptions, out_format: Format) -> Result<String, String> {
     let compact_str = format!("{}", val);
 
     // Raw output: unquote strings
@@ -479,8 +466,8 @@ fn format_val_output(
         }
     }
 
-    let json_val: serde_json::Value = serde_json::from_str(&compact_str)
-        .unwrap_or(serde_json::Value::String(compact_str));
+    let json_val: serde_json::Value =
+        serde_json::from_str(&compact_str).unwrap_or(serde_json::Value::String(compact_str));
 
     format_json_as(out_format, &json_val, opts.compact)
 }
@@ -495,13 +482,11 @@ fn format_json_as(
             if compact {
                 serde_json::to_string(val).map_err(|e| format!("JSON output error: {}", e))
             } else {
-                serde_json::to_string_pretty(val)
-                    .map_err(|e| format!("JSON output error: {}", e))
+                serde_json::to_string_pretty(val).map_err(|e| format!("JSON output error: {}", e))
             }
         }
         Format::Yaml => {
-            let s =
-                serde_yaml::to_string(val).map_err(|e| format!("YAML output error: {}", e))?;
+            let s = serde_yaml::to_string(val).map_err(|e| format!("YAML output error: {}", e))?;
             // Strip leading "---\n" and trailing newline for cleaner output
             let s = s.strip_prefix("---\n").unwrap_or(&s);
             let s = s.strip_suffix('\n').unwrap_or(s);

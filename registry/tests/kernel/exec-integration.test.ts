@@ -10,6 +10,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import {
+  describeIf,
   createIntegrationKernel,
   skipUnlessWasmBuilt,
 } from './helpers.ts';
@@ -17,7 +18,7 @@ import type { IntegrationKernelResult } from './helpers.ts';
 
 const skipReason = skipUnlessWasmBuilt();
 
-describe.skipIf(skipReason)('kernel.exec() integration', () => {
+describeIf(!skipReason, 'kernel.exec() integration', () => {
   let ctx: IntegrationKernelResult;
 
   afterEach(async () => {
@@ -85,9 +86,21 @@ describe.skipIf(skipReason)('kernel.exec() integration', () => {
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr.length).toBeGreaterThan(0);
   });
+
+  it('shell test builtin honors precedence and grouping', async () => {
+    ctx = await createIntegrationKernel({ runtimes: ['wasmvm'] });
+    const script = [
+      "if /bin/[ 1 -eq 1 -o 2 -eq 3 -a 4 -eq 5 ]; then echo precedence; else echo bad; fi",
+      "if /bin/[ '(' 1 -eq 0 -o 2 -eq 2 ')' -a 3 -eq 3 ]; then echo grouping; else echo bad; fi",
+    ].join('\n');
+
+    const result = await ctx.kernel.exec(script);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim().split('\n')).toEqual(['precedence', 'grouping']);
+  });
 });
 
-describe.skipIf(skipReason)('kernel.spawn() integration', () => {
+describeIf(!skipReason, 'kernel.spawn() integration', () => {
   let ctx: IntegrationKernelResult;
 
   afterEach(async () => {

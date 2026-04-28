@@ -10,7 +10,6 @@ import {
 } from "../src/base-filesystem.js";
 import type { VirtualFileSystem } from "../src/runtime-compat.js";
 import { getAgentOsKernel } from "../src/test/runtime.js";
-import { hasRegistryCommands } from "./helpers/registry-commands.js";
 
 describe("AgentOs base filesystem", () => {
 	let vm: AgentOs;
@@ -151,9 +150,7 @@ describe("AgentOs base filesystem", () => {
 		);
 	});
 
-	test.skipIf(!hasRegistryCommands)(
-		"read-only roots preseed WASM command stubs before runtime mount",
-		async () => {
+	test("read-only roots preseed WASM command stubs before runtime mount", async () => {
 			await vm.dispose();
 			vm = await AgentOs.create({
 				software: [coreutils],
@@ -166,8 +163,7 @@ describe("AgentOs base filesystem", () => {
 			expect(await vm.exists("/bin/sh")).toBe(true);
 			expect(await vm.exists("/bin/ls")).toBe(true);
 			expect(await vm.exists("/bin/env")).toBe(true);
-		},
-	);
+	});
 
 	test("read-only roots preserve software-declared alias commands on the sidecar path", async () => {
 		const commandDir = mkdtempSync(join(tmpdir(), "agent-os-command-fixture-"));

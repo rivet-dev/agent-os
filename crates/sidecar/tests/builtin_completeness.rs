@@ -68,6 +68,10 @@ const BUILTIN_EXPECTATIONS: &[BuiltinExpectation] = &[
         status: BuiltinStatus::KernelBacked,
     },
     BuiltinExpectation {
+        name: "dns/promises",
+        status: BuiltinStatus::KernelBacked,
+    },
+    BuiltinExpectation {
         name: "tls",
         status: BuiltinStatus::KernelBacked,
     },
@@ -229,6 +233,7 @@ const EXPECTED_RUNTIME_BUILTINS: &[&str] = &[
     "dgram",
     "diagnostics_channel",
     "dns",
+    "dns/promises",
     "domain",
     "events",
     "fs",

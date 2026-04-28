@@ -23,7 +23,10 @@ pub fn run(args: &[String]) -> i32 {
             1
         }
         "chgrp" | "chown" => {
-            eprintln!("{}: user/group ownership changes are not supported in WASM", cmd);
+            eprintln!(
+                "{}: user/group ownership changes are not supported in WASM",
+                cmd
+            );
             1
         }
         "chroot" => {

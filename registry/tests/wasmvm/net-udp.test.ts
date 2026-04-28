@@ -13,6 +13,7 @@ import {
   COMMANDS_DIR,
   C_BUILD_DIR,
   createKernel,
+  describeIf,
   hasWasmBinaries,
   SOCK_DGRAM,
 } from '../helpers.js';
@@ -135,7 +136,7 @@ async function waitForUdpBinding(
 const TEST_PORT = 9877;
 const CLIENT_PID = 999; // Fake PID for test-side client sockets
 
-describe.skipIf(skipReason())('WasmVM UDP integration', { timeout: 30_000 }, () => {
+describeIf(!skipReason(), 'WasmVM UDP integration', { timeout: 30_000 }, () => {
   let kernel: Kernel;
   let vfs: SimpleVFS;
 

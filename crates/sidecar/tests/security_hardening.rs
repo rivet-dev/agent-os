@@ -1,7 +1,8 @@
 mod support;
 
 use agent_os_sidecar::protocol::{
-    GuestRuntimeKind, OwnershipScope, RequestPayload, ResponsePayload, WriteStdinRequest,
+    ConfigureVmRequest, CreateVmRequest, GuestRuntimeKind, OwnershipScope, PermissionsPolicy,
+    RequestPayload, ResponsePayload, WriteStdinRequest,
 };
 use agent_os_sidecar::{NativeSidecar, NativeSidecarConfig};
 use serde_json::Value;
@@ -10,9 +11,10 @@ use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::time::Duration;
 use support::{
-    assert_node_available, authenticate, collect_process_output, create_vm,
-    create_vm_with_metadata, execute, open_session, request, temp_dir, write_fixture,
+    acquire_sidecar_runtime_test_lock, assert_node_available, authenticate, collect_process_output,
+    create_vm, create_vm_with_metadata, execute, open_session, request, temp_dir, write_fixture,
     RecordingBridge, TEST_AUTH_TOKEN,
 };
 
@@ -83,8 +85,8 @@ fn parse_invocations(log_path: &Path) -> Vec<Vec<String>> {
         .collect()
 }
 
-#[test]
 fn sidecar_rejects_oversized_request_frames_before_dispatch() {
+    acquire_sidecar_runtime_test_lock();
     let root = temp_dir("frame-limit");
     let mut sidecar = NativeSidecar::with_config(
         RecordingBridge::default(),
@@ -93,6 +95,7 @@ fn sidecar_rejects_oversized_request_frames_before_dispatch() {
             max_frame_bytes: 512,
             compile_cache_root: Some(root.join("cache")),
             expected_auth_token: Some(String::from(TEST_AUTH_TOKEN)),
+            acp_termination_grace: Duration::from_secs(3),
         },
     )
     .expect("create frame-limited sidecar");
@@ -100,14 +103,27 @@ fn sidecar_rejects_oversized_request_frames_before_dispatch() {
 
     let connection_id = authenticate(&mut sidecar, "conn-1");
     let session_id = open_session(&mut sidecar, 2, &connection_id);
-    let (vm_id, _) = create_vm(
-        &mut sidecar,
-        3,
-        &connection_id,
-        &session_id,
-        GuestRuntimeKind::JavaScript,
-        &cwd,
-    );
+    let vm_id = match sidecar
+        .dispatch_blocking(request(
+            3,
+            OwnershipScope::session(&connection_id, &session_id),
+            RequestPayload::CreateVm(CreateVmRequest {
+                runtime: GuestRuntimeKind::JavaScript,
+                metadata: BTreeMap::from([(
+                    String::from("cwd"),
+                    cwd.to_string_lossy().into_owned(),
+                )]),
+                root_filesystem: Default::default(),
+                permissions: None,
+            }),
+        ))
+        .expect("create frame-limit vm")
+        .response
+        .payload
+    {
+        ResponsePayload::VmCreated(response) => response.vm_id,
+        other => panic!("unexpected vm create response: {other:?}"),
+    };
 
     let result = sidecar
         .dispatch_blocking(request(
@@ -129,7 +145,6 @@ fn sidecar_rejects_oversized_request_frames_before_dispatch() {
     }
 }
 
-#[test]
 fn guest_execution_clears_host_env_and_blocks_escape_paths() {
     assert_node_available();
 
@@ -226,7 +241,6 @@ console.log(JSON.stringify(result));
     );
 }
 
-#[test]
 fn vm_resource_limits_cap_active_processes_without_poisoning_followup_execs() {
     assert_node_available();
 
@@ -318,7 +332,6 @@ fn vm_resource_limits_cap_active_processes_without_poisoning_followup_execs() {
     assert!(stderr.is_empty(), "unexpected fast stderr: {stderr}");
 }
 
-#[test]
 fn execute_rejects_cwd_outside_vm_sandbox_root() {
     let mut sidecar = support::new_sidecar("execute-cwd-validation");
     let cwd = temp_dir("execute-cwd-validation-root");
@@ -363,7 +376,93 @@ fn execute_rejects_cwd_outside_vm_sandbox_root() {
     }
 }
 
-#[test]
+fn execute_rejects_host_only_absolute_command_path() {
+    let mut sidecar = support::new_sidecar("execute-host-only-command");
+    let cwd = temp_dir("execute-host-only-command-cwd");
+    let host_only_root = temp_dir("execute-host-only-command-host");
+    let host_only_command = host_only_root.join("host-only-command.sh");
+    write_fixture(
+        &host_only_command,
+        "#!/bin/sh\nprintf 'host-only command should stay hidden\\n'\n",
+    );
+    let mut permissions = fs::metadata(&host_only_command)
+        .expect("host-only command metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&host_only_command, permissions).expect("chmod host-only command");
+
+    let connection_id = authenticate(&mut sidecar, "conn-1");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let (vm_id, _) = create_vm(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::JavaScript,
+        &cwd,
+    );
+    sidecar
+        .dispatch_blocking(request(
+            4,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::ConfigureVm(ConfigureVmRequest {
+                mounts: Vec::new(),
+                software: Vec::new(),
+                permissions: Some(PermissionsPolicy::allow_all()),
+                module_access_cwd: None,
+                instructions: Vec::new(),
+                projected_modules: Vec::new(),
+                command_permissions: Default::default(),
+                allowed_node_builtins: Vec::new(),
+                loopback_exempt_ports: Vec::new(),
+            }),
+        ))
+        .expect("configure host-only command permissions");
+
+    let result = sidecar
+        .dispatch_blocking(request(
+            5,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::Execute(agent_os_sidecar::protocol::ExecuteRequest {
+                process_id: String::from("proc-host-only"),
+                command: Some(host_only_command.to_string_lossy().into_owned()),
+                runtime: None,
+                entrypoint: None,
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                cwd: None,
+                wasm_permission_tier: None,
+            }),
+        ))
+        .expect("dispatch host-only command execute");
+
+    match result.response.payload {
+        ResponsePayload::Rejected(rejected) => {
+            assert!(
+                rejected.code == "kernel_error"
+                    || rejected.code == "execution_error"
+                    || rejected.code == "invalid_state",
+                "unexpected rejection code: {rejected:?}"
+            );
+            if rejected.code == "invalid_state" {
+                assert!(
+                    rejected
+                        .message
+                        .contains("command not found on native sidecar path"),
+                    "unexpected invalid_state rejection: {rejected:?}"
+                );
+            }
+            assert!(
+                !rejected
+                    .message
+                    .contains("host-only command should stay hidden"),
+                "host-only command output should not leak through the rejection: {rejected:?}"
+            );
+        }
+        other => panic!("unexpected execute response: {other:?}"),
+    }
+}
+
 fn execute_ignores_host_node_binary_override_for_javascript_runtime() {
     let root = temp_dir("execute-cwd-permission-root");
     let fake_node_path = root.join("fake-node.sh");
@@ -423,4 +522,16 @@ fn execute_ignores_host_node_binary_override_for_javascript_runtime() {
         "javascript guest execution should stay inside the V8 runtime instead of invoking host node: {:?}",
         parse_invocations(&log_path)
     );
+}
+
+#[test]
+fn security_hardening_suite() {
+    // Multiple libtest cases in this V8-backed integration binary still trip
+    // teardown/init crashes, so keep the coverage in one top-level suite.
+    execute_ignores_host_node_binary_override_for_javascript_runtime();
+    execute_rejects_cwd_outside_vm_sandbox_root();
+    execute_rejects_host_only_absolute_command_path();
+    guest_execution_clears_host_env_and_blocks_escape_paths();
+    sidecar_rejects_oversized_request_frames_before_dispatch();
+    vm_resource_limits_cap_active_processes_without_poisoning_followup_execs();
 }

@@ -31,9 +31,9 @@ pub use python::{
 };
 pub use signal::{NodeSignalDispositionAction, NodeSignalHandlerRegistration};
 pub use wasm::{
-    CreateWasmContextRequest, StartWasmExecutionRequest, WasmContext, WasmExecution,
-    WasmExecutionEngine, WasmExecutionError, WasmExecutionEvent, WasmExecutionResult,
-    WasmPermissionTier,
+    CreateWasmContextRequest, NativeBinaryFormat, StartWasmExecutionRequest, WasmContext,
+    WasmExecution, WasmExecutionEngine, WasmExecutionError, WasmExecutionEvent,
+    WasmExecutionResult, WasmPermissionTier,
 };
 
 pub trait NativeExecutionBridge: agent_os_bridge::ExecutionBridge {}

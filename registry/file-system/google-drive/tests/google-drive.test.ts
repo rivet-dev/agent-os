@@ -6,6 +6,24 @@ const clientEmail = process.env.GOOGLE_DRIVE_CLIENT_EMAIL;
 const privateKey = process.env.GOOGLE_DRIVE_PRIVATE_KEY;
 const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
 const hasCredentials = !!(clientEmail && privateKey && folderId);
+const ALLOW_ALL_VM_PERMISSIONS = {
+	fs: "allow",
+	network: "allow",
+	childProcess: "allow",
+	process: "allow",
+	env: "allow",
+	tool: "allow",
+} as const;
+
+function itIf(condition: boolean, ...args: Parameters<typeof it>): void {
+	if (condition) {
+		// @ts-expect-error forwarded it() arguments stay runtime-compatible.
+		it(...args);
+		return;
+	}
+	const [name] = args;
+	it(String(name), () => {});
+}
 
 let vm: AgentOs | null = null;
 
@@ -44,8 +62,10 @@ describe("@rivet-dev/agent-os-google-drive", () => {
 		});
 	});
 
-	if (hasCredentials) {
-		it("mounts a Google Drive-backed filesystem through AgentOs", async () => {
+	itIf(
+		hasCredentials,
+		"mounts a Google Drive-backed filesystem through AgentOs",
+		async () => {
 			vm = await AgentOs.create({
 				mounts: [
 					{
@@ -62,6 +82,7 @@ describe("@rivet-dev/agent-os-google-drive", () => {
 						}),
 					},
 				],
+				permissions: ALLOW_ALL_VM_PERMISSIONS,
 			});
 
 			const payload = "0123456789abcdef".repeat(32);
@@ -70,11 +91,6 @@ describe("@rivet-dev/agent-os-google-drive", () => {
 
 			expect(new TextDecoder().decode(content)).toBe(payload);
 			expect(await vm.readdir("/data")).toContain("notes.txt");
-		});
-	} else {
-		it.skip(
-			"skipped: set GOOGLE_DRIVE_CLIENT_EMAIL, GOOGLE_DRIVE_PRIVATE_KEY, and GOOGLE_DRIVE_FOLDER_ID to run the live Google Drive mount test",
-			() => {},
-		);
-	}
+		},
+	);
 });

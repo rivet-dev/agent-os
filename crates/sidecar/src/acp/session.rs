@@ -1,12 +1,166 @@
 use crate::acp::compat::{
     derive_config_options, synthetic_config_update, synthetic_mode_update,
-    PendingPermissionRequest, RECENT_ACTIVITY_LIMIT,
+    PendingPermissionRequest, SeenInboundRequestIds, RECENT_ACTIVITY_LIMIT,
 };
 use crate::acp::AcpTimeoutDiagnostics;
-use crate::acp::{JsonRpcId, JsonRpcNotification};
+use crate::acp::{JsonRpcError, JsonRpcId, JsonRpcNotification};
 use crate::protocol::{SequencedNotification, SessionCreatedResponse, SessionStateResponse};
+use serde::Serialize;
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AcpSessionStateError {
+    NotificationSerialization(String),
+    InvalidConfigOptionParams(String),
+    MalformedConfigOptionEntry { index: usize, reason: String },
+    UnknownConfigOption(String),
+}
+
+impl AcpSessionStateError {
+    fn notification_serialization(error: serde_json::Error) -> Self {
+        Self::NotificationSerialization(format!("failed to serialize ACP notification: {error}"))
+    }
+
+    fn invalid_config_option_params(message: impl Into<String>) -> Self {
+        Self::InvalidConfigOptionParams(message.into())
+    }
+
+    fn malformed_config_option_entry(index: usize, reason: impl Into<String>) -> Self {
+        Self::MalformedConfigOptionEntry {
+            index,
+            reason: reason.into(),
+        }
+    }
+
+    fn unknown_config_option(config_id: impl Into<String>) -> Self {
+        Self::UnknownConfigOption(config_id.into())
+    }
+
+    pub(crate) fn to_json_rpc_error(&self, method: &str) -> JsonRpcError {
+        match self {
+            Self::NotificationSerialization(message) => JsonRpcError {
+                code: -32000,
+                message: message.clone(),
+                data: Some(serde_json::json!({
+                    "kind": "acp_session_state",
+                    "method": method,
+                })),
+            },
+            Self::InvalidConfigOptionParams(message) => JsonRpcError {
+                code: -32602,
+                message: format!("Invalid params for {method}: {message}"),
+                data: Some(serde_json::json!({
+                    "kind": "invalid_config_option_params",
+                    "method": method,
+                })),
+            },
+            Self::MalformedConfigOptionEntry { index, reason } => JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "Invalid params for {method}: config option entry {index} is malformed: {reason}"
+                ),
+                data: Some(serde_json::json!({
+                    "kind": "malformed_config_option_entry",
+                    "method": method,
+                    "index": index,
+                })),
+            },
+            Self::UnknownConfigOption(config_id) => JsonRpcError {
+                code: -32602,
+                message: format!("Invalid params for {method}: unknown config option {config_id}"),
+                data: Some(serde_json::json!({
+                    "kind": "unknown_config_option",
+                    "method": method,
+                    "configId": config_id,
+                })),
+            },
+        }
+    }
+}
+
+impl fmt::Display for AcpSessionStateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotificationSerialization(message) | Self::InvalidConfigOptionParams(message) => {
+                f.write_str(message)
+            }
+            Self::MalformedConfigOptionEntry { index, reason } => {
+                write!(f, "config option entry {index} is malformed: {reason}")
+            }
+            Self::UnknownConfigOption(config_id) => {
+                write!(f, "unknown config option {config_id}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AcpSessionStateError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AcpInitializeError {
+    MissingProtocolVersion,
+    InvalidProtocolVersion,
+    ProtocolVersionMismatch { requested: u64, reported: u64 },
+}
+
+impl fmt::Display for AcpInitializeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingProtocolVersion => {
+                f.write_str("ACP initialize response missing protocolVersion")
+            }
+            Self::InvalidProtocolVersion => {
+                f.write_str("ACP initialize response protocolVersion must be an unsigned integer")
+            }
+            Self::ProtocolVersionMismatch {
+                requested,
+                reported,
+            } => write!(
+                f,
+                "ACP initialize protocolVersion mismatch: requested {requested}, agent reported {reported}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AcpInitializeError {}
+
+pub(crate) fn build_initialize_request(
+    protocol_version: u64,
+    client_capabilities: Value,
+) -> crate::acp::JsonRpcRequest {
+    crate::acp::JsonRpcRequest {
+        jsonrpc: String::from("2.0"),
+        id: JsonRpcId::Number(1),
+        method: String::from("initialize"),
+        params: Some(serde_json::json!({
+            "protocolVersion": protocol_version,
+            "clientCapabilities": client_capabilities,
+        })),
+    }
+}
+
+pub(crate) fn validate_initialize_result(
+    init_result: &Map<String, Value>,
+    requested_protocol_version: u64,
+) -> Result<u64, AcpInitializeError> {
+    let reported_protocol_version = init_result
+        .get("protocolVersion")
+        .ok_or(AcpInitializeError::MissingProtocolVersion)?
+        .as_u64()
+        .ok_or(AcpInitializeError::InvalidProtocolVersion)?;
+
+    if reported_protocol_version != requested_protocol_version {
+        return Err(AcpInitializeError::ProtocolVersionMismatch {
+            requested: requested_protocol_version,
+            reported: reported_protocol_version,
+        });
+    }
+
+    Ok(reported_protocol_version)
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct AcpTerminalState {
@@ -57,6 +211,8 @@ pub(crate) struct SequencedEvent {
     pub(crate) notification: JsonRpcNotification,
 }
 
+pub(crate) const ACP_SESSION_EVENT_RETENTION_LIMIT: usize = 1024;
+
 #[derive(Debug, Clone)]
 pub(crate) struct AcpSessionState {
     pub(crate) session_id: String,
@@ -67,14 +223,14 @@ pub(crate) struct AcpSessionState {
     pub(crate) stdout_buffer: String,
     pub(crate) next_request_id: i64,
     pub(crate) next_sequence_number: u64,
-    pub(crate) events: Vec<SequencedEvent>,
+    pub(crate) events: VecDeque<SequencedEvent>,
     pub(crate) modes: Option<Value>,
     pub(crate) config_options: Vec<Value>,
     pub(crate) agent_capabilities: Option<Value>,
     pub(crate) agent_info: Option<Value>,
     pub(crate) recent_activity: VecDeque<String>,
     pub(crate) pending_permission_requests: BTreeMap<String, PendingPermissionRequest>,
-    pub(crate) seen_inbound_request_ids: BTreeSet<JsonRpcId>,
+    pub(crate) seen_inbound_request_ids: SeenInboundRequestIds,
     pub(crate) terminals: BTreeMap<String, AcpTerminalState>,
     pub(crate) next_terminal_id: u64,
     pub(crate) closed: bool,
@@ -127,7 +283,7 @@ impl AcpSessionState {
             // reuse ids on the same transport.
             next_request_id: 3,
             next_sequence_number: 0,
-            events: Vec::new(),
+            events: VecDeque::with_capacity(ACP_SESSION_EVENT_RETENTION_LIMIT),
             modes: session_result
                 .get("modes")
                 .cloned()
@@ -137,7 +293,7 @@ impl AcpSessionState {
             agent_info: init_result.get("agentInfo").cloned(),
             recent_activity: VecDeque::with_capacity(RECENT_ACTIVITY_LIMIT),
             pending_permission_requests: BTreeMap::new(),
-            seen_inbound_request_ids: BTreeSet::new(),
+            seen_inbound_request_ids: SeenInboundRequestIds::default(),
             terminals: BTreeMap::new(),
             next_terminal_id: 1,
             closed: false,
@@ -157,8 +313,52 @@ impl AcpSessionState {
         }
     }
 
-    pub(crate) fn state_response(&self) -> SessionStateResponse {
-        SessionStateResponse {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn state_response(&self) -> Result<SessionStateResponse, AcpSessionStateError> {
+        self.state_response_with_additional_events(std::iter::empty())
+    }
+
+    pub(crate) fn acknowledged_state_response(
+        &mut self,
+        acknowledged_sequence_number: Option<u64>,
+    ) -> Result<SessionStateResponse, AcpSessionStateError> {
+        self.drain_acknowledged_events(acknowledged_sequence_number);
+        self.state_response_with_additional_events(std::iter::empty())
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn state_response_with_test_notification<T: Serialize>(
+        &self,
+        sequence_number: u64,
+        notification: &T,
+    ) -> Result<SessionStateResponse, AcpSessionStateError> {
+        self.state_response_with_additional_events(std::iter::once(
+            serialize_sequenced_notification(sequence_number, notification),
+        ))
+    }
+
+    fn state_response_with_additional_events<I>(
+        &self,
+        additional_events: I,
+    ) -> Result<SessionStateResponse, AcpSessionStateError>
+    where
+        I: IntoIterator<Item = Result<SequencedNotification, AcpSessionStateError>>,
+    {
+        let mut events = self
+            .events
+            .iter()
+            .map(|event| {
+                serialize_sequenced_notification(event.sequence_number, &event.notification)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        events.extend(
+            additional_events
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+
+        Ok(SessionStateResponse {
             session_id: self.session_id.clone(),
             agent_type: self.agent_type.clone(),
             process_id: self.process_id.clone(),
@@ -168,16 +368,8 @@ impl AcpSessionState {
             config_options: self.config_options.clone(),
             agent_capabilities: self.agent_capabilities.clone(),
             agent_info: self.agent_info.clone(),
-            events: self
-                .events
-                .iter()
-                .map(|event| SequencedNotification {
-                    sequence_number: event.sequence_number,
-                    notification: serde_json::to_value(&event.notification)
-                        .expect("serialize ACP notification"),
-                })
-                .collect(),
-        }
+            events,
+        })
     }
 
     pub(crate) fn record_activity(&mut self, entry: String) {
@@ -189,6 +381,7 @@ impl AcpSessionState {
 
     pub(crate) fn mark_termination_requested(&mut self) {
         self.termination_requested = true;
+        self.closed = true;
     }
 
     pub(crate) fn timeout_diagnostics(
@@ -211,11 +404,12 @@ impl AcpSessionState {
 
     pub(crate) fn record_notification(&mut self, notification: JsonRpcNotification) {
         self.apply_session_update(&notification);
-        self.events.push(SequencedEvent {
+        self.events.push_back(SequencedEvent {
             sequence_number: self.next_sequence_number,
             notification,
         });
         self.next_sequence_number += 1;
+        self.trim_event_buffer();
     }
 
     pub(crate) fn allocate_terminal_id(&mut self) -> String {
@@ -228,12 +422,12 @@ impl AcpSessionState {
         &mut self,
         method: &str,
         params: &Map<String, Value>,
-        event_count_before: usize,
-    ) -> Option<JsonRpcNotification> {
+        sequence_number_before: u64,
+    ) -> Result<Option<JsonRpcNotification>, AcpSessionStateError> {
         if method == "session/set_mode" {
             if let Some(mode_id) = params.get("modeId").and_then(Value::as_str) {
                 self.apply_local_mode_update(mode_id);
-                if !self.has_session_update_since(event_count_before, |update| {
+                if !self.has_session_update_since(sequence_number_before, |update| {
                     update
                         .get("sessionUpdate")
                         .and_then(Value::as_str)
@@ -245,41 +439,51 @@ impl AcpSessionState {
                 }) {
                     let notification = synthetic_mode_update(mode_id);
                     self.record_notification(notification.clone());
-                    return Some(notification);
+                    return Ok(Some(notification));
                 }
             }
         }
 
         if method == "session/set_config_option" {
-            if let (Some(config_id), Some(value)) = (
-                params.get("configId").and_then(Value::as_str),
-                params.get("value").and_then(Value::as_str),
-            ) {
-                self.apply_local_config_update(config_id, value);
-                if !self.has_session_update_since(event_count_before, |update| {
-                    update
-                        .get("sessionUpdate")
-                        .and_then(Value::as_str)
-                        .is_some_and(|value| {
-                            value == "config_option_update" || value == "config_options_update"
-                        })
-                }) {
-                    let notification = synthetic_config_update(&self.config_options);
-                    self.record_notification(notification.clone());
-                    return Some(notification);
-                }
+            let config_id = params
+                .get("configId")
+                .ok_or_else(|| {
+                    AcpSessionStateError::invalid_config_option_params("configId is required")
+                })?
+                .as_str()
+                .ok_or_else(|| {
+                    AcpSessionStateError::invalid_config_option_params("configId must be a string")
+                })?;
+            let value = params.get("value").ok_or_else(|| {
+                AcpSessionStateError::invalid_config_option_params("value is required")
+            })?;
+            self.apply_local_config_update(config_id, value)?;
+            if !self.has_session_update_since(sequence_number_before, |update| {
+                update
+                    .get("sessionUpdate")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| {
+                        value == "config_option_update" || value == "config_options_update"
+                    })
+            }) {
+                let notification = synthetic_config_update(&self.config_options);
+                self.record_notification(notification.clone());
+                return Ok(Some(notification));
             }
         }
 
-        None
+        Ok(None)
     }
 
     fn has_session_update_since(
         &self,
-        start_index: usize,
+        sequence_number_before: u64,
         predicate: impl Fn(&Map<String, Value>) -> bool,
     ) -> bool {
-        self.events.iter().skip(start_index).any(|event| {
+        self.events.iter().any(|event| {
+            if event.sequence_number < sequence_number_before {
+                return false;
+            }
             if event.notification.method != "session/update" {
                 return false;
             }
@@ -298,6 +502,25 @@ impl AcpSessionState {
                 .unwrap_or(params);
             predicate(&update)
         })
+    }
+
+    fn drain_acknowledged_events(&mut self, acknowledged_sequence_number: Option<u64>) {
+        let Some(acknowledged_sequence_number) = acknowledged_sequence_number else {
+            return;
+        };
+        while self
+            .events
+            .front()
+            .is_some_and(|event| event.sequence_number <= acknowledged_sequence_number)
+        {
+            self.events.pop_front();
+        }
+    }
+
+    fn trim_event_buffer(&mut self) {
+        while self.events.len() > ACP_SESSION_EVENT_RETENTION_LIMIT {
+            self.events.pop_front();
+        }
     }
 
     fn apply_session_update(&mut self, notification: &JsonRpcNotification) {
@@ -350,27 +573,31 @@ impl AcpSessionState {
         );
     }
 
-    fn apply_local_config_update(&mut self, config_id: &str, value: &str) {
-        self.config_options = self
-            .config_options
-            .iter()
-            .map(|option| {
-                let Some(mut map) = option.as_object().cloned() else {
-                    return option.clone();
-                };
-                let is_target = map
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| id == config_id);
-                if is_target {
-                    map.insert(
-                        String::from("currentValue"),
-                        Value::String(String::from(value)),
-                    );
-                }
-                Value::Object(map)
-            })
-            .collect();
+    fn apply_local_config_update(
+        &mut self,
+        config_id: &str,
+        value: &Value,
+    ) -> Result<(), AcpSessionStateError> {
+        let mut updated = false;
+        let mut config_options = Vec::with_capacity(self.config_options.len());
+        for (index, option) in self.config_options.iter().enumerate() {
+            let mut map = option.as_object().cloned().ok_or_else(|| {
+                AcpSessionStateError::malformed_config_option_entry(index, "expected an object")
+            })?;
+            let option_id = map.get("id").and_then(Value::as_str).ok_or_else(|| {
+                AcpSessionStateError::malformed_config_option_entry(index, "missing string id")
+            })?;
+            if option_id == config_id {
+                map.insert(String::from("currentValue"), value.clone());
+                updated = true;
+            }
+            config_options.push(Value::Object(map));
+        }
+        if !updated {
+            return Err(AcpSessionStateError::unknown_config_option(config_id));
+        }
+        self.config_options = config_options;
+        Ok(())
     }
 
     fn timeout_killed_state(&self) -> Option<bool> {
@@ -379,4 +606,15 @@ impl AcpSessionState {
         }
         self.termination_requested.then_some(true)
     }
+}
+
+fn serialize_sequenced_notification<T: Serialize>(
+    sequence_number: u64,
+    notification: &T,
+) -> Result<SequencedNotification, AcpSessionStateError> {
+    Ok(SequencedNotification {
+        sequence_number,
+        notification: serde_json::to_value(notification)
+            .map_err(AcpSessionStateError::notification_serialization)?,
+    })
 }

@@ -3,6 +3,7 @@ use crate::vfs::normalize_path;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub type SocketId = u64;
@@ -67,6 +68,13 @@ pub enum SocketShutdown {
     Read,
     Write,
     Both,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatagramSocketOption {
+    ReuseAddr,
+    ReusePort,
+    Broadcast,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +207,41 @@ impl SocketRecord {
             .map(|state| state.recv_queue.len())
             .unwrap_or(0)
     }
+
+    pub fn reuse_address(&self) -> bool {
+        self.datagram_state
+            .as_ref()
+            .map(|state| state.reuse_addr)
+            .unwrap_or(false)
+    }
+
+    pub fn reuse_port(&self) -> bool {
+        self.datagram_state
+            .as_ref()
+            .map(|state| state.reuse_port)
+            .unwrap_or(false)
+    }
+
+    pub fn broadcast_enabled(&self) -> bool {
+        self.datagram_state
+            .as_ref()
+            .map(|state| state.broadcast)
+            .unwrap_or(false)
+    }
+
+    pub fn multicast_membership_count(&self) -> usize {
+        self.datagram_state
+            .as_ref()
+            .map(|state| state.multicast_memberships.len())
+            .unwrap_or(0)
+    }
+
+    pub fn has_multicast_membership(&self, membership: &SocketMulticastMembership) -> bool {
+        self.datagram_state
+            .as_ref()
+            .map(|state| state.multicast_memberships.contains(membership))
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +269,29 @@ pub struct SocketTableSnapshot {
     pub sockets: usize,
     pub listeners: usize,
     pub connections: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SocketMulticastMembership {
+    group_address: String,
+    interface_address: Option<String>,
+}
+
+impl SocketMulticastMembership {
+    pub fn new(group_address: impl Into<String>, interface_address: Option<String>) -> Self {
+        Self {
+            group_address: group_address.into(),
+            interface_address,
+        }
+    }
+
+    pub fn group_address(&self) -> &str {
+        &self.group_address
+    }
+
+    pub fn interface_address(&self) -> Option<&str> {
+        self.interface_address.as_deref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +322,13 @@ impl SocketTableError {
     fn address_in_use(message: impl Into<String>) -> Self {
         Self {
             code: "EADDRINUSE",
+            message: message.into(),
+        }
+    }
+
+    fn address_not_available(message: impl Into<String>) -> Self {
+        Self {
+            code: "EADDRNOTAVAIL",
             message: message.into(),
         }
     }
@@ -302,8 +375,9 @@ struct SocketTableState {
     sockets: BTreeMap<SocketId, SocketRecord>,
     by_owner: BTreeMap<u32, BTreeSet<SocketId>>,
     bound_inet_streams: BTreeMap<InetSocketAddress, SocketId>,
-    bound_inet_datagrams: BTreeMap<InetSocketAddress, SocketId>,
+    bound_inet_datagrams: BTreeMap<InetSocketAddress, BTreeSet<SocketId>>,
     bound_unix_streams: BTreeMap<String, SocketId>,
+    multicast_groups: BTreeMap<SocketMulticastMembership, BTreeSet<SocketId>>,
     next_socket_id: SocketId,
 }
 
@@ -332,6 +406,10 @@ struct PendingConnection {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct DatagramState {
     recv_queue: VecDeque<QueuedDatagram>,
+    reuse_addr: bool,
+    reuse_port: bool,
+    broadcast: bool,
+    multicast_memberships: BTreeSet<SocketMulticastMembership>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,22 +516,20 @@ impl SocketTable {
                 "socket {socket_id} is not an INET socket"
             )));
         }
-        let existing_id = lookup_bound_inet_socket(&table, existing.spec, &address);
+        let conflicting_ids =
+            lookup_conflicting_bound_inet_socket_ids(&table, existing.spec, &address);
+        if has_incompatible_inet_bind_conflict(&table, &existing, &conflicting_ids) {
+            return Err(SocketTableError::address_in_use(format!(
+                "address {}:{} is already bound",
+                address.host(),
+                address.port()
+            )));
+        }
         let cloned = {
             let record = table
                 .sockets
                 .get_mut(&socket_id)
                 .ok_or_else(|| SocketTableError::not_found(socket_id))?;
-
-            if let Some(bound_socket_id) = existing_id {
-                if bound_socket_id != socket_id {
-                    return Err(SocketTableError::address_in_use(format!(
-                        "address {}:{} is already bound",
-                        address.host(),
-                        address.port()
-                    )));
-                }
-            }
 
             match record.state {
                 SocketState::Created => {}
@@ -478,6 +554,106 @@ impl SocketTable {
             record.clone()
         };
         register_bound_inet_socket(&mut table, cloned.spec, address, socket_id);
+        Ok(cloned)
+    }
+
+    pub fn set_datagram_socket_option(
+        &self,
+        socket_id: SocketId,
+        option: DatagramSocketOption,
+        enabled: bool,
+    ) -> SocketResult<SocketRecord> {
+        let mut table = lock_or_recover(&self.inner.state);
+        let record = table
+            .sockets
+            .get_mut(&socket_id)
+            .ok_or_else(|| SocketTableError::not_found(socket_id))?;
+        let datagram_state = datagram_state_mut(record)?;
+
+        match option {
+            DatagramSocketOption::ReuseAddr => datagram_state.reuse_addr = enabled,
+            DatagramSocketOption::ReusePort => datagram_state.reuse_port = enabled,
+            DatagramSocketOption::Broadcast => datagram_state.broadcast = enabled,
+        }
+
+        Ok(record.clone())
+    }
+
+    pub fn add_multicast_membership(
+        &self,
+        socket_id: SocketId,
+        membership: SocketMulticastMembership,
+    ) -> SocketResult<SocketRecord> {
+        let mut table = lock_or_recover(&self.inner.state);
+        let normalized_membership = {
+            let record = table
+                .sockets
+                .get(&socket_id)
+                .ok_or_else(|| SocketTableError::not_found(socket_id))?;
+            validate_multicast_socket(record)?;
+            normalize_multicast_membership(record.spec, membership)?
+        };
+
+        let cloned = {
+            let record = table
+                .sockets
+                .get_mut(&socket_id)
+                .ok_or_else(|| SocketTableError::not_found(socket_id))?;
+            let datagram_state = datagram_state_mut(record)?;
+            datagram_state
+                .multicast_memberships
+                .insert(normalized_membership.clone());
+            record.clone()
+        };
+
+        table
+            .multicast_groups
+            .entry(normalized_membership)
+            .or_default()
+            .insert(socket_id);
+        Ok(cloned)
+    }
+
+    pub fn drop_multicast_membership(
+        &self,
+        socket_id: SocketId,
+        membership: SocketMulticastMembership,
+    ) -> SocketResult<SocketRecord> {
+        let mut table = lock_or_recover(&self.inner.state);
+        let normalized_membership = {
+            let record = table
+                .sockets
+                .get(&socket_id)
+                .ok_or_else(|| SocketTableError::not_found(socket_id))?;
+            validate_multicast_socket(record)?;
+            normalize_multicast_membership(record.spec, membership)?
+        };
+
+        let cloned = {
+            let record = table
+                .sockets
+                .get_mut(&socket_id)
+                .ok_or_else(|| SocketTableError::not_found(socket_id))?;
+            let datagram_state = datagram_state_mut(record)?;
+            if !datagram_state
+                .multicast_memberships
+                .remove(&normalized_membership)
+            {
+                return Err(SocketTableError::address_not_available(format!(
+                    "socket {socket_id} has not joined multicast group {}",
+                    normalized_membership.group_address()
+                )));
+            }
+            record.clone()
+        };
+
+        if let Some(members) = table.multicast_groups.get_mut(&normalized_membership) {
+            members.remove(&socket_id);
+            if members.is_empty() {
+                table.multicast_groups.remove(&normalized_membership);
+            }
+        }
+
         Ok(cloned)
     }
 
@@ -743,17 +919,15 @@ impl SocketTable {
     ) -> SocketResult<()> {
         let target_address = normalize_inet_address(target_address);
         let mut table = lock_or_recover(&self.inner.state);
-        let listener_socket_id = table
-            .bound_inet_streams
-            .get(&target_address)
-            .copied()
-            .ok_or_else(|| {
-                SocketTableError::not_found_address(format!(
-                    "no listening socket bound at {}:{}",
-                    target_address.host(),
-                    target_address.port()
-                ))
-            })?;
+        let listener_socket_id =
+            lookup_bound_inet_socket_in_table(&table.bound_inet_streams, &target_address)
+                .ok_or_else(|| {
+                    SocketTableError::not_found_address(format!(
+                        "no listening socket bound at {}:{}",
+                        target_address.host(),
+                        target_address.port()
+                    ))
+                })?;
 
         if socket_id == listener_socket_id {
             return Err(SocketTableError::invalid_argument(
@@ -963,7 +1137,7 @@ impl SocketTable {
         let receiver_socket_id = table
             .bound_inet_datagrams
             .get(&target_address)
-            .copied()
+            .and_then(|socket_ids| socket_ids.first().copied())
             .ok_or_else(|| {
                 SocketTableError::not_found_address(format!(
                     "no UDP socket bound at {}:{}",
@@ -1343,18 +1517,81 @@ fn supports_inet_datagram_lifecycle(spec: SocketSpec) -> bool {
         && matches!(spec.domain, SocketDomain::Inet | SocketDomain::Inet6)
 }
 
+fn lookup_conflicting_bound_inet_socket_ids(
+    table: &SocketTableState,
+    spec: SocketSpec,
+    address: &InetSocketAddress,
+) -> Vec<SocketId> {
+    if supports_inet_stream_lifecycle(spec) {
+        table
+            .bound_inet_streams
+            .iter()
+            .find_map(|(bound_address, socket_id)| {
+                inet_stream_bind_addresses_overlap(bound_address, address).then_some(*socket_id)
+            })
+            .into_iter()
+            .collect()
+    } else if supports_inet_datagram_lifecycle(spec) {
+        table
+            .bound_inet_datagrams
+            .iter()
+            .filter(|(bound_address, _)| inet_stream_bind_addresses_overlap(bound_address, address))
+            .flat_map(|(_, socket_ids)| socket_ids.iter().copied())
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
 fn lookup_bound_inet_socket(
     table: &SocketTableState,
     spec: SocketSpec,
     address: &InetSocketAddress,
 ) -> Option<SocketId> {
     if supports_inet_stream_lifecycle(spec) {
-        table.bound_inet_streams.get(address).copied()
+        lookup_bound_inet_socket_in_table(&table.bound_inet_streams, address)
     } else if supports_inet_datagram_lifecycle(spec) {
-        table.bound_inet_datagrams.get(address).copied()
+        lookup_bound_inet_datagram_socket_in_table(&table.bound_inet_datagrams, address)
     } else {
         None
     }
+}
+
+fn inet_stream_bind_addresses_overlap(
+    existing: &InetSocketAddress,
+    requested: &InetSocketAddress,
+) -> bool {
+    if existing == requested {
+        return true;
+    }
+
+    wildcard_inet_address(existing).as_ref() == Some(requested)
+        || wildcard_inet_address(requested).as_ref() == Some(existing)
+}
+
+fn lookup_bound_inet_socket_in_table(
+    sockets: &BTreeMap<InetSocketAddress, SocketId>,
+    address: &InetSocketAddress,
+) -> Option<SocketId> {
+    sockets.get(address).copied().or_else(|| {
+        wildcard_inet_address(address).and_then(|wildcard| sockets.get(&wildcard).copied())
+    })
+}
+
+fn lookup_bound_inet_datagram_socket_in_table(
+    sockets: &BTreeMap<InetSocketAddress, BTreeSet<SocketId>>,
+    address: &InetSocketAddress,
+) -> Option<SocketId> {
+    sockets
+        .get(address)
+        .and_then(|socket_ids| socket_ids.first().copied())
+        .or_else(|| {
+            wildcard_inet_address(address).and_then(|wildcard| {
+                sockets
+                    .get(&wildcard)
+                    .and_then(|socket_ids| socket_ids.first().copied())
+            })
+        })
 }
 
 fn register_bound_inet_socket(
@@ -1366,7 +1603,11 @@ fn register_bound_inet_socket(
     if supports_inet_stream_lifecycle(spec) {
         table.bound_inet_streams.insert(address, socket_id);
     } else if supports_inet_datagram_lifecycle(spec) {
-        table.bound_inet_datagrams.insert(address, socket_id);
+        table
+            .bound_inet_datagrams
+            .entry(address)
+            .or_default()
+            .insert(socket_id);
     }
 }
 
@@ -1437,9 +1678,111 @@ fn validate_bound_udp_receiver(receiver: &SocketRecord) -> SocketResult<()> {
     Ok(())
 }
 
+fn datagram_state_mut(record: &mut SocketRecord) -> SocketResult<&mut DatagramState> {
+    if !supports_inet_datagram_lifecycle(record.spec) {
+        return Err(SocketTableError::invalid_argument(format!(
+            "socket {} is not an INET datagram socket",
+            record.id
+        )));
+    }
+    record.datagram_state.as_mut().ok_or_else(|| {
+        SocketTableError::invalid_argument(format!(
+            "socket {} does not support datagrams",
+            record.id
+        ))
+    })
+}
+
+fn validate_multicast_socket(record: &SocketRecord) -> SocketResult<()> {
+    validate_bound_udp_receiver(record)?;
+    if record.spec.domain != SocketDomain::Inet {
+        return Err(SocketTableError::invalid_argument(format!(
+            "socket {} multicast membership is only implemented for IPv4 datagrams",
+            record.id
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_multicast_membership(
+    spec: SocketSpec,
+    membership: SocketMulticastMembership,
+) -> SocketResult<SocketMulticastMembership> {
+    let group_address = membership.group_address.trim().to_ascii_lowercase();
+    let interface_address = membership
+        .interface_address
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+
+    match spec.domain {
+        SocketDomain::Inet => {
+            let parsed = group_address.parse::<Ipv4Addr>().map_err(|_| {
+                SocketTableError::invalid_argument(format!(
+                    "invalid IPv4 multicast address {group_address}"
+                ))
+            })?;
+            if !parsed.is_multicast() {
+                return Err(SocketTableError::invalid_argument(format!(
+                    "address {group_address} is not an IPv4 multicast group"
+                )));
+            }
+        }
+        SocketDomain::Inet6 => {
+            let parsed = group_address.parse::<Ipv6Addr>().map_err(|_| {
+                SocketTableError::invalid_argument(format!(
+                    "invalid IPv6 multicast address {group_address}"
+                ))
+            })?;
+            if !parsed.is_multicast() {
+                return Err(SocketTableError::invalid_argument(format!(
+                    "address {group_address} is not an IPv6 multicast group"
+                )));
+            }
+        }
+        SocketDomain::Unix => {
+            return Err(SocketTableError::invalid_argument(
+                "unix sockets do not support multicast membership",
+            ));
+        }
+    }
+
+    Ok(SocketMulticastMembership::new(
+        group_address,
+        interface_address,
+    ))
+}
+
+fn has_incompatible_inet_bind_conflict(
+    table: &SocketTableState,
+    record: &SocketRecord,
+    conflicting_ids: &[SocketId],
+) -> bool {
+    conflicting_ids.iter().any(|conflicting_id| {
+        if *conflicting_id == record.id {
+            return false;
+        }
+
+        let Some(existing) = table.sockets.get(conflicting_id) else {
+            return false;
+        };
+
+        if supports_inet_datagram_lifecycle(record.spec) {
+            !inet_datagram_bind_shares_port(record, existing)
+        } else {
+            true
+        }
+    })
+}
+
+fn inet_datagram_bind_shares_port(requested: &SocketRecord, existing: &SocketRecord) -> bool {
+    (requested.reuse_port() && existing.reuse_port())
+        || (requested.reuse_address() && existing.reuse_address())
+}
+
 fn remove_socket(table: &mut SocketTableState, socket_id: SocketId) -> Option<SocketRecord> {
     let record = table.sockets.remove(&socket_id)?;
     unregister_bound_socket(table, &record);
+    unregister_multicast_memberships(table, &record);
     if let Some(listener_state) = record.listener_state.as_ref() {
         let pending_socket_ids = listener_state
             .pending_accepts
@@ -1487,10 +1830,28 @@ fn unregister_bound_socket(table: &mut SocketTableState, record: &SocketRecord) 
     {
         table.bound_inet_streams.remove(address);
     }
-    if supports_inet_datagram_lifecycle(record.spec)
-        && table.bound_inet_datagrams.get(address).copied() == Some(record.id)
-    {
-        table.bound_inet_datagrams.remove(address);
+    if supports_inet_datagram_lifecycle(record.spec) {
+        if let Some(socket_ids) = table.bound_inet_datagrams.get_mut(address) {
+            socket_ids.remove(&record.id);
+            if socket_ids.is_empty() {
+                table.bound_inet_datagrams.remove(address);
+            }
+        }
+    }
+}
+
+fn unregister_multicast_memberships(table: &mut SocketTableState, record: &SocketRecord) {
+    let Some(datagram_state) = record.datagram_state.as_ref() else {
+        return;
+    };
+
+    for membership in &datagram_state.multicast_memberships {
+        if let Some(socket_ids) = table.multicast_groups.get_mut(membership) {
+            socket_ids.remove(&record.id);
+            if socket_ids.is_empty() {
+                table.multicast_groups.remove(membership);
+            }
+        }
     }
 }
 
@@ -1498,6 +1859,14 @@ fn normalize_inet_address(address: InetSocketAddress) -> InetSocketAddress {
     match address.host().to_ascii_lowercase().as_str() {
         "localhost" => InetSocketAddress::new("127.0.0.1", address.port()),
         _ => address,
+    }
+}
+
+fn wildcard_inet_address(address: &InetSocketAddress) -> Option<InetSocketAddress> {
+    match address.host() {
+        "127.0.0.1" => Some(InetSocketAddress::new("0.0.0.0", address.port())),
+        "::1" => Some(InetSocketAddress::new("::", address.port())),
+        _ => None,
     }
 }
 

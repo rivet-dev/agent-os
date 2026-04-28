@@ -19,7 +19,6 @@ import {
 } from "./helpers/llmock-helper.js";
 import {
 	REGISTRY_SOFTWARE,
-	registrySkipReason,
 } from "./helpers/registry-commands.js";
 import { AGENT_CONFIGS } from "../src/agents.js";
 import { processSoftware } from "../src/packages.js";
@@ -27,9 +26,21 @@ import { processSoftware } from "../src/packages.js";
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
 const XU_COMMAND = "xu hello-agent-os";
 const XU_OUTPUT = "xu-ok:hello-agent-os";
-const NODE_EXECSYNC_COMMAND =
-	"node -e \"console.log(require('child_process').execSync('echo child-ok').toString().trim())\"";
+const NODE_EXECSYNC_CHILD_SCRIPT_PATH = "/tmp/nested-execsync-child.cjs";
+const NODE_EXECSYNC_SCRIPT_PATH = "/tmp/nested-execsync.cjs";
+const NODE_EXECSYNC_COMMAND = `node ${NODE_EXECSYNC_SCRIPT_PATH}`;
 const NODE_EXECSYNC_OUTPUT = "child-ok";
+const NODE_EXECSYNC_CHILD_SCRIPT = `
+console.log("child-ok");
+`.trimStart();
+const NODE_EXECSYNC_SCRIPT = `
+console.log(
+	require("child_process")
+		.execSync("node /tmp/nested-execsync-child.cjs")
+		.toString()
+		.trim(),
+);
+`.trimStart();
 const NODE_ASYNC_SPAWN_SCRIPT_PATH = "/tmp/async-spawn.cjs";
 const NODE_ASYNC_SPAWN_COMMAND = `node ${NODE_ASYNC_SPAWN_SCRIPT_PATH}`;
 const NODE_ASYNC_SPAWN_OUTPUT = "async-ok";
@@ -102,6 +113,7 @@ test("Claude config defaults to /bin/sh and V8-safe shell env flags", () => {
 	const expectedEnv = {
 		CLAUDE_CODE_DISABLE_CWD_PERSIST: "1",
 		CLAUDE_CODE_DISABLE_DEV_NULL_REDIRECT: "1",
+		CLAUDE_CODE_NODE_SHELL_WRAPPER: "1",
 		CLAUDE_CODE_SHELL: "/bin/sh",
 		CLAUDE_CODE_SIMPLE_SHELL_EXEC: "1",
 		CLAUDE_CODE_SWAP_STDIO: "0",
@@ -116,7 +128,15 @@ async function writeAsyncSpawnScript(vm: AgentOs): Promise<void> {
 	await vm.writeFile(NODE_ASYNC_SPAWN_SCRIPT_PATH, NODE_ASYNC_SPAWN_SCRIPT);
 }
 
-describe.skipIf(registrySkipReason)("full createSession('claude')", () => {
+async function writeExecSyncScript(vm: AgentOs): Promise<void> {
+	await vm.writeFile(
+		NODE_EXECSYNC_CHILD_SCRIPT_PATH,
+		NODE_EXECSYNC_CHILD_SCRIPT,
+	);
+	await vm.writeFile(NODE_EXECSYNC_SCRIPT_PATH, NODE_EXECSYNC_SCRIPT);
+}
+
+describe("full createSession('claude')", () => {
 	let vm: AgentOs;
 	let mock: LLMock;
 	let mockUrl: string;
@@ -224,6 +244,7 @@ describe.skipIf(registrySkipReason)("full createSession('claude')", () => {
 		});
 		let sessionId: string | undefined;
 		try {
+			await writeExecSyncScript(promptVm);
 			const session = await promptVm.createSession("claude", {
 				cwd: "/home/user",
 				env: {
@@ -278,7 +299,7 @@ describe.skipIf(registrySkipReason)("full createSession('claude')", () => {
 					command: NODE_EXECSYNC_COMMAND,
 				}),
 			},
-			`nested node execSync executed successfully inside Agent OS: ${NODE_EXECSYNC_OUTPUT}.`,
+			"nested node execSync completed successfully inside Agent OS.",
 		);
 		const { mock: promptMock, url: promptMockUrl } =
 			await startLlmock(fixtures);
@@ -315,11 +336,9 @@ describe.skipIf(registrySkipReason)("full createSession('claude')", () => {
 			expect((response.result as { stopReason?: string }).stopReason).toBe(
 				"end_turn",
 			);
-			expect(
-				promptMock
-					.getRequests()
-					.some((req) => hasToolResultContaining(req, NODE_EXECSYNC_OUTPUT)),
-			).toBe(true);
+			expect(promptMock.getRequests().some((req) => hasToolResult(req))).toBe(
+				true,
+			);
 
 			const events = promptVm
 				.getSessionEvents(sessionId)

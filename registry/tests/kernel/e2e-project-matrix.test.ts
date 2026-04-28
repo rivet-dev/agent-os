@@ -13,12 +13,13 @@
 
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { access, cp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { access, cp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import {
+  describeIf,
   COMMANDS_DIR,
   createKernel,
   NodeFileSystem,
@@ -31,6 +32,15 @@ const execFileAsync = promisify(execFile);
 const TEST_TIMEOUT_MS = 55_000;
 const COMMAND_TIMEOUT_MS = 45_000;
 const CACHE_READY_MARKER = '.ready';
+const WORKTREE_SCHEMA_VERSION = 'v2-isolated-worktrees';
+const TRANSIENT_OUTPUT_DIRS = new Set([
+  '.astro',
+  '.next',
+  'build',
+  'coverage',
+  'dist',
+  'out',
+]);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -53,6 +63,7 @@ type FailFixtureMetadata = {
 type FixtureMetadata = PassFixtureMetadata | FailFixtureMetadata;
 type FixtureProject = { name: string; sourceDir: string; metadata: FixtureMetadata };
 type PreparedFixture = { cacheHit: boolean; cacheKey: string; projectDir: string };
+type WorkingFixtureProject = { projectDir: string; dispose: () => Promise<void> };
 type ResultEnvelope = { code: number; stdout: string; stderr: string };
 
 // ---------------------------------------------------------------------------
@@ -170,6 +181,7 @@ async function createFixtureCacheKey(fixture: FixtureProject): Promise<string> {
   hash.update(`pm-version:${pmVersion}\n`);
   hash.update(`platform:${process.platform}\n`);
   hash.update(`arch:${process.arch}\n`);
+  hash.update(`worktree-schema:${WORKTREE_SCHEMA_VERSION}\n`);
 
   const lockFile =
     pm === 'npm'
@@ -198,6 +210,41 @@ async function createFixtureCacheKey(fixture: FixtureProject): Promise<string> {
   }
 
   return hash.digest('hex').slice(0, 16);
+}
+
+async function createWorkingFixtureProject(
+  fixture: FixtureProject,
+  prepared: PreparedFixture,
+  label: string,
+): Promise<WorkingFixtureProject> {
+  const workingRoot = path.join(CACHE_ROOT, '.worktrees');
+  await mkdir(workingRoot, { recursive: true });
+  const projectDir = path.join(
+    workingRoot,
+    `${fixture.name}-${prepared.cacheKey}-${label}-${process.pid}-${Date.now()}`,
+  );
+
+  await cp(prepared.projectDir, projectDir, {
+    recursive: true,
+    filter: (src) => {
+      const relative = path.relative(prepared.projectDir, src);
+      if (!relative) return true;
+      const segments = relative.split(path.sep);
+      return !segments.some((segment) =>
+        segment === 'node_modules' || TRANSIENT_OUTPUT_DIRS.has(segment),
+      );
+    },
+  });
+
+  const installedNodeModulesDir = path.join(prepared.projectDir, 'node_modules');
+  if (await pathExists(installedNodeModulesDir)) {
+    await symlink(installedNodeModulesDir, path.join(projectDir, 'node_modules'), 'dir');
+  }
+
+  return {
+    projectDir,
+    dispose: () => rm(projectDir, { recursive: true, force: true }),
+  };
 }
 
 let _pnpmVersionPromise: Promise<string> | undefined;
@@ -366,7 +413,7 @@ async function pathExists(p: string): Promise<boolean> {
 const skipReason = skipUnlessWasmBuilt();
 const discoveredFixtures = await discoverFixtures();
 
-describe.skipIf(skipReason || discoveredFixtures.length === 0)('e2e project-matrix through kernel', () => {
+describeIf(!(skipReason || discoveredFixtures.length === 0), 'e2e project-matrix through kernel', () => {
   it('discovers at least one fixture project', () => {
     expect(discoveredFixtures.length).toBeGreaterThan(0);
   });
@@ -376,8 +423,17 @@ describe.skipIf(skipReason || discoveredFixtures.length === 0)('e2e project-matr
       `runs fixture ${fixture.name} through kernel with host-node parity`,
       async () => {
         const prepared = await prepareFixtureProject(fixture);
-        const host = await runHostExecution(prepared.projectDir, fixture.metadata.entry);
-        const kernel = await runKernelExecution(prepared.projectDir, fixture.metadata.entry);
+        const hostProject = await createWorkingFixtureProject(fixture, prepared, 'host');
+        const kernelProject = await createWorkingFixtureProject(fixture, prepared, 'kernel');
+        let host: ResultEnvelope;
+        let kernel: ResultEnvelope;
+
+        try {
+          host = await runHostExecution(hostProject.projectDir, fixture.metadata.entry);
+          kernel = await runKernelExecution(kernelProject.projectDir, fixture.metadata.entry);
+        } finally {
+          await Promise.all([hostProject.dispose(), kernelProject.dispose()]);
+        }
 
         if (fixture.metadata.expectation === 'pass') {
           expect(kernel.code).toBe(host.code);

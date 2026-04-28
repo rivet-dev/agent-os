@@ -4,14 +4,16 @@ use agent_os_sidecar::protocol::GuestRuntimeKind;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 use support::{
-    assert_node_available, authenticate, collect_process_output_with_timeout, execute, new_sidecar,
-    open_session, temp_dir, write_fixture,
+    assert_node_available, authenticate, collect_process_output_with_timeout,
+    dispose_vm_and_close_session, execute, new_sidecar, open_session, temp_dir, write_fixture,
 };
 
-#[test]
+const FETCH_VIA_UNDICI_CASES: &[&str] = &["fetch", "abort"];
+
 fn javascript_fetch_uses_guest_undici_over_kernel_tcp_socket() {
     assert_node_available();
 
@@ -130,6 +132,7 @@ console.log(JSON.stringify({{
         "fetch-process",
         Duration::from_secs(10),
     );
+    dispose_vm_and_close_session(&mut sidecar, &connection_id, &session_id, &vm_id);
     let server_result = server.join();
 
     assert_eq!(exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
@@ -148,7 +151,6 @@ console.log(JSON.stringify({{
         .unwrap_or_else(|_| panic!("server thread failed\nstdout:\n{stdout}\nstderr:\n{stderr}"));
 }
 
-#[test]
 fn javascript_fetch_honors_abortsignal_timeout_and_manual_abort() {
     assert_node_available();
 
@@ -281,6 +283,7 @@ console.log(JSON.stringify({{
         "fetch-abort-process",
         Duration::from_secs(10),
     );
+    dispose_vm_and_close_session(&mut sidecar, &connection_id, &session_id, &vm_id);
     let server_result = server.join();
 
     assert_eq!(exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
@@ -310,4 +313,43 @@ console.log(JSON.stringify({{
 
     server_result
         .unwrap_or_else(|_| panic!("server thread failed\nstdout:\n{stdout}\nstderr:\n{stderr}"));
+}
+
+fn run_named_case(case_name: &str) {
+    match case_name {
+        "fetch" => javascript_fetch_uses_guest_undici_over_kernel_tcp_socket(),
+        "abort" => javascript_fetch_honors_abortsignal_timeout_and_manual_abort(),
+        other => panic!("unknown fetch_via_undici case: {other}"),
+    }
+}
+
+#[test]
+fn fetch_via_undici_cases() {
+    let current_exe = std::env::current_exe().expect("current test binary path");
+
+    for case_name in FETCH_VIA_UNDICI_CASES {
+        let status = Command::new(&current_exe)
+            .arg("--exact")
+            .arg("__fetch_via_undici_case_runner")
+            .arg("--nocapture")
+            .env("AGENT_OS_FETCH_VIA_UNDICI_CASE", case_name)
+            .status()
+            .unwrap_or_else(|error| {
+                panic!("spawn fetch_via_undici runner for {case_name}: {error}")
+            });
+
+        assert!(
+            status.success(),
+            "fetch_via_undici case {case_name} failed with status {status}"
+        );
+    }
+}
+
+#[test]
+fn __fetch_via_undici_case_runner() {
+    let Ok(case_name) = std::env::var("AGENT_OS_FETCH_VIA_UNDICI_CASE") else {
+        return;
+    };
+
+    run_named_case(&case_name);
 }

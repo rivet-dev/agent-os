@@ -3,13 +3,11 @@ import {
   createInMemoryFileSystem,
   createKernel,
   createWasmVmRuntime,
-  hasWasmBinaries,
-  skipReason,
   COMMANDS_DIR,
 } from "./helpers.ts";
 import type { Kernel } from "./helpers.ts";
 
-describe.skipIf(skipReason())("smoke", () => {
+describe("smoke", () => {
   let kernel: Kernel;
 
   afterEach(async () => {

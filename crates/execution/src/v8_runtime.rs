@@ -1,83 +1,31 @@
-//! V8 isolate runtime manager.
-//!
-//! Spawns the `agent-os-v8` binary, connects over Unix domain socket,
-//! and manages V8 isolate sessions for guest JavaScript execution.
+//! V8 isolate runtime manager backed by the embedded V8 runtime.
 
 use crate::v8_ipc::{self, BinaryFrame};
+use agent_os_v8_runtime::embedded_runtime::{spawn_embedded_runtime_ipc, EmbeddedRuntimeHandle};
 use serde_json::Value;
 use std::io::{self, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-/// Environment variable for V8 runtime binary path override.
-const V8_RUNTIME_PATH_ENV: &str = "AGENT_OS_V8_RUNTIME_PATH";
-
-/// Environment variable for CBOR codec mode.
-const V8_CODEC_ENV: &str = "SECURE_EXEC_V8_CODEC";
-
-/// Default binary name if not overridden.
-const V8_BINARY_NAME: &str = "agent-os-v8";
-
-/// Manages a V8 runtime child process and its UDS connection.
+/// Manages an embedded V8 runtime and its IPC connection.
 pub struct V8Runtime {
-    _child: Child,
+    runtime: EmbeddedRuntimeHandle,
     reader: BufReader<UnixStream>,
     writer: UnixStream,
-    token: String,
-    authenticated: bool,
 }
 
 impl V8Runtime {
-    /// Spawn the V8 runtime binary and connect over UDS.
+    /// Spawn the embedded V8 runtime and connect over IPC.
     pub fn spawn() -> io::Result<Self> {
-        let binary_path = resolve_v8_binary()?;
-        let token = generate_token();
-
-        let mut child = Command::new(&binary_path)
-            .env("SECURE_EXEC_V8_TOKEN", &token)
-            .env(V8_CODEC_ENV, "cbor")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("failed to spawn V8 runtime at {}: {e}", binary_path),
-                )
-            })?;
-
-        // Read socket path from first line of stdout
-        let stdout = child.stdout.take().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "V8 runtime stdout not captured")
-        })?;
-        let socket_path = read_socket_path(stdout)?;
-
-        // Connect to UDS with retry (the binary may need a moment)
-        let stream = connect_with_retry(&socket_path, Duration::from_secs(5))?;
+        let (stream, runtime) = spawn_embedded_runtime_ipc(None)?;
         let writer = stream.try_clone()?;
         let reader = BufReader::new(stream);
 
-        let mut runtime = V8Runtime {
-            _child: child,
+        Ok(V8Runtime {
+            runtime,
             reader,
             writer,
-            token,
-            authenticated: false,
-        };
-        runtime.authenticate()?;
-        Ok(runtime)
-    }
-
-    fn authenticate(&mut self) -> io::Result<()> {
-        let frame = BinaryFrame::Authenticate {
-            token: self.token.clone(),
-        };
-        self.send_frame(&frame)?;
-        self.authenticated = true;
-        Ok(())
+        })
     }
 
     /// Create a new V8 isolate session.
@@ -190,6 +138,12 @@ impl V8Runtime {
     }
 }
 
+impl Drop for V8Runtime {
+    fn drop(&mut self) {
+        self.runtime.shutdown();
+    }
+}
+
 /// Thread-safe wrapper for V8Runtime that allows sending from multiple threads.
 pub struct SharedV8Runtime {
     inner: Arc<Mutex<V8Runtime>>,
@@ -211,121 +165,6 @@ impl Clone for SharedV8Runtime {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-        }
-    }
-}
-
-fn resolve_v8_binary() -> io::Result<String> {
-    // 1. Check env var override
-    if let Ok(path) = std::env::var(V8_RUNTIME_PATH_ENV) {
-        if std::path::Path::new(&path).exists() {
-            return Ok(path);
-        }
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("{V8_RUNTIME_PATH_ENV}={path} does not exist"),
-        ));
-    }
-
-    // 2. Check alongside the current executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sibling = dir.join(V8_BINARY_NAME);
-            if sibling.exists() {
-                return Ok(sibling.to_string_lossy().into_owned());
-            }
-        }
-    }
-
-    // 3. Check cargo target directory (development)
-    for profile in &["release", "debug"] {
-        let target = format!("target/{profile}/{V8_BINARY_NAME}");
-        if std::path::Path::new(&target).exists() {
-            return Ok(target);
-        }
-    }
-
-    // 4. Fall back to PATH
-    if let Ok(output) = std::process::Command::new("which")
-        .arg(V8_BINARY_NAME)
-        .output()
-    {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Ok(path);
-            }
-        }
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!(
-            "V8 runtime binary '{V8_BINARY_NAME}' not found. Set {V8_RUNTIME_PATH_ENV} to specify the path."
-        ),
-    ))
-}
-
-fn generate_token() -> String {
-    use std::time::SystemTime;
-    let seed = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    // Generate a simple hex token from timestamp + pid (not cryptographic, but
-    // only used for process-local IPC authentication)
-    format!("{:032x}{:08x}", seed, std::process::id())
-}
-
-fn read_socket_path(stdout: std::process::ChildStdout) -> io::Result<String> {
-    let mut reader = BufReader::new(stdout);
-    let mut line = Vec::new();
-    // Read until newline
-    loop {
-        let mut byte = [0u8; 1];
-        match reader.read_exact(&mut byte) {
-            Ok(()) => {
-                if byte[0] == b'\n' {
-                    break;
-                }
-                line.push(byte[0]);
-            }
-            Err(e) => {
-                return Err(io::Error::new(
-                    e.kind(),
-                    format!("failed to read V8 runtime socket path: {e}"),
-                ));
-            }
-        }
-    }
-    String::from_utf8(line).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid socket path: {e}"),
-        )
-    })
-}
-
-fn connect_with_retry(socket_path: &str, timeout: Duration) -> io::Result<UnixStream> {
-    let start = std::time::Instant::now();
-    loop {
-        match UnixStream::connect(socket_path) {
-            Ok(stream) => return Ok(stream),
-            Err(e) if start.elapsed() < timeout => {
-                std::thread::sleep(Duration::from_millis(10));
-                if start.elapsed() >= timeout {
-                    return Err(io::Error::new(
-                        e.kind(),
-                        format!("timed out connecting to V8 runtime at {socket_path}: {e}"),
-                    ));
-                }
-            }
-            Err(e) => {
-                return Err(io::Error::new(
-                    e.kind(),
-                    format!("failed to connect to V8 runtime at {socket_path}: {e}"),
-                ));
-            }
         }
     }
 }
@@ -377,11 +216,14 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
         "_fsTruncateAsync" => ("fs.promises.truncate", false),
         "_fsUtimes" => ("fs.utimesSync", false),
         "_fsUtimesAsync" => ("fs.promises.utimes", false),
+        "_fsLutimes" => ("fs.lutimesSync", false),
+        "_fsLutimesAsync" => ("fs.promises.lutimes", false),
         "fs.openSync" => ("fs.openSync", false),
         "fs.closeSync" => ("fs.closeSync", false),
         "fs.readSync" => ("fs.readSync", false),
         "fs.writeSync" => ("fs.writeSync", false),
         "fs.fstatSync" => ("fs.fstatSync", false),
+        "fs.futimesSync" => ("fs.futimesSync", false),
 
         // Child process operations
         "_childProcessSpawnStart" => ("child_process.spawn", false),
@@ -395,6 +237,7 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
 
         // DNS operations
         "_networkDnsLookupRaw" => ("dns.lookup", false),
+        "_networkDnsResolveRaw" => ("dns.resolve", false),
 
         // Console / logging (handled locally, not forwarded to sidecar)
         "_log" | "_error" => ("__log", false),
@@ -435,10 +278,11 @@ pub fn map_bridge_method(method: &str) -> (&str, bool) {
 
         // Stdin
         "_kernelStdinRead" => ("__kernel_stdin_read", false),
+        "_kernelStdinReadRaw" => ("__kernel_stdin_read", false),
+        "_kernelStdioWriteRaw" => ("__kernel_stdio_write", false),
         "_kernelPollRaw" => ("__kernel_poll", false),
 
         // Network operations
-        "_networkHttpRequestRaw" => ("net.http_request", false),
         "_networkHttpServerListenRaw" => ("net.http_listen", false),
         "_networkHttpServerCloseRaw" => ("net.http_close", false),
         "_networkHttpServerRespondRaw" => ("net.http_respond", false),
@@ -542,6 +386,7 @@ mod tests {
             "_networkHttp2StreamRespondRaw",
             "_upgradeSocketWriteRaw",
             "_netSocketSetNoDelayRaw",
+            "_kernelStdioWriteRaw",
             "_kernelPollRaw",
             "_netSocketUpgradeTlsRaw",
             "_tlsGetCiphersRaw",
@@ -551,6 +396,14 @@ mod tests {
             let (mapped, _) = map_bridge_method(method);
             assert_ne!(mapped, method, "missing bridge-method mapping for {method}");
         }
+    }
+
+    #[test]
+    fn http_request_bridge_shortcut_is_not_mapped() {
+        assert_eq!(
+            map_bridge_method("_networkHttpRequestRaw"),
+            ("_networkHttpRequestRaw", false)
+        );
     }
 }
 

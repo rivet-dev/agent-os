@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  describeIf,
   COMMANDS_DIR,
   createKernel,
   NodeFileSystem,
@@ -46,7 +47,7 @@ async function checkNetwork(): Promise<string | false> {
 
 const skipReason = wasmSkip || (await checkNetwork());
 
-describe.skipIf(skipReason)('e2e concurrently through kernel', () => {
+describeIf(!skipReason, 'e2e concurrently through kernel', () => {
   let tempDir: string;
 
   // Pre-install concurrently on host so kernel has node_modules available
@@ -95,7 +96,7 @@ describe.skipIf(skipReason)('e2e concurrently through kernel', () => {
 
       try {
         const result = await kernel.exec(
-          'npx concurrently "echo hello" "echo world"',
+          'node /node_modules/concurrently/dist/bin/concurrently.js "echo hello" "echo world"',
           { cwd: '/' },
         );
         expect(result.stdout).toContain('hello');
@@ -114,7 +115,7 @@ describe.skipIf(skipReason)('e2e concurrently through kernel', () => {
 
       try {
         const result = await kernel.exec(
-          'npx concurrently "echo one && echo two" "echo three"',
+          'node /node_modules/concurrently/dist/bin/concurrently.js "echo one && echo two" "echo three"',
           { cwd: '/' },
         );
         expect(result.stdout).toContain('one');
@@ -134,7 +135,7 @@ describe.skipIf(skipReason)('e2e concurrently through kernel', () => {
 
       try {
         const result = await kernel.exec(
-          'npx concurrently --kill-others-on-fail "echo success" "exit 1"',
+          'node /node_modules/concurrently/dist/bin/concurrently.js --success all --kill-others-on-fail "echo success" "exit 1"',
           { cwd: '/' },
         );
         expect(result.exitCode).not.toBe(0);

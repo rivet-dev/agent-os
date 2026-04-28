@@ -1,8 +1,11 @@
 use crate::resource_accounting::FileSystemUsage;
-use crate::vfs::{VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat};
+use crate::vfs::{
+    VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat, VirtualUtimeSpec,
+};
 use std::any::Any;
 use std::collections::BTreeSet;
 use std::path::{Component, Path};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub trait MountedFileSystem: Any {
     fn as_any(&self) -> &dyn Any;
@@ -23,6 +26,15 @@ pub trait MountedFileSystem: Any {
     }
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>>;
     fn write_file(&mut self, path: &str, content: Vec<u8>) -> VfsResult<()>;
+    fn write_file_with_mode(
+        &mut self,
+        path: &str,
+        content: Vec<u8>,
+        mode: Option<u32>,
+    ) -> VfsResult<()> {
+        let _ = mode;
+        self.write_file(path, content)
+    }
     fn create_file_exclusive(&mut self, path: &str, content: Vec<u8>) -> VfsResult<()> {
         if self.exists(path) {
             return Err(VfsError::new(
@@ -32,6 +44,15 @@ pub trait MountedFileSystem: Any {
         }
         self.write_file(path, content)
     }
+    fn create_file_exclusive_with_mode(
+        &mut self,
+        path: &str,
+        content: Vec<u8>,
+        mode: Option<u32>,
+    ) -> VfsResult<()> {
+        let _ = mode;
+        self.create_file_exclusive(path, content)
+    }
     fn append_file(&mut self, path: &str, content: Vec<u8>) -> VfsResult<u64> {
         let mut existing = self.read_file(path)?;
         existing.extend_from_slice(&content);
@@ -40,7 +61,15 @@ pub trait MountedFileSystem: Any {
         Ok(new_len)
     }
     fn create_dir(&mut self, path: &str) -> VfsResult<()>;
+    fn create_dir_with_mode(&mut self, path: &str, mode: Option<u32>) -> VfsResult<()> {
+        let _ = mode;
+        self.create_dir(path)
+    }
     fn mkdir(&mut self, path: &str, recursive: bool) -> VfsResult<()>;
+    fn mkdir_with_mode(&mut self, path: &str, recursive: bool, mode: Option<u32>) -> VfsResult<()> {
+        let _ = mode;
+        self.mkdir(path, recursive)
+    }
     fn exists(&self, path: &str) -> bool;
     fn stat(&mut self, path: &str) -> VfsResult<VirtualStat>;
     fn remove_file(&mut self, path: &str) -> VfsResult<()>;
@@ -54,6 +83,52 @@ pub trait MountedFileSystem: Any {
     fn chmod(&mut self, path: &str, mode: u32) -> VfsResult<()>;
     fn chown(&mut self, path: &str, uid: u32, gid: u32) -> VfsResult<()>;
     fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()>;
+    fn utimes_spec(
+        &mut self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        if !follow_symlinks {
+            return Err(VfsError::unsupported(format!(
+                "lutimes is not supported for mount path '{path}'"
+            )));
+        }
+        let existing = match (atime, mtime) {
+            (VirtualUtimeSpec::Omit, _) | (_, VirtualUtimeSpec::Omit) => Some(self.stat(path)?),
+            _ => None,
+        };
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let atime_ms = match atime {
+            VirtualUtimeSpec::Set(spec) => spec.to_truncated_millis()?,
+            VirtualUtimeSpec::Now => now_ms,
+            VirtualUtimeSpec::Omit => {
+                existing
+                    .as_ref()
+                    .ok_or_else(|| {
+                        VfsError::new("EINVAL", "UTIME_OMIT requires existing metadata")
+                    })?
+                    .atime_ms
+            }
+        };
+        let mtime_ms = match mtime {
+            VirtualUtimeSpec::Set(spec) => spec.to_truncated_millis()?,
+            VirtualUtimeSpec::Now => now_ms,
+            VirtualUtimeSpec::Omit => {
+                existing
+                    .as_ref()
+                    .ok_or_else(|| {
+                        VfsError::new("EINVAL", "UTIME_OMIT requires existing metadata")
+                    })?
+                    .mtime_ms
+            }
+        };
+        self.utimes(path, atime_ms, mtime_ms)
+    }
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()>;
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>>;
     fn shutdown(&mut self) -> VfsResult<()> {
@@ -111,8 +186,26 @@ where
         VirtualFileSystem::write_file(&mut self.inner, path, content)
     }
 
+    fn write_file_with_mode(
+        &mut self,
+        path: &str,
+        content: Vec<u8>,
+        mode: Option<u32>,
+    ) -> VfsResult<()> {
+        VirtualFileSystem::write_file_with_mode(&mut self.inner, path, content, mode)
+    }
+
     fn create_file_exclusive(&mut self, path: &str, content: Vec<u8>) -> VfsResult<()> {
         VirtualFileSystem::create_file_exclusive(&mut self.inner, path, content)
+    }
+
+    fn create_file_exclusive_with_mode(
+        &mut self,
+        path: &str,
+        content: Vec<u8>,
+        mode: Option<u32>,
+    ) -> VfsResult<()> {
+        VirtualFileSystem::create_file_exclusive_with_mode(&mut self.inner, path, content, mode)
     }
 
     fn append_file(&mut self, path: &str, content: Vec<u8>) -> VfsResult<u64> {
@@ -123,8 +216,16 @@ where
         VirtualFileSystem::create_dir(&mut self.inner, path)
     }
 
+    fn create_dir_with_mode(&mut self, path: &str, mode: Option<u32>) -> VfsResult<()> {
+        VirtualFileSystem::create_dir_with_mode(&mut self.inner, path, mode)
+    }
+
     fn mkdir(&mut self, path: &str, recursive: bool) -> VfsResult<()> {
         VirtualFileSystem::mkdir(&mut self.inner, path, recursive)
+    }
+
+    fn mkdir_with_mode(&mut self, path: &str, recursive: bool, mode: Option<u32>) -> VfsResult<()> {
+        VirtualFileSystem::mkdir_with_mode(&mut self.inner, path, recursive, mode)
     }
 
     fn exists(&self, path: &str) -> bool {
@@ -177,6 +278,16 @@ where
 
     fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()> {
         VirtualFileSystem::utimes(&mut self.inner, path, atime_ms, mtime_ms)
+    }
+
+    fn utimes_spec(
+        &mut self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        VirtualFileSystem::utimes_spec(&mut self.inner, path, atime, mtime, follow_symlinks)
     }
 
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {
@@ -278,6 +389,16 @@ where
 
     fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()> {
         (**self).utimes(path, atime_ms, mtime_ms)
+    }
+
+    fn utimes_spec(
+        &mut self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        (**self).utimes_spec(path, atime, mtime, follow_symlinks)
     }
 
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {
@@ -428,6 +549,19 @@ where
         ))
     }
 
+    fn utimes_spec(
+        &mut self,
+        path: &str,
+        _atime: VirtualUtimeSpec,
+        _mtime: VirtualUtimeSpec,
+        _follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        Err(VfsError::new(
+            "EROFS",
+            format!("read-only filesystem: {path}"),
+        ))
+    }
+
     fn truncate(&mut self, path: &str, _length: u64) -> VfsResult<()> {
         Err(VfsError::new(
             "EROFS",
@@ -551,6 +685,18 @@ impl MountTable {
         let normalized = normalize_path(path);
         if normalized == "/" {
             return Err(VfsError::new("EINVAL", "cannot unmount root"));
+        }
+
+        let child_mount_prefix = format!("{normalized}/");
+        if self
+            .mounts
+            .iter()
+            .any(|mount| mount.path.starts_with(&child_mount_prefix))
+        {
+            return Err(VfsError::new(
+                "EBUSY",
+                format!("mount point has child mounts: {normalized}"),
+            ));
         }
 
         let Some(index) = self
@@ -764,11 +910,35 @@ impl VirtualFileSystem for MountTable {
             .write_file(&relative_path, content.into())
     }
 
+    fn write_file_with_mode(
+        &mut self,
+        path: &str,
+        content: impl Into<Vec<u8>>,
+        mode: Option<u32>,
+    ) -> VfsResult<()> {
+        let (index, relative_path) = self.resolve_index(path)?;
+        self.mounts[index]
+            .filesystem
+            .write_file_with_mode(&relative_path, content.into(), mode)
+    }
+
     fn create_file_exclusive(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
         let (index, relative_path) = self.resolve_index(path)?;
         self.mounts[index]
             .filesystem
             .create_file_exclusive(&relative_path, content.into())
+    }
+
+    fn create_file_exclusive_with_mode(
+        &mut self,
+        path: &str,
+        content: impl Into<Vec<u8>>,
+        mode: Option<u32>,
+    ) -> VfsResult<()> {
+        let (index, relative_path) = self.resolve_index(path)?;
+        self.mounts[index]
+            .filesystem
+            .create_file_exclusive_with_mode(&relative_path, content.into(), mode)
     }
 
     fn append_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<u64> {
@@ -783,11 +953,25 @@ impl VirtualFileSystem for MountTable {
         self.mounts[index].filesystem.create_dir(&relative_path)
     }
 
+    fn create_dir_with_mode(&mut self, path: &str, mode: Option<u32>) -> VfsResult<()> {
+        let (index, relative_path) = self.resolve_index(path)?;
+        self.mounts[index]
+            .filesystem
+            .create_dir_with_mode(&relative_path, mode)
+    }
+
     fn mkdir(&mut self, path: &str, recursive: bool) -> VfsResult<()> {
         let (index, relative_path) = self.resolve_index(path)?;
         self.mounts[index]
             .filesystem
             .mkdir(&relative_path, recursive)
+    }
+
+    fn mkdir_with_mode(&mut self, path: &str, recursive: bool, mode: Option<u32>) -> VfsResult<()> {
+        let (index, relative_path) = self.resolve_index(path)?;
+        self.mounts[index]
+            .filesystem
+            .mkdir_with_mode(&relative_path, recursive, mode)
     }
 
     fn exists(&self, path: &str) -> bool {
@@ -908,6 +1092,19 @@ impl VirtualFileSystem for MountTable {
         self.mounts[index]
             .filesystem
             .utimes(&relative_path, atime_ms, mtime_ms)
+    }
+
+    fn utimes_spec(
+        &mut self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        let (index, relative_path) = self.resolve_index(path)?;
+        self.mounts[index]
+            .filesystem
+            .utimes_spec(&relative_path, atime, mtime, follow_symlinks)
     }
 
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {

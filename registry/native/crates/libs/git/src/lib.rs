@@ -28,8 +28,7 @@ fn unhex(s: &str) -> io::Result<[u8; 20]> {
     let bytes: Vec<u8> = (0..s.len())
         .step_by(2)
         .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16)
-                .map_err(|e| err(&format!("invalid hex: {}", e)))
+            u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| err(&format!("invalid hex: {}", e)))
         })
         .collect::<io::Result<Vec<u8>>>()?;
     let mut hash = [0u8; 20];
@@ -39,6 +38,15 @@ fn unhex(s: &str) -> io::Result<[u8; 20]> {
 
 fn err(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::Other, msg.to_string())
+}
+
+const SUPPORT_DOC_PATH: &str = "registry/native/crates/libs/git/README.md";
+
+fn unsupported(subcommand: &str, detail: &str) -> io::Error {
+    err(&format!(
+        "GitSubcommandUnsupported: git {} {} See {} for supported transports and commands.",
+        subcommand, detail, SUPPORT_DOC_PATH
+    ))
 }
 
 /// WASI-safe mkdir -p: create_dir_all has issues with WASI permission checks
@@ -94,15 +102,50 @@ fn is_remote_source(source: &str) -> bool {
     source.starts_with("http://") || source.starts_with("https://")
 }
 
+fn is_ssh_clone_source(source: &str) -> bool {
+    source.starts_with("git@")
+        || source.starts_with("ssh://")
+        || source.starts_with("git://")
+        || source.starts_with("ssh+git://")
+}
+
+fn has_http_auth(source: &str) -> bool {
+    if !is_remote_source(source) {
+        return false;
+    }
+
+    let Some(scheme_sep) = source.find("://") else {
+        return false;
+    };
+    let authority = &source[scheme_sep + 3..]
+        .split_once('/')
+        .map(|(authority, _)| authority)
+        .unwrap_or(&source[scheme_sep + 3..]);
+
+    authority.contains('@')
+}
+
 fn infer_clone_destination(source: &str) -> io::Result<String> {
-    let basename = if is_remote_source(source) {
+    let basename = if is_remote_source(source) || is_ssh_clone_source(source) {
         let trimmed = source.trim_end_matches('/');
-        trimmed
-            .rsplit('/')
-            .next()
-            .filter(|segment| !segment.is_empty())
-            .ok_or_else(|| err("could not determine destination path from source"))?
-            .to_string()
+        let leaf = if let Some((_, scp_path)) = trimmed.rsplit_once(':') {
+            if is_ssh_clone_source(source) && !scp_path.contains('/') {
+                scp_path
+            } else {
+                trimmed
+                    .rsplit('/')
+                    .next()
+                    .filter(|segment| !segment.is_empty())
+                    .ok_or_else(|| err("could not determine destination path from source"))?
+            }
+        } else {
+            trimmed
+                .rsplit('/')
+                .next()
+                .filter(|segment| !segment.is_empty())
+                .ok_or_else(|| err("could not determine destination path from source"))?
+        };
+        leaf.to_string()
     } else {
         Path::new(source)
             .file_name()
@@ -159,8 +202,7 @@ fn parse_pkt_lines(data: &[u8]) -> io::Result<Vec<PktLine>> {
     while pos + 4 <= data.len() {
         let len_str =
             std::str::from_utf8(&data[pos..pos + 4]).map_err(|_| err("invalid pkt-line"))?;
-        let len =
-            usize::from_str_radix(len_str, 16).map_err(|_| err("invalid pkt-line length"))?;
+        let len = usize::from_str_radix(len_str, 16).map_err(|_| err("invalid pkt-line length"))?;
         pos += 4;
 
         if len == 0 {
@@ -218,8 +260,7 @@ fn parse_advertised_ref(line: &[u8], adv: &mut RemoteAdvertisement) -> io::Resul
     }
 
     if let Some(capabilities) = capability_part {
-        let caps = std::str::from_utf8(capabilities)
-            .map_err(|_| err("invalid capability list"))?;
+        let caps = std::str::from_utf8(capabilities).map_err(|_| err("invalid capability list"))?;
         for cap in caps.split_whitespace() {
             if let Some(target) = cap.strip_prefix("symref=HEAD:") {
                 adv.head_target = Some(target.to_string());
@@ -231,7 +272,10 @@ fn parse_advertised_ref(line: &[u8], adv: &mut RemoteAdvertisement) -> io::Resul
 }
 
 fn fetch_remote_advertisement(url: &str) -> io::Result<RemoteAdvertisement> {
-    let info_refs_url = format!("{}/info/refs?service=git-upload-pack", url.trim_end_matches('/'));
+    let info_refs_url = format!(
+        "{}/info/refs?service=git-upload-pack",
+        url.trim_end_matches('/')
+    );
     let req = Request::new(Method::Get, &info_refs_url)
         .map_err(|e| err(&format!("bad info/refs URL: {}", e)))?
         .header("Accept", "application/x-git-upload-pack-advertisement")
@@ -445,7 +489,11 @@ fn parse_pack_object_header(pack: &[u8], offset: &mut usize) -> io::Result<(u8, 
     Ok((obj_type, size))
 }
 
-fn parse_ofs_delta_base(pack: &[u8], offset: &mut usize, object_offset: usize) -> io::Result<usize> {
+fn parse_ofs_delta_base(
+    pack: &[u8],
+    offset: &mut usize,
+    object_offset: usize,
+) -> io::Result<usize> {
     if *offset >= pack.len() {
         return Err(err("truncated ofs-delta base"));
     }
@@ -584,49 +632,65 @@ fn apply_delta(base: &[u8], delta: &[u8]) -> io::Result<Vec<u8>> {
             let mut copy_size = 0usize;
 
             if opcode & 0x01 != 0 {
-                copy_offset |= delta.get(pos).copied().ok_or_else(|| err("truncated delta copy"))?
+                copy_offset |= delta
+                    .get(pos)
+                    .copied()
+                    .ok_or_else(|| err("truncated delta copy"))?
                     as usize;
                 pos += 1;
             }
             if opcode & 0x02 != 0 {
-                copy_offset |=
-                    (delta.get(pos).copied().ok_or_else(|| err("truncated delta copy"))?
-                        as usize)
-                        << 8;
+                copy_offset |= (delta
+                    .get(pos)
+                    .copied()
+                    .ok_or_else(|| err("truncated delta copy"))?
+                    as usize)
+                    << 8;
                 pos += 1;
             }
             if opcode & 0x04 != 0 {
-                copy_offset |=
-                    (delta.get(pos).copied().ok_or_else(|| err("truncated delta copy"))?
-                        as usize)
-                        << 16;
+                copy_offset |= (delta
+                    .get(pos)
+                    .copied()
+                    .ok_or_else(|| err("truncated delta copy"))?
+                    as usize)
+                    << 16;
                 pos += 1;
             }
             if opcode & 0x08 != 0 {
-                copy_offset |=
-                    (delta.get(pos).copied().ok_or_else(|| err("truncated delta copy"))?
-                        as usize)
-                        << 24;
+                copy_offset |= (delta
+                    .get(pos)
+                    .copied()
+                    .ok_or_else(|| err("truncated delta copy"))?
+                    as usize)
+                    << 24;
                 pos += 1;
             }
 
             if opcode & 0x10 != 0 {
-                copy_size |=
-                    delta.get(pos).copied().ok_or_else(|| err("truncated delta copy"))? as usize;
+                copy_size |= delta
+                    .get(pos)
+                    .copied()
+                    .ok_or_else(|| err("truncated delta copy"))?
+                    as usize;
                 pos += 1;
             }
             if opcode & 0x20 != 0 {
-                copy_size |=
-                    (delta.get(pos).copied().ok_or_else(|| err("truncated delta copy"))?
-                        as usize)
-                        << 8;
+                copy_size |= (delta
+                    .get(pos)
+                    .copied()
+                    .ok_or_else(|| err("truncated delta copy"))?
+                    as usize)
+                    << 8;
                 pos += 1;
             }
             if opcode & 0x40 != 0 {
-                copy_size |=
-                    (delta.get(pos).copied().ok_or_else(|| err("truncated delta copy"))?
-                        as usize)
-                        << 16;
+                copy_size |= (delta
+                    .get(pos)
+                    .copied()
+                    .ok_or_else(|| err("truncated delta copy"))?
+                    as usize)
+                    << 16;
                 pos += 1;
             }
             if copy_size == 0 {
@@ -688,14 +752,8 @@ fn find_entry_by_hash(
         if visiting[idx] {
             continue;
         }
-        let resolved = resolve_packed_object(
-            idx,
-            git_dir,
-            objects,
-            offset_to_index,
-            memo,
-            visiting,
-        )?;
+        let resolved =
+            resolve_packed_object(idx, git_dir, objects, offset_to_index, memo, visiting)?;
         if resolved.hash == *target {
             return Ok(Some(idx));
         }
@@ -730,14 +788,8 @@ fn resolve_packed_object(
             let base_idx = *offset_to_index
                 .get(base_offset)
                 .ok_or_else(|| err("missing ofs-delta base object"))?;
-            let base = resolve_packed_object(
-                base_idx,
-                git_dir,
-                objects,
-                offset_to_index,
-                memo,
-                visiting,
-            )?;
+            let base =
+                resolve_packed_object(base_idx, git_dir, objects, offset_to_index, memo, visiting)?;
             let data = apply_delta(&base.data, delta)?;
             let hash = hash_bytes(&base.obj_type, &data);
             ResolvedObject {
@@ -749,22 +801,10 @@ fn resolve_packed_object(
         PackedObjectKind::RefDelta { base_hash, delta } => {
             let base = if let Some(local) = maybe_read_local_object(git_dir, base_hash)? {
                 local
-            } else if let Some(base_idx) = find_entry_by_hash(
-                base_hash,
-                git_dir,
-                objects,
-                offset_to_index,
-                memo,
-                visiting,
-            )? {
-                resolve_packed_object(
-                    base_idx,
-                    git_dir,
-                    objects,
-                    offset_to_index,
-                    memo,
-                    visiting,
-                )?
+            } else if let Some(base_idx) =
+                find_entry_by_hash(base_hash, git_dir, objects, offset_to_index, memo, visiting)?
+            {
+                resolve_packed_object(base_idx, git_dir, objects, offset_to_index, memo, visiting)?
             } else {
                 return Err(err("missing ref-delta base object"));
             };
@@ -1044,9 +1084,7 @@ fn resolve_head(git_dir: &Path) -> io::Result<Option<[u8; 20]>> {
 fn head_branch(git_dir: &Path) -> io::Result<Option<String>> {
     let head = fs::read_to_string(git_dir.join("HEAD"))?;
     let head = head.trim();
-    Ok(head
-        .strip_prefix("ref: refs/heads/")
-        .map(|s| s.to_string()))
+    Ok(head.strip_prefix("ref: refs/heads/").map(|s| s.to_string()))
 }
 
 fn update_ref(git_dir: &Path, refname: &str, hash: &[u8; 20]) -> io::Result<()> {
@@ -1155,8 +1193,7 @@ fn read_tree_entries(git_dir: &Path, hash: &[u8; 20], prefix: &str) -> io::Resul
             .ok_or_else(|| err("bad tree entry"))?;
         let mode_str =
             std::str::from_utf8(&data[pos..pos + space]).map_err(|_| err("bad tree mode"))?;
-        let mode =
-            u32::from_str_radix(mode_str, 8).map_err(|_| err("bad tree mode number"))?;
+        let mode = u32::from_str_radix(mode_str, 8).map_err(|_| err("bad tree mode number"))?;
         pos += space + 1;
 
         let nul = data[pos..]
@@ -1243,8 +1280,13 @@ fn cmd_init(path: &Path) -> io::Result<()> {
 
 fn cmd_add(workdir: &Path, paths: &[String]) -> io::Result<()> {
     let git_dir = workdir.join(".git");
-    let mut entries = read_index(&git_dir)
-        .map_err(|e| err(&format!("cannot read index at {}: {}", git_dir.display(), e)))?;
+    let mut entries = read_index(&git_dir).map_err(|e| {
+        err(&format!(
+            "cannot read index at {}: {}",
+            git_dir.display(),
+            e
+        ))
+    })?;
 
     for rel_path in paths {
         let file_path = workdir.join(rel_path);
@@ -1255,9 +1297,8 @@ fn cmd_add(workdir: &Path, paths: &[String]) -> io::Result<()> {
                 file_path.display()
             )));
         }
-        let content = fs::read(&file_path).map_err(|e| {
-            err(&format!("cannot read '{}': {}", file_path.display(), e))
-        })?;
+        let content = fs::read(&file_path)
+            .map_err(|e| err(&format!("cannot read '{}': {}", file_path.display(), e)))?;
         let hash = hash_object(&git_dir, "blob", &content)?;
 
         entries.retain(|e| e.name != *rel_path);
@@ -1369,19 +1410,13 @@ fn cmd_checkout(workdir: &Path, target: &str, create_branch: bool) -> io::Result
     // Resolve target: local branch first, then DWIM remote tracking
     let branch_ref = format!("refs/heads/{}", target);
     let commit_hash = if let Some(h) = resolve_ref(&git_dir, &branch_ref)? {
-        fs::write(
-            git_dir.join("HEAD"),
-            format!("ref: {}\n", branch_ref),
-        )?;
+        fs::write(git_dir.join("HEAD"), format!("ref: {}\n", branch_ref))?;
         h
     } else {
         let remote_ref = format!("refs/remotes/origin/{}", target);
         if let Some(h) = resolve_ref(&git_dir, &remote_ref)? {
             update_ref(&git_dir, &branch_ref, &h)?;
-            fs::write(
-                git_dir.join("HEAD"),
-                format!("ref: {}\n", branch_ref),
-            )?;
+            fs::write(git_dir.join("HEAD"), format!("ref: {}\n", branch_ref))?;
             h
         } else {
             return Err(err(&format!(
@@ -1470,11 +1505,7 @@ fn cmd_clone_local(source: &Path, dest: &Path) -> io::Result<()> {
     let remote_ref = format!("refs/remotes/origin/{}", default_branch);
     let mut has_default_branch = false;
     if let Some(hash) = resolve_ref(&dst_git, &remote_ref)? {
-        update_ref(
-            &dst_git,
-            &format!("refs/heads/{}", default_branch),
-            &hash,
-        )?;
+        update_ref(&dst_git, &format!("refs/heads/{}", default_branch), &hash)?;
         has_default_branch = true;
     }
 
@@ -1524,7 +1555,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
 // ─── Entry point ────────────────────────────────────────────────────────────
 
 pub fn main(args: Vec<OsString>) -> i32 {
-    let str_args: Vec<String> = args.iter().map(|a| a.to_string_lossy().to_string()).collect();
+    let str_args: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
     match run(&str_args) {
         Ok(()) => 0,
         Err(e) => {
@@ -1546,11 +1580,7 @@ fn run(args: &[String]) -> io::Result<()> {
                 return Err(err("-C requires a directory argument"));
             }
             let p = PathBuf::from(&args[i]);
-            workdir = if p.is_absolute() {
-                p
-            } else {
-                workdir.join(p)
-            };
+            workdir = if p.is_absolute() { p } else { workdir.join(p) };
             i += 1;
         } else {
             break;
@@ -1619,6 +1649,24 @@ fn run(args: &[String]) -> io::Result<()> {
                 return Err(err("usage: git clone <source> [<destination>]"));
             }
             let src_arg = &sub_args[0];
+            if is_ssh_clone_source(src_arg) {
+                return Err(unsupported(
+                    "clone",
+                    &format!(
+                        "does not support SSH or git:// remotes (`{}`).",
+                        src_arg
+                    ),
+                ));
+            }
+            if has_http_auth(src_arg) {
+                return Err(unsupported(
+                    "clone",
+                    &format!(
+                        "does not support authenticated HTTP(S) remotes (`{}`).",
+                        src_arg
+                    ),
+                ));
+            }
             let dst_arg = if sub_args.len() == 2 {
                 sub_args[1].clone()
             } else {
@@ -1643,6 +1691,9 @@ fn run(args: &[String]) -> io::Result<()> {
                 cmd_clone_local(&src, &dst)
             }
         }
-        other => Err(err(&format!("git: '{}' is not a git command", other))),
+        other => Err(unsupported(
+            other,
+            "is not implemented in the Agent OS WasmVM git command.",
+        )),
     }
 }

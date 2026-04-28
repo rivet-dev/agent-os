@@ -131,9 +131,15 @@ fn extract_strings<W: Write>(data: &[u8], min_len: usize, offset_fmt: Option<cha
 fn emit_string<W: Write>(out: &mut W, run: &[u8], offset: usize, offset_fmt: Option<char>) {
     if let Some(fmt) = offset_fmt {
         match fmt {
-            'd' => { let _ = write!(out, "{:7} ", offset); }
-            'o' => { let _ = write!(out, "{:7o} ", offset); }
-            'x' => { let _ = write!(out, "{:7x} ", offset); }
+            'd' => {
+                let _ = write!(out, "{:7} ", offset);
+            }
+            'o' => {
+                let _ = write!(out, "{:7o} ", offset);
+            }
+            'x' => {
+                let _ = write!(out, "{:7x} ", offset);
+            }
             _ => {}
         }
     }

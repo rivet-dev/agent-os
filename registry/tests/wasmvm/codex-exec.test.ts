@@ -15,7 +15,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
-import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
+import { COMMANDS_DIR, createKernel, describeIf, hasWasmBinaries } from '../helpers.js';
 import type { Kernel } from '../helpers.js';
 
 const hasApiKey = !!process.env.OPENAI_API_KEY;
@@ -116,7 +116,7 @@ async function createTestKernel(): Promise<{ kernel: Kernel; vfs: SimpleVFS }> {
   return { kernel, vfs };
 }
 
-describe.skipIf(!hasWasmBinaries)('codex-exec headless agent (WasmVM)', { timeout: 30_000 }, () => {
+describeIf(hasWasmBinaries, 'codex-exec headless agent (WasmVM)', { timeout: 30_000 }, () => {
   let kernel: Kernel;
 
   afterEach(async () => {
@@ -150,8 +150,8 @@ describe.skipIf(!hasWasmBinaries)('codex-exec headless agent (WasmVM)', { timeou
   it('accepts prompt as argument and exits cleanly', async () => {
     ({ kernel } = await createTestKernel());
     const result = await kernel.exec('codex-exec "list all files"');
-    // Headless mode is under development — prints prompt to stderr and exits
-    expect(result.stderr).toContain('headless agent mode is under development');
+    // Prompt mode is currently a placeholder that echoes the prompt to stderr.
+    expect(result.stderr).toContain('headless prompt mode is not wired to the provider yet');
     expect(result.stderr).toContain('list all files');
   });
 
@@ -176,7 +176,7 @@ describe.skipIf(!hasWasmBinaries)('codex-exec headless agent (WasmVM)', { timeou
     // Verify stdout is non-empty and contains expected structured output
     expect(result.stdout.length).toBeGreaterThan(0);
     expect(result.stdout).toContain('OPTIONS');
-    expect(result.stdout).toContain('DESCRIPTION');
+    expect(result.stdout).toContain('USAGE');
   });
 
   it('captures stderr correctly through kernel.exec()', async () => {
@@ -196,7 +196,7 @@ describe.skipIf(!hasWasmBinaries)('codex-exec headless agent (WasmVM)', { timeou
   });
 });
 
-describe.skipIf(!hasWasmBinaries || !hasApiKey)('codex-exec API integration (requires OPENAI_API_KEY)', { timeout: 60_000 }, () => {
+describeIf(hasWasmBinaries && hasApiKey, 'codex-exec API integration (requires OPENAI_API_KEY)', { timeout: 60_000 }, () => {
   let kernel: Kernel;
 
   afterEach(async () => {

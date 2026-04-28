@@ -44,7 +44,6 @@ fn wait_for_process_exit(
     }
 }
 
-#[test]
 fn kill_process_terminates_running_guest_execution() {
     assert_node_available();
 
@@ -127,7 +126,79 @@ fn kill_process_terminates_running_guest_execution() {
     assert_eq!(rerun_exit, 0);
 }
 
-#[test]
+fn kill_process_terminates_running_wasm_execution() {
+    assert_node_available();
+
+    let mut sidecar = new_sidecar("kill-process-wasm");
+    let cwd = temp_dir("kill-process-wasm-cwd");
+    let entry = cwd.join("hang.wasm");
+    write_fixture(
+        &entry,
+        wat::parse_str(
+            r#"
+(module
+  (func $_start (export "_start")
+    (loop $loop
+      br $loop
+    )
+  )
+)
+"#,
+        )
+        .expect("compile wasm hang fixture"),
+    );
+
+    let connection_id = authenticate(&mut sidecar, "conn-1");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let (vm_id, _) = create_vm(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::WebAssembly,
+        &cwd,
+    );
+
+    execute(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-hang-wasm",
+        GuestRuntimeKind::WebAssembly,
+        &entry,
+        Vec::new(),
+    );
+
+    let kill = sidecar
+        .dispatch_blocking(request(
+            5,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::KillProcess(KillProcessRequest {
+                process_id: String::from("proc-hang-wasm"),
+                signal: String::from("SIGTERM"),
+            }),
+        ))
+        .expect("kill guest wasm process");
+
+    match kill.response.payload {
+        ResponsePayload::ProcessKilled(response) => {
+            assert_eq!(response.process_id, "proc-hang-wasm");
+        }
+        other => panic!("unexpected kill response: {other:?}"),
+    }
+
+    let exit_code = wait_for_process_exit(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-hang-wasm",
+    );
+    assert_ne!(exit_code, 0);
+}
+
 fn dispose_vm_succeeds_even_when_a_guest_process_is_running() {
     assert_node_available();
 
@@ -215,7 +286,6 @@ fn dispose_vm_succeeds_even_when_a_guest_process_is_running() {
         .expect("inspect persistence bridge");
 }
 
-#[test]
 fn close_session_removes_the_session_and_disposes_owned_vms() {
     let mut sidecar = new_sidecar("close-session");
     let cwd = temp_dir("close-session-cwd");
@@ -295,7 +365,6 @@ fn close_session_removes_the_session_and_disposes_owned_vms() {
         .expect("inspect persistence bridge");
 }
 
-#[test]
 fn remove_connection_disposes_owned_sessions_and_vms() {
     let mut sidecar = new_sidecar("remove-connection");
     let cwd = temp_dir("remove-connection-cwd");
@@ -353,4 +422,15 @@ fn remove_connection_disposes_owned_sessions_and_vms() {
             );
         })
         .expect("inspect persistence bridge");
+}
+
+#[test]
+fn kill_cleanup_suite() {
+    // Multiple libtest cases in this V8-backed integration binary still trip
+    // teardown/init crashes, so keep the coverage in one top-level suite.
+    close_session_removes_the_session_and_disposes_owned_vms();
+    dispose_vm_succeeds_even_when_a_guest_process_is_running();
+    kill_process_terminates_running_guest_execution();
+    kill_process_terminates_running_wasm_execution();
+    remove_connection_disposes_owned_sessions_and_vms();
 }

@@ -1,0 +1,11 @@
+--- a/src/shell.rs
++++ b/src/shell.rs
+@@ -1324,7 +1324,7 @@
+     ) -> Option<PathBuf> {
+         for dir_str in self.env_str("PATH").unwrap_or_default().split(':') {
+             let candidate_path = Path::new(dir_str).join(candidate_name.as_ref());
+-            if candidate_path.executable() {
++            if candidate_path.is_file() && candidate_path.executable() {
+                 return Some(candidate_path);
+             }
+         }

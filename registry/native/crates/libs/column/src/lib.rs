@@ -139,7 +139,11 @@ fn format_table<W: Write>(lines: &[String], separator: &str, out: &mut W) {
 /// Default mode: fill columns across the terminal width (simplified: 80 chars).
 fn format_columns<W: Write>(lines: &[String], out: &mut W) {
     // Filter out empty lines
-    let entries: Vec<&str> = lines.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+    let entries: Vec<&str> = lines
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
     if entries.is_empty() {
         return;
     }

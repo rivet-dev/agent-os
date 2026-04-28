@@ -5,7 +5,6 @@
 		"moduleResolution": "NodeNext",
 		"esModuleInterop": true,
 		"outDir": "./dist",
-		"rootDir": "./src",
 		"noEmit": true
 	},
 	"include": ["src/**/*"],

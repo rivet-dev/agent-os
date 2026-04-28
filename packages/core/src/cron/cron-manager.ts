@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { Cron } from "croner";
 import type { AgentOs, CreateSessionOptions } from "../agent-os.js";
 import type { AgentType } from "../agents.js";
+import {
+	resolveSchedule,
+	validateScheduleForRegistration,
+} from "./parse-schedule.js";
 import type { ScheduleDriver, ScheduleHandle } from "./schedule-driver.js";
 import type {
 	CronAction,
@@ -31,16 +34,7 @@ interface CronJobState {
  * cannot determine a next run.
  */
 function computeNextTime(schedule: string): Date | undefined {
-	if (
-		schedule.includes(" ") &&
-		!schedule.includes("T") &&
-		!schedule.includes("Z")
-	) {
-		const cron = new Cron(schedule);
-		return cron.nextRun() ?? undefined;
-	}
-	const date = new Date(schedule);
-	return date.getTime() > Date.now() ? date : undefined;
+	return resolveSchedule(schedule).nextRun;
 }
 
 /**
@@ -61,6 +55,7 @@ export class CronManager {
 	schedule(options: CronJobOptions): CronJob {
 		const id = options.id ?? randomUUID();
 		const overlap = options.overlap ?? "allow";
+		const resolved = validateScheduleForRegistration(options.schedule);
 
 		const handle = this.driver.schedule({
 			id,
@@ -75,7 +70,7 @@ export class CronManager {
 			overlap,
 			handle,
 			lastRun: undefined,
-			nextRun: computeNextTime(options.schedule),
+			nextRun: resolved.nextRun,
 			runCount: 0,
 			running: false,
 			queued: false,

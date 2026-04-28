@@ -10,7 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
-import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
+import { COMMANDS_DIR, createKernel, describeIf, hasWasmBinaries } from '../helpers.js';
 import type { Kernel } from '../helpers.js';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -110,7 +110,7 @@ class SimpleVFS {
   }
 }
 
-describe.skipIf(skipReason())('wasi-spawn: WasiChild host_process integration', { timeout: 30_000 }, () => {
+describeIf(!skipReason(), 'wasi-spawn: WasiChild host_process integration', { timeout: 30_000 }, () => {
   let kernel: Kernel;
   let vfs: SimpleVFS;
 

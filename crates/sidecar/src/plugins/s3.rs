@@ -194,7 +194,7 @@ impl S3BackedFilesystem {
 impl Drop for S3BackedFilesystem {
     fn drop(&mut self) {
         if let Err(error) = self.flush_pending() {
-            eprintln!("failed to flush pending S3 filesystem state: {error}");
+            log::warn!("failed to flush pending S3 filesystem state during drop: {error}");
         }
     }
 }

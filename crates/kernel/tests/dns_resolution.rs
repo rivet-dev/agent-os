@@ -1,17 +1,20 @@
 use agent_os_kernel::dns::{
-    DnsConfig, DnsLookupPolicy, DnsLookupRequest, DnsResolver, DnsResolverError,
+    DnsConfig, DnsLookupPolicy, DnsLookupRequest, DnsRecordLookupRequest, DnsResolver,
+    DnsResolverError,
 };
 use agent_os_kernel::kernel::{KernelVm, KernelVmConfig};
 use agent_os_kernel::permissions::{
     NetworkAccessRequest, NetworkOperation, PermissionDecision, Permissions,
 };
 use agent_os_kernel::vfs::MemoryFileSystem;
+use hickory_resolver::proto::rr::Record;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 struct MockDnsResolver {
     requests: Arc<Mutex<Vec<DnsLookupRequest>>>,
+    record_requests: Arc<Mutex<Vec<DnsRecordLookupRequest>>>,
     response: Vec<IpAddr>,
 }
 
@@ -19,6 +22,7 @@ impl MockDnsResolver {
     fn new(response: Vec<IpAddr>) -> Self {
         Self {
             requests: Arc::new(Mutex::new(Vec::new())),
+            record_requests: Arc::new(Mutex::new(Vec::new())),
             response,
         }
     }
@@ -36,6 +40,17 @@ impl DnsResolver for MockDnsResolver {
             .push(request.clone());
         Ok(self.response.clone())
     }
+
+    fn lookup_records(
+        &self,
+        request: &DnsRecordLookupRequest,
+    ) -> Result<Vec<Record>, DnsResolverError> {
+        self.record_requests
+            .lock()
+            .expect("mock record requests")
+            .push(request.clone());
+        Ok(Vec::new())
+    }
 }
 
 fn new_kernel(config: KernelVmConfig) -> KernelVm<MemoryFileSystem> {
@@ -48,7 +63,9 @@ fn kernel_dns_resolution_prefers_overrides_before_the_resolver() {
     let mut config = KernelVmConfig::new("vm-dns-override");
     config.permissions = Permissions::allow_all();
     config.dns = DnsConfig {
-        name_servers: vec!["203.0.113.53:5353".parse::<SocketAddr>().expect("nameserver")],
+        name_servers: vec!["203.0.113.53:5353"
+            .parse::<SocketAddr>()
+            .expect("nameserver")],
         overrides: std::iter::once((
             String::from("example.test"),
             vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))],
@@ -64,7 +81,10 @@ fn kernel_dns_resolution_prefers_overrides_before_the_resolver() {
 
     assert_eq!(resolution.hostname(), "example.test");
     assert_eq!(resolution.source().as_str(), "override");
-    assert_eq!(resolution.addresses(), &[IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))]);
+    assert_eq!(
+        resolution.addresses(),
+        &[IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))]
+    );
     assert!(
         resolver.requests().is_empty(),
         "override lookup should not reach the resolver"
@@ -80,7 +100,9 @@ fn kernel_dns_resolution_passes_vm_nameservers_into_the_resolver() {
     let mut config = KernelVmConfig::new("vm-dns-resolver");
     config.permissions = Permissions::allow_all();
     config.dns = DnsConfig {
-        name_servers: vec!["203.0.113.53:5353".parse::<SocketAddr>().expect("nameserver")],
+        name_servers: vec!["203.0.113.53:5353"
+            .parse::<SocketAddr>()
+            .expect("nameserver")],
         overrides: Default::default(),
     };
     config.dns_resolver = Arc::new(resolver.clone());
@@ -91,14 +113,19 @@ fn kernel_dns_resolution_passes_vm_nameservers_into_the_resolver() {
         .expect("resolve via mock resolver");
 
     assert_eq!(resolution.source().as_str(), "resolver");
-    assert_eq!(resolution.addresses(), &[IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))]);
+    assert_eq!(
+        resolution.addresses(),
+        &[IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))]
+    );
 
     let requests = resolver.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].hostname(), "resolver.example.test");
     assert_eq!(
         requests[0].name_servers(),
-        &["203.0.113.53:5353".parse::<SocketAddr>().expect("nameserver")]
+        &["203.0.113.53:5353"
+            .parse::<SocketAddr>()
+            .expect("nameserver")]
     );
 }
 

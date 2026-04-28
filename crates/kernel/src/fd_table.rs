@@ -291,15 +291,21 @@ pub struct ProcessFdTable {
     entries: BTreeMap<u32, FdEntry>,
     next_fd: u32,
     alloc_desc: DescriptionFactory,
+    max_fds: usize,
 }
 
 impl ProcessFdTable {
-    fn new(alloc_desc: DescriptionFactory) -> Self {
+    fn new(alloc_desc: DescriptionFactory, max_fds: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
             next_fd: 3,
             alloc_desc,
+            max_fds,
         }
+    }
+
+    pub fn max_fds(&self) -> usize {
+        self.max_fds
     }
 
     pub fn init_stdio(
@@ -431,7 +437,7 @@ impl ProcessFdTable {
     ) -> FdResult<u32> {
         let fd = match target_fd {
             Some(fd) => {
-                validate_fd_bounds(fd)?;
+                self.validate_fd_bounds(fd)?;
                 fd
             }
             None => self.allocate_fd()?,
@@ -492,7 +498,7 @@ impl ProcessFdTable {
             .get(&old_fd)
             .cloned()
             .ok_or_else(|| FdTableError::bad_file_descriptor(old_fd))?;
-        validate_fd_bounds(new_fd)?;
+        self.validate_fd_bounds(new_fd)?;
         if old_fd == new_fd {
             return Ok(());
         }
@@ -525,7 +531,7 @@ impl ProcessFdTable {
                     .get(&fd)
                     .cloned()
                     .ok_or_else(|| FdTableError::bad_file_descriptor(fd))?;
-                let min_fd = validate_fcntl_dup_min(arg)?;
+                let min_fd = self.validate_fcntl_dup_min(arg)?;
                 let new_fd = self.allocate_fd_from(min_fd)?;
                 self.duplicate_entry(&entry, new_fd, entry.status_flags, 0)
             }
@@ -570,7 +576,7 @@ impl ProcessFdTable {
     }
 
     pub fn fork(&self) -> Self {
-        let mut child = Self::new(self.alloc_desc.clone());
+        let mut child = Self::new(self.alloc_desc.clone(), self.max_fds);
         child.next_fd = self.next_fd;
 
         for (fd, entry) in &self.entries {
@@ -611,13 +617,13 @@ impl ProcessFdTable {
     }
 
     fn allocate_fd(&mut self) -> FdResult<u32> {
-        if self.entries.len() >= MAX_FDS_PER_PROCESS {
+        if self.entries.len() >= self.max_fds {
             return Err(FdTableError::too_many_open_files());
         }
 
-        let start = usize::try_from(self.next_fd).unwrap_or(0) % MAX_FDS_PER_PROCESS;
-        for offset in 0..MAX_FDS_PER_PROCESS {
-            let candidate = ((start + offset) % MAX_FDS_PER_PROCESS) as u32;
+        let start = usize::try_from(self.next_fd).unwrap_or(0) % self.max_fds;
+        for offset in 0..self.max_fds {
+            let candidate = ((start + offset) % self.max_fds) as u32;
             if !self.entries.contains_key(&candidate) {
                 self.next_fd = candidate.saturating_add(1);
                 return Ok(candidate);
@@ -628,17 +634,17 @@ impl ProcessFdTable {
     }
 
     fn allocate_fd_from(&mut self, min_fd: u32) -> FdResult<u32> {
-        if self.entries.len() >= MAX_FDS_PER_PROCESS {
+        if self.entries.len() >= self.max_fds {
             return Err(FdTableError::too_many_open_files());
         }
 
-        if min_fd as usize >= MAX_FDS_PER_PROCESS {
+        if min_fd as usize >= self.max_fds {
             return Err(FdTableError::invalid_argument(format!(
                 "fd {min_fd} exceeds process fd limit"
             )));
         }
 
-        for candidate in min_fd..MAX_FDS_PER_PROCESS as u32 {
+        for candidate in min_fd..self.max_fds as u32 {
             if !self.entries.contains_key(&candidate) {
                 self.next_fd = candidate.saturating_add(1);
                 return Ok(candidate);
@@ -669,13 +675,22 @@ impl ProcessFdTable {
         );
         Ok(new_fd)
     }
-}
 
-fn validate_fd_bounds(fd: u32) -> FdResult<()> {
-    if fd as usize >= MAX_FDS_PER_PROCESS {
-        return Err(FdTableError::bad_file_descriptor(fd));
+    fn validate_fd_bounds(&self, fd: u32) -> FdResult<()> {
+        if fd as usize >= self.max_fds {
+            return Err(FdTableError::bad_file_descriptor(fd));
+        }
+        Ok(())
     }
-    Ok(())
+
+    fn validate_fcntl_dup_min(&self, min_fd: u32) -> FdResult<u32> {
+        if min_fd as usize >= self.max_fds {
+            return Err(FdTableError::invalid_argument(format!(
+                "fd {min_fd} exceeds process fd limit"
+            )));
+        }
+        Ok(min_fd)
+    }
 }
 
 fn description_flags(flags: u32) -> u32 {
@@ -689,15 +704,6 @@ fn status_flags(flags: u32) -> u32 {
 fn visible_fd_flags(description_flags: u32, entry_status_flags: u32) -> u32 {
     (description_flags & (0b11 | SHARED_STATUS_FLAG_MASK))
         | (entry_status_flags & ENTRY_STATUS_FLAG_MASK)
-}
-
-fn validate_fcntl_dup_min(min_fd: u32) -> FdResult<u32> {
-    if min_fd as usize >= MAX_FDS_PER_PROCESS {
-        return Err(FdTableError::invalid_argument(format!(
-            "fd {min_fd} exceeds process fd limit"
-        )));
-    }
-    Ok(min_fd)
 }
 
 const SHARED_STATUS_FLAG_MASK: u32 = O_APPEND;
@@ -716,6 +722,7 @@ impl<'a> IntoIterator for &'a ProcessFdTable {
 pub struct FdTableManager {
     tables: BTreeMap<u32, ProcessFdTable>,
     alloc_desc: DescriptionFactory,
+    max_fds: usize,
 }
 
 impl Default for FdTableManager {
@@ -723,6 +730,7 @@ impl Default for FdTableManager {
         Self {
             tables: BTreeMap::new(),
             alloc_desc: DescriptionFactory::new(1),
+            max_fds: MAX_FDS_PER_PROCESS,
         }
     }
 }
@@ -732,8 +740,15 @@ impl FdTableManager {
         Self::default()
     }
 
+    pub fn with_max_fds(max_fds: usize) -> Self {
+        Self {
+            max_fds,
+            ..Self::default()
+        }
+    }
+
     pub fn create(&mut self, pid: u32) -> &mut ProcessFdTable {
-        let mut table = ProcessFdTable::new(self.alloc_desc.clone());
+        let mut table = ProcessFdTable::new(self.alloc_desc.clone(), self.max_fds);
         table.init_stdio(
             self.alloc_desc.allocate("/dev/stdin", O_RDONLY),
             self.alloc_desc.allocate("/dev/stdout", O_WRONLY),
@@ -753,7 +768,7 @@ impl FdTableManager {
         stdout_override: Option<StdioOverride>,
         stderr_override: Option<StdioOverride>,
     ) -> &mut ProcessFdTable {
-        let mut table = ProcessFdTable::new(self.alloc_desc.clone());
+        let mut table = ProcessFdTable::new(self.alloc_desc.clone(), self.max_fds);
         let stdin_desc = stdin_override
             .as_ref()
             .map(|entry| Arc::clone(&entry.description))

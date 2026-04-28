@@ -85,6 +85,20 @@ oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==\n\
         }
 
         #[test]
+        fn google_drive_query_literals_escape_backslashes_before_quotes() {
+            assert_eq!(escape_query_literal(r#"plain-text"#), r#"plain-text"#);
+            assert_eq!(
+                escape_query_literal(r#"with\backslash"#),
+                r#"with\\backslash"#
+            );
+            assert_eq!(escape_query_literal("with'quote"), "with\\'quote");
+            assert_eq!(
+                escape_query_literal(r#"path\with'quote"#),
+                r#"path\\with\'quote"#
+            );
+        }
+
+        #[test]
         fn google_drive_plugin_persists_files_across_reopen_and_preserves_links() {
             let server = MockGoogleDriveServer::start();
 
@@ -215,8 +229,11 @@ oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==\n\
                                 nlink: 1,
                                 ino: 1,
                                 atime_ms: 0,
+                                atime_nsec: 0,
                                 mtime_ms: 0,
+                                mtime_nsec: 0,
                                 ctime_ms: 0,
+                                ctime_nsec: 0,
                                 birthtime_ms: 0,
                             },
                             kind: PersistedFilesystemInodeKind::Directory,
@@ -232,8 +249,11 @@ oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==\n\
                                 nlink: 1,
                                 ino: 2,
                                 atime_ms: 0,
+                                atime_nsec: 0,
                                 mtime_ms: 0,
+                                mtime_nsec: 0,
                                 ctime_ms: 0,
+                                ctime_nsec: 0,
                                 birthtime_ms: 0,
                             },
                             kind: PersistedFilesystemInodeKind::File {

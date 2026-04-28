@@ -8,13 +8,10 @@ import {
 	startLlmock,
 	stopLlmock,
 } from "./helpers/llmock-helper.js";
-import {
-	REGISTRY_SOFTWARE,
-	registrySkipReason,
-} from "./helpers/registry-commands.js";
+import { REGISTRY_SOFTWARE } from "./helpers/registry-commands.js";
+import { ALLOW_ALL_VM_PERMISSIONS } from "./helpers/permissions.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
-
 function hasToolResult(req: unknown): boolean {
 	const directMessages = (
 		req as {
@@ -54,7 +51,7 @@ describe("filesystem operations", () => {
 	let vm: AgentOs;
 
 	beforeEach(async () => {
-		vm = await AgentOs.create();
+		vm = await AgentOs.create({ permissions: ALLOW_ALL_VM_PERMISSIONS });
 	});
 
 	afterEach(async () => {
@@ -68,75 +65,77 @@ describe("filesystem operations", () => {
 		expect(new TextDecoder().decode(data)).toBe(content);
 	});
 
-	test.skipIf(registrySkipReason)(
-		"writeFile is visible to WASM guest commands",
-		async () => {
-			await vm.dispose();
-			vm = await AgentOs.create({ software: REGISTRY_SOFTWARE });
+	test("writeFile is visible to WASM guest commands", async () => {
+		await vm.dispose();
+		vm = await AgentOs.create({
+			permissions: ALLOW_ALL_VM_PERMISSIONS,
+			software: REGISTRY_SOFTWARE,
+		});
 
-			await vm.writeFile("/tmp/test.txt", "hello");
+		await vm.writeFile("/tmp/test.txt", "hello");
 
-			const cat = await vm.exec("cat /tmp/test.txt");
-			expect(cat.exitCode, cat.stderr || cat.stdout).toBe(0);
-			expect(cat.stdout.trim()).toBe("hello");
+		const cat = await vm.exec("cat /tmp/test.txt");
+		expect(cat.exitCode, cat.stderr || cat.stdout).toBe(0);
+		expect(cat.stdout.trim()).toBe("hello");
 
-			const ls = await vm.exec("ls /tmp/");
-			expect(ls.exitCode, ls.stderr || ls.stdout).toBe(0);
-			expect(ls.stdout).toContain("test.txt");
-		},
-	);
+		const ls = await vm.exec("ls /tmp/");
+		expect(ls.exitCode, ls.stderr || ls.stdout).toBe(0);
+		expect(ls.stdout).toContain("test.txt");
+	});
 
-	test.skipIf(registrySkipReason)(
-		"agent bash tool writes are visible to readFile before the session exits",
-		async () => {
-			const { mock, url } = await startLlmock(
-				createToolFixtures(
-					{
-						name: "Bash",
-						arguments: JSON.stringify({
-							command: "printf 'agent-shadow-ok' > /tmp/agent-shadow.txt",
-						}),
+	test("agent bash tool writes are visible to readFile before the session exits", async () => {
+		const { mock, url } = await startLlmock(
+			createToolFixtures(
+				{
+					name: "Bash",
+					arguments: JSON.stringify({
+						command: "printf 'agent-shadow-ok' > /tmp/agent-shadow.txt",
+					}),
+				},
+				"done",
+			),
+		);
+		const mockPort = Number(new URL(url).port);
+
+		await vm.dispose();
+		vm = await AgentOs.create({
+			loopbackExemptPorts: [mockPort],
+			moduleAccessCwd: MODULE_ACCESS_CWD,
+			permissions: ALLOW_ALL_VM_PERMISSIONS,
+			software: [claude, ...REGISTRY_SOFTWARE],
+		});
+
+		let sessionId: string | undefined;
+		try {
+			sessionId = (
+				await vm.createSession("claude", {
+					cwd: "/home/user",
+					env: {
+						ANTHROPIC_API_KEY: "mock-key",
+						ANTHROPIC_BASE_URL: url,
 					},
-					"done",
-				),
-			);
-			const mockPort = Number(new URL(url).port);
-
-			await vm.dispose();
-			vm = await AgentOs.create({
-				loopbackExemptPorts: [mockPort],
-				moduleAccessCwd: MODULE_ACCESS_CWD,
-				software: [claude, ...REGISTRY_SOFTWARE],
+				})
+			).sessionId;
+			vm.onPermissionRequest(sessionId, (request) => {
+				void vm.respondPermission(sessionId!, request.permissionId, "once");
 			});
 
-			let sessionId: string | undefined;
-			try {
-				sessionId = (
-					await vm.createSession("claude", {
-						env: {
-							ANTHROPIC_API_KEY: "mock-key",
-							ANTHROPIC_BASE_URL: url,
-						},
-					})
-				).sessionId;
+			const { response } = await vm.prompt(
+				sessionId,
+				"Use bash to write agent-shadow-ok into /tmp/agent-shadow.txt.",
+			);
 
-				const { response } = await vm.prompt(
-					sessionId,
-					"Use bash to write agent-shadow-ok into /tmp/agent-shadow.txt.",
-				);
-
-				expect(response.error).toBeUndefined();
-				expect(
-					new TextDecoder().decode(await vm.readFile("/tmp/agent-shadow.txt")),
-				).toBe("agent-shadow-ok");
-			} finally {
-				if (sessionId) {
-					vm.closeSession(sessionId);
-				}
-				await stopLlmock(mock);
+			expect(response.error).toBeUndefined();
+			expect(
+				new TextDecoder().decode(await vm.readFile("/tmp/agent-shadow.txt")),
+			).toBe("agent-shadow-ok");
+		} finally {
+			if (sessionId) {
+				vm.closeSession(sessionId);
 			}
-		},
-	);
+			await stopLlmock(mock);
+		}
+	});
 
 	test("mkdir and readdir", async () => {
 		await vm.mkdir("/tmp/testdir");

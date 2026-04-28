@@ -26,9 +26,17 @@ PATCH_DIR="$SCRIPT_DIR/../patches/duckdb"
 COMMON_FLAGS="-I$OVERLAY_INCLUDE_DIR -D_WASI_EMULATED_PTHREAD -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS"
 COMMON_CXX_FLAGS="$COMMON_FLAGS -DDUCKDB_DISABLE_EXTENSION_LOAD -DSQLITE_NOHAVE_SYSTEM -DSQLITE_OMIT_POPEN -fwasm-exceptions -DWEBDB_FAST_EXCEPTIONS=1"
 CXX_STDLIB_INCLUDE="$SYSROOT_DIR/include/wasm32-wasi/c++/v1"
+RUNTIME_LIB_DIR="$(cd "$(dirname "$SYSROOT_DIR")" && pwd)/build/llvm-runtimes-install/lib"
+SHIM_BUILD_DIR="$DUCKDB_BUILD_DIR/agentos-shims"
+SHIM_CFLAGS="--target=wasm32-wasip1 --sysroot=$SYSROOT_DIR -isystem $SYSROOT_DIR/include/wasm32-wasi -I$OVERLAY_INCLUDE_DIR -D_GNU_SOURCE"
+SHIM_OBJECTS="$SHIM_BUILD_DIR/fcntl.o $SHIM_BUILD_DIR/mlock.o $SHIM_BUILD_DIR/sched.o"
 
 if [ ! -d "$CXX_STDLIB_INCLUDE" ]; then
   echo "missing libc++ headers at $CXX_STDLIB_INCLUDE" >&2
+  exit 1
+fi
+if [ ! -d "$RUNTIME_LIB_DIR" ]; then
+  echo "missing rebuilt C++ runtime libraries at $RUNTIME_LIB_DIR" >&2
   exit 1
 fi
 
@@ -46,6 +54,17 @@ if [ -d "$PATCH_DIR" ]; then
 fi
 
 mkdir -p "$DUCKDB_BUILD_DIR"
+mkdir -p "$SHIM_BUILD_DIR"
+
+"$WASI_SDK_DIR/bin/clang" $SHIM_CFLAGS \
+  -c "$SCRIPT_DIR/../../patches/wasi-libc-overrides/fcntl.c" \
+  -o "$SHIM_BUILD_DIR/fcntl.o"
+"$WASI_SDK_DIR/bin/clang" $SHIM_CFLAGS \
+  -c "$SCRIPT_DIR/../../patches/wasi-libc-overrides/mlock.c" \
+  -o "$SHIM_BUILD_DIR/mlock.o"
+"$WASI_SDK_DIR/bin/clang" $SHIM_CFLAGS \
+  -c "$SCRIPT_DIR/../../patches/wasi-libc-overrides/sched.c" \
+  -o "$SHIM_BUILD_DIR/sched.o"
 
 cmake \
   -S "$DUCKDB_SRC_DIR" \
@@ -58,7 +77,9 @@ cmake \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_FLAGS="$COMMON_FLAGS" \
   -DCMAKE_CXX_FLAGS="$COMMON_CXX_FLAGS -isystem $CXX_STDLIB_INCLUDE" \
-  -DCMAKE_EXE_LINKER_FLAGS="-lwasi-emulated-mman -lwasi-emulated-signal -lwasi-emulated-process-clocks" \
+  -DCMAKE_EXE_LINKER_FLAGS="$SHIM_OBJECTS -L$RUNTIME_LIB_DIR -fwasm-exceptions -lwasi-emulated-mman -lwasi-emulated-signal -lwasi-emulated-process-clocks" \
+  -DCMAKE_SHARED_LINKER_FLAGS="-L$RUNTIME_LIB_DIR -fwasm-exceptions" \
+  -DCMAKE_CXX_STANDARD_LIBRARIES="-lc++ -lc++abi -lunwind -lc" \
   -DBUILD_UNITTESTS=0 \
   -DENABLE_UNITTEST_CPP_TESTS=0 \
   -DBUILD_BENCHMARKS=0 \

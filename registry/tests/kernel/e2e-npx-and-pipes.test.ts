@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { createIntegrationKernel, skipUnlessWasmBuilt } from './helpers.ts';
+import { describeIf, createIntegrationKernel, skipUnlessWasmBuilt } from './helpers.ts';
 
 const skipReason = skipUnlessWasmBuilt();
 
@@ -27,7 +27,7 @@ async function checkNetwork(): Promise<string | false> {
   }
 }
 
-describe.skipIf(skipReason)('e2e npx and pipes through kernel', () => {
+describeIf(!skipReason, 'e2e npx and pipes through kernel', () => {
   describe('npx execution', () => {
     it('npx semver outputs parsed version', async () => {
       const networkSkip = await checkNetwork();

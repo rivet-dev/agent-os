@@ -34,7 +34,23 @@ import type {
 } from "./native-process-client.js";
 
 const SYNTHETIC_PID_BASE = 1_000_000;
-const EVENT_PUMP_TIMEOUT_MS = 86_400_000;
+const MISSING_EXIT_EVENT_GRACE_MS = 500;
+const PROTECTED_READ_ONLY_GUEST_ROOTS = ["/etc/agentos"] as const;
+const TRAILING_OUTPUT_DRAIN_INTERVAL_MS = 10;
+const TRAILING_OUTPUT_DRAIN_MAX_MS = 250;
+const TRAILING_OUTPUT_DRAIN_QUIET_TURNS = 2;
+
+async function drainTrailingProcessOutputTurn(
+	delayMs = 0,
+): Promise<void> {
+	// Native-sidecar `process_output` events can lag one macrotask behind the
+	// terminal `process_exited` notification for very short-lived processes, and
+	// under suite load the sidecar event pump can need a little extra time to
+	// flush delayed output through its listener callbacks.
+	await new Promise<void>((resolve) => {
+		setTimeout(resolve, delayMs);
+	});
+}
 
 const PREFERRED_SIGNAL_NAMES = [
 	"SIGHUP",
@@ -78,6 +94,256 @@ const NON_CANONICAL_SIGNAL_NAMES = new Set([
 	"SIGUNUSED",
 ]);
 const SIGNAL_NAME_BY_NUMBER = buildSignalNameByNumber();
+const DOUBLE_QUOTE_ESCAPABLE_CHARACTERS = new Set(['"', "\\", "$", "`"]);
+function appendDoubleQuotedEscape(current: string, character: string): string {
+	if (DOUBLE_QUOTE_ESCAPABLE_CHARACTERS.has(character)) {
+		return current + character;
+	}
+	if (character === "\n") {
+		return current;
+	}
+	return `${current}\\${character}`;
+}
+
+function parseSimpleExecCommand(command: string): string[] | null {
+	const tokens: string[] = [];
+	let current = "";
+	let quote: "'" | '"' | null = null;
+	let escaped = false;
+
+	for (const character of command) {
+		if (quote === null) {
+			if (escaped) {
+				current += character;
+				escaped = false;
+				continue;
+			}
+			if (character === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (character === "'" || character === '"') {
+				quote = character;
+				continue;
+			}
+			if (/\s/.test(character)) {
+				if (current) {
+					tokens.push(current);
+					current = "";
+				}
+				continue;
+			}
+			if ("|&;<>()$`*?[]{}~!".includes(character)) {
+				return null;
+			}
+			current += character;
+			continue;
+		}
+
+		if (quote === "'") {
+			if (character === "'") {
+				quote = null;
+				continue;
+			}
+			current += character;
+			continue;
+		}
+
+		if (escaped) {
+			current = appendDoubleQuotedEscape(current, character);
+			escaped = false;
+			continue;
+		}
+		if (character === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (character === '"') {
+			quote = null;
+			continue;
+		}
+		if (character === "$" || character === "`") {
+			return null;
+		}
+		current += character;
+	}
+
+	if (quote !== null || escaped) {
+		return null;
+	}
+	if (current) {
+		tokens.push(current);
+	}
+	if (tokens.length === 0) {
+		return null;
+	}
+	if (tokens.some((token) => token.length === 0)) {
+		return null;
+	}
+	return tokens;
+}
+
+interface SimpleExecRedirectCommand {
+	command: string;
+	args: string[];
+	stdinPath?: string;
+	stdoutPath?: string;
+	appendStdout: boolean;
+}
+
+function parseSimpleExecCommandWithRedirects(
+	command: string,
+): SimpleExecRedirectCommand | null {
+	const tokens: string[] = [];
+	let current = "";
+	let quote: "'" | '"' | null = null;
+	let escaped = false;
+
+	const flushCurrent = () => {
+		if (current) {
+			tokens.push(current);
+			current = "";
+		}
+	};
+
+	for (let index = 0; index < command.length; index += 1) {
+		const character = command[index];
+		if (quote === null) {
+			if (escaped) {
+				current += character;
+				escaped = false;
+				continue;
+			}
+			if (character === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (character === "'" || character === '"') {
+				quote = character;
+				continue;
+			}
+			if (/\s/.test(character)) {
+				flushCurrent();
+				continue;
+			}
+			if (character === "<") {
+				flushCurrent();
+				tokens.push("<");
+				continue;
+			}
+			if (character === ">") {
+				flushCurrent();
+				if (command[index + 1] === ">") {
+					tokens.push(">>");
+					index += 1;
+				} else {
+					tokens.push(">");
+				}
+				continue;
+			}
+			if ("|&;()$`*?[]{}~!".includes(character)) {
+				return null;
+			}
+			current += character;
+			continue;
+		}
+
+		if (quote === "'") {
+			if (character === "'") {
+				quote = null;
+				continue;
+			}
+			current += character;
+			continue;
+		}
+
+		if (escaped) {
+			current = appendDoubleQuotedEscape(current, character);
+			escaped = false;
+			continue;
+		}
+		if (character === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (character === '"') {
+			quote = null;
+			continue;
+		}
+		if (character === "$" || character === "`") {
+			return null;
+		}
+		current += character;
+	}
+
+	if (quote !== null || escaped) {
+		return null;
+	}
+	flushCurrent();
+	if (tokens.length === 0) {
+		return null;
+	}
+
+	let commandName: string | undefined;
+	const args: string[] = [];
+	let stdinPath: string | undefined;
+	let stdoutPath: string | undefined;
+	let appendStdout = false;
+
+	for (let index = 0; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (token === "<" || token === ">" || token === ">>") {
+			const redirectPath = tokens[index + 1];
+			if (
+				!redirectPath ||
+				redirectPath === "<" ||
+				redirectPath === ">" ||
+				redirectPath === ">>"
+			) {
+				return null;
+			}
+			if (token === "<") {
+				if (stdinPath !== undefined) {
+					return null;
+				}
+				stdinPath = redirectPath;
+			} else {
+				if (stdoutPath !== undefined) {
+					return null;
+				}
+				stdoutPath = redirectPath;
+				appendStdout = token === ">>";
+			}
+			index += 1;
+			continue;
+		}
+
+		if (!commandName) {
+			commandName = token;
+			continue;
+		}
+		args.push(token);
+	}
+
+	if (!commandName) {
+		return null;
+	}
+
+	return {
+		command: commandName,
+		args,
+		stdinPath,
+		stdoutPath,
+		appendStdout,
+	};
+}
+
+function shellSingleQuote(value: string): string {
+	if (value.length === 0) {
+		return "''";
+	}
+	return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+}
 
 function buildSignalNameByNumber(): Map<number, string> {
 	const signals = osConstants.signals as Record<string, number | undefined>;
@@ -156,6 +422,9 @@ interface TrackedProcessEntry {
 	stdinFlushPromise: Promise<void> | null;
 	pendingCloseStdin: boolean;
 	pendingKillSignal: number | null;
+	waitWithFallbackPromise: Promise<number> | null;
+	hostExitObservedAt: number | null;
+	outputGeneration: number;
 }
 
 interface NativeSidecarKernelProxyOptions {
@@ -164,8 +433,10 @@ interface NativeSidecarKernelProxyOptions {
 	vm: CreatedVm;
 	env: Record<string, string>;
 	cwd: string;
+	defaultExecCwd?: string;
 	localMounts: LocalCompatMount[];
 	commandGuestPaths: ReadonlyMap<string, string>;
+	onWasmCommandResolved?: (command: string) => void;
 	onDispose?: () => Promise<void>;
 }
 
@@ -175,12 +446,16 @@ export class NativeSidecarKernelProxy {
 	readonly commands: ReadonlyMap<string, string>;
 	readonly vfs: VirtualFileSystem;
 	readonly processes = new Map<number, ProcessInfo>();
+	private readonly defaultExecCwd: string | undefined;
 
 	private readonly client: NativeSidecarProcessClient;
 	private readonly session: AuthenticatedSession;
 	private readonly vm: CreatedVm;
 	private readonly localMounts: LocalCompatMount[];
 	private readonly commandDrivers: Map<string, string>;
+	private readonly onWasmCommandResolved:
+		| ((command: string) => void)
+		| undefined;
 	private readonly onDispose: (() => Promise<void>) | undefined;
 	private readonly trackedProcesses = new Map<number, TrackedProcessEntry>();
 	private readonly trackedProcessesById = new Map<
@@ -200,6 +475,7 @@ export class NativeSidecarKernelProxy {
 	private disposed = false;
 	private pumpError: Error | null = null;
 	private nextSyntheticPid = SYNTHETIC_PID_BASE;
+	private readonly eventPumpAbortController = new AbortController();
 	private readonly eventPump: Promise<void>;
 
 	constructor(options: NativeSidecarKernelProxyOptions) {
@@ -208,15 +484,18 @@ export class NativeSidecarKernelProxy {
 		this.vm = options.vm;
 		this.env = { ...options.env };
 		this.cwd = options.cwd;
+		this.defaultExecCwd = options.defaultExecCwd;
 		this.localMounts = [...options.localMounts].sort(
 			(left, right) => right.path.length - left.path.length,
 		);
 		this.commandDrivers = buildCommandMap(options.commandGuestPaths);
+		this.onWasmCommandResolved = options.onWasmCommandResolved;
 		this.onDispose = options.onDispose;
 		this.commands = this.commandDrivers;
 		this.vfs = this.createFilesystemView(true);
 		this.rootView = this.createFilesystemView(false);
 		this.eventPump = this.runEventPump();
+		void this.eventPump.catch(() => {});
 	}
 
 	createRootView(): VirtualFileSystem {
@@ -243,6 +522,7 @@ export class NativeSidecarKernelProxy {
 			return;
 		}
 		this.disposed = true;
+		this.eventPumpAbortController.abort();
 
 		const liveProcesses = [...this.trackedProcesses.values()].filter(
 			(entry) => entry.exitCode === null,
@@ -278,8 +558,242 @@ export class NativeSidecarKernelProxy {
 
 		const stdoutChunks: Uint8Array[] = [];
 		const stderrChunks: Uint8Array[] = [];
+		const effectiveCwd = options?.cwd ?? this.defaultExecCwd ?? this.cwd;
+		const parsedCommand = parseSimpleExecCommand(command);
+		const parsedRedirectCommand = parseSimpleExecCommandWithRedirects(command);
+		const decodeChunks = (chunks: Uint8Array[]) =>
+			Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8");
+		const concatChunks = (chunks: Uint8Array[]) => {
+			const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+			const combined = new Uint8Array(totalLength);
+			let offset = 0;
+			for (const chunk of chunks) {
+				combined.set(chunk, offset);
+				offset += chunk.length;
+			}
+			return combined;
+		};
+		const resolveExecPath = (targetPath: string) =>
+			targetPath.startsWith("/")
+				? posixPath.normalize(targetPath)
+				: posixPath.normalize(posixPath.join(effectiveCwd, targetPath));
+		const runAndCapture = async (
+			proc: ManagedProcess,
+			stdinOverride?: string | Uint8Array,
+			readExitCode?: () => Promise<number>,
+		): Promise<KernelExecResult> => {
+			if (stdinOverride !== undefined) {
+				proc.writeStdin(stdinOverride);
+			} else if (options?.stdin !== undefined) {
+				proc.writeStdin(options.stdin);
+			}
+			// `kernel.exec()` is a non-interactive run-to-completion API: when the
+			// caller does not opt into a streaming stdin handle, the guest process
+			// should observe EOF after any provided input so commands like
+			// `node -e ...` do not linger behind an inherited open stdin pipe.
+			proc.closeStdin();
+
+			const waitPromise = proc.wait();
+			const shellExitCode =
+				typeof options?.timeout === "number"
+					? await new Promise<number>((resolve) => {
+							const timer = setTimeout(() => {
+								proc.kill(9);
+								void proc.wait().then(resolve);
+							}, options.timeout);
+							void waitPromise.then((code) => {
+								clearTimeout(timer);
+								resolve(code);
+							});
+						})
+					: await waitPromise;
+
+			const exitCode = readExitCode
+				? await readExitCode().catch(() => shellExitCode)
+				: shellExitCode;
+
+			await drainTrailingProcessOutputTurn();
+
+			return {
+				exitCode,
+				stdout: Buffer.concat(
+					stdoutChunks.map((chunk) => Buffer.from(chunk)),
+				).toString("utf8"),
+				stderr: Buffer.concat(
+					stderrChunks.map((chunk) => Buffer.from(chunk)),
+				).toString("utf8"),
+			};
+		};
+		if (
+			parsedCommand &&
+			(parsedCommand[0] === "sh" || parsedCommand[0] === "/bin/sh") &&
+			parsedCommand[1] === "-c" &&
+			parsedCommand.length === 3
+		) {
+			const shellScript = parsedCommand[2].trim();
+			const exitMatch = shellScript.match(/^exit(?:\s+(-?\d+))?$/);
+			if (exitMatch) {
+				return {
+					exitCode: Number.parseInt(exitMatch[1] ?? "0", 10),
+					stdout: "",
+					stderr: "",
+				};
+			}
+			return this.exec(parsedCommand[2], options);
+		}
+		if (
+			parsedCommand &&
+			parsedCommand[0] === "chmod" &&
+			parsedCommand.length >= 3 &&
+			/^[0-7]{3,4}$/.test(parsedCommand[1] ?? "")
+		) {
+			const mode = Number.parseInt(parsedCommand[1]!, 8);
+			for (const target of parsedCommand.slice(2)) {
+				await this.client.chmod(
+					this.session,
+					this.vm,
+					resolveExecPath(target),
+					mode,
+				);
+			}
+			return { exitCode: 0, stdout: "", stderr: "" };
+		}
+		if (
+			parsedCommand &&
+			parsedCommand[0] === "stat" &&
+			parsedCommand.length === 4 &&
+			parsedCommand[1] === "-c" &&
+			parsedCommand[2] === "%a"
+		) {
+			const stat = await this.stat(resolveExecPath(parsedCommand[3]!));
+			return {
+				exitCode: 0,
+				stdout: `${(stat.mode & 0o777).toString(8)}\n`,
+				stderr: "",
+			};
+		}
+		const parsedRedirectCommandDriver = parsedRedirectCommand
+			? this.commands.get(parsedRedirectCommand.command)
+			: undefined;
+		// `kernel.exec()` accepts a shell command string. Only take the direct
+		// spawn fast path when the parser has already proven the command is a
+		// shell-free argv list. This keeps guest shell syntax on `sh -c` while
+		// letting simple `node ...` and Wasm commands preserve their real exit codes.
+		const canUseDirectExec = (
+			driver: string | undefined,
+			commandName: string | undefined,
+		) => driver === "wasmvm" || (driver === "node" && commandName === "node");
+		const parsedRedirectCommandHasRedirects = Boolean(
+			parsedRedirectCommand &&
+				(parsedRedirectCommand.stdinPath !== undefined ||
+					parsedRedirectCommand.stdoutPath !== undefined),
+		);
+		if (
+			parsedRedirectCommand &&
+			parsedRedirectCommandDriver &&
+			canUseDirectExec(
+				parsedRedirectCommandDriver,
+				parsedRedirectCommand.command,
+			) &&
+			parsedRedirectCommandHasRedirects
+		) {
+			if (parsedRedirectCommandDriver === "wasmvm") {
+				this.onWasmCommandResolved?.(parsedRedirectCommand.command);
+			}
+			const redirectedStdoutChunks: Uint8Array[] = [];
+			const redirectedStderrChunks: Uint8Array[] = [];
+			const stdinOverride: string | Uint8Array | undefined =
+				parsedRedirectCommand.stdinPath !== undefined
+					? new Uint8Array(
+							await this.readFile(
+							resolveExecPath(parsedRedirectCommand.stdinPath),
+							),
+						)
+					: options?.stdin;
+			const stdoutRedirectPath = parsedRedirectCommand.stdoutPath
+				? resolveExecPath(parsedRedirectCommand.stdoutPath)
+				: undefined;
+			const proc = this.spawn(
+				parsedRedirectCommand.command,
+				parsedRedirectCommand.args,
+				{
+					...options,
+					cwd: effectiveCwd,
+					onStdout: (chunk) => {
+						redirectedStdoutChunks.push(chunk);
+						if (!stdoutRedirectPath) {
+							options?.onStdout?.(chunk);
+						}
+					},
+					onStderr: (chunk) => {
+						redirectedStderrChunks.push(chunk);
+						options?.onStderr?.(chunk);
+					},
+				},
+			);
+			const result = await runAndCapture(proc, stdinOverride);
+			if (stdoutRedirectPath) {
+					const redirectedStdout = concatChunks(redirectedStdoutChunks);
+					if (parsedRedirectCommand.appendStdout) {
+						let existing = new Uint8Array(0);
+						try {
+							existing = new Uint8Array(await this.readFile(stdoutRedirectPath));
+						} catch {
+							// Appending to a nonexistent file should create it.
+						}
+					const combined = new Uint8Array(
+						existing.length + redirectedStdout.length,
+					);
+					combined.set(existing);
+					combined.set(redirectedStdout, existing.length);
+					await this.writeFile(stdoutRedirectPath, combined);
+				} else {
+					await this.writeFile(stdoutRedirectPath, redirectedStdout);
+				}
+				return {
+					exitCode: result.exitCode,
+					stdout: "",
+					stderr: decodeChunks(redirectedStderrChunks),
+				};
+			}
+			return {
+				exitCode: result.exitCode,
+				stdout: decodeChunks(redirectedStdoutChunks),
+				stderr: decodeChunks(redirectedStderrChunks),
+			};
+		}
+		const parsedCommandDriver = parsedCommand
+			? this.commands.get(parsedCommand[0])
+			: undefined;
+		const requiresShellWrappedWasmCwd =
+			parsedCommandDriver === "wasmvm" && parsedCommand?.[0] === "pwd";
+		if (
+			parsedCommand &&
+			parsedCommandDriver &&
+			canUseDirectExec(parsedCommandDriver, parsedCommand[0]) &&
+			!requiresShellWrappedWasmCwd
+		) {
+			if (parsedCommandDriver === "wasmvm") {
+				this.onWasmCommandResolved?.(parsedCommand[0]);
+			}
+			return runAndCapture(
+				this.spawn(parsedCommand[0], parsedCommand.slice(1), {
+					...options,
+					cwd: effectiveCwd,
+					onStdout: (chunk) => {
+						stdoutChunks.push(chunk);
+						options?.onStdout?.(chunk);
+					},
+					onStderr: (chunk) => {
+						stderrChunks.push(chunk);
+						options?.onStderr?.(chunk);
+					},
+				}),
+			);
+		}
 		const proc = this.spawn("sh", ["-c", command], {
 			...options,
+			cwd: effectiveCwd,
 			onStdout: (chunk) => {
 				stdoutChunks.push(chunk);
 				options?.onStdout?.(chunk);
@@ -289,36 +803,7 @@ export class NativeSidecarKernelProxy {
 				options?.onStderr?.(chunk);
 			},
 		});
-
-		if (options?.stdin !== undefined) {
-			proc.writeStdin(options.stdin);
-			proc.closeStdin();
-		}
-
-		const waitPromise = proc.wait();
-		const exitCode =
-			typeof options?.timeout === "number"
-				? await new Promise<number>((resolve) => {
-						const timer = setTimeout(() => {
-							proc.kill(9);
-							void proc.wait().then(resolve);
-						}, options.timeout);
-						void waitPromise.then((code) => {
-							clearTimeout(timer);
-							resolve(code);
-						});
-					})
-				: await waitPromise;
-
-		return {
-			exitCode,
-			stdout: Buffer.concat(
-				stdoutChunks.map((chunk) => Buffer.from(chunk)),
-			).toString("utf8"),
-			stderr: Buffer.concat(
-				stderrChunks.map((chunk) => Buffer.from(chunk)),
-			).toString("utf8"),
-		};
+		return runAndCapture(proc);
 	}
 
 	spawn(
@@ -361,6 +846,9 @@ export class NativeSidecarKernelProxy {
 			stdinFlushPromise: null,
 			pendingCloseStdin: false,
 			pendingKillSignal: null,
+			waitWithFallbackPromise: null,
+			hostExitObservedAt: null,
+			outputGeneration: 0,
 		};
 		this.trackedProcesses.set(pid, entry);
 		this.trackedProcessesById.set(processId, entry);
@@ -373,11 +861,15 @@ export class NativeSidecarKernelProxy {
 					return;
 				}
 				entry.pendingStdin.push(data);
-				void this.flushPendingStdin(entry);
+				void this.flushPendingStdin(entry).catch((error) => {
+					this.handleBackgroundProcessError(entry, error);
+				});
 			},
 			closeStdin: () => {
 				entry.pendingCloseStdin = true;
-				void this.closeTrackedStdin(entry);
+				void this.closeTrackedStdin(entry).catch((error) => {
+					this.handleBackgroundProcessError(entry, error);
+				});
 			},
 			kill: (signal = 15) => {
 				if (entry.exitCode !== null) {
@@ -393,7 +885,11 @@ export class NativeSidecarKernelProxy {
 					await this.signalProcess(entry, pendingSignal);
 				});
 			},
-			wait: () => entry.waitPromise,
+			wait: async () => {
+				const exitCode = await this.waitForTrackedProcess(entry);
+				await this.drainTrailingProcessOutput(entry);
+				return exitCode;
+			},
 			get exitCode() {
 				return entry.exitCode;
 			},
@@ -420,25 +916,42 @@ export class NativeSidecarKernelProxy {
 			options?.args ??
 			(command === "sh" || command === "/bin/sh" ? ["-i"] : []);
 		const synthesizePrompt = !options?.command && !options?.args;
+		const autoCloseExplicitCommandStdin =
+			Boolean(options?.command) &&
+			!["sh", "/bin/sh", "bash"].includes(command);
 		const promptText = "sh-0.4$ ";
 		const textEncoder = new TextEncoder();
 		const execCommand = this.exec.bind(this);
-		const sanitizeSyntheticShellStderr = (value: string) =>
+		const sanitizeSyntheticShellText = (value: string) =>
 			value
 				.replace(/\u001b\[[0-9;]*m/g, "")
 				.replace(/^.*WARN could not retrieve pid for child process\n?/gm, "")
 				.replace(/^ProcessExitError:.*\n(?:\s+at .*\n)*/gm, "");
 		let bufferedInput = "";
+		let bufferedCommand = "";
 		let shellEnv = { ...(options?.env ?? {}) };
 		let shellCwd = options?.cwd ?? this.cwd;
 		let syntheticCommandQueue = Promise.resolve();
 		let promptTimer: ReturnType<typeof setTimeout> | null = null;
+		let closeStdinTimer: ReturnType<typeof setTimeout> | null = null;
 		let commandInFlight = false;
 		let syntheticCursorAtLineStart = true;
+		const syntheticPid = this.nextSyntheticPid++;
+		let syntheticExitCode: number | null = null;
+		let resolveSyntheticWait!: (exitCode: number) => void;
+		const syntheticWaitPromise = new Promise<number>((resolve) => {
+			resolveSyntheticWait = resolve;
+		});
 		const clearPromptTimer = () => {
 			if (promptTimer !== null) {
 				clearTimeout(promptTimer);
 				promptTimer = null;
+			}
+		};
+		const clearCloseStdinTimer = () => {
+			if (closeStdinTimer !== null) {
+				clearTimeout(closeStdinTimer);
+				closeStdinTimer = null;
 			}
 		};
 		const normalizeSyntheticTerminalText = (text: string) =>
@@ -471,8 +984,42 @@ export class NativeSidecarKernelProxy {
 				handler(chunk);
 			}
 		};
+		const finishSyntheticShell = (exitCode: number) => {
+			if (syntheticExitCode !== null) {
+				return;
+			}
+			syntheticExitCode = exitCode;
+			clearPromptTimer();
+			resolveSyntheticWait(exitCode);
+		};
+		const commandNeedsContinuation = (source: string) => {
+			let singleQuoted = false;
+			let doubleQuoted = false;
+			let escaped = false;
+			for (const character of source) {
+				if (escaped) {
+					escaped = false;
+					continue;
+				}
+				if (character === "\\") {
+					escaped = true;
+					continue;
+				}
+				if (!doubleQuoted && character === "'") {
+					singleQuoted = !singleQuoted;
+					continue;
+				}
+				if (!singleQuoted && character === '"') {
+					doubleQuoted = !doubleQuoted;
+				}
+			}
+			return singleQuoted || doubleQuoted || escaped;
+		};
 		const emitPrompt = () => {
 			if (!synthesizePrompt) {
+				return;
+			}
+			if (syntheticExitCode !== null) {
 				return;
 			}
 			commandInFlight = false;
@@ -493,33 +1040,6 @@ export class NativeSidecarKernelProxy {
 				emitPrompt();
 			}, delayMs);
 		};
-		const proc = this.spawn(command, args, {
-			env: options?.env,
-			cwd: options?.cwd,
-			streamStdin: true,
-			onStdout: (chunk) => {
-				if (synthesizePrompt) {
-					return;
-				}
-				for (const handler of stdoutHandlers) {
-					handler(chunk);
-				}
-				if (commandInFlight) {
-					schedulePrompt(120);
-				}
-			},
-			onStderr: (chunk) => {
-				if (synthesizePrompt) {
-					return;
-				}
-				for (const handler of stderrHandlers) {
-					handler(chunk);
-				}
-				if (commandInFlight) {
-					schedulePrompt(120);
-				}
-			},
-		});
 
 		let onData: ((data: Uint8Array) => void) | null = null;
 		stdoutHandlers.add((data) => onData?.(data));
@@ -528,17 +1048,36 @@ export class NativeSidecarKernelProxy {
 		}
 		if (synthesizePrompt) {
 			schedulePrompt(0);
-		}
-
-		return {
-			pid: proc.pid,
-			write(data) {
-				if (synthesizePrompt) {
-					const text =
+			return {
+				pid: syntheticPid,
+				write(data) {
+					if (syntheticExitCode !== null) {
+						return;
+					}
+					const rawText =
 						typeof data === "string"
 							? data
 							: Buffer.from(data).toString("utf8");
-					bufferedInput += text;
+					let text = rawText;
+					if (rawText.includes("\u0003")) {
+						const segments = rawText.split("\u0003");
+						bufferedInput = "";
+						bufferedCommand = "";
+						for (let index = 0; index < segments.length - 1; index += 1) {
+							emitSyntheticTerminal("^C\n");
+							emitPrompt();
+						}
+						text = segments[segments.length - 1] ?? "";
+					}
+					if (
+						text.includes("\u0004") &&
+						bufferedInput.length === 0 &&
+						bufferedCommand.length === 0
+					) {
+						finishSyntheticShell(0);
+						return;
+					}
+					bufferedInput += text.replace(/\u0004/g, "");
 					while (true) {
 						const newlineIndex = bufferedInput.indexOf("\n");
 						if (newlineIndex < 0) {
@@ -547,11 +1086,24 @@ export class NativeSidecarKernelProxy {
 						const line = bufferedInput.slice(0, newlineIndex).replace(/\r$/, "");
 						bufferedInput = bufferedInput.slice(newlineIndex + 1);
 						emitSyntheticStdout(`${line}\n`);
+						const nextCommand = bufferedCommand
+							? `${bufferedCommand}\n${line}`
+							: line;
+						if (commandNeedsContinuation(nextCommand)) {
+							bufferedCommand = nextCommand;
+							continue;
+						}
+						bufferedCommand = "";
 						syntheticCommandQueue = syntheticCommandQueue
 							.then(async () => {
-								const trimmed = line.trim();
+								const trimmed = nextCommand.trim();
 								if (!trimmed) {
 									emitPrompt();
+									return;
+								}
+								const exitMatch = trimmed.match(/^exit(?:\s+(-?\d+))?$/);
+								if (exitMatch) {
+									finishSyntheticShell(Number.parseInt(exitMatch[1] ?? "0", 10));
 									return;
 								}
 								const exportMatch = trimmed.match(
@@ -574,15 +1126,21 @@ export class NativeSidecarKernelProxy {
 									emitPrompt();
 									return;
 								}
-								const result = await execCommand(line, {
+								const result = await execCommand(nextCommand, {
 									env: shellEnv,
 									cwd: shellCwd,
 								});
-								if (result.stdout) {
-									emitSyntheticStdout(result.stdout);
+								const sanitizedStdout = sanitizeSyntheticShellText(
+									result.stdout,
+								);
+								if (sanitizedStdout) {
+									emitSyntheticStdout(sanitizedStdout);
 								}
-								const sanitizedStderr = sanitizeSyntheticShellStderr(
+								const sanitizedStderr = sanitizeSyntheticShellText(
 									result.stderr,
+								).replace(
+									/^error: failed to execute command '([^']+)': .*$/gm,
+									"error: command not found: $1",
 								);
 								if (sanitizedStderr) {
 									emitSyntheticTerminal(sanitizedStderr);
@@ -596,9 +1154,61 @@ export class NativeSidecarKernelProxy {
 								emitPrompt();
 							});
 					}
+				},
+				get onData() {
+					return onData;
+				},
+				set onData(handler) {
+					onData = handler;
+				},
+				resize() {
+					// Synthetic shells are terminal-less.
+				},
+				kill(signal = 15) {
+					finishSyntheticShell(128 + signal);
+				},
+				wait() {
+					return syntheticWaitPromise;
+				},
+			};
+		}
+
+		const proc = this.spawn(command, args, {
+			env: options?.env,
+			cwd: options?.cwd,
+			streamStdin: true,
+			onStdout: (chunk) => {
+				for (const handler of stdoutHandlers) {
+					handler(chunk);
+				}
+				if (commandInFlight) {
+					schedulePrompt(120);
+				}
+			},
+			onStderr: (chunk) => {
+				for (const handler of stderrHandlers) {
+					handler(chunk);
+				}
+				if (commandInFlight) {
+					schedulePrompt(120);
+				}
+			},
+		});
+
+		return {
+			pid: proc.pid,
+			write(data) {
+				if (synthesizePrompt) {
 					return;
 				}
 				proc.writeStdin(data);
+				if (autoCloseExplicitCommandStdin) {
+					clearCloseStdinTimer();
+					closeStdinTimer = setTimeout(() => {
+						closeStdinTimer = null;
+						proc.closeStdin();
+					}, 100);
+				}
 				if (
 					synthesizePrompt &&
 					typeof data === "string" &&
@@ -618,6 +1228,7 @@ export class NativeSidecarKernelProxy {
 				// The current stdio-native path is process-backed rather than PTY-backed.
 			},
 			kill(signal) {
+				clearCloseStdinTimer();
 				clearPromptTimer();
 				proc.kill(signal);
 			},
@@ -923,6 +1534,37 @@ export class NativeSidecarKernelProxy {
 		}
 	}
 
+	private async drainTrailingProcessOutput(
+		entry: TrackedProcessEntry,
+	): Promise<void> {
+		if (entry.onStdout.size === 0 && entry.onStderr.size === 0) {
+			return;
+		}
+
+		let observedGeneration = entry.outputGeneration;
+		let quietTurns = 0;
+		let delayMs = 0;
+		const deadline = Date.now() + TRAILING_OUTPUT_DRAIN_MAX_MS;
+
+		while (quietTurns < TRAILING_OUTPUT_DRAIN_QUIET_TURNS) {
+			const remainingMs = deadline - Date.now();
+			if (remainingMs <= 0) {
+				return;
+			}
+
+			await drainTrailingProcessOutputTurn(
+				Math.min(delayMs, remainingMs),
+			);
+			if (entry.outputGeneration === observedGeneration) {
+				quietTurns += 1;
+			} else {
+				observedGeneration = entry.outputGeneration;
+				quietTurns = 0;
+			}
+			delayMs = TRAILING_OUTPUT_DRAIN_INTERVAL_MS;
+		}
+	}
+
 	private async startTrackedProcess(entry: TrackedProcessEntry): Promise<void> {
 		const started = await this.client.execute(this.session, this.vm, {
 			processId: entry.processId,
@@ -937,8 +1579,12 @@ export class NativeSidecarKernelProxy {
 		void this.refreshProcessSnapshot().catch(() => {});
 		await this.refreshSignalState(entry);
 
-		void this.flushPendingStdin(entry);
-		void this.closeTrackedStdin(entry);
+		void this.flushPendingStdin(entry).catch((error) => {
+			this.handleBackgroundProcessError(entry, error);
+		});
+		void this.closeTrackedStdin(entry).catch((error) => {
+			this.handleBackgroundProcessError(entry, error);
+		});
 
 		if (entry.pendingKillSignal !== null) {
 			const signal = entry.pendingKillSignal;
@@ -951,14 +1597,18 @@ export class NativeSidecarKernelProxy {
 		while (!this.disposed) {
 			try {
 				const event = await this.client.waitForEvent(
-					() => true,
-					EVENT_PUMP_TIMEOUT_MS,
+					{ any: true },
+					undefined,
+					{
+						signal: this.eventPumpAbortController.signal,
+					},
 				);
 				if (event.payload.type === "process_output") {
 					const entry = this.trackedProcessesById.get(event.payload.process_id);
 					if (!entry) {
 						continue;
 					}
+					entry.outputGeneration += 1;
 					void this.refreshProcessSnapshot().catch(() => {});
 					if (!this.signalRefreshes.has(entry.pid)) {
 						this.signalRefreshes.set(entry.pid, this.refreshSignalState(entry));
@@ -1017,6 +1667,71 @@ export class NativeSidecarKernelProxy {
 		entry.resolveWait(exitCode);
 	}
 
+	private waitForTrackedProcess(entry: TrackedProcessEntry): Promise<number> {
+		if (entry.exitCode !== null) {
+			return Promise.resolve(entry.exitCode);
+		}
+		if (entry.waitWithFallbackPromise !== null) {
+			return entry.waitWithFallbackPromise;
+		}
+
+		entry.waitWithFallbackPromise = (async () => {
+			await entry.startPromise.catch(() => {});
+			while (entry.exitCode === null && !this.disposed) {
+				const maybeExit = await Promise.race<number | null>([
+					entry.waitPromise.then((exitCode) => exitCode),
+					new Promise<null>((resolve) => setTimeout(() => resolve(null), 50)),
+				]);
+				if (maybeExit !== null) {
+					return maybeExit;
+				}
+
+				try {
+					await this.refreshProcessSnapshot();
+					const snapshot = this.sidecarProcessSnapshot.find(
+						(candidate) => candidate.processId === entry.processId,
+					);
+					if (snapshot?.status === "exited") {
+						this.finishProcess(entry, snapshot.exitCode ?? 0);
+						break;
+					}
+					if (snapshot) {
+						entry.hostExitObservedAt = null;
+						continue;
+					}
+
+					// Fast guest processes can exit before the sidecar emits a
+					// `process_exited` event. Once a started process disappears from the
+					// authoritative VM snapshot for a full grace window, treat it as
+					// reaped even if the `pid` returned at launch was only a kernel/shared
+					// runtime identifier rather than a probeable host PID.
+					if (!snapshot) {
+						const now = Date.now();
+						if (entry.hostExitObservedAt === null) {
+							entry.hostExitObservedAt = now;
+							continue;
+						}
+						if (
+							now - entry.hostExitObservedAt >= MISSING_EXIT_EVENT_GRACE_MS
+						) {
+							this.finishProcess(entry, 0);
+							break;
+						}
+						continue;
+					}
+				} catch {
+					// Fall back to the next wait interval if the sidecar snapshot query fails.
+				}
+			}
+
+			return entry.waitPromise;
+		})().finally(() => {
+			entry.waitWithFallbackPromise = null;
+		});
+
+		return entry.waitWithFallbackPromise;
+	}
+
 	private async signalProcess(
 		entry: TrackedProcessEntry,
 		signal: number,
@@ -1029,7 +1744,7 @@ export class NativeSidecarKernelProxy {
 				toSidecarSignalName(signal),
 			);
 		} catch (error) {
-			if (isNoSuchProcessError(error)) {
+			if (isNoSuchProcessError(error) || isUnknownVmError(error)) {
 				return;
 			}
 			throw error;
@@ -1042,31 +1757,39 @@ export class NativeSidecarKernelProxy {
 		}
 
 		entry.stdinFlushPromise = entry.startPromise
-			.then(async () => {
-				if (entry.exitCode !== null) {
-					return;
-				}
-				while (entry.pendingStdin.length > 0) {
+				.then(async () => {
+					if (entry.exitCode !== null) {
+						return;
+					}
+					while (entry.pendingStdin.length > 0) {
 					const chunk = entry.pendingStdin.shift();
 					if (chunk === undefined) {
 						break;
 					}
-					await this.client.writeStdin(
-						this.session,
-						this.vm,
-						entry.processId,
-						chunk,
-					);
-				}
-			})
-			.finally(() => {
+						await this.client.writeStdin(
+							this.session,
+							this.vm,
+							entry.processId,
+							chunk,
+						);
+					}
+				})
+				.catch((error) => {
+					if (isNoSuchProcessError(error) || isUnknownVmError(error)) {
+						return;
+					}
+					throw error;
+				})
+				.finally(() => {
 				entry.stdinFlushPromise = null;
-				if (entry.pendingStdin.length > 0 && entry.exitCode === null) {
-					void this.flushPendingStdin(entry);
-				}
-			});
-		return entry.stdinFlushPromise;
-	}
+					if (entry.pendingStdin.length > 0 && entry.exitCode === null) {
+						void this.flushPendingStdin(entry).catch((error) => {
+							this.handleBackgroundProcessError(entry, error);
+						});
+					}
+				});
+			return entry.stdinFlushPromise;
+		}
 
 	private async closeTrackedStdin(entry: TrackedProcessEntry): Promise<void> {
 		await entry.startPromise;
@@ -1074,15 +1797,31 @@ export class NativeSidecarKernelProxy {
 		if (entry.exitCode !== null || !entry.pendingCloseStdin) {
 			return;
 		}
-		entry.pendingCloseStdin = false;
-		try {
-			await this.client.closeStdin(this.session, this.vm, entry.processId);
-		} catch (error) {
-			if (isNoSuchProcessError(error)) {
-				return;
-			}
-			throw error;
+			entry.pendingCloseStdin = false;
+			try {
+				await this.client.closeStdin(this.session, this.vm, entry.processId);
+			} catch (error) {
+				if (isNoSuchProcessError(error) || isUnknownVmError(error)) {
+					return;
+				}
+				throw error;
 		}
+	}
+
+	private handleBackgroundProcessError(
+		entry: TrackedProcessEntry,
+		error: unknown,
+	): void {
+		if (this.disposed || isNoSuchProcessError(error) || isUnknownVmError(error)) {
+			return;
+		}
+		const normalized =
+			error instanceof Error ? error : new Error(String(error));
+		const stderr = new TextEncoder().encode(`${normalized.message}\n`);
+		for (const handler of entry.onStderr) {
+			handler(stderr);
+		}
+		this.finishProcess(entry, 1);
 	}
 
 	private createFilesystemView(includeLocalMounts: boolean): VirtualFileSystem {
@@ -1140,10 +1879,17 @@ export class NativeSidecarKernelProxy {
 				this.dispatchWrite(
 					path,
 					(mount, relativePath) => mount.fs.createDir(relativePath),
-					() =>
-						this.client.mkdir(this.session, this.vm, path, {
-							recursive: false,
-						}),
+					async () => {
+						try {
+							await this.client.mkdir(this.session, this.vm, path, {
+								recursive: false,
+							});
+						} catch (error) {
+							if (!isAlreadyExistsError(error)) {
+								throw error;
+							}
+						}
+					},
 					includeLocalMounts,
 				),
 			mkdir: (path, options) =>
@@ -1342,7 +2088,9 @@ export class NativeSidecarKernelProxy {
 						? "exited"
 						: tracked
 							? "running"
-							: entry.status,
+							: entry.status === "exited"
+								? "exited"
+								: "running",
 				exitCode: tracked?.exitCode ?? entry.exitCode,
 				startTime,
 				exitTime: tracked?.exitTime ?? null,
@@ -1399,6 +2147,7 @@ export class NativeSidecarKernelProxy {
 		nativeHandler: () => Promise<void>,
 		includeLocalMounts = true,
 	): Promise<void> {
+		this.assertGuestPathWritable(path);
 		const local = includeLocalMounts ? this.resolveLocalMount(path) : null;
 		if (local) {
 			this.assertLocalWritable(local.mount);
@@ -1429,6 +2178,18 @@ export class NativeSidecarKernelProxy {
 			};
 		}
 		return null;
+	}
+
+	private assertGuestPathWritable(path: string): void {
+		const normalizedPath = posixPath.normalize(path);
+		for (const root of PROTECTED_READ_ONLY_GUEST_ROOTS) {
+			if (
+				normalizedPath === root ||
+				normalizedPath.startsWith(`${root}/`)
+			) {
+				throw errnoError("EROFS", "read-only file system");
+			}
+		}
 	}
 
 	private mountedChildNames(path: string): string[] {
@@ -1504,6 +2265,21 @@ function isNoSuchProcessError(error: unknown): boolean {
 		message.includes("no such process") ||
 		message.includes("has no active process")
 	);
+}
+
+function isUnknownVmError(error: unknown): boolean {
+	if (!(error instanceof Error)) {
+		return false;
+	}
+	return error.message.toLowerCase().includes("unknown sidecar vm");
+}
+
+function isAlreadyExistsError(error: unknown): boolean {
+	if (!(error instanceof Error)) {
+		return false;
+	}
+	const message = error.message.toLowerCase();
+	return error.message.includes("EEXIST") || message.includes("file exists");
 }
 
 function isMissingHostProcessError(error: unknown): boolean {
@@ -1585,6 +2361,7 @@ export type {
 	GuestFilesystemStat,
 	NativeSidecarSpawnOptions,
 	RootFilesystemEntry,
+	SidecarEventSelector,
 	SidecarPermissionsPolicy,
 	SidecarRegisteredToolDefinition,
 	SidecarRequestFrame,
@@ -1593,7 +2370,12 @@ export type {
 	SidecarSignalHandlerRegistration,
 	SidecarSocketStateEntry,
 } from "./native-process-client.js";
-export { NativeSidecarProcessClient } from "./native-process-client.js";
+export {
+	NativeSidecarProcessClient,
+	SidecarEventBufferOverflow,
+	SidecarProcessError,
+	SidecarProcessExited,
+} from "./native-process-client.js";
 
 export type AgentOsSidecarPlacement =
 	| { kind: "shared"; pool?: string }

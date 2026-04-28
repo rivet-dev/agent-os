@@ -3,7 +3,7 @@ mod support;
 use agent_os_sidecar::protocol::{
     ConfigureVmRequest, CreateLayerRequest, CreateOverlayRequest, CreateVmRequest,
     ExportSnapshotRequest, GuestFilesystemCallRequest, GuestFilesystemOperation, GuestRuntimeKind,
-    ImportSnapshotRequest, OwnershipScope, RequestPayload, ResponsePayload,
+    ImportSnapshotRequest, OwnershipScope, PermissionsPolicy, RequestPayload, ResponsePayload,
     RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryKind,
     RootFilesystemLowerDescriptor, RootFilesystemMode, SealLayerRequest,
 };
@@ -382,7 +382,7 @@ fn create_vm_root_filesystem_composes_multiple_lowers_with_bootstrap_upper() {
                     ],
                     ..RootFilesystemDescriptor::default()
                 },
-                permissions: None,
+                permissions: Some(PermissionsPolicy::allow_all()),
             }),
         ))
         .expect("create vm with multi-layer root");

@@ -292,10 +292,34 @@ pub fn execute_script(
     user_code: &str,
     bridge_cache: &mut Option<BridgeCodeCache>,
 ) -> (i32, Option<ExecutionError>) {
+    execute_script_with_options(scope, None, bridge_code, user_code, None, bridge_cache)
+}
+
+pub fn execute_script_with_options(
+    scope: &mut v8::HandleScope,
+    bridge_ctx: Option<&BridgeCallContext>,
+    bridge_code: &str,
+    user_code: &str,
+    file_path: Option<&str>,
+    bridge_cache: &mut Option<BridgeCodeCache>,
+) -> (i32, Option<ExecutionError>) {
+    if let Some(bridge_ctx) = bridge_ctx {
+        MODULE_RESOLVE_STATE.with(|cell| {
+            *cell.borrow_mut() = Some(ModuleResolveState {
+                bridge_ctx: bridge_ctx as *const BridgeCallContext,
+                module_names: HashMap::new(),
+                module_cache: HashMap::new(),
+            });
+        });
+    }
+
     // Run bridge code IIFE (with code caching)
     if !bridge_code.is_empty() {
         let (code, err) = run_bridge_cached(scope, bridge_code, bridge_cache);
         if code != 0 {
+            if bridge_ctx.is_some() {
+                clear_module_state();
+            }
             return (code, err);
         }
     }
@@ -306,6 +330,9 @@ pub fn execute_script(
         let source = match v8::String::new(tc, user_code) {
             Some(s) => s,
             None => {
+                if bridge_ctx.is_some() {
+                    clear_module_state();
+                }
                 return (
                     1,
                     Some(ExecutionError {
@@ -314,12 +341,31 @@ pub fn execute_script(
                         stack: String::new(),
                         code: None,
                     }),
-                )
+                );
             }
         };
-        let script = match v8::Script::compile(tc, source, None) {
+        let origin = file_path.and_then(|path| {
+            let resource = v8::String::new(tc, path)?;
+            Some(v8::ScriptOrigin::new(
+                tc,
+                resource.into(),
+                0,
+                0,
+                false,
+                -1,
+                None,
+                false,
+                false,
+                false,
+                None,
+            ))
+        });
+        let script = match v8::Script::compile(tc, source, origin.as_ref()) {
             Some(s) => s,
             None => {
+                if bridge_ctx.is_some() {
+                    clear_module_state();
+                }
                 return match tc.exception() {
                     Some(e) => {
                         let (c, err) = exception_to_result(tc, e);
@@ -332,6 +378,9 @@ pub fn execute_script(
         let completion = match script.run(tc) {
             Some(result) => result,
             None => {
+                if bridge_ctx.is_some() {
+                    clear_module_state();
+                }
                 return match tc.exception() {
                     Some(e) => {
                         let (c, err) = exception_to_result(tc, e);
@@ -348,12 +397,18 @@ pub fn execute_script(
         tc.perform_microtask_checkpoint();
 
         if let Some(exception) = tc.exception() {
+            if bridge_ctx.is_some() {
+                clear_module_state();
+            }
             let (c, err) = exception_to_result(tc, exception);
             return (c, Some(err));
         }
 
         if let Some(state) = tc.get_slot_mut::<crate::isolate::PromiseRejectState>() {
             if let Some((_, err)) = state.unhandled.drain().next() {
+                if bridge_ctx.is_some() {
+                    clear_module_state();
+                }
                 return (1, Some(err));
             }
         }
@@ -369,15 +424,20 @@ pub fn execute_script(
                 }
                 v8::PromiseState::Rejected => {
                     let rejection = promise.result(tc);
+                    if bridge_ctx.is_some() {
+                        clear_module_state();
+                    }
                     let (c, err) = exception_to_result(tc, rejection);
                     return (c, Some(err));
                 }
-                v8::PromiseState::Fulfilled => {}
+                v8::PromiseState::Fulfilled => {
+                    return (extract_global_process_exit_code(tc).unwrap_or(0), None);
+                }
             }
         }
     }
 
-    (0, None)
+    (extract_global_process_exit_code(scope).unwrap_or(0), None)
 }
 
 /// Check if a V8 exception is a ProcessExitError (has `_isProcessExit: true` sentinel).
@@ -401,10 +461,33 @@ pub fn extract_process_exit_code(
     // Extract numeric exit code from .code property
     let code_key = v8::String::new(scope, "code")?;
     let code_val = obj.get(scope, code_key.into())?;
-    if code_val.is_number() {
-        Some(code_val.int32_value(scope).unwrap_or(1))
+    if code_val.is_undefined() || code_val.is_null() {
+        Some(0)
+    } else if code_val.is_number() {
+        Some(code_val.int32_value(scope).unwrap_or(0))
     } else {
         Some(1)
+    }
+}
+
+fn extract_global_process_exit_code(scope: &mut v8::HandleScope) -> Option<i32> {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let process_key = v8::String::new(scope, "process")?;
+    let process_val = global.get(scope, process_key.into())?;
+    if !process_val.is_object() {
+        return None;
+    }
+
+    let process_obj = v8::Local::<v8::Object>::try_from(process_val).ok()?;
+    let exit_code_key = v8::String::new(scope, "exitCode")?;
+    let exit_code_val = process_obj.get(scope, exit_code_key.into())?;
+    if exit_code_val.is_undefined() || exit_code_val.is_null() {
+        None
+    } else if exit_code_val.is_number() {
+        Some(exit_code_val.int32_value(scope).unwrap_or(0))
+    } else {
+        None
     }
 }
 
@@ -723,7 +806,9 @@ pub fn finalize_pending_script_evaluation(
             let (code, err) = exception_to_result(tc, rejection);
             Some((code, Some(err)))
         }
-        v8::PromiseState::Fulfilled => Some((0, None)),
+        v8::PromiseState::Fulfilled => {
+            Some((extract_global_process_exit_code(tc).unwrap_or(0), None))
+        }
     }
 }
 
@@ -1112,7 +1197,9 @@ fn prefetch_module_imports(
                     continue;
                 }
 
-                let effective_source = build_module_source(scope, source_code, resolved_path);
+                let module_format = lookup_module_format_via_ipc(scope, bridge_ctx, resolved_path);
+                let effective_source =
+                    build_module_source(scope, source_code, resolved_path, module_format);
 
                 // Compile the module
                 let resource = match v8::String::new(scope, resolved_path) {
@@ -1208,8 +1295,8 @@ fn resolve_or_compile_module<'s>(
 
     // Phase 5: Load and compile the module source.
     let raw_source = load_module_via_ipc(scope, ctx, &resolved_path)?;
-
-    let source_code = build_module_source(scope, &raw_source, &resolved_path);
+    let module_format = lookup_module_format_via_ipc(scope, ctx, &resolved_path);
+    let source_code = build_module_source(scope, &raw_source, &resolved_path, module_format);
 
     let resource = v8::String::new(scope, &resolved_path)?;
     let origin = v8::ScriptOrigin::new(
@@ -1318,7 +1405,7 @@ pub fn dynamic_import_callback<'a>(
     let tc = &mut v8::TryCatch::new(scope);
 
     let specifier_str = specifier.to_rust_string_lossy(tc);
-    let referrer_name = resource_name.to_rust_string_lossy(tc);
+    let referrer_name = resolve_dynamic_import_referrer_name(tc, resource_name);
     let module = match resolve_or_compile_module(tc, &specifier_str, &referrer_name) {
         Some(module) => module,
         None => {
@@ -1388,6 +1475,39 @@ pub fn dynamic_import_callback<'a>(
     }
 
     resolved_promise(tc, namespace.into())
+}
+
+fn resolve_dynamic_import_referrer_name(
+    scope: &mut v8::HandleScope,
+    resource_name: v8::Local<v8::Value>,
+) -> String {
+    let candidate = resource_name.to_rust_string_lossy(scope);
+    if candidate.starts_with('/') || candidate.starts_with("file://") {
+        return candidate;
+    }
+
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let key = match v8::String::new(scope, "_currentModule") {
+        Some(key) => key,
+        None => return candidate,
+    };
+    let current_module = match global.get(scope, key.into()) {
+        Some(value) if value.is_object() => value,
+        _ => return candidate,
+    };
+    let current_module = match v8::Local::<v8::Object>::try_from(current_module) {
+        Ok(object) => object,
+        Err(_) => return candidate,
+    };
+    let filename_key = match v8::String::new(scope, "filename") {
+        Some(key) => key,
+        None => return candidate,
+    };
+    match current_module.get(scope, filename_key.into()) {
+        Some(value) if value.is_string() => value.to_rust_string_lossy(scope),
+        _ => candidate,
+    }
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -1587,6 +1707,58 @@ fn load_module_via_ipc(
             throw_module_error(scope, &format!("Cannot load module '{}'", resolved_path));
             None
         }
+        Err(e) => {
+            throw_module_error(scope, &e);
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolvedModuleFormat {
+    Module,
+    Commonjs,
+    Json,
+}
+
+fn lookup_module_format_via_ipc(
+    scope: &mut v8::HandleScope,
+    ctx: &BridgeCallContext,
+    resolved_path: &str,
+) -> Option<ResolvedModuleFormat> {
+    let path_v8 = v8::String::new(scope, resolved_path).unwrap();
+    let arr = v8::Array::new(scope, 1);
+    arr.set_index(scope, 0, path_v8.into());
+    let args = match serialize_v8_value(scope, arr.into()) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            throw_module_error(scope, &format!("_moduleFormat serialize error: {}", e));
+            return None;
+        }
+    };
+
+    match ctx.sync_call("_moduleFormat", args) {
+        Ok(Some(bytes)) => match deserialize_v8_value(scope, &bytes) {
+            Ok(val) if val.is_string() => match val.to_rust_string_lossy(scope).as_str() {
+                "module" => Some(ResolvedModuleFormat::Module),
+                "commonjs" => Some(ResolvedModuleFormat::Commonjs),
+                "json" => Some(ResolvedModuleFormat::Json),
+                _ => None,
+            },
+            Ok(val) if val.is_null_or_undefined() => None,
+            Ok(_) => {
+                throw_module_error(
+                    scope,
+                    &format!("_moduleFormat returned non-string for '{}'", resolved_path),
+                );
+                None
+            }
+            Err(e) => {
+                throw_module_error(scope, &format!("_moduleFormat decode error: {}", e));
+                None
+            }
+        },
+        Ok(None) => None,
         Err(e) => {
             throw_module_error(scope, &e);
             None
@@ -3030,6 +3202,36 @@ mod tests {
                 },
             )
             .unwrap();
+            crate::ipc_binary::write_frame(
+                &mut response_buf,
+                &crate::ipc_binary::BinaryFrame::BridgeResponse {
+                    session_id: String::new(),
+                    call_id: 2,
+                    status: 0,
+                    payload: v8_serialize_str(&mut iso, &ctx, "module"),
+                },
+            )
+            .unwrap();
+            crate::ipc_binary::write_frame(
+                &mut response_buf,
+                &crate::ipc_binary::BinaryFrame::BridgeResponse {
+                    session_id: String::new(),
+                    call_id: 3,
+                    status: 0,
+                    payload: v8_serialize_str(&mut iso, &ctx, "module"),
+                },
+            )
+            .unwrap();
+            crate::ipc_binary::write_frame(
+                &mut response_buf,
+                &crate::ipc_binary::BinaryFrame::BridgeResponse {
+                    session_id: String::new(),
+                    call_id: 2,
+                    status: 0,
+                    payload: v8_serialize_str(&mut iso, &ctx, "module"),
+                },
+            )
+            .unwrap();
 
             let bridge_ctx = BridgeCallContext::new(
                 Box::new(Vec::new()),
@@ -3115,12 +3317,13 @@ mod tests {
             let (tx, rx) = crossbeam_channel::unbounded();
             let result_v8 = v8_serialize_str(&mut iso, &ctx, "event-loop-resolved");
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::BridgeResponse {
-                    session_id: String::new(),
-                    call_id: 1,
-                    status: 0,
-                    payload: result_v8,
-                },
+                crate::runtime_protocol::SessionMessage::BridgeResponse(
+                    crate::runtime_protocol::BridgeResponse {
+                        call_id: 1,
+                        status: 0,
+                        payload: result_v8,
+                    },
+                ),
             ))
             .unwrap();
 
@@ -3185,22 +3388,24 @@ mod tests {
             // Resolve in reverse order
             let r2 = v8_serialize_str(&mut iso, &ctx, "dns-result");
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::BridgeResponse {
-                    session_id: String::new(),
-                    call_id: 2,
-                    status: 0,
-                    payload: r2,
-                },
+                crate::runtime_protocol::SessionMessage::BridgeResponse(
+                    crate::runtime_protocol::BridgeResponse {
+                        call_id: 2,
+                        status: 0,
+                        payload: r2,
+                    },
+                ),
             ))
             .unwrap();
             let r1 = v8_serialize_str(&mut iso, &ctx, "fetch-result");
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::BridgeResponse {
-                    session_id: String::new(),
-                    call_id: 1,
-                    status: 0,
-                    payload: r1,
-                },
+                crate::runtime_protocol::SessionMessage::BridgeResponse(
+                    crate::runtime_protocol::BridgeResponse {
+                        call_id: 1,
+                        status: 0,
+                        payload: r1,
+                    },
+                ),
             ))
             .unwrap();
 
@@ -3253,9 +3458,7 @@ mod tests {
             // Send TerminateExecution
             let (tx, rx) = crossbeam_channel::unbounded();
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::TerminateExecution {
-                    session_id: "test-session".into(),
-                },
+                crate::runtime_protocol::SessionMessage::TerminateExecution,
             ))
             .unwrap();
 
@@ -3392,23 +3595,25 @@ mod tests {
             let payload_bytes = v8_serialize_str(&mut iso, &ctx, "hello from child");
 
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::StreamEvent {
-                    session_id: "test-session".into(),
-                    event_type: "child_stdout".into(),
-                    payload: payload_bytes,
-                },
+                crate::runtime_protocol::SessionMessage::StreamEvent(
+                    crate::runtime_protocol::StreamEvent {
+                        event_type: "child_stdout".into(),
+                        payload: payload_bytes,
+                    },
+                ),
             ))
             .unwrap();
 
             // Resolve the pending promise to exit the event loop
             let r = v8_serialize_null(&mut iso, &ctx);
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::BridgeResponse {
-                    session_id: String::new(),
-                    call_id: 1,
-                    status: 0,
-                    payload: r,
-                },
+                crate::runtime_protocol::SessionMessage::BridgeResponse(
+                    crate::runtime_protocol::BridgeResponse {
+                        call_id: 1,
+                        status: 0,
+                        payload: r,
+                    },
+                ),
             ))
             .unwrap();
 
@@ -3476,12 +3681,13 @@ mod tests {
             let (tx, rx) = crossbeam_channel::unbounded();
             let r = v8_serialize_null(&mut iso, &ctx);
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::BridgeResponse {
-                    session_id: String::new(),
-                    call_id: 1,
-                    status: 0,
-                    payload: r,
-                },
+                crate::runtime_protocol::SessionMessage::BridgeResponse(
+                    crate::runtime_protocol::BridgeResponse {
+                        call_id: 1,
+                        status: 0,
+                        payload: r,
+                    },
+                ),
             ))
             .unwrap();
 
@@ -3540,34 +3746,37 @@ mod tests {
             // Send child_stderr event
             let stderr_payload = v8_serialize_str(&mut iso, &ctx, "error output");
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::StreamEvent {
-                    session_id: "test-session".into(),
-                    event_type: "child_stderr".into(),
-                    payload: stderr_payload,
-                },
+                crate::runtime_protocol::SessionMessage::StreamEvent(
+                    crate::runtime_protocol::StreamEvent {
+                        event_type: "child_stderr".into(),
+                        payload: stderr_payload,
+                    },
+                ),
             ))
             .unwrap();
 
             // Send child_exit event with exit code
             let exit_payload = v8_serialize_int(&mut iso, &ctx, 1);
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::StreamEvent {
-                    session_id: "test-session".into(),
-                    event_type: "child_exit".into(),
-                    payload: exit_payload,
-                },
+                crate::runtime_protocol::SessionMessage::StreamEvent(
+                    crate::runtime_protocol::StreamEvent {
+                        event_type: "child_exit".into(),
+                        payload: exit_payload,
+                    },
+                ),
             ))
             .unwrap();
 
             // Resolve the pending promise to exit the event loop
             let r = v8_serialize_null(&mut iso, &ctx);
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::BridgeResponse {
-                    session_id: String::new(),
-                    call_id: 1,
-                    status: 0,
-                    payload: r,
-                },
+                crate::runtime_protocol::SessionMessage::BridgeResponse(
+                    crate::runtime_protocol::BridgeResponse {
+                        call_id: 1,
+                        status: 0,
+                        payload: r,
+                    },
+                ),
             ))
             .unwrap();
 
@@ -3634,23 +3843,25 @@ mod tests {
             let http_payload =
                 v8_serialize_eval(&mut iso, &ctx, "({method: 'GET', url: '/api/test'})");
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::StreamEvent {
-                    session_id: "test-session".into(),
-                    event_type: "http_request".into(),
-                    payload: http_payload,
-                },
+                crate::runtime_protocol::SessionMessage::StreamEvent(
+                    crate::runtime_protocol::StreamEvent {
+                        event_type: "http_request".into(),
+                        payload: http_payload,
+                    },
+                ),
             ))
             .unwrap();
 
             // Resolve the pending promise to exit the event loop
             let r = v8_serialize_null(&mut iso, &ctx);
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::BridgeResponse {
-                    session_id: String::new(),
-                    call_id: 1,
-                    status: 0,
-                    payload: r,
-                },
+                crate::runtime_protocol::SessionMessage::BridgeResponse(
+                    crate::runtime_protocol::BridgeResponse {
+                        call_id: 1,
+                        status: 0,
+                        payload: r,
+                    },
+                ),
             ))
             .unwrap();
 
@@ -3713,23 +3924,25 @@ mod tests {
             // Send unknown event type
             let payload = v8_serialize_null(&mut iso, &ctx);
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::StreamEvent {
-                    session_id: "test-session".into(),
-                    event_type: "unknown_event".into(),
-                    payload,
-                },
+                crate::runtime_protocol::SessionMessage::StreamEvent(
+                    crate::runtime_protocol::StreamEvent {
+                        event_type: "unknown_event".into(),
+                        payload,
+                    },
+                ),
             ))
             .unwrap();
 
             // Resolve pending promise to exit loop
             let r = v8_serialize_null(&mut iso, &ctx);
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::BridgeResponse {
-                    session_id: String::new(),
-                    call_id: 1,
-                    status: 0,
-                    payload: r,
-                },
+                crate::runtime_protocol::SessionMessage::BridgeResponse(
+                    crate::runtime_protocol::BridgeResponse {
+                        call_id: 1,
+                        status: 0,
+                        payload: r,
+                    },
+                ),
             ))
             .unwrap();
 
@@ -3784,23 +3997,25 @@ mod tests {
             // Send child_stdout without _childProcessDispatch registered
             let payload = v8_serialize_str(&mut iso, &ctx, "data");
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::StreamEvent {
-                    session_id: "test-session".into(),
-                    event_type: "child_stdout".into(),
-                    payload,
-                },
+                crate::runtime_protocol::SessionMessage::StreamEvent(
+                    crate::runtime_protocol::StreamEvent {
+                        event_type: "child_stdout".into(),
+                        payload,
+                    },
+                ),
             ))
             .unwrap();
 
             // Resolve pending promise
             let r = v8_serialize_null(&mut iso, &ctx);
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::BridgeResponse {
-                    session_id: String::new(),
-                    call_id: 1,
-                    status: 0,
-                    payload: r,
-                },
+                crate::runtime_protocol::SessionMessage::BridgeResponse(
+                    crate::runtime_protocol::BridgeResponse {
+                        call_id: 1,
+                        status: 0,
+                        payload: r,
+                    },
+                ),
             ))
             .unwrap();
 
@@ -3861,23 +4076,25 @@ mod tests {
 
             let payload = v8_serialize_str(&mut iso, &ctx, "data");
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::StreamEvent {
-                    session_id: "test-session".into(),
-                    event_type: "child_stdout".into(),
-                    payload,
-                },
+                crate::runtime_protocol::SessionMessage::StreamEvent(
+                    crate::runtime_protocol::StreamEvent {
+                        event_type: "child_stdout".into(),
+                        payload,
+                    },
+                ),
             ))
             .unwrap();
 
             // Resolve pending promise
             let r = v8_serialize_null(&mut iso, &ctx);
             tx.send(crate::session::SessionCommand::Message(
-                crate::ipc_binary::BinaryFrame::BridgeResponse {
-                    session_id: String::new(),
-                    call_id: 1,
-                    status: 0,
-                    payload: r,
-                },
+                crate::runtime_protocol::SessionMessage::BridgeResponse(
+                    crate::runtime_protocol::BridgeResponse {
+                        call_id: 1,
+                        status: 0,
+                        payload: r,
+                    },
+                ),
             ))
             .unwrap();
 
@@ -4218,6 +4435,51 @@ mod tests {
             assert_eq!(err3.error_type, "ReferenceError");
         }
 
+        // --- Part 54: process.exitCode is honored for synchronous completion ---
+        {
+            let mut iso = isolate::create_isolate(None);
+            let ctx = isolate::create_context(&mut iso);
+
+            let scope = &mut v8::HandleScope::new(&mut iso);
+            let local = v8::Local::new(scope, &ctx);
+            let scope = &mut v8::ContextScope::new(scope, local);
+            execute_script(
+                scope,
+                "",
+                "globalThis.process = { exitCode: 0 };",
+                &mut None,
+            );
+
+            let (exit_code, error) = execute_script(scope, "", "process.exitCode = 3;", &mut None);
+            assert_eq!(exit_code, 3);
+            assert!(error.is_none());
+        }
+
+        // --- Part 55: process.exitCode is honored for fulfilled async completion ---
+        {
+            let mut iso = isolate::create_isolate(None);
+            let ctx = isolate::create_context(&mut iso);
+
+            let scope = &mut v8::HandleScope::new(&mut iso);
+            let local = v8::Local::new(scope, &ctx);
+            let scope = &mut v8::ContextScope::new(scope, local);
+            execute_script(
+                scope,
+                "",
+                "globalThis.process = { exitCode: 0 };",
+                &mut None,
+            );
+
+            let (exit_code, error) = execute_script(
+                scope,
+                "",
+                "(async () => { process.exitCode = 4; })()",
+                &mut None,
+            );
+            assert_eq!(exit_code, 4);
+            assert!(error.is_none());
+        }
+
         // --- Part 54: Stack trace extracted from error.stack property ---
         {
             let mut iso = isolate::create_isolate(None);
@@ -4251,7 +4513,10 @@ mod tests {
 
         // Part 55: Primitives round-trip (null, undefined, true, false, integers, floats)
         {
-            use crate::bridge::{deserialize_v8_value, serialize_v8_value};
+            use crate::bridge::{
+                deserialize_v8_wire_value as deserialize_v8_value,
+                serialize_v8_wire_value as serialize_v8_value,
+            };
 
             let mut iso = isolate::create_isolate(None);
             let ctx = isolate::create_context(&mut iso);
@@ -4304,7 +4569,10 @@ mod tests {
 
         // Part 56: Strings round-trip
         {
-            use crate::bridge::{deserialize_v8_value, serialize_v8_value};
+            use crate::bridge::{
+                deserialize_v8_wire_value as deserialize_v8_value,
+                serialize_v8_wire_value as serialize_v8_value,
+            };
 
             let mut iso = isolate::create_isolate(None);
             let ctx = isolate::create_context(&mut iso);
@@ -4335,7 +4603,10 @@ mod tests {
 
         // Part 57: Arrays round-trip
         {
-            use crate::bridge::{deserialize_v8_value, serialize_v8_value};
+            use crate::bridge::{
+                deserialize_v8_wire_value as deserialize_v8_value,
+                serialize_v8_wire_value as serialize_v8_value,
+            };
 
             let mut iso = isolate::create_isolate(None);
             let ctx = isolate::create_context(&mut iso);
@@ -4387,7 +4658,10 @@ mod tests {
 
         // Part 58: Objects round-trip
         {
-            use crate::bridge::{deserialize_v8_value, serialize_v8_value};
+            use crate::bridge::{
+                deserialize_v8_wire_value as deserialize_v8_value,
+                serialize_v8_wire_value as serialize_v8_value,
+            };
 
             let mut iso = isolate::create_isolate(None);
             let ctx = isolate::create_context(&mut iso);
@@ -4434,7 +4708,10 @@ mod tests {
 
         // Part 59: Uint8Array round-trip
         {
-            use crate::bridge::{deserialize_v8_value, serialize_v8_value};
+            use crate::bridge::{
+                deserialize_v8_wire_value as deserialize_v8_value,
+                serialize_v8_wire_value as serialize_v8_value,
+            };
 
             let mut iso = isolate::create_isolate(None);
             let ctx = isolate::create_context(&mut iso);
@@ -4468,7 +4745,10 @@ mod tests {
 
         // Part 60: Nested structures round-trip
         {
-            use crate::bridge::{deserialize_v8_value, serialize_v8_value};
+            use crate::bridge::{
+                deserialize_v8_wire_value as deserialize_v8_value,
+                serialize_v8_wire_value as serialize_v8_value,
+            };
 
             let mut iso = isolate::create_isolate(None);
             let ctx = isolate::create_context(&mut iso);
@@ -4525,7 +4805,10 @@ mod tests {
 
         // Part 61: Date, RegExp, Map, Set, Error round-trip via JS eval
         {
-            use crate::bridge::{deserialize_v8_value, serialize_v8_value};
+            use crate::bridge::{
+                deserialize_v8_wire_value as deserialize_v8_value,
+                serialize_v8_wire_value as serialize_v8_value,
+            };
 
             let mut iso = isolate::create_isolate(None);
             let ctx = isolate::create_context(&mut iso);
@@ -4587,7 +4870,10 @@ mod tests {
 
         // Part 62: Circular references round-trip
         {
-            use crate::bridge::{deserialize_v8_value, serialize_v8_value};
+            use crate::bridge::{
+                deserialize_v8_wire_value as deserialize_v8_value,
+                serialize_v8_wire_value as serialize_v8_value,
+            };
 
             let mut iso = isolate::create_isolate(None);
             let ctx = isolate::create_context(&mut iso);
@@ -4847,6 +5133,26 @@ mod tests {
                 },
             )
             .unwrap();
+            crate::ipc_binary::write_frame(
+                &mut response_buf,
+                &crate::ipc_binary::BinaryFrame::BridgeResponse {
+                    session_id: String::new(),
+                    call_id: 2,
+                    status: 0,
+                    payload: v8_serialize_str(&mut iso, &ctx, "module"),
+                },
+            )
+            .unwrap();
+            crate::ipc_binary::write_frame(
+                &mut response_buf,
+                &crate::ipc_binary::BinaryFrame::BridgeResponse {
+                    session_id: String::new(),
+                    call_id: 3,
+                    status: 0,
+                    payload: v8_serialize_str(&mut iso, &ctx, "module"),
+                },
+            )
+            .unwrap();
 
             let writer_buf = Arc::new(Mutex::new(Vec::new()));
             let bridge_ctx = BridgeCallContext::new(
@@ -4946,6 +5252,16 @@ mod tests {
                 },
             )
             .unwrap();
+            crate::ipc_binary::write_frame(
+                &mut response_buf,
+                &crate::ipc_binary::BinaryFrame::BridgeResponse {
+                    session_id: String::new(),
+                    call_id: 4,
+                    status: 0,
+                    payload: v8_serialize_str(&mut iso, &ctx, "module"),
+                },
+            )
+            .unwrap();
 
             let bridge_ctx = BridgeCallContext::new(
                 Box::new(Vec::new()),
@@ -5011,8 +5327,18 @@ mod tests {
                 },
             )
             .unwrap();
+            crate::ipc_binary::write_frame(
+                &mut response_buf,
+                &crate::ipc_binary::BinaryFrame::BridgeResponse {
+                    session_id: String::new(),
+                    call_id: 2,
+                    status: 0,
+                    payload: v8_serialize_str(&mut iso, &ctx, "module"),
+                },
+            )
+            .unwrap();
 
-            // Level 2 batch (call_id=2): ./b.mjs has no further imports
+            // Level 2 batch (call_id=3): ./b.mjs has no further imports
             let batch2 = v8_serialize_eval(
                 &mut iso,
                 &ctx,
@@ -5022,9 +5348,19 @@ mod tests {
                 &mut response_buf,
                 &crate::ipc_binary::BinaryFrame::BridgeResponse {
                     session_id: String::new(),
-                    call_id: 2,
+                    call_id: 3,
                     status: 0,
                     payload: batch2,
+                },
+            )
+            .unwrap();
+            crate::ipc_binary::write_frame(
+                &mut response_buf,
+                &crate::ipc_binary::BinaryFrame::BridgeResponse {
+                    session_id: String::new(),
+                    call_id: 4,
+                    status: 0,
+                    payload: v8_serialize_str(&mut iso, &ctx, "module"),
                 },
             )
             .unwrap();
@@ -5130,6 +5466,16 @@ mod tests {
                     call_id: 2,
                     status: 0,
                     payload: load_result,
+                },
+            )
+            .unwrap();
+            crate::ipc_binary::write_frame(
+                &mut response_buf,
+                &crate::ipc_binary::BinaryFrame::BridgeResponse {
+                    session_id: String::new(),
+                    call_id: 3,
+                    status: 0,
+                    payload: v8_serialize_str(&mut iso, &ctx, "module"),
                 },
             )
             .unwrap();
@@ -5295,12 +5641,15 @@ fn build_module_source(
     scope: &mut v8::HandleScope,
     raw_source: &str,
     resolved_path: &str,
+    module_format: Option<ResolvedModuleFormat>,
 ) -> String {
     let normalized_path = resolved_path.to_ascii_lowercase();
-    if normalized_path.ends_with(".json") {
+    if normalized_path.ends_with(".json") || module_format == Some(ResolvedModuleFormat::Json) {
         return build_json_esm_shim(resolved_path);
     }
-    if is_likely_cjs(raw_source, resolved_path) {
+    if module_format == Some(ResolvedModuleFormat::Commonjs)
+        || is_likely_cjs(raw_source, resolved_path, module_format)
+    {
         return build_cjs_esm_shim(scope, raw_source, resolved_path);
     }
     add_esm_runtime_prelude(raw_source)
@@ -5439,13 +5788,20 @@ fn quoted_module_path(resolved_path: &str) -> String {
     )
 }
 
-fn is_likely_cjs(source: &str, resolved_path: &str) -> bool {
+fn is_likely_cjs(
+    source: &str,
+    resolved_path: &str,
+    module_format: Option<ResolvedModuleFormat>,
+) -> bool {
     let normalized_path = resolved_path.to_ascii_lowercase();
     if normalized_path.ends_with(".mjs") || normalized_path.ends_with(".mts") {
         return false;
     }
     if normalized_path.ends_with(".cjs") || normalized_path.ends_with(".cts") {
         return true;
+    }
+    if module_format == Some(ResolvedModuleFormat::Module) {
+        return false;
     }
     if has_probable_esm_syntax(source) {
         return false;

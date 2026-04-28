@@ -81,6 +81,7 @@ enum PipeSide {
 
 #[derive(Debug, Default)]
 struct PendingRead {
+    length: usize,
     result: Option<Option<Vec<u8>>>,
 }
 
@@ -277,8 +278,24 @@ impl PipeManager {
             };
 
             if let Some(waiter_id) = waiter_id {
+                let waiter_length = match state.waiters.get(&waiter_id) {
+                    Some(waiter) => waiter.length,
+                    None => continue,
+                };
+                let delivered_len = waiter_length.min(payload.len());
+                let delivered = payload[..delivered_len].to_vec();
+                let remainder = &payload[delivered_len..];
+
+                if !remainder.is_empty() {
+                    let pipe = state
+                        .pipes
+                        .get_mut(&pipe_ref.pipe_id)
+                        .ok_or_else(|| PipeError::bad_file_descriptor("pipe not found"))?;
+                    pipe.buffer.push_back(remainder.to_vec());
+                }
+
                 if let Some(waiter) = state.waiters.get_mut(&waiter_id) {
-                    waiter.result = Some(Some(payload.to_vec()));
+                    waiter.result = Some(Some(delivered));
                     self.notify_waiters_and_pollers();
                     return Ok(payload.len());
                 }
@@ -381,7 +398,13 @@ impl PipeManager {
             } else {
                 let next = state.next_waiter_id;
                 state.next_waiter_id += 1;
-                state.waiters.insert(next, PendingRead::default());
+                state.waiters.insert(
+                    next,
+                    PendingRead {
+                        length,
+                        result: None,
+                    },
+                );
                 let Some(pipe) = state.pipes.get_mut(&pipe_ref.pipe_id) else {
                     state.waiters.remove(&next);
                     return Err(PipeError::bad_file_descriptor("pipe not found"));
@@ -492,6 +515,20 @@ impl PipeManager {
             .values()
             .map(|pipe| buffer_size(&pipe.buffer))
             .sum()
+    }
+
+    pub fn waiting_reader_count(&self, description_id: u64) -> PipeResult<usize> {
+        let state = lock_or_recover(&self.inner.state);
+        let pipe_ref = state
+            .desc_to_pipe
+            .get(&description_id)
+            .copied()
+            .ok_or_else(|| PipeError::bad_file_descriptor("not a pipe end"))?;
+        let pipe = state
+            .pipes
+            .get(&pipe_ref.pipe_id)
+            .ok_or_else(|| PipeError::bad_file_descriptor("pipe not found"))?;
+        Ok(pipe.waiting_reads.len())
     }
 
     pub fn create_pipe_fds(&self, fd_table: &mut ProcessFdTable) -> FdResult<(u32, u32)> {

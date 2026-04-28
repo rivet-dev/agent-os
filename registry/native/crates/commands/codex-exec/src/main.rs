@@ -7,12 +7,12 @@
 /// Session turn mode reads a JSON line request on stdin, calls a Responses-style
 /// LLM provider via `wasi-http`, optionally executes shell commands through
 /// `wasi-spawn`, and emits NDJSON events on stdout for the adapter.
-
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::os::fd::FromRawFd;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -135,8 +135,14 @@ fn main() {
 }
 
 fn session_turn_mode() -> io::Result<()> {
-    let stdin = io::stdin();
-    let mut stdin = stdin.lock();
+    let stdin_fd = wasi_ext::dup(0).map_err(|errno| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("duplicating control stdin: wasi errno {}", errno),
+        )
+    })?;
+    let stdin = unsafe { std::fs::File::from_raw_fd(stdin_fd as i32) };
+    let mut stdin = io::BufReader::new(stdin);
 
     let start = read_message(&mut stdin)?;
     let InboundMessage::Start(request) = start else {
@@ -165,6 +171,8 @@ fn session_turn_mode() -> io::Result<()> {
     let provider_mode = mode.unwrap_or_else(|| "default".to_string());
     let provider_model = model.unwrap_or_else(|| "gpt-5-codex".to_string());
     let thought_level = thought_level.unwrap_or_else(|| "medium".to_string());
+
+    let mut pending_permission_responses = HashMap::new();
 
     loop {
         let response = call_responses_api(
@@ -197,6 +205,7 @@ fn session_turn_mode() -> io::Result<()> {
             return Ok(());
         }
 
+        let mut permission_requests = Vec::with_capacity(function_calls.len());
         for function_call in &function_calls {
             if function_call.name != "shell" {
                 return Err(io::Error::new(
@@ -210,10 +219,7 @@ fn session_turn_mode() -> io::Result<()> {
                 .get("command")
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "shell tool missing command",
-                    )
+                    io::Error::new(io::ErrorKind::InvalidData, "shell tool missing command")
                 })?;
 
             emit_line(&OutboundMessage::ToolCallUpdate {
@@ -231,9 +237,34 @@ fn session_turn_mode() -> io::Result<()> {
                 tool_call_id: &function_call.call_id,
                 command,
             });
+            permission_requests.push((function_call, command, permission_request_id));
+        }
 
-            let permission = wait_for_permission(&mut stdin, &permission_request_id)?;
-            if !matches!(permission.as_str(), "allow_once" | "allow_always") {
+        let mut permission_outcomes = HashMap::with_capacity(permission_requests.len());
+        for (function_call, _command, permission_request_id) in &permission_requests {
+            let permission = wait_for_permission(
+                &mut stdin,
+                permission_request_id,
+                &mut pending_permission_responses,
+            )
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "waiting for permission response {}: {}",
+                        permission_request_id, error
+                    ),
+                )
+            })?;
+            permission_outcomes.insert(function_call.call_id.as_str(), permission);
+        }
+
+        for (function_call, command, _permission_request_id) in permission_requests {
+            let permission = permission_outcomes
+                .get(function_call.call_id.as_str())
+                .map(String::as_str)
+                .unwrap_or("reject_once");
+            if !matches!(permission, "allow_once" | "allow_always") {
                 emit_line(&OutboundMessage::Done {
                     stop_reason: "cancelled",
                     assistant_text: "",
@@ -251,12 +282,24 @@ fn session_turn_mode() -> io::Result<()> {
                 stderr: None,
             });
 
-            let mut child = wasi_spawn::spawn_child(
-                &["sh", "-lc", command],
-                &[],
-                &cwd,
-            )?;
-            let output = child.consume_output()?;
+            let mut child =
+                wasi_spawn::spawn_child_ignore_stdin(&["sh", "-lc", command], &[], &cwd).map_err(
+                    |error| {
+                        io::Error::new(
+                            error.kind(),
+                            format!("spawning shell for {}: {}", function_call.call_id, error),
+                        )
+                    },
+                )?;
+            let output = child.consume_output().map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "consuming shell output for {}: {}",
+                        function_call.call_id, error
+                    ),
+                )
+            })?;
 
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -315,14 +358,25 @@ fn append_output_items(history: &mut Vec<Value>, response: &Value) {
 fn wait_for_permission(
     stdin: &mut dyn BufRead,
     request_id: &str,
+    pending_responses: &mut HashMap<String, String>,
 ) -> io::Result<String> {
+    if let Some(option_id) = pending_responses.remove(request_id) {
+        return Ok(option_id);
+    }
+
     loop {
         match read_message(stdin)? {
             InboundMessage::PermissionResponse {
                 request_id: incoming_id,
                 option_id,
             } if incoming_id == request_id => return Ok(option_id),
-            InboundMessage::PermissionResponse { .. } => continue,
+            InboundMessage::PermissionResponse {
+                request_id: incoming_id,
+                option_id,
+            } => {
+                pending_responses.insert(incoming_id, option_id);
+                continue;
+            }
             InboundMessage::Start(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -337,10 +391,7 @@ fn read_message(stdin: &mut dyn BufRead) -> io::Result<InboundMessage> {
     let mut line = String::new();
     let bytes = stdin.read_line(&mut line)?;
     if bytes == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "stdin closed",
-        ));
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "stdin closed"));
     }
     serde_json::from_str(line.trim()).map_err(|error| {
         io::Error::new(
@@ -358,8 +409,8 @@ fn emit_line(message: &OutboundMessage<'_>) {
 }
 
 fn provider_endpoint() -> String {
-    let base = std::env::var("OPENAI_BASE_URL")
-        .unwrap_or_else(|_| "https://api.openai.com".to_string());
+    let base =
+        std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".to_string());
     let trimmed = base.trim_end_matches('/');
     if trimmed.ends_with("/v1") {
         format!("{trimmed}/responses")
@@ -409,9 +460,8 @@ fn call_responses_api(
         body["tools"] = json!([]);
     }
 
-    let payload = serde_json::to_string(&body).map_err(|error| {
-        io::Error::new(io::ErrorKind::InvalidData, error.to_string())
-    })?;
+    let payload = serde_json::to_string(&body)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
 
     let url = provider_endpoint();
     let api_key = std::env::var("OPENAI_API_KEY").ok();
@@ -458,9 +508,8 @@ fn extract_function_calls(response: &Value) -> io::Result<Vec<FunctionCall>> {
         }
 
         let arguments = match item.get("arguments") {
-            Some(Value::String(text)) => serde_json::from_str(text).map_err(|error| {
-                io::Error::new(io::ErrorKind::InvalidData, error.to_string())
-            })?,
+            Some(Value::String(text)) => serde_json::from_str(text)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?,
             Some(value) => value.clone(),
             None => json!({}),
         };
@@ -523,7 +572,10 @@ fn extract_assistant_text(response: &Value) -> io::Result<String> {
 }
 
 fn print_help() {
-    println!("codex-exec {} — headless Codex agent for Agent OS WasmVM", VERSION);
+    println!(
+        "codex-exec {} — headless Codex agent for Agent OS WasmVM",
+        VERSION
+    );
     println!();
     println!("USAGE:");
     println!("    codex-exec [OPTIONS] [PROMPT]");

@@ -9,6 +9,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import {
+  describeIf,
   createIntegrationKernel,
   skipUnlessWasmBuilt,
 } from './helpers.ts';
@@ -16,7 +17,7 @@ import type { IntegrationKernelResult } from './helpers.ts';
 
 const skipReason = skipUnlessWasmBuilt();
 
-describe.skipIf(skipReason)('module resolution through kernel VFS', () => {
+describeIf(!skipReason, 'module resolution through kernel VFS', () => {
   let ctx: IntegrationKernelResult;
 
   afterEach(async () => {

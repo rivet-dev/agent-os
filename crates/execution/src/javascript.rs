@@ -22,6 +22,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::{
+    atomic::{AtomicU64, Ordering},
     mpsc::{self, Receiver, SyncSender, TrySendError},
     Arc, Condvar, Mutex, OnceLock,
 };
@@ -58,6 +59,7 @@ const NODE_SYNC_RPC_REQUEST_FD_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_REQUEST_FD";
 const NODE_SYNC_RPC_RESPONSE_FD_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_RESPONSE_FD";
 const NODE_SYNC_RPC_DATA_BYTES_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_DATA_BYTES";
 const NODE_SYNC_RPC_WAIT_TIMEOUT_MS_ENV: &str = "AGENT_OS_NODE_SYNC_RPC_WAIT_TIMEOUT_MS";
+static NEXT_V8_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 const V8_HEAP_LIMIT_MB_ENV: &str = "AGENT_OS_V8_HEAP_LIMIT_MB";
 const NODE_SYNC_RPC_DEFAULT_DATA_BYTES: usize = 4 * 1024 * 1024;
 const NODE_SYNC_RPC_DEFAULT_WAIT_TIMEOUT_MS: u64 = 30_000;
@@ -255,10 +257,12 @@ pub struct StartJavascriptExecutionRequest {
     pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: PathBuf,
-    /// Optional inline JavaScript code to execute directly in the V8 isolate.
-    /// When set, this code is passed as user_code instead of generating a
-    /// require() call for the entrypoint. Used by the sidecar to pass
-    /// entrypoint content read from the VFS.
+    /// Optional inline JavaScript code supplied by the sidecar.
+    /// Eval entrypoints always execute this source directly. Module-mode file
+    /// entrypoints may also use it so the isolate can evaluate the original
+    /// source without re-reading through the host. CommonJS file entrypoints
+    /// still go through the normal require() wrapper so Node-style globals such
+    /// as __filename and __dirname are initialized correctly.
     pub inline_code: Option<String>,
 }
 
@@ -311,9 +315,27 @@ enum ModuleResolveMode {
     Import,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalResolvedModuleFormat {
+    Module,
+    Commonjs,
+    Json,
+}
+
+impl LocalResolvedModuleFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Module => "module",
+            Self::Commonjs => "commonjs",
+            Self::Json => "json",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct LocalModuleResolutionCache {
     resolve_results: HashMap<(String, String, ModuleResolveMode), Option<String>>,
+    module_format_results: HashMap<String, Option<LocalResolvedModuleFormat>>,
     package_json_results: HashMap<String, Option<LocalPackageJson>>,
     exists_results: HashMap<String, bool>,
     stat_results: HashMap<String, Option<bool>>,
@@ -424,6 +446,39 @@ fn timer_delay_ms(value: Option<&Value>) -> u64 {
 }
 
 impl GuestPathTranslator {
+    fn from_host_context(
+        env: &BTreeMap<String, String>,
+        host_cwd: PathBuf,
+        guest_cwd: String,
+    ) -> Self {
+        let mut mappings = parse_guest_path_mappings_from_env(env)
+            .into_iter()
+            .filter(|mapping| mapping.guest_path.starts_with('/'))
+            .collect::<Vec<_>>();
+
+        if !mappings
+            .iter()
+            .any(|mapping| mapping.guest_path == guest_cwd && mapping.host_path == host_cwd)
+        {
+            mappings.push(GuestPathMapping {
+                guest_path: guest_cwd.clone(),
+                host_path: host_cwd.clone(),
+            });
+        }
+
+        sort_guest_path_mappings(&mut mappings);
+
+        Self {
+            implicit_guest_cwd: guest_cwd,
+            implicit_host_cwd: host_cwd,
+            sandbox_root: env
+                .get(NODE_SANDBOX_ROOT_ENV)
+                .filter(|value| Path::new(value.as_str()).is_absolute())
+                .map(PathBuf::from),
+            mappings,
+        }
+    }
+
     fn is_known_host_path(&self, host_path: &Path) -> bool {
         if host_path.starts_with(&self.implicit_host_cwd) {
             return true;
@@ -457,33 +512,30 @@ impl GuestPathTranslator {
                     .cloned()
             })
             .unwrap_or_else(|| String::from("/root"));
-        let mut mappings = parse_guest_path_mappings(request)
-            .into_iter()
-            .filter(|mapping| mapping.guest_path.starts_with('/'))
-            .collect::<Vec<_>>();
-
-        if !mappings
-            .iter()
-            .any(|mapping| mapping.guest_path == implicit_guest_cwd)
-        {
-            mappings.push(GuestPathMapping {
-                guest_path: implicit_guest_cwd.clone(),
-                host_path: request.cwd.clone(),
-            });
-        }
-
-        sort_guest_path_mappings(&mut mappings);
-
-        Self {
-            implicit_guest_cwd,
-            implicit_host_cwd: request.cwd.clone(),
-            sandbox_root: request
-                .env
-                .get(NODE_SANDBOX_ROOT_ENV)
-                .filter(|value| Path::new(value.as_str()).is_absolute())
-                .map(PathBuf::from),
-            mappings,
-        }
+        let mut translator = Self::from_host_context(
+            &request.env,
+            request.cwd.clone(),
+            implicit_guest_cwd.clone(),
+        );
+        translator.mappings.sort_by(|left, right| {
+            let left_is_implicit =
+                left.guest_path == implicit_guest_cwd && left.host_path == request.cwd;
+            let right_is_implicit =
+                right.guest_path == implicit_guest_cwd && right.host_path == request.cwd;
+            right
+                .guest_path
+                .len()
+                .cmp(&left.guest_path.len())
+                .then_with(|| right_is_implicit.cmp(&left_is_implicit))
+                .then_with(|| {
+                    right
+                        .host_path
+                        .components()
+                        .count()
+                        .cmp(&left.host_path.components().count())
+                })
+        });
+        translator
     }
 
     fn guest_cwd(&self) -> &str {
@@ -573,12 +625,12 @@ impl GuestPathTranslator {
                 fallback_candidate.get_or_insert(candidate);
             }
         }
-        if fallback_candidate.is_some() {
-            return fallback_candidate;
-        }
-
         if let Some(suffix) = strip_guest_prefix(&normalized, &self.implicit_guest_cwd) {
             return Some(join_host_path(&self.implicit_host_cwd, suffix));
+        }
+
+        if fallback_candidate.is_some() {
+            return fallback_candidate;
         }
 
         if let Some(sandbox_root) = &self.sandbox_root {
@@ -703,6 +755,29 @@ impl ModuleResolutionTestHarness {
     }
 }
 
+#[doc(hidden)]
+pub fn handle_internal_bridge_call_from_host_context(
+    host_cwd: &Path,
+    guest_cwd: &str,
+    env: &BTreeMap<String, String>,
+    method: &str,
+    args: &[Value],
+) -> Option<Value> {
+    let mut local_bridge = LocalBridgeState {
+        translator: GuestPathTranslator::from_host_context(
+            env,
+            host_cwd.to_path_buf(),
+            guest_cwd.to_owned(),
+        ),
+        ..LocalBridgeState::default()
+    };
+
+    match local_bridge.handle_internal_bridge_call(0, method, args) {
+        Some(LocalBridgeCallResult::Immediate(value)) => Some(value),
+        _ => None,
+    }
+}
+
 fn resolve_pnpm_sibling_host_path(real_mapping_path: &Path, suffix: &str) -> Option<PathBuf> {
     let trimmed = suffix.strip_prefix("node_modules/")?;
     let mut current = Some(real_mapping_path);
@@ -720,9 +795,11 @@ fn resolve_pnpm_sibling_host_path(real_mapping_path: &Path, suffix: &str) -> Opt
 }
 
 fn parse_guest_path_mappings(request: &StartJavascriptExecutionRequest) -> Vec<GuestPathMapping> {
-    request
-        .env
-        .get(NODE_GUEST_PATH_MAPPINGS_ENV)
+    parse_guest_path_mappings_from_env(&request.env)
+}
+
+fn parse_guest_path_mappings_from_env(env: &BTreeMap<String, String>) -> Vec<GuestPathMapping> {
+    env.get(NODE_GUEST_PATH_MAPPINGS_ENV)
         .and_then(|value| serde_json::from_str::<Vec<GuestPathMappingWire>>(value).ok())
         .into_iter()
         .flatten()
@@ -764,6 +841,9 @@ fn join_guest_path(base: &str, suffix: &str) -> String {
 }
 
 fn strip_guest_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    if prefix == "/" {
+        return path.strip_prefix('/');
+    }
     if path == prefix {
         return Some("");
     }
@@ -938,7 +1018,7 @@ impl JavascriptExecution {
         self.child_pid
     }
 
-    pub(crate) fn v8_session_handle(&self) -> V8SessionHandle {
+    pub fn v8_session_handle(&self) -> V8SessionHandle {
         self.v8_session.clone()
     }
 
@@ -960,6 +1040,27 @@ impl JavascriptExecution {
         self.kernel_stdin.close();
         let _ = self.v8_session.send_stream_event("stdin_end", vec![]);
         Ok(())
+    }
+
+    pub(crate) fn write_kernel_stdin_only(&mut self, chunk: &[u8]) {
+        self.kernel_stdin.write(chunk);
+    }
+
+    pub(crate) fn close_kernel_stdin_only(&mut self) {
+        self.kernel_stdin.close();
+    }
+
+    pub(crate) fn handle_kernel_stdin_sync_rpc(
+        &mut self,
+        request: &JavascriptSyncRpcRequest,
+    ) -> Result<bool, JavascriptExecutionError> {
+        if request.method != "__kernel_stdin_read" {
+            return Ok(false);
+        }
+
+        let response = self.kernel_stdin.read(&request.args);
+        self.respond_sync_rpc_success(request.id, response)?;
+        Ok(true)
     }
 
     pub fn terminate(&self) -> Result<(), JavascriptExecutionError> {
@@ -1066,7 +1167,12 @@ impl JavascriptExecution {
 
     pub fn wait(mut self) -> Result<JavascriptExecutionResult, JavascriptExecutionError> {
         self.close_stdin()?;
-        let mut events = self.events.into_inner();
+        let mut events = std::mem::replace(
+            &mut self.events,
+            RefCell::new(tokio::sync::mpsc::unbounded_channel().1),
+        )
+        .into_inner();
+        let execution_id = std::mem::take(&mut self.execution_id);
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -1081,7 +1187,7 @@ impl JavascriptExecution {
                 Some(JavascriptExecutionEvent::SignalState { .. }) => {}
                 Some(JavascriptExecutionEvent::Exited(exit_code)) => {
                     return Ok(JavascriptExecutionResult {
-                        execution_id: self.execution_id,
+                        execution_id,
                         exit_code,
                         stdout,
                         stderr,
@@ -1112,6 +1218,72 @@ impl JavascriptExecution {
             _ => Ok(PendingSyncRpcResolution::Missing),
         }
     }
+}
+
+impl Drop for JavascriptExecution {
+    fn drop(&mut self) {
+        let _ = self.v8_session.destroy();
+    }
+}
+
+struct V8SessionRegistrationGuard<'a> {
+    v8_host: &'a V8RuntimeHost,
+    session_id: String,
+    active: bool,
+}
+
+impl<'a> V8SessionRegistrationGuard<'a> {
+    fn new(v8_host: &'a V8RuntimeHost, session_id: String) -> Self {
+        Self {
+            v8_host,
+            session_id,
+            active: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for V8SessionRegistrationGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.v8_host.unregister_session(&self.session_id);
+        }
+    }
+}
+
+struct PendingV8SessionRegistration<'a> {
+    frame_receiver: Receiver<BinaryFrame>,
+    registration_guard: V8SessionRegistrationGuard<'a>,
+}
+
+fn register_v8_session<F>(
+    v8_host: &V8RuntimeHost,
+    session_id: String,
+    heap_limit_mb: u32,
+    send_frame: F,
+) -> Result<PendingV8SessionRegistration<'_>, JavascriptExecutionError>
+where
+    F: FnOnce(&BinaryFrame) -> std::io::Result<()>,
+{
+    let frame_receiver = v8_host
+        .register_session(&session_id)
+        .map_err(JavascriptExecutionError::Spawn)?;
+    let registration_guard = V8SessionRegistrationGuard::new(v8_host, session_id.clone());
+
+    send_frame(&BinaryFrame::CreateSession {
+        session_id,
+        heap_limit_mb,
+        cpu_time_limit_ms: 0,
+    })
+    .map_err(JavascriptExecutionError::Spawn)?;
+
+    Ok(PendingV8SessionRegistration {
+        frame_receiver,
+        registration_guard,
+    })
 }
 
 pub struct JavascriptExecutionEngine {
@@ -1214,16 +1386,19 @@ impl JavascriptExecutionEngine {
         let v8_host = self.v8_host.as_ref().unwrap();
 
         // Create a V8 session
-        let session_id = format!("v8-{execution_id}");
-        let frame_receiver = v8_host.register_session(&session_id);
-
-        v8_host
-            .send_frame(&BinaryFrame::CreateSession {
-                session_id: session_id.clone(),
-                heap_limit_mb: javascript_heap_limit_mb(&request),
-                cpu_time_limit_ms: 0,
-            })
-            .map_err(JavascriptExecutionError::Spawn)?;
+        let session_id = format!(
+            "v8-{execution_id}-{}",
+            NEXT_V8_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let PendingV8SessionRegistration {
+            frame_receiver,
+            mut registration_guard,
+        } = register_v8_session(
+            v8_host,
+            session_id.clone(),
+            javascript_heap_limit_mb(&request),
+            |frame| v8_host.send_frame(frame),
+        )?;
 
         // Build user code: prefer inline code, fall back to entrypoint-based
         let translator = GuestPathTranslator::from_request(&request);
@@ -1251,22 +1426,34 @@ impl JavascriptExecutionEngine {
             || inline_code
                 .as_deref()
                 .is_some_and(inline_code_uses_module_mode);
-        let user_code = if let Some(inline_code) = inline_code {
-            if matches!(guest_entrypoint.as_str(), "-e" | "--eval") {
-                inline_code
-            } else {
-                format!("{inline_code}\n//# sourceURL={guest_entrypoint}")
+        if !matches!(guest_entrypoint.as_str(), "-e" | "--eval") && !use_module_mode {
+            if let Some(inline_code) = inline_code.as_ref() {
+                if let Some(parent) = host_entrypoint.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(JavascriptExecutionError::PrepareImportCache)?;
+                }
+                fs::write(&host_entrypoint, inline_code)
+                    .map_err(JavascriptExecutionError::PrepareImportCache)?;
             }
+        }
+        let user_code = if matches!(guest_entrypoint.as_str(), "-e" | "--eval") {
+            inline_code.unwrap_or_else(|| build_v8_user_code(&guest_entrypoint, &request.env))
         } else if use_module_mode {
-            strip_javascript_hashbang(&fs::read_to_string(&host_entrypoint).map_err(|error| {
-                JavascriptExecutionError::PrepareImportCache(std::io::Error::new(
-                    error.kind(),
-                    format!(
-                        "failed to read JavaScript entrypoint {}: {error}",
-                        host_entrypoint.display()
-                    ),
-                ))
-            })?)
+            if let Some(inline_code) = inline_code {
+                format!("{inline_code}\n//# sourceURL={guest_entrypoint}")
+            } else {
+                strip_javascript_hashbang(&fs::read_to_string(&host_entrypoint).map_err(
+                    |error| {
+                        JavascriptExecutionError::PrepareImportCache(std::io::Error::new(
+                            error.kind(),
+                            format!(
+                                "failed to read JavaScript entrypoint {}: {error}",
+                                host_entrypoint.display()
+                            ),
+                        ))
+                    },
+                )?)
+            }
         } else {
             build_v8_user_code(&guest_entrypoint, &request.env)
         };
@@ -1279,7 +1466,7 @@ impl JavascriptExecutionEngine {
         );
 
         // Create session handle for sending bridge responses
-        let v8_session = V8SessionHandle::new(session_id.clone(), v8_host.writer_handle());
+        let v8_session = v8_host.session_handle(session_id.clone());
 
         // Start the event bridge before execution so early sync bridge calls
         // made during module instantiation/evaluation cannot deadlock waiting
@@ -1310,6 +1497,7 @@ impl JavascriptExecutionEngine {
                 user_code,
             })
             .map_err(JavascriptExecutionError::Spawn)?;
+        registration_guard.disarm();
 
         Ok(JavascriptExecution {
             execution_id,
@@ -1565,49 +1753,220 @@ fn host_entrypoint_uses_module_mode(entrypoint: &Path) -> bool {
 }
 
 fn inline_code_uses_module_mode(source: &str) -> bool {
-    let mut in_block_comment = false;
+    let sanitized = strip_non_code_segments(source);
+    let tokens = tokenize_inline_module_source(&sanitized);
+    let has_commonjs_signal = tokens.windows(3).any(|window| {
+        matches!(
+            window,
+            [
+                InlineModuleToken::Identifier("module"),
+                InlineModuleToken::Punct('.'),
+                InlineModuleToken::Identifier("exports")
+            ]
+        )
+    }) || tokens.windows(2).any(|window| {
+        matches!(
+            window,
+            [
+                InlineModuleToken::Identifier("exports"),
+                InlineModuleToken::Punct('.' | '[')
+            ] | [
+                InlineModuleToken::Identifier("require"),
+                InlineModuleToken::Punct('(')
+            ]
+        )
+    });
 
-    for line in source.lines() {
-        let mut trimmed = line.trim_start();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        if in_block_comment {
-            if let Some(end) = trimmed.find("*/") {
-                trimmed = trimmed[end + 2..].trim_start();
-                in_block_comment = false;
-                if trimmed.is_empty() {
-                    continue;
-                }
-            } else {
-                continue;
-            }
-        }
-
-        if trimmed.starts_with("/*") {
-            if let Some(end) = trimmed.find("*/") {
-                trimmed = trimmed[end + 2..].trim_start();
-                if trimmed.is_empty() {
-                    continue;
-                }
-            } else {
-                in_block_comment = true;
-                continue;
-            }
-        }
-
-        if trimmed.starts_with("//") {
-            continue;
-        }
-
-        return trimmed.starts_with("import ")
-            || trimmed.starts_with("import{")
-            || trimmed.starts_with("import*")
-            || trimmed.starts_with("export ");
+    if has_commonjs_signal {
+        return false;
     }
 
-    false
+    tokens.windows(2).any(|window| match window {
+        [InlineModuleToken::Identifier("import"), InlineModuleToken::Punct('.')] => true,
+        [InlineModuleToken::Identifier("import"), InlineModuleToken::Punct('(' | ':')] => false,
+        [InlineModuleToken::Identifier("import"), InlineModuleToken::Identifier(_)
+        | InlineModuleToken::Punct('{')
+        | InlineModuleToken::Punct('*')
+        | InlineModuleToken::StringLiteral] => true,
+        [InlineModuleToken::Identifier("export"), InlineModuleToken::Identifier(
+            "default" | "const" | "let" | "var" | "function" | "class" | "async" | "enum" | "type"
+            | "interface",
+        )
+        | InlineModuleToken::Punct('{')
+        | InlineModuleToken::Punct('*')] => true,
+        _ => false,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InlineModuleToken<'a> {
+    Identifier(&'a str),
+    StringLiteral,
+    Punct(char),
+}
+
+const INLINE_MODULE_STRING_PLACEHOLDER: char = '\u{1F}';
+
+fn strip_non_code_segments(source: &str) -> String {
+    let mut sanitized = String::with_capacity(source.len());
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    sanitize_javascript_code(bytes, &mut index, &mut sanitized, None);
+    sanitized
+}
+
+fn sanitize_javascript_code(
+    bytes: &[u8],
+    index: &mut usize,
+    output: &mut String,
+    until_brace_depth: Option<usize>,
+) {
+    let mut brace_depth = 0usize;
+
+    while *index < bytes.len() {
+        let current = bytes[*index];
+
+        if let Some(target_depth) = until_brace_depth {
+            match current {
+                b'{' => brace_depth += 1,
+                b'}' => {
+                    if brace_depth == target_depth {
+                        output.push(' ');
+                        *index += 1;
+                        return;
+                    }
+                    brace_depth = brace_depth.saturating_sub(1);
+                }
+                _ => {}
+            }
+        }
+
+        match current {
+            b'/' if bytes.get(*index + 1) == Some(&b'/') => {
+                output.push(' ');
+                output.push(' ');
+                *index += 2;
+                while *index < bytes.len() {
+                    let comment_byte = bytes[*index];
+                    *index += 1;
+                    if comment_byte == b'\n' {
+                        output.push('\n');
+                        break;
+                    }
+                    output.push(' ');
+                }
+            }
+            b'/' if bytes.get(*index + 1) == Some(&b'*') => {
+                output.push(' ');
+                output.push(' ');
+                *index += 2;
+                while *index < bytes.len() {
+                    let comment_byte = bytes[*index];
+                    if comment_byte == b'*' && bytes.get(*index + 1) == Some(&b'/') {
+                        output.push(' ');
+                        output.push(' ');
+                        *index += 2;
+                        break;
+                    }
+                    output.push(if comment_byte == b'\n' { '\n' } else { ' ' });
+                    *index += 1;
+                }
+            }
+            b'\'' | b'"' => sanitize_string_literal(bytes, index, output, current),
+            b'`' => sanitize_template_literal(bytes, index, output),
+            _ => {
+                output.push(char::from(current));
+                *index += 1;
+            }
+        }
+    }
+}
+
+fn sanitize_string_literal(bytes: &[u8], index: &mut usize, output: &mut String, quote: u8) {
+    output.push(INLINE_MODULE_STRING_PLACEHOLDER);
+    *index += 1;
+
+    while *index < bytes.len() {
+        let current = bytes[*index];
+        *index += 1;
+        match current {
+            b'\\' => {
+                if *index < bytes.len() {
+                    *index += 1;
+                }
+            }
+            c if c == quote => break,
+            _ => {}
+        }
+    }
+}
+
+fn sanitize_template_literal(bytes: &[u8], index: &mut usize, output: &mut String) {
+    output.push(INLINE_MODULE_STRING_PLACEHOLDER);
+    *index += 1;
+
+    while *index < bytes.len() {
+        let current = bytes[*index];
+        match current {
+            b'\\' => {
+                *index += 1;
+                if *index < bytes.len() {
+                    *index += 1;
+                }
+            }
+            b'`' => {
+                *index += 1;
+                break;
+            }
+            b'$' if bytes.get(*index + 1) == Some(&b'{') => {
+                output.push(' ');
+                output.push(' ');
+                *index += 2;
+                sanitize_javascript_code(bytes, index, output, Some(0));
+                output.push(INLINE_MODULE_STRING_PLACEHOLDER);
+            }
+            b'\n' => {
+                output.push('\n');
+                *index += 1;
+            }
+            _ => {
+                *index += 1;
+            }
+        }
+    }
+}
+
+fn tokenize_inline_module_source(source: &str) -> Vec<InlineModuleToken<'_>> {
+    let mut tokens = Vec::new();
+    let bytes = source.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let current = bytes[index];
+        match current {
+            b if b.is_ascii_whitespace() => index += 1,
+            b if char::from(b) == INLINE_MODULE_STRING_PLACEHOLDER => {
+                tokens.push(InlineModuleToken::StringLiteral);
+                index += 1;
+            }
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$' => {
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && matches!(bytes[index], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'$')
+                {
+                    index += 1;
+                }
+                tokens.push(InlineModuleToken::Identifier(&source[start..index]));
+            }
+            _ => {
+                tokens.push(InlineModuleToken::Punct(char::from(current)));
+                index += 1;
+            }
+        }
+    }
+
+    tokens
 }
 
 fn nearest_package_json_type(entrypoint: &Path) -> Option<String> {
@@ -1657,6 +2016,12 @@ fn prepend_v8_runtime_shim(
   const entryFile = {entry_json};
   const nextCwd = {cwd_json};
   const nextEnv = {env_json};
+  Object.defineProperty(globalThis, "__agentOsProcessConfigEnv", {{
+    configurable: true,
+    enumerable: false,
+    value: nextEnv,
+    writable: true,
+  }});
   const visibleEnv = Object.fromEntries(
     Object.entries(nextEnv).filter(([key]) => !key.startsWith("AGENT_OS_"))
   );
@@ -1752,10 +2117,34 @@ fn prepend_v8_runtime_shim(
   globalThis.__runtimeStreamStdin = nextEnv.AGENT_OS_KEEP_STDIN_OPEN === "1";
 
   if (
+    typeof globalThis.WebAssembly === "object" &&
+    globalThis.WebAssembly !== null &&
+    typeof globalThis.WebAssembly.instantiateStreaming !== "function"
+  ) {{
+    globalThis.WebAssembly.instantiateStreaming = async function instantiateStreaming(source, imports) {{
+      const response = await source;
+      if (response == null || typeof response.arrayBuffer !== "function") {{
+        throw new TypeError(
+          "WebAssembly.instantiateStreaming requires a Response or promise for one",
+        );
+      }}
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return globalThis.WebAssembly.instantiate(bytes, imports);
+    }};
+  }}
+
+  if (
     typeof globalThis.require === "undefined" &&
     typeof globalThis._moduleModule?.createRequire === "function"
   ) {{
-    globalThis.require = globalThis._moduleModule.createRequire(entryFile);
+    const requireEntryFile =
+      entryFile === "-e" || entryFile === "--eval"
+        ? nextCwd === "/"
+          ? "/__agent_os_eval__.js"
+          : `${{nextCwd.replace(/\/+$/, "")}}/__agent_os_eval__.js`
+        : entryFile;
+    globalThis.require =
+      globalThis._moduleModule.createRequire(requireEntryFile);
   }}
 }})();
 {user_code}"#
@@ -1855,25 +2244,21 @@ fn spawn_v8_event_bridge(
                 BinaryFrame::ExecutionResult {
                     exit_code, error, ..
                 } => {
+                    let is_process_exit_error = error.as_ref().is_some_and(|err| {
+                        err.error_type == "ProcessExitError"
+                            || err.message.starts_with("process.exit(")
+                    });
                     let resolved_exit_code = error
                         .as_ref()
                         .and_then(|err| {
-                            if err.error_type == "ProcessExitError"
-                                || err.message.starts_with("process.exit(")
-                            {
+                            if is_process_exit_error {
                                 parse_process_exit_code_message(&err.message)
                             } else {
                                 None
                             }
                         })
                         .unwrap_or(exit_code);
-                    let should_emit_error = if let Some(err) = &error {
-                        !(resolved_exit_code == 0
-                            && (err.error_type == "ProcessExitError"
-                                || err.message.starts_with("process.exit(")))
-                    } else {
-                        false
-                    };
+                    let should_emit_error = error.is_some() && !is_process_exit_error;
                     if should_emit_error {
                         let err = error.as_ref().expect("checked above");
                         let error_msg = if err.stack.is_empty() {
@@ -1931,6 +2316,11 @@ impl LocalBridgeState {
                         .unwrap_or(Value::Null),
                 ))
             }
+            "_moduleFormat" => Some(LocalBridgeCallResult::Immediate(
+                self.module_format(args.first().and_then(Value::as_str).unwrap_or(""))
+                    .map(|format| Value::String(String::from(format.as_str())))
+                    .unwrap_or(Value::Null),
+            )),
             "_loadFile" | "_loadFileSync" => Some(LocalBridgeCallResult::Immediate(
                 self.load_file(args.first().and_then(Value::as_str).unwrap_or(""))
                     .map(Value::String)
@@ -1980,8 +2370,11 @@ impl LocalBridgeState {
                     bytes[15],
                 ))))
             }
-            "_kernelStdinRead" => Some(LocalBridgeCallResult::Immediate(
+            "_kernelStdinRead" | "_kernelStdinReadRaw" => Some(LocalBridgeCallResult::Immediate(
                 self.kernel_stdin.read(args),
+            )),
+            "_pythonStdinRead" => Some(LocalBridgeCallResult::Immediate(
+                self.kernel_stdin.read_python_raw(args),
             )),
             "_scheduleTimer" => {
                 self.schedule_bridge_timer_response(call_id, timer_delay_ms(args.first()));
@@ -2194,11 +2587,15 @@ impl LocalBridgeState {
         from_dir: &str,
         mode: ModuleResolveMode,
     ) -> Option<String> {
-        let normalized_from = self
+        let normalized_from_path = self
             .translator
             .canonical_guest_path(from_dir)
-            .map(|path| normalize_module_resolve_context(&path))
-            .unwrap_or_else(|| normalize_module_resolve_context(from_dir));
+            .unwrap_or_else(|| normalize_guest_path(from_dir));
+        let normalized_from = if self.cached_stat(&normalized_from_path) == Some(false) {
+            dirname_guest_path(&normalized_from_path)
+        } else {
+            normalize_module_resolve_context(&normalized_from_path)
+        };
         let cache_key = (specifier.to_owned(), normalized_from.clone(), mode);
         if let Some(cached) = self.resolution_cache.resolve_results.get(&cache_key) {
             return cached.clone();
@@ -2206,6 +2603,8 @@ impl LocalBridgeState {
 
         let resolved = if let Some(builtin) = normalize_builtin_specifier(specifier) {
             Some(builtin)
+        } else if let Some(file_path) = guest_path_from_file_url(specifier) {
+            self.resolve_path(&file_path, mode)
         } else if specifier.starts_with('/') {
             self.resolve_path(specifier, mode)
         } else if specifier.starts_with("./")
@@ -2244,6 +2643,61 @@ impl LocalBridgeState {
                 source
             },
         )
+    }
+
+    fn module_format(&mut self, path: &str) -> Option<LocalResolvedModuleFormat> {
+        if let Some(cached) = self.resolution_cache.module_format_results.get(path) {
+            return *cached;
+        }
+
+        let format = self.detect_module_format(path);
+        self.resolution_cache
+            .module_format_results
+            .insert(path.to_owned(), format);
+        format
+    }
+
+    fn detect_module_format(&mut self, path: &str) -> Option<LocalResolvedModuleFormat> {
+        if is_builtin_specifier(path) {
+            return Some(LocalResolvedModuleFormat::Module);
+        }
+
+        let normalized = normalize_guest_path(path);
+        match Path::new(&normalized)
+            .extension()
+            .and_then(|ext| ext.to_str())
+        {
+            Some("mjs" | "mts") => Some(LocalResolvedModuleFormat::Module),
+            Some("cjs" | "cts") => Some(LocalResolvedModuleFormat::Commonjs),
+            Some("json") => Some(LocalResolvedModuleFormat::Json),
+            Some("js") => Some(
+                if self
+                    .nearest_package_json_type_for_guest_path(&normalized)
+                    .as_deref()
+                    == Some("module")
+                {
+                    LocalResolvedModuleFormat::Module
+                } else {
+                    LocalResolvedModuleFormat::Commonjs
+                },
+            ),
+            _ => None,
+        }
+    }
+
+    fn nearest_package_json_type_for_guest_path(&mut self, guest_path: &str) -> Option<String> {
+        let mut dir = dirname_guest_path(guest_path);
+        loop {
+            let package_json_path = join_guest_path(&dir, "package.json");
+            if let Some(package_json) = self.read_package_json(&package_json_path) {
+                return package_json.package_type;
+            }
+            if dir == "/" {
+                break;
+            }
+            dir = dirname_guest_path(&dir);
+        }
+        None
     }
 
     fn resolve_package_imports(
@@ -2499,6 +2953,61 @@ impl LocalBridgeState {
     }
 }
 
+fn guest_path_from_file_url(specifier: &str) -> Option<String> {
+    if !specifier.starts_with("file:") {
+        return None;
+    }
+
+    let mut pathname = if let Some(stripped) = specifier.strip_prefix("file://") {
+        stripped
+    } else {
+        specifier.strip_prefix("file:")?
+    };
+
+    if let Some(terminator_index) = pathname.find(['?', '#']) {
+        pathname = &pathname[..terminator_index];
+    }
+
+    if !pathname.starts_with('/') {
+        let slash_index = pathname.find('/')?;
+        let host = &pathname[..slash_index];
+        if !host.is_empty() && host != "localhost" {
+            return None;
+        }
+        pathname = &pathname[slash_index..];
+    }
+
+    Some(normalize_guest_path(&percent_decode(pathname)))
+}
+
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut index = 0;
+    let mut decoded = Vec::with_capacity(bytes.len());
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                if let Ok(value) = u8::from_str_radix(&raw[index + 1..index + 3], 16) {
+                    decoded.push(value);
+                    index += 3;
+                } else {
+                    decoded.push(bytes[index]);
+                    index += 1;
+                }
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).expect("decode file URL path")
+}
+
 impl LocalKernelStdinBridge {
     fn write(&self, chunk: &[u8]) {
         let mut state = self.state.lock().expect("kernel stdin state poisoned");
@@ -2548,6 +3057,42 @@ impl LocalKernelStdinBridge {
         json!({
             "done": true,
         })
+    }
+
+    fn read_python_raw(&self, args: &[Value]) -> Value {
+        const PYTHON_STDIN_DONE_SENTINEL: &str = "__AGENT_OS_PYTHON_STDIN_DONE__";
+
+        let max_bytes = args
+            .first()
+            .and_then(Value::as_u64)
+            .map(|value| value.clamp(1, 64 * 1024) as usize)
+            .unwrap_or(64 * 1024);
+        let timeout = Duration::from_millis(args.get(1).and_then(Value::as_u64).unwrap_or(100));
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state.lock().expect("kernel stdin state poisoned");
+
+        while state.bytes.is_empty() && !state.closed {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Value::Null;
+            }
+            let (next_state, wait_result) = self
+                .ready
+                .wait_timeout(state, remaining)
+                .expect("kernel stdin wait poisoned");
+            state = next_state;
+            if wait_result.timed_out() && state.bytes.is_empty() && !state.closed {
+                return Value::Null;
+            }
+        }
+
+        if !state.bytes.is_empty() {
+            let read_len = state.bytes.len().min(max_bytes);
+            let bytes = state.bytes.drain(..read_len).collect::<Vec<_>>();
+            return Value::String(v8_runtime::base64_encode_pub(&bytes));
+        }
+
+        Value::String(String::from(PYTHON_STDIN_DONE_SENTINEL))
     }
 }
 
@@ -2614,6 +3159,7 @@ fn normalize_builtin_specifier(specifier: &str) -> Option<String> {
         | "dgram"
         | "diagnostics_channel"
         | "dns"
+        | "dns/promises"
         | "events"
         | "fs"
         | "fs/promises"
@@ -2682,8 +3228,11 @@ fn polyfill_expression(request: &str) -> Option<String> {
                 message = serde_json::to_string(&format!(
                     "node:{normalized} is not available in the Agent OS guest runtime"
                 ))
-                .unwrap_or_else(|_| format!("\"node:{normalized} is not available in the Agent OS guest runtime\"")),
-                code = serde_json::to_string(error_code).unwrap_or_else(|_| "\"ERR_ACCESS_DENIED\"".to_owned())
+                .unwrap_or_else(|_| format!(
+                    "\"node:{normalized} is not available in the Agent OS guest runtime\""
+                )),
+                code = serde_json::to_string(error_code)
+                    .unwrap_or_else(|_| "\"ERR_ACCESS_DENIED\"".to_owned())
             )
         }
     })
@@ -3077,11 +3626,7 @@ function pathToFileURL(path) {
   const href = `file://${pathname}`;
 
   try {
-    const url = new NativeURL("file:///");
-    url.pathname = pathname;
-    if (typeof url.href === "string" && url.href.startsWith("file:///")) {
-      return url;
-    }
+    return new NativeURL(href);
   } catch {}
 
   return buildFileUrlRecord(href, pathname);
@@ -3217,8 +3762,14 @@ export function createInterface(options = {}) {
   let ended = false;
   const queuedLines = [];
   let pendingResolve = null;
+  const pendingQuestionResolves = [];
 
   const enqueueLine = (line) => {
+    if (pendingQuestionResolves.length > 0) {
+      const resolve = pendingQuestionResolves.shift();
+      resolve(line);
+      return;
+    }
     if (pendingResolve) {
       const resolve = pendingResolve;
       pendingResolve = null;
@@ -3253,6 +3804,10 @@ export function createInterface(options = {}) {
     ended = true;
     flush();
     emitter.emit("close");
+    while (pendingQuestionResolves.length > 0) {
+      const resolve = pendingQuestionResolves.shift();
+      resolve("");
+    }
     if (pendingResolve) {
       const resolve = pendingResolve;
       pendingResolve = null;
@@ -3263,7 +3818,9 @@ export function createInterface(options = {}) {
   if (input && typeof input.on === "function") {
     input.on("data", onData);
     input.on("end", onEnd);
-    input.on("close", onEnd);
+    if (typeof input.resume === "function") {
+      input.resume();
+    }
   }
 
   emitter.close = () => {
@@ -3272,10 +3829,13 @@ export function createInterface(options = {}) {
     if (input && typeof input.off === "function") {
       input.off("data", onData);
       input.off("end", onEnd);
-      input.off("close", onEnd);
     }
     flush();
     emitter.emit("close");
+    while (pendingQuestionResolves.length > 0) {
+      const resolve = pendingQuestionResolves.shift();
+      resolve("");
+    }
     if (pendingResolve) {
       const resolve = pendingResolve;
       pendingResolve = null;
@@ -3287,9 +3847,24 @@ export function createInterface(options = {}) {
     if (output && typeof output.write === "function" && prompt) {
       output.write(String(prompt));
     }
+    const readLine = () => {
+      if (queuedLines.length > 0) {
+        return Promise.resolve(queuedLines.shift());
+      }
+      if (closed || ended) {
+        return Promise.resolve("");
+      }
+      return new Promise((resolve) => {
+        pendingQuestionResolves.push(resolve);
+      });
+    };
     if (typeof callback === "function") {
-      callback("");
+      void readLine().then((line) => {
+        callback(line);
+      });
+      return;
     }
+    return readLine();
   };
 
   emitter[Symbol.asyncIterator] = () => ({
@@ -3794,10 +4369,42 @@ if (typeof _m.constants === "undefined") {
 
 export default _m;
 export const constants = _m.constants;
+export const BrotliCompress = _m.BrotliCompress;
+export const BrotliDecompress = _m.BrotliDecompress;
+export const Deflate = _m.Deflate;
+export const DeflateRaw = _m.DeflateRaw;
+export const Gunzip = _m.Gunzip;
+export const Gzip = _m.Gzip;
+export const Inflate = _m.Inflate;
+export const InflateRaw = _m.InflateRaw;
+export const Unzip = _m.Unzip;
+export const brotliCompress = _m.brotliCompress;
+export const brotliCompressSync = _m.brotliCompressSync;
+export const brotliDecompress = _m.brotliDecompress;
+export const brotliDecompressSync = _m.brotliDecompressSync;
+export const createBrotliCompress = _m.createBrotliCompress;
+export const createBrotliDecompress = _m.createBrotliDecompress;
 export const createDeflate = _m.createDeflate;
+export const createDeflateRaw = _m.createDeflateRaw;
+export const createGunzip = _m.createGunzip;
+export const createGzip = _m.createGzip;
 export const createInflate = _m.createInflate;
+export const createInflateRaw = _m.createInflateRaw;
+export const createUnzip = _m.createUnzip;
+export const deflate = _m.deflate;
+export const deflateRaw = _m.deflateRaw;
+export const deflateRawSync = _m.deflateRawSync;
 export const deflateSync = _m.deflateSync;
+export const gunzip = _m.gunzip;
+export const gunzipSync = _m.gunzipSync;
+export const gzip = _m.gzip;
+export const gzipSync = _m.gzipSync;
+export const inflate = _m.inflate;
+export const inflateRaw = _m.inflateRaw;
+export const inflateRawSync = _m.inflateRawSync;
 export const inflateSync = _m.inflateSync;
+export const unzip = _m.unzip;
+export const unzipSync = _m.unzipSync;
 "#,
         );
     }
@@ -3872,11 +4479,18 @@ export const writeFile = _m.writeFile;
 
 function createInterface(...args) {
   const interfaceValue = _m.createInterface(...args);
-  if (
-    interfaceValue &&
-    typeof interfaceValue === "object" &&
-    typeof interfaceValue[Symbol.asyncIterator] !== "function"
-  ) {
+  if (interfaceValue && typeof interfaceValue === "object") {
+    if (interfaceValue.__agentOsReadlineWrapped === true) {
+      return interfaceValue;
+    }
+    Object.defineProperty(interfaceValue, "__agentOsReadlineWrapped", {
+      value: true,
+      configurable: true,
+      enumerable: false,
+      writable: false,
+    });
+    const options = args[0] && typeof args[0] === "object" ? args[0] : {};
+    const output = options.output ?? null;
     const originalOn = typeof interfaceValue.on === "function"
       ? interfaceValue.on.bind(interfaceValue)
       : null;
@@ -3889,9 +4503,15 @@ function createInterface(...args) {
       ? interfaceValue.close.bind(interfaceValue)
       : null;
     const queued = [];
+    const pendingQuestionResolves = [];
     let pendingResolve = null;
     let done = false;
     const enqueue = (line) => {
+      if (pendingQuestionResolves.length > 0) {
+        const resolve = pendingQuestionResolves.shift();
+        resolve(line);
+        return;
+      }
       if (pendingResolve) {
         const resolve = pendingResolve;
         pendingResolve = null;
@@ -3905,14 +4525,41 @@ function createInterface(...args) {
         return;
       }
       done = true;
+      while (pendingQuestionResolves.length > 0) {
+        const resolve = pendingQuestionResolves.shift();
+        resolve("");
+      }
       if (pendingResolve) {
         const resolve = pendingResolve;
         pendingResolve = null;
         resolve({ done: true, value: void 0 });
       }
     };
+    const readLine = () => {
+      if (queued.length > 0) {
+        return Promise.resolve(queued.shift());
+      }
+      if (done) {
+        return Promise.resolve("");
+      }
+      return new Promise((resolve) => {
+        pendingQuestionResolves.push(resolve);
+      });
+    };
     originalOn?.("line", enqueue);
     originalOn?.("close", finish);
+    interfaceValue.question = (prompt, callback) => {
+      if (output && typeof output.write === "function" && prompt) {
+        output.write(String(prompt));
+      }
+      if (typeof callback === "function") {
+        void readLine().then((line) => {
+          callback(line);
+        });
+        return;
+      }
+      return readLine();
+    };
     interfaceValue[Symbol.asyncIterator] = () => ({
       next() {
         if (queued.length > 0) {
@@ -4191,40 +4838,141 @@ export default {
 
     if module_name == "vm" {
         return String::from(
-            r#"function runInThisContext(code) {
-  return (0, eval)(String(code));
+            r#"const VM_CONTEXT_TAG = typeof Symbol === "function" ? Symbol.for("agent-os.vm.context") : "__agent_os_vm_context__";
+const VM_CONTEXT_ID = typeof Symbol === "function" ? Symbol.for("agent-os.vm.context.id") : "__agent_os_vm_context_id__";
+
+function createVmNotImplementedError(feature) {
+  const error = new Error(`node:vm ${feature} is not implemented in the Agent OS guest runtime`);
+  error.code = "ERR_NOT_IMPLEMENTED";
+  return error;
+}
+
+function isVmContextCandidate(value) {
+  return value !== null && (typeof value === "object" || typeof value === "function");
+}
+
+function normalizeVmOptions(options = undefined) {
+  if (typeof options === "string") {
+    return { filename: options };
+  }
+  if (!options || typeof options !== "object") {
+    return {};
+  }
+  const normalized = {};
+  if (typeof options.filename === "string") {
+    normalized.filename = options.filename;
+  }
+  if (Number.isInteger(options.lineOffset)) {
+    normalized.lineOffset = options.lineOffset;
+  }
+  if (Number.isInteger(options.columnOffset)) {
+    normalized.columnOffset = options.columnOffset;
+  }
+  if (Number.isInteger(options.timeout) && options.timeout > 0) {
+    normalized.timeout = options.timeout;
+  }
+  if (options.cachedData !== undefined) {
+    normalized.cachedData = options.cachedData;
+  }
+  if (options.produceCachedData === true) {
+    normalized.produceCachedData = true;
+  }
+  return normalized;
+}
+
+function mergeVmOptions(baseOptions, overrideOptions) {
+  return { ...normalizeVmOptions(baseOptions), ...normalizeVmOptions(overrideOptions) };
 }
 
 function createContext(context = {}) {
+  if (!isVmContextCandidate(context)) {
+    throw new TypeError('The "object" argument must be of type object.');
+  }
+  if (context[VM_CONTEXT_TAG] === true && Number.isInteger(context[VM_CONTEXT_ID])) {
+    return context;
+  }
+  const contextId = globalThis._vmCreateContext(context);
+  Object.defineProperty(context, VM_CONTEXT_TAG, {
+    value: true,
+    configurable: true,
+    enumerable: false,
+    writable: false,
+  });
+  Object.defineProperty(context, VM_CONTEXT_ID, {
+    value: contextId,
+    configurable: false,
+    enumerable: false,
+    writable: false,
+  });
   return context;
 }
 
 function isContext(context) {
-  return Boolean(context) && typeof context === "object";
+  return isVmContextCandidate(context) && context[VM_CONTEXT_TAG] === true && Number.isInteger(context[VM_CONTEXT_ID]);
 }
 
-function runInNewContext(code, context = {}) {
-  const params = Object.keys(context);
-  const values = Object.values(context);
-  return Function(...params, `return (${String(code)});`)(...values);
+function assertContext(context) {
+  if (!isContext(context)) {
+    throw new TypeError('The "contextifiedObject" argument must be a vm context.');
+  }
+  return context;
+}
+
+function runInThisContext(code, options = undefined) {
+  return globalThis._vmRunInThisContext(String(code), normalizeVmOptions(options));
+}
+
+function runInContext(code, contextifiedObject, options = undefined) {
+  const context = assertContext(contextifiedObject);
+  return globalThis._vmRunInContext(context[VM_CONTEXT_ID], String(code), normalizeVmOptions(options), context);
+}
+
+function runInNewContext(code, contextOrOptions = {}, maybeOptions = undefined) {
+  const hasExplicitContext = isVmContextCandidate(contextOrOptions);
+  const context = hasExplicitContext ? contextOrOptions : {};
+  const options = hasExplicitContext ? maybeOptions : contextOrOptions;
+  return runInContext(code, createContext(context), options);
 }
 
 class Script {
-  constructor(code) {
+  constructor(code, options = undefined) {
     this.code = String(code);
+    this.options = normalizeVmOptions(options);
+    this.filename = this.options.filename ?? "evalmachine.<anonymous>";
+    this.lineOffset = this.options.lineOffset ?? 0;
+    this.columnOffset = this.options.columnOffset ?? 0;
+    this.cachedData = this.options.cachedData;
+    this.cachedDataProduced = false;
+    this.cachedDataRejected = false;
   }
 
-  runInThisContext() {
-    return runInThisContext(this.code);
+  createCachedData() {
+    return typeof Buffer === "function" ? Buffer.alloc(0) : new Uint8Array(0);
   }
 
-  runInNewContext(context = {}) {
-    return runInNewContext(this.code, context);
+  runInThisContext(options = undefined) {
+    return runInThisContext(this.code, mergeVmOptions(this.options, options));
+  }
+
+  runInContext(contextifiedObject, options = undefined) {
+    return runInContext(this.code, contextifiedObject, mergeVmOptions(this.options, options));
+  }
+
+  runInNewContext(context = {}, options = undefined) {
+    return runInNewContext(this.code, context, mergeVmOptions(this.options, options));
   }
 }
 
-export { Script, createContext, isContext, runInNewContext, runInThisContext };
-export default { Script, createContext, isContext, runInNewContext, runInThisContext };
+function compileFunction() {
+  throw createVmNotImplementedError("compileFunction");
+}
+
+function measureMemory() {
+  throw createVmNotImplementedError("measureMemory");
+}
+
+export { Script, compileFunction, createContext, isContext, measureMemory, runInContext, runInNewContext, runInThisContext };
+export default { Script, compileFunction, createContext, isContext, measureMemory, runInContext, runInNewContext, runInThisContext };
 "#,
         );
     }
@@ -4409,7 +5157,33 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "once",
             "setMaxListeners",
         ],
-        "dns" => &["lookup", "promises", "resolve", "resolve4", "resolve6"],
+        "dns" => &[
+            "Resolver",
+            "getServers",
+            "lookup",
+            "promises",
+            "resolve",
+            "resolve4",
+            "resolve6",
+            "setServers",
+        ],
+        "dns/promises" => &[
+            "Resolver",
+            "lookup",
+            "resolve",
+            "resolve4",
+            "resolve6",
+            "resolveAny",
+            "resolveMx",
+            "resolveTxt",
+            "resolveSrv",
+            "resolveCname",
+            "resolvePtr",
+            "resolveNs",
+            "resolveSoa",
+            "resolveNaptr",
+            "resolveCaa",
+        ],
         "fs" => &[
             "access",
             "accessSync",
@@ -4487,13 +5261,39 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
         ],
         "http" => &[
             "Agent",
+            "ClientRequest",
+            "IncomingMessage",
             "METHODS",
+            "Server",
+            "ServerResponse",
             "STATUS_CODES",
+            "_checkInvalidHeaderChar",
+            "_checkIsHttpToken",
             "createServer",
+            "get",
+            "globalAgent",
+            "maxHeaderSize",
             "request",
+            "validateHeaderName",
+            "validateHeaderValue",
         ],
         "http2" => &["connect", "createServer", "createSecureServer"],
-        "https" => &["Agent", "createServer", "request"],
+        "https" => &[
+            "Agent",
+            "ClientRequest",
+            "IncomingMessage",
+            "Server",
+            "ServerResponse",
+            "_checkInvalidHeaderChar",
+            "_checkIsHttpToken",
+            "createServer",
+            "get",
+            "globalAgent",
+            "maxHeaderSize",
+            "request",
+            "validateHeaderName",
+            "validateHeaderValue",
+        ],
         "module" => &[
             "Module",
             "_cache",
@@ -4688,8 +5488,11 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
         ],
         "vm" => &[
             "Script",
+            "compileFunction",
             "createContext",
             "isContext",
+            "measureMemory",
+            "runInContext",
             "runInNewContext",
             "runInThisContext",
         ],
@@ -4727,11 +5530,43 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "workerData",
         ],
         "zlib" => &[
+            "BrotliCompress",
+            "BrotliDecompress",
+            "Deflate",
+            "DeflateRaw",
+            "Gunzip",
+            "Gzip",
+            "Inflate",
+            "InflateRaw",
+            "Unzip",
+            "brotliCompress",
+            "brotliCompressSync",
+            "brotliDecompress",
+            "brotliDecompressSync",
             "constants",
+            "createBrotliCompress",
+            "createBrotliDecompress",
             "createDeflate",
+            "createDeflateRaw",
+            "createGunzip",
+            "createGzip",
             "createInflate",
+            "createInflateRaw",
+            "createUnzip",
+            "deflate",
+            "deflateRaw",
+            "deflateRawSync",
             "deflateSync",
+            "gunzip",
+            "gunzipSync",
+            "gzip",
+            "gzipSync",
+            "inflate",
+            "inflateRaw",
+            "inflateRawSync",
             "inflateSync",
+            "unzip",
+            "unzipSync",
         ],
         _ => &[],
     }
@@ -4894,6 +5729,43 @@ mod tests {
     use nix::unistd::pipe2;
     use serde_json::Value;
     use std::io::BufRead;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::tempdir;
+
+    #[test]
+    fn inline_code_module_detection_prefers_commonjs_when_import_only_appears_in_comment() {
+        let source = "// import { x } from 'y';\nmodule.exports = { foo: 1 };";
+        assert!(!inline_code_uses_module_mode(source));
+    }
+
+    #[test]
+    fn inline_code_module_detection_ignores_import_inside_string_literal() {
+        let source = "const msg = \"run: import x from 'y'\";\nmodule.exports.msg = msg;";
+        assert!(!inline_code_uses_module_mode(source));
+    }
+
+    #[test]
+    fn inline_code_module_detection_accepts_multiline_import_statements() {
+        let source = "import\n  { default as foo }\nfrom 'bar';\nconsole.log(foo);";
+        assert!(inline_code_uses_module_mode(source));
+    }
+
+    #[test]
+    fn inline_code_module_detection_accepts_real_esm_source() {
+        let source = "import { foo } from 'bar';\nexport const baz = 1;\nconsole.log(foo, baz);";
+        assert!(inline_code_uses_module_mode(source));
+    }
+
+    #[test]
+    fn inline_code_module_detection_is_deterministic_for_empty_comment_only_and_template_cases() {
+        assert!(!inline_code_uses_module_mode(""));
+        assert!(!inline_code_uses_module_mode(
+            "// import x from 'y';\n/* export const z = 1; */"
+        ));
+        assert!(!inline_code_uses_module_mode(
+            "const msg = `export const nope = 1;`;"
+        ));
+    }
 
     #[test]
     fn javascript_sync_rpc_timeout_writes_clear_error_response() {
@@ -4955,5 +5827,117 @@ mod tests {
         assert!(error
             .to_string()
             .contains("timed out after 30ms while queueing JavaScript sync RPC response"));
+    }
+
+    #[test]
+    fn internal_bridge_host_context_resolves_relative_module_path() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "agent-os-module-bridge-{}-{unique}",
+            std::process::id()
+        ));
+        let bin_dir = root.join("node_modules/next/dist/bin");
+        let cli_dir = root.join("node_modules/next/dist/cli");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        fs::create_dir_all(&cli_dir).expect("create cli dir");
+        fs::write(
+            root.join("node_modules/next/package.json"),
+            r#"{"name":"next"}"#,
+        )
+        .expect("write package.json");
+        fs::write(bin_dir.join("next"), "#!/usr/bin/env node\n").expect("write next bin");
+        fs::write(cli_dir.join("next-build.js"), "module.exports = 1;\n")
+            .expect("write next-build.js");
+
+        let env = BTreeMap::new();
+        let result = handle_internal_bridge_call_from_host_context(
+            &root,
+            "/",
+            &env,
+            "_resolveModule",
+            &[
+                Value::String(String::from("../cli/next-build.js")),
+                Value::String(String::from("/node_modules/next/dist/bin/next")),
+                Value::String(String::from("import")),
+            ],
+        );
+
+        assert_eq!(
+            result,
+            Some(Value::String(String::from(
+                "/node_modules/next/dist/cli/next-build.js"
+            )))
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp module tree");
+    }
+
+    #[test]
+    fn register_v8_session_deregisters_on_create_session_failure() {
+        let host = V8RuntimeHost::spawn().expect("spawn V8 runtime host");
+        let session_id = format!(
+            "v8-register-failure-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        );
+
+        let error = match register_v8_session(&host, session_id.clone(), 0, |_frame| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "simulated CreateSession send failure",
+            ))
+        }) {
+            Ok(_) => panic!("register_v8_session should surface create-session send failures"),
+            Err(error) => error,
+        };
+
+        match error {
+            JavascriptExecutionError::Spawn(inner) => {
+                assert_eq!(inner.kind(), std::io::ErrorKind::BrokenPipe);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        let receiver = host
+            .register_session(&session_id)
+            .expect("failed registration should not leak the session output receiver");
+        drop(receiver);
+        host.unregister_session(&session_id);
+    }
+
+    #[test]
+    fn javascript_execution_drop_keeps_normal_v8_session_cleanup() {
+        let temp = tempdir().expect("create temp dir");
+        let mut engine = JavascriptExecutionEngine::default();
+        let context = engine.create_context(CreateJavascriptContextRequest {
+            vm_id: String::from("vm-drop-cleanup"),
+            bootstrap_module: None,
+            compile_cache_root: None,
+        });
+
+        let execution = engine
+            .start_execution(StartJavascriptExecutionRequest {
+                vm_id: String::from("vm-drop-cleanup"),
+                context_id: context.context_id,
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::new(),
+                cwd: temp.path().to_path_buf(),
+                inline_code: Some(String::from("globalThis.__agentOsDropCleanup = true;")),
+            })
+            .expect("start JavaScript execution");
+        let session_id = execution.v8_session.session_id().to_owned();
+        let host = engine.v8_host.as_ref().expect("shared V8 runtime host");
+
+        drop(execution);
+
+        let receiver = host
+            .register_session(&session_id)
+            .expect("execution drop should still destroy and deregister the session");
+        drop(receiver);
+        host.unregister_session(&session_id);
     }
 }

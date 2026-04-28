@@ -5,7 +5,6 @@ import codexAgent from "@rivet-dev/agent-os-codex-agent";
 import { afterEach, describe, expect, test } from "vitest";
 import { z } from "zod";
 import { AgentOs, hostTool, toolKit } from "../src/index.js";
-import { registrySkipReason } from "./helpers/registry-commands.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
 const MOCK_ADAPTER_PATH = "/tmp/mock-migration-parity-adapter.mjs";
@@ -189,219 +188,238 @@ function useMockAdapterBin(vm: AgentOs, scriptPath: string): () => void {
 	};
 }
 
-describe.skipIf(registrySkipReason)(
-	"native sidecar migration parity gate",
-	() => {
-		const cleanups = new Set<() => Promise<void>>();
+describe("native sidecar migration parity gate", () => {
+	const cleanups = new Set<() => Promise<void>>();
 
-		afterEach(async () => {
-			for (const stop of cleanups) {
-				await stop();
-			}
-			cleanups.clear();
+	afterEach(async () => {
+		for (const stop of cleanups) {
+			await stop();
+		}
+		cleanups.clear();
+	});
+
+test("covers filesystem, process execution, and reusable layer snapshots on the Rust sidecar path", async () => {
+		const vm = await AgentOs.create({
+			software: [common],
+			permissions: {
+				fs: "allow",
+				childProcess: "allow",
+			},
+		});
+		cleanups.add(async () => {
+			await vm.dispose();
+		});
+		assertNativeSidecar(vm);
+
+		await vm.mkdir("/workspace", { recursive: true });
+		await vm.writeFile("/workspace/source.txt", "filesystem-ok");
+
+		const processResult = await runSpawnedProcess(vm, "node", [
+			"-e",
+			[
+				'const fs = require("node:fs");',
+				'const input = fs.readFileSync("/workspace/source.txt", "utf8");',
+				'fs.writeFileSync("/workspace/process.txt", `${input}:process-ok`);',
+				'console.log(JSON.stringify({ input, wrote: "/workspace/process.txt" }));',
+			].join("\n"),
+		]);
+
+		expect(processResult.exitCode).toBe(0);
+		expect(processResult.stderr).toBe("");
+		expect(JSON.parse(processResult.stdout.trim())).toEqual({
+			input: "filesystem-ok",
+			wrote: "/workspace/process.txt",
+		});
+		expect(
+			textDecoder.decode(await vm.readFile("/workspace/process.txt")),
+		).toBe("filesystem-ok:process-ok");
+
+		const snapshot = await vm.snapshotRootFilesystem();
+		const clonedVm = await AgentOs.create({
+			rootFilesystem: {
+				disableDefaultBaseLayer: true,
+				lowers: [snapshot],
+			},
+			permissions: {
+				fs: "allow",
+			},
+		});
+		cleanups.add(async () => {
+			await clonedVm.dispose();
+		});
+		assertNativeSidecar(clonedVm);
+
+		expect(
+			textDecoder.decode(await clonedVm.readFile("/workspace/process.txt")),
+		).toBe("filesystem-ok:process-ok");
+		expect(
+			textDecoder.decode(await clonedVm.readFile("/workspace/source.txt")),
+		).toBe("filesystem-ok");
+	}, 60_000);
+
+	test("covers registered host tools through guest command dispatch on the Rust sidecar path", async () => {
+		const vm = await AgentOs.create({
+			software: [common],
+			toolKits: [mathToolKit],
+			permissions: {
+				fs: "allow",
+				childProcess: "allow",
+				tool: "allow",
+			},
+		});
+		cleanups.add(async () => {
+			await vm.dispose();
+		});
+		assertNativeSidecar(vm);
+
+		const listed = await runSpawnedProcess(vm, "agentos", ["list-tools"]);
+		expect(listed.exitCode).toBe(0);
+		expect(JSON.parse(listed.stdout)).toEqual({
+			ok: true,
+			result: {
+				toolkits: [
+					{
+						name: "math",
+						description: "Math utilities",
+						tools: ["add"],
+					},
+				],
+			},
 		});
 
-		test("covers filesystem, process execution, and reusable layer snapshots on the Rust sidecar path", async () => {
-			const vm = await AgentOs.create({
-				software: [common],
-			});
-			cleanups.add(async () => {
-				await vm.dispose();
-			});
-			assertNativeSidecar(vm);
+		const result = await runSpawnedProcess(vm, "agentos-math", [
+			"add",
+			"--a",
+			"8",
+			"--b",
+			"13",
+		]);
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.stdout)).toEqual({
+			ok: true,
+			result: { sum: 21 },
+		});
+	}, 60_000);
 
-			await vm.mkdir("/workspace", { recursive: true });
-			await vm.writeFile("/workspace/source.txt", "filesystem-ok");
-
-			const processResult = await runSpawnedProcess(vm, "node", [
-				"-e",
-				[
-					'const fs = require("node:fs");',
-					'const input = fs.readFileSync("/workspace/source.txt", "utf8");',
-					'fs.writeFileSync("/workspace/process.txt", `${input}:process-ok`);',
-					'console.log(JSON.stringify({ input, wrote: "/workspace/process.txt" }));',
-				].join("\n"),
-			]);
-
-			expect(processResult.exitCode).toBe(0);
-			expect(processResult.stderr).toBe("");
-			expect(JSON.parse(processResult.stdout.trim())).toEqual({
-				input: "filesystem-ok",
-				wrote: "/workspace/process.txt",
-			});
-			expect(textDecoder.decode(await vm.readFile("/workspace/process.txt"))).toBe(
-				"filesystem-ok:process-ok",
+	test("covers guest loopback networking through the Rust sidecar path", async () => {
+		const server = createServer((req, res) => {
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(
+				JSON.stringify({
+					ok: true,
+					path: getRequestPath(req),
+				}),
 			);
+		});
+		await new Promise<void>((resolveListen) => {
+			server.listen(0, "127.0.0.1", () => resolveListen());
+		});
+		cleanups.add(
+			async () =>
+				await new Promise<void>((resolveClose, reject) => {
+					server.close((error) => {
+						if (error) {
+							reject(error);
+							return;
+						}
+						resolveClose();
+					});
+				}),
+		);
 
-			const snapshot = await vm.snapshotRootFilesystem();
-			const clonedVm = await AgentOs.create({
-				rootFilesystem: {
-					disableDefaultBaseLayer: true,
-					lowers: [snapshot],
-				},
-			});
-			cleanups.add(async () => {
-				await clonedVm.dispose();
-			});
-			assertNativeSidecar(clonedVm);
+		const address = server.address();
+		if (!address || typeof address === "string") {
+			throw new Error("host fixture did not expose a TCP port");
+		}
 
-			expect(
-				textDecoder.decode(await clonedVm.readFile("/workspace/process.txt")),
-			).toBe("filesystem-ok:process-ok");
-			expect(
-				textDecoder.decode(await clonedVm.readFile("/workspace/source.txt")),
-			).toBe("filesystem-ok");
-		}, 60_000);
+		const vm = await AgentOs.create({
+			loopbackExemptPorts: [address.port],
+			permissions: {
+				fs: "allow",
+				childProcess: "allow",
+				network: "allow",
+			},
+		});
+		cleanups.add(async () => {
+			await vm.dispose();
+		});
+		assertNativeSidecar(vm);
 
-		test("covers registered host tools through guest command dispatch on the Rust sidecar path", async () => {
-			const vm = await AgentOs.create({
-				software: [common],
-				toolKits: [mathToolKit],
-			});
-			cleanups.add(async () => {
-				await vm.dispose();
-			});
-			assertNativeSidecar(vm);
+		const result = await runSpawnedProcess(vm, "node", [
+			"-e",
+			[
+				"async function main() {",
+				`  const response = await fetch("http://127.0.0.1:${address.port}/parity");`,
+				"  const body = await response.json();",
+				"  console.log(JSON.stringify(body));",
+				"}",
+				"main().catch((error) => {",
+				"  console.error(error);",
+				"  process.exit(1);",
+				"});",
+			].join("\n"),
+		]);
 
-			const listed = await runSpawnedProcess(vm, "agentos", ["list-tools"]);
-			expect(listed.exitCode).toBe(0);
-			expect(JSON.parse(listed.stdout)).toEqual({
-				ok: true,
-				result: {
-					toolkits: [
-						{
-							name: "math",
-							description: "Math utilities",
-							tools: ["add"],
-						},
-					],
-				},
-			});
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toBe("");
+		expect(JSON.parse(result.stdout.trim())).toEqual({
+			ok: true,
+			path: "/parity",
+		});
+	}, 60_000);
 
-			const result = await runSpawnedProcess(vm, "agentos-math", [
-				"add",
-				"--a",
-				"8",
-				"--b",
-				"13",
-			]);
-			expect(result.exitCode).toBe(0);
-			expect(JSON.parse(result.stdout)).toEqual({
-				ok: true,
-				result: { sum: 21 },
-			});
-		}, 60_000);
+	test("covers session lifecycle and agent prompt flow on the Rust sidecar path", async () => {
+		const vm = await AgentOs.create({
+			moduleAccessCwd: MODULE_ACCESS_CWD,
+			software: [codexAgent],
+			permissions: {
+				fs: "allow",
+				childProcess: "allow",
+				network: "allow",
+			},
+		});
+		cleanups.add(async () => {
+			await vm.dispose();
+		});
+		assertNativeSidecar(vm);
 
-		test("covers guest loopback networking through the Rust sidecar path", async () => {
-			const server = createServer((req, res) => {
-				res.writeHead(200, { "content-type": "application/json" });
-				res.end(
-					JSON.stringify({
-						ok: true,
-						path: getRequestPath(req),
-					}),
-				);
-			});
-			await new Promise<void>((resolveListen) => {
-				server.listen(0, "127.0.0.1", () => resolveListen());
-			});
-			cleanups.add(
-				async () =>
-					await new Promise<void>((resolveClose, reject) => {
-						server.close((error) => {
-							if (error) {
-								reject(error);
-								return;
-							}
-							resolveClose();
-						});
-					}),
-			);
+		const restoreAdapter = useMockAdapterBin(vm, MOCK_ADAPTER_PATH);
+		cleanups.add(async () => {
+			restoreAdapter();
+		});
+		await vm.writeFile(MOCK_ADAPTER_PATH, MOCK_ACP_ADAPTER);
 
-			const address = server.address();
-			if (!address || typeof address === "string") {
-				throw new Error("host fixture did not expose a TCP port");
-			}
+		const { sessionId } = await vm.createSession("codex");
 
-			const vm = await AgentOs.create({
-				loopbackExemptPorts: [address.port],
-			});
-			cleanups.add(async () => {
-				await vm.dispose();
-			});
-			assertNativeSidecar(vm);
+		const { response, text } = await vm.prompt(
+			sessionId,
+			"Run the migration parity prompt flow.",
+		);
 
-			const result = await runSpawnedProcess(vm, "node", [
-				"-e",
-				[
-					"async function main() {",
-					`  const response = await fetch("http://127.0.0.1:${address.port}/parity");`,
-					"  const body = await response.json();",
-					"  console.log(JSON.stringify(body));",
-					"}",
-					"main().catch((error) => {",
-					"  console.error(error);",
-					"  process.exit(1);",
-					"});",
-				].join("\n"),
-			]);
+		expect(response.error).toBeUndefined();
+		expect((response.result as { stopReason?: string }).stopReason).toBe(
+			"end_turn",
+		);
+		expect(text).toContain("mock-parity-flow-ok");
 
-			expect(result.exitCode).toBe(0);
-			expect(result.stderr).toBe("");
-			expect(JSON.parse(result.stdout.trim())).toEqual({
-				ok: true,
-				path: "/parity",
-			});
-		}, 60_000);
+		const events = vm
+			.getSessionEvents(sessionId)
+			.map((entry) => entry.notification);
+		expect(
+			events.some(
+				(event) =>
+					event.method === "session/update" &&
+					JSON.stringify(event.params).includes("tool_call"),
+			),
+		).toBe(true);
+		expect(
+			events.some(
+				(event) =>
+					event.method === "session/update" &&
+					JSON.stringify(event.params).includes('"completed"'),
+			),
+		).toBe(true);
 
-		test("covers session lifecycle and agent prompt flow on the Rust sidecar path", async () => {
-			const vm = await AgentOs.create({
-				moduleAccessCwd: MODULE_ACCESS_CWD,
-				software: [codexAgent],
-			});
-			cleanups.add(async () => {
-				await vm.dispose();
-			});
-			assertNativeSidecar(vm);
-
-			const restoreAdapter = useMockAdapterBin(vm, MOCK_ADAPTER_PATH);
-			cleanups.add(async () => {
-				restoreAdapter();
-			});
-			await vm.writeFile(MOCK_ADAPTER_PATH, MOCK_ACP_ADAPTER);
-
-			const { sessionId } = await vm.createSession("codex");
-
-			const { response, text } = await vm.prompt(
-				sessionId,
-				"Run the migration parity prompt flow.",
-			);
-
-			expect(response.error).toBeUndefined();
-			expect((response.result as { stopReason?: string }).stopReason).toBe(
-				"end_turn",
-			);
-			expect(text).toContain("mock-parity-flow-ok");
-
-			const events = vm
-				.getSessionEvents(sessionId)
-				.map((entry) => entry.notification);
-			expect(
-				events.some(
-					(event) =>
-						event.method === "session/update" &&
-						JSON.stringify(event.params).includes("tool_call"),
-				),
-			).toBe(true);
-			expect(
-				events.some(
-					(event) =>
-						event.method === "session/update" &&
-						JSON.stringify(event.params).includes("\"completed\""),
-				),
-			).toBe(true);
-
-			await vm.destroySession(sessionId);
-		}, 120_000);
-	},
-);
+		await vm.destroySession(sessionId);
+	}, 120_000);
+});

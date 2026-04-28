@@ -190,6 +190,8 @@ type PiToolLike = {
 	}>;
 };
 
+type ExtensionFactoryLike = (api: unknown) => unknown;
+
 type PiSessionLike = {
 	readonly sessionId: string;
 	readonly thinkingLevel: string;
@@ -218,6 +220,12 @@ type PiSdkRuntime = {
 	AuthStorage: {
 		create(authPath?: string): unknown;
 	};
+	DefaultResourceLoader: new (options: {
+		cwd?: string;
+		agentDir?: string;
+		settingsManager?: SettingsManagerInstanceLike;
+		appendSystemPrompt?: string;
+	}) => MinimalResourceLoaderLike;
 	DEFAULT_THINKING_LEVEL: string;
 	ModelRegistry: new (authStorage: unknown, modelsPath?: string) => {
 		find(provider: string, modelId: string): ModelLike | undefined;
@@ -422,6 +430,107 @@ function installAgentOsToolOverrides(
 	});
 }
 
+const DISCOVERED_EXTENSION_INDEX_CANDIDATES = [
+	"index.js",
+	"index.mjs",
+	"index.cjs",
+] as const;
+
+function isDiscoveredExtensionEntry(name: string): boolean {
+	return (
+		name.endsWith(".js") || name.endsWith(".mjs") || name.endsWith(".cjs")
+	);
+}
+
+function discoverAutoExtensionPaths(cwd: string, agentDir: string): string[] {
+	const extensionRoots = [join(agentDir, "extensions"), join(cwd, ".pi", "extensions")];
+	const discovered = new Set<string>();
+
+	for (const root of extensionRoots) {
+		if (!existsSync(root)) {
+			continue;
+		}
+		for (const entry of readdirSync(root, { withFileTypes: true })) {
+			const entryPath = join(root, entry.name);
+			if (entry.isFile() && isDiscoveredExtensionEntry(entry.name)) {
+				discovered.add(entryPath);
+				continue;
+			}
+			if (!entry.isDirectory()) {
+				continue;
+			}
+			for (const candidate of DISCOVERED_EXTENSION_INDEX_CANDIDATES) {
+				const candidatePath = join(entryPath, candidate);
+				if (existsSync(candidatePath)) {
+					discovered.add(candidatePath);
+					break;
+				}
+			}
+		}
+	}
+
+	return [...discovered].sort();
+}
+
+async function loadExtensionFactoryFromPath(
+	extensionPath: string,
+): Promise<ExtensionFactoryLike | undefined> {
+	try {
+		const module = await import(extensionPath);
+		if (typeof module.default === "function") {
+			return module.default as ExtensionFactoryLike;
+		}
+		if (typeof module === "function") {
+			return module as ExtensionFactoryLike;
+		}
+	} catch (error) {
+		if (!extensionPath.endsWith(".cjs")) {
+			throw error;
+		}
+	}
+
+	const required = require(extensionPath);
+	if (typeof required === "function") {
+		return required as ExtensionFactoryLike;
+	}
+	if (typeof required?.default === "function") {
+		return required.default as ExtensionFactoryLike;
+	}
+	return undefined;
+}
+
+async function loadDiscoveredExtensionFactories(
+	cwd: string,
+	agentDir: string,
+): Promise<{
+	extensionFactories: ExtensionFactoryLike[];
+	errors: Array<{ path: string; error: string }>;
+}> {
+	const extensionFactories: ExtensionFactoryLike[] = [];
+	const errors: Array<{ path: string; error: string }> = [];
+
+	for (const extensionPath of discoverAutoExtensionPaths(cwd, agentDir)) {
+		try {
+			const factory = await loadExtensionFactoryFromPath(extensionPath);
+			if (!factory) {
+				errors.push({
+					path: extensionPath,
+					error: "Extension does not export a valid factory function",
+				});
+				continue;
+			}
+			extensionFactories.push(factory);
+		} catch (error) {
+			errors.push({
+				path: extensionPath,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	return { extensionFactories, errors };
+}
+
 class MinimalResourceLoader implements MinimalResourceLoaderLike {
 	private readonly runtime = {
 		flagValues: new Map<string, unknown>(),
@@ -520,6 +629,7 @@ async function loadPiSdkRuntime(): Promise<PiSdkRuntime> {
 				defaultsModule,
 				messagesModule,
 				modelRegistryModule,
+				resourceLoaderModule,
 				sdkModule,
 				sessionManagerModule,
 				settingsManagerModule,
@@ -532,6 +642,7 @@ async function loadPiSdkRuntime(): Promise<PiSdkRuntime> {
 					import(`${packageRoot}/dist/core/defaults.js`),
 					import(`${packageRoot}/dist/core/messages.js`),
 					import(`${packageRoot}/dist/core/model-registry.js`),
+					import(`${packageRoot}/dist/core/resource-loader.js`),
 					import(`${packageRoot}/dist/core/sdk.js`),
 					import(`${packageRoot}/dist/core/session-manager.js`),
 					import(`${packageRoot}/dist/core/settings-manager.js`),
@@ -541,6 +652,8 @@ async function loadPiSdkRuntime(): Promise<PiSdkRuntime> {
 			return {
 				Agent: agentCoreModule.Agent as PiAgentCoreLike,
 				AuthStorage: authStorageModule.AuthStorage as PiSdkRuntime["AuthStorage"],
+				DefaultResourceLoader:
+					resourceLoaderModule.DefaultResourceLoader as PiSdkRuntime["DefaultResourceLoader"],
 				DEFAULT_THINKING_LEVEL:
 					defaultsModule.DEFAULT_THINKING_LEVEL as string,
 				ModelRegistry:
@@ -653,18 +766,33 @@ class PiSdkAgent implements Agent {
 		params: NewSessionRequest,
 	): Promise<NewSessionResponse> {
 		this.cwd = params.cwd;
+		const agentDir = join(process.env.HOME || "/home/user", ".pi", "agent");
 		const {
+			DefaultResourceLoader,
 			SessionManager,
 			SettingsManager,
 			createCodingTools,
 		} = await loadPiSdkRuntime();
-		const resourceLoader = new MinimalResourceLoader({
+		const { extensionFactories, errors: extensionLoadErrors } =
+			await loadDiscoveredExtensionFactories(params.cwd, agentDir);
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: params.cwd,
+			agentDir,
+			...(extensionFactories.length > 0
+				? {
+						noExtensions: true,
+						extensionFactories,
+					}
+				: {}),
 			...(appendSystemPrompt ? { appendSystemPrompt } : {}),
 		});
 		await resourceLoader.reload();
+		for (const { path, error } of extensionLoadErrors) {
+			console.warn(`[pi-sdk-acp] Failed to load extension ${path}: ${error}`);
+		}
 		const settingsManager = SettingsManager.create(
 			params.cwd,
-			join(process.env.HOME || "/home/user", ".pi", "agent"),
+			agentDir,
 		);
 
 		const { session } = await createAgentSession({

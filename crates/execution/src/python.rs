@@ -7,7 +7,7 @@ use crate::javascript::{
 use crate::node_import_cache::{NodeImportCache, NODE_IMPORT_CACHE_ASSET_ROOT_ENV};
 use crate::runtime_support::{
     env_flag_enabled, file_fingerprint, resolve_execution_path, warmup_marker_path,
-    NODE_FROZEN_TIME_ENV,
+    NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
 };
 use crate::v8_runtime;
 use base64::Engine as _;
@@ -334,11 +334,13 @@ impl PythonExecution {
     }
 
     pub fn write_stdin(&mut self, chunk: &[u8]) -> Result<(), PythonExecutionError> {
-        self.inner.write_stdin(chunk).map_err(map_javascript_error)
+        self.inner.write_kernel_stdin_only(chunk);
+        Ok(())
     }
 
     pub fn close_stdin(&mut self) -> Result<(), PythonExecutionError> {
-        self.inner.close_stdin().map_err(map_javascript_error)
+        self.inner.close_kernel_stdin_only();
+        Ok(())
     }
 
     pub fn cancel(&mut self) -> Result<(), PythonExecutionError> {
@@ -717,11 +719,16 @@ impl PythonExecutionEngine {
         }
 
         let frozen_time_ms = frozen_time_ms();
-        let javascript_context_id = self
-            .javascript_context_ids
-            .get(&context.context_id)
-            .cloned()
-            .ok_or_else(|| PythonExecutionError::MissingContext(context.context_id.clone()))?;
+        let javascript_context =
+            self.javascript_engine
+                .create_context(CreateJavascriptContextRequest {
+                    vm_id: request.vm_id.clone(),
+                    bootstrap_module: None,
+                    compile_cache_root: None,
+                });
+        let javascript_context_id = javascript_context.context_id.clone();
+        self.javascript_context_ids
+            .insert(context.context_id.clone(), javascript_context_id.clone());
         let warmup_metrics = {
             let import_cache = self.import_caches.entry(context.vm_id.clone()).or_default();
             import_cache
@@ -898,6 +905,10 @@ fn build_python_internal_env(
         PYTHON_SYNC_RPC_WAIT_TIMEOUT_MS.to_string(),
     );
     internal_env.insert(
+        NODE_DISABLE_COMPILE_CACHE_ENV.to_string(),
+        String::from("1"),
+    );
+    internal_env.insert(
         V8_HEAP_LIMIT_MB_ENV.to_string(),
         python_max_old_space_mb(request).to_string(),
     );
@@ -947,6 +958,7 @@ fn add_python_guest_path_mapping(
 fn pyodide_cache_path(pyodide_dist_path: &Path) -> PathBuf {
     pyodide_dist_path
         .parent()
+        .and_then(Path::parent)
         .unwrap_or(pyodide_dist_path)
         .join("pyodide-package-cache")
 }
@@ -977,13 +989,13 @@ fn build_python_runner_bootstrap(
 
     match warmup_metrics_json {
         Some(warmup_metrics_json) => format!(
-            "const __agentOsPythonInternalEnv = {internal_env_json};\n\
-if (typeof process !== 'undefined') {{\n  process.env = {{ ...(process.env || {{}}), ...__agentOsPythonInternalEnv }};\n}}\n\
+            "globalThis.__agentOsPythonInternalEnv = {internal_env_json};\n\
+if (typeof process !== 'undefined') {{\n  process.env = {{ ...(process.env || {{}}), ...globalThis.__agentOsPythonInternalEnv }};\n}}\n\
 if (typeof process?.stderr?.write === 'function') {{\n  process.stderr.write({warmup_metrics_json});\n}}\n"
         ),
         None => format!(
-            "const __agentOsPythonInternalEnv = {internal_env_json};\n\
-if (typeof process !== 'undefined') {{\n  process.env = {{ ...(process.env || {{}}), ...__agentOsPythonInternalEnv }};\n}}\n"
+            "globalThis.__agentOsPythonInternalEnv = {internal_env_json};\n\
+if (typeof process !== 'undefined') {{\n  process.env = {{ ...(process.env || {{}}), ...globalThis.__agentOsPythonInternalEnv }};\n}}\n"
         ),
     }
 }
@@ -1190,17 +1202,7 @@ fn prewarm_python_path(
         PYTHON_WARMUP_MARKER_VERSION,
         &marker_contents,
     );
-    if marker_path.exists() {
-        return Ok(warmup_metrics_line(
-            debug_enabled,
-            false,
-            "cached",
-            0.0,
-            import_cache,
-            context,
-            request,
-        ));
-    }
+    let marker_exists = marker_path.exists();
 
     let started = Instant::now();
     let mut prewarm_execution = start_python_javascript_execution(
@@ -1298,6 +1300,18 @@ fn prewarm_python_path(
         });
     }
 
+    if marker_exists {
+        return Ok(warmup_metrics_line(
+            debug_enabled,
+            false,
+            "cached",
+            0.0,
+            import_cache,
+            context,
+            request,
+        ));
+    }
+
     fs::write(&marker_path, marker_contents).map_err(PythonExecutionError::PrepareWarmPath)?;
     Ok(warmup_metrics_line(
         debug_enabled,
@@ -1322,7 +1336,8 @@ fn python_javascript_sync_rpc_action(
     let Some(path) = request.args.first().and_then(Value::as_str) else {
         return Ok(None);
     };
-    let Some(host_path) = python_guest_path_to_host(pyodide_dist_path, path) else {
+    let path_kind = python_managed_path_kind(pyodide_dist_path, path);
+    let Some(host_path) = path_kind.host_path() else {
         return Ok(None);
     };
 
@@ -1330,15 +1345,15 @@ fn python_javascript_sync_rpc_action(
         "fs.promises.readFile" | "fs.readFileSync" => {
             let bytes = match fs::read(&host_path) {
                 Ok(bytes) => bytes,
-                Err(error) => return python_sync_rpc_fs_action_error(path, "open", error).map(Some),
+                Err(error) => {
+                    return python_sync_rpc_fs_action_error(path, "open", error).map(Some);
+                }
             };
             let encoding = python_prewarm_sync_rpc_encoding(&request.args);
             match encoding.as_deref() {
-                Some("utf8") | Some("utf-8") => {
-                    PythonJavascriptSyncRpcAction::Success(Value::String(
-                        String::from_utf8_lossy(&bytes).into_owned(),
-                    ))
-                }
+                Some("utf8") | Some("utf-8") => PythonJavascriptSyncRpcAction::Success(
+                    Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+                ),
                 _ => PythonJavascriptSyncRpcAction::Success(json!({
                     "__agentOsType": "bytes",
                     "base64": v8_runtime::base64_encode_pub(&bytes),
@@ -1346,20 +1361,22 @@ fn python_javascript_sync_rpc_action(
             }
         }
         "fs.statSync" | "fs.promises.stat" => match fs::metadata(&host_path) {
-            Ok(metadata) => PythonJavascriptSyncRpcAction::Success(python_host_stat_value(&metadata)),
+            Ok(metadata) => {
+                PythonJavascriptSyncRpcAction::Success(python_host_stat_value(&metadata))
+            }
             Err(error) => return python_sync_rpc_fs_action_error(path, "stat", error).map(Some),
         },
         "fs.lstatSync" | "fs.promises.lstat" => match fs::symlink_metadata(&host_path) {
-            Ok(metadata) => PythonJavascriptSyncRpcAction::Success(python_host_stat_value(&metadata)),
+            Ok(metadata) => {
+                PythonJavascriptSyncRpcAction::Success(python_host_stat_value(&metadata))
+            }
             Err(error) => return python_sync_rpc_fs_action_error(path, "lstat", error).map(Some),
         },
         "fs.existsSync" => PythonJavascriptSyncRpcAction::Success(Value::Bool(host_path.exists())),
-        "fs.accessSync" | "fs.promises.access" => {
-            match fs::metadata(&host_path) {
-                Ok(_) => PythonJavascriptSyncRpcAction::Success(Value::Null),
-                Err(error) => return python_sync_rpc_fs_action_error(path, "access", error).map(Some),
-            }
-        }
+        "fs.accessSync" | "fs.promises.access" => match fs::metadata(&host_path) {
+            Ok(_) => PythonJavascriptSyncRpcAction::Success(Value::Null),
+            Err(error) => return python_sync_rpc_fs_action_error(path, "access", error).map(Some),
+        },
         "fs.readdirSync" | "fs.promises.readdir" => match fs::read_dir(&host_path) {
             Ok(entries) => PythonJavascriptSyncRpcAction::Success(python_readdir_value(
                 entries
@@ -1376,7 +1393,9 @@ fn python_javascript_sync_rpc_action(
             } else {
                 match fs::create_dir(&host_path) {
                     Ok(()) => {}
-                    Err(error) => return python_sync_rpc_fs_action_error(path, "mkdir", error).map(Some),
+                    Err(error) => {
+                        return python_sync_rpc_fs_action_error(path, "mkdir", error).map(Some);
+                    }
                 }
             }
             PythonJavascriptSyncRpcAction::Success(Value::Null)
@@ -1391,10 +1410,11 @@ fn python_javascript_sync_rpc_action(
         }
         "fs.realpathSync" | "fs.realpathSync.native" => match fs::canonicalize(&host_path) {
             Ok(canonical) => PythonJavascriptSyncRpcAction::Success(Value::String(
-                python_host_path_to_guest(pyodide_dist_path, &canonical)
-                    .unwrap_or_else(|| path.to_owned()),
+                path_kind.render_path(pyodide_dist_path, &canonical, path),
             )),
-            Err(error) => return python_sync_rpc_fs_action_error(path, "realpath", error).map(Some),
+            Err(error) => {
+                return python_sync_rpc_fs_action_error(path, "realpath", error).map(Some);
+            }
         },
         _ => return Ok(None),
     }))
@@ -1443,24 +1463,91 @@ fn respond_python_javascript_sync_rpc_action(
     }
 }
 
-fn python_guest_path_to_host(pyodide_dist_path: &Path, guest_path: &str) -> Option<PathBuf> {
-    if let Some(normalized) = guest_path.strip_prefix(PYODIDE_GUEST_ROOT) {
+#[derive(Debug, Clone)]
+enum PythonManagedPathKind {
+    GuestPyodide,
+    GuestCache,
+    HostManaged,
+    Unmanaged,
+}
+
+impl PythonManagedPathKind {
+    fn render_path(&self, pyodide_dist_path: &Path, canonical: &Path, original: &str) -> String {
+        match self {
+            Self::GuestPyodide | Self::GuestCache => {
+                python_host_path_to_guest(pyodide_dist_path, canonical)
+                    .unwrap_or_else(|| original.to_owned())
+            }
+            Self::HostManaged => canonical.display().to_string(),
+            Self::Unmanaged => original.to_owned(),
+        }
+    }
+}
+
+fn python_managed_path_kind(pyodide_dist_path: &Path, path: &str) -> PythonManagedResolvedPath {
+    if let Some(normalized) = path.strip_prefix(PYODIDE_GUEST_ROOT) {
         let relative = normalized.trim_start_matches('/');
-        return Some(if relative.is_empty() {
-            pyodide_dist_path.to_path_buf()
-        } else {
-            pyodide_dist_path.join(relative)
-        });
+        return PythonManagedResolvedPath {
+            kind: PythonManagedPathKind::GuestPyodide,
+            host_path: Some(if relative.is_empty() {
+                pyodide_dist_path.to_path_buf()
+            } else {
+                pyodide_dist_path.join(relative)
+            }),
+        };
     }
 
     let cache_path = pyodide_cache_path(pyodide_dist_path);
-    let normalized = guest_path.strip_prefix(PYODIDE_CACHE_GUEST_ROOT)?;
-    let relative = normalized.trim_start_matches('/');
-    Some(if relative.is_empty() {
-        cache_path
-    } else {
-        cache_path.join(relative)
-    })
+    if let Some(normalized) = path.strip_prefix(PYODIDE_CACHE_GUEST_ROOT) {
+        let relative = normalized.trim_start_matches('/');
+        return PythonManagedResolvedPath {
+            kind: PythonManagedPathKind::GuestCache,
+            host_path: Some(if relative.is_empty() {
+                cache_path
+            } else {
+                cache_path.join(relative)
+            }),
+        };
+    }
+
+    let candidate = PathBuf::from(path);
+    if candidate.is_absolute()
+        && (candidate == pyodide_dist_path
+            || path_is_within_root(&candidate, pyodide_dist_path)
+            || candidate == cache_path
+            || path_is_within_root(&candidate, &cache_path))
+    {
+        return PythonManagedResolvedPath {
+            kind: PythonManagedPathKind::HostManaged,
+            host_path: Some(candidate),
+        };
+    }
+
+    PythonManagedResolvedPath {
+        kind: PythonManagedPathKind::Unmanaged,
+        host_path: None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PythonManagedResolvedPath {
+    kind: PythonManagedPathKind,
+    host_path: Option<PathBuf>,
+}
+
+impl PythonManagedResolvedPath {
+    fn host_path(&self) -> Option<PathBuf> {
+        self.host_path.clone()
+    }
+
+    fn render_path(&self, pyodide_dist_path: &Path, canonical: &Path, original: &str) -> String {
+        self.kind
+            .render_path(pyodide_dist_path, canonical, original)
+    }
+}
+
+fn path_is_within_root(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
 }
 
 fn python_host_path_to_guest(pyodide_dist_path: &Path, host_path: &Path) -> Option<String> {

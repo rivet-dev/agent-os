@@ -43,7 +43,7 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build
         run: npx turbo build --filter='!./registry/software/*' --filter='!@rivet-dev/agent-os-playground' --filter='!./examples/*'

@@ -84,6 +84,39 @@ async function createVmWorkspace(vm: AgentOs): Promise<string> {
 }
 
 describe("full createSession('pi') inside the VM", () => {
+	test("createSession('pi') initializes over the default native sidecar transport", async () => {
+		const { mock, url } = await startLlmock([]);
+		const vm = await createPiVm(url);
+
+		let sessionId: string | undefined;
+		try {
+			const homeDir = await createVmPiHome(vm, url);
+			const workspaceDir = await createVmWorkspace(vm);
+			sessionId = (
+				await vm.createSession("pi", {
+					cwd: workspaceDir,
+					env: {
+						HOME: homeDir,
+						ANTHROPIC_API_KEY: "mock-key",
+						ANTHROPIC_BASE_URL: url,
+						PI_SKIP_VERSION_CHECK: "1",
+					},
+				})
+			).sessionId;
+
+			expect(sessionId).toBeTruthy();
+			expect(vm.listSessions().some((entry) => entry.sessionId === sessionId)).toBe(
+				true,
+			);
+		} finally {
+			if (sessionId) {
+				vm.closeSession(sessionId);
+			}
+			await vm.dispose();
+			await stopLlmock(mock);
+		}
+	}, 120_000);
+
 	test("runs the real Pi SDK ACP flow end-to-end for write tool calls", async () => {
 		const fixtures = createToolFixtures(
 			{
@@ -170,9 +203,7 @@ describe("full createSession('pi') inside the VM", () => {
 		}
 	}, 120_000);
 
-	(hasRegistryCommands ? test : test.skip)(
-		"runs the real Pi SDK ACP flow end-to-end for bash tool calls",
-		async () => {
+	test("runs the real Pi SDK ACP flow end-to-end for bash tool calls", async () => {
 		const fixtures = createToolFixtures(
 			{
 				name: "bash",
@@ -222,7 +253,5 @@ describe("full createSession('pi') inside the VM", () => {
 			await vm.dispose();
 			await stopLlmock(mock);
 		}
-		},
-		120_000,
-	);
+	}, 120_000);
 });

@@ -4,22 +4,27 @@ use crate::acp::compat::{
     summarize_inbound_request, summarize_inbound_response, to_record, ACP_CANCEL_METHOD,
     LEGACY_PERMISSION_METHOD,
 };
-use crate::acp::session::{AcpSessionState, AcpTerminalState};
+use crate::acp::session::{
+    build_initialize_request, validate_initialize_result, AcpInitializeError, AcpSessionState,
+    AcpTerminalState,
+};
 use crate::acp::{
     deserialize_message, serialize_message, AcpTimeoutDiagnostics, JsonRpcError, JsonRpcId,
     JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
 };
 use crate::bridge::{build_mount_plugin_registry, MountPluginContext};
 pub(crate) use crate::execution::{
-    build_javascript_socket_path_context, error_code, ignore_stale_javascript_sync_rpc_response,
-    javascript_sync_rpc_arg_str, javascript_sync_rpc_arg_u32, javascript_sync_rpc_arg_u32_optional,
-    javascript_sync_rpc_arg_u64, javascript_sync_rpc_arg_u64_optional,
-    javascript_sync_rpc_bytes_arg, javascript_sync_rpc_bytes_value, javascript_sync_rpc_encoding,
-    javascript_sync_rpc_error_code, javascript_sync_rpc_option_bool,
-    javascript_sync_rpc_option_u32, parse_signal, runtime_child_is_alive,
+    build_javascript_socket_path_context, canonical_signal_name, error_code,
+    ignore_stale_javascript_sync_rpc_response, javascript_sync_rpc_arg_str,
+    javascript_sync_rpc_arg_u32, javascript_sync_rpc_arg_u32_optional, javascript_sync_rpc_arg_u64,
+    javascript_sync_rpc_arg_u64_optional, javascript_sync_rpc_bytes_arg,
+    javascript_sync_rpc_bytes_value, javascript_sync_rpc_encoding, javascript_sync_rpc_error_code,
+    javascript_sync_rpc_option_bool, javascript_sync_rpc_option_u32, parse_signal,
     sanitize_javascript_child_process_internal_bootstrap_env, service_javascript_sync_rpc,
-    signal_runtime_process, vm_network_resource_counts, write_kernel_process_stdin,
+    vm_network_resource_counts, write_kernel_process_stdin,
 };
+#[cfg(test)]
+pub(crate) use crate::execution::{runtime_child_is_alive, signal_runtime_process};
 use crate::filesystem::guest_filesystem_call as filesystem_guest_filesystem_call;
 use crate::protocol::{
     AgentSessionClosedResponse, AuthenticatedResponse, CloseAgentSessionRequest,
@@ -29,13 +34,15 @@ use crate::protocol::{
     OwnershipScope, PatternPermissionRule, PatternPermissionScope, PermissionMode,
     PermissionsPolicy, ProtocolSchema, RejectedResponse, RequestFrame, RequestId, RequestPayload,
     ResponseFrame, ResponsePayload, SessionOpenedResponse, SessionRequest as AgentSessionRequest,
-    SessionRpcResponse, SidecarPermissionRequest, SidecarRequestFrame, SidecarRequestPayload,
-    SidecarResponseFrame, SidecarResponsePayload, SidecarResponseTracker,
-    SidecarResponseTrackerError, SignalDispositionAction, SignalHandlerRegistration,
-    StructuredEvent, VmLifecycleEvent, VmLifecycleState,
+    SessionRpcResponse, SidecarAcpRequest, SidecarAcpResultResponse, SidecarPermissionRequest,
+    SidecarRequestFrame, SidecarRequestPayload, SidecarResponseFrame, SidecarResponsePayload,
+    SidecarResponseTracker, SidecarResponseTrackerError, SignalDispositionAction,
+    SignalHandlerRegistration, StructuredEvent, VmLifecycleEvent, VmLifecycleState,
 };
+#[cfg(test)]
+use crate::state::ActiveExecution;
 use crate::state::{
-    ActiveExecution, ActiveExecutionEvent, BridgeError, ConnectionState, JavascriptSocketFamily,
+    ActiveExecutionEvent, BridgeError, ConnectionState, JavascriptSocketFamily,
     JavascriptSocketPathContext, ProcessEventEnvelope, SessionState, SharedBridge,
     SharedSidecarRequestClient, SidecarRequestTransport, VmState, EXECUTION_DRIVER_NAME,
 };
@@ -53,14 +60,13 @@ use agent_os_execution::{
 use agent_os_kernel::kernel::KernelError;
 use agent_os_kernel::mount_plugin::{FileSystemPluginRegistry, PluginError};
 use agent_os_kernel::permissions::{
-    CommandAccessRequest, EnvAccessRequest, EnvironmentOperation, NetworkAccessRequest,
-    NetworkOperation, PermissionDecision,
+    permission_glob_matches, CommandAccessRequest, EnvAccessRequest, EnvironmentOperation,
+    NetworkAccessRequest, NetworkOperation, PermissionDecision,
 };
+#[cfg(test)]
 use agent_os_kernel::process_table::SIGKILL;
 // root_fs types moved to crate::vm
 use agent_os_kernel::vfs::VfsError;
-use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
-use nix::unistd::Pid;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -75,6 +81,12 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::time;
 
 // Constants and type aliases moved to crate::state
+
+const INTERNAL_JAVASCRIPT_ENTRYPOINT_ENV_KEYS: &[&str] =
+    &["AGENT_OS_ENTRYPOINT", "AGENT_OS_BOOTSTRAP_MODULE"];
+const INTERNAL_WASM_ENTRYPOINT_ENV_KEYS: &[&str] =
+    &["AGENT_OS_WASM_MODULE_PATH", "AGENT_OS_WASM_MODULE_BASE64"];
+const INTERNAL_PYTHON_ENTRYPOINT_ENV_PREFIXES: &[&str] = &["AGENT_OS_PYTHON_"];
 
 // NativeSidecarConfig, DispatchResult, SidecarError moved to crate::state
 pub use crate::state::{DispatchResult, NativeSidecarConfig, SidecarError};
@@ -93,6 +105,8 @@ struct LegacyJavascriptChildProcessSpawnOptions {
     shell: bool,
     #[serde(default)]
     detached: bool,
+    #[serde(default)]
+    stdio: Vec<String>,
     #[serde(default, rename = "maxBuffer")]
     max_buffer: Option<usize>,
 }
@@ -151,6 +165,7 @@ pub(crate) fn parse_javascript_child_process_spawn_request(
                 input: parsed_options.input,
                 shell: parsed_options.shell,
                 detached: parsed_options.detached,
+                stdio: parsed_options.stdio,
             },
         },
         parsed_options.max_buffer,
@@ -162,6 +177,8 @@ impl<B> SharedBridge<B> {
         Self {
             inner: Arc::new(Mutex::new(bridge)),
             permissions: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(test)]
+            set_vm_permissions_outcomes: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 }
@@ -186,6 +203,20 @@ where
             SidecarError::Bridge(String::from("native sidecar bridge lock poisoned"))
         })?;
         Ok(operation(&mut bridge))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queue_set_vm_permissions_result(
+        &self,
+        result: Result<(), SidecarError>,
+    ) -> Result<(), SidecarError> {
+        let mut outcomes = self.set_vm_permissions_outcomes.lock().map_err(|_| {
+            SidecarError::Bridge(String::from(
+                "native sidecar test set_vm_permissions outcome lock poisoned",
+            ))
+        })?;
+        outcomes.push_back(result.err());
+        Ok(())
     }
 
     pub(crate) fn emit_lifecycle(
@@ -247,6 +278,9 @@ where
         vm_id: &str,
         request: &CommandAccessRequest,
     ) -> PermissionDecision {
+        if is_internal_runtime_command_request(request) {
+            return PermissionDecision::allow();
+        }
         if let Some(decision) = self.static_permission_decision(
             vm_id,
             "child_process.spawn",
@@ -359,6 +393,20 @@ where
         vm_id: &str,
         permissions: &PermissionsPolicy,
     ) -> Result<(), SidecarError> {
+        #[cfg(test)]
+        {
+            let mut outcomes = self.set_vm_permissions_outcomes.lock().map_err(|_| {
+                SidecarError::Bridge(String::from(
+                    "native sidecar test set_vm_permissions outcome lock poisoned",
+                ))
+            })?;
+            if let Some(outcome) = outcomes.pop_front() {
+                if let Some(error) = outcome {
+                    return Err(error);
+                }
+            }
+        }
+
         let mut stored = self.permissions.lock().map_err(|_| {
             SidecarError::Bridge(String::from(
                 "native sidecar permission policy lock poisoned",
@@ -366,6 +414,29 @@ where
         })?;
         stored.insert(vm_id.to_owned(), permissions.clone());
         Ok(())
+    }
+
+    pub(crate) fn restore_vm_permissions_fail_closed(
+        &self,
+        vm_id: &str,
+        original_permissions: &PermissionsPolicy,
+        context: &str,
+        operation_error: &SidecarError,
+    ) -> Result<(), SidecarError> {
+        match self.set_vm_permissions(vm_id, original_permissions) {
+            Ok(()) => Ok(()),
+            Err(restore_error) => {
+                let deny_all = PermissionsPolicy::deny_all();
+                match self.set_vm_permissions(vm_id, &deny_all) {
+                    Ok(()) => Err(SidecarError::InvalidState(format!(
+                        "{context} failed: {operation_error}; restoring original permissions failed: {restore_error}; applied deny-all fallback"
+                    ))),
+                    Err(deny_all_error) => panic!(
+                        "{context} failed: {operation_error}; restoring original permissions failed: {restore_error}; deny-all fallback failed: {deny_all_error}"
+                    ),
+                }
+            }
+        }
     }
 
     pub(crate) fn clear_vm_permissions(&self, vm_id: &str) -> Result<(), SidecarError> {
@@ -392,7 +463,7 @@ where
     }
 }
 
-fn evaluate_permissions_policy(
+pub(crate) fn evaluate_permissions_policy(
     permissions: &PermissionsPolicy,
     domain: &str,
     capability: &str,
@@ -414,8 +485,18 @@ fn evaluate_permissions_policy(
             capability_operation(capability, domain),
             resource,
         ),
+        "process" => evaluate_pattern_permission_scope(
+            permissions.process.as_ref(),
+            capability_operation(capability, domain),
+            resource,
+        ),
         "env" => evaluate_pattern_permission_scope(
             permissions.env.as_ref(),
+            capability_operation(capability, domain),
+            resource,
+        ),
+        "tool" => evaluate_pattern_permission_scope(
+            permissions.tool.as_ref(),
             capability_operation(capability, domain),
             resource,
         ),
@@ -468,14 +549,8 @@ fn fs_rule_matches(
     operation: &str,
     resource: Option<&str>,
 ) -> bool {
-    let operations_match = rule.operations.is_empty()
-        || rule
-            .operations
-            .iter()
-            .any(|candidate| candidate == operation);
-    let paths_match = rule.paths.is_empty()
-        || resource
-            .is_some_and(|path| rule.paths.iter().any(|pattern| glob_matches(pattern, path)));
+    let operations_match = permission_operation_matches(&rule.operations, operation);
+    let paths_match = permission_resource_matches(&rule.paths, resource);
     operations_match && paths_match
 }
 
@@ -484,18 +559,97 @@ fn pattern_rule_matches(
     operation: &str,
     resource: Option<&str>,
 ) -> bool {
-    let operations_match = rule.operations.is_empty()
-        || rule
-            .operations
-            .iter()
-            .any(|candidate| candidate == operation);
-    let patterns_match = rule.patterns.is_empty()
-        || resource.is_some_and(|value| {
-            rule.patterns
-                .iter()
-                .any(|pattern| glob_matches(pattern, value))
-        });
+    let operations_match = permission_operation_matches(&rule.operations, operation);
+    let patterns_match = permission_resource_matches(&rule.patterns, resource);
     operations_match && patterns_match
+}
+
+fn permission_operation_matches(candidates: &[String], operation: &str) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| candidate == "*" || candidate == operation)
+}
+
+fn permission_resource_matches(patterns: &[String], resource: Option<&str>) -> bool {
+    resource.is_some_and(|value| {
+        patterns
+            .iter()
+            .any(|pattern| permission_glob_matches(pattern, value))
+    })
+}
+
+pub(crate) fn validate_permissions_policy(
+    permissions: &PermissionsPolicy,
+) -> Result<(), SidecarError> {
+    if let Some(scope) = permissions.fs.as_ref() {
+        validate_fs_permission_scope("fs", scope)?;
+    }
+    if let Some(scope) = permissions.network.as_ref() {
+        validate_pattern_permission_scope("network", scope)?;
+    }
+    if let Some(scope) = permissions.child_process.as_ref() {
+        validate_pattern_permission_scope("child_process", scope)?;
+    }
+    if let Some(scope) = permissions.process.as_ref() {
+        validate_pattern_permission_scope("process", scope)?;
+    }
+    if let Some(scope) = permissions.env.as_ref() {
+        validate_pattern_permission_scope("env", scope)?;
+    }
+    if let Some(scope) = permissions.tool.as_ref() {
+        validate_pattern_permission_scope("tool", scope)?;
+    }
+    Ok(())
+}
+
+fn validate_fs_permission_scope(
+    domain: &str,
+    scope: &FsPermissionScope,
+) -> Result<(), SidecarError> {
+    let FsPermissionScope::Rules(rule_set) = scope else {
+        return Ok(());
+    };
+
+    for (index, rule) in rule_set.rules.iter().enumerate() {
+        validate_permission_rule_field(
+            &rule.operations,
+            &format!("{domain}.rules[{index}].operations"),
+        )?;
+        validate_permission_rule_field(&rule.paths, &format!("{domain}.rules[{index}].paths"))?;
+    }
+
+    Ok(())
+}
+
+fn validate_pattern_permission_scope(
+    domain: &str,
+    scope: &PatternPermissionScope,
+) -> Result<(), SidecarError> {
+    let PatternPermissionScope::Rules(rule_set) = scope else {
+        return Ok(());
+    };
+
+    for (index, rule) in rule_set.rules.iter().enumerate() {
+        validate_permission_rule_field(
+            &rule.operations,
+            &format!("{domain}.rules[{index}].operations"),
+        )?;
+        validate_permission_rule_field(
+            &rule.patterns,
+            &format!("{domain}.rules[{index}].patterns"),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_permission_rule_field(values: &[String], field: &str) -> Result<(), SidecarError> {
+    if values.is_empty() {
+        return Err(SidecarError::InvalidState(format!(
+            "invalid permissions policy: {field} must not be empty; use [\"*\"] for wildcard"
+        )));
+    }
+    Ok(())
 }
 
 fn capability_operation<'a>(capability: &'a str, domain: &str) -> &'a str {
@@ -503,50 +657,6 @@ fn capability_operation<'a>(capability: &'a str, domain: &str) -> &'a str {
         .strip_prefix(domain)
         .and_then(|value| value.strip_prefix('.'))
         .unwrap_or("")
-}
-
-fn glob_matches(pattern: &str, value: &str) -> bool {
-    let pattern = pattern.as_bytes();
-    let value = value.as_bytes();
-    let mut pattern_index = 0usize;
-    let mut value_index = 0usize;
-    let mut star_pattern_index = None;
-    let mut star_value_index = 0usize;
-
-    while value_index < value.len() {
-        if pattern_index < pattern.len()
-            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == value[value_index])
-        {
-            pattern_index += 1;
-            value_index += 1;
-            continue;
-        }
-
-        if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-            while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-                pattern_index += 1;
-            }
-            if pattern_index == pattern.len() {
-                return true;
-            }
-            star_pattern_index = Some(pattern_index);
-            star_value_index = value_index;
-            continue;
-        }
-
-        let Some(saved_pattern_index) = star_pattern_index else {
-            return false;
-        };
-        star_value_index += 1;
-        value_index = star_value_index;
-        pattern_index = saved_pattern_index;
-    }
-
-    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-        pattern_index += 1;
-    }
-
-    pattern_index == pattern.len()
 }
 
 fn permission_mode_to_kernel_decision(
@@ -594,6 +704,25 @@ fn environment_permission_capability(operation: EnvironmentOperation) -> &'stati
     }
 }
 
+fn is_internal_runtime_command_request(request: &CommandAccessRequest) -> bool {
+    match request.command.as_str() {
+        "node" => request
+            .env
+            .keys()
+            .any(|key| INTERNAL_JAVASCRIPT_ENTRYPOINT_ENV_KEYS.contains(&key.as_str())),
+        "wasm" => request
+            .env
+            .keys()
+            .any(|key| INTERNAL_WASM_ENTRYPOINT_ENV_KEYS.contains(&key.as_str())),
+        "python" => request.env.keys().any(|key| {
+            INTERNAL_PYTHON_ENTRYPOINT_ENV_PREFIXES
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+        }),
+        _ => false,
+    }
+}
+
 fn ownership_matches_process_event(
     ownership: &OwnershipScope,
     event: &ProcessEventEnvelope,
@@ -614,6 +743,29 @@ fn ownership_matches_process_event(
                 && vm_id == &event.vm_id
         }
     }
+}
+
+fn public_process_event_matches_ownership<B>(
+    sidecar: &NativeSidecar<B>,
+    ownership: &OwnershipScope,
+    event: &ProcessEventEnvelope,
+) -> bool
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    if !ownership_matches_process_event(ownership, event) {
+        return false;
+    }
+
+    if event.process_id.contains('/') {
+        return false;
+    }
+
+    // Stale queued events must still be drained through handle_process_event_envelope()
+    // so the sidecar can emit the expected fail-closed log when teardown wins the race.
+    let _ = sidecar;
+    true
 }
 
 fn poll_future_once<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> Option<F::Output> {
@@ -735,6 +887,8 @@ where
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
     const ACP_REQUEST_TIMEOUT_MS: u64 = 120_000;
+    const ACP_CANCEL_FLUSH_GRACE: Duration = Duration::from_millis(50);
+    const ACP_KILL_WAIT_GRACE: Duration = Duration::from_secs(5);
 
     pub fn new(bridge: B) -> Result<Self, SidecarError> {
         Self::with_config(bridge, NativeSidecarConfig::default())
@@ -971,6 +1125,7 @@ where
             }
             RequestPayload::FindListener(payload) => self.find_listener(&request, payload).await,
             RequestPayload::FindBoundUdp(payload) => self.find_bound_udp(&request, payload).await,
+            RequestPayload::VmFetch(payload) => self.vm_fetch(&request, payload).await,
             RequestPayload::GetSignalState(payload) => {
                 self.get_signal_state(&request, payload).await
             }
@@ -1010,12 +1165,11 @@ where
             if let Some(index) = self
                 .pending_process_events
                 .iter()
-                .position(|event| ownership_matches_process_event(ownership, event))
+                .position(|event| public_process_event_matches_ownership(self, ownership, event))
             {
-                let envelope = self
-                    .pending_process_events
-                    .remove(index)
-                    .expect("pending process event index should exist");
+                let Some(envelope) = self.pending_process_events.remove(index) else {
+                    continue;
+                };
                 if let Some(frame) = self.handle_process_event_envelope(envelope)? {
                     return Ok(Some(frame));
                 }
@@ -1026,20 +1180,27 @@ where
                 let _ = self.pump_process_events(ownership).await?;
             }
 
-            let matching_envelope = {
+            let queued_envelopes = {
                 let receiver = self.process_event_receiver.as_mut().ok_or_else(|| {
                     SidecarError::InvalidState(String::from("process event receiver unavailable"))
                 })?;
-                let mut matching_envelope = None;
+                let mut queued = Vec::new();
                 while let Ok(envelope) = receiver.try_recv() {
-                    if ownership_matches_process_event(ownership, &envelope) {
-                        matching_envelope = Some(envelope);
-                        break;
-                    }
+                    queued.push(envelope);
+                }
+                queued
+            };
+
+            let mut matching_envelope = None;
+            for envelope in queued_envelopes {
+                if matching_envelope.is_none()
+                    && public_process_event_matches_ownership(self, ownership, &envelope)
+                {
+                    matching_envelope = Some(envelope);
+                } else {
                     self.pending_process_events.push_back(envelope);
                 }
-                matching_envelope
-            };
+            }
 
             if let Some(envelope) = matching_envelope {
                 if let Some(frame) = self.handle_process_event_envelope(envelope)? {
@@ -1183,6 +1344,14 @@ where
             return Err(error);
         }
 
+        let expected_bridge_version = agent_os_bridge::bridge_contract().version;
+        if payload.bridge_version != expected_bridge_version {
+            return Err(SidecarError::BridgeVersionMismatch(format!(
+                "bridge contract version mismatch: expected {expected_bridge_version}, got {}",
+                payload.bridge_version
+            )));
+        }
+
         let connection_id = self.allocate_connection_id();
         self.connections.insert(
             connection_id.clone(),
@@ -1277,21 +1446,10 @@ where
             _ => None,
         };
 
-        let initialize = JsonRpcRequest {
-            jsonrpc: String::from("2.0"),
-            id: JsonRpcId::Number(1),
-            method: String::from("initialize"),
-            params: Some(json!({
-                "protocolVersion": 1,
-                "clientCapabilities": {
-                    "fs": {
-                        "readTextFile": true,
-                        "writeTextFile": true,
-                    },
-                    "terminal": true,
-                }
-            })),
-        };
+        let initialize = build_initialize_request(
+            payload.protocol_version,
+            payload.client_capabilities.clone(),
+        );
         let initialize_response = match self
             .send_acp_request_and_collect(
                 &vm_id,
@@ -1311,14 +1469,30 @@ where
                 return Err(error.into_sidecar_error());
             }
         };
-        if let Some(error) = &initialize_response.error {
+        if let Some(error) = initialize_response.error() {
             self.kill_acp_process(&vm_id, &process_id);
             return Err(SidecarError::InvalidState(format!(
                 "ACP initialize failed: {}",
                 error.message
             )));
         }
-        let init_result = to_record(initialize_response.result);
+        let init_result = to_record(initialize_response.into_result());
+        match validate_initialize_result(&init_result, payload.protocol_version) {
+            Ok(_) => {}
+            Err(AcpInitializeError::ProtocolVersionMismatch {
+                requested,
+                reported,
+            }) => {
+                self.kill_acp_process(&vm_id, &process_id);
+                return Err(SidecarError::ProtocolVersionMismatch(format!(
+                    "ACP initialize protocolVersion mismatch: requested {requested}, agent reported {reported}"
+                )));
+            }
+            Err(error) => {
+                self.kill_acp_process(&vm_id, &process_id);
+                return Err(SidecarError::InvalidState(error.to_string()));
+            }
+        }
 
         let session_new = JsonRpcRequest {
             jsonrpc: String::from("2.0"),
@@ -1348,14 +1522,14 @@ where
                 return Err(error.into_sidecar_error());
             }
         };
-        if let Some(error) = &session_response.error {
+        if let Some(error) = session_response.error() {
             self.kill_acp_process(&vm_id, &process_id);
             return Err(SidecarError::InvalidState(format!(
                 "ACP session/new failed: {}",
                 error.message
             )));
         }
-        let session_result = to_record(session_response.result);
+        let session_result = to_record(session_response.into_result());
         let acp_session_id = session_result
             .get("sessionId")
             .and_then(Value::as_str)
@@ -1412,12 +1586,7 @@ where
             )
         };
         if let Some((response_id, result)) = normalized {
-            let response = JsonRpcResponse {
-                jsonrpc: String::from("2.0"),
-                id: response_id.clone(),
-                result: Some(result.clone()),
-                error: None,
-            };
+            let response = JsonRpcResponse::success(response_id.clone(), result.clone());
             self.write_json_rpc_message(
                 &vm_id,
                 &process_id,
@@ -1436,12 +1605,11 @@ where
             });
         }
 
-        let event_count_before = self
+        let sequence_number_before = self
             .acp_sessions
             .get(&payload.session_id)
             .expect("ACP session should exist")
-            .events
-            .len();
+            .next_sequence_number;
         let rpc_id = {
             let session = self
                 .acp_sessions
@@ -1495,38 +1663,49 @@ where
                 &process_id,
                 JsonRpcMessage::Notification(notification),
             )?;
-            response = JsonRpcResponse {
-                jsonrpc: String::from("2.0"),
-                id: response.id,
-                result: Some(json!({
+            response = JsonRpcResponse::success(
+                response.id,
+                json!({
                     "cancelled": false,
                     "requested": true,
                     "via": "notification-fallback",
-                })),
-                error: None,
-            };
+                }),
+            );
         }
-        if response.error.is_none() {
+        if !response.is_error() {
             let synthetic = {
                 let session = self
                     .acp_sessions
                     .get_mut(&payload.session_id)
                     .expect("ACP session should exist");
-                session.apply_request_success(&payload.method, &merged_params, event_count_before)
+                session.apply_request_success(
+                    &payload.method,
+                    &merged_params,
+                    sequence_number_before,
+                )
             };
-            if let Some(notification) = synthetic {
-                events.push(
-                    self.build_acp_event_frame(
-                        &request.ownership,
-                        &payload.session_id,
-                        self.acp_sessions
-                            .get(&payload.session_id)
-                            .expect("ACP session should exist")
-                            .next_sequence_number
-                            - 1,
-                        &notification,
-                    )?,
-                );
+            match synthetic {
+                Ok(Some(notification)) => {
+                    events.push(
+                        self.build_acp_event_frame(
+                            &request.ownership,
+                            &payload.session_id,
+                            self.acp_sessions
+                                .get(&payload.session_id)
+                                .expect("ACP session should exist")
+                                .next_sequence_number
+                                - 1,
+                            &notification,
+                        )?,
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    response = JsonRpcResponse::error_response(
+                        response.id.clone(),
+                        error.to_json_rpc_error(&payload.method),
+                    );
+                }
             }
         }
 
@@ -1549,12 +1728,14 @@ where
         payload: GetSessionStateRequest,
     ) -> Result<DispatchResult, SidecarError> {
         let (_, _, vm_id) = self.vm_scope_for(&request.ownership)?;
-        let session = self.require_acp_session(&payload.session_id, &vm_id)?;
+        let session_state = {
+            let session = self.require_acp_session_mut(&payload.session_id, &vm_id)?;
+            session
+                .acknowledged_state_response(payload.acknowledged_sequence_number)
+                .map_err(|error| SidecarError::InvalidState(error.to_string()))?
+        };
         Ok(DispatchResult {
-            response: self.respond(
-                request,
-                ResponsePayload::SessionState(session.state_response()),
-            ),
+            response: self.respond(request, ResponsePayload::SessionState(session_state)),
             events: Vec::new(),
         })
     }
@@ -1676,14 +1857,39 @@ where
         process_id: &str,
         request: JavascriptSyncRpcRequest,
     ) -> Result<(), SidecarError> {
+        let Some(vm) = self.vms.get(vm_id) else {
+            log_stale_process_event(&self.bridge, vm_id, process_id, "javascript sync RPC");
+            return Ok(());
+        };
+        if !vm.active_processes.contains_key(process_id) {
+            log_stale_process_event(&self.bridge, vm_id, process_id, "javascript sync RPC");
+            return Ok(());
+        }
+
         let response: Result<Value, SidecarError> = match request.method.as_str() {
             "child_process.spawn" => {
-                let vm = self.vms.get(vm_id).expect("VM should exist");
+                let Some(vm) = self.vms.get(vm_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
+                        vm_id,
+                        process_id,
+                        "javascript sync RPC child_process.spawn",
+                    );
+                    return Ok(());
+                };
                 let (payload, _) = parse_javascript_child_process_spawn_request(vm, &request.args)?;
                 self.spawn_javascript_child_process(vm_id, process_id, payload)
             }
             "child_process.spawn_sync" => {
-                let vm = self.vms.get(vm_id).expect("VM should exist");
+                let Some(vm) = self.vms.get(vm_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
+                        vm_id,
+                        process_id,
+                        "javascript sync RPC child_process.spawn_sync",
+                    );
+                    return Ok(());
+                };
                 let (payload, max_buffer) =
                     parse_javascript_child_process_spawn_request(vm, &request.args)?;
                 self.spawn_javascript_child_process_sync(vm_id, process_id, payload, max_buffer)
@@ -1746,11 +1952,24 @@ where
                     TopLevel(String),
                 }
                 let target = {
-                    let vm = self.vms.get(vm_id).expect("VM should exist");
-                    let caller = vm
-                        .active_processes
-                        .get(process_id)
-                        .expect("process should still exist");
+                    let Some(vm) = self.vms.get(vm_id) else {
+                        log_stale_process_event(
+                            &self.bridge,
+                            vm_id,
+                            process_id,
+                            "javascript sync RPC process.kill",
+                        );
+                        return Ok(());
+                    };
+                    let Some(caller) = vm.active_processes.get(process_id) else {
+                        log_stale_process_event(
+                            &self.bridge,
+                            vm_id,
+                            process_id,
+                            "javascript sync RPC process.kill",
+                        );
+                        return Ok(());
+                    };
                     if caller.kernel_pid == target_pid {
                         let action = vm
                             .signal_states
@@ -1775,14 +1994,29 @@ where
                     }
                 };
                 match target {
-                    Some(ProcessKillTarget::SelfProcess(action)) => Ok(json!({
-                        "self": true,
-                        "action": match action {
-                            SignalDispositionAction::Default => "default",
-                            SignalDispositionAction::Ignore => "ignore",
-                            SignalDispositionAction::User => "user",
-                        },
-                    })),
+                    Some(ProcessKillTarget::SelfProcess(action)) => {
+                        if action == SignalDispositionAction::Default
+                            && parsed_signal != 0
+                            && !matches!(
+                                canonical_signal_name(parsed_signal),
+                                Some("SIGWINCH" | "SIGCHLD" | "SIGCONT" | "SIGURG")
+                            )
+                        {
+                            if let Some(vm) = self.vms.get_mut(vm_id) {
+                                if let Some(process) = vm.active_processes.get_mut(process_id) {
+                                    process.pending_self_signal_exit = Some(parsed_signal);
+                                }
+                            }
+                        }
+                        Ok(json!({
+                            "self": true,
+                            "action": match action {
+                                SignalDispositionAction::Default => "default",
+                                SignalDispositionAction::Ignore => "ignore",
+                                SignalDispositionAction::User => "user",
+                            },
+                        }))
+                    }
                     Some(ProcessKillTarget::Child(child_process_id)) => {
                         self.kill_javascript_child_process(
                             vm_id,
@@ -1825,7 +2059,15 @@ where
                         )));
                     }
                 };
-                let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                let Some(vm) = self.vms.get_mut(vm_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
+                        vm_id,
+                        process_id,
+                        "javascript sync RPC process.signal_state",
+                    );
+                    return Ok(());
+                };
                 if action == SignalDispositionAction::Default && mask.is_empty() && flags == 0 {
                     let remove_process_entry = vm
                         .signal_states
@@ -1854,14 +2096,27 @@ where
                 Ok(Value::Null)
             }
             _ => {
-                let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                let Some(vm) = self.vms.get_mut(vm_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
+                        vm_id,
+                        process_id,
+                        "javascript sync RPC bridge dispatch",
+                    );
+                    return Ok(());
+                };
                 let resource_limits = vm.kernel.resource_limits().clone();
                 let network_counts = vm_network_resource_counts(vm);
                 let socket_paths = build_javascript_socket_path_context(vm)?;
-                let process = vm
-                    .active_processes
-                    .get_mut(process_id)
-                    .expect("process should still exist");
+                let Some(process) = vm.active_processes.get_mut(process_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
+                        vm_id,
+                        process_id,
+                        "javascript sync RPC bridge dispatch",
+                    );
+                    return Ok(());
+                };
                 service_javascript_sync_rpc(
                     &self.bridge,
                     vm_id,
@@ -1876,12 +2131,25 @@ where
             }
         };
 
-        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let Some(vm) = self.vms.get_mut(vm_id) else {
+            log_stale_process_event(
+                &self.bridge,
+                vm_id,
+                process_id,
+                "javascript sync RPC response delivery",
+            );
+            return Ok(());
+        };
         let shadow_root = vm.cwd.clone();
-        let process = vm
-            .active_processes
-            .get_mut(process_id)
-            .expect("process should still exist");
+        let Some(process) = vm.active_processes.get_mut(process_id) else {
+            log_stale_process_event(
+                &self.bridge,
+                vm_id,
+                process_id,
+                "javascript sync RPC response delivery",
+            );
+            return Ok(());
+        };
 
         if response.is_ok()
             && matches!(
@@ -2053,6 +2321,23 @@ where
         vm_id: &str,
     ) -> Result<&AcpSessionState, SidecarError> {
         let session = self.acp_sessions.get(acp_session_id).ok_or_else(|| {
+            SidecarError::InvalidState(format!("unknown ACP session {acp_session_id}"))
+        })?;
+        if session.vm_id == vm_id {
+            Ok(session)
+        } else {
+            Err(SidecarError::InvalidState(format!(
+                "ACP session {acp_session_id} is not owned by VM {vm_id}"
+            )))
+        }
+    }
+
+    fn require_acp_session_mut(
+        &mut self,
+        acp_session_id: &str,
+        vm_id: &str,
+    ) -> Result<&mut AcpSessionState, SidecarError> {
+        let session = self.acp_sessions.get_mut(acp_session_id).ok_or_else(|| {
             SidecarError::InvalidState(format!("unknown ACP session {acp_session_id}"))
         })?;
         if session.vm_id == vm_id {
@@ -2552,6 +2837,131 @@ where
         }
     }
 
+    fn resolve_inbound_acp_request(
+        &mut self,
+        ownership: &OwnershipScope,
+        session_id: &str,
+        request: &JsonRpcRequest,
+    ) -> JsonRpcResponse {
+        self.resolve_inbound_acp_request_with_timeout(
+            ownership,
+            session_id,
+            request,
+            Duration::from_millis(Self::ACP_REQUEST_TIMEOUT_MS),
+        )
+    }
+
+    fn resolve_inbound_acp_request_with_timeout(
+        &mut self,
+        ownership: &OwnershipScope,
+        session_id: &str,
+        request: &JsonRpcRequest,
+        timeout: Duration,
+    ) -> JsonRpcResponse {
+        match self.handle_inbound_acp_request(session_id, request) {
+            Ok(Some(result)) => JsonRpcResponse::success(request.id.clone(), result),
+            Ok(None) => match self.forward_inbound_acp_request(
+                ownership.clone(),
+                session_id,
+                request,
+                timeout,
+            ) {
+                Ok(Some(response)) => response,
+                Ok(None) => Self::acp_method_not_found_response(request),
+                Err(error) => JsonRpcResponse::error_response(
+                    request.id.clone(),
+                    JsonRpcError {
+                        code: -32000,
+                        message: error.to_string(),
+                        data: None,
+                    },
+                ),
+            },
+            Err(error) => JsonRpcResponse::error_response(
+                request.id.clone(),
+                JsonRpcError {
+                    code: -32000,
+                    message: error.to_string(),
+                    data: None,
+                },
+            ),
+        }
+    }
+
+    fn forward_inbound_acp_request(
+        &self,
+        ownership: OwnershipScope,
+        session_id: &str,
+        request: &JsonRpcRequest,
+        timeout: Duration,
+    ) -> Result<Option<JsonRpcResponse>, SidecarError> {
+        let sidecar_response = match self.sidecar_requests.invoke(
+            ownership,
+            SidecarRequestPayload::AcpRequest(SidecarAcpRequest {
+                session_id: session_id.to_owned(),
+                request: serde_json::to_value(request).map_err(|error| {
+                    SidecarError::InvalidState(format!(
+                        "failed to serialize forwarded ACP request: {error}"
+                    ))
+                })?,
+            }),
+            timeout,
+        ) {
+            Ok(response) => response,
+            Err(error) if Self::is_unavailable_inbound_acp_forward(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+
+        let response = match sidecar_response {
+            SidecarResponsePayload::AcpRequestResult(SidecarAcpResultResponse {
+                response, ..
+            }) => response,
+            other => {
+                return Err(SidecarError::InvalidState(format!(
+                    "unexpected sidecar ACP response: {other:?}"
+                )));
+            }
+        };
+
+        let Some(response) = response else {
+            return Ok(None);
+        };
+
+        let response = serde_json::from_value::<JsonRpcResponse>(response).map_err(|error| {
+            SidecarError::InvalidState(format!("failed to parse forwarded ACP response: {error}"))
+        })?;
+        if response.id != request.id {
+            return Err(SidecarError::InvalidState(format!(
+                "forwarded ACP response id {:?} did not match request {:?}",
+                response.id, request.id
+            )));
+        }
+        Ok(Some(response))
+    }
+
+    fn is_unavailable_inbound_acp_forward(error: &SidecarError) -> bool {
+        matches!(
+            error,
+            SidecarError::Unsupported(message)
+                if message == "sidecar request transport is not configured"
+        ) || matches!(
+            error,
+            SidecarError::Io(message)
+                if message.starts_with("timed out waiting for sidecar response after ")
+        )
+    }
+
+    fn acp_method_not_found_response(request: &JsonRpcRequest) -> JsonRpcResponse {
+        JsonRpcResponse::error_response(
+            request.id.clone(),
+            JsonRpcError {
+                code: -32601,
+                message: format!("Method not found: {}", request.method),
+                data: None,
+            },
+        )
+    }
+
     fn build_acp_event_frame(
         &self,
         ownership: &OwnershipScope,
@@ -2600,6 +3010,63 @@ where
         write_kernel_process_stdin(&mut vm.kernel, process, encoded.as_bytes())
     }
 
+    fn begin_acp_process_termination(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+    ) -> Result<Option<(Vec<String>, OwnershipScope)>, SidecarError> {
+        let session_ids = self
+            .acp_sessions
+            .iter()
+            .filter(|(_, session)| session.vm_id == vm_id && session.process_id == process_id)
+            .map(|(session_id, _)| session_id.clone())
+            .collect::<Vec<_>>();
+        for session_id in &session_ids {
+            if let Some(session) = self.acp_sessions.get_mut(session_id) {
+                session.mark_termination_requested();
+                session.record_activity(String::from("termination requested"));
+            }
+        }
+        if !self
+            .vms
+            .get(vm_id)
+            .is_some_and(|vm| vm.active_processes.contains_key(process_id))
+        {
+            self.acp_process_stdout_buffers.remove(process_id);
+            if let Some(vm) = self.vms.get_mut(vm_id) {
+                vm.signal_states.remove(process_id);
+            }
+            return Ok(None);
+        }
+
+        let ownership = self.vm_ownership(vm_id)?;
+        for session_id in &session_ids {
+            let acp_session_id = self
+                .acp_sessions
+                .get(session_id)
+                .map(|session| session.session_id.clone())
+                .unwrap_or_else(|| session_id.clone());
+            let notification = JsonRpcNotification {
+                jsonrpc: String::from("2.0"),
+                method: String::from(ACP_CANCEL_METHOD),
+                params: Some(json!({ "sessionId": acp_session_id })),
+            };
+            let activity = match self.write_json_rpc_message(
+                vm_id,
+                process_id,
+                JsonRpcMessage::Notification(notification),
+            ) {
+                Ok(()) => String::from("sent notification session/cancel"),
+                Err(error) => format!("failed to send notification session/cancel: {error}"),
+            };
+            if let Some(session) = self.acp_sessions.get_mut(session_id) {
+                session.record_activity(activity);
+            }
+        }
+
+        Ok(Some((session_ids, ownership)))
+    }
+
     fn kill_acp_process(&mut self, vm_id: &str, process_id: &str) {
         let _ = self.kill_process_internal(vm_id, process_id, "SIGKILL");
         self.acp_process_stdout_buffers.remove(process_id);
@@ -2614,38 +3081,41 @@ where
         vm_id: &str,
         process_id: &str,
     ) -> Result<(), SidecarError> {
-        for session in self.acp_sessions.values_mut() {
-            if session.vm_id == vm_id && session.process_id == process_id {
-                session.mark_termination_requested();
-            }
+        let Some((session_ids, ownership)) =
+            self.begin_acp_process_termination(vm_id, process_id)?
+        else {
+            return Ok(());
+        };
+
+        let cancel_flush_grace =
+            Self::ACP_CANCEL_FLUSH_GRACE.min(self.config.acp_termination_grace);
+        let cancel_deadline = Instant::now() + cancel_flush_grace;
+        while self
+            .vms
+            .get(vm_id)
+            .is_some_and(|vm| vm.active_processes.contains_key(process_id))
+            && Instant::now() < cancel_deadline
+        {
+            let remaining = cancel_deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(10));
+            let _ = self.poll_event(&ownership, remaining).await?;
         }
-        let shared_runtime_child_pid = self.vms.get(vm_id).and_then(|vm| {
-            vm.active_processes
-                .get(process_id)
-                .and_then(|process| match &process.execution {
-                    ActiveExecution::Javascript(execution)
-                        if execution.uses_shared_v8_runtime() && execution.child_pid() != 0 =>
-                    {
-                        Some(execution.child_pid())
-                    }
-                    _ => None,
-                })
-        });
-        if !self
+
+        if self
             .vms
             .get(vm_id)
             .is_some_and(|vm| vm.active_processes.contains_key(process_id))
         {
-            self.acp_process_stdout_buffers.remove(process_id);
-            if let Some(vm) = self.vms.get_mut(vm_id) {
-                vm.signal_states.remove(process_id);
+            let _ = self.kill_process_internal(vm_id, process_id, "SIGTERM");
+            for session_id in &session_ids {
+                if let Some(session) = self.acp_sessions.get_mut(session_id) {
+                    session.record_activity(String::from("sent signal SIGTERM"));
+                }
             }
-            return Ok(());
         }
 
-        let _ = self.kill_process_internal(vm_id, process_id, "SIGKILL");
-        let ownership = self.vm_ownership(vm_id)?;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + self.config.acp_termination_grace;
 
         while self
             .vms
@@ -2659,21 +3129,29 @@ where
             let _ = self.poll_event(&ownership, remaining).await?;
         }
 
-        if let Some(child_pid) = shared_runtime_child_pid {
-            let other_shared_runtime_users = self.vms.get(vm_id).is_some_and(|vm| {
-                vm.active_processes.iter().any(|(candidate_id, process)| {
-                    candidate_id != process_id && process.execution.child_pid() == child_pid
-                })
-            });
-            if !other_shared_runtime_users {
-                if runtime_child_is_alive(child_pid)? {
-                    signal_runtime_process(child_pid, SIGKILL)?;
-                    let child_deadline = Instant::now() + Duration::from_secs(5);
-                    while runtime_child_is_alive(child_pid)? && Instant::now() < child_deadline {
-                        time::sleep(Duration::from_millis(10)).await;
-                    }
+        if self
+            .vms
+            .get(vm_id)
+            .is_some_and(|vm| vm.active_processes.contains_key(process_id))
+        {
+            let _ = self.kill_process_internal(vm_id, process_id, "SIGKILL");
+            for session_id in &session_ids {
+                if let Some(session) = self.acp_sessions.get_mut(session_id) {
+                    session.record_activity(String::from("sent signal SIGKILL"));
                 }
-                reap_runtime_child_if_exited(child_pid)?;
+            }
+
+            let kill_deadline = Instant::now() + Self::ACP_KILL_WAIT_GRACE;
+            while self
+                .vms
+                .get(vm_id)
+                .is_some_and(|vm| vm.active_processes.contains_key(process_id))
+                && Instant::now() < kill_deadline
+            {
+                let remaining = kill_deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(10));
+                let _ = self.poll_event(&ownership, remaining).await?;
             }
         }
 
@@ -2697,16 +3175,14 @@ where
         id: JsonRpcId,
         diagnostics: AcpTimeoutDiagnostics,
     ) -> JsonRpcResponse {
-        JsonRpcResponse {
-            jsonrpc: String::from("2.0"),
+        JsonRpcResponse::error_response(
             id,
-            result: None,
-            error: Some(JsonRpcError {
+            JsonRpcError {
                 code: -32000,
                 message: diagnostics.message(),
                 data: Some(diagnostics.to_json()),
-            }),
-        }
+            },
+        )
     }
 
     async fn send_acp_request_and_collect(
@@ -2758,19 +3234,17 @@ where
                         .await
                         .map_err(AcpRequestError::Sidecar)?;
                     return Ok((
-                        JsonRpcResponse {
-                            jsonrpc: String::from("2.0"),
-                            id: request.id.clone(),
-                            result: None,
-                            error: Some(JsonRpcError {
+                        JsonRpcResponse::error_response(
+                            request.id.clone(),
+                            JsonRpcError {
                                 code: -32000,
                                 message: format!(
                                     "ACP process exited while handling {} (exit code {exit_code})",
                                     request.method
                                 ),
                                 data: None,
-                            }),
-                        },
+                            },
+                        ),
                         events,
                     ));
                 }
@@ -2825,19 +3299,17 @@ where
                         .await
                         .map_err(AcpRequestError::Sidecar)?;
                     return Ok((
-                        JsonRpcResponse {
-                            jsonrpc: String::from("2.0"),
-                            id: request.id.clone(),
-                            result: None,
-                            error: Some(JsonRpcError {
+                        JsonRpcResponse::error_response(
+                            request.id.clone(),
+                            JsonRpcError {
                                 code: -32000,
                                 message: format!(
                                     "ACP process exited while handling {} (exit code {exit_code})",
                                     request.method
                                 ),
                                 data: None,
-                            }),
-                        },
+                            },
+                        ),
                         events,
                     ));
                 }
@@ -2934,13 +3406,25 @@ where
                     if line.is_empty() {
                         continue;
                     }
-                    let Some(message) = deserialize_message(&line) else {
-                        if let Some(session_id) = session_id {
-                            if let Some(session) = self.acp_sessions.get_mut(session_id) {
-                                session.record_activity(format!("non_json {}", line));
+                    let message = match deserialize_message(&line) {
+                        Ok(message) => message,
+                        Err(error) => {
+                            if let Some(session_id) = session_id {
+                                if let Some(session) = self.acp_sessions.get_mut(session_id) {
+                                    session.record_activity(format!(
+                                        "invalid_json_rpc code={} {}",
+                                        error.code(),
+                                        error.message()
+                                    ));
+                                }
                             }
+                            self.write_json_rpc_message(
+                                vm_id,
+                                process_id,
+                                JsonRpcMessage::Response(error.to_response()),
+                            )?;
+                            continue;
                         }
-                        continue;
                     };
                     match message {
                         JsonRpcMessage::Response(response) => {
@@ -3046,12 +3530,10 @@ where
                                             self.write_json_rpc_message(
                                                 vm_id,
                                                 process_id,
-                                                JsonRpcMessage::Response(JsonRpcResponse {
-                                                    jsonrpc: String::from("2.0"),
-                                                    id: response_id,
-                                                    result: Some(result),
-                                                    error: None,
-                                                }),
+                                                JsonRpcMessage::Response(JsonRpcResponse::success(
+                                                    response_id,
+                                                    result,
+                                                )),
                                             )?;
                                         }
                                         continue;
@@ -3073,39 +3555,9 @@ where
                                         &notification,
                                     )?);
                                 } else if !duplicate {
-                                    let response = match self
-                                        .handle_inbound_acp_request(session_id, &request)
-                                    {
-                                        Ok(Some(result)) => JsonRpcResponse {
-                                            jsonrpc: String::from("2.0"),
-                                            id: request.id,
-                                            result: Some(result),
-                                            error: None,
-                                        },
-                                        Ok(None) => JsonRpcResponse {
-                                            jsonrpc: String::from("2.0"),
-                                            id: request.id,
-                                            result: None,
-                                            error: Some(JsonRpcError {
-                                                code: -32601,
-                                                message: format!(
-                                                    "Method not found: {}",
-                                                    request.method
-                                                ),
-                                                data: None,
-                                            }),
-                                        },
-                                        Err(error) => JsonRpcResponse {
-                                            jsonrpc: String::from("2.0"),
-                                            id: request.id,
-                                            result: None,
-                                            error: Some(JsonRpcError {
-                                                code: -32000,
-                                                message: error.to_string(),
-                                                data: None,
-                                            }),
-                                        },
-                                    };
+                                    let response = self.resolve_inbound_acp_request(
+                                        ownership, session_id, &request,
+                                    );
                                     self.write_json_rpc_message(
                                         vm_id,
                                         process_id,
@@ -3359,29 +3811,6 @@ fn audit_timestamp() -> String {
         .to_string()
 }
 
-fn reap_runtime_child_if_exited(child_pid: u32) -> Result<(), SidecarError> {
-    if child_pid == 0 {
-        return Ok(());
-    }
-
-    let wait_flags = WaitPidFlag::WNOHANG
-        | WaitPidFlag::WEXITED
-        | WaitPidFlag::WUNTRACED
-        | WaitPidFlag::WCONTINUED;
-    match wait_on_child(WaitId::Pid(Pid::from_raw(child_pid as i32)), wait_flags) {
-        Ok(WaitStatus::StillAlive)
-        | Ok(WaitStatus::Stopped(_, _))
-        | Ok(WaitStatus::Continued(_)) => Ok(()),
-        Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => Ok(()),
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        Ok(WaitStatus::PtraceEvent(_, _, _) | WaitStatus::PtraceSyscall(_)) => Ok(()),
-        Err(nix::errno::Errno::ECHILD) => Ok(()),
-        Err(error) => Err(SidecarError::Execution(format!(
-            "failed to reap guest runtime process {child_pid}: {error}"
-        ))),
-    }
-}
-
 pub(crate) fn audit_fields<I, K, V>(fields: I) -> BTreeMap<String, String>
 where
     I: IntoIterator<Item = (K, V)>,
@@ -3424,6 +3853,23 @@ pub(crate) fn emit_security_audit_event<B>(
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
     let _ = emit_structured_event(bridge, vm_id, name, fields);
+}
+
+pub(crate) fn log_stale_process_event<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    process_id: &str,
+    context: &str,
+) where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let _ = bridge.emit_log(
+        vm_id,
+        format!(
+            "Ignoring stale process event during {context}: VM {vm_id} process {process_id} was already reaped"
+        ),
+    );
 }
 
 // filesystem_operation_label moved to crate::vm

@@ -6,15 +6,49 @@
 //! commands like `which zsh` / `which bash`.
 
 use std::ffi::OsString;
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
+#[cfg(target_os = "wasi")]
+mod host_fs {
+    #[link(wasm_import_module = "host_fs")]
+    unsafe extern "C" {
+        pub fn path_mode(path_ptr: *const u8, path_len: u32, follow_symlinks: u32) -> u32;
+    }
+}
 
 fn print_usage() {
     println!("Usage: which [-a] name [...]");
 }
 
 fn is_executable_path(path: &Path) -> bool {
-    path.exists() && path.is_file()
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+
+    metadata.is_file() && executable_mode_bits(path, &metadata)
+}
+
+#[cfg(unix)]
+fn executable_mode_bits(_path: &Path, metadata: &fs::Metadata) -> bool {
+    (metadata.mode() & 0o111) != 0
+}
+
+#[cfg(target_os = "wasi")]
+fn executable_mode_bits(path: &Path, _metadata: &fs::Metadata) -> bool {
+    let path_string = path.to_string_lossy();
+    let bytes = path_string.as_bytes();
+    let mode = unsafe { host_fs::path_mode(bytes.as_ptr(), bytes.len() as u32, 1) };
+    (mode & 0o111) != 0
+}
+
+#[cfg(not(any(unix, target_os = "wasi")))]
+fn executable_mode_bits(_path: &Path, metadata: &fs::Metadata) -> bool {
+    !metadata.permissions().readonly()
 }
 
 fn search_path(command: &str, all: bool) -> Vec<PathBuf> {
@@ -92,5 +126,9 @@ pub fn which(args: Vec<OsString>) -> i32 {
         }
     }
 
-    if found_all { 0 } else { 1 }
+    if found_all {
+        0
+    } else {
+        1
+    }
 }

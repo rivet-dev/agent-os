@@ -10,12 +10,19 @@ use std::fmt;
 
 pub const DEFAULT_MAX_FILESYSTEM_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_INODE_COUNT: usize = 16_384;
+pub const DEFAULT_MAX_PROCESSES: usize = 256;
+pub const DEFAULT_MAX_OPEN_FDS: usize = 256;
+pub const DEFAULT_MAX_PIPES: usize = 128;
+pub const DEFAULT_MAX_PTYS: usize = 128;
+pub const DEFAULT_MAX_SOCKETS: usize = 256;
+pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
 pub const DEFAULT_BLOCKING_READ_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_MAX_PREAD_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_FD_WRITE_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_PROCESS_ARGV_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_MAX_PROCESS_ENV_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_MAX_READDIR_ENTRIES: usize = 4_096;
+pub const DEFAULT_VIRTUAL_CPU_COUNT: usize = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResourceSnapshot {
@@ -35,6 +42,7 @@ pub struct ResourceSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceLimits {
+    pub virtual_cpu_count: Option<usize>,
     pub max_processes: Option<usize>,
     pub max_open_fds: Option<usize>,
     pub max_pipes: Option<usize>,
@@ -57,12 +65,13 @@ pub struct ResourceLimits {
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
-            max_processes: None,
-            max_open_fds: None,
-            max_pipes: None,
-            max_ptys: None,
-            max_sockets: None,
-            max_connections: None,
+            virtual_cpu_count: Some(DEFAULT_VIRTUAL_CPU_COUNT),
+            max_processes: Some(DEFAULT_MAX_PROCESSES),
+            max_open_fds: Some(DEFAULT_MAX_OPEN_FDS),
+            max_pipes: Some(DEFAULT_MAX_PIPES),
+            max_ptys: Some(DEFAULT_MAX_PTYS),
+            max_sockets: Some(DEFAULT_MAX_SOCKETS),
+            max_connections: Some(DEFAULT_MAX_CONNECTIONS),
             max_filesystem_bytes: Some(DEFAULT_MAX_FILESYSTEM_BYTES),
             max_inode_count: Some(DEFAULT_MAX_INODE_COUNT),
             max_blocking_read_ms: Some(DEFAULT_BLOCKING_READ_TIMEOUT_MS),
@@ -98,6 +107,13 @@ impl ResourceError {
     fn exhausted(message: impl Into<String>) -> Self {
         Self {
             code: "EAGAIN",
+            message: message.into(),
+        }
+    }
+
+    fn file_table_full(message: impl Into<String>) -> Self {
+        Self {
+            code: "ENFILE",
             message: message.into(),
         }
     }
@@ -303,6 +319,14 @@ impl ResourceAccountant {
         Ok(())
     }
 
+    pub fn check_fd_allocation(
+        &self,
+        snapshot: &ResourceSnapshot,
+        additional_fds: usize,
+    ) -> Result<(), ResourceError> {
+        self.check_open_fds(snapshot, additional_fds)
+    }
+
     pub fn max_readdir_entries(&self) -> Option<usize> {
         self.limits.max_readdir_entries
     }
@@ -326,7 +350,7 @@ impl ResourceAccountant {
     ) -> Result<(), ResourceError> {
         if let Some(limit) = self.limits.max_open_fds {
             if snapshot.open_fds.saturating_add(additional_fds) > limit {
-                return Err(ResourceError::exhausted(
+                return Err(ResourceError::file_table_full(
                     "maximum open file descriptor limit reached",
                 ));
             }

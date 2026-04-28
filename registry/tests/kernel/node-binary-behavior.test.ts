@@ -12,11 +12,20 @@
  * Gracefully skipped when WASM binaries are not built.
  */
 
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, it, expect, afterEach } from 'vitest';
 import {
-  createIntegrationKernel,
-  skipUnlessWasmBuilt,
-  TerminalHarness,
+	describeIf,
+	createIntegrationKernel,
+	skipUnlessWasmBuilt,
+	TerminalHarness,
+  createKernel,
+  createNodeRuntime,
+  createWasmVmRuntime,
+  NodeFileSystem,
+  COMMANDS_DIR,
 } from './helpers.ts';
 import type { IntegrationKernelResult } from './helpers.ts';
 
@@ -35,11 +44,16 @@ function findOutputLine(screen: string, expected: string): string | undefined {
   );
 }
 
+function decodeChunks(chunks: Uint8Array[]): string {
+  const decoder = new TextDecoder();
+  return chunks.map((chunk) => decoder.decode(chunk)).join("");
+}
+
 // ---------------------------------------------------------------------------
 // kernel.exec() -- stdout
 // ---------------------------------------------------------------------------
 
-describe.skipIf(skipReason)('node binary: exec stdout', () => {
+describeIf(!skipReason, 'node binary: exec stdout', () => {
   let ctx: IntegrationKernelResult;
 
   afterEach(async () => {
@@ -63,11 +77,53 @@ describe.skipIf(skipReason)('node binary: exec stdout', () => {
   }, 10_000);
 });
 
+describeIf(!skipReason, 'node binary: spawn callback routing', () => {
+  let ctxA: IntegrationKernelResult;
+  let ctxB: IntegrationKernelResult;
+
+  afterEach(async () => {
+    await ctxA?.dispose();
+    await ctxB?.dispose();
+  });
+
+  it('concurrent kernels keep stdout callbacks isolated per VM marker', async () => {
+    ctxA = await createIntegrationKernel({ runtimes: ['wasmvm', 'node'] });
+    ctxB = await createIntegrationKernel({ runtimes: ['wasmvm', 'node'] });
+
+    const stdoutA: Uint8Array[] = [];
+    const stdoutB: Uint8Array[] = [];
+    const stderrA: Uint8Array[] = [];
+    const stderrB: Uint8Array[] = [];
+
+    const procA = ctxA.kernel.spawn('node', ['-e', "console.log('VM_A_MARKER')"], {
+      onStdout: (chunk) => stdoutA.push(chunk),
+      onStderr: (chunk) => stderrA.push(chunk),
+    });
+    const procB = ctxB.kernel.spawn('node', ['-e', "console.log('VM_B_MARKER')"], {
+      onStdout: (chunk) => stdoutB.push(chunk),
+      onStderr: (chunk) => stderrB.push(chunk),
+    });
+
+    const [exitA, exitB] = await Promise.all([procA.wait(), procB.wait()]);
+    expect(exitA).toBe(0);
+    expect(exitB).toBe(0);
+
+    const stdoutAText = decodeChunks(stdoutA);
+    const stdoutBText = decodeChunks(stdoutB);
+    expect(stdoutAText).toContain('VM_A_MARKER');
+    expect(stdoutAText).not.toContain('VM_B_MARKER');
+    expect(stdoutBText).toContain('VM_B_MARKER');
+    expect(stdoutBText).not.toContain('VM_A_MARKER');
+    expect(decodeChunks(stderrA)).toBe('');
+    expect(decodeChunks(stderrB)).toBe('');
+  }, 15_000);
+});
+
 // ---------------------------------------------------------------------------
 // kernel.exec() -- exit codes
 // ---------------------------------------------------------------------------
 
-describe.skipIf(skipReason)('node binary: exec exit codes', () => {
+describeIf(!skipReason, 'node binary: exec exit codes', () => {
   let ctx: IntegrationKernelResult;
 
   afterEach(async () => {
@@ -91,7 +147,7 @@ describe.skipIf(skipReason)('node binary: exec exit codes', () => {
 // kernel.exec() -- stderr and error types
 // ---------------------------------------------------------------------------
 
-describe.skipIf(skipReason)('node binary: exec stderr', () => {
+describeIf(!skipReason, 'node binary: exec stderr', () => {
   let ctx: IntegrationKernelResult;
 
   afterEach(async () => {
@@ -131,7 +187,7 @@ describe.skipIf(skipReason)('node binary: exec stderr', () => {
 // kernel.exec() -- stdin
 // ---------------------------------------------------------------------------
 
-describe.skipIf(skipReason)('node binary: exec stdin', () => {
+describeIf(!skipReason, 'node binary: exec stdin', () => {
   let ctx: IntegrationKernelResult;
 
   afterEach(async () => {
@@ -156,7 +212,7 @@ describe.skipIf(skipReason)('node binary: exec stdin', () => {
 // kernel.exec() -- VFS access
 // ---------------------------------------------------------------------------
 
-describe.skipIf(skipReason)('node binary: exec VFS access', () => {
+describeIf(!skipReason, 'node binary: exec VFS access', () => {
   let ctx: IntegrationKernelResult;
 
   afterEach(async () => {
@@ -179,11 +235,16 @@ describe.skipIf(skipReason)('node binary: exec VFS access', () => {
 // kernel.exec() -- cross-runtime child_process
 // ---------------------------------------------------------------------------
 
-describe.skipIf(skipReason)('node binary: exec child_process', () => {
+describeIf(!skipReason, 'node binary: exec child_process', () => {
   let ctx: IntegrationKernelResult;
+  let tempDir: string | undefined;
 
   afterEach(async () => {
     await ctx?.dispose();
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = undefined;
+    }
   });
 
   it('node -e execSync("echo sub") captures child stdout', async () => {
@@ -194,13 +255,62 @@ describe.skipIf(skipReason)('node binary: exec child_process', () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain('sub');
   }, 15_000);
+
+  it('node -e spawnSync resolves shebang-backed node_modules/.bin commands through JavaScript runtime', async () => {
+    tempDir = await mkdtemp(path.join(tmpdir(), 'kernel-node-bin-'));
+    await writeFile(
+      path.join(tempDir, 'package.json'),
+      JSON.stringify({ name: 'node-bin-repro', private: true }),
+    );
+    await mkdir(path.join(tempDir, 'node_modules', 'hello-pkg', 'bin'), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(tempDir, 'node_modules', 'hello-pkg', 'bin', 'hello.js'),
+      [
+        '#!/usr/bin/env node',
+        "console.log(`hello ${process.argv.slice(2).join(' ')}`);",
+      ].join('\n'),
+    );
+    await mkdir(path.join(tempDir, 'node_modules', '.bin'), { recursive: true });
+    await symlink(
+      '../hello-pkg/bin/hello.js',
+      path.join(tempDir, 'node_modules', '.bin', 'hello-js'),
+    );
+
+    const vfs = new NodeFileSystem({ root: tempDir });
+    const kernel = createKernel({ filesystem: vfs, cwd: '/' });
+    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(createNodeRuntime());
+    ctx = { kernel, vfs, dispose: () => kernel.dispose() };
+
+    const guestScriptPath = '/tmp/spawn-bin-check.js';
+    const code = [
+      "const { spawnSync } = require('child_process');",
+      "const env = { ...process.env, PATH: `/node_modules/.bin:${process.env.PATH}` };",
+      "const result = spawnSync('hello-js', ['from-child'], { encoding: 'utf8', env });",
+      "console.log(JSON.stringify({ status: result.status, stdout: result.stdout, stderr: result.stderr }));",
+    ].join(' ');
+    await ctx.kernel.writeFile(guestScriptPath, code);
+    const result = await ctx.kernel.exec(`node ${guestScriptPath}`);
+    expect(result.exitCode).toBe(0);
+
+    const payload = JSON.parse(result.stdout.trim()) as {
+      status: number | null;
+      stdout: string;
+      stderr: string;
+    };
+    expect(payload.status).toBe(0);
+    expect(payload.stdout.trim()).toBe('hello from-child');
+    expect(payload.stderr).toBe('');
+  }, 20_000);
 });
 
 // ---------------------------------------------------------------------------
 // kernel.exec() -- node --version
 // ---------------------------------------------------------------------------
 
-describe.skipIf(skipReason)('node binary: exec --version', () => {
+describeIf(!skipReason, 'node binary: exec --version', () => {
   let ctx: IntegrationKernelResult;
 
   afterEach(async () => {
@@ -220,7 +330,7 @@ describe.skipIf(skipReason)('node binary: exec --version', () => {
 // kernel.exec() -- node with no args + closed stdin
 // ---------------------------------------------------------------------------
 
-describe.skipIf(skipReason)('node binary: exec no args', () => {
+describeIf(!skipReason, 'node binary: exec no args', () => {
   let ctx: IntegrationKernelResult;
 
   afterEach(async () => {
@@ -241,7 +351,7 @@ describe.skipIf(skipReason)('node binary: exec no args', () => {
 // TerminalHarness (PTY path) -- stdout verification
 // ---------------------------------------------------------------------------
 
-describe.skipIf(skipReason)('node binary: terminal stdout', () => {
+describeIf(!skipReason, 'node binary: terminal stdout', () => {
   let harness: TerminalHarness;
   let ctx: IntegrationKernelResult;
 
@@ -279,7 +389,7 @@ describe.skipIf(skipReason)('node binary: terminal stdout', () => {
 // TerminalHarness (PTY path) -- stderr verification
 // ---------------------------------------------------------------------------
 
-describe.skipIf(skipReason)('node binary: terminal stderr', () => {
+describeIf(!skipReason, 'node binary: terminal stderr', () => {
   let harness: TerminalHarness;
   let ctx: IntegrationKernelResult;
 
@@ -302,14 +412,14 @@ describe.skipIf(skipReason)('node binary: terminal stderr', () => {
 
   it('node -e throw Error visible on terminal', async () => {
     ctx = await createIntegrationKernel({ runtimes: ['wasmvm', 'node'] });
-    harness = new TerminalHarness(ctx.kernel);
+    const stderrChunks: Uint8Array[] = [];
+    const proc = ctx.kernel.spawn('node', ['-e', "throw new Error('boom')"], {
+      onStderr: (chunk) => stderrChunks.push(chunk),
+    });
 
-    await harness.waitFor(PROMPT);
-    await harness.type('node -e "throw new Error(\'boom\')"\n');
-    await harness.waitFor(PROMPT, 2, 10_000);
-
-    const screen = harness.screenshotTrimmed();
-    expect(screen).toContain('boom');
+    const exitCode = await proc.wait();
+    expect(exitCode).not.toBe(0);
+    expect(decodeChunks(stderrChunks)).toContain('boom');
   }, 15_000);
 
   it('node -e SyntaxError visible on terminal', async () => {

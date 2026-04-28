@@ -185,6 +185,8 @@ $(COPY_MARKER): $(RUST_MARKER) $(C_MARKER)
 	@# --- git ---
 	@mkdir -p software/git/wasm
 	@[ -f "$(COMMANDS_DIR)/git" ] && cp -f "$(COMMANDS_DIR)/git" software/git/wasm/ || echo "  WARN: git not found"
+	@[ -f "$(COMMANDS_DIR)/git-remote-http" ] && cp -f "$(COMMANDS_DIR)/git-remote-http" software/git/wasm/ || ([ -f "$(COMMANDS_DIR)/git" ] && cp -f "$(COMMANDS_DIR)/git" software/git/wasm/git-remote-http") || echo "  WARN: git-remote-http not found"
+	@[ -f "$(COMMANDS_DIR)/git-remote-https" ] && cp -f "$(COMMANDS_DIR)/git-remote-https" software/git/wasm/ || ([ -f "$(COMMANDS_DIR)/git" ] && cp -f "$(COMMANDS_DIR)/git" software/git/wasm/git-remote-https") || echo "  WARN: git-remote-https not found"
 
 	@echo "=== Copy complete ==="
 	@touch $(COPY_MARKER)

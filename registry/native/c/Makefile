@@ -98,6 +98,8 @@ NATIVE_OUTPUTS := $(addprefix $(NATIVE_DIR)/,$(NATIVE_PROG_NAMES))
 
 .PHONY: all wasi-sdk programs sysroot install native clean wasm-opt-check os-test os-test-native
 
+HAS_WASM_OPT := $(shell command -v wasm-opt >/dev/null 2>&1 && echo 1 || echo 0)
+
 all: programs
 
 # --- wasi-sdk download and cache ---
@@ -413,13 +415,10 @@ sysroot: $(PATCHED_SYSROOT)/lib/wasm32-wasi/libc.a
 # --- wasm-opt check ---
 
 wasm-opt-check:
-	@if ! command -v wasm-opt >/dev/null 2>&1; then \
-		echo "Error: wasm-opt (binaryen) is not installed."; \
-		echo "Install it via your package manager:"; \
-		echo "  apt: sudo apt install binaryen"; \
-		echo "  brew: brew install binaryen"; \
-		echo "  cargo: cargo install wasm-opt"; \
-		exit 1; \
+	@if [ "$(HAS_WASM_OPT)" = "1" ]; then \
+		echo "wasm-opt found: $$(wasm-opt --version | head -1)"; \
+	else \
+		echo "Warning: wasm-opt (binaryen) is not installed; skipping WASM optimization."; \
 	fi
 
 # --- Compile all C programs to WASM ---
@@ -436,7 +435,11 @@ programs: wasi-sdk fetch-libs wasm-opt-check $(WASM_OUTPUTS)
 $(BUILD_DIR)/%: programs/%.c $(WASI_SDK_DIR)/bin/clang
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(WASM_CFLAGS) -o $@.wasm $<
-	wasm-opt -O3 --strip-debug $@.wasm -o $@
+	@if [ "$(HAS_WASM_OPT)" = "1" ]; then \
+		wasm-opt -O3 --strip-debug $@.wasm -o $@; \
+	else \
+		cp $@.wasm $@; \
+	fi
 	@rm -f $@.wasm
 
 # --- Per-program override rules for multi-file compilation ---
@@ -446,7 +449,11 @@ $(BUILD_DIR)/%: programs/%.c $(WASI_SDK_DIR)/bin/clang
 $(BUILD_DIR)/json_parse: programs/json_parse.c libs/cjson/cJSON.c $(WASI_SDK_DIR)/bin/clang
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(WASM_CFLAGS) -Ilibs/cjson -o $@.wasm programs/json_parse.c libs/cjson/cJSON.c
-	wasm-opt -O3 --strip-debug $@.wasm -o $@
+	@if [ "$(HAS_WASM_OPT)" = "1" ]; then \
+		wasm-opt -O3 --strip-debug $@.wasm -o $@; \
+	else \
+		cp $@.wasm $@; \
+	fi
 	@rm -f $@.wasm
 
 $(NATIVE_DIR)/json_parse: programs/json_parse.c libs/cjson/cJSON.c
@@ -463,7 +470,11 @@ $(BUILD_DIR)/sqlite3_mem: programs/sqlite3_mem.c libs/sqlite3/sqlite3.c $(WASI_S
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(WASM_CFLAGS) $(SQLITE_WASM) -Ilibs/sqlite3 -o $@.wasm \
 	    programs/sqlite3_mem.c libs/sqlite3/sqlite3.c
-	wasm-opt -O3 --strip-debug $@.wasm -o $@
+	@if [ "$(HAS_WASM_OPT)" = "1" ]; then \
+		wasm-opt -O3 --strip-debug $@.wasm -o $@; \
+	else \
+		cp $@.wasm $@; \
+	fi
 	@rm -f $@.wasm
 
 $(NATIVE_DIR)/sqlite3_mem: programs/sqlite3_mem.c libs/sqlite3/sqlite3.c
@@ -496,7 +507,11 @@ ZIP_INCLUDES := -Ilibs/zlib -Ilibs/minizip
 $(BUILD_DIR)/zip: programs/zip.c $(ZLIB_SRCS) $(MINIZIP_SRCS) $(WASI_SDK_DIR)/bin/clang
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(WASM_CFLAGS) $(ZIP_INCLUDES) -o $@.wasm programs/zip.c $(ZLIB_SRCS) $(MINIZIP_SRCS)
-	wasm-opt -O3 --strip-debug $@.wasm -o $@
+	@if [ "$(HAS_WASM_OPT)" = "1" ]; then \
+		wasm-opt -O3 --strip-debug $@.wasm -o $@; \
+	else \
+		cp $@.wasm $@; \
+	fi
 	@rm -f $@.wasm
 
 $(NATIVE_DIR)/zip: programs/zip.c $(ZLIB_SRCS) $(MINIZIP_SRCS)
@@ -509,7 +524,11 @@ MINIZIP_UNZIP_SRCS := libs/minizip/ioapi.c libs/minizip/unzip.c
 $(BUILD_DIR)/unzip: programs/unzip.c $(ZLIB_SRCS) $(MINIZIP_UNZIP_SRCS) $(WASI_SDK_DIR)/bin/clang
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(WASM_CFLAGS) $(ZIP_INCLUDES) -o $@.wasm programs/unzip.c $(ZLIB_SRCS) $(MINIZIP_UNZIP_SRCS)
-	wasm-opt -O3 --strip-debug $@.wasm -o $@
+	@if [ "$(HAS_WASM_OPT)" = "1" ]; then \
+		wasm-opt -O3 --strip-debug $@.wasm -o $@; \
+	else \
+		cp $@.wasm $@; \
+	fi
 	@rm -f $@.wasm
 
 $(NATIVE_DIR)/unzip: programs/unzip.c $(ZLIB_SRCS) $(MINIZIP_UNZIP_SRCS)
@@ -543,7 +562,11 @@ $(BUILD_DIR)/wget: programs/wget.c $(CURL_SRCS) $(WASI_SDK_DIR)/bin/clang
 	$(CC) $(WASM_CFLAGS) $(CURL_LIB_DEFS) $(CURL_INCLUDES) \
 	    -lwasi-emulated-signal \
 	    -o $@.wasm programs/wget.c $(CURL_SRCS)
-	wasm-opt -O3 --strip-debug --all-features $@.wasm -o $@
+	@if [ "$(HAS_WASM_OPT)" = "1" ]; then \
+		wasm-opt -O3 --strip-debug --all-features $@.wasm -o $@; \
+	else \
+		cp $@.wasm $@; \
+	fi
 	@rm -f $@.wasm
 
 $(NATIVE_DIR)/wget: programs/wget.c

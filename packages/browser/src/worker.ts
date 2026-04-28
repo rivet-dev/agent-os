@@ -1076,14 +1076,6 @@ async function initRuntime(payload: BrowserWorkerInitPayload): Promise<void> {
 			return JSON.stringify(result);
 		}),
 	);
-	exposeCustomGlobal(
-		"_networkHttpRequestRaw",
-		makeApplyPromise(async (url: string, optionsJson: string) => {
-			const options = JSON.parse(optionsJson);
-			const result = await netAdapter.httpRequest(url, options);
-			return JSON.stringify(result);
-		}),
-	);
 
 	const execAdapter = commandExecutor ?? createCommandExecutorStub();
 	let nextSessionId = 1;

@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
 // ---------------------------------------------------------------------------
@@ -52,6 +52,7 @@ pub(crate) const PYTHON_COMMAND: &str = "python";
 pub(crate) const WASM_COMMAND: &str = "wasm";
 pub(crate) const PYTHON_VFS_RPC_GUEST_ROOT: &str = "/workspace";
 pub(crate) const EXECUTION_SANDBOX_ROOT_ENV: &str = "AGENT_OS_SANDBOX_ROOT";
+pub(crate) const WASM_STDIO_SYNC_RPC_ENV: &str = "AGENT_OS_WASI_STDIO_SYNC_RPC";
 #[cfg(test)]
 pub(crate) const HOST_REALPATH_MAX_SYMLINK_DEPTH: usize = 40;
 pub(crate) const DISPOSE_VM_SIGTERM_GRACE: std::time::Duration =
@@ -79,6 +80,7 @@ pub struct NativeSidecarConfig {
     pub max_frame_bytes: usize,
     pub compile_cache_root: Option<PathBuf>,
     pub expected_auth_token: Option<String>,
+    pub acp_termination_grace: Duration,
 }
 
 impl Default for NativeSidecarConfig {
@@ -88,6 +90,7 @@ impl Default for NativeSidecarConfig {
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             compile_cache_root: None,
             expected_auth_token: None,
+            acp_termination_grace: Duration::from_secs(3),
         }
     }
 }
@@ -101,6 +104,9 @@ pub struct DispatchResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidecarError {
     InvalidState(String),
+    ProtocolVersionMismatch(String),
+    BridgeVersionMismatch(String),
+    Conflict(String),
     Unauthorized(String),
     Unsupported(String),
     FrameTooLarge(String),
@@ -115,6 +121,9 @@ impl fmt::Display for SidecarError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidState(message)
+            | Self::ProtocolVersionMismatch(message)
+            | Self::BridgeVersionMismatch(message)
+            | Self::Conflict(message)
             | Self::Unauthorized(message)
             | Self::Unsupported(message)
             | Self::FrameTooLarge(message)
@@ -191,6 +200,8 @@ impl SharedSidecarRequestClient {
 pub(crate) struct SharedBridge<B> {
     pub(crate) inner: Arc<Mutex<B>>,
     pub(crate) permissions: Arc<Mutex<BTreeMap<String, PermissionsPolicy>>>,
+    #[cfg(test)]
+    pub(crate) set_vm_permissions_outcomes: Arc<Mutex<VecDeque<Option<SidecarError>>>>,
 }
 
 impl<B> Clone for SharedBridge<B> {
@@ -198,6 +209,8 @@ impl<B> Clone for SharedBridge<B> {
         Self {
             inner: Arc::clone(&self.inner),
             permissions: Arc::clone(&self.permissions),
+            #[cfg(test)]
+            set_vm_permissions_outcomes: Arc::clone(&self.set_vm_permissions_outcomes),
         }
     }
 }
@@ -275,6 +288,7 @@ pub(crate) struct VmState {
     pub(crate) dns: VmDnsConfig,
     pub(crate) guest_env: BTreeMap<String, String>,
     pub(crate) requested_runtime: GuestRuntimeKind,
+    pub(crate) root_filesystem_mode: RootFilesystemMode,
     pub(crate) guest_cwd: String,
     pub(crate) cwd: PathBuf,
     pub(crate) host_cwd: PathBuf,
@@ -286,8 +300,15 @@ pub(crate) struct VmState {
     pub(crate) command_permissions: BTreeMap<String, WasmPermissionTier>,
     pub(crate) toolkits: BTreeMap<String, RegisterToolkitRequest>,
     pub(crate) active_processes: BTreeMap<String, ActiveProcess>,
+    pub(crate) exited_process_snapshots: VecDeque<ExitedProcessSnapshot>,
     pub(crate) detached_child_processes: BTreeSet<String>,
     pub(crate) signal_states: BTreeMap<String, BTreeMap<u32, SignalHandlerRegistration>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExitedProcessSnapshot {
+    pub(crate) captured_at: Instant,
+    pub(crate) process: crate::protocol::ProcessSnapshotEntry,
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +393,7 @@ pub(crate) struct ActiveProcess {
     pub(crate) mapped_host_fds: BTreeMap<u32, ActiveMappedHostFd>,
     pub(crate) next_mapped_host_fd: u32,
     pub(crate) pending_execution_events: VecDeque<ActiveExecutionEvent>,
+    pub(crate) pending_self_signal_exit: Option<i32>,
     pub(crate) child_processes: BTreeMap<String, ActiveProcess>,
     pub(crate) next_child_process_id: usize,
     pub(crate) http_servers: BTreeMap<u64, ActiveHttpServer>,

@@ -12,6 +12,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import {
+  describeIf,
   createIntegrationKernel,
   skipUnlessWasmBuilt,
   TerminalHarness,
@@ -21,7 +22,7 @@ import type { IntegrationKernelResult } from './helpers.ts';
 const PROMPT = 'sh-0.4$ ';
 const wasmSkip = skipUnlessWasmBuilt();
 
-describe.skipIf(wasmSkip)('Ctrl+C at shell prompt', () => {
+describeIf(!wasmSkip, 'Ctrl+C at shell prompt', () => {
   let harness: TerminalHarness;
   let ctx: IntegrationKernelResult;
 

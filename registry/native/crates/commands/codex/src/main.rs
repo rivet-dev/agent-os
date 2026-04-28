@@ -12,7 +12,6 @@
 ///   - Terminal size from COLUMNS/LINES env vars
 ///   - Event source reads stdin directly and parses ANSI escape sequences
 ///   - IsTty returns true (PTY slave FDs are terminals)
-
 use std::io;
 
 use ratatui::{
@@ -134,10 +133,7 @@ fn handle_key_event(
                 let prompt = input.clone();
                 messages.push(format!("> {}", prompt));
                 messages.push("codex: agent loop is under development".to_string());
-                messages.push(format!(
-                    "codex: prompt received ({} chars)",
-                    prompt.len()
-                ));
+                messages.push(format!("codex: prompt received ({} chars)", prompt.len()));
                 input.clear();
             }
         }
@@ -162,7 +158,7 @@ fn draw_ui(f: &mut Frame, input: &str, messages: &[String], model: Option<&str>)
     let area = f.area();
 
     let chunks = Layout::vertical([
-        Constraint::Length(3),  // Header
+        Constraint::Length(3), // Header
         Constraint::Min(5),    // Messages
         Constraint::Length(3), // Input
     ])
@@ -171,7 +167,12 @@ fn draw_ui(f: &mut Frame, input: &str, messages: &[String], model: Option<&str>)
     // Header
     let model_text = model.unwrap_or("default");
     let header = Paragraph::new(Line::from(vec![
-        Span::styled("Codex ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Codex ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(VERSION, Style::default().fg(Color::DarkGray)),
         Span::raw("  "),
         Span::styled(
@@ -179,10 +180,7 @@ fn draw_ui(f: &mut Frame, input: &str, messages: &[String], model: Option<&str>)
             Style::default().fg(Color::Yellow),
         ),
         Span::raw("  "),
-        Span::styled(
-            "WasmVM",
-            Style::default().fg(Color::Green),
-        ),
+        Span::styled("WasmVM", Style::default().fg(Color::Green)),
     ]))
     .block(Block::default().borders(Borders::ALL).title(" codex "));
     f.render_widget(header, chunks[0]);
@@ -204,7 +202,9 @@ fn draw_ui(f: &mut Frame, input: &str, messages: &[String], model: Option<&str>)
             Line::from(""),
             Line::from(Span::styled(
                 "Welcome to Codex on WasmVM!",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from("Type a prompt and press Enter to submit."),
@@ -229,7 +229,10 @@ fn draw_ui(f: &mut Frame, input: &str, messages: &[String], model: Option<&str>)
 }
 
 fn print_help() {
-    println!("codex {} — interactive Codex TUI for Agent OS WasmVM", VERSION);
+    println!(
+        "codex {} — interactive Codex TUI for Agent OS WasmVM",
+        VERSION
+    );
     println!();
     println!("USAGE:");
     println!("    codex [OPTIONS]");

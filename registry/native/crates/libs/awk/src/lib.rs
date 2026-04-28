@@ -64,8 +64,8 @@ fn run_awk(args: &[String]) -> Result<i32, String> {
             if i >= args.len() {
                 return Err("option -f requires an argument".to_string());
             }
-            let content = std::fs::read_to_string(&args[i])
-                .map_err(|e| format!("{}: {}", args[i], e))?;
+            let content =
+                std::fs::read_to_string(&args[i]).map_err(|e| format!("{}: {}", args[i], e))?;
             program_source = Some(content);
         } else if arg.starts_with('-') && arg != "-" {
             // Skip unknown options gracefully
@@ -108,7 +108,9 @@ fn run_awk(args: &[String]) -> Result<i32, String> {
         // Read from stdin
         let stdin = io::stdin();
         let inputs = vec![BufReader::new(stdin.lock())];
-        interpreter.run(inputs, &mut output).map_err(|e| format!("{}", e))?
+        interpreter
+            .run(inputs, &mut output)
+            .map_err(|e| format!("{}", e))?
     } else {
         let mut exit_code = 0;
         for filename in &input_files {
@@ -116,13 +118,17 @@ fn run_awk(args: &[String]) -> Result<i32, String> {
                 interpreter.set_filename("");
                 let stdin = io::stdin();
                 let inputs = vec![BufReader::new(stdin.lock())];
-                exit_code = interpreter.run(inputs, &mut output).map_err(|e| format!("{}", e))?;
+                exit_code = interpreter
+                    .run(inputs, &mut output)
+                    .map_err(|e| format!("{}", e))?;
             } else {
                 interpreter.set_filename(filename);
-                let file = std::fs::File::open(filename)
-                    .map_err(|e| format!("{}: {}", filename, e))?;
+                let file =
+                    std::fs::File::open(filename).map_err(|e| format!("{}: {}", filename, e))?;
                 let inputs = vec![BufReader::new(file)];
-                exit_code = interpreter.run(inputs, &mut output).map_err(|e| format!("{}", e))?;
+                exit_code = interpreter
+                    .run(inputs, &mut output)
+                    .map_err(|e| format!("{}", e))?;
             }
         }
         exit_code

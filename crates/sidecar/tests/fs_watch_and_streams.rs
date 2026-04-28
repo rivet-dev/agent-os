@@ -1,8 +1,8 @@
 mod support;
 
 use agent_os_sidecar::protocol::{
-    CreateVmRequest, GuestRuntimeKind, OwnershipScope, RequestPayload, ResponsePayload,
-    RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryEncoding,
+    CreateVmRequest, GuestRuntimeKind, OwnershipScope, PermissionsPolicy, RequestPayload,
+    ResponsePayload, RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryEncoding,
     RootFilesystemEntryKind,
 };
 use std::time::Duration;
@@ -132,7 +132,7 @@ console.log(
                     ],
                     ..RootFilesystemDescriptor::default()
                 },
-                permissions: None,
+                permissions: Some(PermissionsPolicy::allow_all()),
             }),
         ))
         .expect("create sidecar vm");
@@ -174,7 +174,7 @@ console.log(
         serde_json::from_str(json_line).expect("parse fs watch and streams result");
 
     assert_eq!(payload["readChunks"], serde_json::json!(["bc", "de", "f"]));
-    assert_eq!(payload["output"], "heXYZ");
+    assert_eq!(payload["output"], "\u{0}\u{0}XYZ");
     assert_eq!(payload["watchEvents"][0]["eventType"], "change");
     assert_eq!(payload["watchEvents"][0]["filename"], "watch.txt");
     assert_eq!(payload["watchFileEvents"][0]["prevSize"], 6);

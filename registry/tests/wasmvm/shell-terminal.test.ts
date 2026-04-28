@@ -3,13 +3,13 @@
  * headless xterm screen state.
  *
  * All output assertions use exact-match on screenshotTrimmed().
- * Gated with skipIf(!hasWasmBinaries) — requires WASM binary built.
+ * Registers only when the WASM shell binary is available.
  */
 
 import { describe, it, expect, afterEach } from "vitest";
 import { TerminalHarness } from './terminal-harness.js';
 import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
-import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
+import { COMMANDS_DIR, createKernel, describeIf, hasWasmBinaries } from '../helpers.js';
 import type { Kernel } from "../helpers.js";
 
 /** brush-shell interactive prompt (captured empirically). */
@@ -151,7 +151,7 @@ async function createShellKernel(): Promise<{
 // Tests
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!hasWasmBinaries)("wasmvm-shell-terminal", () => {
+describeIf(hasWasmBinaries, "wasmvm-shell-terminal", () => {
 	let harness: TerminalHarness;
 
 	afterEach(async () => {
@@ -288,7 +288,6 @@ describe.skipIf(!hasWasmBinaries)("wasmvm-shell-terminal", () => {
 		expect(harness.screenshotTrimmed()).toBe(
 			[
 				`${PROMPT}cat /tmp/hello.txt`,
-				" WARN could not retrieve pid for child process",
 				"hello world",
 				PROMPT,
 			].join("\n"),
@@ -310,7 +309,6 @@ describe.skipIf(!hasWasmBinaries)("wasmvm-shell-terminal", () => {
 			[
 				`${PROMPT}echo foo > /tmp/pipe.out`,
 				`${PROMPT}cat /tmp/pipe.out`,
-				" WARN could not retrieve pid for child process",
 				"foo",
 				PROMPT,
 			].join("\n"),
@@ -366,7 +364,6 @@ describe.skipIf(!hasWasmBinaries)("wasmvm-shell-terminal", () => {
 			[
 				`${PROMPT}echo hello > /tmp/out`,
 				`${PROMPT}cat /tmp/out`,
-				" WARN could not retrieve pid for child process",
 				"hello",
 				PROMPT,
 			].join("\n"),
@@ -429,10 +426,7 @@ describe.skipIf(!hasWasmBinaries)("wasmvm-shell-terminal", () => {
 	// CWD propagation regressions (US-076)
 	// -----------------------------------------------------------------------
 
-	// Requires WASM binaries rebuilt with init_cwd.c override so getcwd()
-	// reads PWD from env at startup. brush-shell calls getcwd() to determine
-	// its initial cwd; without the override, __wasilibc_cwd stays "/".
-	it.skip("shell started with non-root cwd — 'pwd' builtin reports that cwd", async () => {
+	it("shell started with non-root cwd — 'pwd' builtin reports that cwd", async () => {
 		const { kernel, vfs } = await createShellKernel();
 		await vfs.createDir("/home");
 		await vfs.createDir("/home/user");
@@ -462,10 +456,7 @@ describe.skipIf(!hasWasmBinaries)("wasmvm-shell-terminal", () => {
 		expect(screen).toContain("/tmp/work");
 	});
 
-	// Requires WASM binaries rebuilt with init_cwd.c override so getcwd()
-	// reads PWD from env. ls uses getcwd() to determine its working
-	// directory when called without arguments.
-	it.skip("cd then ls — spawned ls lists cwd contents, not root", async () => {
+	it("cd then ls — spawned ls lists cwd contents, not root", async () => {
 		const { kernel, vfs } = await createShellKernel();
 		await vfs.createDir("/data");
 		await vfs.writeFile("/data/marker.txt", "x");

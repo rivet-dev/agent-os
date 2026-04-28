@@ -17,6 +17,7 @@ import {
   COMMANDS_DIR,
   createInMemoryFileSystem,
   createKernel,
+  describeIf,
   hasWasmBinaries,
 } from '../helpers.js';
 import type { Kernel } from '../helpers.js';
@@ -72,7 +73,7 @@ async function run(kernel: Kernel, cmd: string): Promise<{ stdout: string; stder
   return r;
 }
 
-describe.skipIf(!hasGit)('git command', () => {
+describeIf(hasGit, 'git command', () => {
   let kernel: Kernel;
   let vfs: any;
   let dispose: () => Promise<void>;
@@ -352,7 +353,44 @@ describe.skipIf(!hasGit)('git command', () => {
     expect(readmeContent).toBe('relative clone\n');
   });
 
-  describe.skipIf(!hasHostGit)('remote clone over smart HTTP', () => {
+  it('push fails with a typed unsupported-subcommand error', async () => {
+    ({ kernel, dispose } = await createGitKernel());
+
+    await run(kernel, 'git init /tmp/repo');
+
+    const result = await kernel.exec('git -C /tmp/repo push origin main');
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain('GitSubcommandUnsupported');
+    expect(result.stderr).toContain('git push');
+    expect(result.stderr).toContain('registry/native/crates/libs/git/README.md');
+  });
+
+  it('clone rejects SSH-style remotes with a typed unsupported-subcommand error', async () => {
+    ({ kernel, dispose } = await createGitKernel());
+
+    const result = await kernel.exec('git clone git@github.com:rivet-dev/agent-os.git /tmp/clone');
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain('GitSubcommandUnsupported');
+    expect(result.stderr).toContain('git clone');
+    expect(result.stderr).toContain('SSH');
+    expect(result.stderr).toContain('registry/native/crates/libs/git/README.md');
+  });
+
+  it('clone rejects authenticated HTTPS remotes loudly instead of attempting a broken auth flow', async () => {
+    ({ kernel, dispose } = await createGitKernel());
+
+    const result = await kernel.exec(
+      'git clone https://private@example.com/owner/repo.git /tmp/clone',
+      { env: { GIT_AUTH_TOKEN: 'test-token' } },
+    );
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain('GitSubcommandUnsupported');
+    expect(result.stderr).toContain('git clone');
+    expect(result.stderr).toContain('authenticated HTTP(S) remotes');
+    expect(result.stderr).toContain('registry/native/crates/libs/git/README.md');
+  });
+
+  describeIf(hasHostGit, 'remote clone over smart HTTP', () => {
     let repoRoot: string;
     let httpServer: HttpServer;
     let httpPort: number;

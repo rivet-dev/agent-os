@@ -6,10 +6,6 @@ license.workspace = true
 description = "V8 isolate runtime for Agent OS guest JavaScript execution"
 publish = false
 
-[[bin]]
-name = "agent-os-v8"
-path = "src/main.rs"
-
 [dependencies]
 agent-os-bridge = { path = "../bridge" }
 v8 = "130"
@@ -17,3 +13,4 @@ crossbeam-channel = "0.5"
 signal-hook = "0.3"
 libc = "0.2"
 ciborium = "0.2"
+openssl = "0.10"

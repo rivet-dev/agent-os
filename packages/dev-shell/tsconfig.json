@@ -6,14 +6,10 @@
     "moduleResolution": "NodeNext",
     "declaration": true,
     "outDir": "./dist",
-    "rootDir": "./src",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "paths": {
-      "@rivet-dev/agent-os-core/internal/runtime-compat": ["../core/dist/runtime-compat.d.ts"],
-      "@rivet-dev/agent-os-core/test/runtime": ["../core/dist/test/runtime.d.ts"]
-    }
+	"rootDir": "./src",
+	"strict": true,
+	"esModuleInterop": true,
+	"skipLibCheck": true
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]

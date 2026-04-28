@@ -11,6 +11,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import {
+  describeIf,
   createKernel,
   createNodeRuntime,
   createIntegrationKernel,
@@ -22,7 +23,7 @@ import type { IntegrationKernelResult } from './helpers.ts';
 
 const skipReason = skipUnlessWasmBuilt();
 
-describe.skipIf(skipReason)('dispose with active processes (integration)', () => {
+describeIf(!skipReason, 'dispose with active processes (integration)', () => {
   let ctx: IntegrationKernelResult;
 
   afterEach(async () => {

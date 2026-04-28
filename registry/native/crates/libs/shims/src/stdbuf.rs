@@ -6,7 +6,7 @@
 //! Usage: stdbuf [-i MODE] [-o MODE] [-e MODE] COMMAND [ARG]...
 
 use std::ffi::OsString;
-use std::io::Write;
+use std::process::Stdio;
 
 pub fn stdbuf(args: Vec<OsString>) -> i32 {
     let str_args: Vec<String> = args
@@ -20,8 +20,12 @@ pub fn stdbuf(args: Vec<OsString>) -> i32 {
     let mut i = 0;
     while i < str_args.len() {
         let arg = &str_args[i];
-        if (arg == "-i" || arg == "-o" || arg == "-e"
-            || arg == "--input" || arg == "--output" || arg == "--error")
+        if (arg == "-i"
+            || arg == "-o"
+            || arg == "-e"
+            || arg == "--input"
+            || arg == "--output"
+            || arg == "--error")
             && i + 1 < str_args.len()
         {
             i += 2;
@@ -41,15 +45,14 @@ pub fn stdbuf(args: Vec<OsString>) -> i32 {
     let program = &str_args[cmd_start];
     let child_args = &str_args[cmd_start + 1..];
 
-    match std::process::Command::new(program)
-        .args(child_args)
-        .output()
-    {
-        Ok(output) => {
-            let _ = std::io::stdout().write_all(&output.stdout);
-            let _ = std::io::stderr().write_all(&output.stderr);
-            output.status.code().unwrap_or(1)
-        }
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(child_args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("stdbuf: failed to run command '{}': {}", program, e);
             127

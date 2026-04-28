@@ -54,7 +54,7 @@
   "scripts": {
     "check-types": "tsc --noEmit",
     "build": "tsc",
-    "test:browser": "pnpm --dir ../playground run setup-vendor && pnpm --dir ../playground build:assets && playwright test --project=chromium --workers=1",
+    "test:browser": "node ./scripts/run-browser-tests.mjs",
     "test": "pnpm build && vitest run tests/runtime-driver/permission-validation.test.ts && pnpm run test:browser"
   },
   "dependencies": {

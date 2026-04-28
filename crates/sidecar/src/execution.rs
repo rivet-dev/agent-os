@@ -15,12 +15,12 @@ use crate::protocol::{
     ProcessKilledResponse, ProcessOutputEvent, ProcessSnapshotEntry, ProcessSnapshotResponse,
     ProcessSnapshotStatus, ProcessStartedResponse, RequestFrame, ResponsePayload,
     SidecarRequestPayload, SignalDispositionAction, SignalHandlerRegistration, SignalStateResponse,
-    SocketStateEntry, StdinClosedResponse, StdinWrittenResponse, StreamChannel, WasmPermissionTier,
-    WriteStdinRequest, ZombieTimerCountResponse,
+    SocketStateEntry, StdinClosedResponse, StdinWrittenResponse, StreamChannel, VmFetchRequest,
+    VmFetchResponse, WasmPermissionTier, WriteStdinRequest, ZombieTimerCountResponse,
 };
 use crate::service::{
     audit_fields, dirname, emit_security_audit_event, emit_structured_event, javascript_error,
-    kernel_error, normalize_host_path, normalize_path,
+    kernel_error, log_stale_process_event, normalize_host_path, normalize_path,
     parse_javascript_child_process_spawn_request, path_is_within_root, python_error, wasm_error,
 };
 use crate::state::{
@@ -28,28 +28,30 @@ use crate::state::{
     ActiveExecution, ActiveExecutionEvent, ActiveHttp2Server, ActiveHttp2Session,
     ActiveHttp2Stream, ActiveHttpServer, ActiveMappedHostFd, ActiveProcess, ActiveSqliteDatabase,
     ActiveSqliteStatement, ActiveTcpListener, ActiveTcpSocket, ActiveTlsState, ActiveTlsStream,
-    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError, Http2BridgeEvent,
-    Http2RuntimeSnapshot, Http2SessionCommand, Http2SessionSnapshot, Http2SocketSnapshot,
-    JavascriptSocketFamily, JavascriptSocketPathContext, JavascriptTcpListenerEvent,
-    JavascriptTcpSocketEvent, JavascriptTlsBridgeOptions, JavascriptTlsClientHello,
-    JavascriptTlsDataValue, JavascriptTlsMaterial, JavascriptUdpFamily, JavascriptUdpSocketEvent,
-    JavascriptUnixListenerEvent, NetworkResourceCounts, PendingTcpSocket, PendingUnixSocket,
-    ProcNetEntry, ProcessEventEnvelope, ResolvedChildProcessExecution, ResolvedTcpConnectAddr,
-    SharedBridge, SharedSidecarRequestClient, SidecarKernel, SocketQueryKind, ToolExecution,
-    VmDnsConfig, VmListenPolicy, VmState, DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME,
-    EXECUTION_SANDBOX_ROOT_ENV, JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV,
-    MAPPED_HOST_FD_START, PYTHON_COMMAND, TOOL_DRIVER_NAME,
+    ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket, BridgeError,
+    DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
+    ExitedProcessSnapshot, Http2BridgeEvent, Http2RuntimeSnapshot, Http2SessionCommand,
+    Http2SessionSnapshot, Http2SocketSnapshot, JAVASCRIPT_COMMAND, JavascriptSocketFamily,
+    JavascriptSocketPathContext, JavascriptTcpListenerEvent, JavascriptTcpSocketEvent,
+    JavascriptTlsBridgeOptions, JavascriptTlsClientHello, JavascriptTlsDataValue,
+    JavascriptTlsMaterial, JavascriptUdpFamily, JavascriptUdpSocketEvent,
+    JavascriptUnixListenerEvent, LOOPBACK_EXEMPT_PORTS_ENV, MAPPED_HOST_FD_START,
+    NetworkResourceCounts, PYTHON_COMMAND, PendingTcpSocket, PendingUnixSocket, ProcNetEntry,
+    ProcessEventEnvelope, ResolvedChildProcessExecution, ResolvedTcpConnectAddr, SharedBridge,
+    SharedSidecarRequestClient, SidecarKernel, SocketQueryKind, TOOL_DRIVER_NAME, ToolExecution,
     VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, VM_LISTEN_PORT_MAX_METADATA_KEY,
-    VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND,
+    VM_LISTEN_PORT_MIN_METADATA_KEY, VmDnsConfig, VmListenPolicy, VmState, WASM_COMMAND,
+    WASM_STDIO_SYNC_RPC_ENV,
 };
 use crate::tools::{
-    format_tool_failure_output, is_tool_command, resolve_tool_command, ToolCommandResolution,
+    ToolCommandResolution, format_tool_failure_output, is_tool_command,
+    normalized_tool_command_name, resolve_tool_command,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
 use agent_os_bridge::LifecycleState;
 use agent_os_execution::wasm::{
-    WasmExecutionError, WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV,
+    WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV, WasmExecutionError,
 };
 use agent_os_execution::{
     CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
@@ -58,27 +60,33 @@ use agent_os_execution::{
     PythonVfsRpcResponsePayload, StartJavascriptExecutionRequest, StartPythonExecutionRequest,
     StartWasmExecutionRequest, WasmExecutionEvent,
     WasmPermissionTier as ExecutionWasmPermissionTier,
+    javascript::handle_internal_bridge_call_from_host_context, v8_host::V8SessionHandle,
+    v8_runtime,
 };
-use agent_os_kernel::dns::{DnsLookupPolicy, DnsResolutionSource as KernelDnsResolutionSource};
+use agent_os_kernel::dns::{
+    DnsLookupPolicy, DnsRecordResolution, DnsResolutionSource as KernelDnsResolutionSource,
+};
 use agent_os_kernel::kernel::{KernelProcessHandle, SpawnOptions, VirtualProcessOptions};
 use agent_os_kernel::permissions::NetworkOperation;
-use agent_os_kernel::poll::{PollEvents, PollFd, PollTargetEntry, POLLERR, POLLHUP, POLLIN};
-use agent_os_kernel::process_table::{ProcessStatus, SIGKILL, SIGTERM};
+use agent_os_kernel::poll::{POLLERR, POLLHUP, POLLIN, PollEvents, PollFd, PollTargetEntry};
+use agent_os_kernel::process_table::{ProcessStatus, SIGKILL, SIGTERM, WaitPidFlags};
 use agent_os_kernel::pty::LineDisciplineConfig;
 use agent_os_kernel::resource_accounting::ResourceLimits;
+use agent_os_kernel::root_fs::RootFilesystemMode;
 use agent_os_kernel::socket_table::{
     InetSocketAddress, SocketDomain, SocketId, SocketShutdown as KernelSocketShutdown, SocketSpec,
     SocketState, SocketType,
 };
 use base64::Engine;
 use bytes::Bytes;
-use h2::{client, server, Reason};
+use h2::{Reason, client, server};
+use hickory_resolver::proto::rr::{RData, Record, RecordType};
 use hmac::{Hmac, Mac};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri};
 use md5::Md5;
 use nix::libc;
-use nix::sys::signal::{kill as send_signal, Signal};
-use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag, WaitStatus};
+use nix::sys::signal::{Signal, kill as send_signal};
+use nix::sys::wait::{Id as WaitId, WaitPidFlag, WaitStatus, waitid as wait_on_child};
 use nix::unistd::Pid;
 use openssl::bn::{BigNum, BigNumContext};
 use openssl::derive::Deriver;
@@ -103,11 +111,11 @@ use rustls::{
     ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, ServerConfig,
     ServerConnection, SignatureScheme,
 };
-use scrypt::{scrypt, Params as ScryptParams};
+use scrypt::{Params as ScryptParams, scrypt};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha1::Sha1;
-use sha2::{digest::Digest, Sha256, Sha512};
+use sha2::{Sha256, Sha512, digest::Digest};
 use socket2::{SockRef, TcpKeepalive};
 use std::collections::VecDeque;
 use std::collections::{BTreeMap, BTreeSet};
@@ -118,7 +126,7 @@ use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
     UdpSocket,
 };
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{SocketAddr as UnixSocketAddr, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -129,7 +137,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use url::Url;
 
@@ -319,6 +327,7 @@ impl ActiveProcess {
             mapped_host_fds: BTreeMap::new(),
             next_mapped_host_fd: MAPPED_HOST_FD_START,
             pending_execution_events: VecDeque::new(),
+            pending_self_signal_exit: None,
             child_processes: BTreeMap::new(),
             next_child_process_id: 0,
             http_servers: BTreeMap::new(),
@@ -504,12 +513,52 @@ fn poll_child_execution_after_exit(
     }
 }
 
+fn closed_javascript_event_channel(message: &str) -> bool {
+    message == "guest JavaScript event channel closed unexpectedly"
+}
+
+fn closed_python_event_channel(message: &str) -> bool {
+    message == "guest Python event channel closed unexpectedly"
+}
+
+fn closed_wasm_event_channel(message: &str) -> bool {
+    message == WasmExecutionError::EventChannelClosed.to_string()
+}
+
+fn missing_vm_error(vm_id: &str) -> SidecarError {
+    SidecarError::InvalidState(format!("VM {vm_id} is no longer active"))
+}
+
+fn missing_process_error(vm_id: &str, process_id: &str) -> SidecarError {
+    SidecarError::InvalidState(format!(
+        "VM {vm_id} no longer has active process {process_id}"
+    ))
+}
+
 fn is_broken_pipe_error(error: &SidecarError) -> bool {
     matches!(error, SidecarError::Execution(message) if message.contains("Broken pipe") || message.contains("os error 32") || message.contains("EPIPE"))
 }
 
-fn loopback_tls_transport_registry(
-) -> &'static Mutex<BTreeMap<String, Weak<crate::state::LoopbackTlsTransportPair>>> {
+fn javascript_child_process_gone_error(process_id: &str, child_path: &[&str]) -> SidecarError {
+    let child_label = if child_path.is_empty() {
+        process_id.to_owned()
+    } else {
+        format!("{process_id}/{}", child_path.join("/"))
+    };
+    SidecarError::Execution(format!(
+        "ECHILD: child_process {child_label} is no longer available"
+    ))
+}
+
+fn is_javascript_child_process_gone_error(error: &SidecarError) -> bool {
+    matches!(
+        error,
+        SidecarError::Execution(message) if guest_errno_code(message) == Some("ECHILD")
+    )
+}
+
+fn loopback_tls_transport_registry()
+-> &'static Mutex<BTreeMap<String, Weak<crate::state::LoopbackTlsTransportPair>>> {
     static REGISTRY: OnceLock<
         Mutex<BTreeMap<String, Weak<crate::state::LoopbackTlsTransportPair>>>,
     > = OnceLock::new();
@@ -1822,7 +1871,7 @@ impl ActiveTcpListener {
                         return Ok(Some(JavascriptTcpListenerEvent::Error {
                             code: Some(error.code().to_string()),
                             message: error.to_string(),
-                        }))
+                        }));
                     }
                 };
             let accepted = kernel.socket_get(accepted_socket_id).ok_or_else(|| {
@@ -2158,7 +2207,7 @@ impl ActiveUdpSocket {
             other => {
                 return Err(SidecarError::InvalidState(format!(
                     "unsupported UDP buffer size kind {other}"
-                )))
+                )));
             }
         }
         if self.kernel_socket_id.is_some() {
@@ -2183,7 +2232,7 @@ impl ActiveUdpSocket {
                 other => {
                     return Err(SidecarError::InvalidState(format!(
                         "unsupported UDP buffer size kind {other}"
-                    )))
+                    )));
                 }
             });
         }
@@ -2202,6 +2251,15 @@ impl ActiveUdpSocket {
 // ActiveExecution, ActiveExecutionEvent, SocketQueryKind moved to crate::state
 
 impl ActiveExecution {
+    pub(crate) fn uses_shared_v8_runtime(&self) -> bool {
+        match self {
+            Self::Javascript(execution) => execution.uses_shared_v8_runtime(),
+            Self::Python(execution) => execution.uses_shared_v8_runtime(),
+            Self::Wasm(execution) => execution.uses_shared_v8_runtime(),
+            Self::Tool(_) => false,
+        }
+    }
+
     pub(crate) fn child_pid(&self) -> u32 {
         match self {
             Self::Javascript(execution) => execution.child_pid(),
@@ -2281,9 +2339,35 @@ impl ActiveExecution {
             Self::Javascript(execution) => execution
                 .send_stream_event(event_type, payload)
                 .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Wasm(execution) => execution
+                .send_stream_event(event_type, payload)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
             _ => Err(SidecarError::InvalidState(String::from(
-                "only JavaScript executions can receive JavaScript stream events",
+                "only embedded V8 executions can receive JavaScript stream events",
             ))),
+        }
+    }
+
+    pub(crate) fn javascript_v8_session_handle(&self) -> Option<V8SessionHandle> {
+        match self {
+            Self::Javascript(execution) => Some(execution.v8_session_handle()),
+            Self::Wasm(execution) => Some(execution.v8_session_handle()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn terminate(&mut self) -> Result<(), SidecarError> {
+        match self {
+            Self::Javascript(execution) => execution
+                .terminate()
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Python(execution) => execution
+                .kill()
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Wasm(execution) => execution
+                .terminate()
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Tool(_) => Ok(()),
         }
     }
 
@@ -2560,7 +2644,7 @@ fn spawn_tool_process_events(
                             connection_id,
                             session_id,
                             vm_id,
-                            process_id,
+                            process_id: process_id.clone(),
                             event: ActiveExecutionEvent::Exited(0),
                         });
                     } else {
@@ -2580,7 +2664,7 @@ fn spawn_tool_process_events(
                             connection_id,
                             session_id,
                             vm_id,
-                            process_id,
+                            process_id: process_id.clone(),
                             event: ActiveExecutionEvent::Exited(1),
                         });
                     }
@@ -2639,7 +2723,10 @@ where
         let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
         self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
 
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
+        let vm = self
+            .vms
+            .get_mut(&vm_id)
+            .ok_or_else(|| missing_vm_error(&vm_id))?;
         if vm.active_processes.contains_key(&payload.process_id) {
             return Err(SidecarError::InvalidState(format!(
                 "VM {vm_id} already has an active process with id {}",
@@ -2720,6 +2807,8 @@ where
         );
         if resolved.runtime == GuestRuntimeKind::JavaScript {
             env.insert(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"));
+        } else if resolved.runtime == GuestRuntimeKind::WebAssembly {
+            env.insert(String::from(WASM_STDIO_SYNC_RPC_ENV), String::from("1"));
         }
         let argv = std::iter::once(resolved.entrypoint.clone())
             .chain(resolved.execution_args.iter().cloned())
@@ -2745,9 +2834,7 @@ where
                     &resolved.entrypoint,
                     &env,
                 );
-                if inline_code.is_none() {
-                    prepare_javascript_shadow(vm, &resolved)?;
-                }
+                prepare_javascript_shadow(vm, &resolved)?;
 
                 let context =
                     self.javascript_engine
@@ -2779,6 +2866,7 @@ where
                     .map_err(python_error)?;
                 let pyodide_cache_path = pyodide_dist_path
                     .parent()
+                    .and_then(Path::parent)
                     .unwrap_or(pyodide_dist_path.as_path())
                     .join("pyodide-package-cache");
                 add_runtime_guest_path_mapping(
@@ -2790,6 +2878,24 @@ where
                     &mut env,
                     PYTHON_PYODIDE_CACHE_GUEST_ROOT,
                     &pyodide_cache_path,
+                );
+                add_runtime_host_access_path(
+                    &mut env,
+                    "AGENT_OS_EXTRA_FS_READ_PATHS",
+                    &pyodide_dist_path,
+                    true,
+                );
+                add_runtime_host_access_path(
+                    &mut env,
+                    "AGENT_OS_EXTRA_FS_READ_PATHS",
+                    &pyodide_cache_path,
+                    true,
+                );
+                add_runtime_host_access_path(
+                    &mut env,
+                    "AGENT_OS_EXTRA_FS_WRITE_PATHS",
+                    &pyodide_cache_path,
+                    false,
                 );
                 let context = self
                     .python_engine
@@ -2875,7 +2981,10 @@ where
         let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
         self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
 
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
+        let vm = self
+            .vms
+            .get_mut(&vm_id)
+            .ok_or_else(|| missing_vm_error(&vm_id))?;
         let process = vm
             .active_processes
             .get_mut(&payload.process_id)
@@ -2908,7 +3017,10 @@ where
         let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
         self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
 
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
+        let vm = self
+            .vms
+            .get_mut(&vm_id)
+            .ok_or_else(|| missing_vm_error(&vm_id))?;
         let process = vm
             .active_processes
             .get_mut(&payload.process_id)
@@ -2959,6 +3071,13 @@ where
     ) -> Result<DispatchResult, SidecarError> {
         let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
         self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+        require_vm_inspection_permission(
+            &self.bridge,
+            &vm_id,
+            "network.inspect",
+            "network",
+            &socket_query_resource(SocketQueryKind::TcpListener, &payload),
+        )?;
 
         let listener =
             find_socket_state_entry(self.vms.get(&vm_id), SocketQueryKind::TcpListener, &payload)?;
@@ -2979,11 +3098,21 @@ where
     ) -> Result<DispatchResult, SidecarError> {
         let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
         self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+        require_vm_inspection_permission(
+            &self.bridge,
+            &vm_id,
+            "process.inspect",
+            "process",
+            "process://snapshot",
+        )?;
 
         let processes = self
             .vms
-            .get(&vm_id)
-            .map(snapshot_vm_processes)
+            .get_mut(&vm_id)
+            .map(|vm| {
+                prune_exited_process_snapshots(vm);
+                snapshot_vm_processes(vm)
+            })
             .unwrap_or_default();
 
         Ok(DispatchResult {
@@ -3008,6 +3137,13 @@ where
             port: payload.port,
             path: None,
         };
+        require_vm_inspection_permission(
+            &self.bridge,
+            &vm_id,
+            "network.inspect",
+            "network",
+            &socket_query_resource(SocketQueryKind::UdpBound, &lookup_request),
+        )?;
         let socket = find_socket_state_entry(
             self.vms.get(&vm_id),
             SocketQueryKind::UdpBound,
@@ -3018,6 +3154,109 @@ where
             response: self.respond(
                 request,
                 ResponsePayload::BoundUdpSnapshot(BoundUdpSnapshotResponse { socket }),
+            ),
+            events: Vec::new(),
+        })
+    }
+
+    pub(crate) async fn vm_fetch(
+        &mut self,
+        request: &RequestFrame,
+        payload: VmFetchRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
+        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+
+        let vm = self
+            .vms
+            .get_mut(&vm_id)
+            .ok_or_else(|| SidecarError::InvalidState(String::from("unknown sidecar VM")))?;
+        let target_path = if payload.path.starts_with('/') {
+            payload.path.clone()
+        } else {
+            format!("/{}", payload.path)
+        };
+        let request_url = Url::parse(&format!("http://127.0.0.1:{}{target_path}", payload.port))
+            .map_err(|error| {
+                SidecarError::InvalidState(format!(
+                    "invalid vm.fetch target {target_path:?}: {error}"
+                ))
+            })?;
+        let header_values: BTreeMap<String, Value> = serde_json::from_str(&payload.headers_json)
+            .map_err(|error| {
+                SidecarError::InvalidState(format!(
+                    "vm.fetch headers_json must be valid JSON: {error}"
+                ))
+            })?;
+        let options = JavascriptHttpRequestOptions {
+            method: Some(payload.method),
+            headers: header_values,
+            body: payload.body,
+            reject_unauthorized: None,
+        };
+        let headers = parse_http_header_collection(&options.headers, "vm.fetch headers")?;
+        let Some((target_process_id, server_id)) =
+            vm.active_processes
+                .iter()
+                .find_map(|(process_id, process)| {
+                    process
+                        .http_servers
+                        .iter()
+                        .find(|(_, server)| server.guest_local_addr.port() == payload.port)
+                        .map(|(server_id, _)| (process_id.clone(), *server_id))
+                })
+        else {
+            return Err(SidecarError::Execution(format!(
+                "vm.fetch could not find a guest HTTP listener on port {}",
+                payload.port
+            )));
+        };
+        let socket_paths = build_javascript_socket_path_context(vm)?;
+        let resource_limits = vm.kernel.resource_limits().clone();
+        let process = vm
+            .active_processes
+            .get_mut(&target_process_id)
+            .ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "vm.fetch target process disappeared: {target_process_id}"
+                ))
+            })?;
+        let request_json = serialize_http_loopback_request(&request_url, &options, &headers)?;
+        let request_id = {
+            let server = process.http_servers.get_mut(&server_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "vm.fetch target server disappeared: {server_id}"
+                ))
+            })?;
+            server.next_request_id += 1;
+            server.next_request_id
+        };
+        process
+            .pending_http_requests
+            .insert((server_id, request_id), None);
+        process.execution.send_javascript_stream_event(
+            "http_request",
+            json!({
+                "serverId": server_id,
+                "requestId": request_id,
+                "request": request_json,
+            }),
+        )?;
+        let response_json = wait_for_loopback_http_response(
+            &self.bridge,
+            &vm_id,
+            &vm.dns,
+            &socket_paths,
+            &mut vm.kernel,
+            process,
+            &resource_limits,
+            (server_id, request_id),
+        )?;
+
+        Ok(DispatchResult {
+            response: self.respond(
+                request,
+                ResponsePayload::VmFetchResult(VmFetchResponse { response_json }),
             ),
             events: Vec::new(),
         })
@@ -3088,13 +3327,14 @@ where
         let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
             SidecarError::InvalidState(format!("VM {vm_id} has no active process {process_id}"))
         })?;
+        let kernel_pid = process.kernel_pid;
 
         enum KillBehavior {
             Tool,
-            SharedJavascriptSignalHost(u32),
-            SharedJavascriptTerminate,
-            SharedJavascriptDispatchOrTerminate,
-            SharedPythonTerminate,
+            SharedV8StateOnly,
+            SharedV8Continue,
+            SharedV8Terminate,
+            SharedV8DispatchOrTerminate,
             Noop,
             HostPid(u32),
         }
@@ -3102,21 +3342,45 @@ where
         let behavior = match &process.execution {
             ActiveExecution::Tool(_) => KillBehavior::Tool,
             ActiveExecution::Javascript(execution)
+                if execution.uses_shared_v8_runtime() && matches!(signal, 0 | libc::SIGSTOP) =>
+            {
+                KillBehavior::SharedV8StateOnly
+            }
+            ActiveExecution::Javascript(execution)
+                if execution.uses_shared_v8_runtime() && signal == libc::SIGCONT =>
+            {
+                KillBehavior::SharedV8Continue
+            }
+            ActiveExecution::Wasm(execution)
                 if execution.uses_shared_v8_runtime()
                     && matches!(signal, 0 | libc::SIGSTOP | libc::SIGCONT) =>
             {
-                KillBehavior::SharedJavascriptSignalHost(execution.child_pid())
+                KillBehavior::SharedV8StateOnly
+            }
+            ActiveExecution::Python(execution)
+                if execution.uses_shared_v8_runtime()
+                    && matches!(signal, 0 | libc::SIGSTOP | libc::SIGCONT) =>
+            {
+                KillBehavior::SharedV8StateOnly
             }
             ActiveExecution::Javascript(execution)
                 if execution.uses_shared_v8_runtime() && signal == SIGKILL =>
             {
-                KillBehavior::SharedJavascriptTerminate
+                KillBehavior::SharedV8Terminate
+            }
+            ActiveExecution::Wasm(execution)
+                if execution.uses_shared_v8_runtime() && signal == SIGKILL =>
+            {
+                KillBehavior::SharedV8Terminate
             }
             ActiveExecution::Javascript(execution) if execution.uses_shared_v8_runtime() => {
-                KillBehavior::SharedJavascriptDispatchOrTerminate
+                KillBehavior::SharedV8DispatchOrTerminate
+            }
+            ActiveExecution::Wasm(execution) if execution.uses_shared_v8_runtime() => {
+                KillBehavior::SharedV8Terminate
             }
             ActiveExecution::Python(execution) if execution.uses_shared_v8_runtime() => {
-                KillBehavior::SharedPythonTerminate
+                KillBehavior::SharedV8Terminate
             }
             ActiveExecution::Javascript(execution) if execution.child_pid() == 0 => {
                 KillBehavior::Noop
@@ -3140,42 +3404,46 @@ where
                     });
                 }
             }
-            KillBehavior::SharedJavascriptSignalHost(pid) => {
-                signal_runtime_process(pid, signal)?;
+            KillBehavior::SharedV8StateOnly => {
+                if matches!(signal, libc::SIGSTOP | libc::SIGCONT) {
+                    vm.kernel
+                        .kill_process(EXECUTION_DRIVER_NAME, kernel_pid, signal)
+                        .map_err(kernel_error)?;
+                }
             }
-            KillBehavior::SharedJavascriptTerminate => {
-                let ActiveExecution::Javascript(execution) = &mut process.execution else {
-                    unreachable!("kill behavior must match shared JavaScript execution");
-                };
-                execution
-                    .terminate()
-                    .map_err(|error| SidecarError::Execution(error.to_string()))?;
+            KillBehavior::SharedV8Continue => {
+                vm.kernel
+                    .kill_process(EXECUTION_DRIVER_NAME, kernel_pid, signal)
+                    .map_err(kernel_error)?;
+                if signal != 0 && !dispatch_v8_process_signal(process, signal)? {
+                    process.execution.terminate()?;
+                }
             }
-            KillBehavior::SharedJavascriptDispatchOrTerminate => {
+            KillBehavior::SharedV8Terminate => {
+                if signal != 0 && matches!(process.execution, ActiveExecution::Python(_)) {
+                    close_kernel_process_stdin(&mut vm.kernel, process)?;
+                }
+                process.execution.terminate()?;
+                if signal != 0 && matches!(process.execution, ActiveExecution::Wasm(_)) {
+                    process
+                        .pending_execution_events
+                        .push_back(ActiveExecutionEvent::Exited(128 + signal));
+                }
+            }
+            KillBehavior::SharedV8DispatchOrTerminate => {
                 if signal != 0 {
                     if !dispatch_v8_process_signal(process, signal)? {
-                        let ActiveExecution::Javascript(execution) = &mut process.execution else {
-                            unreachable!("kill behavior must match shared JavaScript execution");
-                        };
-                        execution
-                            .terminate()
-                            .map_err(|error| SidecarError::Execution(error.to_string()))?;
+                        process.execution.terminate()?;
                     }
                 }
             }
-            KillBehavior::SharedPythonTerminate => {
-                if signal != 0 {
-                    close_kernel_process_stdin(&mut vm.kernel, process)?;
-                    let ActiveExecution::Python(execution) = &mut process.execution else {
-                        unreachable!("kill behavior must match shared Python execution");
-                    };
-                    execution
-                        .kill()
-                        .map_err(|error| SidecarError::Execution(error.to_string()))?;
-                }
-            }
             KillBehavior::Noop => {}
-            KillBehavior::HostPid(pid) => signal_runtime_process(pid, signal)?,
+            KillBehavior::HostPid(pid) => {
+                if signal != 0 && matches!(process.execution, ActiveExecution::Python(_)) {
+                    close_kernel_process_stdin(&mut vm.kernel, process)?;
+                }
+                signal_runtime_process(pid, signal)?;
+            }
         }
         emit_security_audit_event(
             &self.bridge,
@@ -3235,29 +3503,52 @@ where
 
                 for process_id in process_ids {
                     if self
+                        .vms
+                        .get(&vm_id)
+                        .is_some_and(|vm| vm.detached_child_processes.contains(&process_id))
+                    {
+                        continue;
+                    }
+                    if self
                         .acp_terminal_owner_for_process(&vm_id, &process_id)
                         .is_some()
                     {
                         continue;
                     }
-                    let event = {
-                        let vm = self.vms.get_mut(&vm_id).expect("VM should still exist");
-                        let process = vm
-                            .active_processes
-                            .get_mut(&process_id)
-                            .expect("process should still exist");
-                        // Treat a closed event channel as "no more events" rather than
-                        // a hard error. The channel closes after the Exited event is
-                        // sent, but the process isn't removed from active_processes
-                        // until the envelope is dequeued and handled later.
-                        match process.execution.poll_event(Duration::ZERO).await {
-                            Ok(event) => event,
-                            Err(SidecarError::Execution(message))
-                                if message.contains("event channel closed") =>
-                            {
-                                None
+                    enum ProcessPollResult {
+                        Event(Option<ActiveExecutionEvent>),
+                        RecoverClosedChannel,
+                    }
+                    let poll_result = {
+                        let Some(vm) = self.vms.get_mut(&vm_id) else {
+                            continue;
+                        };
+                        let Some(process) = vm.active_processes.get_mut(&process_id) else {
+                            continue;
+                        };
+                        if let Some(event) = process.pending_execution_events.pop_front() {
+                            ProcessPollResult::Event(Some(event))
+                        } else {
+                            match process.execution.poll_event(Duration::ZERO).await {
+                                Ok(event) => ProcessPollResult::Event(event),
+                                Err(SidecarError::Execution(message))
+                                    if (process.runtime == GuestRuntimeKind::JavaScript
+                                        && closed_javascript_event_channel(&message))
+                                        || (process.runtime == GuestRuntimeKind::Python
+                                            && closed_python_event_channel(&message))
+                                        || (process.runtime == GuestRuntimeKind::WebAssembly
+                                            && closed_wasm_event_channel(&message)) =>
+                                {
+                                    ProcessPollResult::RecoverClosedChannel
+                                }
+                                Err(other) => return Err(other),
                             }
-                            Err(other) => return Err(other),
+                        }
+                    };
+                    let event = match poll_result {
+                        ProcessPollResult::Event(event) => event,
+                        ProcessPollResult::RecoverClosedChannel => {
+                            self.recover_closed_root_runtime_process_event(&vm_id, &process_id)?
                         }
                     };
 
@@ -3289,6 +3580,39 @@ where
         Ok(emitted_any)
     }
 
+    fn recover_closed_root_runtime_process_event(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+    ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
+        let Some(vm) = self.vms.get_mut(vm_id) else {
+            return Ok(None);
+        };
+        let Some(process) = vm.active_processes.get(process_id) else {
+            return Ok(None);
+        };
+        if process.execution.uses_shared_v8_runtime() {
+            return Ok(None);
+        }
+        if process.runtime != GuestRuntimeKind::JavaScript
+            && process.runtime != GuestRuntimeKind::Python
+            && process.runtime != GuestRuntimeKind::WebAssembly
+        {
+            return Ok(None);
+        }
+        let runtime_child_pid = process.execution.child_pid();
+        if runtime_child_pid == 0 {
+            return Ok(None);
+        }
+        if let Some(status) = runtime_child_exit_status(runtime_child_pid)? {
+            return Ok(Some(ActiveExecutionEvent::Exited(status)));
+        }
+        if runtime_child_is_alive(runtime_child_pid)? {
+            return Ok(None);
+        }
+        Ok(Some(ActiveExecutionEvent::Exited(0)))
+    }
+
     fn active_process_by_path<'a>(
         process: &'a ActiveProcess,
         child_path: &[&str],
@@ -3309,6 +3633,24 @@ where
             current = current.child_processes.get_mut(*child_id)?;
         }
         Some(current)
+    }
+
+    fn descendant_parent_process<'a>(
+        vm: &'a VmState,
+        process_id: &str,
+        child_path: &[&str],
+    ) -> Option<&'a ActiveProcess> {
+        let root = vm.active_processes.get(process_id)?;
+        Self::active_process_by_path(root, child_path)
+    }
+
+    fn descendant_parent_process_mut<'a>(
+        vm: &'a mut VmState,
+        process_id: &str,
+        child_path: &[&str],
+    ) -> Option<&'a mut ActiveProcess> {
+        let root = vm.active_processes.get_mut(process_id)?;
+        Self::active_process_by_path_mut(root, child_path)
     }
 
     fn child_process_path_label(process_id: &str, child_path: &[&str]) -> String {
@@ -3393,7 +3735,6 @@ where
             })
             .unwrap_or_default();
         let mut emitted_any = false;
-
         for detached_process_id in detached_process_ids {
             let Some((root_process_id, child_path)) = self
                 .vms
@@ -3406,8 +3747,110 @@ where
                 continue;
             };
             if child_path.is_empty() {
-                if let Some(vm) = self.vms.get_mut(vm_id) {
-                    vm.detached_child_processes.remove(&detached_process_id);
+                loop {
+                    enum ProcessPollResult {
+                        Event(Option<ActiveExecutionEvent>),
+                        RecoverClosedChannel,
+                    }
+                    let poll_result = {
+                        let Some(vm) = self.vms.get_mut(vm_id) else {
+                            break;
+                        };
+                        let Some(process) = vm.active_processes.get_mut(&root_process_id) else {
+                            break;
+                        };
+                        if let Some(event) = process.pending_execution_events.pop_front() {
+                            ProcessPollResult::Event(Some(event))
+                        } else {
+                            match process.execution.poll_event_blocking(Duration::ZERO) {
+                                Ok(event) => ProcessPollResult::Event(event),
+                                Err(SidecarError::Execution(message))
+                                    if (process.runtime == GuestRuntimeKind::JavaScript
+                                        && closed_javascript_event_channel(&message))
+                                        || (process.runtime == GuestRuntimeKind::Python
+                                            && closed_python_event_channel(&message))
+                                        || (process.runtime == GuestRuntimeKind::WebAssembly
+                                            && closed_wasm_event_channel(&message)) =>
+                                {
+                                    ProcessPollResult::RecoverClosedChannel
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    };
+                    let event = match poll_result {
+                        ProcessPollResult::Event(event) => event,
+                        ProcessPollResult::RecoverClosedChannel => {
+                            self.recover_closed_root_runtime_process_event(vm_id, &root_process_id)?
+                        }
+                    };
+                    let Some(event) = event else {
+                        break;
+                    };
+                    let Some((connection_id, session_id)) = self
+                        .vms
+                        .get(vm_id)
+                        .map(|vm| (vm.connection_id.clone(), vm.session_id.clone()))
+                    else {
+                        break;
+                    };
+                    match event {
+                        ActiveExecutionEvent::Stdout(chunk) => {
+                            self.pending_process_events.push_back(ProcessEventEnvelope {
+                                connection_id,
+                                session_id,
+                                vm_id: vm_id.to_owned(),
+                                process_id: detached_process_id.clone(),
+                                event: ActiveExecutionEvent::Stdout(chunk),
+                            });
+                            emitted_any = true;
+                        }
+                        ActiveExecutionEvent::Stderr(chunk) => {
+                            self.pending_process_events.push_back(ProcessEventEnvelope {
+                                connection_id,
+                                session_id,
+                                vm_id: vm_id.to_owned(),
+                                process_id: detached_process_id.clone(),
+                                event: ActiveExecutionEvent::Stderr(chunk),
+                            });
+                            emitted_any = true;
+                        }
+                        ActiveExecutionEvent::Exited(exit_code) => {
+                            if let Some(vm) = self.vms.get_mut(vm_id) {
+                                vm.detached_child_processes.remove(&detached_process_id);
+                            }
+                            self.pending_process_events.push_back(ProcessEventEnvelope {
+                                connection_id,
+                                session_id,
+                                vm_id: vm_id.to_owned(),
+                                process_id: detached_process_id.clone(),
+                                event: ActiveExecutionEvent::Exited(exit_code),
+                            });
+                            emitted_any = true;
+                            break;
+                        }
+                        ActiveExecutionEvent::JavascriptSyncRpcRequest(request) => {
+                            self.handle_javascript_sync_rpc_request(
+                                vm_id,
+                                &root_process_id,
+                                request,
+                            )?;
+                        }
+                        ActiveExecutionEvent::PythonVfsRpcRequest(request) => {
+                            self.handle_python_vfs_rpc_request(vm_id, &root_process_id, request)?;
+                        }
+                        ActiveExecutionEvent::SignalState {
+                            signal,
+                            registration,
+                        } => {
+                            if let Some(vm) = self.vms.get_mut(vm_id) {
+                                vm.signal_states
+                                    .entry(root_process_id.clone())
+                                    .or_default()
+                                    .insert(signal, registration);
+                            }
+                        }
+                    }
                 }
                 continue;
             }
@@ -3436,27 +3879,30 @@ where
                         }
                         break;
                     }
+                    Err(error) if is_javascript_child_process_gone_error(&error) => {
+                        if let Some(vm) = self.vms.get_mut(vm_id) {
+                            vm.detached_child_processes.remove(&detached_process_id);
+                        }
+                        break;
+                    }
                     Err(error) => return Err(error),
                 };
 
                 let Some(event_type) = event.get("type").and_then(Value::as_str) else {
                     break;
                 };
+                let Some((connection_id, session_id)) = self
+                    .vms
+                    .get(vm_id)
+                    .map(|vm| (vm.connection_id.clone(), vm.session_id.clone()))
+                else {
+                    break;
+                };
 
                 let envelope = match event_type {
                     "stdout" => Some(ProcessEventEnvelope {
-                        connection_id: self
-                            .vms
-                            .get(vm_id)
-                            .expect("VM should exist")
-                            .connection_id
-                            .clone(),
-                        session_id: self
-                            .vms
-                            .get(vm_id)
-                            .expect("VM should exist")
-                            .session_id
-                            .clone(),
+                        connection_id: connection_id.clone(),
+                        session_id: session_id.clone(),
                         vm_id: vm_id.to_owned(),
                         process_id: detached_process_id.clone(),
                         event: ActiveExecutionEvent::Stdout(javascript_sync_rpc_bytes_arg(
@@ -3466,18 +3912,8 @@ where
                         )?),
                     }),
                     "stderr" => Some(ProcessEventEnvelope {
-                        connection_id: self
-                            .vms
-                            .get(vm_id)
-                            .expect("VM should exist")
-                            .connection_id
-                            .clone(),
-                        session_id: self
-                            .vms
-                            .get(vm_id)
-                            .expect("VM should exist")
-                            .session_id
-                            .clone(),
+                        connection_id: connection_id.clone(),
+                        session_id: session_id.clone(),
                         vm_id: vm_id.to_owned(),
                         process_id: detached_process_id.clone(),
                         event: ActiveExecutionEvent::Stderr(javascript_sync_rpc_bytes_arg(
@@ -3491,18 +3927,8 @@ where
                             vm.detached_child_processes.remove(&detached_process_id);
                         }
                         Some(ProcessEventEnvelope {
-                            connection_id: self
-                                .vms
-                                .get(vm_id)
-                                .expect("VM should exist")
-                                .connection_id
-                                .clone(),
-                            session_id: self
-                                .vms
-                                .get(vm_id)
-                                .expect("VM should exist")
-                                .session_id
-                                .clone(),
+                            connection_id,
+                            session_id,
                             vm_id: vm_id.to_owned(),
                             process_id: detached_process_id.clone(),
                             event: ActiveExecutionEvent::Exited(
@@ -3531,7 +3957,6 @@ where
 
         Ok(emitted_any)
     }
-
     fn drain_queued_descendant_javascript_child_process_events(
         &mut self,
         vm_id: &str,
@@ -3592,9 +4017,11 @@ where
         event: ActiveExecutionEvent,
     ) -> Result<Option<EventFrame>, SidecarError> {
         let Some(vm) = self.vms.get(vm_id) else {
+            log_stale_process_event(&self.bridge, vm_id, process_id, "execution event dispatch");
             return Ok(None);
         };
         if !vm.active_processes.contains_key(process_id) {
+            log_stale_process_event(&self.bridge, vm_id, process_id, "execution event dispatch");
             return Ok(None);
         }
         let (connection_id, session_id) = { (vm.connection_id.clone(), vm.session_id.clone()) };
@@ -3629,7 +4056,12 @@ where
                 signal,
                 registration,
             } => {
-                let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                let Some(vm) = self.vms.get_mut(vm_id) else {
+                    return Ok(None);
+                };
+                if !vm.active_processes.contains_key(process_id) {
+                    return Ok(None);
+                }
                 vm.signal_states
                     .entry(process_id.to_owned())
                     .or_default()
@@ -3638,11 +4070,26 @@ where
             }
             ActiveExecutionEvent::Exited(exit_code) => {
                 let became_idle = {
-                    let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-                    let mut process = vm
-                        .active_processes
-                        .remove(process_id)
-                        .expect("process should still exist");
+                    let Some(vm) = self.vms.get_mut(vm_id) else {
+                        return Ok(None);
+                    };
+                    prune_exited_process_snapshots(vm);
+                    let process_table = vm.kernel.list_processes();
+                    let Some(mut process) = vm.active_processes.remove(process_id) else {
+                        return Ok(None);
+                    };
+                    if let Some(info) = process_table.get(&process.kernel_pid) {
+                        vm.exited_process_snapshots
+                            .push_back(ExitedProcessSnapshot {
+                                captured_at: Instant::now(),
+                                process: build_process_snapshot_entry(
+                                    process_id,
+                                    &process,
+                                    info,
+                                    Some(exit_code),
+                                ),
+                            });
+                    }
                     let detached_children =
                         Self::adopt_detached_child_processes(process_id, &mut process);
                     sync_process_host_writes_to_kernel(vm, &process)?;
@@ -3651,6 +4098,8 @@ where
                     let _ = vm.kernel.wait_and_reap(process.kernel_pid);
                     vm.signal_states.remove(process_id);
                     for (detached_process_id, detached_child) in detached_children {
+                        vm.detached_child_processes
+                            .insert(detached_process_id.clone());
                         vm.active_processes
                             .insert(detached_process_id, detached_child);
                     }
@@ -3688,10 +4137,14 @@ where
                 let Some(process) = vm.active_processes.get_mut(process_id) else {
                     break;
                 };
-                match process.execution.poll_event_blocking(Duration::ZERO) {
-                    Ok(event) => event,
-                    Err(SidecarError::Execution(_)) => None,
-                    Err(other) => return Err(other),
+                if let Some(event) = process.pending_execution_events.pop_front() {
+                    Some(event)
+                } else {
+                    match process.execution.poll_event_blocking(Duration::ZERO) {
+                        Ok(event) => event,
+                        Err(SidecarError::Execution(_)) => None,
+                        Err(other) => return Err(other),
+                    }
                 }
             };
 
@@ -3710,10 +4163,14 @@ where
                     let Some(process) = vm.active_processes.get_mut(process_id) else {
                         break;
                     };
-                    match process.execution.poll_event_blocking(blocking_wait) {
-                        Ok(event) => event,
-                        Err(SidecarError::Execution(_)) => None,
-                        Err(other) => return Err(other),
+                    if let Some(event) = process.pending_execution_events.pop_front() {
+                        Some(event)
+                    } else {
+                        match process.execution.poll_event_blocking(blocking_wait) {
+                            Ok(event) => event,
+                            Err(SidecarError::Execution(_)) => None,
+                            Err(other) => return Err(other),
+                        }
                     }
                 };
                 let Some(event) = delayed_event else {
@@ -3762,12 +4219,13 @@ where
         process_id: &str,
         request: PythonVfsRpcRequest,
     ) -> Result<(), SidecarError> {
+        let Some(vm) = self.vms.get(vm_id) else {
+            return Ok(());
+        };
+        if !vm.active_processes.contains_key(process_id) {
+            return Ok(());
+        }
         let response = (|| {
-            let vm = self.vms.get(vm_id).expect("VM should exist");
-            let _process = vm
-                .active_processes
-                .get(process_id)
-                .expect("process should still exist");
             let url_text = request.url.as_deref().ok_or_else(|| {
                 SidecarError::InvalidState(String::from("python httpRequest requires a url"))
             })?;
@@ -3904,8 +4362,13 @@ where
         process_id: &str,
         request: PythonVfsRpcRequest,
     ) -> Result<(), SidecarError> {
+        let Some(vm) = self.vms.get(vm_id) else {
+            return Ok(());
+        };
+        if !vm.active_processes.contains_key(process_id) {
+            return Ok(());
+        }
         let response = (|| {
-            let vm = self.vms.get(vm_id).expect("VM should exist");
             let hostname = request.hostname.as_deref().ok_or_else(|| {
                 SidecarError::InvalidState(String::from("python dnsLookup requires a hostname"))
             })?;
@@ -3948,11 +4411,12 @@ where
             SidecarError::InvalidState(String::from("python subprocessRun requires a command"))
         })?;
         let (internal_bootstrap_env, cwd) = {
-            let vm = self.vms.get(vm_id).expect("VM should exist");
-            let process = vm
-                .active_processes
-                .get(process_id)
-                .expect("process should still exist");
+            let Some(vm) = self.vms.get(vm_id) else {
+                return Ok(());
+            };
+            let Some(process) = vm.active_processes.get(process_id) else {
+                return Ok(());
+            };
             let cwd = request.cwd.clone().or_else(|| {
                 guest_runtime_path_for_host_path(
                     &vm.guest_env,
@@ -3979,6 +4443,11 @@ where
                         internal_bootstrap_env,
                         shell: request.shell,
                         detached: false,
+                        stdio: vec![
+                            String::from("pipe"),
+                            String::from("pipe"),
+                            String::from("pipe"),
+                        ],
                     },
                 },
                 request.max_buffer,
@@ -4017,11 +4486,12 @@ where
         request_id: u64,
         response: Result<PythonVfsRpcResponsePayload, SidecarError>,
     ) -> Result<(), SidecarError> {
-        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-        let process = vm
-            .active_processes
-            .get_mut(process_id)
-            .expect("process should still exist");
+        let Some(vm) = self.vms.get_mut(vm_id) else {
+            return Ok(());
+        };
+        let Some(process) = vm.active_processes.get_mut(process_id) else {
+            return Ok(());
+        };
         let result = match response {
             Ok(payload) => process
                 .execution
@@ -4062,11 +4532,16 @@ where
                         .unwrap_or_else(|_| Path::new(""));
                     let relative = relative.to_string_lossy().replace('\\', "/");
                     let guest_cwd = if relative.is_empty() {
-                        String::from("/")
+                        parent_guest_cwd.to_owned()
                     } else {
-                        normalize_path(&format!("/{relative}"))
+                        normalize_path(&format!("{parent_guest_cwd}/{relative}"))
                     };
                     (guest_cwd, Some(requested_host_cwd))
+                } else if Path::new(cwd).is_relative() {
+                    (
+                        normalize_path(&format!("{parent_guest_cwd}/{cwd}")),
+                        Some(normalize_host_path(&parent_host_cwd.join(cwd))),
+                    )
                 } else {
                     (normalize_path(cwd), None)
                 }
@@ -4102,21 +4577,17 @@ where
         env.remove("AGENT_OS_NODE_EVAL");
 
         let (command, process_args) = if request.options.shell {
-            if !command_requires_shell(&request.command) {
-                let tokens = tokenize_shell_free_command(&request.command);
-                let Some((command, args)) = tokens.split_first() else {
-                    return Err(SidecarError::InvalidState(String::from(
-                        "child_process shell command must not be empty",
-                    )));
-                };
-                (command.clone(), args.to_vec())
-            } else if vm.command_guest_paths.contains_key("sh") {
+            let tokens = tokenize_shell_free_command(&request.command);
+            let requires_shell = command_requires_shell(&request.command)
+                || tokens
+                    .first()
+                    .is_some_and(|command| is_posix_shell_builtin(command));
+            if requires_shell && vm.command_guest_paths.contains_key("sh") {
                 (
                     String::from("sh"),
                     vec![String::from("-c"), request.command.clone()],
                 )
             } else {
-                let tokens = tokenize_shell_free_command(&request.command);
                 let Some((command, args)) = tokens.split_first() else {
                     return Err(SidecarError::InvalidState(String::from(
                         "child_process shell command must not be empty",
@@ -4129,6 +4600,7 @@ where
         };
         let process_args = apply_shell_cwd_prefix(&command, process_args, &guest_cwd);
         if is_tool_command(vm, &command) {
+            let command = normalized_tool_command_name(&command).unwrap_or(command);
             return Ok(ResolvedChildProcessExecution {
                 command: command.clone(),
                 process_args: std::iter::once(command.clone())
@@ -4197,6 +4669,38 @@ where
         }
 
         if is_node_runtime_command(&command) {
+            if let Some(cli) = resolve_host_node_cli_entrypoint(&command) {
+                env.insert(
+                    String::from("AGENT_OS_NODE_EVAL"),
+                    build_host_node_cli_eval(&cli),
+                );
+                prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, None)?;
+                add_runtime_guest_path_mapping(&mut env, &cli.guest_root, &cli.package_root);
+                add_runtime_host_access_path(
+                    &mut env,
+                    "AGENT_OS_EXTRA_FS_READ_PATHS",
+                    &cli.package_root,
+                    true,
+                );
+
+                return Ok(ResolvedChildProcessExecution {
+                    command: command.clone(),
+                    process_args: std::iter::once(command.clone())
+                        .chain(process_args.iter().cloned())
+                        .collect(),
+                    runtime: GuestRuntimeKind::JavaScript,
+                    entrypoint: String::from("-e"),
+                    execution_args: std::iter::once(cli.guest_entrypoint.clone())
+                        .chain(process_args.iter().cloned())
+                        .collect(),
+                    env,
+                    guest_cwd,
+                    host_cwd,
+                    wasm_permission_tier: None,
+                    tool_command: false,
+                });
+            }
+
             if process_args.is_empty() {
                 env.insert(String::from("AGENT_OS_NODE_EVAL"), String::new());
                 prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, None)?;
@@ -4306,8 +4810,13 @@ where
             )));
         }
 
-        let guest_entrypoint = resolve_guest_command_entrypoint(vm, &guest_cwd, &command)
-            .ok_or_else(|| SidecarError::InvalidState(format!("command not found: {command}")))?;
+        let guest_entrypoint = resolve_guest_command_entrypoint(
+            vm,
+            &guest_cwd,
+            &command,
+            env.get("PATH").map(String::as_str),
+        )
+        .ok_or_else(|| SidecarError::InvalidState(format!("command not found: {command}")))?;
         let host_entrypoint = resolve_vm_guest_path_to_host(vm, &guest_entrypoint);
         let wasm_permission_tier = vm.command_permissions.get(&command).copied().or_else(|| {
             Path::new(&guest_entrypoint)
@@ -4315,6 +4824,32 @@ where
                 .and_then(|name| name.to_str())
                 .and_then(|name| vm.command_permissions.get(name).copied())
         });
+        if let Some((javascript_guest_entrypoint, javascript_host_entrypoint)) =
+            resolve_javascript_command_entrypoint(vm, &guest_entrypoint, &host_entrypoint)
+        {
+            prepare_guest_runtime_env(
+                vm,
+                &mut env,
+                &guest_cwd,
+                &host_cwd,
+                Some(javascript_guest_entrypoint),
+            )?;
+
+            return Ok(ResolvedChildProcessExecution {
+                command: command.clone(),
+                process_args: std::iter::once(command)
+                    .chain(process_args.iter().cloned())
+                    .collect(),
+                runtime: GuestRuntimeKind::JavaScript,
+                entrypoint: javascript_host_entrypoint.to_string_lossy().into_owned(),
+                execution_args: process_args,
+                env,
+                guest_cwd,
+                host_cwd,
+                wasm_permission_tier: None,
+                tool_command: false,
+            });
+        }
         prepare_guest_runtime_env(
             vm,
             &mut env,
@@ -4346,11 +4881,11 @@ where
         request: JavascriptChildProcessSpawnRequest,
     ) -> Result<Value, SidecarError> {
         let resolved = {
-            let vm = self.vms.get(vm_id).expect("VM should exist");
+            let vm = self.vms.get(vm_id).ok_or_else(|| missing_vm_error(vm_id))?;
             let parent = vm
                 .active_processes
                 .get(process_id)
-                .expect("process should still exist");
+                .ok_or_else(|| missing_process_error(vm_id, process_id))?;
             self.resolve_javascript_child_process_execution(
                 vm,
                 &parent.env,
@@ -4360,11 +4895,14 @@ where
             )?
         };
         let (parent_kernel_pid, child_process_id) = {
-            let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+            let vm = self
+                .vms
+                .get_mut(vm_id)
+                .ok_or_else(|| missing_vm_error(vm_id))?;
             let process = vm
                 .active_processes
                 .get_mut(process_id)
-                .expect("process should still exist");
+                .ok_or_else(|| missing_process_error(vm_id, process_id))?;
             (process.kernel_pid, process.allocate_child_process_id())
         };
         let child_runtime_process_id =
@@ -4372,7 +4910,10 @@ where
 
         let process_event_sender = self.process_event_sender.clone();
         let sidecar_requests = self.sidecar_requests.clone();
-        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let vm = self
+            .vms
+            .get_mut(vm_id)
+            .ok_or_else(|| missing_vm_error(vm_id))?;
         let (kernel_pid, kernel_handle, execution, kernel_stdin_writer_fd) = if resolved
             .tool_command
         {
@@ -4396,6 +4937,7 @@ where
                     &resolved.command,
                     resolved.process_args.clone(),
                     VirtualProcessOptions {
+                        parent_pid: Some(parent_kernel_pid),
                         env: resolved.env.clone(),
                         cwd: Some(resolved.guest_cwd.clone()),
                         ..VirtualProcessOptions::default()
@@ -4448,7 +4990,6 @@ where
                     .setsid(EXECUTION_DRIVER_NAME, kernel_pid)
                     .map_err(kernel_error)?;
             }
-
             let mut execution_env = resolved.env.clone();
             execution_env.insert(
                 String::from(EXECUTION_SANDBOX_ROOT_ENV),
@@ -4502,6 +5043,7 @@ where
                     ActiveExecution::Javascript(execution)
                 }
                 GuestRuntimeKind::WebAssembly => {
+                    execution_env.insert(String::from(WASM_STDIO_SYNC_RPC_ENV), String::from("1"));
                     apply_wasm_limit_env(&mut execution_env, vm.kernel.resource_limits());
                     let context = self.wasm_engine.create_context(CreateWasmContextRequest {
                         vm_id: vm_id.to_owned(),
@@ -4528,41 +5070,43 @@ where
                     unreachable!("python child_process execution is rejected")
                 }
             };
-            let kernel_stdin_writer_fd = install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?;
-            (
-                kernel_pid,
-                kernel_handle,
-                execution,
-                Some(kernel_stdin_writer_fd),
-            )
+            let kernel_stdin_writer_fd = match javascript_child_process_stdin_mode(&request) {
+                "pipe" => Some(install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?),
+                "ignore" => {
+                    vm.kernel
+                        .fd_close(EXECUTION_DRIVER_NAME, kernel_pid, 0)
+                        .map_err(kernel_error)?;
+                    None
+                }
+                "inherit" => None,
+                _ => Some(install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?),
+            };
+            (kernel_pid, kernel_handle, execution, kernel_stdin_writer_fd)
         };
 
-        vm.active_processes
+        let process = vm
+            .active_processes
             .get_mut(process_id)
-            .expect("process should still exist")
-            .child_processes
-            .insert(
-                child_process_id.clone(),
-                ActiveProcess::new(kernel_pid, kernel_handle, resolved.runtime, execution)
-                    .with_detached(request.options.detached)
-                    .with_guest_cwd(resolved.guest_cwd.clone())
-                    .with_env(resolved.env.clone())
-                    .with_host_cwd(resolved.host_cwd.clone()),
-            );
+            .ok_or_else(|| missing_process_error(vm_id, process_id))?;
+        process.child_processes.insert(
+            child_process_id.clone(),
+            ActiveProcess::new(kernel_pid, kernel_handle, resolved.runtime, execution)
+                .with_detached(request.options.detached)
+                .with_guest_cwd(resolved.guest_cwd.clone())
+                .with_env(resolved.env.clone())
+                .with_host_cwd(resolved.host_cwd.clone()),
+        );
         if let Some(kernel_stdin_writer_fd) = kernel_stdin_writer_fd {
-            vm.active_processes
-                .get_mut(process_id)
-                .expect("process should still exist")
+            process
                 .child_processes
                 .get_mut(&child_process_id)
-                .expect("child process should exist")
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(format!(
+                        "child process {child_process_id} disappeared during spawn"
+                    ))
+                })?
                 .kernel_stdin_writer_fd = Some(kernel_stdin_writer_fd);
         }
-        if request.options.detached {
-            vm.detached_child_processes
-                .insert(child_runtime_process_id.clone());
-        }
-
         Ok(json!({
             "childId": child_process_id,
             "pid": kernel_pid,
@@ -4674,11 +5218,11 @@ where
         let current_process_label =
             Self::child_process_path_label(process_id, current_process_path);
         let (resolved, parent_kernel_pid) = {
-            let vm = self.vms.get(vm_id).expect("VM should exist");
+            let vm = self.vms.get(vm_id).ok_or_else(|| missing_vm_error(vm_id))?;
             let root = vm
                 .active_processes
                 .get(process_id)
-                .expect("process should still exist");
+                .ok_or_else(|| missing_process_error(vm_id, process_id))?;
             let parent =
                 Self::active_process_by_path(root, current_process_path).ok_or_else(|| {
                     SidecarError::InvalidState(format!(
@@ -4699,12 +5243,15 @@ where
 
         let process_event_sender = self.process_event_sender.clone();
         let sidecar_requests = self.sidecar_requests.clone();
-        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let vm = self
+            .vms
+            .get_mut(vm_id)
+            .ok_or_else(|| missing_vm_error(vm_id))?;
         let child_process_id = {
             let root = vm
                 .active_processes
                 .get_mut(process_id)
-                .expect("process should still exist");
+                .ok_or_else(|| missing_process_error(vm_id, process_id))?;
             let parent =
                 Self::active_process_by_path_mut(root, current_process_path).ok_or_else(|| {
                     SidecarError::InvalidState(format!(
@@ -4739,6 +5286,7 @@ where
                     &resolved.command,
                     resolved.process_args.clone(),
                     VirtualProcessOptions {
+                        parent_pid: Some(parent_kernel_pid),
                         env: resolved.env.clone(),
                         cwd: Some(resolved.guest_cwd.clone()),
                         ..VirtualProcessOptions::default()
@@ -4791,7 +5339,6 @@ where
                     .setsid(EXECUTION_DRIVER_NAME, kernel_pid)
                     .map_err(kernel_error)?;
             }
-
             let mut execution_env = resolved.env.clone();
             execution_env.insert(
                 String::from(EXECUTION_SANDBOX_ROOT_ENV),
@@ -4844,6 +5391,7 @@ where
                     ActiveExecution::Javascript(execution)
                 }
                 GuestRuntimeKind::WebAssembly => {
+                    execution_env.insert(String::from(WASM_STDIO_SYNC_RPC_ENV), String::from("1"));
                     apply_wasm_limit_env(&mut execution_env, vm.kernel.resource_limits());
                     let context = self.wasm_engine.create_context(CreateWasmContextRequest {
                         vm_id: vm_id.to_owned(),
@@ -4870,19 +5418,24 @@ where
                     unreachable!("python child_process execution is rejected")
                 }
             };
-            let kernel_stdin_writer_fd = install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?;
-            (
-                kernel_pid,
-                kernel_handle,
-                execution,
-                Some(kernel_stdin_writer_fd),
-            )
+            let kernel_stdin_writer_fd = match javascript_child_process_stdin_mode(&request) {
+                "pipe" => Some(install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?),
+                "ignore" => {
+                    vm.kernel
+                        .fd_close(EXECUTION_DRIVER_NAME, kernel_pid, 0)
+                        .map_err(kernel_error)?;
+                    None
+                }
+                "inherit" => None,
+                _ => Some(install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?),
+            };
+            (kernel_pid, kernel_handle, execution, kernel_stdin_writer_fd)
         };
 
         let root = vm
             .active_processes
             .get_mut(process_id)
-            .expect("process should still exist");
+            .ok_or_else(|| missing_process_error(vm_id, process_id))?;
         let parent =
             Self::active_process_by_path_mut(root, current_process_path).ok_or_else(|| {
                 SidecarError::InvalidState(format!(
@@ -4901,14 +5454,13 @@ where
             parent
                 .child_processes
                 .get_mut(&child_process_id)
-                .expect("child process should exist")
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(format!(
+                        "child process {child_process_id} disappeared during nested spawn"
+                    ))
+                })?
                 .kernel_stdin_writer_fd = Some(kernel_stdin_writer_fd);
         }
-        if request.options.detached {
-            vm.detached_child_processes
-                .insert(child_runtime_process_id.clone());
-        }
-
         Ok(json!({
             "childId": child_process_id,
             "pid": kernel_pid,
@@ -5043,7 +5595,9 @@ where
     ) -> Result<Value, SidecarError> {
         match request.method.as_str() {
             "child_process.spawn" => {
-                let vm = self.vms.get(vm_id).expect("VM should exist");
+                let Some(vm) = self.vms.get(vm_id) else {
+                    return Ok(Value::Null);
+                };
                 let (payload, _) = parse_javascript_child_process_spawn_request(vm, &request.args)?;
                 self.spawn_descendant_javascript_child_process(
                     vm_id,
@@ -5053,7 +5607,9 @@ where
                 )
             }
             "child_process.spawn_sync" => {
-                let vm = self.vms.get(vm_id).expect("VM should exist");
+                let Some(vm) = self.vms.get(vm_id) else {
+                    return Ok(Value::Null);
+                };
                 let (payload, max_buffer) =
                     parse_javascript_child_process_spawn_request(vm, &request.args)?;
                 self.spawn_descendant_javascript_child_process_sync(
@@ -5144,10 +5700,9 @@ where
         child_process_id: &str,
         wait_ms: u64,
     ) -> Result<Value, SidecarError> {
-        let current_process_label =
-            Self::child_process_path_label(process_id, current_process_path);
         let mut child_path = current_process_path.to_vec();
         child_path.push(child_process_id);
+        let child_gone_error = || javascript_child_process_gone_error(process_id, &child_path);
 
         loop {
             self.drain_queued_descendant_javascript_child_process_events(
@@ -5155,33 +5710,55 @@ where
                 process_id,
                 &child_path,
             )?;
-            let event = {
-                let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-                let root = vm
-                    .active_processes
-                    .get_mut(process_id)
-                    .expect("process should still exist");
-                let Some(parent) = Self::active_process_by_path_mut(root, current_process_path)
-                else {
-                    return Err(SidecarError::InvalidState(format!(
-                        "unknown child process path {current_process_label} during nested poll"
-                    )));
-                };
-                let child = parent.child_processes.get_mut(child_process_id);
-                let Ok(child) = child.ok_or_else(|| {
-                    SidecarError::InvalidState(format!(
-                        "unknown child process {child_process_id} during nested poll"
-                    ))
-                }) else {
+            enum ChildPollResult {
+                Event(Option<ActiveExecutionEvent>),
+                RecoverRuntimeExit,
+            }
+            let poll_result = {
+                let Some(vm) = self.vms.get_mut(vm_id) else {
                     return Ok(Value::Null);
                 };
+                let Some(parent) =
+                    Self::descendant_parent_process_mut(vm, process_id, current_process_path)
+                else {
+                    return Err(child_gone_error());
+                };
+                let Some(child) = parent.child_processes.get_mut(child_process_id) else {
+                    return Err(child_gone_error());
+                };
                 if let Some(event) = child.pending_execution_events.pop_front() {
-                    Some(event)
+                    ChildPollResult::Event(Some(event))
                 } else {
-                    child
+                    match child
                         .execution
-                        .poll_event_blocking(Duration::from_millis(wait_ms))?
+                        .poll_event_blocking(Duration::from_millis(wait_ms))
+                    {
+                        Ok(Some(event)) => ChildPollResult::Event(Some(event)),
+                        Ok(None) => ChildPollResult::RecoverRuntimeExit,
+                        Err(SidecarError::Execution(message))
+                            if (child.runtime == GuestRuntimeKind::JavaScript
+                                && closed_javascript_event_channel(&message))
+                                || (child.runtime == GuestRuntimeKind::Python
+                                    && closed_python_event_channel(&message))
+                                || (child.runtime == GuestRuntimeKind::WebAssembly
+                                    && closed_wasm_event_channel(&message)) =>
+                        {
+                            ChildPollResult::RecoverRuntimeExit
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
+            };
+            let event = match poll_result {
+                ChildPollResult::Event(event) => event,
+                ChildPollResult::RecoverRuntimeExit => self
+                    .recover_descendant_runtime_child_process_event(
+                        vm_id,
+                        process_id,
+                        current_process_path,
+                        child_process_id,
+                        wait_ms,
+                    )?,
             };
 
             let Some(event) = event else {
@@ -5203,17 +5780,19 @@ where
                 }
                 ActiveExecutionEvent::Exited(exit_code) => {
                     let had_trailing_events = {
-                        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-                        let root = vm
-                            .active_processes
-                            .get_mut(process_id)
-                            .expect("process should still exist");
-                        let parent = Self::active_process_by_path_mut(root, current_process_path)
-                            .expect("child process should still exist");
-                        let child = parent
-                            .child_processes
-                            .get_mut(child_process_id)
-                            .expect("child process should still exist");
+                        let Some(vm) = self.vms.get_mut(vm_id) else {
+                            return Ok(Value::Null);
+                        };
+                        let Some(parent) = Self::descendant_parent_process_mut(
+                            vm,
+                            process_id,
+                            current_process_path,
+                        ) else {
+                            return Ok(Value::Null);
+                        };
+                        let Some(child) = parent.child_processes.get_mut(child_process_id) else {
+                            return Ok(Value::Null);
+                        };
                         let deadline = Instant::now() + Duration::from_millis(150);
                         loop {
                             let wait = deadline.saturating_duration_since(Instant::now());
@@ -5244,21 +5823,43 @@ where
 
                     let parent_signal_key =
                         Self::child_process_signal_key(process_id, current_process_path);
-                    let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-                    let (parent_runtime_pid, parent_uses_v8_signal_bridge, should_signal_parent) = {
-                        let root = vm
-                            .active_processes
-                            .get(process_id)
-                            .expect("process should still exist");
-                        let parent = Self::active_process_by_path(root, current_process_path)
-                            .expect("child process should still exist");
+                    let Some(vm) = self.vms.get_mut(vm_id) else {
+                        return Ok(Value::Null);
+                    };
+                    let signal_name = {
+                        let Some(parent) = Self::descendant_parent_process_mut(
+                            vm,
+                            process_id,
+                            current_process_path,
+                        ) else {
+                            return Ok(Value::Null);
+                        };
+                        let Some(child) = parent.child_processes.get_mut(child_process_id) else {
+                            return Ok(Value::Null);
+                        };
+                        child.pending_self_signal_exit.take().and_then(|signal| {
+                            if exit_code == 128 + signal {
+                                canonical_signal_name(signal).map(str::to_owned)
+                            } else {
+                                None
+                            }
+                        })
+                    };
+                    let (parent_runtime_pid, parent_v8_signal_session, should_signal_parent) = {
+                        let Some(parent) =
+                            Self::descendant_parent_process(vm, process_id, current_process_path)
+                        else {
+                            return Ok(Value::Null);
+                        };
                         (
                             parent.execution.child_pid(),
-                            matches!(
-                                &parent.execution,
-                                ActiveExecution::Javascript(execution)
-                                    if execution.uses_shared_v8_runtime()
-                            ),
+                            parent.execution.javascript_v8_session_handle().filter(|_| {
+                                matches!(
+                                    &parent.execution,
+                                    ActiveExecution::Javascript(execution)
+                                        if execution.uses_shared_v8_runtime()
+                                )
+                            }),
                             vm.signal_states
                                 .get(parent_signal_key)
                                 .and_then(|handlers| handlers.get(&(libc::SIGCHLD as u32)))
@@ -5267,16 +5868,14 @@ where
                                 }),
                         )
                     };
-                    let root = vm
-                        .active_processes
-                        .get_mut(process_id)
-                        .expect("process should still exist");
-                    let parent = Self::active_process_by_path_mut(root, current_process_path)
-                        .expect("child process should still exist");
-                    let mut child = parent
-                        .child_processes
-                        .remove(child_process_id)
-                        .expect("child process should still exist");
+                    let Some(parent) =
+                        Self::descendant_parent_process_mut(vm, process_id, current_process_path)
+                    else {
+                        return Ok(Value::Null);
+                    };
+                    let Some(mut child) = parent.child_processes.remove(child_process_id) else {
+                        return Ok(Value::Null);
+                    };
                     let child_process_label =
                         Self::child_process_path_label(process_id, &child_path);
                     let detached_children =
@@ -5287,31 +5886,46 @@ where
                     let _ = vm.kernel.wait_and_reap(child.kernel_pid);
                     vm.signal_states.remove(child_process_id);
                     for (detached_process_id, detached_child) in detached_children {
+                        vm.detached_child_processes
+                            .insert(detached_process_id.clone());
                         vm.active_processes
                             .insert(detached_process_id, detached_child);
                     }
                     if should_signal_parent {
-                        if parent_uses_v8_signal_bridge {
-                            let root = vm
-                                .active_processes
-                                .get(process_id)
-                                .expect("process should still exist");
-                            let parent = Self::active_process_by_path(root, current_process_path)
-                                .expect("child process should still exist");
-                            dispatch_v8_process_signal(parent, libc::SIGCHLD)?;
+                        if let Some(session) = parent_v8_signal_session {
+                            dispatch_v8_session_signal_async(session, libc::SIGCHLD);
                         } else {
                             signal_runtime_process(parent_runtime_pid, libc::SIGCHLD)?;
                         }
                     }
-                    return Ok(json!({
-                        "type": "exit",
-                        "exitCode": exit_code,
-                    }));
+                    let mut payload = Map::new();
+                    payload.insert(String::from("type"), Value::String(String::from("exit")));
+                    payload.insert(String::from("exitCode"), Value::from(exit_code));
+                    if let Some(signal_name) = signal_name {
+                        payload.insert(String::from("signal"), Value::String(signal_name));
+                    }
+                    return Ok(Value::Object(payload));
                 }
                 ActiveExecutionEvent::JavascriptSyncRpcRequest(request) => {
                     let mut current_child_path = current_process_path.to_vec();
                     current_child_path.push(child_process_id);
-                    let response = if request.method.starts_with("child_process.") {
+                    let response = if request.method == "process.signal_state" {
+                        let (signal, registration) =
+                            parse_process_signal_state_request(&request.args)?;
+                        let Some(vm) = self.vms.get_mut(vm_id) else {
+                            return Ok(Value::Null);
+                        };
+                        let signal_key =
+                            Self::child_process_signal_key(process_id, &current_child_path)
+                                .to_owned();
+                        apply_process_signal_state_update(
+                            &mut vm.signal_states,
+                            &signal_key,
+                            signal,
+                            registration,
+                        );
+                        Ok(Value::Null)
+                    } else if request.method.starts_with("child_process.") {
                         self.handle_descendant_javascript_child_process_rpc(
                             vm_id,
                             process_id,
@@ -5319,26 +5933,23 @@ where
                             &request,
                         )
                     } else {
-                        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+                        let Some(vm) = self.vms.get_mut(vm_id) else {
+                            return Ok(Value::Null);
+                        };
                         let resource_limits = vm.kernel.resource_limits().clone();
                         let network_counts = vm_network_resource_counts(vm);
                         let socket_paths = build_javascript_socket_path_context(vm)?;
-                        let root = vm
-                            .active_processes
-                            .get_mut(process_id)
-                            .expect("process should still exist");
-                        let parent =
-                            Self::active_process_by_path_mut(root, current_process_path).ok_or_else(
-                                || {
-                                    SidecarError::InvalidState(format!(
-                                        "unknown child process path {current_process_label} during nested poll"
-                                    ))
-                                },
-                            )?;
-                        let child = parent
-                            .child_processes
-                            .get_mut(child_process_id)
-                            .expect("child process should still exist");
+                        let Some(root) = vm.active_processes.get_mut(process_id) else {
+                            return Ok(Value::Null);
+                        };
+                        let Some(parent) =
+                            Self::active_process_by_path_mut(root, current_process_path)
+                        else {
+                            return Ok(Value::Null);
+                        };
+                        let Some(child) = parent.child_processes.get_mut(child_process_id) else {
+                            return Ok(Value::Null);
+                        };
                         service_javascript_sync_rpc(
                             &self.bridge,
                             vm_id,
@@ -5352,17 +5963,17 @@ where
                         )
                     };
 
-                    let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-                    let root = vm
-                        .active_processes
-                        .get_mut(process_id)
-                        .expect("process should still exist");
-                    let parent = Self::active_process_by_path_mut(root, current_process_path)
-                        .expect("child process should still exist");
-                    let child = parent
-                        .child_processes
-                        .get_mut(child_process_id)
-                        .expect("child process should still exist");
+                    let Some(vm) = self.vms.get_mut(vm_id) else {
+                        return Ok(Value::Null);
+                    };
+                    let Some(parent) =
+                        Self::descendant_parent_process_mut(vm, process_id, current_process_path)
+                    else {
+                        return Ok(Value::Null);
+                    };
+                    let Some(child) = parent.child_processes.get_mut(child_process_id) else {
+                        return Ok(Value::Null);
+                    };
                     match response {
                         Ok(result) => child
                             .execution
@@ -5383,8 +5994,110 @@ where
                         "nested Python child_process execution is not supported yet",
                     )));
                 }
-                ActiveExecutionEvent::SignalState { .. } => {}
+                ActiveExecutionEvent::SignalState {
+                    signal,
+                    registration,
+                } => {
+                    let Some(vm) = self.vms.get_mut(vm_id) else {
+                        return Ok(Value::Null);
+                    };
+                    let signal_key =
+                        Self::child_process_signal_key(process_id, &child_path).to_owned();
+                    apply_process_signal_state_update(
+                        &mut vm.signal_states,
+                        &signal_key,
+                        signal,
+                        registration.clone(),
+                    );
+                    return Ok(json!({
+                        "type": "signal_state",
+                        "signal": signal,
+                        "registration": registration,
+                    }));
+                }
             }
+        }
+    }
+
+    fn recover_descendant_runtime_child_process_event(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        current_process_path: &[&str],
+        child_process_id: &str,
+        wait_ms: u64,
+    ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
+        let (
+            parent_kernel_pid,
+            child_kernel_pid,
+            child_runtime_pid,
+            child_runtime,
+            child_shared_runtime,
+        ) = {
+            let mut child_path = current_process_path.to_vec();
+            child_path.push(child_process_id);
+            let Some(vm) = self.vms.get_mut(vm_id) else {
+                return Ok(None);
+            };
+            let Some(parent) =
+                Self::descendant_parent_process_mut(vm, process_id, current_process_path)
+            else {
+                return Err(javascript_child_process_gone_error(process_id, &child_path));
+            };
+            let Some(child) = parent.child_processes.get_mut(child_process_id) else {
+                return Err(javascript_child_process_gone_error(process_id, &child_path));
+            };
+            (
+                parent.kernel_pid,
+                child.kernel_pid,
+                child.execution.child_pid(),
+                child.runtime.clone(),
+                child.execution.uses_shared_v8_runtime(),
+            )
+        };
+        if child_runtime != GuestRuntimeKind::JavaScript
+            && child_runtime != GuestRuntimeKind::Python
+            && child_runtime != GuestRuntimeKind::WebAssembly
+        {
+            return Ok(None);
+        }
+        let wait_deadline = Instant::now() + Duration::from_millis(wait_ms.min(25));
+        loop {
+            let Some(vm) = self.vms.get_mut(vm_id) else {
+                return Ok(None);
+            };
+            if let Some(process_info) = vm.kernel.list_processes().get(&child_kernel_pid) {
+                if process_info.status == ProcessStatus::Exited {
+                    return Ok(Some(ActiveExecutionEvent::Exited(
+                        process_info.exit_code.unwrap_or(0),
+                    )));
+                }
+            }
+            if let Some(wait_result) = vm
+                .kernel
+                .waitpid_with_options(
+                    EXECUTION_DRIVER_NAME,
+                    parent_kernel_pid,
+                    child_kernel_pid as i32,
+                    WaitPidFlags::WNOHANG,
+                )
+                .map_err(kernel_error)?
+            {
+                return Ok(Some(ActiveExecutionEvent::Exited(wait_result.status)));
+            }
+
+            if !child_shared_runtime && child_runtime_pid != 0 {
+                if let Some(status) = runtime_child_exit_status(child_runtime_pid)? {
+                    return Ok(Some(ActiveExecutionEvent::Exited(status)));
+                }
+                if !runtime_child_is_alive(child_runtime_pid)? {
+                    return Ok(Some(ActiveExecutionEvent::Exited(0)));
+                }
+            }
+            if Instant::now() >= wait_deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -5396,16 +6109,19 @@ where
         child_process_id: &str,
         chunk: &[u8],
     ) -> Result<(), SidecarError> {
-        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-        let root = vm
-            .active_processes
-            .get_mut(process_id)
-            .expect("process should still exist");
+        let mut child_path = current_process_path.to_vec();
+        child_path.push(child_process_id);
+        let Some(vm) = self.vms.get_mut(vm_id) else {
+            return Err(javascript_child_process_gone_error(process_id, &child_path));
+        };
+        let Some(root) = vm.active_processes.get_mut(process_id) else {
+            return Err(javascript_child_process_gone_error(process_id, &child_path));
+        };
         let Some(parent) = Self::active_process_by_path_mut(root, current_process_path) else {
-            return Ok(());
+            return Err(javascript_child_process_gone_error(process_id, &child_path));
         };
         let Some(child) = parent.child_processes.get_mut(child_process_id) else {
-            return Ok(());
+            return Err(javascript_child_process_gone_error(process_id, &child_path));
         };
         if let Err(error) = child.execution.write_stdin(chunk) {
             if is_broken_pipe_error(&error) {
@@ -5423,16 +6139,19 @@ where
         current_process_path: &[&str],
         child_process_id: &str,
     ) -> Result<(), SidecarError> {
-        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-        let root = vm
-            .active_processes
-            .get_mut(process_id)
-            .expect("process should still exist");
+        let mut child_path = current_process_path.to_vec();
+        child_path.push(child_process_id);
+        let Some(vm) = self.vms.get_mut(vm_id) else {
+            return Err(javascript_child_process_gone_error(process_id, &child_path));
+        };
+        let Some(root) = vm.active_processes.get_mut(process_id) else {
+            return Err(javascript_child_process_gone_error(process_id, &child_path));
+        };
         let Some(parent) = Self::active_process_by_path_mut(root, current_process_path) else {
-            return Ok(());
+            return Err(javascript_child_process_gone_error(process_id, &child_path));
         };
         let Some(child) = parent.child_processes.get_mut(child_process_id) else {
-            return Ok(());
+            return Err(javascript_child_process_gone_error(process_id, &child_path));
         };
         child.execution.close_stdin()?;
         close_kernel_process_stdin(&mut vm.kernel, child)
@@ -5448,31 +6167,38 @@ where
     ) -> Result<(), SidecarError> {
         let signal_name = signal.to_owned();
         let signal = parse_signal(signal)?;
-        let current_process_label =
-            Self::child_process_path_label(process_id, current_process_path);
-        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
-        let root = vm
-            .active_processes
-            .get_mut(process_id)
-            .expect("process should still exist");
-        let parent =
-            Self::active_process_by_path_mut(root, current_process_path).ok_or_else(|| {
-                SidecarError::InvalidState(format!(
-                    "unknown child process path {current_process_label} during nested kill"
-                ))
-            })?;
+        let Some(vm) = self.vms.get_mut(vm_id) else {
+            return Ok(());
+        };
+        let Some(root) = vm.active_processes.get_mut(process_id) else {
+            return Ok(());
+        };
+        let Some(parent) = Self::active_process_by_path_mut(root, current_process_path) else {
+            return Ok(());
+        };
         let source_pid = parent.kernel_pid;
-        let child = parent
-            .child_processes
-            .get_mut(child_process_id)
-            .ok_or_else(|| {
-                SidecarError::InvalidState(format!(
-                    "unknown child process {child_process_id} during nested kill"
-                ))
-            })?;
-        vm.kernel
-            .kill_process(EXECUTION_DRIVER_NAME, child.kernel_pid, signal)
-            .map_err(kernel_error)?;
+        let Some(child) = parent.child_processes.get_mut(child_process_id) else {
+            return Ok(());
+        };
+        let should_terminate_shared_runtime = child.execution.uses_shared_v8_runtime()
+            && signal != 0
+            && !matches!(
+                signal,
+                libc::SIGHUP
+                    | libc::SIGINT
+                    | libc::SIGTERM
+                    | libc::SIGCHLD
+                    | libc::SIGWINCH
+                    | libc::SIGSTOP
+                    | libc::SIGCONT
+            );
+        if should_terminate_shared_runtime {
+            child.execution.terminate()?;
+        } else {
+            vm.kernel
+                .kill_process(EXECUTION_DRIVER_NAME, child.kernel_pid, signal)
+                .map_err(kernel_error)?;
+        }
         let child_process_label = if current_process_path.is_empty() {
             child_process_id.to_owned()
         } else {
@@ -5517,15 +6243,23 @@ where
         child_process_id: &str,
         chunk: &[u8],
     ) -> Result<(), SidecarError> {
-        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let Some(vm) = self.vms.get_mut(vm_id) else {
+            return Err(javascript_child_process_gone_error(
+                process_id,
+                &[child_process_id],
+            ));
+        };
         let Some(child) = vm
             .active_processes
             .get_mut(process_id)
-            .expect("process should still exist")
+            .ok_or_else(|| missing_process_error(vm_id, process_id))?
             .child_processes
             .get_mut(child_process_id)
         else {
-            return Ok(());
+            return Err(javascript_child_process_gone_error(
+                process_id,
+                &[child_process_id],
+            ));
         };
         if let Err(error) = child.execution.write_stdin(chunk) {
             if is_broken_pipe_error(&error) {
@@ -5542,15 +6276,23 @@ where
         process_id: &str,
         child_process_id: &str,
     ) -> Result<(), SidecarError> {
-        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let Some(vm) = self.vms.get_mut(vm_id) else {
+            return Err(javascript_child_process_gone_error(
+                process_id,
+                &[child_process_id],
+            ));
+        };
         let Some(child) = vm
             .active_processes
             .get_mut(process_id)
-            .expect("process should still exist")
+            .ok_or_else(|| missing_process_error(vm_id, process_id))?
             .child_processes
             .get_mut(child_process_id)
         else {
-            return Ok(());
+            return Err(javascript_child_process_gone_error(
+                process_id,
+                &[child_process_id],
+            ));
         };
         child.execution.close_stdin()?;
         close_kernel_process_stdin(&mut vm.kernel, child)
@@ -5565,11 +6307,13 @@ where
     ) -> Result<(), SidecarError> {
         let signal_name = signal.to_owned();
         let signal = parse_signal(signal)?;
-        let vm = self.vms.get_mut(vm_id).expect("VM should exist");
+        let Some(vm) = self.vms.get_mut(vm_id) else {
+            return Ok(());
+        };
         let process = vm
             .active_processes
             .get_mut(process_id)
-            .expect("process should still exist");
+            .ok_or_else(|| missing_process_error(vm_id, process_id))?;
         let source_pid = process.kernel_pid;
         let child = process
             .child_processes
@@ -5579,9 +6323,25 @@ where
                     "unknown child process {child_process_id} during kill"
                 ))
             })?;
-        vm.kernel
-            .kill_process(EXECUTION_DRIVER_NAME, child.kernel_pid, signal)
-            .map_err(kernel_error)?;
+        let should_terminate_shared_runtime = child.execution.uses_shared_v8_runtime()
+            && signal != 0
+            && !matches!(
+                signal,
+                libc::SIGHUP
+                    | libc::SIGINT
+                    | libc::SIGTERM
+                    | libc::SIGCHLD
+                    | libc::SIGWINCH
+                    | libc::SIGSTOP
+                    | libc::SIGCONT
+            );
+        if should_terminate_shared_runtime {
+            child.execution.terminate()?;
+        } else {
+            vm.kernel
+                .kill_process(EXECUTION_DRIVER_NAME, child.kernel_pid, signal)
+                .map_err(kernel_error)?;
+        }
         emit_security_audit_event(
             &self.bridge,
             vm_id,
@@ -5620,6 +6380,68 @@ fn map_wasm_signal_registration(
         mask: registration.mask,
         flags: registration.flags,
     }
+}
+
+fn parse_process_signal_state_request(
+    args: &[Value],
+) -> Result<(u32, SignalHandlerRegistration), SidecarError> {
+    let signal = javascript_sync_rpc_arg_u32(args, 0, "process.signal_state signal")?;
+    let action = javascript_sync_rpc_arg_str(args, 1, "process.signal_state action")?;
+    let mask_json = javascript_sync_rpc_arg_str(args, 2, "process.signal_state mask")?;
+    let flags = javascript_sync_rpc_arg_u32(args, 3, "process.signal_state flags")?;
+    let mask: Vec<u32> = serde_json::from_str(mask_json).map_err(|error| {
+        SidecarError::InvalidState(format!(
+            "process.signal_state mask must be valid JSON: {error}"
+        ))
+    })?;
+    let action = match action.trim().to_ascii_lowercase().as_str() {
+        "default" => SignalDispositionAction::Default,
+        "ignore" => SignalDispositionAction::Ignore,
+        "user" => SignalDispositionAction::User,
+        other => {
+            return Err(SidecarError::InvalidState(format!(
+                "unsupported process.signal_state action {other}"
+            )));
+        }
+    };
+
+    Ok((
+        signal,
+        SignalHandlerRegistration {
+            action,
+            mask,
+            flags,
+        },
+    ))
+}
+
+fn apply_process_signal_state_update(
+    signal_states: &mut BTreeMap<String, BTreeMap<u32, SignalHandlerRegistration>>,
+    process_id: &str,
+    signal: u32,
+    registration: SignalHandlerRegistration,
+) {
+    if registration.action == SignalDispositionAction::Default
+        && registration.mask.is_empty()
+        && registration.flags == 0
+    {
+        let remove_process_entry = signal_states
+            .get_mut(process_id)
+            .map(|handlers| {
+                handlers.remove(&signal);
+                handlers.is_empty()
+            })
+            .unwrap_or(false);
+        if remove_process_entry {
+            signal_states.remove(process_id);
+        }
+        return;
+    }
+
+    signal_states
+        .entry(process_id.to_owned())
+        .or_default()
+        .insert(signal, registration);
 }
 
 fn map_node_signal_registration(
@@ -5736,8 +6558,59 @@ fn resolve_command_execution(
     let (guest_cwd, host_cwd, allow_host_path_overrides) = resolve_execution_cwds(vm, cwd);
     let mut env = vm.guest_env.clone();
     env.extend(extra_env.clone());
+    let args = apply_shell_cwd_prefix(command, args.to_vec(), &guest_cwd);
+
+    if is_tool_command(vm, command) {
+        let command = normalized_tool_command_name(command).unwrap_or_else(|| command.to_owned());
+        return Ok(ResolvedChildProcessExecution {
+            command: command.clone(),
+            process_args: std::iter::once(command.clone())
+                .chain(args.iter().cloned())
+                .collect(),
+            runtime: GuestRuntimeKind::JavaScript,
+            entrypoint: command,
+            execution_args: args,
+            env,
+            guest_cwd,
+            host_cwd,
+            wasm_permission_tier: None,
+            tool_command: true,
+        });
+    }
 
     if is_node_runtime_command(command) {
+        if let Some(cli) = resolve_host_node_cli_entrypoint(command) {
+            env.insert(
+                String::from("AGENT_OS_NODE_EVAL"),
+                build_host_node_cli_eval(&cli),
+            );
+            prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, None)?;
+            add_runtime_guest_path_mapping(&mut env, &cli.guest_root, &cli.package_root);
+            add_runtime_host_access_path(
+                &mut env,
+                "AGENT_OS_EXTRA_FS_READ_PATHS",
+                &cli.package_root,
+                true,
+            );
+
+            return Ok(ResolvedChildProcessExecution {
+                command: String::from(JAVASCRIPT_COMMAND),
+                process_args: std::iter::once(command.to_owned())
+                    .chain(args.iter().cloned())
+                    .collect(),
+                runtime: GuestRuntimeKind::JavaScript,
+                entrypoint: String::from("-e"),
+                execution_args: std::iter::once(cli.guest_entrypoint.clone())
+                    .chain(args.iter().cloned())
+                    .collect(),
+                env,
+                guest_cwd,
+                host_cwd,
+                wasm_permission_tier: None,
+                tool_command: false,
+            });
+        }
+
         if args.is_empty() {
             env.insert(String::from("AGENT_OS_NODE_EVAL"), String::new());
             prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, None)?;
@@ -5757,7 +6630,7 @@ fn resolve_command_execution(
         }
 
         if let Some((entrypoint, execution_args)) =
-            resolve_special_node_cli_invocation(args, &mut env)
+            resolve_special_node_cli_invocation(&args, &mut env)
         {
             prepare_guest_runtime_env(vm, &mut env, &guest_cwd, &host_cwd, None)?;
 
@@ -5885,13 +6758,17 @@ fn resolve_command_execution(
         });
     }
 
-    let args = apply_shell_cwd_prefix(command, args.to_vec(), &guest_cwd);
-    let guest_entrypoint =
-        resolve_guest_command_entrypoint(vm, &guest_cwd, command).ok_or_else(|| {
-            SidecarError::InvalidState(format!(
-                "command not found on native sidecar path: {command}"
-            ))
-        })?;
+    let guest_entrypoint = resolve_guest_command_entrypoint(
+        vm,
+        &guest_cwd,
+        command,
+        env.get("PATH").map(String::as_str),
+    )
+    .ok_or_else(|| {
+        SidecarError::InvalidState(format!(
+            "command not found on native sidecar path: {command}"
+        ))
+    })?;
     let wasm_permission_tier = explicit_wasm_permission_tier
         .or_else(|| vm.command_permissions.get(command).copied())
         .or_else(|| {
@@ -5902,6 +6779,32 @@ fn resolve_command_execution(
         });
 
     let host_entrypoint = resolve_vm_guest_path_to_host(vm, &guest_entrypoint);
+    if let Some((javascript_guest_entrypoint, javascript_host_entrypoint)) =
+        resolve_javascript_command_entrypoint(vm, &guest_entrypoint, &host_entrypoint)
+    {
+        prepare_guest_runtime_env(
+            vm,
+            &mut env,
+            &guest_cwd,
+            &host_cwd,
+            Some(javascript_guest_entrypoint),
+        )?;
+
+        return Ok(ResolvedChildProcessExecution {
+            command: command.to_owned(),
+            process_args: std::iter::once(command.to_owned())
+                .chain(args.iter().cloned())
+                .collect(),
+            runtime: GuestRuntimeKind::JavaScript,
+            entrypoint: javascript_host_entrypoint.to_string_lossy().into_owned(),
+            execution_args: args.to_vec(),
+            env,
+            guest_cwd,
+            host_cwd,
+            wasm_permission_tier: None,
+            tool_command: false,
+        });
+    }
     prepare_guest_runtime_env(
         vm,
         &mut env,
@@ -5911,7 +6814,7 @@ fn resolve_command_execution(
     )?;
 
     Ok(ResolvedChildProcessExecution {
-        command: String::from(WASM_COMMAND),
+        command: command.to_owned(),
         process_args: std::iter::once(command.to_owned())
             .chain(args.iter().cloned())
             .collect(),
@@ -5924,6 +6827,170 @@ fn resolve_command_execution(
         wasm_permission_tier,
         tool_command: false,
     })
+}
+
+const MAX_JAVASCRIPT_COMMAND_REDIRECT_DEPTH: usize = 4;
+
+fn resolve_javascript_command_entrypoint(
+    vm: &VmState,
+    guest_entrypoint: &str,
+    host_entrypoint: &Path,
+) -> Option<(String, PathBuf)> {
+    resolve_javascript_command_entrypoint_inner(
+        vm,
+        guest_entrypoint,
+        host_entrypoint,
+        MAX_JAVASCRIPT_COMMAND_REDIRECT_DEPTH,
+    )
+}
+
+fn resolve_javascript_command_entrypoint_inner(
+    vm: &VmState,
+    guest_entrypoint: &str,
+    host_entrypoint: &Path,
+    redirects_remaining: usize,
+) -> Option<(String, PathBuf)> {
+    if redirects_remaining > 0 {
+        let symlink_target = fs::symlink_metadata(host_entrypoint)
+            .ok()
+            .filter(|metadata| metadata.file_type().is_symlink())
+            .and_then(|_| fs::read_link(host_entrypoint).ok());
+        if let Some(symlink_target) = symlink_target {
+            let guest_parent = Path::new(guest_entrypoint)
+                .parent()
+                .and_then(|path| path.to_str())
+                .unwrap_or("/");
+            let symlink_guest_entrypoint = if symlink_target.is_absolute() {
+                normalize_path(&symlink_target.to_string_lossy())
+            } else {
+                normalize_path(&format!(
+                    "{guest_parent}/{}",
+                    symlink_target.to_string_lossy().replace('\\', "/")
+                ))
+            };
+            let symlink_host_entrypoint =
+                resolve_vm_guest_path_to_host(vm, &symlink_guest_entrypoint);
+            return resolve_javascript_command_entrypoint_inner(
+                vm,
+                &symlink_guest_entrypoint,
+                &symlink_host_entrypoint,
+                redirects_remaining - 1,
+            );
+        }
+    }
+
+    let script = load_executable_script_preview(host_entrypoint)?;
+    let interpreter = parse_script_interpreter_name(&script);
+
+    if interpreter.is_none() && is_probable_javascript_entrypoint(host_entrypoint, &script) {
+        return Some((guest_entrypoint.to_owned(), host_entrypoint.to_path_buf()));
+    }
+
+    let interpreter = interpreter?;
+    if interpreter == "node" {
+        return Some((guest_entrypoint.to_owned(), host_entrypoint.to_path_buf()));
+    }
+
+    if redirects_remaining == 0 || !matches!(interpreter.as_str(), "sh" | "bash" | "dash") {
+        return None;
+    }
+
+    let shim_target = parse_node_shell_shim_target(&script)?;
+    let guest_parent = Path::new(guest_entrypoint)
+        .parent()
+        .and_then(|path| path.to_str())
+        .unwrap_or("/");
+    let shim_guest_entrypoint = normalize_path(&format!("{guest_parent}/{shim_target}"));
+    let shim_host_entrypoint = resolve_vm_guest_path_to_host(vm, &shim_guest_entrypoint);
+    resolve_javascript_command_entrypoint_inner(
+        vm,
+        &shim_guest_entrypoint,
+        &shim_host_entrypoint,
+        redirects_remaining - 1,
+    )
+}
+
+fn load_executable_script_preview(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    let preview_len = bytes.len().min(16 * 1024);
+    Some(String::from_utf8_lossy(&bytes[..preview_len]).into_owned())
+}
+
+fn parse_script_interpreter_name(script: &str) -> Option<String> {
+    let shebang = script.lines().next()?.strip_prefix("#!")?.trim();
+    let mut tokens = shebang.split_whitespace();
+    let command = tokens.next()?;
+    let command_name = Path::new(command).file_name()?.to_str()?;
+    if command_name == "env" {
+        for token in tokens {
+            if token.starts_with('-') {
+                continue;
+            }
+            return Path::new(token)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned);
+        }
+        return None;
+    }
+
+    Some(command_name.to_owned())
+}
+
+fn parse_node_shell_shim_target(script: &str) -> Option<String> {
+    for line in script.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("exec ") {
+            continue;
+        }
+
+        let mut remaining = trimmed;
+        while let Some(start) = remaining.find("\"$basedir/") {
+            let after_prefix = &remaining[start + "\"$basedir/".len()..];
+            let end = after_prefix.find('"')?;
+            let candidate = &after_prefix[..end];
+            remaining = &after_prefix[end + 1..];
+
+            if candidate.is_empty() || candidate == "node" || candidate.ends_with("/node") {
+                continue;
+            }
+
+            return Some(candidate.to_owned());
+        }
+    }
+
+    None
+}
+
+fn is_probable_javascript_entrypoint(path: &Path, script: &str) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if matches!(extension, "js" | "cjs" | "mjs") {
+        return true;
+    }
+
+    if !path
+        .components()
+        .any(|component| component.as_os_str() == "node_modules")
+    {
+        return false;
+    }
+
+    let preview = script.trim_start_matches('\u{feff}').trim_start();
+    !preview.is_empty()
+        && !preview.starts_with("#!")
+        && (preview.starts_with("\"use strict\"")
+            || preview.starts_with("'use strict'")
+            || preview.starts_with("import ")
+            || preview.starts_with("export ")
+            || preview.starts_with("const ")
+            || preview.starts_with("let ")
+            || preview.starts_with("var ")
+            || preview.starts_with("Object.defineProperty(exports")
+            || preview.starts_with("module.exports")
+            || preview.starts_with("require("))
 }
 
 fn resolve_guest_execution_cwd(vm: &VmState, value: Option<&str>) -> String {
@@ -5987,7 +7054,7 @@ fn apply_shell_cwd_prefix(command: &str, mut args: Vec<String>, guest_cwd: &str)
 
     let command_text = args[1].clone();
     let quoted_cwd = shell_single_quote(guest_cwd);
-    args[1] = format!("cd -- {quoted_cwd} && {command_text}");
+    args[1] = format!("cd {quoted_cwd} && {command_text}");
     args
 }
 
@@ -6013,12 +7080,64 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+pub(crate) fn sync_active_process_host_writes_to_kernel(
+    vm: &mut VmState,
+) -> Result<(), SidecarError> {
+    if vm.root_filesystem_mode != RootFilesystemMode::ReadOnly {
+        let shadow_root = vm.cwd.clone();
+        sync_host_directory_tree_to_kernel(vm, &shadow_root, "/")?;
+    }
+
+    let normalized_vm_root = normalize_host_path(&vm.cwd);
+    let extra_roots = collect_active_process_host_sync_roots(vm, &normalized_vm_root);
+    for (host_cwd, guest_cwd) in extra_roots {
+        sync_host_directory_tree_to_kernel(vm, &host_cwd, &guest_cwd)?;
+    }
+
+    Ok(())
+}
+
+fn collect_active_process_host_sync_roots(
+    vm: &VmState,
+    normalized_vm_root: &Path,
+) -> Vec<(PathBuf, String)> {
+    let mut roots = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for process in vm.active_processes.values() {
+        collect_process_host_sync_roots(process, normalized_vm_root, &mut seen, &mut roots);
+    }
+
+    roots
+}
+
+fn collect_process_host_sync_roots(
+    process: &ActiveProcess,
+    normalized_vm_root: &Path,
+    seen: &mut BTreeSet<(PathBuf, String)>,
+    roots: &mut Vec<(PathBuf, String)>,
+) {
+    let normalized_host_cwd = normalize_host_path(&process.host_cwd);
+    if !path_is_within_root(&normalized_host_cwd, normalized_vm_root) {
+        let guest_cwd = normalize_path(&process.guest_cwd);
+        if seen.insert((normalized_host_cwd.clone(), guest_cwd.clone())) {
+            roots.push((normalized_host_cwd, guest_cwd));
+        }
+    }
+
+    for child in process.child_processes.values() {
+        collect_process_host_sync_roots(child, normalized_vm_root, seen, roots);
+    }
+}
+
 fn sync_process_host_writes_to_kernel(
     vm: &mut VmState,
     process: &ActiveProcess,
 ) -> Result<(), SidecarError> {
-    let shadow_root = vm.cwd.clone();
-    sync_host_directory_tree_to_kernel(vm, &shadow_root, "/")?;
+    if vm.root_filesystem_mode != RootFilesystemMode::ReadOnly {
+        let shadow_root = vm.cwd.clone();
+        sync_host_directory_tree_to_kernel(vm, &shadow_root, "/")?;
+    }
 
     if !path_is_within_root(
         &normalize_host_path(&process.host_cwd),
@@ -6037,11 +7156,13 @@ fn sync_host_directory_tree_to_kernel(
 ) -> Result<(), SidecarError> {
     let normalized_host_root = normalize_host_path(host_root);
     let normalized_guest_root = normalize_path(guest_root);
+    let mut synced_file_times = BTreeMap::new();
     sync_host_directory_tree_to_kernel_inner(
         vm,
         &normalized_host_root,
         &normalized_host_root,
         &normalized_guest_root,
+        &mut synced_file_times,
     )
 }
 
@@ -6050,6 +7171,7 @@ fn sync_host_directory_tree_to_kernel_inner(
     host_root: &Path,
     current_host_dir: &Path,
     guest_root: &str,
+    synced_file_times: &mut BTreeMap<(u64, u64), (u64, u64)>,
 ) -> Result<(), SidecarError> {
     let entries = match fs::read_dir(current_host_dir) {
         Ok(entries) => entries,
@@ -6058,7 +7180,7 @@ fn sync_host_directory_tree_to_kernel_inner(
             return Err(SidecarError::Io(format!(
                 "failed to read host shadow directory {}: {error}",
                 current_host_dir.display()
-            )))
+            )));
         }
     };
 
@@ -6073,12 +7195,6 @@ fn sync_host_directory_tree_to_kernel_inner(
         let file_type = entry.file_type().map_err(|error| {
             SidecarError::Io(format!(
                 "failed to stat host shadow entry {}: {error}",
-                host_path.display()
-            ))
-        })?;
-        let metadata = entry.metadata().map_err(|error| {
-            SidecarError::Io(format!(
-                "failed to read host shadow metadata {}: {error}",
                 host_path.display()
             ))
         })?;
@@ -6103,22 +7219,64 @@ fn sync_host_directory_tree_to_kernel_inner(
             ))
         };
 
-        if is_kernel_owned_shadow_sync_path(&guest_path) {
+        if should_skip_shadow_sync_path(vm, &guest_path) {
             continue;
         }
 
         if file_type.is_dir() {
-            if !is_shadow_bootstrap_dir(&guest_path) {
-                vm.kernel.mkdir(&guest_path, true).map_err(kernel_error)?;
+            let metadata = entry.metadata().map_err(|error| {
+                SidecarError::Io(format!(
+                    "failed to read host shadow metadata {}: {error}",
+                    host_path.display()
+                ))
+            })?;
+            if !is_shadow_bootstrap_dir(&guest_path)
+                && !vm.kernel.exists(&guest_path).unwrap_or(false)
+            {
+                vm.kernel.mkdir(&guest_path, true).map_err(|error| {
+                    SidecarError::InvalidState(format!(
+                        "failed to sync host shadow directory {} to guest {}: {}",
+                        host_path.display(),
+                        guest_path,
+                        kernel_error(error)
+                    ))
+                })?;
                 vm.kernel
                     .chmod(&guest_path, host_shadow_mode(&metadata))
-                    .map_err(kernel_error)?;
+                    .map_err(|error| {
+                        SidecarError::InvalidState(format!(
+                            "failed to sync host shadow directory mode {} to guest {}: {}",
+                            host_path.display(),
+                            guest_path,
+                            kernel_error(error)
+                        ))
+                    })?;
             }
-            sync_host_directory_tree_to_kernel_inner(vm, host_root, &host_path, guest_root)?;
+            sync_host_directory_tree_to_kernel_inner(
+                vm,
+                host_root,
+                &host_path,
+                guest_root,
+                synced_file_times,
+            )?;
             continue;
         }
 
         if file_type.is_file() {
+            let metadata = entry.metadata().map_err(|error| {
+                SidecarError::Io(format!(
+                    "failed to read host shadow metadata {}: {error}",
+                    host_path.display()
+                ))
+            })?;
+            let timestamp_key = (metadata.dev(), metadata.ino());
+            let (atime_ms, mtime_ms) =
+                *synced_file_times.entry(timestamp_key).or_insert_with(|| {
+                    (
+                        metadata_time_ms(metadata.atime(), metadata.atime_nsec()),
+                        metadata_time_ms(metadata.mtime(), metadata.mtime_nsec()),
+                    )
+                });
             let desired_mode = host_shadow_mode(&metadata);
             let bytes = fs::read(&host_path).map_err(|error| {
                 SidecarError::Io(format!(
@@ -6126,42 +7284,88 @@ fn sync_host_directory_tree_to_kernel_inner(
                     host_path.display()
                 ))
             })?;
-            vm.kernel
-                .write_file(&guest_path, bytes)
-                .map_err(kernel_error)?;
+            vm.kernel.write_file(&guest_path, bytes).map_err(|error| {
+                SidecarError::InvalidState(format!(
+                    "failed to sync host shadow file {} to guest {}: {}",
+                    host_path.display(),
+                    guest_path,
+                    kernel_error(error)
+                ))
+            })?;
             vm.kernel
                 .chmod(&guest_path, desired_mode)
-                .map_err(kernel_error)?;
+                .map_err(|error| {
+                    SidecarError::InvalidState(format!(
+                        "failed to sync host shadow file mode {} to guest {}: {}",
+                        host_path.display(),
+                        guest_path,
+                        kernel_error(error)
+                    ))
+                })?;
+            vm.kernel
+                .utimes(&guest_path, atime_ms, mtime_ms)
+                .map_err(|error| {
+                    SidecarError::InvalidState(format!(
+                        "failed to sync host shadow file times {} to guest {}: {}",
+                        host_path.display(),
+                        guest_path,
+                        kernel_error(error)
+                    ))
+                })?;
             continue;
         }
 
         if file_type.is_symlink() {
-            let target = fs::read_link(&host_path).map_err(|error| {
-                SidecarError::Io(format!(
-                    "failed to read host shadow symlink {}: {error}",
-                    host_path.display()
-                ))
-            })?;
-            match vm.kernel.lstat(&guest_path) {
-                Ok(stat) if stat.is_directory => {
-                    let _ = vm.kernel.remove_dir(&guest_path);
+            let target = match fs::read_link(&host_path) {
+                Ok(target) => target,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(SidecarError::Io(format!(
+                        "failed to read host shadow symlink {}: {error}",
+                        host_path.display()
+                    )));
                 }
-                Ok(_) => {
-                    let _ = vm.kernel.remove_file(&guest_path);
-                }
-                Err(_) => {}
-            }
-            vm.kernel
-                .symlink(&target.to_string_lossy(), &guest_path)
-                .map_err(kernel_error)?;
+            };
+            replace_kernel_symlink(vm, &guest_path, &target.to_string_lossy())?;
         }
     }
 
     Ok(())
 }
 
+fn replace_kernel_symlink(
+    vm: &mut VmState,
+    guest_path: &str,
+    target: &str,
+) -> Result<(), SidecarError> {
+    if vm.kernel.symlink(target, guest_path).is_ok() {
+        return Ok(());
+    }
+
+    if let Ok(existing_target) = vm.kernel.read_link(guest_path) {
+        if existing_target == target {
+            return Ok(());
+        }
+    }
+
+    let _ = vm.kernel.remove_file(guest_path);
+    let _ = vm.kernel.remove_dir(guest_path);
+    vm.kernel
+        .symlink(target, guest_path)
+        .map_err(kernel_error)?;
+    Ok(())
+}
+
 fn host_shadow_mode(metadata: &fs::Metadata) -> u32 {
     metadata.permissions().mode() & 0o7777
+}
+
+fn metadata_time_ms(seconds: i64, nanos: i64) -> u64 {
+    let seconds = seconds.max(0) as u64;
+    let nanos = nanos.max(0) as u64;
+    seconds
+        .saturating_mul(1_000)
+        .saturating_add(nanos / 1_000_000)
 }
 
 fn is_shadow_bootstrap_dir(path: &str) -> bool {
@@ -6183,6 +7387,7 @@ fn is_shadow_bootstrap_dir(path: &str) -> bool {
             | "/mnt"
             | "/media"
             | "/home"
+            | "/home/user"
             | "/usr"
             | "/usr/bin"
             | "/usr/games"
@@ -6208,11 +7413,28 @@ fn is_shadow_bootstrap_dir(path: &str) -> bool {
     )
 }
 
+#[cfg(test)]
+mod shadow_sync_tests {
+    use super::is_shadow_bootstrap_dir;
+
+    #[test]
+    fn shadow_bootstrap_sync_skips_virtual_home_tree() {
+        assert!(is_shadow_bootstrap_dir("/home"));
+        assert!(is_shadow_bootstrap_dir("/home/user"));
+    }
+}
+
 fn is_kernel_owned_shadow_sync_path(path: &str) -> bool {
     matches!(path, "/dev" | "/proc" | "/sys")
         || path.starts_with("/dev/")
         || path.starts_with("/proc/")
         || path.starts_with("/sys/")
+}
+
+fn should_skip_shadow_sync_path(vm: &VmState, guest_path: &str) -> bool {
+    is_kernel_owned_shadow_sync_path(guest_path)
+        || host_mount_path_for_guest_path_from_mounts(&vm.configuration.mounts, guest_path)
+            .is_some()
 }
 
 fn resolve_path_like_guest_specifier(cwd: &str, specifier: &str) -> String {
@@ -6263,17 +7485,113 @@ fn resolve_special_node_cli_invocation(
     }
 }
 
+fn node_runtime_command_name(command: &str) -> Option<&str> {
+    let name = Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())?;
+    matches!(name, "node" | "npm" | "npx").then_some(name)
+}
+
+struct ResolvedHostNodeCliEntrypoint {
+    command_name: String,
+    guest_root: String,
+    guest_entrypoint: String,
+    package_root: PathBuf,
+}
+
+fn resolve_host_node_cli_entrypoint(command: &str) -> Option<ResolvedHostNodeCliEntrypoint> {
+    let command_name = node_runtime_command_name(command)?;
+    if !matches!(command_name, "npm" | "npx") {
+        return None;
+    }
+
+    let path = std::env::var_os("PATH")?;
+    for root in std::env::split_paths(&path) {
+        let candidate = root.join(command_name);
+        if !candidate.is_file() {
+            continue;
+        }
+        let entrypoint = candidate.canonicalize().ok().unwrap_or(candidate);
+        let package_root = entrypoint.parent()?.parent()?.to_path_buf();
+        let guest_root = format!("/__agentos/node-runtime/{command_name}");
+        let relative_entrypoint = entrypoint.strip_prefix(&package_root).ok()?;
+        let guest_entrypoint = normalize_path(&format!(
+            "{guest_root}/{}",
+            relative_entrypoint.to_string_lossy().replace('\\', "/")
+        ));
+        return Some(ResolvedHostNodeCliEntrypoint {
+            command_name: command_name.to_owned(),
+            guest_root,
+            guest_entrypoint,
+            package_root,
+        });
+    }
+
+    None
+}
+
+fn build_host_node_cli_eval(cli: &ResolvedHostNodeCliEntrypoint) -> String {
+    let guest_npm_main = normalize_path(&format!("{}/lib/npm.js", cli.guest_root));
+    let guest_npm_cli = normalize_path(&format!("{}/bin/npm-cli.js", cli.guest_root));
+    let guest_package_json = normalize_path(&format!("{}/package.json", cli.guest_root));
+    let guest_display_module = normalize_path(&format!("{}/lib/utils/display.js", cli.guest_root));
+    let guest_log_file_module =
+        normalize_path(&format!("{}/lib/utils/log-file.js", cli.guest_root));
+    let debug_preamble = "const __agentOsDebugNpmCli = !!process.env.CODEX_DEBUG_NPM_CLI; const __agentOsDebugLog = (...args) => { if (__agentOsDebugNpmCli) { console.error('[agent-os npm debug]', ...args); } }; const __agentOsIsProcessExitError = (error) => !!(error && typeof error === 'object' && (error._isProcessExit === true || error.name === 'ProcessExitError')); const __agentOsResolveExitCode = (code) => Number.isFinite(code) ? code : (Number.isFinite(process.exitCode) ? process.exitCode : 0); const __agentOsFinish = (code) => { process.exitCode = __agentOsResolveExitCode(code); }; if (__agentOsDebugNpmCli) { const __agentOsWrapAsyncFsMethod = (__agentOsTarget, __agentOsMethod) => { const __agentOsOriginal = __agentOsTarget[__agentOsMethod]; if (typeof __agentOsOriginal !== 'function' || __agentOsOriginal.__agentOsDebugWrapped) { return; } const __agentOsWrapped = async (...args) => { const target = args.length > 0 ? args[0] : '<none>'; __agentOsDebugLog(`fs.${__agentOsMethod}:start`, String(target)); try { const result = await __agentOsOriginal.apply(__agentOsTarget, args); __agentOsDebugLog(`fs.${__agentOsMethod}:done`, String(target)); return result; } catch (error) { __agentOsDebugLog(`fs.${__agentOsMethod}:error`, String(target), error && error.stack ? error.stack : String(error)); throw error; } }; __agentOsWrapped.__agentOsDebugWrapped = true; __agentOsTarget[__agentOsMethod] = __agentOsWrapped; }; const __agentOsWrapSyncFsMethod = (__agentOsTarget, __agentOsMethod) => { const __agentOsOriginal = __agentOsTarget[__agentOsMethod]; if (typeof __agentOsOriginal !== 'function' || __agentOsOriginal.__agentOsDebugWrapped) { return; } const __agentOsWrapped = (...args) => { const target = args.length > 0 ? args[0] : '<none>'; __agentOsDebugLog(`fs.${__agentOsMethod}:start`, String(target)); try { const result = __agentOsOriginal.apply(__agentOsTarget, args); __agentOsDebugLog(`fs.${__agentOsMethod}:done`, String(target)); return result; } catch (error) { __agentOsDebugLog(`fs.${__agentOsMethod}:error`, String(target), error && error.stack ? error.stack : String(error)); throw error; } }; __agentOsWrapped.__agentOsDebugWrapped = true; __agentOsTarget[__agentOsMethod] = __agentOsWrapped; }; const __agentOsFsPromiseModules = [require('fs/promises'), require('node:fs/promises')]; for (const __agentOsFsPromises of __agentOsFsPromiseModules) { for (const __agentOsMethod of ['access', 'lstat', 'mkdir', 'open', 'readFile', 'readdir', 'readlink', 'realpath', 'rename', 'rm', 'rmdir', 'stat', 'symlink', 'unlink', 'writeFile']) { __agentOsWrapAsyncFsMethod(__agentOsFsPromises, __agentOsMethod); } } const __agentOsFsModules = [require('fs'), require('node:fs')]; for (const __agentOsFs of __agentOsFsModules) { for (const __agentOsMethod of ['accessSync', 'existsSync', 'lstatSync', 'mkdirSync', 'openSync', 'readFileSync', 'readdirSync', 'readlinkSync', 'realpathSync', 'renameSync', 'rmSync', 'rmdirSync', 'statSync', 'symlinkSync', 'unlinkSync', 'writeFileSync']) { __agentOsWrapSyncFsMethod(__agentOsFs, __agentOsMethod); } } }";
+    let display_stub = format!(
+        "const __agentOsDisplayModulePath = require.resolve({display_module}); const __agentOsLogFileModulePath = require.resolve({log_file_module}); const __agentOsColorPassthrough = new Proxy((value) => value, {{ get: () => __agentOsColorPassthrough, apply: (_target, _thisArg, args) => args[0] }}); class __AgentOsNpmDisplayStub {{ constructor() {{ this.chalk = {{ noColor: __agentOsColorPassthrough, stdout: __agentOsColorPassthrough, stderr: __agentOsColorPassthrough }}; this._logPaused = true; this._logBuffer = []; this._outputBuffer = []; this._write = (stream, values) => {{ if (!Array.isArray(values) || values.length === 0) {{ return; }} const text = values.map((value) => typeof value === 'string' ? value : String(value)).join(' '); if (text.length === 0) {{ return; }} const normalized = text.replace(/\\r\\n/g, '\\n'); if (/^\\n?> npx\\n> /u.test(normalized)) {{ return; }} stream.write(text.endsWith('\\n') ? text : `${{text}}\\n`); }}; this._inputHandler = (level, ...args) => {{ if (level !== 'read') {{ return; }} const [resolve, reject, callback] = args; Promise.resolve().then(() => callback()).then(resolve, reject); }}; this._logHandler = (level, ...args) => {{ if (level === 'resume') {{ this._logPaused = false; for (const entry of this._logBuffer.splice(0)) {{ this._write(process.stderr, entry); }} return; }} if (level === 'pause') {{ this._logPaused = true; return; }} if (this._logPaused) {{ this._logBuffer.push(args); return; }} this._write(process.stderr, args); }}; this._outputHandler = (level, ...args) => {{ if (level === 'buffer') {{ this._outputBuffer.push(['standard', args]); return; }} if (level === 'flush') {{ for (const [bufferLevel, bufferArgs] of this._outputBuffer.splice(0)) {{ this._write(bufferLevel === 'error' ? process.stderr : process.stdout, bufferArgs); }} return; }} this._write(level === 'error' ? process.stderr : process.stdout, args); }}; process.on('input', this._inputHandler); process.on('log', this._logHandler); process.on('output', this._outputHandler); }} async load() {{ process.emit('log', 'resume'); process.emit('output', 'flush'); }} off() {{ if (this._inputHandler) {{ process.off('input', this._inputHandler); }} if (this._logHandler) {{ process.off('log', this._logHandler); }} if (this._outputHandler) {{ process.off('output', this._outputHandler); }} this._logBuffer.length = 0; this._outputBuffer.length = 0; }} }} class __AgentOsNpmLogFileStub {{ constructor() {{ this.files = []; }} async load() {{ return []; }} off() {{}} }} globalThis._moduleCache[__agentOsDisplayModulePath] = {{ exports: __AgentOsNpmDisplayStub }}; globalThis._moduleCache[__agentOsLogFileModulePath] = {{ exports: __AgentOsNpmLogFileStub }};",
+        display_module = serde_json::to_string(&guest_display_module)
+            .unwrap_or_else(|_| format!("\"{guest_display_module}\"")),
+        log_file_module = serde_json::to_string(&guest_log_file_module)
+            .unwrap_or_else(|_| format!("\"{guest_log_file_module}\"")),
+    );
+    let registry_fetch_stub = "const { createRequire: __agentOsCreateRequire } = require('module'); const __agentOsNpmRequire = __agentOsCreateRequire(require.resolve(__AGENT_OS_NPM_MAIN__)); try { const __agentOsMinipassFetchPath = __agentOsNpmRequire.resolve('minipass-fetch'); const __agentOsMinipassFetch = __agentOsNpmRequire(__agentOsMinipassFetchPath); const { FetchError: __agentOsFetchError, Headers: __agentOsFetchHeaders, Request: __agentOsFetchRequest, Response: __agentOsFetchResponse, AbortError: __agentOsAbortError } = __agentOsMinipassFetch; const { Minipass: __agentOsMinipass } = __agentOsNpmRequire('minipass'); const __agentOsCreateBinaryMinipass = () => new __agentOsMinipass({ objectMode: false, encoding: null }); const __agentOsCloneBuffer = (buffer) => Buffer.isBuffer(buffer) ? Buffer.from(buffer) : Buffer.from(buffer ?? []); const __agentOsBufferToArrayBuffer = (buffer) => { const bytes = __agentOsCloneBuffer(buffer); return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); }; const __agentOsAttachBufferedBodyMethods = (response, responseBuffer) => { const __agentOsReadBuffer = async () => __agentOsCloneBuffer(responseBuffer); response.__agentOsBufferedBody = __agentOsCloneBuffer(responseBuffer); response.buffer = __agentOsReadBuffer; response.text = async () => (await __agentOsReadBuffer()).toString('utf8'); response.json = async () => JSON.parse(await response.text()); response.arrayBuffer = async () => __agentOsBufferToArrayBuffer(await __agentOsReadBuffer()); response.clone = () => { const clonedBody = __agentOsCreateBinaryMinipass(); const clonedBuffer = __agentOsCloneBuffer(responseBuffer); clonedBody.end(clonedBuffer); const clonedResponse = new __agentOsFetchResponse(clonedBody, { url: response.url, status: response.status, statusText: response.statusText, headers: response.headers, size: response.size, timeout: response.timeout, counter: response.counter, trailer: response.trailer }); return __agentOsAttachBufferedBodyMethods(clonedResponse, clonedBuffer); }; return response; }; const __agentOsNormalizeHeaders = (__agentOsHeaders) => { const normalized = {}; __agentOsHeaders.forEach((value, key) => { if (normalized[key] === undefined) { normalized[key] = value; return; } if (Array.isArray(normalized[key])) { normalized[key].push(value); return; } normalized[key] = [normalized[key], value]; }); return normalized; }; const __agentOsPatchedMinipassFetch = async (input, opts = {}) => { const request = input instanceof __agentOsFetchRequest ? input : new __agentOsFetchRequest(input, opts); const __agentOsController = !request.signal && typeof AbortController === 'function' ? new AbortController() : null; const __agentOsSignal = request.signal ?? __agentOsController?.signal; let __agentOsTimer = null; if (__agentOsController && Number.isFinite(request.timeout) && request.timeout > 0) { __agentOsTimer = setTimeout(() => __agentOsController.abort(new Error(`network timeout at: ${request.url}`)), request.timeout); __agentOsTimer.unref?.(); } try { const requestHeaders = {}; request.headers.forEach((value, key) => { requestHeaders[key] = value; }); const response = await fetch(request.url, { method: request.method, headers: requestHeaders, body: request.body ?? undefined, redirect: request.redirect ?? opts.redirect ?? 'follow', signal: __agentOsSignal, ...(request.body ? { duplex: 'half' } : {}) }); const responseBody = __agentOsCreateBinaryMinipass(); const contentType = String(response.headers.get('content-type') || '').toLowerCase(); const responseBuffer = contentType.includes('json') ? Buffer.from(JSON.stringify(await response.json())) : contentType.startsWith('text/') ? Buffer.from(await response.text()) : Buffer.from(await response.arrayBuffer()); responseBody.end(responseBuffer); return __agentOsAttachBufferedBodyMethods(new __agentOsFetchResponse(responseBody, { url: response.url, status: response.status, statusText: response.statusText, headers: __agentOsNormalizeHeaders(response.headers), size: request.size, timeout: request.timeout, counter: request.counter ?? opts.counter ?? 0, trailer: Promise.resolve(new __agentOsFetchHeaders()) }), responseBuffer); } catch (error) { if (error instanceof Error) { throw error; } throw new __agentOsFetchError(String(error), 'system', error); } finally { if (__agentOsTimer) { clearTimeout(__agentOsTimer); } } }; globalThis.__agentOsPatchedMinipassFetch = __agentOsPatchedMinipassFetch; __agentOsPatchedMinipassFetch.isRedirect = typeof __agentOsMinipassFetch.isRedirect === 'function' ? __agentOsMinipassFetch.isRedirect.bind(__agentOsMinipassFetch) : (code) => code === 301 || code === 302 || code === 303 || code === 307 || code === 308; __agentOsPatchedMinipassFetch.FetchError = __agentOsFetchError; __agentOsPatchedMinipassFetch.Headers = __agentOsFetchHeaders; __agentOsPatchedMinipassFetch.Request = __agentOsFetchRequest; __agentOsPatchedMinipassFetch.Response = __agentOsFetchResponse; __agentOsPatchedMinipassFetch.AbortError = __agentOsAbortError; globalThis._moduleCache[__agentOsMinipassFetchPath] = { exports: __agentOsPatchedMinipassFetch }; __agentOsDebugLog('patched-minipass-fetch', __agentOsMinipassFetchPath); const __agentOsCheckResponsePath = __agentOsNpmRequire.resolve('npm-registry-fetch/lib/check-response.js'); const __agentOsCheckResponse = __agentOsNpmRequire(__agentOsCheckResponsePath); const __agentOsEnsureResponseBodyStream = (response) => { if (!response || (response.body && typeof response.body.on === 'function')) { return response; } const body = __agentOsCreateBinaryMinipass(); const finishWithError = (error) => body.emit('error', error instanceof Error ? error : new Error(String(error))); try { if (typeof response.buffer === 'function') { Promise.resolve(response.buffer()).then((buffer) => body.end(buffer), finishWithError); } else if (Buffer.isBuffer(response.body) || typeof response.body === 'string') { body.end(response.body); } else if (response.body && typeof response.body[Symbol.asyncIterator] === 'function') { (async () => { try { for await (const chunk of response.body) { body.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)); } body.end(); } catch (error) { finishWithError(error); body.end(); } })(); } else { body.end(); } } catch (error) { finishWithError(error); body.end(); } return new __agentOsFetchResponse(body, response); }; globalThis._moduleCache[__agentOsCheckResponsePath] = { exports: (payload) => { const normalized = { ...payload, res: __agentOsEnsureResponseBodyStream(payload.res) }; __agentOsDebugLog('check-response-body', normalized.res && normalized.res.status, typeof (normalized.res && normalized.res.body), normalized.res && normalized.res.body && typeof normalized.res.body.on, normalized.res && normalized.res.body && normalized.res.body.constructor && normalized.res.body.constructor.name, !!(normalized.res && normalized.res.__agentOsBufferedBody), normalized.res && typeof normalized.res.json); return __agentOsCheckResponse(normalized); } }; __agentOsDebugLog('patched-check-response', __agentOsCheckResponsePath); } catch (error) { __agentOsDebugLog('patch-minipass-fetch-failed', error && error.stack ? error.stack : String(error)); } try { const __agentOsRegistryFetchPath = __agentOsNpmRequire.resolve('npm-registry-fetch'); const __agentOsRegistryFetch = __agentOsNpmRequire(__agentOsRegistryFetchPath); const __agentOsWrapRegistryFetch = (fn) => { const wrapResult = (promise) => Promise.resolve(promise).then((res) => { __agentOsDebugLog('registry-fetch-result', res && res.status, typeof (res && res.body), res && res.body && typeof res.body.on, res && res.body && res.body.constructor && res.body.constructor.name, !!(res && res.__agentOsBufferedBody), res && typeof res.json); return res; }); const wrapped = (uri, opts = {}) => wrapResult(globalThis.__agentOsPatchedMinipassFetch(uri, { method: opts.method, headers: opts.headers, body: opts.body, redirect: opts.redirect, signal: opts.signal, timeout: opts.timeout, size: opts.size, counter: opts.counter })); if (typeof fn.json === 'function') { wrapped.json = (uri, opts = {}) => wrapped(uri, opts).then((res) => res.json()); } if (fn.json && typeof fn.json.stream === 'function') { wrapped.json = wrapped.json || {}; wrapped.json.stream = (uri, path, opts = {}) => fn.json.stream(uri, path, { ...opts, agent: false }); } if (typeof fn.pickRegistry === 'function') { wrapped.pickRegistry = fn.pickRegistry.bind(fn); } if (typeof fn.getAuth === 'function') { wrapped.getAuth = fn.getAuth.bind(fn); } return wrapped; }; globalThis._moduleCache[__agentOsRegistryFetchPath] = { exports: __agentOsWrapRegistryFetch(__agentOsRegistryFetch) }; __agentOsDebugLog('patched-npm-registry-fetch', __agentOsRegistryFetchPath); } catch (error) { __agentOsDebugLog('patch-npm-registry-fetch-failed', error && error.stack ? error.stack : String(error)); }";
+    match cli.command_name.as_str() {
+        "npx" => format!(
+            "{debug_preamble} {display_stub} {registry_fetch_stub} process.argv[1] = require.resolve({npm_cli}); process.argv.splice(2, 0, 'exec'); __agentOsDebugLog('argv', JSON.stringify(process.argv), 'cwd', process.cwd()); (async () => {{ const pkg = require({package_json}); if (process.argv.includes('--version') || process.argv.includes('-v')) {{ __agentOsDebugLog('version-shortcut'); console.log(pkg.version); __agentOsFinish(0); return; }} const Npm = require({npm_main}); const npm = new Npm(); __agentOsDebugLog('before-load'); const loaded = await npm.load(); __agentOsDebugLog('after-load', loaded && loaded.command, JSON.stringify(loaded && loaded.args)); if (!loaded.exec) {{ __agentOsDebugLog('no-exec'); __agentOsFinish(); return; }} if (!loaded.command) {{ __agentOsDebugLog('no-command'); const {{ output }} = require('proc-log'); output.standard(npm.usage); __agentOsFinish(1); return; }} __agentOsDebugLog('before-exec', loaded.command, JSON.stringify(loaded.args)); await npm.exec(loaded.command, loaded.args); __agentOsDebugLog('after-exec', __agentOsResolveExitCode()); __agentOsFinish(); }})().catch((error) => {{ if (__agentOsIsProcessExitError(error)) {{ __agentOsDebugLog('process-exit-error', __agentOsResolveExitCode(error.code)); __agentOsFinish(error.code); return; }} console.error(error && error.stack ? error.stack : String(error)); __agentOsFinish(error && typeof error === 'object' && Number.isFinite(error.exitCode) ? error.exitCode : 1); }});",
+            debug_preamble = debug_preamble,
+            display_stub = display_stub,
+            registry_fetch_stub = registry_fetch_stub.replace(
+                "__AGENT_OS_NPM_MAIN__",
+                &serde_json::to_string(&guest_npm_main)
+                    .unwrap_or_else(|_| format!("\"{guest_npm_main}\"")),
+            ),
+            npm_main = serde_json::to_string(&guest_npm_main)
+                .unwrap_or_else(|_| format!("\"{guest_npm_main}\"")),
+            npm_cli = serde_json::to_string(&guest_npm_cli)
+                .unwrap_or_else(|_| format!("\"{guest_npm_cli}\"")),
+            package_json = serde_json::to_string(&guest_package_json)
+                .unwrap_or_else(|_| format!("\"{guest_package_json}\"")),
+        ),
+        _ => format!(
+            "{debug_preamble} {display_stub} {registry_fetch_stub} __agentOsDebugLog('argv', JSON.stringify(process.argv), 'cwd', process.cwd()); (async () => {{ const pkg = require({package_json}); if (process.argv.includes('--version') || process.argv.includes('-v')) {{ __agentOsDebugLog('version-shortcut'); console.log(pkg.version); __agentOsFinish(0); return; }} const Npm = require({npm_main}); const npm = new Npm(); __agentOsDebugLog('before-load'); const loaded = await npm.load(); __agentOsDebugLog('after-load', loaded && loaded.command, JSON.stringify(loaded && loaded.args)); if (!loaded.exec) {{ __agentOsDebugLog('no-exec'); __agentOsFinish(); return; }} if (!loaded.command) {{ __agentOsDebugLog('no-command'); const {{ output }} = require('proc-log'); output.standard(npm.usage); __agentOsFinish(1); return; }} __agentOsDebugLog('before-exec', loaded.command, JSON.stringify(loaded.args)); await npm.exec(loaded.command, loaded.args); __agentOsDebugLog('after-exec', __agentOsResolveExitCode()); __agentOsFinish(); }})().catch((error) => {{ if (__agentOsIsProcessExitError(error)) {{ __agentOsDebugLog('process-exit-error', __agentOsResolveExitCode(error.code)); __agentOsFinish(error.code); return; }} console.error(error && error.stack ? error.stack : String(error)); __agentOsFinish(error && typeof error === 'object' && Number.isFinite(error.exitCode) ? error.exitCode : 1); }});",
+            debug_preamble = debug_preamble,
+            display_stub = display_stub,
+            registry_fetch_stub = registry_fetch_stub.replace(
+                "__AGENT_OS_NPM_MAIN__",
+                &serde_json::to_string(&guest_npm_main)
+                    .unwrap_or_else(|_| format!("\"{guest_npm_main}\"")),
+            ),
+            npm_main = serde_json::to_string(&guest_npm_main)
+                .unwrap_or_else(|_| format!("\"{guest_npm_main}\"")),
+            package_json = serde_json::to_string(&guest_package_json)
+                .unwrap_or_else(|_| format!("\"{guest_package_json}\"")),
+        ),
+    }
+}
+
 fn resolve_guest_command_entrypoint(
     vm: &VmState,
     guest_cwd: &str,
     command: &str,
+    path_env: Option<&str>,
 ) -> Option<String> {
     if !is_path_like_specifier(command) {
         if let Some(entrypoint) = vm.command_guest_paths.get(command) {
             return Some(entrypoint.clone());
         }
 
-        for search_dir in guest_command_search_dirs(vm, guest_cwd) {
+        for search_dir in guest_command_search_dirs(vm, guest_cwd, path_env) {
             let candidate = normalize_path(&format!("{search_dir}/{command}"));
             if let Some(entrypoint) = resolve_guest_command_path_candidate(vm, &candidate) {
                 return Some(entrypoint);
@@ -6284,14 +7602,28 @@ fn resolve_guest_command_entrypoint(
     }
 
     let normalized = resolve_path_like_guest_specifier(guest_cwd, command);
-    resolve_guest_command_path_candidate(vm, &normalized).or(Some(normalized))
+    resolve_guest_command_path_candidate(vm, &normalized).or_else(|| {
+        // Some guest shells materialize PATH lookups into absolute candidate paths.
+        // If that path points into a searched directory but does not exist, fall
+        // back to the command basename so the sidecar can remap VM command packages.
+        let parent_dir = Path::new(&normalized).parent()?.to_str()?;
+        if !guest_command_search_dirs(vm, guest_cwd, path_env)
+            .iter()
+            .any(|search_dir| normalize_path(search_dir) == normalize_path(parent_dir))
+        {
+            return None;
+        }
+
+        let file_name = Path::new(&normalized).file_name()?.to_str()?;
+        vm.command_guest_paths.get(file_name).cloned()
+    })
 }
 
-fn guest_command_search_dirs(vm: &VmState, guest_cwd: &str) -> Vec<String> {
+fn guest_command_search_dirs(vm: &VmState, guest_cwd: &str, path_env: Option<&str>) -> Vec<String> {
     let mut search_dirs = Vec::new();
     let mut seen = BTreeSet::new();
 
-    if let Some(path) = vm.guest_env.get("PATH") {
+    if let Some(path) = path_env.or_else(|| vm.guest_env.get("PATH").map(String::as_str)) {
         for segment in path.split(':') {
             let trimmed = segment.trim();
             if trimmed.is_empty() {
@@ -6334,10 +7666,18 @@ fn resolve_guest_command_path_candidate(vm: &VmState, candidate: &str) -> Option
         }
     }
 
-    vm.kernel
+    if vm
+        .kernel
         .exists(candidate)
         .ok()
-        .and_then(|exists| exists.then(|| normalize_path(candidate)))
+        .is_some_and(|exists| exists)
+    {
+        return Some(normalize_path(candidate));
+    }
+
+    resolve_vm_guest_path_to_host(vm, candidate)
+        .is_file()
+        .then(|| normalize_path(candidate))
 }
 
 fn resolve_host_entrypoint_within_vm_host_cwd(
@@ -6379,6 +7719,7 @@ fn prepare_guest_runtime_env(
     guest_entrypoint: Option<String>,
 ) -> Result<(), SidecarError> {
     let user = vm.kernel.user_profile();
+    let resource_limits = vm.kernel.resource_limits();
     let path_mappings = runtime_guest_path_mappings(vm);
     let read_paths = expand_host_access_paths(
         std::iter::once(vm.cwd.clone())
@@ -6391,7 +7732,13 @@ fn prepare_guest_runtime_env(
             .collect::<Vec<_>>()
             .as_slice(),
     );
-    let write_paths = dedupe_host_paths(&[vm.cwd.clone(), host_cwd.to_path_buf()]);
+    let write_paths = dedupe_host_paths(
+        std::iter::once(vm.cwd.clone())
+            .chain(std::iter::once(host_cwd.to_path_buf()))
+            .chain(runtime_guest_writable_host_paths(vm))
+            .collect::<Vec<_>>()
+            .as_slice(),
+    );
     let allowed_node_builtins = configured_allowed_node_builtins(vm);
     let loopback_exempt_ports = configured_loopback_exempt_ports(vm);
 
@@ -6401,6 +7748,8 @@ fn prepare_guest_runtime_env(
             SidecarError::InvalidState(format!("failed to encode guest path mappings: {error}"))
         })?,
     );
+    env.entry(String::from(EXECUTION_SANDBOX_ROOT_ENV))
+        .or_insert_with(|| normalize_host_path(&vm.cwd).to_string_lossy().into_owned());
     env.insert(
         String::from("AGENT_OS_EXTRA_FS_READ_PATHS"),
         serde_json::to_string(
@@ -6444,6 +7793,18 @@ fn prepare_guest_runtime_env(
         user.shell.clone(),
     );
     env.insert(
+        String::from("AGENT_OS_VIRTUAL_OS_CPU_COUNT"),
+        virtual_os_cpu_count(resource_limits).to_string(),
+    );
+    env.insert(
+        String::from("AGENT_OS_VIRTUAL_OS_TOTALMEM"),
+        virtual_os_totalmem_bytes(resource_limits).to_string(),
+    );
+    env.insert(
+        String::from("AGENT_OS_VIRTUAL_OS_FREEMEM"),
+        virtual_os_freemem_bytes(resource_limits).to_string(),
+    );
+    env.insert(
         String::from("AGENT_OS_VIRTUAL_PROCESS_UID"),
         user.uid.to_string(),
     );
@@ -6482,6 +7843,22 @@ fn prepare_guest_runtime_env(
     Ok(())
 }
 
+fn virtual_os_cpu_count(resource_limits: &ResourceLimits) -> usize {
+    resource_limits.virtual_cpu_count.unwrap_or(1).max(1)
+}
+
+fn virtual_os_totalmem_bytes(resource_limits: &ResourceLimits) -> u64 {
+    resource_limits
+        .max_wasm_memory_bytes
+        .unwrap_or(1024 * 1024 * 1024)
+}
+
+fn virtual_os_freemem_bytes(resource_limits: &ResourceLimits) -> u64 {
+    resource_limits
+        .max_wasm_memory_bytes
+        .unwrap_or(512 * 1024 * 1024)
+}
+
 fn configured_allowed_node_builtins(vm: &VmState) -> Vec<String> {
     let configured = if vm.configuration.allowed_node_builtins.is_empty() {
         DEFAULT_ALLOWED_NODE_BUILTINS
@@ -6517,6 +7894,20 @@ fn configured_loopback_exempt_ports(vm: &VmState) -> Vec<String> {
         .collect()
 }
 
+fn runtime_guest_writable_host_paths(vm: &VmState) -> Vec<PathBuf> {
+    vm.configuration
+        .mounts
+        .iter()
+        .filter(|mount| !mount.read_only)
+        .filter_map(|mount| {
+            ((mount.plugin.id == "host_dir") || (mount.plugin.id == "module_access"))
+                .then(|| mount.plugin.config.get("hostPath").and_then(Value::as_str))
+                .flatten()
+                .map(PathBuf::from)
+        })
+        .collect()
+}
+
 fn runtime_guest_path_mappings(vm: &VmState) -> Vec<RuntimeGuestPathMapping> {
     let mut mappings = vm
         .configuration
@@ -6538,6 +7929,25 @@ fn runtime_guest_path_mappings(vm: &VmState) -> Vec<RuntimeGuestPathMapping> {
                 .flatten()
         })
         .collect::<Vec<_>>();
+    let mut command_root_mappings = vm
+        .command_guest_paths
+        .values()
+        .filter_map(|guest_path| {
+            Path::new(guest_path)
+                .parent()
+                .and_then(|parent| parent.to_str())
+                .map(normalize_path)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|guest_path| RuntimeGuestPathMapping {
+            host_path: resolve_vm_guest_path_to_host(vm, &guest_path)
+                .to_string_lossy()
+                .into_owned(),
+            guest_path,
+        })
+        .collect::<Vec<_>>();
+    mappings.append(&mut command_root_mappings);
     let mut extra_node_modules_roots = mappings
         .iter()
         .filter(|mapping| mapping.guest_path.starts_with("/root/node_modules/"))
@@ -6563,8 +7973,19 @@ fn runtime_guest_path_mappings(vm: &VmState) -> Vec<RuntimeGuestPathMapping> {
 }
 
 fn host_node_modules_root(path: &Path) -> Option<PathBuf> {
-    let canonical = fs::canonicalize(path).ok()?;
-    canonical
+    if let Some(root) = path
+        .ancestors()
+        .filter(|candidate| {
+            candidate.file_name().and_then(|name| name.to_str()) == Some("node_modules")
+        })
+        .last()
+        .map(Path::to_path_buf)
+    {
+        return Some(root);
+    }
+
+    fs::canonicalize(path)
+        .ok()?
         .ancestors()
         .filter(|candidate| {
             candidate.file_name().and_then(|name| name.to_str()) == Some("node_modules")
@@ -6605,6 +8026,31 @@ mod runtime_guest_path_mapping_tests {
     }
 
     #[test]
+    fn host_node_modules_root_preserves_symlinked_workspace_node_modules_path() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let temp =
+            std::env::temp_dir().join(format!("agent-os-sidecar-node-modules-symlink-{unique}"));
+        let workspace_node_modules = temp.join("node_modules");
+        let package_link = workspace_node_modules.join("@scope").join("pkg");
+        let real_package = temp.join("registry").join("agent").join("pkg");
+        fs::create_dir_all(package_link.parent().expect("package parent should exist"))
+            .expect("scoped parent should be created");
+        fs::create_dir_all(&real_package).expect("real package root should be created");
+        std::os::unix::fs::symlink(&real_package, &package_link)
+            .expect("package symlink should be created");
+
+        let resolved =
+            host_node_modules_root(&package_link).expect("node_modules root should resolve");
+
+        assert_eq!(resolved, workspace_node_modules);
+
+        fs::remove_dir_all(&temp).expect("temp tree should be removed");
+    }
+
+    #[test]
     fn javascript_sync_rpc_option_bool_accepts_boolean_recursive_argument() {
         assert_eq!(
             javascript_sync_rpc_option_bool(&[json!("/workspace"), json!(true)], 1, "recursive"),
@@ -6624,9 +8070,9 @@ mod runtime_guest_path_mapping_tests {
 #[cfg(test)]
 mod kernel_poll_sync_rpc_tests {
     use super::{
-        service_javascript_kernel_poll_sync_rpc, ActiveExecution, ActiveProcess,
+        ActiveExecution, ActiveProcess, EXECUTION_DRIVER_NAME, JAVASCRIPT_COMMAND,
         JavascriptSyncRpcRequest, KernelPollFdResponse, SidecarKernel, ToolExecution,
-        EXECUTION_DRIVER_NAME, JAVASCRIPT_COMMAND,
+        service_javascript_kernel_poll_sync_rpc,
     };
     use agent_os_kernel::command_registry::CommandDriver;
     use agent_os_kernel::kernel::{KernelVmConfig, SpawnOptions};
@@ -6634,7 +8080,7 @@ mod kernel_poll_sync_rpc_tests {
     use agent_os_kernel::permissions::Permissions;
     use agent_os_kernel::poll::{POLLHUP, POLLIN};
     use agent_os_kernel::vfs::MemoryFileSystem;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     #[test]
     fn javascript_kernel_poll_sync_rpc_reports_multiple_kernel_fds() {
         let mut config = KernelVmConfig::new("vm-js-kernel-poll");
@@ -6816,10 +8262,76 @@ fn prepare_javascript_shadow(
             }
         };
         if host_entrypoint.exists() {
-            return Ok(());
+            return materialize_host_path_to_shadow(vm, &guest_entrypoint, &host_entrypoint);
         }
     }
     materialize_guest_path_to_shadow(vm, &guest_entrypoint)
+}
+
+fn materialize_host_path_to_shadow(
+    vm: &VmState,
+    guest_path: &str,
+    host_path: &Path,
+) -> Result<(), SidecarError> {
+    let shadow_path = shadow_path_for_guest(vm, guest_path);
+    let metadata = fs::symlink_metadata(host_path)
+        .map_err(|error| SidecarError::Io(format!("failed to stat host entrypoint: {error}")))?;
+
+    if metadata.file_type().is_symlink() {
+        if let Some(parent) = shadow_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                SidecarError::Io(format!("failed to create shadow symlink parent: {error}"))
+            })?;
+        }
+        let _ = fs::remove_file(&shadow_path);
+        let _ = fs::remove_dir_all(&shadow_path);
+        let target = fs::read_link(host_path)
+            .map_err(|error| SidecarError::Io(format!("failed to read host symlink: {error}")))?;
+        std::os::unix::fs::symlink(&target, &shadow_path)
+            .map_err(|error| SidecarError::Io(format!("failed to mirror host symlink: {error}")))?;
+        return Ok(());
+    }
+
+    if metadata.is_dir() {
+        fs::create_dir_all(&shadow_path).map_err(|error| {
+            SidecarError::Io(format!("failed to create shadow directory: {error}"))
+        })?;
+        fs::set_permissions(
+            &shadow_path,
+            fs::Permissions::from_mode(metadata.permissions().mode() & 0o7777),
+        )
+        .map_err(|error| {
+            SidecarError::Io(format!(
+                "failed to set shadow directory mode on {}: {error}",
+                shadow_path.display()
+            ))
+        })?;
+        return Ok(());
+    }
+
+    if let Some(parent) = shadow_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            SidecarError::Io(format!("failed to create shadow parent: {error}"))
+        })?;
+    }
+    let bytes = fs::read(host_path)
+        .map_err(|error| SidecarError::Io(format!("failed to read host entrypoint: {error}")))?;
+    fs::write(&shadow_path, bytes).map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to mirror host file into shadow root: {error}"
+        ))
+    })?;
+    fs::set_permissions(
+        &shadow_path,
+        fs::Permissions::from_mode(metadata.permissions().mode() & 0o7777),
+    )
+    .map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to set shadow file mode on {}: {error}",
+            shadow_path.display()
+        ))
+    })?;
+    Ok(())
 }
 
 fn materialize_guest_path_to_shadow(
@@ -7066,6 +8578,58 @@ fn emit_dns_resolution_event<B>(
     );
 }
 
+fn emit_dns_record_resolution_event<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    hostname: &str,
+    resolution: &DnsRecordResolution,
+    dns: &VmDnsConfig,
+) where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    if let Some(addresses) = dns_resolution_ip_addrs(resolution.records()) {
+        emit_dns_resolution_event(
+            bridge,
+            vm_id,
+            hostname,
+            resolution.source(),
+            &addresses,
+            dns,
+        );
+        return;
+    }
+
+    let _ = emit_structured_event(
+        bridge,
+        vm_id,
+        "network.dns.resolved",
+        audit_fields([
+            ("hostname", hostname.to_owned()),
+            ("source", resolution.source().as_str().to_owned()),
+            (
+                "addresses",
+                resolution
+                    .records()
+                    .iter()
+                    .map(summarize_dns_record)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            ("address_count", resolution.records().len().to_string()),
+            ("resolver_count", dns.name_servers.len().to_string()),
+            (
+                "resolvers",
+                dns.name_servers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        ]),
+    );
+}
+
 fn emit_dns_resolution_failure_event<B>(
     bridge: &SharedBridge<B>,
     vm_id: &str,
@@ -7094,6 +8658,360 @@ fn emit_dns_resolution_failure_event<B>(
             ),
         ]),
     );
+}
+
+fn parse_dns_record_type(rrtype: &str) -> Result<RecordType, SidecarError> {
+    match rrtype {
+        "A" => Ok(RecordType::A),
+        "AAAA" => Ok(RecordType::AAAA),
+        "MX" => Ok(RecordType::MX),
+        "TXT" => Ok(RecordType::TXT),
+        "SRV" => Ok(RecordType::SRV),
+        "CNAME" => Ok(RecordType::CNAME),
+        "PTR" => Ok(RecordType::PTR),
+        "NS" => Ok(RecordType::NS),
+        "SOA" => Ok(RecordType::SOA),
+        "NAPTR" => Ok(RecordType::NAPTR),
+        "CAA" => Ok(RecordType::CAA),
+        "ANY" => Ok(RecordType::ANY),
+        other => Err(SidecarError::Execution(format!(
+            "ERR_NOT_IMPLEMENTED: dns rrtype {other} is not supported by the Agent OS dns bridge"
+        ))),
+    }
+}
+
+fn dns_resolution_to_node_value(
+    resolution: &DnsRecordResolution,
+    requested_type: &str,
+) -> Result<Value, SidecarError> {
+    let safe_ips = dns_resolution_safe_ip_set(resolution.records(), resolution.hostname())?;
+    match requested_type {
+        "A" | "AAAA" => Ok(Value::Array(
+            resolution
+                .records()
+                .iter()
+                .filter_map(|record| dns_record_ip_string(record, &safe_ips))
+                .map(Value::String)
+                .collect(),
+        )),
+        "MX" => Ok(Value::Array(
+            resolution
+                .records()
+                .iter()
+                .filter_map(|record| match record.data() {
+                    RData::MX(mx) => Some(json!({
+                        "priority": mx.preference,
+                        "exchange": normalize_dns_name_for_node(&mx.exchange),
+                        "type": "MX",
+                    })),
+                    _ => None,
+                })
+                .collect(),
+        )),
+        "TXT" => Ok(Value::Array(
+            resolution
+                .records()
+                .iter()
+                .filter_map(|record| match record.data() {
+                    RData::TXT(txt) => Some(Value::Array(
+                        txt.txt_data
+                            .iter()
+                            .map(|entry| Value::String(String::from_utf8_lossy(entry).into_owned()))
+                            .collect(),
+                    )),
+                    _ => None,
+                })
+                .collect(),
+        )),
+        "SRV" => Ok(Value::Array(
+            resolution
+                .records()
+                .iter()
+                .filter_map(|record| match record.data() {
+                    RData::SRV(srv) => Some(json!({
+                        "priority": srv.priority,
+                        "weight": srv.weight,
+                        "port": srv.port,
+                        "name": normalize_dns_name_for_node(&srv.target),
+                        "type": "SRV",
+                    })),
+                    _ => None,
+                })
+                .collect(),
+        )),
+        "CNAME" => Ok(Value::Array(
+            resolution
+                .records()
+                .iter()
+                .filter_map(|record| match record.data() {
+                    RData::CNAME(name) => Some(Value::String(normalize_dns_name_for_node(&name.0))),
+                    _ => None,
+                })
+                .collect(),
+        )),
+        "PTR" => Ok(Value::Array(
+            resolution
+                .records()
+                .iter()
+                .filter_map(|record| match record.data() {
+                    RData::PTR(name) => Some(Value::String(normalize_dns_name_for_node(&name.0))),
+                    _ => None,
+                })
+                .collect(),
+        )),
+        "NS" => Ok(Value::Array(
+            resolution
+                .records()
+                .iter()
+                .filter_map(|record| match record.data() {
+                    RData::NS(name) => Some(Value::String(normalize_dns_name_for_node(&name.0))),
+                    _ => None,
+                })
+                .collect(),
+        )),
+        "SOA" => resolution
+            .records()
+            .iter()
+            .find_map(|record| match record.data() {
+                RData::SOA(soa) => Some(json!({
+                    "nsname": normalize_dns_name_for_node(&soa.mname),
+                    "hostmaster": normalize_dns_name_for_node(&soa.rname),
+                    "serial": soa.serial,
+                    "refresh": soa.refresh,
+                    "retry": soa.retry,
+                    "expire": soa.expire,
+                    "minttl": soa.minimum,
+                })),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                SidecarError::Execution(String::from("failed to resolve DNS SOA record"))
+            }),
+        "NAPTR" => Ok(Value::Array(
+            resolution
+                .records()
+                .iter()
+                .filter_map(|record| match record.data() {
+                    RData::NAPTR(naptr) => Some(json!({
+                        "flags": String::from_utf8_lossy(&naptr.flags).into_owned(),
+                        "service": String::from_utf8_lossy(&naptr.services).into_owned(),
+                        "regexp": String::from_utf8_lossy(&naptr.regexp).into_owned(),
+                        "replacement": normalize_dns_name_for_node(&naptr.replacement),
+                        "order": naptr.order,
+                        "preference": naptr.preference,
+                    })),
+                    _ => None,
+                })
+                .collect(),
+        )),
+        "CAA" => Ok(Value::Array(
+            resolution
+                .records()
+                .iter()
+                .filter_map(|record| match record.data() {
+                    RData::CAA(caa) => {
+                        let mut value = serde_json::Map::new();
+                        value.insert(
+                            "critical".to_owned(),
+                            Value::from(u8::from(caa.issuer_critical)),
+                        );
+                        value.insert("type".to_owned(), Value::String(String::from("CAA")));
+                        if caa.tag.eq_ignore_ascii_case("iodef") {
+                            value.insert(
+                                "iodef".to_owned(),
+                                Value::String(
+                                    caa.value_as_iodef()
+                                        .map(|url| url.to_string())
+                                        .unwrap_or_else(|_| {
+                                            String::from_utf8_lossy(&caa.value).into_owned()
+                                        }),
+                                ),
+                            );
+                        } else if let Ok((issuer, _params)) = caa.value_as_issue() {
+                            let field = if caa.tag.eq_ignore_ascii_case("issuewild") {
+                                "issuewild"
+                            } else {
+                                "issue"
+                            };
+                            value.insert(
+                                field.to_owned(),
+                                Value::String(
+                                    issuer.as_ref().map(ToString::to_string).unwrap_or_else(|| {
+                                        String::from_utf8_lossy(&caa.value).into_owned()
+                                    }),
+                                ),
+                            );
+                        } else {
+                            value.insert(
+                                caa.tag.to_ascii_lowercase(),
+                                Value::String(String::from_utf8_lossy(&caa.value).into_owned()),
+                            );
+                        }
+                        Some(Value::Object(value))
+                    }
+                    _ => None,
+                })
+                .collect(),
+        )),
+        "ANY" => Ok(Value::Array(
+            resolution
+                .records()
+                .iter()
+                .filter_map(|record| dns_any_record_to_value(record, &safe_ips))
+                .collect(),
+        )),
+        other => Err(SidecarError::Execution(format!(
+            "ERR_NOT_IMPLEMENTED: dns rrtype {other} is not supported by the Agent OS dns bridge"
+        ))),
+    }
+}
+
+fn dns_resolution_safe_ip_set(
+    records: &[Record],
+    hostname: &str,
+) -> Result<BTreeSet<IpAddr>, SidecarError> {
+    let ips = records
+        .iter()
+        .filter_map(dns_record_ip_addr)
+        .collect::<Vec<_>>();
+    if ips.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    Ok(filter_dns_safe_ip_addrs(ips, hostname)?
+        .into_iter()
+        .collect())
+}
+
+fn dns_resolution_ip_addrs(records: &[Record]) -> Option<Vec<IpAddr>> {
+    let ips = records
+        .iter()
+        .filter_map(dns_record_ip_addr)
+        .collect::<Vec<_>>();
+    if ips.is_empty() {
+        return None;
+    }
+    Some(ips)
+}
+
+fn dns_record_ip_addr(record: &Record) -> Option<IpAddr> {
+    match record.data() {
+        RData::A(address) => Some(IpAddr::V4(**address)),
+        RData::AAAA(address) => Some(IpAddr::V6(**address)),
+        _ => None,
+    }
+}
+
+fn dns_record_ip_string(record: &Record, safe_ips: &BTreeSet<IpAddr>) -> Option<String> {
+    let ip = dns_record_ip_addr(record)?;
+    safe_ips.contains(&ip).then(|| ip.to_string())
+}
+
+fn dns_any_record_to_value(record: &Record, safe_ips: &BTreeSet<IpAddr>) -> Option<Value> {
+    let value = match record.data() {
+        RData::A(_) | RData::AAAA(_) => json!({
+            "address": dns_record_ip_string(record, safe_ips)?,
+            "ttl": record.ttl(),
+            "type": record.record_type().to_string(),
+        }),
+        RData::MX(mx) => json!({
+            "exchange": normalize_dns_name_for_node(&mx.exchange),
+            "priority": mx.preference,
+            "type": "MX",
+        }),
+        RData::TXT(txt) => json!({
+            "entries": txt
+                .txt_data
+                .iter()
+                .map(|entry| String::from_utf8_lossy(entry).into_owned())
+                .collect::<Vec<_>>(),
+            "type": "TXT",
+        }),
+        RData::SRV(srv) => json!({
+            "name": normalize_dns_name_for_node(&srv.target),
+            "port": srv.port,
+            "priority": srv.priority,
+            "weight": srv.weight,
+            "type": "SRV",
+        }),
+        RData::CNAME(name) => json!({
+            "value": normalize_dns_name_for_node(&name.0),
+            "type": "CNAME",
+        }),
+        RData::PTR(name) => json!({
+            "value": normalize_dns_name_for_node(&name.0),
+            "type": "PTR",
+        }),
+        RData::NS(name) => json!({
+            "value": normalize_dns_name_for_node(&name.0),
+            "type": "NS",
+        }),
+        RData::SOA(soa) => json!({
+            "nsname": normalize_dns_name_for_node(&soa.mname),
+            "hostmaster": normalize_dns_name_for_node(&soa.rname),
+            "serial": soa.serial,
+            "refresh": soa.refresh,
+            "retry": soa.retry,
+            "expire": soa.expire,
+            "minttl": soa.minimum,
+            "type": "SOA",
+        }),
+        RData::NAPTR(naptr) => json!({
+            "flags": String::from_utf8_lossy(&naptr.flags).into_owned(),
+            "service": String::from_utf8_lossy(&naptr.services).into_owned(),
+            "regexp": String::from_utf8_lossy(&naptr.regexp).into_owned(),
+            "replacement": normalize_dns_name_for_node(&naptr.replacement),
+            "order": naptr.order,
+            "preference": naptr.preference,
+            "type": "NAPTR",
+        }),
+        RData::CAA(caa) => {
+            let mut value = serde_json::Map::new();
+            value.insert(
+                "critical".to_owned(),
+                Value::from(u8::from(caa.issuer_critical)),
+            );
+            value.insert("type".to_owned(), Value::String(String::from("CAA")));
+            if caa.tag.eq_ignore_ascii_case("iodef") {
+                value.insert(
+                    "iodef".to_owned(),
+                    Value::String(
+                        caa.value_as_iodef()
+                            .map(|url| url.to_string())
+                            .unwrap_or_else(|_| String::from_utf8_lossy(&caa.value).into_owned()),
+                    ),
+                );
+            } else if let Ok((issuer, _params)) = caa.value_as_issue() {
+                let field = if caa.tag.eq_ignore_ascii_case("issuewild") {
+                    "issuewild"
+                } else {
+                    "issue"
+                };
+                value.insert(
+                    field.to_owned(),
+                    Value::String(
+                        issuer
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| String::from_utf8_lossy(&caa.value).into_owned()),
+                    ),
+                );
+            }
+            Value::Object(value)
+        }
+        _ => return None,
+    };
+    Some(value)
+}
+
+fn normalize_dns_name_for_node(name: &impl ToString) -> String {
+    name.to_string().trim_end_matches('.').to_owned()
+}
+
+fn summarize_dns_record(record: &Record) -> String {
+    match record.data() {
+        RData::A(_) | RData::AAAA(_) => record.data().to_string(),
+        _ => format!("{} {}", record.record_type(), record.data()),
+    }
 }
 
 // build_root_filesystem, convert_root_lower_descriptor, convert_root_filesystem_entry,
@@ -7227,15 +9145,105 @@ fn find_socket_state_entry(
     Ok(None)
 }
 
+fn require_vm_inspection_permission<B>(
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    capability: &str,
+    domain: &str,
+    resource: &str,
+) -> Result<(), SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let decision = bridge.static_permission_decision(vm_id, capability, domain, Some(resource));
+    if decision.as_ref().is_some_and(|decision| decision.allow) {
+        return Ok(());
+    }
+
+    let reason = decision
+        .and_then(|decision| decision.reason)
+        .unwrap_or_else(|| format!("{capability} permission required"));
+    Err(SidecarError::Execution(format!(
+        "EACCES: permission denied, {resource}: {reason}"
+    )))
+}
+
+fn socket_query_resource(kind: SocketQueryKind, request: &FindListenerRequest) -> String {
+    if let Some(path) = request.path.as_deref() {
+        return format!("unix://{path}");
+    }
+
+    let host = request.host.as_deref().unwrap_or("*");
+    let port = request
+        .port
+        .map_or_else(|| String::from("*"), |port| port.to_string());
+    match kind {
+        SocketQueryKind::TcpListener => format!("tcp://{host}:{port}"),
+        SocketQueryKind::UdpBound => format!("udp://{host}:{port}"),
+    }
+}
+
 fn snapshot_vm_processes(vm: &VmState) -> Vec<ProcessSnapshotEntry> {
     let process_table = vm.kernel.list_processes();
+    snapshot_vm_processes_inner(vm, &process_table)
+}
+
+fn snapshot_vm_processes_inner(
+    vm: &VmState,
+    process_table: &BTreeMap<u32, agent_os_kernel::process_table::ProcessInfo>,
+) -> Vec<ProcessSnapshotEntry> {
     let mut entries = Vec::new();
 
     for (process_id, process) in &vm.active_processes {
-        collect_process_snapshot_entries(process_id, process, &process_table, &mut entries);
+        collect_process_snapshot_entries(process_id, process, process_table, &mut entries);
+    }
+
+    for exited in &vm.exited_process_snapshots {
+        entries.push(exited.process.clone());
     }
 
     entries
+}
+
+fn prune_exited_process_snapshots(vm: &mut VmState) {
+    let cutoff = Instant::now() - EXITED_PROCESS_SNAPSHOT_RETENTION;
+    while vm
+        .exited_process_snapshots
+        .front()
+        .is_some_and(|snapshot| snapshot.captured_at < cutoff)
+    {
+        vm.exited_process_snapshots.pop_front();
+    }
+}
+
+fn build_process_snapshot_entry(
+    process_id: &str,
+    process: &ActiveProcess,
+    info: &agent_os_kernel::process_table::ProcessInfo,
+    exit_code: Option<i32>,
+) -> ProcessSnapshotEntry {
+    ProcessSnapshotEntry {
+        process_id: process_id.to_owned(),
+        pid: info.pid,
+        ppid: info.ppid,
+        pgid: info.pgid,
+        sid: info.sid,
+        driver: info.driver.clone(),
+        command: info.command.clone(),
+        args: Vec::new(),
+        cwd: process.guest_cwd.clone(),
+        status: if exit_code.is_some() {
+            ProcessSnapshotStatus::Exited
+        } else {
+            match info.status {
+                ProcessStatus::Running => ProcessSnapshotStatus::Running,
+                ProcessStatus::Stopped => ProcessSnapshotStatus::Stopped,
+                ProcessStatus::Exited => ProcessSnapshotStatus::Exited,
+            }
+        },
+        exit_code: exit_code.or(info.exit_code),
+    }
 }
 
 fn collect_process_snapshot_entries(
@@ -7245,22 +9253,9 @@ fn collect_process_snapshot_entries(
     entries: &mut Vec<ProcessSnapshotEntry>,
 ) {
     if let Some(info) = process_table.get(&process.kernel_pid) {
-        entries.push(ProcessSnapshotEntry {
-            process_id: process_id.to_owned(),
-            pid: info.pid,
-            ppid: info.ppid,
-            pgid: info.pgid,
-            sid: info.sid,
-            driver: info.driver.clone(),
-            command: info.command.clone(),
-            args: Vec::new(),
-            cwd: process.guest_cwd.clone(),
-            status: match info.status {
-                ProcessStatus::Running | ProcessStatus::Stopped => ProcessSnapshotStatus::Running,
-                ProcessStatus::Exited => ProcessSnapshotStatus::Exited,
-            },
-            exit_code: info.exit_code,
-        });
+        entries.push(build_process_snapshot_entry(
+            process_id, process, info, None,
+        ));
     }
 
     for (child_id, child) in &process.child_processes {
@@ -7828,6 +9823,35 @@ fn add_runtime_guest_path_mapping(
     }
 }
 
+fn add_runtime_host_access_path(
+    env: &mut BTreeMap<String, String>,
+    key: &str,
+    host_path: &Path,
+    expand: bool,
+) {
+    let existing = env
+        .get(key)
+        .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    let mut paths = existing;
+    paths.push(host_path.to_path_buf());
+    let normalized = if expand {
+        expand_host_access_paths(&paths)
+    } else {
+        dedupe_host_paths(&paths)
+    };
+    let serialized = normalized
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if let Ok(serialized) = serde_json::to_string(&serialized) {
+        env.insert(key.to_owned(), serialized);
+    }
+}
+
 // discover_command_guest_paths moved to crate::bootstrap
 
 fn is_path_like_specifier(specifier: &str) -> bool {
@@ -7869,6 +9893,28 @@ fn tokenize_shell_free_command(command: &str) -> Vec<String> {
         .filter(|segment| !segment.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+fn is_posix_shell_builtin(command: &str) -> bool {
+    matches!(
+        command,
+        "." | ":"
+            | "break"
+            | "cd"
+            | "continue"
+            | "eval"
+            | "exec"
+            | "exit"
+            | "export"
+            | "readonly"
+            | "return"
+            | "set"
+            | "shift"
+            | "times"
+            | "trap"
+            | "umask"
+            | "unset"
+    )
 }
 
 fn command_requires_shell(command: &str) -> bool {
@@ -8138,7 +10184,7 @@ fn host_mount_path_for_guest_path_from_mounts(
     let mut host_mounts = mounts
         .iter()
         .filter_map(|mount| {
-            (mount.plugin.id == "host_dir")
+            ((mount.plugin.id == "host_dir") || (mount.plugin.id == "module_access"))
                 .then(|| {
                     mount
                         .plugin
@@ -8169,6 +10215,37 @@ fn host_mount_path_for_guest_path_from_mounts(
     }
 
     None
+}
+
+#[cfg(test)]
+mod host_mount_path_for_guest_path_from_mounts_tests {
+    use super::host_mount_path_for_guest_path_from_mounts;
+    use crate::protocol::{MountDescriptor, MountPluginDescriptor};
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolves_module_access_mount_paths() {
+        let mounts = vec![MountDescriptor {
+            guest_path: String::from("/root/node_modules"),
+            read_only: true,
+            plugin: MountPluginDescriptor {
+                id: String::from("module_access"),
+                config: json!({
+                    "hostPath": "/tmp/workspace/node_modules",
+                }),
+            },
+        }];
+
+        let resolved =
+            host_mount_path_for_guest_path_from_mounts(&mounts, "/root/node_modules/pkg/index.js")
+                .expect("module_access mount should resolve");
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/workspace/node_modules/pkg/index.js")
+        );
+    }
 }
 
 fn resolve_guest_socket_host_path(
@@ -8464,6 +10541,33 @@ where
         dns,
     );
     Ok(resolution.addresses().to_vec())
+}
+
+fn resolve_dns_records<B>(
+    bridge: &SharedBridge<B>,
+    kernel: &SidecarKernel,
+    vm_id: &str,
+    dns: &VmDnsConfig,
+    hostname: &str,
+    record_type: RecordType,
+    policy: DnsLookupPolicy,
+) -> Result<DnsRecordResolution, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let resolution = match kernel.resolve_dns_records(hostname, record_type, policy) {
+        Ok(resolution) => resolution,
+        Err(error) => {
+            let sidecar_error = kernel_error(error.clone());
+            if error.code() != "EACCES" {
+                emit_dns_resolution_failure_event(bridge, vm_id, hostname, dns, &sidecar_error);
+            }
+            return Err(sidecar_error);
+        }
+    };
+    emit_dns_record_resolution_event(bridge, vm_id, hostname, &resolution, dns);
+    Ok(resolution)
 }
 
 fn filter_dns_ip_addrs(
@@ -9459,10 +11563,9 @@ fn sqlite_exec_database(
         .map_err(sqlite_error)?;
     mark_sqlite_mutation(database, sql);
     sqlite_sync_database(kernel, kernel_pid, database)?;
-    Ok(json!(database
-        .connection
-        .total_changes()
-        .saturating_sub(before)))
+    Ok(json!(
+        database.connection.total_changes().saturating_sub(before)
+    ))
 }
 
 fn sqlite_query_database(
@@ -10262,7 +12365,18 @@ where
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
     match request.method.as_str() {
+        "_resolveModule"
+        | "_resolveModuleSync"
+        | "__resolve_module"
+        | "_batchResolveModules"
+        | "__batch_resolve_modules"
+        | "_loadPolyfill"
+        | "__load_polyfill"
+        | "_moduleFormat" => service_javascript_internal_bridge_sync_rpc(process, request),
         "__kernel_stdin_read" => service_javascript_kernel_stdin_sync_rpc(kernel, process, request),
+        "__kernel_stdio_write" => {
+            service_javascript_kernel_stdio_write_sync_rpc(kernel, process, request)
+        }
         "__kernel_poll" => service_javascript_kernel_poll_sync_rpc(kernel, process, request),
         "__pty_set_raw_mode" => {
             service_javascript_pty_set_raw_mode_sync_rpc(kernel, process, request)
@@ -10291,18 +12405,19 @@ where
         "dns.lookup" | "dns.resolve" | "dns.resolve4" | "dns.resolve6" => {
             service_javascript_dns_sync_rpc(bridge, kernel, vm_id, dns, request)
         }
-        "net.http_request" | "net.http_listen" | "net.http_close" | "net.http_wait"
-        | "net.http_respond" => service_javascript_net_sync_rpc(
-            bridge,
-            vm_id,
-            dns,
-            socket_paths,
-            kernel,
-            process,
-            request,
-            resource_limits,
-            network_counts,
-        ),
+        "net.http_listen" | "net.http_close" | "net.http_wait" | "net.http_respond" => {
+            service_javascript_net_sync_rpc(
+                bridge,
+                vm_id,
+                dns,
+                socket_paths,
+                kernel,
+                process,
+                request,
+                resource_limits,
+                network_counts,
+            )
+        }
         "net.http2_server_listen"
         | "net.http2_server_poll"
         | "net.http2_server_close"
@@ -10404,6 +12519,30 @@ where
         | "sqlite.statement.finalize" => {
             service_javascript_sqlite_sync_rpc(kernel, process, request)
         }
+        "process.kill" => {
+            let target_pid =
+                javascript_sync_rpc_arg_u32(&request.args, 0, "process.kill target pid")?;
+            let signal = javascript_sync_rpc_arg_str(&request.args, 1, "process.kill signal")?;
+            let parsed_signal = parse_signal(signal)?;
+            if target_pid != process.kernel_pid {
+                return Err(SidecarError::InvalidState(format!(
+                    "unknown process pid {target_pid}"
+                )));
+            }
+            process.pending_self_signal_exit = None;
+            if parsed_signal != 0
+                && !matches!(
+                    canonical_signal_name(parsed_signal),
+                    Some("SIGWINCH" | "SIGCHLD" | "SIGCONT" | "SIGURG")
+                )
+            {
+                process.pending_self_signal_exit = Some(parsed_signal);
+            }
+            Ok(json!({
+                "self": true,
+                "action": "default",
+            }))
+        }
         "process.umask" => {
             let new_mask = javascript_sync_rpc_arg_u32_optional(&request.args, 0, "process umask")?;
             kernel
@@ -10419,6 +12558,36 @@ where
         }
         _ => service_javascript_fs_sync_rpc(kernel, process, process.kernel_pid, request),
     }
+}
+
+fn service_javascript_internal_bridge_sync_rpc(
+    process: &ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let method = match request.method.as_str() {
+        "_resolveModule" | "_resolveModuleSync" | "__resolve_module" => "_resolveModule",
+        "_batchResolveModules" | "__batch_resolve_modules" => "_batchResolveModules",
+        "_loadPolyfill" | "__load_polyfill" => "_loadPolyfill",
+        "_moduleFormat" => "_moduleFormat",
+        other => {
+            return Err(SidecarError::InvalidState(format!(
+                "unsupported JavaScript internal bridge method {other}"
+            )));
+        }
+    };
+
+    handle_internal_bridge_call_from_host_context(
+        &process.host_cwd,
+        &process.guest_cwd,
+        &process.env,
+        method,
+        &request.args,
+    )
+    .ok_or_else(|| {
+        SidecarError::InvalidState(format!(
+            "JavaScript internal bridge method {method} returned no value"
+        ))
+    })
 }
 
 fn mirror_process_chmod_to_host(
@@ -10454,6 +12623,11 @@ fn resolve_process_guest_path_to_host(
             guest_path
         ))
     };
+    if let Some(host_path) =
+        host_path_from_runtime_guest_mappings(&process.env, &normalized_guest_path)
+    {
+        return Some(host_path);
+    }
     let normalized_guest_cwd = normalize_path(&process.guest_cwd);
     let mut host_root = normalize_host_path(&process.host_cwd);
     for _ in normalized_guest_cwd
@@ -10863,9 +13037,11 @@ fn service_javascript_crypto_verify_sync_rpc(
     verifier
         .update(&data)
         .map_err(javascript_crypto_openssl_error)?;
-    Ok(json!(verifier
-        .verify(&signature)
-        .map_err(javascript_crypto_openssl_error)?))
+    Ok(json!(
+        verifier
+            .verify(&signature)
+            .map_err(javascript_crypto_openssl_error)?
+    ))
 }
 
 fn service_javascript_crypto_asymmetric_op_sync_rpc(
@@ -12339,6 +14515,38 @@ fn service_javascript_pty_set_raw_mode_sync_rpc(
     Ok(Value::Null)
 }
 
+fn service_javascript_kernel_stdio_write_sync_rpc(
+    kernel: &mut SidecarKernel,
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "__kernel_stdio_write fd")?;
+    let chunk = javascript_sync_rpc_bytes_arg(&request.args, 1, "__kernel_stdio_write chunk")?;
+
+    let written = match fd {
+        1 => kernel
+            .write_process_stdout(EXECUTION_DRIVER_NAME, process.kernel_pid, &chunk)
+            .map_err(kernel_error)?,
+        2 => kernel
+            .write_process_stderr(EXECUTION_DRIVER_NAME, process.kernel_pid, &chunk)
+            .map_err(kernel_error)?,
+        other => {
+            return Err(SidecarError::InvalidState(format!(
+                "__kernel_stdio_write only supports fd 1/2, got {other}"
+            )));
+        }
+    };
+
+    let event = if fd == 1 {
+        ActiveExecutionEvent::Stdout(chunk)
+    } else {
+        ActiveExecutionEvent::Stderr(chunk)
+    };
+    process.pending_execution_events.push_back(event);
+
+    Ok(json!(written))
+}
+
 fn service_javascript_kernel_poll_sync_rpc(
     kernel: &mut SidecarKernel,
     process: &ActiveProcess,
@@ -12407,6 +14615,15 @@ fn install_kernel_stdin_pipe(kernel: &mut SidecarKernel, pid: u32) -> Result<u32
     Ok(write_fd)
 }
 
+fn javascript_child_process_stdin_mode(request: &JavascriptChildProcessSpawnRequest) -> &str {
+    request
+        .options
+        .stdio
+        .first()
+        .map(String::as_str)
+        .unwrap_or("pipe")
+}
+
 pub(crate) fn write_kernel_process_stdin(
     kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
@@ -12431,24 +14648,6 @@ pub(crate) fn close_kernel_process_stdin(
     kernel
         .fd_close(EXECUTION_DRIVER_NAME, process.kernel_pid, writer_fd)
         .map_err(kernel_error)
-}
-
-fn parse_http_request_options(
-    request: &JavascriptSyncRpcRequest,
-) -> Result<(Url, JavascriptHttpRequestOptions, HttpHeaderCollection), SidecarError> {
-    let resource = javascript_sync_rpc_arg_str(&request.args, 0, "net.http_request resource")?;
-    let url = Url::parse(resource)
-        .map_err(|error| SidecarError::Execution(format!("ERR_INVALID_URL: {error}")))?;
-    let options_json =
-        javascript_sync_rpc_arg_str(&request.args, 1, "net.http_request options payload")?;
-    let options: JavascriptHttpRequestOptions =
-        serde_json::from_str(options_json).map_err(|error| {
-            SidecarError::InvalidState(format!(
-                "net.http_request options must be valid JSON: {error}"
-            ))
-        })?;
-    let headers = parse_http_header_collection(&options.headers, "net.http_request headers")?;
-    Ok((url, options, headers))
 }
 
 fn parse_http_header_collection(
@@ -12599,11 +14798,15 @@ fn issue_outbound_http_request(
     headers: &HttpHeaderCollection,
 ) -> Result<Value, SidecarError> {
     let method = options.method.as_deref().unwrap_or("GET");
-    let mut agent_builder = ureq::AgentBuilder::new();
+    let mut agent_builder = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout_read(Duration::from_secs(15))
+        .timeout_write(Duration::from_secs(15));
     if url.scheme() == "https" {
         let tls_options = JavascriptTlsBridgeOptions {
             is_server: false,
             servername: url.host_str().map(str::to_owned),
+            alpn_protocols: Some(vec![String::from("http/1.1")]),
             reject_unauthorized: options.reject_unauthorized,
             ..JavascriptTlsBridgeOptions::default()
         };
@@ -12612,6 +14815,9 @@ fn issue_outbound_http_request(
     let agent = agent_builder.build();
     let mut request = agent.request_url(method, url);
     for (name, values) in &headers.normalized {
+        if name == "host" {
+            continue;
+        }
         let header_value = values.join(", ");
         request = request.set(name, &header_value);
     }
@@ -12778,43 +14984,26 @@ where
                         SidecarError::InvalidState(format!("invalid dns.resolve payload: {error}"))
                     })
                 })?;
-            let family = match request.method.as_str() {
-                "dns.resolve4" => Some(4),
-                "dns.resolve6" => Some(6),
-                _ => match payload
+            let requested_type = match request.method.as_str() {
+                "dns.resolve4" => String::from("A"),
+                "dns.resolve6" => String::from("AAAA"),
+                _ => payload
                     .rrtype
                     .as_deref()
                     .unwrap_or("A")
-                    .to_ascii_uppercase()
-                    .as_str()
-                {
-                    "A" => Some(4),
-                    "AAAA" => Some(6),
-                    other => {
-                        return Err(SidecarError::InvalidState(format!(
-                            "unsupported dns rrtype {other}"
-                        )));
-                    }
-                },
+                    .to_ascii_uppercase(),
             };
-            let addresses = filter_dns_ip_addrs(
-                resolve_dns_ip_addrs(
-                    bridge,
-                    kernel,
-                    vm_id,
-                    dns,
-                    &payload.hostname,
-                    DnsLookupPolicy::CheckPermissions,
-                )?,
-                family,
+            let record_type = parse_dns_record_type(&requested_type)?;
+            let resolution = resolve_dns_records(
+                bridge,
+                kernel,
+                vm_id,
+                dns,
+                &payload.hostname,
+                record_type,
+                DnsLookupPolicy::CheckPermissions,
             )?;
-            let addresses = filter_dns_safe_ip_addrs(addresses, &payload.hostname)?;
-            Ok(Value::Array(
-                addresses
-                    .into_iter()
-                    .map(|ip| Value::String(ip.to_string()))
-                    .collect(),
-            ))
+            dns_resolution_to_node_value(&resolution, &requested_type)
         }
         other => Err(SidecarError::InvalidState(format!(
             "unsupported JavaScript dns sync RPC method {other}"
@@ -15335,6 +17524,19 @@ where
     }
 }
 
+const JAVASCRIPT_NET_POLL_MAX_WAIT: Duration = Duration::from_millis(50);
+const EXITED_PROCESS_SNAPSHOT_RETENTION: Duration = Duration::from_secs(2);
+
+pub(crate) fn clamp_javascript_net_poll_wait(wait_ms: u64) -> Duration {
+    // WASM net.poll runs on the sidecar's sync-RPC main thread. Guest-controlled waits
+    // must stay bounded so one VM cannot stall dispose/shutdown or unrelated VM work.
+    if wait_ms == 0 {
+        Duration::ZERO
+    } else {
+        Duration::from_millis(wait_ms).min(JAVASCRIPT_NET_POLL_MAX_WAIT)
+    }
+}
+
 pub(crate) fn service_javascript_net_sync_rpc<B>(
     bridge: &SharedBridge<B>,
     vm_id: &str,
@@ -15351,60 +17553,6 @@ where
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
     match request.method.as_str() {
-        "net.http_request" => {
-            let (url, options, headers) = parse_http_request_options(request)?;
-            let host = url.host_str().ok_or_else(|| {
-                SidecarError::Execution(String::from("ERR_INVALID_URL: missing host"))
-            })?;
-            let port = url.port_or_known_default().ok_or_else(|| {
-                SidecarError::Execution(String::from("ERR_INVALID_URL: missing port"))
-            })?;
-            bridge.require_network_access(
-                vm_id,
-                NetworkOperation::Http,
-                format_tcp_resource(host, port),
-            )?;
-
-            if is_loopback_request_host(host) {
-                if let Some((server_id, request_id, request_json)) = process
-                    .http_servers
-                    .iter_mut()
-                    .find(|(_, server)| server.guest_local_addr.port() == port)
-                    .map(|(server_id, server)| {
-                        server.next_request_id += 1;
-                        let request_id = server.next_request_id;
-                        serialize_http_loopback_request(&url, &options, &headers)
-                            .map(|request_json| (*server_id, request_id, request_json))
-                    })
-                    .transpose()?
-                {
-                    process
-                        .pending_http_requests
-                        .insert((server_id, request_id), None);
-                    process.execution.send_javascript_stream_event(
-                        "http_request",
-                        json!({
-                            "serverId": server_id,
-                            "requestId": request_id,
-                            "request": request_json,
-                        }),
-                    )?;
-                    let response = wait_for_loopback_http_response(
-                        bridge,
-                        vm_id,
-                        dns,
-                        socket_paths,
-                        kernel,
-                        process,
-                        resource_limits,
-                        (server_id, request_id),
-                    )?;
-                    return Ok(Value::String(response));
-                }
-            }
-
-            issue_outbound_http_request(&url, &options, &headers)
-        }
         "net.http_listen" => {
             check_network_resource_limit(
                 resource_limits.max_sockets,
@@ -15673,10 +17821,11 @@ where
             let wait_ms =
                 javascript_sync_rpc_arg_u64_optional(&request.args, 1, "net.poll wait ms")?
                     .unwrap_or_default();
+            let wait = clamp_javascript_net_poll_wait(wait_ms);
             let event = if let Some(socket) = process.tcp_sockets.get_mut(socket_id) {
-                socket.poll(kernel, process.kernel_pid, Duration::from_millis(wait_ms))?
+                socket.poll(kernel, process.kernel_pid, wait)?
             } else if let Some(socket) = process.unix_sockets.get_mut(socket_id) {
-                socket.poll(Duration::from_millis(wait_ms))?
+                socket.poll(wait)?
             } else {
                 return Err(SidecarError::InvalidState(format!(
                     "unknown net socket {socket_id}"
@@ -16246,9 +18395,46 @@ fn signal_name_for_stream_event(signal: i32) -> Option<&'static str> {
     match signal {
         libc::SIGHUP => Some("SIGHUP"),
         libc::SIGINT => Some("SIGINT"),
+        libc::SIGCONT => Some("SIGCONT"),
         libc::SIGTERM => Some("SIGTERM"),
         libc::SIGCHLD => Some("SIGCHLD"),
         libc::SIGWINCH => Some("SIGWINCH"),
+        _ => None,
+    }
+}
+
+pub(crate) fn canonical_signal_name(signal: i32) -> Option<&'static str> {
+    match signal {
+        1 => Some("SIGHUP"),
+        2 => Some("SIGINT"),
+        3 => Some("SIGQUIT"),
+        4 => Some("SIGILL"),
+        5 => Some("SIGTRAP"),
+        6 => Some("SIGABRT"),
+        7 => Some("SIGBUS"),
+        8 => Some("SIGFPE"),
+        9 => Some("SIGKILL"),
+        10 => Some("SIGUSR1"),
+        11 => Some("SIGSEGV"),
+        12 => Some("SIGUSR2"),
+        13 => Some("SIGPIPE"),
+        14 => Some("SIGALRM"),
+        15 => Some("SIGTERM"),
+        17 => Some("SIGCHLD"),
+        18 => Some("SIGCONT"),
+        19 => Some("SIGSTOP"),
+        20 => Some("SIGTSTP"),
+        21 => Some("SIGTTIN"),
+        22 => Some("SIGTTOU"),
+        23 => Some("SIGURG"),
+        24 => Some("SIGXCPU"),
+        25 => Some("SIGXFSZ"),
+        26 => Some("SIGVTALRM"),
+        27 => Some("SIGPROF"),
+        28 => Some("SIGWINCH"),
+        29 => Some("SIGIO"),
+        30 => Some("SIGPWR"),
+        31 => Some("SIGSYS"),
         _ => None,
     }
 }
@@ -16268,6 +18454,22 @@ fn dispatch_v8_process_signal(process: &ActiveProcess, signal: i32) -> Result<bo
     Ok(true)
 }
 
+fn dispatch_v8_session_signal_async(session: V8SessionHandle, signal: i32) {
+    let Some(signal_name) = signal_name_for_stream_event(signal).map(str::to_owned) else {
+        return;
+    };
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(1));
+        let payload = v8_runtime::json_to_cbor_payload(&json!({
+            "signal": signal_name,
+            "number": signal,
+            "action": "default",
+        }))
+        .unwrap_or_default();
+        let _ = session.send_stream_event("signal", payload);
+    });
+}
+
 pub(crate) fn parse_signal(signal: &str) -> Result<i32, SidecarError> {
     let trimmed = signal.trim();
     if trimmed.is_empty() {
@@ -16278,15 +18480,7 @@ pub(crate) fn parse_signal(signal: &str) -> Result<i32, SidecarError> {
 
     if let Ok(value) = trimmed.parse::<i32>() {
         return match value {
-            0
-            | libc::SIGHUP
-            | libc::SIGINT
-            | SIGKILL
-            | SIGTERM
-            | libc::SIGCONT
-            | libc::SIGSTOP
-            | libc::SIGWINCH
-            | libc::SIGCHLD => Ok(value),
+            0..=31 => Ok(value),
             _ => Err(SidecarError::InvalidState(format!(
                 "unsupported kill_process signal {signal}"
             ))),
@@ -16304,21 +18498,48 @@ pub(crate) fn parse_signal(signal: &str) -> Result<i32, SidecarError> {
 fn signal_number_from_name(signal: &str) -> Option<i32> {
     match signal {
         "0" => Some(0),
-        "HUP" => Some(libc::SIGHUP),
-        "INT" => Some(libc::SIGINT),
-        "KILL" => Some(SIGKILL),
-        "TERM" => Some(SIGTERM),
-        "CONT" => Some(libc::SIGCONT),
-        "STOP" => Some(libc::SIGSTOP),
-        "WINCH" => Some(libc::SIGWINCH),
-        "CHLD" => Some(libc::SIGCHLD),
+        "HUP" => Some(1),
+        "INT" => Some(2),
+        "QUIT" => Some(3),
+        "ILL" => Some(4),
+        "TRAP" => Some(5),
+        "ABRT" | "IOT" => Some(6),
+        "BUS" => Some(7),
+        "FPE" => Some(8),
+        "KILL" => Some(9),
+        "USR1" => Some(10),
+        "SEGV" => Some(11),
+        "USR2" => Some(12),
+        "PIPE" => Some(13),
+        "ALRM" => Some(14),
+        "TERM" => Some(15),
+        "STKFLT" => Some(16),
+        "CHLD" => Some(17),
+        "CONT" => Some(18),
+        "STOP" => Some(19),
+        "TSTP" => Some(20),
+        "TTIN" => Some(21),
+        "TTOU" => Some(22),
+        "URG" => Some(23),
+        "XCPU" => Some(24),
+        "XFSZ" => Some(25),
+        "VTALRM" => Some(26),
+        "PROF" => Some(27),
+        "WINCH" => Some(28),
+        "IO" | "POLL" => Some(29),
+        "PWR" => Some(30),
+        "SYS" => Some(31),
         _ => None,
     }
 }
 
 pub(crate) fn runtime_child_is_alive(child_pid: u32) -> Result<bool, SidecarError> {
+    Ok(runtime_child_exit_status(child_pid)?.is_none())
+}
+
+fn runtime_child_exit_status(child_pid: u32) -> Result<Option<i32>, SidecarError> {
     if child_pid == 0 {
-        return Ok(false);
+        return Ok(Some(0));
     }
 
     let wait_flags = WaitPidFlag::WNOHANG
@@ -16329,11 +18550,12 @@ pub(crate) fn runtime_child_is_alive(child_pid: u32) -> Result<bool, SidecarErro
     match wait_on_child(WaitId::Pid(Pid::from_raw(child_pid as i32)), wait_flags) {
         Ok(WaitStatus::StillAlive)
         | Ok(WaitStatus::Stopped(_, _))
-        | Ok(WaitStatus::Continued(_)) => Ok(true),
-        Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => Ok(false),
+        | Ok(WaitStatus::Continued(_)) => Ok(None),
+        Ok(WaitStatus::Exited(_, status)) => Ok(Some(status)),
+        Ok(WaitStatus::Signaled(_, signal, _)) => Ok(Some(128 + signal as i32)),
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        Ok(WaitStatus::PtraceEvent(_, _, _) | WaitStatus::PtraceSyscall(_)) => Ok(true),
-        Err(nix::errno::Errno::ECHILD) => Ok(false),
+        Ok(WaitStatus::PtraceEvent(_, _, _) | WaitStatus::PtraceSyscall(_)) => Ok(None),
+        Err(nix::errno::Errno::ECHILD) => Ok(Some(0)),
         Err(error) => Err(SidecarError::Execution(format!(
             "failed to inspect guest runtime process {child_pid}: {error}"
         ))),
@@ -16370,6 +18592,9 @@ pub(crate) fn signal_runtime_process(child_pid: u32, signal: i32) -> Result<(), 
 pub(crate) fn error_code(error: &SidecarError) -> &'static str {
     match error {
         SidecarError::InvalidState(_) => "invalid_state",
+        SidecarError::ProtocolVersionMismatch(_) => "protocol_version_mismatch",
+        SidecarError::BridgeVersionMismatch(_) => "bridge_version_mismatch",
+        SidecarError::Conflict(_) => "conflict",
         SidecarError::Unauthorized(_) => "unauthorized",
         SidecarError::Unsupported(_) => "unsupported",
         SidecarError::FrameTooLarge(_) => "frame_too_large",
@@ -16382,19 +18607,64 @@ pub(crate) fn error_code(error: &SidecarError) -> &'static str {
 }
 
 fn guest_errno_code(message: &str) -> Option<&str> {
-    message.split(':').map(str::trim).find(|code| {
-        code.len() >= 2
-            && code.starts_with('E')
-            && code[1..]
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-    })
+    const TRUSTED_PREFIXES: &[&str] = &[
+        "ERR_AGENT_OS_NODE_SYNC_RPC",
+        "ERR_AGENT_OS_PYTHON_VFS_RPC",
+        "ERR_AGENT_OS_BRIDGE",
+    ];
+
+    let mut segments = message.split(':').map(str::trim);
+    let first = segments.next()?;
+    if is_guest_errno_segment(first) {
+        return Some(first);
+    }
+
+    if TRUSTED_PREFIXES.contains(&first) {
+        let second = segments.next()?;
+        if is_guest_errno_segment(second) {
+            return Some(second);
+        }
+    }
+
+    None
+}
+
+fn is_guest_errno_segment(segment: &str) -> bool {
+    segment.len() >= 2
+        && segment.starts_with('E')
+        && !segment.starts_with("ERR_")
+        && segment[1..]
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 pub(crate) fn javascript_sync_rpc_error_code(error: &SidecarError) -> String {
-    guest_errno_code(&error.to_string())
-        .unwrap_or("ERR_AGENT_OS_NODE_SYNC_RPC")
-        .to_owned()
+    let message = error.to_string();
+    if let Some(code) = guest_errno_code(&message) {
+        return code.to_owned();
+    }
+    if message.starts_with("ERR_NATIVE_BINARY_NOT_SUPPORTED:") {
+        return String::from("ERR_NATIVE_BINARY_NOT_SUPPORTED");
+    }
+
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("no such file or directory")
+        || lower.contains("entry not found")
+        || lower.contains("not found")
+    {
+        return String::from("ENOENT");
+    }
+    if lower.contains("permission denied") {
+        return String::from("EACCES");
+    }
+    if lower.contains("already exists") || lower.contains("already registered") {
+        return String::from("EEXIST");
+    }
+    if lower.contains("invalid argument") {
+        return String::from("EINVAL");
+    }
+
+    String::from("ERR_AGENT_OS_NODE_SYNC_RPC")
 }
 
 pub(crate) fn ignore_stale_javascript_sync_rpc_response(
@@ -16407,6 +18677,72 @@ pub(crate) fn ignore_stale_javascript_sync_rpc_response(
         {
             Ok(())
         }
+        SidecarError::Execution(message) => {
+            let lower = message.to_ascii_lowercase();
+            if lower.contains("sync rpc response")
+                && (lower.contains("broken pipe") || lower.contains("channel closed unexpectedly"))
+            {
+                Ok(())
+            } else {
+                Err(SidecarError::Execution(message))
+            }
+        }
         other => Err(other),
+    }
+}
+
+#[cfg(test)]
+mod error_code_tests {
+    use super::{SidecarError, guest_errno_code, javascript_sync_rpc_error_code};
+
+    #[test]
+    fn guest_errno_code_rejects_guest_controlled_errno_segments() {
+        assert_eq!(guest_errno_code("user said 'EACCES: denied'"), None);
+        assert_eq!(
+            guest_errno_code("prefix: user said 'EPERM': more text"),
+            None
+        );
+        assert_eq!(guest_errno_code("ERR_AGENT_OS_FAKE: EACCES: denied"), None);
+    }
+
+    #[test]
+    fn guest_errno_code_accepts_trusted_agent_os_prefixes() {
+        assert_eq!(
+            guest_errno_code("ERR_AGENT_OS_NODE_SYNC_RPC: EACCES: permission denied on /foo"),
+            Some("EACCES")
+        );
+        assert_eq!(
+            guest_errno_code("ERR_AGENT_OS_PYTHON_VFS_RPC: ENOENT: missing file"),
+            Some("ENOENT")
+        );
+        assert_eq!(guest_errno_code("EEXIST: already exists"), Some("EEXIST"));
+    }
+
+    #[test]
+    fn javascript_sync_rpc_error_code_ignores_spoofed_errnos() {
+        let error = SidecarError::Execution(String::from("user said 'EACCES: denied'"));
+        assert_eq!(
+            javascript_sync_rpc_error_code(&error),
+            "ERR_AGENT_OS_NODE_SYNC_RPC"
+        );
+    }
+
+    #[test]
+    fn javascript_sync_rpc_error_code_preserves_real_sidecar_errnos() {
+        let error = SidecarError::Execution(String::from(
+            "ERR_AGENT_OS_NODE_SYNC_RPC: EACCES: permission denied on /foo",
+        ));
+        assert_eq!(javascript_sync_rpc_error_code(&error), "EACCES");
+    }
+
+    #[test]
+    fn javascript_sync_rpc_error_code_preserves_native_binary_rejections() {
+        let error = SidecarError::Execution(String::from(
+            "ERR_NATIVE_BINARY_NOT_SUPPORTED: refused to execute native ELF guest binary at /tmp/fake-rg inside the VM",
+        ));
+        assert_eq!(
+            javascript_sync_rpc_error_code(&error),
+            "ERR_NATIVE_BINARY_NOT_SUPPORTED"
+        );
     }
 }

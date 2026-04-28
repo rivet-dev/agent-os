@@ -1,12 +1,13 @@
 use crate::acp::json_rpc::{JsonRpcId, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub(crate) const LEGACY_PERMISSION_METHOD: &str = "request/permission";
 pub(crate) const ACP_PERMISSION_METHOD: &str = "session/request_permission";
 pub(crate) const ACP_CANCEL_METHOD: &str = "session/cancel";
 pub(crate) const RECENT_ACTIVITY_LIMIT: usize = 20;
 pub(crate) const ACTIVITY_TEXT_LIMIT: usize = 240;
+pub(crate) const SEEN_INBOUND_REQUEST_ID_RETENTION_LIMIT: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentCompatibilityKind {
@@ -21,6 +22,59 @@ pub(crate) struct PendingPermissionRequest {
     pub(crate) options: Option<Vec<Map<String, Value>>>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SeenInboundRequestIds {
+    seen: BTreeSet<JsonRpcId>,
+    order: VecDeque<JsonRpcId>,
+    limit: usize,
+}
+
+impl SeenInboundRequestIds {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            seen: BTreeSet::new(),
+            order: VecDeque::new(),
+            limit,
+        }
+    }
+
+    pub(crate) fn contains(&self, id: &JsonRpcId) -> bool {
+        self.seen.contains(id)
+    }
+
+    pub(crate) fn insert(&mut self, id: JsonRpcId) {
+        if !self.seen.insert(id.clone()) {
+            return;
+        }
+        self.order.push_back(id);
+        self.evict_oldest();
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.seen.clear();
+        self.order.clear();
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    fn evict_oldest(&mut self) {
+        while self.order.len() > self.limit {
+            if let Some(oldest) = self.order.pop_front() {
+                self.seen.remove(&oldest);
+            }
+        }
+    }
+}
+
+impl Default for SeenInboundRequestIds {
+    fn default() -> Self {
+        Self::new(SEEN_INBOUND_REQUEST_ID_RETENTION_LIMIT)
+    }
+}
+
 pub(crate) fn compatibility_for(agent_type: &str) -> AgentCompatibilityKind {
     match agent_type {
         "opencode" => AgentCompatibilityKind::OpenCode,
@@ -30,7 +84,7 @@ pub(crate) fn compatibility_for(agent_type: &str) -> AgentCompatibilityKind {
 
 pub(crate) fn normalize_inbound_permission_request(
     request: &JsonRpcRequest,
-    seen_inbound_request_ids: &mut BTreeSet<JsonRpcId>,
+    seen_inbound_request_ids: &mut SeenInboundRequestIds,
     pending_permission_requests: &mut BTreeMap<String, PendingPermissionRequest>,
 ) -> Option<JsonRpcNotification> {
     if request.method != ACP_PERMISSION_METHOD {
@@ -103,7 +157,7 @@ pub(crate) fn maybe_normalize_permission_response(
 }
 
 pub(crate) fn is_cancel_method_not_found(response: &JsonRpcResponse) -> bool {
-    let Some(error) = &response.error else {
+    let Some(error) = response.error() else {
         return false;
     };
     if error.code != -32601 {
@@ -241,7 +295,7 @@ pub(crate) fn summarize_inbound_request(request: &JsonRpcRequest) -> String {
 }
 
 pub(crate) fn summarize_inbound_response(response: &JsonRpcResponse) -> String {
-    match &response.error {
+    match response.error() {
         Some(error) => truncate_activity_text(&format!(
             "received response id={} error={}:{}",
             response.id, error.code, error.message
@@ -281,6 +335,30 @@ fn normalize_permission_result(
             json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })
         }
         _ => json!({ "outcome": { "outcome": "cancelled" } }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seen_inbound_request_ids_evict_oldest_entry_after_retention_window() {
+        let mut seen = SeenInboundRequestIds::new(2);
+        let first = JsonRpcId::Number(1);
+        let second = JsonRpcId::Number(2);
+        let third = JsonRpcId::Number(3);
+
+        seen.insert(first.clone());
+        seen.insert(second.clone());
+        assert!(seen.contains(&first));
+        assert!(seen.contains(&second));
+
+        seen.insert(third.clone());
+        assert_eq!(seen.len(), 2);
+        assert!(!seen.contains(&first));
+        assert!(seen.contains(&second));
+        assert!(seen.contains(&third));
     }
 }
 

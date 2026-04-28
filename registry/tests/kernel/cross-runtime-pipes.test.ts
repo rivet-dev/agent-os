@@ -14,6 +14,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import {
+  describeIf,
   createIntegrationKernel,
   skipUnlessWasmBuilt,
 } from './helpers.ts';
@@ -23,7 +24,7 @@ import type { Kernel } from './helpers.ts';
 // Integration tests with real WasmVM + Node (skipped if WASM not built)
 // ---------------------------------------------------------------------------
 
-describe.skipIf(skipUnlessWasmBuilt())('cross-runtime pipes (WasmVM + Node)', () => {
+describeIf(!skipUnlessWasmBuilt(), 'cross-runtime pipes (WasmVM + Node)', () => {
   let kernel: Kernel;
   let dispose: () => Promise<void>;
 

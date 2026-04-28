@@ -1,20 +1,21 @@
 mod support;
 
 use agent_os_sidecar::protocol::{
-    CreateVmRequest, GuestRuntimeKind, OwnershipScope, RequestId, RequestPayload, ResponsePayload,
-    RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryEncoding,
-    RootFilesystemEntryKind,
+    CreateVmRequest, GuestRuntimeKind, OwnershipScope, PermissionsPolicy, RequestId,
+    RequestPayload, ResponsePayload, RootFilesystemDescriptor, RootFilesystemEntry,
+    RootFilesystemEntryEncoding, RootFilesystemEntryKind,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::process::Command;
 use support::{
-    assert_node_available, authenticate, collect_process_output, create_vm, execute, new_sidecar,
-    open_session, request, temp_dir,
+    assert_node_available, authenticate, collect_process_output, create_vm,
+    dispose_vm_and_close_session, execute, new_sidecar, open_session, request, temp_dir,
 };
 
-const DEFAULT_GUEST_PATH_ENV: &str =
-    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const DEFAULT_GUEST_PATH_ENV: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const GUEST_IDENTITY_CASES: &[&str] = &["javascript", "python", "wasm_identity", "wasm_env"];
 
 fn create_vm_with_root_filesystem(
     sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
@@ -36,7 +37,7 @@ fn create_vm_with_root_filesystem(
                     cwd.to_string_lossy().into_owned(),
                 )]),
                 root_filesystem,
-                permissions: None,
+                permissions: Some(PermissionsPolicy::allow_all()),
             }),
         ))
         .expect("create sidecar VM");
@@ -59,7 +60,6 @@ fn parse_env_stdout(stdout: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-#[test]
 fn javascript_guest_identity_uses_kernel_owned_defaults() {
     let mut sidecar = new_sidecar("guest-identity-js");
     let cwd = temp_dir("guest-identity-js-cwd");
@@ -121,6 +121,7 @@ console.log(JSON.stringify({
         &vm_id,
         "proc-js-identity",
     );
+    dispose_vm_and_close_session(&mut sidecar, &connection_id, &session_id, &vm_id);
     assert_eq!(exit_code, 0, "stderr:\n{stderr}");
     assert!(
         stderr.is_empty(),
@@ -148,7 +149,6 @@ console.log(JSON.stringify({
     assert_eq!(parsed["userInfo"]["homedir"], "/home/user");
 }
 
-#[test]
 fn python_guest_identity_uses_kernel_owned_defaults() {
     assert_node_available();
 
@@ -222,6 +222,7 @@ print(json.dumps({
         &vm_id,
         "proc-python-identity",
     );
+    dispose_vm_and_close_session(&mut sidecar, &connection_id, &session_id, &vm_id);
     assert_eq!(exit_code, 0, "stderr:\n{stderr}");
     assert!(
         stderr.is_empty(),
@@ -238,7 +239,6 @@ print(json.dumps({
     assert_eq!(parsed["path_home"], "/home/user");
 }
 
-#[test]
 fn wasm_guest_identity_commands_use_kernel_owned_defaults() {
     assert_node_available();
 
@@ -352,6 +352,7 @@ fn wasm_guest_identity_commands_use_kernel_owned_defaults() {
         &vm_id,
         "proc-wasm-identity",
     );
+    dispose_vm_and_close_session(&mut sidecar, &connection_id, &session_id, &vm_id);
     assert_eq!(exit_code, 0, "stderr:\n{stderr}");
     assert!(
         stderr.is_empty(),
@@ -360,7 +361,6 @@ fn wasm_guest_identity_commands_use_kernel_owned_defaults() {
     assert_eq!(stdout, "user:x:1000:1000::/home/user:/bin/sh");
 }
 
-#[test]
 fn wasm_guest_env_filters_internal_control_vars_and_uses_kernel_defaults() {
     assert_node_available();
 
@@ -494,6 +494,7 @@ fn wasm_guest_env_filters_internal_control_vars_and_uses_kernel_defaults() {
         &vm_id,
         "proc-wasm-env",
     );
+    dispose_vm_and_close_session(&mut sidecar, &connection_id, &session_id, &vm_id);
     assert_eq!(exit_code, 0, "stderr:\n{stderr}");
     assert!(
         stderr.is_empty(),
@@ -509,9 +510,51 @@ fn wasm_guest_env_filters_internal_control_vars_and_uses_kernel_defaults() {
 
     assert_eq!(env.get("HOME").map(String::as_str), Some("/home/user"));
     assert_eq!(env.get("USER").map(String::as_str), Some("user"));
-    assert_eq!(env.get("PATH").map(String::as_str), Some(DEFAULT_GUEST_PATH_ENV));
+    assert_eq!(
+        env.get("PATH").map(String::as_str),
+        Some(DEFAULT_GUEST_PATH_ENV)
+    );
     assert!(
         leaked_internal.is_empty(),
         "unexpected internal env leakage: {leaked_internal:?}"
     );
+}
+
+fn run_named_case(case_name: &str) {
+    match case_name {
+        "javascript" => javascript_guest_identity_uses_kernel_owned_defaults(),
+        "python" => python_guest_identity_uses_kernel_owned_defaults(),
+        "wasm_identity" => wasm_guest_identity_commands_use_kernel_owned_defaults(),
+        "wasm_env" => wasm_guest_env_filters_internal_control_vars_and_uses_kernel_defaults(),
+        other => panic!("unknown guest_identity case: {other}"),
+    }
+}
+
+#[test]
+fn guest_identity_cases() {
+    let current_exe = std::env::current_exe().expect("current test binary path");
+
+    for case_name in GUEST_IDENTITY_CASES {
+        let status = Command::new(&current_exe)
+            .arg("--exact")
+            .arg("__guest_identity_case_runner")
+            .arg("--nocapture")
+            .env("AGENT_OS_GUEST_IDENTITY_CASE", case_name)
+            .status()
+            .unwrap_or_else(|error| panic!("spawn guest_identity runner for {case_name}: {error}"));
+
+        assert!(
+            status.success(),
+            "guest_identity case {case_name} failed with status {status}"
+        );
+    }
+}
+
+#[test]
+fn __guest_identity_case_runner() {
+    let Ok(case_name) = std::env::var("AGENT_OS_GUEST_IDENTITY_CASE") else {
+        return;
+    };
+
+    run_named_case(&case_name);
 }

@@ -966,7 +966,7 @@ fn is_google_drive_test_url(url: &Url) -> bool {
 }
 
 fn escape_query_literal(raw: &str) -> String {
-    raw.replace('\'', "\\'")
+    raw.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
 fn now_unix_seconds() -> u64 {

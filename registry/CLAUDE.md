@@ -54,10 +54,12 @@ The following packages exist but **cannot be compiled** until a patched wasi-lib
 | @rivet-dev/agent-os-git | WASM binary not yet built |
 
 To unblock the remaining C packages: run `cd native && ./scripts/patch-wasi-libc.sh` to build the patched sysroot, then `cd .. && make build-wasm-c copy-wasm`.
+When rerolling `native/patches/wasi-libc/*.patch`, validate the series with strict `git apply` semantics on the pinned temp worktree instead of relying on `patch` fuzz or reverse fallbacks; later patches such as `0012-posix-spawn-cwd.patch` intentionally depend on earlier series entries being applied in order.
 
 The published `@rivet-dev/agent-os-curl` package is currently backed by the Rust `native/crates/commands/curl/` binary built on `crates/libs/wasi-http`. Keep curl CLI compatibility fixes there until the patched-sysroot C curl path is restored.
 When patching the OpenCode ACP Node bundle in `registry/agent/opencode/scripts/build-opencode-acp.mjs`, run result-returning SQLite PRAGMAs through `db.$client.exec(...)` instead of drizzle `db.run(...)`. The VM `node:sqlite` shim treats `journal_mode`, `busy_timeout`, `foreign_keys`, and `wal_checkpoint` as queries with rows, so `db.run(...)` breaks `createSession("opencode")` during database bootstrap.
 OpenCode ACP bundle patches that touch `packages/opencode/src/util/filesystem.ts` should resolve absolute guest paths through `AGENT_OS_GUEST_PATH_MAPPINGS` before calling `node:fs`, or tool writes can report success while landing outside the mounted project on the host. When patching streamed LLM or tool execution paths, keep the current `Instance` restored around the async work itself, not just the ACP entrypoint, or VM runs will fail with `No context found for instance`.
+For vendored agent-bundle rewrite scripts under `registry/agent/*/scripts/`, add an explicit post-patch assertion in the build script and a `node:test` that reads the generated `dist/` artifact. Upstream minified bundle changes can otherwise leave stale kill-switches or missing guards hidden until runtime.
 
 ### Meta-packages
 
@@ -87,7 +89,9 @@ Commands declare a default permission tier that controls WASI host imports:
 - All WASM binaries are built in-repo via `make build-wasm`. No external dependencies except Rust toolchain and wasi-sdk.
 - If you patch a vendored Rust dependency under `native/vendor/`, add the same patch under `native/patches/crates/<crate>/` so `native/scripts/patch-vendor.sh` reapplies it on future rebuilds instead of silently losing the fix.
 - When you rebuild a Rust command locally, the fresh artifacts are the top-level `native/target/wasm32-wasip1/release/<command>.wasm` files. `release/commands/<command>` can lag until the packaging/copy step rewrites the published command directory.
+- In Ralph shells, repo-root `RUSTC` / `RUSTDOC` are often pinned to the stable workspace toolchain. When running `registry/native` commands that rely on its local nightly toolchain (for example `make patch-std` or `cargo build -Z build-std=...`), unset those env vars first or the patch/build step will hit the wrong toolchain.
 - For vendored `brush-core` on WASI, command lookup must require `is_file()` before treating a PATH candidate as executable, and once the shell resolves a guest binary path (for example `/bin/printf`) it should spawn that resolved path instead of falling back to the bare command name. Pi prepends `~/.pi/agent/bin` even when it does not exist, so bare-name WASI lookup can fail on the first PATH entry.
+- For ACP adapters that proxy a line-based child process, keep child stdout event handling serialized and make the child-side request waiter buffer out-of-order responses by request id. Multiple permission/tool requests from one model turn can resolve out of order, and dropping unmatched lines turns into flaky multi-tool failures.
 
 ### Descriptor Format
 
@@ -140,9 +144,20 @@ make clean         # Remove dist/ and wasm/ from all packages
 
 ## Testing
 
+- The root `registry/` package does not keep its own `node_modules/` tree in this workspace. Keep `registry/package.json` test execution routed through `scripts/run-vitest.mjs`, and keep `registry/vitest.config.ts` as a plain exported object instead of importing `vitest/config`, so `pnpm --dir registry test` resolves the workspace-installed Vitest CLI cleanly.
 - External-network registry tests should stay behind `AGENTOS_E2E_NETWORK=1`, probe host connectivity up front so CI can skip cleanly when the internet is unavailable, and retry the in-VM command itself for transient outbound failures instead of hard-failing on the first flaky request.
+- First-party registry Vitest files under `registry/tests/` should avoid `describe.skipIf` / `it.skipIf`; use conditional registration helpers instead, and make gated suites leave behind a no-op placeholder test so the file does not fail with `No test found in suite` when prerequisites are absent.
+- For intentionally partial Wasm command implementations such as `registry/native/crates/libs/git`, reject unsupported subcommands or transport/auth variants with a stable typed error that points at the package README. Generic "not a command" or downstream HTTP failures make guest debugging much harder than an explicit compatibility boundary.
+- C-built Wasm command suites under `registry/tests/wasmvm/` should gate on `hasCWasmBinaries(...)` and mount `createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] })`; those binaries are not guaranteed to be copied into `native/target/wasm32-wasip1/release/commands`, so mounting only `COMMANDS_DIR` produces false `command not found` failures.
+- Negative-path npm registry tests should disable npm fetch retries and shorten fetch timeouts explicitly; the default retry budget can outlive the Vitest timeout and turn a clear network-error assertion into a false hang.
 - Cross-runtime kernel networking tests should prefer shipped first-party command artifacts from `native/target/wasm32-wasip1/release/commands` plus explicit `loopbackExemptPorts` host fixtures over optional `native/c` programs, unless the story is specifically about the patched-sysroot C command surface.
+- Cross-runtime terminal tests should assert user-visible output and prompt behavior, not require incidental diagnostic `WARN could not retrieve pid` lines; that warning is runtime-dependent noise, while the stable contract is that real stdout still appears.
+- `tests/wasmvm/dynamic-module-integration.test.ts` exercises the embedded sidecar’s real cold-start/compile path now. Keep the module-cache assertions on an explicit `30_000ms` budget instead of the default 5s timeout or the file will report false negatives even when repeated-command caching is working.
+- Embedded registry kernel command suites that boot the full WasmVM/Node path can spend 8-12s inside a single healthy command. Keep per-command and per-test timeouts aligned with the real embedded cold-start path instead of reusing stale 5s budgets from the pre-embedded runtime.
+- For registry kernel package-CLI behavior tests, prefer invoking the installed CLI entrypoint directly (for example `node /node_modules/<pkg>/dist/bin/<cli>.js`) instead of `npx`; npm exec flag parsing can swallow package flags and turn a package-behavior test into an npm-wrapper test.
 - WASI command shims that poll child-process state must sleep through `wasi_ext::host_sleep_ms()` instead of `std::thread::sleep()`: the host import blocks inside the VM kernel, while `std::thread::sleep()` returns immediately on wasm32-wasip1 and turns retry loops like `timeout` into CPU-burning busy-waits.
+- For builtin-only Rust command stories under `registry/native/crates/libs/builtins`, use `cargo test -p secureexec-builtins` from `registry/native/` as the focused truth suite when the PRD still points at the legacy `agent-os-kernel --test wasm_commands` target, then pair it with a narrow `registry/tests/kernel/*` guest-shell smoke if shell behavior is part of acceptance.
+- For subprocess-streaming fixes in `registry/native/crates/libs/shims`, put the timing-sensitive assertions in the corresponding command crate integration tests (`registry/native/crates/commands/*/tests`) and spawn the real built binary via `CARGO_BIN_EXE_*`; library unit tests cannot observe inherited-stdio behavior faithfully.
 
 ## Native Source
 

@@ -13,7 +13,7 @@
 
 import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
-import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
+import { C_BUILD_DIR, COMMANDS_DIR, createKernel, describeIf, hasCWasmBinaries } from '../helpers.js';
 import type { Kernel } from '../helpers.js';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 
@@ -117,7 +117,7 @@ class SimpleVFS {
   }
 }
 
-describe.skipIf(!hasWasmBinaries)('wget command', () => {
+describeIf(hasCWasmBinaries('wget'), 'wget command', () => {
   let kernel: Kernel;
   let server: Server;
   let port: number;
@@ -181,7 +181,7 @@ describe.skipIf(!hasWasmBinaries)('wget command', () => {
   it('downloads file to VFS using URL basename', async () => {
     const vfs = new SimpleVFS();
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }));
 
     await kernel.exec(`wget http://127.0.0.1:${port}/file.txt`);
 
@@ -192,7 +192,7 @@ describe.skipIf(!hasWasmBinaries)('wget command', () => {
   it('-O saves to specified filename', async () => {
     const vfs = new SimpleVFS();
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }));
 
     await kernel.exec(`wget -O /output.txt http://127.0.0.1:${port}/data.json`);
 
@@ -204,7 +204,7 @@ describe.skipIf(!hasWasmBinaries)('wget command', () => {
   it('-q suppresses progress output', async () => {
     const vfs = new SimpleVFS();
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }));
 
     const result = await kernel.exec(`wget -q -O /output.txt http://127.0.0.1:${port}/file.txt`);
 
@@ -217,7 +217,7 @@ describe.skipIf(!hasWasmBinaries)('wget command', () => {
   it('returns non-zero exit code for 404 URL', async () => {
     const vfs = new SimpleVFS();
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }));
 
     const result = await kernel.exec(`wget http://127.0.0.1:${port}/nonexistent`);
 
@@ -228,7 +228,7 @@ describe.skipIf(!hasWasmBinaries)('wget command', () => {
   it('follows redirects by default', async () => {
     const vfs = new SimpleVFS();
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }));
 
     await kernel.exec(`wget -O /output.txt http://127.0.0.1:${port}/redirect`);
 

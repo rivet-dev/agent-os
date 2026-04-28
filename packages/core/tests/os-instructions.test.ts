@@ -8,7 +8,6 @@ import { createHostDirBackend } from "../src/host-dir-mount.js";
 import { getAgentOsKernel } from "../src/test/runtime.js";
 import {
 	REGISTRY_SOFTWARE,
-	registrySkipReason,
 } from "./helpers/registry-commands.js";
 
 /**
@@ -120,7 +119,7 @@ describe("/etc/agentos/ read-only mount", () => {
 	});
 });
 
-describe.skipIf(registrySkipReason)("/etc/agentos/ exec from inside VM", () => {
+describe("/etc/agentos/ exec from inside VM", () => {
 	let vm: AgentOs;
 
 	beforeEach(async () => {
@@ -449,6 +448,35 @@ describe("createSession OS instructions integration", () => {
 			const argv = agentInfo.argv ?? [];
 
 			expect(argv).not.toContain("--append-system-prompt");
+
+			vm.closeSession(sessionId);
+		} finally {
+			restore();
+		}
+	});
+
+	test("createSession with skipOsInstructions:true still forwards additionalInstructions", async () => {
+		const scriptPath = "/tmp/mock-adapter.mjs";
+		await vm.writeFile(scriptPath, MOCK_ACP_ADAPTER);
+		const restore = useMockAdapterBin(scriptPath);
+
+		const additionalText = "CUSTOM_MARKER: skip base, keep extras.";
+
+		try {
+			const { sessionId } = await vm.createSession("pi", {
+				skipOsInstructions: true,
+				additionalInstructions: additionalText,
+			});
+			const agentInfo = vm.getSessionAgentInfo(sessionId) as {
+				argv?: string[];
+			};
+			const argv = agentInfo.argv ?? [];
+
+			const argIdx = argv.indexOf("--append-system-prompt");
+			expect(argIdx).toBeGreaterThan(-1);
+			const instructionsArg = argv[argIdx + 1];
+			expect(instructionsArg).toContain(additionalText);
+			expect(instructionsArg).not.toContain("# agentOS");
 
 			vm.closeSession(sessionId);
 		} finally {

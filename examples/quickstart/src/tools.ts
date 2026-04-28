@@ -43,6 +43,13 @@ const calcToolkit = toolKit({
 
 const vm = await AgentOs.create({
 	toolKits: [weatherToolkit, calcToolkit],
+	permissions: {
+		fs: "allow",
+		network: "allow",
+		childProcess: "allow",
+		env: "allow",
+		tool: "allow",
+	},
 });
 
 async function readToolsPort(): Promise<string> {

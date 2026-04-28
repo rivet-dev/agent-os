@@ -20,7 +20,11 @@ pub fn main(args: Vec<OsString>) -> i32 {
 
     match run(&str_args) {
         Ok(found) => {
-            if found { 0 } else { 1 }
+            if found {
+                0
+            } else {
+                1
+            }
         }
         Err(msg) => {
             eprintln!("[fd error]: {}", msg);
@@ -97,8 +101,8 @@ fn walk(
             }
         }
 
-        let entries = fs::read_dir(full_path)
-            .map_err(|e| format!("{}: {}", full_path.display(), e))?;
+        let entries =
+            fs::read_dir(full_path).map_err(|e| format!("{}: {}", full_path.display(), e))?;
 
         let mut sorted: Vec<_> = entries.filter_map(|e| e.ok()).collect();
         sorted.sort_by_key(|e| e.file_name());
@@ -142,7 +146,11 @@ fn matches_entry(path: &Path, _base_path: &str, opts: &Options) -> bool {
             .map(|e| e.to_string_lossy().to_string())
             .unwrap_or_default();
         let ext_lower = ext.to_lowercase();
-        if !opts.extensions.iter().any(|e| e.to_lowercase() == ext_lower) {
+        if !opts
+            .extensions
+            .iter()
+            .any(|e| e.to_lowercase() == ext_lower)
+        {
             return false;
         }
     }

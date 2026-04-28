@@ -2,7 +2,12 @@
 
 export { AgentOs, AgentOsSidecar } from "./agent-os.js";
 export { AGENT_CONFIGS } from "./agents.js";
-export { CronManager, TimerScheduleDriver } from "./cron/index.js";
+export {
+	CronManager,
+	InvalidScheduleError,
+	PastScheduleError,
+	TimerScheduleDriver,
+} from "./cron/index.js";
 export { createHostDirBackend } from "./host-dir-mount.js";
 export {
 	hostTool,

@@ -2,8 +2,9 @@ use crate::bridge::LifecycleState;
 use crate::command_registry::{CommandDriver, CommandRegistry};
 use crate::device_layer::{create_device_layer, DeviceLayer};
 use crate::dns::{
-    format_dns_resource, resolve_dns, DnsConfig, DnsLookupPolicy, DnsResolution,
-    DnsResolverErrorKind, HickoryDnsResolver, SharedDnsResolver,
+    format_dns_resource, resolve_dns, resolve_dns_records, DnsConfig, DnsLookupPolicy,
+    DnsRecordResolution, DnsResolution, DnsResolverErrorKind, HickoryDnsResolver,
+    SharedDnsResolver,
 };
 use crate::fd_table::{
     FdEntry, FdStat, FdTableError, FdTableManager, FileDescription, FileLockManager,
@@ -23,25 +24,31 @@ use crate::poll::{
 };
 use crate::process_table::{
     DriverProcess, ProcessContext, ProcessExitCallback, ProcessInfo, ProcessStatus, ProcessTable,
-    ProcessTableError, ProcessWaitResult, DEFAULT_PROCESS_UMASK, SIGCONT, SIGPIPE, SIGSTOP,
-    SIGTSTP, SIGWINCH,
+    ProcessTableError, ProcessWaitResult, SigmaskHow, SignalSet, DEFAULT_PROCESS_UMASK, SIGCONT,
+    SIGPIPE, SIGSTOP, SIGTSTP, SIGWINCH,
 };
 use crate::pty::{LineDisciplineConfig, PartialTermios, PtyError, PtyManager, Termios};
 use crate::resource_accounting::{
     measure_filesystem_usage, FileSystemUsage, ResourceAccountant, ResourceError, ResourceLimits,
-    ResourceSnapshot,
+    ResourceSnapshot, DEFAULT_MAX_OPEN_FDS,
 };
 use crate::root_fs::{RootFileSystem, RootFilesystemError, RootFilesystemSnapshot};
 use crate::socket_table::{
-    InetSocketAddress, ReceivedDatagram, SocketId, SocketRecord, SocketShutdown, SocketSpec,
-    SocketState, SocketTable, SocketTableError,
+    DatagramSocketOption, InetSocketAddress, ReceivedDatagram, SocketId, SocketMulticastMembership,
+    SocketRecord, SocketShutdown, SocketSpec, SocketState, SocketTable, SocketTableError,
 };
 use crate::user::{ProcessIdentity, UserConfig, UserManager};
-use crate::vfs::{normalize_path, VfsError, VfsResult, VirtualFileSystem, VirtualStat};
+use crate::vfs::{
+    normalize_path, VfsError, VfsResult, VirtualFileSystem, VirtualStat, VirtualTimeSpec,
+    VirtualUtimeSpec,
+};
+use hickory_resolver::proto::rr::RecordType;
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, WaitTimeoutResult};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -262,6 +269,8 @@ impl OpenShellHandle {
 
 pub struct KernelVm<F> {
     vm_id: String,
+    boot_time_ms: u64,
+    boot_instant: Instant,
     filesystem: PermissionedFileSystem<DeviceLayer<F>>,
     permissions: Permissions,
     dns: DnsConfig,
@@ -291,9 +300,10 @@ fn cleanup_process_resources(
     driver_pids: &Mutex<BTreeMap<String, BTreeSet<u32>>>,
     pid: u32,
 ) {
-    let descriptors = {
-        let tables = lock_or_recover(fd_tables);
-        tables
+    let mut cleanup = Vec::new();
+    {
+        let mut tables = lock_or_recover(fd_tables);
+        let descriptors = tables
             .get(pid)
             .map(|table| {
                 table
@@ -301,12 +311,10 @@ fn cleanup_process_resources(
                     .map(|entry| (entry.fd, Arc::clone(&entry.description), entry.filetype))
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default()
-    };
+            .unwrap_or_default();
 
-    let mut cleanup = Vec::new();
-    {
-        let mut tables = lock_or_recover(fd_tables);
+        cleanup_process_resources_test_hook();
+
         if let Some(table) = tables.get_mut(pid) {
             for (fd, description, filetype) in &descriptors {
                 table.close(*fd);
@@ -326,6 +334,50 @@ fn cleanup_process_resources(
     for pids in owners.values_mut() {
         pids.remove(&pid);
     }
+}
+
+fn dispose_kernel_vm_resources<F>(kernel: &mut KernelVm<F>) {
+    kernel.processes.terminate_all();
+    let pids = lock_or_recover(&kernel.fd_tables).pids();
+    for pid in pids {
+        cleanup_process_resources(
+            kernel.fd_tables.as_ref(),
+            &kernel.file_locks,
+            &kernel.pipes,
+            &kernel.ptys,
+            &kernel.sockets,
+            kernel.driver_pids.as_ref(),
+            pid,
+        );
+    }
+    lock_or_recover(&kernel.driver_pids).clear();
+    kernel.terminated = true;
+}
+
+#[cfg(test)]
+type CleanupProcessResourcesHook = Arc<dyn Fn() + Send + Sync + 'static>;
+
+#[cfg(test)]
+fn cleanup_process_resources_test_hook() {
+    let hook = lock_or_recover(cleanup_process_resources_test_hook_slot()).clone();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+fn cleanup_process_resources_test_hook() {}
+
+#[cfg(test)]
+fn cleanup_process_resources_test_hook_slot() -> &'static Mutex<Option<CleanupProcessResourcesHook>>
+{
+    static HOOK: OnceLock<Mutex<Option<CleanupProcessResourcesHook>>> = OnceLock::new();
+    HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn set_cleanup_process_resources_test_hook(hook: Option<CleanupProcessResourcesHook>) {
+    *lock_or_recover(cleanup_process_resources_test_hook_slot()) = hook;
 }
 
 fn close_special_resource_if_needed(
@@ -354,6 +406,11 @@ fn close_special_resource_if_needed(
 enum ProcNode {
     RootDir,
     MountsFile,
+    CpuInfoFile,
+    MemInfoFile,
+    LoadAvgFile,
+    UptimeFile,
+    VersionFile,
     SelfLink { pid: u32 },
     PidDir { pid: u32 },
     PidFdDir { pid: u32 },
@@ -361,17 +418,25 @@ enum ProcNode {
     PidEnviron { pid: u32 },
     PidCwdLink { pid: u32 },
     PidStatFile { pid: u32 },
+    PidStatusFile { pid: u32 },
     PidFdLink { pid: u32, fd: u32 },
 }
 
 impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     pub fn new(filesystem: F, config: KernelVmConfig) -> Self {
         let vm_id = config.vm_id;
+        let boot_time_ms = now_ms();
+        let boot_instant = Instant::now();
         let permissions = config.permissions.clone();
         let users = UserManager::from_config(config.user);
         let process_table = ProcessTable::with_zombie_ttl(config.zombie_ttl);
         let process_table_for_pty = process_table.clone();
-        let fd_tables = Arc::new(Mutex::new(FdTableManager::new()));
+        let fd_tables = Arc::new(Mutex::new(FdTableManager::with_max_fds(
+            config
+                .resources
+                .max_open_fds
+                .unwrap_or(DEFAULT_MAX_OPEN_FDS),
+        )));
         let file_locks = FileLockManager::new();
         let driver_pids = Arc::new(Mutex::new(BTreeMap::new()));
         let poll_notifier = PollNotifier::default();
@@ -404,6 +469,8 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
         Self {
             vm_id: vm_id.clone(),
+            boot_time_ms,
+            boot_instant,
             filesystem: PermissionedFileSystem::new(
                 create_device_layer(filesystem),
                 vm_id,
@@ -498,12 +565,16 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             .supplementary_gids)
     }
 
-    pub fn getpwuid(&self, uid: u32) -> String {
-        self.users.getpwuid(uid)
+    pub fn getpwuid(&self, uid: u32) -> KernelResult<String> {
+        self.users
+            .getpwuid(uid)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("unknown uid {uid}")))
     }
 
-    pub fn getgrgid(&self, gid: u32) -> String {
-        self.users.getgrgid(gid)
+    pub fn getgrgid(&self, gid: u32) -> KernelResult<String> {
+        self.users
+            .getgrgid(gid)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("unknown gid {gid}")))
     }
 
     pub fn resource_snapshot(&self) -> ResourceSnapshot {
@@ -540,13 +611,36 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         resolve_dns(&self.dns, self.dns_resolver.as_ref(), hostname).map_err(map_dns_resolver_error)
     }
 
+    pub fn resolve_dns_records(
+        &self,
+        hostname: &str,
+        record_type: RecordType,
+        policy: DnsLookupPolicy,
+    ) -> KernelResult<DnsRecordResolution> {
+        self.assert_not_terminated()?;
+        if matches!(policy, DnsLookupPolicy::CheckPermissions) {
+            let resource = format_dns_resource(hostname).map_err(map_dns_resolver_error)?;
+            check_network_access(
+                &self.vm_id,
+                &self.permissions,
+                NetworkOperation::Dns,
+                &resource,
+            )?;
+        }
+
+        resolve_dns_records(&self.dns, self.dns_resolver.as_ref(), hostname, record_type)
+            .map_err(map_dns_resolver_error)
+    }
+
     pub fn register_driver(&mut self, driver: CommandDriver) -> KernelResult<()> {
         self.assert_not_terminated()?;
         lock_or_recover(&self.driver_pids)
             .entry(driver.name().to_owned())
             .or_default();
+        let populate_driver = driver.clone();
         self.commands.register(driver);
-        self.commands.populate_bin(&mut self.filesystem)?;
+        self.commands
+            .populate_driver_bin(&mut self.filesystem, &populate_driver)?;
         Ok(())
     }
 
@@ -633,7 +727,14 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.assert_driver_owns(requester_driver, pid)?;
         let existed = self.exists_internal(Some(pid), path)?;
         let content = content.into();
-        self.write_file(path, content)?;
+        if is_proc_path(path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(path));
+        }
+        self.check_write_file_limits(path, content.len() as u64)?;
+        VirtualFileSystem::write_file_with_mode(&mut self.filesystem, path, content, mode)?;
         if !existed {
             let umask = self.processes.get_umask(pid)?;
             self.apply_creation_mode(path, mode.unwrap_or(0o666), umask)?;
@@ -663,7 +764,14 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.assert_not_terminated()?;
         self.assert_driver_owns(requester_driver, pid)?;
         let existed = self.exists_internal(Some(pid), path)?;
-        self.create_dir(path)?;
+        if is_proc_path(path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(path));
+        }
+        self.check_create_dir_limits(path)?;
+        VirtualFileSystem::create_dir_with_mode(&mut self.filesystem, path, mode)?;
         if !existed {
             let umask = self.processes.get_umask(pid)?;
             self.apply_creation_mode(path, mode.unwrap_or(0o777), umask)?;
@@ -694,7 +802,14 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.assert_not_terminated()?;
         self.assert_driver_owns(requester_driver, pid)?;
         let created_paths = self.missing_directory_paths(path, recursive)?;
-        self.mkdir(path, recursive)?;
+        if is_proc_path(path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(path));
+        }
+        self.check_mkdir_limits(path, recursive)?;
+        VirtualFileSystem::mkdir_with_mode(&mut self.filesystem, path, recursive, mode)?;
         if !created_paths.is_empty() {
             let umask = self.processes.get_umask(pid)?;
             let mode = mode.unwrap_or(0o777);
@@ -904,6 +1019,19 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     }
 
     pub fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> KernelResult<()> {
+        self.utimes_spec(
+            path,
+            VirtualUtimeSpec::Set(VirtualTimeSpec::from_millis(atime_ms)),
+            VirtualUtimeSpec::Set(VirtualTimeSpec::from_millis(mtime_ms)),
+        )
+    }
+
+    pub fn utimes_spec(
+        &mut self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+    ) -> KernelResult<()> {
         self.assert_not_terminated()?;
         if is_proc_path(path) {
             self.filesystem
@@ -911,7 +1039,45 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 .map_err(KernelError::from)?;
             return Err(read_only_filesystem_error(path));
         }
-        Ok(self.filesystem.utimes(path, atime_ms, mtime_ms)?)
+        Ok(self.filesystem.utimes_spec(path, atime, mtime, true)?)
+    }
+
+    pub fn lutimes(
+        &mut self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        if is_proc_path(path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(path));
+        }
+        Ok(self.filesystem.utimes_spec(path, atime, mtime, false)?)
+    }
+
+    pub fn futimes(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        let path = self
+            .description_for_fd(requester_driver, pid, fd)?
+            .path()
+            .to_owned();
+        if is_proc_path(&path) {
+            self.filesystem
+                .check_virtual_path(FsOperation::Write, &path)
+                .map_err(KernelError::from)?;
+            return Err(read_only_filesystem_error(&path));
+        }
+        Ok(self.filesystem.utimes_spec(&path, atime, mtime, true)?)
     }
 
     pub fn truncate(&mut self, path: &str, length: u64) -> KernelResult<()> {
@@ -988,6 +1154,8 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 umask: DEFAULT_PROCESS_UMASK,
                 fds: Default::default(),
                 identity: self.users.identity(),
+                blocked_signals: SignalSet::empty(),
+                pending_signals: SignalSet::empty(),
             },
             options.requester_driver.as_deref(),
         )
@@ -1044,6 +1212,8 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 umask: DEFAULT_PROCESS_UMASK,
                 fds: Default::default(),
                 identity: self.users.identity(),
+                blocked_signals: SignalSet::empty(),
+                pending_signals: SignalSet::empty(),
             },
             Some(requester_driver),
         )
@@ -1525,6 +1695,82 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(result)
     }
 
+    pub fn socket_set_datagram_option(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        option: DatagramSocketOption,
+        enabled: bool,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        self.sockets
+            .set_datagram_socket_option(socket_id, option, enabled)?;
+        self.poll_notifier.notify();
+        Ok(())
+    }
+
+    pub fn socket_add_membership(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        membership: SocketMulticastMembership,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        self.sockets
+            .add_multicast_membership(socket_id, membership)?;
+        self.poll_notifier.notify();
+        Ok(())
+    }
+
+    pub fn socket_drop_membership(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        socket_id: SocketId,
+        membership: SocketMulticastMembership,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let existing = self
+            .sockets
+            .get(socket_id)
+            .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
+        if existing.owner_pid() != pid {
+            return Err(KernelError::permission_denied(format!(
+                "process {pid} does not own socket {socket_id}"
+            )));
+        }
+
+        self.sockets
+            .drop_multicast_membership(socket_id, membership)?;
+        self.poll_notifier.notify();
+        Ok(())
+    }
+
     pub fn socket_set_state(
         &mut self,
         requester_driver: &str,
@@ -1664,6 +1910,17 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.assert_not_terminated()?;
         self.assert_driver_owns(requester_driver, pid)?;
         if let Some(existing_fd) = parse_dev_fd_path(path)? {
+            {
+                let tables = lock_or_recover(&self.fd_tables);
+                let table = tables
+                    .get(pid)
+                    .ok_or_else(|| KernelError::no_such_process(pid))?;
+                table
+                    .get(existing_fd)
+                    .ok_or_else(|| KernelError::bad_file_descriptor(existing_fd))?;
+            }
+            self.resources
+                .check_fd_allocation(&self.resource_snapshot(), 1)?;
             let mut tables = lock_or_recover(&self.fd_tables);
             let table = tables
                 .get_mut(pid)
@@ -1701,6 +1958,8 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             self.filesystem
                 .check_virtual_path(FsOperation::Read, path)
                 .map_err(KernelError::from)?;
+            self.resources
+                .check_fd_allocation(&self.resource_snapshot(), 1)?;
             let mut tables = lock_or_recover(&self.fd_tables);
             let table = tables
                 .get_mut(pid)
@@ -1718,11 +1977,13 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         } else {
             false
         };
-        let (filetype, lock_target) = self.prepare_fd_open(path, flags)?;
+        let (filetype, lock_target) = self.prepare_fd_open(path, flags, mode)?;
         if flags & O_CREAT != 0 && !existed {
             let umask = self.processes.get_umask(pid)?;
             self.apply_creation_mode(path, mode.unwrap_or(0o666), umask)?;
         }
+        self.resources
+            .check_fd_allocation(&self.resource_snapshot(), 1)?;
         let mut tables = lock_or_recover(&self.fd_tables);
         let table = tables
             .get_mut(pid)
@@ -1858,6 +2119,14 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         let path = entry.description.path().to_owned();
+        if is_virtual_device_storage_path(&path) {
+            VirtualFileSystem::write_file(&mut self.filesystem, &path, data.to_vec())?;
+            let cursor = entry.description.cursor();
+            entry
+                .description
+                .set_cursor(cursor.saturating_add(data.len() as u64));
+            return Ok(data.len());
+        }
         let current_size = self.current_storage_file_size(&path)?;
         let cursor = entry.description.cursor() as usize;
         if entry.description.flags() & O_APPEND != 0 {
@@ -2107,6 +2376,17 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
     pub fn fd_dup(&mut self, requester_driver: &str, pid: u32, fd: u32) -> KernelResult<u32> {
         self.assert_driver_owns(requester_driver, pid)?;
+        {
+            let tables = lock_or_recover(&self.fd_tables);
+            let table = tables
+                .get(pid)
+                .ok_or_else(|| KernelError::no_such_process(pid))?;
+            table
+                .get(fd)
+                .ok_or_else(|| KernelError::bad_file_descriptor(fd))?;
+        }
+        self.resources
+            .check_fd_allocation(&self.resource_snapshot(), 1)?;
         let mut tables = lock_or_recover(&self.fd_tables);
         let table = tables
             .get_mut(pid)
@@ -2122,19 +2402,36 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         new_fd: u32,
     ) -> KernelResult<()> {
         self.assert_driver_owns(requester_driver, pid)?;
-        let replaced = {
-            let mut tables = lock_or_recover(&self.fd_tables);
+        let (replaced, needs_fd_growth) = {
+            let tables = lock_or_recover(&self.fd_tables);
             let table = tables
-                .get_mut(pid)
+                .get(pid)
                 .ok_or_else(|| KernelError::no_such_process(pid))?;
+            table
+                .get(old_fd)
+                .ok_or_else(|| KernelError::bad_file_descriptor(old_fd))?;
             let replaced = if old_fd == new_fd {
                 None
             } else {
                 table.get(new_fd).cloned()
             };
-            table.dup2(old_fd, new_fd)?;
-            replaced
+            if new_fd as usize >= table.max_fds() {
+                return Err(KernelError::bad_file_descriptor(new_fd));
+            }
+            let needs_fd_growth = old_fd != new_fd && replaced.is_none();
+            (replaced, needs_fd_growth)
         };
+        if needs_fd_growth {
+            self.resources
+                .check_fd_allocation(&self.resource_snapshot(), 1)?;
+        }
+        {
+            let mut tables = lock_or_recover(&self.fd_tables);
+            let table = tables
+                .get_mut(pid)
+                .ok_or_else(|| KernelError::no_such_process(pid))?;
+            table.dup2(old_fd, new_fd)?;
+        }
 
         if let Some(entry) = replaced {
             self.close_special_resource_if_needed(&entry.description, entry.filetype);
@@ -2169,6 +2466,25 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         arg: u32,
     ) -> KernelResult<u32> {
         self.assert_driver_owns(requester_driver, pid)?;
+        if command == F_DUPFD {
+            {
+                let tables = lock_or_recover(&self.fd_tables);
+                let table = tables
+                    .get(pid)
+                    .ok_or_else(|| KernelError::no_such_process(pid))?;
+                table
+                    .get(fd)
+                    .ok_or_else(|| KernelError::bad_file_descriptor(fd))?;
+                if arg as usize >= table.max_fds() {
+                    return Err(KernelError::new(
+                        "EINVAL",
+                        format!("fd {arg} exceeds process fd limit"),
+                    ));
+                }
+            }
+            self.resources
+                .check_fd_allocation(&self.resource_snapshot(), 1)?;
+        }
         let mut tables = lock_or_recover(&self.fd_tables);
         let table = tables
             .get_mut(pid)
@@ -2223,6 +2539,11 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             .get(pid)
             .ok_or_else(|| KernelError::no_such_process(pid))?
             .stat(fd)?)
+    }
+
+    pub fn fd_path(&self, requester_driver: &str, pid: u32, fd: u32) -> KernelResult<String> {
+        let description = self.description_for_fd(requester_driver, pid, fd)?;
+        Ok(description.path().to_owned())
     }
 
     pub fn isatty(&self, requester_driver: &str, pid: u32, fd: u32) -> KernelResult<bool> {
@@ -2356,6 +2677,22 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(pid)
     }
 
+    pub fn sigprocmask(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        how: SigmaskHow,
+        set: SignalSet,
+    ) -> KernelResult<SignalSet> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        Ok(self.processes.sigprocmask(pid, how, set)?)
+    }
+
+    pub fn sigpending(&self, requester_driver: &str, pid: u32) -> KernelResult<SignalSet> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        Ok(self.processes.sigpending(pid)?)
+    }
+
     pub fn getppid(&self, requester_driver: &str, pid: u32) -> KernelResult<u32> {
         self.assert_driver_owns(requester_driver, pid)?;
         Ok(self.processes.getppid(pid)?)
@@ -2414,13 +2751,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             return Ok(());
         }
 
-        self.processes.terminate_all();
-        let pids = lock_or_recover(&self.fd_tables).pids();
-        for pid in pids {
-            self.cleanup_process_resources(pid);
-        }
-        lock_or_recover(&self.driver_pids).clear();
-        self.terminated = true;
+        dispose_kernel_vm_resources(self);
         Ok(())
     }
 
@@ -2428,10 +2759,16 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         &mut self,
         path: &str,
         flags: u32,
+        mode: Option<u32>,
     ) -> KernelResult<(u8, Option<FileLockTarget>)> {
         if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
             self.check_write_file_limits(path, 0)?;
-            VirtualFileSystem::create_file_exclusive(&mut self.filesystem, path, Vec::new())?;
+            VirtualFileSystem::create_file_exclusive_with_mode(
+                &mut self.filesystem,
+                path,
+                Vec::new(),
+                mode,
+            )?;
             let stat = VirtualFileSystem::stat(&mut self.filesystem, path)?;
             return Ok((
                 filetype_for_path(path, &stat),
@@ -2447,7 +2784,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             }
         } else if flags & O_CREAT != 0 {
             self.check_write_file_limits(path, 0)?;
-            VirtualFileSystem::write_file(&mut self.filesystem, path, Vec::new())?;
+            VirtualFileSystem::write_file_with_mode(&mut self.filesystem, path, Vec::new(), mode)?;
         } else {
             let _ = VirtualFileSystem::stat(&mut self.filesystem, path)?;
             unreachable!("stat should return an error when opening a missing path");
@@ -2886,8 +3223,17 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             return Ok(Some(ProcNode::RootDir));
         }
 
-        if parts == ["mounts"] {
-            return Ok(Some(ProcNode::MountsFile));
+        let root_node = match parts.as_slice() {
+            ["mounts"] => Some(ProcNode::MountsFile),
+            ["cpuinfo"] => Some(ProcNode::CpuInfoFile),
+            ["meminfo"] => Some(ProcNode::MemInfoFile),
+            ["loadavg"] => Some(ProcNode::LoadAvgFile),
+            ["uptime"] => Some(ProcNode::UptimeFile),
+            ["version"] => Some(ProcNode::VersionFile),
+            _ => None,
+        };
+        if let Some(node) = root_node {
+            return Ok(Some(node));
         }
 
         let pid = match parts[0] {
@@ -2906,6 +3252,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             [_pid, "environ"] => ProcNode::PidEnviron { pid },
             [_pid, "cwd"] => ProcNode::PidCwdLink { pid },
             [_pid, "stat"] => ProcNode::PidStatFile { pid },
+            [_pid, "status"] => ProcNode::PidStatusFile { pid },
             [_pid, "fd", fd] => {
                 let fd = fd
                     .parse::<u32>()
@@ -2946,9 +3293,15 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 self.read_file_internal(current_pid, &target)
             }
             ProcNode::MountsFile => Ok(self.proc_mounts_bytes()),
+            ProcNode::CpuInfoFile => Ok(self.proc_cpuinfo_bytes()),
+            ProcNode::MemInfoFile => Ok(self.proc_meminfo_bytes()),
+            ProcNode::LoadAvgFile => Ok(self.proc_loadavg_bytes()),
+            ProcNode::UptimeFile => Ok(self.proc_uptime_bytes()),
+            ProcNode::VersionFile => Ok(self.proc_version_bytes()),
             ProcNode::PidCmdline { pid } => Ok(self.proc_cmdline_bytes(*pid)),
             ProcNode::PidEnviron { pid } => Ok(self.proc_environ_bytes(*pid)),
             ProcNode::PidStatFile { pid } => Ok(self.proc_stat_bytes(*pid)),
+            ProcNode::PidStatusFile { pid } => Ok(self.proc_status_bytes(*pid)),
             ProcNode::RootDir | ProcNode::PidDir { .. } | ProcNode::PidFdDir { .. } => {
                 Err(KernelError::new(
                     "EISDIR",
@@ -2986,6 +3339,26 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 proc_inode(node),
                 self.proc_mounts_bytes().len() as u64,
             )),
+            ProcNode::CpuInfoFile => Ok(proc_file_stat(
+                proc_inode(node),
+                self.proc_cpuinfo_bytes().len() as u64,
+            )),
+            ProcNode::MemInfoFile => Ok(proc_file_stat(
+                proc_inode(node),
+                self.proc_meminfo_bytes().len() as u64,
+            )),
+            ProcNode::LoadAvgFile => Ok(proc_file_stat(
+                proc_inode(node),
+                self.proc_loadavg_bytes().len() as u64,
+            )),
+            ProcNode::UptimeFile => Ok(proc_file_stat(
+                proc_inode(node),
+                self.proc_uptime_bytes().len() as u64,
+            )),
+            ProcNode::VersionFile => Ok(proc_file_stat(
+                proc_inode(node),
+                self.proc_version_bytes().len() as u64,
+            )),
             ProcNode::PidCmdline { pid } => Ok(proc_file_stat(
                 proc_inode(node),
                 self.proc_cmdline_bytes(*pid).len() as u64,
@@ -2997,6 +3370,10 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             ProcNode::PidStatFile { pid } => Ok(proc_file_stat(
                 proc_inode(node),
                 self.proc_stat_bytes(*pid).len() as u64,
+            )),
+            ProcNode::PidStatusFile { pid } => Ok(proc_file_stat(
+                proc_inode(node),
+                self.proc_status_bytes(*pid).len() as u64,
             )),
             ProcNode::SelfLink { .. }
             | ProcNode::PidCwdLink { .. }
@@ -3041,8 +3418,13 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                     .keys()
                     .map(|pid| pid.to_string())
                     .collect::<Vec<_>>();
+                entries.push(String::from("cpuinfo"));
+                entries.push(String::from("loadavg"));
+                entries.push(String::from("meminfo"));
                 entries.push(String::from("mounts"));
                 entries.push(String::from("self"));
+                entries.push(String::from("uptime"));
+                entries.push(String::from("version"));
                 entries.sort();
                 Ok(entries)
             }
@@ -3052,6 +3434,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 String::from("environ"),
                 String::from("fd"),
                 String::from("stat"),
+                String::from("status"),
             ]),
             ProcNode::PidFdDir { pid } => {
                 let tables = lock_or_recover(&self.fd_tables);
@@ -3103,6 +3486,11 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         match node {
             ProcNode::RootDir => String::from("/proc"),
             ProcNode::MountsFile => String::from("/proc/mounts"),
+            ProcNode::CpuInfoFile => String::from("/proc/cpuinfo"),
+            ProcNode::MemInfoFile => String::from("/proc/meminfo"),
+            ProcNode::LoadAvgFile => String::from("/proc/loadavg"),
+            ProcNode::UptimeFile => String::from("/proc/uptime"),
+            ProcNode::VersionFile => String::from("/proc/version"),
             ProcNode::SelfLink { pid } => format!("/proc/{pid}"),
             ProcNode::PidDir { pid } => format!("/proc/{pid}"),
             ProcNode::PidFdDir { pid } => format!("/proc/{pid}/fd"),
@@ -3110,6 +3498,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             ProcNode::PidEnviron { pid } => format!("/proc/{pid}/environ"),
             ProcNode::PidCwdLink { pid } => format!("/proc/{pid}/cwd"),
             ProcNode::PidStatFile { pid } => format!("/proc/{pid}/stat"),
+            ProcNode::PidStatusFile { pid } => format!("/proc/{pid}/status"),
             ProcNode::PidFdLink { pid, fd } => format!("/proc/{pid}/fd/{fd}"),
         }
     }
@@ -3184,6 +3573,84 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             })
             .collect::<String>()
             .into_bytes()
+    }
+
+    fn proc_cpu_count(&self) -> usize {
+        self.resource_limits().virtual_cpu_count.unwrap_or(1)
+    }
+
+    fn proc_cpuinfo_bytes(&self) -> Vec<u8> {
+        let mut body = String::new();
+        for processor in 0..self.proc_cpu_count() {
+            body.push_str(&format!(
+                "processor\t: {processor}\nmodel name\t: agentOS Virtual CPU\ncpu MHz\t\t: 1000.000\nsiblings\t: 1\ncpu cores\t: 1\n\n"
+            ));
+        }
+        body.into_bytes()
+    }
+
+    fn proc_mem_total_bytes(&self) -> u64 {
+        self.resource_limits()
+            .max_wasm_memory_bytes
+            .or(self.resource_limits().max_filesystem_bytes)
+            .unwrap_or(DEFAULT_MAX_OPEN_FDS as u64 * 1024 * 1024)
+    }
+
+    fn proc_meminfo_bytes(&self) -> Vec<u8> {
+        let total_kb = self.proc_mem_total_bytes().div_ceil(1024);
+        let zero_kb = 0;
+        format!(
+            "MemTotal:{total_kb:>8} kB\nMemFree:{total_kb:>9} kB\nMemAvailable:{total_kb:>4} kB\nBuffers:{zero_kb:>9} kB\nCached:{zero_kb:>10} kB\n"
+        )
+        .into_bytes()
+    }
+
+    fn proc_loadavg_bytes(&self) -> Vec<u8> {
+        let processes = self.processes.list_processes();
+        let running = processes
+            .values()
+            .filter(|process| process.status == ProcessStatus::Running)
+            .count();
+        let total = processes.len().max(1);
+        let last_pid = processes.keys().next_back().copied().unwrap_or(0);
+        format!("0.00 0.00 0.00 {running}/{total} {last_pid}\n").into_bytes()
+    }
+
+    fn proc_uptime_bytes(&self) -> Vec<u8> {
+        let uptime = self.boot_instant.elapsed().as_secs_f64();
+        format!("{uptime:.2} {uptime:.2}\n").into_bytes()
+    }
+
+    fn proc_version_bytes(&self) -> Vec<u8> {
+        format!(
+            "Linux version 6.8.0-agentos (agentos@localhost) #1 SMP boot={}\n",
+            self.boot_time_ms
+        )
+        .into_bytes()
+    }
+
+    fn proc_status_bytes(&self, pid: u32) -> Vec<u8> {
+        let entry = self
+            .processes
+            .get(pid)
+            .expect("process must exist while procfs path is resolved");
+        let (state_code, state_name) = match entry.status {
+            ProcessStatus::Running => ('R', "running"),
+            ProcessStatus::Stopped => ('T', "stopped"),
+            ProcessStatus::Exited => ('Z', "zombie"),
+        };
+        format!(
+            "Name:\t{name}\nState:\t{state_code} ({state_name})\nPid:\t{pid}\nPPid:\t{ppid}\nUid:\t{uid}\t{euid}\t{euid}\t{euid}\nGid:\t{gid}\t{egid}\t{egid}\t{egid}\nVmSize:\t{:>8} kB\nVmRSS:\t{:>9} kB\nThreads:\t1\n",
+            0,
+            0,
+            name = entry.command,
+            ppid = entry.ppid,
+            uid = entry.identity.uid,
+            euid = entry.identity.euid,
+            gid = entry.identity.gid,
+            egid = entry.identity.egid,
+        )
+        .into_bytes()
     }
 
     fn proc_read_file_from_open_path(
@@ -3796,8 +4263,11 @@ fn synthetic_character_device_stat(ino: u64) -> VirtualStat {
         is_directory: false,
         is_symbolic_link: false,
         atime_ms: now,
+        atime_nsec: 0,
         mtime_ms: now,
+        mtime_nsec: 0,
         ctime_ms: now,
+        ctime_nsec: 0,
         birthtime_ms: now,
         ino,
         nlink: 1,
@@ -3817,8 +4287,11 @@ fn proc_dir_stat(ino: u64) -> VirtualStat {
         is_directory: true,
         is_symbolic_link: false,
         atime_ms: now,
+        atime_nsec: 0,
         mtime_ms: now,
+        mtime_nsec: 0,
         ctime_ms: now,
+        ctime_nsec: 0,
         birthtime_ms: now,
         ino,
         nlink: 2,
@@ -3838,8 +4311,11 @@ fn proc_file_stat(ino: u64, size: u64) -> VirtualStat {
         is_directory: false,
         is_symbolic_link: false,
         atime_ms: now,
+        atime_nsec: 0,
         mtime_ms: now,
+        mtime_nsec: 0,
         ctime_ms: now,
+        ctime_nsec: 0,
         birthtime_ms: now,
         ino,
         nlink: 1,
@@ -3859,8 +4335,11 @@ fn proc_symlink_stat(ino: u64, size: u64) -> VirtualStat {
         is_directory: false,
         is_symbolic_link: true,
         atime_ms: now,
+        atime_nsec: 0,
         mtime_ms: now,
+        mtime_nsec: 0,
         ctime_ms: now,
+        ctime_nsec: 0,
         birthtime_ms: now,
         ino,
         nlink: 1,
@@ -3878,9 +4357,15 @@ fn proc_filetype(node: &ProcNode) -> u8 {
             FILETYPE_SYMBOLIC_LINK
         }
         ProcNode::MountsFile
+        | ProcNode::CpuInfoFile
+        | ProcNode::MemInfoFile
+        | ProcNode::LoadAvgFile
+        | ProcNode::UptimeFile
+        | ProcNode::VersionFile
         | ProcNode::PidCmdline { .. }
         | ProcNode::PidEnviron { .. }
-        | ProcNode::PidStatFile { .. } => FILETYPE_REGULAR_FILE,
+        | ProcNode::PidStatFile { .. }
+        | ProcNode::PidStatusFile { .. } => FILETYPE_REGULAR_FILE,
     }
 }
 
@@ -3888,6 +4373,11 @@ fn proc_inode(node: &ProcNode) -> u64 {
     match node {
         ProcNode::RootDir => 0xfffe_0001,
         ProcNode::MountsFile => 0xfffe_0002,
+        ProcNode::CpuInfoFile => 0xfffe_0003,
+        ProcNode::MemInfoFile => 0xfffe_0004,
+        ProcNode::LoadAvgFile => 0xfffe_0005,
+        ProcNode::UptimeFile => 0xfffe_0006,
+        ProcNode::VersionFile => 0xfffe_0007,
         ProcNode::SelfLink { pid } => 0xfffe_1000 + u64::from(*pid),
         ProcNode::PidDir { pid } => 0xfffe_2000 + u64::from(*pid),
         ProcNode::PidFdDir { pid } => 0xfffe_3000 + u64::from(*pid),
@@ -3895,6 +4385,7 @@ fn proc_inode(node: &ProcNode) -> u64 {
         ProcNode::PidEnviron { pid } => 0xfffe_5000 + u64::from(*pid),
         ProcNode::PidCwdLink { pid } => 0xfffe_6000 + u64::from(*pid),
         ProcNode::PidStatFile { pid } => 0xfffe_7000 + u64::from(*pid),
+        ProcNode::PidStatusFile { pid } => 0xfffe_8000 + u64::from(*pid),
         ProcNode::PidFdLink { pid, fd } => 0xffff_0000 + ((u64::from(*pid)) << 8) + u64::from(*fd),
     }
 }
@@ -3927,10 +4418,101 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+impl<F> Drop for KernelVm<F> {
+    fn drop(&mut self) {
+        if !self.terminated {
+            dispose_kernel_vm_resources(self);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::vfs::MemoryFileSystem;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::thread;
+
+    struct RetainedKernelResources {
+        process: KernelProcessHandle,
+        fd_tables: Arc<Mutex<FdTableManager>>,
+        pipes: PipeManager,
+        ptys: PtyManager,
+        sockets: SocketTable,
+        driver_pids: Arc<Mutex<BTreeMap<String, BTreeSet<u32>>>>,
+    }
+
+    fn kernel_with_live_resources() -> (KernelVm<MemoryFileSystem>, RetainedKernelResources) {
+        let mut config = KernelVmConfig::new("vm-drop-resources");
+        config.permissions = Permissions::allow_all();
+        let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+        kernel
+            .register_driver(CommandDriver::new("shell", ["sh"]))
+            .expect("register shell");
+
+        let process = kernel
+            .spawn_process(
+                "sh",
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from("shell")),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn shell");
+        let _ = kernel.open_pipe("shell", process.pid()).expect("open pipe");
+        let _ = kernel.open_pty("shell", process.pid()).expect("open pty");
+        let socket = kernel
+            .socket_create("shell", process.pid(), SocketSpec::tcp())
+            .expect("create socket");
+        kernel
+            .socket_set_state("shell", process.pid(), socket, SocketState::Listening)
+            .expect("mark listener");
+
+        let retained = RetainedKernelResources {
+            process: process.clone(),
+            fd_tables: Arc::clone(&kernel.fd_tables),
+            pipes: kernel.pipes.clone(),
+            ptys: kernel.ptys.clone(),
+            sockets: kernel.sockets.clone(),
+            driver_pids: Arc::clone(&kernel.driver_pids),
+        };
+
+        assert_eq!(lock_or_recover(retained.fd_tables.as_ref()).len(), 1);
+        assert_eq!(retained.pipes.pipe_count(), 1);
+        assert_eq!(retained.ptys.pty_count(), 1);
+        assert_eq!(retained.sockets.snapshot().sockets, 1);
+
+        (kernel, retained)
+    }
+
+    fn assert_kernel_drop_released_resources(retained: &RetainedKernelResources) {
+        assert_eq!(retained.process.wait(Duration::from_millis(50)), Some(143));
+        assert_eq!(retained.process.kill_signals(), vec![15]);
+        assert!(
+            lock_or_recover(retained.fd_tables.as_ref()).is_empty(),
+            "kernel drop should remove fd tables"
+        );
+        assert_eq!(
+            retained.pipes.pipe_count(),
+            0,
+            "kernel drop should close pipes"
+        );
+        assert_eq!(
+            retained.ptys.pty_count(),
+            0,
+            "kernel drop should close PTYs"
+        );
+        assert_eq!(
+            retained.sockets.snapshot().sockets,
+            0,
+            "kernel drop should reclaim sockets"
+        );
+        assert!(
+            lock_or_recover(retained.driver_pids.as_ref()).is_empty(),
+            "kernel drop should clear driver-owned pid tracking"
+        );
+    }
 
     #[test]
     fn setpgid_rejects_joining_a_process_group_owned_by_another_driver() {
@@ -3950,6 +4532,8 @@ mod tests {
                 umask: DEFAULT_PROCESS_UMASK,
                 fds: Default::default(),
                 identity: ProcessIdentity::default(),
+                blocked_signals: SignalSet::empty(),
+                pending_signals: SignalSet::empty(),
             },
             Arc::new(StubDriverProcess::default()),
         );
@@ -3968,6 +4552,8 @@ mod tests {
                 umask: DEFAULT_PROCESS_UMASK,
                 fds: Default::default(),
                 identity: ProcessIdentity::default(),
+                blocked_signals: SignalSet::empty(),
+                pending_signals: SignalSet::empty(),
             },
             Arc::new(StubDriverProcess::default()),
         );
@@ -3985,5 +4571,168 @@ mod tests {
             .setpgid("driver-b", peer_pid, leader_pid)
             .expect_err("cross-driver process-group join should be denied");
         assert_eq!(error.code(), "EPERM");
+    }
+
+    #[test]
+    fn sigprocmask_and_sigpending_require_process_ownership() {
+        let mut kernel = KernelVm::new(MemoryFileSystem::new(), KernelVmConfig::new("vm-sigmask"));
+        let process = kernel
+            .create_virtual_process(
+                "driver-a",
+                "driver-a",
+                "sleep",
+                Vec::new(),
+                VirtualProcessOptions::default(),
+            )
+            .expect("create virtual process");
+        let mask =
+            SignalSet::from_signal(crate::process_table::SIGCHLD).expect("SIGCHLD should be valid");
+
+        let previous = kernel
+            .sigprocmask("driver-a", process.pid(), SigmaskHow::Block, mask)
+            .expect("owner should update signal mask");
+        assert_eq!(previous, SignalSet::empty());
+        assert_eq!(
+            kernel
+                .sigpending("driver-a", process.pid())
+                .expect("owner should read pending signals"),
+            SignalSet::empty()
+        );
+
+        let error = kernel
+            .sigprocmask("driver-b", process.pid(), SigmaskHow::Block, mask)
+            .expect_err("foreign driver should be rejected");
+        assert_eq!(error.code(), "EPERM");
+        let error = kernel
+            .sigpending("driver-b", process.pid())
+            .expect_err("foreign driver should be rejected");
+        assert_eq!(error.code(), "EPERM");
+    }
+
+    #[test]
+    fn cleanup_process_resources_blocks_concurrent_dup2_until_pipe_cleanup_finishes() {
+        let fd_tables = Arc::new(Mutex::new(FdTableManager::new()));
+        let file_locks = FileLockManager::new();
+        let pipes = PipeManager::new();
+        let ptys = PtyManager::new();
+        let sockets = SocketTable::new();
+        let driver_pids = Arc::new(Mutex::new(BTreeMap::from([(
+            String::from("driver"),
+            BTreeSet::from([41]),
+        )])));
+        let pipe = pipes.create_pipe();
+
+        {
+            let mut tables = lock_or_recover(fd_tables.as_ref());
+            let table = tables.create(41);
+            table
+                .open_with(
+                    Arc::clone(&pipe.read.description),
+                    pipe.read.filetype,
+                    Some(10),
+                )
+                .expect("open pipe read end");
+            table
+                .open_with(
+                    Arc::clone(&pipe.write.description),
+                    pipe.write.filetype,
+                    Some(11),
+                )
+                .expect("open pipe write end");
+        }
+
+        let hook_state = Arc::new((Mutex::new((false, false)), Condvar::new()));
+        let hook_state_for_cleanup = Arc::clone(&hook_state);
+        set_cleanup_process_resources_test_hook(Some(Arc::new(move || {
+            let (state, wake) = &*hook_state_for_cleanup;
+            let mut state = lock_or_recover(state);
+            state.0 = true;
+            wake.notify_all();
+            while !state.1 {
+                state = wake.wait(state).expect("wait for cleanup release");
+            }
+        })));
+
+        let fd_tables_for_cleanup = Arc::clone(&fd_tables);
+        let pipes_for_cleanup = pipes.clone();
+        let driver_pids_for_cleanup = Arc::clone(&driver_pids);
+        let cleanup_thread = thread::spawn(move || {
+            cleanup_process_resources(
+                fd_tables_for_cleanup.as_ref(),
+                &file_locks,
+                &pipes_for_cleanup,
+                &ptys,
+                &sockets,
+                driver_pids_for_cleanup.as_ref(),
+                41,
+            );
+        });
+
+        {
+            let (state, wake) = &*hook_state;
+            let mut state = lock_or_recover(state);
+            while !state.0 {
+                state = wake.wait(state).expect("wait for cleanup hook");
+            }
+        }
+
+        let fd_tables_for_dup = Arc::clone(&fd_tables);
+        let dup_thread = thread::spawn(move || {
+            let mut tables = lock_or_recover(fd_tables_for_dup.as_ref());
+            let Some(table) = tables.get_mut(41) else {
+                return Err(String::from("ESRCH"));
+            };
+            table.dup2(10, 12).map_err(|error| error.code().to_string())
+        });
+
+        {
+            let (state, wake) = &*hook_state;
+            let mut state = lock_or_recover(state);
+            state.1 = true;
+            wake.notify_all();
+        }
+
+        cleanup_thread.join().expect("cleanup thread should finish");
+        let dup_result = dup_thread.join().expect("dup thread should finish");
+        set_cleanup_process_resources_test_hook(None);
+
+        assert_eq!(dup_result, Err(String::from("ESRCH")));
+        assert!(
+            lock_or_recover(fd_tables.as_ref()).get(41).is_none(),
+            "cleanup should remove the process FD table"
+        );
+        assert_eq!(pipes.pipe_count(), 0, "pipe cleanup should not leak");
+        assert!(
+            lock_or_recover(driver_pids.as_ref())
+                .get("driver")
+                .is_none_or(|pids| pids.is_empty()),
+            "driver ownership should be cleared"
+        );
+    }
+
+    #[test]
+    fn drop_disposes_live_kernel_vm_resources() {
+        let (kernel, retained) = kernel_with_live_resources();
+        drop(kernel);
+        assert_kernel_drop_released_resources(&retained);
+    }
+
+    #[test]
+    fn drop_during_panic_still_disposes_live_kernel_vm_resources() {
+        let retained = Arc::new(Mutex::new(None::<RetainedKernelResources>));
+        let retained_for_panic = Arc::clone(&retained);
+
+        let panic_result = catch_unwind(AssertUnwindSafe(move || {
+            let (kernel, resources) = kernel_with_live_resources();
+            *lock_or_recover(retained_for_panic.as_ref()) = Some(resources);
+            let _kernel = kernel;
+            panic!("intentional panic to exercise KernelVm::drop");
+        }));
+
+        assert!(panic_result.is_err(), "panic should be observed");
+        let retained = lock_or_recover(retained.as_ref())
+            .take()
+            .expect("panic path should retain resources for assertions");
+        assert_kernel_drop_released_resources(&retained);
     }
 }

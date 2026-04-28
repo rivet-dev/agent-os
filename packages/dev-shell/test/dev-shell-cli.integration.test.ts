@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -15,8 +15,76 @@ interface CommandResult {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(__dirname, "..", "..", "..");
-const paths = resolveWorkspacePaths(__dirname);
-const hasWasmBinaries = existsSync(path.join(paths.wasmCommandsDir, "bash"));
+const justfilePath = path.join(workspaceRoot, "justfile");
+const fallbackRecipe =
+	'pnpm --filter @rivet-dev/agent-os-dev-shell dev-shell -- "$@"';
+resolveWorkspacePaths(__dirname);
+
+function resolveExecutable(binaryName: string): string | undefined {
+	const pathValue = process.env.PATH;
+	if (!pathValue) {
+		return undefined;
+	}
+
+	const candidateNames =
+		process.platform === "win32"
+			? [binaryName, `${binaryName}.exe`, `${binaryName}.cmd`]
+			: [binaryName];
+
+	for (const entry of pathValue.split(path.delimiter)) {
+		if (!entry) {
+			continue;
+		}
+
+		for (const candidateName of candidateNames) {
+			const candidatePath = path.join(entry, candidateName);
+			if (existsSync(candidatePath)) {
+				return candidatePath;
+			}
+		}
+	}
+
+	return undefined;
+}
+
+function createDevShellWrapperProcess(args: string[]) {
+	const justBinary = resolveExecutable("just");
+	if (justBinary) {
+		return spawn(justBinary, ["--justfile", justfilePath, "dev-shell", ...args], {
+			cwd: workspaceRoot,
+			env: process.env,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+	}
+
+	const justfileContents = readFileSync(justfilePath, "utf8");
+	if (!justfileContents.includes(fallbackRecipe)) {
+		throw new Error(
+			"just is not installed and the dev-shell justfile recipe no longer matches the pnpm fallback command",
+		);
+	}
+
+	const separatorIndex = args.indexOf("--");
+	const forwardedArgs =
+		separatorIndex === -1
+			? args
+			: [...args.slice(0, separatorIndex), ...args.slice(separatorIndex + 1)];
+	return spawn(
+		"pnpm",
+		[
+			"--filter",
+			"@rivet-dev/agent-os-dev-shell",
+			"dev-shell",
+			"--",
+			...forwardedArgs,
+		],
+		{
+			cwd: workspaceRoot,
+			env: process.env,
+			stdio: ["ignore", "pipe", "pipe"],
+		},
+	);
+}
 
 function stripJustPreamble(output: string): string {
 	return output
@@ -28,7 +96,11 @@ function stripJustPreamble(output: string): string {
 					"pnpm --filter @rivet-dev/agent-os-dev-shell dev-shell --",
 				) &&
 				!line.startsWith("> @rivet-dev/agent-os-dev-shell@ dev-shell ") &&
-				!line.startsWith("> tsx src/shell.ts "),
+				!line.startsWith("> pnpm exec tsx src/shell.ts ") &&
+				!line.startsWith("> tsx src/shell.ts ") &&
+				!line.startsWith(
+					"> node ../../node_modules/tsx/dist/cli.mjs src/shell.ts ",
+				),
 		)
 		.join("\n")
 		.trim();
@@ -39,11 +111,7 @@ function runJustDevShell(
 	timeoutMs = 30_000,
 ): Promise<CommandResult> {
 	return new Promise((resolve, reject) => {
-		const child = spawn("just", ["dev-shell", ...args], {
-			cwd: workspaceRoot,
-			env: process.env,
-			stdio: ["ignore", "pipe", "pipe"],
-		});
+		const child = createDevShellWrapperProcess(args);
 
 		const stdoutChunks: Buffer[] = [];
 		const stderrChunks: Buffer[] = [];
@@ -122,13 +190,12 @@ describe("dev-shell justfile wrapper", { timeout: 60_000 }, () => {
 		);
 	});
 
-	it.skip("runs scripted shell commands through the just wrapper", async () => {
-		workDir = await mkdtemp(
-			path.join(tmpdir(), "agent-os-dev-shell-just-wasm-"),
-		);
+	it("runs scripted shell commands through the just wrapper", async () => {
+		workDir = await mkdtemp(path.join(tmpdir(), "agent-os-dev-shell-shell-"));
+		const shellWorkDir = workDir;
 		const result = await runJustDevShell([
 			"--work-dir",
-			workDir,
+			shellWorkDir,
 			"--",
 			"bash",
 			"-lc",
@@ -137,7 +204,7 @@ describe("dev-shell justfile wrapper", { timeout: 60_000 }, () => {
 		expect(result.exitCode).toBe(0);
 		const stdout = stripJustPreamble(result.stdout);
 		expect(stdout).toContain("cli-shell-ok");
-		expect(stdout).toContain(workDir);
+		expect(stdout).toContain(shellWorkDir);
 	});
 
 	it("runs pi through the just wrapper", async () => {

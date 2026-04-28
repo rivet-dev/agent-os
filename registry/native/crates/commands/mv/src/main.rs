@@ -89,7 +89,11 @@ fn move_path(source: &Path, destination: &Path) -> io::Result<()> {
 fn move_file(source: &Path, destination: &Path, permissions: &fs::Permissions) -> io::Result<()> {
     remove_existing_non_dir(destination)?;
     fs::copy(source, destination)?;
-    fs::set_permissions(destination, permissions.clone())?;
+    if let Err(error) = fs::set_permissions(destination, permissions.clone()) {
+        if !is_ignorable_permission_copy_error(&error) {
+            return Err(error);
+        }
+    }
     fs::remove_file(source)
 }
 
@@ -164,4 +168,9 @@ fn file_name(path: &Path) -> io::Result<&OsStr> {
             format!("cannot determine file name for '{}'", path.display()),
         )
     })
+}
+
+fn is_ignorable_permission_copy_error(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::Unsupported
+        || matches!(error.raw_os_error(), Some(52 | 95))
 }

@@ -20,6 +20,7 @@ pub const SIGTERM: i32 = 15;
 pub const SIGKILL: i32 = 9;
 pub const SIGPIPE: i32 = 13;
 pub const SIGWINCH: i32 = 28;
+const MAX_SIGNAL: i32 = 64;
 
 pub type ProcessResult<T> = Result<T, ProcessTableError>;
 pub type ProcessExitCallback = Arc<dyn Fn(i32) + Send + Sync + 'static>;
@@ -90,6 +91,80 @@ pub enum ProcessStatus {
     Running,
     Stopped,
     Exited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SignalSet {
+    bits: u64,
+}
+
+impl SignalSet {
+    pub const fn empty() -> Self {
+        Self { bits: 0 }
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.bits == 0
+    }
+
+    pub fn from_signal(signal: i32) -> ProcessResult<Self> {
+        Ok(Self {
+            bits: signal_bit(signal)?,
+        })
+    }
+
+    pub fn from_signals(signals: impl IntoIterator<Item = i32>) -> ProcessResult<Self> {
+        let mut set = Self::empty();
+        for signal in signals {
+            set.insert(signal)?;
+        }
+        Ok(set)
+    }
+
+    pub fn contains(self, signal: i32) -> bool {
+        signal_bit(signal)
+            .map(|bit| self.bits & bit != 0)
+            .unwrap_or(false)
+    }
+
+    pub fn insert(&mut self, signal: i32) -> ProcessResult<()> {
+        self.bits |= signal_bit(signal)?;
+        Ok(())
+    }
+
+    pub fn remove(&mut self, signal: i32) -> ProcessResult<()> {
+        self.bits &= !signal_bit(signal)?;
+        Ok(())
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            bits: self.bits | other.bits,
+        }
+    }
+
+    pub fn difference(self, other: Self) -> Self {
+        Self {
+            bits: self.bits & !other.bits,
+        }
+    }
+
+    pub fn signals(self) -> Vec<i32> {
+        let mut signals = Vec::new();
+        for signal in 1..=MAX_SIGNAL {
+            if self.contains(signal) {
+                signals.push(signal);
+            }
+        }
+        signals
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigmaskHow {
+    Block,
+    Unblock,
+    SetMask,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +248,8 @@ pub struct ProcessContext {
     pub umask: u32,
     pub fds: ProcessFileDescriptors,
     pub identity: ProcessIdentity,
+    pub blocked_signals: SignalSet,
+    pub pending_signals: SignalSet,
 }
 
 impl Default for ProcessContext {
@@ -185,6 +262,8 @@ impl Default for ProcessContext {
             umask: DEFAULT_PROCESS_UMASK,
             fds: ProcessFileDescriptors::default(),
             identity: ProcessIdentity::default(),
+            blocked_signals: SignalSet::empty(),
+            pending_signals: SignalSet::empty(),
         }
     }
 }
@@ -235,6 +314,15 @@ struct ProcessRecord {
     entry: ProcessEntry,
     driver_process: Arc<dyn DriverProcess>,
     pending_wait_events: VecDeque<PendingWaitEvent>,
+    blocked_signals: SignalSet,
+    pending_signals: SignalSet,
+}
+
+struct ScheduledSignalDelivery {
+    pid: u32,
+    signal: i32,
+    status: ProcessStatus,
+    driver_process: Arc<dyn DriverProcess>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,6 +456,8 @@ impl ProcessTable {
                 entry: entry.clone(),
                 driver_process,
                 pending_wait_events: VecDeque::new(),
+                blocked_signals: ctx.blocked_signals,
+                pending_signals: ctx.pending_signals,
             },
         );
 
@@ -480,30 +570,24 @@ impl ProcessTable {
     }
 
     pub fn kill(&self, pid: i32, signal: i32) -> ProcessResult<()> {
-        if !(0..=64).contains(&signal) {
+        if !(0..=MAX_SIGNAL).contains(&signal) {
             return Err(ProcessTableError::invalid_signal(signal));
         }
 
-        let targets = {
-            let state = self.inner.lock_state();
+        let deliveries = {
+            let mut state = self.inner.lock_state();
             if pid < 0 {
                 let pgid = pid.unsigned_abs();
-                let grouped: Vec<_> = state
+                let grouped = state
                     .entries
                     .values()
                     .filter(|record| record.entry.pgid == pgid)
-                    .map(|record| {
-                        (
-                            record.entry.pid,
-                            record.entry.status,
-                            Arc::clone(&record.driver_process),
-                        )
-                    })
-                    .collect();
+                    .map(|record| record.entry.pid)
+                    .collect::<Vec<_>>();
                 if grouped.is_empty() {
                     return Err(ProcessTableError::no_such_process_group(pgid));
                 }
-                grouped
+                collect_signal_deliveries(&mut state, &grouped, signal)?
             } else {
                 let pid = pid as u32;
                 let Some(record) = state.entries.get(&pid) else {
@@ -512,11 +596,7 @@ impl ProcessTable {
                 if record.entry.status == ProcessStatus::Exited || signal == 0 {
                     return Ok(());
                 }
-                vec![(
-                    record.entry.pid,
-                    record.entry.status,
-                    Arc::clone(&record.driver_process),
-                )]
+                collect_signal_deliveries(&mut state, &[pid], signal)?
             }
         };
 
@@ -524,23 +604,7 @@ impl ProcessTable {
             return Ok(());
         }
 
-        let mut stopped = Vec::new();
-        let mut continued = Vec::new();
-        for (target_pid, status, driver) in &targets {
-            match signal {
-                SIGSTOP | SIGTSTP if *status == ProcessStatus::Running => stopped.push(*target_pid),
-                SIGCONT if *status == ProcessStatus::Stopped => continued.push(*target_pid),
-                _ => {}
-            }
-            driver.kill(signal);
-        }
-
-        for pid in stopped {
-            self.mark_stopped(pid, signal);
-        }
-        for pid in continued {
-            self.mark_continued(pid);
-        }
+        deliver_signals(&self.inner, deliveries);
         Ok(())
     }
 
@@ -698,6 +762,43 @@ impl ProcessTable {
 
         self.inner.lock_state().terminating_all = false;
     }
+
+    pub fn sigprocmask(
+        &self,
+        pid: u32,
+        how: SigmaskHow,
+        set: SignalSet,
+    ) -> ProcessResult<SignalSet> {
+        let (previous, deliveries) = {
+            let mut state = self.inner.lock_state();
+            let record = state
+                .entries
+                .get_mut(&pid)
+                .ok_or_else(|| ProcessTableError::no_such_process(pid))?;
+            let previous = record.blocked_signals;
+            record.blocked_signals = match how {
+                SigmaskHow::Block => previous.union(set),
+                SigmaskHow::Unblock => previous.difference(set),
+                SigmaskHow::SetMask => set,
+            };
+
+            let unblocked_pending = record.pending_signals.difference(record.blocked_signals);
+            let deliveries = collect_pending_signal_deliveries(record, unblocked_pending)?;
+            (previous, deliveries)
+        };
+
+        deliver_signals(&self.inner, deliveries);
+        Ok(previous)
+    }
+
+    pub fn sigpending(&self, pid: u32) -> ProcessResult<SignalSet> {
+        self.inner
+            .lock_state()
+            .entries
+            .get(&pid)
+            .map(|record| record.pending_signals)
+            .ok_or_else(|| ProcessTableError::no_such_process(pid))
+    }
 }
 
 fn to_process_info(entry: &ProcessEntry) -> ProcessInfo {
@@ -715,7 +816,7 @@ fn to_process_info(entry: &ProcessEntry) -> ProcessInfo {
 }
 
 fn mark_exited_inner(inner: &Arc<ProcessTableInner>, pid: u32, exit_code: i32) {
-    let (callback, zombie_ttl, should_schedule, parent_driver, orphaned_group_targets) = {
+    let (callback, zombie_ttl, should_schedule, deliveries) = {
         let mut state = inner.lock_state();
         let (ppid, pgid) = {
             let Some(record) = state.entries.get_mut(&pid) else {
@@ -739,22 +840,41 @@ fn mark_exited_inner(inner: &Arc<ProcessTableInner>, pid: u32, exit_code: i32) {
         let orphaned_group_targets = collect_orphaned_group_signal_targets(&state, &affected_pgids);
 
         let should_schedule = !state.terminating_all;
-        let parent_driver = if should_schedule {
-            state
+        let mut deliveries = Vec::new();
+        if should_schedule {
+            if let Some(parent) = state
                 .entries
-                .get(&ppid)
+                .get_mut(&ppid)
                 .filter(|parent| parent.entry.status == ProcessStatus::Running)
-                .map(|parent| Arc::clone(&parent.driver_process))
-        } else {
-            None
-        };
+            {
+                if let Some(delivery) =
+                    queue_or_schedule_signal(parent, SIGCHLD).expect("SIGCHLD should be valid")
+                {
+                    deliveries.push(delivery);
+                }
+            }
+        }
+
+        for target_pid in orphaned_group_targets {
+            if let Some(record) = state.entries.get_mut(&target_pid) {
+                if let Some(delivery) =
+                    queue_or_schedule_signal(record, SIGHUP).expect("SIGHUP should be valid")
+                {
+                    deliveries.push(delivery);
+                }
+                if let Some(delivery) =
+                    queue_or_schedule_signal(record, SIGCONT).expect("SIGCONT should be valid")
+                {
+                    deliveries.push(delivery);
+                }
+            }
+        }
 
         (
             state.on_process_exit.clone(),
             state.zombie_ttl,
             should_schedule,
-            parent_driver,
-            orphaned_group_targets,
+            deliveries,
         )
     };
 
@@ -764,16 +884,7 @@ fn mark_exited_inner(inner: &Arc<ProcessTableInner>, pid: u32, exit_code: i32) {
         inner.reaper.cancel(pid);
     }
 
-    if let Some(parent_driver) = parent_driver {
-        parent_driver.kill(SIGCHLD);
-    }
-
-    for driver in &orphaned_group_targets {
-        driver.kill(SIGHUP);
-    }
-    for driver in &orphaned_group_targets {
-        driver.kill(SIGCONT);
-    }
+    deliver_signals(inner, deliveries);
 
     if let Some(on_process_exit) = callback {
         on_process_exit(pid);
@@ -814,7 +925,7 @@ fn reparent_target_pid(state: &ProcessTableState, exiting_pid: u32) -> u32 {
 fn collect_orphaned_group_signal_targets(
     state: &ProcessTableState,
     candidate_pgids: &BTreeSet<u32>,
-) -> Vec<Arc<dyn DriverProcess>> {
+) -> Vec<u32> {
     let mut targets = Vec::new();
     for &pgid in candidate_pgids {
         if !process_group_is_orphaned(state, pgid) || !process_group_has_stopped_member(state, pgid)
@@ -824,7 +935,7 @@ fn collect_orphaned_group_signal_targets(
 
         for record in state.entries.values() {
             if record.entry.pgid == pgid && record.entry.status != ProcessStatus::Exited {
-                targets.push(Arc::clone(&record.driver_process));
+                targets.push(record.entry.pid);
             }
         }
     }
@@ -877,7 +988,7 @@ fn mark_wait_event_inner(
     next_status: ProcessStatus,
     event: PendingWaitEvent,
 ) {
-    let parent_driver = {
+    let deliveries = {
         let mut state = inner.lock_state();
         let ppid = {
             let Some(record) = state.entries.get_mut(&pid) else {
@@ -895,16 +1006,122 @@ fn mark_wait_event_inner(
 
         state
             .entries
-            .get(&ppid)
+            .get_mut(&ppid)
             .filter(|parent| parent.entry.status == ProcessStatus::Running)
-            .map(|parent| Arc::clone(&parent.driver_process))
+            .and_then(|parent| {
+                queue_or_schedule_signal(parent, SIGCHLD)
+                    .expect("SIGCHLD should be valid")
+                    .into_iter()
+                    .next()
+            })
+            .into_iter()
+            .collect::<Vec<_>>()
     };
 
-    if let Some(parent_driver) = parent_driver {
-        parent_driver.kill(SIGCHLD);
-    }
+    deliver_signals(inner, deliveries);
 
     inner.waiters.notify_all();
+}
+
+fn signal_bit(signal: i32) -> ProcessResult<u64> {
+    if !(1..=MAX_SIGNAL).contains(&signal) {
+        return Err(ProcessTableError::invalid_signal(signal));
+    }
+    Ok(1u64 << (signal - 1))
+}
+
+fn signal_can_be_blocked(signal: i32) -> bool {
+    !matches!(signal, SIGKILL | SIGSTOP | SIGCONT)
+}
+
+fn queue_or_schedule_signal(
+    record: &mut ProcessRecord,
+    signal: i32,
+) -> ProcessResult<Option<ScheduledSignalDelivery>> {
+    if signal_can_be_blocked(signal) && record.blocked_signals.contains(signal) {
+        record.pending_signals.insert(signal)?;
+        return Ok(None);
+    }
+
+    Ok(Some(ScheduledSignalDelivery {
+        pid: record.entry.pid,
+        signal,
+        status: record.entry.status,
+        driver_process: Arc::clone(&record.driver_process),
+    }))
+}
+
+fn collect_signal_deliveries(
+    state: &mut ProcessTableState,
+    target_pids: &[u32],
+    signal: i32,
+) -> ProcessResult<Vec<ScheduledSignalDelivery>> {
+    let mut deliveries = Vec::new();
+    for pid in target_pids {
+        let Some(record) = state.entries.get_mut(pid) else {
+            continue;
+        };
+        if let Some(delivery) = queue_or_schedule_signal(record, signal)? {
+            deliveries.push(delivery);
+        }
+    }
+    Ok(deliveries)
+}
+
+fn collect_pending_signal_deliveries(
+    record: &mut ProcessRecord,
+    signals: SignalSet,
+) -> ProcessResult<Vec<ScheduledSignalDelivery>> {
+    let mut deliveries = Vec::new();
+    for signal in signals.signals() {
+        record.pending_signals.remove(signal)?;
+        deliveries.push(ScheduledSignalDelivery {
+            pid: record.entry.pid,
+            signal,
+            status: record.entry.status,
+            driver_process: Arc::clone(&record.driver_process),
+        });
+    }
+    Ok(deliveries)
+}
+
+fn deliver_signals(inner: &Arc<ProcessTableInner>, deliveries: Vec<ScheduledSignalDelivery>) {
+    let mut stopped = Vec::new();
+    let mut continued = Vec::new();
+
+    for delivery in &deliveries {
+        match delivery.signal {
+            SIGSTOP | SIGTSTP if delivery.status == ProcessStatus::Running => {
+                stopped.push((delivery.pid, delivery.signal))
+            }
+            SIGCONT if delivery.status == ProcessStatus::Stopped => continued.push(delivery.pid),
+            _ => {}
+        }
+        delivery.driver_process.kill(delivery.signal);
+    }
+
+    for (pid, signal) in stopped {
+        mark_wait_event_inner(
+            inner,
+            pid,
+            ProcessStatus::Stopped,
+            PendingWaitEvent {
+                status: signal,
+                event: ProcessWaitEvent::Stopped,
+            },
+        );
+    }
+    for pid in continued {
+        mark_wait_event_inner(
+            inner,
+            pid,
+            ProcessStatus::Running,
+            PendingWaitEvent {
+                status: SIGCONT,
+                event: ProcessWaitEvent::Continued,
+            },
+        );
+    }
 }
 
 fn resolve_wait_selector(

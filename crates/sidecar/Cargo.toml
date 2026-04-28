@@ -24,6 +24,7 @@ http = "1"
 hmac = "0.12"
 hickory-resolver = "0.26.0-beta.3"
 jsonwebtoken = "8.3.0"
+log = "0.4"
 md-5 = "0.10"
 nix = { version = "0.29", features = ["fs", "process", "signal", "user"] }
 openssl = "0.10"
@@ -46,3 +47,4 @@ url = "2"
 
 [dev-dependencies]
 wat = "1.0"
+v8 = "130"

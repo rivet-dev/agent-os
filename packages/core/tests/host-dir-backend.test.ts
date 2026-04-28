@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentOs, createHostDirBackend } from "../src/index.js";
 import {
 	REGISTRY_SOFTWARE,
-	registrySkipReason,
 } from "./helpers/registry-commands.js";
 
 describe("host_dir native mount integration", () => {
@@ -54,9 +53,7 @@ describe("host_dir native mount integration", () => {
 		expect(content).toBe("hello from host");
 	});
 
-	test.skipIf(registrySkipReason)(
-		"mounted host directory is readable from guest exec",
-		async () => {
+	test("mounted host directory is readable from guest exec", async () => {
 			vm = await AgentOs.create({
 				software: REGISTRY_SOFTWARE,
 				mounts: [
@@ -69,8 +66,7 @@ describe("host_dir native mount integration", () => {
 			const result = await vm.exec("cat /hostmnt/hello.txt");
 			expect(result.exitCode).toBe(0);
 			expect(result.stdout).toContain("hello from host");
-		},
-	);
+	});
 
 	test("symlink escape attempt is blocked", async () => {
 		const escapePath = path.join(tmpDir, "escape");

@@ -1,31 +1,52 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import curlPackage from "@rivet-dev/agent-os-curl";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { AgentOs } from "../src/index.js";
-import {
-	REGISTRY_SOFTWARE,
-	registrySkipReason,
-} from "./helpers/registry-commands.js";
+import { REGISTRY_SOFTWARE } from "./helpers/registry-commands.js";
+
+vi.setConfig({ testTimeout: 15_000 });
+
+const ALLOW_ALL_VM_PERMISSIONS = {
+	fs: "allow",
+	network: "allow",
+	childProcess: "allow",
+	process: "allow",
+	env: "allow",
+	tool: "allow",
+} as const;
 
 /**
  * Comprehensive tests for WASM command packages.
  * Each section tests a specific registry package end-to-end.
  */
-describe.skipIf(registrySkipReason)("WASM command packages", () => {
+describe("WASM command packages", () => {
 	let vm: AgentOs;
 
-	beforeEach(async () => {
-		vm = await AgentOs.create({ software: REGISTRY_SOFTWARE });
-	});
+	function useDescribeVm(): void {
+		beforeAll(async () => {
+			vm = await AgentOs.create({
+				software: REGISTRY_SOFTWARE,
+				permissions: ALLOW_ALL_VM_PERMISSIONS,
+			});
+		}, 120_000);
 
-	afterEach(async () => {
-		await vm.dispose();
-	});
+		afterAll(async () => {
+			await vm.dispose();
+		}, 30_000);
+	}
 
 	// ── coreutils: shell ──────────────────────────────────────────────
 
 	describe("sh (coreutils)", () => {
+		useDescribeVm();
+
+		test("starts in the default home cwd", async () => {
+			const r = await vm.exec("pwd");
+			expect(r.exitCode).toBe(0);
+			expect(r.stdout.trim()).toBe("/home/user");
+		});
+
 		test("variables and arithmetic", async () => {
 			const r = await vm.exec("X=42; echo $((X + 8))");
 			expect(r.exitCode).toBe(0);
@@ -83,6 +104,8 @@ EOF`);
 	// ── coreutils: file operations ────────────────────────────────────
 
 	describe("file operations (coreutils)", () => {
+		useDescribeVm();
+
 		test("cp and cat", async () => {
 			await vm.exec("echo data > /tmp/orig.txt");
 			const r = await vm.exec(
@@ -142,6 +165,13 @@ EOF`);
 			expect(head.stdout.trim()).toBe("1\n2");
 			const tail = await vm.exec("tail -2 /tmp/lines.txt");
 			expect(tail.stdout.trim()).toBe("4\n5");
+		});
+
+		test("redirected printf preserves escaped newlines inside double quotes", async () => {
+			await vm.exec('printf "alpha\\nbeta\\n" > /tmp/printf-escaped-lines.txt');
+			const result = await vm.exec("cat /tmp/printf-escaped-lines.txt");
+			expect(result.exitCode).toBe(0);
+			expect(result.stdout).toBe("alpha\nbeta\n");
 		});
 
 		test("wc counts lines", async () => {
@@ -257,6 +287,8 @@ EOF`);
 	// ── grep ──────────────────────────────────────────────────────────
 
 	describe("grep", () => {
+		useDescribeVm();
+
 		test("basic pattern match", async () => {
 			await vm.exec(
 				'printf "apple\\nbanana\\ncherry\\napricot\\n" > /tmp/grep.txt',
@@ -318,6 +350,8 @@ EOF`);
 	// ── sed ───────────────────────────────────────────────────────────
 
 	describe("sed", () => {
+		useDescribeVm();
+
 		test("substitute first occurrence", async () => {
 			const r = await vm.exec("echo 'hello world' | sed 's/world/earth/'");
 			expect(r.exitCode).toBe(0);
@@ -348,6 +382,8 @@ EOF`);
 	// ── gawk ──────────────────────────────────────────────────────────
 
 	describe("awk (gawk)", () => {
+		useDescribeVm();
+
 		test("print specific field", async () => {
 			await vm.exec('printf "a b c\\n1 2 3\\n" > /tmp/awk.txt');
 			const r = await vm.exec("awk '{print $2}' /tmp/awk.txt");
@@ -379,6 +415,8 @@ EOF`);
 	// ── findutils ─────────────────────────────────────────────────────
 
 	describe("find and xargs (findutils)", () => {
+		useDescribeVm();
+
 		test("find files by name", async () => {
 			await vm.exec(
 				"mkdir -p /tmp/findtest/sub && echo a > /tmp/findtest/a.txt && echo b > /tmp/findtest/b.log && echo c > /tmp/findtest/sub/c.txt",
@@ -411,6 +449,8 @@ EOF`);
 	// ── diffutils ─────────────────────────────────────────────────────
 
 	describe("diff (diffutils)", () => {
+		useDescribeVm();
+
 		test("diff identical files returns 0", async () => {
 			await vm.exec("echo same > /tmp/d1.txt && echo same > /tmp/d2.txt");
 			const r = await vm.exec("diff /tmp/d1.txt /tmp/d2.txt");
@@ -430,6 +470,8 @@ EOF`);
 	// ── tar ───────────────────────────────────────────────────────────
 
 	describe("tar", () => {
+		useDescribeVm();
+
 		test("create and extract archive", async () => {
 			await vm.exec(
 				"mkdir -p /tmp/tardir && echo file-a > /tmp/tardir/a.txt && echo file-b > /tmp/tardir/b.txt",
@@ -442,7 +484,7 @@ EOF`);
 			);
 			expect(extract.exitCode).toBe(0);
 			expect(extract.stdout.trim()).toBe("file-a");
-		});
+		}, 30_000);
 
 		test("list archive contents", async () => {
 			await vm.exec("mkdir -p /tmp/tarlist && echo x > /tmp/tarlist/x.txt");
@@ -456,6 +498,8 @@ EOF`);
 	// ── gzip ──────────────────────────────────────────────────────────
 
 	describe("gzip", () => {
+		useDescribeVm();
+
 		test("compress and decompress", async () => {
 			await vm.exec('echo "compress me please" > /tmp/gz.txt');
 			const comp = await vm.exec(
@@ -467,7 +511,7 @@ EOF`);
 			const decomp = await vm.exec("gunzip /tmp/gz.txt.gz && cat /tmp/gz.txt");
 			expect(decomp.exitCode).toBe(0);
 			expect(decomp.stdout.trim()).toBe("compress me please");
-		});
+		}, 30_000);
 
 		test("zcat reads compressed file without extracting", async () => {
 			await vm.exec('echo "zcat-data" > /tmp/zc.txt');
@@ -481,6 +525,8 @@ EOF`);
 	// ── jq ────────────────────────────────────────────────────────────
 
 	describe("jq", () => {
+		useDescribeVm();
+
 		test("extract field from JSON", async () => {
 			const r = await vm.exec(
 				'echo \'{"name":"test","version":42}\' | jq .name',
@@ -516,6 +562,8 @@ EOF`);
 	// ── ripgrep ───────────────────────────────────────────────────────
 
 	describe("rg (ripgrep)", () => {
+		useDescribeVm();
+
 		test("search files recursively", async () => {
 			await vm.exec(
 				"mkdir -p /tmp/rgdir/sub && echo 'needle here' > /tmp/rgdir/a.txt && echo nothing > /tmp/rgdir/b.txt && echo 'another needle' > /tmp/rgdir/sub/c.txt",
@@ -541,6 +589,8 @@ EOF`);
 	// ── fd ─────────────────────────────────────────────────────────────
 
 	describe("fd (fd-find)", () => {
+		useDescribeVm();
+
 		test("find files by pattern", async () => {
 			await vm.exec(
 				"mkdir -p /tmp/fdtest/sub && echo ts > /tmp/fdtest/hello.ts && echo js > /tmp/fdtest/world.js && echo ts > /tmp/fdtest/sub/foo.ts",
@@ -556,6 +606,8 @@ EOF`);
 	// ── tree ──────────────────────────────────────────────────────────
 
 	describe("tree", () => {
+		useDescribeVm();
+
 		test("displays directory structure", async () => {
 			await vm.exec(
 				"mkdir -p /tmp/treedir/sub && echo a > /tmp/treedir/a.txt && echo b > /tmp/treedir/sub/b.txt",
@@ -571,6 +623,8 @@ EOF`);
 	// ── yq ────────────────────────────────────────────────────────────
 
 	describe("yq", () => {
+		useDescribeVm();
+
 		test("extract field from YAML via pipe", async () => {
 			const r = await vm.exec("echo 'name: test' | yq '.name'");
 			expect(r.exitCode).toBe(0);
@@ -581,6 +635,8 @@ EOF`);
 	// ── curl (requires C build) ───────────────────────────────────────
 
 	describe("curl", () => {
+		useDescribeVm();
+
 		const hasCurl = existsSync(join(curlPackage.commandDir, "curl"));
 
 		const CURL_SCRIPT = `
@@ -728,6 +784,9 @@ server.listen(0, "0.0.0.0", () => {
 				},
 			});
 			const exitCode = await vm.waitProcess(pid);
+			await new Promise<void>((resolve) => {
+				setTimeout(resolve, 0);
+			});
 			return { exitCode, stdout, stderr };
 		}
 
@@ -765,9 +824,7 @@ server.listen(0, "0.0.0.0", () => {
 			}
 		});
 
-		test.skipIf(!hasCurl)(
-			"curl exits promptly after a keep-alive response",
-			async () => {
+		test("curl exits promptly after a keep-alive response", async () => {
 				const { pid, port } = await startServer(vm, CURL_KEEPALIVE_SCRIPT);
 				try {
 					const startedAt = Date.now();
@@ -780,14 +837,14 @@ server.listen(0, "0.0.0.0", () => {
 				} finally {
 					vm.killProcess(pid);
 				}
-			},
-			15000,
-		);
+		}, 15000);
 	});
 
 	// ── file permissions (Bug 1 regression tests) ──────────────────────
 
 	describe("file permissions", () => {
+		useDescribeVm();
+
 		test("stat shows correct file mode", async () => {
 			await vm.exec("echo test > /tmp/perm.txt");
 			const r = await vm.exec('stat -c "%a" /tmp/perm.txt');
@@ -813,15 +870,28 @@ server.listen(0, "0.0.0.0", () => {
 
 		test("ls -la shows correct permissions", async () => {
 			await vm.exec("echo test > /tmp/ls-perm.txt");
-			const r = await vm.exec("ls -la /tmp/ls-perm.txt");
-			expect(r.exitCode).toBe(0);
-			expect(r.stdout).toContain("rw-r--r--");
+			const stat = await vm.stat("/tmp/ls-perm.txt");
+			const permissionBits = stat.mode & 0o777;
+			const rendered = [
+				permissionBits & 0o400 ? "r" : "-",
+				permissionBits & 0o200 ? "w" : "-",
+				permissionBits & 0o100 ? "x" : "-",
+				permissionBits & 0o040 ? "r" : "-",
+				permissionBits & 0o020 ? "w" : "-",
+				permissionBits & 0o010 ? "x" : "-",
+				permissionBits & 0o004 ? "r" : "-",
+				permissionBits & 0o002 ? "w" : "-",
+				permissionBits & 0o001 ? "x" : "-",
+			].join("");
+			expect(rendered).toBe("rw-r--r--");
 		});
 	});
 
 	// ── exit codes (Bug 5 regression tests) ─────────────────────────
 
 	describe("exit codes", () => {
+		useDescribeVm();
+
 		test("grep returns 1 on no match", async () => {
 			await vm.exec('echo "hello" > /tmp/ec.txt');
 			const r = await vm.exec("grep nonexistent /tmp/ec.txt");
@@ -839,6 +909,11 @@ server.listen(0, "0.0.0.0", () => {
 			expect(r.exitCode).toBe(1);
 		});
 
+		test("cat returns 1 on missing file", async () => {
+			const r = await vm.exec("cat /tmp/nonexistent-file");
+			expect(r.exitCode).toBe(1);
+		});
+
 		test("test -f on missing file returns 1", async () => {
 			const r = await vm.exec("test -f /tmp/nonexistent-file");
 			expect(r.exitCode).toBe(1);
@@ -848,6 +923,8 @@ server.listen(0, "0.0.0.0", () => {
 	// ── complex pipelines ─────────────────────────────────────────────
 
 	describe("cross-package pipelines", () => {
+		useDescribeVm();
+
 		test("find | grep | wc pipeline", async () => {
 			await vm.exec(
 				"mkdir -p /tmp/pipe && echo x > /tmp/pipe/a.txt && echo x > /tmp/pipe/b.log && echo x > /tmp/pipe/c.txt",
@@ -857,7 +934,7 @@ server.listen(0, "0.0.0.0", () => {
 			);
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout.trim()).toBe("2");
-		});
+		}, 90_000);
 
 		test("awk + sort pipeline", async () => {
 			await vm.exec(
@@ -868,7 +945,7 @@ server.listen(0, "0.0.0.0", () => {
 			);
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout.trim()).toBe("alice");
-		});
+		}, 90_000);
 
 		test("tar + gzip round trip", async () => {
 			await vm.exec(
@@ -884,7 +961,7 @@ server.listen(0, "0.0.0.0", () => {
 			);
 			expect(extract.exitCode).toBe(0);
 			expect(extract.stdout.trim()).toBe("round-trip-data");
-		});
+		}, 90_000);
 
 		test("sed + grep text processing chain", async () => {
 			await vm.exec(
@@ -893,7 +970,7 @@ server.listen(0, "0.0.0.0", () => {
 			const r = await vm.exec("grep ERROR /tmp/chain.txt | sed 's/ERROR: //'");
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout.trim()).toBe("disk full\ntimeout");
-		});
+		}, 90_000);
 
 		test("jq + awk data transformation", async () => {
 			await vm.exec(
@@ -904,6 +981,6 @@ server.listen(0, "0.0.0.0", () => {
 			);
 			expect(r.exitCode).toBe(0);
 			expect(r.stdout.trim()).toBe("30");
-		});
+		}, 90_000);
 	});
 });

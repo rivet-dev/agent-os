@@ -2,14 +2,16 @@
 
 use agent_os_execution::{
     CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
-    JavascriptExecutionEngine, PythonExecutionEngine, StartJavascriptExecutionRequest,
-    StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecutionEngine,
-    WasmPermissionTier,
+    JavascriptExecutionEngine, PythonExecutionEngine, PythonExecutionEvent,
+    StartJavascriptExecutionRequest, StartPythonExecutionRequest, StartWasmExecutionRequest,
+    WasmExecutionEngine, WasmPermissionTier,
 };
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::time::Duration;
 use tempfile::tempdir;
 
 const PYTHON_MAX_OLD_SPACE_MB_ENV: &str = "AGENT_OS_PYTHON_MAX_OLD_SPACE_MB";
@@ -79,7 +81,6 @@ fn wasm_noop_module() -> Vec<u8> {
     .expect("compile noop wasm fixture")
 }
 
-#[test]
 fn node_permission_flags_allow_workers_for_internal_javascript_loader_runtime() {
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
@@ -135,7 +136,6 @@ fn node_permission_flags_allow_workers_for_internal_javascript_loader_runtime() 
     );
 }
 
-#[test]
 fn node_permission_flags_only_propagate_nested_child_capabilities_when_parent_explicitly_allows_them(
 ) {
     let temp = tempdir().expect("create temp dir");
@@ -206,7 +206,6 @@ fn node_permission_flags_only_propagate_nested_child_capabilities_when_parent_ex
     );
 }
 
-#[test]
 fn python_execution_applies_configured_heap_limit_to_v8_runtime() {
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide-dist");
@@ -239,7 +238,7 @@ export async function loadPyodide() {
         pyodide_dist_path: pyodide_dir,
     });
 
-    let result = python_engine
+    let mut execution = python_engine
         .start_execution(StartPythonExecutionRequest {
             vm_id: String::from("vm-python"),
             context_id: context.context_id,
@@ -251,12 +250,41 @@ export async function loadPyodide() {
             )]),
             cwd: temp.path().to_path_buf(),
         })
-        .expect("start python execution")
-        .wait(None)
-        .expect("wait for python execution");
+        .expect("start python execution");
 
-    assert_eq!(result.exit_code, 0);
-    let heap_limit = String::from_utf8(result.stdout)
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_code = None;
+
+    while exit_code.is_none() {
+        match execution
+            .poll_event_blocking(Duration::from_secs(5))
+            .expect("poll python event")
+        {
+            Some(PythonExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(PythonExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+                let cache_path = request.args.first().and_then(Value::as_str);
+                assert_eq!(request.method, "fs.mkdirSync");
+                assert!(
+                    cache_path.is_some_and(|path| path.ends_with("pyodide-package-cache")),
+                    "unexpected JS sync RPC request: {request:?}"
+                );
+                execution
+                    .respond_javascript_sync_rpc_success(request.id, Value::Null)
+                    .expect("acknowledge pyodide cache mkdir");
+            }
+            Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
+                panic!("unexpected Python VFS RPC request: {request:?}");
+            }
+            Some(PythonExecutionEvent::Exited(code)) => exit_code = Some(code),
+            None => panic!("timed out waiting for Python execution"),
+        }
+    }
+
+    let stderr = String::from_utf8(stderr).expect("stderr utf8");
+    assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+    let heap_limit = String::from_utf8(stdout)
         .expect("stdout utf8")
         .trim()
         .parse::<u64>()
@@ -267,7 +295,6 @@ export async function loadPyodide() {
     );
 }
 
-#[test]
 fn wasm_execution_applies_runtime_memory_and_fuel_limits_inside_v8_runtime() {
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
@@ -310,7 +337,6 @@ fn wasm_execution_applies_runtime_memory_and_fuel_limits_inside_v8_runtime() {
     );
 }
 
-#[test]
 fn wasm_permission_tiers_do_not_fall_back_to_host_node_binary() {
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
@@ -360,4 +386,16 @@ fn wasm_permission_tiers_do_not_fall_back_to_host_node_binary() {
         !log_path.exists(),
         "wasm permission tiers should stay inside the V8 runtime rather than falling back to the host node binary"
     );
+}
+
+#[test]
+fn permission_flags_suite() {
+    // Keep V8-backed integration coverage inside one top-level libtest case.
+    // Running these guest-runtime cases as separate tests in the same binary
+    // still trips a V8 teardown/init boundary crash between cases.
+    node_permission_flags_allow_workers_for_internal_javascript_loader_runtime();
+    node_permission_flags_only_propagate_nested_child_capabilities_when_parent_explicitly_allows_them();
+    python_execution_applies_configured_heap_limit_to_v8_runtime();
+    wasm_execution_applies_runtime_memory_and_fuel_limits_inside_v8_runtime();
+    wasm_permission_tiers_do_not_fall_back_to_host_node_binary();
 }

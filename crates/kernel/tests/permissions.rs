@@ -2,8 +2,8 @@ use agent_os_kernel::command_registry::CommandDriver;
 use agent_os_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions};
 use agent_os_kernel::mount_table::{MountOptions, MountTable};
 use agent_os_kernel::permissions::{
-    filter_env, EnvAccessRequest, FsAccessRequest, PermissionDecision, PermissionedFileSystem,
-    Permissions,
+    filter_env, permission_glob_matches, EnvAccessRequest, FsAccessRequest, PermissionDecision,
+    PermissionedFileSystem, Permissions,
 };
 use agent_os_kernel::vfs::{MemoryFileSystem, VfsResult, VirtualFileSystem};
 use std::collections::BTreeMap;
@@ -193,6 +193,92 @@ fn permission_wrapped_filesystem_link_checks_source_and_destination_permissions(
 }
 
 #[test]
+fn permission_wrapped_filesystem_link_resolves_source_as_existing_path() {
+    let mut inner = MemoryFileSystem::new();
+    inner.mkdir("/allowed", true).expect("seed allowed dir");
+    inner.mkdir("/private", true).expect("seed private dir");
+    inner
+        .write_file("/private/source.txt", b"source".to_vec())
+        .expect("seed source file");
+    inner
+        .symlink("/private/source.txt", "/allowed/source-link")
+        .expect("seed source symlink");
+
+    let checked_paths = Arc::new(Mutex::new(Vec::new()));
+    let checked_paths_for_permission = Arc::clone(&checked_paths);
+    let permissions = Permissions {
+        filesystem: Some(Arc::new(move |request: &FsAccessRequest| {
+            checked_paths_for_permission
+                .lock()
+                .expect("permission path lock poisoned")
+                .push(request.path.clone());
+            if request.path.starts_with("/allowed") {
+                PermissionDecision::allow()
+            } else {
+                PermissionDecision::deny("allowed-only")
+            }
+        })),
+        ..Permissions::default()
+    };
+
+    let mut filesystem = PermissionedFileSystem::new(inner, "vm-permissions", permissions);
+    let error = filesystem
+        .link("/allowed/source-link", "/allowed/linked.txt")
+        .expect_err("hardlink source should resolve through the existing target path");
+    assert_eq!(error.code(), "EACCES");
+    assert_eq!(
+        checked_paths
+            .lock()
+            .expect("permission path lock poisoned")
+            .as_slice(),
+        [String::from("/private/source.txt")].as_slice()
+    );
+}
+
+#[test]
+fn permission_wrapped_filesystem_remove_checks_resolved_destination_path() {
+    let mut inner = MemoryFileSystem::new();
+    inner.mkdir("/allowed", true).expect("seed allowed dir");
+    inner.mkdir("/private", true).expect("seed private dir");
+    inner
+        .write_file("/private/secret.txt", b"secret".to_vec())
+        .expect("seed secret file");
+    inner
+        .symlink("/private", "/allowed/private-link")
+        .expect("seed directory symlink");
+
+    let checked_paths = Arc::new(Mutex::new(Vec::new()));
+    let checked_paths_for_permission = Arc::clone(&checked_paths);
+    let permissions = Permissions {
+        filesystem: Some(Arc::new(move |request: &FsAccessRequest| {
+            checked_paths_for_permission
+                .lock()
+                .expect("permission path lock poisoned")
+                .push(request.path.clone());
+            if request.path.starts_with("/allowed") {
+                PermissionDecision::allow()
+            } else {
+                PermissionDecision::deny("allowed-only")
+            }
+        })),
+        ..Permissions::default()
+    };
+
+    let mut filesystem = PermissionedFileSystem::new(inner, "vm-permissions", permissions);
+    let error = filesystem
+        .remove_file("/allowed/private-link/secret.txt")
+        .expect_err("remove should resolve symlinked parent before permission check");
+    assert_eq!(error.code(), "EACCES");
+    assert_eq!(
+        checked_paths
+            .lock()
+            .expect("permission path lock poisoned")
+            .as_slice(),
+        [String::from("/private/secret.txt")].as_slice()
+    );
+}
+
+#[test]
 fn permission_wrapped_filesystem_exists_fails_closed_on_permission_denied() {
     let permissions = Permissions {
         filesystem: Some(Arc::new(|_: &FsAccessRequest| {
@@ -255,6 +341,29 @@ fn child_process_permissions_block_spawn() {
         .expect_err("spawn should be denied");
     assert_eq!(error.code(), "EACCES");
     assert!(error.to_string().contains("blocked by policy"));
+}
+
+#[test]
+fn permission_glob_single_star_does_not_cross_path_separators() {
+    assert!(permission_glob_matches("network/*", "network/foo"));
+    assert!(!permission_glob_matches("network/*", "network/foo/bar"));
+    assert!(permission_glob_matches(
+        "/workspace/*",
+        "/workspace/file.txt"
+    ));
+    assert!(!permission_glob_matches(
+        "/workspace/*",
+        "/workspace/nested/file.txt",
+    ));
+}
+
+#[test]
+fn permission_glob_double_star_still_matches_nested_paths() {
+    assert!(permission_glob_matches(
+        "/workspace/**",
+        "/workspace/nested/file.txt",
+    ));
+    assert!(permission_glob_matches("tcp://**", "tcp://127.0.0.1:43111"));
 }
 
 #[test]

@@ -13,6 +13,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { resolve } from 'node:path';
 import { createServer as createNetServer } from 'node:net';
 import {
+  describeIf,
   COMMANDS_DIR,
   createIntegrationKernel,
   skipUnlessWasmBuilt,
@@ -76,7 +77,7 @@ async function runGuestNodeProgram(
   };
 }
 
-describe.skipIf(skipReasonNetwork())('cross-runtime network integration', { timeout: 30_000 }, () => {
+describeIf(!skipReasonNetwork(), 'cross-runtime network integration', { timeout: 30_000 }, () => {
   let ctx: IntegrationKernelResult;
   let hostNetServer: ReturnType<typeof createNetServer> | undefined;
   let hostHttpServer: ReturnType<typeof createHttpServer> | undefined;

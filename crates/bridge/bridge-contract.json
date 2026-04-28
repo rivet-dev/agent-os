@@ -132,6 +132,13 @@
       "argumentTypes": ["...args: unknown[]"],
       "returnType": "unknown",
       "names": [
+        "process.cpuUsage",
+        "process.memoryUsage",
+        "process.resourceUsage",
+        "process.versions",
+        "_vmCreateContext",
+        "_vmRunInContext",
+        "_vmRunInThisContext",
         "_networkHttp2ServerListenRaw",
         "_networkHttp2SessionConnectRaw",
         "_networkHttp2SessionRequestRaw",
@@ -194,6 +201,7 @@
         "_sqliteStatementSetAllowBareNamedParametersRaw",
         "_sqliteStatementSetAllowUnknownNamedParametersRaw",
         "_sqliteStatementFinalizeRaw",
+        "_kernelStdioWriteRaw",
         "_kernelPollRaw",
         "_ptySetRawMode"
       ]
@@ -211,6 +219,24 @@
       "names": ["_scheduleTimer"]
     },
     {
+      "convention": "sync",
+      "argumentTypes": ["request: unknown"],
+      "returnType": "unknown",
+      "names": ["_pythonRpc"]
+    },
+    {
+      "convention": "sync",
+      "argumentTypes": ["maxBytes: number", "timeoutMs: number"],
+      "returnType": "string | null",
+      "names": ["_pythonStdinRead"]
+    },
+    {
+      "convention": "sync",
+      "argumentTypes": ["...args: unknown[]"],
+      "returnType": "unknown",
+      "names": ["_kernelStdinReadRaw"]
+    },
+    {
       "convention": "async",
       "argumentTypes": [],
       "returnType": "{ done: boolean; dataBase64?: string }",
@@ -222,7 +248,7 @@
       "returnType": "unknown",
       "names": [
         "_networkDnsLookupRaw",
-        "_networkHttpRequestRaw",
+        "_networkDnsResolveRaw",
         "_networkHttpServerListenRaw",
         "_networkHttpServerCloseRaw",
         "_networkHttpServerWaitRaw",

@@ -1,9 +1,9 @@
 use agent_os_execution::wasm::{
-    WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_PREWARM_TIMEOUT_MS_ENV,
+    NativeBinaryFormat, WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_PREWARM_TIMEOUT_MS_ENV,
 };
 use agent_os_execution::{
-    CreateWasmContextRequest, StartWasmExecutionRequest, WasmExecutionEngine, WasmExecutionEvent,
-    WasmPermissionTier,
+    CreateWasmContextRequest, StartWasmExecutionRequest, WasmExecutionEngine, WasmExecutionError,
+    WasmExecutionEvent, WasmPermissionTier,
 };
 use base64::Engine;
 use serde_json::json;
@@ -242,6 +242,83 @@ fn wasm_stdout_module() -> Vec<u8> {
     .expect("compile wasm fixture")
 }
 
+fn wasm_stdin_echo_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"
+(module
+  (type $fd_read_t (func (param i32 i32 i32 i32) (result i32)))
+  (type $fd_write_t (func (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_read" (func $fd_read (type $fd_read_t)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (type $fd_write_t)))
+  (memory (export "memory") 1)
+  (func $_start (export "_start")
+    (i32.store (i32.const 0) (i32.const 32))
+    (i32.store (i32.const 4) (i32.const 64))
+    (drop
+      (call $fd_read
+        (i32.const 0)
+        (i32.const 0)
+        (i32.const 1)
+        (i32.const 8)
+      )
+    )
+    (i32.store (i32.const 16) (i32.const 32))
+    (i32.store (i32.const 20) (i32.load (i32.const 8)))
+    (drop
+      (call $fd_write
+        (i32.const 1)
+        (i32.const 16)
+        (i32.const 1)
+        (i32.const 24)
+      )
+    )
+  )
+)
+"#,
+    )
+    .expect("compile stdin echo wasm fixture")
+}
+
+fn wasm_fdstat_set_flags_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"
+(module
+  (type $fd_fdstat_get_t (func (param i32 i32) (result i32)))
+  (type $fd_fdstat_set_flags_t (func (param i32 i32) (result i32)))
+  (type $proc_exit_t (func (param i32)))
+  (import "wasi_snapshot_preview1" "fd_fdstat_get" (func $fd_fdstat_get (type $fd_fdstat_get_t)))
+  (import "wasi_snapshot_preview1" "fd_fdstat_set_flags" (func $fd_fdstat_set_flags (type $fd_fdstat_set_flags_t)))
+  (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (type $proc_exit_t)))
+  (memory (export "memory") 1)
+  (func $_start (export "_start")
+    (if
+      (i32.ne
+        (call $fd_fdstat_set_flags (i32.const 1) (i32.const 4))
+        (i32.const 0)
+      )
+      (then (call $proc_exit (i32.const 41)))
+    )
+    (if
+      (i32.ne
+        (call $fd_fdstat_get (i32.const 1) (i32.const 0))
+        (i32.const 0)
+      )
+      (then (call $proc_exit (i32.const 42)))
+    )
+    (if
+      (i32.ne
+        (i32.load16_u offset=2 (i32.const 0))
+        (i32.const 4)
+      )
+      (then (call $proc_exit (i32.const 43)))
+    )
+  )
+)
+"#,
+    )
+    .expect("compile fdstat flags wasm fixture")
+}
+
 fn wasm_override_module() -> Vec<u8> {
     wat::parse_str(
         r#"
@@ -349,6 +426,66 @@ fn wasm_signal_state_module() -> Vec<u8> {
     .expect("compile signal wasm fixture")
 }
 
+fn wat_escape_ascii(input: &str) -> String {
+    let mut escaped = String::new();
+    for ch in input.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\0d"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn wasm_stdout_chunks_module(chunks: &[&str]) -> Vec<u8> {
+    let mut data_offset = 64u32;
+    let mut data_segments = String::new();
+    let mut writes = String::new();
+
+    for (index, chunk) in chunks.iter().enumerate() {
+        let escaped = wat_escape_ascii(chunk);
+        let chunk_len = chunk.len();
+        let iovec_offset = (index as u32) * 8;
+        data_segments.push_str(&format!(
+            "  (data (i32.const {data_offset}) \"{escaped}\")\n"
+        ));
+        writes.push_str(&format!(
+            "    (i32.store (i32.const {iovec_offset}) (i32.const {data_offset}))\n    (i32.store (i32.const {}) (i32.const {chunk_len}))\n    (drop\n      (call $fd_write\n        (i32.const 1)\n        (i32.const {iovec_offset})\n        (i32.const 1)\n        (i32.const 40)\n      )\n    )\n",
+            iovec_offset + 4
+        ));
+        data_offset += chunk_len as u32;
+    }
+
+    wat::parse_str(&format!(
+        r#"
+(module
+  (type $fd_write_t (func (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (type $fd_write_t)))
+  (memory (export "memory") 1)
+{data_segments}  (func $_start (export "_start")
+{writes}  )
+)
+"#
+    ))
+    .expect("compile stdout-chunks wasm fixture")
+}
+
+fn wasm_signal_state_line_stdout_module() -> Vec<u8> {
+    wasm_stdout_chunks_module(&[
+        "hello\n__AGENT_OS_WASM_SIGNAL_STATE__:{\"signal\":2,\"registration\":{\"action\":\"user\",\"mask\":[15],\"flags\":4660}}\n",
+    ])
+}
+
+fn wasm_split_signal_state_line_stdout_module() -> Vec<u8> {
+    wasm_stdout_chunks_module(&[
+        "__AGENT_OS_WASM_SIGNAL_STATE__:",
+        "{\"signal\":2,\"registration\":{\"action\":\"user\",\"mask\":[15],\"flags\":4660}}\n",
+    ])
+}
+
 fn wasm_write_file_module() -> Vec<u8> {
     wat::parse_str(
         r#"
@@ -400,6 +537,137 @@ fn wasm_write_file_module() -> Vec<u8> {
 "#,
     )
     .expect("compile write-file wasm fixture")
+}
+
+fn wasm_write_nested_file_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"
+(module
+  (type $path_open_t (func (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+  (type $fd_write_t (func (param i32 i32 i32 i32) (result i32)))
+  (type $fd_close_t (func (param i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_open" (func $path_open (type $path_open_t)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (type $fd_write_t)))
+  (import "wasi_snapshot_preview1" "fd_close" (func $fd_close (type $fd_close_t)))
+  (memory (export "memory") 1)
+  (data (i32.const 64) "nested/output.txt")
+  (data (i32.const 96) "nested-write\n")
+  (func $_start (export "_start")
+    (if
+      (i32.ne
+        (call $path_open
+          (i32.const 3)
+          (i32.const 0)
+          (i32.const 64)
+          (i32.const 17)
+          (i32.const 9)
+          (i64.const 64)
+          (i64.const 64)
+          (i32.const 0)
+          (i32.const 8)
+        )
+        (i32.const 0)
+      )
+      (then unreachable)
+    )
+    (i32.store (i32.const 0) (i32.const 96))
+    (i32.store (i32.const 4) (i32.const 13))
+    (if
+      (i32.ne
+        (call $fd_write
+          (i32.load (i32.const 8))
+          (i32.const 0)
+          (i32.const 1)
+          (i32.const 12)
+        )
+        (i32.const 0)
+      )
+      (then unreachable)
+    )
+    (drop (call $fd_close (i32.load (i32.const 8))))
+  )
+)
+"#,
+    )
+    .expect("compile nested write-file wasm fixture")
+}
+
+fn wasm_expect_write_open_errno_module(expected_errno: u32) -> Vec<u8> {
+    wat::parse_str(&format!(
+        r#"
+(module
+  (type $path_open_t (func (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+  (type $fd_close_t (func (param i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_open" (func $path_open (type $path_open_t)))
+  (import "wasi_snapshot_preview1" "fd_close" (func $fd_close (type $fd_close_t)))
+  (memory (export "memory") 1)
+  (data (i32.const 64) "output.txt")
+  (func $_start (export "_start")
+    (local $errno i32)
+    (local.set $errno
+      (call $path_open
+        (i32.const 3)
+        (i32.const 0)
+        (i32.const 64)
+        (i32.const 10)
+        (i32.const 9)
+        (i64.const 64)
+        (i64.const 64)
+        (i32.const 0)
+        (i32.const 8)
+      )
+    )
+    (if
+      (i32.ne
+        (local.get $errno)
+        (i32.const {expected_errno})
+      )
+      (then unreachable)
+    )
+    (if
+      (i32.eq (local.get $errno) (i32.const 0))
+      (then
+        (drop (call $fd_close (i32.load (i32.const 8))))
+      )
+    )
+  )
+)
+"#
+    ))
+    .expect("compile expected-errno wasm fixture")
+}
+
+fn wasm_escape_preopen_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"
+(module
+  (type $path_open_t (func (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_open" (func $path_open (type $path_open_t)))
+  (memory (export "memory") 1)
+  (data (i32.const 64) "../../../../etc/passwd")
+  (func $_start (export "_start")
+    (if
+      (i32.ne
+        (call $path_open
+          (i32.const 3)
+          (i32.const 0)
+          (i32.const 64)
+          (i32.const 22)
+          (i32.const 0)
+          (i64.const 0)
+          (i64.const 0)
+          (i32.const 0)
+          (i32.const 8)
+        )
+        (i32.const 44)
+      )
+      (then unreachable)
+    )
+  )
+)
+"#,
+    )
+    .expect("compile preopen-escape wasm fixture")
 }
 
 fn wasm_poll_oneoff_module() -> Vec<u8> {
@@ -547,7 +815,6 @@ fn encode_varuint(mut value: u64) -> Vec<u8> {
     }
 }
 
-#[test]
 fn wasm_contexts_preserve_vm_and_module_configuration() {
     let mut engine = WasmExecutionEngine::default();
     let context = engine.create_context(CreateWasmContextRequest {
@@ -560,7 +827,6 @@ fn wasm_contexts_preserve_vm_and_module_configuration() {
     assert_eq!(context.module_path.as_deref(), Some("./guest.wasm"));
 }
 
-#[test]
 fn wasm_execution_stays_inside_v8_runtime_without_host_node_launches() {
     let _guard = lock_node_binary_env();
     let temp = tempdir().expect("create temp dir");
@@ -582,13 +848,10 @@ fn wasm_execution_stays_inside_v8_runtime_without_host_node_launches() {
         context.context_id,
         temp.path(),
         Vec::new(),
-        BTreeMap::from([
-            (String::from(WASM_MAX_FUEL_ENV), String::from("250")),
-            (
-                String::from(WASM_MAX_MEMORY_BYTES_ENV),
-                String::from((2 * 65_536).to_string()),
-            ),
-        ]),
+        BTreeMap::from([(
+            String::from(WASM_MAX_MEMORY_BYTES_ENV),
+            String::from((2 * 65_536).to_string()),
+        )]),
         WasmPermissionTier::Full,
     );
 
@@ -600,7 +863,6 @@ fn wasm_execution_stays_inside_v8_runtime_without_host_node_launches() {
     );
 }
 
-#[test]
 fn wasm_execution_runs_guest_module_through_v8() {
     assert_node_available();
 
@@ -638,7 +900,41 @@ fn wasm_execution_runs_guest_module_through_v8() {
     assert!(stdout.contains("stdout:wasm-smoke"));
 }
 
-#[test]
+fn wasm_execution_supports_fd_fdstat_set_flags() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("guest.wasm"),
+        &wasm_fdstat_set_flags_module(),
+    );
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let (_stdout, stderr, exit_code) = run_wasm_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        Vec::new(),
+        BTreeMap::new(),
+        WasmPermissionTier::Full,
+    );
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert!(
+        !stderr.contains("fd_fdstat_set_flags"),
+        "missing WASI fd_fdstat_set_flags import should not leak into stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("LinkError"),
+        "WASI import gaps should not break module instantiation: {stderr}"
+    );
+}
+
 fn wasm_execution_ignores_guest_overrides_for_internal_node_env() {
     assert_node_available();
 
@@ -676,7 +972,6 @@ fn wasm_execution_ignores_guest_overrides_for_internal_node_env() {
     assert!(!stdout.contains("evil-smoke"));
 }
 
-#[test]
 fn wasm_execution_freezes_wasi_clock_time() {
     assert_node_available();
 
@@ -703,7 +998,6 @@ fn wasm_execution_freezes_wasi_clock_time() {
     assert!(stdout.contains("timing:frozen"), "stdout: {stdout}");
 }
 
-#[test]
 fn wasm_execution_rejects_vm_mismatch() {
     let mut engine = WasmExecutionEngine::default();
     let context = engine.create_context(CreateWasmContextRequest {
@@ -727,7 +1021,6 @@ fn wasm_execution_rejects_vm_mismatch() {
         .contains("guest WebAssembly context belongs to vm vm-wasm, not vm-other"));
 }
 
-#[test]
 fn wasm_execution_streams_exit_event() {
     assert_node_available();
 
@@ -780,7 +1073,6 @@ fn wasm_execution_streams_exit_event() {
     assert!(saw_stdout, "expected stdout event before exit");
 }
 
-#[test]
 fn wasm_execution_can_route_stdio_through_kernel_sync_rpc() {
     assert_node_available();
 
@@ -836,7 +1128,46 @@ fn wasm_execution_can_route_stdio_through_kernel_sync_rpc() {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
+fn wasm_execution_reads_streaming_stdin_via_kernel_bridge() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(&temp.path().join("guest.wasm"), &wasm_stdin_echo_module());
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let mut execution = engine
+        .start_execution(StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            argv: Vec::new(),
+            env: BTreeMap::from([(
+                String::from("AGENT_OS_WASI_STDIO_SYNC_RPC"),
+                String::from("1"),
+            )]),
+            cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
+        })
+        .expect("start wasm execution");
+
+    execution
+        .write_stdin(b"stdin-echo\n")
+        .expect("write wasm stdin");
+    execution.close_stdin().expect("close wasm stdin");
+
+    let result = execution.wait().expect("wait for wasm execution");
+    let stdout = String::from_utf8(result.stdout).expect("stdout utf8");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+
+    assert_eq!(result.exit_code, 0, "stderr={stderr}");
+    assert_eq!(stdout, "stdin-echo\n");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
 fn wasm_execution_poll_oneoff_uses_kernel_poll_for_multiple_fds() {
     assert_node_available();
 
@@ -901,7 +1232,6 @@ fn wasm_execution_poll_oneoff_uses_kernel_poll_for_multiple_fds() {
     assert_eq!(stdout, "poll-ready\n");
 }
 
-#[test]
 fn wasm_execution_emits_signal_state_from_control_channel() {
     assert_node_available();
 
@@ -968,7 +1298,139 @@ fn wasm_execution_emits_signal_state_from_control_channel() {
     assert!(saw_signal, "expected signal-state event before exit");
 }
 
-#[test]
+fn wasm_execution_preserves_stdout_when_signal_state_marker_shares_stdout_chunk() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("guest.wasm"),
+        &wasm_signal_state_line_stdout_module(),
+    );
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let mut execution = engine
+        .start_execution(StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            argv: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::ReadWrite,
+        })
+        .expect("start wasm execution");
+
+    let mut stdout = Vec::new();
+    let mut saw_signal = false;
+    let mut saw_exit = false;
+
+    while !saw_exit {
+        match execution
+            .poll_event_blocking(Duration::from_secs(5))
+            .expect("poll wasm event")
+        {
+            Some(WasmExecutionEvent::Stdout(chunk)) => stdout.push(chunk),
+            Some(WasmExecutionEvent::SignalState {
+                signal,
+                registration,
+            }) => {
+                assert_eq!(signal, 2);
+                assert_eq!(
+                    registration.action,
+                    agent_os_execution::wasm::WasmSignalDispositionAction::User
+                );
+                assert_eq!(registration.mask, vec![15]);
+                assert_eq!(registration.flags, 0x1234);
+                saw_signal = true;
+            }
+            Some(WasmExecutionEvent::Exited(code)) => {
+                assert_eq!(code, 0);
+                saw_exit = true;
+            }
+            Some(WasmExecutionEvent::Stderr(chunk)) => {
+                panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
+            }
+            Some(WasmExecutionEvent::SyncRpcRequest(_)) => {}
+            None => panic!("timed out waiting for wasm execution event"),
+        }
+    }
+
+    assert_eq!(stdout, vec![b"hello\n".to_vec()]);
+    assert!(saw_signal, "expected signal-state event before exit");
+}
+
+fn wasm_execution_reassembles_split_signal_state_marker_across_stdout_chunks() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("guest.wasm"),
+        &wasm_split_signal_state_line_stdout_module(),
+    );
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let mut execution = engine
+        .start_execution(StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            argv: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::ReadWrite,
+        })
+        .expect("start wasm execution");
+
+    let mut saw_signal = false;
+    let mut saw_exit = false;
+    let mut stdout = Vec::new();
+
+    while !saw_exit {
+        match execution
+            .poll_event_blocking(Duration::from_secs(5))
+            .expect("poll wasm event")
+        {
+            Some(WasmExecutionEvent::Stdout(chunk)) => stdout.push(chunk),
+            Some(WasmExecutionEvent::SignalState {
+                signal,
+                registration,
+            }) => {
+                assert_eq!(signal, 2);
+                assert_eq!(
+                    registration.action,
+                    agent_os_execution::wasm::WasmSignalDispositionAction::User
+                );
+                assert_eq!(registration.mask, vec![15]);
+                assert_eq!(registration.flags, 0x1234);
+                saw_signal = true;
+            }
+            Some(WasmExecutionEvent::Exited(code)) => {
+                assert_eq!(code, 0);
+                saw_exit = true;
+            }
+            Some(WasmExecutionEvent::Stderr(chunk)) => {
+                panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
+            }
+            Some(WasmExecutionEvent::SyncRpcRequest(_)) => {}
+            None => panic!("timed out waiting for wasm execution event"),
+        }
+    }
+
+    assert!(stdout.is_empty(), "split marker should not leak to stdout");
+    assert!(
+        saw_signal,
+        "expected reassembled signal-state event before exit"
+    );
+}
+
 fn wasm_read_only_tier_blocks_workspace_writes_but_read_write_allows_them() {
     assert_node_available();
 
@@ -1022,7 +1484,102 @@ fn wasm_read_only_tier_blocks_workspace_writes_but_read_write_allows_them() {
     );
 }
 
-#[test]
+fn wasm_read_only_tier_returns_eacces_for_write_open() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("guest.wasm"),
+        &wasm_expect_write_open_errno_module(2),
+    );
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let (stdout, stderr, exit_code) = run_wasm_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        Vec::new(),
+        BTreeMap::new(),
+        WasmPermissionTier::ReadOnly,
+    );
+
+    assert_eq!(exit_code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.is_empty(), "stdout={stdout}");
+    assert!(stderr.is_empty(), "stderr={stderr}");
+    assert!(
+        !temp.path().join("output.txt").exists(),
+        "read-only tier should reject write-open before creating the target"
+    );
+}
+
+fn wasm_execution_rejects_path_open_escape_outside_preopen() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("guest.wasm"),
+        &wasm_escape_preopen_module(),
+    );
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let (stdout, stderr, exit_code) = run_wasm_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        Vec::new(),
+        BTreeMap::new(),
+        WasmPermissionTier::Full,
+    );
+
+    assert_eq!(exit_code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.is_empty(), "stdout={stdout}");
+    assert!(stderr.is_empty(), "stderr={stderr}");
+}
+
+fn wasm_execution_allows_path_open_for_nested_paths_inside_preopen() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    fs::create_dir_all(temp.path().join("nested")).expect("create nested dir");
+    write_fixture(
+        &temp.path().join("guest.wasm"),
+        &wasm_write_nested_file_module(),
+    );
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+
+    let (stdout, stderr, exit_code) = run_wasm_execution(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        Vec::new(),
+        BTreeMap::new(),
+        WasmPermissionTier::ReadWrite,
+    );
+
+    assert_eq!(exit_code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.is_empty(), "stdout={stdout}");
+    assert!(stderr.is_empty(), "stderr={stderr}");
+    assert_eq!(
+        fs::read_to_string(temp.path().join("nested/output.txt")).expect("read nested output"),
+        "nested-write\n"
+    );
+}
+
 fn wasm_full_tier_exposes_host_process_imports_but_read_write_does_not() {
     assert_node_available();
 
@@ -1070,7 +1627,6 @@ fn wasm_full_tier_exposes_host_process_imports_but_read_write_does_not() {
     );
 }
 
-#[test]
 fn wasm_execution_reuses_shared_warmup_path_across_contexts() {
     assert_node_available();
 
@@ -1131,7 +1687,6 @@ fn wasm_execution_reuses_shared_warmup_path_across_contexts() {
     );
 }
 
-#[test]
 fn wasm_execution_rewarms_when_symlink_target_changes_with_same_size_module() {
     assert_node_available();
 
@@ -1188,7 +1743,6 @@ fn wasm_execution_rewarms_when_symlink_target_changes_with_same_size_module() {
     assert_eq!(second_warmup.reason, "executed");
 }
 
-#[test]
 fn wasm_warmup_metrics_encode_emoji_module_paths_as_json() {
     assert_node_available();
 
@@ -1222,7 +1776,6 @@ fn wasm_warmup_metrics_encode_emoji_module_paths_as_json() {
     assert!(stderr.contains("\\ud83d\\ude00"), "stderr: {stderr}");
 }
 
-#[test]
 fn wasm_execution_times_out_when_fuel_budget_is_exhausted() {
     assert_node_available();
 
@@ -1255,7 +1808,6 @@ fn wasm_execution_times_out_when_fuel_budget_is_exhausted() {
     );
 }
 
-#[test]
 fn wasm_execution_allows_prewarm_timeout_to_differ_from_execution_timeout() {
     assert_node_available();
 
@@ -1294,7 +1846,6 @@ fn wasm_execution_allows_prewarm_timeout_to_differ_from_execution_timeout() {
     );
 }
 
-#[test]
 fn wasm_execution_rejects_modules_whose_memory_cap_exceeds_limit() {
     assert_node_available();
 
@@ -1330,7 +1881,6 @@ fn wasm_execution_rejects_modules_whose_memory_cap_exceeds_limit() {
     );
 }
 
-#[test]
 fn wasm_execution_enforces_runtime_memory_growth_limit_for_modules_without_declared_maximum() {
     assert_node_available();
 
@@ -1366,7 +1916,6 @@ fn wasm_execution_enforces_runtime_memory_growth_limit_for_modules_without_decla
     );
 }
 
-#[test]
 fn wasm_execution_rejects_modules_that_exceed_parser_file_size_cap() {
     let temp = tempdir().expect("create temp dir");
     let module_path = temp.path().join("guest.wasm");
@@ -1402,7 +1951,6 @@ fn wasm_execution_rejects_modules_that_exceed_parser_file_size_cap() {
     );
 }
 
-#[test]
 fn wasm_execution_rejects_modules_with_too_many_import_entries() {
     let temp = tempdir().expect("create temp dir");
     let mut import_section = encode_varuint(16_385);
@@ -1440,7 +1988,6 @@ fn wasm_execution_rejects_modules_with_too_many_import_entries() {
     );
 }
 
-#[test]
 fn wasm_execution_rejects_modules_with_too_many_memory_entries() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(
@@ -1476,7 +2023,6 @@ fn wasm_execution_rejects_modules_with_too_many_memory_entries() {
     );
 }
 
-#[test]
 fn wasm_execution_rejects_varuints_that_exceed_parser_iteration_cap() {
     let temp = tempdir().expect("create temp dir");
     let mut bytes = Vec::from(*b"\0asm");
@@ -1512,4 +2058,259 @@ fn wasm_execution_rejects_varuints_that_exceed_parser_iteration_cap() {
             .contains("varuint exceeds the parser cap of 10 bytes"),
         "unexpected error: {error}"
     );
+}
+
+// Regression for US-090: a resolved WebAssembly module that turns out to be a
+// `node_modules/.bin/<cmd>` shell-shim script must be rejected by the WASM
+// engine with a typed `NonWasmBinary` error BEFORE V8 ever sees the bytes. The
+// pre-fix behavior was to base64-encode the `#!/bin/sh` bytes into the prewarm
+// env and hand them to `WebAssembly.compile()`, which failed with the opaque
+// `CompileError: WebAssembly.Module(): expected magic word 00 61 73 6d, found
+// 23 21 2f 62 @+0` cascade that blocked US-088. See
+// `.agent/specs/us-090-wasm-warmup-shebang-fix.md` for the full story.
+fn wasm_execution_rejects_shell_shim_before_handing_bytes_to_v8() {
+    let temp = tempdir().expect("create temp dir");
+    let node_modules_bin = temp.path().join("node_modules").join(".bin");
+    fs::create_dir_all(&node_modules_bin).expect("create node_modules/.bin");
+    let shim_path = node_modules_bin.join("fake-shim");
+    let shim_script = "#!/bin/sh\n\
+basedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\n\
+\n\
+case `uname` in\n\
+    *CYGWIN*|*MINGW*|*MSYS*) basedir=`cygpath -w \"$basedir\"`;;\n\
+esac\n\
+\n\
+if [ -x \"$basedir/node\" ]; then\n\
+  exec \"$basedir/node\"  \"$basedir/../fake/dist/cli.js\" \"$@\"\n\
+else\n\
+  exec node  \"$basedir/../fake/dist/cli.js\" \"$@\"\n\
+fi\n";
+    fs::write(&shim_path, shim_script).expect("write shell-shim fixture");
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(&shim_path)
+        .expect("shim metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&shim_path, permissions).expect("chmod shell-shim");
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(shim_path.to_string_lossy().into_owned()),
+    });
+
+    let error = engine
+        .start_execution(StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            argv: vec![shim_path.to_string_lossy().into_owned()],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
+        })
+        .expect_err("shell shim should be rejected before prewarm/V8");
+
+    match &error {
+        agent_os_execution::WasmExecutionError::NonWasmBinary {
+            path,
+            header,
+            shell_shim,
+        } => {
+            assert!(
+                *shell_shim,
+                "expected shell_shim=true for shebang header, got header {header:?}"
+            );
+            assert!(
+                header.starts_with(b"#!"),
+                "expected header to begin with '#!', got {header:?}"
+            );
+            assert!(
+                path.ends_with("node_modules/.bin/fake-shim"),
+                "expected rejected path to name the shim, got {path:?}"
+            );
+        }
+        other => panic!("expected NonWasmBinary typed error, got {other:?}"),
+    }
+
+    let rendered = error.to_string();
+    assert!(
+        !rendered.contains("CompileError"),
+        "rendered error must not mention CompileError (got: {rendered})"
+    );
+    assert!(
+        !rendered.contains("WebAssembly.Module()"),
+        "rendered error must not mention WebAssembly.Module() (got: {rendered})"
+    );
+    assert!(
+        rendered.contains("node_modules/.bin/fake-shim"),
+        "rendered error must name the resolved shim path (got: {rendered})"
+    );
+    assert!(
+        rendered.contains("shell-shim"),
+        "rendered error must describe the shell-shim classification (got: {rendered})"
+    );
+}
+
+fn wasm_execution_rejects_random_non_wasm_bytes_with_typed_error() {
+    let temp = tempdir().expect("create temp dir");
+    let module_path = temp.path().join("not-really.wasm");
+    fs::write(&module_path, b"hello world, definitely not wasm\n").expect("write non-wasm fixture");
+
+    let mut engine = WasmExecutionEngine::default();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./not-really.wasm")),
+    });
+
+    let error = engine
+        .start_execution(StartWasmExecutionRequest {
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            argv: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
+        })
+        .expect_err("non-wasm file should be rejected before prewarm/V8");
+
+    match &error {
+        agent_os_execution::WasmExecutionError::NonWasmBinary {
+            header, shell_shim, ..
+        } => {
+            assert!(
+                !*shell_shim,
+                "expected shell_shim=false for non-#! header, got header {header:?}"
+            );
+            assert_eq!(
+                header.as_slice(),
+                b"hell",
+                "expected first 4 bytes of the fixture, got {header:?}"
+            );
+        }
+        other => panic!("expected NonWasmBinary typed error, got {other:?}"),
+    }
+
+    let rendered = error.to_string();
+    assert!(
+        !rendered.contains("CompileError"),
+        "rendered error must not mention CompileError (got: {rendered})"
+    );
+}
+
+fn wasm_execution_rejects_native_binary_headers_with_explicit_error() {
+    for (file_name, header, expected_format) in [
+        (
+            "fake-elf.wasm",
+            b"\x7fELF\x02\x01\x01\x00".as_slice(),
+            NativeBinaryFormat::Elf,
+        ),
+        (
+            "fake-macho.wasm",
+            b"\xfe\xed\xfa\xcf\x00\x00\x00\x00".as_slice(),
+            NativeBinaryFormat::MachO,
+        ),
+        (
+            "fake-pe.wasm",
+            b"MZ\x90\x00\x03\x00\x00\x00".as_slice(),
+            NativeBinaryFormat::PeCoff,
+        ),
+    ] {
+        let temp = tempdir().expect("create temp dir");
+        let module_path = temp.path().join(file_name);
+        fs::write(&module_path, header).expect("write native-binary fixture");
+
+        let mut engine = WasmExecutionEngine::default();
+        let context = engine.create_context(CreateWasmContextRequest {
+            vm_id: String::from("vm-wasm"),
+            module_path: Some(format!("./{file_name}")),
+        });
+
+        let error = engine
+            .start_execution(StartWasmExecutionRequest {
+                vm_id: String::from("vm-wasm"),
+                context_id: context.context_id,
+                argv: Vec::new(),
+                env: BTreeMap::new(),
+                cwd: temp.path().to_path_buf(),
+                permission_tier: WasmPermissionTier::Full,
+            })
+            .expect_err("native binary should be rejected before prewarm/V8");
+
+        match &error {
+            WasmExecutionError::NativeBinaryNotSupported {
+                header: observed_header,
+                format,
+                ..
+            } => {
+                assert_eq!(*format, expected_format);
+                assert_eq!(
+                    observed_header.as_slice(),
+                    &header[..4],
+                    "expected rejected header bytes for {file_name}"
+                );
+            }
+            other => panic!("expected NativeBinaryNotSupported typed error, got {other:?}"),
+        }
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("ERR_NATIVE_BINARY_NOT_SUPPORTED"),
+            "rendered error must expose the explicit native-binary code (got: {rendered})"
+        );
+        assert!(
+            rendered.contains(expected_format_display(expected_format)),
+            "rendered error must name the detected binary format (got: {rendered})"
+        );
+        assert!(
+            !rendered.contains("CompileError"),
+            "rendered error must not mention CompileError (got: {rendered})"
+        );
+    }
+}
+
+fn expected_format_display(format: NativeBinaryFormat) -> &'static str {
+    match format {
+        NativeBinaryFormat::Elf => "ELF",
+        NativeBinaryFormat::MachO => "Mach-O",
+        NativeBinaryFormat::PeCoff => "PE/COFF",
+    }
+}
+
+// Separate libtest cases in this binary still trip a V8 teardown/init crash, so
+// keep the WASM runtime coverage in one top-level suite until that boundary is fixed.
+#[test]
+fn wasm_suite() {
+    wasm_contexts_preserve_vm_and_module_configuration();
+    wasm_execution_stays_inside_v8_runtime_without_host_node_launches();
+    wasm_execution_runs_guest_module_through_v8();
+    wasm_execution_supports_fd_fdstat_set_flags();
+    wasm_execution_ignores_guest_overrides_for_internal_node_env();
+    wasm_execution_freezes_wasi_clock_time();
+    wasm_execution_rejects_vm_mismatch();
+    wasm_execution_streams_exit_event();
+    wasm_execution_can_route_stdio_through_kernel_sync_rpc();
+    wasm_execution_reads_streaming_stdin_via_kernel_bridge();
+    wasm_execution_poll_oneoff_uses_kernel_poll_for_multiple_fds();
+    wasm_execution_emits_signal_state_from_control_channel();
+    wasm_execution_preserves_stdout_when_signal_state_marker_shares_stdout_chunk();
+    wasm_execution_reassembles_split_signal_state_marker_across_stdout_chunks();
+    wasm_read_only_tier_blocks_workspace_writes_but_read_write_allows_them();
+    wasm_read_only_tier_returns_eacces_for_write_open();
+    wasm_execution_rejects_path_open_escape_outside_preopen();
+    wasm_execution_allows_path_open_for_nested_paths_inside_preopen();
+    wasm_full_tier_exposes_host_process_imports_but_read_write_does_not();
+    wasm_execution_reuses_shared_warmup_path_across_contexts();
+    wasm_execution_rewarms_when_symlink_target_changes_with_same_size_module();
+    wasm_warmup_metrics_encode_emoji_module_paths_as_json();
+    wasm_execution_times_out_when_fuel_budget_is_exhausted();
+    wasm_execution_allows_prewarm_timeout_to_differ_from_execution_timeout();
+    wasm_execution_rejects_modules_whose_memory_cap_exceeds_limit();
+    wasm_execution_enforces_runtime_memory_growth_limit_for_modules_without_declared_maximum();
+    wasm_execution_rejects_modules_that_exceed_parser_file_size_cap();
+    wasm_execution_rejects_modules_with_too_many_import_entries();
+    wasm_execution_rejects_modules_with_too_many_memory_entries();
+    wasm_execution_rejects_varuints_that_exceed_parser_iteration_cap();
+    wasm_execution_rejects_shell_shim_before_handing_bytes_to_v8();
+    wasm_execution_rejects_random_non_wasm_bytes_with_typed_error();
+    wasm_execution_rejects_native_binary_headers_with_explicit_error();
 }

@@ -4,6 +4,7 @@ use agent_os_sidecar::acp::{
     JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
 };
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{split, AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
@@ -87,12 +88,10 @@ async fn client_correlates_responses_and_forwards_notifications() {
             .await;
             write_message(
                 &mut writer,
-                &JsonRpcMessage::Response(JsonRpcResponse {
-                    jsonrpc: String::from("2.0"),
-                    id: message.id,
-                    result: Some(json!({ "status": "complete" })),
-                    error: None,
-                }),
+                &JsonRpcMessage::Response(JsonRpcResponse::success(
+                    message.id,
+                    json!({ "status": "complete" }),
+                )),
             )
             .await;
         }
@@ -104,7 +103,7 @@ async fn client_correlates_responses_and_forwards_notifications() {
     assert_eq!(notification.params, Some(json!({ "status": "thinking" })));
 
     let response = request_task.await.expect("request task").expect("request");
-    assert_eq!(response.result, Some(json!({ "status": "complete" })));
+    assert_eq!(response.result(), Some(&json!({ "status": "complete" })));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -165,8 +164,8 @@ async fn client_shims_modern_permission_requests_to_legacy_notifications() {
         .await
         .expect("permission response");
     assert_eq!(
-        permission_response.result,
-        Some(json!({
+        permission_response.result(),
+        Some(&json!({
             "outcome": {
                 "outcome": "selected",
                 "optionId": "allow_always"
@@ -182,8 +181,8 @@ async fn client_shims_modern_permission_requests_to_legacy_notifications() {
                 JsonRpcId::String(String::from("perm-modern-1"))
             );
             assert_eq!(
-                response.result,
-                Some(json!({
+                response.result(),
+                Some(&json!({
                     "outcome": {
                         "outcome": "selected",
                         "optionId": "allow_always"
@@ -196,12 +195,10 @@ async fn client_shims_modern_permission_requests_to_legacy_notifications() {
 
     write_message(
         &mut writer,
-        &JsonRpcMessage::Response(JsonRpcResponse {
-            jsonrpc: String::from("2.0"),
-            id: prompt_id,
-            result: Some(json!({ "status": "complete" })),
-            error: None,
-        }),
+        &JsonRpcMessage::Response(JsonRpcResponse::success(
+            prompt_id,
+            json!({ "status": "complete" }),
+        )),
     )
     .await;
 
@@ -210,8 +207,8 @@ async fn client_shims_modern_permission_requests_to_legacy_notifications() {
         .expect("prompt task")
         .expect("prompt response");
     assert_eq!(
-        prompt_response.result,
-        Some(json!({ "status": "complete" }))
+        prompt_response.result(),
+        Some(&json!({ "status": "complete" }))
     );
 }
 
@@ -270,8 +267,8 @@ async fn client_normalizes_opencode_style_permission_option_ids() {
     match outbound_permission {
         JsonRpcMessage::Response(response) => {
             assert_eq!(
-                response.result,
-                Some(json!({
+                response.result(),
+                Some(&json!({
                     "outcome": {
                         "outcome": "selected",
                         "optionId": "always"
@@ -284,12 +281,7 @@ async fn client_normalizes_opencode_style_permission_option_ids() {
 
     write_message(
         &mut writer,
-        &JsonRpcMessage::Response(JsonRpcResponse {
-            jsonrpc: String::from("2.0"),
-            id: prompt_id,
-            result: Some(json!({ "done": true })),
-            error: None,
-        }),
+        &JsonRpcMessage::Response(JsonRpcResponse::success(prompt_id, json!({ "done": true }))),
     )
     .await;
 
@@ -297,7 +289,7 @@ async fn client_normalizes_opencode_style_permission_option_ids() {
         .await
         .expect("prompt task")
         .expect("prompt response");
-    assert_eq!(prompt_response.result, Some(json!({ "done": true })));
+    assert_eq!(prompt_response.result(), Some(&json!({ "done": true })));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -362,12 +354,7 @@ async fn client_deduplicates_repeated_permission_request_ids() {
 
     write_message(
         &mut writer,
-        &JsonRpcMessage::Response(JsonRpcResponse {
-            jsonrpc: String::from("2.0"),
-            id: prompt_id,
-            result: Some(json!({ "done": true })),
-            error: None,
-        }),
+        &JsonRpcMessage::Response(JsonRpcResponse::success(prompt_id, json!({ "done": true }))),
     )
     .await;
 
@@ -401,16 +388,14 @@ async fn client_falls_back_to_cancel_notification_when_request_form_is_unsupport
 
     write_message(
         &mut writer,
-        &JsonRpcMessage::Response(JsonRpcResponse {
-            jsonrpc: String::from("2.0"),
-            id: request_id,
-            result: None,
-            error: Some(JsonRpcError {
+        &JsonRpcMessage::Response(JsonRpcResponse::error_response(
+            request_id,
+            JsonRpcError {
                 code: -32601,
                 message: String::from("Method not found: session/cancel"),
                 data: Some(json!({ "method": "session/cancel" })),
-            }),
-        }),
+            },
+        )),
     )
     .await;
 
@@ -431,8 +416,8 @@ async fn client_falls_back_to_cancel_notification_when_request_form_is_unsupport
         .expect("cancel task")
         .expect("cancel response");
     assert_eq!(
-        response.result,
-        Some(json!({
+        response.result(),
+        Some(&json!({
             "cancelled": false,
             "requested": true,
             "via": "notification-fallback"
@@ -444,11 +429,13 @@ async fn client_falls_back_to_cancel_notification_when_request_form_is_unsupport
 async fn client_timeout_errors_include_recent_activity() {
     let (client, mut reader, mut writer) = new_client(AcpClientOptions {
         timeout: Duration::from_millis(50),
+        method_timeouts: BTreeMap::new(),
         request_handler: None,
         process_state_provider: Some(Arc::new(|| AcpClientProcessState {
             exit_code: Some(137),
             killed: Some(true),
         })),
+        max_read_line_bytes: 16 * 1024 * 1024,
     });
 
     let request_task = tokio::spawn({
@@ -485,7 +472,7 @@ async fn client_timeout_errors_include_recent_activity() {
         .expect_err("request should time out");
     let message = error.to_string();
     assert!(message.contains("Recent ACP activity"));
-    assert!(message.contains("non_json [sandbox.require] start node:url /"));
+    assert!(message.contains("invalid_json_rpc code=-32700 Parse error"));
     assert!(message.contains("received notification session/update"));
     assert!(message.contains("process exitCode=137"));
     assert!(message.contains("killed=true"));
@@ -495,8 +482,10 @@ async fn client_timeout_errors_include_recent_activity() {
 async fn client_waits_for_exit_drain_before_rejecting_pending_requests() {
     let (client, mut reader, mut writer) = new_client(AcpClientOptions {
         timeout: Duration::from_secs(1),
+        method_timeouts: BTreeMap::new(),
         request_handler: None,
         process_state_provider: None,
+        max_read_line_bytes: 16 * 1024 * 1024,
     });
 
     let started_at = Instant::now();
@@ -547,8 +536,10 @@ async fn client_handles_inbound_requests_with_registered_handler() {
 
     let (client, mut reader, mut writer) = new_client(AcpClientOptions {
         timeout: Duration::from_secs(1),
+        method_timeouts: BTreeMap::new(),
         request_handler: Some(handler),
         process_state_provider: None,
+        max_read_line_bytes: 16 * 1024 * 1024,
     });
     let mut notifications = client.subscribe_notifications();
 
@@ -578,8 +569,8 @@ async fn client_handles_inbound_requests_with_registered_handler() {
         JsonRpcMessage::Response(response) => {
             assert_eq!(response.id, JsonRpcId::Number(41));
             assert_eq!(
-                response.result,
-                Some(json!({
+                response.result(),
+                Some(&json!({
                     "echo": {
                         "path": "/workspace/notes.txt"
                     }

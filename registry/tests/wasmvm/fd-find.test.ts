@@ -12,7 +12,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
-import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
+import { COMMANDS_DIR, createKernel, describeIf, hasWasmBinaries } from '../helpers.js';
 import type { Kernel } from '../helpers.js';
 
 // Minimal in-memory VFS for kernel tests
@@ -137,7 +137,7 @@ function parseLines(stdout: string): string[] {
   return stdout.split('\n').filter(l => l.length > 0).sort();
 }
 
-describe.skipIf(!hasWasmBinaries)('fd-find command', () => {
+describeIf(hasWasmBinaries, 'fd-find command', { timeout: 10_000 }, () => {
   let kernel: Kernel;
 
   afterEach(async () => {
@@ -159,7 +159,7 @@ describe.skipIf(!hasWasmBinaries)('fd-find command', () => {
     kernel = createKernel({ filesystem: vfs as any });
     await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
 
-    const result = await kernel.exec('fd -e js /project', {});
+    const result = await kernel.exec('fd -e js . /project', {});
     const lines = parseLines(result.stdout);
     expect(lines).toContain('/project/src/main.js');
     expect(lines).toContain('/project/src/utils.js');
@@ -173,7 +173,7 @@ describe.skipIf(!hasWasmBinaries)('fd-find command', () => {
     kernel = createKernel({ filesystem: vfs as any });
     await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
 
-    const result = await kernel.exec('fd -t f /project', {});
+    const result = await kernel.exec('fd -t f . /project', {});
     const lines = parseLines(result.stdout);
     // All entries should be files, not directories
     for (const line of lines) {
@@ -190,7 +190,7 @@ describe.skipIf(!hasWasmBinaries)('fd-find command', () => {
     kernel = createKernel({ filesystem: vfs as any });
     await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
 
-    const result = await kernel.exec('fd -t d /project', {});
+    const result = await kernel.exec('fd -t d . /project', {});
     const lines = parseLines(result.stdout);
     // All entries should be directories
     for (const line of lines) {

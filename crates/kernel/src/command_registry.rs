@@ -75,12 +75,28 @@ impl CommandRegistry {
     where
         F: VirtualFileSystem,
     {
+        self.populate_commands(vfs, self.commands.keys())
+    }
+
+    pub fn populate_driver_bin<F>(&self, vfs: &mut F, driver: &CommandDriver) -> VfsResult<()>
+    where
+        F: VirtualFileSystem,
+    {
+        self.populate_commands(vfs, driver.commands())
+    }
+
+    fn populate_commands<F, I, S>(&self, vfs: &mut F, commands: I) -> VfsResult<()>
+    where
+        F: VirtualFileSystem,
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
         if !vfs.exists("/bin") {
             vfs.mkdir("/bin", true)?;
         }
 
-        for command in self.commands.keys() {
-            let path = format!("/bin/{command}");
+        for command in commands {
+            let path = format!("/bin/{}", command.as_ref());
             if !vfs.exists(&path) {
                 vfs.write_file(&path, COMMAND_STUB.to_vec())?;
                 let _ = vfs.chmod(&path, 0o755);

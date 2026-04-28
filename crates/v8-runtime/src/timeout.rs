@@ -8,8 +8,8 @@ use std::time::Duration;
 /// Guard for per-session CPU timeout enforcement.
 ///
 /// Spawns a timer thread that calls `v8::Isolate::terminate_execution()`
-/// and drops an abort sender to unblock any channel-based readers when the
-/// timeout elapses. Drop or call `cancel()` to prevent firing.
+/// and closes the active execution abort channel to unblock any channel-based
+/// readers when the timeout elapses. Drop or call `cancel()` to prevent firing.
 pub struct TimeoutGuard {
     /// Sender side of cancellation channel — dropped to cancel the timer
     cancel_tx: Option<crossbeam_channel::Sender<()>>,
@@ -25,10 +25,33 @@ impl TimeoutGuard {
     /// - `timeout_ms`: wall-clock time limit in milliseconds
     /// - `isolate_handle`: V8 isolate handle for `terminate_execution()`
     /// - `abort_tx`: dropped on timeout to unblock channel readers via `select!`
-    pub fn new(
+    pub(crate) fn new(
         timeout_ms: u32,
         isolate_handle: v8::IsolateHandle,
         abort_tx: crossbeam_channel::Sender<()>,
+    ) -> Self {
+        Self::spawn(timeout_ms, isolate_handle, move || {
+            drop(abort_tx);
+        })
+    }
+
+    pub(crate) fn with_execution_abort(
+        timeout_ms: u32,
+        isolate_handle: v8::IsolateHandle,
+        execution_abort: crate::session::SharedExecutionAbort,
+    ) -> Self {
+        Self::spawn(timeout_ms, isolate_handle, move || {
+            crate::session::signal_execution_abort(
+                &execution_abort,
+                crate::session::ExecutionAbortReason::TimedOut,
+            );
+        })
+    }
+
+    fn spawn(
+        timeout_ms: u32,
+        isolate_handle: v8::IsolateHandle,
+        on_timeout: impl FnOnce() + Send + 'static,
     ) -> Self {
         let (cancel_tx, cancel_rx) = crossbeam_channel::bounded::<()>(1);
         let fired = Arc::new(AtomicBool::new(false));
@@ -44,8 +67,7 @@ impl TimeoutGuard {
                         // Timeout elapsed — terminate V8 execution
                         fired_clone.store(true, Ordering::SeqCst);
                         isolate_handle.terminate_execution();
-                        // Drop abort_tx to unblock any channel readers
-                        drop(abort_tx);
+                        on_timeout();
                     }
                     recv(cancel_rx) -> _ => {
                         // Cancelled — execution completed normally

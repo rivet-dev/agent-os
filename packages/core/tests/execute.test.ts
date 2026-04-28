@@ -1,11 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/index.js";
-import {
-	REGISTRY_SOFTWARE,
-	registrySkipReason,
-} from "./helpers/registry-commands.js";
+import { REGISTRY_SOFTWARE } from "./helpers/registry-commands.js";
 
-describe.skipIf(registrySkipReason)("command execution", () => {
+describe("command execution", () => {
 	let vm: AgentOs;
 
 	beforeEach(async () => {
@@ -20,6 +17,7 @@ describe.skipIf(registrySkipReason)("command execution", () => {
 		const result = await vm.exec("echo hello");
 		expect(result.exitCode).toBe(0);
 		expect(result.stdout.trim()).toBe("hello");
+		expect(result.stderr).toBe("");
 	});
 
 	test("exec returns stderr and non-zero exit code", async () => {
@@ -60,9 +58,15 @@ describe.skipIf(registrySkipReason)("command execution", () => {
 		expect(result.stdout).toContain("node-output");
 	});
 
-	test("exec shell pipeline", async () => {
-		const result = await vm.exec("echo hello | cat");
-		expect(result.exitCode).toBe(0);
-		expect(result.stdout).toContain("hello");
-	});
+	test(
+		"exec shell pipeline",
+		async () => {
+			for (let attempt = 0; attempt < 5; attempt += 1) {
+				const result = await vm.exec("echo hello | cat");
+				expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+				expect(result.stdout).toContain("hello");
+			}
+		},
+		120_000,
+	);
 });

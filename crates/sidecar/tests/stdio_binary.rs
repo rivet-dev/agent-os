@@ -3,9 +3,9 @@ mod support;
 use agent_os_sidecar::protocol::{
     AuthenticateRequest, ConfigureVmRequest, CreateVmRequest, EventPayload, ExecuteRequest,
     GuestFilesystemCallRequest, GuestFilesystemOperation, GuestRuntimeKind, MountDescriptor,
-    MountPluginDescriptor, NativeFrameCodec, OpenSessionRequest, OwnershipScope, ProtocolFrame,
-    RequestFrame, RequestId, RequestPayload, ResponseFrame, ResponsePayload, SidecarPlacement,
-    SidecarRequestFrame, SidecarResponseFrame, SidecarResponsePayload,
+    MountPluginDescriptor, NativeFrameCodec, OpenSessionRequest, OwnershipScope, PermissionsPolicy,
+    ProtocolFrame, RequestFrame, RequestId, RequestPayload, ResponseFrame, ResponsePayload,
+    SidecarPlacement, SidecarRequestFrame, SidecarResponseFrame, SidecarResponsePayload,
     SnapshotRootFilesystemRequest, StreamChannel,
 };
 use base64::Engine;
@@ -256,6 +256,7 @@ fn native_sidecar_binary_runs_the_framed_protocol_over_stdio() {
             RequestPayload::Authenticate(AuthenticateRequest {
                 client_name: String::from("stdio-test"),
                 auth_token: String::from("stdio-test-token"),
+                bridge_version: agent_os_bridge::bridge_contract().version,
             }),
         ),
     );
@@ -296,7 +297,7 @@ fn native_sidecar_binary_runs_the_framed_protocol_over_stdio() {
                     temp.to_string_lossy().into_owned(),
                 )]),
                 root_filesystem: Default::default(),
-                permissions: None,
+                permissions: Some(PermissionsPolicy::allow_all()),
             }),
         ),
     );
@@ -699,6 +700,7 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
             RequestPayload::Authenticate(AuthenticateRequest {
                 client_name: String::from("stdio-test"),
                 auth_token: String::from("stdio-test-token"),
+                bridge_version: agent_os_bridge::bridge_contract().version,
             }),
         ),
     );
@@ -736,7 +738,7 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
                 runtime: GuestRuntimeKind::JavaScript,
                 metadata: BTreeMap::new(),
                 root_filesystem: Default::default(),
-                permissions: None,
+                permissions: Some(PermissionsPolicy::allow_all()),
             }),
         ),
     );
@@ -770,7 +772,7 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
                     },
                 }],
                 software: Vec::new(),
-                permissions: None,
+                permissions: Some(PermissionsPolicy::allow_all()),
                 module_access_cwd: None,
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
@@ -1019,7 +1021,23 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
             }),
         ),
     );
-    let disposed = recv_response(&mut stdout, &codec, 7, &mut buffered_events);
+    let disposed = recv_response_with_sidecar_handler(
+        &mut stdin,
+        &mut stdout,
+        &codec,
+        7,
+        &mut buffered_events,
+        |request| {
+            let agent_os_sidecar::protocol::SidecarRequestPayload::JsBridgeCall(call) =
+                &request.payload
+            else {
+                panic!("expected js_bridge_call payload during dispose");
+            };
+            assert_eq!(call.mount_id, "mount-1");
+            js_bridge_root_response(call)
+                .unwrap_or_else(|| panic!("unexpected js bridge dispose callback: {call:?}"))
+        },
+    );
     match disposed.payload {
         ResponsePayload::VmDisposed(response) => assert_eq!(response.vm_id, vm_id),
         other => panic!("unexpected dispose response: {other:?}"),

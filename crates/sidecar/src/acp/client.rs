@@ -1,10 +1,11 @@
+use crate::acp::compat::SeenInboundRequestIds;
 use crate::acp::json_rpc::{
     serialize_message, JsonRpcError, JsonRpcId, JsonRpcMessage, JsonRpcNotification,
     JsonRpcRequest, JsonRpcResponse,
 };
 use crate::acp::AcpTimeoutDiagnostics;
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -14,7 +15,11 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::sync::{broadcast, oneshot, Mutex as AsyncMutex};
 
 const DEFAULT_TIMEOUT_MS: Duration = Duration::from_millis(120_000);
+const INITIALIZE_TIMEOUT_MS: Duration = Duration::from_millis(10_000);
+const SESSION_NEW_TIMEOUT_MS: Duration = Duration::from_millis(30_000);
+const SESSION_PROMPT_TIMEOUT_MS: Duration = Duration::from_millis(600_000);
 const EXIT_DRAIN_GRACE_MS: Duration = Duration::from_millis(50);
+const DEFAULT_MAX_READ_LINE_BYTES: usize = 16 * 1024 * 1024;
 const LEGACY_PERMISSION_METHOD: &str = "request/permission";
 const ACP_PERMISSION_METHOD: &str = "session/request_permission";
 const ACP_CANCEL_METHOD: &str = "session/cancel";
@@ -47,16 +52,20 @@ pub struct AcpClient {
 #[derive(Clone)]
 pub struct AcpClientOptions {
     pub timeout: Duration,
+    pub method_timeouts: BTreeMap<String, Duration>,
     pub request_handler: Option<InboundRequestHandler>,
     pub process_state_provider: Option<AcpClientProcessStateProvider>,
+    pub max_read_line_bytes: usize,
 }
 
 impl Default for AcpClientOptions {
     fn default() -> Self {
         Self {
             timeout: DEFAULT_TIMEOUT_MS,
+            method_timeouts: AcpClient::default_method_timeouts(),
             request_handler: None,
             process_state_provider: None,
+            max_read_line_bytes: DEFAULT_MAX_READ_LINE_BYTES,
         }
     }
 }
@@ -89,16 +98,19 @@ struct PendingPermissionRequest {
 struct AcpClientInner {
     writer: AsyncMutex<Pin<Box<dyn AsyncWrite + Send>>>,
     pending: Mutex<BTreeMap<JsonRpcId, oneshot::Sender<Result<JsonRpcResponse, AcpClientError>>>>,
-    seen_inbound_request_ids: Mutex<BTreeSet<JsonRpcId>>,
+    seen_inbound_request_ids: Mutex<SeenInboundRequestIds>,
     pending_permission_requests: Mutex<BTreeMap<String, PendingPermissionRequest>>,
     request_handler: Mutex<Option<InboundRequestHandler>>,
     notification_tx: broadcast::Sender<JsonRpcNotification>,
     recent_activity: Mutex<VecDeque<String>>,
     next_id: AtomicI64,
     closed: AtomicBool,
+    terminal_error: Mutex<Option<AcpClientError>>,
     transport_state: Mutex<String>,
     timeout: Duration,
+    method_timeouts: BTreeMap<String, Duration>,
     process_state_provider: Option<AcpClientProcessStateProvider>,
+    max_read_line_bytes: usize,
 }
 
 impl AcpClient {
@@ -111,16 +123,19 @@ impl AcpClient {
         let inner = Arc::new(AcpClientInner {
             writer: AsyncMutex::new(Box::pin(writer)),
             pending: Mutex::new(BTreeMap::new()),
-            seen_inbound_request_ids: Mutex::new(BTreeSet::new()),
+            seen_inbound_request_ids: Mutex::new(SeenInboundRequestIds::default()),
             pending_permission_requests: Mutex::new(BTreeMap::new()),
             request_handler: Mutex::new(options.request_handler),
             notification_tx,
             recent_activity: Mutex::new(VecDeque::with_capacity(RECENT_ACTIVITY_LIMIT)),
             next_id: AtomicI64::new(1),
             closed: AtomicBool::new(false),
+            terminal_error: Mutex::new(None),
             transport_state: Mutex::new(String::from("transport_open")),
             timeout: options.timeout,
+            method_timeouts: options.method_timeouts,
             process_state_provider: options.process_state_provider,
+            max_read_line_bytes: options.max_read_line_bytes,
         });
 
         tokio::spawn(read_loop(BufReader::new(reader), Arc::clone(&inner)));
@@ -130,6 +145,14 @@ impl AcpClient {
 
     pub fn subscribe_notifications(&self) -> broadcast::Receiver<JsonRpcNotification> {
         self.inner.notification_tx.subscribe()
+    }
+
+    pub fn default_method_timeouts() -> BTreeMap<String, Duration> {
+        BTreeMap::from([
+            (String::from("initialize"), INITIALIZE_TIMEOUT_MS),
+            (String::from("session/new"), SESSION_NEW_TIMEOUT_MS),
+            (String::from("session/prompt"), SESSION_PROMPT_TIMEOUT_MS),
+        ])
     }
 
     pub fn set_request_handler(&self, handler: Option<InboundRequestHandler>) {
@@ -145,8 +168,8 @@ impl AcpClient {
         method: impl Into<String>,
         params: Option<Value>,
     ) -> Result<JsonRpcResponse, AcpClientError> {
-        if self.inner.closed.load(Ordering::SeqCst) {
-            return Err(AcpClientError::Closed(String::from("AcpClient is closed")));
+        if let Some(error) = self.inner.terminal_error() {
+            return Err(error);
         }
 
         let method = method.into();
@@ -156,6 +179,7 @@ impl AcpClient {
         {
             return Ok(response);
         }
+        let request_timeout = self.inner.timeout_for_method(&method);
 
         let id = JsonRpcId::Number(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
         let message = JsonRpcRequest {
@@ -183,7 +207,7 @@ impl AcpClient {
             return Err(error);
         }
 
-        let response = match tokio::time::timeout(self.inner.timeout, rx).await {
+        let response = match tokio::time::timeout(request_timeout, rx).await {
             Ok(Ok(Ok(response))) => response,
             Ok(Ok(Err(error))) => return Err(error),
             Ok(Err(_)) => {
@@ -197,7 +221,10 @@ impl AcpClient {
                     .lock()
                     .expect("pending lock poisoned")
                     .remove(&id);
-                return Err(self.inner.create_timeout_error(&method, &id));
+                self.dispatch_timeout_cancel(&method, params.as_ref()).await;
+                return Err(self
+                    .inner
+                    .create_timeout_error(&method, &id, request_timeout));
             }
         };
 
@@ -206,16 +233,14 @@ impl AcpClient {
         }
 
         self.notify(method.clone(), params).await?;
-        Ok(JsonRpcResponse {
-            jsonrpc: String::from("2.0"),
-            id: response.id,
-            result: Some(json!({
+        Ok(JsonRpcResponse::success(
+            response.id,
+            json!({
                 "cancelled": false,
                 "requested": true,
                 "via": "notification-fallback",
-            })),
-            error: None,
-        })
+            }),
+        ))
     }
 
     pub async fn notify(
@@ -223,8 +248,8 @@ impl AcpClient {
         method: impl Into<String>,
         params: Option<Value>,
     ) -> Result<(), AcpClientError> {
-        if self.inner.closed.load(Ordering::SeqCst) {
-            return Err(AcpClientError::Closed(String::from("AcpClient is closed")));
+        if let Some(error) = self.inner.terminal_error() {
+            return Err(error);
         }
 
         let method = method.into();
@@ -241,6 +266,16 @@ impl AcpClient {
     pub async fn close(&self) -> Result<(), AcpClientError> {
         if self.inner.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
+        }
+
+        {
+            let mut terminal_error = self
+                .inner
+                .terminal_error
+                .lock()
+                .expect("terminal error lock poisoned");
+            terminal_error
+                .get_or_insert_with(|| AcpClientError::Closed(String::from("AcpClient closed")));
         }
 
         {
@@ -284,12 +319,7 @@ impl AcpClient {
         }
 
         let result = normalize_permission_result(&payload, &pending);
-        let response = JsonRpcResponse {
-            jsonrpc: String::from("2.0"),
-            id: pending.id.clone(),
-            result: Some(result),
-            error: None,
-        };
+        let response = JsonRpcResponse::success(pending.id.clone(), result);
 
         self.inner
             .record_activity(format!("sent permission response id={}", pending.id));
@@ -299,23 +329,25 @@ impl AcpClient {
     }
 
     async fn write_message(&self, message: JsonRpcMessage) -> Result<(), AcpClientError> {
-        let encoded = serialize_message(&message).map_err(|error| {
-            AcpClientError::Io(format!("failed to serialize ACP frame: {error}"))
-        })?;
-        let mut writer = self.inner.writer.lock().await;
-        writer
-            .write_all(encoded.as_bytes())
-            .await
-            .map_err(|error| AcpClientError::Io(format!("failed to write ACP frame: {error}")))?;
-        writer
-            .flush()
-            .await
-            .map_err(|error| AcpClientError::Io(format!("failed to flush ACP frame: {error}")))?;
-        Ok(())
+        write_with_inner(&self.inner, message).await
+    }
+
+    async fn dispatch_timeout_cancel(&self, method: &str, params: Option<&Value>) {
+        let Some(cancel_params) = timeout_cancel_params(method, params) else {
+            return;
+        };
+        let _ = self.notify(ACP_CANCEL_METHOD, Some(cancel_params)).await;
     }
 }
 
 impl AcpClientInner {
+    fn terminal_error(&self) -> Option<AcpClientError> {
+        self.terminal_error
+            .lock()
+            .expect("terminal error lock poisoned")
+            .clone()
+    }
+
     fn record_activity(&self, entry: String) {
         let mut recent = self
             .recent_activity
@@ -327,7 +359,12 @@ impl AcpClientInner {
         }
     }
 
-    fn create_timeout_error(&self, method: &str, id: &JsonRpcId) -> AcpClientError {
+    fn create_timeout_error(
+        &self,
+        method: &str,
+        id: &JsonRpcId,
+        timeout: Duration,
+    ) -> AcpClientError {
         let transport_state = self
             .transport_state
             .lock()
@@ -345,7 +382,7 @@ impl AcpClientInner {
             .as_ref()
             .map(|provider| provider())
             .unwrap_or_default();
-        let timeout_ms = u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX);
+        let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
         let diagnostics = AcpTimeoutDiagnostics::new(
             method,
             id.clone(),
@@ -356,6 +393,13 @@ impl AcpClientInner {
             recent_activity,
         );
         AcpClientError::Timeout(diagnostics.message())
+    }
+
+    fn timeout_for_method(&self, method: &str) -> Duration {
+        self.method_timeouts
+            .get(method)
+            .copied()
+            .unwrap_or(self.timeout)
     }
 
     fn reject_all(&self, error: AcpClientError) {
@@ -375,24 +419,49 @@ impl AcpClientInner {
             .expect("seen request ids lock poisoned")
             .clear();
     }
+
+    fn fail_transport(&self, error: AcpClientError) -> AcpClientError {
+        if !self.closed.swap(true, Ordering::SeqCst) {
+            let mut terminal_error = self
+                .terminal_error
+                .lock()
+                .expect("terminal error lock poisoned");
+            terminal_error.get_or_insert_with(|| error.clone());
+            self.reject_all(error.clone());
+        }
+        error
+    }
 }
 
-async fn read_loop<R>(reader: BufReader<R>, inner: Arc<AcpClientInner>)
+async fn read_loop<R>(mut reader: BufReader<R>, inner: Arc<AcpClientInner>)
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
-    let mut lines = reader.lines();
+    let max_read_line_bytes = inner.max_read_line_bytes;
     loop {
-        match lines.next_line().await {
+        match read_bounded_line(&mut reader, max_read_line_bytes).await {
             Ok(Some(line)) => {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
 
-                let Some(message) = crate::acp::deserialize_message(trimmed) else {
-                    inner.record_activity(format!("non_json {}", truncate_activity_text(trimmed)));
-                    continue;
+                let message = match crate::acp::deserialize_message(trimmed) {
+                    Ok(message) => message,
+                    Err(error) => {
+                        inner.record_activity(format!(
+                            "invalid_json_rpc code={} {}",
+                            error.code(),
+                            truncate_activity_text(error.message())
+                        ));
+                        if write_with_inner(&inner, JsonRpcMessage::Response(error.to_response()))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        continue;
+                    }
                 };
                 inner.record_activity(summarize_inbound_message(&message));
 
@@ -429,15 +498,67 @@ where
                     .lock()
                     .expect("transport state lock poisoned") = format!("transport_error {error}");
                 inner.record_activity(format!("process_exit transport_error={error}"));
-                break;
+                inner.fail_transport(AcpClientError::Io(format!(
+                    "failed to read ACP frame: {error}"
+                )));
+                return;
             }
         }
     }
 
     tokio::time::sleep(EXIT_DRAIN_GRACE_MS).await;
-    if !inner.closed.swap(true, Ordering::SeqCst) {
-        inner.reject_all(AcpClientError::Closed(String::from("Agent process exited")));
+    if !inner.closed.load(Ordering::SeqCst) {
+        inner.fail_transport(AcpClientError::Closed(String::from("Agent process exited")));
     }
+}
+
+async fn read_bounded_line<R>(
+    reader: &mut BufReader<R>,
+    max_read_line_bytes: usize,
+) -> std::io::Result<Option<String>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut line = Vec::new();
+
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+
+        let (chunk, consume_len, line_complete) =
+            if let Some(newline_pos) = available.iter().position(|byte| *byte == b'\n') {
+                (&available[..newline_pos], newline_pos + 1, true)
+            } else {
+                (available, available.len(), false)
+            };
+
+        if line.len().saturating_add(chunk.len()) > max_read_line_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("ACP adapter emitted a line longer than {max_read_line_bytes} bytes"),
+            ));
+        }
+
+        line.extend_from_slice(chunk);
+        reader.consume(consume_len);
+
+        if line_complete {
+            break;
+        }
+    }
+
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 async fn handle_inbound_request(inner: Arc<AcpClientInner>, request: JsonRpcRequest) {
@@ -511,56 +632,90 @@ async fn handle_inbound_request(inner: Arc<AcpClientInner>, request: JsonRpcRequ
         .expect("request handler lock poisoned")
         .clone();
     let Some(handler) = handler else {
-        let response = JsonRpcResponse {
-            jsonrpc: String::from("2.0"),
-            id: request.id,
-            result: None,
-            error: Some(JsonRpcError {
-                code: -32601,
-                message: format!("Method not found: {}", request.method),
-                data: None,
-            }),
-        };
-        let _ = write_with_inner(&inner, JsonRpcMessage::Response(response)).await;
+        let response = method_not_found_response(&request);
+        if write_with_inner(&inner, JsonRpcMessage::Response(response))
+            .await
+            .is_err()
+        {
+            return;
+        }
         return;
     };
 
-    let response = match handler(request.clone()).await {
-        Ok(Some(outcome)) if outcome.error.is_some() => JsonRpcResponse {
-            jsonrpc: String::from("2.0"),
-            id: request.id,
-            result: None,
-            error: outcome.error,
+    let response = match tokio::time::timeout(inner.timeout, handler(request.clone())).await {
+        Ok(result) => match result {
+            Ok(Some(outcome)) if outcome.error.is_some() => JsonRpcResponse::error_response(
+                request.id,
+                outcome.error.expect("guard ensured error is present"),
+            ),
+            Ok(Some(outcome)) => {
+                JsonRpcResponse::success(request.id, outcome.result.unwrap_or(Value::Null))
+            }
+            Ok(None) => method_not_found_response(&request),
+            Err(message) => JsonRpcResponse::error_response(
+                request.id,
+                JsonRpcError {
+                    code: -32000,
+                    message,
+                    data: None,
+                },
+            ),
         },
-        Ok(Some(outcome)) => JsonRpcResponse {
-            jsonrpc: String::from("2.0"),
-            id: request.id,
-            result: Some(outcome.result.unwrap_or(Value::Null)),
-            error: None,
-        },
-        Ok(None) => JsonRpcResponse {
-            jsonrpc: String::from("2.0"),
-            id: request.id,
-            result: None,
-            error: Some(JsonRpcError {
-                code: -32601,
-                message: format!("Method not found: {}", request.method),
-                data: None,
-            }),
-        },
-        Err(message) => JsonRpcResponse {
-            jsonrpc: String::from("2.0"),
-            id: request.id,
-            result: None,
-            error: Some(JsonRpcError {
-                code: -32000,
-                message,
-                data: None,
-            }),
-        },
+        Err(_) => {
+            inner.record_activity(format!(
+                "timed out waiting for inbound host handler {} id={}",
+                request.method, request.id
+            ));
+            method_not_found_response(&request)
+        }
     };
 
-    let _ = write_with_inner(&inner, JsonRpcMessage::Response(response)).await;
+    if write_with_inner(&inner, JsonRpcMessage::Response(response))
+        .await
+        .is_err()
+    {
+        return;
+    }
+}
+
+#[cfg(test)]
+impl AcpClient {
+    fn seen_inbound_request_id_count_for_tests(&self) -> usize {
+        self.inner
+            .seen_inbound_request_ids
+            .lock()
+            .expect("seen request ids lock poisoned")
+            .len()
+    }
+
+    fn recent_activity_for_tests(&self) -> Vec<String> {
+        self.inner
+            .recent_activity
+            .lock()
+            .expect("recent activity lock poisoned")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    fn transport_state_for_tests(&self) -> String {
+        self.inner
+            .transport_state
+            .lock()
+            .expect("transport state lock poisoned")
+            .clone()
+    }
+}
+
+fn method_not_found_response(request: &JsonRpcRequest) -> JsonRpcResponse {
+    JsonRpcResponse::error_response(
+        request.id.clone(),
+        JsonRpcError {
+            code: -32601,
+            message: format!("Method not found: {}", request.method),
+            data: None,
+        },
+    )
 }
 
 async fn write_with_inner(
@@ -573,11 +728,26 @@ async fn write_with_inner(
     writer
         .write_all(encoded.as_bytes())
         .await
-        .map_err(|error| AcpClientError::Io(format!("failed to write ACP frame: {error}")))?;
-    writer
-        .flush()
-        .await
-        .map_err(|error| AcpClientError::Io(format!("failed to flush ACP frame: {error}")))?;
+        .map_err(|error| {
+            *inner
+                .transport_state
+                .lock()
+                .expect("transport state lock poisoned") = format!("transport_write_error {error}");
+            inner.record_activity(format!("process_exit transport_write_error={error}"));
+            inner.fail_transport(AcpClientError::Io(format!(
+                "failed to write ACP frame: {error}"
+            )))
+        })?;
+    writer.flush().await.map_err(|error| {
+        *inner
+            .transport_state
+            .lock()
+            .expect("transport state lock poisoned") = format!("transport_flush_error {error}");
+        inner.record_activity(format!("process_exit transport_flush_error={error}"));
+        inner.fail_transport(AcpClientError::Io(format!(
+            "failed to flush ACP frame: {error}"
+        )))
+    })?;
     Ok(())
 }
 
@@ -664,7 +834,7 @@ fn resolve_permission_option_id(
 }
 
 fn is_cancel_method_not_found(response: &JsonRpcResponse) -> bool {
-    let Some(error) = &response.error else {
+    let Some(error) = response.error() else {
         return false;
     };
     if error.code != -32601 {
@@ -691,6 +861,16 @@ fn to_record(value: Option<Value>) -> Map<String, Value> {
     }
 }
 
+fn timeout_cancel_params(method: &str, params: Option<&Value>) -> Option<Value> {
+    if method == ACP_CANCEL_METHOD {
+        return None;
+    }
+
+    let params = params?.as_object()?;
+    let session_id = params.get("sessionId")?.clone();
+    Some(json!({ "sessionId": session_id }))
+}
+
 fn truncate_activity_text(value: &str) -> String {
     if value.len() <= ACTIVITY_TEXT_LIMIT {
         return String::from(value);
@@ -700,7 +880,7 @@ fn truncate_activity_text(value: &str) -> String {
 
 fn summarize_inbound_message(message: &JsonRpcMessage) -> String {
     match message {
-        JsonRpcMessage::Response(response) => match &response.error {
+        JsonRpcMessage::Response(response) => match response.error() {
             Some(error) => truncate_activity_text(&format!(
                 "received response id={} error={}:{}",
                 response.id, error.code, error.message
@@ -714,5 +894,168 @@ fn summarize_inbound_message(message: &JsonRpcMessage) -> String {
         JsonRpcMessage::Notification(notification) => {
             truncate_activity_text(&format!("received notification {}", notification.method))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{split, AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::time::timeout;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_seen_request_ids_stay_bounded_after_many_unique_requests() {
+        let (client_stream, server_stream) = tokio::io::duplex(256 * 1024);
+        let (client_reader, client_writer) = split(client_stream);
+        let (server_reader, mut server_writer) = split(server_stream);
+        let client = AcpClient::new(client_reader, client_writer, AcpClientOptions::default());
+
+        let response_drain = tokio::spawn(async move {
+            let mut lines = BufReader::new(server_reader).lines();
+            let mut responses = 0usize;
+            while responses < 100_000 {
+                let line = lines
+                    .next_line()
+                    .await
+                    .expect("read response line")
+                    .expect("response line should exist");
+                let message = crate::acp::deserialize_message(&line).expect("decode response");
+                match message {
+                    JsonRpcMessage::Response(_) => responses += 1,
+                    other => {
+                        panic!("unexpected outbound frame while draining responses: {other:?}")
+                    }
+                }
+            }
+        });
+
+        for request_id in 0..100_000 {
+            let message = JsonRpcMessage::Request(JsonRpcRequest {
+                jsonrpc: String::from("2.0"),
+                id: JsonRpcId::Number(request_id),
+                method: String::from("fs/read_text_file"),
+                params: Some(json!({ "path": format!("/tmp/{request_id}.txt") })),
+            });
+            let encoded = serialize_message(&message).expect("encode request");
+            server_writer
+                .write_all(encoded.as_bytes())
+                .await
+                .expect("write request");
+        }
+        server_writer.flush().await.expect("flush requests");
+
+        response_drain.await.expect("response drain");
+        assert_eq!(
+            client.seen_inbound_request_id_count_for_tests(),
+            crate::acp::compat::SEEN_INBOUND_REQUEST_ID_RETENTION_LIMIT
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_fails_when_adapter_emits_a_line_longer_than_the_configured_limit() {
+        const MAX_READ_LINE_BYTES: usize = 16 * 1024 * 1024;
+        const OVERSIZED_LINE_BYTES: usize = 20 * 1024 * 1024;
+
+        let (client_stream, server_stream) = tokio::io::duplex(OVERSIZED_LINE_BYTES + 1024);
+        let (client_reader, client_writer) = split(client_stream);
+        let (server_reader, mut server_writer) = split(server_stream);
+        let client = AcpClient::new(
+            client_reader,
+            client_writer,
+            AcpClientOptions {
+                max_read_line_bytes: MAX_READ_LINE_BYTES,
+                ..AcpClientOptions::default()
+            },
+        );
+        let mut outbound_lines = BufReader::new(server_reader).lines();
+
+        let pending_request = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .request(
+                        "session/prompt",
+                        Some(json!({ "sessionId": "oversized-line" })),
+                    )
+                    .await
+            }
+        });
+
+        let outbound_request = outbound_lines
+            .next_line()
+            .await
+            .expect("read outbound request")
+            .expect("outbound request should exist");
+        let outbound_request =
+            crate::acp::deserialize_message(&outbound_request).expect("decode outbound request");
+        match outbound_request {
+            JsonRpcMessage::Request(request) => {
+                assert_eq!(request.method, "session/prompt");
+            }
+            other => panic!("unexpected outbound frame: {other:?}"),
+        }
+
+        let oversized_writer = tokio::spawn(async move {
+            let chunk = vec![b'x'; 1024 * 1024];
+            let mut remaining = OVERSIZED_LINE_BYTES;
+            while remaining > 0 {
+                let next = remaining.min(chunk.len());
+                server_writer
+                    .write_all(&chunk[..next])
+                    .await
+                    .map_err(|error| error.kind())?;
+                remaining -= next;
+            }
+            server_writer
+                .write_all(b"\n")
+                .await
+                .map_err(|error| error.kind())?;
+            server_writer.flush().await.map_err(|error| error.kind())
+        });
+
+        let pending_error = timeout(Duration::from_secs(5), pending_request)
+            .await
+            .expect("pending request timeout")
+            .expect("pending request join")
+            .expect_err("oversized line should fail the client");
+        assert!(
+            matches!(pending_error, AcpClientError::Io(_)),
+            "unexpected error: {pending_error:?}"
+        );
+        assert!(
+            pending_error
+                .to_string()
+                .contains("ACP adapter emitted a line longer than"),
+            "unexpected oversized-line error: {pending_error}"
+        );
+
+        let transport_state = client.transport_state_for_tests();
+        assert!(transport_state.contains("transport_error"));
+        assert!(
+            client
+                .recent_activity_for_tests()
+                .iter()
+                .any(|entry| entry.contains("transport_error")),
+            "recent activity should capture a transport_error entry"
+        );
+
+        let subsequent_error = client
+            .request(
+                "session/prompt",
+                Some(json!({ "sessionId": "after-oversized-line" })),
+            )
+            .await
+            .expect_err("subsequent request should fail immediately");
+        assert_eq!(subsequent_error.to_string(), pending_error.to_string());
+
+        let oversized_writer_result = timeout(Duration::from_secs(1), oversized_writer)
+            .await
+            .expect("oversized writer timeout")
+            .expect("oversized writer join");
+        assert!(
+            oversized_writer_result.is_ok()
+                || oversized_writer_result == Err(std::io::ErrorKind::BrokenPipe),
+            "unexpected oversized writer result: {oversized_writer_result:?}"
+        );
     }
 }

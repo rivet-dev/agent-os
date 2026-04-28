@@ -13,7 +13,7 @@
 
 import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
-import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
+import { COMMANDS_DIR, createKernel, describeIf, hasWasmBinaries } from '../helpers.js';
 import type { Kernel } from '../helpers.js';
 import { createServer as createHttpServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
@@ -174,7 +174,7 @@ function requestHandler(port: number) {
   };
 }
 
-describe.skipIf(!hasWasmBinaries)('wasi-http client (http-test binary)', () => {
+describeIf(hasWasmBinaries, 'wasi-http client (http-test binary)', () => {
   let kernel: Kernel;
   let server: Server;
   let port: number;
@@ -268,7 +268,7 @@ describe.skipIf(!hasWasmBinaries)('wasi-http client (http-test binary)', () => {
   });
 });
 
-describe.skipIf(!hasWasmBinaries || !hasOpenssl)('wasi-http HTTPS (http-test binary)', () => {
+describeIf(hasWasmBinaries && hasOpenssl, 'wasi-http HTTPS (http-test binary)', () => {
   let kernel: Kernel;
   let httpsServer: HttpsServer;
   let httpsPort: number;

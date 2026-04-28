@@ -335,6 +335,7 @@ mod tests {
             RequestPayload::Authenticate(AuthenticateRequest {
                 client_name: "probe".to_string(),
                 auth_token: "probe-token".to_string(),
+                bridge_version: agent_os_bridge::bridge_contract().version,
             }),
         ));
         let encoded =

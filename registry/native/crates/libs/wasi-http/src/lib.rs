@@ -166,9 +166,7 @@ impl Request {
     fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(512);
         // Request line
-        buf.extend_from_slice(
-            format!("{} {} HTTP/1.1\r\n", self.method, self.url.path).as_bytes(),
-        );
+        buf.extend_from_slice(format!("{} {} HTTP/1.1\r\n", self.method, self.url.path).as_bytes());
 
         // Host header (always first)
         buf.extend_from_slice(format!("Host: {}\r\n", self.url.host_header()).as_bytes());
@@ -488,7 +486,9 @@ fn read_headers(fd: u32) -> Result<(u16, String, Vec<(String, String)>, Vec<u8>)
         let n = wasi_ext::recv(fd, &mut recv_buf, 0)
             .map_err(|e| HttpError::Socket(format!("recv failed: errno {}", e)))?;
         if n == 0 {
-            return Err(HttpError::Protocol("connection closed before headers complete".into()));
+            return Err(HttpError::Protocol(
+                "connection closed before headers complete".into(),
+            ));
         }
         buf.extend_from_slice(&recv_buf[..n as usize]);
 
@@ -656,8 +656,7 @@ fn parse_response_headers(
 
 /// Find \r\n\r\n in a byte slice (end of HTTP headers).
 fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4)
-        .position(|w| w == b"\r\n\r\n")
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
 /// Find \r\n in a byte slice.

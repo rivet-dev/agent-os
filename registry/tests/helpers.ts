@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { describe, it } from "vitest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -38,16 +39,49 @@ export function skipReason(): string | false {
   return false;
 }
 
+export function describeIf(
+	condition: unknown,
+	...args: Parameters<typeof describe>
+): void {
+	if (condition) {
+		// Vitest's overloaded tuple shape is awkward to preserve across helper forwarding.
+		// @ts-expect-error forwarded describe() arguments stay runtime-compatible.
+		describe(...args);
+		return;
+	}
+	const [name] = args;
+	describe(String(name), () => {
+		it('environment prerequisites not met', () => {});
+	});
+}
+
+export function itIf(
+	condition: unknown,
+	...args: Parameters<typeof it>
+): void {
+	if (condition) {
+		// Vitest's overloaded tuple shape is awkward to preserve across helper forwarding.
+		// @ts-expect-error forwarded it() arguments stay runtime-compatible.
+		it(...args);
+		return;
+	}
+	const [name] = args;
+	it(String(name), () => {});
+}
+
 // Re-exports from the repo-owned Agent OS test runtime surface.
 export {
   AF_INET,
   AF_UNIX,
   allowAll,
   createInMemoryFileSystem,
-  createKernel,
   SIGTERM,
   SOCK_DGRAM,
   SOCK_STREAM,
+} from "@rivet-dev/agent-os-core/test/runtime";
+import {
+	allowAll,
+	createKernel as createKernelBase,
 } from "@rivet-dev/agent-os-core/test/runtime";
 export type {
   DriverProcess,
@@ -70,3 +104,16 @@ export {
   NodeFileSystem,
   TerminalHarness,
 } from "@rivet-dev/agent-os-core/test/runtime";
+
+/**
+ * Registry integration tests assume they can bootstrap runtimes and /bin stubs
+ * unless they explicitly opt into a stricter permission policy.
+ */
+export function createKernel(
+	options: Parameters<typeof createKernelBase>[0],
+): ReturnType<typeof createKernelBase> {
+	return createKernelBase({
+		...options,
+		permissions: options.permissions ?? allowAll,
+	});
+}

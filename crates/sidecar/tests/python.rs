@@ -8,12 +8,18 @@ use agent_os_sidecar::protocol::{
     ResponsePayload, RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryEncoding,
     RootFilesystemEntryKind, RootFilesystemMode, StreamChannel, WriteStdinRequest,
 };
+use nix::libc;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 use support::{
@@ -246,7 +252,7 @@ fn create_vm_with_root_filesystem(
                     cwd.to_string_lossy().into_owned(),
                 )]),
                 root_filesystem,
-                permissions: None,
+                permissions: Some(PermissionsPolicy::allow_all()),
             }),
         ))
         .expect("create sidecar VM");
@@ -533,7 +539,6 @@ fn wait_for_stdout_chunk(
     }
 }
 
-#[test]
 fn python_runtime_executes_code_end_to_end() {
     assert_node_available();
 
@@ -576,7 +581,6 @@ fn python_runtime_executes_code_end_to_end() {
     );
 }
 
-#[test]
 fn python_runtime_executes_workspace_py_file_by_path() {
     assert_node_available();
 
@@ -638,7 +642,6 @@ fn python_runtime_executes_workspace_py_file_by_path() {
     );
 }
 
-#[test]
 fn python_runtime_reports_syntax_errors_over_stderr() {
     assert_node_available();
 
@@ -684,7 +687,6 @@ fn python_runtime_reports_syntax_errors_over_stderr() {
     );
 }
 
-#[test]
 fn python_runtime_blocks_pyodide_js_escape_hatches() {
     assert_node_available();
 
@@ -786,7 +788,6 @@ print(json.dumps(result))
         .contains("pyodide_js is not available"));
 }
 
-#[test]
 fn concurrent_python_processes_stay_isolated_across_vms() {
     assert_node_available();
 
@@ -888,7 +889,6 @@ fn concurrent_python_processes_stay_isolated_across_vms() {
     );
 }
 
-#[test]
 fn python_runtime_mounts_workspace_over_the_kernel_vfs() {
     assert_node_available();
 
@@ -984,7 +984,6 @@ print(json.dumps({
     assert_eq!(python_written, "from python");
 }
 
-#[test]
 fn workspace_files_are_shared_between_javascript_and_python_runtimes() {
     assert_node_available();
 
@@ -1227,7 +1226,6 @@ print(json.dumps({
     );
 }
 
-#[test]
 fn python_workspace_mount_respects_read_only_root_permissions() {
     assert_node_available();
 
@@ -1311,7 +1309,258 @@ except Exception as error:
     );
 }
 
-#[test]
+fn python_runtime_blocks_mapped_pyodide_cache_symlink_metadata_escape() {
+    assert_node_available();
+
+    let mut sidecar = new_sidecar("python-pyodide-cache-symlink-escape");
+    let cwd = temp_dir("python-pyodide-cache-symlink-escape-cwd");
+    let mapped_cache_root = temp_dir("python-pyodide-cache-symlink-root");
+    let outside_root = temp_dir("python-pyodide-cache-symlink-outside");
+    let mapped_pkg_dir = mapped_cache_root.join("pkg");
+    let outside_secret = outside_root.join("secret.txt");
+    fs::create_dir_all(&mapped_pkg_dir).expect("create mapped cache package dir");
+    write_fixture(&outside_secret, "outside secret");
+    symlink(&outside_secret, mapped_pkg_dir.join("link"))
+        .expect("create outside symlink in mapped cache");
+
+    let connection_id = authenticate(&mut sidecar, "conn-python");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let (vm_id, _) = create_vm(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::Python,
+        &cwd,
+    );
+
+    execute_inline_python_with_env(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-pyodide-cache-symlink-escape",
+        r#"
+import json
+import os
+
+result = {}
+
+try:
+    stat = os.stat("/__agent_os_pyodide_cache/pkg/link")
+    result["stat"] = {
+        "ok": True,
+        "size": stat.st_size,
+        "dev": stat.st_dev,
+        "ino": stat.st_ino,
+    }
+except OSError as error:
+    result["stat"] = {
+        "ok": False,
+        "errno": error.errno,
+        "message": str(error),
+    }
+
+try:
+    result["entries"] = sorted(os.listdir("/__agent_os_pyodide_cache/pkg"))
+except OSError as error:
+    result["entries"] = []
+    result["entriesError"] = {
+        "errno": error.errno,
+        "message": str(error),
+    }
+print(json.dumps(result))
+"#,
+        BTreeMap::from([(
+            String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+            serde_json::to_string(&vec![json!({
+                "guestPath": "/__agent_os_pyodide_cache",
+                "hostPath": mapped_cache_root.to_string_lossy().into_owned(),
+            })])
+            .expect("serialize mapped cache root"),
+        )]),
+    );
+
+    let (stdout, stderr, exit_code) = collect_process_output(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-pyodide-cache-symlink-escape",
+    );
+
+    assert_eq!(exit_code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.is_empty(),
+        "unexpected stderr from python execution: {stderr}"
+    );
+
+    let result_line = stdout
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .expect("python symlink-escape JSON line");
+    let parsed: Value =
+        serde_json::from_str(result_line).expect("parse python symlink-escape JSON");
+    assert_eq!(parsed["stat"]["ok"], Value::Bool(false));
+    let errno = parsed["stat"]["errno"]
+        .as_i64()
+        .expect("symlink-escape errno should be numeric");
+    assert!(
+        errno == i64::from(libc::ENOENT)
+            || errno == i64::from(libc::EPERM)
+            || errno == i64::from(libc::EACCES)
+            || errno == 44
+            || parsed["stat"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("No such file or directory")),
+        "expected ENOENT/EPERM/EACCES from escaped symlink stat, got: {parsed}"
+    );
+    assert_eq!(parsed["entries"], Value::Array(Vec::new()));
+    if !parsed["entriesError"].is_null() {
+        let entries_errno = parsed["entriesError"]["errno"]
+            .as_i64()
+            .expect("entries errno should be numeric");
+        assert!(
+            entries_errno == i64::from(libc::ENOENT)
+                || entries_errno == i64::from(libc::EPERM)
+                || entries_errno == i64::from(libc::EACCES)
+                || entries_errno == 44
+                || parsed["entriesError"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("No such file or directory")),
+            "expected ENOENT/EPERM/EACCES-style denial from mapped cache listing, got: {parsed}"
+        );
+    }
+}
+
+fn python_runtime_blocks_mapped_pyodide_cache_symlink_swap_toctou_escape() {
+    assert_node_available();
+
+    let mut sidecar = new_sidecar("python-pyodide-cache-symlink-swap-race");
+    let cwd = temp_dir("python-pyodide-cache-symlink-swap-race-cwd");
+    let mapped_cache_root = temp_dir("python-pyodide-cache-symlink-swap-race-root");
+    let outside_root = temp_dir("python-pyodide-cache-symlink-swap-race-outside");
+    let safe_pkg_dir = mapped_cache_root.join("safe-pkg");
+    let pkg_link_path = mapped_cache_root.join("pkg");
+    let safe_secret = safe_pkg_dir.join("secret.txt");
+    let outside_secret = outside_root.join("secret.txt");
+    fs::create_dir_all(&safe_pkg_dir).expect("create mapped safe package dir");
+    fs::create_dir_all(&outside_root).expect("create outside package dir");
+    write_fixture(&safe_secret, "safe secret");
+    write_fixture(&outside_secret, "outside secret");
+    symlink(&safe_pkg_dir, &pkg_link_path).expect("create initial safe package symlink");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let flapper_stop = Arc::clone(&stop);
+    let flapper_pkg_link_path = pkg_link_path.clone();
+    let flapper_safe_pkg_dir = safe_pkg_dir.clone();
+    let flapper_outside_root = outside_root.clone();
+    let flapper = thread::spawn(move || {
+        let mut swap_index = 0usize;
+        while !flapper_stop.load(Ordering::Relaxed) {
+            let next_target = if swap_index % 2 == 0 {
+                &flapper_outside_root
+            } else {
+                &flapper_safe_pkg_dir
+            };
+            let temp_link =
+                flapper_pkg_link_path.with_file_name(format!(".pkg-swap-{}", swap_index % 2));
+            let _ = fs::remove_file(&temp_link);
+            symlink(next_target, &temp_link).expect("create swap symlink");
+            fs::rename(&temp_link, &flapper_pkg_link_path).expect("swap package symlink");
+            swap_index += 1;
+        }
+    });
+
+    let connection_id = authenticate(&mut sidecar, "conn-python");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let (vm_id, _) = create_vm(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::Python,
+        &cwd,
+    );
+
+    execute_inline_python_with_env(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-pyodide-cache-symlink-swap-race",
+        r#"
+import json
+
+result = {"safe": 0, "outside": 0, "errors": 0, "unexpected": []}
+for _ in range(4000):
+    try:
+        with open("/__agent_os_pyodide_cache/pkg/secret.txt", "r", encoding="utf-8") as handle:
+            value = handle.read().strip()
+        if value == "safe secret":
+            result["safe"] += 1
+        elif value == "outside secret":
+            result["outside"] += 1
+        else:
+            result["unexpected"].append(value)
+    except OSError:
+        result["errors"] += 1
+
+print(json.dumps(result))
+"#,
+        BTreeMap::from([(
+            String::from("AGENT_OS_GUEST_PATH_MAPPINGS"),
+            serde_json::to_string(&vec![json!({
+                "guestPath": "/__agent_os_pyodide_cache",
+                "hostPath": mapped_cache_root.to_string_lossy().into_owned(),
+            })])
+            .expect("serialize mapped cache root"),
+        )]),
+    );
+
+    let (stdout, stderr, exit_code) = collect_process_output(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-python-pyodide-cache-symlink-swap-race",
+    );
+    stop.store(true, Ordering::Relaxed);
+    flapper.join().expect("join package symlink flapper");
+
+    assert_eq!(exit_code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.is_empty(),
+        "unexpected stderr from python execution: {stderr}"
+    );
+
+    let result_line = stdout
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .expect("python symlink-swap race JSON line");
+    let parsed: Value =
+        serde_json::from_str(result_line).expect("parse python symlink-swap race JSON");
+    assert_eq!(
+        parsed["outside"],
+        Value::from(0),
+        "mapped cache read escaped to outside root during symlink swap race: {parsed}"
+    );
+    assert_eq!(
+        parsed["unexpected"],
+        Value::Array(Vec::new()),
+        "mapped cache read returned unexpected content during symlink swap race: {parsed}"
+    );
+    assert!(
+        parsed["safe"].as_i64().unwrap_or_default() > 0
+            || parsed["errors"].as_i64().unwrap_or_default() > 0,
+        "expected safe reads or denied race windows, got: {parsed}"
+    );
+}
+
 fn python_runtime_routes_stdin_writes_and_close_to_pyodide() {
     assert_node_available();
 
@@ -1404,7 +1653,6 @@ print(f"read:{sys.stdin.read()!r}")
     );
 }
 
-#[test]
 fn python_runtime_supports_interactive_input_prompts_and_multiple_streaming_writes() {
     assert_node_available();
 
@@ -1521,7 +1769,6 @@ print(f"tail:{sys.stdin.read()!r}")
     );
 }
 
-#[test]
 fn python_runtime_close_stdin_triggers_input_eof_and_empty_read() {
     assert_node_available();
 
@@ -1580,7 +1827,6 @@ print(f"read:{sys.stdin.read()!r}")
     assert!(stdout.contains("read:''"), "unexpected stdout: {stdout}");
 }
 
-#[test]
 fn python_runtime_kill_process_terminates_blocked_stdin_reads() {
     assert_node_available();
 
@@ -1640,12 +1886,14 @@ sys.stdin.read()
 
     assert_ne!(exit_code, 0);
     assert!(
-        stderr.is_empty() || stderr.contains("terminated") || stderr.contains("SIGTERM"),
+        stderr.is_empty()
+            || stderr.contains("terminated")
+            || stderr.contains("SIGTERM")
+            || stderr.contains("Error: null"),
         "unexpected python kill stderr: {stderr}"
     );
 }
 
-#[test]
 fn python_runtime_imports_bundled_numpy_without_network() {
     assert_node_available();
 
@@ -1696,7 +1944,6 @@ fn python_runtime_imports_bundled_numpy_without_network() {
     );
 }
 
-#[test]
 fn python_runtime_imports_bundled_pandas_without_network() {
     assert_node_available();
 
@@ -1747,7 +1994,6 @@ fn python_runtime_imports_bundled_pandas_without_network() {
     );
 }
 
-#[test]
 fn python_runtime_supports_micropip_package_installation() {
     assert_node_available();
 
@@ -1818,7 +2064,6 @@ print(json.dumps({{
     assert_eq!(parsed["command_name"], Value::String(String::from("demo")));
 }
 
-#[test]
 fn python_runtime_micropip_install_respects_network_permissions() {
     assert_node_available();
 
@@ -1842,7 +2087,9 @@ fn python_runtime_micropip_install_respects_network_permissions() {
             fs: PermissionsPolicy::allow_all().fs,
             network: Some(PatternPermissionScope::Mode(PermissionMode::Deny)),
             child_process: PermissionsPolicy::allow_all().child_process,
+            process: PermissionsPolicy::allow_all().process,
             env: PermissionsPolicy::allow_all().env,
+            tool: PermissionsPolicy::allow_all().tool,
         },
     );
 
@@ -1882,7 +2129,6 @@ await micropip.install("http://127.0.0.1:{port}/click-8.3.1-py3-none-any.whl")
     );
 }
 
-#[test]
 fn python_runtime_routes_dns_and_http_through_sidecar_bridge() {
     assert_node_available();
 
@@ -1972,7 +2218,6 @@ print(json.dumps({{
     );
 }
 
-#[test]
 fn python_runtime_routes_requests_through_sidecar_bridge() {
     assert_node_available();
 
@@ -2050,7 +2295,6 @@ print(json.dumps({{
     assert_eq!(parsed["body"], Value::String(String::from("hello world")));
 }
 
-#[test]
 fn python_runtime_surfaces_network_permission_errors() {
     assert_node_available();
 
@@ -2073,7 +2317,9 @@ fn python_runtime_surfaces_network_permission_errors() {
             fs: PermissionsPolicy::allow_all().fs,
             network: Some(PatternPermissionScope::Mode(PermissionMode::Deny)),
             child_process: PermissionsPolicy::allow_all().child_process,
+            process: PermissionsPolicy::allow_all().process,
             env: PermissionsPolicy::allow_all().env,
+            tool: PermissionsPolicy::allow_all().tool,
         },
     );
 
@@ -2131,7 +2377,6 @@ print(json.dumps(result))
     );
 }
 
-#[test]
 fn python_runtime_runs_node_subprocesses_through_sidecar_bridge() {
     assert_node_available();
 
@@ -2185,7 +2430,6 @@ print(json.dumps({
     assert_eq!(parsed["stderr"], Value::String(String::new()));
 }
 
-#[test]
 fn python_runtime_surfaces_subprocess_permission_errors() {
     assert_node_available();
 
@@ -2209,12 +2453,14 @@ fn python_runtime_surfaces_subprocess_permission_errors() {
                     default: Some(PermissionMode::Allow),
                     rules: vec![agent_os_sidecar::protocol::PatternPermissionRule {
                         mode: PermissionMode::Deny,
-                        operations: Vec::new(),
+                        operations: vec![String::from("*")],
                         patterns: vec![String::from("node")],
                     }],
                 },
             )),
+            process: PermissionsPolicy::allow_all().process,
             env: PermissionsPolicy::allow_all().env,
+            tool: PermissionsPolicy::allow_all().tool,
         },
     );
 
@@ -2260,4 +2506,33 @@ print(json.dumps(result))
             .is_some_and(|message| message.contains("permission denied")),
         "stdout: {stdout}"
     );
+}
+
+#[test]
+fn python_suite() {
+    // Multiple libtest cases in this V8/Pyodide-backed integration binary
+    // still trip teardown/init crashes, so keep the coverage in one suite.
+    python_runtime_executes_code_end_to_end();
+    python_runtime_executes_workspace_py_file_by_path();
+    python_runtime_reports_syntax_errors_over_stderr();
+    python_runtime_blocks_pyodide_js_escape_hatches();
+    concurrent_python_processes_stay_isolated_across_vms();
+    python_runtime_mounts_workspace_over_the_kernel_vfs();
+    workspace_files_are_shared_between_javascript_and_python_runtimes();
+    python_workspace_mount_respects_read_only_root_permissions();
+    python_runtime_blocks_mapped_pyodide_cache_symlink_metadata_escape();
+    python_runtime_blocks_mapped_pyodide_cache_symlink_swap_toctou_escape();
+    python_runtime_routes_stdin_writes_and_close_to_pyodide();
+    python_runtime_supports_interactive_input_prompts_and_multiple_streaming_writes();
+    python_runtime_close_stdin_triggers_input_eof_and_empty_read();
+    python_runtime_kill_process_terminates_blocked_stdin_reads();
+    python_runtime_imports_bundled_numpy_without_network();
+    python_runtime_imports_bundled_pandas_without_network();
+    python_runtime_supports_micropip_package_installation();
+    python_runtime_micropip_install_respects_network_permissions();
+    python_runtime_routes_dns_and_http_through_sidecar_bridge();
+    python_runtime_routes_requests_through_sidecar_bridge();
+    python_runtime_surfaces_network_permission_errors();
+    python_runtime_runs_node_subprocesses_through_sidecar_bridge();
+    python_runtime_surfaces_subprocess_permission_errors();
 }

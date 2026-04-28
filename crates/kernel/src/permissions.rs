@@ -1,7 +1,8 @@
 use crate::vfs::{
     validate_path, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
+    VirtualUtimeSpec,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
@@ -181,6 +182,71 @@ impl Permissions {
             environment: Some(Arc::new(|_: &EnvAccessRequest| PermissionDecision::allow())),
         }
     }
+}
+
+pub fn permission_glob_matches(pattern: &str, value: &str) -> bool {
+    fn matches(
+        pattern: &[u8],
+        value: &[u8],
+        pattern_index: usize,
+        value_index: usize,
+        memo: &mut HashMap<(usize, usize), bool>,
+    ) -> bool {
+        if let Some(result) = memo.get(&(pattern_index, value_index)) {
+            return *result;
+        }
+
+        let result = if pattern_index == pattern.len() {
+            value_index == value.len()
+        } else {
+            match pattern[pattern_index] {
+                b'?' => {
+                    value_index < value.len()
+                        && value[value_index] != b'/'
+                        && matches(pattern, value, pattern_index + 1, value_index + 1, memo)
+                }
+                b'*' => {
+                    let mut next_pattern_index = pattern_index;
+                    while next_pattern_index < pattern.len() && pattern[next_pattern_index] == b'*'
+                    {
+                        next_pattern_index += 1;
+                    }
+
+                    if matches(pattern, value, next_pattern_index, value_index, memo) {
+                        true
+                    } else {
+                        let crosses_separators = next_pattern_index - pattern_index > 1;
+                        let mut next_value_index = value_index;
+                        while next_value_index < value.len()
+                            && (crosses_separators || value[next_value_index] != b'/')
+                        {
+                            next_value_index += 1;
+                            if matches(pattern, value, next_pattern_index, next_value_index, memo) {
+                                return true;
+                            }
+                        }
+                        false
+                    }
+                }
+                expected => {
+                    value_index < value.len()
+                        && expected == value[value_index]
+                        && matches(pattern, value, pattern_index + 1, value_index + 1, memo)
+                }
+            }
+        };
+
+        memo.insert((pattern_index, value_index), result);
+        result
+    }
+
+    matches(
+        pattern.as_bytes(),
+        value.as_bytes(),
+        0,
+        0,
+        &mut HashMap::new(),
+    )
 }
 
 pub fn filter_env(
@@ -394,13 +460,25 @@ impl<F: VirtualFileSystem> PermissionedFileSystem<F> {
             | FsOperation::Rename
             | FsOperation::Symlink
             | FsOperation::Link
-            | FsOperation::MountSensitive => self.resolved_destination_path(path),
-            FsOperation::Remove => Ok(crate::vfs::normalize_path(path)),
+            | FsOperation::MountSensitive
+            | FsOperation::Remove => self.resolved_destination_path(path),
         }
     }
 
     fn check_subject(&self, op: FsOperation, path: &str) -> VfsResult<()> {
         let subject = self.permission_subject(op, path)?;
+        self.check(op, &subject)
+    }
+
+    fn check_existing_subject(&self, op: FsOperation, path: &str) -> VfsResult<()> {
+        validate_path(path)?;
+        let subject = self.resolved_existing_path(path)?;
+        self.check(op, &subject)
+    }
+
+    fn check_destination_subject(&self, op: FsOperation, path: &str) -> VfsResult<()> {
+        validate_path(path)?;
+        let subject = self.resolved_destination_path(path)?;
         self.check(op, &subject)
     }
 
@@ -515,8 +593,8 @@ impl<F: VirtualFileSystem> VirtualFileSystem for PermissionedFileSystem<F> {
     }
 
     fn link(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
-        self.check_subject(FsOperation::Link, old_path)?;
-        self.check_subject(FsOperation::Link, new_path)?;
+        self.check_existing_subject(FsOperation::Link, old_path)?;
+        self.check_destination_subject(FsOperation::Link, new_path)?;
         self.inner.link(old_path, new_path)
     }
 
@@ -533,6 +611,17 @@ impl<F: VirtualFileSystem> VirtualFileSystem for PermissionedFileSystem<F> {
     fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()> {
         self.check_subject(FsOperation::Utimes, path)?;
         self.inner.utimes(path, atime_ms, mtime_ms)
+    }
+
+    fn utimes_spec(
+        &mut self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        self.check_subject(FsOperation::Utimes, path)?;
+        self.inner.utimes_spec(path, atime, mtime, follow_symlinks)
     }
 
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {

@@ -8,20 +8,33 @@
  * Gracefully skipped when the WASM binary is not built.
  */
 
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect, afterEach } from 'vitest';
 import {
+  COMMANDS_DIR,
+  createKernel,
+  createNodeRuntime,
+  createWasmVmRuntime,
+  describeIf,
   createIntegrationKernel,
+  NodeFileSystem,
   skipUnlessWasmBuilt,
 } from './helpers.ts';
 import type { IntegrationKernelResult } from './helpers.ts';
 
 const skipReason = skipUnlessWasmBuilt();
 
-describe.skipIf(skipReason)('bridge child_process → kernel routing', () => {
+describeIf(!skipReason, 'bridge child_process → kernel routing', () => {
   let ctx: IntegrationKernelResult;
+  const cleanupPaths: string[] = [];
 
   afterEach(async () => {
     if (ctx) await ctx.dispose();
+    for (const cleanupPath of cleanupPaths.splice(0)) {
+      rmSync(cleanupPath, { recursive: true, force: true });
+    }
   });
 
   it('execSync("echo hello") routes through kernel to WasmVM shell', async () => {
@@ -114,6 +127,28 @@ describe.skipIf(skipReason)('bridge child_process → kernel routing', () => {
     expect(output).toContain('async-ok');
   });
 
+  it('child_process.spawn with shell:true preserves shell builtin exit codes', async () => {
+    ctx = await createIntegrationKernel({ runtimes: ['wasmvm', 'node'] });
+
+    const chunks: Uint8Array[] = [];
+    const proc = ctx.kernel.spawn('node', ['-e', `
+      const { spawn } = require('child_process');
+      const child = spawn('exit 7', { shell: true });
+      child.on('close', (code) => {
+        console.log('close:' + code);
+        process.exit(code ?? 0);
+      });
+    `], {
+      onStdout: (data) => chunks.push(data),
+    });
+
+    const code = await proc.wait();
+    expect(code).toBe(7);
+
+    const output = chunks.map(c => new TextDecoder().decode(c)).join('');
+    expect(output).toContain('close:7');
+  });
+
   it('stderr from spawned child processes pipes back to Node caller', async () => {
     ctx = await createIntegrationKernel({ runtimes: ['wasmvm', 'node'] });
 
@@ -201,9 +236,127 @@ describe.skipIf(skipReason)('bridge child_process → kernel routing', () => {
     const output = chunks.map(c => new TextDecoder().decode(c)).join('');
     expect(output).toContain('hello from vfs');
   });
+
+  it('execFileSync on node_modules/.bin shell shims unwraps to the node entrypoint', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'agent-os-node-bin-shim-'));
+    cleanupPaths.push(projectRoot);
+
+    mkdirSync(join(projectRoot, 'node_modules', '.bin'), { recursive: true });
+    mkdirSync(join(projectRoot, 'node_modules', 'demo'), { recursive: true });
+    writeFileSync(
+      join(projectRoot, 'node_modules', 'demo', 'index.js'),
+      '#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2)));\n',
+    );
+    chmodSync(join(projectRoot, 'node_modules', 'demo', 'index.js'), 0o755);
+    writeFileSync(
+      join(projectRoot, 'node_modules', '.bin', 'demo'),
+      [
+        '#!/bin/sh',
+        'basedir=$(dirname "$0")',
+        'if [ -x "$basedir/node" ]; then',
+        '  exec "$basedir/node" "$basedir/../demo/index.js" "$@"',
+        'else',
+        '  exec node "$basedir/../demo/index.js" "$@"',
+        'fi',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(projectRoot, 'node_modules', '.bin', 'demo'), 0o755);
+
+    const kernel = createKernel({
+      filesystem: new NodeFileSystem({ root: projectRoot }),
+    });
+    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(createNodeRuntime());
+    ctx = {
+      kernel,
+      vfs: new NodeFileSystem({ root: projectRoot }),
+      dispose: () => kernel.dispose(),
+    };
+
+    const chunks: Uint8Array[] = [];
+    const stderrChunks: Uint8Array[] = [];
+    const proc = ctx.kernel.spawn('node', ['-e', `
+      const { execFileSync } = require('child_process');
+      const result = execFileSync('/node_modules/.bin/demo', ['alpha', 'beta'], {
+        encoding: 'utf-8',
+      });
+      process.stdout.write(result);
+    `], {
+      onStdout: (data) => chunks.push(data),
+      onStderr: (data) => stderrChunks.push(data),
+    });
+
+    const code = await proc.wait();
+    expect(code).toBe(0);
+
+    const output = chunks.map(c => new TextDecoder().decode(c)).join('');
+    const stderr = stderrChunks.map(c => new TextDecoder().decode(c)).join('');
+    expect(stderr).toBe('');
+    expect(output.trim()).toBe(JSON.stringify(['alpha', 'beta']));
+  });
+
+  it('execFileSync unwraps shell shims whose node entrypoint has no shebang or extension', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'agent-os-node-bin-shim-no-shebang-'));
+    cleanupPaths.push(projectRoot);
+
+    mkdirSync(join(projectRoot, 'node_modules', '.bin'), { recursive: true });
+    mkdirSync(join(projectRoot, 'node_modules', 'demo', 'dist', 'bin'), { recursive: true });
+    writeFileSync(
+      join(projectRoot, 'node_modules', 'demo', 'dist', 'bin', 'demo'),
+      '"use strict";\nconsole.log(JSON.stringify(process.argv.slice(2)));\n',
+    );
+    chmodSync(join(projectRoot, 'node_modules', 'demo', 'dist', 'bin', 'demo'), 0o755);
+    writeFileSync(
+      join(projectRoot, 'node_modules', '.bin', 'demo-no-shebang'),
+      [
+        '#!/bin/sh',
+        'basedir=$(dirname "$0")',
+        'if [ -x "$basedir/node" ]; then',
+        '  exec "$basedir/node" "$basedir/../demo/dist/bin/demo" "$@"',
+        'else',
+        '  exec node "$basedir/../demo/dist/bin/demo" "$@"',
+        'fi',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(projectRoot, 'node_modules', '.bin', 'demo-no-shebang'), 0o755);
+
+    const kernel = createKernel({
+      filesystem: new NodeFileSystem({ root: projectRoot }),
+    });
+    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(createNodeRuntime());
+    ctx = {
+      kernel,
+      vfs: new NodeFileSystem({ root: projectRoot }),
+      dispose: () => kernel.dispose(),
+    };
+
+    const chunks: Uint8Array[] = [];
+    const stderrChunks: Uint8Array[] = [];
+    const proc = ctx.kernel.spawn('node', ['-e', `
+      const { execFileSync } = require('child_process');
+      const result = execFileSync('/node_modules/.bin/demo-no-shebang', ['gamma', 'delta'], {
+        encoding: 'utf-8',
+      });
+      process.stdout.write(result);
+    `], {
+      onStdout: (data) => chunks.push(data),
+      onStderr: (data) => stderrChunks.push(data),
+    });
+
+    const code = await proc.wait();
+    expect(code).toBe(0);
+
+    const output = chunks.map(c => new TextDecoder().decode(c)).join('');
+    const stderr = stderrChunks.map(c => new TextDecoder().decode(c)).join('');
+    expect(stderr).toBe('');
+    expect(output.trim()).toBe(JSON.stringify(['gamma', 'delta']));
+  });
 });
 
-describe.skipIf(skipReason)('bridge child_process exploit/abuse paths', () => {
+describeIf(!skipReason, 'bridge child_process exploit/abuse paths', () => {
   let ctx: IntegrationKernelResult;
 
   afterEach(async () => {

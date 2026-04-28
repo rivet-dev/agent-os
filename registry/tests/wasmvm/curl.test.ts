@@ -15,10 +15,14 @@ import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
 import {
   allowAll,
+  C_BUILD_DIR,
   COMMANDS_DIR,
   createInMemoryFileSystem,
   createKernel,
+  describeIf,
+  hasCWasmBinaries,
   hasWasmBinaries,
+  itIf,
 } from '../helpers.js';
 import type { Kernel } from '../helpers.js';
 import {
@@ -36,15 +40,13 @@ import {
 import { execSync } from 'node:child_process';
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const CURL_PACKAGE_DIR = resolve(__dirname, '../../software/curl/wasm');
-
+// The upstream curl parity assertions below only hold for the C-built curl
+// artifact; the Rust fallback in COMMANDS_DIR intentionally supports a smaller
+// flag surface and should not be used for these cases.
 const hasHttpGetTest = hasWasmBinaries && existsSync(resolve(COMMANDS_DIR, 'http_get_test'));
-const hasPackagedCurl = existsSync(resolve(CURL_PACKAGE_DIR, 'curl'));
-const hasCurl = hasPackagedCurl || (hasWasmBinaries && existsSync(resolve(COMMANDS_DIR, 'curl')));
+const hasCurl = hasCWasmBinaries('curl');
 const runExternalNetwork = process.env.AGENTOS_E2E_NETWORK === '1';
 const EXTERNAL_HOST = 'example.com';
 const EXTERNAL_TCP_PORT = 80;
@@ -170,7 +172,7 @@ function generateSelfSignedCert(): { key: string; cert: string } {
   }
 }
 
-describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
+describeIf(hasCurl || hasHttpGetTest, 'curl and socket layer', () => {
   let kernel: Kernel;
   let httpServer: HttpServer;
   let httpsServer: HttpsServer;
@@ -418,8 +420,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
       permissions: allowAll,
       loopbackExemptPorts: [httpPort, httpsPort, keepAlivePort],
     });
-    const commandDirs = hasPackagedCurl ? [CURL_PACKAGE_DIR, COMMANDS_DIR] : [COMMANDS_DIR];
-    await kernel.mount(createWasmVmRuntime({ commandDirs }));
+    await kernel.mount(createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }));
     return kernel;
   }
 
@@ -440,7 +441,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     await kernel?.dispose();
   });
 
-  it.skipIf(!hasHttpGetTest)('http_get_test reaches a local HTTP server', async () => {
+  itIf(hasHttpGetTest, 'http_get_test reaches a local HTTP server', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(`http_get_test 127.0.0.1 ${httpPort} /json`);
     expect(result.exitCode).toBe(0);
@@ -448,7 +449,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(result.stdout).toContain('"ok":true');
   }, 15000);
 
-  it.skipIf(!hasHttpGetTest)('http_get_test preserves non-blocking connect diagnostics', async () => {
+  itIf(hasHttpGetTest, 'http_get_test preserves non-blocking connect diagnostics', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(`http_get_test 127.0.0.1 ${httpPort} /json`);
     expect(result.exitCode).toBe(0);
@@ -458,14 +459,14 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(result.stderr).toContain('poll(POLLOUT)=1');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl GET returns JSON from a local server', async () => {
+  itIf(hasCurl, 'curl GET returns JSON from a local server', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(`curl -s http://127.0.0.1:${httpPort}/json`);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain('"ok":true');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl --version reports the upstream tool version', async () => {
+  itIf(hasCurl, 'curl --version reports the upstream tool version', async () => {
     await createKernelWithNet();
     const result = await kernel.exec('curl --version');
     expect(result.exitCode).toBe(0);
@@ -473,14 +474,14 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(result.stdout).toMatch(/Protocols:/);
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl -L follows redirects', async () => {
+  itIf(hasCurl, 'curl -L follows redirects', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(`curl -s -L http://127.0.0.1:${httpPort}/redirect`);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe('followed redirect');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl POST sends body and headers', async () => {
+  itIf(hasCurl, 'curl POST sends body and headers', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(
       `curl -s -X POST -H 'X-Test: edge-case' -d 'payload-data' http://127.0.0.1:${httpPort}/echo`,
@@ -492,7 +493,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(body.header).toBe('edge-case');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl --json sends JSON with the expected headers', async () => {
+  itIf(hasCurl, 'curl --json sends JSON with the expected headers', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(
       `curl -s --json '{\"hello\":\"world\"}' http://127.0.0.1:${httpPort}/json-post`,
@@ -505,7 +506,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(body.accept).toBe('application/json');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl -I returns response headers without the body', async () => {
+  itIf(hasCurl, 'curl -I returns response headers without the body', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(`curl -s -I http://127.0.0.1:${httpPort}/head-test`);
     expect(result.exitCode).toBe(0);
@@ -514,14 +515,14 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(result.stdout).not.toContain('body should not appear');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl -u sends HTTP Basic authentication', async () => {
+  itIf(hasCurl, 'curl -u sends HTTP Basic authentication', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(`curl -s -u user:pass http://127.0.0.1:${httpPort}/auth-required`);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe('authenticated: user:pass');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl -F uploads multipart form data', async () => {
+  itIf(hasCurl, 'curl -F uploads multipart form data', async () => {
     await createKernelWithNet();
     await kernel.writeFile('/tmp/upload.txt', 'file payload\n');
     const result = await kernel.exec(`curl -s -F file=@/tmp/upload.txt http://127.0.0.1:${httpPort}/upload`);
@@ -530,7 +531,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(result.stdout).toContain('body-contains-file: true');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl -K reads options from a config file', async () => {
+  itIf(hasCurl, 'curl -K reads options from a config file', async () => {
     await createKernelWithNet();
     await kernel.writeFile(
       '/tmp/curlrc',
@@ -541,7 +542,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(result.stdout).toContain('"ok":true');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl -o writes text output to a file', async () => {
+  itIf(hasCurl, 'curl -o writes text output to a file', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(`curl -s -o /tmp/out.json http://127.0.0.1:${httpPort}/json`);
     expect(result.exitCode).toBe(0);
@@ -550,7 +551,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(file).toContain('"ok":true');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl -o respects the current working directory for relative output paths', async () => {
+  itIf(hasCurl, 'curl -o respects the current working directory for relative output paths', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(
       `mkdir -p /tmp/curl-cwd && cd /tmp/curl-cwd && ` +
@@ -560,7 +561,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(result.stdout).toBe('downloaded-by-remote-name\n');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl -o writes binary output without truncation', async () => {
+  itIf(hasCurl, 'curl -o writes binary output without truncation', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(`curl -s -o /tmp/out.bin http://127.0.0.1:${httpPort}/binary`);
     expect(result.exitCode).toBe(0);
@@ -570,7 +571,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(Array.from(file.slice(-4))).toEqual([252, 253, 254, 255]);
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl -D and -o split headers and body into separate files', async () => {
+  itIf(hasCurl, 'curl -D and -o split headers and body into separate files', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(
       `curl -s -D /tmp/headers.txt -o /tmp/body.txt http://127.0.0.1:${httpPort}/named.txt`,
@@ -585,7 +586,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(body).toBe('downloaded-by-remote-name\n');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl -O writes to the remote filename', async () => {
+  itIf(hasCurl, 'curl -O writes to the remote filename', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(
       `mkdir -p /tmp/remote-name && cd /tmp/remote-name && ` +
@@ -595,7 +596,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(result.stdout).toBe('downloaded-by-remote-name\n');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl -w writes the HTTP status code', async () => {
+  itIf(hasCurl, 'curl -w writes the HTTP status code', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(`curl -s -w '%{http_code}' http://127.0.0.1:${httpPort}/status`);
     expect(result.exitCode).toBe(0);
@@ -603,14 +604,14 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(result.stdout).toContain('201');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl -f reports HTTP errors with a non-zero exit code', async () => {
+  itIf(hasCurl, 'curl -f reports HTTP errors with a non-zero exit code', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(`curl -fsS http://127.0.0.1:${httpPort}/missing`);
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toMatch(/404|not found|error/i);
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl --fail-with-body preserves the response body on HTTP errors', async () => {
+  itIf(hasCurl, 'curl --fail-with-body preserves the response body on HTTP errors', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(`curl -sS --fail-with-body http://127.0.0.1:${httpPort}/missing`);
     expect(result.exitCode).not.toBe(0);
@@ -618,7 +619,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(result.stderr).toMatch(/404|error/i);
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl reports refused connections without hanging', async () => {
+  itIf(hasCurl, 'curl reports refused connections without hanging', async () => {
     await createKernelWithNet();
 
     const probe = createTcpServer();
@@ -633,14 +634,14 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(result.stderr).toMatch(/connect|refused|failed/i);
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl reports DNS failures cleanly', async () => {
+  itIf(hasCurl, 'curl reports DNS failures cleanly', async () => {
     await createKernelWithNet();
     const result = await kernel.exec('curl -sS http://does-not-exist.invalid/');
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toMatch(/resolve|host|dns/i);
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl handles multiple URLs in one invocation', async () => {
+  itIf(hasCurl, 'curl handles multiple URLs in one invocation', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(
       `curl -s http://127.0.0.1:${httpPort}/one http://127.0.0.1:${httpPort}/two`,
@@ -649,7 +650,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(result.stdout).toBe('first-response\nsecond-response\n');
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl --retry retries transient HTTP failures', async () => {
+  itIf(hasCurl, 'curl --retry retries transient HTTP failures', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(
       `curl -fsS --retry 2 --retry-delay 0 http://127.0.0.1:${httpPort}/flaky`,
@@ -659,7 +660,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(flakyRequestCount).toBeGreaterThanOrEqual(2);
   }, 15000);
 
-  it.skipIf(!hasCurl)('curl exits promptly after a keep-alive response', async () => {
+  itIf(hasCurl, 'curl exits promptly after a keep-alive response', async () => {
     await createKernelWithNet();
     const startedAt = Date.now();
     const result = await kernel.exec(`curl -s http://127.0.0.1:${keepAlivePort}/`);
@@ -668,21 +669,21 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(Date.now() - startedAt).toBeLessThan(8000);
   }, 15000);
 
-  it.skipIf(!hasCurl || !hasOpenssl)('curl -k performs an HTTPS request through the WASI TLS backend', async () => {
+  itIf(hasCurl && hasOpenssl, 'curl -k performs an HTTPS request through the WASI TLS backend', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(`curl -ks https://127.0.0.1:${httpsPort}/json`);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain('"secure":true');
   }, 15000);
 
-  it.skipIf(!hasCurl || !hasOpenssl)('curl fails TLS verification without -k on a self-signed endpoint', async () => {
+  itIf(hasCurl && hasOpenssl, 'curl fails TLS verification without -k on a self-signed endpoint', async () => {
     await createKernelWithNet();
     const result = await kernel.exec(`curl -sS https://127.0.0.1:${httpsPort}/json`);
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toMatch(/certificate|tls|ssl|verify/i);
   }, 15000);
 
-  it.skipIf(!hasCurl || !hasOpenssl)('curl -k exits promptly after an HTTPS keep-alive response', async () => {
+  itIf(hasCurl && hasOpenssl, 'curl -k exits promptly after an HTTPS keep-alive response', async () => {
     await createKernelWithNet();
     const startedAt = Date.now();
     const result = await kernel.exec(`curl -ks https://127.0.0.1:${httpsPort}/keepalive`);
@@ -691,14 +692,14 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(Date.now() - startedAt).toBeLessThan(8000);
   }, 15000);
 
-  it.skipIf(!hasHttpGetTest || externalNetworkSkipReason)('http_get_test reaches an external host over real TCP', async () => {
+  itIf(hasHttpGetTest && !externalNetworkSkipReason, 'http_get_test reaches an external host over real TCP', async () => {
     await createKernelWithNet();
     const result = await execWithRetry(`http_get_test ${EXTERNAL_HOST} ${EXTERNAL_TCP_PORT} /`);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toMatch(/HTTP\/1\.[01] (200|301|302)/);
   }, 30000);
 
-  it.skipIf(!hasCurl || externalNetworkSkipReason)('curl reaches a real external HTTP endpoint', async () => {
+  itIf(hasCurl && !externalNetworkSkipReason, 'curl reaches a real external HTTP endpoint', async () => {
     await createKernelWithNet();
     const result = await execWithRetry(
       `curl -fsSL --retry 2 --retry-delay 1 --retry-all-errors --connect-timeout 10 --max-time 30 ${EXTERNAL_HTTP_URL}`,
@@ -707,7 +708,7 @@ describe.skipIf(!hasCurl && !hasHttpGetTest)('curl and socket layer', () => {
     expect(result.stdout).toContain(EXTERNAL_EXPECTED_BODY);
   }, 30000);
 
-  it.skipIf(!hasCurl || externalNetworkSkipReason)('curl reaches a real external HTTPS endpoint', async () => {
+  itIf(hasCurl && !externalNetworkSkipReason, 'curl reaches a real external HTTPS endpoint', async () => {
     await createKernelWithNet();
     const result = await execWithRetry(
       `curl -fsSL --retry 2 --retry-delay 1 --retry-all-errors --connect-timeout 10 --max-time 30 ${EXTERNAL_HTTPS_URL}`,

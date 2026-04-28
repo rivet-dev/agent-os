@@ -1,6 +1,6 @@
 use crate::vfs::{
     normalize_path, MemoryFileSystem, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem,
-    VirtualStat,
+    VirtualStat, VirtualUtimeSpec,
 };
 use base64::Engine;
 use std::collections::BTreeSet;
@@ -118,6 +118,19 @@ impl OverlayFileSystem {
     fn should_hide_directory_entry(path: &str, entry: &str) -> bool {
         let normalized = Self::normalized(path);
         normalized == "/" && entry == Self::hidden_root_entry_name()
+    }
+
+    fn should_ignore_raw_directory_entry(
+        upper: Option<&MemoryFileSystem>,
+        path: &str,
+        entry: &str,
+    ) -> bool {
+        if entry == "." || entry == ".." || Self::should_hide_directory_entry(path, entry) {
+            return true;
+        }
+
+        let entry_path = Self::join_path(path, entry);
+        Self::marker_exists_in_upper(upper, OverlayMarkerKind::Whiteout, &entry_path)
     }
 
     fn marker_exists(&self, kind: OverlayMarkerKind, path: &str) -> bool {
@@ -449,22 +462,19 @@ impl OverlayFileSystem {
             if let Ok(entries) = upper.read_dir(&normalized) {
                 directory_exists = true;
                 if entries.into_iter().any(|entry| {
-                    entry != "."
-                        && entry != ".."
-                        && !Self::should_hide_directory_entry(&normalized, &entry)
+                    !Self::should_ignore_raw_directory_entry(Some(&*upper), &normalized, &entry)
                 }) {
                     return Ok(true);
                 }
             }
         }
 
+        let upper = self.upper.as_ref();
         for lower in self.lowers.iter_mut().rev() {
             if let Ok(entries) = lower.read_dir(&normalized) {
                 directory_exists = true;
                 if entries.into_iter().any(|entry| {
-                    entry != "."
-                        && entry != ".."
-                        && !Self::should_hide_directory_entry(&normalized, &entry)
+                    !Self::should_ignore_raw_directory_entry(upper, &normalized, &entry)
                 }) {
                     return Ok(true);
                 }
@@ -1175,6 +1185,26 @@ impl VirtualFileSystem for OverlayFileSystem {
         self.writable_upper(path)?.utimes(path, atime_ms, mtime_ms)
     }
 
+    fn utimes_spec(
+        &mut self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        if Self::is_internal_metadata_path(path) {
+            return Err(VfsError::permission_denied("utime", path));
+        }
+        if self.is_whited_out(path) {
+            return Err(Self::entry_not_found(path));
+        }
+        if !self.exists_in_upper(path) {
+            self.copy_up_path(path)?;
+        }
+        self.writable_upper(path)?
+            .utimes_spec(path, atime, mtime, follow_symlinks)
+    }
+
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {
         if Self::is_internal_metadata_path(path) {
             return Err(VfsError::permission_denied("truncate", path));
@@ -1212,7 +1242,7 @@ impl VirtualFileSystem for OverlayFileSystem {
 #[cfg(test)]
 mod tests {
     use super::{OverlayFileSystem, OverlayMode};
-    use crate::vfs::{MemoryFileSystem, VirtualFileSystem};
+    use crate::vfs::{MemoryFileSystem, VfsResult, VirtualFileSystem};
 
     #[test]
     fn whiteouts_persist_when_overlay_reopens_with_same_upper() {
@@ -1263,5 +1293,41 @@ mod tests {
         assert!(!root_entries
             .iter()
             .any(|entry| entry == ".agent-os-overlay"));
+    }
+
+    #[test]
+    fn remove_dir_succeeds_when_only_lower_children_are_whited_out() {
+        let mut lower = MemoryFileSystem::new();
+        lower.mkdir("/a", true).expect("create lower directory");
+        lower
+            .write_file("/a/c", b"child".to_vec())
+            .expect("seed lower child");
+
+        let mut overlay = OverlayFileSystem::new(vec![lower], OverlayMode::Ephemeral);
+        overlay.remove_file("/a/c").expect("whiteout lower child");
+        overlay
+            .remove_dir("/a")
+            .expect("remove merged-empty directory");
+
+        assert!(!overlay.exists("/a"));
+        assert_error_code(overlay.read_dir("/a"), "ENOENT");
+    }
+
+    #[test]
+    fn remove_dir_still_rejects_visible_children() {
+        let mut lower = MemoryFileSystem::new();
+        lower.mkdir("/a", true).expect("create lower directory");
+        lower
+            .write_file("/a/c", b"child".to_vec())
+            .expect("seed lower child");
+
+        let mut overlay = OverlayFileSystem::new(vec![lower], OverlayMode::Ephemeral);
+        assert_error_code(overlay.remove_dir("/a"), "ENOTEMPTY");
+        assert!(overlay.exists("/a/c"));
+    }
+
+    fn assert_error_code<T: std::fmt::Debug>(result: VfsResult<T>, expected: &str) {
+        let error = result.expect_err("expected operation to fail");
+        assert_eq!(error.code(), expected);
     }
 }

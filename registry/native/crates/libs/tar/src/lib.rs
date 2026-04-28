@@ -309,11 +309,7 @@ fn do_extract(
                     if !parent.as_os_str().is_empty() {
                         let relative_parent =
                             relative_dest.parent().unwrap_or_else(|| Path::new(""));
-                        ensure_relative_dir_exists(
-                            directory,
-                            relative_parent,
-                            &mut known_dirs,
-                        )?;
+                        ensure_relative_dir_exists(directory, relative_parent, &mut known_dirs)?;
                     }
                 }
                 let mut contents = Vec::new();

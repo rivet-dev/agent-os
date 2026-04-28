@@ -1,6 +1,7 @@
 use agent_os_kernel::process_table::{
     DriverProcess, ProcessContext, ProcessExitCallback, ProcessResult, ProcessStatus, ProcessTable,
-    ProcessWaitEvent, WaitPidFlags, SIGCHLD, SIGCONT, SIGHUP, SIGSTOP, SIGTSTP,
+    ProcessWaitEvent, SigmaskHow, SignalSet, WaitPidFlags, SIGCHLD, SIGCONT, SIGHUP, SIGSTOP,
+    SIGTERM, SIGTSTP,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -567,6 +568,69 @@ fn exiting_child_delivers_sigchld_to_living_parent() {
 }
 
 #[test]
+fn blocked_sigchld_is_queued_until_the_parent_unblocks_it() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+    let parent = MockDriverProcess::new();
+    let child = MockDriverProcess::new();
+    let parent_pid = table.allocate_pid();
+    let child_pid = table.allocate_pid();
+    let sigchld_mask = SignalSet::from_signal(SIGCHLD).expect("SIGCHLD should be valid");
+
+    table.register(
+        parent_pid,
+        "wasmvm",
+        "parent",
+        Vec::new(),
+        create_context(0),
+        parent.clone(),
+    );
+    table.register(
+        child_pid,
+        "wasmvm",
+        "child",
+        Vec::new(),
+        create_context(parent_pid),
+        child.clone(),
+    );
+
+    assert_eq!(
+        table
+            .sigprocmask(parent_pid, SigmaskHow::Block, sigchld_mask)
+            .expect("block SIGCHLD"),
+        SignalSet::empty()
+    );
+
+    child.exit(0);
+
+    wait_for(
+        || {
+            table
+                .get(child_pid)
+                .is_some_and(|entry| entry.status == ProcessStatus::Exited)
+        },
+        Duration::from_millis(100),
+    );
+    assert!(parent.kills().is_empty(), "SIGCHLD should remain pending");
+    assert_eq!(
+        table.sigpending(parent_pid).expect("pending signals"),
+        sigchld_mask
+    );
+
+    table
+        .sigprocmask(parent_pid, SigmaskHow::Unblock, sigchld_mask)
+        .expect("unblock SIGCHLD");
+
+    wait_for(
+        || parent.kills() == vec![SIGCHLD],
+        Duration::from_millis(100),
+    );
+    assert_eq!(
+        table.sigpending(parent_pid).expect("pending signals"),
+        SignalSet::empty()
+    );
+}
+
+#[test]
 fn killed_child_delivers_sigchld_to_living_parent() {
     let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
     let parent = MockDriverProcess::new();
@@ -603,6 +667,49 @@ fn killed_child_delivers_sigchld_to_living_parent() {
         table.waitpid(child_pid).expect("reap killed child"),
         (child_pid, 143)
     );
+}
+
+#[test]
+fn blocked_sigterm_is_delivered_when_the_process_unblocks_it() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+    let process = MockDriverProcess::new();
+    let pid = table.allocate_pid();
+    let sigterm_mask = SignalSet::from_signal(SIGTERM).expect("SIGTERM should be valid");
+
+    table.register(
+        pid,
+        "wasmvm",
+        "sleep",
+        Vec::new(),
+        create_context(0),
+        process.clone(),
+    );
+
+    table
+        .sigprocmask(pid, SigmaskHow::Block, sigterm_mask)
+        .expect("block SIGTERM");
+    table
+        .kill(pid as i32, SIGTERM)
+        .expect("queue blocked SIGTERM");
+
+    assert!(
+        process.kills().is_empty(),
+        "blocked SIGTERM should not deliver"
+    );
+    assert_eq!(
+        table.sigpending(pid).expect("pending signals"),
+        sigterm_mask
+    );
+
+    table
+        .sigprocmask(pid, SigmaskHow::Unblock, sigterm_mask)
+        .expect("unblock SIGTERM");
+
+    wait_for(
+        || process.kills() == vec![SIGTERM],
+        Duration::from_millis(100),
+    );
+    assert_eq!(table.waitpid(pid).expect("reap SIGTERM exit"), (pid, 143));
 }
 
 #[test]

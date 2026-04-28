@@ -14,6 +14,7 @@ import {
 	type RootFilesystemEntry,
 	serializeMountConfigForSidecar,
 } from "./sidecar/rpc-client.js";
+import { findCargoBinary, resolveCargoBinary } from "./sidecar/cargo.js";
 
 export const AF_INET = 2;
 export const AF_UNIX = 1;
@@ -26,6 +27,7 @@ const S_IFDIR = 0o040000;
 const S_IFLNK = 0o120000;
 const MAX_SYMLINK_DEPTH = 40;
 const KERNEL_COMMAND_STUB = "#!/bin/sh\n# kernel command stub\n";
+const NODE_RUNTIME_BOOTSTRAP_COMMANDS = ["node", "npm", "npx"] as const;
 const KERNEL_POSIX_BOOTSTRAP_DIRS = [
 	"/dev",
 	"/proc",
@@ -43,6 +45,7 @@ const KERNEL_POSIX_BOOTSTRAP_DIRS = [
 	"/mnt",
 	"/media",
 	"/home",
+	"/home/user",
 	"/usr",
 	"/usr/bin",
 	"/usr/games",
@@ -163,7 +166,13 @@ export type NetworkPermissions =
 export type ChildProcessPermissions =
 	| PermissionMode
 	| RulePermissions<PatternPermissionRule>;
+export type ProcessPermissions =
+	| PermissionMode
+	| RulePermissions<PatternPermissionRule>;
 export type EnvPermissions =
+	| PermissionMode
+	| RulePermissions<PatternPermissionRule>;
+export type ToolPermissions =
 	| PermissionMode
 	| RulePermissions<PatternPermissionRule>;
 
@@ -258,7 +267,9 @@ export interface Permissions {
 	fs?: FsPermissions;
 	network?: NetworkPermissions;
 	childProcess?: ChildProcessPermissions;
+	process?: ProcessPermissions;
 	env?: EnvPermissions;
+	tool?: ToolPermissions;
 }
 
 export interface ResourceBudgets {
@@ -463,6 +474,10 @@ export interface KernelRuntimeDriver {
 	readonly name: string;
 	readonly commands: string[];
 	readonly commandDirs?: string[];
+	init?(kernel: KernelInterface): Promise<void> | void;
+	tryResolve?(command: string): boolean;
+	getGuestCommandPaths?(startIndex: number): ReadonlyMap<string, string>;
+	recordModuleExecution?(command: string): void;
 }
 
 export type DriverProcess = ManagedProcess;
@@ -1153,11 +1168,13 @@ function envPolicyAllows(
 export const allowAllFs: FsPermissions = "allow";
 export const allowAllNetwork: NetworkPermissions = "allow";
 export const allowAllChildProcess: ChildProcessPermissions = "allow";
+export const allowAllProcess: ProcessPermissions = "allow";
 export const allowAllEnv: EnvPermissions = "allow";
 export const allowAll: Permissions = {
 	fs: allowAllFs,
 	network: allowAllNetwork,
 	childProcess: allowAllChildProcess,
+	process: allowAllProcess,
 	env: allowAllEnv,
 };
 
@@ -1612,9 +1629,19 @@ class NativeRuntimeDescriptor implements KernelRuntimeDriver {
 	) {}
 }
 
+function normalizeCommandLookup(command: string): string {
+	return path.posix.basename(command);
+}
+
+interface DiscoveredWasmCommandEntry {
+	name: string;
+	hostPath: string;
+	dirOffset: number;
+}
+
 function isWasmBinaryFile(filePath: string): boolean {
 	try {
-		const header = fsSync.readFileSync(filePath);
+		const header = fsSync.readFileSync(filePath, { encoding: null });
 		return (
 			header.length >= 4 &&
 			header[0] === 0x00 &&
@@ -1627,52 +1654,136 @@ function isWasmBinaryFile(filePath: string): boolean {
 	}
 }
 
-function discoverCommands(commandDirs: string[]): string[] {
-	const commands = new Set<string>();
-	for (const commandDir of commandDirs) {
+function discoverWasmCommandEntries(
+	commandDirs: string[],
+): DiscoveredWasmCommandEntry[] {
+	const discovered: DiscoveredWasmCommandEntry[] = [];
+	const seen = new Set<string>();
+	commandDirs.forEach((commandDir, dirOffset) => {
 		let entries: string[];
 		try {
 			entries = fsSync
 				.readdirSync(commandDir)
 				.sort((left, right) => left.localeCompare(right));
 		} catch {
-			continue;
+			return;
 		}
 		for (const entry of entries) {
 			if (entry.startsWith(".")) continue;
+			if (seen.has(entry)) continue;
 			const fullPath = path.join(commandDir, entry);
 			if (isWasmBinaryFile(fullPath)) {
-				commands.add(entry);
+				seen.add(entry);
+				discovered.push({
+					name: entry,
+					hostPath: fullPath,
+					dirOffset,
+				});
 				continue;
 			}
 			try {
 				const realPath = fsSync.realpathSync(fullPath);
 				if (isWasmBinaryFile(realPath)) {
-					commands.add(entry);
+					seen.add(entry);
+					discovered.push({
+						name: entry,
+						hostPath: fullPath,
+						dirOffset,
+					});
 				}
 			} catch {}
 		}
+	});
+	return discovered;
+}
+
+class WasmVmRuntimeDescriptor implements KernelRuntimeDriver {
+	readonly kind = "wasmvm" as const;
+	readonly name = "wasmvm" as const;
+	readonly commands: string[] = [];
+	readonly commandDirs?: string[];
+	readonly _commandPaths = new Map<string, string>();
+	readonly _moduleCache = new Map<string, true>();
+	private readonly commandDirOffsets = new Map<string, number>();
+
+	constructor(options: WasmVmRuntimeOptions) {
+		this.commandDirs =
+			options.commandDirs && options.commandDirs.length > 0
+				? [...options.commandDirs]
+				: undefined;
+		if (options.commandDirs && options.commandDirs.length > 0) {
+			this.refreshDiscovery();
+			return;
+		}
+		this.commands.push(...WASMVM_COMMANDS);
+		if (options.wasmBinaryPath) {
+			console.warn(
+				"createWasmVmRuntime({ wasmBinaryPath }) is deprecated; use commandDirs instead.",
+			);
+		}
 	}
-	return [...commands];
+
+	init(_kernel: KernelInterface): void {
+		if (this.commandDirs && this.commandDirs.length > 0) {
+			this.refreshDiscovery();
+		}
+	}
+
+	tryResolve(command: string): boolean {
+		if (!this.commandDirs || this.commandDirs.length === 0) {
+			return false;
+		}
+		const normalized = normalizeCommandLookup(command);
+		if (this._commandPaths.has(normalized)) {
+			return true;
+		}
+		this.refreshDiscovery();
+		return this._commandPaths.has(normalized);
+	}
+
+	getGuestCommandPaths(startIndex: number): ReadonlyMap<string, string> {
+		const guestPaths = new Map<string, string>();
+		for (const [name] of this._commandPaths) {
+			const dirOffset = this.commandDirOffsets.get(name);
+			if (dirOffset === undefined) {
+				continue;
+			}
+			guestPaths.set(name, `/__agentos/commands/${startIndex + dirOffset}/${name}`);
+		}
+		return guestPaths;
+	}
+
+	recordModuleExecution(command: string): void {
+		const normalized = normalizeCommandLookup(command);
+		if (
+			this._commandPaths.has(normalized) ||
+			(!this.commandDirs || this.commandDirs.length === 0) &&
+				this.commands.includes(normalized)
+		) {
+			this._moduleCache.set(normalized, true);
+		}
+	}
+
+	private refreshDiscovery(): void {
+		if (!this.commandDirs || this.commandDirs.length === 0) {
+			return;
+		}
+		const discovered = discoverWasmCommandEntries(this.commandDirs);
+		this.commands.length = 0;
+		this._commandPaths.clear();
+		this.commandDirOffsets.clear();
+		for (const entry of discovered) {
+			this.commands.push(entry.name);
+			this._commandPaths.set(entry.name, entry.hostPath);
+			this.commandDirOffsets.set(entry.name, entry.dirOffset);
+		}
+	}
 }
 
 export function createWasmVmRuntime(
 	options: WasmVmRuntimeOptions = {},
 ): KernelRuntimeDriver {
-	if (options.commandDirs && options.commandDirs.length > 0) {
-		return new NativeRuntimeDescriptor(
-			"wasmvm",
-			"wasmvm",
-			discoverCommands(options.commandDirs),
-			options.commandDirs,
-		);
-	}
-	return new NativeRuntimeDescriptor(
-		"wasmvm",
-		"wasmvm",
-		[...WASMVM_COMMANDS],
-		options.wasmBinaryPath ? [path.dirname(options.wasmBinaryPath)] : undefined,
-	);
+	return new WasmVmRuntimeDescriptor(options);
 }
 
 export function createNodeRuntime(): KernelRuntimeDriver {
@@ -1714,10 +1825,18 @@ function ensureNativeSidecarBinary(): string {
 		return ensuredSidecarBinary;
 	}
 	if (sidecarBinaryNeedsBuild()) {
-		execFileSync("cargo", ["build", "-q", "-p", "agent-os-sidecar"], {
-			cwd: REPO_ROOT,
-			stdio: "pipe",
-		});
+		const cargoBinary = findCargoBinary();
+		if (cargoBinary) {
+			execFileSync(cargoBinary, ["build", "-q", "-p", "agent-os-sidecar"], {
+				cwd: REPO_ROOT,
+				stdio: "pipe",
+			});
+		} else if (!fsSync.existsSync(SIDECAR_BINARY)) {
+			execFileSync(resolveCargoBinary(), ["build", "-q", "-p", "agent-os-sidecar"], {
+				cwd: REPO_ROOT,
+				stdio: "pipe",
+			});
+		}
 	}
 	ensuredSidecarBinary = SIDECAR_BINARY;
 	return ensuredSidecarBinary;
@@ -1783,9 +1902,14 @@ async function snapshotFilesystemEntries(
 	filesystem: VirtualFileSystem,
 	targetPath = "/",
 	output: RootFilesystemEntry[] = [],
+	options?: {
+		passthroughDirectories?: ReadonlySet<string>;
+	},
 ): Promise<RootFilesystemEntry[]> {
+	const passthroughDirectories = options?.passthroughDirectories;
+	const passthroughDirectory = passthroughDirectories?.has(targetPath) ?? false;
 	const statInfo =
-		targetPath === "/"
+		targetPath === "/" || passthroughDirectory
 			? await filesystem.stat(targetPath)
 			: await filesystem.lstat(targetPath);
 	if (statInfo.isSymbolicLink) {
@@ -1807,6 +1931,9 @@ async function snapshotFilesystemEntries(
 			uid: statInfo.uid,
 			gid: statInfo.gid,
 		});
+		if (passthroughDirectory) {
+			return output;
+		}
 		const children = (await filesystem.readDirWithTypes(targetPath))
 			.map((entry) => entry.name)
 			.filter((name) => name !== "." && name !== "..")
@@ -1816,7 +1943,7 @@ async function snapshotFilesystemEntries(
 				targetPath === "/"
 					? posixPath.join("/", child)
 					: posixPath.join(targetPath, child);
-			await snapshotFilesystemEntries(filesystem, childPath, output);
+			await snapshotFilesystemEntries(filesystem, childPath, output, options);
 		}
 		return output;
 	}
@@ -1834,31 +1961,108 @@ async function snapshotFilesystemEntries(
 	return output;
 }
 
+async function materializeSnapshotEntriesIntoVm(
+	client: NativeSidecarProcessClient,
+	session: AuthenticatedSession,
+	vm: CreatedVm,
+	entries: RootFilesystemEntry[],
+): Promise<void> {
+	for (const entry of entries) {
+		if (entry.path === "/") {
+			continue;
+		}
+		if (entry.kind === "directory") {
+			await client.mkdir(session, vm, entry.path, { recursive: true });
+		} else if (entry.kind === "file") {
+			await client.writeFile(
+				session,
+				vm,
+				entry.path,
+				decodeRootFilesystemEntryContent(entry),
+			);
+		} else {
+			await client.symlink(session, vm, entry.target ?? "", entry.path);
+			continue;
+		}
+
+		if (typeof entry.mode === "number") {
+			await client.chmod(session, vm, entry.path, entry.mode);
+		}
+		if (typeof entry.uid === "number" && typeof entry.gid === "number") {
+			await client.chown(session, vm, entry.path, entry.uid, entry.gid);
+		}
+	}
+}
+
+function decodeRootFilesystemEntryContent(entry: RootFilesystemEntry): Uint8Array {
+	const content = entry.content ?? "";
+	if (entry.encoding === "base64") {
+		return new Uint8Array(Buffer.from(content, "base64"));
+	}
+	return new TextEncoder().encode(content);
+}
+
+const NODE_FILESYSTEM_ROOT_PASSTHROUGH_DIRS = ["node_modules"] as const;
+
+function planNodeFilesystemPassthroughMounts(
+	filesystem: VirtualFileSystem,
+	existingMounts: readonly LocalCompatMount[],
+): {
+	mounts: LocalCompatMount[];
+	passthroughDirectories: ReadonlySet<string>;
+} {
+	if (!(filesystem instanceof NodeFileSystem)) {
+		return {
+			mounts: [],
+			passthroughDirectories: new Set<string>(),
+		};
+	}
+
+	const passthroughDirectories = new Set<string>();
+	const existingGuestPaths = new Set(existingMounts.map((mount) => mount.path));
+	const mounts: LocalCompatMount[] = [];
+	for (const directoryName of NODE_FILESYSTEM_ROOT_PASSTHROUGH_DIRS) {
+		const guestPath = normalizePath(`/${directoryName}`);
+		const hostPath = path.join(filesystem.rootPath, directoryName);
+		let statInfo: fsSync.Stats;
+		try {
+			statInfo = fsSync.statSync(hostPath);
+		} catch {
+			continue;
+		}
+		if (!statInfo.isDirectory()) {
+			continue;
+		}
+		passthroughDirectories.add(guestPath);
+		if (existingGuestPaths.has(guestPath)) {
+			continue;
+		}
+		mounts.push({
+			path: guestPath,
+			fs: new NodeFileSystem({ root: hostPath }),
+			readOnly: false,
+		});
+	}
+
+	return {
+		mounts,
+		passthroughDirectories,
+	};
+}
+
 function collectGuestCommandPaths(
 	commandDirs: string[],
 	startIndex = 0,
 ): Map<string, string> {
 	const guestPaths = new Map<string, string>();
-	commandDirs.forEach((commandDir, index) => {
-		let entries: string[];
-		try {
-			entries = fsSync
-				.readdirSync(commandDir)
-				.sort((left, right) => left.localeCompare(right));
-		} catch {
-			return;
+	for (const entry of discoverWasmCommandEntries(commandDirs)) {
+		if (!guestPaths.has(entry.name)) {
+			guestPaths.set(
+				entry.name,
+				`/__agentos/commands/${startIndex + entry.dirOffset}/${entry.name}`,
+			);
 		}
-		for (const entry of entries) {
-			if (entry.startsWith(".")) continue;
-			if (!isWasmBinaryFile(path.join(commandDir, entry))) continue;
-			if (!guestPaths.has(entry)) {
-				guestPaths.set(
-					entry,
-					`/__agentos/commands/${startIndex + index}/${entry}`,
-				);
-			}
-		}
-	});
+	}
 	return guestPaths;
 }
 
@@ -1866,10 +2070,11 @@ async function ensureCommandStubs(
 	proxy: NativeSidecarKernelProxy,
 	commands: Iterable<string>,
 ): Promise<void> {
+	const rootView = proxy.createRootView();
 	for (const command of commands) {
 		const stubPath = `/bin/${command}`;
-		if (await proxy.exists(stubPath)) continue;
-		await proxy.writeFile(stubPath, KERNEL_COMMAND_STUB);
+		await rootView.writeFile(stubPath, KERNEL_COMMAND_STUB);
+		await rootView.chmod(stubPath, 0o755);
 	}
 }
 
@@ -1955,6 +2160,69 @@ class DeferredFileSystem implements VirtualFileSystem {
 	}
 }
 
+const VIRTUAL_FILESYSTEM_METHOD_NAMES = [
+	"readFile",
+	"readTextFile",
+	"readDir",
+	"readDirWithTypes",
+	"writeFile",
+	"createDir",
+	"mkdir",
+	"exists",
+	"stat",
+	"removeFile",
+	"removeDir",
+	"rename",
+	"realpath",
+	"symlink",
+	"readlink",
+	"lstat",
+	"link",
+	"chmod",
+	"chown",
+	"utimes",
+	"truncate",
+	"pread",
+	"pwrite",
+] as const;
+
+type VirtualFileSystemMethodName =
+	(typeof VIRTUAL_FILESYSTEM_METHOD_NAMES)[number];
+
+function bindLiveFilesystem(
+	target: VirtualFileSystem,
+	getFilesystem: () => VirtualFileSystem | null,
+): void {
+	const fallback: Partial<
+		Record<VirtualFileSystemMethodName, (...args: unknown[]) => unknown>
+	> = {};
+	for (const method of VIRTUAL_FILESYSTEM_METHOD_NAMES) {
+		const candidate = (target as unknown as Record<string, unknown>)[method];
+		if (typeof candidate === "function") {
+			fallback[method] = candidate.bind(target);
+		}
+	}
+
+	for (const method of VIRTUAL_FILESYSTEM_METHOD_NAMES) {
+		(target as unknown as Record<string, unknown>)[method] = (
+			...args: unknown[]
+		) => {
+			const filesystem = getFilesystem();
+			const delegate = filesystem
+				? (filesystem[method] as (...args: unknown[]) => unknown).bind(
+						filesystem,
+					)
+				: fallback[method];
+			if (!delegate) {
+				throw new Error(
+					`kernel filesystem is not ready; mount a runtime before calling ${method}()`,
+				);
+			}
+			return delegate(...args);
+		};
+	}
+}
+
 class NativeKernel implements Kernel {
 	readonly env: Record<string, string>;
 	readonly cwd: string;
@@ -1973,6 +2241,11 @@ class NativeKernel implements Kernel {
 	private readyPromise: Promise<void> | null = null;
 	private readonly pendingLocalMounts: LocalCompatMount[] = [];
 	private mountedCommandDirs: string[] = [];
+	private readonly mountedRuntimeDrivers: KernelRuntimeDriver[] = [];
+	private readonly runtimeDriverCommandDirStarts = new Map<
+		KernelRuntimeDriver,
+		number
+	>();
 	private readonly loopbackExemptPorts: number[];
 
 	constructor(
@@ -1991,7 +2264,7 @@ class NativeKernel implements Kernel {
 		},
 	) {
 		this.env = { ...(options.env ?? {}) };
-		this.cwd = options.cwd ?? "/";
+		this.cwd = options.cwd ?? "/home/user";
 		this.socketTable = {
 			hasHostNetworkAdapter: () => Boolean(options.hostNetworkAdapter),
 			findListener: (request: {
@@ -2017,6 +2290,7 @@ class NativeKernel implements Kernel {
 			});
 		}
 		this.vfs = new DeferredFileSystem(() => this.rootFilesystem);
+		bindLiveFilesystem(this.options.filesystem, () => this.rootFilesystem);
 	}
 
 	get zombieTimerCount(): number {
@@ -2028,10 +2302,12 @@ class NativeKernel implements Kernel {
 		if (!this.proxy || !this.client || !this.session || !this.vm) {
 			throw new Error("kernel is not ready");
 		}
+		await driver.init?.(this);
 		if (driver.kind === "node") {
 			for (const command of driver.commands) {
 				this.commands.set(command, "node");
 			}
+			this.mountedRuntimeDrivers.push(driver);
 			await ensureCommandStubs(this.proxy, driver.commands);
 			return;
 		}
@@ -2041,19 +2317,19 @@ class NativeKernel implements Kernel {
 			for (const command of driver.commands) {
 				this.commands.set(command, "wasmvm");
 			}
+			this.mountedRuntimeDrivers.push(driver);
 			await ensureCommandStubs(this.proxy, driver.commands);
 			return;
 		}
 
 		const startIndex = this.mountedCommandDirs.length;
-		const newGuestPaths = collectGuestCommandPaths(commandDirs, startIndex);
-		const commandMountMappings = commandDirs.map((commandDir, index) => ({
-			guestPath: `/__agentos/commands/${startIndex + index}`,
-			hostPath: commandDir,
-		}));
-		const sidecarMounts = commandDirs.map((commandDir, index) =>
+		const newGuestPaths =
+			driver.getGuestCommandPaths?.(startIndex) ??
+			collectGuestCommandPaths(commandDirs, startIndex);
+		const allCommandDirs = [...this.mountedCommandDirs, ...commandDirs];
+		const sidecarMounts = allCommandDirs.map((commandDir, index) =>
 			serializeMountConfigForSidecar({
-				path: `/__agentos/commands/${startIndex + index}`,
+				path: `/__agentos/commands/${index}`,
 				readOnly: true,
 				plugin: {
 					id: "host_dir",
@@ -2064,12 +2340,33 @@ class NativeKernel implements Kernel {
 				},
 			}),
 		);
+		const localMounts = this.pendingLocalMounts.map((mount) =>
+			mount.fs instanceof NodeFileSystem
+				? serializeMountConfigForSidecar({
+						path: mount.path,
+						readOnly: mount.readOnly,
+						plugin: {
+							id: "host_dir",
+							config: {
+								hostPath: mount.fs.rootPath,
+								readOnly: mount.readOnly,
+							},
+						},
+					})
+				: serializeMountConfigForSidecar({
+						path: mount.path,
+						driver: mount.fs,
+						readOnly: mount.readOnly,
+					}),
+		);
 		await this.client.configureVm(this.session, this.vm, {
-			mounts: sidecarMounts,
+			mounts: [...localMounts, ...sidecarMounts],
 			loopbackExemptPorts: this.loopbackExemptPorts,
 		});
 		this.proxy.registerCommandGuestPaths(newGuestPaths);
 		this.mountedCommandDirs.push(...commandDirs);
+		this.mountedRuntimeDrivers.push(driver);
+		this.runtimeDriverCommandDirStarts.set(driver, startIndex);
 		for (const command of newGuestPaths.keys()) {
 			this.commands.set(command, "wasmvm");
 		}
@@ -2105,7 +2402,45 @@ class NativeKernel implements Kernel {
 		if (!this.proxy) {
 			throw new Error("kernel is not ready; await kernel.mount(...) first");
 		}
-		return this.proxy.spawn(command, args, options);
+		const normalized = normalizeCommandLookup(command);
+		const knownCommand =
+			this.commands.has(command) || this.commands.has(normalized);
+		if (!knownCommand && !this.tryResolveMountedCommand(command)) {
+			throw new Error(`ENOENT: command not found: ${command}`);
+		}
+		const proc = this.proxy.spawn(command, args, options);
+		const syncProcessSnapshot = () => {
+			const snapshot = this.proxy?.processes.get(proc.pid);
+			if (!snapshot) {
+				return;
+			}
+			this.processes.set(proc.pid, {
+				...snapshot,
+				args: [...snapshot.args],
+			});
+		};
+		syncProcessSnapshot();
+		return {
+			pid: proc.pid,
+			writeStdin(data) {
+				proc.writeStdin(data);
+			},
+			closeStdin() {
+				proc.closeStdin();
+			},
+			kill(signal) {
+				proc.kill(signal);
+				syncProcessSnapshot();
+			},
+			async wait() {
+				const exitCode = await proc.wait();
+				syncProcessSnapshot();
+				return exitCode;
+			},
+			get exitCode() {
+				return proc.exitCode;
+			},
+		};
 	}
 
 	openShell(options?: OpenShellOptions): ShellHandle {
@@ -2191,6 +2526,35 @@ class NativeKernel implements Kernel {
 		return this.proxy!.rename(oldPath, newPath);
 	}
 
+	private tryResolveMountedCommand(command: string): boolean {
+		const normalized = normalizeCommandLookup(command);
+		for (const driver of this.mountedRuntimeDrivers) {
+			if (!driver.tryResolve?.(command)) {
+				continue;
+			}
+			this.commands.set(normalized, driver.kind);
+			if (driver.kind === "wasmvm" && this.proxy) {
+				const startIndex = this.runtimeDriverCommandDirStarts.get(driver);
+				if (startIndex !== undefined) {
+					const guestPaths = driver.getGuestCommandPaths?.(startIndex);
+					if (guestPaths?.has(normalized)) {
+						this.proxy.registerCommandGuestPaths(
+							new Map([[normalized, guestPaths.get(normalized)!]]),
+						);
+					}
+				}
+			}
+			return true;
+		}
+		return false;
+	}
+
+	private recordModuleExecution(command: string): void {
+		for (const driver of this.mountedRuntimeDrivers) {
+			driver.recordModuleExecution?.(command);
+		}
+	}
+
 	private async ensureReady(): Promise<void> {
 		if (!this.readyPromise) {
 			this.readyPromise = this.initialize();
@@ -2200,19 +2564,33 @@ class NativeKernel implements Kernel {
 
 	private async initialize(): Promise<void> {
 		const createVmEnv = { ...this.env };
+		const requestedPermissions = this.options.permissions;
+		const bootstrapPermissions = requestedPermissions ? allowAll : undefined;
 		if (this.loopbackExemptPorts.length > 0) {
 			createVmEnv.AGENT_OS_LOOPBACK_EXEMPT_PORTS = JSON.stringify(
 				this.loopbackExemptPorts,
 			);
 		}
-		const snapshotEntries = await snapshotFilesystemEntries(this.options.filesystem);
+		const rootPassthroughPlan = planNodeFilesystemPassthroughMounts(
+			this.options.filesystem,
+			this.pendingLocalMounts,
+		);
+		const snapshotEntries = await snapshotFilesystemEntries(
+			this.options.filesystem,
+			"/",
+			[],
+			{
+				passthroughDirectories:
+					rootPassthroughPlan.passthroughDirectories,
+			},
+		);
 		const rootFilesystem = {
 			disableDefaultBaseLayer: true,
 			lowers: [
 				{
 					kind: "snapshot" as const,
 					entries: mergeRootFilesystemEntries(
-						createBootstrapEntries([]),
+						createBootstrapEntries([...NODE_RUNTIME_BOOTSTRAP_COMMANDS]),
 						snapshotEntries,
 					),
 				},
@@ -2230,20 +2608,43 @@ class NativeKernel implements Kernel {
 			runtime: "java_script",
 			metadata: {
 				...Object.fromEntries(
-					Object.entries(createVmEnv).map(([key, value]) => [`env.${key}`, value]),
+					Object.entries(createVmEnv).map(([key, value]) => [
+						`env.${key}`,
+						value,
+					]),
 				),
 			},
 			rootFilesystem,
+			permissions: bootstrapPermissions,
 		});
 		await client.waitForEvent(
-			(event) =>
-				event.payload.type === "vm_lifecycle" &&
-				event.payload.state === "ready",
+			{
+				type: "vm_lifecycle",
+				ownership: {
+					scope: "vm",
+					connection_id: session.connectionId,
+					session_id: session.sessionId,
+					vm_id: vm.vmId,
+				},
+				state: "ready",
+			},
 			10_000,
 		);
+		if (requestedPermissions && snapshotEntries.length > 1) {
+			await materializeSnapshotEntriesIntoVm(
+				client,
+				session,
+				vm,
+				snapshotEntries,
+			);
+		}
+		if (rootPassthroughPlan.mounts.length > 0) {
+			this.pendingLocalMounts.push(...rootPassthroughPlan.mounts);
+		}
 		if (
 			this.pendingLocalMounts.length > 0 ||
-			this.loopbackExemptPorts.length > 0
+			this.loopbackExemptPorts.length > 0 ||
+			requestedPermissions
 		) {
 			await client.configureVm(session, vm, {
 				mounts: this.pendingLocalMounts.map((mount) =>
@@ -2265,6 +2666,7 @@ class NativeKernel implements Kernel {
 								readOnly: mount.readOnly,
 							}),
 				),
+				permissions: requestedPermissions,
 				loopbackExemptPorts: this.loopbackExemptPorts,
 			});
 		}
@@ -2275,8 +2677,12 @@ class NativeKernel implements Kernel {
 			vm,
 			env: this.env,
 			cwd: this.cwd,
+			defaultExecCwd: this.options.cwd === undefined ? "/home/user" : this.cwd,
 			localMounts: this.pendingLocalMounts,
 			commandGuestPaths: new Map<string, string>(),
+			onWasmCommandResolved: (command) => {
+				this.recordModuleExecution(command);
+			},
 		});
 
 		this.client = client;

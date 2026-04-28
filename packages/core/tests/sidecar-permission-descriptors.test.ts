@@ -3,12 +3,14 @@ import type { Permissions } from "../src/runtime-compat.js";
 import { serializePermissionsForSidecar } from "../src/sidecar/permissions.js";
 
 describe("serializePermissionsForSidecar", () => {
-	test("uses allow-all policy when permissions are omitted", () => {
+	test("uses deny-all policy when permissions are omitted", () => {
 		expect(serializePermissionsForSidecar()).toEqual({
-			fs: "allow",
-			network: "allow",
-			childProcess: "allow",
-			env: "allow",
+			fs: "deny",
+			network: "deny",
+			childProcess: "deny",
+			process: "deny",
+			env: "deny",
+			tool: "deny",
 		});
 	});
 
@@ -35,6 +37,26 @@ describe("serializePermissionsForSidecar", () => {
 				],
 			},
 			childProcess: "deny",
+			process: {
+				default: "deny",
+				rules: [
+					{
+						mode: "allow",
+						operations: ["inspect"],
+						patterns: ["**"],
+					},
+				],
+			},
+			tool: {
+				default: "deny",
+				rules: [
+					{
+						mode: "allow",
+						operations: ["invoke"],
+						patterns: ["math:*"],
+					},
+				],
+			},
 		};
 
 		expect(serializePermissionsForSidecar(permissions)).toEqual({
@@ -59,7 +81,27 @@ describe("serializePermissionsForSidecar", () => {
 				],
 			},
 			childProcess: "deny",
+			process: {
+				default: "deny",
+				rules: [
+					{
+						mode: "allow",
+						operations: ["inspect"],
+						patterns: ["**"],
+					},
+				],
+			},
 			env: undefined,
+			tool: {
+				default: "deny",
+				rules: [
+					{
+						mode: "allow",
+						operations: ["invoke"],
+						patterns: ["math:*"],
+					},
+				],
+			},
 		});
 	});
 
@@ -69,6 +111,7 @@ describe("serializePermissionsForSidecar", () => {
 				rules: [
 					{
 						mode: "allow",
+						operations: ["*"],
 						patterns: ["OPENAI_*", "PATH"],
 					},
 				],
@@ -79,14 +122,67 @@ describe("serializePermissionsForSidecar", () => {
 			fs: undefined,
 			network: undefined,
 			childProcess: undefined,
+			process: undefined,
 			env: {
 				rules: [
 					{
 						mode: "allow",
+						operations: ["*"],
 						patterns: ["OPENAI_*", "PATH"],
 					},
 				],
 			},
+			tool: undefined,
+		});
+	});
+
+	test("expands omitted rule operations and resources to explicit wildcards", () => {
+		const permissions: Permissions = {
+			fs: {
+				default: "deny",
+				rules: [
+					{
+						mode: "allow",
+						operations: ["read"],
+					},
+				],
+			},
+			network: {
+				default: "deny",
+				rules: [
+					{
+						mode: "allow",
+						patterns: ["tcp://localhost:443"],
+					},
+				],
+			},
+		};
+
+		expect(serializePermissionsForSidecar(permissions)).toEqual({
+			fs: {
+				default: "deny",
+				rules: [
+					{
+						mode: "allow",
+						operations: ["read"],
+						paths: ["**"],
+					},
+				],
+			},
+			network: {
+				default: "deny",
+				rules: [
+					{
+						mode: "allow",
+						operations: ["*"],
+						patterns: ["tcp://localhost:443"],
+					},
+				],
+			},
+			childProcess: undefined,
+			process: undefined,
+			env: undefined,
+			tool: undefined,
 		});
 	});
 });

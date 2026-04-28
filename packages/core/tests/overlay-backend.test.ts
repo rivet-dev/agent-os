@@ -23,6 +23,15 @@ defineFsDriverTests({
 		pread: true,
 		mkdir: true,
 		removeDir: true,
+		allowMissingFileRemoveNoop: false,
+		allowMissingDirReadAsEmpty: false,
+		allowMissingSourceRenameNoop: false,
+		allowDirectoryRenameUnsupported: true,
+		allowSymlinkLoopErrnoFallback: false,
+		allowDirectoryHardLink: false,
+		allowMkdirWithoutRecursiveParentAutoCreate: false,
+		allowRemoveDirNonEmptyRecursiveDelete: false,
+		allowSymlinkOverwrite: false,
 	},
 });
 

@@ -84,7 +84,10 @@ fn supports_root_configuration() {
 fn getpwuid_returns_configured_entry_for_the_active_user() {
     let user = UserManager::new();
 
-    assert_eq!(user.getpwuid(1000), "user:x:1000:1000::/home/user:/bin/sh");
+    assert_eq!(
+        user.getpwuid(1000),
+        Some(String::from("user:x:1000:1000::/home/user:/bin/sh"))
+    );
 
     let with_gecos = UserManager::from_config(UserConfig {
         gecos: Some(String::from("Test User")),
@@ -92,12 +95,14 @@ fn getpwuid_returns_configured_entry_for_the_active_user() {
     });
     assert_eq!(
         with_gecos.getpwuid(1000),
-        "user:x:1000:1000:Test User:/home/user:/bin/sh"
+        Some(String::from(
+            "user:x:1000:1000:Test User:/home/user:/bin/sh"
+        ))
     );
 }
 
 #[test]
-fn getpwuid_returns_custom_and_generic_entries() {
+fn getpwuid_returns_custom_entry_and_rejects_unknown_uids() {
     let deploy = UserManager::from_config(UserConfig {
         uid: Some(501),
         gid: Some(502),
@@ -110,18 +115,17 @@ fn getpwuid_returns_custom_and_generic_entries() {
 
     assert_eq!(
         deploy.getpwuid(501),
-        "deploy:x:501:502:Deploy User:/opt/deploy:/bin/bash"
+        Some(String::from(
+            "deploy:x:501:502:Deploy User:/opt/deploy:/bin/bash"
+        ))
     );
-    assert_eq!(
-        deploy.getpwuid(9999),
-        "user9999:x:9999:9999::/home/user9999:/bin/sh"
-    );
+    assert_eq!(deploy.getpwuid(9999), None);
 }
 
 #[test]
 fn getpwuid_handles_root_uid_for_root_and_non_root_configs() {
     let user = UserManager::new();
-    assert_eq!(user.getpwuid(0), "user0:x:0:0::/home/user0:/bin/sh");
+    assert_eq!(user.getpwuid(0), None);
 
     let root = UserManager::from_config(UserConfig {
         uid: Some(0),
@@ -130,7 +134,10 @@ fn getpwuid_handles_root_uid_for_root_and_non_root_configs() {
         homedir: Some(String::from("/root")),
         ..UserConfig::default()
     });
-    assert_eq!(root.getpwuid(0), "root:x:0:0::/root:/bin/sh");
+    assert_eq!(
+        root.getpwuid(0),
+        Some(String::from("root:x:0:0::/root:/bin/sh"))
+    );
 }
 
 #[test]
@@ -144,6 +151,13 @@ fn getgroups_and_getgrgid_use_kernel_managed_group_state() {
     });
 
     assert_eq!(user.getgroups(), vec![123, 456, 789]);
-    assert_eq!(user.getgrgid(123), "deployers:x:123:deploy");
-    assert_eq!(user.getgrgid(999), "group999:x:999:");
+    assert_eq!(
+        user.getgrgid(123),
+        Some(String::from("deployers:x:123:deploy"))
+    );
+    assert_eq!(
+        user.getgrgid(456),
+        Some(String::from("group456:x:456:deploy"))
+    );
+    assert_eq!(user.getgrgid(999), None);
 }

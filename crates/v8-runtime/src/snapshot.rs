@@ -564,15 +564,16 @@ pub fn run_snapshot_consolidated_checks() {
 
         // Create minimal BridgeCallContext (sync call will fail but we
         // test that the FunctionTemplate dispatches without crash)
-        let (ipc_tx, _ipc_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+        let (event_tx, _event_rx) =
+            crossbeam_channel::unbounded::<crate::runtime_protocol::RuntimeEvent>();
         let (_cmd_tx, _cmd_rx) = crossbeam_channel::unbounded::<crate::session::SessionCommand>();
         let call_id_router: crate::host_call::CallIdRouter =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
 
-        let receiver = crate::host_call::ReaderResponseReceiver::new(Box::new(
+        let receiver = crate::host_call::ReaderBridgeResponseReceiver::new(Box::new(
             std::io::Cursor::new(Vec::<u8>::new()),
         ));
-        let sender = crate::host_call::ChannelFrameSender::new(ipc_tx);
+        let sender = crate::host_call::ChannelRuntimeEventSender::new(event_tx);
         let bridge_ctx = BridgeCallContext::with_receiver(
             Box::new(sender),
             Box::new(receiver),
@@ -784,7 +785,8 @@ pub fn run_snapshot_consolidated_checks() {
                     // Verify all async bridge functions are registered as stubs
                     var asyncFns = ['_dynamicImport', '_scheduleTimer',
                         '_networkDnsLookupRaw',
-                        '_networkHttpRequestRaw', '_networkHttpServerListenRaw',
+                        '_networkDnsResolveRaw',
+                        '_networkHttpServerListenRaw',
                         '_networkHttpServerCloseRaw', '_networkHttpServerWaitRaw',
                         '_networkHttp2ServerWaitRaw', '_networkHttp2SessionWaitRaw'];
                     for (var i = 0; i < asyncFns.length; i++) {
@@ -948,13 +950,14 @@ pub fn run_snapshot_consolidated_checks() {
         let mut isolate = create_isolate_from_snapshot(blob, None);
 
         // Create BridgeCallContext (sync calls will fail but we verify dispatch)
-        let (ipc_tx, _ipc_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+        let (event_tx, _event_rx) =
+            crossbeam_channel::unbounded::<crate::runtime_protocol::RuntimeEvent>();
         let call_id_router: crate::host_call::CallIdRouter =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let receiver = crate::host_call::ReaderResponseReceiver::new(Box::new(
+        let receiver = crate::host_call::ReaderBridgeResponseReceiver::new(Box::new(
             std::io::Cursor::new(Vec::<u8>::new()),
         ));
-        let sender = crate::host_call::ChannelFrameSender::new(ipc_tx);
+        let sender = crate::host_call::ChannelRuntimeEventSender::new(event_tx);
         let bridge_ctx = BridgeCallContext::with_receiver(
             Box::new(sender),
             Box::new(receiver),

@@ -6,13 +6,13 @@
  * resolution, on-demand discovery through the kernel, path-based resolution,
  * and backwards compatibility.
  *
- * Tests requiring real WASM execution are gated with skipIf(!hasWasmBinaries).
+ * Tests requiring real WASM execution register only when binaries are available.
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createWasmVmRuntime, WASMVM_COMMANDS } from '@rivet-dev/agent-os-core/test/runtime';
 import type { WasmVmRuntimeOptions } from '@rivet-dev/agent-os-core/test/runtime';
-import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
+import { COMMANDS_DIR, createKernel, describeIf, hasWasmBinaries } from '../helpers.js';
 import type {
   DriverProcess,
   Kernel,
@@ -423,7 +423,7 @@ describe('Dynamic module loading — integration', () => {
     });
   });
 
-  describe.skipIf(!hasWasmBinaries)('module cache integration', () => {
+  describeIf(hasWasmBinaries, 'module cache integration', () => {
     let kernel: Kernel;
 
     afterEach(async () => {
@@ -448,7 +448,7 @@ describe('Dynamic module loading — integration', () => {
       const r2 = await kernel.exec('echo second');
       expect(r2.exitCode).toBe(0);
       expect(driver._moduleCache.size).toBe(1);
-    });
+    }, 30_000);
 
     it('different commands get separate cache entries', async () => {
       const vfs = new SimpleVFS();
@@ -460,6 +460,6 @@ describe('Dynamic module loading — integration', () => {
       await kernel.exec('echo hello');
       await kernel.exec('true');
       expect(driver._moduleCache.size).toBe(2);
-    });
+    }, 30_000);
   });
 });

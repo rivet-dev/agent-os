@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CronManager } from "../src/cron/cron-manager.js";
+import {
+	InvalidScheduleError,
+	PastScheduleError,
+} from "../src/cron/parse-schedule.js";
 import type {
 	ScheduleDriver,
 	ScheduleEntry,
@@ -85,6 +89,82 @@ describe("CronManager", () => {
 		expect(list[0].overlap).toBe("allow");
 		expect(list[0].runCount).toBe(0);
 		expect(list[0].running).toBe(false);
+	});
+
+	it("classifies parseable dates before falling back to cron", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-04-10T13:00:00Z"));
+		try {
+			manager.schedule({
+				id: "space-date",
+				schedule: "2026-04-10 14:00:00",
+				action: { type: "callback", fn: () => {} },
+			});
+			manager.schedule({
+				id: "iso-date",
+				schedule: "2026-04-10T14:00:00Z",
+				action: { type: "callback", fn: () => {} },
+			});
+			manager.schedule({
+				id: "cron-5",
+				schedule: "* * * * *",
+				action: { type: "callback", fn: () => {} },
+			});
+			manager.schedule({
+				id: "cron-6",
+				schedule: "* * * * * *",
+				action: { type: "callback", fn: () => {} },
+			});
+
+			const jobs = new Map(manager.list().map((job) => [job.id, job]));
+
+			expect(jobs.get("space-date")?.nextRun?.toISOString()).toBe(
+				"2026-04-10T14:00:00.000Z",
+			);
+			expect(jobs.get("iso-date")?.nextRun?.toISOString()).toBe(
+				"2026-04-10T14:00:00.000Z",
+			);
+			expect(jobs.get("cron-5")?.nextRun?.toISOString()).toBe(
+				"2026-04-10T13:01:00.000Z",
+			);
+			expect(jobs.get("cron-6")?.nextRun?.toISOString()).toBe(
+				"2026-04-10T13:00:01.000Z",
+			);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("rejects malformed schedules before registering with the driver", () => {
+		expect(() =>
+			manager.schedule({
+				id: "bad-schedule",
+				schedule: "tomorrow",
+				action: { type: "callback", fn: () => {} },
+			}),
+		).toThrowError(InvalidScheduleError);
+
+		expect(manager.list()).toHaveLength(0);
+		expect(driver.entries.size).toBe(0);
+	});
+
+	it("rejects past one-shot schedules before registering with the driver", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-04-10T13:00:00Z"));
+		try {
+			expect(() =>
+				manager.schedule({
+					id: "past-date",
+					schedule: "2020-01-01T00:00:00Z",
+					action: { type: "callback", fn: () => {} },
+				}),
+			).toThrowError(PastScheduleError);
+
+			expect(manager.list()).toHaveLength(0);
+			expect(driver.entries.size).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	// -----------------------------------------------------------------------

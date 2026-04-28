@@ -8,6 +8,7 @@ mod host_dir {
         use agent_os_kernel::vfs::VirtualFileSystem;
         use serde_json::json;
         use std::fs;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         use std::path::PathBuf;
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -106,6 +107,50 @@ mod host_dir {
                 fs::read(outside_dir.join("outside.txt")).expect("outside file should stay intact"),
                 b"outside".to_vec()
             );
+
+            fs::remove_dir_all(host_dir).expect("remove temp dir");
+            fs::remove_dir_all(outside_dir).expect("remove outside temp dir");
+        }
+
+        #[test]
+        fn filesystem_metadata_ops_reject_symlink_targets() {
+            let host_dir = temp_dir("agent-os-host-dir-plugin-metadata");
+            let outside_dir = temp_dir("agent-os-host-dir-plugin-metadata-outside");
+            let outside_file = outside_dir.join("outside.txt");
+            fs::write(&outside_file, b"outside").expect("seed outside file");
+            std::os::unix::fs::symlink(&outside_file, host_dir.join("link"))
+                .expect("seed escape symlink");
+
+            let baseline = fs::metadata(&outside_file).expect("outside metadata before ops");
+            let baseline_mode = baseline.permissions().mode() & 0o7777;
+            let baseline_uid = baseline.uid();
+            let baseline_gid = baseline.gid();
+            let baseline_atime_ns = baseline.atime_nsec();
+            let baseline_mtime_ns = baseline.mtime_nsec();
+
+            let mut filesystem = HostDirFilesystem::new(&host_dir).expect("create host dir fs");
+
+            let chmod_error = filesystem
+                .chmod("/link", 0o777)
+                .expect_err("chmod should reject symlink targets");
+            assert_eq!(chmod_error.code(), "EPERM");
+
+            let chown_error = filesystem
+                .chown("/link", baseline_uid, baseline_gid)
+                .expect_err("chown should reject symlink targets");
+            assert_eq!(chown_error.code(), "EPERM");
+
+            let utimes_error = filesystem
+                .utimes("/link", 1_000, 2_000)
+                .expect_err("utimes should reject symlink targets");
+            assert_eq!(utimes_error.code(), "EPERM");
+
+            let after = fs::metadata(&outside_file).expect("outside metadata after ops");
+            assert_eq!(after.permissions().mode() & 0o7777, baseline_mode);
+            assert_eq!(after.uid(), baseline_uid);
+            assert_eq!(after.gid(), baseline_gid);
+            assert_eq!(after.atime_nsec(), baseline_atime_ns);
+            assert_eq!(after.mtime_nsec(), baseline_mtime_ns);
 
             fs::remove_dir_all(host_dir).expect("remove temp dir");
             fs::remove_dir_all(outside_dir).expect("remove outside temp dir");

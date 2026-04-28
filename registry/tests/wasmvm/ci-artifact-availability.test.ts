@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { COMMANDS_DIR, C_BUILD_DIR } from '../helpers.js';
+import { COMMANDS_DIR, C_BUILD_DIR, itIf } from '../helpers.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -48,7 +48,7 @@ function formatMissingArtifacts(): string {
 }
 
 describe('WasmVM CI artifact availability', () => {
-  it.skipIf(!process.env.CI)('requires story-critical C-built Wasm artifacts in CI', () => {
+  itIf(Boolean(process.env.CI), 'requires story-critical C-built Wasm artifacts in CI', () => {
     const missing = formatMissingArtifacts();
     expect(
       missing,

@@ -12,10 +12,13 @@ mod sandbox_agent {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         #[test]
-        fn filesystem_round_trips_small_files_and_gates_large_pread_without_range_support() {
+        fn filesystem_round_trips_small_files_and_uses_http_range_for_large_pread() {
             let server = MockSandboxAgentServer::start("agent-os-sandbox-plugin", None);
             fs::write(server.root().join("hello.txt"), "hello from sandbox").expect("seed file");
-            fs::write(server.root().join("large.bin"), vec![b'x'; 512]).expect("seed large file");
+            let large_file = (0..100 * 1024)
+                .map(|index| (index % 251) as u8)
+                .collect::<Vec<_>>();
+            fs::write(server.root().join("large.bin"), &large_file).expect("seed large file");
 
             let mut filesystem = SandboxAgentFilesystem::from_config(SandboxAgentMountConfig {
                 base_url: server.base_url().to_owned(),
@@ -43,20 +46,69 @@ mod sandbox_agent {
                 "native sandbox mount"
             );
 
-            let error = filesystem
-                .pread("/large.bin", 4, 8)
-                .expect_err("large pread should fail closed without ranged reads");
-            assert_eq!(error.code(), "ENOSYS");
+            let chunk = filesystem
+                .pread("/large.bin", 4_096, 1_024)
+                .expect("pread should use a byte range");
+            assert_eq!(chunk, large_file[4_096..5_120].to_vec());
 
             let logged_requests = server.requests();
-            assert!(
-                !logged_requests.iter().any(|request| {
+            let pread_request = logged_requests
+                .iter()
+                .find(|request| {
                     request.method == "GET"
                         && request.path == "/v1/fs/file"
                         && request.query.get("path") == Some(&String::from("/large.bin"))
-                }),
-                "pread gate should reject before issuing a full-file GET"
+                })
+                .expect("log pread request");
+            assert_eq!(
+                pread_request.headers.get("range"),
+                Some(&String::from("bytes=4096-5119"))
             );
+            assert_eq!(pread_request.response_status, 206);
+            assert_eq!(pread_request.response_body_bytes, 1_024);
+        }
+
+        #[test]
+        fn filesystem_pread_falls_back_to_full_fetch_when_remote_ignores_range() {
+            let server = MockSandboxAgentServer::start_without_range_support(
+                "agent-os-sandbox-plugin",
+                None,
+            );
+            let large_file = (0..100 * 1024)
+                .map(|index| (index % 251) as u8)
+                .collect::<Vec<_>>();
+            fs::write(server.root().join("large.bin"), &large_file).expect("seed large file");
+
+            let mut filesystem = SandboxAgentFilesystem::from_config(SandboxAgentMountConfig {
+                base_url: server.base_url().to_owned(),
+                token: None,
+                headers: None,
+                base_path: None,
+                timeout_ms: Some(5_000),
+                max_full_read_bytes: Some(128),
+            })
+            .expect("create sandbox_agent filesystem");
+
+            let chunk = filesystem
+                .pread("/large.bin", 4_096, 1_024)
+                .expect("pread should fall back to the full response");
+            assert_eq!(chunk, large_file[4_096..5_120].to_vec());
+
+            let logged_requests = server.requests();
+            let pread_request = logged_requests
+                .iter()
+                .find(|request| {
+                    request.method == "GET"
+                        && request.path == "/v1/fs/file"
+                        && request.query.get("path") == Some(&String::from("/large.bin"))
+                })
+                .expect("log pread request");
+            assert_eq!(
+                pread_request.headers.get("range"),
+                Some(&String::from("bytes=4096-5119"))
+            );
+            assert_eq!(pread_request.response_status, 200);
+            assert_eq!(pread_request.response_body_bytes, large_file.len());
         }
 
         #[test]

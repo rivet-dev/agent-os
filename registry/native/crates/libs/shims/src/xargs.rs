@@ -131,10 +131,7 @@ pub fn xargs(args: Vec<OsString>) -> i32 {
 
     // Command and initial args
     let (program, initial_args) = if let Some(idx) = cmd_start {
-        (
-            str_args[idx].clone(),
-            str_args[idx + 1..].to_vec(),
-        )
+        (str_args[idx].clone(), str_args[idx + 1..].to_vec())
     } else {
         ("echo".to_string(), Vec::new())
     };

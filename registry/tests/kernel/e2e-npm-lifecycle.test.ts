@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  describeIf,
   COMMANDS_DIR,
   createKernel,
   NodeFileSystem,
@@ -45,7 +46,7 @@ async function checkNetwork(): Promise<string | false> {
 
 const skipReason = wasmSkip || (await checkNetwork());
 
-describe.skipIf(skipReason)('e2e npm lifecycle scripts through kernel', () => {
+describeIf(!skipReason, 'e2e npm lifecycle scripts through kernel', () => {
   it(
     'postinstall script writes marker file during npm install',
     async () => {

@@ -31,7 +31,11 @@ import type {
 } from "./agent-session-types.js";
 import { type HostTool, type ToolKit, validateToolkits } from "./host-tools.js";
 import { zodToJsonSchema } from "./host-tools-zod.js";
-import type { JsonRpcNotification, JsonRpcResponse } from "./json-rpc.js";
+import type {
+	JsonRpcNotification,
+	JsonRpcRequest,
+	JsonRpcResponse,
+} from "./json-rpc.js";
 import {
 	type ConnectTerminalOptions,
 	type Kernel,
@@ -46,6 +50,7 @@ import {
 	type VirtualFileSystem,
 	type VirtualStat,
 } from "./runtime-compat.js";
+import { findCargoBinary, resolveCargoBinary } from "./sidecar/cargo.js";
 
 export type {
 	AgentCapabilities,
@@ -71,6 +76,34 @@ export type {
 } from "./json-rpc.js";
 export { isAcpTimeoutErrorData } from "./json-rpc.js";
 export type { ConnectTerminalOptions } from "./runtime-compat.js";
+
+const ACP_PROTOCOL_VERSION = 1;
+const SHELL_DISPOSE_TIMEOUT_MS = 5_000;
+
+function defaultAcpClientCapabilities(): Record<string, unknown> {
+	return {
+		fs: {
+			readTextFile: true,
+			writeTextFile: true,
+		},
+		terminal: true,
+	};
+}
+
+async function waitForTrackedExitPromises(
+	promises: Promise<unknown>[],
+	timeoutMs: number,
+): Promise<void> {
+	if (promises.length === 0) {
+		return;
+	}
+	await Promise.race([
+		Promise.allSettled(promises).then(() => undefined),
+		new Promise<void>((resolve) => {
+			setTimeout(resolve, timeoutMs);
+		}),
+	]);
+}
 
 /** Process tree node: extends kernel ProcessInfo with child references. */
 export interface ProcessTreeNode extends KernelProcessInfo {
@@ -123,6 +156,7 @@ export interface AgentRegistryEntry {
 
 import { AGENT_CONFIGS, type AgentConfig, type AgentType } from "./agents.js";
 import {
+	type BaseFilesystemEntry,
 	getBaseEnvironment,
 	getBaseFilesystemEntries,
 } from "./base-filesystem.js";
@@ -160,7 +194,7 @@ import {
 	type SoftwareInput,
 	type SoftwareRoot,
 } from "./packages.js";
-import { createNodeHostNetworkAdapter } from "./runtime-compat.js";
+import { allowAll, createNodeHostNetworkAdapter } from "./runtime-compat.js";
 import { serializePermissionsForSidecar } from "./sidecar/permissions.js";
 import {
 	type AgentOsSidecarClient,
@@ -245,6 +279,11 @@ interface AgentOsVmAdmin extends InProcessSidecarVmAdmin {
 	toolReference: string;
 }
 
+interface SessionEventSubscriber {
+	handler: SessionEventHandler;
+	lastDeliveredSequenceNumber: number | null;
+}
+
 interface AgentSessionEntry {
 	sessionId: string;
 	agentType: string;
@@ -255,8 +294,10 @@ interface AgentSessionEntry {
 	configOptions: SessionConfigOption[];
 	capabilities: AgentCapabilities;
 	agentInfo: AgentInfo | null;
+	highestSequenceNumber: number | null;
 	events: SequencedEvent[];
-	eventHandlers: Set<SessionEventHandler>;
+	eventHandlers: Set<SessionEventSubscriber>;
+	sessionEventDispatchScheduled: boolean;
 	permissionHandlers: Set<PermissionRequestHandler>;
 	configOverrides: Map<string, string>;
 	pendingPermissionReplies: Map<
@@ -267,6 +308,21 @@ interface AgentSessionEntry {
 			timer: ReturnType<typeof setTimeout>;
 		}
 	>;
+}
+
+interface AcpTerminalEntry {
+	handle: ShellHandle;
+	output: string;
+	truncated: boolean;
+	outputByteLimit: number;
+	exitCode: number | null;
+	waitPromise: Promise<number>;
+}
+
+interface ShellEntry {
+	handle: ShellHandle;
+	dataHandlers: Set<(data: Uint8Array) => void>;
+	exitPromise: Promise<void>;
 }
 
 export type RootLowerInput =
@@ -443,6 +499,18 @@ export interface SpawnedProcessInfo {
 const LEGACY_PERMISSION_METHOD = "request/permission";
 const ACP_PERMISSION_METHOD = "session/request_permission";
 
+class AcpDispatchError extends Error {
+	readonly code: number;
+	readonly data?: Record<string, unknown>;
+
+	constructor(code: number, message: string, data?: Record<string, unknown>) {
+		super(message);
+		this.name = "AcpDispatchError";
+		this.code = code;
+		this.data = data;
+	}
+}
+
 function toJsonRpcNotification(value: unknown): JsonRpcNotification {
 	if (
 		!value ||
@@ -460,6 +528,47 @@ function toRecord(value: unknown): Record<string, unknown> {
 	return value && typeof value === "object" && !Array.isArray(value)
 		? (value as Record<string, unknown>)
 		: {};
+}
+
+const ACP_SESSION_EVENT_RETENTION_LIMIT = 1024;
+const CLOSED_SESSION_ID_RETENTION_LIMIT = 2048;
+
+class BoundedSet<T> {
+	readonly limit: number;
+	#entries = new Map<T, undefined>();
+
+	constructor(limit: number) {
+		if (!Number.isInteger(limit) || limit <= 0) {
+			throw new Error(`BoundedSet limit must be a positive integer: ${limit}`);
+		}
+		this.limit = limit;
+	}
+
+	add(value: T): void {
+		if (this.#entries.has(value)) {
+			this.#entries.delete(value);
+		}
+		this.#entries.set(value, undefined);
+		if (this.#entries.size <= this.limit) {
+			return;
+		}
+		const oldest = this.#entries.keys().next();
+		if (!oldest.done) {
+			this.#entries.delete(oldest.value);
+		}
+	}
+
+	has(value: T): boolean {
+		return this.#entries.has(value);
+	}
+
+	delete(value: T): boolean {
+		return this.#entries.delete(value);
+	}
+
+	get size(): number {
+		return this.#entries.size;
+	}
 }
 
 function cloneSequencedEvents(events: SequencedEvent[]): SequencedEvent[] {
@@ -480,9 +589,41 @@ function mergeSequencedEvents(
 	for (const event of incoming) {
 		bySequence.set(event.sequenceNumber, event);
 	}
-	return [...bySequence.values()].sort(
+	const merged = [...bySequence.values()].sort(
 		(left, right) => left.sequenceNumber - right.sequenceNumber,
 	);
+	return merged.length <= ACP_SESSION_EVENT_RETENTION_LIMIT
+		? merged
+		: merged.slice(-ACP_SESSION_EVENT_RETENTION_LIMIT);
+}
+
+function nextHighestSequenceNumber(
+	current: number | null,
+	events: SequencedEvent[],
+): number | null {
+	const latest = events.at(-1)?.sequenceNumber;
+	if (latest === undefined) {
+		return current;
+	}
+	return current === null ? latest : Math.max(current, latest);
+}
+
+function shouldDispatchToSessionEventHandlers(
+	notification: JsonRpcNotification,
+): boolean {
+	return notification.method === "session/update";
+}
+
+function latestBufferedSessionEventSequence(
+	events: SequencedEvent[],
+): number | null {
+	for (let index = events.length - 1; index >= 0; index -= 1) {
+		const event = events[index];
+		if (event && shouldDispatchToSessionEventHandlers(event.notification)) {
+			return event.sequenceNumber;
+		}
+	}
+	return null;
 }
 
 function toSessionModes(value: unknown): SessionModeState | null {
@@ -528,8 +669,10 @@ function sessionEntryFromInit(
 		configOptions: initData.configOptions ?? [],
 		capabilities: initData.capabilities ?? {},
 		agentInfo: initData.agentInfo ?? null,
+		highestSequenceNumber: null,
 		events: [],
 		eventHandlers: new Set(),
+		sessionEventDispatchScheduled: false,
 		permissionHandlers: new Set(),
 		configOverrides: new Map(),
 		pendingPermissionReplies: new Map(),
@@ -749,6 +892,7 @@ const KERNEL_POSIX_BOOTSTRAP_DIRS = [
 	"/mnt",
 	"/media",
 	"/home",
+	"/home/user",
 	"/usr",
 	"/usr/bin",
 	"/usr/games",
@@ -947,13 +1091,26 @@ function collectConfiguredLowerPaths(
 		}
 	}
 
-	if (!config?.disableDefaultBaseLayer) {
-		for (const entry of getBaseFilesystemEntries()) {
-			paths.add(entry.path);
+	return paths;
+}
+
+function findBootstrapSeedEntry(
+	config: RootFilesystemConfig | undefined,
+	path: string,
+): BaseFilesystemEntry | undefined {
+	for (const lower of config?.lowers ?? []) {
+		if (lower.kind !== "snapshot-export") {
+			continue;
+		}
+		const entry = lower.source.filesystem.entries.find(
+			(candidate) => candidate.path === path,
+		);
+		if (entry) {
+			return entry;
 		}
 	}
 
-	return paths;
+	return getBaseFilesystemEntries().find((entry) => entry.path === path);
 }
 
 function createKernelBootstrapLower(
@@ -961,7 +1118,13 @@ function createKernelBootstrapLower(
 	commandNames: string[],
 	extraEntries: FilesystemEntry[] = [],
 ): RootSnapshotExport | null {
+	const includesBundledBaseLayer = !(config?.disableDefaultBaseLayer ?? false);
 	const existingPaths = collectConfiguredLowerPaths(config);
+	if (includesBundledBaseLayer) {
+		for (const entry of getBaseFilesystemEntries()) {
+			existingPaths.add(entry.path);
+		}
+	}
 	const entries: FilesystemEntry[] = [
 		{
 			path: "/",
@@ -976,16 +1139,17 @@ function createKernelBootstrapLower(
 		if (existingPaths.has(dir)) {
 			continue;
 		}
+		const seed = findBootstrapSeedEntry(config, dir);
 		entries.push({
 			path: dir,
 			type: "directory",
-			mode: "755",
-			uid: 0,
-			gid: 0,
+			mode: seed?.type === "directory" ? seed.mode : "755",
+			uid: seed?.uid ?? 0,
+			gid: seed?.gid ?? 0,
 		});
 	}
 
-	if (!existingPaths.has("/usr/bin/env")) {
+	if (!includesBundledBaseLayer && !existingPaths.has("/usr/bin/env")) {
 		entries.push({
 			path: "/usr/bin/env",
 			type: "file",
@@ -1024,6 +1188,46 @@ function createKernelBootstrapLower(
 	}
 
 	return entries.length > 1 ? createSnapshotExport(entries) : null;
+}
+
+function buildLiveBootstrapDirectoryEntries(
+	existingPaths: ReadonlySet<string>,
+	config: RootFilesystemConfig | undefined,
+): RootFilesystemEntry[] {
+	const entries: RootFilesystemEntry[] = [];
+	for (const dir of KERNEL_POSIX_BOOTSTRAP_DIRS) {
+		if (existingPaths.has(dir)) {
+			continue;
+		}
+		const seed = findBootstrapSeedEntry(config, dir);
+		entries.push({
+			path: dir,
+			kind: "directory",
+			mode: Number.parseInt(seed?.type === "directory" ? seed.mode : "755", 8),
+			uid: seed?.uid ?? 0,
+			gid: seed?.gid ?? 0,
+			executable: true,
+		});
+	}
+	return entries;
+}
+
+async function bootstrapLiveBootstrapDirectories(
+	client: NativeSidecarProcessClient,
+	session: AuthenticatedSession,
+	vm: CreatedVm,
+	config: RootFilesystemConfig | undefined,
+): Promise<void> {
+	const existingPaths = new Set(
+		(await client.snapshotRootFilesystem(session, vm)).map(
+			(entry) => entry.path,
+		),
+	);
+	const entries = buildLiveBootstrapDirectoryEntries(existingPaths, config);
+	if (entries.length === 0) {
+		return;
+	}
+	await client.bootstrapRootFilesystem(session, vm, entries);
 }
 
 function buildOsInstructionsBootstrapEntries(
@@ -1097,10 +1301,22 @@ function ensureNativeSidecarBinary(): string {
 	}
 
 	if (sidecarBinaryNeedsBuild()) {
-		execFileSync("cargo", ["build", "-q", "-p", "agent-os-sidecar"], {
-			cwd: REPO_ROOT,
-			stdio: "pipe",
-		});
+		const cargoBinary = findCargoBinary();
+		if (cargoBinary) {
+			execFileSync(cargoBinary, ["build", "-q", "-p", "agent-os-sidecar"], {
+				cwd: REPO_ROOT,
+				stdio: "pipe",
+			});
+		} else if (!existsSync(SIDECAR_BINARY)) {
+			execFileSync(
+				resolveCargoBinary(),
+				["build", "-q", "-p", "agent-os-sidecar"],
+				{
+					cwd: REPO_ROOT,
+					stdio: "pipe",
+				},
+			);
+		}
 	}
 
 	ensuredSidecarBinary = SIDECAR_BINARY;
@@ -1310,16 +1526,12 @@ function collectSidecarMountPlan(options: {
 
 function materializeToolShimDir(toolKits: ToolKit[]): string {
 	const shimDir = mkdtempSync(join(tmpdir(), "agent-os-host-tools-shims-"));
-	writeFileSync(
-		join(shimDir, "agentos"),
-		'#!/bin/sh\nexec /bin/agentos "$@"\n',
-		{ mode: 0o755 },
-	);
+	writeFileSync(join(shimDir, "agentos"), KERNEL_COMMAND_STUB, { mode: 0o755 });
 
 	for (const toolKit of toolKits) {
 		writeFileSync(
 			join(shimDir, `agentos-${toolKit.name}`),
-			`#!/bin/sh\nexec /bin/agentos-${toolKit.name} "$@"\n`,
+			KERNEL_COMMAND_STUB,
 			{ mode: 0o755 },
 		);
 	}
@@ -1333,17 +1545,6 @@ function collectToolkitBootstrapCommands(toolKits: ToolKit[]): string[] {
 	}
 
 	return ["agentos", ...toolKits.map((toolKit) => `agentos-${toolKit.name}`)];
-}
-
-function materializeOsInstructionsDir(additionalInstructions?: string): string {
-	const instructionsDir = mkdtempSync(
-		join(tmpdir(), "agent-os-os-instructions-"),
-	);
-	writeFileSync(
-		join(instructionsDir, "instructions.md"),
-		buildOsInstructions(additionalInstructions),
-	);
-	return instructionsDir;
 }
 
 function validationMessage(error: unknown): string {
@@ -1488,7 +1689,9 @@ export class AgentOs {
 	#kernel: Kernel;
 	readonly sidecar: AgentOsSidecar;
 	private _sessions = new Map<string, AgentSessionEntry>();
-	private _closedSessionIds = new Set<string>();
+	private _closedSessionIds = new BoundedSet<string>(
+		CLOSED_SESSION_ID_RETENTION_LIMIT,
+	);
 	private _sessionClosePromises = new Map<string, Promise<void>>();
 	private _pendingSessionRequestResolvers = new Map<
 		string,
@@ -1508,14 +1711,11 @@ export class AgentOs {
 			exitHandlers: Set<(exitCode: number) => void>;
 		}
 	>();
-	private _shells = new Map<
-		string,
-		{
-			handle: ShellHandle;
-			dataHandlers: Set<(data: Uint8Array) => void>;
-		}
-	>();
+	private _shells = new Map<string, ShellEntry>();
+	private _pendingShellExitPromises = new Set<Promise<void>>();
 	private _shellCounter = 0;
+	private _acpTerminals = new Map<string, AcpTerminalEntry>();
+	private _acpTerminalCounter = 0;
 	private _moduleAccessCwd: string;
 	private _softwareRoots: SoftwareRoot[];
 	private _softwareAgentConfigs: Map<string, AgentConfig>;
@@ -1605,7 +1805,6 @@ export class AgentOs {
 			let rootBridge: NativeSidecarKernelProxy | null = null;
 			let kernel: Kernel | null = null;
 			let client: NativeSidecarProcessClient | null = null;
-			let osInstructionsDir: string | null = null;
 			let toolShimDir: string | null = null;
 			let cleanedUp = false;
 
@@ -1618,10 +1817,6 @@ export class AgentOs {
 					rmSync(toolShimDir, { recursive: true, force: true });
 					toolShimDir = null;
 				}
-				if (osInstructionsDir) {
-					rmSync(osInstructionsDir, { recursive: true, force: true });
-					osInstructionsDir = null;
-				}
 				preparedCommandDirs.dispose();
 			};
 
@@ -1630,9 +1825,6 @@ export class AgentOs {
 				if (toolKits && toolKits.length > 0) {
 					toolShimDir = materializeToolShimDir(toolKits);
 				}
-				osInstructionsDir = materializeOsInstructionsDir(
-					options?.additionalInstructions,
-				);
 				const commandGuestPaths = collectGuestCommandPaths(
 					preparedCommandDirs.commandDirs,
 				);
@@ -1644,17 +1836,6 @@ export class AgentOs {
 						commandDirs: preparedCommandDirs.commandDirs,
 						shimDir: toolShimDir,
 					});
-				sidecarMounts.push(
-					serializeMountConfigForSidecar({
-						path: "/etc/agentos",
-						plugin: createHostDirBackend({
-							hostPath: osInstructionsDir,
-							readOnly: true,
-						}),
-						readOnly: true,
-					}),
-				);
-
 				client = NativeSidecarProcessClient.spawn({
 					cwd: REPO_ROOT,
 					command: ensureNativeSidecarBinary(),
@@ -1663,7 +1844,7 @@ export class AgentOs {
 				});
 				const session = await client.authenticateAndOpenSession();
 				const sidecarPermissions = serializePermissionsForSidecar(
-					options?.permissions,
+					options?.permissions ?? allowAll,
 				);
 				const nativeVm = await client.createVm(session, {
 					runtime: "java_script",
@@ -1718,6 +1899,12 @@ export class AgentOs {
 					commandGuestPaths,
 					onDispose: cleanup,
 				});
+				await bootstrapLiveBootstrapDirectories(
+					client,
+					session,
+					nativeVm,
+					options?.rootFilesystem,
+				);
 
 				kernel = rootBridge as unknown as Kernel;
 				const snapshotClient = client;
@@ -2175,19 +2362,33 @@ export class AgentOs {
 
 	async fetch(port: number, request: Request): Promise<Response> {
 		const url = new URL(request.url);
-		url.hostname = "127.0.0.1";
-		url.port = String(port);
-		url.protocol = "http:";
-
-		return globalThis.fetch(
-			new Request(url, {
+		const responsePayload = JSON.parse(
+			await this._sidecarClient.vmFetch(this._sidecarSession, this._sidecarVm, {
+				port,
 				method: request.method,
-				headers: request.headers,
-				body: request.body,
-				redirect: request.redirect,
-				signal: request.signal,
+				path: `${url.pathname}${url.search}`,
+				headersJson: JSON.stringify(
+					Object.fromEntries(request.headers.entries()),
+				),
+				...(request.method !== "GET" && request.method !== "HEAD"
+					? { body: await request.text() }
+					: {}),
 			}),
-		);
+		) as {
+			status: number;
+			statusText?: string;
+			headers?: Array<[string, string]>;
+			body?: string;
+		};
+		const headers = new Headers();
+		for (const [key, value] of responsePayload.headers ?? []) {
+			headers.append(key, value);
+		}
+		return new Response(Buffer.from(responsePayload.body ?? "", "base64"), {
+			status: responsePayload.status,
+			statusText: responsePayload.statusText,
+			headers,
+		});
 	}
 
 	openShell(options?: OpenShellOptions): { shellId: string } {
@@ -2199,7 +2400,23 @@ export class AgentOs {
 			for (const h of dataHandlers) h(data);
 		};
 
-		this._shells.set(shellId, { handle, dataHandlers });
+		const entry: ShellEntry = {
+			handle,
+			dataHandlers,
+			exitPromise: Promise.resolve(),
+		};
+		const exitPromise = handle.wait().then(
+			() => undefined,
+			() => undefined,
+		);
+		entry.exitPromise = exitPromise.finally(() => {
+			this._pendingShellExitPromises.delete(entry.exitPromise);
+			if (this._shells.get(shellId) === entry) {
+				this._shells.delete(shellId);
+			}
+		});
+		this._pendingShellExitPromises.add(entry.exitPromise);
+		this._shells.set(shellId, entry);
 		return { shellId };
 	}
 
@@ -2428,6 +2645,10 @@ export class AgentOs {
 				notification: toJsonRpcNotification(event.notification),
 			})),
 		);
+		session.highestSequenceNumber = nextHighestSequenceNumber(
+			session.highestSequenceNumber,
+			session.events,
+		);
 	}
 
 	private _applySessionUpdate(
@@ -2470,12 +2691,14 @@ export class AgentOs {
 		session.events = mergeSequencedEvents(session.events, [
 			{ sequenceNumber, notification },
 		]);
+		session.highestSequenceNumber = nextHighestSequenceNumber(
+			session.highestSequenceNumber,
+			session.events,
+		);
 		this._applySessionUpdate(session, notification);
 
-		if (notification.method === "session/update") {
-			for (const handler of session.eventHandlers) {
-				handler(notification);
-			}
+		if (shouldDispatchToSessionEventHandlers(notification)) {
+			this._queueSessionEventDispatch(session);
 		}
 
 		if (
@@ -2501,6 +2724,79 @@ export class AgentOs {
 				}
 			}
 		}
+	}
+
+	private _queueSessionEventDispatch(session: AgentSessionEntry): void {
+		if (
+			session.sessionEventDispatchScheduled ||
+			session.eventHandlers.size === 0
+		) {
+			return;
+		}
+
+		session.sessionEventDispatchScheduled = true;
+		queueMicrotask(() => {
+			session.sessionEventDispatchScheduled = false;
+			this._flushSessionEventHandlers(session);
+		});
+	}
+
+	private _flushSessionEventHandlers(session: AgentSessionEntry): void {
+		if (session.eventHandlers.size === 0) {
+			return;
+		}
+
+		const dispatchableEvents = session.events.filter((event) =>
+			shouldDispatchToSessionEventHandlers(event.notification),
+		);
+		if (dispatchableEvents.length === 0) {
+			return;
+		}
+
+		for (const subscriber of [...session.eventHandlers]) {
+			const pendingEvents = dispatchableEvents.filter((event) =>
+				subscriber.lastDeliveredSequenceNumber === null
+					? true
+					: event.sequenceNumber > subscriber.lastDeliveredSequenceNumber,
+			);
+			for (const event of pendingEvents) {
+				try {
+					subscriber.handler(event.notification);
+				} catch {
+					// Ignore subscriber callback failures and keep event delivery moving.
+				}
+				subscriber.lastDeliveredSequenceNumber = event.sequenceNumber;
+			}
+		}
+	}
+
+	private _subscribeSessionEvents(
+		session: AgentSessionEntry,
+		handler: SessionEventHandler,
+		options?: { replayBuffered?: boolean },
+	): () => void {
+		const replayBuffered = options?.replayBuffered !== false;
+		const subscriber: SessionEventSubscriber = {
+			handler,
+			lastDeliveredSequenceNumber: replayBuffered
+				? null
+				: latestBufferedSessionEventSequence(session.events),
+		};
+
+		if (replayBuffered) {
+			for (const event of session.events) {
+				if (!shouldDispatchToSessionEventHandlers(event.notification)) {
+					continue;
+				}
+				handler(event.notification);
+				subscriber.lastDeliveredSequenceNumber = event.sequenceNumber;
+			}
+		}
+
+		session.eventHandlers.add(subscriber);
+		return () => {
+			session.eventHandlers.delete(subscriber);
+		};
 	}
 
 	private _nextSyntheticSequenceNumber(session: AgentSessionEntry): number {
@@ -2703,7 +2999,10 @@ export class AgentOs {
 					}
 				});
 		});
-		await this._hydrateSessionState(session).catch(() => {});
+		const liveSession = this._sessions.get(sessionId);
+		if (liveSession) {
+			await this._hydrateSessionState(liveSession).catch(() => {});
+		}
 		if (!response.error) {
 			if (
 				method === "session/set_mode" &&
@@ -2784,10 +3083,10 @@ export class AgentOs {
 		}
 	}
 
-	private _cancelPendingPromptRequests(sessionId: string): void {
+	private _cancelPendingPromptRequests(sessionId: string): boolean {
 		const resolvers = this._pendingSessionRequestResolvers.get(sessionId);
 		if (!resolvers) {
-			return;
+			return false;
 		}
 
 		const response: JsonRpcResponse = {
@@ -2798,17 +3097,21 @@ export class AgentOs {
 			},
 		};
 
+		let cancelledPrompt = false;
 		for (const resolver of [...resolvers]) {
 			if (resolver.method !== "session/prompt") {
 				continue;
 			}
 			resolvers.delete(resolver);
 			resolver.resolve(response);
+			cancelledPrompt = true;
 		}
 
 		if (resolvers.size === 0) {
 			this._pendingSessionRequestResolvers.delete(sessionId);
 		}
+
+		return cancelledPrompt;
 	}
 
 	private _rejectPendingPermissionReplies(sessionId: string): void {
@@ -2828,6 +3131,57 @@ export class AgentOs {
 		session.pendingPermissionReplies.clear();
 	}
 
+	private _collectHostProcessTree(rootPid: number): number[] {
+		let output = "";
+		try {
+			output = execFileSync("ps", ["-eo", "pid=,ppid="], {
+				encoding: "utf8",
+			});
+		} catch {
+			return [];
+		}
+
+		const rows = output
+			.split("\n")
+			.map((line) => line.trim())
+			.filter(Boolean)
+			.map((line) => {
+				const [pid, ppid] = line.split(/\s+/);
+				return {
+					pid: Number(pid),
+					ppid: Number(ppid),
+				};
+			})
+			.filter((row) => Number.isFinite(row.pid) && Number.isFinite(row.ppid));
+		if (!rows.some((row) => row.pid === rootPid)) {
+			return [];
+		}
+
+		const byParent = new Map<number, number[]>();
+		for (const row of rows) {
+			const children = byParent.get(row.ppid);
+			if (children) {
+				children.push(row.pid);
+			} else {
+				byParent.set(row.ppid, [row.pid]);
+			}
+		}
+
+		const discovered: number[] = [];
+		const queue = [rootPid];
+		while (queue.length > 0) {
+			const pid = queue.shift();
+			if (pid === undefined || discovered.includes(pid)) {
+				continue;
+			}
+			discovered.push(pid);
+			for (const childPid of byParent.get(pid) ?? []) {
+				queue.push(childPid);
+			}
+		}
+		return discovered;
+	}
+
 	private _tryForceCloseSessionProcess(sessionId: string): void {
 		const session = this._sessions.get(sessionId);
 		if (!session?.pid) {
@@ -2839,6 +3193,34 @@ export class AgentOs {
 		);
 		if (sharedPidUsers.length > 0) {
 			return;
+		}
+		if (this.#kernel instanceof NativeSidecarKernelProxy && session.processId) {
+			void this._sidecarClient
+				.killProcess(
+					this._sidecarSession,
+					this._sidecarVm,
+					session.processId,
+					"SIGKILL",
+				)
+				.catch(() => {});
+		}
+		// Native-sidecar control requests share the same framed transport as the
+		// in-flight ACP prompt request. If that prompt is wedged in adapter I/O,
+		// the sidecar may not service queued `kill_process` / `close_agent_session`
+		// frames until the prompt itself unwinds. Kill the host process tree
+		// directly as an out-of-band escape hatch so the blocked prompt tears down
+		// immediately and the sidecar close path can finish deterministically.
+		try {
+			process.kill(-session.pid, "SIGKILL");
+		} catch {
+			// Ignore ESRCH/EPERM when the session pid is not a process-group leader.
+		}
+		for (const pid of this._collectHostProcessTree(session.pid).reverse()) {
+			try {
+				process.kill(pid, "SIGKILL");
+			} catch {
+				// Ignore ESRCH and permission errors; close_agent_session remains the source of truth.
+			}
 		}
 		try {
 			process.kill(session.pid, "SIGKILL");
@@ -2884,6 +3266,13 @@ export class AgentOs {
 			this._sidecarSession,
 			this._sidecarVm,
 			session.sessionId,
+			{
+				...(session.highestSequenceNumber !== null
+					? {
+							acknowledgedSequenceNumber: session.highestSequenceNumber,
+						}
+					: {}),
+			},
 		);
 		this._syncSessionState(session, state);
 	}
@@ -2904,12 +3293,13 @@ export class AgentOs {
 			const cwd = options?.cwd ?? "/home/user";
 			const skipBase = options?.skipOsInstructions ?? false;
 			const hasToolRef = !!toolReference;
+			const hasAdditionalInstructions = !!options?.additionalInstructions;
 
-			if (!skipBase || hasToolRef) {
+			if (!skipBase || hasToolRef || hasAdditionalInstructions) {
 				const prepared = await config.prepareInstructions(
 					this.#kernel,
 					cwd,
-					skipBase ? undefined : options?.additionalInstructions,
+					options?.additionalInstructions,
 					{ toolReference, skipBase },
 				);
 				if (prepared.args) extraArgs = prepared.args;
@@ -2942,6 +3332,8 @@ export class AgentOs {
 				env: launchEnv,
 				cwd: sessionCwd,
 				mcpServers: options?.mcpServers ?? [],
+				protocolVersion: ACP_PROTOCOL_VERSION,
+				clientCapabilities: defaultAcpClientCapabilities(),
 			},
 		);
 
@@ -3021,6 +3413,8 @@ export class AgentOs {
 					return handleToolInvocation(request, toolMap);
 				case "permission_request":
 					return this._handlePermissionSidecarRequest(request);
+				case "acp_request":
+					return this._handleAcpSidecarRequest(request.payload.request);
 				case "js_bridge_call":
 					return Promise.resolve({
 						type: "js_bridge_result",
@@ -3029,6 +3423,609 @@ export class AgentOs {
 					});
 			}
 		});
+	}
+
+	private async _handleAcpSidecarRequest(
+		request: JsonRpcRequest,
+	): Promise<SidecarResponsePayload> {
+		return {
+			type: "acp_request_result",
+			response: await this._dispatchAcpSidecarRequest(request),
+		};
+	}
+
+	private async _dispatchAcpSidecarRequest(
+		request: JsonRpcRequest,
+	): Promise<JsonRpcResponse> {
+		try {
+			const result = await this._handleSupportedAcpSidecarRequest(request);
+			return {
+				jsonrpc: "2.0",
+				id: request.id,
+				result,
+			};
+		} catch (error) {
+			if (error instanceof AcpDispatchError) {
+				return {
+					jsonrpc: "2.0",
+					id: request.id,
+					error: {
+						code: error.code,
+						message: error.message,
+						...(error.data ? { data: error.data } : {}),
+					},
+				};
+			}
+			return {
+				jsonrpc: "2.0",
+				id: request.id,
+				error: {
+					code: -32603,
+					message: error instanceof Error ? error.message : String(error),
+				},
+			};
+		}
+	}
+
+	private async _handleSupportedAcpSidecarRequest(
+		request: JsonRpcRequest,
+	): Promise<unknown> {
+		const params = this._acpParams(request);
+		switch (request.method) {
+			case ACP_PERMISSION_METHOD:
+				return this._handleAcpPermissionRequest(request, params);
+			case "fs/read":
+			case "fs/read_text_file":
+				return this._handleAcpReadFile(params);
+			case "fs/write":
+			case "fs/write_text_file":
+				return this._handleAcpWriteFile(params);
+			case "fs/readDir":
+			case "fs/read_dir":
+				return this._handleAcpReadDir(params);
+			case "terminal/create":
+				return this._handleAcpCreateTerminal(params);
+			case "terminal/write":
+				return this._handleAcpWriteTerminal(params);
+			case "terminal/output":
+			case "terminal/read":
+				return this._handleAcpReadTerminal(params);
+			case "terminal/wait_for_exit":
+			case "terminal/waitForExit":
+				return this._handleAcpWaitForTerminalExit(params);
+			case "terminal/kill":
+				return this._handleAcpKillTerminal(params);
+			case "terminal/release":
+			case "terminal/close":
+				return this._handleAcpReleaseTerminal(params);
+			case "terminal/resize":
+				return this._handleAcpResizeTerminal(params);
+			default:
+				throw new AcpDispatchError(
+					-32601,
+					`Method not found: ${request.method}`,
+					{
+						method: request.method,
+					},
+				);
+		}
+	}
+
+	private _normalizeAcpPermissionOptionId(
+		options: Array<Record<string, unknown>> | undefined,
+		reply: PermissionReply,
+	): string | null {
+		const optionTargets =
+			reply === "always"
+				? {
+						optionIds: new Set(["always", "allow_always"]),
+						kinds: new Set(["allow_always"]),
+					}
+				: reply === "once"
+					? {
+							optionIds: new Set(["once", "allow_once"]),
+							kinds: new Set(["allow_once"]),
+						}
+					: {
+							optionIds: new Set(["reject", "reject_once"]),
+							kinds: new Set(["reject_once"]),
+						};
+
+		const matched = options?.find((option) => {
+			const optionId =
+				typeof option.optionId === "string" ? option.optionId : undefined;
+			const kind = typeof option.kind === "string" ? option.kind : undefined;
+			return (
+				(optionId !== undefined && optionTargets.optionIds.has(optionId)) ||
+				(kind !== undefined && optionTargets.kinds.has(kind))
+			);
+		});
+		if (matched && typeof matched.optionId === "string") {
+			return matched.optionId;
+		}
+		if (reply === "always") {
+			return "allow_always";
+		}
+		if (reply === "once") {
+			return "allow_once";
+		}
+		return "reject_once";
+	}
+
+	private _buildAcpPermissionResult(
+		reply: PermissionReply,
+		params: Record<string, unknown>,
+	): Record<string, unknown> {
+		const options = Array.isArray(params.options)
+			? params.options.filter(
+					(option): option is Record<string, unknown> =>
+						typeof option === "object" && option !== null,
+				)
+			: undefined;
+		const optionId = this._normalizeAcpPermissionOptionId(options, reply);
+		return {
+			outcome: optionId
+				? {
+						outcome: "selected",
+						optionId,
+					}
+				: {
+						outcome: "cancelled",
+					},
+		};
+	}
+
+	private async _handleAcpPermissionRequest(
+		request: JsonRpcRequest,
+		params: Record<string, unknown>,
+	): Promise<unknown> {
+		const sessionId =
+			typeof params.sessionId === "string" ? params.sessionId : undefined;
+		if (!sessionId) {
+			throw new AcpDispatchError(
+				-32602,
+				`${ACP_PERMISSION_METHOD} requires a sessionId`,
+			);
+		}
+
+		const session = this._sessions.get(sessionId);
+		if (!session) {
+			throw new AcpDispatchError(-32602, `Session not found: ${sessionId}`);
+		}
+
+		const permissionId = String(request.id);
+		const permissionParams: Record<string, unknown> = {
+			...params,
+			permissionId,
+			_acpMethod: request.method,
+		};
+		if (session.permissionHandlers.size === 0) {
+			return this._buildAcpPermissionResult("reject", permissionParams);
+		}
+
+		const reply = await new Promise<PermissionReply>((resolve, reject) => {
+			const timer = setTimeout(() => {
+				session.pendingPermissionReplies.delete(permissionId);
+				reject(
+					new Error(`Timed out waiting for permission reply: ${permissionId}`),
+				);
+			}, 120_000);
+			session.pendingPermissionReplies.set(permissionId, {
+				resolve,
+				reject,
+				timer,
+			});
+
+			const permissionRequest: PermissionRequest = {
+				permissionId,
+				description:
+					typeof permissionParams["description"] === "string"
+						? permissionParams["description"]
+						: undefined,
+				params: permissionParams,
+			};
+			for (const handler of session.permissionHandlers) {
+				handler(permissionRequest);
+			}
+		});
+
+		return this._buildAcpPermissionResult(reply, permissionParams);
+	}
+
+	private _handleUnsupportedAcpSidecarRequest(
+		request: JsonRpcRequest,
+	): SidecarResponsePayload {
+		return {
+			type: "acp_request_result",
+			response: {
+				jsonrpc: "2.0",
+				id: request.id,
+				error: {
+					code: -32601,
+					message: `Method not found: ${request.method}`,
+					data: {
+						method: request.method,
+					},
+				},
+			},
+		};
+	}
+
+	private _acpParams(request: JsonRpcRequest): Record<string, unknown> {
+		if (!request.params) {
+			return {};
+		}
+		if (
+			typeof request.params !== "object" ||
+			request.params === null ||
+			Array.isArray(request.params)
+		) {
+			throw new AcpDispatchError(
+				-32602,
+				`${request.method} requires object params`,
+			);
+		}
+		return request.params as Record<string, unknown>;
+	}
+
+	private _requireAcpStringParam(
+		params: Record<string, unknown>,
+		name: string,
+		method: string,
+	): string {
+		const value = params[name];
+		if (typeof value !== "string") {
+			throw new AcpDispatchError(-32602, `${method} requires a string ${name}`);
+		}
+		return value;
+	}
+
+	private _optionalAcpStringParam(
+		params: Record<string, unknown>,
+		name: string,
+		method: string,
+	): string | undefined {
+		const value = params[name];
+		if (value === undefined || value === null) {
+			return undefined;
+		}
+		if (typeof value !== "string") {
+			throw new AcpDispatchError(
+				-32602,
+				`${method} requires ${name} to be a string when provided`,
+			);
+		}
+		return value;
+	}
+
+	private _optionalAcpNumberParam(
+		params: Record<string, unknown>,
+		name: string,
+		method: string,
+	): number | undefined {
+		const value = params[name];
+		if (value === undefined || value === null) {
+			return undefined;
+		}
+		if (typeof value !== "number" || !Number.isFinite(value)) {
+			throw new AcpDispatchError(
+				-32602,
+				`${method} requires ${name} to be a number when provided`,
+			);
+		}
+		return value;
+	}
+
+	private _optionalAcpStringArrayParam(
+		params: Record<string, unknown>,
+		name: string,
+		method: string,
+	): string[] | undefined {
+		const value = params[name];
+		if (value === undefined || value === null) {
+			return undefined;
+		}
+		if (
+			!Array.isArray(value) ||
+			value.some((entry) => typeof entry !== "string")
+		) {
+			throw new AcpDispatchError(
+				-32602,
+				`${method} requires ${name} to be an array of strings when provided`,
+			);
+		}
+		return [...value];
+	}
+
+	private _optionalAcpEnvParam(
+		params: Record<string, unknown>,
+		name: string,
+		method: string,
+	): Record<string, string> | undefined {
+		const value = params[name];
+		if (value === undefined || value === null) {
+			return undefined;
+		}
+		if (Array.isArray(value)) {
+			const env: Record<string, string> = {};
+			for (const entry of value) {
+				if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+					throw new AcpDispatchError(
+						-32602,
+						`${method} requires ${name} entries to be { name, value } objects`,
+					);
+				}
+				const record = entry as Record<string, unknown>;
+				if (
+					typeof record.name !== "string" ||
+					typeof record.value !== "string"
+				) {
+					throw new AcpDispatchError(
+						-32602,
+						`${method} requires ${name} entries to be { name, value } objects`,
+					);
+				}
+				env[record.name] = record.value;
+			}
+			return env;
+		}
+		if (typeof value !== "object") {
+			throw new AcpDispatchError(
+				-32602,
+				`${method} requires ${name} to be an object or name/value array`,
+			);
+		}
+		const env: Record<string, string> = {};
+		for (const [key, entryValue] of Object.entries(
+			value as Record<string, unknown>,
+		)) {
+			if (typeof entryValue !== "string") {
+				throw new AcpDispatchError(
+					-32602,
+					`${method} requires ${name} values to be strings`,
+				);
+			}
+			env[key] = entryValue;
+		}
+		return env;
+	}
+
+	private _requireAcpTerminal(
+		params: Record<string, unknown>,
+		method: string,
+	): AcpTerminalEntry {
+		const terminalId = this._requireAcpStringParam(
+			params,
+			"terminalId",
+			method,
+		);
+		const terminal = this._acpTerminals.get(terminalId);
+		if (!terminal) {
+			throw new AcpDispatchError(
+				-32602,
+				`ACP terminal not found: ${terminalId}`,
+			);
+		}
+		return terminal;
+	}
+
+	private _appendAcpTerminalOutput(
+		terminal: AcpTerminalEntry,
+		data: Uint8Array,
+	): void {
+		const chunk = Buffer.from(data).toString("utf8");
+		if (!chunk) {
+			return;
+		}
+		terminal.output += chunk;
+		if (
+			Number.isFinite(terminal.outputByteLimit) &&
+			terminal.outputByteLimit >= 0 &&
+			terminal.output.length > terminal.outputByteLimit
+		) {
+			terminal.output = terminal.output.slice(
+				terminal.output.length - terminal.outputByteLimit,
+			);
+			terminal.truncated = true;
+		}
+	}
+
+	private async _handleAcpReadFile(
+		params: Record<string, unknown>,
+	): Promise<{ content: string }> {
+		const method = "fs/read";
+		const path = this._requireAcpStringParam(params, "path", method);
+		const line = this._optionalAcpNumberParam(params, "line", method);
+		const limit = this._optionalAcpNumberParam(params, "limit", method);
+		const encoding = this._optionalAcpStringParam(params, "encoding", method);
+		const bytes = await this.readFile(path);
+		if (encoding === "base64") {
+			return { content: Buffer.from(bytes).toString("base64") };
+		}
+		const text = new TextDecoder().decode(bytes);
+		if (line === undefined && limit === undefined) {
+			return { content: text };
+		}
+		const startLine = Math.max(1, Math.trunc(line ?? 1));
+		const lineLimit =
+			limit === undefined
+				? Number.POSITIVE_INFINITY
+				: Math.max(0, Math.trunc(limit));
+		return {
+			content: text
+				.split("\n")
+				.slice(startLine - 1, startLine - 1 + lineLimit)
+				.join("\n"),
+		};
+	}
+
+	private async _handleAcpWriteFile(
+		params: Record<string, unknown>,
+	): Promise<null> {
+		const method = "fs/write";
+		const path = this._requireAcpStringParam(params, "path", method);
+		const content = this._requireAcpStringParam(params, "content", method);
+		const encoding = this._optionalAcpStringParam(params, "encoding", method);
+		await this.writeFile(
+			path,
+			encoding === "base64" ? Buffer.from(content, "base64") : content,
+		);
+		return null;
+	}
+
+	private async _handleAcpReadDir(params: Record<string, unknown>): Promise<{
+		entries: Array<{
+			name: string;
+			path: string;
+			type: "file" | "directory" | "symlink";
+		}>;
+	}> {
+		const method = "fs/readDir";
+		const path = this._requireAcpStringParam(params, "path", method);
+		const entries = await this._vfs().readDirWithTypes(path);
+		return {
+			entries: entries
+				.filter((entry) => entry.name !== "." && entry.name !== "..")
+				.map((entry) => ({
+					name: entry.name,
+					path: path === "/" ? `/${entry.name}` : `${path}/${entry.name}`,
+					type: entry.isSymbolicLink
+						? "symlink"
+						: entry.isDirectory
+							? "directory"
+							: "file",
+				})),
+		};
+	}
+
+	private _handleAcpCreateTerminal(params: Record<string, unknown>): {
+		terminalId: string;
+	} {
+		const method = "terminal/create";
+		const command = this._requireAcpStringParam(params, "command", method);
+		const args = this._optionalAcpStringArrayParam(params, "args", method);
+		const env = this._optionalAcpEnvParam(params, "env", method);
+		const cwd = this._optionalAcpStringParam(params, "cwd", method);
+		const cols = this._optionalAcpNumberParam(params, "cols", method);
+		const rows = this._optionalAcpNumberParam(params, "rows", method);
+		const outputByteLimit = Math.max(
+			0,
+			Math.trunc(
+				this._optionalAcpNumberParam(params, "outputByteLimit", method) ??
+					1_048_576,
+			),
+		);
+		const terminalId = `acp-terminal-${++this._acpTerminalCounter}`;
+		const terminal: AcpTerminalEntry = {
+			handle: this.#kernel.openShell({
+				command,
+				...(args ? { args } : {}),
+				...(env ? { env } : {}),
+				...(cwd ? { cwd } : {}),
+				...(cols !== undefined ? { cols: Math.trunc(cols) } : {}),
+				...(rows !== undefined ? { rows: Math.trunc(rows) } : {}),
+				onStderr: (data) => {
+					this._appendAcpTerminalOutput(terminal, data);
+				},
+			}),
+			output: "",
+			truncated: false,
+			outputByteLimit,
+			exitCode: null,
+			waitPromise: Promise.resolve(0),
+		};
+		terminal.handle.onData = (data) => {
+			this._appendAcpTerminalOutput(terminal, data);
+		};
+		terminal.waitPromise = terminal.handle.wait().then((exitCode) => {
+			terminal.exitCode = exitCode;
+			return exitCode;
+		});
+		this._acpTerminals.set(terminalId, terminal);
+		return { terminalId };
+	}
+
+	private _handleAcpWriteTerminal(params: Record<string, unknown>): null {
+		const method = "terminal/write";
+		const terminal = this._requireAcpTerminal(params, method);
+		const data = this._requireAcpStringParam(params, "data", method);
+		const encoding = this._optionalAcpStringParam(params, "encoding", method);
+		terminal.handle.write(
+			encoding === "base64" ? Buffer.from(data, "base64") : data,
+		);
+		return null;
+	}
+
+	private _handleAcpReadTerminal(params: Record<string, unknown>): {
+		output: string;
+		truncated: boolean;
+		exitStatus?: { exitCode: number; signal: null };
+	} {
+		const terminal = this._requireAcpTerminal(params, "terminal/output");
+		return {
+			output: terminal.output,
+			truncated: terminal.truncated,
+			...(terminal.exitCode !== null
+				? {
+						exitStatus: {
+							exitCode: terminal.exitCode,
+							signal: null,
+						},
+					}
+				: {}),
+		};
+	}
+
+	private async _handleAcpWaitForTerminalExit(
+		params: Record<string, unknown>,
+	): Promise<{ exitCode: number; signal: null }> {
+		const terminal = this._requireAcpTerminal(params, "terminal/wait_for_exit");
+		const exitCode = await terminal.waitPromise;
+		return { exitCode, signal: null };
+	}
+
+	private _handleAcpKillTerminal(params: Record<string, unknown>): null {
+		const method = "terminal/kill";
+		const terminal = this._requireAcpTerminal(params, method);
+		const signal = this._optionalAcpNumberParam(params, "signal", method) ?? 15;
+		terminal.handle.kill(Math.trunc(signal));
+		return null;
+	}
+
+	private _handleAcpReleaseTerminal(params: Record<string, unknown>): null {
+		const method = "terminal/release";
+		const terminalId = this._requireAcpStringParam(
+			params,
+			"terminalId",
+			method,
+		);
+		const terminal = this._acpTerminals.get(terminalId);
+		if (!terminal) {
+			throw new AcpDispatchError(
+				-32602,
+				`ACP terminal not found: ${terminalId}`,
+			);
+		}
+		if (terminal.exitCode === null) {
+			terminal.handle.kill();
+		}
+		this._acpTerminals.delete(terminalId);
+		return null;
+	}
+
+	private _handleAcpResizeTerminal(params: Record<string, unknown>): null {
+		const method = "terminal/resize";
+		const terminal = this._requireAcpTerminal(params, method);
+		const cols = this._optionalAcpNumberParam(params, "cols", method);
+		const rows = this._optionalAcpNumberParam(params, "rows", method);
+		if (cols === undefined || rows === undefined) {
+			throw new AcpDispatchError(
+				-32602,
+				`${method} requires numeric cols and rows`,
+			);
+		}
+		terminal.handle.resize(Math.trunc(cols), Math.trunc(rows));
+		return null;
 	}
 
 	private async _handlePermissionSidecarRequest(
@@ -3142,7 +4139,7 @@ export class AgentOs {
 	// ── Flat session API (ID-based) ───────────────────────────────
 
 	async prompt(sessionId: string, text: string): Promise<PromptResult> {
-		this._requireSession(sessionId);
+		const session = this._requireSession(sessionId);
 		let agentText = "";
 		const handler: SessionEventHandler = (event) => {
 			const params = toRecord(event.params);
@@ -3154,7 +4151,9 @@ export class AgentOs {
 				}
 			}
 		};
-		const unsubscribe = this.onSessionEvent(sessionId, handler);
+		const unsubscribe = this._subscribeSessionEvents(session, handler, {
+			replayBuffered: false,
+		});
 
 		try {
 			const response = await this._sendSessionRequest(
@@ -3172,7 +4171,26 @@ export class AgentOs {
 
 	/** Cancel ongoing agent work for a session. */
 	async cancelSession(sessionId: string): Promise<JsonRpcResponse> {
-		this._cancelPendingPromptRequests(sessionId);
+		this._requireSession(sessionId);
+		const cancelledPendingPrompt =
+			this._cancelPendingPromptRequests(sessionId);
+		if (cancelledPendingPrompt) {
+			// Session control requests share the same framed sidecar transport as an
+			// in-flight prompt request. If the adapter is blocked in prompt I/O, a
+			// synchronous cancel RPC can wedge behind that prompt until the transport
+			// timeout fires. Resolve the local prompt immediately, then let the sidecar
+			// cancellation continue in the background as best effort.
+			void this._sendSessionRequest(sessionId, "session/cancel").catch(() => {});
+			return {
+				jsonrpc: "2.0",
+				id: null,
+				result: {
+					cancelled: true,
+					requested: true,
+					via: "prompt-fallback",
+				},
+			};
+		}
 		return this._sendSessionRequest(sessionId, "session/cancel");
 	}
 
@@ -3293,10 +4311,7 @@ export class AgentOs {
 
 	onSessionEvent(sessionId: string, handler: SessionEventHandler): () => void {
 		const session = this._requireSession(sessionId);
-		session.eventHandlers.add(handler);
-		return () => {
-			session.eventHandlers.delete(handler);
-		};
+		return this._subscribeSessionEvents(session, handler);
 	}
 
 	onPermissionRequest(
@@ -3342,7 +4357,23 @@ export class AgentOs {
 		for (const [id, entry] of this._shells) {
 			entry.handle.kill();
 		}
+		const shellExitPromises = [...this._pendingShellExitPromises];
 		this._shells.clear();
+		const terminalExitPromises: Promise<unknown>[] = [];
+		for (const terminal of this._acpTerminals.values()) {
+			terminal.handle.kill();
+			terminalExitPromises.push(
+				terminal.waitPromise.then(
+					() => undefined,
+					() => undefined,
+				),
+			);
+		}
+		this._acpTerminals.clear();
+		await waitForTrackedExitPromises(
+			[...shellExitPromises, ...terminalExitPromises],
+			SHELL_DISPOSE_TIMEOUT_MS,
+		);
 
 		this._disposeSidecarEventListener();
 
@@ -3466,6 +4497,31 @@ function createAgentOsSidecarInternal(
 		kind: "explicit",
 		sidecarId,
 	});
+}
+
+/**
+ * Test-only escape hatch: dispose every cached shared sidecar so vitest
+ * workers can exit cleanly. The shared sidecar is normally process-global and
+ * keeps its native subprocess alive across `AgentOs.create()` calls; without
+ * this hook the vitest worker can hold open piped stdio handles after the
+ * test suite finishes and stall `pnpm test` indefinitely.
+ */
+export async function __disposeAllSharedSidecarsForTesting(): Promise<void> {
+	const sidecars = Array.from(sharedSidecars.values());
+	sharedSidecars.clear();
+	const errors: Error[] = [];
+	for (const sidecar of sidecars) {
+		try {
+			await sidecar.dispose();
+		} catch (error) {
+			errors.push(error instanceof Error ? error : new Error(String(error)));
+		}
+	}
+	if (errors.length > 0) {
+		throw new Error(
+			`failed to dispose shared sidecars: ${errors.map((error) => error.message).join("; ")}`,
+		);
+	}
 }
 
 function getSharedAgentOsSidecarInternal(

@@ -10,6 +10,7 @@ pub use client::{
 };
 pub use json_rpc::{
     deserialize_message, is_request, is_response, serialize_message, JsonRpcError, JsonRpcId,
-    JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
+    JsonRpcMessage, JsonRpcNotification, JsonRpcParseError, JsonRpcParseErrorKind, JsonRpcRequest,
+    JsonRpcResponse, JsonRpcResponseShapeError,
 };
 pub(crate) use timeout::AcpTimeoutDiagnostics;

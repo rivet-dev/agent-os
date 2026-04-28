@@ -125,12 +125,12 @@ fi
 
 # Find patch files
 if [ "$MODE" = "reverse" ]; then
-    PATCH_FILES=$(find "$PATCHES_DIR" -name '*.patch' -type f 2>/dev/null | sort -r)
+    mapfile -t PATCH_FILES < <(find "$PATCHES_DIR" -name '*.patch' -type f 2>/dev/null | sort -r)
 else
-    PATCH_FILES=$(find "$PATCHES_DIR" -name '*.patch' -type f 2>/dev/null | sort)
+    mapfile -t PATCH_FILES < <(find "$PATCHES_DIR" -name '*.patch' -type f 2>/dev/null | sort)
 fi
 
-if [ -z "$PATCH_FILES" ]; then
+if [ "${#PATCH_FILES[@]}" -eq 0 ]; then
     echo "No patch files found in $PATCHES_DIR"
     if [ "$MODE" = "apply" ]; then
         echo "Building vanilla (unpatched) sysroot..."
@@ -138,73 +138,72 @@ if [ -z "$PATCH_FILES" ]; then
         exit 0
     fi
 else
-    PATCH_COUNT=$(echo "$PATCH_FILES" | wc -l)
+    PATCH_COUNT="${#PATCH_FILES[@]}"
     echo "Found $PATCH_COUNT patch(es) in $PATCHES_DIR"
     echo "wasi-libc source: $WASI_LIBC_SRC_DIR"
     echo ""
 
-    FAILED=0
+    apply_patch_series_entry() {
+        local patch="$1"
+        local success_message="$2"
 
-    for PATCH in $PATCH_FILES; do
+        if git -C "$WASI_LIBC_SRC_DIR" apply --check "$patch" >/dev/null 2>&1; then
+            git -C "$WASI_LIBC_SRC_DIR" apply "$patch"
+            echo "$success_message"
+            return 0
+        fi
+
+        if git -C "$WASI_LIBC_SRC_DIR" apply --reverse --check "$patch" >/dev/null 2>&1; then
+            echo "OK (already applied)"
+            return 0
+        fi
+
+        echo "FAIL (does not apply)"
+        return 1
+    }
+
+    reverse_patch_series_entry() {
+        local patch="$1"
+
+        if git -C "$WASI_LIBC_SRC_DIR" apply --reverse --check "$patch" >/dev/null 2>&1; then
+            git -C "$WASI_LIBC_SRC_DIR" apply --reverse "$patch"
+            echo "reversed"
+            return 0
+        fi
+
+        if git -C "$WASI_LIBC_SRC_DIR" apply --check "$patch" >/dev/null 2>&1; then
+            echo "not applied (skipping)"
+            return 0
+        fi
+
+        echo "FAIL (cannot reverse cleanly)"
+        return 1
+    }
+
+    for PATCH in "${PATCH_FILES[@]}"; do
         PATCH_NAME="$(basename "$PATCH")"
 
         case "$MODE" in
             check)
                 echo -n "Checking $PATCH_NAME ... "
-                if git -C "$WASI_LIBC_SRC_DIR" apply --check --recount "$PATCH" > /dev/null 2>&1; then
-                    git -C "$WASI_LIBC_SRC_DIR" apply --recount "$PATCH" > /dev/null 2>&1
-                    echo "OK (applies cleanly)"
-                elif git -C "$WASI_LIBC_SRC_DIR" apply -R --check --recount "$PATCH" > /dev/null 2>&1; then
-                    echo "OK (already applied)"
-                else
-                    # Check if new files from this patch exist (layered patch scenario)
-                    NEW_FILES=$(
-                        sed -n 's|^+++ b/\([^[:space:]]*\).*|\1|p' "$PATCH" | while read -r f; do
-                            [ -f "$WASI_LIBC_SRC_DIR/$f" ] && echo "$f"
-                        done || true
-                    )
-                    if [ -n "$NEW_FILES" ]; then
-                        echo "OK (applied, modified by later patch)"
-                    else
-                        echo "FAIL (does not apply)"
-                        FAILED=1
-                    fi
-                fi
+                apply_patch_series_entry "$PATCH" "OK (applies cleanly)" || exit 1
                 ;;
             apply)
                 echo -n "Applying $PATCH_NAME ... "
-                if git -C "$WASI_LIBC_SRC_DIR" apply --check --recount "$PATCH" > /dev/null 2>&1; then
-                    git -C "$WASI_LIBC_SRC_DIR" apply --recount "$PATCH" > /dev/null 2>&1
-                    echo "applied"
-                elif git -C "$WASI_LIBC_SRC_DIR" apply -R --check --recount "$PATCH" > /dev/null 2>&1; then
-                    echo "already applied (skipping)"
-                else
-                    echo "FAIL (does not apply)"
-                    FAILED=1
-                fi
+                apply_patch_series_entry "$PATCH" "applied" || exit 1
                 ;;
             reverse)
                 echo -n "Reversing $PATCH_NAME ... "
-                if git -C "$WASI_LIBC_SRC_DIR" apply -R --check --recount "$PATCH" > /dev/null 2>&1; then
-                    git -C "$WASI_LIBC_SRC_DIR" apply -R --recount "$PATCH" > /dev/null 2>&1
-                    echo "reversed"
-                else
-                    echo "not applied (skipping)"
-                fi
+                reverse_patch_series_entry "$PATCH" || exit 1
                 ;;
         esac
     done
 
     echo ""
-    if [ "$FAILED" -ne 0 ]; then
-        echo "Some patches failed to apply. Check patch compatibility with pinned wasi-libc."
-        exit 1
-    else
-        case "$MODE" in
-            check)   echo "All patches verified."; exit 0 ;;
-            reverse) echo "All patches reversed."; exit 0 ;;
-        esac
-    fi
+    case "$MODE" in
+        check)   echo "All patches verified."; exit 0 ;;
+        reverse) echo "All patches reversed."; exit 0 ;;
+    esac
 fi
 
 # Build the sysroot (only in apply mode)

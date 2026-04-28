@@ -258,9 +258,7 @@ impl HostChildProcessHarness {
             }
 
             if let Some(exit_code) = child.exit_status {
-                if child.pending_events.is_empty()
-                    && (child.open_streams == 0 || std::time::Instant::now() >= deadline)
-                {
+                if child.pending_events.is_empty() && child.open_streams == 0 {
                     self.children.remove(child_id);
                     return Ok(json!({
                         "type": "exit",
@@ -663,7 +661,6 @@ impl Drop for EnvVarGuard {
     }
 }
 
-#[test]
 fn javascript_contexts_preserve_vm_and_bootstrap_configuration() {
     let mut engine = JavascriptExecutionEngine::default();
     let context = engine.create_context(CreateJavascriptContextRequest {
@@ -678,7 +675,6 @@ fn javascript_contexts_preserve_vm_and_bootstrap_configuration() {
     assert_eq!(context.compile_cache_dir, None);
 }
 
-#[test]
 fn javascript_execution_uses_v8_runtime_without_spawning_guest_node_binary() {
     let temp = tempdir().expect("create temp dir");
     let fake_node_path = temp.path().join("fake-node.sh");
@@ -708,10 +704,10 @@ fn javascript_execution_uses_v8_runtime_without_spawning_guest_node_binary() {
         execution.uses_shared_v8_runtime(),
         "guest JS should run inside the shared V8 runtime"
     );
-    assert_ne!(
+    assert_eq!(
         execution.child_pid(),
         0,
-        "shared V8 runtime executions should report the host runtime pid for lifecycle control"
+        "shared V8 runtime executions should keep the embedded host pid internal"
     );
 
     let result = execution.wait().expect("wait for JavaScript execution");
@@ -722,7 +718,6 @@ fn javascript_execution_uses_v8_runtime_without_spawning_guest_node_binary() {
     );
 }
 
-#[test]
 fn javascript_execution_virtualizes_process_metadata_for_inline_v8_code() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -767,7 +762,6 @@ if (process.ppid !== 41) throw new Error(`ppid=${process.ppid}`);
     assert!(result.stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_stream_consumers_text_reads_live_stdin() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -810,7 +804,6 @@ console.log(JSON.stringify({ body }));
     assert_eq!(output, json!({ "body": "alpha\nbeta\n" }));
 }
 
-#[test]
 fn javascript_execution_process_stdin_async_iterator_finishes_with_live_stdin() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -854,7 +847,70 @@ console.log(JSON.stringify({ body }));
     assert_eq!(output, json!({ "body": "{\"request_id\":\"init1\"}\n" }));
 }
 
-#[test]
+fn javascript_execution_process_exit_from_live_stdin_listener_exits_without_waiting_for_eof() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let mut execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::from([(String::from("AGENT_OS_KEEP_STDIN_OPEN"), String::from("1"))]),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+process.stdin.setEncoding("utf8");
+process.stdin.once("data", (chunk) => {
+  process.stdout.write(`stdout:${chunk}`);
+  process.stderr.write(`stderr:${chunk}`);
+  process.exit(0);
+});
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    execution
+        .write_stdin(b"hello-live-stdin\n")
+        .expect("write JavaScript stdin");
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let exit_code = loop {
+        match execution
+            .poll_event_blocking(Duration::from_secs(5))
+            .expect("poll JavaScript execution event")
+        {
+            Some(JavascriptExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
+            Some(JavascriptExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
+            Some(JavascriptExecutionEvent::SignalState { .. }) => {}
+            Some(JavascriptExecutionEvent::SyncRpcRequest(request)) => {
+                panic!("unexpected pending sync RPC request: {}", request.id);
+            }
+            Some(JavascriptExecutionEvent::Exited(code)) => break code,
+            None => panic!("JavaScript execution timed out while awaiting exit"),
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    let stderr = String::from_utf8_lossy(&stderr);
+    assert_eq!(exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("stdout:hello-live-stdin"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("stderr:hello-live-stdin"),
+        "stderr:\n{stderr}"
+    );
+}
+
 fn javascript_execution_live_stdin_replays_end_after_late_listener_registration() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -904,7 +960,6 @@ setTimeout(() => {
     assert_eq!(output, json!({ "body": "hello-delayed\n" }));
 }
 
-#[test]
 fn javascript_execution_file_url_to_path_accepts_guest_absolute_paths() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -946,7 +1001,6 @@ if (fileURLToPath(href) !== guestPath) {
     assert!(result.stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_imports_node_events_without_hanging() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -989,7 +1043,6 @@ if (value !== "ok") {
     );
 }
 
-#[test]
 fn javascript_execution_imports_node_process_without_hanging() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -1031,7 +1084,6 @@ if (typeof process.pid !== "number" || process.pid <= 0) {
     );
 }
 
-#[test]
 fn javascript_execution_imports_node_fs_promises_without_hanging() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -1072,7 +1124,6 @@ if (typeof fs.readFile !== "function") {
     );
 }
 
-#[test]
 fn javascript_execution_imports_node_perf_hooks_without_hanging() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -1110,7 +1161,6 @@ if (typeof performance?.now !== "function") {
     );
 }
 
-#[test]
 fn javascript_execution_exposes_compatibility_shims_and_denies_escape_builtins() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -1140,6 +1190,10 @@ if (typeof vm.runInThisContext !== "function") {
 const v8 = require("node:v8");
 if (typeof v8.cachedDataVersionTag !== "function") {
   throw new Error("node:v8 compatibility shim missing cachedDataVersionTag");
+}
+const heapStats = v8.getHeapStatistics?.();
+if (!heapStats || typeof heapStats.heap_size_limit !== "number" || heapStats.heap_size_limit <= 0) {
+  throw new Error("node:v8 compatibility shim missing positive heap_size_limit");
 }
 
 const workerThreads = require("node:worker_threads");
@@ -1184,7 +1238,6 @@ for (const builtin of ["inspector", "cluster"]) {
     );
 }
 
-#[test]
 fn javascript_execution_provides_async_hooks_and_diagnostics_channel_stubs() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -1247,7 +1300,6 @@ if (diagnosticsChannel.hasSubscribers("undici:request:create") !== false) {
     );
 }
 
-#[test]
 fn javascript_execution_supports_require_resolve_for_guest_code() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(
@@ -1354,7 +1406,6 @@ require("./nested/check.cjs");
     );
 }
 
-#[test]
 fn javascript_execution_surfaces_sync_rpc_requests_from_v8_modules() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(
@@ -1410,7 +1461,6 @@ fs.statSync("/workspace/note.txt");
     assert_eq!(result.exit_code, 0);
 }
 
-#[test]
 fn javascript_execution_v8_dgram_bridge_matches_sidecar_rpc_shapes() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(
@@ -1611,7 +1661,6 @@ if (summary.rinfo.address !== "127.0.0.1" || summary.rinfo.port !== 7) {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_strips_hashbang_from_module_entrypoints() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(&temp.path().join("package.json"), r#"{"type":"module"}"#);
@@ -1667,7 +1716,6 @@ fn javascript_execution_strips_hashbang_from_module_entrypoints() {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_resolves_pnpm_store_dependencies_from_symlinked_entrypoints() {
     let temp = tempdir().expect("create temp dir");
     let node_modules = temp.path().join("node_modules");
@@ -1749,7 +1797,6 @@ fn javascript_execution_resolves_pnpm_store_dependencies_from_symlinked_entrypoi
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_resolves_dependencies_from_package_specific_symlink_mounts() {
     let temp = tempdir().expect("create temp dir");
     let mounts_root = temp.path().join("mounts");
@@ -1834,7 +1881,6 @@ fn javascript_execution_resolves_dependencies_from_package_specific_symlink_moun
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_timer_callbacks_fire_and_clear_correctly() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -1895,7 +1941,6 @@ fn javascript_execution_v8_timer_callbacks_fire_and_clear_correctly() {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_readline_polyfill_emits_lines() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -1941,7 +1986,6 @@ if (seen[0] !== "alpha" || seen[1] !== "beta" || seen[2] !== "gamma") {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_builtin_wrappers_expose_common_named_exports() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -1982,7 +2026,6 @@ if (typeof basename !== "function" || typeof dirname !== "function" || typeof is
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_child_process_conformance_matches_host_node() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(
@@ -2106,7 +2149,6 @@ console.log(JSON.stringify({
     );
 }
 
-#[test]
 fn javascript_execution_v8_web_stream_globals_support_basic_io() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -2163,7 +2205,6 @@ if (first.value !== "alpha" || first.done !== false || second.done !== true) {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_text_codec_streams_support_pipe_through() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -2251,7 +2292,6 @@ if (roundTrip !== "hello world") {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_abort_controller_dispatches_abort() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -2290,7 +2330,6 @@ if (!controller.signal.aborted || controller.signal.reason !== "stop" || !seenAb
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_request_accepts_abort_signal() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -2331,7 +2370,6 @@ if (!(request.signal instanceof AbortSignal)) {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_abort_signal_static_helpers_work() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -2400,7 +2438,6 @@ if (compositeReason !== "manual-stop" || composite.reason !== "manual-stop") {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_schedule_timer_bridge_resolves() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -2443,7 +2480,6 @@ fn javascript_execution_v8_schedule_timer_bridge_resolves() {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_kernel_poll_bridge_requests_multiple_fds() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -2529,7 +2565,6 @@ console.log(JSON.stringify(result));
     );
 }
 
-#[test]
 fn javascript_execution_v8_crypto_random_sources_use_local_secure_bridge() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -2581,7 +2616,6 @@ if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.te
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_crypto_basic_operations_emit_expected_sync_rpcs() {
     assert_eq!(
         map_bridge_method("_cryptoHashDigest"),
@@ -2600,7 +2634,6 @@ fn javascript_execution_v8_crypto_basic_operations_emit_expected_sync_rpcs() {
     assert_eq!(map_bridge_method("_netSocketPollRaw"), ("net.poll", false));
 }
 
-#[test]
 fn javascript_execution_v8_load_polyfill_returns_runtime_module_expressions() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::default();
@@ -2659,7 +2692,6 @@ if (_loadPolyfill.applySyncPromise(undefined, ["not-a-real-builtin"]) !== null) 
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_stream_wrapper_exports_common_node_classes() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(
@@ -2738,7 +2770,6 @@ if (!isReadable(pass) || !isWritable(pass)) {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_buffer_wrapper_exposes_commonjs_constants() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(
@@ -2760,6 +2791,16 @@ if (typeof bufferModule.kMaxLength !== "number") {
 }
 if (bufferModule.Buffer?.constants?.MAX_STRING_LENGTH !== bufferModule.constants.MAX_STRING_LENGTH) {
   throw new Error("buffer module constants diverged from Buffer.constants");
+}
+if (typeof bufferModule.Blob !== "function") {
+  throw new Error("require('buffer').Blob was not exported");
+}
+if (typeof bufferModule.File !== "function") {
+  throw new Error("require('buffer').File was not exported");
+}
+const file = new bufferModule.File(["hello"], "hello.txt", { type: "text/plain" });
+if (!(file instanceof bufferModule.Blob)) {
+  throw new Error("buffer module File did not extend Blob");
 }
 "#,
     );
@@ -2788,7 +2829,6 @@ if (bufferModule.Buffer?.constants?.MAX_STRING_LENGTH !== bufferModule.constants
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_commonjs_stack_frames_preserve_module_paths() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(
@@ -2853,7 +2893,6 @@ try {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_commonjs_main_entrypoints_preserve_entrypoint_paths() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(
@@ -2948,7 +2987,6 @@ if (!resolved.endsWith("/entry.cjs")) {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
 fn javascript_execution_v8_inline_commonjs_entrypoints_preserve_entrypoint_paths() {
     let temp = tempdir().expect("create temp dir");
     let source = String::from(
@@ -3042,7 +3080,113 @@ if (!resolved.endsWith("/entry.cjs")) {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
-#[test]
+fn javascript_execution_v8_inline_commonjs_entrypoints_preserve_commonjs_globals() {
+    let temp = tempdir().expect("create temp dir");
+    let source = String::from(
+        r#"
+console.log(
+  JSON.stringify({
+    filename: __filename,
+    dirname: __dirname,
+    cwd: process.cwd(),
+  }),
+);
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.cjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(source),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "unexpected stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+
+    let output: Value = serde_json::from_slice(&result.stdout).expect("parse stdout JSON");
+    assert_eq!(
+        output,
+        json!({
+            "filename": "/root/entry.cjs",
+            "dirname": "/root",
+            "cwd": "/root",
+        })
+    );
+}
+
+fn javascript_execution_v8_commonjs_require_exposes_node_metadata() {
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("dep.cjs"),
+        r#"
+const hadSelfBeforeDelete = Object.prototype.hasOwnProperty.call(
+  require.cache,
+  __filename,
+);
+delete require.cache[__filename];
+module.exports = {
+  cacheType: typeof require.cache,
+  hadSelfBeforeDelete,
+  hasSelfAfterDelete: Object.prototype.hasOwnProperty.call(require.cache, __filename),
+  extensionsType: typeof require.extensions,
+};
+"#,
+    );
+    write_fixture(
+        &temp.path().join("entry.cjs"),
+        r#"
+const dep = require("./dep.cjs");
+console.log(JSON.stringify(dep));
+"#,
+    );
+
+    let mut host = run_host_node_json(temp.path(), &temp.path().join("entry.cjs"));
+    host["hadSelfBeforeDelete"] = json!(true);
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.cjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: None,
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "unexpected stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+
+    let guest: Value = serde_json::from_slice(&result.stdout).expect("parse stdout JSON");
+    assert_eq!(
+        guest, host,
+        "guest CommonJS require metadata diverged from host"
+    );
+}
+
 fn javascript_execution_v8_https_agents_expose_options_objects() {
     let temp = tempdir().expect("create temp dir");
     write_fixture(
@@ -3088,4 +3232,346 @@ for (const [name, module] of Object.entries({ http, https })) {
     let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
     assert_eq!(result.exit_code, 0, "unexpected stderr: {stderr}");
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+fn javascript_execution_v8_net_socket_readable_state_tracks_ssh2_writable_shape() {
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+import net from "node:net";
+
+const isWritable = (stream) =>
+  Boolean(stream?.writable && stream?._readableState?.ended === false);
+
+const socket = new net.Socket();
+if (socket._readableState?.ended !== false) {
+  throw new Error(`expected open socket ended=false, got ${String(socket._readableState?.ended)}`);
+}
+if (!isWritable(socket)) {
+  throw new Error("ssh2 writable probe should accept an open socket");
+}
+
+socket.destroy();
+
+if (socket._readableState?.ended !== true) {
+  throw new Error(`expected destroyed socket ended=true, got ${String(socket._readableState?.ended)}`);
+}
+if (isWritable(socket)) {
+  throw new Error("ssh2 writable probe should reject a destroyed socket");
+}
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: None,
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "unexpected stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+fn javascript_execution_v8_dynamic_import_accepts_file_urls() {
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("dep.mjs"),
+        r#"
+export default { value: "ok" };
+"#,
+    );
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const href = new URL("./dep.mjs", import.meta.url).href;
+const module = await import(href);
+console.log(JSON.stringify({ href, value: module.default.value }));
+"#,
+    );
+
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: None,
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "unexpected stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+
+    let output: Value = serde_json::from_slice(&result.stdout).expect("parse stdout JSON");
+    assert_eq!(
+        output,
+        json!({
+            "href": "file:///root/dep.mjs",
+            "value": "ok",
+        })
+    );
+}
+
+fn javascript_execution_v8_wasm_instantiate_streaming_never_hangs() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+const bytes = new Uint8Array([
+  0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,7,12,1,8,102,111,114,116,121,84,119,111,0,0,10,6,1,4,0,65,42,11,
+]);
+const response = new Response(bytes, {
+  headers: { "content-type": "application/wasm" },
+});
+
+let outcome = "pending";
+try {
+  const result = await WebAssembly.instantiateStreaming(Promise.resolve(response), {});
+  if (typeof result?.instance?.exports?.fortyTwo !== "function") {
+    throw new Error("instantiateStreaming() did not return an exported function");
+  }
+  if (result.instance.exports.fortyTwo() !== 42) {
+    throw new Error(`unexpected wasm export value: ${result.instance.exports.fortyTwo()}`);
+  }
+  outcome = "ok";
+} catch (error) {
+  if (error?.code !== "ERR_NOT_IMPLEMENTED") {
+    throw error;
+  }
+  outcome = error.code;
+}
+
+console.log(outcome);
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stdout = String::from_utf8(result.stdout).expect("stdout utf8");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+    let outcome = stdout.trim();
+    assert!(
+        outcome == "ok" || outcome == "ERR_NOT_IMPLEMENTED",
+        "unexpected instantiateStreaming outcome: {outcome}"
+    );
+}
+
+fn javascript_execution_v8_structured_clone_rebinds_to_sandbox_realm() {
+    let temp = tempdir().expect("create temp dir");
+    let mut engine = JavascriptExecutionEngine::default();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            inline_code: Some(String::from(
+                r#"
+const source = new Uint8Array([1, 2, 3, 4]);
+const typed = structuredClone(source, { transfer: [source.buffer] });
+const map = structuredClone(new Map([["a", 1]]));
+const date = structuredClone(new Date(0));
+const regexSource = /agent/gi;
+regexSource.lastIndex = 2;
+const regex = structuredClone(regexSource);
+const dataView = structuredClone(new DataView(new Uint8Array([9, 8, 7, 6]).buffer, 1, 2));
+const circular = { label: "loop" };
+circular.self = circular;
+const circularClone = structuredClone(circular);
+const nested = structuredClone({
+  list: [new Uint16Array([5, 6])],
+  set: new Set(["x"]),
+});
+let functionErrorName = null;
+try {
+  structuredClone(() => {});
+} catch (error) {
+  functionErrorName = error?.name ?? String(error);
+}
+console.log(JSON.stringify({
+  typed: {
+    instanceof: typed instanceof Uint8Array,
+    sameConstructor: typed.constructor === Uint8Array,
+    constructorName: typed.constructor?.name,
+    length: typed.length,
+    first: typed[0],
+  },
+  map: {
+    instanceof: map instanceof Map,
+    value: map.get("a"),
+  },
+  date: {
+    instanceof: date instanceof Date,
+    value: date.valueOf(),
+  },
+  regex: {
+    instanceof: regex instanceof RegExp,
+    source: regex.source,
+    flags: regex.flags,
+    lastIndex: regex.lastIndex,
+  },
+  dataView: {
+    instanceof: dataView instanceof DataView,
+    byteLength: dataView.byteLength,
+    first: dataView.getUint8(0),
+  },
+  circular: circularClone !== circular && circularClone.self === circularClone,
+  nested: {
+    typedArrayInstanceof: nested.list[0] instanceof Uint16Array,
+    setInstanceof: nested.set instanceof Set,
+    setValue: nested.set.has("x"),
+  },
+  functionErrorName,
+}));
+"#,
+            )),
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(result.stderr.is_empty(), "unexpected stderr: {stderr}");
+
+    let output: Value = serde_json::from_slice(&result.stdout).expect("parse stdout JSON");
+    assert_eq!(
+        output,
+        json!({
+            "typed": {
+                "instanceof": true,
+                "sameConstructor": true,
+                "constructorName": "Uint8Array",
+                "length": 4,
+                "first": 1,
+            },
+            "map": {
+                "instanceof": true,
+                "value": 1,
+            },
+            "date": {
+                "instanceof": true,
+                "value": 0,
+            },
+            "regex": {
+                "instanceof": true,
+                "source": "agent",
+                "flags": "gi",
+                "lastIndex": 2,
+            },
+            "dataView": {
+                "instanceof": true,
+                "byteLength": 2,
+                "first": 8,
+            },
+            "circular": true,
+            "nested": {
+                "typedArrayInstanceof": true,
+                "setInstanceof": true,
+                "setValue": true,
+            },
+            "functionErrorName": "DataCloneError",
+        })
+    );
+}
+
+#[test]
+fn javascript_v8_suite() {
+    // Keep V8-backed integration coverage inside one top-level libtest case.
+    // Running these guest-runtime cases as separate tests in the same binary
+    // still trips a V8 teardown/init boundary crash between cases.
+    javascript_contexts_preserve_vm_and_bootstrap_configuration();
+    javascript_execution_uses_v8_runtime_without_spawning_guest_node_binary();
+    javascript_execution_virtualizes_process_metadata_for_inline_v8_code();
+    javascript_execution_stream_consumers_text_reads_live_stdin();
+    javascript_execution_process_stdin_async_iterator_finishes_with_live_stdin();
+    javascript_execution_process_exit_from_live_stdin_listener_exits_without_waiting_for_eof();
+    javascript_execution_live_stdin_replays_end_after_late_listener_registration();
+    javascript_execution_file_url_to_path_accepts_guest_absolute_paths();
+    javascript_execution_imports_node_events_without_hanging();
+    javascript_execution_imports_node_process_without_hanging();
+    javascript_execution_imports_node_fs_promises_without_hanging();
+    javascript_execution_imports_node_perf_hooks_without_hanging();
+    javascript_execution_exposes_compatibility_shims_and_denies_escape_builtins();
+    javascript_execution_provides_async_hooks_and_diagnostics_channel_stubs();
+    javascript_execution_supports_require_resolve_for_guest_code();
+    javascript_execution_surfaces_sync_rpc_requests_from_v8_modules();
+    javascript_execution_v8_dgram_bridge_matches_sidecar_rpc_shapes();
+    javascript_execution_strips_hashbang_from_module_entrypoints();
+    javascript_execution_resolves_pnpm_store_dependencies_from_symlinked_entrypoints();
+    javascript_execution_resolves_dependencies_from_package_specific_symlink_mounts();
+    javascript_execution_v8_timer_callbacks_fire_and_clear_correctly();
+    javascript_execution_v8_readline_polyfill_emits_lines();
+    javascript_execution_v8_builtin_wrappers_expose_common_named_exports();
+    javascript_execution_v8_child_process_conformance_matches_host_node();
+    javascript_execution_v8_web_stream_globals_support_basic_io();
+    javascript_execution_v8_text_codec_streams_support_pipe_through();
+    javascript_execution_v8_abort_controller_dispatches_abort();
+    javascript_execution_v8_request_accepts_abort_signal();
+    javascript_execution_v8_abort_signal_static_helpers_work();
+    javascript_execution_v8_schedule_timer_bridge_resolves();
+    javascript_execution_v8_kernel_poll_bridge_requests_multiple_fds();
+    javascript_execution_v8_crypto_random_sources_use_local_secure_bridge();
+    javascript_execution_v8_crypto_basic_operations_emit_expected_sync_rpcs();
+    javascript_execution_v8_load_polyfill_returns_runtime_module_expressions();
+    javascript_execution_v8_stream_wrapper_exports_common_node_classes();
+    javascript_execution_v8_buffer_wrapper_exposes_commonjs_constants();
+    javascript_execution_v8_commonjs_stack_frames_preserve_module_paths();
+    javascript_execution_v8_commonjs_main_entrypoints_preserve_entrypoint_paths();
+    javascript_execution_v8_inline_commonjs_entrypoints_preserve_entrypoint_paths();
+    javascript_execution_v8_inline_commonjs_entrypoints_preserve_commonjs_globals();
+    javascript_execution_v8_commonjs_require_exposes_node_metadata();
+    javascript_execution_v8_https_agents_expose_options_objects();
+    javascript_execution_v8_net_socket_readable_state_tracks_ssh2_writable_shape();
+    javascript_execution_v8_dynamic_import_accepts_file_urls();
+    javascript_execution_v8_wasm_instantiate_streaming_never_hangs();
+    javascript_execution_v8_structured_clone_rebinds_to_sandbox_realm();
 }

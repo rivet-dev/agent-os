@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ScheduleEntry } from "../src/cron/schedule-driver.js";
+import {
+	InvalidScheduleError,
+	PastScheduleError,
+} from "../src/cron/parse-schedule.js";
 import { TimerScheduleDriver } from "../src/cron/timer-driver.js";
 
 describe("TimerScheduleDriver", () => {
@@ -66,6 +70,21 @@ describe("TimerScheduleDriver", () => {
 		expect(callback).toHaveBeenCalledTimes(1);
 	});
 
+	it("schedule with a space-delimited ISO timestamp fires once", async () => {
+		const callback = vi.fn();
+		driver.schedule({
+			id: "job-3b",
+			schedule: "2026-01-01 00:00:05",
+			callback,
+		});
+
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(callback).toHaveBeenCalledTimes(1);
+
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(callback).toHaveBeenCalledTimes(1);
+	});
+
 	it("cancel prevents pending callback from firing", async () => {
 		const callback = vi.fn();
 		const handle = driver.schedule({
@@ -102,22 +121,28 @@ describe("TimerScheduleDriver", () => {
 		expect(callback2).not.toHaveBeenCalled();
 	});
 
-	it("schedule with past ISO timestamp fires immediately (delay clamped to 0)", async () => {
+	it("rejects malformed schedule strings at schedule time", () => {
+		expect(() =>
+			driver.schedule({
+				id: "job-invalid",
+				schedule: "tomorrow",
+				callback: vi.fn(),
+			}),
+		).toThrowError(InvalidScheduleError);
+	});
+
+	it("rejects past one-shot timestamps at schedule time", async () => {
 		const callback = vi.fn();
-		// 10 seconds in the past
-		driver.schedule({
-			id: "job-6",
-			schedule: "2025-12-31T23:59:50Z",
-			callback,
-		});
+		expect(() =>
+			driver.schedule({
+				id: "job-6",
+				schedule: "2025-12-31T23:59:50Z",
+				callback,
+			}),
+		).toThrowError(PastScheduleError);
 
-		// Should fire on next tick (delay clamped to 0)
-		await vi.advanceTimersByTimeAsync(0);
-		expect(callback).toHaveBeenCalledTimes(1);
-
-		// Should not reschedule (one-shot)
 		await vi.advanceTimersByTimeAsync(60_000);
-		expect(callback).toHaveBeenCalledTimes(1);
+		expect(callback).not.toHaveBeenCalled();
 	});
 
 	it("multiple concurrent schedules fire independently", async () => {

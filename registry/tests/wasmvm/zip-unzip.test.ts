@@ -7,7 +7,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
-import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
+import { C_BUILD_DIR, COMMANDS_DIR, createKernel } from '../helpers.js';
 import type { Kernel } from '../helpers.js';
 
 // Minimal in-memory VFS for kernel tests
@@ -100,7 +100,7 @@ class SimpleVFS {
   }
 }
 
-describe.skipIf(!hasWasmBinaries)('zip/unzip commands', () => {
+describe('zip/unzip commands', () => {
   let kernel: Kernel;
 
   afterEach(async () => {
@@ -112,7 +112,9 @@ describe.skipIf(!hasWasmBinaries)('zip/unzip commands', () => {
     await vfs.writeFile('/hello.txt', 'Hello, World!\n');
 
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(
+      createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
+    );
 
     // Create zip archive
     const zipResult = await kernel.exec('zip /archive.zip /hello.txt');
@@ -137,7 +139,9 @@ describe.skipIf(!hasWasmBinaries)('zip/unzip commands', () => {
     await vfs.writeFile('/mydir/b.txt', 'file b\n');
 
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(
+      createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
+    );
 
     const zipResult = await kernel.exec('zip -r /dir.zip /mydir');
     expect(zipResult.exitCode).toBe(0);
@@ -158,7 +162,9 @@ describe.skipIf(!hasWasmBinaries)('zip/unzip commands', () => {
     await vfs.writeFile('/data.txt', 'some data content\n');
 
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(
+      createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
+    );
 
     // Create archive first
     const zipResult = await kernel.exec('zip /list-test.zip /data.txt');
@@ -182,7 +188,9 @@ describe.skipIf(!hasWasmBinaries)('zip/unzip commands', () => {
     await vfs.writeFile('/binary.bin', content);
 
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(
+      createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
+    );
 
     const zipResult = await kernel.exec('zip /roundtrip.zip /binary.bin');
     expect(zipResult.exitCode).toBe(0);
@@ -202,7 +210,9 @@ describe.skipIf(!hasWasmBinaries)('zip/unzip commands', () => {
     await vfs.writeFile('/src.txt', 'target content\n');
 
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(
+      createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
+    );
 
     const zipResult = await kernel.exec('zip /dest-test.zip /src.txt');
     expect(zipResult.exitCode).toBe(0);

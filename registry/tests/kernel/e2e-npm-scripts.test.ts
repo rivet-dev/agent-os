@@ -9,11 +9,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { createIntegrationKernel, skipUnlessWasmBuilt } from './helpers.ts';
+import { describeIf, createIntegrationKernel, skipUnlessWasmBuilt } from './helpers.ts';
 
 const skipReason = skipUnlessWasmBuilt();
 
-describe.skipIf(skipReason)('e2e npm run scripts through kernel', () => {
+describeIf(!skipReason, 'e2e npm run scripts through kernel', () => {
   it('npm run greet echoes hello world', async () => {
     const { kernel, dispose } = await createIntegrationKernel({
       runtimes: ['wasmvm', 'node'],

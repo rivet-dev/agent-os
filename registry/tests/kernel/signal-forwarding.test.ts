@@ -8,6 +8,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import {
+  describeIf,
   createIntegrationKernel,
   skipUnlessWasmBuilt,
 } from './helpers.ts';
@@ -15,7 +16,7 @@ import type { IntegrationKernelResult } from './helpers.ts';
 
 const skipReason = skipUnlessWasmBuilt();
 
-describe.skipIf(skipReason)('signal forwarding (integration)', () => {
+describeIf(!skipReason, 'signal forwarding (integration)', () => {
   let ctx: IntegrationKernelResult;
 
   afterEach(async () => {

@@ -100,18 +100,13 @@ fn serialize_env(env: &[(&str, &str)]) -> Vec<u8> {
 /// * `argv` - Command and arguments (argv[0] is the program name)
 /// * `env` - Environment variable pairs (empty inherits parent env via host)
 /// * `cwd` - Working directory for the child
-pub fn spawn_session(
-    argv: &[&str],
-    env: &[(&str, &str)],
-    cwd: &str,
-) -> io::Result<WasiPtyChild> {
+pub fn spawn_session(argv: &[&str], env: &[(&str, &str)], cwd: &str) -> io::Result<WasiPtyChild> {
     if argv.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty argv"));
     }
 
     // Allocate PTY master/slave pair via kernel
-    let (master_fd, slave_fd) = wasi_ext::openpty()
-        .map_err(errno_to_io_error)?;
+    let (master_fd, slave_fd) = wasi_ext::openpty().map_err(errno_to_io_error)?;
 
     let argv_buf = serialize_null_separated(argv);
     let envp_buf = serialize_env(env);
@@ -148,8 +143,7 @@ pub fn spawn_session(
 /// separately so the caller can pass it to [`wasi_spawn::spawn_child`] or
 /// use it directly.
 pub fn open_pty() -> io::Result<(WasiSpawnedPty, RawFd)> {
-    let (master_fd, slave_fd) = wasi_ext::openpty()
-        .map_err(errno_to_io_error)?;
+    let (master_fd, slave_fd) = wasi_ext::openpty().map_err(errno_to_io_error)?;
 
     Ok((WasiSpawnedPty { master_fd }, slave_fd))
 }
@@ -211,8 +205,7 @@ impl WasiPtyChild {
             return Err(io::Error::new(io::ErrorKind::Other, "already waited"));
         }
 
-        let (status, _actual_pid) = wasi_ext::waitpid(self.pid, 0)
-            .map_err(errno_to_io_error)?;
+        let (status, _actual_pid) = wasi_ext::waitpid(self.pid, 0).map_err(errno_to_io_error)?;
 
         self.exited = true;
         Ok(status as i32)
@@ -220,8 +213,7 @@ impl WasiPtyChild {
 
     /// Send a signal to the child process.
     pub fn kill(&mut self, signal: u32) -> io::Result<()> {
-        wasi_ext::kill(self.pid, signal)
-            .map_err(errno_to_io_error)
+        wasi_ext::kill(self.pid, signal).map_err(errno_to_io_error)
     }
 
     /// Send SIGTERM to the child process.

@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  describeIf,
   COMMANDS_DIR,
   createKernel,
   createWasmVmRuntime,
@@ -84,7 +85,7 @@ async function checkNpmInstallWorks(): Promise<string | false> {
 
 // --- Offline tests (no network required) ---
 
-describe.skipIf(wasmSkip)('npm suite - offline', () => {
+describeIf(!wasmSkip, 'npm suite - offline', () => {
   it('npm init -y creates package.json with default values', async () => {
     const tempDir = await mkdtemp(path.join(tmpdir(), 'kernel-npm-init-'));
 
@@ -201,7 +202,7 @@ describe.skipIf(wasmSkip)('npm suite - offline', () => {
 
 const npmInstallSkip = wasmSkip || (await checkNetwork()) || (await checkNpmInstallWorks());
 
-describe.skipIf(npmInstallSkip)('npm suite - online', () => {
+describeIf(!npmInstallSkip, 'npm suite - online', () => {
   it(
     'npm install left-pad installs package to node_modules',
     async () => {
@@ -307,7 +308,7 @@ describe.skipIf(npmInstallSkip)('npm suite - online', () => {
 
 // --- Error handling ---
 
-describe.skipIf(wasmSkip)('npm suite - error handling', () => {
+describeIf(!wasmSkip, 'npm suite - error handling', () => {
   it(
     'npm install with unreachable registry returns clear error',
     async () => {
@@ -327,7 +328,14 @@ describe.skipIf(wasmSkip)('npm suite - error handling', () => {
 
         // Use an unreachable registry to simulate no network
         const result = await kernel.exec(
-          'npm install --registry=http://localhost:1',
+          [
+            'npm install',
+            '--registry=http://127.0.0.1:1',
+            '--fetch-retries=0',
+            '--fetch-timeout=1000',
+            '--fetch-retry-mintimeout=1',
+            '--fetch-retry-maxtimeout=1',
+          ].join(' '),
           { cwd: '/' },
         );
         expect(result.exitCode).not.toBe(0);

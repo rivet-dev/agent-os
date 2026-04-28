@@ -10,7 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -21,21 +31,21 @@ jobs:
           key: ${{ runner.os }}-rusty-v8-${{ hashFiles('Cargo.lock', 'crates/v8-runtime/Cargo.toml', 'crates/v8-runtime/build.rs') }}
           restore-keys: |
             ${{ runner.os }}-rusty-v8-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: latest
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-      - run: cargo build -p agent-os-v8-runtime
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test -p agent-os-v8-runtime -- --test-threads=1
       - run: cargo test -p agent-os-v8-runtime snapshot::tests::snapshot_consolidated_tests -- --exact --ignored
       - run: cargo test -p agent-os-execution -- --test-threads=1
-      - run: pnpm install --frozen-lockfile
+      - run: cargo test -p agent-os-sidecar -- --test-threads=1
+      - run: cargo test -p agent-os-kernel -- --test-threads=1
+      - run: cargo test -p agent-os-bridge -- --test-threads=1
       - run: pnpm check-types
-      - run: pnpm build
-      - run: pnpm test
+      - run: pnpm lint
+      - if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        run: pnpm test
         env:
           AGENTOS_E2E_NETWORK: '1'
+      - if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: pnpm test

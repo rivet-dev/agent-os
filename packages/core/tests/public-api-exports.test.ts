@@ -1,5 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
+	InvalidScheduleError,
+	PastScheduleError,
 	isAcpTimeoutErrorData,
 	type AcpTimeoutErrorData,
 	type ExecOptions,
@@ -46,5 +48,14 @@ describe("root public API exports", () => {
 
 		expect(isAcpTimeoutErrorData(timeout)).toBe(true);
 		expect(isAcpTimeoutErrorData({ kind: "other" })).toBe(false);
+	});
+
+	test("re-exports cron scheduling errors from the root entrypoint", () => {
+		expect(new InvalidScheduleError("tomorrow").name).toBe(
+			"InvalidScheduleError",
+		);
+		expect(new PastScheduleError("2020-01-01T00:00:00Z").name).toBe(
+			"PastScheduleError",
+		);
 	});
 });

@@ -150,9 +150,7 @@ describe("full createSession('pi-cli') inside the VM", () => {
 		}
 	}, 120_000);
 
-	(hasRegistryCommands ? test : test.skip)(
-		"runs the unmodified Pi CLI ACP flow end-to-end for bash tool calls",
-		async () => {
+	test("runs the unmodified Pi CLI ACP flow end-to-end for bash tool calls", async () => {
 			const workspacePath = "/home/user/workspace/bash-output.txt";
 			const fixtures = createToolFixtures(
 				{
@@ -201,7 +199,5 @@ describe("full createSession('pi-cli') inside the VM", () => {
 				await vm.dispose();
 				await stopLlmock(mock);
 			}
-		},
-		120_000,
-	);
+	}, 120_000);
 });

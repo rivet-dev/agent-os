@@ -15,7 +15,7 @@ new file mode 100644
 index 0000000..c80a680
 --- /dev/null
 +++ b/libc-bottom-half/sources/host_user_getpwuid.c
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,57 @@
 +// getpwuid() via wasmVM host_user.getpwuid import.
 +//
 +// Replaces musl's /etc/passwd-based implementation with a call to our

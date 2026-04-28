@@ -6,7 +6,20 @@
 
 import { AgentOs } from "@rivet-dev/agent-os-core";
 
-const vm = await AgentOs.create();
+function settleWithin(promise: Promise<unknown>, ms: number): Promise<void> {
+	return Promise.race([
+		promise.then(() => {}),
+		new Promise<void>((resolve) => setTimeout(resolve, ms)),
+	]);
+}
+
+const vm = await AgentOs.create({
+	permissions: {
+		fs: "allow",
+		network: "allow",
+		childProcess: "allow",
+	},
+});
 
 // Write a server script to run inside the VM
 await vm.writeFile(
@@ -16,6 +29,7 @@ const http = require("http");
 const server = http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ status: "ok", method: req.method, url: req.url }));
+  server.close(() => process.exit(0));
 });
 server.listen(0, "0.0.0.0", () => {
   console.log("LISTENING:" + server.address().port);
@@ -45,5 +59,6 @@ const response = await vm.fetch(port, new Request("http://localhost/api/test"));
 const json = await response.json();
 console.log("Response:", json);
 
-vm.stopProcess(proc.pid);
-await vm.dispose();
+await settleWithin(vm.waitProcess(proc.pid).catch(() => {}), 500);
+await settleWithin(vm.dispose().catch(() => {}), 500);
+process.exit(0);

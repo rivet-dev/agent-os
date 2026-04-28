@@ -6,6 +6,7 @@ export interface WorkspacePaths {
 	workspaceRoot: string;
 	hostProjectRoot: string;
 	wasmCommandsDir: string;
+	wasmCommandDirs: string[];
 	realProviderEnvFile: string;
 }
 
@@ -27,20 +28,35 @@ export function findWorkspaceRoot(startDir: string): string {
 
 export function resolveWorkspacePaths(startDir: string): WorkspacePaths {
 	const workspaceRoot = findWorkspaceRoot(startDir);
+	const builtWasmCommandsDir = path.join(
+		workspaceRoot,
+		"registry",
+		"native",
+		"target",
+		"wasm32-wasip1",
+		"release",
+		"commands",
+	);
+	const packagedCoreutilsWasmDir = path.join(
+		workspaceRoot,
+		"registry",
+		"software",
+		"coreutils",
+		"wasm",
+	);
+	const wasmCommandDirs = [
+		builtWasmCommandsDir,
+		packagedCoreutilsWasmDir,
+	].filter((commandDir, index, allDirs) => {
+		return existsSync(commandDir) && allDirs.indexOf(commandDir) === index;
+	});
 	return {
 		workspaceRoot,
 		// Dev-shell used to live in a nested runtime repo. In this monorepo,
 		// the workspace root itself is the host-visible project root.
 		hostProjectRoot: workspaceRoot,
-		wasmCommandsDir: path.join(
-			workspaceRoot,
-			"registry",
-			"native",
-			"target",
-			"wasm32-wasip1",
-			"release",
-			"commands",
-		),
+		wasmCommandsDir: wasmCommandDirs[0] ?? packagedCoreutilsWasmDir,
+		wasmCommandDirs,
 		realProviderEnvFile: path.join(homedir(), "misc", "env.txt"),
 	};
 }

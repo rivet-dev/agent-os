@@ -16,7 +16,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { TerminalHarness } from './terminal-harness.js';
 import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
-import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
+import { COMMANDS_DIR, createKernel, describeIf, hasWasmBinaries } from '../helpers.js';
 import type { Kernel } from '../helpers.js';
 
 const hasApiKey = !!process.env.OPENAI_API_KEY;
@@ -124,7 +124,7 @@ async function createTestKernel(): Promise<{ kernel: Kernel; vfs: SimpleVFS }> {
 // Non-interactive tests (kernel.exec — --help bypasses TUI)
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!hasWasmBinaries)('codex TUI (WasmVM) - non-interactive', { timeout: 30_000 }, () => {
+describeIf(hasWasmBinaries, 'codex TUI (WasmVM) - non-interactive', { timeout: 30_000 }, () => {
   let kernel: Kernel;
 
   afterEach(async () => {
@@ -154,7 +154,7 @@ describe.skipIf(!hasWasmBinaries)('codex TUI (WasmVM) - non-interactive', { time
 // Interactive TUI tests (PTY via TerminalHarness)
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!hasWasmBinaries)('codex TUI (WasmVM) - interactive', { timeout: 30_000 }, () => {
+describeIf(hasWasmBinaries, 'codex TUI (WasmVM) - interactive', { timeout: 30_000 }, () => {
   let kernel: Kernel;
   let harness: TerminalHarness;
 
@@ -253,7 +253,7 @@ describe.skipIf(!hasWasmBinaries)('codex TUI (WasmVM) - interactive', { timeout:
 // API integration tests (gated behind OPENAI_API_KEY)
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!hasWasmBinaries || !hasApiKey)('codex TUI API integration (requires OPENAI_API_KEY)', { timeout: 60_000 }, () => {
+describeIf(hasWasmBinaries && hasApiKey, 'codex TUI API integration (requires OPENAI_API_KEY)', { timeout: 60_000 }, () => {
   let kernel: Kernel;
   let harness: TerminalHarness;
 

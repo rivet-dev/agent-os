@@ -1,0 +1,43 @@
+--- a/library/std/src/sys/pipe/mod.rs
++++ b/library/std/src/sys/pipe/mod.rs
+@@ -10,6 +10,10 @@ cfg_select! {
+     target_os = "motor" => {
+         mod motor;
+         pub use motor::{Pipe, pipe};
++    }
++    target_os = "wasi" => {
++        mod wasi;
++        pub use wasi::{Pipe, pipe};
+     }
+     _ => {
+         mod unsupported;
+--- /dev/null
++++ b/library/std/src/sys/pipe/wasi.rs
+@@ -0,0 +1,27 @@
++// WASI pipe implementation using wasmVM host_process.fd_pipe.
++
++use crate::io;
++use crate::os::fd::FromRawFd;
++use crate::sys::fd::FileDesc;
++
++pub type Pipe = FileDesc;
++
++#[link(wasm_import_module = "host_process")]
++unsafe extern "C" {
++    fn fd_pipe(ret_read_fd: *mut u32, ret_write_fd: *mut u32) -> u32;
++}
++
++pub fn pipe() -> io::Result<(Pipe, Pipe)> {
++    let mut read_fd: u32 = 0;
++    let mut write_fd: u32 = 0;
++    let errno = unsafe { fd_pipe(&mut read_fd, &mut write_fd) };
++    if errno != 0 {
++        return Err(io::Error::from_raw_os_error(errno as i32));
++    }
++    unsafe {
++        Ok((
++            Pipe::from_raw_fd(read_fd as i32),
++            Pipe::from_raw_fd(write_fd as i32),
++        ))
++    }
++}

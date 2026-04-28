@@ -81,45 +81,35 @@ fn serialize_env(env: &[(&str, &str)]) -> Vec<u8> {
     buf
 }
 
-/// Spawn a child process with pipe-captured stdout and stderr.
-///
-/// Creates pipes for stdout/stderr, spawns the child via host_process FFI,
-/// and returns a `WasiChild` handle. The parent's stdin is inherited.
-///
-/// # Arguments
-/// * `argv` - Command and arguments (argv[0] is the program name)
-/// * `env` - Environment variable pairs (empty inherits parent env via host)
-/// * `cwd` - Working directory for the child
-pub fn spawn_child(
+fn spawn_child_with_stdin_fd(
     argv: &[&str],
     env: &[(&str, &str)],
     cwd: &str,
+    stdin_fd: u32,
 ) -> io::Result<WasiChild> {
     if argv.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty argv"));
     }
 
     // Create stdout pipe
-    let (stdout_read, stdout_write) = wasi_ext::pipe()
-        .map_err(errno_to_io_error)?;
+    let (stdout_read, stdout_write) = wasi_ext::pipe().map_err(errno_to_io_error)?;
 
     // Create stderr pipe
-    let (stderr_read, stderr_write) = wasi_ext::pipe()
-        .map_err(|e| {
-            fd_close(stdout_read);
-            fd_close(stdout_write);
-            errno_to_io_error(e)
-        })?;
+    let (stderr_read, stderr_write) = wasi_ext::pipe().map_err(|e| {
+        fd_close(stdout_read);
+        fd_close(stdout_write);
+        errno_to_io_error(e)
+    })?;
 
     // Serialize argv and envp
     let argv_buf = serialize_null_separated(argv);
     let envp_buf = serialize_env(env);
 
-    // Spawn child with pipes as stdout/stderr, inherit parent stdin (0)
+    // Spawn child with pipe-captured stdout/stderr and caller-selected stdin.
     let result = wasi_ext::spawn(
         &argv_buf,
         &envp_buf,
-        0, // stdin: inherit parent
+        stdin_fd,
         stdout_write,
         stderr_write,
         cwd.as_bytes(),
@@ -144,6 +134,31 @@ pub fn spawn_child(
     }
 }
 
+/// Spawn a child process with pipe-captured stdout and stderr.
+///
+/// Creates pipes for stdout/stderr, spawns the child via host_process FFI,
+/// and returns a `WasiChild` handle. The parent's stdin is inherited.
+///
+/// # Arguments
+/// * `argv` - Command and arguments (argv[0] is the program name)
+/// * `env` - Environment variable pairs (empty inherits parent env via host)
+/// * `cwd` - Working directory for the child
+pub fn spawn_child(argv: &[&str], env: &[(&str, &str)], cwd: &str) -> io::Result<WasiChild> {
+    spawn_child_with_stdin_fd(argv, env, cwd, 0)
+}
+
+/// Spawn a child process with stdin ignored and stdout/stderr captured.
+///
+/// This is appropriate for agent tool calls or other subprocesses that must not
+/// inherit an interactive control stream from the parent process.
+pub fn spawn_child_ignore_stdin(
+    argv: &[&str],
+    env: &[(&str, &str)],
+    cwd: &str,
+) -> io::Result<WasiChild> {
+    spawn_child_with_stdin_fd(argv, env, cwd, u32::MAX)
+}
+
 /// Spawn a child process inheriting all stdio (no pipe capture).
 ///
 /// Useful for interactive commands where output should go directly to
@@ -163,9 +178,12 @@ pub fn spawn_child_inherit(
     let pid = wasi_ext::spawn(
         &argv_buf,
         &envp_buf,
-        0, 1, 2, // inherit all stdio
+        0,
+        1,
+        2, // inherit all stdio
         cwd.as_bytes(),
-    ).map_err(errno_to_io_error)?;
+    )
+    .map_err(errno_to_io_error)?;
 
     Ok(WasiChild {
         pid,
@@ -209,8 +227,7 @@ impl WasiChild {
             return Err(io::Error::new(io::ErrorKind::Other, "already waited"));
         }
 
-        let (status, _actual_pid) = wasi_ext::waitpid(self.pid, 0)
-            .map_err(errno_to_io_error)?;
+        let (status, _actual_pid) = wasi_ext::waitpid(self.pid, 0).map_err(errno_to_io_error)?;
 
         self.exited = true;
 
@@ -224,8 +241,7 @@ impl WasiChild {
     ///
     /// Common signals: SIGTERM (15), SIGKILL (9).
     pub fn kill(&mut self, signal: u32) -> io::Result<()> {
-        wasi_ext::kill(self.pid, signal)
-            .map_err(errno_to_io_error)
+        wasi_ext::kill(self.pid, signal).map_err(errno_to_io_error)
     }
 
     /// Send SIGTERM to the child process.

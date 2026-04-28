@@ -13,11 +13,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { createIntegrationKernel, skipUnlessWasmBuilt } from './helpers.ts';
+import { describeIf, createIntegrationKernel, skipUnlessWasmBuilt } from './helpers.ts';
 
 const skipReason = skipUnlessWasmBuilt();
 
-describe.skipIf(skipReason)('e2e npm/npx version and init', () => {
+describeIf(!skipReason, 'e2e npm/npx version and init', () => {
   it('npm --version returns valid semver', async () => {
     const { kernel, dispose } = await createIntegrationKernel({
       runtimes: ['wasmvm', 'node'],
@@ -47,11 +47,7 @@ describe.skipIf(skipReason)('e2e npm/npx version and init', () => {
     }
   }, 30_000);
 
-  // npm init -y requires the full npm init command chain which loads
-  // @sigstore/sign -> http2, a module not yet available in the V8 isolate
-  // sandbox. This test verifies the error is reported (not a silent hang)
-  // and will be unskipped once the http2 bridge polyfill is added.
-  it.skip('npm init -y creates package.json with default values', async () => {
+  it('npm init -y creates package.json with default values', async () => {
     const { kernel, vfs, dispose } = await createIntegrationKernel({
       runtimes: ['wasmvm', 'node'],
     });

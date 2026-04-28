@@ -4,7 +4,7 @@ You are an autonomous coding agent working on a software project.
 
 ## Your Task
 
-1. Read the PRD at `prd.json` (in the same directory as this file)
+1. Read the PRD at `prd.json` (relative to this file's directory)
 2. Read the progress log at `progress.txt` (check Codebase Patterns section first)
    - Treat `archive/` as historical-only context. The active `prd.json` and its exact story acceptance commands are the only current test policy.
 3. Check you're on the correct branch from PRD `branchName`. If not, check it out or create from main.
@@ -75,6 +75,7 @@ Only update CLAUDE.md if you have **genuinely reusable knowledge** that would he
 
 - ALL commits must pass your project's quality checks (typecheck, lint, test)
 - For verification, use the exact scoped commands named in the active story or `prd.json` test policy instead of substituting older generic `pnpm test` or bare Vitest commands from archived Ralph artifacts.
+- In Ralph Docker shells, keep Rust acceptance commands pinned to the workspace toolchain via container env (`CARGO_HOME=/workspace/.cargo`, `RUSTUP_HOME=/workspace/.rustup`, and `RUSTC`/`RUSTDOC` under `/workspace/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/`); otherwise cargo can resolve the wrong rustdoc path and fail before doctests run.
 - Do NOT commit broken code
 - Keep changes focused and minimal
 - Follow existing code patterns

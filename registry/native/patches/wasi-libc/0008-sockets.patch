@@ -33,33 +33,52 @@ Import signatures match wasmvm/crates/wasi-ext/src/lib.rs exactly.
 +#      $TARGET_TRIPLE == *"wasip1" || $TARGET_TRIPLE == *"wasip1-threads" ]]; then
 +#    MUSL_OMIT_HEADERS+=("netdb.h")
 +#fi
- 
+
  # Remove all the `MUSL_OMIT_HEADERS` previously copied over.
  for OMIT_HEADER in "${MUSL_OMIT_HEADERS[@]}"; do
 
---- a/libc-top-half/musl/include/sys/socket.h	2026-03-20 04:05:48.609869966 -0700
-+++ b/libc-top-half/musl/include/sys/socket.h	2026-03-20 04:06:04.989889334 -0700
-@@ -401,3 +401 @@
+--- a/libc-top-half/musl/include/sys/socket.h
++++ b/libc-top-half/musl/include/sys/socket.h
+@@ -398,9 +398,7 @@
+ #include <__struct_sockaddr_storage.h>
+ #endif
+
 -#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
  int socket (int, int, int);
 -#endif
-@@ -411,5 +409,3 @@
+
+ #ifdef __wasilibc_unmodified_upstream /* WASI has no socketpair */
+ int socketpair (int, int, int, int [2]);
+@@ -408,35 +406,27 @@
+
+ int shutdown (int, int);
+
 -#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
  int connect (int, const struct sockaddr *, socklen_t);
  int bind (int, const struct sockaddr *, socklen_t);
  int listen (int, int);
 -#endif
-@@ -420,4 +416,2 @@
+
+ int accept (int, struct sockaddr *__restrict, socklen_t *__restrict);
+ int accept4(int, struct sockaddr *__restrict, socklen_t *__restrict, int);
+
 -#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
  int getsockname (int, struct sockaddr *__restrict, socklen_t *__restrict);
  int getpeername (int, struct sockaddr *__restrict, socklen_t *__restrict);
 -#endif
-@@ -427,4 +421,2 @@
+
+ ssize_t send (int, const void *, size_t, int);
+ ssize_t recv (int, void *, size_t, int);
 -#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
  ssize_t sendto (int, const void *, size_t, int, const struct sockaddr *, socklen_t);
  ssize_t recvfrom (int, void *__restrict, size_t, int, struct sockaddr *__restrict, socklen_t *__restrict);
 -#endif
-@@ -437,3 +429 @@
+ #ifdef __wasilibc_unmodified_upstream /* WASI has no sendmsg/recvmsg */
+ ssize_t sendmsg (int, const struct msghdr *, int);
+ ssize_t recvmsg (int, struct msghdr *, int);
+ #endif
+
+ int getsockopt (int, int, int, void *__restrict, socklen_t *__restrict);
 -#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
  int setsockopt (int, int, int, const void *, socklen_t);
 -#endif
@@ -70,19 +89,19 @@ Import signatures match wasmvm/crates/wasi-ext/src/lib.rs exactly.
 --- a/libc-bottom-half/headers/public/__struct_sockaddr_un.h
 +++ b/libc-bottom-half/headers/public/__struct_sockaddr_un.h
 @@ -5,6 +5,7 @@
- 
+
  struct sockaddr_un {
      __attribute__((aligned(__BIGGEST_ALIGNMENT__))) sa_family_t sun_family;
 +    char sun_path[108];
  };
- 
+
  #endif
 diff --git a/libc-bottom-half/sources/host_socket.c b/libc-bottom-half/sources/host_socket.c
 new file mode 100644
 index 0000000..975e62a
 --- /dev/null
 +++ b/libc-bottom-half/sources/host_socket.c
-@@ -0,0 +1,779 @@
+@@ -0,0 +1,696 @@
 +// Socket API via wasmVM host_net imports.
 +//
 +// Replaces wasi-libc's ENOSYS stubs with calls to our custom WASM imports:
@@ -779,74 +798,3 @@ index 0000000..975e62a
 +    }
 +    return ready;
 +}
-diff --git a/libc-top-half/musl/include/sys/socket.h b/libc-top-half/musl/include/sys/socket.h
-index 29189e3..b1957d4 100644
---- a/libc-top-half/musl/include/sys/socket.h
-+++ b/libc-top-half/musl/include/sys/socket.h
-@@ -398,9 +398,7 @@ struct sockaddr_storage {
- #include <__struct_sockaddr_storage.h>
- #endif
- 
--#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
- int socket (int, int, int);
--#endif
- 
- #ifdef __wasilibc_unmodified_upstream /* WASI has no socketpair */
- int socketpair (int, int, int, int [2]);
-@@ -408,35 +406,27 @@ int socketpair (int, int, int, int [2]);
- 
- int shutdown (int, int);
- 
--#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
- int connect (int, const struct sockaddr *, socklen_t);
- int bind (int, const struct sockaddr *, socklen_t);
- int listen (int, int);
--#endif
- 
- int accept (int, struct sockaddr *__restrict, socklen_t *__restrict);
- int accept4(int, struct sockaddr *__restrict, socklen_t *__restrict, int);
- 
--#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
- int getsockname (int, struct sockaddr *__restrict, socklen_t *__restrict);
- int getpeername (int, struct sockaddr *__restrict, socklen_t *__restrict);
--#endif
- 
- ssize_t send (int, const void *, size_t, int);
- ssize_t recv (int, void *, size_t, int);
--#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
- ssize_t sendto (int, const void *, size_t, int, const struct sockaddr *, socklen_t);
- ssize_t recvfrom (int, void *__restrict, size_t, int, struct sockaddr *__restrict, socklen_t *__restrict);
--#endif
- #ifdef __wasilibc_unmodified_upstream /* WASI has no sendmsg/recvmsg */
- ssize_t sendmsg (int, const struct msghdr *, int);
- ssize_t recvmsg (int, struct msghdr *, int);
- #endif
- 
- int getsockopt (int, int, int, void *__restrict, socklen_t *__restrict);
--#if (defined __wasilibc_unmodified_upstream) || (defined __wasilibc_use_wasip2)
- int setsockopt (int, int, int, const void *, socklen_t);
--#endif
- 
- #ifdef __wasilibc_unmodified_upstream /* WASI has no sockatmark */
- int sockatmark (int);
-diff --git a/scripts/install-include-headers.sh b/scripts/install-include-headers.sh
-index efa48aa..57d2ac3 100755
---- a/scripts/install-include-headers.sh
-+++ b/scripts/install-include-headers.sh
-@@ -68,11 +68,11 @@ MUSL_OMIT_HEADERS+=("sys/procfs.h" "sys/user.h" "sys/kd.h" "sys/vt.h" \
-     "sys/termios.h" "bits/termios.h" "net/if.h" "net/if_arp.h" \
-     "net/ethernet.h" "net/route.h" "netinet/if_ether.h" "netinet/ether.h" \
-     "sys/timerfd.h" "libintl.h" "sys/sysmacros.h" "aio.h")
--# Exclude `netdb.h` from all of the p1 targets.
--if [[ $TARGET_TRIPLE == *"wasi" || $TARGET_TRIPLE == *"wasi-threads" || \
--      $TARGET_TRIPLE == *"wasip1" || $TARGET_TRIPLE == *"wasip1-threads" ]]; then
--    MUSL_OMIT_HEADERS+=("netdb.h")
--fi
-+# NOTE: Agent OS provides getaddrinfo via host_net, so keep netdb.h.
-+#if [[ $TARGET_TRIPLE == *"wasi" || $TARGET_TRIPLE == *"wasi-threads" || \
-+#      $TARGET_TRIPLE == *"wasip1" || $TARGET_TRIPLE == *"wasip1-threads" ]]; then
-+#    MUSL_OMIT_HEADERS+=("netdb.h")
-+#fi
- 
- # Remove all the `MUSL_OMIT_HEADERS` previously copied over.
- for OMIT_HEADER in "${MUSL_OMIT_HEADERS[@]}"; do

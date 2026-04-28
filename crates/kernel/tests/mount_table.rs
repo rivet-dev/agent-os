@@ -104,3 +104,33 @@ fn mount_table_rejects_hardlinks_that_cross_mount_boundaries() {
         .expect_err("cross-mount hardlink should fail");
     assert_eq!(error.code(), "EXDEV");
 }
+
+#[test]
+fn mount_table_unmount_rejects_parent_mounts_with_children() {
+    let mut table = MountTable::new(MemoryFileSystem::new());
+    table
+        .mount("/a", MemoryFileSystem::new(), MountOptions::new("parent"))
+        .expect("mount parent filesystem");
+    table
+        .mount("/a/b", MemoryFileSystem::new(), MountOptions::new("child"))
+        .expect("mount child filesystem");
+
+    let error = table
+        .unmount("/a")
+        .expect_err("parent mount should stay busy while child mount exists");
+    assert_eq!(error.code(), "EBUSY");
+}
+
+#[test]
+fn mount_table_unmount_succeeds_after_children_are_removed() {
+    let mut table = MountTable::new(MemoryFileSystem::new());
+    table
+        .mount("/a", MemoryFileSystem::new(), MountOptions::new("parent"))
+        .expect("mount parent filesystem");
+    table
+        .mount("/a/b", MemoryFileSystem::new(), MountOptions::new("child"))
+        .expect("mount child filesystem");
+
+    table.unmount("/a/b").expect("unmount child first");
+    table.unmount("/a").expect("unmount parent after child");
+}

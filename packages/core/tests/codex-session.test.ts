@@ -9,7 +9,6 @@ import {
 } from "./helpers/openai-responses-mock.js";
 import {
 	REGISTRY_SOFTWARE,
-	registrySkipReason,
 } from "./helpers/registry-commands.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
@@ -118,7 +117,7 @@ async function createVm(fixtures: ResponsesFixture[]): Promise<RunningVm> {
 	};
 }
 
-describe.skipIf(registrySkipReason)("full createSession('codex')", () => {
+describe("full createSession('codex')", () => {
 	const cleanups = new Set<() => Promise<void>>();
 
 	afterEach(async () => {

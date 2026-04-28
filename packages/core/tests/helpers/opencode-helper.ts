@@ -3,6 +3,21 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentOs } from "../../src/agent-os.js";
 
+type OpenCodeProviderConfig = {
+	name?: string;
+	env?: string[];
+	npm?: string;
+	api?: string;
+	options?: Record<string, unknown>;
+	models?: Record<string, unknown>;
+};
+
+type CreateVmOpenCodeHomeOptions = {
+	permission?: Record<string, string>;
+	model?: string;
+	providers?: Record<string, OpenCodeProviderConfig>;
+};
+
 async function mkdirpVm(vm: AgentOs, targetPath: string): Promise<void> {
 	const parts = targetPath.split("/").filter(Boolean);
 	let current = "";
@@ -40,11 +55,18 @@ export function resolveOpenCodeAdapterBinPath(moduleAccessCwd: string): string {
 export async function createVmOpenCodeHome(
 	vm: AgentOs,
 	mockUrl: string,
-	permission?: Record<string, string>,
+	options: CreateVmOpenCodeHomeOptions = {},
 ): Promise<string> {
 	const homeDir = `/tmp/opencode-home-${randomUUID()}`;
 	const configPath = `${homeDir}/.config/opencode/opencode.json`;
 	await mkdirpVm(vm, `${homeDir}/.config/opencode`);
+	const providers = options.providers ?? {
+		anthropic: {
+			options: {
+				baseURL: `${mockUrl}/v1`,
+			},
+		},
+	};
 	await vm.writeFile(
 		configPath,
 		JSON.stringify(
@@ -53,15 +75,9 @@ export async function createVmOpenCodeHome(
 				autoupdate: false,
 				share: "disabled",
 				snapshot: false,
-				model: "anthropic/claude-sonnet-4-20250514",
-				...(permission ? { permission } : {}),
-				provider: {
-					anthropic: {
-						options: {
-							baseURL: `${mockUrl}/v1`,
-						},
-					},
-				},
+				model: options.model ?? "anthropic/claude-sonnet-4-20250514",
+				...(options.permission ? { permission: options.permission } : {}),
+				provider: providers,
 			},
 			null,
 			2,

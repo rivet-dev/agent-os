@@ -7,6 +7,8 @@ mod rg_cmd;
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, Read, Write};
+use std::mem::ManuallyDrop;
+use std::os::fd::FromRawFd;
 use std::path::Path;
 
 use regex::Regex;
@@ -42,6 +44,20 @@ pub fn fgrep(args: Vec<OsString>) -> i32 {
 /// Entry point for rg command.
 pub fn rg(args: Vec<OsString>) -> i32 {
     rg_cmd::rg(args)
+}
+
+struct RawStdout;
+
+impl Write for RawStdout {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut file = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(1) });
+        file.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut file = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(1) });
+        file.flush()
+    }
 }
 
 /// grep mode determines how patterns are interpreted.
@@ -134,7 +150,11 @@ fn run_grep(args: Vec<OsString>, default_mode: GrepMode) -> i32 {
             if file == "-" {
                 let stdin = io::stdin();
                 let reader = stdin.lock();
-                let label = if multiple_files { Some("(standard input)") } else { None };
+                let label = if multiple_files {
+                    Some("(standard input)")
+                } else {
+                    None
+                };
                 if search_reader(reader, label, &regex, &opts, multiple_files) {
                     any_match = true;
                 }
@@ -142,7 +162,11 @@ fn run_grep(args: Vec<OsString>, default_mode: GrepMode) -> i32 {
                 match std::fs::File::open(file) {
                     Ok(f) => {
                         let reader = io::BufReader::new(f);
-                        let label = if multiple_files { Some(file.as_str()) } else { None };
+                        let label = if multiple_files {
+                            Some(file.as_str())
+                        } else {
+                            None
+                        };
                         if search_reader(reader, label, &regex, &opts, multiple_files) {
                             any_match = true;
                         }
@@ -155,7 +179,11 @@ fn run_grep(args: Vec<OsString>, default_mode: GrepMode) -> i32 {
         }
     }
 
-    if any_match { 0 } else { 1 }
+    if any_match {
+        0
+    } else {
+        1
+    }
 }
 
 fn parse_args(args: &[String], default_mode: GrepMode) -> Result<GrepOptions, String> {
@@ -193,7 +221,7 @@ fn parse_args(args: &[String], default_mode: GrepMode) -> Result<GrepOptions, St
                     'H' => {} // force filename
                     'e' => {
                         // -e PATTERN (rest of this flag group or next arg)
-                        let rest: String = chars[j+1..].iter().collect();
+                        let rest: String = chars[j + 1..].iter().collect();
                         if !rest.is_empty() {
                             opts.patterns.push(rest);
                             pattern_from_args = true;
@@ -234,9 +262,11 @@ fn parse_args(args: &[String], default_mode: GrepMode) -> Result<GrepOptions, St
                         if i >= args.len() {
                             return Err("option requires an argument -- 'm'".to_string());
                         }
-                        opts.max_count = Some(args[i].parse().map_err(|_| {
-                            format!("invalid max count '{}'", args[i])
-                        })?);
+                        opts.max_count = Some(
+                            args[i]
+                                .parse()
+                                .map_err(|_| format!("invalid max count '{}'", args[i]))?,
+                        );
                         j = chars.len();
                         continue;
                     }
@@ -265,9 +295,11 @@ fn parse_args(args: &[String], default_mode: GrepMode) -> Result<GrepOptions, St
                     pattern_from_args = true;
                 }
                 _ if arg.starts_with("--max-count=") => {
-                    opts.max_count = Some(arg[12..].parse().map_err(|_| {
-                        format!("invalid max count '{}'", &arg[12..])
-                    })?);
+                    opts.max_count = Some(
+                        arg[12..]
+                            .parse()
+                            .map_err(|_| format!("invalid max count '{}'", &arg[12..]))?,
+                    );
                 }
                 _ => {
                     return Err(format!("unrecognized option '{}'", arg));
@@ -316,7 +348,9 @@ fn build_regex(opts: &GrepOptions) -> Result<Regex, String> {
     let mut builder = regex::RegexBuilder::new(&pattern);
     builder.case_insensitive(opts.ignore_case);
 
-    builder.build().map_err(|e| format!("invalid pattern: {}", e))
+    builder
+        .build()
+        .map_err(|e| format!("invalid pattern: {}", e))
 }
 
 /// Convert a single pattern string to a regex pattern based on mode.
@@ -349,13 +383,34 @@ fn convert_bre_to_ere(bre: &str) -> String {
     while i < chars.len() {
         if chars[i] == '\\' && i + 1 < chars.len() {
             match chars[i + 1] {
-                '(' => { result.push('('); i += 2; }
-                ')' => { result.push(')'); i += 2; }
-                '{' => { result.push('{'); i += 2; }
-                '}' => { result.push('}'); i += 2; }
-                '+' => { result.push('+'); i += 2; }
-                '?' => { result.push('?'); i += 2; }
-                '|' => { result.push('|'); i += 2; }
+                '(' => {
+                    result.push('(');
+                    i += 2;
+                }
+                ')' => {
+                    result.push(')');
+                    i += 2;
+                }
+                '{' => {
+                    result.push('{');
+                    i += 2;
+                }
+                '}' => {
+                    result.push('}');
+                    i += 2;
+                }
+                '+' => {
+                    result.push('+');
+                    i += 2;
+                }
+                '?' => {
+                    result.push('?');
+                    i += 2;
+                }
+                '|' => {
+                    result.push('|');
+                    i += 2;
+                }
                 '1'..='9' => {
                     // Backreference - not supported in Rust regex, pass through
                     result.push('\\');
@@ -371,11 +426,26 @@ fn convert_bre_to_ere(bre: &str) -> String {
         } else {
             match chars[i] {
                 // In BRE, unescaped (, ), {, }, +, ? are literal
-                '(' => { result.push_str("\\("); i += 1; }
-                ')' => { result.push_str("\\)"); i += 1; }
-                '{' => { result.push_str("\\{"); i += 1; }
-                '}' => { result.push_str("\\}"); i += 1; }
-                _ => { result.push(chars[i]); i += 1; }
+                '(' => {
+                    result.push_str("\\(");
+                    i += 1;
+                }
+                ')' => {
+                    result.push_str("\\)");
+                    i += 1;
+                }
+                '{' => {
+                    result.push_str("\\{");
+                    i += 1;
+                }
+                '}' => {
+                    result.push_str("\\}");
+                    i += 1;
+                }
+                _ => {
+                    result.push(chars[i]);
+                    i += 1;
+                }
             }
         }
     }
@@ -394,8 +464,7 @@ fn search_reader<R: Read>(
     let buf_reader = io::BufReader::new(reader);
     let mut match_count: usize = 0;
     let mut line_num: usize = 0;
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+    let mut out = RawStdout;
 
     for line_result in buf_reader.lines() {
         let line = match line_result {
@@ -405,7 +474,11 @@ fn search_reader<R: Read>(
         line_num += 1;
 
         let is_match = regex.is_match(&line);
-        let is_match = if opts.invert_match { !is_match } else { is_match };
+        let is_match = if opts.invert_match {
+            !is_match
+        } else {
+            is_match
+        };
 
         if is_match {
             match_count += 1;
@@ -460,6 +533,8 @@ fn search_reader<R: Read>(
             let _ = writeln!(out, "(standard input)");
         }
     }
+
+    let _ = out.flush();
 
     match_count > 0
 }

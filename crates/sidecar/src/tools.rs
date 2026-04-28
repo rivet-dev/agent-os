@@ -1,8 +1,8 @@
 use crate::protocol::{
-    RegisterToolkitRequest, RegisteredToolDefinition, RequestFrame, ResponsePayload,
-    ToolInvocationRequest, ToolkitRegisteredResponse,
+    PermissionMode, PermissionsPolicy, RegisterToolkitRequest, RegisteredToolDefinition,
+    RequestFrame, ResponsePayload, ToolInvocationRequest, ToolkitRegisteredResponse,
 };
-use crate::service::{kernel_error, normalize_path, DispatchResult};
+use crate::service::{evaluate_permissions_policy, kernel_error, normalize_path, DispatchResult};
 use crate::state::{BridgeError, VmState, TOOL_DRIVER_NAME, TOOL_MASTER_COMMAND};
 use crate::{NativeSidecar, NativeSidecarBridge, SidecarError};
 use agent_os_kernel::command_registry::CommandDriver;
@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
 pub(crate) const MAX_TOOL_DESCRIPTION_LENGTH: usize = 200;
+const TOOL_INVOKE_CAPABILITY: &str = "tool.invoke";
 
 #[derive(Debug)]
 pub(crate) enum ToolCommandResolution {
@@ -51,14 +52,51 @@ where
     validate_toolkit_registration(&payload)?;
 
     let registered_name = payload.name.clone();
-    let (command_count, prompt_markdown) = {
+    let (original_permissions, original_toolkits, original_command_guest_paths) = {
+        let vm = sidecar.vms.get(&vm_id).expect("owned VM should exist");
+        (
+            vm.configuration.permissions.clone(),
+            vm.toolkits.clone(),
+            vm.command_guest_paths.clone(),
+        )
+    };
+    sidecar
+        .bridge
+        .set_vm_permissions(&vm_id, &PermissionsPolicy::allow_all())?;
+    let registration_result = (|| -> Result<_, SidecarError> {
         let vm = sidecar.vms.get_mut(&vm_id).expect("owned VM should exist");
+        ensure_toolkit_name_available(&vm.toolkits, &registered_name)?;
         vm.toolkits.insert(registered_name.clone(), payload);
         refresh_tool_registry(vm)?;
-        (
+        Ok::<_, SidecarError>((
             tool_command_names(vm).len() as u32,
             generate_tool_reference(vm.toolkits.values()),
-        )
+        ))
+    })();
+    let (command_count, prompt_markdown) = match registration_result {
+        Ok(result) => {
+            sidecar
+                .bridge
+                .set_vm_permissions(&vm_id, &original_permissions)?;
+            result
+        }
+        Err(error) => {
+            let vm = sidecar.vms.get_mut(&vm_id).expect("owned VM should exist");
+            vm.toolkits = original_toolkits;
+            vm.command_guest_paths = original_command_guest_paths;
+            match sidecar.bridge.restore_vm_permissions_fail_closed(
+                &vm_id,
+                &original_permissions,
+                "toolkit registration rollback",
+                &error,
+            ) {
+                Ok(()) => return Err(error),
+                Err(rollback_error) => {
+                    vm.configuration.permissions = PermissionsPolicy::deny_all();
+                    return Err(rollback_error);
+                }
+            }
+        }
     };
 
     Ok(DispatchResult {
@@ -115,6 +153,10 @@ pub(crate) fn is_tool_command(vm: &VmState, command: &str) -> bool {
     identify_tool_command(vm, command).is_some()
 }
 
+pub(crate) fn normalized_tool_command_name(command: &str) -> Option<String> {
+    tool_command_name_from_specifier(command).map(ToOwned::to_owned)
+}
+
 fn identify_tool_command(vm: &VmState, command: &str) -> Option<ToolCommand> {
     let command_name = tool_command_name_from_specifier(command).unwrap_or(command);
 
@@ -130,12 +172,18 @@ fn identify_tool_command(vm: &VmState, command: &str) -> Option<ToolCommand> {
 
 fn tool_command_name_from_specifier<'a>(command: &'a str) -> Option<&'a str> {
     let file_name = Path::new(command).file_name()?.to_str()?;
+    let normalized = normalize_path(command);
+    let registered_internal_path = normalized
+        .strip_prefix("/__agentos/commands/")
+        .and_then(|suffix| suffix.rsplit('/').next())
+        .is_some_and(|name| name == file_name);
     if !matches!(
-        normalize_path(command).as_str(),
+        normalized.as_str(),
         path if path == format!("/bin/{file_name}")
             || path == format!("/usr/bin/{file_name}")
             || path == format!("/usr/local/bin/{file_name}")
-    ) {
+    ) && !registered_internal_path
+    {
         return None;
     }
     Some(file_name)
@@ -265,6 +313,11 @@ fn build_invocation_resolution(
             exit_code: 1,
         };
     };
+    let permission_mode =
+        tool_invocation_permission_mode(&vm.configuration.permissions, toolkit_name, tool_name);
+    if permission_mode != PermissionMode::Allow {
+        return denied_tool_invocation_resolution(permission_mode, toolkit_name, tool_name);
+    }
     let input = match resolve_invocation_input(vm, &tool, cli_args, guest_cwd) {
         Ok(input) => input,
         Err(message) => {
@@ -272,7 +325,7 @@ fn build_invocation_resolution(
                 stdout: Vec::new(),
                 stderr: format_tool_failure_output(&message),
                 exit_code: 1,
-            }
+            };
         }
     };
     let timeout_ms = tool.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS);
@@ -292,6 +345,53 @@ fn build_invocation_resolution(
     }
 }
 
+fn ensure_toolkit_name_available(
+    toolkits: &BTreeMap<String, RegisterToolkitRequest>,
+    toolkit_name: &str,
+) -> Result<(), SidecarError> {
+    if toolkits.contains_key(toolkit_name) {
+        return Err(SidecarError::Conflict(format!(
+            "toolkit already registered: {toolkit_name}"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn tool_invocation_permission_mode(
+    permissions: &PermissionsPolicy,
+    toolkit_name: &str,
+    tool_name: &str,
+) -> PermissionMode {
+    let tool_key = tool_invocation_resource(toolkit_name, tool_name);
+    evaluate_permissions_policy(permissions, "tool", TOOL_INVOKE_CAPABILITY, Some(&tool_key))
+}
+
+fn denied_tool_invocation_resolution(
+    permission_mode: PermissionMode,
+    toolkit_name: &str,
+    tool_name: &str,
+) -> ToolCommandResolution {
+    let tool_key = tool_invocation_resource(toolkit_name, tool_name);
+    let message = match permission_mode {
+        PermissionMode::Allow => unreachable!("allowed tool invocations should not be denied"),
+        PermissionMode::Ask => {
+            format!("EACCES: permission prompt required for {TOOL_INVOKE_CAPABILITY} on {tool_key}")
+        }
+        PermissionMode::Deny => {
+            format!("EACCES: blocked by {TOOL_INVOKE_CAPABILITY} policy for {tool_key}")
+        }
+    };
+    ToolCommandResolution::Immediate {
+        stdout: Vec::new(),
+        stderr: format_tool_failure_output(&message),
+        exit_code: 1,
+    }
+}
+
+fn tool_invocation_resource(toolkit_name: &str, tool_name: &str) -> String {
+    format!("{toolkit_name}:{tool_name}")
+}
+
 fn resolve_invocation_input(
     vm: &mut VmState,
     tool: &RegisteredToolDefinition,
@@ -302,8 +402,10 @@ fn resolve_invocation_input(
         let value = cli_args
             .get(1)
             .ok_or_else(|| String::from("Flag --json requires a value"))?;
-        return serde_json::from_str(value)
-            .map_err(|error| format!("Invalid JSON for --json: {error}"));
+        let input = serde_json::from_str(value)
+            .map_err(|error| format!("Invalid JSON for --json: {error}"))?;
+        validate_tool_input(&tool.input_schema, &input).map_err(|error| error.to_string())?;
+        return Ok(input);
     }
 
     if cli_args.first().is_some_and(|arg| arg == "--json-file") {
@@ -321,10 +423,452 @@ fn resolve_invocation_input(
             .map_err(|error| format!("Invalid JSON file: {error}"))?;
         let text =
             String::from_utf8(bytes).map_err(|error| format!("Invalid JSON file: {error}"))?;
-        return serde_json::from_str(&text).map_err(|error| format!("Invalid JSON file: {error}"));
+        let input =
+            serde_json::from_str(&text).map_err(|error| format!("Invalid JSON file: {error}"))?;
+        validate_tool_input(&tool.input_schema, &input).map_err(|error| error.to_string())?;
+        return Ok(input);
     }
 
     parse_argv(&tool.input_schema, cli_args)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolInputSchemaViolation {
+    path: String,
+    expected: String,
+    actual: String,
+}
+
+impl ToolInputSchemaViolation {
+    fn new(
+        path: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            expected: expected.into(),
+            actual: actual.into(),
+        }
+    }
+}
+
+impl fmt::Display for ToolInputSchemaViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ToolInputSchemaViolation at {}: expected {}, got {}",
+            self.path, self.expected, self.actual
+        )
+    }
+}
+
+fn validate_tool_input(schema: &Value, input: &Value) -> Result<(), ToolInputSchemaViolation> {
+    validate_tool_input_at_path(schema, input, "$")
+}
+
+fn validate_tool_input_at_path(
+    schema: &Value,
+    input: &Value,
+    path: &str,
+) -> Result<(), ToolInputSchemaViolation> {
+    if schema.is_null() || schema.as_object().is_some_and(|object| object.is_empty()) {
+        return Ok(());
+    }
+
+    if let Some(branches) = schema.get("anyOf").and_then(Value::as_array) {
+        return validate_schema_branches(branches, input, path, "anyOf");
+    }
+    if let Some(branches) = schema.get("oneOf").and_then(Value::as_array) {
+        return validate_schema_branches(branches, input, path, "oneOf");
+    }
+
+    if let Some(enum_values) = schema.get("enum").and_then(Value::as_array) {
+        if enum_values.iter().any(|candidate| candidate == input) {
+            return Ok(());
+        }
+        return Err(ToolInputSchemaViolation::new(
+            path,
+            format!(
+                "one of {}",
+                enum_values
+                    .iter()
+                    .map(compact_json)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            describe_value(input),
+        ));
+    }
+
+    if let Some(expected) = schema.get("const") {
+        if expected == input {
+            return Ok(());
+        }
+        return Err(ToolInputSchemaViolation::new(
+            path,
+            format!("constant {}", compact_json(expected)),
+            describe_value(input),
+        ));
+    }
+
+    match schema.get("type") {
+        Some(Value::String(expected_type)) => {
+            validate_typed_tool_input(schema, input, path, expected_type)
+        }
+        Some(Value::Array(expected_types)) => {
+            let mut first_error = None;
+            for expected_type in expected_types.iter().filter_map(Value::as_str) {
+                match validate_typed_tool_input(schema, input, path, expected_type) {
+                    Ok(()) => return Ok(()),
+                    Err(error) if first_error.is_none() => first_error = Some(error),
+                    Err(_) => {}
+                }
+            }
+            Err(first_error.unwrap_or_else(|| {
+                ToolInputSchemaViolation::new(
+                    path,
+                    describe_expected(schema),
+                    describe_value(input),
+                )
+            }))
+        }
+        Some(_) => Ok(()),
+        None if has_object_keywords(schema) => {
+            validate_typed_tool_input(schema, input, path, "object")
+        }
+        None => Ok(()),
+    }
+}
+
+fn validate_schema_branches(
+    branches: &[Value],
+    input: &Value,
+    path: &str,
+    keyword: &str,
+) -> Result<(), ToolInputSchemaViolation> {
+    let mut first_error = None;
+    for branch in branches {
+        match validate_tool_input_at_path(branch, input, path) {
+            Ok(()) => return Ok(()),
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Err(_) => {}
+        }
+    }
+
+    Err(first_error.unwrap_or_else(|| {
+        ToolInputSchemaViolation::new(
+            path,
+            format!(
+                "{keyword} branch ({})",
+                branches
+                    .iter()
+                    .map(describe_expected)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ),
+            describe_value(input),
+        )
+    }))
+}
+
+fn validate_typed_tool_input(
+    schema: &Value,
+    input: &Value,
+    path: &str,
+    expected_type: &str,
+) -> Result<(), ToolInputSchemaViolation> {
+    match expected_type {
+        "null" => {
+            if input.is_null() {
+                Ok(())
+            } else {
+                Err(type_violation(path, expected_type, input))
+            }
+        }
+        "boolean" => {
+            if input.is_boolean() {
+                Ok(())
+            } else {
+                Err(type_violation(path, expected_type, input))
+            }
+        }
+        "string" => validate_string_tool_input(schema, input, path),
+        "number" => validate_number_tool_input(schema, input, path, false),
+        "integer" => validate_number_tool_input(schema, input, path, true),
+        "array" => validate_array_tool_input(schema, input, path),
+        "object" => validate_object_tool_input(schema, input, path),
+        _ => Ok(()),
+    }
+}
+
+fn validate_string_tool_input(
+    schema: &Value,
+    input: &Value,
+    path: &str,
+) -> Result<(), ToolInputSchemaViolation> {
+    let Some(value) = input.as_str() else {
+        return Err(type_violation(path, "string", input));
+    };
+
+    if let Some(min_length) = schema.get("minLength").and_then(Value::as_u64) {
+        if value.chars().count() < min_length as usize {
+            return Err(ToolInputSchemaViolation::new(
+                path,
+                format!("string with minLength {min_length}"),
+                format!("string length {}", value.chars().count()),
+            ));
+        }
+    }
+
+    if let Some(max_length) = schema.get("maxLength").and_then(Value::as_u64) {
+        if value.chars().count() > max_length as usize {
+            return Err(ToolInputSchemaViolation::new(
+                path,
+                format!("string with maxLength {max_length}"),
+                format!("string length {}", value.chars().count()),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_number_tool_input(
+    schema: &Value,
+    input: &Value,
+    path: &str,
+    expect_integer: bool,
+) -> Result<(), ToolInputSchemaViolation> {
+    let Some(number) = input.as_f64() else {
+        return Err(type_violation(
+            path,
+            if expect_integer { "integer" } else { "number" },
+            input,
+        ));
+    };
+
+    if expect_integer && number.fract() != 0.0 {
+        return Err(type_violation(path, "integer", input));
+    }
+
+    if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64) {
+        if number < minimum {
+            return Err(ToolInputSchemaViolation::new(
+                path,
+                format!(
+                    "{} >= {}",
+                    if expect_integer { "integer" } else { "number" },
+                    minimum
+                ),
+                compact_json(input),
+            ));
+        }
+    }
+
+    if let Some(minimum) = schema.get("exclusiveMinimum").and_then(Value::as_f64) {
+        if number <= minimum {
+            return Err(ToolInputSchemaViolation::new(
+                path,
+                format!(
+                    "{} > {}",
+                    if expect_integer { "integer" } else { "number" },
+                    minimum
+                ),
+                compact_json(input),
+            ));
+        }
+    }
+
+    if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64) {
+        if number > maximum {
+            return Err(ToolInputSchemaViolation::new(
+                path,
+                format!(
+                    "{} <= {}",
+                    if expect_integer { "integer" } else { "number" },
+                    maximum
+                ),
+                compact_json(input),
+            ));
+        }
+    }
+
+    if let Some(maximum) = schema.get("exclusiveMaximum").and_then(Value::as_f64) {
+        if number >= maximum {
+            return Err(ToolInputSchemaViolation::new(
+                path,
+                format!(
+                    "{} < {}",
+                    if expect_integer { "integer" } else { "number" },
+                    maximum
+                ),
+                compact_json(input),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_array_tool_input(
+    schema: &Value,
+    input: &Value,
+    path: &str,
+) -> Result<(), ToolInputSchemaViolation> {
+    let Some(items) = input.as_array() else {
+        return Err(type_violation(path, "array", input));
+    };
+
+    if let Some(min_items) = schema.get("minItems").and_then(Value::as_u64) {
+        if items.len() < min_items as usize {
+            return Err(ToolInputSchemaViolation::new(
+                path,
+                format!("array with minItems {min_items}"),
+                format!("array length {}", items.len()),
+            ));
+        }
+    }
+
+    if let Some(max_items) = schema.get("maxItems").and_then(Value::as_u64) {
+        if items.len() > max_items as usize {
+            return Err(ToolInputSchemaViolation::new(
+                path,
+                format!("array with maxItems {max_items}"),
+                format!("array length {}", items.len()),
+            ));
+        }
+    }
+
+    if let Some(item_schema) = schema.get("items") {
+        for (index, item) in items.iter().enumerate() {
+            validate_tool_input_at_path(item_schema, item, &format!("{path}[{index}]"))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_object_tool_input(
+    schema: &Value,
+    input: &Value,
+    path: &str,
+) -> Result<(), ToolInputSchemaViolation> {
+    let Some(object) = input.as_object() else {
+        return Err(type_violation(path, "object", input));
+    };
+
+    let properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    for field in required.iter().filter_map(Value::as_str) {
+        if !object.contains_key(field) {
+            let field_path = format!("{path}.{field}");
+            let expected = properties
+                .get(field)
+                .map(describe_expected)
+                .unwrap_or_else(|| String::from("required value"));
+            return Err(ToolInputSchemaViolation::new(
+                field_path,
+                expected,
+                "missing value",
+            ));
+        }
+    }
+
+    for (field, value) in object {
+        let field_path = format!("{path}.{field}");
+        if let Some(field_schema) = properties.get(field) {
+            validate_tool_input_at_path(field_schema, value, &field_path)?;
+            continue;
+        }
+
+        match schema.get("additionalProperties") {
+            Some(Value::Bool(false)) => {
+                return Err(ToolInputSchemaViolation::new(
+                    field_path,
+                    "no additional properties",
+                    describe_value(value),
+                ));
+            }
+            Some(additional_schema) => {
+                validate_tool_input_at_path(additional_schema, value, &field_path)?;
+            }
+            None => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn has_object_keywords(schema: &Value) -> bool {
+    schema.get("properties").is_some()
+        || schema.get("required").is_some()
+        || schema.get("additionalProperties").is_some()
+}
+
+fn type_violation(path: &str, expected: &str, input: &Value) -> ToolInputSchemaViolation {
+    ToolInputSchemaViolation::new(path, expected, describe_value(input))
+}
+
+fn describe_expected(schema: &Value) -> String {
+    if let Some(enum_values) = schema.get("enum").and_then(Value::as_array) {
+        return format!(
+            "one of {}",
+            enum_values
+                .iter()
+                .map(compact_json)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    if let Some(expected) = schema.get("const") {
+        return format!("constant {}", compact_json(expected));
+    }
+
+    match schema.get("type") {
+        Some(Value::String(expected_type)) => expected_type.clone(),
+        Some(Value::Array(expected_types)) => expected_types
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" | "),
+        _ if has_object_keywords(schema) => String::from("object"),
+        _ => String::from("value"),
+    }
+}
+
+fn describe_value(value: &Value) -> String {
+    match value {
+        Value::Null => String::from("null"),
+        Value::Bool(_) => String::from("boolean"),
+        Value::Number(number) => {
+            let is_integer = number.as_i64().is_some()
+                || number.as_u64().is_some()
+                || number.as_f64().is_some_and(|float| float.fract() == 0.0);
+            if is_integer {
+                String::from("integer")
+            } else {
+                String::from("number")
+            }
+        }
+        Value::String(_) => String::from("string"),
+        Value::Array(_) => String::from("array"),
+        Value::Object(_) => String::from("object"),
+    }
+}
+
+fn compact_json(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| String::from("<invalid json>"))
 }
 
 fn parse_argv(schema: &Value, argv: &[String]) -> Result<Value, String> {
@@ -906,6 +1450,55 @@ mod tests {
     }
 
     #[test]
+    fn validates_json_tool_input_against_schema() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer", "minimum": 0 },
+                "label": { "type": "string" }
+            },
+            "required": ["count", "label"],
+            "additionalProperties": false,
+        });
+
+        validate_tool_input(&schema, &json!({ "count": 2, "label": "ok" }))
+            .expect("valid input should pass");
+
+        let error = validate_tool_input(&schema, &json!({ "count": "oops", "label": 4 }))
+            .expect_err("wrong types should fail");
+        assert_eq!(
+            error.to_string(),
+            "ToolInputSchemaViolation at $.count: expected integer, got string"
+        );
+    }
+
+    #[test]
+    fn rejects_numeric_bounds_and_additional_properties_for_json_tool_input() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["count"],
+            "additionalProperties": false,
+        });
+
+        let negative = validate_tool_input(&schema, &json!({ "count": -1 }))
+            .expect_err("minimum should reject negative numbers");
+        assert_eq!(
+            negative.to_string(),
+            "ToolInputSchemaViolation at $.count: expected integer >= 0, got -1"
+        );
+
+        let extra = validate_tool_input(&schema, &json!({ "count": 1, "extra": true }))
+            .expect_err("unexpected properties should fail");
+        assert_eq!(
+            extra.to_string(),
+            "ToolInputSchemaViolation at $.extra: expected no additional properties, got boolean"
+        );
+    }
+
+    #[test]
     fn generates_prompt_markdown() {
         let markdown = generate_tool_reference([&RegisterToolkitRequest {
             name: String::from("browser"),
@@ -991,6 +1584,64 @@ mod tests {
                 MAX_TOOL_DESCRIPTION_LENGTH + 1,
                 MAX_TOOL_DESCRIPTION_LENGTH
             )
+        );
+    }
+
+    #[test]
+    fn tools_reject_duplicate_toolkit_registration() {
+        let toolkits = BTreeMap::from([(
+            String::from("browser"),
+            toolkit_with_descriptions(
+                String::from("Browser automation"),
+                String::from("Take a screenshot"),
+            ),
+        )]);
+
+        let error =
+            ensure_toolkit_name_available(&toolkits, "browser").expect_err("duplicate rejected");
+        assert_eq!(
+            error,
+            SidecarError::Conflict(String::from("toolkit already registered: browser"))
+        );
+    }
+
+    #[test]
+    fn tools_deny_tool_invocation_without_explicit_permission() {
+        let permissions = PermissionsPolicy::deny_all();
+
+        assert_eq!(
+            tool_invocation_permission_mode(&permissions, "browser", "screenshot"),
+            PermissionMode::Deny
+        );
+    }
+
+    #[test]
+    fn tools_allow_tool_invocation_with_matching_permission() {
+        let permissions = PermissionsPolicy {
+            fs: None,
+            network: None,
+            child_process: None,
+            process: None,
+            env: None,
+            tool: Some(crate::protocol::PatternPermissionScope::Rules(
+                crate::protocol::PatternPermissionRuleSet {
+                    default: Some(PermissionMode::Deny),
+                    rules: vec![crate::protocol::PatternPermissionRule {
+                        mode: PermissionMode::Allow,
+                        operations: vec![String::from("invoke")],
+                        patterns: vec![String::from("browser:screenshot")],
+                    }],
+                },
+            )),
+        };
+
+        assert_eq!(
+            tool_invocation_permission_mode(&permissions, "browser", "screenshot"),
+            PermissionMode::Allow
+        );
+        assert_eq!(
+            tool_invocation_permission_mode(&permissions, "browser", "click"),
+            PermissionMode::Deny
         );
     }
 }

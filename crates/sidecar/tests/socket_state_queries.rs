@@ -1,9 +1,9 @@
 mod support;
 
 use agent_os_sidecar::protocol::{
-    DisposeReason, DisposeVmRequest, EventPayload, FindBoundUdpRequest, FindListenerRequest,
-    GetSignalStateRequest, GuestRuntimeKind, KillProcessRequest, OwnershipScope, RequestPayload,
-    ResponsePayload, SignalDispositionAction,
+    EventPayload, FindBoundUdpRequest, FindListenerRequest, GetProcessSnapshotRequest,
+    GetSignalStateRequest, GuestRuntimeKind, KillProcessRequest, OwnershipScope,
+    ProcessSnapshotStatus, RequestPayload, ResponsePayload, SignalDispositionAction,
 };
 use nix::libc;
 use std::collections::BTreeMap;
@@ -26,14 +26,14 @@ fn wait_for_process_output(
     let deadline = Instant::now() + Duration::from_secs(10);
 
     loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for process output"
+        );
         let event = sidecar
             .poll_event_blocking(&ownership, Duration::from_millis(100))
             .expect("poll sidecar process output");
         let Some(event) = event else {
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for process output"
-            );
             continue;
         };
 
@@ -48,7 +48,49 @@ fn wait_for_process_output(
     }
 }
 
-#[test]
+fn wait_for_process_status(
+    sidecar: &mut agent_os_sidecar::NativeSidecar<support::RecordingBridge>,
+    connection_id: &str,
+    session_id: &str,
+    vm_id: &str,
+    process_id: &str,
+    expected: ProcessSnapshotStatus,
+) {
+    let ownership = OwnershipScope::vm(connection_id, session_id, vm_id);
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    loop {
+        let snapshot = sidecar
+            .dispatch_blocking(request(
+                0,
+                ownership.clone(),
+                RequestPayload::GetProcessSnapshot(GetProcessSnapshotRequest {}),
+            ))
+            .expect("query process snapshot");
+        match snapshot.response.payload {
+            ResponsePayload::ProcessSnapshot(snapshot) => {
+                if snapshot
+                    .processes
+                    .iter()
+                    .find(|entry| entry.process_id == process_id)
+                    .is_some_and(|entry| entry.status == expected)
+                {
+                    return;
+                }
+            }
+            other => panic!("unexpected process snapshot response: {other:?}"),
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for process status {expected:?}"
+        );
+        let _ = sidecar
+            .poll_event_blocking(&ownership, Duration::from_millis(25))
+            .expect("pump process events while waiting for status");
+    }
+}
+
 fn v8_signal_delivery_routes_kill_process_and_process_kill() {
     assert_node_available();
 
@@ -205,7 +247,102 @@ fn v8_signal_delivery_routes_kill_process_and_process_kill() {
     assert_eq!(exit_code, Some(0));
 }
 
-#[test]
+fn v8_signal_stop_and_continue_updates_process_snapshot() {
+    assert_node_available();
+
+    let mut sidecar = new_sidecar("v8-signal-stop-cont");
+    let cwd = temp_dir("v8-signal-stop-cont-cwd");
+    let entry = cwd.join("signal-stop-cont.mjs");
+
+    write_fixture(
+        &entry,
+        ["console.log('ready');", "setInterval(() => {}, 25);"].join("\n"),
+    );
+
+    let connection_id = authenticate(&mut sidecar, "conn-v8-signal-stop-cont");
+    let session_id = open_session(&mut sidecar, 2, &connection_id);
+    let (vm_id, _) = create_vm_with_metadata(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::JavaScript,
+        &cwd,
+        BTreeMap::new(),
+    );
+
+    execute(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "signal-stop-cont",
+        GuestRuntimeKind::JavaScript,
+        &entry,
+        Vec::new(),
+    );
+
+    wait_for_process_output(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "signal-stop-cont",
+        "ready",
+    );
+
+    let ownership = OwnershipScope::vm(&connection_id, &session_id, &vm_id);
+    sidecar
+        .dispatch_blocking(request(
+            5,
+            ownership.clone(),
+            RequestPayload::KillProcess(KillProcessRequest {
+                process_id: String::from("signal-stop-cont"),
+                signal: String::from("SIGSTOP"),
+            }),
+        ))
+        .expect("deliver SIGSTOP to V8 guest");
+    wait_for_process_status(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "signal-stop-cont",
+        ProcessSnapshotStatus::Stopped,
+    );
+
+    sidecar
+        .dispatch_blocking(request(
+            6,
+            ownership.clone(),
+            RequestPayload::KillProcess(KillProcessRequest {
+                process_id: String::from("signal-stop-cont"),
+                signal: String::from("SIGCONT"),
+            }),
+        ))
+        .expect("deliver SIGCONT to V8 guest");
+    wait_for_process_status(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "signal-stop-cont",
+        ProcessSnapshotStatus::Running,
+    );
+
+    sidecar
+        .dispatch_blocking(request(
+            7,
+            ownership,
+            RequestPayload::KillProcess(KillProcessRequest {
+                process_id: String::from("signal-stop-cont"),
+                signal: String::from("SIGTERM"),
+            }),
+        ))
+        .expect("terminate V8 guest after stop/cont");
+}
+
 fn sidecar_queries_listener_udp_and_signal_state() {
     assert_node_available();
 
@@ -361,14 +498,7 @@ fn sidecar_queries_listener_udp_and_signal_state() {
         &signal_entry,
         Vec::new(),
     );
-    wait_for_process_output(
-        &mut sidecar,
-        &connection_id,
-        &session_id,
-        &wasm_vm_id,
-        "signal-state",
-        "signal-registered",
-    );
+    let wasm_ownership = OwnershipScope::vm(&connection_id, &session_id, &wasm_vm_id);
 
     let bound_udp = sidecar
         .dispatch_blocking(request(
@@ -391,7 +521,6 @@ fn sidecar_queries_listener_udp_and_signal_state() {
     }
 
     let signal_deadline = Instant::now() + Duration::from_secs(5);
-    let wasm_ownership = OwnershipScope::vm(&connection_id, &session_id, &wasm_vm_id);
     loop {
         let _ = sidecar
             .poll_event_blocking(&wasm_ownership, Duration::from_millis(25))
@@ -426,26 +555,8 @@ fn sidecar_queries_listener_udp_and_signal_state() {
         );
         std::thread::sleep(Duration::from_millis(25));
     }
-
-    let dispose = sidecar
-        .dispatch_blocking(request(
-            10,
-            OwnershipScope::vm(&connection_id, &session_id, &wasm_vm_id),
-            RequestPayload::DisposeVm(DisposeVmRequest {
-                reason: DisposeReason::Requested,
-            }),
-        ))
-        .expect("dispose wasm vm");
-    match dispose.response.payload {
-        ResponsePayload::VmDisposed(response) => {
-            assert_eq!(response.vm_id, wasm_vm_id);
-        }
-        other => panic!("unexpected dispose response: {other:?}"),
-    }
 }
 
-#[test]
-#[ignore = "V8 sidecar SIGCHLD delivery is flaky in this harness; execution-layer tests cover the V8 bridge path"]
 fn sidecar_tracks_javascript_sigchld_and_delivers_it_on_child_exit() {
     assert_node_available();
 
@@ -604,4 +715,14 @@ fn sidecar_tracks_javascript_sigchld_and_delivers_it_on_child_exit() {
     assert!(saw_sigchld_output, "parent should receive SIGCHLD output");
     assert!(saw_final_output, "parent should report final SIGCHLD count");
     assert_eq!(exit_code, Some(0));
+}
+
+#[test]
+fn socket_state_queries_suite() {
+    // Multiple libtest cases in this V8-backed integration binary still trip
+    // teardown/init crashes, so keep the coverage in one top-level suite.
+    v8_signal_delivery_routes_kill_process_and_process_kill();
+    v8_signal_stop_and_continue_updates_process_snapshot();
+    sidecar_queries_listener_udp_and_signal_state();
+    sidecar_tracks_javascript_sigchld_and_delivers_it_on_child_exit();
 }

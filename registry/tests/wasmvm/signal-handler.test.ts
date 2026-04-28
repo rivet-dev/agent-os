@@ -12,6 +12,7 @@ import {
   COMMANDS_DIR,
   C_BUILD_DIR,
   createKernel,
+  describeIf,
   hasWasmBinaries,
   SIGTERM,
 } from '../helpers.js';
@@ -118,7 +119,7 @@ class SimpleVFS {
   }
 }
 
-describe.skipIf(skipReason())('WasmVM signal handler integration', { timeout: 30_000 }, () => {
+describeIf(!skipReason(), 'WasmVM signal handler integration', { timeout: 30_000 }, () => {
   let kernel: Kernel;
   let vfs: SimpleVFS;
 

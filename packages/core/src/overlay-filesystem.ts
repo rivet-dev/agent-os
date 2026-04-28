@@ -508,6 +508,14 @@ export function createOverlayBackend(
 			if (!upper) {
 				throwReadOnly();
 			}
+			if (options?.recursive === false) {
+				const parentPath = posixPath.dirname(normPath(path));
+				if (!(await pathExistsInMergedView(parentPath))) {
+					throw new KernelError("ENOENT", `no such directory: ${parentPath}`);
+				}
+				await ensureAncestorDirectoriesInUpper(path);
+				return upper.createDir(path);
+			}
 			await ensureAncestorDirectoriesInUpper(path);
 			return upper.mkdir(path, options);
 		},
@@ -646,6 +654,10 @@ export function createOverlayBackend(
 			}
 			if (!upper) {
 				throwReadOnly();
+			}
+			const sourceStat = await mergedLstat(oldPath);
+			if (sourceStat.isDirectory && !sourceStat.isSymbolicLink) {
+				throw new KernelError("EPERM", `operation not permitted: ${oldPath}`);
 			}
 			await clearPathMetadata(newPath);
 			await copyUpPath(oldPath);

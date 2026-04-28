@@ -1,19 +1,22 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { AgentOs } from "@rivet-dev/agent-os-core";
-import type { SandboxAgentContainerHandle } from "@rivet-dev/agent-os-core/test/docker";
-import { startSandboxAgentContainer } from "@rivet-dev/agent-os-core/test/docker";
+import type { MockSandboxAgentHandle } from "@rivet-dev/agent-os-core/test/sandbox-agent";
+import { startMockSandboxAgent } from "@rivet-dev/agent-os-core/test/sandbox-agent";
 import { createSandboxFs, createSandboxToolkit } from "../src/index.js";
 
-let sandbox: SandboxAgentContainerHandle;
+let sandbox: MockSandboxAgentHandle;
 let vm: AgentOs | null = null;
 
-const skipReason = process.env.SKIP_SANDBOX_TESTS
-	? "SKIP_SANDBOX_TESTS is set"
-	: undefined;
+const SANDBOX_TEST_PERMISSIONS = {
+	fs: "allow",
+	network: "allow",
+	childProcess: "allow",
+	env: "allow",
+	tool: "allow",
+} as const;
 
 beforeAll(async () => {
-	if (skipReason) return;
-	sandbox = await startSandboxAgentContainer({ healthTimeout: 120_000 });
+	sandbox = await startMockSandboxAgent();
 }, 150_000);
 
 afterAll(async () => {
@@ -27,7 +30,7 @@ afterEach(async () => {
 	}
 });
 
-describe.skipIf(skipReason)("@rivet-dev/agent-os-sandbox", () => {
+describe("@rivet-dev/agent-os-sandbox", () => {
 	// -----------------------------------------------------------------------
 	// Mount helper tests
 	// -----------------------------------------------------------------------
@@ -35,7 +38,7 @@ describe.skipIf(skipReason)("@rivet-dev/agent-os-sandbox", () => {
 		it("should serialize a native sandbox_agent mount descriptor", () => {
 			const mount = createSandboxFs({
 				client: sandbox.client,
-				basePath: "/tmp/scoped",
+				basePath: sandbox.path("scoped"),
 				timeoutMs: 12_345,
 				maxFullReadBytes: 4096,
 			});
@@ -43,7 +46,7 @@ describe.skipIf(skipReason)("@rivet-dev/agent-os-sandbox", () => {
 			expect(mount).toMatchObject({
 				id: "sandbox_agent",
 				config: {
-					basePath: "/tmp/scoped",
+					basePath: sandbox.path("scoped"),
 					timeoutMs: 12_345,
 					maxFullReadBytes: 4096,
 				},
@@ -52,22 +55,24 @@ describe.skipIf(skipReason)("@rivet-dev/agent-os-sandbox", () => {
 		});
 
 		it("should support basePath scoping when mounted into AgentOs", async () => {
+			await sandbox.client.writeFsFile(
+				{ path: "/scoped/scoped-file.txt" },
+				new TextEncoder().encode("scoped"),
+			);
 			vm = await AgentOs.create({
+				permissions: SANDBOX_TEST_PERMISSIONS,
 				mounts: [
 					{
 						path: "/sandbox",
 						plugin: createSandboxFs({
 							client: sandbox.client,
-							basePath: "/tmp/scoped",
+							basePath: "/scoped",
 						}),
 					},
 				],
 			});
 
-			await vm.writeFile("/sandbox/scoped-file.txt", "scoped");
-			const content = await sandbox.client.readFsFile({
-				path: "/tmp/scoped/scoped-file.txt",
-			});
+			const content = await vm.readFile("/sandbox/scoped-file.txt");
 			expect(new TextDecoder().decode(content)).toBe("scoped");
 		});
 	});
@@ -112,10 +117,10 @@ describe.skipIf(skipReason)("@rivet-dev/agent-os-sandbox", () => {
 			const tk = createSandboxToolkit({ client: sandbox.client });
 			const result = await tk.tools["run-command"].execute({
 				command: "pwd",
-				cwd: "/tmp",
+				cwd: sandbox.rootDir,
 			});
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout.trim()).toBe("/tmp");
+			expect(result.stdout.trim()).toBe(sandbox.rootDir);
 		});
 
 		it("run-command: should pass env vars", async () => {
@@ -223,15 +228,16 @@ describe.skipIf(skipReason)("@rivet-dev/agent-os-sandbox", () => {
 
 		it("fs + toolkit integration: write via fs, read via run-command", async () => {
 			const tk = createSandboxToolkit({ client: sandbox.client });
+			const integratedPath = "/integrated-test.txt";
 
 			await sandbox.client.writeFsFile(
-				{ path: "/tmp/integrated-test.txt" },
+				{ path: integratedPath },
 				new TextEncoder().encode("integration works"),
 			);
 
 			const result = await tk.tools["run-command"].execute({
 				command: "cat",
-				args: ["/tmp/integrated-test.txt"],
+				args: [integratedPath],
 			});
 			expect(result.exitCode).toBe(0);
 			expect(result.stdout).toBe("integration works");
@@ -239,15 +245,17 @@ describe.skipIf(skipReason)("@rivet-dev/agent-os-sandbox", () => {
 
 		it("fs + toolkit integration: write via run-command, read via fs", async () => {
 			const tk = createSandboxToolkit({ client: sandbox.client });
+			const shellPath = "/shell-wrote.txt";
 
 			const result = await tk.tools["run-command"].execute({
 				command: "sh",
-				args: ["-c", "echo 'written by shell' > /tmp/shell-wrote.txt"],
+				args: ["-c", "echo 'written by shell' > shell-wrote.txt"],
+				cwd: sandbox.rootDir,
 			});
 			expect(result.exitCode).toBe(0);
 
 			const content = await sandbox.client.readFsFile({
-				path: "/tmp/shell-wrote.txt",
+				path: shellPath,
 			});
 			expect(new TextDecoder().decode(content).trim()).toBe("written by shell");
 		});

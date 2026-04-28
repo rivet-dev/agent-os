@@ -208,14 +208,8 @@ fn proc_filesystem_reports_kernel_identity_and_sanitized_process_metadata() {
         .expect("seed guest file");
 
     let env = BTreeMap::from([
-        (
-            String::from("KERNEL_ONLY_MARKER"),
-            String::from("present"),
-        ),
-        (
-            String::from("SECOND_MARKER"),
-            String::from("also-present"),
-        ),
+        (String::from("KERNEL_ONLY_MARKER"), String::from("present")),
+        (String::from("SECOND_MARKER"), String::from("also-present")),
     ]);
     let process = spawn_shell(
         &mut kernel,
@@ -257,10 +251,7 @@ fn proc_filesystem_reports_kernel_identity_and_sanitized_process_metadata() {
         .expect("read environ");
     assert_eq!(
         environ,
-        null_separated_bytes(&[
-            "KERNEL_ONLY_MARKER=present",
-            "SECOND_MARKER=also-present",
-        ]),
+        null_separated_bytes(&["KERNEL_ONLY_MARKER=present", "SECOND_MARKER=also-present",]),
         "proc environ should only expose kernel-managed env entries"
     );
 

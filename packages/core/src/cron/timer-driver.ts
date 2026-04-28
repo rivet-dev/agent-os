@@ -1,26 +1,17 @@
-import { Cron } from "croner";
 import type { LongTimeout } from "long-timeout";
 import {
 	clearTimeout as clearLongTimeout,
 	setTimeout as longSetTimeout,
 } from "long-timeout";
+import {
+	resolveSchedule,
+	validateScheduleForRegistration,
+} from "./parse-schedule.js";
 import type {
 	ScheduleDriver,
 	ScheduleEntry,
 	ScheduleHandle,
 } from "./schedule-driver.js";
-
-/**
- * Checks whether a schedule string is a cron expression (as opposed to an
- * ISO 8601 timestamp). Uses a simple heuristic: cron expressions contain
- * spaces and don't contain 'T' or 'Z' characters that are typical of
- * ISO timestamps.
- */
-function isCronExpression(schedule: string): boolean {
-	return (
-		schedule.includes(" ") && !schedule.includes("T") && !schedule.includes("Z")
-	);
-}
 
 /**
  * Default ScheduleDriver that uses in-process timers. For cron expressions
@@ -35,8 +26,9 @@ export class TimerScheduleDriver implements ScheduleDriver {
 	private entries = new Map<string, ScheduleEntry>();
 
 	schedule(entry: ScheduleEntry): ScheduleHandle {
+		const resolved = validateScheduleForRegistration(entry.schedule);
 		this.entries.set(entry.id, entry);
-		this.scheduleNext(entry);
+		this.scheduleNext(entry, resolved);
 		return { id: entry.id };
 	}
 
@@ -57,18 +49,15 @@ export class TimerScheduleDriver implements ScheduleDriver {
 		this.entries.clear();
 	}
 
-	private scheduleNext(entry: ScheduleEntry): void {
-		const isCron = isCronExpression(entry.schedule);
-		let next: Date | null;
-
-		if (isCron) {
-			const cron = new Cron(entry.schedule);
-			next = cron.nextRun();
-		} else {
-			next = new Date(entry.schedule);
-		}
+	private scheduleNext(
+		entry: ScheduleEntry,
+		resolved = resolveSchedule(entry.schedule),
+	): void {
+		const { parsed, nextRun: next } = resolved;
+		const isCron = parsed.kind === "cron";
 
 		if (!next) {
+			this.timers.delete(entry.id);
 			this.entries.delete(entry.id);
 			return;
 		}

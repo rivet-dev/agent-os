@@ -14,6 +14,7 @@ use agent_os_sidecar_browser::{
 };
 use bridge_support::RecordingBridge;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 impl BrowserWorkerBridge for RecordingBridge {
     fn create_worker(
@@ -206,4 +207,97 @@ fn browser_worker_spawn_requests_preserve_browser_entrypoints() {
             module_path: Some(_)
         }
     ));
+}
+
+#[test]
+fn browser_sidecar_routes_kernel_filesystem_and_execution_state_through_vm_state() {
+    let mut sidecar =
+        BrowserSidecar::new(RecordingBridge::default(), BrowserSidecarConfig::default());
+    sidecar
+        .create_vm(KernelVmConfig::new("vm-browser"))
+        .expect("create vm");
+
+    assert_eq!(
+        sidecar.kernel_state("vm-browser").expect("kernel ready"),
+        LifecycleState::Ready
+    );
+
+    sidecar
+        .mkdir("vm-browser", "/workspace", true)
+        .expect("create workspace");
+    sidecar
+        .write_file("vm-browser", "/workspace/hello.txt", b"hello".to_vec())
+        .expect("write kernel file");
+    assert_eq!(
+        sidecar
+            .read_file("vm-browser", "/workspace/hello.txt")
+            .expect("read kernel file"),
+        b"hello".to_vec()
+    );
+    assert_eq!(
+        sidecar
+            .read_dir("vm-browser", "/workspace")
+            .expect("read workspace"),
+        vec![String::from("hello.txt")]
+    );
+
+    let context = sidecar
+        .create_javascript_context(CreateJavascriptContextRequest {
+            vm_id: String::from("vm-browser"),
+            bootstrap_module: Some(String::from("@rivet-dev/agent-os/browser")),
+        })
+        .expect("create JavaScript context");
+    let started = sidecar
+        .start_execution(StartExecutionRequest {
+            vm_id: String::from("vm-browser"),
+            context_id: context.context_id,
+            argv: vec![String::from("node"), String::from("script.js")],
+            env: BTreeMap::from([(String::from("MODE"), String::from("browser"))]),
+            cwd: String::from("/workspace"),
+        })
+        .expect("start execution");
+
+    assert_eq!(
+        sidecar.kernel_state("vm-browser").expect("kernel busy"),
+        LifecycleState::Busy
+    );
+
+    sidecar
+        .write_stdin(agent_os_bridge::WriteExecutionStdinRequest {
+            vm_id: String::from("vm-browser"),
+            execution_id: started.execution_id.clone(),
+            chunk: b"input".to_vec(),
+        })
+        .expect("write stdin");
+    assert_eq!(
+        sidecar
+            .read_execution_stdin(
+                "vm-browser",
+                &started.execution_id,
+                16,
+                Duration::from_millis(5),
+            )
+            .expect("read stdin"),
+        Some(b"input".to_vec())
+    );
+
+    sidecar
+        .bridge_mut()
+        .push_execution_event(ExecutionEvent::Exited(ExecutionExited {
+            vm_id: String::from("vm-browser"),
+            execution_id: started.execution_id,
+            exit_code: 0,
+        }));
+    sidecar
+        .poll_execution_event(PollExecutionEventRequest {
+            vm_id: String::from("vm-browser"),
+        })
+        .expect("poll exit");
+
+    assert_eq!(
+        sidecar
+            .kernel_state("vm-browser")
+            .expect("kernel ready after exit"),
+        LifecycleState::Ready
+    );
 }

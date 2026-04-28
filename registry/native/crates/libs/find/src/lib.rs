@@ -21,7 +21,11 @@ pub fn main(args: Vec<OsString>) -> i32 {
 
     match run_find(&str_args) {
         Ok(found) => {
-            if found { 0 } else { 0 } // find returns 0 even if no matches
+            if found {
+                0
+            } else {
+                0
+            } // find returns 0 even if no matches
         }
         Err(msg) => {
             eprintln!("find: {}", msg);
@@ -78,13 +82,7 @@ fn run_find(args: &[String]) -> Result<bool, String> {
     let mut found_any = false;
 
     for path in &opts.paths {
-        walk(
-            &PathBuf::from(path),
-            path,
-            0,
-            &opts,
-            &mut found_any,
-        )?;
+        walk(&PathBuf::from(path), path, 0, &opts, &mut found_any)?;
     }
 
     Ok(found_any)
@@ -128,12 +126,9 @@ fn walk(
             }
         }
 
-        let entries = fs::read_dir(full_path)
-            .map_err(|e| format!("{}: {}", display_path, e))?;
+        let entries = fs::read_dir(full_path).map_err(|e| format!("{}: {}", display_path, e))?;
 
-        let mut sorted_entries: Vec<_> = entries
-            .filter_map(|e| e.ok())
-            .collect();
+        let mut sorted_entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
         sorted_entries.sort_by_key(|e| e.file_name());
 
         for entry in sorted_entries {
@@ -171,38 +166,33 @@ fn eval_expr(expr: &Expr, full_path: &Path, display_path: &str) -> bool {
         }
         Expr::PathMatch(re) => re.is_match(display_path),
         Expr::IPathMatch(re) => re.is_match(display_path),
-        Expr::Type(ft) => {
-            match ft {
-                FileType::Directory => full_path.is_dir(),
-                FileType::File => full_path.is_file(),
-                FileType::Symlink => full_path.symlink_metadata()
-                    .map(|m| m.file_type().is_symlink())
-                    .unwrap_or(false),
-            }
-        }
+        Expr::Type(ft) => match ft {
+            FileType::Directory => full_path.is_dir(),
+            FileType::File => full_path.is_file(),
+            FileType::Symlink => full_path
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false),
+        },
         Expr::Empty => {
             if full_path.is_dir() {
                 fs::read_dir(full_path)
                     .map(|mut d| d.next().is_none())
                     .unwrap_or(false)
             } else if full_path.is_file() {
-                full_path.metadata()
-                    .map(|m| m.len() == 0)
-                    .unwrap_or(false)
+                full_path.metadata().map(|m| m.len() == 0).unwrap_or(false)
             } else {
                 false
             }
         }
         Expr::MaxDepth(_) | Expr::MinDepth(_) => true, // handled in walk()
-        Expr::Print => true, // print is an action, always "matches"
+        Expr::Print => true,                           // print is an action, always "matches"
         Expr::Not(inner) => !eval_expr(inner, full_path, display_path),
         Expr::And(left, right) => {
-            eval_expr(left, full_path, display_path)
-                && eval_expr(right, full_path, display_path)
+            eval_expr(left, full_path, display_path) && eval_expr(right, full_path, display_path)
         }
         Expr::Or(left, right) => {
-            eval_expr(left, full_path, display_path)
-                || eval_expr(right, full_path, display_path)
+            eval_expr(left, full_path, display_path) || eval_expr(right, full_path, display_path)
         }
     }
 }
@@ -349,7 +339,8 @@ fn parse_args(args: &[String]) -> Result<FindOptions, String> {
                 if i >= args.len() {
                     return Err("-maxdepth requires an argument".to_string());
                 }
-                let n: usize = args[i].parse()
+                let n: usize = args[i]
+                    .parse()
                     .map_err(|_| format!("-maxdepth: {}: not a number", args[i]))?;
                 max_depth = Some(n);
             }
@@ -358,7 +349,8 @@ fn parse_args(args: &[String]) -> Result<FindOptions, String> {
                 if i >= args.len() {
                     return Err("-mindepth requires an argument".to_string());
                 }
-                let n: usize = args[i].parse()
+                let n: usize = args[i]
+                    .parse()
                     .map_err(|_| format!("-mindepth: {}: not a number", args[i]))?;
                 min_depth = n;
             }
@@ -373,7 +365,9 @@ fn parse_args(args: &[String]) -> Result<FindOptions, String> {
                 // Parse the next single expression
                 let (next_expr, next_i) = parse_single_expr(&args, i)?;
                 if let Some((md, mi)) = extract_depth(&next_expr) {
-                    if let Some(d) = md { max_depth = Some(d); }
+                    if let Some(d) = md {
+                        max_depth = Some(d);
+                    }
                     min_depth = mi.unwrap_or(min_depth);
                 }
                 exprs.push(Expr::Not(Box::new(next_expr)));
@@ -397,7 +391,9 @@ fn parse_args(args: &[String]) -> Result<FindOptions, String> {
                 while i < args.len() {
                     let (e, ni) = parse_single_expr(args, i)?;
                     if let Some((md, mi)) = extract_depth(&e) {
-                        if let Some(d) = md { max_depth = Some(d); }
+                        if let Some(d) = md {
+                            max_depth = Some(d);
+                        }
                         min_depth = mi.unwrap_or(min_depth);
                     }
                     right_exprs.push(e);
@@ -413,9 +409,15 @@ fn parse_args(args: &[String]) -> Result<FindOptions, String> {
                 let mut depth = 1;
                 let start = i;
                 while i < args.len() && depth > 0 {
-                    if args[i] == "(" { depth += 1; }
-                    if args[i] == ")" { depth -= 1; }
-                    if depth > 0 { i += 1; }
+                    if args[i] == "(" {
+                        depth += 1;
+                    }
+                    if args[i] == ")" {
+                        depth -= 1;
+                    }
+                    if depth > 0 {
+                        i += 1;
+                    }
                 }
                 if depth != 0 {
                     return Err("unmatched '('".to_string());
@@ -460,22 +462,30 @@ fn parse_single_expr(args: &[String], i: usize) -> Result<(Expr, usize), String>
     let arg = &args[i];
     match arg.as_str() {
         "-name" => {
-            if i + 1 >= args.len() { return Err("-name requires an argument".to_string()); }
+            if i + 1 >= args.len() {
+                return Err("-name requires an argument".to_string());
+            }
             let re = glob_to_regex(&args[i + 1], false)?;
             Ok((Expr::Name(re), i + 2))
         }
         "-iname" => {
-            if i + 1 >= args.len() { return Err("-iname requires an argument".to_string()); }
+            if i + 1 >= args.len() {
+                return Err("-iname requires an argument".to_string());
+            }
             let re = glob_to_regex(&args[i + 1], true)?;
             Ok((Expr::IName(re), i + 2))
         }
         "-path" | "-wholename" => {
-            if i + 1 >= args.len() { return Err(format!("{} requires an argument", arg)); }
+            if i + 1 >= args.len() {
+                return Err(format!("{} requires an argument", arg));
+            }
             let re = glob_to_regex(&args[i + 1], false)?;
             Ok((Expr::PathMatch(re), i + 2))
         }
         "-type" => {
-            if i + 1 >= args.len() { return Err("-type requires an argument".to_string()); }
+            if i + 1 >= args.len() {
+                return Err("-type requires an argument".to_string());
+            }
             let ft = match args[i + 1].as_str() {
                 "d" => FileType::Directory,
                 "f" => FileType::File,
@@ -486,14 +496,20 @@ fn parse_single_expr(args: &[String], i: usize) -> Result<(Expr, usize), String>
         }
         "-empty" => Ok((Expr::Empty, i + 1)),
         "-maxdepth" => {
-            if i + 1 >= args.len() { return Err("-maxdepth requires an argument".to_string()); }
-            let n: usize = args[i + 1].parse()
+            if i + 1 >= args.len() {
+                return Err("-maxdepth requires an argument".to_string());
+            }
+            let n: usize = args[i + 1]
+                .parse()
                 .map_err(|_| format!("-maxdepth: {}: not a number", args[i + 1]))?;
             Ok((Expr::MaxDepth(n), i + 2))
         }
         "-mindepth" => {
-            if i + 1 >= args.len() { return Err("-mindepth requires an argument".to_string()); }
-            let n: usize = args[i + 1].parse()
+            if i + 1 >= args.len() {
+                return Err("-mindepth requires an argument".to_string());
+            }
+            let n: usize = args[i + 1]
+                .parse()
                 .map_err(|_| format!("-mindepth: {}: not a number", args[i + 1]))?;
             Ok((Expr::MinDepth(n), i + 2))
         }
@@ -535,5 +551,7 @@ fn combine_and(mut exprs: Vec<Expr>) -> Expr {
         return exprs.remove(0);
     }
     let first = exprs.remove(0);
-    exprs.into_iter().fold(first, |acc, e| Expr::And(Box::new(acc), Box::new(e)))
+    exprs
+        .into_iter()
+        .fold(first, |acc, e| Expr::And(Box::new(acc), Box::new(e)))
 }

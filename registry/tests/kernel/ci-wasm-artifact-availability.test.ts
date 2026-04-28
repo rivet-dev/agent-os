@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { COMMANDS_DIR } from './helpers.ts';
+import { COMMANDS_DIR, itIf } from './helpers.ts';
 
 const REQUIRED_ARTIFACTS = [
   {
@@ -32,7 +32,7 @@ function formatMissingArtifacts(): string {
 }
 
 describe('Kernel cross-runtime CI Wasm artifact availability', () => {
-  it.skipIf(!process.env.CI)('requires cross-runtime Wasm fixtures in CI', () => {
+  itIf(Boolean(process.env.CI), 'requires cross-runtime Wasm fixtures in CI', () => {
     const missing = formatMissingArtifacts();
     expect(
       missing,

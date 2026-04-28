@@ -1,4 +1,8 @@
 export { CronManager } from "./cron-manager.js";
+export {
+	InvalidScheduleError,
+	PastScheduleError,
+} from "./parse-schedule.js";
 export type {
 	ScheduleDriver,
 	ScheduleEntry,

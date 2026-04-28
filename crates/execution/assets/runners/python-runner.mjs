@@ -21,7 +21,8 @@ const PYTHON_PRELOAD_PACKAGES_ENV = 'AGENT_OS_PYTHON_PRELOAD_PACKAGES';
 const PYTHON_VFS_RPC_REQUEST_FD_ENV = 'AGENT_OS_PYTHON_VFS_RPC_REQUEST_FD';
 const PYTHON_VFS_RPC_RESPONSE_FD_ENV = 'AGENT_OS_PYTHON_VFS_RPC_RESPONSE_FD';
 const PYTHON_RUNTIME_ENV_NAMES = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'PWD', 'TMPDIR', 'PATH'];
-const ALLOW_PROCESS_BINDINGS = process.env.AGENT_OS_ALLOW_PROCESS_BINDINGS === '1';
+const INTERNAL_ENV = globalThis.__agentOsPythonInternalEnv ?? Object.create(null);
+const ALLOW_PROCESS_BINDINGS = readRunnerEnv('AGENT_OS_ALLOW_PROCESS_BINDINGS') === '1';
 const STDIN_FD = 0;
 const SUPPORTED_PRELOAD_PACKAGES = ['numpy', 'pandas'];
 const SUPPORTED_PRELOAD_PACKAGE_SET = new Set(SUPPORTED_PRELOAD_PACKAGES);
@@ -51,6 +52,7 @@ const originalRequire =
   typeof globalThis.require === 'function'
     ? globalThis.require.bind(globalThis)
     : null;
+const PYTHON_STDIN_DONE_SENTINEL = '__AGENT_OS_PYTHON_STDIN_DONE__';
 function canCallBridgeSync(bridge) {
   return (
     typeof bridge?.applySyncPromise === 'function' ||
@@ -76,6 +78,10 @@ const bridgePythonRpc =
   canCallBridgeSync(globalThis._pythonRpc)
     ? globalThis._pythonRpc
     : null;
+const bridgePythonStdinRead =
+  canCallBridgeSync(globalThis._pythonStdinRead)
+    ? globalThis._pythonStdinRead
+    : null;
 const bridgeKernelStdinRead = globalThis._kernelStdinRead ?? null;
 const bridgeLoadFileSync =
   canCallBridgeSync(globalThis._loadFileSync)
@@ -85,11 +91,19 @@ const originalGetBuiltinModule =
   typeof process.getBuiltinModule === 'function'
     ? process.getBuiltinModule.bind(process)
     : null;
-const CONTROL_PIPE_FD = parseControlPipeFd(process.env.AGENT_OS_CONTROL_PIPE_FD);
+const CONTROL_PIPE_FD = parseControlPipeFd(readRunnerEnv('AGENT_OS_CONTROL_PIPE_FD'));
 const register = typeof moduleBuiltin?.register === 'function' ? moduleBuiltin.register.bind(moduleBuiltin) : null;
 
+function readRunnerEnv(name) {
+  const internalValue = INTERNAL_ENV[name];
+  if (typeof internalValue === 'string') {
+    return internalValue;
+  }
+  return process.env[name];
+}
+
 function requiredEnv(name) {
-  const value = process.env[name];
+  const value = readRunnerEnv(name);
   if (value == null) {
     throw new Error(`${name} is required`);
   }
@@ -309,16 +323,21 @@ function writePyodideStdout(message) {
 }
 
 function resolvePyodidePackageCacheDir() {
-  if (bridgePythonRpc) {
+  const guestPathMappings = readRunnerEnv('AGENT_OS_GUEST_PATH_MAPPINGS');
+  const hasGuestCacheMapping =
+    typeof guestPathMappings === 'string' &&
+    guestPathMappings.includes(PYODIDE_PACKAGE_CACHE_GUEST_ROOT);
+
+  if (bridgePythonRpc || hasGuestCacheMapping) {
     return PYODIDE_PACKAGE_CACHE_GUEST_ROOT;
   }
 
-  const configured = process.env[PYODIDE_PACKAGE_CACHE_DIR_ENV];
+  const configured = readRunnerEnv(PYODIDE_PACKAGE_CACHE_DIR_ENV);
   if (typeof configured === 'string' && configured.trim() !== '') {
     return path.resolve(configured);
   }
 
-  const assetRoot = process.env[ASSET_ROOT_ENV];
+  const assetRoot = readRunnerEnv(ASSET_ROOT_ENV);
   if (typeof assetRoot === 'string' && assetRoot.trim() !== '') {
     return path.resolve(assetRoot, '..', 'pyodide-package-cache');
   }
@@ -327,7 +346,7 @@ function resolvePyodidePackageCacheDir() {
 }
 
 function emitWarmupStage(stage) {
-  if (process.env[PYTHON_WARMUP_DEBUG_ENV] !== '1') {
+  if (readRunnerEnv(PYTHON_WARMUP_DEBUG_ENV) !== '1') {
     return;
   }
 
@@ -335,7 +354,7 @@ function emitWarmupStage(stage) {
 }
 
 function emitPythonDebug(channel, message) {
-  if (process.env[PYTHON_WARMUP_DEBUG_ENV] !== '1') {
+  if (readRunnerEnv(PYTHON_WARMUP_DEBUG_ENV) !== '1') {
     return;
   }
 
@@ -407,7 +426,7 @@ function emitPythonStartupMetrics({
   packageCount,
   source,
 }) {
-  if (process.env[PYTHON_WARMUP_DEBUG_ENV] !== '1') {
+  if (readRunnerEnv(PYTHON_WARMUP_DEBUG_ENV) !== '1') {
     return;
   }
 
@@ -472,7 +491,7 @@ function parsePreloadPackages(value) {
 }
 
 function parseOptionalFd(name) {
-  const value = process.env[name];
+  const value = readRunnerEnv(name);
   if (value == null || value.trim() === '') {
     return null;
   }
@@ -1405,7 +1424,7 @@ function installPythonGuestProcessHardening() {
 }
 
 function installPythonGuestLoaderHooks() {
-  const assetRoot = process.env[ASSET_ROOT_ENV];
+  const assetRoot = readRunnerEnv(ASSET_ROOT_ENV);
   if (!assetRoot || !register) {
     return;
   }
@@ -1765,6 +1784,23 @@ function installPythonStdin(pyodide) {
 
   function readFromKernelStdin(buffer) {
     while (true) {
+      if (bridgePythonStdinRead) {
+        const response = callBridgeSync(bridgePythonStdinRead, [buffer.length, 100]);
+        if (response === PYTHON_STDIN_DONE_SENTINEL) {
+          return 0;
+        }
+
+        const dataBase64 = typeof response === 'string' ? response : '';
+        if (dataBase64.length === 0) {
+          continue;
+        }
+
+        const chunk = Buffer.from(dataBase64, 'base64');
+        const target = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+        chunk.copy(target, 0, 0, Math.min(chunk.length, target.length));
+        return Math.min(chunk.length, buffer.length);
+      }
+
       const response = callBridgeSync(bridgeKernelStdinRead, [buffer.length, 100]);
       if (response?.done) {
         return 0;
@@ -1794,7 +1830,7 @@ function installPythonStdin(pyodide) {
 }
 
 function resolvePythonSource(pyodide) {
-  const filePath = process.env[PYTHON_FILE_ENV];
+  const filePath = readRunnerEnv(PYTHON_FILE_ENV);
   if (filePath != null) {
     if (typeof pyodide?.FS?.readFile !== 'function') {
       throw new Error(`Pyodide FS.readFile() is required to execute ${filePath}`);
@@ -1815,12 +1851,12 @@ try {
   const { indexPath, indexUrl } = resolveIndexLocation(requiredEnv(PYODIDE_INDEX_URL_ENV));
   const bundledPackageBaseUrl = normalizeBaseUrl(indexPath);
   const packageBaseUrl = normalizeBaseUrl(
-    process.env[PYODIDE_PACKAGE_BASE_URL_ENV] ?? bundledPackageBaseUrl,
+    readRunnerEnv(PYODIDE_PACKAGE_BASE_URL_ENV) ?? bundledPackageBaseUrl,
   );
   const packageCacheDir = resolvePyodidePackageCacheDir();
   emitWarmupStage(`package-cache-dir:${packageCacheDir}`);
-  const prewarmOnly = process.env[PYTHON_PREWARM_ONLY_ENV] === '1';
-  const preloadPackages = parsePreloadPackages(process.env[PYTHON_PRELOAD_PACKAGES_ENV]);
+  const prewarmOnly = readRunnerEnv(PYTHON_PREWARM_ONLY_ENV) === '1';
+  const preloadPackages = parsePreloadPackages(readRunnerEnv(PYTHON_PRELOAD_PACKAGES_ENV));
   const lockFileContents = await readLockFileContents(indexPath, indexUrl).catch((error) => {
     throw wrapPythonStartupError('lock file read', { indexPath, indexUrl }, error);
   });
@@ -1917,7 +1953,7 @@ try {
   installPythonGuestProcessHardening();
   installPythonGuestImportBlocklist(pyodide);
   installPythonRuntimeEnv(pyodide);
-  const source = process.env[PYTHON_FILE_ENV] != null ? 'file' : 'inline';
+  const source = readRunnerEnv(PYTHON_FILE_ENV) != null ? 'file' : 'inline';
   emitPythonStartupMetrics({
     prewarmOnly: false,
     startupMs: realPerformance.now() - startupStarted,

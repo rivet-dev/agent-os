@@ -178,7 +178,9 @@ type PermissionsPolicy struct {
   fs: optional<FsPermissionScope>
   network: optional<PatternPermissionScope>
   childProcess: optional<PatternPermissionScope>
+  process: optional<PatternPermissionScope>
   env: optional<PatternPermissionScope>
+  tool: optional<PatternPermissionScope>
 }
 
 type RootFilesystemEntryKind enum {
@@ -277,11 +279,13 @@ type SignalDispositionAction enum {
 type ProcessSnapshotStatus enum {
   RUNNING = 1
   EXITED = 2
+  STOPPED = 3
 }
 
 type AuthenticateRequest struct {
   clientName: str
   authToken: str
+  bridgeVersion: u32
 }
 
 type OpenSessionRequest struct {
@@ -491,7 +495,8 @@ type RequestPayload union {
   HostFilesystemCallRequest = 28 |
   PermissionRequest = 29 |
   PersistenceLoadRequest = 30 |
-  PersistenceFlushRequest = 31
+  PersistenceFlushRequest = 31 |
+  VmFetchRequest = 32
 }
 
 type ToolInvocationRequest struct {
@@ -507,6 +512,11 @@ type SidecarPermissionRequest struct {
   params: JsonUtf8
 }
 
+type SidecarAcpRequest struct {
+  sessionId: str
+  request: JsonUtf8
+}
+
 type JsBridgeCallRequest struct {
   callId: str
   mountId: str
@@ -517,7 +527,8 @@ type JsBridgeCallRequest struct {
 type SidecarRequestPayload union {
   ToolInvocationRequest = 1 |
   SidecarPermissionRequest = 2 |
-  JsBridgeCallRequest = 3
+  SidecarAcpRequest = 3 |
+  JsBridgeCallRequest = 4
 }
 
 type AuthenticatedResponse struct {
@@ -695,6 +706,18 @@ type BoundUdpSnapshotResponse struct {
   socket: optional<SocketStateEntry>
 }
 
+type VmFetchRequest struct {
+  port: u16
+  method: str
+  path: str
+  headersJson: str
+  body: optional<str>
+}
+
+type VmFetchResponse struct {
+  responseJson: str
+}
+
 type SignalHandlerRegistration struct {
   action: SignalDispositionAction
   mask: list<u32>
@@ -744,6 +767,11 @@ type SidecarPermissionResultResponse struct {
   error: optional<str>
 }
 
+type SidecarAcpResultResponse struct {
+  response: optional<JsonUtf8>
+  error: optional<str>
+}
+
 type JsBridgeResultResponse struct {
   callId: str
   result: optional<JsonUtf8>
@@ -787,7 +815,8 @@ type ResponsePayload union {
   PermissionDecisionResponse = 29 |
   PersistenceStateResponse = 30 |
   PersistenceFlushedResponse = 31 |
-  RejectedResponse = 32
+  RejectedResponse = 32 |
+  VmFetchResponse = 33
 }
 
 type VmLifecycleEvent struct {
@@ -820,5 +849,6 @@ type EventPayload union {
 type SidecarResponsePayload union {
   ToolInvocationResultResponse = 1 |
   SidecarPermissionResultResponse = 2 |
-  JsBridgeResultResponse = 3
+  SidecarAcpResultResponse = 3 |
+  JsBridgeResultResponse = 4
 }

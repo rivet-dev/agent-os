@@ -6,4 +6,5 @@ license.workspace = true
 description = "Built-in command implementations (sleep, test/[, whoami) for Agent OS WasmVM"
 
 [dependencies]
+libc = "0.2"
 wasi-ext = { path = "../../wasi-ext" }

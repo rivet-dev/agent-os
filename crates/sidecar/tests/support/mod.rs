@@ -4,19 +4,42 @@
 mod bridge_support;
 
 use agent_os_sidecar::protocol::{
-    AuthenticateRequest, CreateVmRequest, EventPayload, ExecuteRequest, GuestRuntimeKind,
-    OpenSessionRequest, OwnershipScope, ProcessOutputEvent, RequestFrame, RequestId,
-    RequestPayload, ResponsePayload, SidecarPlacement,
+    AuthenticateRequest, CreateVmRequest, DisposeReason, EventPayload, ExecuteRequest,
+    GuestRuntimeKind, OpenSessionRequest, OwnershipScope, PermissionsPolicy, ProcessOutputEvent,
+    RequestFrame, RequestId, RequestPayload, ResponsePayload, SidecarPlacement,
 };
 use agent_os_sidecar::{DispatchResult, NativeSidecar, NativeSidecarConfig};
 pub use bridge_support::RecordingBridge;
+use nix::fcntl::{flock, FlockArg};
 use std::collections::BTreeMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const TEST_AUTH_TOKEN: &str = "sidecar-test-token";
+
+pub fn acquire_sidecar_runtime_test_lock() {
+    static LOCK_FILE: OnceLock<std::fs::File> = OnceLock::new();
+    let _ = LOCK_FILE.get_or_init(|| {
+        let path = std::env::temp_dir().join("agent-os-sidecar-runtime-tests.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap_or_else(|error| {
+                panic!("open sidecar test runtime lock {}: {error}", path.display())
+            });
+        flock(file.as_raw_fd(), FlockArg::LockExclusive).unwrap_or_else(|error| {
+            panic!("lock sidecar test runtime {}: {error}", path.display())
+        });
+        file
+    });
+}
 
 pub fn assert_node_available() {
     let output = Command::new("node")
@@ -49,6 +72,7 @@ pub fn new_sidecar_with_auth_token(
     name: &str,
     expected_auth_token: &str,
 ) -> NativeSidecar<RecordingBridge> {
+    acquire_sidecar_runtime_test_lock();
     let root = temp_dir(name);
     NativeSidecar::with_config(
         RecordingBridge::default(),
@@ -94,6 +118,7 @@ pub fn authenticate_with_token(
             RequestPayload::Authenticate(AuthenticateRequest {
                 client_name: String::from("sidecar-tests"),
                 auth_token: auth_token.to_owned(),
+                bridge_version: agent_os_bridge::bridge_contract().version,
             }),
         ))
         .expect("authenticate connection")
@@ -161,7 +186,7 @@ pub fn create_vm_with_metadata(
                 runtime,
                 metadata,
                 root_filesystem: Default::default(),
-                permissions: None,
+                permissions: Some(PermissionsPolicy::allow_all()),
             }),
         ))
         .expect("create sidecar VM");
@@ -277,6 +302,23 @@ pub fn collect_process_output_with_timeout(
             "timed out waiting for process events\nstdout:\n{stdout}\nstderr:\n{stderr}"
         );
     }
+}
+
+pub fn dispose_vm_and_close_session(
+    sidecar: &mut NativeSidecar<RecordingBridge>,
+    connection_id: &str,
+    session_id: &str,
+    vm_id: &str,
+) {
+    sidecar
+        .dispose_vm_internal_blocking(connection_id, session_id, vm_id, DisposeReason::Requested)
+        .expect("dispose sidecar VM");
+    sidecar
+        .close_session_blocking(connection_id, session_id)
+        .expect("close sidecar session");
+    sidecar
+        .remove_connection_blocking(connection_id)
+        .expect("remove sidecar connection");
 }
 
 pub fn write_fixture(path: &Path, contents: impl AsRef<[u8]>) {

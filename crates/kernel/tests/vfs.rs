@@ -1,9 +1,43 @@
-use agent_os_kernel::vfs::{normalize_path, MemoryFileSystem, VirtualFileSystem, S_IFLNK, S_IFREG};
+use agent_os_kernel::vfs::{
+    normalize_path, validate_path, MemoryFileSystem, VfsResult, VirtualFileSystem, S_IFLNK, S_IFREG,
+};
 use std::{fmt::Debug, thread::sleep, time::Duration};
 
 fn assert_error_code<T: Debug>(result: agent_os_kernel::vfs::VfsResult<T>, expected: &str) {
     let error = result.expect_err("operation should fail");
     assert_eq!(error.code(), expected);
+}
+
+fn assert_invalid_path_keeps_snapshot<T: Debug>(
+    baseline: &MemoryFileSystem,
+    path: &str,
+    operation: impl FnOnce(&mut MemoryFileSystem, &str) -> VfsResult<T>,
+) {
+    let mut filesystem = MemoryFileSystem::from_snapshot(baseline.snapshot());
+    let before = filesystem.snapshot();
+    assert_error_code(operation(&mut filesystem, path), "EINVAL");
+    assert_eq!(filesystem.snapshot(), before);
+}
+
+fn generated_invalid_path(seed: u32) -> String {
+    let mut path = String::from("/");
+    let segments = (seed % 4) + 1;
+    for segment in 0..segments {
+        if segment > 0 {
+            path.push('/');
+        }
+        path.push(char::from(b'a' + ((seed + segment) % 26) as u8));
+        let invalid_byte = if seed % 2 == 0 {
+            0
+        } else if seed % 5 == 0 {
+            0x7f
+        } else {
+            1 + ((seed + segment) % 31) as u8
+        };
+        path.push(char::from(invalid_byte));
+        path.push(char::from(b'a' + (((seed / 3) + segment) % 26) as u8));
+    }
+    path
 }
 
 #[test]
@@ -142,6 +176,98 @@ fn symlink_loops_fail_closed() {
         .expect("create second loop entry");
 
     assert_error_code(filesystem.read_file("/loop-a.txt"), "ELOOP");
+}
+
+#[test]
+fn path_validation_rejects_nul_and_control_bytes_without_mutating_filesystem() {
+    let mut baseline = MemoryFileSystem::new();
+    baseline
+        .write_file("/safe/file.txt", "safe contents")
+        .expect("seed file");
+    baseline
+        .write_file("/safe/source.txt", "source")
+        .expect("seed link source");
+    baseline
+        .symlink("/safe/file.txt", "/safe/link.txt")
+        .expect("seed symlink");
+    baseline
+        .create_dir("/safe/empty")
+        .expect("seed removable dir");
+
+    let invalid_paths = ["/bad\0path", "/bad\npath", "/bad\x7fpath"];
+
+    for invalid_path in invalid_paths {
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| fs.read_file(path));
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| fs.read_dir(path));
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.read_dir_with_types(path)
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| fs.stat(path));
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| fs.realpath(path));
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| fs.read_link(path));
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| fs.lstat(path));
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.write_file(path, "x")
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.create_file_exclusive(path, "x")
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.append_file(path, "x")
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| fs.create_dir(path));
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.mkdir(path, true)
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.remove_file(path)
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| fs.remove_dir(path));
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.rename(path, "/safe/renamed.txt")
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.rename("/safe/file.txt", path)
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.symlink("/safe/file.txt", path)
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.link(path, "/safe/linked.txt")
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.link("/safe/source.txt", path)
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.chmod(path, 0o600)
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.chown(path, 1000, 1000)
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.utimes(path, 1_000, 2_000)
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.truncate(path, 1)
+        });
+        assert_invalid_path_keeps_snapshot(&baseline, invalid_path, |fs, path| {
+            fs.pread(path, 0, 1)
+        });
+    }
+}
+
+#[test]
+fn validate_path_rejects_generated_invalid_inputs() {
+    for seed in 0..1_000u32 {
+        let invalid_path = generated_invalid_path(seed);
+        assert!(
+            invalid_path
+                .bytes()
+                .any(|byte| byte == 0 || byte.is_ascii_control()),
+            "generated path should contain at least one prohibited byte"
+        );
+        assert_error_code(validate_path(&invalid_path), "EINVAL");
+    }
 }
 
 #[test]

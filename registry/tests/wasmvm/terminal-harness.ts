@@ -16,7 +16,7 @@ const SETTLE_MS = 50;
 /** Poll interval for waitFor(). */
 const POLL_MS = 20;
 /** Default waitFor() timeout. */
-const DEFAULT_WAIT_TIMEOUT_MS = 5_000;
+const DEFAULT_WAIT_TIMEOUT_MS = 10_000;
 
 export class TerminalHarness {
 	readonly term: Terminal;

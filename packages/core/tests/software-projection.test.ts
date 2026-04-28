@@ -1,10 +1,7 @@
-import { existsSync } from "node:fs";
 import common, { coreutils } from "@rivet-dev/agent-os-common";
 import pi from "@rivet-dev/agent-os-pi";
 import { afterEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/agent-os.js";
-
-const hasRegistryCommands = existsSync(coreutils.commandDir);
 
 async function waitForExit(
 	vm: AgentOs,
@@ -109,9 +106,7 @@ describe("software projection on the sidecar path", () => {
 		expect(stdout).toMatch(/writeError (ERR_ACCESS_DENIED|EACCES|EPERM|EROFS)/);
 	});
 
-	test.skipIf(!hasRegistryCommands)(
-		"preserves registry meta-package command injection on the sidecar path",
-		async () => {
+	test("preserves registry meta-package command injection on the sidecar path", async () => {
 			vm = await AgentOs.create({
 				moduleAccessCwd: "/tmp",
 				software: [common],
@@ -119,6 +114,5 @@ describe("software projection on the sidecar path", () => {
 
 			expect(await vm.exists("/bin/cat")).toBe(true);
 			expect(await vm.exists("/bin/grep")).toBe(true);
-		},
-	);
+	});
 });

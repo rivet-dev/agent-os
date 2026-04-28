@@ -193,7 +193,6 @@ fn assert_process_exits(pid: u32) {
     panic!("process {pid} was still alive after waiting for cleanup");
 }
 
-#[test]
 fn python_contexts_preserve_vm_and_pyodide_configuration() {
     let pyodide_dist_path = PathBuf::from("/tmp/pyodide");
     let mut engine = PythonExecutionEngine::default();
@@ -207,7 +206,6 @@ fn python_contexts_preserve_vm_and_pyodide_configuration() {
     assert_eq!(context.pyodide_dist_path, pyodide_dist_path);
 }
 
-#[test]
 fn python_execution_runs_code_and_streams_stdio() {
     assert_node_available();
 
@@ -251,7 +249,6 @@ export async function loadPyodide(options) {
     );
 }
 
-#[test]
 fn python_execution_wait_bounds_output_buffers() {
     assert_node_available();
 
@@ -303,7 +300,6 @@ export async function loadPyodide(options) {
     assert!(result.stderr.iter().all(|byte| *byte == b'y'));
 }
 
-#[test]
 fn python_execution_emits_stdout_before_exit() {
     assert_node_available();
 
@@ -375,7 +371,6 @@ export async function loadPyodide(options) {
     assert!(saw_stdout, "expected stdout event before exit");
 }
 
-#[test]
 fn python_execution_reports_prewarm_and_startup_metrics_when_debug_enabled() {
     assert_node_available();
 
@@ -465,7 +460,6 @@ export async function loadPyodide() {
     assert_eq!(second_startup.source, "inline");
 }
 
-#[test]
 fn python_execution_keeps_streaming_stdin_sessions_alive_until_closed() {
     assert_node_available();
 
@@ -561,7 +555,6 @@ export async function loadPyodide(options) {
     );
 }
 
-#[test]
 fn python_execution_surfaces_vfs_rpc_requests_and_resumes_after_responses() {
     assert_node_available();
 
@@ -721,7 +714,6 @@ export async function loadPyodide(options) {
     );
 }
 
-#[test]
 fn python_execution_wait_timeout_cleans_up_hanging_child() {
     assert_node_available();
 
@@ -777,7 +769,6 @@ export async function loadPyodide() {
     }
 }
 
-#[test]
 fn python_execution_uses_configured_default_timeout_when_wait_timeout_not_provided() {
     assert_node_available();
 
@@ -836,7 +827,6 @@ export async function loadPyodide() {
     }
 }
 
-#[test]
 fn python_vfs_rpc_bridge_times_out_when_sidecar_never_responds() {
     assert_node_available();
 
@@ -929,7 +919,6 @@ export async function loadPyodide() {
     }
 }
 
-#[test]
 fn python_execution_surfaces_runtime_stderr() {
     let temp = tempdir().expect("create temp dir");
     let pyodide_dir = temp.path().join("pyodide");
@@ -981,7 +970,6 @@ export async function loadPyodide() {
     );
 }
 
-#[test]
 fn python_execution_kill_stops_inflight_process_and_emits_exit() {
     assert_node_available();
 
@@ -1076,7 +1064,6 @@ export async function loadPyodide(options) {
     }
 }
 
-#[test]
 fn python_execution_blocks_network_requests_during_pyodide_init() {
     assert_node_available();
 
@@ -1106,6 +1093,7 @@ export async function loadPyodide() {
     },
   };
 }
+
 "#,
     );
     write_pyodide_lock_fixture(&pyodide_dir.join("pyodide-lock.json"));
@@ -1142,6 +1130,28 @@ export async function loadPyodide() {
             "unexpected stdout: {stdout}"
         );
     } else {
-        assert!(message.contains("network access"), "unexpected stdout: {stdout}");
+        assert!(
+            message.contains("network access"),
+            "unexpected stdout: {stdout}"
+        );
     }
+}
+
+// Separate libtest cases in this binary still trip a V8 teardown/init crash, so
+// keep the Python runtime coverage in one top-level suite until that boundary is fixed.
+#[test]
+fn python_suite() {
+    python_contexts_preserve_vm_and_pyodide_configuration();
+    python_execution_runs_code_and_streams_stdio();
+    python_execution_wait_bounds_output_buffers();
+    python_execution_emits_stdout_before_exit();
+    python_execution_reports_prewarm_and_startup_metrics_when_debug_enabled();
+    python_execution_keeps_streaming_stdin_sessions_alive_until_closed();
+    python_execution_surfaces_vfs_rpc_requests_and_resumes_after_responses();
+    python_execution_wait_timeout_cleans_up_hanging_child();
+    python_execution_uses_configured_default_timeout_when_wait_timeout_not_provided();
+    python_vfs_rpc_bridge_times_out_when_sidecar_never_responds();
+    python_execution_surfaces_runtime_stderr();
+    python_execution_kill_stops_inflight_process_and_emits_exit();
+    python_execution_blocks_network_requests_during_pyodide_init();
 }

@@ -1,3 +1,4 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import type { Fixture, ToolCall } from "@copilotkit/llmock";
 import opencode from "@rivet-dev/agent-os-opencode";
@@ -17,7 +18,6 @@ import {
 } from "./helpers/opencode-helper.js";
 import {
 	REGISTRY_SOFTWARE,
-	registrySkipReason,
 } from "./helpers/registry-commands.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
@@ -25,6 +25,15 @@ const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
 type LlmockMessage = {
 	role?: string;
 	content?: string | null;
+};
+
+type ChatCompletionsRequestBody = Record<string, unknown>;
+
+type ChatCompletionsFixture = {
+	name: string;
+	predicate: (body: ChatCompletionsRequestBody) => boolean;
+	response: Record<string, unknown>;
+	delayMs?: number;
 };
 
 function getLlmockMessages(req: unknown): LlmockMessage[] {
@@ -82,6 +91,112 @@ function createToolFixtures(
 	];
 }
 
+async function readJsonBody(
+	req: IncomingMessage,
+): Promise<ChatCompletionsRequestBody> {
+	const chunks: Buffer[] = [];
+	for await (const chunk of req) {
+		chunks.push(Buffer.from(chunk));
+	}
+
+	return JSON.parse(Buffer.concat(chunks).toString("utf8")) as ChatCompletionsRequestBody;
+}
+
+function writeJson(
+	res: ServerResponse,
+	statusCode: number,
+	body: Record<string, unknown>,
+): void {
+	const payload = JSON.stringify(body);
+	res.statusCode = statusCode;
+	res.setHeader("content-type", "application/json");
+	res.setHeader("content-length", Buffer.byteLength(payload));
+	res.end(payload);
+}
+
+function createChatCompletionResponse(model: string, content: string) {
+	return {
+		id: `chatcmpl-${model}`,
+		object: "chat.completion",
+		created: 1,
+		model,
+		choices: [
+			{
+				index: 0,
+				message: {
+					role: "assistant",
+					content,
+				},
+				finish_reason: "stop",
+			},
+		],
+	};
+}
+
+async function startChatCompletionsMock(
+	fixtures: ChatCompletionsFixture[],
+): Promise<{
+	url: string;
+	requests: ChatCompletionsRequestBody[];
+	stop: () => Promise<void>;
+}> {
+	const requests: ChatCompletionsRequestBody[] = [];
+	const server = createServer(async (req, res) => {
+		if (req.method !== "POST" || req.url !== "/chat/completions") {
+			writeJson(res, 404, { error: "not_found" });
+			return;
+		}
+
+		try {
+			const body = await readJsonBody(req);
+			requests.push(body);
+
+			const fixture = fixtures.find((candidate) => candidate.predicate(body));
+			if (!fixture) {
+				writeJson(res, 500, {
+					error: "no_matching_fixture",
+					request: body,
+				});
+				return;
+			}
+
+			if (fixture.delayMs) {
+				await new Promise((resolve) => setTimeout(resolve, fixture.delayMs));
+			}
+
+			writeJson(res, 200, fixture.response);
+		} catch (error) {
+			writeJson(res, 500, {
+				error: "invalid_request",
+				message: error instanceof Error ? error.message : String(error),
+			});
+		}
+	});
+
+	await new Promise<void>((resolve) => {
+		server.listen(0, "127.0.0.1", () => resolve());
+	});
+	server.unref();
+
+	const address = server.address();
+	if (!address || typeof address === "string") {
+		throw new Error("chat completions mock did not expose a TCP port");
+	}
+
+	return {
+		url: `http://127.0.0.1:${address.port}`,
+		requests,
+		stop: async () => {
+			await new Promise<void>((resolve, reject) => {
+				server.close((error) => {
+					if (error) reject(error);
+					else resolve();
+				});
+			});
+		},
+	};
+}
+
 async function createOpenCodeVm(mockUrl: string): Promise<AgentOs> {
 	return AgentOs.create({
 		loopbackExemptPorts: [Number(new URL(mockUrl).port)],
@@ -90,7 +205,7 @@ async function createOpenCodeVm(mockUrl: string): Promise<AgentOs> {
 	});
 }
 
-describe.skipIf(registrySkipReason)("OpenCode session API integration", () => {
+describe("OpenCode session API integration", () => {
 	test("full createSession'opencode' inside the VM", async () => {
 		const { mock, url } = await startLlmock([DEFAULT_TEXT_FIXTURE]);
 		const vm = await createOpenCodeVm(url);
@@ -228,71 +343,80 @@ describe.skipIf(registrySkipReason)("OpenCode session API integration", () => {
 			}
 	}, 120_000);
 
-	test("runs the real OpenCode ACP flow end-to-end for bash tool calls", async () => {
-			const fixtures = [
-				createAnthropicFixture(
-					{
-						predicate: (req) =>
-							!getLlmockMessages(req).some(
-								(message) => message.role === "tool",
-							),
-					},
-					{
-						toolCalls: [
-							{
-								name: "bash",
-								arguments: JSON.stringify({
-									command: "printf 'bash-ok' > bash-output.txt",
-									description: "write bash-ok to bash-output.txt",
-								}),
+	test("supports real OpenCode ACP prompts through Groq and Mistral providers", async () => {
+		const providerCases = [
+			{
+				providerId: "groq",
+				modelId: "llama-3.3-70b-versatile",
+				envName: "GROQ_API_KEY",
+				reply: "groq provider ok",
+			},
+			{
+				providerId: "mistral",
+				modelId: "mistral-small-latest",
+				envName: "MISTRAL_API_KEY",
+				reply: "mistral provider ok",
+			},
+		] as const;
+		const mock = await startChatCompletionsMock(
+			providerCases.map((providerCase) => ({
+				name: providerCase.providerId,
+				predicate: (body) => body.model === providerCase.modelId,
+				response: createChatCompletionResponse(
+					providerCase.modelId,
+					providerCase.reply,
+				),
+			})),
+		);
+
+		try {
+			for (const providerCase of providerCases) {
+				const vm = await createOpenCodeVm(mock.url);
+				let sessionId: string | undefined;
+				try {
+					const homeDir = await createVmOpenCodeHome(vm, mock.url, {
+						model: `${providerCase.providerId}/${providerCase.modelId}`,
+						providers: {
+							[providerCase.providerId]: {
+								options: {
+									baseURL: mock.url,
+								},
 							},
-						],
-					},
-				),
-				createAnthropicFixture(
-					{
-						predicate: (req) =>
-							getLlmockMessages(req).some(
-								(message) => message.role === "tool",
-							),
-					},
-					{ content: "bash-output.txt was written successfully." },
-				),
-			];
-			const { mock, url } = await startLlmock(fixtures);
-			const vm = await createOpenCodeVm(url);
-
-			let sessionId: string | undefined;
-			try {
-				const homeDir = await createVmOpenCodeHome(vm, url);
-				const workspaceDir = await createVmWorkspace(vm);
-				sessionId = (
-					await vm.createSession("opencode", {
-						cwd: workspaceDir,
-						env: {
-							HOME: homeDir,
-							ANTHROPIC_API_KEY: "mock-key",
 						},
-					})
-				).sessionId;
+					});
+					const workspaceDir = await createVmWorkspace(vm);
+					sessionId = (
+						await vm.createSession("opencode", {
+							cwd: workspaceDir,
+							env: {
+								HOME: homeDir,
+								[providerCase.envName]: "mock-key",
+							},
+						})
+					).sessionId;
 
-				const { response } = await vm.prompt(
-					sessionId,
-					"Use bash to write bash-ok into bash-output.txt.",
-				);
+					const { response } = await vm.prompt(
+						sessionId,
+						`Reply with exactly ${providerCase.reply}.`,
+					);
 
-				expect(response.error).toBeUndefined();
-				expect(await readVmText(vm, `${workspaceDir}/bash-output.txt`)).toBe(
-					"bash-ok",
-				);
-				expect(mock.getRequests().length).toBeGreaterThanOrEqual(2);
-			} finally {
-				if (sessionId) {
-					vm.closeSession(sessionId);
+					expect(response.error).toBeUndefined();
+				} finally {
+					if (sessionId) {
+						vm.closeSession(sessionId);
+					}
+					await vm.dispose();
 				}
-				await vm.dispose();
-				await stopLlmock(mock);
 			}
+
+			expect(
+				mock.requests.map((request) => request.model),
+			).toEqual(
+				expect.arrayContaining(providerCases.map((providerCase) => providerCase.modelId)),
+			);
+		} finally {
+			await mock.stop();
+		}
 	}, 120_000);
 
 	test("integrates OpenCode session metadata, plan mode, and lifecycle into the Agent OS session API", async () => {
@@ -477,6 +601,16 @@ describe.skipIf(registrySkipReason)("OpenCode session API integration", () => {
 					},
 					{ content: "perm-output.txt was written after approval." },
 				),
+				createAnthropicFixture(
+					{
+						predicate: (req) =>
+							hasUserMessageContaining(
+								req,
+								"Generate a title for this conversation:",
+							),
+					},
+					{ content: "Permission approval check" },
+				),
 			];
 			const { mock, url } = await startLlmock(fixtures);
 			const vm = await createOpenCodeVm(url);
@@ -484,7 +618,9 @@ describe.skipIf(registrySkipReason)("OpenCode session API integration", () => {
 			let sessionId: string | undefined;
 			const permissionIds: string[] = [];
 			try {
-				const homeDir = await createVmOpenCodeHome(vm, url, { bash: "ask" });
+				const homeDir = await createVmOpenCodeHome(vm, url, {
+					permission: { bash: "ask" },
+				});
 				const workspaceDir = await createVmWorkspace(vm);
 				sessionId = (
 					await vm.createSession("opencode", {
@@ -573,7 +709,9 @@ describe.skipIf(registrySkipReason)("OpenCode session API integration", () => {
 			let sessionId: string | undefined;
 			const permissionIds: string[] = [];
 			try {
-				const homeDir = await createVmOpenCodeHome(vm, url, { bash: "ask" });
+				const homeDir = await createVmOpenCodeHome(vm, url, {
+					permission: { bash: "ask" },
+				});
 				const workspaceDir = await createVmWorkspace(vm);
 				sessionId = (
 					await vm.createSession("opencode", {

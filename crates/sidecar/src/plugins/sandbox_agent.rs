@@ -129,8 +129,11 @@ impl SandboxAgentFilesystem {
             is_directory,
             is_symbolic_link: false,
             atime_ms: modified_ms,
+            atime_nsec: 0,
             mtime_ms: modified_ms,
+            mtime_nsec: 0,
             ctime_ms: modified_ms,
+            ctime_nsec: 0,
             birthtime_ms: modified_ms,
             ino: 0,
             nlink: 1,
@@ -154,39 +157,17 @@ impl SandboxAgentFilesystem {
             is_directory: true,
             is_symbolic_link: false,
             atime_ms: modified_ms,
+            atime_nsec: 0,
             mtime_ms: modified_ms,
+            mtime_nsec: 0,
             ctime_ms: modified_ms,
+            ctime_nsec: 0,
             birthtime_ms: modified_ms,
             ino: 0,
             nlink: 1,
             uid: 0,
             gid: 0,
         }
-    }
-
-    fn ensure_buffered_full_read_allowed(
-        &self,
-        path: &str,
-        stat: &SandboxAgentFsStat,
-        target_size: u64,
-        op: &'static str,
-    ) -> VfsResult<()> {
-        if stat.entry_type == "directory" {
-            return Err(VfsError::new(
-                "EISDIR",
-                format!("illegal operation on a directory, {op} '{path}'"),
-            ));
-        }
-
-        let required_size = stat.size.max(target_size);
-        if required_size <= self.max_full_read_bytes {
-            return Ok(());
-        }
-
-        Err(VfsError::unsupported(format!(
-            "sandbox_agent {op} '{path}' requires ranged reads for files larger than {} bytes; current sandbox-agent servers only expose full-file reads",
-            self.max_full_read_bytes
-        )))
     }
 
     fn scoped_target(&self, target: &str) -> String {
@@ -613,18 +594,36 @@ impl VirtualFileSystem for SandboxAgentFilesystem {
             .client
             .stat_fs(&remote_path)
             .map_err(|error| sandbox_client_error_to_vfs("open", path, error))?;
-        self.ensure_buffered_full_read_allowed(path, &stat, stat.size, "pread")?;
-
-        let content = self
-            .client
-            .read_fs_file(&remote_path)
-            .map_err(|error| sandbox_client_error_to_vfs("open", path, error))?;
-        let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        if start >= content.len() {
+        if stat.entry_type == "directory" {
+            return Err(VfsError::new(
+                "EISDIR",
+                format!("illegal operation on a directory, open '{path}'"),
+            ));
+        }
+        if offset >= stat.size {
             return Ok(Vec::new());
         }
-        let end = start.saturating_add(length).min(content.len());
-        Ok(content[start..end].to_vec())
+
+        match self
+            .client
+            .read_fs_file_range(&remote_path, offset, length)
+            .map_err(|error| sandbox_client_error_to_vfs("open", path, error))?
+        {
+            SandboxAgentReadResponse::Partial(content) => Ok(content),
+            SandboxAgentReadResponse::Full(content) => {
+                eprintln!(
+                    "warning: sandbox_agent pread '{path}' fell back to a full-file GET because the remote ignored Range; downloaded {} bytes (maxFullReadBytes={})",
+                    content.len(),
+                    self.max_full_read_bytes
+                );
+                let start = usize::try_from(offset).unwrap_or(usize::MAX);
+                if start >= content.len() {
+                    return Ok(Vec::new());
+                }
+                let end = start.saturating_add(length).min(content.len());
+                Ok(content[start..end].to_vec())
+            }
+        }
     }
 }
 
@@ -747,6 +746,30 @@ impl SandboxAgentFilesystemClient {
             vec![(String::from("path"), path.to_owned())],
             Some("application/octet-stream"),
         )
+    }
+
+    fn read_fs_file_range(
+        &self,
+        path: &str,
+        offset: u64,
+        length: usize,
+    ) -> Result<SandboxAgentReadResponse, SandboxAgentClientError> {
+        let range_length = u64::try_from(length).unwrap_or(u64::MAX);
+        let end = offset.saturating_add(range_length.saturating_sub(1));
+        let response = self.request_raw_with_headers(
+            "GET",
+            "/v1/fs/file",
+            vec![(String::from("path"), path.to_owned())],
+            RequestBody::None,
+            Some("application/octet-stream"),
+            vec![(String::from("Range"), format!("bytes={offset}-{end}"))],
+        )?;
+        let status = response.status();
+        let bytes = response_into_bytes(response)?;
+        Ok(match status {
+            206 => SandboxAgentReadResponse::Partial(bytes),
+            _ => SandboxAgentReadResponse::Full(bytes),
+        })
     }
 
     fn write_fs_file(&self, path: &str, content: &[u8]) -> Result<(), SandboxAgentClientError> {
@@ -878,6 +901,18 @@ impl SandboxAgentFilesystemClient {
         body: RequestBody,
         accept: Option<&str>,
     ) -> Result<ureq::Response, SandboxAgentClientError> {
+        self.request_raw_with_headers(method, path, query, body, accept, Vec::new())
+    }
+
+    fn request_raw_with_headers(
+        &self,
+        method: &str,
+        path: &str,
+        query: Vec<(String, String)>,
+        body: RequestBody,
+        accept: Option<&str>,
+        request_headers: Vec<(String, String)>,
+    ) -> Result<ureq::Response, SandboxAgentClientError> {
         let mut request = self
             .agent
             .request(method, &format!("{}{}", self.base_url, path));
@@ -888,6 +923,10 @@ impl SandboxAgentFilesystemClient {
 
         for (name, value) in &self.headers {
             request = request.set(name, value);
+        }
+
+        for (name, value) in request_headers {
+            request = request.set(&name, &value);
         }
 
         if let Some(accept) = accept {
@@ -917,6 +956,11 @@ impl SandboxAgentFilesystemClient {
             }
         }
     }
+}
+
+enum SandboxAgentReadResponse {
+    Partial(Vec<u8>),
+    Full(Vec<u8>),
 }
 
 enum RequestBody {
@@ -1018,6 +1062,15 @@ fn read_problem_details(response: ureq::Response) -> SandboxAgentProblemDetails 
         }
         _ => SandboxAgentProblemDetails::default(),
     }
+}
+
+fn response_into_bytes(response: ureq::Response) -> Result<Vec<u8>, SandboxAgentClientError> {
+    let mut reader = response.into_reader();
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|error| SandboxAgentClientError::Decode(error.to_string()))?;
+    Ok(bytes)
 }
 
 fn sandbox_client_error_to_vfs(
@@ -1358,6 +1411,8 @@ pub(crate) mod test_support {
         pub path: String,
         pub query: BTreeMap<String, String>,
         pub headers: BTreeMap<String, String>,
+        pub response_status: u16,
+        pub response_body_bytes: usize,
     }
 
     pub(crate) struct MockSandboxAgentServer {
@@ -1370,17 +1425,22 @@ pub(crate) mod test_support {
 
     impl MockSandboxAgentServer {
         pub(crate) fn start(prefix: &str, token: Option<&str>) -> Self {
-            Self::start_with_process_api(prefix, token, true)
+            Self::start_with_options(prefix, token, true, true)
         }
 
         pub(crate) fn start_without_process_api(prefix: &str, token: Option<&str>) -> Self {
-            Self::start_with_process_api(prefix, token, false)
+            Self::start_with_options(prefix, token, false, true)
         }
 
-        fn start_with_process_api(
+        pub(crate) fn start_without_range_support(prefix: &str, token: Option<&str>) -> Self {
+            Self::start_with_options(prefix, token, true, false)
+        }
+
+        fn start_with_options(
             prefix: &str,
             token: Option<&str>,
             process_api_supported: bool,
+            range_requests_supported: bool,
         ) -> Self {
             let root = temp_dir(prefix);
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock sandbox-agent");
@@ -1406,6 +1466,7 @@ pub(crate) mod test_support {
                                 &root_for_thread,
                                 token.as_deref(),
                                 process_api_supported,
+                                range_requests_supported,
                                 &requests_for_thread,
                             );
                         }
@@ -1508,6 +1569,7 @@ pub(crate) mod test_support {
         root: &Path,
         token: Option<&str>,
         process_api_supported: bool,
+        range_requests_supported: bool,
         requests: &Arc<Mutex<Vec<LoggedRequest>>>,
     ) {
         stream
@@ -1567,15 +1629,18 @@ pub(crate) mod test_support {
         }
         let body = &buffer[header_end + 4..header_end + 4 + content_length];
 
-        requests
-            .lock()
-            .expect("record mock sandbox-agent request")
-            .push(LoggedRequest {
+        let request_index = {
+            let mut logged_requests = requests.lock().expect("record mock sandbox-agent request");
+            logged_requests.push(LoggedRequest {
                 method: method.clone(),
                 path: path.clone(),
                 query: query.clone(),
                 headers: headers.clone(),
+                response_status: 0,
+                response_body_bytes: 0,
             });
+            logged_requests.len() - 1
+        };
 
         if let Some(expected_token) = token {
             let authorization = headers
@@ -1583,12 +1648,14 @@ pub(crate) mod test_support {
                 .map(String::as_str)
                 .unwrap_or_default();
             if authorization != format!("Bearer {expected_token}") {
-                send_problem(&mut stream, 401, "Unauthorized", "authentication required");
+                let outcome =
+                    send_problem(&mut stream, 401, "Unauthorized", "authentication required");
+                update_logged_request(requests, request_index, outcome);
                 return;
             }
         }
 
-        match (method.as_str(), path.as_str()) {
+        let outcome = match (method.as_str(), path.as_str()) {
             ("GET", "/v1/fs/entries") => {
                 let path = query
                     .get("path")
@@ -1615,16 +1682,14 @@ pub(crate) mod test_support {
                             })
                             .collect::<Vec<_>>();
                         payload.sort_by(|left, right| left.name.cmp(&right.name));
-                        send_json(&mut stream, 200, &payload);
+                        send_json(&mut stream, 200, &payload)
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        send_problem(
-                            &mut stream,
-                            400,
-                            "Bad Request",
-                            &format!("path not found: {}", target.display()),
-                        );
-                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => send_problem(
+                        &mut stream,
+                        400,
+                        "Bad Request",
+                        &format!("path not found: {}", target.display()),
+                    ),
                     Err(error) => send_problem(
                         &mut stream,
                         500,
@@ -1639,6 +1704,37 @@ pub(crate) mod test_support {
                 match fs::metadata(&target) {
                     Ok(metadata) if metadata.is_file() => match fs::read(&target) {
                         Ok(bytes) => {
+                            if range_requests_supported {
+                                if let Some(range) = headers
+                                    .get("range")
+                                    .and_then(|value| parse_range_header(value, bytes.len()))
+                                {
+                                    let body = &bytes[range.start..=range.end];
+                                    return_with_logged_request(
+                                        requests,
+                                        request_index,
+                                        send_bytes_with_headers(
+                                            &mut stream,
+                                            206,
+                                            "application/octet-stream",
+                                            body,
+                                            &[
+                                                ("Accept-Ranges", String::from("bytes")),
+                                                (
+                                                    "Content-Range",
+                                                    format!(
+                                                        "bytes {}-{}/{}",
+                                                        range.start,
+                                                        range.end,
+                                                        bytes.len()
+                                                    ),
+                                                ),
+                                            ],
+                                        ),
+                                    );
+                                    return;
+                                }
+                            }
                             send_bytes(&mut stream, 200, "application/octet-stream", &bytes)
                         }
                         Err(error) => send_problem(
@@ -1654,14 +1750,12 @@ pub(crate) mod test_support {
                         "Bad Request",
                         &format!("path is not a file: {}", target.display()),
                     ),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        send_problem(
-                            &mut stream,
-                            400,
-                            "Bad Request",
-                            &format!("path not found: {}", target.display()),
-                        );
-                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => send_problem(
+                        &mut stream,
+                        400,
+                        "Bad Request",
+                        &format!("path not found: {}", target.display()),
+                    ),
                     Err(error) => send_problem(
                         &mut stream,
                         500,
@@ -1734,14 +1828,12 @@ pub(crate) mod test_support {
                             &error.to_string(),
                         ),
                     },
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        send_problem(
-                            &mut stream,
-                            400,
-                            "Bad Request",
-                            &format!("path not found: {}", target.display()),
-                        );
-                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => send_problem(
+                        &mut stream,
+                        400,
+                        "Bad Request",
+                        &format!("path not found: {}", target.display()),
+                    ),
                     Err(error) => send_problem(
                         &mut stream,
                         500,
@@ -1815,14 +1907,12 @@ pub(crate) mod test_support {
                             "to": destination.to_string_lossy(),
                         }),
                     ),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        send_problem(
-                            &mut stream,
-                            400,
-                            "Bad Request",
-                            &format!("path not found: {}", source.display()),
-                        );
-                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => send_problem(
+                        &mut stream,
+                        400,
+                        "Bad Request",
+                        &format!("path not found: {}", source.display()),
+                    ),
                     Err(error) => send_problem(
                         &mut stream,
                         500,
@@ -1849,14 +1939,12 @@ pub(crate) mod test_support {
                             modified: None,
                         },
                     ),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        send_problem(
-                            &mut stream,
-                            400,
-                            "Bad Request",
-                            &format!("path not found: {}", target.display()),
-                        );
-                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => send_problem(
+                        &mut stream,
+                        400,
+                        "Bad Request",
+                        &format!("path not found: {}", target.display()),
+                    ),
                     Err(error) => send_problem(
                         &mut stream,
                         500,
@@ -1867,12 +1955,13 @@ pub(crate) mod test_support {
             }
             ("POST", "/v1/processes/run") => {
                 if !process_api_supported {
-                    send_problem(
+                    let outcome = send_problem(
                         &mut stream,
                         501,
                         "Not Implemented",
                         "process API unsupported by mock sandbox-agent",
                     );
+                    update_logged_request(requests, request_index, outcome);
                     return;
                 }
 
@@ -1931,7 +2020,8 @@ pub(crate) mod test_support {
                 }
             }
             _ => send_problem(&mut stream, 404, "Not Found", "unknown mock route"),
-        }
+        };
+        update_logged_request(requests, request_index, outcome);
     }
 
     fn find_header_end(buffer: &[u8]) -> Option<usize> {
@@ -2022,12 +2112,76 @@ pub(crate) mod test_support {
         serde_json::to_string(&value).expect("serialize sanitized process stdout")
     }
 
-    fn send_json(stream: &mut TcpStream, status: u16, value: &impl Serialize) {
-        let body = serde_json::to_vec(value).expect("serialize mock sandbox-agent response");
-        send_bytes(stream, status, "application/json", &body);
+    #[derive(Clone, Copy)]
+    struct ResponseOutcome {
+        status: u16,
+        body_bytes: usize,
     }
 
-    fn send_problem(stream: &mut TcpStream, status: u16, title: &str, detail: &str) {
+    #[derive(Clone, Copy)]
+    struct ByteRange {
+        start: usize,
+        end: usize,
+    }
+
+    fn parse_range_header(raw: &str, content_len: usize) -> Option<ByteRange> {
+        let spec = raw.strip_prefix("bytes=")?;
+        let (start_raw, end_raw) = spec.split_once('-')?;
+        if start_raw.is_empty() {
+            return None;
+        }
+        let start = start_raw.parse::<usize>().ok()?;
+        if start >= content_len {
+            return None;
+        }
+        let end = if end_raw.is_empty() {
+            content_len.saturating_sub(1)
+        } else {
+            end_raw
+                .parse::<usize>()
+                .ok()?
+                .min(content_len.saturating_sub(1))
+        };
+        if end < start {
+            return None;
+        }
+        Some(ByteRange { start, end })
+    }
+
+    fn update_logged_request(
+        requests: &Arc<Mutex<Vec<LoggedRequest>>>,
+        request_index: usize,
+        outcome: ResponseOutcome,
+    ) {
+        if let Some(request) = requests
+            .lock()
+            .expect("lock mock sandbox-agent request log")
+            .get_mut(request_index)
+        {
+            request.response_status = outcome.status;
+            request.response_body_bytes = outcome.body_bytes;
+        }
+    }
+
+    fn return_with_logged_request(
+        requests: &Arc<Mutex<Vec<LoggedRequest>>>,
+        request_index: usize,
+        outcome: ResponseOutcome,
+    ) {
+        update_logged_request(requests, request_index, outcome);
+    }
+
+    fn send_json(stream: &mut TcpStream, status: u16, value: &impl Serialize) -> ResponseOutcome {
+        let body = serde_json::to_vec(value).expect("serialize mock sandbox-agent response");
+        send_bytes(stream, status, "application/json", &body)
+    }
+
+    fn send_problem(
+        stream: &mut TcpStream,
+        status: u16,
+        title: &str,
+        detail: &str,
+    ) -> ResponseOutcome {
         send_json(
             stream,
             status,
@@ -2037,25 +2191,52 @@ pub(crate) mod test_support {
                 "status": status,
                 "detail": detail,
             }),
-        );
+        )
     }
 
-    fn send_bytes(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) {
+    fn send_bytes(
+        stream: &mut TcpStream,
+        status: u16,
+        content_type: &str,
+        body: &[u8],
+    ) -> ResponseOutcome {
+        send_bytes_with_headers(stream, status, content_type, body, &[])
+    }
+
+    fn send_bytes_with_headers(
+        stream: &mut TcpStream,
+        status: u16,
+        content_type: &str,
+        body: &[u8],
+        extra_headers: &[(&str, String)],
+    ) -> ResponseOutcome {
         let status_text = match status {
             200 => "OK",
+            206 => "Partial Content",
             400 => "Bad Request",
             401 => "Unauthorized",
             404 => "Not Found",
             501 => "Not Implemented",
             _ => "Internal Server Error",
         };
-        let headers = format!(
-            "HTTP/1.1 {status} {status_text}\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n",
+        let mut headers = format!(
+            "HTTP/1.1 {status} {status_text}\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nConnection: close\r\n",
             body.len()
         );
+        for (name, value) in extra_headers {
+            headers.push_str(name);
+            headers.push_str(": ");
+            headers.push_str(value);
+            headers.push_str("\r\n");
+        }
+        headers.push_str("\r\n");
         let _ = stream.write_all(headers.as_bytes());
         let _ = stream.write_all(body);
         let _ = stream.flush();
+        ResponseOutcome {
+            status,
+            body_bytes: body.len(),
+        }
     }
 
     fn temp_dir(prefix: &str) -> PathBuf {

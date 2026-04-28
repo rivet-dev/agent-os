@@ -1,6 +1,6 @@
 --- a/src/chmod.rs
 +++ b/src/chmod.rs
-@@ -8,16 +8,51 @@
+@@ -8,16 +8,70 @@
  use clap::{Arg, ArgAction, Command};
  use std::ffi::OsString;
  use std::fs;
@@ -71,7 +71,7 @@
  #[cfg(all(unix, not(target_os = "redox")))]
  use uucore::safe_traversal::{DirFd, SymlinkBehavior};
  use uucore::{format_usage, show, show_error};
-@@ -683,7 +718,12 @@
+@@ -683,7 +737,12 @@
              // Use the helper method for consistent reporting
              self.report_permission_change(file, fperm, mode);
              Ok(())

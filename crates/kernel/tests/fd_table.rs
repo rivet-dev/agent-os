@@ -111,6 +111,23 @@ fn open_with_rejects_target_fds_past_the_process_limit() {
 }
 
 #[test]
+fn configurable_process_fd_limit_returns_emfile() {
+    let mut manager = FdTableManager::with_max_fds(5);
+    manager.create(1);
+
+    let table = manager.get_mut(1).expect("FD table should exist");
+    table
+        .open("/tmp/test-1.txt", O_RDONLY)
+        .expect("first non-stdio FD should open");
+    table
+        .open("/tmp/test-2.txt", O_RDONLY)
+        .expect("second non-stdio FD should open");
+
+    let result = table.open("/tmp/test-3.txt", O_RDONLY);
+    assert_error_code(result, "EMFILE");
+}
+
+#[test]
 fn close_decrements_refcount() {
     let mut manager = FdTableManager::new();
     manager.create(1);

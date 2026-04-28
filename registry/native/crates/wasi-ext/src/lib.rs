@@ -333,7 +333,13 @@ pub fn openpty() -> Result<(u32, u32), Errno> {
 /// `mask_lo` / `mask_hi` encode the low/high 32 bits of sa_mask, and `flags`
 /// carries the raw POSIX sa_flags bitmask.
 /// Returns `Ok(())` on success, `Err(errno)` on failure.
-pub fn sigaction_set(signal: u32, action: u32, mask_lo: u32, mask_hi: u32, flags: u32) -> Result<(), Errno> {
+pub fn sigaction_set(
+    signal: u32,
+    action: u32,
+    mask_lo: u32,
+    mask_hi: u32,
+    flags: u32,
+) -> Result<(), Errno> {
     let errno = unsafe { proc_sigaction(signal, action, mask_lo, mask_hi, flags) };
     if errno == ERRNO_SUCCESS {
         Ok(())
@@ -369,7 +375,8 @@ extern "C" {
     /// `flags` are send flags (0 for default).
     /// Number of bytes sent is written to `ret_sent`.
     /// Returns errno.
-    fn net_send(fd: u32, buf_ptr: *const u8, buf_len: u32, flags: u32, ret_sent: *mut u32) -> Errno;
+    fn net_send(fd: u32, buf_ptr: *const u8, buf_len: u32, flags: u32, ret_sent: *mut u32)
+        -> Errno;
 
     /// Receive data from a connected socket.
     ///
@@ -377,7 +384,13 @@ extern "C" {
     /// `flags` are recv flags (0 for default).
     /// Number of bytes received is written to `ret_received`.
     /// Returns errno.
-    fn net_recv(fd: u32, buf_ptr: *mut u8, buf_len: u32, flags: u32, ret_received: *mut u32) -> Errno;
+    fn net_recv(
+        fd: u32,
+        buf_ptr: *mut u8,
+        buf_len: u32,
+        flags: u32,
+        ret_received: *mut u32,
+    ) -> Errno;
 
     /// Close a socket.
     ///
@@ -413,7 +426,13 @@ extern "C" {
     /// `optname` is the option name.
     /// `optval_ptr`/`optval_len` point to the option value.
     /// Returns errno.
-    fn net_setsockopt(fd: u32, level: u32, optname: u32, optval_ptr: *const u8, optval_len: u32) -> Errno;
+    fn net_setsockopt(
+        fd: u32,
+        level: u32,
+        optname: u32,
+        optval_ptr: *const u8,
+        optval_len: u32,
+    ) -> Errno;
 
     /// Get the local address of a socket.
     ///
@@ -736,7 +755,12 @@ pub fn sendto(fd: u32, buf: &[u8], flags: u32, addr: &[u8]) -> Result<u32, Errno
 ///
 /// Writes received data into `buf` and the source address string into `addr_buf`.
 /// Returns `Ok((bytes_received, addr_len))` on success, `Err(errno)` on failure.
-pub fn recvfrom(fd: u32, buf: &mut [u8], flags: u32, addr_buf: &mut [u8]) -> Result<(u32, u32), Errno> {
+pub fn recvfrom(
+    fd: u32,
+    buf: &mut [u8],
+    flags: u32,
+    addr_buf: &mut [u8],
+) -> Result<(u32, u32), Errno> {
     let buf_len = checked_u32_len(buf.len())?;
     let mut received: u32 = 0;
     let mut addr_len = checked_u32_len(addr_buf.len())?;
@@ -852,8 +876,14 @@ mod tests {
     #[test]
     fn poll_buffer_validation_requires_exact_pollfd_capacity() {
         assert_eq!(validate_poll_buffer_len(POLLFD_BYTES, 1), Ok(()));
-        assert_eq!(validate_poll_buffer_len(POLLFD_BYTES - 1, 1), Err(ERRNO_INVAL));
-        assert_eq!(validate_poll_buffer_len(POLLFD_BYTES + 1, 1), Err(ERRNO_INVAL));
+        assert_eq!(
+            validate_poll_buffer_len(POLLFD_BYTES - 1, 1),
+            Err(ERRNO_INVAL)
+        );
+        assert_eq!(
+            validate_poll_buffer_len(POLLFD_BYTES + 1, 1),
+            Err(ERRNO_INVAL)
+        );
     }
 
     #[test]

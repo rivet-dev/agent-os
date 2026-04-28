@@ -98,7 +98,7 @@ fn readdir_lists_known_device_entries() {
 }
 
 #[test]
-fn stdio_devices_fall_through_to_backing_vfs_for_regular_io() {
+fn stdio_devices_behave_like_write_sinks_without_backing_vfs_state() {
     let mut filesystem = create_test_vfs();
 
     assert_error_code(filesystem.read_file("/dev/stdin"), "ENOENT");
@@ -111,19 +111,18 @@ fn stdio_devices_fall_through_to_backing_vfs_for_regular_io() {
     filesystem
         .write_file("/dev/stderr", "error output")
         .expect("write /dev/stderr");
+    assert_eq!(
+        filesystem
+            .append_file("/dev/stdout", "more output")
+            .expect("append /dev/stdout"),
+        "more output".len() as u64
+    );
+    filesystem
+        .truncate("/dev/stderr", 0)
+        .expect("truncate /dev/stderr");
 
-    assert_eq!(
-        filesystem
-            .read_text_file("/dev/stdout")
-            .expect("read /dev/stdout"),
-        "output"
-    );
-    assert_eq!(
-        filesystem
-            .read_text_file("/dev/stderr")
-            .expect("read /dev/stderr"),
-        "error output"
-    );
+    assert_error_code(filesystem.read_file("/dev/stdout"), "ENOENT");
+    assert_error_code(filesystem.read_file("/dev/stderr"), "ENOENT");
 }
 
 #[test]

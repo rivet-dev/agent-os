@@ -11,7 +11,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
-import { COMMANDS_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
+import { C_BUILD_DIR, COMMANDS_DIR, createKernel } from '../helpers.js';
 import type { Kernel } from '../helpers.js';
 
 // Minimal in-memory VFS for kernel tests
@@ -102,7 +102,7 @@ class SimpleVFS {
   }
 }
 
-describe.skipIf(!hasWasmBinaries)('envsubst command', () => {
+describe('envsubst command', () => {
   let kernel: Kernel;
 
   afterEach(async () => {
@@ -112,7 +112,9 @@ describe.skipIf(!hasWasmBinaries)('envsubst command', () => {
   it('substitutes $VAR with environment variable value', async () => {
     const vfs = new SimpleVFS();
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(
+      createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
+    );
 
     const result = await kernel.exec('envsubst', {
       stdin: 'Hello $USER\n',
@@ -124,7 +126,9 @@ describe.skipIf(!hasWasmBinaries)('envsubst command', () => {
   it('substitutes ${VAR:-default} with fallback for undefined var', async () => {
     const vfs = new SimpleVFS();
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(
+      createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
+    );
 
     const result = await kernel.exec('envsubst', {
       stdin: '${UNDEFINED:-fallback}\n',
@@ -136,7 +140,9 @@ describe.skipIf(!hasWasmBinaries)('envsubst command', () => {
   it('passes through escaped \\$VAR literally', async () => {
     const vfs = new SimpleVFS();
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(
+      createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
+    );
 
     const result = await kernel.exec('envsubst', {
       stdin: '\\$ESCAPED\n',
@@ -148,7 +154,9 @@ describe.skipIf(!hasWasmBinaries)('envsubst command', () => {
   it('substitutes multiple variables in one line', async () => {
     const vfs = new SimpleVFS();
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(
+      createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
+    );
 
     const result = await kernel.exec('envsubst', {
       stdin: '$GREETING $NAME from $PLACE\n',
@@ -160,7 +168,9 @@ describe.skipIf(!hasWasmBinaries)('envsubst command', () => {
   it('replaces undefined variables with empty string', async () => {
     const vfs = new SimpleVFS();
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(
+      createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
+    );
 
     const result = await kernel.exec('envsubst', {
       stdin: 'before${MISSING}after\n',
@@ -172,7 +182,9 @@ describe.skipIf(!hasWasmBinaries)('envsubst command', () => {
   it('handles ${VAR} brace syntax with defined variable', async () => {
     const vfs = new SimpleVFS();
     kernel = createKernel({ filesystem: vfs as any });
-    await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+    await kernel.mount(
+      createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
+    );
 
     const result = await kernel.exec('envsubst', {
       stdin: '${APP_NAME}_config\n',

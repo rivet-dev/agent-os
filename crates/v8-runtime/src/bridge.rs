@@ -1,11 +1,13 @@
 // Host function injection via v8::FunctionTemplate
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
+use openssl::version as openssl_version;
 use v8::MapFnTo;
 use v8::ValueDeserializerHelper;
 use v8::ValueSerializerHelper;
@@ -17,20 +19,39 @@ use crate::host_call::BridgeCallContext;
 // SECURE_EXEC_V8_CODEC=cbor for runtimes whose node:v8 module doesn't
 // produce real V8 serialization format (e.g. Bun).
 static USE_CBOR_CODEC: AtomicBool = AtomicBool::new(false);
+static EMBEDDED_CBOR_USERS: AtomicUsize = AtomicUsize::new(0);
 
 /// Initialize the codec from the SECURE_EXEC_V8_CODEC environment variable.
 /// Call once at process startup before any sessions are created.
 pub fn init_codec() {
-    if let Ok(val) = std::env::var("SECURE_EXEC_V8_CODEC") {
-        if val == "cbor" {
-            USE_CBOR_CODEC.store(true, Ordering::Relaxed);
-        }
+    USE_CBOR_CODEC.store(configured_cbor_codec_enabled(), Ordering::Relaxed);
+}
+
+pub fn enable_cbor_codec() {
+    USE_CBOR_CODEC.store(true, Ordering::Relaxed);
+}
+
+pub fn acquire_embedded_cbor_codec() {
+    EMBEDDED_CBOR_USERS.fetch_add(1, Ordering::AcqRel);
+    USE_CBOR_CODEC.store(true, Ordering::Relaxed);
+}
+
+pub fn release_embedded_cbor_codec() {
+    let previous = EMBEDDED_CBOR_USERS.fetch_sub(1, Ordering::AcqRel);
+    if previous <= 1 {
+        USE_CBOR_CODEC.store(configured_cbor_codec_enabled(), Ordering::Relaxed);
     }
 }
 
 /// Returns true if the CBOR codec is active.
 pub fn is_cbor_codec() -> bool {
     USE_CBOR_CODEC.load(Ordering::Relaxed)
+}
+
+fn configured_cbor_codec_enabled() -> bool {
+    std::env::var("SECURE_EXEC_V8_CODEC")
+        .map(|val| val == "cbor")
+        .unwrap_or(false)
 }
 
 /// External references for V8 snapshot serialization.
@@ -80,6 +101,15 @@ pub fn serialize_v8_value(
     if is_cbor_codec() {
         return serialize_cbor_value(scope, value);
     }
+    serialize_v8_wire_value(scope, value)
+}
+
+/// Serialize a V8 value to bytes using V8's native wire format regardless of
+/// the process-wide codec toggle.
+pub fn serialize_v8_wire_value(
+    scope: &mut v8::HandleScope,
+    value: v8::Local<v8::Value>,
+) -> Result<Vec<u8>, String> {
     let context = scope.get_current_context();
     let serializer = v8::ValueSerializer::new(scope, Box::new(DefaultSerializerDelegate));
     serializer.write_header();
@@ -114,6 +144,15 @@ pub fn deserialize_v8_value<'s>(
     if is_cbor_codec() {
         return deserialize_cbor_value(scope, data);
     }
+    deserialize_v8_wire_value(scope, data)
+}
+
+/// Deserialize bytes from V8's native wire format regardless of the
+/// process-wide codec toggle.
+pub fn deserialize_v8_wire_value<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    data: &[u8],
+) -> Result<v8::Local<'s, v8::Value>, String> {
     let context = scope.get_current_context();
     let deserializer =
         v8::ValueDeserializer::new(scope, Box::new(DefaultDeserializerDelegate), data);
@@ -337,6 +376,729 @@ impl PendingPromises {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ThreadResourceUsageSnapshot {
+    user_cpu_us: u64,
+    system_cpu_us: u64,
+    max_rss_kib: i64,
+    shared_memory_size: i64,
+    unshared_data_size: i64,
+    unshared_stack_size: i64,
+    minor_page_faults: i64,
+    major_page_faults: i64,
+    swapped_out: i64,
+    fs_read: i64,
+    fs_write: i64,
+    ipc_sent: i64,
+    ipc_received: i64,
+    signals_count: i64,
+    voluntary_context_switches: i64,
+    involuntary_context_switches: i64,
+}
+
+fn non_negative_c_long(value: libc::c_long) -> i64 {
+    let normalized = i128::from(value).max(0);
+    normalized.min(i128::from(i64::MAX)) as i64
+}
+
+fn timeval_to_micros(value: libc::timeval) -> u64 {
+    let seconds = i128::from(value.tv_sec).max(0);
+    let micros = i128::from(value.tv_usec).max(0);
+    (seconds
+        .saturating_mul(1_000_000)
+        .saturating_add(micros)
+        .min(i128::from(u64::MAX))) as u64
+}
+
+fn current_thread_resource_usage() -> Result<ThreadResourceUsageSnapshot, String> {
+    let mut usage = MaybeUninit::<libc::rusage>::uninit();
+    let result = unsafe { libc::getrusage(libc::RUSAGE_THREAD, usage.as_mut_ptr()) };
+    if result != 0 {
+        return Err(format!(
+            "getrusage(RUSAGE_THREAD) failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let usage = unsafe { usage.assume_init() };
+    Ok(ThreadResourceUsageSnapshot {
+        user_cpu_us: timeval_to_micros(usage.ru_utime),
+        system_cpu_us: timeval_to_micros(usage.ru_stime),
+        max_rss_kib: non_negative_c_long(usage.ru_maxrss),
+        shared_memory_size: non_negative_c_long(usage.ru_ixrss),
+        unshared_data_size: non_negative_c_long(usage.ru_idrss),
+        unshared_stack_size: non_negative_c_long(usage.ru_isrss),
+        minor_page_faults: non_negative_c_long(usage.ru_minflt),
+        major_page_faults: non_negative_c_long(usage.ru_majflt),
+        swapped_out: non_negative_c_long(usage.ru_nswap),
+        fs_read: non_negative_c_long(usage.ru_inblock),
+        fs_write: non_negative_c_long(usage.ru_oublock),
+        ipc_sent: non_negative_c_long(usage.ru_msgsnd),
+        ipc_received: non_negative_c_long(usage.ru_msgrcv),
+        signals_count: non_negative_c_long(usage.ru_nsignals),
+        voluntary_context_switches: non_negative_c_long(usage.ru_nvcsw),
+        involuntary_context_switches: non_negative_c_long(usage.ru_nivcsw),
+    })
+}
+
+fn normalize_openssl_version(raw: &str) -> String {
+    raw.split_whitespace().nth(1).unwrap_or(raw).to_string()
+}
+
+fn set_object_string_property<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    object: v8::Local<'s, v8::Object>,
+    key: &str,
+    value: &str,
+) {
+    let key = v8::String::new(scope, key).expect("V8 string key");
+    let value = v8::String::new(scope, value).expect("V8 string value");
+    let _ = object.set(scope, key.into(), value.into());
+}
+
+fn set_object_number_property<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    object: v8::Local<'s, v8::Object>,
+    key: &str,
+    value: f64,
+) {
+    let key = v8::String::new(scope, key).expect("V8 string key");
+    let value = v8::Number::new(scope, value);
+    let _ = object.set(scope, key.into(), value.into());
+}
+
+fn number_property_or_zero<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    object: v8::Local<'s, v8::Object>,
+    key: &str,
+) -> u64 {
+    let key = v8::String::new(scope, key).expect("V8 string key");
+    object
+        .get(scope, key.into())
+        .and_then(|value| value.integer_value(scope))
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or_default()
+}
+
+fn process_memory_usage_value<'s>(scope: &mut v8::HandleScope<'s>) -> v8::Local<'s, v8::Value> {
+    let mut stats = v8::HeapStatistics::default();
+    scope.get_heap_statistics(&mut stats);
+
+    let object = v8::Object::new(scope);
+    set_object_number_property(scope, object, "rss", stats.total_physical_size() as f64);
+    set_object_number_property(scope, object, "heapTotal", stats.total_heap_size() as f64);
+    set_object_number_property(scope, object, "heapUsed", stats.used_heap_size() as f64);
+    set_object_number_property(scope, object, "external", stats.external_memory() as f64);
+    set_object_number_property(
+        scope,
+        object,
+        "arrayBuffers",
+        stats.external_memory() as f64,
+    );
+    object.into()
+}
+
+fn process_cpu_usage_value<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    args: &v8::FunctionCallbackArguments,
+) -> Result<v8::Local<'s, v8::Value>, String> {
+    let usage = current_thread_resource_usage()?;
+    let current_user = usage.user_cpu_us;
+    let current_system = usage.system_cpu_us;
+
+    let (user, system) = if args.length() > 0 {
+        let prev = args.get(0);
+        if prev.is_null_or_undefined() {
+            (current_user, current_system)
+        } else if let Some(prev) = prev.to_object(scope) {
+            let previous_user = number_property_or_zero(scope, prev, "user");
+            let previous_system = number_property_or_zero(scope, prev, "system");
+            (
+                current_user.saturating_sub(previous_user),
+                current_system.saturating_sub(previous_system),
+            )
+        } else {
+            (current_user, current_system)
+        }
+    } else {
+        (current_user, current_system)
+    };
+
+    let object = v8::Object::new(scope);
+    set_object_number_property(scope, object, "user", user as f64);
+    set_object_number_property(scope, object, "system", system as f64);
+    Ok(object.into())
+}
+
+fn process_resource_usage_value<'s>(
+    scope: &mut v8::HandleScope<'s>,
+) -> Result<v8::Local<'s, v8::Value>, String> {
+    let usage = current_thread_resource_usage()?;
+    let object = v8::Object::new(scope);
+    set_object_number_property(scope, object, "userCPUTime", usage.user_cpu_us as f64);
+    set_object_number_property(scope, object, "systemCPUTime", usage.system_cpu_us as f64);
+    set_object_number_property(scope, object, "maxRSS", usage.max_rss_kib as f64);
+    set_object_number_property(
+        scope,
+        object,
+        "sharedMemorySize",
+        usage.shared_memory_size as f64,
+    );
+    set_object_number_property(
+        scope,
+        object,
+        "unsharedDataSize",
+        usage.unshared_data_size as f64,
+    );
+    set_object_number_property(
+        scope,
+        object,
+        "unsharedStackSize",
+        usage.unshared_stack_size as f64,
+    );
+    set_object_number_property(
+        scope,
+        object,
+        "minorPageFault",
+        usage.minor_page_faults as f64,
+    );
+    set_object_number_property(
+        scope,
+        object,
+        "majorPageFault",
+        usage.major_page_faults as f64,
+    );
+    set_object_number_property(scope, object, "swappedOut", usage.swapped_out as f64);
+    set_object_number_property(scope, object, "fsRead", usage.fs_read as f64);
+    set_object_number_property(scope, object, "fsWrite", usage.fs_write as f64);
+    set_object_number_property(scope, object, "ipcSent", usage.ipc_sent as f64);
+    set_object_number_property(scope, object, "ipcReceived", usage.ipc_received as f64);
+    set_object_number_property(scope, object, "signalsCount", usage.signals_count as f64);
+    set_object_number_property(
+        scope,
+        object,
+        "voluntaryContextSwitches",
+        usage.voluntary_context_switches as f64,
+    );
+    set_object_number_property(
+        scope,
+        object,
+        "involuntaryContextSwitches",
+        usage.involuntary_context_switches as f64,
+    );
+    Ok(object.into())
+}
+
+fn process_versions_value<'s>(scope: &mut v8::HandleScope<'s>) -> v8::Local<'s, v8::Value> {
+    let object = v8::Object::new(scope);
+    set_object_string_property(scope, object, "v8", v8::V8::get_version());
+    set_object_string_property(
+        scope,
+        object,
+        "openssl",
+        &normalize_openssl_version(openssl_version::version()),
+    );
+    object.into()
+}
+
+#[derive(Clone)]
+struct VmContextState {
+    context: v8::Global<v8::Context>,
+    baseline_keys: HashSet<String>,
+    mirrored_keys: HashSet<String>,
+}
+
+#[derive(Clone, Debug)]
+struct VmRunOptions {
+    filename: String,
+    line_offset: i32,
+    column_offset: i32,
+    timeout_ms: Option<u32>,
+}
+
+impl Default for VmRunOptions {
+    fn default() -> Self {
+        Self {
+            filename: String::from("evalmachine.<anonymous>"),
+            line_offset: 0,
+            column_offset: 0,
+            timeout_ms: None,
+        }
+    }
+}
+
+thread_local! {
+    static VM_CONTEXTS: RefCell<HashMap<u32, VmContextState>> = RefCell::new(HashMap::new());
+    static NEXT_VM_CONTEXT_ID: Cell<u32> = const { Cell::new(1) };
+}
+
+fn next_vm_context_id() -> u32 {
+    NEXT_VM_CONTEXT_ID.with(|next_id| {
+        let id = next_id.get();
+        let next = id.checked_add(1).unwrap_or(1);
+        next_id.set(next.max(1));
+        id
+    })
+}
+
+fn vm_collect_object_keys<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    object: v8::Local<'s, v8::Object>,
+) -> HashSet<String> {
+    let names = object
+        .get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
+        .unwrap_or_else(|| v8::Array::new(scope, 0));
+    let mut keys = HashSet::new();
+    for index in 0..names.length() {
+        let Some(name) = names.get_index(scope, index) else {
+            continue;
+        };
+        if name.is_string() {
+            keys.insert(name.to_rust_string_lossy(scope));
+        }
+    }
+    keys
+}
+
+fn vm_set_property<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    object: v8::Local<'s, v8::Object>,
+    key: &str,
+    value: v8::Local<'s, v8::Value>,
+) {
+    let Some(key_value) = v8::String::new(scope, key) else {
+        return;
+    };
+    let _ = object.set(scope, key_value.into(), value);
+}
+
+fn vm_delete_property<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    object: v8::Local<'s, v8::Object>,
+    key: &str,
+) {
+    let Some(key_value) = v8::String::new(scope, key) else {
+        return;
+    };
+    let _ = object.delete(scope, key_value.into());
+}
+
+fn vm_copy_sandbox_into_context<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    sandbox: v8::Local<'s, v8::Object>,
+    context_global: v8::Local<'s, v8::Object>,
+    previous_mirrored_keys: &HashSet<String>,
+) -> HashSet<String> {
+    let current_keys = vm_collect_object_keys(scope, sandbox);
+    for key in current_keys.iter() {
+        let Some(key_value) = v8::String::new(scope, key) else {
+            continue;
+        };
+        let value = sandbox
+            .get(scope, key_value.into())
+            .unwrap_or_else(|| v8::undefined(scope).into());
+        vm_set_property(scope, context_global, key, value);
+    }
+    for key in previous_mirrored_keys {
+        if !current_keys.contains(key) {
+            vm_delete_property(scope, context_global, key);
+        }
+    }
+    current_keys
+}
+
+fn vm_copy_context_into_sandbox<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    context_global: v8::Local<'s, v8::Object>,
+    sandbox: v8::Local<'s, v8::Object>,
+    baseline_keys: &HashSet<String>,
+    previous_mirrored_keys: &HashSet<String>,
+) -> HashSet<String> {
+    let current_keys = vm_collect_object_keys(scope, context_global)
+        .into_iter()
+        .filter(|key| !baseline_keys.contains(key))
+        .collect::<HashSet<_>>();
+    for key in current_keys.iter() {
+        let Some(key_value) = v8::String::new(scope, key) else {
+            continue;
+        };
+        let value = context_global
+            .get(scope, key_value.into())
+            .unwrap_or_else(|| v8::undefined(scope).into());
+        vm_set_property(scope, sandbox, key, value);
+    }
+    for key in previous_mirrored_keys {
+        if !current_keys.contains(key) {
+            vm_delete_property(scope, sandbox, key);
+        }
+    }
+    current_keys
+}
+
+fn vm_options_from_value<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    value: v8::Local<'s, v8::Value>,
+) -> VmRunOptions {
+    if value.is_null_or_undefined() {
+        return VmRunOptions::default();
+    }
+    if value.is_string() {
+        return VmRunOptions {
+            filename: value.to_rust_string_lossy(scope),
+            ..VmRunOptions::default()
+        };
+    }
+    let Some(options) = value.to_object(scope) else {
+        return VmRunOptions::default();
+    };
+    let mut result = VmRunOptions::default();
+    let read_string = |scope: &mut v8::HandleScope<'s>, key: &str| {
+        let key_value = v8::String::new(scope, key).expect("V8 string key");
+        options
+            .get(scope, key_value.into())
+            .filter(|value| value.is_string())
+            .map(|value| value.to_rust_string_lossy(scope))
+    };
+    let read_i32 = |scope: &mut v8::HandleScope<'s>, key: &str| {
+        let key_value = v8::String::new(scope, key).expect("V8 string key");
+        options
+            .get(scope, key_value.into())
+            .and_then(|value| value.int32_value(scope))
+    };
+    let read_u32 = |scope: &mut v8::HandleScope<'s>, key: &str| {
+        let key_value = v8::String::new(scope, key).expect("V8 string key");
+        options
+            .get(scope, key_value.into())
+            .and_then(|value| value.integer_value(scope))
+            .and_then(|value| u32::try_from(value).ok())
+    };
+
+    if let Some(filename) = read_string(scope, "filename") {
+        result.filename = filename;
+    }
+    if let Some(line_offset) = read_i32(scope, "lineOffset") {
+        result.line_offset = line_offset;
+    }
+    if let Some(column_offset) = read_i32(scope, "columnOffset") {
+        result.column_offset = column_offset;
+    }
+    result.timeout_ms = read_u32(scope, "timeout").filter(|timeout_ms| *timeout_ms > 0);
+    result
+}
+
+fn vm_throw_error<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    message: &str,
+    code: Option<&str>,
+    type_error: bool,
+) -> v8::Local<'s, v8::Value> {
+    let message_value = v8::String::new(scope, message).expect("V8 error message");
+    let exception = if type_error {
+        v8::Exception::type_error(scope, message_value)
+    } else {
+        v8::Exception::error(scope, message_value)
+    };
+    if let Some(code) = code {
+        if let Some(exception_object) = exception.to_object(scope) {
+            let code_key = v8::String::new(scope, "code").expect("V8 code key");
+            let code_value = v8::String::new(scope, code).expect("V8 code value");
+            let _ = exception_object.set(scope, code_key.into(), code_value.into());
+        }
+    }
+    scope.throw_exception(exception);
+    exception
+}
+
+fn vm_throw_execution_error<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    error: &crate::ipc::ExecutionError,
+) -> v8::Local<'s, v8::Value> {
+    let message_value = v8::String::new(scope, &error.message).expect("V8 error message");
+    let exception = match error.error_type.as_str() {
+        "TypeError" => v8::Exception::type_error(scope, message_value),
+        _ => v8::Exception::error(scope, message_value),
+    };
+    if let Some(exception_object) = exception.to_object(scope) {
+        if let Some(code) = error.code.as_deref() {
+            let code_key = v8::String::new(scope, "code").expect("V8 code key");
+            let code_value = v8::String::new(scope, code).expect("V8 code value");
+            let _ = exception_object.set(scope, code_key.into(), code_value.into());
+        }
+        if !error.stack.is_empty() {
+            let stack_key = v8::String::new(scope, "stack").expect("V8 stack key");
+            let stack_value = v8::String::new(scope, &error.stack).expect("V8 stack value");
+            let _ = exception_object.set(scope, stack_key.into(), stack_value.into());
+        }
+    }
+    scope.throw_exception(exception);
+    exception
+}
+
+fn vm_apply_script_origin_to_error(
+    mut error: crate::ipc::ExecutionError,
+    options: &VmRunOptions,
+) -> crate::ipc::ExecutionError {
+    let display_line = options.line_offset.saturating_add(1).max(1);
+    let display_column = options.column_offset.saturating_add(1).max(1);
+    let marker = format!("{}:{}", options.filename, display_line);
+    if !error.stack.contains(&marker) {
+        error.stack = format!(
+            "{}: {}\n    at {}:{}:{}",
+            error.error_type, error.message, options.filename, display_line, display_column
+        );
+    }
+    error
+}
+
+fn vm_run_script_in_context<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    isolate_handle: v8::IsolateHandle,
+    context: v8::Local<'s, v8::Context>,
+    code: &str,
+    options: &VmRunOptions,
+) -> Result<v8::Local<'s, v8::Value>, String> {
+    let mut timeout_guard = options.timeout_ms.map(|timeout_ms| {
+        let (abort_tx, _abort_rx) = crossbeam_channel::bounded::<()>(0);
+        crate::timeout::TimeoutGuard::new(timeout_ms, isolate_handle.clone(), abort_tx)
+    });
+
+    let mut result = None;
+    let mut exception = None;
+    {
+        let context_scope = &mut v8::ContextScope::new(scope, context);
+        let tc = &mut v8::TryCatch::new(context_scope);
+        let source = v8::String::new(tc, code)
+            .ok_or_else(|| String::from("vm source string too large for V8"))?;
+        let filename = v8::String::new(tc, &options.filename)
+            .ok_or_else(|| String::from("vm filename too large for V8"))?;
+        let origin = v8::ScriptOrigin::new(
+            tc,
+            filename.into(),
+            options.line_offset.saturating_sub(1),
+            options.column_offset,
+            false,
+            -1,
+            None,
+            false,
+            false,
+            false,
+            None,
+        );
+        match v8::Script::compile(tc, source, Some(&origin)) {
+            Some(script) => match script.run(tc) {
+                Some(value) => {
+                    tc.perform_microtask_checkpoint();
+                    if let Some(thrown) = tc.exception() {
+                        exception = Some(vm_apply_script_origin_to_error(
+                            crate::execution::extract_error_info(tc, thrown),
+                            options,
+                        ));
+                    } else {
+                        result = Some(v8::Global::new(tc, value));
+                    }
+                }
+                None => {
+                    let failure_message = v8::String::new(tc, "vm script execution failed")
+                        .expect("vm failure message");
+                    let thrown = tc
+                        .exception()
+                        .unwrap_or_else(|| v8::Exception::error(tc, failure_message).into());
+                    exception = Some(vm_apply_script_origin_to_error(
+                        crate::execution::extract_error_info(tc, thrown),
+                        options,
+                    ));
+                }
+            },
+            None => {
+                let failure_message = v8::String::new(tc, "vm script compilation failed")
+                    .expect("vm failure message");
+                let thrown = tc
+                    .exception()
+                    .unwrap_or_else(|| v8::Exception::error(tc, failure_message).into());
+                exception = Some(vm_apply_script_origin_to_error(
+                    crate::execution::extract_error_info(tc, thrown),
+                    options,
+                ));
+            }
+        }
+    }
+
+    let timed_out = if let Some(ref mut guard) = timeout_guard {
+        guard.cancel();
+        guard.timed_out()
+    } else {
+        false
+    };
+
+    if timed_out {
+        isolate_handle.cancel_terminate_execution();
+        return Ok(vm_throw_error(
+            scope,
+            &format!(
+                "Script execution timed out after {}ms",
+                options.timeout_ms.unwrap_or_default()
+            ),
+            Some("ERR_SCRIPT_EXECUTION_TIMEOUT"),
+            false,
+        ));
+    }
+
+    if let Some(exception) = exception {
+        return Ok(vm_throw_execution_error(scope, &exception));
+    }
+
+    Ok(result
+        .map(|result| v8::Local::new(scope, &result))
+        .unwrap_or_else(|| v8::undefined(scope).into()))
+}
+
+fn vm_create_context_value<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    args: &mut v8::FunctionCallbackArguments<'s>,
+) -> Result<v8::Local<'s, v8::Value>, String> {
+    let sandbox_value = args.get(0);
+    if !(sandbox_value.is_object() || sandbox_value.is_function()) {
+        return Ok(vm_throw_error(
+            scope,
+            "The \"object\" argument must be of type object.",
+            None,
+            true,
+        ));
+    }
+    let sandbox = sandbox_value
+        .to_object(scope)
+        .ok_or_else(|| String::from("vm.createContext expected an object sandbox"))?;
+    let context = v8::Context::new(scope, Default::default());
+    {
+        let context_scope = &mut v8::ContextScope::new(scope, context);
+        let global = context.global(context_scope);
+        for key in [
+            "Buffer",
+            "require",
+            "process",
+            "module",
+            "exports",
+            "__dirname",
+            "__filename",
+        ] {
+            vm_delete_property(context_scope, global, key);
+            let undefined = v8::undefined(context_scope).into();
+            vm_set_property(context_scope, global, key, undefined);
+        }
+    }
+    let baseline_keys = {
+        let context_scope = &mut v8::ContextScope::new(scope, context);
+        let global = context.global(context_scope);
+        vm_collect_object_keys(context_scope, global)
+    };
+    let mirrored_keys = {
+        let context_scope = &mut v8::ContextScope::new(scope, context);
+        let global = context.global(context_scope);
+        vm_copy_sandbox_into_context(context_scope, sandbox, global, &HashSet::new())
+    };
+
+    let context_id = next_vm_context_id();
+    VM_CONTEXTS.with(|contexts| {
+        contexts.borrow_mut().insert(
+            context_id,
+            VmContextState {
+                context: v8::Global::new(scope, context),
+                baseline_keys,
+                mirrored_keys,
+            },
+        );
+    });
+    Ok(v8::Integer::new_from_unsigned(scope, context_id).into())
+}
+
+fn vm_run_in_context_value<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    args: &mut v8::FunctionCallbackArguments<'s>,
+) -> Result<v8::Local<'s, v8::Value>, String> {
+    let context_id = args
+        .get(0)
+        .uint32_value(scope)
+        .ok_or_else(|| String::from("vm.runInContext missing context id"))?;
+    let code = args.get(1).to_rust_string_lossy(scope);
+    let options_value = args.get(2);
+    let options = vm_options_from_value(scope, options_value);
+    let sandbox = args
+        .get(3)
+        .to_object(scope)
+        .ok_or_else(|| String::from("vm.runInContext missing sandbox object"))?;
+    let isolate_handle = unsafe { args.get_isolate() }.thread_safe_handle();
+
+    let Some((context_global, baseline_keys, mirrored_keys)) = VM_CONTEXTS.with(|contexts| {
+        contexts.borrow().get(&context_id).map(|state| {
+            (
+                state.context.clone(),
+                state.baseline_keys.clone(),
+                state.mirrored_keys.clone(),
+            )
+        })
+    }) else {
+        return Ok(vm_throw_error(
+            scope,
+            "The \"contextifiedObject\" argument must be a vm context.",
+            Some("ERR_INVALID_ARG_TYPE"),
+            true,
+        ));
+    };
+
+    let context = v8::Local::new(scope, &context_global);
+    {
+        let context_scope = &mut v8::ContextScope::new(scope, context);
+        let global = context.global(context_scope);
+        vm_copy_sandbox_into_context(context_scope, sandbox, global, &mirrored_keys);
+    }
+    let result = vm_run_script_in_context(scope, isolate_handle, context, &code, &options)?;
+    let updated_keys = {
+        let context_scope = &mut v8::ContextScope::new(scope, context);
+        let global = context.global(context_scope);
+        vm_copy_context_into_sandbox(
+            context_scope,
+            global,
+            sandbox,
+            &baseline_keys,
+            &mirrored_keys,
+        )
+    };
+    VM_CONTEXTS.with(|contexts| {
+        if let Some(state) = contexts.borrow_mut().get_mut(&context_id) {
+            state.mirrored_keys = updated_keys;
+        }
+    });
+    Ok(result)
+}
+
+fn vm_run_in_this_context_value<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    args: &mut v8::FunctionCallbackArguments<'s>,
+) -> Result<v8::Local<'s, v8::Value>, String> {
+    let code = args.get(0).to_rust_string_lossy(scope);
+    let options_value = args.get(1);
+    let options = vm_options_from_value(scope, options_value);
+    let context = scope.get_current_context();
+    let isolate_handle = unsafe { args.get_isolate() }.thread_safe_handle();
+    vm_run_script_in_context(scope, isolate_handle, context, &code, &options)
+}
+
+fn handle_local_bridge_call<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    method: &str,
+    args: &mut v8::FunctionCallbackArguments<'s>,
+) -> Result<Option<v8::Local<'s, v8::Value>>, String> {
+    match method {
+        "process.memoryUsage" => Ok(Some(process_memory_usage_value(scope))),
+        "process.cpuUsage" => process_cpu_usage_value(scope, args).map(Some),
+        "process.resourceUsage" => process_resource_usage_value(scope).map(Some),
+        "process.versions" => Ok(Some(process_versions_value(scope))),
+        "_vmCreateContext" => vm_create_context_value(scope, args).map(Some),
+        "_vmRunInContext" => vm_run_in_context_value(scope, args).map(Some),
+        "_vmRunInThisContext" => vm_run_in_this_context_value(scope, args).map(Some),
+        _ => Ok(None),
+    }
+}
+
 /// Register sync-blocking bridge functions on the V8 global object.
 ///
 /// Each registered function, when called from V8:
@@ -382,11 +1144,12 @@ pub fn register_sync_bridge_fns(
 }
 
 /// V8 FunctionTemplate callback for sync-blocking bridge calls.
-fn sync_bridge_callback(
-    scope: &mut v8::HandleScope,
-    args: v8::FunctionCallbackArguments,
+fn sync_bridge_callback<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue,
 ) {
+    let mut args = args;
     // Extract SyncBridgeFnData from External
     let external = match v8::Local::<v8::External>::try_from(args.data()) {
         Ok(ext) => ext,
@@ -402,6 +1165,31 @@ fn sync_bridge_callback(
     let data = unsafe { &*(external.value() as *const SyncBridgeFnData) };
     let ctx = unsafe { &*data.ctx };
     let buffers = unsafe { &*data.buffers };
+
+    {
+        let tc = &mut v8::TryCatch::new(scope);
+        match handle_local_bridge_call(tc, &data.method, &mut args) {
+            Ok(Some(value)) => {
+                if tc.has_caught() {
+                    let _ = tc.rethrow();
+                    return;
+                }
+                rv.set(value);
+                return;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                if tc.has_caught() {
+                    let _ = tc.rethrow();
+                    return;
+                }
+                let msg = v8::String::new(tc, &format!("bridge runtime error: {err}")).unwrap();
+                let exc = v8::Exception::error(tc, msg);
+                tc.throw_exception(exc);
+                return;
+            }
+        }
+    }
 
     // Serialize V8 arguments into reusable buffer (avoids per-call allocation)
     let encoded_args = {
@@ -747,11 +1535,61 @@ pub fn resolve_pending_promise(
 }
 
 fn bridge_error_code(message: &str) -> Option<&str> {
-    message.split(':').map(str::trim).find(|code| {
-        code.len() >= 2
-            && code.starts_with('E')
-            && code[1..]
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-    })
+    const TRUSTED_PREFIXES: &[&str] = &[
+        "ERR_AGENT_OS_NODE_SYNC_RPC",
+        "ERR_AGENT_OS_PYTHON_VFS_RPC",
+        "ERR_AGENT_OS_BRIDGE",
+    ];
+
+    let mut segments = message.split(':').map(str::trim);
+    let first = segments.next()?;
+    if is_errno_segment(first) {
+        return Some(first);
+    }
+
+    if TRUSTED_PREFIXES.contains(&first) {
+        let second = segments.next()?;
+        if is_errno_segment(second) {
+            return Some(second);
+        }
+    }
+
+    None
+}
+
+fn is_errno_segment(segment: &str) -> bool {
+    segment.len() >= 2
+        && segment.starts_with('E')
+        && !segment.starts_with("ERR_")
+        && segment[1..]
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bridge_error_code;
+
+    #[test]
+    fn bridge_error_code_rejects_guest_controlled_errno_segments() {
+        assert_eq!(bridge_error_code("user said 'EACCES: denied'"), None);
+        assert_eq!(
+            bridge_error_code("prefix: user said 'EPERM': more text"),
+            None
+        );
+        assert_eq!(bridge_error_code("ERR_AGENT_OS_FAKE: EACCES: denied"), None);
+    }
+
+    #[test]
+    fn bridge_error_code_accepts_trusted_agent_os_prefixes() {
+        assert_eq!(
+            bridge_error_code("ERR_AGENT_OS_NODE_SYNC_RPC: EACCES: permission denied on /foo"),
+            Some("EACCES")
+        );
+        assert_eq!(
+            bridge_error_code("ERR_AGENT_OS_PYTHON_VFS_RPC: ENOENT: missing file"),
+            Some("ENOENT")
+        );
+        assert_eq!(bridge_error_code("EEXIST: already exists"), Some("EEXIST"));
+    }
 }

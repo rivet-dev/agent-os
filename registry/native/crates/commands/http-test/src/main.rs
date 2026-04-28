@@ -77,8 +77,8 @@ fn do_get_with_headers(url: &str, headers: &[&str]) -> Result<(), wasi_http::Htt
 
 fn do_sse(url: &str) -> Result<(), wasi_http::HttpError> {
     let client = wasi_http::HttpClient::new();
-    let req = wasi_http::Request::new(wasi_http::Method::Get, url)?
-        .header("Accept", "text/event-stream");
+    let req =
+        wasi_http::Request::new(wasi_http::Method::Get, url)?.header("Accept", "text/event-stream");
     let (resp, mut reader) = client.send_sse(&req)?;
     println!("status: {}", resp.status);
 

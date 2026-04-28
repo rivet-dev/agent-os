@@ -493,6 +493,7 @@ pub enum RequestPayload {
     GetProcessSnapshot(GetProcessSnapshotRequest),
     FindListener(FindListenerRequest),
     FindBoundUdp(FindBoundUdpRequest),
+    VmFetch(VmFetchRequest),
     GetSignalState(GetSignalStateRequest),
     GetZombieTimerCount(GetZombieTimerCountRequest),
     HostFilesystemCall(HostFilesystemCallRequest),
@@ -528,6 +529,7 @@ pub enum ResponsePayload {
     ProcessSnapshot(ProcessSnapshotResponse),
     ListenerSnapshot(ListenerSnapshotResponse),
     BoundUdpSnapshot(BoundUdpSnapshotResponse),
+    VmFetchResult(VmFetchResponse),
     SignalState(SignalStateResponse),
     ZombieTimerCount(ZombieTimerCountResponse),
     FilesystemResult(FilesystemResultResponse),
@@ -541,6 +543,7 @@ pub enum ResponsePayload {
 pub enum SidecarRequestPayload {
     ToolInvocation(ToolInvocationRequest),
     PermissionRequest(SidecarPermissionRequest),
+    AcpRequest(SidecarAcpRequest),
     JsBridgeCall(JsBridgeCallRequest),
 }
 
@@ -548,6 +551,7 @@ pub enum SidecarRequestPayload {
 pub enum SidecarResponsePayload {
     ToolInvocationResult(ToolInvocationResultResponse),
     PermissionRequestResult(SidecarPermissionResultResponse),
+    AcpRequestResult(SidecarAcpResultResponse),
     JsBridgeResult(JsBridgeResultResponse),
 }
 
@@ -574,6 +578,21 @@ pub enum GuestRuntimeKind {
 
 fn default_create_session_runtime() -> GuestRuntimeKind {
     GuestRuntimeKind::JavaScript
+}
+
+fn default_create_session_protocol_version() -> u64 {
+    1
+}
+
+fn default_create_session_client_capabilities() -> Value {
+    let mut fs = serde_json::Map::new();
+    fs.insert(String::from("readTextFile"), Value::Bool(true));
+    fs.insert(String::from("writeTextFile"), Value::Bool(true));
+
+    let mut capabilities = serde_json::Map::new();
+    capabilities.insert(String::from("fs"), Value::Object(fs));
+    capabilities.insert(String::from("terminal"), Value::Bool(true));
+    Value::Object(capabilities)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -679,16 +698,33 @@ pub struct PermissionsPolicy {
     #[serde(default)]
     pub child_process: Option<PatternPermissionScope>,
     #[serde(default)]
+    pub process: Option<PatternPermissionScope>,
+    #[serde(default)]
     pub env: Option<PatternPermissionScope>,
+    #[serde(default)]
+    pub tool: Option<PatternPermissionScope>,
 }
 
 impl PermissionsPolicy {
+    pub fn deny_all() -> Self {
+        Self {
+            fs: Some(FsPermissionScope::Mode(PermissionMode::Deny)),
+            network: Some(PatternPermissionScope::Mode(PermissionMode::Deny)),
+            child_process: Some(PatternPermissionScope::Mode(PermissionMode::Deny)),
+            process: Some(PatternPermissionScope::Mode(PermissionMode::Deny)),
+            env: Some(PatternPermissionScope::Mode(PermissionMode::Deny)),
+            tool: Some(PatternPermissionScope::Mode(PermissionMode::Deny)),
+        }
+    }
+
     pub fn allow_all() -> Self {
         Self {
             fs: Some(FsPermissionScope::Mode(PermissionMode::Allow)),
             network: Some(PatternPermissionScope::Mode(PermissionMode::Allow)),
             child_process: Some(PatternPermissionScope::Mode(PermissionMode::Allow)),
+            process: Some(PatternPermissionScope::Mode(PermissionMode::Allow)),
             env: Some(PatternPermissionScope::Mode(PermissionMode::Allow)),
+            tool: Some(PatternPermissionScope::Mode(PermissionMode::Allow)),
         }
     }
 }
@@ -739,6 +775,7 @@ pub enum VmLifecycleState {
 pub struct AuthenticateRequest {
     pub client_name: String,
     pub auth_token: String,
+    pub bridge_version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -770,6 +807,13 @@ pub struct CreateSessionRequest {
     pub cwd: String,
     #[serde(default, with = "json_utf8_vec")]
     pub mcp_servers: Vec<Value>,
+    #[serde(default = "default_create_session_protocol_version")]
+    pub protocol_version: u64,
+    #[serde(
+        default = "default_create_session_client_capabilities",
+        with = "json_utf8_value"
+    )]
+    pub client_capabilities: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -783,6 +827,8 @@ pub struct SessionRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetSessionStateRequest {
     pub session_id: String,
+    #[serde(default)]
+    pub acknowledged_sequence_number: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1133,6 +1179,16 @@ pub struct FindBoundUdpRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmFetchRequest {
+    pub port: u16,
+    pub method: String,
+    pub path: String,
+    pub headers_json: String,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetSignalStateRequest {
     pub process_id: String,
 }
@@ -1204,6 +1260,13 @@ pub struct SidecarPermissionRequest {
     pub permission_id: String,
     #[serde(with = "json_utf8_value")]
     pub params: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SidecarAcpRequest {
+    pub session_id: String,
+    #[serde(with = "json_utf8_value")]
+    pub request: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1405,6 +1468,7 @@ pub struct ProcessKilledResponse {
 pub enum ProcessSnapshotStatus {
     Running,
     Exited,
+    Stopped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1450,6 +1514,11 @@ pub struct ListenerSnapshotResponse {
 pub struct BoundUdpSnapshotResponse {
     #[serde(default)]
     pub socket: Option<SocketStateEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmFetchResponse {
+    pub response_json: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1517,6 +1586,14 @@ pub struct SidecarPermissionResultResponse {
     pub permission_id: String,
     #[serde(default)]
     pub reply: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SidecarAcpResultResponse {
+    #[serde(default, with = "json_utf8_option")]
+    pub response: Option<Value>,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -1649,6 +1726,7 @@ impl_bare_string_enum!(WasmPermissionTier {
 impl_bare_string_enum!(ProcessSnapshotStatus {
     Running => ("running", 1),
     Exited => ("exited", 2),
+    Stopped => ("stopped", 3),
 });
 
 impl_bare_string_enum!(SignalDispositionAction {
@@ -1706,6 +1784,7 @@ impl_bare_newtype_union_enum!(
         PermissionRequest(PermissionRequest) = 29,
         PersistenceLoad(PersistenceLoadRequest) = 30,
         PersistenceFlush(PersistenceFlushRequest) = 31,
+        VmFetch(VmFetchRequest) = 32,
     }
 );
 
@@ -1746,6 +1825,7 @@ impl_bare_newtype_union_enum!(
         PersistenceState(PersistenceStateResponse) = 30,
         PersistenceFlushed(PersistenceFlushedResponse) = 31,
         Rejected(RejectedResponse) = 32,
+        VmFetchResult(VmFetchResponse) = 33,
     }
 );
 
@@ -1756,7 +1836,8 @@ impl_bare_newtype_union_enum!(
     {
         ToolInvocation(ToolInvocationRequest) = 1,
         PermissionRequest(SidecarPermissionRequest) = 2,
-        JsBridgeCall(JsBridgeCallRequest) = 3,
+        AcpRequest(SidecarAcpRequest) = 3,
+        JsBridgeCall(JsBridgeCallRequest) = 4,
     }
 );
 
@@ -1767,7 +1848,8 @@ impl_bare_newtype_union_enum!(
     {
         ToolInvocationResult(ToolInvocationResultResponse) = 1,
         PermissionRequestResult(SidecarPermissionResultResponse) = 2,
-        JsBridgeResult(JsBridgeResultResponse) = 3,
+        AcpRequestResult(SidecarAcpResultResponse) = 3,
+        JsBridgeResult(JsBridgeResultResponse) = 4,
     }
 );
 
@@ -2556,7 +2638,10 @@ impl fmt::Display for ProtocolCodecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TruncatedFrame { actual } => {
-                write!(f, "protocol frame is truncated: only {actual} bytes provided")
+                write!(
+                    f,
+                    "protocol frame is truncated: only {actual} bytes provided"
+                )
             }
             Self::LengthPrefixMismatch { declared, actual } => write!(
                 f,
@@ -2573,19 +2658,20 @@ impl fmt::Display for ProtocolCodecError {
             Self::InvalidRequestDirection {
                 request_id,
                 expected,
-            } => write!(
-                f,
-                "protocol request id {request_id} must be {expected}",
-            ),
+            } => write!(f, "protocol request id {request_id} must be {expected}",),
             Self::EmptyOwnershipField { field } => {
                 write!(f, "protocol ownership field `{field}` cannot be empty")
             }
-            Self::EmptyAuthToken => write!(f, "authenticate requests require a non-empty auth token"),
+            Self::EmptyAuthToken => {
+                write!(f, "authenticate requests require a non-empty auth token")
+            }
             Self::InvalidOwnershipScope { required, actual } => write!(
                 f,
                 "protocol frame requires {required} ownership but carried {actual}",
             ),
-            Self::SerializeFailure(message) => write!(f, "protocol frame serialization failed: {message}"),
+            Self::SerializeFailure(message) => {
+                write!(f, "protocol frame serialization failed: {message}")
+            }
             Self::DeserializeFailure(message) => {
                 write!(f, "protocol frame deserialization failed: {message}")
             }
@@ -2795,6 +2881,7 @@ enum ExpectedResponseKind {
     ProcessSnapshot,
     ListenerSnapshot,
     BoundUdpSnapshot,
+    VmFetchResult,
     SignalState,
     ZombieTimerCount,
     FilesystemResult,
@@ -2807,6 +2894,7 @@ enum ExpectedResponseKind {
 enum ExpectedSidecarResponseKind {
     ToolInvocationResult,
     PermissionRequestResult,
+    AcpRequestResult,
     JsBridgeResult,
 }
 
@@ -2838,6 +2926,7 @@ impl ExpectedResponseKind {
             Self::ProcessSnapshot => "process_snapshot",
             Self::ListenerSnapshot => "listener_snapshot",
             Self::BoundUdpSnapshot => "bound_udp_snapshot",
+            Self::VmFetchResult => "vm_fetch_result",
             Self::SignalState => "signal_state",
             Self::ZombieTimerCount => "zombie_timer_count",
             Self::FilesystemResult => "filesystem_result",
@@ -2860,6 +2949,7 @@ impl ExpectedSidecarResponseKind {
         match self {
             Self::ToolInvocationResult => "tool_invocation_result",
             Self::PermissionRequestResult => "permission_request_result",
+            Self::AcpRequestResult => "acp_request_result",
             Self::JsBridgeResult => "js_bridge_result",
         }
     }
@@ -2898,6 +2988,7 @@ impl RequestPayload {
             | Self::GetProcessSnapshot(_)
             | Self::FindListener(_)
             | Self::FindBoundUdp(_)
+            | Self::VmFetch(_)
             | Self::GetSignalState(_)
             | Self::GetZombieTimerCount(_)
             | Self::HostFilesystemCall(_)
@@ -2932,6 +3023,7 @@ impl RequestPayload {
             Self::GetProcessSnapshot(_) => ExpectedResponseKind::ProcessSnapshot,
             Self::FindListener(_) => ExpectedResponseKind::ListenerSnapshot,
             Self::FindBoundUdp(_) => ExpectedResponseKind::BoundUdpSnapshot,
+            Self::VmFetch(_) => ExpectedResponseKind::VmFetchResult,
             Self::GetSignalState(_) => ExpectedResponseKind::SignalState,
             Self::GetZombieTimerCount(_) => ExpectedResponseKind::ZombieTimerCount,
             Self::HostFilesystemCall(_) => ExpectedResponseKind::FilesystemResult,
@@ -2951,6 +3043,7 @@ impl SidecarRequestPayload {
         match self {
             Self::ToolInvocation(_) => ExpectedSidecarResponseKind::ToolInvocationResult,
             Self::PermissionRequest(_) => ExpectedSidecarResponseKind::PermissionRequestResult,
+            Self::AcpRequest(_) => ExpectedSidecarResponseKind::AcpRequestResult,
             Self::JsBridgeCall(_) => ExpectedSidecarResponseKind::JsBridgeResult,
         }
     }
@@ -2986,6 +3079,7 @@ impl ResponsePayload {
             | Self::ProcessSnapshot(_)
             | Self::ListenerSnapshot(_)
             | Self::BoundUdpSnapshot(_)
+            | Self::VmFetchResult(_)
             | Self::SignalState(_)
             | Self::ZombieTimerCount(_)
             | Self::FilesystemResult(_)
@@ -3020,6 +3114,7 @@ impl ResponsePayload {
             Self::ProcessSnapshot(_) => "process_snapshot",
             Self::ListenerSnapshot(_) => "listener_snapshot",
             Self::BoundUdpSnapshot(_) => "bound_udp_snapshot",
+            Self::VmFetchResult(_) => "vm_fetch_result",
             Self::SignalState(_) => "signal_state",
             Self::ZombieTimerCount(_) => "zombie_timer_count",
             Self::FilesystemResult(_) => "filesystem_result",
@@ -3040,6 +3135,7 @@ impl SidecarResponsePayload {
         match self {
             Self::ToolInvocationResult(_) => "tool_invocation_result",
             Self::PermissionRequestResult(_) => "permission_request_result",
+            Self::AcpRequestResult(_) => "acp_request_result",
             Self::JsBridgeResult(_) => "js_bridge_result",
         }
     }
@@ -3232,6 +3328,8 @@ pub struct JavascriptChildProcessSpawnOptions {
     pub shell: bool,
     #[serde(default)]
     pub detached: bool,
+    #[serde(default)]
+    pub stdio: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

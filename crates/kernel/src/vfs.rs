@@ -138,13 +138,64 @@ pub struct VirtualStat {
     pub is_directory: bool,
     pub is_symbolic_link: bool,
     pub atime_ms: u64,
+    pub atime_nsec: u32,
     pub mtime_ms: u64,
+    pub mtime_nsec: u32,
     pub ctime_ms: u64,
+    pub ctime_nsec: u32,
     pub birthtime_ms: u64,
     pub ino: u64,
     pub nlink: u64,
     pub uid: u32,
     pub gid: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VirtualTimeSpec {
+    pub sec: i64,
+    pub nsec: u32,
+}
+
+impl VirtualTimeSpec {
+    pub fn new(sec: i64, nsec: u32) -> VfsResult<Self> {
+        if nsec >= 1_000_000_000 {
+            return Err(VfsError::new(
+                "EINVAL",
+                format!("timespec nanoseconds out of range: {nsec}"),
+            ));
+        }
+        Ok(Self { sec, nsec })
+    }
+
+    pub fn from_millis(ms: u64) -> Self {
+        Self {
+            sec: (ms / 1_000) as i64,
+            nsec: ((ms % 1_000) * 1_000_000) as u32,
+        }
+    }
+
+    pub fn to_truncated_millis(self) -> VfsResult<u64> {
+        if self.sec < 0 {
+            return Err(VfsError::new(
+                "EINVAL",
+                format!(
+                    "negative timestamps are not supported by this filesystem: {}",
+                    self.sec
+                ),
+            ));
+        }
+        let seconds = u64::try_from(self.sec).map_err(|_| {
+            VfsError::new("EINVAL", format!("timestamp is out of range: {}", self.sec))
+        })?;
+        Ok(seconds.saturating_mul(1_000) + (self.nsec as u64 / 1_000_000))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtualUtimeSpec {
+    Set(VirtualTimeSpec),
+    Now,
+    Omit,
 }
 
 pub trait VirtualFileSystem {
@@ -167,12 +218,30 @@ pub trait VirtualFileSystem {
     }
     fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>>;
     fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()>;
+    fn write_file_with_mode(
+        &mut self,
+        path: &str,
+        content: impl Into<Vec<u8>>,
+        mode: Option<u32>,
+    ) -> VfsResult<()> {
+        let _ = mode;
+        self.write_file(path, content)
+    }
     fn create_file_exclusive(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
         let content = content.into();
         if self.exists(path) {
             return Err(VfsError::already_exists("open", path));
         }
         self.write_file(path, content)
+    }
+    fn create_file_exclusive_with_mode(
+        &mut self,
+        path: &str,
+        content: impl Into<Vec<u8>>,
+        mode: Option<u32>,
+    ) -> VfsResult<()> {
+        let _ = mode;
+        self.create_file_exclusive(path, content)
     }
     fn append_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<u64> {
         let content = content.into();
@@ -183,7 +252,15 @@ pub trait VirtualFileSystem {
         Ok(new_len)
     }
     fn create_dir(&mut self, path: &str) -> VfsResult<()>;
+    fn create_dir_with_mode(&mut self, path: &str, mode: Option<u32>) -> VfsResult<()> {
+        let _ = mode;
+        self.create_dir(path)
+    }
     fn mkdir(&mut self, path: &str, recursive: bool) -> VfsResult<()>;
+    fn mkdir_with_mode(&mut self, path: &str, recursive: bool, mode: Option<u32>) -> VfsResult<()> {
+        let _ = mode;
+        self.mkdir(path, recursive)
+    }
     fn exists(&self, path: &str) -> bool;
     fn stat(&mut self, path: &str) -> VfsResult<VirtualStat>;
     fn remove_file(&mut self, path: &str) -> VfsResult<()>;
@@ -197,6 +274,41 @@ pub trait VirtualFileSystem {
     fn chmod(&mut self, path: &str, mode: u32) -> VfsResult<()>;
     fn chown(&mut self, path: &str, uid: u32, gid: u32) -> VfsResult<()>;
     fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()>;
+    fn utimes_spec(
+        &mut self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        if !follow_symlinks {
+            return Err(VfsError::unsupported(format!(
+                "lutimes is not supported for '{path}'"
+            )));
+        }
+        let existing = match (atime, mtime) {
+            (VirtualUtimeSpec::Omit, _) | (_, VirtualUtimeSpec::Omit) => Some(self.stat(path)?),
+            _ => None,
+        };
+        let now = now_ms();
+        let atime_ms = resolve_utime_millis(
+            atime,
+            now,
+            existing.as_ref().map(|stat| VirtualTimeSpec {
+                sec: (stat.atime_ms / 1_000) as i64,
+                nsec: stat.atime_nsec,
+            }),
+        )?;
+        let mtime_ms = resolve_utime_millis(
+            mtime,
+            now,
+            existing.as_ref().map(|stat| VirtualTimeSpec {
+                sec: (stat.mtime_ms / 1_000) as i64,
+                nsec: stat.mtime_nsec,
+            }),
+        )?;
+        self.utimes(path, atime_ms, mtime_ms)
+    }
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()>;
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>>;
     fn pwrite(&mut self, path: &str, content: impl Into<Vec<u8>>, offset: u64) -> VfsResult<()> {
@@ -223,8 +335,11 @@ struct Metadata {
     nlink: u64,
     ino: u64,
     atime_ms: u64,
+    atime_nsec: u32,
     mtime_ms: u64,
+    mtime_nsec: u32,
     ctime_ms: u64,
+    ctime_nsec: u32,
     birthtime_ms: u64,
 }
 
@@ -236,8 +351,14 @@ pub struct MemoryFileSystemSnapshotMetadata {
     pub nlink: u64,
     pub ino: u64,
     pub atime_ms: u64,
+    #[serde(default)]
+    pub atime_nsec: u32,
     pub mtime_ms: u64,
+    #[serde(default)]
+    pub mtime_nsec: u32,
     pub ctime_ms: u64,
+    #[serde(default)]
+    pub ctime_nsec: u32,
     pub birthtime_ms: u64,
 }
 
@@ -313,8 +434,11 @@ impl MemoryFileSystem {
                     nlink,
                     ino,
                     atime_ms: now,
+                    atime_nsec: 0,
                     mtime_ms: now,
+                    mtime_nsec: 0,
                     ctime_ms: now,
+                    ctime_nsec: 0,
                     birthtime_ms: now,
                 },
                 kind,
@@ -576,8 +700,11 @@ impl MemoryFileSystem {
             is_directory: matches!(inode.kind, InodeKind::Directory),
             is_symbolic_link: matches!(inode.kind, InodeKind::SymbolicLink { .. }),
             atime_ms: inode.metadata.atime_ms,
+            atime_nsec: inode.metadata.atime_nsec,
             mtime_ms: inode.metadata.mtime_ms,
+            mtime_nsec: inode.metadata.mtime_nsec,
             ctime_ms: inode.metadata.ctime_ms,
+            ctime_nsec: inode.metadata.ctime_nsec,
             birthtime_ms: inode.metadata.birthtime_ms,
             ino: inode.metadata.ino,
             nlink: inode.metadata.nlink,
@@ -603,8 +730,11 @@ impl MemoryFileSystem {
                                 nlink: inode.metadata.nlink,
                                 ino: inode.metadata.ino,
                                 atime_ms: inode.metadata.atime_ms,
+                                atime_nsec: inode.metadata.atime_nsec,
                                 mtime_ms: inode.metadata.mtime_ms,
+                                mtime_nsec: inode.metadata.mtime_nsec,
                                 ctime_ms: inode.metadata.ctime_ms,
+                                ctime_nsec: inode.metadata.ctime_nsec,
                                 birthtime_ms: inode.metadata.birthtime_ms,
                             },
                             kind: match &inode.kind {
@@ -645,8 +775,11 @@ impl MemoryFileSystem {
                                 nlink: inode.metadata.nlink,
                                 ino: inode.metadata.ino,
                                 atime_ms: inode.metadata.atime_ms,
+                                atime_nsec: inode.metadata.atime_nsec,
                                 mtime_ms: inode.metadata.mtime_ms,
+                                mtime_nsec: inode.metadata.mtime_nsec,
                                 ctime_ms: inode.metadata.ctime_ms,
+                                ctime_nsec: inode.metadata.ctime_nsec,
                                 birthtime_ms: inode.metadata.birthtime_ms,
                             },
                             kind: match inode.kind {
@@ -1097,8 +1230,51 @@ impl VirtualFileSystem for MemoryFileSystem {
     fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()> {
         let inode = self.inode_mut_for_existing_path(path, "utimes", true)?;
         inode.metadata.atime_ms = atime_ms;
+        inode.metadata.atime_nsec = 0;
         inode.metadata.mtime_ms = mtime_ms;
+        inode.metadata.mtime_nsec = 0;
         inode.metadata.ctime_ms = now_ms();
+        inode.metadata.ctime_nsec = 0;
+        Ok(())
+    }
+
+    fn utimes_spec(
+        &mut self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        let stat = if follow_symlinks {
+            self.stat(path)?
+        } else {
+            self.lstat(path)?
+        };
+        let inode = self.inode_mut_for_existing_path(path, "utimes", follow_symlinks)?;
+        let now = now_time_spec();
+        let atime = resolve_utime_spec(
+            atime,
+            now,
+            VirtualTimeSpec {
+                sec: (stat.atime_ms / 1_000) as i64,
+                nsec: stat.atime_nsec,
+            },
+        )?;
+        let mtime = resolve_utime_spec(
+            mtime,
+            now,
+            VirtualTimeSpec {
+                sec: (stat.mtime_ms / 1_000) as i64,
+                nsec: stat.mtime_nsec,
+            },
+        )?;
+        inode.metadata.atime_ms = atime.to_truncated_millis()?;
+        inode.metadata.atime_nsec = atime.nsec;
+        inode.metadata.mtime_ms = mtime.to_truncated_millis()?;
+        inode.metadata.mtime_nsec = mtime.nsec;
+        let ctime = now_time_spec();
+        inode.metadata.ctime_ms = ctime.to_truncated_millis()?;
+        inode.metadata.ctime_nsec = ctime.nsec;
         Ok(())
     }
 
@@ -1141,7 +1317,44 @@ impl Default for MemoryFileSystem {
     }
 }
 
+fn resolve_utime_spec(
+    spec: VirtualUtimeSpec,
+    now: VirtualTimeSpec,
+    existing: VirtualTimeSpec,
+) -> VfsResult<VirtualTimeSpec> {
+    match spec {
+        VirtualUtimeSpec::Set(spec) => Ok(spec),
+        VirtualUtimeSpec::Now => Ok(now),
+        VirtualUtimeSpec::Omit => Ok(existing),
+    }
+}
+
+fn resolve_utime_millis(
+    spec: VirtualUtimeSpec,
+    now_ms: u64,
+    existing: Option<VirtualTimeSpec>,
+) -> VfsResult<u64> {
+    match spec {
+        VirtualUtimeSpec::Set(spec) => spec.to_truncated_millis(),
+        VirtualUtimeSpec::Now => Ok(now_ms),
+        VirtualUtimeSpec::Omit => existing
+            .ok_or_else(|| VfsError::new("EINVAL", "UTIME_OMIT requires existing metadata"))?
+            .to_truncated_millis(),
+    }
+}
+
 pub fn validate_path(path: &str) -> VfsResult<()> {
+    if path.as_bytes().contains(&0) {
+        return Err(VfsError::invalid_input("path contains NUL byte"));
+    }
+    if let Some(control) = path
+        .bytes()
+        .find(|byte| byte.is_ascii_control() && *byte != b'\0')
+    {
+        return Err(VfsError::invalid_input(format!(
+            "path contains control character byte 0x{control:02x}"
+        )));
+    }
     let normalized = normalize_path(path);
     if normalized.len() > MAX_PATH_LENGTH {
         return Err(VfsError::path_too_long(path));
@@ -1204,4 +1417,14 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn now_time_spec() -> VirtualTimeSpec {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    VirtualTimeSpec {
+        sec: now.as_secs() as i64,
+        nsec: now.subsec_nanos(),
+    }
 }

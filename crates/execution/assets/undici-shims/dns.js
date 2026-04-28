@@ -9,7 +9,34 @@ function getDnsModule() {
 }
 
 const exported = {};
-for (const key of ["lookup", "resolve", "resolve4", "resolve6", "promises"]) {
+for (const key of [
+	"ADDRCONFIG",
+	"ALL",
+	"Resolver",
+	"V4MAPPED",
+	"constants",
+	"getDefaultResultOrder",
+	"getServers",
+	"lookup",
+	"lookupService",
+	"promises",
+	"resolve",
+	"resolve4",
+	"resolve6",
+	"resolveAny",
+	"resolveMx",
+	"resolveTxt",
+	"resolveSrv",
+	"resolveCname",
+	"resolvePtr",
+	"resolveNs",
+	"resolveSoa",
+	"resolveNaptr",
+	"resolveCaa",
+	"reverse",
+	"setDefaultResultOrder",
+	"setServers",
+]) {
 	Object.defineProperty(exported, key, {
 		enumerable: true,
 		get() {

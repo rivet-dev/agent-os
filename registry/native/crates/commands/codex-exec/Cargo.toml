@@ -10,6 +10,7 @@ name = "codex-exec"
 path = "src/main.rs"
 
 [dependencies]
+wasi-ext = { path = "../../wasi-ext" }
 wasi-spawn = { package = "secureexec-wasi-spawn", path = "../../libs/wasi-spawn" }
 wasi-http = { package = "secureexec-wasi-http", path = "../../libs/wasi-http" }
 serde = { version = "1", features = ["derive"] }

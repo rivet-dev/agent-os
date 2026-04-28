@@ -6,7 +6,7 @@ use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn assert_pipe_error<T: Debug>(result: PipeResult<T>, expected: &str) {
     let error = result.expect_err("operation should fail");
@@ -16,6 +16,24 @@ fn assert_pipe_error<T: Debug>(result: PipeResult<T>, expected: &str) {
 fn assert_fd_error<T: Debug>(result: FdResult<T>, expected: &str) {
     let error = result.expect_err("operation should fail");
     assert_eq!(error.code(), expected);
+}
+
+fn wait_for_waiting_reader(manager: &PipeManager, description_id: u64) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if manager
+            .waiting_reader_count(description_id)
+            .expect("pipe should still exist")
+            > 0
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "reader never blocked on pipe description {description_id}"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 #[test]
@@ -85,7 +103,7 @@ fn closing_the_write_end_delivers_eof_to_waiting_readers() {
     let reader = manager.clone();
 
     let handle = thread::spawn(move || reader.read(read_id, 1024).expect("blocking read"));
-    thread::sleep(Duration::from_millis(10));
+    wait_for_waiting_reader(&manager, read_id);
     manager.close(write_id);
 
     assert_eq!(handle.join().expect("reader thread should finish"), None);
@@ -107,7 +125,7 @@ fn closing_the_read_end_does_not_wake_waiting_readers() {
         result
     });
 
-    thread::sleep(Duration::from_millis(10));
+    wait_for_waiting_reader(&manager, read_id);
     manager.close(read_id);
     thread::sleep(Duration::from_millis(25));
     assert!(!completed.load(Ordering::SeqCst));
@@ -204,7 +222,7 @@ fn waiting_reader_receives_large_writes_without_hitting_the_buffer_limit() {
             .len()
     });
 
-    thread::sleep(Duration::from_millis(10));
+    wait_for_waiting_reader(&manager, read_id);
     manager
         .write(write_id, vec![7; MAX_PIPE_BUFFER_BYTES + 1024])
         .expect("large direct write should bypass buffering");
@@ -213,6 +231,37 @@ fn waiting_reader_receives_large_writes_without_hitting_the_buffer_limit() {
         handle.join().expect("reader thread should finish"),
         MAX_PIPE_BUFFER_BYTES + 1024
     );
+}
+
+#[test]
+fn direct_handoff_honors_waiting_reader_length_and_buffers_the_remainder() {
+    let manager = PipeManager::new();
+    let pipe = manager.create_pipe();
+    let read_id = pipe.read.description.id();
+    let write_id = pipe.write.description.id();
+    let reader = manager.clone();
+
+    let handle = thread::spawn(move || {
+        reader
+            .read(read_id, 10)
+            .expect("blocking read should succeed")
+            .expect("blocking read should receive data")
+    });
+
+    wait_for_waiting_reader(&manager, read_id);
+    manager
+        .write(write_id, vec![7; 1024])
+        .expect("direct handoff write should succeed");
+
+    let first = handle.join().expect("reader thread should finish");
+    let second = manager
+        .read(read_id, 2048)
+        .expect("remainder read should succeed")
+        .expect("remainder should stay buffered");
+
+    assert_eq!(first, vec![7; 10]);
+    assert_eq!(second.len(), 1014);
+    assert!(second.iter().all(|byte| *byte == 7));
 }
 
 #[test]

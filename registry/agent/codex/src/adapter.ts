@@ -21,6 +21,8 @@ import {
 } from "@agentclientprotocol/sdk";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 type JsonRecord = Record<string, unknown>;
 type SessionModeId = "default" | "plan";
@@ -69,6 +71,45 @@ type ChildEvent =
 const DEFAULT_MODEL = "gpt-5-codex";
 const DEFAULT_THOUGHT_LEVEL = "medium";
 const traceAdapter = process.env.CODEX_WASM_TRACE_ADAPTER === "1";
+const CODEX_EXEC_ENV_ALLOWLIST = new Set([
+	"ALL_PROXY",
+	"APPDATA",
+	"COLORTERM",
+	"COMSPEC",
+	"HOME",
+	"HTTPS_PROXY",
+	"HTTP_PROXY",
+	"LANG",
+	"LOCALAPPDATA",
+	"LOGNAME",
+	"NO_COLOR",
+	"NO_PROXY",
+	"OPENAI_API_KEY",
+	"OPENAI_BASE_URL",
+	"OPENAI_ORGANIZATION",
+	"OPENAI_ORG_ID",
+	"OPENAI_PROJECT",
+	"PATH",
+	"PATHEXT",
+	"PWD",
+	"SHELL",
+	"SSL_CERT_DIR",
+	"SSL_CERT_FILE",
+	"SYSTEMROOT",
+	"TEMP",
+	"TERM",
+	"TMP",
+	"TMPDIR",
+	"USER",
+	"USERNAME",
+	"USERPROFILE",
+]);
+const CODEX_EXEC_ENV_PREFIX_ALLOWLIST = ["LC_", "XDG_"];
+const CODEX_EXEC_ENV_BLOCKLIST = new Set([
+	"DYLD_INSERT_LIBRARIES",
+	"LD_PRELOAD",
+	"NODE_OPTIONS",
+]);
 
 let appendDeveloperInstructions: string | undefined;
 const argv = process.argv.slice(2);
@@ -134,10 +175,54 @@ function sendLine(stream: NodeJS.WritableStream, value: JsonRecord): void {
 	stream.write(`${JSON.stringify(value)}\n`);
 }
 
+export function createCodexExecEnv(
+	env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+	const filtered: NodeJS.ProcessEnv = {};
+	for (const [key, value] of Object.entries(env)) {
+		if (typeof value !== "string") {
+			continue;
+		}
+		if (
+			key.startsWith("AGENT_OS_") ||
+			key.startsWith("NODE_SYNC_RPC_") ||
+			CODEX_EXEC_ENV_BLOCKLIST.has(key)
+		) {
+			continue;
+		}
+		if (
+			CODEX_EXEC_ENV_ALLOWLIST.has(key) ||
+			CODEX_EXEC_ENV_PREFIX_ALLOWLIST.some((prefix) => key.startsWith(prefix))
+		) {
+			filtered[key] = value;
+		}
+	}
+	return filtered;
+}
+
+type SpawnCodexExecOptions = {
+	cwd: string;
+	env?: NodeJS.ProcessEnv;
+	execCommand?: string;
+};
+
+export function spawnCodexExecChild({
+	cwd,
+	env = process.env,
+	execCommand = process.env.CODEX_EXEC_COMMAND ?? "codex-exec",
+}: SpawnCodexExecOptions): ChildProcess {
+	return spawn(execCommand, ["--session-turn"], {
+		cwd,
+		env: createCodexExecEnv(env),
+		stdio: ["pipe", "pipe", "pipe"],
+	});
+}
+
 class ActivePrompt {
 	private child: ChildProcess;
 	private stdoutBuffer = "";
 	private stderr = "";
+	private eventChain: Promise<void> = Promise.resolve();
 	private resolved = false;
 	private exited = false;
 	private forceKillTimer: NodeJS.Timeout | null = null;
@@ -156,11 +241,8 @@ class ActivePrompt {
 			this.rejectPrompt = reject;
 		});
 
-		const execCommand = process.env.CODEX_EXEC_COMMAND ?? "codex-exec";
-		this.child = spawn(execCommand, ["--session-turn"], {
+		this.child = spawnCodexExecChild({
 			cwd: session.cwd,
-			env: process.env,
-			stdio: ["pipe", "pipe", "pipe"],
 		});
 
 		this.child.stdout?.on("data", (chunk) => {
@@ -173,9 +255,11 @@ class ActivePrompt {
 			this.stderr += text;
 			trace(`child stderr ${JSON.stringify(text)}`);
 		});
-		this.child.on("exit", (code, signal) => {
+		this.child.on("exit", () => {
 			this.exited = true;
 			this.clearForceKillTimer();
+		});
+		this.child.on("close", (code, signal) => {
 			if (this.resolved) return;
 			if (this.cancelled) {
 				this.finish({ stopReason: "cancelled" });
@@ -258,8 +342,30 @@ class ActivePrompt {
 				continue;
 			}
 
-			void this.handleEvent(event);
+			this.enqueueEvent(event);
 		}
+	}
+
+	private enqueueEvent(event: ChildEvent): void {
+		this.eventChain = this.eventChain
+			.then(async () => {
+				if (this.resolved) {
+					return;
+				}
+				await this.handleEvent(event);
+			})
+			.catch((error) => {
+				if (this.resolved) {
+					return;
+				}
+				const message = error instanceof Error ? error.message : String(error);
+				this.rejectPrompt(
+					RequestError.internalError(
+						{ cause: message, stderr: this.stderr.trim() },
+						"codex event handling failed",
+					),
+				);
+			});
 	}
 
 	private async handleEvent(event: ChildEvent): Promise<void> {
@@ -546,33 +652,42 @@ class CodexAgent implements Agent {
 	}
 }
 
-const input = new WritableStream<Uint8Array>({
-	write(chunk) {
-		return new Promise<void>((resolve) => {
-			process.stdout.write(chunk, () => resolve());
-		});
-	},
-});
+export function startCodexAdapter(): void {
+	const input = new WritableStream<Uint8Array>({
+		write(chunk) {
+			return new Promise<void>((resolve) => {
+				process.stdout.write(chunk, () => resolve());
+			});
+		},
+	});
 
-const output = new ReadableStream<Uint8Array>({
-	start(controller) {
-		process.stdin.on("data", (chunk: Buffer) => {
-			controller.enqueue(new Uint8Array(chunk));
-		});
-		process.stdin.on("end", () => controller.close());
-		process.stdin.on("error", (error: Error) => controller.error(error));
-	},
-});
+	const output = new ReadableStream<Uint8Array>({
+		start(controller) {
+			process.stdin.on("data", (chunk: Buffer) => {
+				controller.enqueue(new Uint8Array(chunk));
+			});
+			process.stdin.on("end", () => controller.close());
+			process.stdin.on("error", (error: Error) => controller.error(error));
+		},
+	});
 
-const stream = ndJsonStream(input, output);
-const connection = new AgentSideConnection(
-	(conn: AgentSideConnection) => new CodexAgent(conn),
-	stream,
-);
+	const stream = ndJsonStream(input, output);
+	const connection = new AgentSideConnection(
+		(conn: AgentSideConnection) => new CodexAgent(conn),
+		stream,
+	);
 
-process.stdin.resume();
-process.stdin.on("end", () => {
-	process.exit(0);
-});
+	process.stdin.resume();
+	process.stdin.on("end", () => {
+		process.exit(0);
+	});
 
-void connection.closed;
+	void connection.closed;
+}
+
+if (
+	process.argv[1] &&
+	resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+	startCodexAdapter();
+}

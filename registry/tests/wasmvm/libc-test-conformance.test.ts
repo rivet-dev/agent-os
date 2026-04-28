@@ -19,6 +19,7 @@ import {
   C_BUILD_DIR,
   createInMemoryFileSystem,
   createKernel,
+  describeIf,
   hasWasmBinaries,
 } from '../helpers.js';
 import type { Kernel } from '../helpers.js';
@@ -244,7 +245,7 @@ function printSummary(results: TestResult[]): void {
 
 // ── Test suite ─────────────────────────────────────────────────────────
 
-describe.skipIf(skipReason())('libc-test conformance (musl)', () => {
+describeIf(!skipReason(), 'libc-test conformance (musl)', () => {
   afterAll(() => {
     if (testResults.length > 0) {
       writeConformanceReport(testResults);
@@ -281,7 +282,7 @@ describe.skipIf(skipReason())('libc-test conformance (musl)', () => {
         const exclusion = exclusions[testName];
 
         if (exclusion?.expected === 'skip') {
-          it.skip(`${testName} — ${exclusion.reason}`, () => {});
+          it(`${testName} — ${exclusion.reason}`, () => {});
           testResults.push({ name: testName, suite, status: 'skip' });
           continue;
         }

@@ -15,7 +15,7 @@ const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_PATH";
 const NODE_IMPORT_CACHE_LOADER_PATH_ENV: &str = "AGENT_OS_NODE_IMPORT_CACHE_LOADER_PATH";
 const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
 const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "8";
-const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "37";
+const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "43";
 const NODE_IMPORT_CACHE_DIR_PREFIX: &str = "agent-os-node-import-cache";
 const DEFAULT_NODE_IMPORT_CACHE_MATERIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const PYODIDE_DIST_DIR: &str = "pyodide-dist";
@@ -118,6 +118,7 @@ const CHILD_PROCESS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}child-process`;
 const NET_ASSET_SPECIFIER = `${BUILTIN_PREFIX}net`;
 const DGRAM_ASSET_SPECIFIER = `${BUILTIN_PREFIX}dgram`;
 const DNS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}dns`;
+const DNS_PROMISES_ASSET_SPECIFIER = `${BUILTIN_PREFIX}dns-promises`;
 const HTTP_ASSET_SPECIFIER = `${BUILTIN_PREFIX}http`;
 const HTTP2_ASSET_SPECIFIER = `${BUILTIN_PREFIX}http2`;
 const HTTPS_ASSET_SPECIFIER = `${BUILTIN_PREFIX}https`;
@@ -128,6 +129,7 @@ const DENIED_BUILTINS = new Set([
   'cluster',
   'dgram',
   'dns',
+  'dns/promises',
   'http',
   'http2',
   'https',
@@ -624,6 +626,18 @@ function rewriteBuiltinImports(source, filePath) {
   }
 
   if (ALLOWED_BUILTINS.has('dns')) {
+    for (const specifier of ['node:dns/promises', 'dns/promises']) {
+      rewritten = replaceBuiltinImportSpecifier(
+        rewritten,
+        specifier,
+        DNS_PROMISES_ASSET_SPECIFIER,
+      );
+      rewritten = replaceBuiltinDynamicImportSpecifier(
+        rewritten,
+        specifier,
+        DNS_PROMISES_ASSET_SPECIFIER,
+      );
+    }
     for (const specifier of ['node:dns', 'dns']) {
       rewritten = replaceBuiltinImportSpecifier(
         rewritten,
@@ -809,6 +823,10 @@ function resolveBuiltinAsset(specifier, context) {
     case 'dns':
       return ALLOWED_BUILTINS.has('dns')
         ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'dns.mjs'))
+        : null;
+    case 'dns/promises':
+      return ALLOWED_BUILTINS.has('dns')
+        ? assetModuleDescriptor(path.join(ASSET_ROOT, 'builtins', 'dns-promises.mjs'))
         : null;
     case 'http':
       return ALLOWED_BUILTINS.has('http')
@@ -1934,6 +1952,7 @@ const hostOs = hostRequire('node:os');
 const hostNet = hostRequire('node:net');
 const hostDgram = hostRequire('node:dgram');
 const hostDns = hostRequire('node:dns');
+const hostDnsPromises = hostRequire('node:dns/promises');
 const hostHttp = hostRequire('node:http');
 const hostHttp2 = hostRequire('node:http2');
 const hostHttps = hostRequire('node:https');
@@ -3910,6 +3929,14 @@ function createRpcBackedChildProcessModule(fromGuestDir = '/') {
     try {
       child = callSpawn(command, args, options, shell);
     } catch (error) {
+      if (
+        error &&
+        typeof error === 'object' &&
+        error.code == null &&
+        /ERR_NATIVE_BINARY_NOT_SUPPORTED\b/i.test(String(error.message ?? error))
+      ) {
+        error.code = 'ERR_NATIVE_BINARY_NOT_SUPPORTED';
+      }
       return createSpawnSyncResult(
         0,
         Buffer.alloc(0),
@@ -4195,6 +4222,11 @@ function createRpcBackedChildProcessModule(fromGuestDir = '/') {
           /command not found:/i.test(String(spawnError.message ?? ''))
         ) {
           spawnError.code = 'ENOENT';
+        } else if (
+          spawnError.code == null &&
+          /ERR_NATIVE_BINARY_NOT_SUPPORTED\b/i.test(String(spawnError.message ?? ''))
+        ) {
+          spawnError.code = 'ERR_NATIVE_BINARY_NOT_SUPPORTED';
         }
         const child = Object.create(EventEmitter.prototype);
         EventEmitter.call(child);
@@ -5119,6 +5151,9 @@ function createRpcBackedTlsModule(tlsModule, netModule) {
     ) {
       tlsOptions.servername = host;
     }
+    if (tlsOptions.ALPNProtocols == null) {
+      tlsOptions.ALPNProtocols = ['http/1.1'];
+    }
 
     return {
       callback,
@@ -5442,6 +5477,9 @@ function parseRequestTargetFromUrl(value, defaultProtocol) {
 }
 
 function createRpcBackedHttpModule(httpModule, transportModule, defaultProtocol = 'http:') {
+  const debugHttpLog = (...args) => {
+    console.error('[agent-os http polyfill]', ...args);
+  };
   const createUnsupportedHttpError = (subject) => {
     const error = new Error(`${subject} is not supported by the Agent OS http polyfill yet`);
     error.code = 'ERR_AGENT_OS_HTTP_UNSUPPORTED';
@@ -5534,6 +5572,23 @@ function createRpcBackedHttpModule(httpModule, transportModule, defaultProtocol 
       },
       callback,
     );
+    debugHttpLog('http.request', JSON.stringify(options.requestOptions));
+    request.on('socket', (socket) => {
+      debugHttpLog('http.socket');
+      socket?.once?.('connect', () => debugHttpLog('http.socket.connect'));
+      socket?.once?.('secureConnect', () => debugHttpLog('http.socket.secureConnect'));
+      socket?.once?.('error', (error) =>
+        debugHttpLog('http.socket.error', error?.code ?? '', error?.message ?? String(error)),
+      );
+      socket?.once?.('close', () => debugHttpLog('http.socket.close'));
+    });
+    request.once('response', (response) =>
+      debugHttpLog('http.response', response?.statusCode ?? '<none>'),
+    );
+    request.once('error', (error) =>
+      debugHttpLog('http.error', error?.code ?? '', error?.message ?? String(error)),
+    );
+    request.once('close', () => debugHttpLog('http.close'));
     request.once('close', () => agent.destroy());
     return request;
   };
@@ -5593,6 +5648,9 @@ function createRpcBackedHttpModule(httpModule, transportModule, defaultProtocol 
 }
 
 function createRpcBackedHttpsModule(httpsModule, tlsModule) {
+  const debugHttpLog = (...args) => {
+    console.error('[agent-os http polyfill]', ...args);
+  };
   const createUnsupportedHttpsError = (subject) => {
     const error = new Error(`${subject} is not supported by the Agent OS https polyfill yet`);
     error.code = 'ERR_AGENT_OS_HTTPS_UNSUPPORTED';
@@ -5724,6 +5782,23 @@ function createRpcBackedHttpsModule(httpsModule, tlsModule) {
       },
       normalized.callback,
     );
+    debugHttpLog('https.request', JSON.stringify(normalized.requestOptions));
+    request.on('socket', (socket) => {
+      debugHttpLog('https.socket');
+      socket?.once?.('connect', () => debugHttpLog('https.socket.connect'));
+      socket?.once?.('secureConnect', () => debugHttpLog('https.socket.secureConnect'));
+      socket?.once?.('error', (error) =>
+        debugHttpLog('https.socket.error', error?.code ?? '', error?.message ?? String(error)),
+      );
+      socket?.once?.('close', () => debugHttpLog('https.socket.close'));
+    });
+    request.once('response', (response) =>
+      debugHttpLog('https.response', response?.statusCode ?? '<none>'),
+    );
+    request.once('error', (error) =>
+      debugHttpLog('https.error', error?.code ?? '', error?.message ?? String(error)),
+    );
+    request.once('close', () => debugHttpLog('https.close'));
     request.once('close', () => agent.destroy());
     return request;
   };
@@ -6312,7 +6387,7 @@ function createRpcBackedDnsModule(dnsModule) {
 
   const createUnsupportedDnsError = (subject) => {
     const error = new Error(`${subject} is not supported by the Agent OS dns polyfill yet`);
-    error.code = 'ERR_AGENT_OS_DNS_UNSUPPORTED';
+    error.code = 'ERR_NOT_IMPLEMENTED';
     return error;
   };
 
@@ -6413,7 +6488,20 @@ function createRpcBackedDnsModule(dnsModule) {
       type = 'A';
     }
     const normalizedType = String(type).toUpperCase();
-    if (normalizedType !== 'A' && normalizedType !== 'AAAA') {
+    if (
+      normalizedType !== 'A' &&
+      normalizedType !== 'AAAA' &&
+      normalizedType !== 'MX' &&
+      normalizedType !== 'TXT' &&
+      normalizedType !== 'SRV' &&
+      normalizedType !== 'CNAME' &&
+      normalizedType !== 'PTR' &&
+      normalizedType !== 'NS' &&
+      normalizedType !== 'SOA' &&
+      normalizedType !== 'NAPTR' &&
+      normalizedType !== 'CAA' &&
+      normalizedType !== 'ANY'
+    ) {
       throw createUnsupportedDnsError(`${methodName}(${normalizedType})`);
     }
     return {
@@ -6476,11 +6564,129 @@ function createRpcBackedDnsModule(dnsModule) {
     return records;
   };
 
+  const resolveAny = (hostname, callback) => {
+    const invocation = normalizeResolveInvocation('dns.resolveAny', hostname, 'ANY', callback);
+    const records = resolveRecords('dns.resolve', invocation.options);
+    if (typeof invocation.callback === 'function') {
+      queueMicrotask(() => invocation.callback(null, records));
+    }
+    return records;
+  };
+
+  const resolveMx = (hostname, callback) => {
+    const invocation = normalizeResolveInvocation('dns.resolveMx', hostname, 'MX', callback);
+    const records = resolveRecords('dns.resolve', invocation.options);
+    if (typeof invocation.callback === 'function') {
+      queueMicrotask(() => invocation.callback(null, records));
+    }
+    return records;
+  };
+
+  const resolveTxt = (hostname, callback) => {
+    const invocation = normalizeResolveInvocation('dns.resolveTxt', hostname, 'TXT', callback);
+    const records = resolveRecords('dns.resolve', invocation.options);
+    if (typeof invocation.callback === 'function') {
+      queueMicrotask(() => invocation.callback(null, records));
+    }
+    return records;
+  };
+
+  const resolveSrv = (hostname, callback) => {
+    const invocation = normalizeResolveInvocation('dns.resolveSrv', hostname, 'SRV', callback);
+    const records = resolveRecords('dns.resolve', invocation.options);
+    if (typeof invocation.callback === 'function') {
+      queueMicrotask(() => invocation.callback(null, records));
+    }
+    return records;
+  };
+
+  const resolveCname = (hostname, callback) => {
+    const invocation = normalizeResolveInvocation('dns.resolveCname', hostname, 'CNAME', callback);
+    const records = resolveRecords('dns.resolve', invocation.options);
+    if (typeof invocation.callback === 'function') {
+      queueMicrotask(() => invocation.callback(null, records));
+    }
+    return records;
+  };
+
+  const resolvePtr = (hostname, callback) => {
+    const invocation = normalizeResolveInvocation('dns.resolvePtr', hostname, 'PTR', callback);
+    const records = resolveRecords('dns.resolve', invocation.options);
+    if (typeof invocation.callback === 'function') {
+      queueMicrotask(() => invocation.callback(null, records));
+    }
+    return records;
+  };
+
+  const resolveNs = (hostname, callback) => {
+    const invocation = normalizeResolveInvocation('dns.resolveNs', hostname, 'NS', callback);
+    const records = resolveRecords('dns.resolve', invocation.options);
+    if (typeof invocation.callback === 'function') {
+      queueMicrotask(() => invocation.callback(null, records));
+    }
+    return records;
+  };
+
+  const resolveSoa = (hostname, callback) => {
+    const invocation = normalizeResolveInvocation('dns.resolveSoa', hostname, 'SOA', callback);
+    const records = resolveRecords('dns.resolve', invocation.options);
+    if (typeof invocation.callback === 'function') {
+      queueMicrotask(() => invocation.callback(null, records));
+    }
+    return records;
+  };
+
+  const resolveNaptr = (hostname, callback) => {
+    const invocation = normalizeResolveInvocation('dns.resolveNaptr', hostname, 'NAPTR', callback);
+    const records = resolveRecords('dns.resolve', invocation.options);
+    if (typeof invocation.callback === 'function') {
+      queueMicrotask(() => invocation.callback(null, records));
+    }
+    return records;
+  };
+
+  const resolveCaa = (hostname, callback) => {
+    const invocation = normalizeResolveInvocation('dns.resolveCaa', hostname, 'CAA', callback);
+    const records = resolveRecords('dns.resolve', invocation.options);
+    if (typeof invocation.callback === 'function') {
+      queueMicrotask(() => invocation.callback(null, records));
+    }
+    return records;
+  };
+
+  const createInvalidDnsServersError = (subject) => {
+    const error = new TypeError(
+      `${subject} expects an array of non-empty server strings`,
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    return error;
+  };
+
+  const normalizeDnsServers = (subject, servers) => {
+    if (!Array.isArray(servers)) {
+      throw createInvalidDnsServersError(subject);
+    }
+
+    return servers.map((server) => {
+      if (typeof server !== 'string' || server.length === 0) {
+        throw createInvalidDnsServersError(subject);
+      }
+      return server;
+    });
+  };
+
+  // Resolver instances keep guest-owned server lists for API compatibility.
+  // Queries still use the VM-wide kernel resolver until the sync RPC grows
+  // per-request nameserver overrides.
   class AgentOsResolver {
+    constructor() {
+      this._servers = [];
+    }
+
     cancel() {}
 
     getServers() {
-      return [];
+      return this._servers.slice();
     }
 
     lookup(hostname, options, callback) {
@@ -6499,16 +6705,60 @@ function createRpcBackedDnsModule(dnsModule) {
       return resolve6(hostname, callback);
     }
 
-    setServers() {
-      throw createUnsupportedDnsError('dns.Resolver.setServers');
+    resolveAny(hostname, callback) {
+      return resolveAny(hostname, callback);
+    }
+
+    resolveMx(hostname, callback) {
+      return resolveMx(hostname, callback);
+    }
+
+    resolveTxt(hostname, callback) {
+      return resolveTxt(hostname, callback);
+    }
+
+    resolveSrv(hostname, callback) {
+      return resolveSrv(hostname, callback);
+    }
+
+    resolveCname(hostname, callback) {
+      return resolveCname(hostname, callback);
+    }
+
+    resolvePtr(hostname, callback) {
+      return resolvePtr(hostname, callback);
+    }
+
+    resolveNs(hostname, callback) {
+      return resolveNs(hostname, callback);
+    }
+
+    resolveSoa(hostname, callback) {
+      return resolveSoa(hostname, callback);
+    }
+
+    resolveNaptr(hostname, callback) {
+      return resolveNaptr(hostname, callback);
+    }
+
+    resolveCaa(hostname, callback) {
+      return resolveCaa(hostname, callback);
+    }
+
+    setServers(servers) {
+      this._servers = normalizeDnsServers('dns.Resolver.setServers', servers);
     }
   }
 
   class AgentOsPromisesResolver {
+    constructor() {
+      this._servers = [];
+    }
+
     cancel() {}
 
     getServers() {
-      return [];
+      return this._servers.slice();
     }
 
     lookup(hostname, options) {
@@ -6527,8 +6777,51 @@ function createRpcBackedDnsModule(dnsModule) {
       return Promise.resolve(resolve6(hostname));
     }
 
-    setServers() {
-      throw createUnsupportedDnsError('dns.promises.Resolver.setServers');
+    resolveAny(hostname) {
+      return Promise.resolve(resolveAny(hostname));
+    }
+
+    resolveMx(hostname) {
+      return Promise.resolve(resolveMx(hostname));
+    }
+
+    resolveTxt(hostname) {
+      return Promise.resolve(resolveTxt(hostname));
+    }
+
+    resolveSrv(hostname) {
+      return Promise.resolve(resolveSrv(hostname));
+    }
+
+    resolveCname(hostname) {
+      return Promise.resolve(resolveCname(hostname));
+    }
+
+    resolvePtr(hostname) {
+      return Promise.resolve(resolvePtr(hostname));
+    }
+
+    resolveNs(hostname) {
+      return Promise.resolve(resolveNs(hostname));
+    }
+
+    resolveSoa(hostname) {
+      return Promise.resolve(resolveSoa(hostname));
+    }
+
+    resolveNaptr(hostname) {
+      return Promise.resolve(resolveNaptr(hostname));
+    }
+
+    resolveCaa(hostname) {
+      return Promise.resolve(resolveCaa(hostname));
+    }
+
+    setServers(servers) {
+      this._servers = normalizeDnsServers(
+        'dns.promises.Resolver.setServers',
+        servers,
+      );
     }
   }
 
@@ -6545,6 +6838,36 @@ function createRpcBackedDnsModule(dnsModule) {
     },
     resolve6(hostname) {
       return Promise.resolve(resolve6(hostname));
+    },
+    resolveAny(hostname) {
+      return Promise.resolve(resolveAny(hostname));
+    },
+    resolveMx(hostname) {
+      return Promise.resolve(resolveMx(hostname));
+    },
+    resolveTxt(hostname) {
+      return Promise.resolve(resolveTxt(hostname));
+    },
+    resolveSrv(hostname) {
+      return Promise.resolve(resolveSrv(hostname));
+    },
+    resolveCname(hostname) {
+      return Promise.resolve(resolveCname(hostname));
+    },
+    resolvePtr(hostname) {
+      return Promise.resolve(resolvePtr(hostname));
+    },
+    resolveNs(hostname) {
+      return Promise.resolve(resolveNs(hostname));
+    },
+    resolveSoa(hostname) {
+      return Promise.resolve(resolveSoa(hostname));
+    },
+    resolveNaptr(hostname) {
+      return Promise.resolve(resolveNaptr(hostname));
+    },
+    resolveCaa(hostname) {
+      return Promise.resolve(resolveCaa(hostname));
     },
   });
 
@@ -6568,6 +6891,16 @@ function createRpcBackedDnsModule(dnsModule) {
     resolve,
     resolve4,
     resolve6,
+    resolveAny,
+    resolveMx,
+    resolveTxt,
+    resolveSrv,
+    resolveCname,
+    resolvePtr,
+    resolveNs,
+    resolveSoa,
+    resolveNaptr,
+    resolveCaa,
     reverse() {
       throw createUnsupportedDnsError('dns.reverse');
     },
@@ -7599,6 +7932,7 @@ function installGuestHardening() {
   }
   if (ALLOWED_BUILTINS.has('dns')) {
     syncBuiltinModuleExports(hostDns, guestDns);
+    syncBuiltinModuleExports(hostDnsPromises, guestDns.promises);
   }
   if (ALLOWED_BUILTINS.has('http')) {
     syncBuiltinModuleExports(hostHttp, guestHttp);
@@ -7686,6 +8020,9 @@ function installGuestHardening() {
       if (normalized === 'dns' && ALLOWED_BUILTINS.has('dns')) {
         return guestDns;
       }
+      if (normalized === 'dns/promises' && ALLOWED_BUILTINS.has('dns')) {
+        return guestDns.promises;
+      }
       if (normalized === 'http' && ALLOWED_BUILTINS.has('http')) {
         return guestHttp;
       }
@@ -7729,6 +8066,9 @@ function installGuestHardening() {
       }
       if (normalized === 'dns' && ALLOWED_BUILTINS.has('dns')) {
         return guestDns;
+      }
+      if (normalized === 'dns/promises' && ALLOWED_BUILTINS.has('dns')) {
+        return guestDns.promises;
       }
       if (normalized === 'http' && ALLOWED_BUILTINS.has('http')) {
         return guestHttp;
@@ -8040,8 +8380,14 @@ const path =
     ? globalThis._requireFrom('node:path', '/')
     : __agentOsRequireBuiltin('node:path');
 const { WASI } = globalThis.__agentOsWasiModule;
+const HOST_CWD =
+  typeof process?.env?.AGENT_OS_WASM_HOST_CWD === 'string' &&
+  process.env.AGENT_OS_WASM_HOST_CWD.length > 0
+    ? path.resolve(process.env.AGENT_OS_WASM_HOST_CWD)
+    : path.resolve('.');
 
 const WASI_ERRNO_SUCCESS = 0;
+const WASI_ERRNO_ACCES = 2;
 const WASI_ERRNO_BADF = 8;
 const WASI_ERRNO_CHILD = 10;
 const WASI_ERRNO_ROFS = 69;
@@ -8080,11 +8426,47 @@ function isPathLike(specifier) {
   return specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('file:');
 }
 
+function resolveModuleGuestPathToHostPath(guestPath) {
+  if (typeof guestPath !== 'string') {
+    return null;
+  }
+
+  const normalized = path.posix.normalize(guestPath);
+  for (const mapping of GUEST_PATH_MAPPINGS) {
+    if (mapping.guestPath === '/') {
+      const suffix = normalized.replace(/^\/+/, '');
+      return suffix ? path.join(mapping.hostPath, suffix) : mapping.hostPath;
+    }
+
+    if (
+      normalized !== mapping.guestPath &&
+      !normalized.startsWith(`${mapping.guestPath}/`)
+    ) {
+      continue;
+    }
+
+    const suffix =
+      normalized === mapping.guestPath
+        ? ''
+        : normalized.slice(mapping.guestPath.length + 1);
+    return suffix ? path.join(mapping.hostPath, ...suffix.split('/')) : mapping.hostPath;
+  }
+
+  return null;
+}
+
 function resolveModulePath(specifier) {
   if (specifier.startsWith('file:')) {
+    const guestPath = guestFilePathFromUrl(specifier);
+    if (guestPath) {
+      return resolveModuleGuestPathToHostPath(guestPath) ?? new URL(specifier);
+    }
     return new URL(specifier);
   }
   if (isPathLike(specifier)) {
+    if (specifier.startsWith('/')) {
+      return resolveModuleGuestPathToHostPath(specifier) ?? path.resolve(process.cwd(), specifier);
+    }
     return path.resolve(process.cwd(), specifier);
   }
   return specifier;
@@ -8161,13 +8543,17 @@ let nextSyncRpcId = 1;
 let syncRpcResponseBuffer = '';
 const spawnedChildren = new Map();
 const spawnedChildrenById = new Map();
+let nextSyntheticChildPid = 0x40000000;
 const syntheticFdEntries = new Map();
 const delegateManagedFdRefCounts = new Map();
+globalThis.__agentOsWasiDelegateFdRefCount = (fd) =>
+  delegateManagedFdRefCounts.get(Number(fd) >>> 0) ?? 0;
 const passthroughHandles = new Map([
   [0, { kind: 'passthrough', targetFd: 0, displayFd: 0, refCount: 0, open: true }],
   [1, { kind: 'passthrough', targetFd: 1, displayFd: 1, refCount: 0, open: true }],
   [2, { kind: 'passthrough', targetFd: 2, displayFd: 2, refCount: 0, open: true }],
 ]);
+const retainedSyntheticHandlesByDisplayFd = new Map();
 let nextSyntheticFd = 64;
 let nextSyntheticPipeId = 1;
 const syntheticWaitArray = new Int32Array(new SharedArrayBuffer(4));
@@ -8176,6 +8562,8 @@ let delegateWriteScratch = { base: 0, capacity: 0 };
 function traceHostProcess(event, details) {
   const enabled =
     (typeof TRACE_HOST_PROCESS === 'boolean' && TRACE_HOST_PROCESS) ||
+    (typeof HOST_PROCESS_ENV !== 'undefined' &&
+      HOST_PROCESS_ENV?.AGENT_OS_TRACE_HOST_PROCESS === '1') ||
     (typeof process !== 'undefined' && process?.env?.AGENT_OS_TRACE_HOST_PROCESS === '1');
   if (!enabled) {
     return;
@@ -8187,6 +8575,113 @@ function traceHostProcess(event, details) {
   }
 }
 
+const WASI_RIGHT_FD_DATASYNC = 1n << 0n;
+const WASI_RIGHT_FD_READ = 1n << 1n;
+const WASI_RIGHT_FD_SEEK = 1n << 2n;
+const WASI_RIGHT_FD_FDSTAT_SET_FLAGS = 1n << 3n;
+const WASI_RIGHT_FD_SYNC = 1n << 4n;
+const WASI_RIGHT_FD_TELL = 1n << 5n;
+const WASI_RIGHT_FD_ADVISE = 1n << 7n;
+const WASI_RIGHT_FD_ALLOCATE = 1n << 8n;
+const WASI_RIGHT_PATH_CREATE_DIRECTORY = 1n << 9n;
+const WASI_RIGHT_PATH_LINK_SOURCE = 1n << 10n;
+const WASI_RIGHT_PATH_LINK_TARGET = 1n << 11n;
+const WASI_RIGHT_PATH_OPEN = 1n << 13n;
+const WASI_RIGHT_FD_READDIR = 1n << 14n;
+const WASI_RIGHT_PATH_READLINK = 1n << 15n;
+const WASI_RIGHT_PATH_RENAME_SOURCE = 1n << 16n;
+const WASI_RIGHT_PATH_RENAME_TARGET = 1n << 17n;
+const WASI_RIGHT_PATH_FILESTAT_GET = 1n << 18n;
+const WASI_RIGHT_PATH_FILESTAT_SET_SIZE = 1n << 19n;
+const WASI_RIGHT_PATH_FILESTAT_SET_TIMES = 1n << 20n;
+const WASI_RIGHT_FD_FILESTAT_GET = 1n << 21n;
+const WASI_RIGHT_FD_FILESTAT_SET_SIZE = 1n << 22n;
+const WASI_RIGHT_FD_FILESTAT_SET_TIMES = 1n << 23n;
+const WASI_RIGHT_PATH_SYMLINK = 1n << 24n;
+const WASI_RIGHT_PATH_REMOVE_DIRECTORY = 1n << 25n;
+const WASI_RIGHT_PATH_UNLINK_FILE = 1n << 26n;
+const WASI_RIGHT_POLL_FD_READWRITE = 1n << 27n;
+
+const READ_ONLY_PREOPEN_RIGHTS_BASE =
+  WASI_RIGHT_FD_READ |
+  WASI_RIGHT_FD_SEEK |
+  WASI_RIGHT_FD_FDSTAT_SET_FLAGS |
+  WASI_RIGHT_FD_TELL |
+  WASI_RIGHT_PATH_OPEN |
+  WASI_RIGHT_FD_READDIR |
+  WASI_RIGHT_PATH_READLINK |
+  WASI_RIGHT_PATH_FILESTAT_GET |
+  WASI_RIGHT_FD_FILESTAT_GET |
+  WASI_RIGHT_POLL_FD_READWRITE;
+const READ_ONLY_PREOPEN_RIGHTS_INHERITING =
+  WASI_RIGHT_FD_READ |
+  WASI_RIGHT_FD_SEEK |
+  WASI_RIGHT_FD_FDSTAT_SET_FLAGS |
+  WASI_RIGHT_FD_TELL |
+  WASI_RIGHT_FD_FILESTAT_GET |
+  WASI_RIGHT_POLL_FD_READWRITE;
+const READ_WRITE_PREOPEN_RIGHTS_BASE =
+  READ_ONLY_PREOPEN_RIGHTS_BASE |
+  WASI_RIGHT_FD_DATASYNC |
+  WASI_RIGHT_FD_SYNC |
+  WASI_RIGHT_FD_WRITE |
+  WASI_RIGHT_FD_ADVISE |
+  WASI_RIGHT_FD_ALLOCATE |
+  WASI_RIGHT_PATH_CREATE_DIRECTORY |
+  WASI_RIGHT_PATH_FILESTAT_SET_SIZE |
+  WASI_RIGHT_PATH_FILESTAT_SET_TIMES |
+  WASI_RIGHT_FD_FILESTAT_SET_SIZE |
+  WASI_RIGHT_FD_FILESTAT_SET_TIMES;
+const READ_WRITE_PREOPEN_RIGHTS_INHERITING =
+  READ_ONLY_PREOPEN_RIGHTS_INHERITING |
+  WASI_RIGHT_FD_DATASYNC |
+  WASI_RIGHT_FD_SYNC |
+  WASI_RIGHT_FD_WRITE |
+  WASI_RIGHT_FD_ADVISE |
+  WASI_RIGHT_FD_ALLOCATE |
+  WASI_RIGHT_FD_FILESTAT_SET_SIZE |
+  WASI_RIGHT_FD_FILESTAT_SET_TIMES;
+const FULL_PREOPEN_RIGHTS_BASE =
+  READ_WRITE_PREOPEN_RIGHTS_BASE |
+  WASI_RIGHT_PATH_LINK_SOURCE |
+  WASI_RIGHT_PATH_LINK_TARGET |
+  WASI_RIGHT_PATH_RENAME_SOURCE |
+  WASI_RIGHT_PATH_RENAME_TARGET |
+  WASI_RIGHT_PATH_SYMLINK |
+  WASI_RIGHT_PATH_REMOVE_DIRECTORY |
+  WASI_RIGHT_PATH_UNLINK_FILE;
+const FULL_PREOPEN_RIGHTS_INHERITING = READ_WRITE_PREOPEN_RIGHTS_INHERITING;
+
+function buildPreopenRights() {
+  switch (permissionTier) {
+    case 'read-only':
+      return {
+        rightsBase: READ_ONLY_PREOPEN_RIGHTS_BASE,
+        rightsInheriting: READ_ONLY_PREOPEN_RIGHTS_INHERITING,
+      };
+    case 'read-write':
+      return {
+        rightsBase: READ_WRITE_PREOPEN_RIGHTS_BASE,
+        rightsInheriting: READ_WRITE_PREOPEN_RIGHTS_INHERITING,
+      };
+    case 'full':
+    default:
+      return {
+        rightsBase: FULL_PREOPEN_RIGHTS_BASE,
+        rightsInheriting: FULL_PREOPEN_RIGHTS_INHERITING,
+      };
+  }
+}
+
+function createPreopen(hostPath) {
+  const rights = buildPreopenRights();
+  return {
+    hostPath,
+    rightsBase: rights.rightsBase,
+    rightsInheriting: rights.rightsInheriting,
+  };
+}
+
 function buildPreopens() {
   switch (permissionTier) {
     case 'isolated':
@@ -8195,9 +8690,14 @@ function buildPreopens() {
     case 'read-write':
     case 'full':
     default:
+      const guestCwd =
+        typeof guestEnv?.PWD === 'string' && guestEnv.PWD.startsWith('/')
+          ? path.posix.normalize(guestEnv.PWD)
+          : typeof process.env.PWD === 'string' && process.env.PWD.startsWith('/')
+            ? path.posix.normalize(process.env.PWD)
+            : null;
       const preopens = {
-        '.': process.cwd(),
-        '/workspace': process.cwd(),
+        '.': createPreopen(HOST_CWD),
       };
       const seen = new Set(Object.keys(preopens));
       for (const mapping of GUEST_PATH_MAPPINGS) {
@@ -8205,11 +8705,24 @@ function buildPreopens() {
           continue;
         }
         const guestPath = path.posix.normalize(mapping.guestPath);
-        if (!path.posix.isAbsolute(guestPath) || seen.has(guestPath)) {
+        if (
+          !path.posix.isAbsolute(guestPath) ||
+          seen.has(guestPath) ||
+          guestPath === guestCwd
+        ) {
           continue;
         }
-        preopens[guestPath] = mapping.hostPath;
+        preopens[guestPath] = createPreopen(mapping.hostPath);
         seen.add(guestPath);
+      }
+      const cwdMount = guestCwd || '/workspace';
+      if (!seen.has(cwdMount)) {
+        preopens[cwdMount] = createPreopen(HOST_CWD);
+        seen.add(cwdMount);
+      }
+      if (cwdMount !== '/workspace' && !seen.has('/workspace')) {
+        preopens['/workspace'] = createPreopen(HOST_CWD);
+        seen.add('/workspace');
       }
       return preopens;
   }
@@ -8347,6 +8860,20 @@ function decodeBase64ToUint8Array(value) {
   return bytes;
 }
 
+function readKernelStdinChunk(maxBytes) {
+  const requestedLength = Math.max(1, Number(maxBytes) >>> 0);
+  while (true) {
+    const response = callSyncRpc('__kernel_stdin_read', [requestedLength, 10]);
+    if (response && typeof response.dataBase64 === 'string') {
+      return Buffer.from(response.dataBase64, 'base64');
+    }
+    if (response && response.done === true) {
+      return null;
+    }
+    Atomics.wait(syntheticWaitArray, 0, 0, 10);
+  }
+}
+
 const moduleSource =
   typeof moduleBase64 === 'string' && moduleBase64.length > 0
     ? moduleBase64
@@ -8388,9 +8915,17 @@ const delegateFdWrite =
   typeof wasi.wasiImport.fd_write === 'function'
     ? wasi.wasiImport.fd_write.bind(wasi.wasiImport)
     : null;
+const delegateFdPread =
+  typeof wasi.wasiImport.fd_pread === 'function'
+    ? wasi.wasiImport.fd_pread.bind(wasi.wasiImport)
+    : null;
 const delegateFdPwrite =
   typeof wasi.wasiImport.fd_pwrite === 'function'
     ? wasi.wasiImport.fd_pwrite.bind(wasi.wasiImport)
+    : null;
+const delegateFdSync =
+  typeof wasi.wasiImport.fd_sync === 'function'
+    ? wasi.wasiImport.fd_sync.bind(wasi.wasiImport)
     : null;
 
 function decodeSignalMask(maskLo, maskHi) {
@@ -8467,7 +9002,7 @@ function hasMutationOpenFlags(oflags) {
 }
 
 function denyReadOnlyMutation() {
-  return WASI_ERRNO_ROFS;
+  return WASI_ERRNO_ACCES;
 }
 
 function writeGuestUint32(ptr, value) {
@@ -8529,6 +9064,49 @@ function lookupFdHandle(fd) {
   return syntheticFdEntries.get(numericFd) ?? passthroughHandles.get(numericFd) ?? null;
 }
 
+function lookupSyntheticHandleByDisplayFd(fd, expectedKind = null) {
+  const numericFd = Number(fd) >>> 0;
+  for (const handle of syntheticFdEntries.values()) {
+    if (!handle || handle.displayFd !== numericFd) {
+      continue;
+    }
+    if (expectedKind && handle.kind !== expectedKind) {
+      continue;
+    }
+    return handle;
+  }
+
+  const retainedHandle = retainedSyntheticHandlesByDisplayFd.get(numericFd) ?? null;
+  if (
+    retainedHandle &&
+    (!expectedKind || retainedHandle.kind === expectedKind)
+  ) {
+    return retainedHandle;
+  }
+
+  return null;
+}
+
+function retainSyntheticHandleByDisplayFd(handle) {
+  if (
+    handle &&
+    (handle.kind === 'pipe-read' || handle.kind === 'pipe-write')
+  ) {
+    retainedSyntheticHandlesByDisplayFd.set(handle.displayFd >>> 0, handle);
+  }
+}
+
+function releaseRetainedSyntheticHandleByDisplayFd(handle) {
+  if (!handle) {
+    return;
+  }
+
+  const displayFd = handle.displayFd >>> 0;
+  if (retainedSyntheticHandlesByDisplayFd.get(displayFd) === handle) {
+    retainedSyntheticHandlesByDisplayFd.delete(displayFd);
+  }
+}
+
 function cloneFdHandle(fd) {
   const handle = lookupFdHandle(fd);
   if (!handle) {
@@ -8578,7 +9156,7 @@ function releaseFdHandle(handle) {
     handle.pipe.readHandleCount = Math.max(0, handle.pipe.readHandleCount - 1);
   } else if (handle.kind === 'pipe-write') {
     handle.pipe.writeHandleCount = Math.max(0, handle.pipe.writeHandleCount - 1);
-    if (handle.pipe.writeHandleCount === 0) {
+    if (handle.pipe.writeHandleCount === 0 && (handle.pipe.producers?.size ?? 0) === 0) {
       closePipeConsumers(handle.pipe);
     }
   }
@@ -8594,6 +9172,9 @@ function closeSyntheticFd(fd) {
   const shouldRetainMapping =
     ((handle.kind === 'pipe-write' && (handle.pipe.producers?.size ?? 0) > 0) ||
       (handle.kind === 'pipe-read' && (handle.pipe.consumers?.size ?? 0) > 0));
+  if (shouldRetainMapping) {
+    retainSyntheticHandleByDisplayFd(handle);
+  }
   if (!shouldRetainMapping) {
     syntheticFdEntries.delete(numericFd);
   }
@@ -8626,6 +9207,17 @@ function collectInactivePipeHandles(pipe) {
       handle.refCount === 0
     ) {
       syntheticFdEntries.delete(fd);
+    }
+  }
+
+  for (const [displayFd, handle] of Array.from(retainedSyntheticHandlesByDisplayFd.entries())) {
+    if (
+      (handle.kind === 'pipe-read' || handle.kind === 'pipe-write') &&
+      handle.pipe === pipe &&
+      !handle.open &&
+      handle.refCount === 0
+    ) {
+      retainedSyntheticHandlesByDisplayFd.delete(displayFd);
     }
   }
 }
@@ -8712,9 +9304,7 @@ function dequeuePipeBytes(pipe, maxBytes) {
 
 function enqueuePipeBytes(pipe, bytes) {
   const chunk = Buffer.from(bytes ?? []);
-  const hasReaders =
-    (pipe.readHandleCount ?? 0) > 0 || (pipe.consumers?.size ?? 0) > 0;
-  if (chunk.length === 0 || !hasReaders) {
+  if (chunk.length === 0) {
     return;
   }
   pipe.chunks.push(chunk);
@@ -8751,7 +9341,8 @@ function unregisterChildPipeProducers(record) {
     const outputPipe =
       pipe ??
       (() => {
-        const handle = lookupFdHandle(fd);
+        const handle =
+          lookupFdHandle(fd) ?? lookupSyntheticHandleByDisplayFd(fd, 'pipe-write');
         return handle?.kind === 'pipe-write' ? handle.pipe : null;
       })();
     if (outputPipe) {
@@ -8765,19 +9356,31 @@ function unregisterChildPipeConsumers(record) {
     return;
   }
 
-  const inputPipe =
-    record.stdinPipe ??
-    (() => {
-      const handle = lookupFdHandle(record.stdinFd);
-      return handle?.kind === 'pipe-read' ? handle.pipe : null;
-    })();
+  const inputPipe = resolveChildInputPipe(record);
   if (inputPipe) {
     unregisterPipeConsumer(inputPipe, `${record.childId}:stdin`);
   }
 }
 
+function resolveChildInputPipe(record) {
+  if (!record) {
+    return null;
+  }
+
+  return (
+    record.stdinPipe ??
+    (() => {
+      const handle =
+        lookupFdHandle(record.stdinFd) ??
+        lookupSyntheticHandleByDisplayFd(record.stdinFd, 'pipe-read');
+      return handle?.kind === 'pipe-read' ? handle.pipe : null;
+    })()
+  );
+}
+
 function registerPipeProducer(fd, childId, stream) {
-  const handle = lookupFdHandle(fd);
+  const handle =
+    lookupFdHandle(fd) ?? lookupSyntheticHandleByDisplayFd(fd, 'pipe-write');
   if (handle?.kind !== 'pipe-write') {
     return null;
   }
@@ -8787,16 +9390,29 @@ function registerPipeProducer(fd, childId, stream) {
 }
 
 function registerPipeConsumer(fd, childId, stream) {
-  const handle = lookupFdHandle(fd);
+  const handle =
+    lookupFdHandle(fd) ?? lookupSyntheticHandleByDisplayFd(fd, 'pipe-read');
   if (handle?.kind !== 'pipe-read') {
     return null;
   }
   handle.pipe.consumers.set(`${childId}:${stream}`, { childId, stream });
-  flushPipeConsumers(handle.pipe);
-  if (handle.pipe.producers.size === 0 && (handle.pipe.writeHandleCount ?? 0) === 0) {
-    closePipeConsumers(handle.pipe);
+  const shouldDeferInitialDelivery =
+    stream === 'stdin' && !spawnedChildrenById.has(childId);
+  traceHostProcess('register-consumer', {
+    fd: Number(fd) >>> 0,
+    childId,
+    stream,
+    pipeId: handle.pipe.id,
+    deferred: shouldDeferInitialDelivery,
+  });
+  if (!shouldDeferInitialDelivery) {
+    if (handle.pipe.chunks.length > 0) {
+      flushPipeConsumers(handle.pipe);
+    }
+    if (handle.pipe.producers.size === 0 && (handle.pipe.writeHandleCount ?? 0) === 0) {
+      closePipeConsumers(handle.pipe);
+    }
   }
-  traceHostProcess('register-consumer', { fd: Number(fd) >>> 0, childId, stream, pipeId: handle.pipe.id });
   return handle.pipe;
 }
 
@@ -8813,19 +9429,37 @@ function flushPipeConsumers(pipe) {
 
   let flushed = false;
   while (pipe.chunks.length > 0) {
-    const chunk = pipe.chunks.shift();
+    const chunk = pipe.chunks[0];
     if (!chunk || chunk.length === 0) {
+      pipe.chunks.shift();
       continue;
     }
-
+    let shouldRetryChunk = false;
     for (const [consumerKey, consumer] of Array.from(pipe.consumers.entries())) {
       try {
         callSyncRpc('child_process.write_stdin', [consumer.childId, chunk]);
+        traceHostProcess('flush-consumer-write', {
+          pipeId: pipe.id,
+          childId: consumer.childId,
+          bytes: chunk.length,
+        });
         flushed = true;
-      } catch {
+      } catch (error) {
+        if (spawnedChildrenById.has(consumer?.childId) && isChildProcessGoneError(error)) {
+          shouldRetryChunk = true;
+          continue;
+        }
+        traceHostProcess('flush-consumer-write-failed', {
+          pipeId: pipe.id,
+          childId: consumer?.childId ?? null,
+        });
         pipe.consumers.delete(consumerKey);
       }
     }
+    if (shouldRetryChunk) {
+      break;
+    }
+    pipe.chunks.shift();
   }
 
   return flushed;
@@ -8840,8 +9474,19 @@ function closePipeConsumers(pipe) {
   for (const [consumerKey, consumer] of Array.from(pipe.consumers.entries())) {
     try {
       callSyncRpc('child_process.close_stdin', [consumer.childId]);
+      traceHostProcess('close-consumer-stdin', {
+        pipeId: pipe.id,
+        childId: consumer.childId,
+      });
       closed = true;
-    } catch {
+    } catch (error) {
+      if (spawnedChildrenById.has(consumer?.childId) && isChildProcessGoneError(error)) {
+        continue;
+      }
+      traceHostProcess('close-consumer-stdin-failed', {
+        pipeId: pipe.id,
+        childId: consumer?.childId ?? null,
+      });
       // Ignore close errors during teardown.
     }
     pipe.consumers.delete(consumerKey);
@@ -8863,7 +9508,12 @@ function consumeSpawnOutputFd(fd) {
 
 function routeChunkToFd(fd, bytes) {
   const numericFd = Number(fd) >>> 0;
-  const handle = lookupFdHandle(numericFd);
+  const handle =
+    lookupFdHandle(numericFd) ??
+    lookupSyntheticHandleByDisplayFd(numericFd) ??
+    (typeof globalThis.lookupFdHandle === 'function'
+      ? globalThis.lookupFdHandle(numericFd)
+      : null);
   traceHostProcess('route-chunk', {
     fd: numericFd,
     handleKind: handle?.kind ?? null,
@@ -8877,11 +9527,7 @@ function routeChunkToFd(fd, bytes) {
       writeToStdioFd(numericFd, Buffer.from(bytes ?? []));
       return;
     }
-    if (
-      numericFd > 2 &&
-      delegateManagedFdRefCounts.has(numericFd) &&
-      routeChunkToDelegateFd(numericFd, bytes)
-    ) {
+    if (numericFd > 2 && routeChunkToDelegateFd(numericFd, bytes)) {
       return;
     }
     writeSync(numericFd, bytes);
@@ -8889,6 +9535,21 @@ function routeChunkToFd(fd, bytes) {
   }
 
   if (handle.kind === 'passthrough') {
+    if (routeChunkToDelegateFd(handle.targetFd, bytes)) {
+      return;
+    }
+    if (isStdioFd(handle.targetFd)) {
+      writeToStdioFd(handle.targetFd, Buffer.from(bytes ?? []));
+      return;
+    }
+    writeSync(handle.targetFd, bytes);
+    return;
+  }
+
+  if (handle.kind === 'host-passthrough') {
+    if (routeChunkToDelegateFd(handle.displayFd ?? numericFd, bytes)) {
+      return;
+    }
     if (routeChunkToDelegateFd(handle.targetFd, bytes)) {
       return;
     }
@@ -8928,15 +9589,30 @@ function routeChunkToDelegateFd(fd, bytes) {
     };
   }
 
-  const iovsPtr = delegateWriteScratch.base;
-  const dataPtr = iovsPtr + 8;
-  const nwrittenPtr = dataPtr + chunk.length;
-  const memory = new Uint8Array(instanceMemory.buffer);
-  const view = new DataView(instanceMemory.buffer);
-  memory.set(chunk, dataPtr);
-  view.setUint32(iovsPtr, dataPtr, true);
-  view.setUint32(iovsPtr + 4, chunk.length, true);
-  return delegateManagedFdWrite(fd, iovsPtr, 1, nwrittenPtr) === WASI_ERRNO_SUCCESS;
+  try {
+    const iovsPtr = delegateWriteScratch.base;
+    const dataPtr = iovsPtr + 8;
+    const nwrittenPtr = dataPtr + chunk.length;
+    const memory = new Uint8Array(instanceMemory.buffer);
+    const view = new DataView(instanceMemory.buffer);
+    memory.set(chunk, dataPtr);
+    view.setUint32(iovsPtr, dataPtr, true);
+    view.setUint32(iovsPtr + 4, chunk.length, true);
+    const result = delegateManagedFdWrite(fd, iovsPtr, 1, nwrittenPtr);
+    traceHostProcess('route-chunk-delegate', {
+      fd: Number(fd) >>> 0,
+      bytes: chunk.length,
+      result,
+    });
+    return result === WASI_ERRNO_SUCCESS;
+  } catch (error) {
+    traceHostProcess('route-chunk-delegate-error', {
+      fd: Number(fd) >>> 0,
+      bytes: chunk.length,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
 }
 
 function finalizeChildExit(record, exitCode, signal) {
@@ -8953,6 +9629,167 @@ function finalizeChildExit(record, exitCode, signal) {
   unregisterChildPipeProducers(record);
   unregisterChildPipeConsumers(record);
   return status;
+}
+
+function pollChildEvent(record, waitMs) {
+  if (Array.isArray(record?.pendingEvents) && record.pendingEvents.length > 0) {
+    return record.pendingEvents.shift() ?? null;
+  }
+  if (record?.synthetic) {
+    return null;
+  }
+  return callSyncRpc('child_process.poll', [record.childId, waitMs]);
+}
+
+function isChildProcessGoneError(error) {
+  return (
+    (error instanceof Error && error.code === 'ECHILD') ||
+    (error instanceof Error &&
+      typeof error.message === 'string' &&
+      error.message.startsWith('ECHILD:'))
+  );
+}
+
+function resolveSyntheticGuestPath(value, fromGuestDir = '/') {
+  if (typeof value !== 'string') {
+    return value;
+  }
+  if (value.startsWith('file:')) {
+    try {
+      return path.posix.normalize(new URL(value).pathname);
+    } catch {
+      return value;
+    }
+  }
+  if (value.startsWith('/')) {
+    return path.posix.normalize(value);
+  }
+  if (value.startsWith('./') || value.startsWith('../')) {
+    return path.posix.normalize(path.posix.join(fromGuestDir, value));
+  }
+  return value;
+}
+
+function resolveSyntheticHostPath(value, fromGuestDir = '/') {
+  const guestPath = resolveSyntheticGuestPath(value, fromGuestDir);
+  if (typeof guestPath !== 'string') {
+    return null;
+  }
+  return resolveModuleGuestPathToHostPath(guestPath);
+}
+
+function maybeCreateSyntheticCommandResult(command, args, cwd) {
+  const basename = path.posix.basename(String(command || ''));
+
+  if (basename === 'chmod') {
+    if (args.length < 2 || !args.every((arg) => typeof arg === 'string')) {
+      return null;
+    }
+    const modeArg = args[0];
+    if (!/^[0-7]{3,4}$/.test(modeArg)) {
+      return null;
+    }
+    const mode = Number.parseInt(modeArg, 8) >>> 0;
+    try {
+      for (const targetArg of args.slice(1)) {
+        const hostPath = resolveSyntheticHostPath(targetArg, cwd || '/');
+        if (typeof hostPath !== 'string') {
+          throw new Error(`No such file or directory: ${targetArg}`);
+        }
+        fsModule.chmodSync(hostPath, mode);
+      }
+      return { exitCode: 0, stdout: '', stderr: '' };
+    } catch (error) {
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr: `chmod: ${error instanceof Error ? error.message : String(error)}\n`,
+      };
+    }
+  }
+
+  if (basename === 'stat') {
+    if (
+      args.length === 3 &&
+      args[0] === '-c' &&
+      (args[1] === '%a' || args[1] === '"%a"') &&
+      typeof args[2] === 'string'
+    ) {
+      try {
+        const hostPath = resolveSyntheticHostPath(args[2], cwd || '/');
+        if (typeof hostPath !== 'string') {
+          return null;
+        }
+        const stat = fsModule.statSync(hostPath);
+        const mode = Number(stat?.mode) >>> 0;
+        return {
+          exitCode: 0,
+          stdout: `${(mode & 0o777).toString(8)}\n`,
+          stderr: '',
+        };
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  return null;
+}
+
+function createSyntheticChildRecord(result, stdinTarget, stdoutTarget, stderrTarget) {
+  const pid = nextSyntheticChildPid++;
+  const childId = `synthetic-child-${pid}`;
+  const pendingEvents = [{
+    type: 'exit',
+    exitCode: Number(result?.exitCode ?? 1) >>> 0,
+    signal: null,
+  }];
+
+  return {
+    childId,
+    pid,
+    stdinFd: stdinTarget,
+    stdoutFd: stdoutTarget,
+    stderrFd: stderrTarget,
+    stdinPipe: null,
+    stdoutPipe: null,
+    stderrPipe: null,
+    delegateRetainedFds: [],
+    exitStatus: null,
+    pendingEvents,
+    synthetic: true,
+  };
+}
+
+function emitSyntheticCommandOutput(record, stdoutFd, stderrFd, result) {
+  const syntheticOutputs = [
+    ['stdout', stdoutFd, record.stdoutFd, result?.stdout],
+    ['stderr', stderrFd, record.stderrFd, result?.stderr],
+  ];
+
+  for (const [stream, rawFd, targetFd, value] of syntheticOutputs) {
+    const text = typeof value === 'string' ? value : '';
+    const pipe = registerPipeProducer(targetFd, record.childId, stream);
+    consumeSpawnOutputFd(rawFd);
+    if (text.length > 0 && targetFd !== 0xffffffff) {
+      routeChunkToFd(targetFd, Buffer.from(text, 'utf8'));
+    }
+    if (pipe) {
+      unregisterPipeProducer(pipe, `${record.childId}:${stream}`);
+    }
+  }
+}
+
+function reapSpawnedChild(record) {
+  if (!record) {
+    return;
+  }
+
+  spawnedChildren.delete(record.pid);
+  if (typeof record.childId === 'string' && record.childId.length > 0) {
+    spawnedChildrenById.delete(record.childId);
+  }
 }
 
 function processChildEvent(record, event) {
@@ -8989,7 +9826,15 @@ function processChildEvent(record, event) {
     const signal =
       typeof event.signal === 'string' ? event.signal : null;
     while (true) {
-      const trailingEvent = callSyncRpc('child_process.poll', [record.childId, 0]);
+      let trailingEvent = null;
+      try {
+        trailingEvent = pollChildEvent(record, 0);
+      } catch (error) {
+        if (isChildProcessGoneError(error)) {
+          break;
+        }
+        throw error;
+      }
       if (!trailingEvent) {
         break;
       }
@@ -9017,7 +9862,7 @@ function pumpPipeProducers(pipe, waitMs) {
       continue;
     }
 
-    const event = callSyncRpc('child_process.poll', [record.childId, waitMs]);
+    const event = pollChildEvent(record, waitMs);
     if (!event) {
       continue;
     }
@@ -9027,6 +9872,56 @@ function pumpPipeProducers(pipe, waitMs) {
   }
 
   return processed;
+}
+
+function pumpChildInputPipe(record, waitMs) {
+  const inputPipe = resolveChildInputPipe(record);
+  if (!inputPipe) {
+    traceHostProcess('pump-child-input-skip-no-pipe', {
+      childId: record?.childId ?? null,
+    });
+    return false;
+  }
+  const stdinReadyAt = Number(record?.stdinReadyAtMs) || 0;
+  if (stdinReadyAt > Date.now()) {
+    traceHostProcess('pump-child-input-deferred', {
+      childId: record?.childId ?? null,
+      waitMs: Number(waitMs) >>> 0,
+      stdinReadyAt,
+      now: Date.now(),
+      chunkCount: inputPipe.chunks.length,
+      writeHandleCount: inputPipe.writeHandleCount ?? null,
+      producerCount: inputPipe.producers?.size ?? null,
+    });
+    return false;
+  }
+
+  let progressed = false;
+  traceHostProcess('pump-child-input-begin', {
+    childId: record?.childId ?? null,
+    waitMs: Number(waitMs) >>> 0,
+    chunkCount: inputPipe.chunks.length,
+    writeHandleCount: inputPipe.writeHandleCount ?? null,
+    producerCount: inputPipe.producers?.size ?? null,
+  });
+  if (inputPipe.chunks.length > 0) {
+    progressed = flushPipeConsumers(inputPipe) || progressed;
+  }
+
+  if (inputPipe.producers.size === 0 && (inputPipe.writeHandleCount ?? 0) === 0) {
+    return closePipeConsumers(inputPipe) || progressed;
+  }
+
+  const pumped = pumpPipeProducers(inputPipe, waitMs);
+  progressed = pumped || progressed;
+  if (inputPipe.chunks.length > 0) {
+    progressed = flushPipeConsumers(inputPipe) || progressed;
+  }
+  if (inputPipe.producers.size === 0 && (inputPipe.writeHandleCount ?? 0) === 0) {
+    progressed = closePipeConsumers(inputPipe) || progressed;
+  }
+
+  return progressed;
 }
 
 function encodeGuestBytes(value) {
@@ -9348,16 +10243,15 @@ function writeGuestBytes(ptr, maxLen, bytes, actualLenPtr) {
 const hostNetImport = {
   net_socket(domain, sockType, protocol, retFdPtr) {
     try {
+      const numericDomain = Number(domain) >>> 0;
       const numericType = Number(sockType) >>> 0;
-      if (numericType !== 1) {
-        return WASI_ERRNO_FAULT;
-      }
+      const numericProtocol = Number(protocol) >>> 0;
 
       const fd = nextHostNetSocketFd++;
       hostNetSockets.set(fd, {
-        domain: Number(domain) >>> 0,
+        domain: numericDomain,
         sockType: numericType,
-        protocol: Number(protocol) >>> 0,
+        protocol: numericProtocol,
         socketId: null,
         readChunks: [],
         readableEnded: false,
@@ -9482,9 +10376,7 @@ const hostNetImport = {
   },
 };
 
-const hostProcessImport =
-  permissionTier === 'full'
-    ? {
+const hostProcessImport = {
         proc_spawn(
           argvPtr,
           argvLen,
@@ -9497,6 +10389,9 @@ const hostProcessImport =
           cwdLen,
           retPidPtr,
         ) {
+          if (permissionTier !== 'full') {
+            return WASI_ERRNO_FAULT;
+          }
           try {
             const argv = decodeNullSeparatedStrings(readGuestBytes(argvPtr, argvLen));
             if (argv.length === 0) {
@@ -9510,6 +10405,25 @@ const hostProcessImport =
             const stdinTarget = resolveSpawnFd(stdinFd);
             const stdoutTarget = resolveSpawnFd(stdoutFd);
             const stderrTarget = resolveSpawnFd(stderrFd);
+            const syntheticResult = maybeCreateSyntheticCommandResult(command, args, cwd);
+            if (syntheticResult) {
+              const record = createSyntheticChildRecord(
+                syntheticResult,
+                stdinTarget,
+                stdoutTarget,
+                stderrTarget,
+              );
+              spawnedChildren.set(record.pid, record);
+              spawnedChildrenById.set(record.childId, record);
+              traceHostProcess('proc-spawn-synthetic', {
+                command,
+                childId: record.childId,
+                pid: record.pid,
+                exitCode: syntheticResult.exitCode,
+              });
+              emitSyntheticCommandOutput(record, stdoutFd, stderrFd, syntheticResult);
+              return writeGuestUint32(retPidPtr, record.pid);
+            }
             traceHostProcess('proc-spawn-begin', {
               command,
               args,
@@ -9576,9 +10490,10 @@ const hostProcessImport =
               stdinPipe,
               stdoutPipe,
               stderrPipe,
+              stdinReadyAtMs: Date.now() + 100,
               delegateRetainedFds,
               exitStatus: null,
-            };
+      };
             spawnedChildren.set(pid, record);
             spawnedChildrenById.set(result.childId, record);
             traceHostProcess('proc-spawn-ready', {
@@ -9589,13 +10504,18 @@ const hostProcessImport =
             consumeSpawnOutputFd(stdoutFd);
             consumeSpawnOutputFd(stderrFd);
             return writeGuestUint32(retPidPtr, pid);
-          } catch {
-            traceHostProcess('proc-spawn-fault', {});
+          } catch (error) {
+            traceHostProcess('proc-spawn-fault', {
+              message: error instanceof Error ? error.message : String(error),
+            });
             return WASI_ERRNO_FAULT;
           }
         },
         proc_waitpid(pid, options, retStatusPtr, retPidPtr) {
           const requestedPid = Number(pid) >>> 0;
+          if (permissionTier !== 'full') {
+            return requestedPid === 0xffffffff ? WASI_ERRNO_CHILD : WASI_ERRNO_SRCH;
+          }
           const record =
             requestedPid === 0xffffffff
               ? spawnedChildren.values().next().value
@@ -9605,6 +10525,7 @@ const hostProcessImport =
           }
 
           try {
+            const nonBlocking = (Number(options) >>> 0) !== 0;
             traceHostProcess('proc-waitpid-begin', {
               requestedPid,
               childId: record.childId,
@@ -9614,15 +10535,25 @@ const hostProcessImport =
               if (writeGuestUint32(retStatusPtr, record.exitStatus) !== WASI_ERRNO_SUCCESS) {
                 return WASI_ERRNO_FAULT;
               }
-              return writeGuestUint32(retPidPtr, record.pid);
+              const writePidResult = writeGuestUint32(retPidPtr, record.pid);
+              if (writePidResult !== WASI_ERRNO_SUCCESS) {
+                return writePidResult;
+              }
+              reapSpawnedChild(record);
+              return writePidResult;
             }
 
             while (true) {
-              const event = callSyncRpc('child_process.poll', [
-                record.childId,
-                Number(options) >>> 0 ? 0 : 50,
-              ]);
+              const event = pollChildEvent(
+                record,
+                nonBlocking ? 0 : 10,
+              );
               if (!event) {
+                if (!pumpChildInputPipe(record, nonBlocking ? 0 : 10)) {
+                  if (nonBlocking) {
+                    return writeGuestUint32(retPidPtr, 0);
+                  }
+                }
                 continue;
               }
               traceHostProcess('proc-waitpid-poll', {
@@ -9652,7 +10583,12 @@ const hostProcessImport =
                 if (writeGuestUint32(retStatusPtr, record.exitStatus ?? 1) !== WASI_ERRNO_SUCCESS) {
                   return WASI_ERRNO_FAULT;
                 }
-                return writeGuestUint32(retPidPtr, record.pid);
+                const writePidResult = writeGuestUint32(retPidPtr, record.pid);
+                if (writePidResult !== WASI_ERRNO_SUCCESS) {
+                  return writePidResult;
+                }
+                reapSpawnedChild(record);
+                return writePidResult;
               }
             }
           } catch {
@@ -9665,6 +10601,9 @@ const hostProcessImport =
           }
         },
         proc_kill(pid, signal) {
+          if (permissionTier !== 'full') {
+            return WASI_ERRNO_SRCH;
+          }
           const record = spawnedChildren.get(Number(pid) >>> 0);
           if (!record) {
             return WASI_ERRNO_SRCH;
@@ -9761,6 +10700,43 @@ const hostProcessImport =
             return WASI_ERRNO_FAULT;
           }
         },
+        fd_dup_min(fd, minFd, retNewFdPtr) {
+          try {
+            const sourceFd = Number(fd);
+            const minimumFdNumber = Number(minFd);
+            if (!Number.isInteger(sourceFd) || sourceFd < 0) {
+              return WASI_ERRNO_BADF;
+            }
+            if (!Number.isInteger(minimumFdNumber) || minimumFdNumber < 0) {
+              return WASI_ERRNO_INVAL;
+            }
+
+            let duplicatedFd = minimumFdNumber >>> 0;
+            while (
+              syntheticFdEntries.has(duplicatedFd) ||
+              passthroughHandles.has(duplicatedFd) ||
+              delegateManagedFdRefCounts.has(duplicatedFd)
+            ) {
+              duplicatedFd += 1;
+            }
+            nextSyntheticFd = Math.max(nextSyntheticFd, duplicatedFd + 1);
+
+            const handle =
+              cloneFdHandle(sourceFd) ?? wrapDelegateFdHandle(sourceFd, duplicatedFd);
+            syntheticFdEntries.set(duplicatedFd, handle);
+            traceHostProcess('fd-dup-min', {
+              fd: sourceFd >>> 0,
+              minimumFd: minimumFdNumber >>> 0,
+              duplicatedFd,
+              handleKind: handle.kind,
+              targetFd: handle.targetFd ?? null,
+              displayFd: handle.displayFd ?? null,
+            });
+            return writeGuestUint32(retNewFdPtr, duplicatedFd);
+          } catch {
+            return WASI_ERRNO_FAULT;
+          }
+        },
         sleep_ms(milliseconds) {
           try {
             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(milliseconds) >>> 0);
@@ -9792,8 +10768,11 @@ const hostProcessImport =
             return WASI_ERRNO_FAULT;
           }
         },
-      }
-    : {};
+};
+
+const limitedHostProcessImport = {
+  fd_dup_min: hostProcessImport.fd_dup_min,
+};
 
 const hostUserImport = {
   getuid(retUidPtr) {
@@ -9826,10 +10805,22 @@ const hostUserImport = {
 const HOST_FS_MODE_REGULAR = 0o100644;
 const HOST_FS_MODE_CHARACTER = 0o020666;
 const HOST_FS_MODE_FIFO = 0o010600;
+const HOST_FS_GUEST_CWD =
+  typeof guestEnv?.PWD === 'string' && guestEnv.PWD.startsWith('/')
+    ? path.posix.normalize(guestEnv.PWD)
+    : '/';
 
 function hostFsModeFromStat(stat) {
   const mode = Number(stat?.mode);
   return Number.isInteger(mode) && mode > 0 ? mode >>> 0 : 0;
+}
+
+function resolveHostFsPath(value, fromGuestDir = HOST_FS_GUEST_CWD) {
+  const guestPath = resolveSyntheticGuestPath(value, fromGuestDir);
+  if (typeof guestPath !== 'string') {
+    return null;
+  }
+  return resolveModuleGuestPathToHostPath(guestPath);
 }
 
 const hostFsImport = {
@@ -9845,7 +10836,9 @@ const hostFsImport = {
     }
 
     try {
-      return hostFsModeFromStat(callSyncRpc('fs.fstatSync', [descriptor])) || HOST_FS_MODE_REGULAR;
+      const targetFd =
+        typeof handle?.targetFd === 'number' ? Number(handle.targetFd) >>> 0 : descriptor;
+      return hostFsModeFromStat(fsModule.fstatSync(targetFd)) || HOST_FS_MODE_REGULAR;
     } catch {
       return HOST_FS_MODE_REGULAR;
     }
@@ -9853,24 +10846,53 @@ const hostFsImport = {
   path_mode(pathPtr, pathLen, followSymlinks) {
     try {
       const target = readGuestString(pathPtr, pathLen);
-      const method = Number(followSymlinks) === 0 ? 'fs.lstatSync' : 'fs.statSync';
-      return hostFsModeFromStat(callSyncRpc(method, [target]));
+      const hostPath = resolveHostFsPath(target);
+      if (typeof hostPath !== 'string') {
+        return 0;
+      }
+      const stat =
+        Number(followSymlinks) === 0
+          ? fsModule.lstatSync(hostPath)
+          : fsModule.statSync(hostPath);
+      const mode = hostFsModeFromStat(stat);
+      traceHostProcess('host-fs-path-mode', {
+        target,
+        hostPath,
+        followSymlinks: Number(followSymlinks) >>> 0,
+        mode,
+      });
+      return mode;
     } catch {
+      traceHostProcess('host-fs-path-mode-fault', {});
       return 0;
     }
   },
   chmod(pathPtr, pathLen, mode) {
     try {
       const target = readGuestString(pathPtr, pathLen);
-      callSyncRpc('fs.chmodSync', [target, Number(mode) >>> 0]);
+      const hostPath = resolveHostFsPath(target);
+      if (typeof hostPath !== 'string') {
+        return 1;
+      }
+      traceHostProcess('host-fs-chmod', {
+        target,
+        hostPath,
+        mode: Number(mode) >>> 0,
+      });
+      fsModule.chmodSync(hostPath, Number(mode) >>> 0);
       return 0;
     } catch {
+      traceHostProcess('host-fs-chmod-fault', {});
       return 1;
     }
   },
 };
 
 wasiImport.clock_time_get = (clockId, precision, resultPtr) => {
+  const numericClockId = Number(clockId) >>> 0;
+  if (numericClockId !== 0 && delegateClockTimeGet) {
+    return delegateClockTimeGet(clockId, precision, resultPtr);
+  }
   if (!(instanceMemory instanceof WebAssembly.Memory)) {
     return delegateClockTimeGet
       ? delegateClockTimeGet(clockId, precision, resultPtr)
@@ -9887,6 +10909,10 @@ wasiImport.clock_time_get = (clockId, precision, resultPtr) => {
 };
 
 wasiImport.clock_res_get = (clockId, resultPtr) => {
+  const numericClockId = Number(clockId) >>> 0;
+  if (numericClockId !== 0 && delegateClockResGet) {
+    return delegateClockResGet(clockId, resultPtr);
+  }
   if (!(instanceMemory instanceof WebAssembly.Memory)) {
     return delegateClockResGet
       ? delegateClockResGet(clockId, resultPtr)
@@ -9936,6 +10962,15 @@ if (delegatePathOpen) {
       try {
         const openedFd = new DataView(instanceMemory.buffer).getUint32(Number(openedFdPtr), true);
         retainDelegateFd(openedFd);
+        if (openedFd > 2 && !passthroughHandles.has(openedFd)) {
+          passthroughHandles.set(openedFd, {
+            kind: 'passthrough',
+            targetFd: openedFd,
+            displayFd: openedFd,
+            refCount: 0,
+            open: true,
+          });
+        }
       } catch {
         return WASI_ERRNO_FAULT;
       }
@@ -10004,7 +11039,9 @@ const KERNEL_POLLERR = 0x0008;
 const KERNEL_POLLHUP = 0x0010;
 
 wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
-  const handle = lookupFdHandle(fd);
+  const numericFd = Number(fd) >>> 0;
+  const handle = lookupFdHandle(numericFd);
+
   if (handle?.kind === 'pipe-read') {
     try {
       const requestedLength = (() => {
@@ -10039,18 +11076,89 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
     }
   }
 
+  if (numericFd === 0) {
+    const sidecarManagedProcess =
+      typeof process?.env?.AGENT_OS_SANDBOX_ROOT === 'string' &&
+      process.env.AGENT_OS_SANDBOX_ROOT.length > 0;
+    if (sidecarManagedProcess || KERNEL_STDIO_SYNC_RPC) {
+      try {
+        const requestedLength = (() => {
+          if (!(instanceMemory instanceof WebAssembly.Memory)) {
+            return 0;
+          }
+          const view = new DataView(instanceMemory.buffer);
+          let total = 0;
+          for (let index = 0; index < (Number(iovsLen) >>> 0); index += 1) {
+            const entryOffset = (Number(iovs) >>> 0) + index * 8;
+            total += view.getUint32(entryOffset + 4, true);
+          }
+          return total >>> 0;
+        })();
+        const chunk = readKernelStdinChunk(requestedLength);
+        if (!chunk || chunk.length === 0) {
+          return writeGuestUint32(nreadPtr, 0);
+        }
+        const written = writeBytesToGuestIovs(iovs, iovsLen, chunk);
+        return writeGuestUint32(nreadPtr, written);
+      } catch {
+        return WASI_ERRNO_FAULT;
+      }
+    }
+  }
+
   if (handle?.kind === 'passthrough') {
     return delegateManagedFdRead
       ? delegateManagedFdRead(handle.targetFd, iovs, iovsLen, nreadPtr)
       : WASI_ERRNO_BADF;
   }
 
-  return delegateManagedFdRead ? delegateManagedFdRead(fd, iovs, iovsLen, nreadPtr) : WASI_ERRNO_BADF;
+  return delegateManagedFdRead
+    ? delegateManagedFdRead(numericFd, iovs, iovsLen, nreadPtr)
+    : WASI_ERRNO_BADF;
+};
+
+wasiImport.fd_pread = (fd, iovs, iovsLen, offset, nreadPtr) => {
+  const handle = lookupFdHandle(fd);
+  if (handle?.kind === 'passthrough') {
+    return delegateFdPread
+      ? delegateFdPread(handle.targetFd, iovs, iovsLen, offset, nreadPtr)
+      : WASI_ERRNO_BADF;
+  }
+
+  return delegateFdPread
+    ? delegateFdPread(fd, iovs, iovsLen, offset, nreadPtr)
+    : WASI_ERRNO_BADF;
+};
+
+wasiImport.fd_sync = (fd) => {
+  const handle = lookupFdHandle(fd);
+  if (handle?.kind === 'passthrough') {
+    return delegateFdSync ? delegateFdSync(handle.targetFd) : WASI_ERRNO_SUCCESS;
+  }
+
+  return delegateFdSync ? delegateFdSync(fd) : WASI_ERRNO_SUCCESS;
 };
 
 wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
   const handle = lookupFdHandle(fd);
   const numericFd = Number(fd) >>> 0;
+  if (handle?.kind === 'pipe-write') {
+    try {
+      const bytes = collectGuestIovBytes(iovs, iovsLen);
+      enqueuePipeBytes(handle.pipe, bytes);
+      flushPipeConsumers(handle.pipe);
+      return writeGuestUint32(nwrittenPtr, bytes.length);
+    } catch {
+      return WASI_ERRNO_FAULT;
+    }
+  }
+
+  if (handle?.kind === 'passthrough') {
+    return delegateManagedFdWrite
+      ? delegateManagedFdWrite(handle.targetFd, iovs, iovsLen, nwrittenPtr)
+      : WASI_ERRNO_BADF;
+  }
+
   if (numericFd === 1 || numericFd === 2) {
     try {
       const bytes = collectGuestIovBytes(iovs, iovsLen);
@@ -10068,23 +11176,6 @@ wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
     } catch {
       return WASI_ERRNO_FAULT;
     }
-  }
-
-  if (handle?.kind === 'pipe-write') {
-    try {
-      const bytes = collectGuestIovBytes(iovs, iovsLen);
-      enqueuePipeBytes(handle.pipe, bytes);
-      flushPipeConsumers(handle.pipe);
-      return writeGuestUint32(nwrittenPtr, bytes.length);
-    } catch {
-      return WASI_ERRNO_FAULT;
-    }
-  }
-
-  if (handle?.kind === 'passthrough') {
-    return delegateManagedFdWrite
-      ? delegateManagedFdWrite(handle.targetFd, iovs, iovsLen, nwrittenPtr)
-      : WASI_ERRNO_BADF;
   }
 
   return delegateManagedFdWrite
@@ -10122,6 +11213,7 @@ wasiImport.fd_close = (fd) => {
     if (!shouldDelegateClose) {
       return WASI_ERRNO_SUCCESS;
     }
+    passthroughHandles.delete(Number(fd) >>> 0);
   }
 
   traceHostProcess('fd-close-delegate', { fd: Number(fd) >>> 0 });
@@ -10146,7 +11238,10 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
   const memory = new Uint8Array(instanceMemory.buffer);
   const subscriptions = [];
   let hasSyntheticSubscription = false;
-  let hasPassthroughSubscription = false;
+  let hasRemappedPassthroughSubscription = false;
+  const sidecarManagedProcess =
+    typeof process?.env?.AGENT_OS_SANDBOX_ROOT === 'string' &&
+    process.env.AGENT_OS_SANDBOX_ROOT.length > 0;
   let timeoutMs = null;
 
   for (let index = 0; index < subscriptionCount; index += 1) {
@@ -10172,7 +11267,13 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
     if (handle && handle.kind !== 'passthrough') {
       hasSyntheticSubscription = true;
     } else if (handle?.kind === 'passthrough') {
-      hasPassthroughSubscription = true;
+      const targetFd = Number(handle.targetFd) >>> 0;
+      if (
+        targetFd !== fd ||
+        (fd === 0 && (sidecarManagedProcess || KERNEL_STDIO_SYNC_RPC))
+      ) {
+        hasRemappedPassthroughSubscription = true;
+      }
     }
     subscriptions.push({
       kind: tag === 1 ? 'fd_read' : 'fd_write',
@@ -10182,7 +11283,7 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
     });
   }
 
-  if (!hasSyntheticSubscription && !hasPassthroughSubscription) {
+  if (!hasSyntheticSubscription && !hasRemappedPassthroughSubscription) {
     return delegateManagedPollOneoff
       ? delegateManagedPollOneoff(inPtr, outPtr, nsubscriptions, neventsPtr)
       : WASI_ERRNO_BADF;
@@ -10192,7 +11293,7 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
   const readyEvents = [];
 
   function collectKernelReadyEvents(waitMs) {
-    if (!hasPassthroughSubscription) {
+    if (!hasRemappedPassthroughSubscription) {
       return [];
     }
 
@@ -10200,7 +11301,12 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
       .filter(
         (subscription) =>
           (subscription.kind === 'fd_read' || subscription.kind === 'fd_write') &&
-          subscription.handle?.kind === 'passthrough'
+          subscription.handle?.kind === 'passthrough' &&
+          (
+            (Number(subscription.handle.targetFd) >>> 0) !== (Number(subscription.fd) >>> 0) ||
+            ((Number(subscription.fd) >>> 0) === 0 &&
+              (sidecarManagedProcess || KERNEL_STDIO_SYNC_RPC))
+          )
       )
       .map((subscription) => ({
         fd: Number(subscription.handle.targetFd) >>> 0,
@@ -10225,7 +11331,14 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
     for (const subscription of subscriptions) {
       if (
         (subscription.kind !== 'fd_read' && subscription.kind !== 'fd_write') ||
-        subscription.handle?.kind !== 'passthrough'
+        subscription.handle?.kind !== 'passthrough' ||
+        (
+          (Number(subscription.handle.targetFd) >>> 0) === (Number(subscription.fd) >>> 0) &&
+          !(
+            (Number(subscription.fd) >>> 0) === 0 &&
+            (sidecarManagedProcess || KERNEL_STDIO_SYNC_RPC)
+          )
+        )
       ) {
         continue;
       }
@@ -10286,7 +11399,7 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
       break;
     }
 
-    if (hasPassthroughSubscription) {
+    if (hasRemappedPassthroughSubscription) {
       const kernelWaitMs =
         deadline == null ? 10 : Math.max(0, Math.min(10, deadline - Date.now()));
       readyEvents.push(...collectKernelReadyEvents(kernelWaitMs));
@@ -10345,8 +11458,16 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
 const instance = new WebAssembly.Instance(module, {
   wasi_snapshot_preview1: wasiImport,
   wasi_unstable: wasiImport,
-  host_process: permissionTier === 'full' ? hostProcessImport : undefined,
-  host_net: hostNetImport,
+  // Read-write commands like DuckDB need fd_dup_min from the patched
+  // wasi-libc surface, but broader host_process capabilities stay
+  // reserved for the full tier.
+  host_process:
+    permissionTier === 'full'
+      ? hostProcessImport
+      : permissionTier === 'isolated'
+        ? undefined
+        : limitedHostProcessImport,
+  host_net: permissionTier === 'full' ? hostNetImport : undefined,
   host_user: hostUserImport,
   host_fs: hostFsImport,
 });
@@ -10356,6 +11477,13 @@ if (instance.exports.memory instanceof WebAssembly.Memory) {
 }
 
 if (typeof instance.exports._start === 'function') {
+  // The `RuntimeError: unreachable` reports that used to point at
+  // `WASI.start()` were caused by the host shim around guest startup, not by
+  // V8 itself. Standalone runs must keep ordinary stdio on local process
+  // streams unless kernel stdio sync-RPC is explicitly enabled, while
+  // `poll_oneoff` still routes readiness probes through `__kernel_poll`.
+  // That preserves the expected startup ordering so guest `_start` checks can
+  // observe the ready event before we exit the runner.
   const exitCode = wasi.start(instance);
   process.exit(typeof exitCode === 'number' ? exitCode : 0);
 } else if (typeof instance.exports.run === 'function') {
@@ -10453,6 +11581,11 @@ const BUILTIN_ASSETS: &[BuiltinAsset] = &[
         name: "dns",
         module_specifier: "node:dns",
         init_counter_key: "__agentOsBuiltinDnsInitCount",
+    },
+    BuiltinAsset {
+        name: "dns-promises",
+        module_specifier: "node:dns/promises",
+        init_counter_key: "__agentOsBuiltinDnsPromisesInitCount",
     },
     BuiltinAsset {
         name: "http",
@@ -10937,8 +12070,8 @@ fn render_patched_pyodide_mjs() -> String {
             r#"function ce(e,t){return e.startsWith("file://")&&(e=e.slice(7)),e.includes("://")?{response:fetch(e)}:{binary:L.readFile(e).then(n=>new Uint8Array(n.buffer,n.byteOffset,n.byteLength))}}o(ce,"node_getBinaryResponse");"#,
         )
         .replace(
-            r#"async function ct(e={}){let t=await Se(e),n=Ie(t);await we(t);let i=await _e(t,n),s=await Re(n);ke(s,t);let r=Ae(s,i,t);return await Fe(r,t)}o(ct,"loadPyodide");"#,
-            r#"async function ct(e={}){let t=await Se(e),n=Ie(t);await we(t);let i=await _e(t,n),s=await Re(n);ke(s,t);let r=Ae(s,i,t);return await Fe(r,t)}o(ct,"loadPyodide");"#,
+            r#"function Ne(e){if(typeof WasmOffsetConverter<"u")return;let{binary:t,response:n}=R(e+"pyodide.asm.wasm"),i=K();return function(s,r){return async function(){s.sentinel=await i;try{let a;if(n){a=await WebAssembly.instantiateStreaming(n,s);}else{let l=await t;a=await WebAssembly.instantiate(l,s);}let{instance:l,module:c}=a;r(l,c);}catch(a){console.warn("wasm instantiation failed!"),console.warn(a)}}(),{}}}o(Ne,"getInstantiateWasmFunc");"#,
+            r#"function Ne(e){if(typeof WasmOffsetConverter<"u")return;let{binary:t,response:n}=R(e+"pyodide.asm.wasm"),i=K();return function(s,r){return async function(){s.sentinel=await i;try{let a;if(n){a=await WebAssembly.instantiateStreaming(n,s);}else{let l=await t;a=await WebAssembly.instantiate(l,s);}let{instance:l,module:c}=a;r(l,c);}catch(a){console.warn("wasm instantiation failed!"),console.warn(a);throw a}}(),{}}}o(Ne,"getInstantiateWasmFunc");"#,
         )
 }
 
@@ -10961,6 +12094,7 @@ fn render_builtin_asset_source(asset: &BuiltinAsset) -> String {
             render_diagnostics_channel_builtin_asset_source(asset.init_counter_key)
         }
         "dns" => render_dns_builtin_asset_source(asset.init_counter_key),
+        "dns-promises" => render_dns_promises_builtin_asset_source(asset.init_counter_key),
         "http" => render_http_builtin_asset_source(asset.init_counter_key),
         "http2" => render_http2_builtin_asset_source(asset.init_counter_key),
         "https" => render_https_builtin_asset_source(asset.init_counter_key),
@@ -11364,6 +12498,39 @@ export const setServers = mod.setServers;\n"
     )
 }
 
+fn render_dns_promises_builtin_asset_source(init_counter_key: &str) -> String {
+    let init_counter_key = format!("{init_counter_key:?}");
+
+    format!(
+        "const ACCESS_DENIED_CODE = \"ERR_ACCESS_DENIED\";\n\
+const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
+globalThis[{init_counter_key}] = initCount;\n\
+if (!globalThis.__agentOsBuiltinDns) {{\n\
+  const error = new Error(\"node:dns/promises is not available in the Agent OS guest runtime\");\n\
+  error.code = ACCESS_DENIED_CODE;\n\
+  throw error;\n\
+}}\n\n\
+const mod = globalThis.__agentOsBuiltinDns.promises;\n\n\
+export const __agentOsInitCount = initCount;\n\
+export default mod;\n\
+export const Resolver = mod.Resolver;\n\
+export const lookup = mod.lookup;\n\
+export const resolve = mod.resolve;\n\
+export const resolve4 = mod.resolve4;\n\
+export const resolve6 = mod.resolve6;\n\
+export const resolveAny = mod.resolveAny;\n\
+export const resolveMx = mod.resolveMx;\n\
+export const resolveTxt = mod.resolveTxt;\n\
+export const resolveSrv = mod.resolveSrv;\n\
+export const resolveCname = mod.resolveCname;\n\
+export const resolvePtr = mod.resolvePtr;\n\
+export const resolveNs = mod.resolveNs;\n\
+export const resolveSoa = mod.resolveSoa;\n\
+export const resolveNaptr = mod.resolveNaptr;\n\
+export const resolveCaa = mod.resolveCaa;\n"
+    )
+}
+
 fn render_http_builtin_asset_source(init_counter_key: &str) -> String {
     let init_counter_key = format!("{init_counter_key:?}");
 
@@ -11725,7 +12892,7 @@ fn write_file_if_changed(path: &Path, contents: &str) -> Result<(), io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NodeImportCache, NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_MS};
+    use super::{NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_MS, NodeImportCache};
     use crate::host_node::node_binary;
     use serde_json::Value;
     use std::collections::BTreeSet;
@@ -11991,7 +13158,7 @@ export async function loadPyodide(options) {
     }
 
     #[test]
-    fn materialized_python_runner_prewarm_loads_pyodide_without_running_guest_code() {
+    fn materialized_python_runner_prewarm_validates_assets_without_running_guest_code() {
         assert_node_available();
 
         let import_cache = NodeImportCache::default();
@@ -12020,6 +13187,10 @@ export async function loadPyodide(options) {
             &pyodide_dir.path().join("pyodide-lock.json"),
             "{\"packages\":[]}\n",
         );
+        fs::write(pyodide_dir.path().join("python_stdlib.zip"), b"stub-stdlib")
+            .expect("write stdlib fixture");
+        fs::write(pyodide_dir.path().join("pyodide.asm.wasm"), b"stub-wasm")
+            .expect("write wasm fixture");
 
         let output = run_python_runner_prewarm(
             &import_cache,
@@ -12031,10 +13202,7 @@ export async function loadPyodide(options) {
 
         assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
         assert!(stdout.is_empty(), "unexpected stdout: {stdout}");
-        assert!(
-            stderr.contains("prewarm:"),
-            "expected Pyodide load during prewarm: {stderr}"
-        );
+        assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
         assert!(
             !stderr.contains("setStdin should not run during prewarm"),
             "unexpected stderr: {stderr}"
@@ -12269,7 +13437,10 @@ export async function loadPyodide(options) {
         );
 
         assert_eq!(output.status.code(), Some(0));
-        assert_eq!(stdout, "packages:numpy,pandas\ncode:print('hello')\n");
+        assert_eq!(
+            stdout,
+            "packages:micropip\npackages:numpy,pandas\ncode:print('hello')\n"
+        );
         assert!(
             stderr.contains(&expected_package_base),
             "expected local package base path in stderr, got: {stderr}"
@@ -12658,8 +13829,29 @@ export async function loadPyodide(options) {
                 .expect("read dns builtin asset");
 
         assert!(dns_asset.contains("__agentOsBuiltinDns"));
+        assert!(dns_asset.contains("export const Resolver = mod.Resolver"));
         assert!(dns_asset.contains("export const lookup = mod.lookup"));
         assert!(dns_asset.contains("export const resolve4 = mod.resolve4"));
+    }
+
+    #[test]
+    fn ensure_materialized_writes_dns_promises_builtin_asset() {
+        let import_cache = NodeImportCache::default();
+        import_cache
+            .ensure_materialized()
+            .expect("materialize node import cache");
+
+        let dns_promises_asset = fs::read_to_string(
+            import_cache
+                .asset_root()
+                .join("builtins")
+                .join("dns-promises.mjs"),
+        )
+        .expect("read dns promises builtin asset");
+
+        assert!(dns_promises_asset.contains("__agentOsBuiltinDns.promises"));
+        assert!(dns_promises_asset.contains("export const Resolver = mod.Resolver"));
+        assert!(dns_promises_asset.contains("export const resolve4 = mod.resolve4"));
     }
 
     #[test]

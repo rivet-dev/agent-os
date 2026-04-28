@@ -1,7 +1,8 @@
 mod support;
 
 use agent_os_sidecar::protocol::{
-    CreateVmRequest, GuestRuntimeKind, OwnershipScope, RequestPayload, ResponsePayload,
+    AuthenticateRequest, CreateVmRequest, GuestRuntimeKind, OwnershipScope, RequestPayload,
+    ResponsePayload,
 };
 use support::{
     authenticate, authenticate_with_token, new_sidecar, new_sidecar_with_auth_token, open_session,
@@ -66,5 +67,31 @@ fn authenticate_rejects_invalid_auth_tokens() {
             assert!(response.message.contains("invalid auth token"));
         }
         other => panic!("unexpected invalid auth response: {other:?}"),
+    }
+}
+
+#[test]
+fn authenticate_rejects_bridge_contract_version_mismatch() {
+    let mut sidecar = new_sidecar("connection-auth-bridge-version");
+
+    let result = sidecar
+        .dispatch_blocking(request(
+            1,
+            OwnershipScope::connection("client-a"),
+            RequestPayload::Authenticate(AuthenticateRequest {
+                client_name: String::from("bridge-version-test"),
+                auth_token: String::from(TEST_AUTH_TOKEN),
+                bridge_version: agent_os_bridge::bridge_contract().version + 1,
+            }),
+        ))
+        .expect("dispatch mismatched authenticate");
+
+    match result.response.payload {
+        ResponsePayload::Rejected(response) => {
+            assert_eq!(response.code, "bridge_version_mismatch");
+            assert!(response.message.contains("expected"));
+            assert!(response.message.contains("got"));
+        }
+        other => panic!("unexpected bridge version auth response: {other:?}"),
     }
 }

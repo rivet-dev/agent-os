@@ -11,14 +11,15 @@ use crate::bridge::{bridge_permissions, MountPluginContext};
 use crate::protocol::{
     ConfigureVmRequest, CreateLayerRequest, CreateOverlayRequest, DisposeReason, EventFrame,
     ExportSnapshotRequest, ImportSnapshotRequest, LayerCreatedResponse, LayerSealedResponse,
-    MountDescriptor, MountPluginDescriptor, OverlayCreatedResponse, ResponsePayload,
-    RootFilesystemEntry, RootFilesystemMode, RootFilesystemSnapshotResponse, SealLayerRequest,
-    SnapshotExportedResponse, SnapshotImportedResponse, SnapshotRootFilesystemRequest,
-    VmConfiguredResponse, VmCreatedResponse, VmDisposedResponse, VmLifecycleState,
+    MountDescriptor, MountPluginDescriptor, OverlayCreatedResponse, PermissionsPolicy,
+    ResponsePayload, RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemLowerDescriptor,
+    RootFilesystemMode, RootFilesystemSnapshotResponse, SealLayerRequest, SnapshotExportedResponse,
+    SnapshotImportedResponse, SnapshotRootFilesystemRequest, VmConfiguredResponse,
+    VmCreatedResponse, VmDisposedResponse, VmLifecycleState,
 };
 use crate::service::{
-    audit_fields, emit_security_audit_event, kernel_error, normalize_path, plugin_error,
-    root_filesystem_error,
+    audit_fields, emit_security_audit_event, emit_structured_event, kernel_error, normalize_path,
+    plugin_error, root_filesystem_error, validate_permissions_policy,
 };
 use crate::state::{
     BridgeError, VmConfiguration, VmDnsConfig, VmLayer, VmLayerStore, VmOverlayLayer, VmState,
@@ -37,12 +38,14 @@ use agent_os_kernel::mount_table::MountOptions;
 use agent_os_kernel::permissions::filter_env;
 use agent_os_kernel::resource_accounting::ResourceLimits;
 use agent_os_kernel::root_fs::{
-    encode_snapshot as encode_root_snapshot, RootFileSystem,
-    RootFilesystemDescriptor as KernelRootFilesystemDescriptor,
+    decode_snapshot as decode_root_snapshot, encode_snapshot as encode_root_snapshot,
+    RootFileSystem, RootFilesystemDescriptor as KernelRootFilesystemDescriptor,
     RootFilesystemMode as KernelRootFilesystemMode, RootFilesystemSnapshot,
     ROOT_FILESYSTEM_SNAPSHOT_FORMAT,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use agent_os_kernel::vfs::VirtualFileSystem;
+use base64::Engine;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
@@ -67,6 +70,7 @@ const SHADOW_ROOT_BOOTSTRAP_DIRS: &[(&str, u32)] = &[
     ("/mnt", 0o755),
     ("/media", 0o755),
     ("/home", 0o755),
+    ("/home/user", 0o755),
     ("/usr", 0o755),
     ("/usr/bin", 0o755),
     ("/usr/games", 0o755),
@@ -93,6 +97,7 @@ const SHADOW_ROOT_BOOTSTRAP_DIRS: &[(&str, u32)] = &[
 
 pub(crate) const DEFAULT_GUEST_PATH_ENV: &str =
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const KERNEL_COMMAND_STUB: &[u8] = b"#!/bin/sh\n# kernel command stub\n";
 
 // ---------------------------------------------------------------------------
 // NativeSidecar VM lifecycle methods
@@ -110,6 +115,11 @@ where
     ) -> Result<DispatchResult, SidecarError> {
         let (connection_id, session_id) = self.session_scope_for(&request.ownership)?;
         self.require_owned_session(&connection_id, &session_id)?;
+        let permissions_policy = payload
+            .permissions
+            .clone()
+            .unwrap_or_else(PermissionsPolicy::deny_all);
+        validate_permissions_policy(&permissions_policy)?;
 
         self.next_vm_id += 1;
         let vm_id = format!("vm-{}", self.next_vm_id);
@@ -119,19 +129,27 @@ where
             .map_err(|error| SidecarError::Io(format!("failed to create VM cwd: {error}")))?;
         let resource_limits = parse_resource_limits(&payload.metadata)?;
         let dns = parse_vm_dns_config(&payload.metadata)?;
-        let permissions_policy = payload.permissions.clone().unwrap_or_default();
         self.bridge
             .set_vm_permissions(&vm_id, &permissions_policy)?;
         let permissions = bridge_permissions(self.bridge.clone(), &vm_id);
         let mut guest_env = filter_env(&vm_id, &extract_guest_env(&payload.metadata), &permissions);
+        // Sidecar-owned bootstrap work still needs to reconcile command stubs and the root
+        // filesystem before the guest-visible policy takes effect.
+        self.bridge
+            .set_vm_permissions(&vm_id, &PermissionsPolicy::allow_all())?;
         let loaded_snapshot = self.bridge.with_mut(|bridge| {
             bridge.load_filesystem_state(LoadFilesystemStateRequest {
                 vm_id: vm_id.clone(),
             })
         })?;
+        materialize_shadow_root_snapshot_entries(
+            &cwd,
+            &payload.root_filesystem,
+            loaded_snapshot.as_ref(),
+        )?;
 
         let mut config = KernelVmConfig::new(vm_id.clone());
-        config.cwd = String::from("/");
+        config.cwd = guest_cwd.clone();
         config.env = guest_env.clone();
         config.permissions = permissions;
         config.dns = agent_os_kernel::dns::DnsConfig {
@@ -159,10 +177,13 @@ where
                 execution_commands,
             ))
             .map_err(kernel_error)?;
+        prune_kernel_command_stub(&mut kernel, "/bin/python")?;
         kernel
             .root_filesystem_mut()
             .expect("native sidecar root filesystem should exist")
             .finish_bootstrap();
+        self.bridge
+            .set_vm_permissions(&vm_id, &permissions_policy)?;
 
         self.bridge
             .emit_lifecycle(&vm_id, LifecycleState::Starting)?;
@@ -186,17 +207,26 @@ where
                 dns,
                 guest_env,
                 requested_runtime: payload.runtime,
+                root_filesystem_mode: match payload.root_filesystem.mode {
+                    RootFilesystemMode::Ephemeral => KernelRootFilesystemMode::Ephemeral,
+                    RootFilesystemMode::ReadOnly => KernelRootFilesystemMode::ReadOnly,
+                },
                 guest_cwd,
                 cwd,
                 host_cwd,
                 kernel,
                 loaded_snapshot,
-                configuration: VmConfiguration::default(),
+                configuration: VmConfiguration {
+                    permissions: permissions_policy,
+                    ..VmConfiguration::default()
+                },
                 layers: VmLayerStore::default(),
                 command_guest_paths,
                 command_permissions: BTreeMap::new(),
                 toolkits: BTreeMap::new(),
                 active_processes: BTreeMap::new(),
+                exited_process_snapshots: VecDeque::new(),
+                detached_child_processes: BTreeSet::new(),
                 signal_states: BTreeMap::new(),
             },
         );
@@ -277,50 +307,75 @@ where
         self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
 
         let mount_plugins = &self.mount_plugins;
+        let bridge = self.bridge.clone();
         let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
+        let original_permissions = vm.configuration.permissions.clone();
+        let configured_permissions = payload
+            .permissions
+            .clone()
+            .unwrap_or_else(|| original_permissions.clone());
+        validate_permissions_policy(&configured_permissions)?;
+        bridge.set_vm_permissions(&vm_id, &PermissionsPolicy::allow_all())?;
         let mut effective_mounts = payload.mounts.clone();
         append_module_access_mount(&mut effective_mounts, payload.module_access_cwd.as_ref())?;
-        reconcile_mounts(
+        let reconfigure_result = reconcile_mounts(
             mount_plugins,
             vm,
             &effective_mounts,
             MountPluginContext {
-                bridge: self.bridge.clone(),
+                bridge: bridge.clone(),
                 connection_id: connection_id.clone(),
                 session_id: session_id.clone(),
                 vm_id: vm_id.clone(),
                 sidecar_requests: self.sidecar_requests.clone(),
             },
-        )?;
-        vm.command_guest_paths = discover_command_guest_paths(&mut vm.kernel);
-        refresh_guest_command_path_env(&mut vm.guest_env, &vm.command_guest_paths);
-        let mut execution_commands =
-            vec![String::from(JAVASCRIPT_COMMAND), String::from(WASM_COMMAND)];
-        execution_commands.extend(vm.command_guest_paths.keys().cloned());
-        vm.kernel
-            .register_driver(CommandDriver::new(
-                EXECUTION_DRIVER_NAME,
-                execution_commands,
-            ))
-            .map_err(kernel_error)?;
-        vm.command_permissions = payload.command_permissions.clone();
-        let configured_permissions = payload
-            .permissions
-            .clone()
-            .unwrap_or_else(|| vm.configuration.permissions.clone());
-        vm.configuration = VmConfiguration {
-            mounts: effective_mounts.clone(),
-            software: payload.software.clone(),
-            permissions: configured_permissions.clone(),
-            module_access_cwd: payload.module_access_cwd.clone(),
-            instructions: payload.instructions.clone(),
-            projected_modules: payload.projected_modules.clone(),
-            command_permissions: payload.command_permissions.clone(),
-            allowed_node_builtins: payload.allowed_node_builtins.clone(),
-            loopback_exempt_ports: payload.loopback_exempt_ports.clone(),
-        };
-        if let Some(permissions) = payload.permissions.as_ref() {
-            self.bridge.set_vm_permissions(&vm_id, permissions)?;
+        )
+        .and_then(|()| {
+            vm.command_guest_paths = discover_command_guest_paths(&mut vm.kernel);
+            refresh_guest_command_path_env(&mut vm.guest_env, &vm.command_guest_paths);
+            let mut execution_commands =
+                vec![String::from(JAVASCRIPT_COMMAND), String::from(WASM_COMMAND)];
+            execution_commands.extend(vm.command_guest_paths.keys().cloned());
+            vm.kernel
+                .register_driver(CommandDriver::new(
+                    EXECUTION_DRIVER_NAME,
+                    execution_commands,
+                ))
+                .map_err(kernel_error)?;
+            vm.command_permissions = payload.command_permissions.clone();
+            vm.configuration = VmConfiguration {
+                mounts: effective_mounts.clone(),
+                software: payload.software.clone(),
+                permissions: configured_permissions.clone(),
+                module_access_cwd: payload.module_access_cwd.clone(),
+                instructions: payload.instructions.clone(),
+                projected_modules: payload.projected_modules.clone(),
+                command_permissions: payload.command_permissions.clone(),
+                allowed_node_builtins: payload.allowed_node_builtins.clone(),
+                loopback_exempt_ports: payload.loopback_exempt_ports.clone(),
+            };
+            Ok(())
+        });
+        match reconfigure_result {
+            Ok(()) => bridge.set_vm_permissions(&vm_id, &configured_permissions)?,
+            Err(error) => {
+                match bridge.restore_vm_permissions_fail_closed(
+                    &vm_id,
+                    &original_permissions,
+                    "configure_vm rollback",
+                    &error,
+                ) {
+                    Ok(()) => return Err(error),
+                    Err(rollback_error) => {
+                        self.vms
+                            .get_mut(&vm_id)
+                            .expect("owned VM should exist")
+                            .configuration
+                            .permissions = PermissionsPolicy::deny_all();
+                        return Err(rollback_error);
+                    }
+                }
+            }
         }
 
         Ok(DispatchResult {
@@ -486,6 +541,25 @@ where
         )];
         self.terminate_vm_processes(vm_id, &mut events).await?;
 
+        {
+            let vm = self
+                .vms
+                .get_mut(vm_id)
+                .expect("owned VM should exist before disposal");
+            shutdown_configured_mounts(
+                vm,
+                &MountPluginContext {
+                    bridge: self.bridge.clone(),
+                    connection_id: connection_id.to_owned(),
+                    session_id: session_id.to_owned(),
+                    vm_id: vm_id.to_owned(),
+                    sidecar_requests: self.sidecar_requests.clone(),
+                },
+                "dispose_vm",
+                true,
+            )?;
+        }
+
         let mut vm = self
             .vms
             .remove(vm_id)
@@ -619,22 +693,7 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    for existing in &vm.configuration.mounts {
-        match vm.kernel.unmount_filesystem(&existing.guest_path) {
-            Ok(()) => emit_security_audit_event(
-                &context.bridge,
-                &context.vm_id,
-                "security.mount.unmounted",
-                audit_fields([
-                    (String::from("guest_path"), existing.guest_path.clone()),
-                    (String::from("plugin_id"), existing.plugin.id.clone()),
-                    (String::from("read_only"), existing.read_only.to_string()),
-                ]),
-            ),
-            Err(error) if error.code() == "EINVAL" => {}
-            Err(error) => return Err(kernel_error(error)),
-        }
-    }
+    shutdown_configured_mounts(vm, &context, "configure_vm", false)?;
 
     for mount in mounts {
         let filesystem = mount_plugins
@@ -667,6 +726,54 @@ where
                 (String::from("read_only"), mount.read_only.to_string()),
             ]),
         );
+    }
+
+    Ok(())
+}
+
+fn shutdown_configured_mounts<B>(
+    vm: &mut VmState,
+    context: &MountPluginContext<B>,
+    phase: &str,
+    continue_on_error: bool,
+) -> Result<(), SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    for existing in vm.configuration.mounts.clone() {
+        match vm.kernel.unmount_filesystem(&existing.guest_path) {
+            Ok(()) => emit_security_audit_event(
+                &context.bridge,
+                &context.vm_id,
+                "security.mount.unmounted",
+                audit_fields([
+                    (String::from("guest_path"), existing.guest_path.clone()),
+                    (String::from("plugin_id"), existing.plugin.id.clone()),
+                    (String::from("read_only"), existing.read_only.to_string()),
+                ]),
+            ),
+            Err(error) if error.code() == "EINVAL" => {}
+            Err(error) => {
+                let _ = emit_structured_event(
+                    &context.bridge,
+                    &context.vm_id,
+                    "filesystem.mount.shutdown_failed",
+                    audit_fields([
+                        (String::from("guest_path"), existing.guest_path.clone()),
+                        (String::from("plugin_id"), existing.plugin.id.clone()),
+                        (String::from("read_only"), existing.read_only.to_string()),
+                        (String::from("phase"), String::from(phase)),
+                        (String::from("error_code"), String::from(error.code())),
+                        (String::from("error"), error.to_string()),
+                    ]),
+                );
+
+                if !continue_on_error {
+                    return Err(kernel_error(error));
+                }
+            }
+        }
     }
 
     Ok(())
@@ -970,7 +1077,7 @@ fn dedupe_overlay_bootstrap_entries(
 fn resolve_guest_cwd(value: Option<&String>) -> String {
     value
         .map(|path| normalize_guest_path(path))
-        .unwrap_or_else(|| String::from("/"))
+        .unwrap_or_else(|| String::from("/home/user"))
 }
 
 fn resolve_vm_cwds(
@@ -1043,6 +1150,139 @@ fn bootstrap_shadow_root(root: &Path) -> Result<(), SidecarError> {
     Ok(())
 }
 
+fn materialize_shadow_root_snapshot_entries(
+    shadow_root: &Path,
+    descriptor: &RootFilesystemDescriptor,
+    loaded_snapshot: Option<&FilesystemSnapshot>,
+) -> Result<(), SidecarError> {
+    if let Some(snapshot) = loaded_snapshot
+        .filter(|snapshot| snapshot.format == ROOT_FILESYSTEM_SNAPSHOT_FORMAT)
+        .map(|snapshot| decode_root_snapshot(&snapshot.bytes).map_err(root_filesystem_error))
+        .transpose()?
+    {
+        return materialize_shadow_entries(shadow_root, &root_snapshot_entries(&snapshot));
+    }
+
+    for lower in &descriptor.lowers {
+        if let RootFilesystemLowerDescriptor::Snapshot { entries } = lower {
+            materialize_shadow_entries(shadow_root, entries)?;
+        }
+    }
+    materialize_shadow_entries(shadow_root, &descriptor.bootstrap_entries)?;
+    Ok(())
+}
+
+fn materialize_shadow_entries(
+    shadow_root: &Path,
+    entries: &[RootFilesystemEntry],
+) -> Result<(), SidecarError> {
+    let mut ordered = entries.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|entry| {
+        let depth = entry.path.matches('/').count();
+        let kind_rank = match entry.kind {
+            crate::protocol::RootFilesystemEntryKind::Directory => 0,
+            crate::protocol::RootFilesystemEntryKind::File => 1,
+            crate::protocol::RootFilesystemEntryKind::Symlink => 2,
+        };
+        (kind_rank, depth, entry.path.as_str())
+    });
+
+    for entry in ordered {
+        let shadow_path = shadow_path_for_guest(shadow_root, &entry.path);
+        if let Some(parent) = shadow_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                SidecarError::Io(format!(
+                    "failed to create shadow parent for {}: {error}",
+                    entry.path
+                ))
+            })?;
+        }
+
+        match entry.kind {
+            crate::protocol::RootFilesystemEntryKind::Directory => {
+                fs::create_dir_all(&shadow_path).map_err(|error| {
+                    SidecarError::Io(format!(
+                        "failed to materialize shadow directory {}: {error}",
+                        entry.path
+                    ))
+                })?;
+            }
+            crate::protocol::RootFilesystemEntryKind::File => {
+                let bytes = decode_root_entry_content(entry)?;
+                fs::write(&shadow_path, bytes).map_err(|error| {
+                    SidecarError::Io(format!(
+                        "failed to materialize shadow file {}: {error}",
+                        entry.path
+                    ))
+                })?;
+            }
+            crate::protocol::RootFilesystemEntryKind::Symlink => {
+                let _ = fs::remove_file(&shadow_path);
+                let _ = fs::remove_dir_all(&shadow_path);
+                std::os::unix::fs::symlink(
+                    entry.target.as_deref().ok_or_else(|| {
+                        SidecarError::InvalidState(format!(
+                            "root filesystem symlink {} requires a target",
+                            entry.path
+                        ))
+                    })?,
+                    &shadow_path,
+                )
+                .map_err(|error| {
+                    SidecarError::Io(format!(
+                        "failed to materialize shadow symlink {}: {error}",
+                        entry.path
+                    ))
+                })?;
+                continue;
+            }
+        }
+
+        let mode = entry.mode.unwrap_or(match entry.kind {
+            crate::protocol::RootFilesystemEntryKind::Directory => 0o755,
+            crate::protocol::RootFilesystemEntryKind::File => {
+                if entry.executable {
+                    0o755
+                } else {
+                    0o644
+                }
+            }
+            crate::protocol::RootFilesystemEntryKind::Symlink => 0o777,
+        });
+        fs::set_permissions(&shadow_path, fs::Permissions::from_mode(mode & 0o7777)).map_err(
+            |error| {
+                SidecarError::Io(format!(
+                    "failed to set shadow mode on {}: {error}",
+                    entry.path
+                ))
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+fn decode_root_entry_content(entry: &RootFilesystemEntry) -> Result<Vec<u8>, SidecarError> {
+    let content = entry.content.as_deref().unwrap_or_default();
+    match entry
+        .encoding
+        .clone()
+        .unwrap_or(crate::protocol::RootFilesystemEntryEncoding::Utf8)
+    {
+        crate::protocol::RootFilesystemEntryEncoding::Utf8 => Ok(content.as_bytes().to_vec()),
+        crate::protocol::RootFilesystemEntryEncoding::Base64 => {
+            base64::engine::general_purpose::STANDARD
+                .decode(content)
+                .map_err(|error| {
+                    SidecarError::InvalidState(format!(
+                        "invalid base64 root filesystem content for {}: {error}",
+                        entry.path
+                    ))
+                })
+        }
+    }
+}
+
 fn shadow_path_for_guest(shadow_root: &std::path::Path, guest_path: &str) -> PathBuf {
     let normalized = normalize_guest_path(guest_path);
     let relative = normalized.trim_start_matches('/');
@@ -1077,7 +1317,13 @@ fn normalize_guest_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{bootstrap_shadow_root, shadow_path_for_guest};
+    use super::{
+        bootstrap_shadow_root, materialize_shadow_root_snapshot_entries, shadow_path_for_guest,
+    };
+    use crate::protocol::{
+        RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryKind,
+        RootFilesystemLowerDescriptor,
+    };
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1118,6 +1364,58 @@ mod tests {
 
         fs::remove_dir_all(&root).expect("temp shadow root should be removed");
     }
+
+    #[test]
+    fn materialize_shadow_root_snapshot_entries_copies_custom_snapshot_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("agent-os-sidecar-shadow-snapshot-{unique}"));
+        fs::create_dir_all(&root).expect("temp shadow root should be created");
+        bootstrap_shadow_root(&root).expect("shadow bootstrap should succeed");
+
+        let descriptor = RootFilesystemDescriptor {
+            lowers: vec![RootFilesystemLowerDescriptor::Snapshot {
+                entries: vec![
+                    RootFilesystemEntry {
+                        path: String::from("/"),
+                        kind: RootFilesystemEntryKind::Directory,
+                        mode: Some(0o755),
+                        uid: Some(0),
+                        gid: Some(0),
+                        content: None,
+                        encoding: None,
+                        target: None,
+                        executable: false,
+                    },
+                    RootFilesystemEntry {
+                        path: String::from("/hello.txt"),
+                        kind: RootFilesystemEntryKind::File,
+                        mode: Some(0o644),
+                        uid: Some(0),
+                        gid: Some(0),
+                        content: Some(String::from("hello from snapshot\n")),
+                        encoding: Some(crate::protocol::RootFilesystemEntryEncoding::Utf8),
+                        target: None,
+                        executable: false,
+                    },
+                ],
+            }],
+            ..RootFilesystemDescriptor::default()
+        };
+
+        materialize_shadow_root_snapshot_entries(&root, &descriptor, None)
+            .expect("snapshot entries should materialize into the shadow root");
+
+        assert_eq!(
+            fs::read_to_string(shadow_path_for_guest(&root, "/hello.txt"))
+                .expect("shadow file should be readable"),
+            "hello from snapshot\n"
+        );
+
+        fs::remove_dir_all(&root).expect("temp shadow root should be removed");
+    }
 }
 
 pub(crate) fn extract_guest_env(metadata: &BTreeMap<String, String>) -> BTreeMap<String, String> {
@@ -1134,6 +1432,9 @@ pub(crate) fn parse_resource_limits(
     metadata: &BTreeMap<String, String>,
 ) -> Result<ResourceLimits, SidecarError> {
     let mut limits = ResourceLimits::default();
+    if metadata.contains_key("resource.cpu_count") {
+        limits.virtual_cpu_count = parse_resource_limit(metadata, "resource.cpu_count")?;
+    }
     if metadata.contains_key("resource.max_processes") {
         limits.max_processes = parse_resource_limit(metadata, "resource.max_processes")?;
     }
@@ -1338,4 +1639,24 @@ pub(crate) fn normalize_dns_hostname(hostname: &str) -> Result<String, SidecarEr
         )));
     }
     Ok(normalized)
+}
+
+fn prune_kernel_command_stub(
+    kernel: &mut KernelVm<agent_os_kernel::mount_table::MountTable>,
+    path: &str,
+) -> Result<(), SidecarError> {
+    let root = kernel
+        .root_filesystem_mut()
+        .ok_or_else(|| root_filesystem_error("native root filesystem is not available"))?;
+
+    if !VirtualFileSystem::exists(root, path) {
+        return Ok(());
+    }
+
+    let content = VirtualFileSystem::read_file(root, path).map_err(root_filesystem_error)?;
+    if content == KERNEL_COMMAND_STUB {
+        VirtualFileSystem::remove_file(root, path).map_err(root_filesystem_error)?;
+    }
+
+    Ok(())
 }

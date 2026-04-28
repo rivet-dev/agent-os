@@ -62,7 +62,6 @@ fn parse_metrics(stderr: &str, phase: &str) -> Value {
     payload
 }
 
-#[test]
 fn python_execution_prewarms_once_when_compile_cache_is_ready() {
     let temp = tempdir().expect("create temp dir");
     let (mut engine, context_id, _pyodide_dir) = setup_engine();
@@ -85,7 +84,6 @@ fn python_execution_prewarms_once_when_compile_cache_is_ready() {
     assert_eq!(second_prewarm["reason"], "cached");
 }
 
-#[test]
 fn python_execution_invalidates_prewarm_stamp_when_pyodide_bundle_changes() {
     let temp = tempdir().expect("create temp dir");
     let (mut engine, context_id, pyodide_dir) = setup_engine();
@@ -114,4 +112,12 @@ fn python_execution_invalidates_prewarm_stamp_when_pyodide_bundle_changes() {
         parse_metrics(&second_stderr, "prewarm")["reason"],
         "executed"
     );
+}
+
+// Separate libtest cases in this binary still trip a V8 teardown/init crash, so
+// keep the prewarm coverage in one top-level suite until that boundary is fixed.
+#[test]
+fn python_prewarm_suite() {
+    python_execution_prewarms_once_when_compile_cache_is_ready();
+    python_execution_invalidates_prewarm_stamp_when_pyodide_bundle_changes();
 }

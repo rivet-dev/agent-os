@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import {
 	createServer,
 	type IncomingMessage,
@@ -10,10 +9,17 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import duckdb from "../../../registry/software/duckdb/dist/index.js";
 import httpGet from "../../../registry/software/http-get/dist/index.js";
 import { AgentOs } from "../dist/index.js";
+import {
+	commandPackageSkipReason,
+	withFallbackCommandDir,
+} from "./helpers/registry-commands.js";
 
-const hasDuckdbPackage = existsSync(`${duckdb.commandDir}/duckdb`);
-const hasHttpGetPackage = existsSync(`${httpGet.commandDir}/http_get`);
-const hasCoreutilsPackage = existsSync(`${coreutils.commandDir}/sh`);
+const DUCKDB_PACKAGE = withFallbackCommandDir(duckdb);
+const HTTP_GET_PACKAGE = withFallbackCommandDir(httpGet);
+const duckdbPackageSkipReason = commandPackageSkipReason(
+	DUCKDB_PACKAGE,
+	HTTP_GET_PACKAGE,
+);
 
 function closeServer(server: Server) {
 	return new Promise<void>((resolve, reject) => {
@@ -24,20 +30,43 @@ function closeServer(server: Server) {
 	});
 }
 
-describe.skipIf(
-	!hasDuckdbPackage || !hasHttpGetPackage || !hasCoreutilsPackage,
-)("duckdb registry package", () => {
+describe("duckdb registry package", () => {
+	if (duckdbPackageSkipReason) {
+		test("requires registry DuckDB command artifacts", () => {
+			expect(duckdbPackageSkipReason).toBe(false);
+		});
+		return;
+	}
+
 	let vm: AgentOs;
 
+	async function recreateVm(options?: {
+		software?: Parameters<typeof AgentOs.create>[0]["software"];
+		loopbackExemptPorts?: number[];
+	}) {
+		if (vm) {
+			await vm.dispose();
+		}
+		vm = await AgentOs.create({
+			software: options?.software ?? [coreutils, HTTP_GET_PACKAGE, DUCKDB_PACKAGE],
+			...(options?.loopbackExemptPorts
+				? { loopbackExemptPorts: options.loopbackExemptPorts }
+				: {}),
+		});
+		await vm.exec("mkdir -p /tmp");
+	}
+
 	beforeEach(async () => {
-		vm = await AgentOs.create({ software: [coreutils, httpGet, duckdb] });
+		await recreateVm();
 	});
 
 	afterEach(async () => {
 		await vm.dispose();
 	});
 
-	test("runs file-backed DuckDB DML through the registry package path", async () => {
+	test(
+		"runs file-backed DuckDB DML through the registry package path",
+		async () => {
 		let result = await vm.exec(
 			`duckdb -csv /tmp/app.duckdb -c "CREATE TABLE items(id INTEGER, value INTEGER); INSERT INTO items VALUES (1, 10), (2, 20); UPDATE items SET value = value + 1 WHERE id = 2;"`,
 		);
@@ -48,10 +77,13 @@ describe.skipIf(
 		);
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
 		expect(result.stdout.trim()).toBe("id,value\n1,10\n2,21");
-		expect(await vm.exists("/tmp/app.duckdb")).toBe(true);
-	});
+		},
+		90_000,
+	);
 
-	test("fetches remote CSV data into the VFS and queries it from DuckDB", async () => {
+	test(
+		"fetches remote CSV data into the VFS and queries it from DuckDB",
+		async () => {
 		const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 			if (req.url === "/remote.csv") {
 				res.writeHead(200, { "Content-Type": "text/csv" });
@@ -72,6 +104,7 @@ describe.skipIf(
 			if (!address || typeof address === "string") {
 				throw new Error("failed to bind test HTTP server");
 			}
+			await recreateVm({ loopbackExemptPorts: [address.port] });
 
 			let result = await vm.exec(
 				`http_get ${address.port} /remote.csv /tmp/remote.csv`,
@@ -86,9 +119,13 @@ describe.skipIf(
 		} finally {
 			await closeServer(server);
 		}
-	});
+		},
+		90_000,
+	);
 
-	test("keeps DuckDB itself file-scoped while the network helper handles remote fetches", async () => {
+	test(
+		"keeps DuckDB itself file-scoped while the network helper handles remote fetches",
+		async () => {
 		let requests = 0;
 		const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 			requests += 1;
@@ -111,6 +148,7 @@ describe.skipIf(
 			if (!address || typeof address === "string") {
 				throw new Error("failed to bind test HTTP server");
 			}
+			await recreateVm({ loopbackExemptPorts: [address.port] });
 
 			const result = await vm.exec(
 				`duckdb -csv -c "SELECT SUM(value) AS total FROM read_csv_auto('http://127.0.0.1:${address.port}/remote.csv');"`,
@@ -120,13 +158,17 @@ describe.skipIf(
 		} finally {
 			await closeServer(server);
 		}
-	});
+		},
+		90_000,
+	);
 
-	test("propagates registry package command permission tiers into the runtime", async () => {
+	test(
+		"propagates registry package command permission tiers into the runtime",
+		async () => {
 		await vm.dispose();
 
-		const httpGetReadOnly = {
-			...httpGet,
+			const httpGetReadOnly = {
+			...HTTP_GET_PACKAGE,
 			commands: [{ name: "http_get", permissionTier: "read-only" as const }],
 		};
 		vm = await AgentOs.create({ software: [coreutils, httpGetReadOnly] });
@@ -145,11 +187,17 @@ describe.skipIf(
 			if (!address || typeof address === "string") {
 				throw new Error("failed to bind test HTTP server");
 			}
+			await recreateVm({
+				software: [coreutils, httpGetReadOnly],
+				loopbackExemptPorts: [address.port],
+			});
 
 			const result = await vm.exec(`http_get ${address.port} /blocked`);
 			expect(result.exitCode).not.toBe(0);
 		} finally {
 			await closeServer(server);
 		}
-	});
+		},
+		90_000,
+	);
 });

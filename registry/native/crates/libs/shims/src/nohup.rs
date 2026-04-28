@@ -5,7 +5,7 @@
 //! Usage: nohup COMMAND [ARG]...
 
 use std::ffi::OsString;
-use std::io::Write;
+use std::process::Stdio;
 
 pub fn nohup(args: Vec<OsString>) -> i32 {
     let str_args: Vec<String> = args
@@ -22,15 +22,14 @@ pub fn nohup(args: Vec<OsString>) -> i32 {
     let program = &str_args[0];
     let child_args = &str_args[1..];
 
-    match std::process::Command::new(program)
-        .args(child_args)
-        .output()
-    {
-        Ok(output) => {
-            let _ = std::io::stdout().write_all(&output.stdout);
-            let _ = std::io::stderr().write_all(&output.stderr);
-            output.status.code().unwrap_or(1)
-        }
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(child_args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("nohup: failed to run command '{}': {}", program, e);
             127

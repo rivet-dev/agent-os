@@ -1,5 +1,7 @@
 use crate::overlay_fs::{OverlayFileSystem, OverlayMode};
-use crate::vfs::{normalize_path, MemoryFileSystem, VfsError, VfsResult, VirtualFileSystem};
+use crate::vfs::{
+    normalize_path, MemoryFileSystem, VfsError, VfsResult, VirtualFileSystem, VirtualUtimeSpec,
+};
 use base64::Engine;
 use serde::Deserialize;
 
@@ -317,6 +319,17 @@ impl VirtualFileSystem for RootFileSystem {
 
     fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()> {
         self.overlay.utimes(path, atime_ms, mtime_ms)
+    }
+
+    fn utimes_spec(
+        &mut self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        self.overlay
+            .utimes_spec(path, atime, mtime, follow_symlinks)
     }
 
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {

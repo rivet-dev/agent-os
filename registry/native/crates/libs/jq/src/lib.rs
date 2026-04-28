@@ -3,7 +3,10 @@
 //! Wraps jaq-core/jaq-std/jaq-json to provide a standard jq CLI interface.
 
 use std::ffi::OsString;
+use std::fs::File as StdFile;
 use std::io::{self, Read, Write};
+use std::mem::ManuallyDrop;
+use std::os::fd::FromRawFd;
 
 use jaq_core::load::{Arena, File, Loader};
 use jaq_core::{Compiler, Ctx, RcIter};
@@ -23,6 +26,20 @@ pub fn main(args: Vec<OsString>) -> i32 {
             eprintln!("jq: {}", msg);
             2
         }
+    }
+}
+
+struct RawStdout;
+
+impl Write for RawStdout {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut file = ManuallyDrop::new(unsafe { StdFile::from_raw_fd(1) });
+        file.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut file = ManuallyDrop::new(unsafe { StdFile::from_raw_fd(1) });
+        file.flush()
     }
 }
 
@@ -159,8 +176,7 @@ fn read_inputs(opts: &JqOptions) -> Result<Vec<Val>, String> {
         }
 
         let mut values = Vec::new();
-        let decoder =
-            serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
+        let decoder = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
         for result in decoder {
             let value = result.map_err(|e| format!("invalid JSON input: {}", e))?;
             values.push(Val::from(value));
@@ -171,8 +187,7 @@ fn read_inputs(opts: &JqOptions) -> Result<Vec<Val>, String> {
                 values
                     .into_iter()
                     .map(|v| {
-                        serde_json::from_str(&format!("{}", v))
-                            .unwrap_or(serde_json::Value::Null)
+                        serde_json::from_str(&format!("{}", v)).unwrap_or(serde_json::Value::Null)
                     })
                     .collect(),
             );
@@ -239,8 +254,7 @@ fn run_jq(args: &[String]) -> Result<i32, String> {
         .map_err(|errs| format!("compile error: {:?}", errs))?;
 
     let empty_inputs = RcIter::new(core::iter::empty());
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+    let mut out = RawStdout;
     let mut had_false_or_null = false;
 
     for input in inputs {
@@ -275,6 +289,8 @@ fn run_jq(args: &[String]) -> Result<i32, String> {
     if opts.exit_status && had_false_or_null {
         return Ok(1);
     }
+
+    out.flush().ok();
 
     Ok(0)
 }

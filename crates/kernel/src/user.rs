@@ -92,25 +92,31 @@ impl UserManager {
         self.supplementary_gids.clone()
     }
 
-    pub fn getpwuid(&self, uid: u32) -> String {
+    pub fn getpwuid(&self, uid: u32) -> Option<String> {
         if uid == self.uid {
-            return format!(
+            return Some(format!(
                 "{}:x:{}:{}:{}:{}:{}",
                 self.username, self.uid, self.gid, self.gecos, self.homedir, self.shell
-            );
+            ));
         }
 
-        let username = format!("user{uid}");
-        format!("{username}:x:{uid}:{uid}::/home/{username}:/bin/sh")
+        None
     }
 
-    pub fn getgrgid(&self, gid: u32) -> String {
+    pub fn getgrgid(&self, gid: u32) -> Option<String> {
         if gid == self.gid {
-            return format!("{}:x:{}:{}", self.group_name, self.gid, self.username);
+            return Some(format!(
+                "{}:x:{}:{}",
+                self.group_name, self.gid, self.username
+            ));
         }
 
-        let group_name = format!("group{gid}");
-        format!("{group_name}:x:{gid}:")
+        if self.supplementary_gids.contains(&gid) {
+            let group_name = format!("group{gid}");
+            return Some(format!("{group_name}:x:{gid}:{}", self.username));
+        }
+
+        None
     }
 }
 

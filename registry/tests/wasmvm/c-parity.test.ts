@@ -9,7 +9,14 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createWasmVmRuntime } from '@rivet-dev/agent-os-core/test/runtime';
-import { COMMANDS_DIR, C_BUILD_DIR, createKernel, hasWasmBinaries } from '../helpers.js';
+import {
+  COMMANDS_DIR,
+  C_BUILD_DIR,
+  createKernel,
+  describeIf,
+  hasWasmBinaries,
+  itIf,
+} from '../helpers.js';
 import type { Kernel } from '../helpers.js';
 import { existsSync } from 'node:fs';
 import { writeFile as fsWriteFile, readFile as fsReadFile, mkdtemp, rm, mkdir as fsMkdir } from 'node:fs/promises';
@@ -170,7 +177,7 @@ class SimpleVFS {
   }
 }
 
-describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, () => {
+describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () => {
   let kernel: Kernel;
   let vfs: SimpleVFS;
 
@@ -324,7 +331,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     ? 'C Tier 2 WASM binaries not built (need patched sysroot: make -C native/wasmvm/c sysroot && make -C native/wasmvm/c programs)'
     : false;
 
-  it.skipIf(tier2Skip)('isatty_test: piped stdin/stdout/stderr all report not-a-tty', async () => {
+  itIf(!tier2Skip, 'isatty_test: piped stdin/stdout/stderr all report not-a-tty', async () => {
     const native = await runNative('isatty_test');
     const wasm = await kernel.exec('isatty_test');
 
@@ -333,7 +340,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(normalizeStderr(wasm.stderr)).toBe(normalizeStderr(native.stderr));
   });
 
-  it.skipIf(tier2Skip)('getpid_test: PID is valid, not hardcoded 42, and consistent', async () => {
+  itIf(!tier2Skip, 'getpid_test: PID is valid, not hardcoded 42, and consistent', async () => {
     const native = await runNative('getpid_test');
     const wasm = await kernel.exec('getpid_test');
 
@@ -352,7 +359,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(wasmPid).not.toBe(42);
   });
 
-  it.skipIf(tier2Skip)('getppid_test: parent PID is valid and positive', async () => {
+  itIf(!tier2Skip, 'getppid_test: parent PID is valid and positive', async () => {
     const native = await runNative('getppid_test');
     const wasm = await kernel.exec('getppid_test');
 
@@ -362,7 +369,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(native.stdout).toContain('ppid_positive=yes');
   });
 
-  it.skipIf(tier2Skip)('userinfo: uid/gid/euid/egid values are specific', async () => {
+  itIf(!tier2Skip, 'userinfo: uid/gid/euid/egid values are specific', async () => {
     const native = await runNative('userinfo');
     const wasm = await kernel.exec('userinfo');
 
@@ -379,7 +386,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(wasm.stdout).toContain('egid=1000');
   });
 
-  it.skipIf(tier2Skip)('getpwuid_test: passwd entry fields valid', async () => {
+  itIf(!tier2Skip, 'getpwuid_test: passwd entry fields valid', async () => {
     const native = await runNative('getpwuid_test');
     const wasm = await kernel.exec('getpwuid_test');
 
@@ -398,7 +405,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(native.stdout).toContain('pw_uid_match: yes');
   });
 
-  it.skipIf(tier2Skip)('pipe_test: write through pipe and read back matches', async () => {
+  itIf(!tier2Skip, 'pipe_test: write through pipe and read back matches', async () => {
     const native = await runNative('pipe_test');
     const wasm = await kernel.exec('pipe_test');
 
@@ -407,7 +414,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(normalizeStderr(wasm.stderr)).toBe(normalizeStderr(native.stderr));
   });
 
-  it.skipIf(tier2Skip)('dup_test: write through duplicated fds matches', async () => {
+  itIf(!tier2Skip, 'dup_test: write through duplicated fds matches', async () => {
     const native = await runNative('dup_test');
     const wasm = await kernel.exec('dup_test');
 
@@ -436,7 +443,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     ? 'C Tier 3 WASM binaries not built (need patched sysroot: make -C native/wasmvm/c sysroot && make -C native/wasmvm/c programs)'
     : false;
 
-  it.skipIf(tier3Skip)('spawn_child: posix_spawn echo, capture stdout via pipe', async () => {
+  itIf(!tier3Skip, 'spawn_child: posix_spawn echo, capture stdout via pipe', async () => {
     const native = await runNative('spawn_child');
     const wasm = await kernel.exec('spawn_child');
 
@@ -448,7 +455,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(wasm.stdout).toContain('child_exit: 0');
   });
 
-  it.skipIf(tier3Skip)('spawn_exit_code: child exits non-zero, verify via waitpid', async () => {
+  itIf(!tier3Skip, 'spawn_exit_code: child exits non-zero, verify via waitpid', async () => {
     const native = await runNative('spawn_exit_code');
     const wasm = await kernel.exec('spawn_exit_code');
 
@@ -460,7 +467,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(wasm.stdout).toContain('match: yes');
   });
 
-  it.skipIf(tier3Skip)('pipeline: echo hello | cat via pipe + posix_spawn', async () => {
+  itIf(!tier3Skip, 'pipeline: echo hello | cat via pipe + posix_spawn', async () => {
     const native = await runNative('pipeline');
     const wasm = await kernel.exec('pipeline');
 
@@ -473,7 +480,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(wasm.stdout).toContain('cat_exit: 0');
   });
 
-  it.skipIf(tier3Skip)('kill_child: spawn sleep, kill SIGTERM, verify terminated', async () => {
+  itIf(!tier3Skip, 'kill_child: spawn sleep, kill SIGTERM, verify terminated', async () => {
     const native = await runNative('kill_child');
     const wasm = await kernel.exec('kill_child');
 
@@ -492,7 +499,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(native.stdout).toContain('termsig=15');
   });
 
-  it.skipIf(tier3Skip)('signal_tests: SIGKILL, kill exited PID, kill invalid PID', async () => {
+  itIf(!tier3Skip, 'signal_tests: SIGKILL, kill exited PID, kill invalid PID', async () => {
     const native = await runNative('signal_tests');
     const wasm = await kernel.exec('signal_tests');
 
@@ -514,7 +521,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(native.stdout).toContain('test_kill_invalid: ok');
   });
 
-  it.skipIf(tier3Skip)('sigaction_behavior: query, SA_RESETHAND, and SA_RESTART parity', async () => {
+  itIf(!tier3Skip, 'sigaction_behavior: query, SA_RESETHAND, and SA_RESTART parity', async () => {
     const env = { ...process.env, PATH: `${NATIVE_DIR}:${process.env.PATH ?? ''}` };
     const native = await runNative('sigaction_behavior', [], { env });
     const wasm = await kernel.exec('sigaction_behavior');
@@ -531,7 +538,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(wasm.stdout).toContain('sa_restart_child_exit=0');
   });
 
-  it.skipIf(tier3Skip)('getppid_verify: child getppid matches parent getpid', async () => {
+  itIf(!tier3Skip, 'getppid_verify: child getppid matches parent getpid', async () => {
     // Native needs getppid_test on PATH for posix_spawnp
     const native = await runNative('getppid_verify', [], {
       env: { ...process.env, PATH: `${NATIVE_DIR}:${process.env.PATH}` },
@@ -547,7 +554,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(native.stdout).toContain('child_exit=0');
   });
 
-  it.skipIf(tier3Skip)('waitpid_return: waitpid returns correct child PID', async () => {
+  itIf(!tier3Skip, 'waitpid_return: waitpid returns correct child PID', async () => {
     const native = await runNative('waitpid_return');
     const wasm = await kernel.exec('waitpid_return');
 
@@ -565,7 +572,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(wasm.stdout).toContain('test3_ret2_positive: yes');
   });
 
-  it.skipIf(tier3Skip)('waitpid_edge: concurrent children and invalid PID', async () => {
+  itIf(!tier3Skip, 'waitpid_edge: concurrent children and invalid PID', async () => {
     const native = await runNative('waitpid_edge');
     const wasm = await kernel.exec('waitpid_edge');
 
@@ -591,7 +598,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(native.stdout).toContain('test3: ok');
   });
 
-  it.skipIf(tier3Skip)('pipe_edge: large write, broken pipe, EOF, close-both', async () => {
+  itIf(!tier3Skip, 'pipe_edge: large write, broken pipe, EOF, close-both', async () => {
     const native = await runNative('pipe_edge');
     const wasm = await kernel.exec('pipe_edge');
 
@@ -627,7 +634,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     ? 'syscall_coverage WASM binary not built (need patched sysroot: make -C native/wasmvm/c sysroot && make -C native/wasmvm/c programs)'
     : false;
 
-  it.skipIf(syscallCoverageSkip)('syscall_coverage: all syscall categories pass parity', async () => {
+  itIf(!syscallCoverageSkip, 'syscall_coverage: all syscall categories pass parity', async () => {
     // Pre-create /tmp in VFS for the program's file operations
     await vfs.createDir('/tmp');
 
@@ -705,7 +712,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     return { nativeDir: tmpDir, vfsBase: base };
   }
 
-  it.skipIf(tier4Skip)('c-ls: directory listing with file sizes matches', async () => {
+  itIf(!tier4Skip, 'c-ls: directory listing with file sizes matches', async () => {
     const { nativeDir } = await setupTestTree(vfs);
     try {
       const native = await runNative('c-ls', [nativeDir]);
@@ -723,7 +730,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     }
   });
 
-  it.skipIf(tier4Skip)('c-tree: recursive directory listing matches', async () => {
+  itIf(!tier4Skip, 'c-tree: recursive directory listing matches', async () => {
     const { nativeDir } = await setupTestTree(vfs);
     try {
       const native = await runNative('c-tree', [nativeDir]);
@@ -744,7 +751,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     }
   });
 
-  it.skipIf(tier4Skip)('c-find: find files matching glob pattern', async () => {
+  itIf(!tier4Skip, 'c-find: find files matching glob pattern', async () => {
     const { nativeDir } = await setupTestTree(vfs);
     try {
       const native = await runNative('c-find', [nativeDir, '*.txt']);
@@ -764,7 +771,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     }
   });
 
-  it.skipIf(tier4Skip)('c-cp: copied file contents match', async () => {
+  itIf(!tier4Skip, 'c-cp: copied file contents match', async () => {
     const srcContent = 'copy test content\nwith multiple lines\n';
 
     // Native: write source, copy, read dest
@@ -808,7 +815,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     ? 'SQLite binaries not built (run make -C native/wasmvm/c programs && make -C native/wasmvm/c native)'
     : false;
 
-  it.skipIf(sqliteSkip)('sqlite3_mem: in-memory SQL operations parity', async () => {
+  itIf(!sqliteSkip, 'sqlite3_mem: in-memory SQL operations parity', async () => {
     const native = await runNative('sqlite3_mem');
     const wasm = await kernel.exec('sqlite3_mem');
 
@@ -826,7 +833,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     expect(wasm.stdout).toContain('db: closed');
   });
 
-  it.skipIf(tier5Skip)('json_parse: cJSON parse and format parity', async () => {
+  itIf(!tier5Skip, 'json_parse: cJSON parse and format parity', async () => {
     const sampleJson = JSON.stringify({
       name: 'agent-os',
       version: 2,
@@ -861,7 +868,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     ? 'C networking binaries not built (need patched sysroot: make -C native/wasmvm/c sysroot && make -C native/wasmvm/c programs && make -C native/wasmvm/c native)'
     : false;
 
-  it.skipIf(netSkip)('tcp_echo: connect to TCP echo server, send and receive', async () => {
+  itIf(!netSkip, 'tcp_echo: connect to TCP echo server, send and receive', async () => {
     // Start a local TCP echo server
     const server = createTcpServer((conn) => {
       conn.on('data', (data) => { conn.write(data); conn.end(); });
@@ -884,7 +891,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     }
   });
 
-  it.skipIf(netSkip)('http_get: connect to HTTP server, receive response body', async () => {
+  itIf(!netSkip, 'http_get: connect to HTTP server, receive response body', async () => {
     // Start a local HTTP server
     const server = createHttpServer((_req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -907,7 +914,7 @@ describe.skipIf(skipReason())('C parity: native vs WASM', { timeout: 30_000 }, (
     }
   });
 
-  it.skipIf(netSkip)('dns_lookup: resolve localhost to 127.0.0.1', async () => {
+  itIf(!netSkip, 'dns_lookup: resolve localhost to 127.0.0.1', async () => {
     const native = await runNative('dns_lookup', ['localhost']);
     const wasm = await kernel.exec('dns_lookup localhost');
 

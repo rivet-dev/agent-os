@@ -56,6 +56,8 @@ const customAlias = {
 	"node:tls": path.join(undiciShimDir, "tls.js"),
 	dns: path.join(undiciShimDir, "dns.js"),
 	"node:dns": path.join(undiciShimDir, "dns.js"),
+	"dns/promises": path.join(undiciShimDir, "dns-promises.js"),
+	"node:dns/promises": path.join(undiciShimDir, "dns-promises.js"),
 	http: path.join(undiciShimDir, "http.js"),
 	"node:http": path.join(undiciShimDir, "http.js"),
 	https: path.join(undiciShimDir, "https.js"),
@@ -69,6 +71,8 @@ const customAlias = {
 	"diagnostics_channel": path.join(undiciShimDir, "diagnostics_channel.js"),
 	"node:perf_hooks": path.join(undiciShimDir, "perf_hooks.js"),
 	"perf_hooks": path.join(undiciShimDir, "perf_hooks.js"),
+	"node:async_hooks": path.join(undiciShimDir, "async_hooks.js"),
+	async_hooks: path.join(undiciShimDir, "async_hooks.js"),
 	"node:util/types": path.join(undiciShimDir, "util-types.js"),
 	"util/types": path.join(undiciShimDir, "util-types.js"),
 	"node:worker_threads": path.join(undiciShimDir, "worker_threads.js"),
@@ -391,6 +395,7 @@ async function buildWebStreamsPrelude() {
 		target: "es2020",
 		minify: true,
 		alias,
+		plugins: createUndiciBuildPlugins(),
 		define: {
 			"process.env.NODE_ENV": '"production"',
 			global: "globalThis",
@@ -421,6 +426,18 @@ function createUndiciBuildPlugins() {
 		{
 			name: "agent-os-undici-runtime-features-shim",
 			setup(build) {
+				build.onResolve(
+					{
+						filter:
+							/^(undici\/lib\/.+|web-streams-polyfill\/ponyfill\/es2018)$/,
+					},
+					(args) => {
+						const resolvedPath = require.resolve(args.path, {
+							paths: [args.resolveDir, packageRoot, workspaceRoot],
+						});
+						return { path: resolvedPath };
+					},
+				);
 				build.onResolve({ filter: /^(?:node:)?worker_threads$/ }, () => ({
 					path: path.join(undiciShimDir, "worker_threads.js"),
 				}));

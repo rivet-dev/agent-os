@@ -6,19 +6,19 @@ use agent_os_kernel::mount_table::{
 };
 use agent_os_kernel::vfs::{
     normalize_path, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
+    VirtualTimeSpec, VirtualUtimeSpec,
 };
 use nix::errno::Errno;
 use nix::fcntl::{openat2, readlinkat, renameat, AtFlags, OFlag, OpenHow, ResolveFlag};
-use nix::sys::stat::{
-    fchmodat, fstatat, mkdirat, utimensat, FchmodatFlags, Mode, SFlag, UtimensatFlags,
-};
-use nix::sys::time::{TimeSpec, TimeValLike};
-use nix::unistd::{fchownat, linkat, symlinkat, unlinkat, Gid, Uid, UnlinkatFlags};
+use nix::libc;
+use nix::sys::stat::{fstatat, mkdirat, utimensat, Mode, SFlag, UtimensatFlags};
+use nix::sys::time::TimeSpec;
+use nix::unistd::{chown, linkat, symlinkat, unlinkat, Gid, Uid, UnlinkatFlags};
 use serde::Deserialize;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::{FileExt, MetadataExt};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -182,7 +182,27 @@ impl HostDirFilesystem {
         Ok(host_path)
     }
 
-    fn ensure_directory_tree(&self, relative_dir: &Path, virtual_path: &str) -> VfsResult<()> {
+    fn open_metadata_beneath(&self, path: &str, op: &'static str) -> VfsResult<AnchoredFd> {
+        let (_, relative) = self.relative_virtual_path(path);
+        let handle =
+            self.open_beneath(&relative, OFlag::O_PATH | OFlag::O_NOFOLLOW, Mode::empty())?;
+        let metadata =
+            fs::metadata(handle.proc_path()).map_err(|error| io_error_to_vfs(op, path, error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(VfsError::new(
+                "EPERM",
+                format!("{op} '{path}': metadata operations do not follow symlinks"),
+            ));
+        }
+        Ok(handle)
+    }
+
+    fn ensure_directory_tree(
+        &self,
+        relative_dir: &Path,
+        virtual_path: &str,
+        mode: u32,
+    ) -> VfsResult<()> {
         if relative_dir == Path::new(".") {
             return Ok(());
         }
@@ -215,7 +235,7 @@ impl HostDirFilesystem {
             match mkdirat(
                 Some(parent_dir.as_raw_fd()),
                 name,
-                Mode::from_bits_truncate(0o755),
+                Mode::from_bits_truncate(mode),
             ) {
                 Ok(()) => {}
                 Err(Errno::EEXIST) => {}
@@ -245,7 +265,7 @@ impl HostDirFilesystem {
             _ => PathBuf::from("."),
         };
         if create_parent_dirs {
-            self.ensure_directory_tree(&parent, &normalized)?;
+            self.ensure_directory_tree(&parent, &normalized, 0o755)?;
         }
         let parent_dir = self.open_directory_beneath(&parent)?;
         Ok((parent_dir, parent, name.to_os_string(), normalized))
@@ -272,13 +292,98 @@ impl HostDirFilesystem {
         Ok(format!("/{}", segments.join("/")))
     }
 
+    fn existing_utime_specs(
+        &self,
+        parent_dir: &AnchoredFd,
+        name: &std::ffi::OsStr,
+        virtual_path: &str,
+        follow_symlinks: bool,
+    ) -> VfsResult<(VirtualTimeSpec, VirtualTimeSpec)> {
+        let flags = if follow_symlinks {
+            AtFlags::empty()
+        } else {
+            AtFlags::AT_SYMLINK_NOFOLLOW
+        };
+        let stat = fstatat(Some(parent_dir.as_raw_fd()), name, flags)
+            .map_err(|error| io_error_to_vfs("utimes", virtual_path, nix_to_io(error)))?;
+        let atime = VirtualTimeSpec::new(
+            stat.st_atime,
+            stat.st_atime_nsec.clamp(0, 999_999_999) as u32,
+        )?;
+        let mtime = VirtualTimeSpec::new(
+            stat.st_mtime,
+            stat.st_mtime_nsec.clamp(0, 999_999_999) as u32,
+        )?;
+        Ok((atime, mtime))
+    }
+
+    fn resolve_utime_timespec(spec: VirtualUtimeSpec, existing: VirtualTimeSpec) -> TimeSpec {
+        match spec {
+            VirtualUtimeSpec::Set(spec) => TimeSpec::new(spec.sec, spec.nsec as libc::c_long),
+            VirtualUtimeSpec::Now => TimeSpec::new(0, libc::UTIME_NOW),
+            VirtualUtimeSpec::Omit => TimeSpec::new(existing.sec, libc::UTIME_OMIT),
+        }
+    }
+
+    fn apply_utimens(
+        &self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        if follow_symlinks {
+            let _ = self.open_metadata_beneath(path, "utimes")?;
+        }
+        let (parent_dir, _, name, normalized) = self.split_parent(path, false)?;
+        let existing = match (atime, mtime) {
+            (VirtualUtimeSpec::Omit, _) | (_, VirtualUtimeSpec::Omit) => {
+                Some(self.existing_utime_specs(
+                    &parent_dir,
+                    name.as_os_str(),
+                    &normalized,
+                    follow_symlinks,
+                )?)
+            }
+            _ => None,
+        };
+        let existing_atime = existing
+            .as_ref()
+            .map(|(atime, _)| *atime)
+            .unwrap_or(VirtualTimeSpec { sec: 0, nsec: 0 });
+        let existing_mtime = existing
+            .as_ref()
+            .map(|(_, mtime)| *mtime)
+            .unwrap_or(VirtualTimeSpec { sec: 0, nsec: 0 });
+        let times = [
+            Self::resolve_utime_timespec(atime, existing_atime),
+            Self::resolve_utime_timespec(mtime, existing_mtime),
+        ];
+        let flags = if follow_symlinks {
+            UtimensatFlags::FollowSymlink
+        } else {
+            UtimensatFlags::NoFollowSymlink
+        };
+        utimensat(
+            Some(parent_dir.as_raw_fd()),
+            name.as_os_str(),
+            &times[0],
+            &times[1],
+            flags,
+        )
+        .map_err(|error| io_error_to_vfs("utimes", &normalized, nix_to_io(error)))
+    }
+
     fn stat_from_metadata(metadata: fs::Metadata) -> VirtualStat {
         let atime_ms = metadata.atime().max(0) as u64 * 1_000
             + (metadata.atime_nsec().max(0) as u64 / 1_000_000);
+        let atime_nsec = metadata.atime_nsec().clamp(0, 999_999_999) as u32;
         let mtime_ms = metadata.mtime().max(0) as u64 * 1_000
             + (metadata.mtime_nsec().max(0) as u64 / 1_000_000);
+        let mtime_nsec = metadata.mtime_nsec().clamp(0, 999_999_999) as u32;
         let ctime_ms = metadata.ctime().max(0) as u64 * 1_000
             + (metadata.ctime_nsec().max(0) as u64 / 1_000_000);
+        let ctime_nsec = metadata.ctime_nsec().clamp(0, 999_999_999) as u32;
         VirtualStat {
             mode: metadata.mode(),
             size: metadata.size(),
@@ -288,8 +393,11 @@ impl HostDirFilesystem {
             is_directory: metadata.is_dir(),
             is_symbolic_link: metadata.file_type().is_symlink(),
             atime_ms,
+            atime_nsec,
             mtime_ms,
+            mtime_nsec,
             ctime_ms,
+            ctime_nsec,
             birthtime_ms: ctime_ms,
             ino: metadata.ino(),
             nlink: metadata.nlink(),
@@ -302,10 +410,13 @@ impl HostDirFilesystem {
         let file_type = SFlag::from_bits_truncate(stat.st_mode);
         let atime_ms =
             stat.st_atime.max(0) as u64 * 1_000 + (stat.st_atime_nsec.max(0) as u64 / 1_000_000);
+        let atime_nsec = stat.st_atime_nsec.clamp(0, 999_999_999) as u32;
         let mtime_ms =
             stat.st_mtime.max(0) as u64 * 1_000 + (stat.st_mtime_nsec.max(0) as u64 / 1_000_000);
+        let mtime_nsec = stat.st_mtime_nsec.clamp(0, 999_999_999) as u32;
         let ctime_ms =
             stat.st_ctime.max(0) as u64 * 1_000 + (stat.st_ctime_nsec.max(0) as u64 / 1_000_000);
+        let ctime_nsec = stat.st_ctime_nsec.clamp(0, 999_999_999) as u32;
 
         VirtualStat {
             mode: stat.st_mode,
@@ -316,8 +427,11 @@ impl HostDirFilesystem {
             is_directory: file_type == SFlag::S_IFDIR,
             is_symbolic_link: file_type == SFlag::S_IFLNK,
             atime_ms,
+            atime_nsec,
             mtime_ms,
+            mtime_nsec,
             ctime_ms,
+            ctime_nsec,
             birthtime_ms: ctime_ms,
             ino: stat.st_ino,
             nlink: stat.st_nlink,
@@ -353,6 +467,54 @@ impl HostDirFilesystem {
         }
 
         Ok(())
+    }
+
+    fn write_file_with_creation_mode(
+        &mut self,
+        path: &str,
+        content: Vec<u8>,
+        file_mode: u32,
+    ) -> VfsResult<()> {
+        let (_, relative) = self.relative_virtual_path(path);
+        if let Some(parent) = relative.parent() {
+            self.ensure_directory_tree(parent, path, 0o755)?;
+        }
+        let handle = self.open_beneath(
+            &relative,
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
+            Mode::from_bits_truncate(file_mode),
+        )?;
+        let mut file = File::options()
+            .write(true)
+            .custom_flags(libc::O_CLOEXEC)
+            .open(handle.proc_path())
+            .map_err(|error| io_error_to_vfs("write", path, error))?;
+        file.write_all(&content)
+            .map_err(|error| io_error_to_vfs("write", path, error))
+    }
+
+    fn create_dir_with_creation_mode(&mut self, path: &str, mode: u32) -> VfsResult<()> {
+        let (parent_dir, _, name, normalized) = self.split_parent(path, false)?;
+        mkdirat(
+            Some(parent_dir.as_raw_fd()),
+            name.as_os_str(),
+            Mode::from_bits_truncate(mode),
+        )
+        .map_err(|error| io_error_to_vfs("mkdir", &normalized, nix_to_io(error)))
+    }
+
+    fn mkdir_with_creation_mode(
+        &mut self,
+        path: &str,
+        recursive: bool,
+        mode: u32,
+    ) -> VfsResult<()> {
+        if recursive {
+            let (normalized, relative) = self.relative_virtual_path(path);
+            self.ensure_directory_tree(&relative, &normalized, mode)
+        } else {
+            self.create_dir_with_creation_mode(path, mode)
+        }
     }
 }
 
@@ -405,40 +567,32 @@ impl VirtualFileSystem for HostDirFilesystem {
     }
 
     fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
-        let (_, relative) = self.relative_virtual_path(path);
-        if let Some(parent) = relative.parent() {
-            self.ensure_directory_tree(parent, path)?;
-        }
-        let handle = self.open_beneath(
-            &relative,
-            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
-            Mode::from_bits_truncate(0o644),
-        )?;
-        let mut file = File::options()
-            .write(true)
-            .open(handle.proc_path())
-            .map_err(|error| io_error_to_vfs("write", path, error))?;
-        file.write_all(&content.into())
-            .map_err(|error| io_error_to_vfs("write", path, error))
+        self.write_file_with_creation_mode(path, content.into(), 0o644)
+    }
+
+    fn write_file_with_mode(
+        &mut self,
+        path: &str,
+        content: impl Into<Vec<u8>>,
+        mode: Option<u32>,
+    ) -> VfsResult<()> {
+        self.write_file_with_creation_mode(path, content.into(), mode.unwrap_or(0o666))
     }
 
     fn create_dir(&mut self, path: &str) -> VfsResult<()> {
-        let (parent_dir, _, name, normalized) = self.split_parent(path, false)?;
-        mkdirat(
-            Some(parent_dir.as_raw_fd()),
-            name.as_os_str(),
-            Mode::from_bits_truncate(0o755),
-        )
-        .map_err(|error| io_error_to_vfs("mkdir", &normalized, nix_to_io(error)))
+        self.create_dir_with_creation_mode(path, 0o755)
+    }
+
+    fn create_dir_with_mode(&mut self, path: &str, mode: Option<u32>) -> VfsResult<()> {
+        self.create_dir_with_creation_mode(path, mode.unwrap_or(0o777))
     }
 
     fn mkdir(&mut self, path: &str, recursive: bool) -> VfsResult<()> {
-        if recursive {
-            let (normalized, relative) = self.relative_virtual_path(path);
-            self.ensure_directory_tree(&relative, &normalized)
-        } else {
-            self.create_dir(path)
-        }
+        self.mkdir_with_creation_mode(path, recursive, 0o755)
+    }
+
+    fn mkdir_with_mode(&mut self, path: &str, recursive: bool, mode: Option<u32>) -> VfsResult<()> {
+        self.mkdir_with_creation_mode(path, recursive, mode.unwrap_or(0o777))
     }
 
     fn exists(&self, path: &str) -> bool {
@@ -575,38 +729,38 @@ impl VirtualFileSystem for HostDirFilesystem {
     }
 
     fn chmod(&mut self, path: &str, mode: u32) -> VfsResult<()> {
-        let (_, relative) = self.relative_virtual_path(path);
-        fchmodat(
-            Some(self.host_root_dir.as_raw_fd()),
-            &relative,
-            Mode::from_bits_truncate(mode),
-            FchmodatFlags::FollowSymlink,
-        )
-        .map_err(|error| io_error_to_vfs("chmod", path, nix_to_io(error)))
+        let handle = self.open_metadata_beneath(path, "chmod")?;
+        fs::set_permissions(handle.proc_path(), fs::Permissions::from_mode(mode))
+            .map_err(|error| io_error_to_vfs("chmod", path, error))
     }
 
     fn chown(&mut self, path: &str, uid: u32, gid: u32) -> VfsResult<()> {
-        let (_, relative) = self.relative_virtual_path(path);
-        fchownat(
-            Some(self.host_root_dir.as_raw_fd()),
-            &relative,
+        let handle = self.open_metadata_beneath(path, "chown")?;
+        chown(
+            handle.proc_path().as_path(),
             Some(Uid::from_raw(uid)),
             Some(Gid::from_raw(gid)),
-            AtFlags::empty(),
         )
         .map_err(|error| VfsError::new(error_code(&error), error.to_string()))
     }
 
     fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()> {
-        let (_, relative) = self.relative_virtual_path(path);
-        utimensat(
-            Some(self.host_root_dir.as_raw_fd()),
-            &relative,
-            &TimeSpec::nanoseconds((atime_ms as i64) * 1_000_000),
-            &TimeSpec::nanoseconds((mtime_ms as i64) * 1_000_000),
-            UtimensatFlags::FollowSymlink,
+        self.apply_utimens(
+            path,
+            VirtualUtimeSpec::Set(VirtualTimeSpec::from_millis(atime_ms)),
+            VirtualUtimeSpec::Set(VirtualTimeSpec::from_millis(mtime_ms)),
+            true,
         )
-        .map_err(|error| io_error_to_vfs("utimes", path, nix_to_io(error)))
+    }
+
+    fn utimes_spec(
+        &mut self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        self.apply_utimens(path, atime, mtime, follow_symlinks)
     }
 
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {

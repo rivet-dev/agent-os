@@ -1429,10 +1429,9 @@ impl fmt::Display for JavascriptBenchmarkError {
                     "transport probe timed out waiting for {payload_bytes}-byte round-trip"
                 )
             }
-            Self::TransportProbeExited { exit_code, stderr } => write!(
-                f,
-                "transport probe exited with code {exit_code}: {stderr}"
-            ),
+            Self::TransportProbeExited { exit_code, stderr } => {
+                write!(f, "transport probe exited with code {exit_code}: {stderr}")
+            }
             Self::InvalidTransportProbeResponse {
                 payload_bytes,
                 expected,
@@ -2059,8 +2058,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "startup-floor",
             runtime: ScenarioRuntime::NativeExecution,
             mode: ScenarioMode::BaselineControl,
-            description:
-                "Minimal guest with no extra imports. Measures the current startup floor for create-context plus node process bootstrap.",
+            description: "Minimal guest with no extra imports. Measures the current startup floor for create-context plus node process bootstrap.",
             fixture: "empty entrypoint",
             entrypoint: "./bench/isolate-startup.mjs",
             compile_cache: CompileCacheStrategy::Disabled,
@@ -2073,8 +2071,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "startup-floor",
             runtime: ScenarioRuntime::NativeExecution,
             mode: ScenarioMode::SameEngineReplay,
-            description:
-                "Minimal guest after a priming pass while one execution engine keeps materialized assets and builtin/polyfill prewarm state alive, isolating the hot startup floor from import work.",
+            description: "Minimal guest after a priming pass while one execution engine keeps materialized assets and builtin/polyfill prewarm state alive, isolating the hot startup floor from import work.",
             fixture: "empty entrypoint",
             entrypoint: "./bench/isolate-startup.mjs",
             compile_cache: CompileCacheStrategy::Primed,
@@ -2087,8 +2084,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "local-import",
             runtime: ScenarioRuntime::NativeExecution,
             mode: ScenarioMode::TrueColdStart,
-            description:
-                "Cold import of a repo-local ESM graph that simulates layered application modules without compile-cache reuse.",
+            description: "Cold import of a repo-local ESM graph that simulates layered application modules without compile-cache reuse.",
             fixture: "24-module local ESM graph",
             entrypoint: "./bench/cold-local-import.mjs",
             compile_cache: CompileCacheStrategy::Disabled,
@@ -2101,8 +2097,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "local-import",
             runtime: ScenarioRuntime::NativeExecution,
             mode: ScenarioMode::NewSessionReplay,
-            description:
-                "Warm import of the same local ESM graph after a compile-cache priming pass in an earlier isolate.",
+            description: "Warm import of the same local ESM graph after a compile-cache priming pass in an earlier isolate.",
             fixture: "24-module local ESM graph",
             entrypoint: "./bench/warm-local-import.mjs",
             compile_cache: CompileCacheStrategy::Primed,
@@ -2115,8 +2110,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "local-import",
             runtime: ScenarioRuntime::NativeExecution,
             mode: ScenarioMode::SameSessionReplay,
-            description:
-                "Warm import of the same local ESM graph by replaying executions against one reused JavaScript context after a compile-cache priming pass.",
+            description: "Warm import of the same local ESM graph by replaying executions against one reused JavaScript context after a compile-cache priming pass.",
             fixture: "24-module local ESM graph",
             entrypoint: "./bench/warm-local-import.mjs",
             compile_cache: CompileCacheStrategy::Primed,
@@ -2129,8 +2123,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "local-import",
             runtime: ScenarioRuntime::NativeExecution,
             mode: ScenarioMode::SameEngineReplay,
-            description:
-                "Warm import of the same local ESM graph after compile-cache priming while one execution engine keeps materialized assets and builtin/polyfill prewarm state alive.",
+            description: "Warm import of the same local ESM graph after compile-cache priming while one execution engine keeps materialized assets and builtin/polyfill prewarm state alive.",
             fixture: "24-module local ESM graph",
             entrypoint: "./bench/warm-local-import.mjs",
             compile_cache: CompileCacheStrategy::Primed,
@@ -2143,8 +2136,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "local-import",
             runtime: ScenarioRuntime::HostNode,
             mode: ScenarioMode::HostControl,
-            description:
-                "Direct host-Node control for the same local ESM graph so later runs can separate native executor overhead from guest import work.",
+            description: "Direct host-Node control for the same local ESM graph so later runs can separate native executor overhead from guest import work.",
             fixture: "24-module local ESM graph",
             entrypoint: "./bench/cold-local-import.mjs",
             compile_cache: CompileCacheStrategy::Disabled,
@@ -2157,8 +2149,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "builtin-import",
             runtime: ScenarioRuntime::NativeExecution,
             mode: ScenarioMode::TrueColdStart,
-            description:
-                "Import of the common builtin path used by the wrappers and polyfill-adjacent bootstrap code.",
+            description: "Import of the common builtin path used by the wrappers and polyfill-adjacent bootstrap code.",
             fixture: "node:path + node:url + node:fs/promises",
             entrypoint: "./bench/builtin-import.mjs",
             compile_cache: CompileCacheStrategy::Disabled,
@@ -2171,8 +2162,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "builtin-hot-import",
             runtime: ScenarioRuntime::NativeExecution,
             mode: ScenarioMode::SameEngineReplay,
-            description:
-                "Hot single-import microbench for `node:stream` after a priming pass inside one reused execution engine.",
+            description: "Hot single-import microbench for `node:stream` after a priming pass inside one reused execution engine.",
             fixture: "node:stream",
             entrypoint: "./bench/hot-builtin-stream-import.mjs",
             compile_cache: CompileCacheStrategy::Primed,
@@ -2185,8 +2175,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "builtin-hot-import",
             runtime: ScenarioRuntime::NativeExecution,
             mode: ScenarioMode::SameEngineReplay,
-            description:
-                "Hot single-import microbench for `node:stream/web` after a priming pass inside one reused execution engine.",
+            description: "Hot single-import microbench for `node:stream/web` after a priming pass inside one reused execution engine.",
             fixture: "node:stream/web",
             entrypoint: "./bench/hot-builtin-stream-web-import.mjs",
             compile_cache: CompileCacheStrategy::Primed,
@@ -2199,8 +2188,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "builtin-hot-import",
             runtime: ScenarioRuntime::NativeExecution,
             mode: ScenarioMode::SameEngineReplay,
-            description:
-                "Hot single-import microbench for `node:crypto` after a priming pass inside one reused execution engine.",
+            description: "Hot single-import microbench for `node:crypto` after a priming pass inside one reused execution engine.",
             fixture: "node:crypto",
             entrypoint: "./bench/hot-builtin-crypto-import.mjs",
             compile_cache: CompileCacheStrategy::Primed,
@@ -2213,8 +2201,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "builtin-hot-import",
             runtime: ScenarioRuntime::NativeExecution,
             mode: ScenarioMode::SameEngineReplay,
-            description:
-                "Hot single-import microbench for `node:zlib` after a priming pass inside one reused execution engine.",
+            description: "Hot single-import microbench for `node:zlib` after a priming pass inside one reused execution engine.",
             fixture: "node:zlib",
             entrypoint: "./bench/hot-builtin-zlib-import.mjs",
             compile_cache: CompileCacheStrategy::Primed,
@@ -2227,8 +2214,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "builtin-hot-import",
             runtime: ScenarioRuntime::NativeExecution,
             mode: ScenarioMode::SameEngineReplay,
-            description:
-                "Hot single-import microbench for `node:assert/strict` after a priming pass inside one reused execution engine.",
+            description: "Hot single-import microbench for `node:assert/strict` after a priming pass inside one reused execution engine.",
             fixture: "node:assert/strict",
             entrypoint: "./bench/hot-builtin-assert-import.mjs",
             compile_cache: CompileCacheStrategy::Primed,
@@ -2241,8 +2227,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "builtin-hot-import",
             runtime: ScenarioRuntime::NativeExecution,
             mode: ScenarioMode::SameEngineReplay,
-            description:
-                "Hot single-import microbench for `node:url` after a priming pass inside one reused execution engine.",
+            description: "Hot single-import microbench for `node:url` after a priming pass inside one reused execution engine.",
             fixture: "node:url",
             entrypoint: "./bench/hot-builtin-url-import.mjs",
             compile_cache: CompileCacheStrategy::Primed,
@@ -2255,8 +2240,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "projected-package-hot-import",
             runtime: ScenarioRuntime::HostNode,
             mode: ScenarioMode::SameEngineReplay,
-            description:
-                "Hot projected-package single-import microbench for the TypeScript compiler file with compile cache and projected-source manifest reuse enabled across repeated contexts.",
+            description: "Hot projected-package single-import microbench for the TypeScript compiler file with compile cache and projected-source manifest reuse enabled across repeated contexts.",
             fixture: "projected TypeScript compiler file",
             entrypoint: "./bench/hot-projected-package-file-import.mjs",
             compile_cache: CompileCacheStrategy::Primed,
@@ -2269,8 +2253,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "large-package-import",
             runtime: ScenarioRuntime::HostNode,
             mode: ScenarioMode::TrueColdStart,
-            description:
-                "Cold import of the real-world `typescript` package from the workspace root `node_modules` tree.",
+            description: "Cold import of the real-world `typescript` package from the workspace root `node_modules` tree.",
             fixture: "typescript",
             entrypoint: "./bench/large-package-import.mjs",
             compile_cache: CompileCacheStrategy::Disabled,
@@ -2283,8 +2266,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "projected-package-import",
             runtime: ScenarioRuntime::HostNode,
             mode: ScenarioMode::HostControl,
-            description:
-                "Projected-package guest-path import of TypeScript with compile cache and projected-source manifest reuse enabled across repeated contexts.",
+            description: "Projected-package guest-path import of TypeScript with compile cache and projected-source manifest reuse enabled across repeated contexts.",
             fixture: "projected TypeScript guest-path import",
             entrypoint: "./bench/projected-package-import.mjs",
             compile_cache: CompileCacheStrategy::Primed,
@@ -2297,8 +2279,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "pdf-lib-startup",
             runtime: ScenarioRuntime::HostNode,
             mode: ScenarioMode::HostControl,
-            description:
-                "Cold import of `pdf-lib` plus representative document setup that creates a PDF page and embeds a standard font.",
+            description: "Cold import of `pdf-lib` plus representative document setup that creates a PDF page and embeds a standard font.",
             fixture: "pdf-lib document creation",
             entrypoint: "./bench/pdf-lib-startup.mjs",
             compile_cache: CompileCacheStrategy::Disabled,
@@ -2311,8 +2292,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "jszip-startup",
             runtime: ScenarioRuntime::HostNode,
             mode: ScenarioMode::HostControl,
-            description:
-                "Cold import of `jszip` plus representative archive staging that builds a nested archive structure.",
+            description: "Cold import of `jszip` plus representative archive staging that builds a nested archive structure.",
             fixture: "jszip archive staging",
             entrypoint: "./bench/jszip-startup.mjs",
             compile_cache: CompileCacheStrategy::Disabled,
@@ -2325,8 +2305,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "jszip-end-to-end",
             runtime: ScenarioRuntime::HostNode,
             mode: ScenarioMode::HostControl,
-            description:
-                "Cold import of `jszip` plus a full compressed archive roundtrip that writes, compresses, reloads, and validates nested archive contents.",
+            description: "Cold import of `jszip` plus a full compressed archive roundtrip that writes, compresses, reloads, and validates nested archive contents.",
             fixture: "jszip end-to-end archive roundtrip",
             entrypoint: "./bench/jszip-end-to-end.mjs",
             compile_cache: CompileCacheStrategy::Disabled,
@@ -2339,8 +2318,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
             workload: "jszip-repeated-session-compressed",
             runtime: ScenarioRuntime::HostNode,
             mode: ScenarioMode::HostControl,
-            description:
-                "Repeated-session `jszip` workload after a compile-cache priming pass that compresses and reloads a nested archive in each fresh isolate.",
+            description: "Repeated-session `jszip` workload after a compile-cache priming pass that compresses and reloads a nested archive in each fresh isolate.",
             fixture: "jszip compressed archive roundtrip",
             entrypoint: "./bench/jszip-repeated-session-compressed.mjs",
             compile_cache: CompileCacheStrategy::Primed,

@@ -13,6 +13,7 @@ import {
   COMMANDS_DIR,
   C_BUILD_DIR,
   createKernel,
+  describeIf,
   hasWasmBinaries,
   SOCK_STREAM,
 } from '../helpers.js';
@@ -135,7 +136,7 @@ async function waitForListener(
 const TEST_PORT = 9876;
 const CLIENT_PID = 999; // Fake PID for test-side client sockets
 
-describe.skipIf(skipReason())('WasmVM TCP server integration', { timeout: 30_000 }, () => {
+describeIf(!skipReason(), 'WasmVM TCP server integration', { timeout: 30_000 }, () => {
   let kernel: Kernel;
   let vfs: SimpleVFS;
 

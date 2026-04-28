@@ -17,7 +17,8 @@
 	},
 	"scripts": {
 		"build": "tsc && node ./scripts/build-patched-cli.mjs",
-		"check-types": "tsc --noEmit"
+		"check-types": "tsc --noEmit",
+		"test": "pnpm build && node --test tests/*.test.mjs"
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "^0.16.1",

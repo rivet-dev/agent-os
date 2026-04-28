@@ -25,6 +25,8 @@
 		"@rivet-dev/agent-os-core": "workspace:*",
 		"@rivet-dev/agent-os-sandbox": "workspace:*",
 		"sandbox-agent": "^0.4.2",
+		"dockerode": "^4.0.9",
+		"get-port": "^7.1.0",
 		"@rivet-dev/agent-os-common": "workspace:*",
 		"@rivet-dev/agent-os-git": "workspace:*",
 		"@rivet-dev/agent-os-claude": "workspace:*",

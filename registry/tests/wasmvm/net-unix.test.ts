@@ -13,6 +13,7 @@ import {
   COMMANDS_DIR,
   C_BUILD_DIR,
   createKernel,
+  describeIf,
   hasWasmBinaries,
   SOCK_STREAM,
 } from '../helpers.js';
@@ -135,7 +136,7 @@ async function waitForUnixListener(
 const SOCK_PATH = '/tmp/test.sock';
 const CLIENT_PID = 999; // Fake PID for test-side client sockets
 
-describe.skipIf(skipReason())('WasmVM Unix domain socket integration', { timeout: 30_000 }, () => {
+describeIf(!skipReason(), 'WasmVM Unix domain socket integration', { timeout: 30_000 }, () => {
   let kernel: Kernel;
   let vfs: SimpleVFS;
 

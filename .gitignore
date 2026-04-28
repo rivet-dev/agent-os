@@ -9,6 +9,8 @@ pnpm-debug.log*
 
 # Rust
 target/
+.cargo/
+.rustup/
 
 # TypeScript
 *.tsbuildinfo
@@ -23,6 +25,12 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Core dumps
+core
+core.*
+**/core
+**/core.*
 
 # Secrets
 secrets/**/*
@@ -46,4 +54,17 @@ scripts/ralph/archive/
 scripts/ralph/codex-streams/
 scripts/ralph/.last-branch
 scripts/ralph/prd.json
+scripts/ralph/todo/prd.json
 scripts/ralph/progress.txt
+scripts/ralph/reviews/
+scripts/ralph/.codex-last-msg-*
+
+# Agent working dir tmp/local state
+.agent/tmp/
+.claude/scheduled_tasks.lock
+
+# Local caches and stray outputs
+crates/execution/.agent-os-pyodide-cache/
+crates/execution/async-out.txt
+crates/sidecar/.tmp-sidecar-tests/
+packages/browser/.cache/

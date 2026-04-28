@@ -415,6 +415,185 @@ async function loadProviderCatalog(directory: string | undefined) {
       })
     }
 
+    if (
+      config?.provider?.google ||
+      config?.model?.startsWith("google/") ||
+      process.env.GOOGLE_GENERATIVE_AI_API_KEY
+    ) {
+      providers.push({
+        id: "google",
+        name: "Google",
+        source: "config",
+        env: ["GOOGLE_GENERATIVE_AI_API_KEY"],
+        options: {
+          ...(config?.provider?.google?.options ?? {}),
+        },
+        models: {
+          "gemini-2.5-pro": {
+            id: "gemini-2.5-pro",
+            providerID: "google",
+            api: { id: "gemini-2.5-pro", url: "", npm: "@ai-sdk/google" },
+            name: "Gemini 2.5 Pro",
+            family: "gemini-2.5-pro",
+            capabilities: {
+              temperature: true,
+              reasoning: true,
+              attachment: true,
+              toolcall: true,
+              input: { text: true, audio: false, image: true, video: false, pdf: true },
+              output: { text: true, audio: false, image: false, video: false, pdf: false },
+              interleaved: false,
+            },
+            cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+            limit: { context: 200000, output: 32000 },
+            status: "active",
+            options: {},
+            headers: {},
+            release_date: "2025-01-01",
+            variants: {},
+          },
+          "gemini-2.5-flash": {
+            id: "gemini-2.5-flash",
+            providerID: "google",
+            api: { id: "gemini-2.5-flash", url: "", npm: "@ai-sdk/google" },
+            name: "Gemini 2.5 Flash",
+            family: "gemini-2.5-flash",
+            capabilities: {
+              temperature: true,
+              reasoning: true,
+              attachment: true,
+              toolcall: true,
+              input: { text: true, audio: false, image: true, video: false, pdf: true },
+              output: { text: true, audio: false, image: false, video: false, pdf: false },
+              interleaved: false,
+            },
+            cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+            limit: { context: 200000, output: 16000 },
+            status: "active",
+            options: {},
+            headers: {},
+            release_date: "2025-01-01",
+            variants: {},
+          },
+        },
+      })
+    }
+
+    if (
+      config?.provider?.["google-vertex"] ||
+      config?.model?.startsWith("google-vertex/") ||
+      (process.env.GOOGLE_VERTEX_PROJECT && process.env.GOOGLE_VERTEX_LOCATION)
+    ) {
+      providers.push({
+        id: "google-vertex",
+        name: "Google Vertex",
+        source: "config",
+        env: [],
+        options: {
+          ...(config?.provider?.["google-vertex"]?.options ?? {}),
+        },
+        models: {
+          "gemini-2.5-pro": {
+            id: "gemini-2.5-pro",
+            providerID: "google-vertex",
+            api: { id: "gemini-2.5-pro", url: "", npm: "@ai-sdk/google-vertex" },
+            name: "Gemini 2.5 Pro",
+            family: "gemini-2.5-pro",
+            capabilities: {
+              temperature: true,
+              reasoning: true,
+              attachment: true,
+              toolcall: true,
+              input: { text: true, audio: false, image: true, video: false, pdf: true },
+              output: { text: true, audio: false, image: false, video: false, pdf: false },
+              interleaved: false,
+            },
+            cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+            limit: { context: 200000, output: 32000 },
+            status: "active",
+            options: {},
+            headers: {},
+            release_date: "2025-01-01",
+            variants: {},
+          },
+        },
+      })
+    }
+
+    if (config?.provider?.groq || config?.model?.startsWith("groq/") || process.env.GROQ_API_KEY) {
+      providers.push({
+        id: "groq",
+        name: "Groq",
+        source: "config",
+        env: ["GROQ_API_KEY"],
+        options: {
+          ...(config?.provider?.groq?.options ?? {}),
+        },
+        models: {
+          "llama-3.3-70b-versatile": {
+            id: "llama-3.3-70b-versatile",
+            providerID: "groq",
+            api: { id: "llama-3.3-70b-versatile", url: "", npm: "@ai-sdk/groq" },
+            name: "Llama 3.3 70B Versatile",
+            family: "llama-3.3-70b",
+            capabilities: {
+              temperature: true,
+              reasoning: true,
+              attachment: false,
+              toolcall: true,
+              input: { text: true, audio: false, image: false, video: false, pdf: false },
+              output: { text: true, audio: false, image: false, video: false, pdf: false },
+              interleaved: false,
+            },
+            cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+            limit: { context: 200000, output: 32000 },
+            status: "active",
+            options: {},
+            headers: {},
+            release_date: "2025-01-01",
+            variants: {},
+          },
+        },
+      })
+    }
+
+    if (config?.provider?.mistral || config?.model?.startsWith("mistral/") || process.env.MISTRAL_API_KEY) {
+      providers.push({
+        id: "mistral",
+        name: "Mistral",
+        source: "config",
+        env: ["MISTRAL_API_KEY"],
+        options: {
+          ...(config?.provider?.mistral?.options ?? {}),
+        },
+        models: {
+          "mistral-small-latest": {
+            id: "mistral-small-latest",
+            providerID: "mistral",
+            api: { id: "mistral-small-latest", url: "", npm: "@ai-sdk/mistral" },
+            name: "Mistral Small Latest",
+            family: "mistral-small",
+            capabilities: {
+              temperature: true,
+              reasoning: true,
+              attachment: true,
+              toolcall: true,
+              input: { text: true, audio: false, image: true, video: false, pdf: true },
+              output: { text: true, audio: false, image: false, video: false, pdf: false },
+              interleaved: false,
+            },
+            cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+            limit: { context: 200000, output: 32000 },
+            status: "active",
+            options: {},
+            headers: {},
+            release_date: "2025-01-01",
+            variants: {},
+          },
+        },
+      })
+    }
+
     if (providers.length === 0) {
       providers.push({
         id: "anthropic",
@@ -2330,6 +2509,11 @@ import { ProviderTransform } from "./transform"
 		resolve(sourceRoot, "packages/opencode/src/provider/provider.ts"),
 		`import z from "zod"
 import { createAnthropic } from "@ai-sdk/anthropic"
+import { createGoogleGenerativeAI } from "@ai-sdk/google"
+import { createVertex } from "@ai-sdk/google-vertex"
+import { createVertexAnthropic } from "@ai-sdk/google-vertex/anthropic"
+import { createGroq } from "@ai-sdk/groq"
+import { createMistral } from "@ai-sdk/mistral"
 import { createOpenAI } from "@ai-sdk/openai"
 import type { LanguageModelV3 } from "@ai-sdk/provider"
 import { NamedError } from "@opencode-ai/util/error"
@@ -2529,10 +2713,91 @@ export namespace Provider {
         },
       ],
     },
+    google: {
+      name: "Google",
+      env: ["GOOGLE_GENERATIVE_AI_API_KEY"],
+      npm: "@ai-sdk/google",
+      models: [
+        {
+          id: "gemini-2.5-pro",
+          name: "Gemini 2.5 Pro",
+          family: "gemini-2.5-pro",
+          reasoning: true,
+          attachment: true,
+          input: { image: true, pdf: true },
+          releaseDate: "2025-01-01",
+        },
+        {
+          id: "gemini-2.5-flash",
+          name: "Gemini 2.5 Flash",
+          family: "gemini-2.5-flash",
+          reasoning: true,
+          attachment: true,
+          input: { image: true, pdf: true },
+          limit: { output: 16_000 },
+          releaseDate: "2025-01-01",
+        },
+      ],
+    },
+    "google-vertex": {
+      name: "Google Vertex",
+      env: [],
+      npm: "@ai-sdk/google-vertex",
+      models: [
+        {
+          id: "gemini-2.5-pro",
+          name: "Gemini 2.5 Pro",
+          family: "gemini-2.5-pro",
+          reasoning: true,
+          attachment: true,
+          input: { image: true, pdf: true },
+          releaseDate: "2025-01-01",
+        },
+      ],
+    },
+    groq: {
+      name: "Groq",
+      env: ["GROQ_API_KEY"],
+      npm: "@ai-sdk/groq",
+      models: [
+        {
+          id: "llama-3.3-70b-versatile",
+          name: "Llama 3.3 70B Versatile",
+          family: "llama-3.3-70b",
+          reasoning: true,
+          releaseDate: "2025-01-01",
+        },
+      ],
+    },
+    mistral: {
+      name: "Mistral",
+      env: ["MISTRAL_API_KEY"],
+      npm: "@ai-sdk/mistral",
+      models: [
+        {
+          id: "mistral-small-latest",
+          name: "Mistral Small Latest",
+          family: "mistral-small",
+          reasoning: true,
+          attachment: true,
+          input: { image: true, pdf: true },
+          releaseDate: "2025-01-01",
+        },
+      ],
+    },
   }
 
   const providerCache = new Map<string, any>()
   const languageCache = new Map<string, LanguageModelV3>()
+  const SDK_FACTORIES: Record<string, (options: Record<string, any>) => any> = {
+    "@ai-sdk/anthropic": createAnthropic,
+    "@ai-sdk/google": createGoogleGenerativeAI,
+    "@ai-sdk/google-vertex": createVertex,
+    "@ai-sdk/google-vertex/anthropic": createVertexAnthropic,
+    "@ai-sdk/groq": createGroq,
+    "@ai-sdk/mistral": createMistral,
+    "@ai-sdk/openai": createOpenAI,
+  }
   const priority = ["gpt-5", "claude-sonnet-4", "big-pickle", "gemini-3-pro"]
 
   function firstEnv(names: string[]) {
@@ -2798,20 +3063,19 @@ export namespace Provider {
       },
     }
 
-    let sdk: any
-    switch (provider.id) {
-      case ProviderID.anthropic:
-        sdk = createAnthropic(options)
-        break
-      case ProviderID.openai:
-        sdk = createOpenAI(options)
-        break
-      default:
-        throw new InitError(
-          { providerID: provider.id },
-          { cause: new Error("Unsupported provider in ACP VM build: " + provider.id) },
-        )
+    const factory = SDK_FACTORIES[model.api.npm]
+    if (!factory) {
+      throw new InitError(
+        { providerID: provider.id },
+        {
+          cause: new Error(
+            "Unsupported provider in ACP VM build: " + provider.id + " (" + model.api.npm + ")",
+          ),
+        },
+      )
     }
+
+    const sdk = factory(options)
 
     providerCache.set(cacheKey, sdk)
     return sdk

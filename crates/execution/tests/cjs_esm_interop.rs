@@ -106,7 +106,6 @@ fn run_guest_json(fixture: &Fixture, entrypoint: &str) -> Value {
     serde_json::from_slice(&result.stdout).expect("parse guest stdout as JSON")
 }
 
-#[test]
 fn resolution_nested_exports_conditions_recurse_three_levels() {
     let fixture = Fixture::new();
     fixture.write_json(
@@ -146,7 +145,6 @@ fn resolution_nested_exports_conditions_recurse_three_levels() {
     );
 }
 
-#[test]
 fn resolution_exports_array_and_condition_nesting_uses_first_valid_target() {
     let fixture = Fixture::new();
     fixture.write_json(
@@ -181,7 +179,6 @@ fn resolution_exports_array_and_condition_nesting_uses_first_valid_target() {
     );
 }
 
-#[test]
 fn resolution_require_prefers_cjs_entry_for_dual_packages() {
     let fixture = Fixture::new();
     fixture.write_json(
@@ -207,7 +204,6 @@ fn resolution_require_prefers_cjs_entry_for_dual_packages() {
     );
 }
 
-#[test]
 fn runtime_exports_dot_named_exports_are_available_to_esm_imports() {
     let fixture = Fixture::new();
     fixture.write(
@@ -234,7 +230,6 @@ console.log(JSON.stringify({ answer, label, extra, defaultAnswer: dep.answer }))
     );
 }
 
-#[test]
 fn runtime_minified_type_module_js_is_not_misclassified_as_cjs() {
     let fixture = Fixture::new();
     fixture.write_json("package.json", json!({ "type": "module" }));
@@ -253,7 +248,6 @@ fn runtime_minified_type_module_js_is_not_misclassified_as_cjs() {
     );
 }
 
-#[test]
 fn runtime_object_define_property_exports_are_available_to_esm_imports() {
     let fixture = Fixture::new();
     fixture.write(
@@ -282,7 +276,6 @@ console.log(JSON.stringify({ answer, label, defaultLabel: dep.label }));
     );
 }
 
-#[test]
 fn runtime_computed_property_cjs_modules_still_work_via_default_import() {
     let fixture = Fixture::new();
     fixture.write(
@@ -304,7 +297,6 @@ console.log(JSON.stringify(dep));
     assert_eq!(output, json!({ "dynamic": 7, "plain": 1 }));
 }
 
-#[test]
 fn runtime_exports_bracket_assignment_preserves_default_export_shape() {
     let fixture = Fixture::new();
     fixture.write(
@@ -334,7 +326,6 @@ console.log(JSON.stringify({ alpha: dep.alpha, beta, defaultBeta: dep.beta }));
     );
 }
 
-#[test]
 fn runtime_object_assign_module_exports_exposes_named_esm_imports_via_runtime_fallback() {
     let fixture = Fixture::new();
     fixture.write(
@@ -358,7 +349,6 @@ console.log(JSON.stringify({ answer, label, defaultAnswer: dep.answer }));
     );
 }
 
-#[test]
 fn runtime_spread_based_module_exports_still_exposes_the_default_export_shape() {
     let fixture = Fixture::new();
     fixture.write(
@@ -380,7 +370,6 @@ console.log(JSON.stringify(dep));
     assert_eq!(output, json!({ "alpha": 1, "beta": 2 }));
 }
 
-#[test]
 fn runtime_object_create_descriptor_exports_expose_named_esm_imports_via_runtime_fallback() {
     let fixture = Fixture::new();
     fixture.write(
@@ -413,7 +402,6 @@ console.log(JSON.stringify({
     );
 }
 
-#[test]
 fn runtime_cjs_reexport_preserves_named_esm_imports_via_runtime_fallback() {
     let fixture = Fixture::new();
     fixture.write(
@@ -440,7 +428,6 @@ console.log(JSON.stringify({ alpha, beta, defaultAlpha: dep.alpha }));
     assert_eq!(output, json!({ "alpha": 1, "beta": 2, "defaultAlpha": 1 }));
 }
 
-#[test]
 fn runtime_require_of_esm_only_packages_either_loads_or_throws_clearly() {
     let fixture = Fixture::new();
     fixture.write_json(
@@ -489,7 +476,39 @@ try {
     }
 }
 
-#[test]
+fn runtime_type_module_export_subpaths_keep_js_files_in_esm_mode() {
+    let fixture = Fixture::new();
+    fixture.write_json(
+        "node_modules/pkg/package.json",
+        json!({
+            "type": "module",
+            "exports": {
+                "./runtime": "./dist/runtime.js"
+            }
+        }),
+    );
+    fixture.write(
+        "node_modules/pkg/dist/runtime.js",
+        r#"
+globalThis.__pkgRuntimeUrl = import.meta.url;
+"#,
+    );
+    fixture.write(
+        "entry.mjs",
+        r#"
+import "pkg/runtime";
+console.log(JSON.stringify({
+  isFileUrl:
+    typeof globalThis.__pkgRuntimeUrl === "string" &&
+    globalThis.__pkgRuntimeUrl.startsWith("file:///root/node_modules/pkg/dist/runtime.js")
+}));
+"#,
+    );
+
+    let output = run_guest_json(&fixture, "./entry.mjs");
+    assert_eq!(output, json!({ "isFileUrl": true }));
+}
+
 fn runtime_require_of_dual_packages_uses_the_cjs_entrypoint() {
     let fixture = Fixture::new();
     fixture.write_json(
@@ -521,7 +540,6 @@ fn runtime_require_of_dual_packages_uses_the_cjs_entrypoint() {
     assert_eq!(output, json!({ "kind": "cjs" }));
 }
 
-#[test]
 fn runtime_two_module_circular_require_exposes_partial_exports() {
     let fixture = Fixture::new();
     fixture.write(
@@ -573,7 +591,6 @@ console.log(JSON.stringify({ a, b }));
     );
 }
 
-#[test]
 fn runtime_three_module_circular_chains_complete_without_hanging() {
     let fixture = Fixture::new();
     fixture.write(
@@ -621,7 +638,6 @@ console.log(JSON.stringify({ a: a.chain, b: b.chain, c: c.chain }));
     );
 }
 
-#[test]
 fn runtime_circular_requires_use_cache_instead_of_re_evaluating_modules() {
     let fixture = Fixture::new();
     fixture.write(
@@ -669,7 +685,6 @@ console.log(JSON.stringify({
     );
 }
 
-#[test]
 fn runtime_require_json_returns_the_parsed_object() {
     let fixture = Fixture::new();
     fixture.write("data.json", r#"{ "name": "agent-os", "ok": true }"#);
@@ -682,7 +697,6 @@ fn runtime_require_json_returns_the_parsed_object() {
     assert_eq!(output, json!({ "name": "agent-os", "ok": true }));
 }
 
-#[test]
 fn runtime_require_invalid_json_surfaces_a_parse_error() {
     let fixture = Fixture::new();
     fixture.write(
@@ -714,7 +728,6 @@ try {
     );
 }
 
-#[test]
 fn runtime_esm_entrypoints_can_use_require_via_the_runtime_prelude() {
     let fixture = Fixture::new();
     fixture.write("dep.cjs", "module.exports = { answer: 42 };");
@@ -730,7 +743,6 @@ console.log(JSON.stringify(dep));
     assert_eq!(output, json!({ "answer": 42 }));
 }
 
-#[test]
 fn runtime_esm_default_import_of_cjs_uses_module_exports_value() {
     let fixture = Fixture::new();
     fixture.write(
@@ -753,7 +765,6 @@ console.log(JSON.stringify({ greeting: greet("agent") }));
     assert_eq!(output, json!({ "greeting": "hello agent" }));
 }
 
-#[test]
 fn runtime_esm_named_imports_of_cjs_use_the_extracted_names() {
     let fixture = Fixture::new();
     fixture.write(
@@ -775,7 +786,6 @@ console.log(JSON.stringify({ answer, label }));
     assert_eq!(output, json!({ "answer": 42, "label": "ok" }));
 }
 
-#[test]
 fn runtime_builtin_assert_exposes_deep_strict_equal() {
     let fixture = Fixture::new();
     fixture.write(
@@ -793,7 +803,6 @@ console.log(JSON.stringify({
     assert_eq!(output, json!({ "deepStrictEqual": "function" }));
 }
 
-#[test]
 fn runtime_builtin_assert_exposes_throws() {
     let fixture = Fixture::new();
     fixture.write(
@@ -811,7 +820,6 @@ console.log(JSON.stringify({ throws: typeof assert.throws }));
     assert_eq!(output, json!({ "throws": "function" }));
 }
 
-#[test]
 fn runtime_builtin_path_normalize_matches_expected_edge_cases() {
     let fixture = Fixture::new();
     fixture.write(
@@ -839,7 +847,6 @@ console.log(JSON.stringify({
     );
 }
 
-#[test]
 fn runtime_builtin_path_resolve_and_relative_match_expected_values() {
     let fixture = Fixture::new();
     fixture.write(
@@ -865,7 +872,6 @@ console.log(JSON.stringify({
     );
 }
 
-#[test]
 fn runtime_object_assign_module_exports_named_exports_are_visible_to_esm_imports() {
     let fixture = Fixture::new();
     fixture.write(
@@ -886,7 +892,6 @@ console.log(JSON.stringify({ answer, label }));
     assert_eq!(output, json!({ "answer": 42, "label": "ok" }));
 }
 
-#[test]
 fn runtime_spread_based_module_exports_named_exports_are_visible_to_esm_imports() {
     let fixture = Fixture::new();
     fixture.write(
@@ -908,7 +913,6 @@ console.log(JSON.stringify({ alpha, beta }));
     assert_eq!(output, json!({ "alpha": 1, "beta": 2 }));
 }
 
-#[test]
 fn runtime_object_define_properties_reexports_are_visible_to_esm_imports() {
     let fixture = Fixture::new();
     fixture.write(
@@ -932,7 +936,6 @@ console.log(JSON.stringify({ answer, label }));
     assert_eq!(output, json!({ "answer": 42, "label": "ok" }));
 }
 
-#[test]
 fn runtime_esm_json_imports_return_the_parsed_object() {
     let fixture = Fixture::new();
     fixture.write("data.json", r#"{ "name": "agent-os", "ok": true }"#);
@@ -946,4 +949,159 @@ console.log(JSON.stringify(data));
 
     let output = run_guest_json(&fixture, "./entry.mjs");
     assert_eq!(output, json!({ "name": "agent-os", "ok": true }));
+}
+
+fn runtime_intl_datetime_format_does_not_crash() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "entry.mjs",
+        r#"
+console.log(JSON.stringify({
+  formatted: new Intl.DateTimeFormat("en-US").format(new Date("2024-01-02T03:04:05Z"))
+}));
+"#,
+    );
+
+    let output = run_guest_json(&fixture, "./entry.mjs");
+    assert_eq!(output, json!({ "formatted": "2024-01-02" }));
+}
+
+fn runtime_buffer_base64url_encoding_matches_node_behavior() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "entry.mjs",
+        r#"
+const encoded = Buffer.from("hello").toString("base64url");
+const decoded = Buffer.from(encoded, "base64url").toString("utf8");
+console.log(JSON.stringify({
+  isEncoding: Buffer.isEncoding("base64url"),
+  encoded,
+  decoded,
+  byteLength: Buffer.byteLength(encoded, "base64url")
+}));
+"#,
+    );
+
+    let output = run_guest_json(&fixture, "./entry.mjs");
+    assert_eq!(
+        output,
+        json!({
+            "isEncoding": true,
+            "encoded": "aGVsbG8",
+            "decoded": "hello",
+            "byteLength": 5
+        })
+    );
+}
+
+fn runtime_relative_file_urls_preserve_directory_trailing_slashes() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "entry.mjs",
+        r#"
+const base = "file:///node_modules/.pnpm/pkg/node_modules/pkg/dist/content/utils.js";
+const pkgBase = new URL("../../", base);
+console.log(JSON.stringify({
+  pkgBase: String(pkgBase),
+  template: String(new URL("templates/content/types.d.ts", pkgBase))
+}));
+"#,
+    );
+
+    let output = run_guest_json(&fixture, "./entry.mjs");
+    assert_eq!(
+        output,
+        json!({
+            "pkgBase": "file:///node_modules/.pnpm/pkg/node_modules/pkg/",
+            "template": "file:///node_modules/.pnpm/pkg/node_modules/pkg/templates/content/types.d.ts"
+        })
+    );
+}
+
+fn runtime_require_module_returns_the_module_constructor_shape() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "entry.cjs",
+        r#"
+const mod = require("module");
+console.log(JSON.stringify({
+  hasPrototypeRequire: typeof mod.prototype?.require === "function",
+  sameConstructor: mod.Module === mod,
+  hasCreateRequire: typeof mod.createRequire === "function"
+}));
+"#,
+    );
+
+    let output = run_guest_json(&fixture, "./entry.cjs");
+    assert_eq!(
+        output,
+        json!({
+            "hasPrototypeRequire": true,
+            "sameConstructor": true,
+            "hasCreateRequire": true
+        })
+    );
+}
+
+fn runtime_cjs_entrypoints_can_use_dynamic_import() {
+    let fixture = Fixture::new();
+    fixture.write("dep.mjs", "export const answer = 42;\n");
+    fixture.write(
+        "entry.cjs",
+        r#"
+(async () => {
+  const mod = await import("./dep.mjs");
+  console.log(JSON.stringify({ answer: mod.answer }));
+})().catch((error) => {
+  console.error(String(error && error.stack ? error.stack : error));
+  process.exit(1);
+});
+"#,
+    );
+
+    let output = run_guest_json(&fixture, "./entry.cjs");
+    assert_eq!(output, json!({ "answer": 42 }));
+}
+
+#[test]
+fn cjs_esm_interop_suite() {
+    // Keep V8-backed integration coverage inside one top-level libtest case.
+    // Running these guest-runtime cases as separate tests in the same binary
+    // still trips a V8 teardown/init boundary crash between cases.
+    resolution_nested_exports_conditions_recurse_three_levels();
+    resolution_exports_array_and_condition_nesting_uses_first_valid_target();
+    resolution_require_prefers_cjs_entry_for_dual_packages();
+    runtime_exports_dot_named_exports_are_available_to_esm_imports();
+    runtime_minified_type_module_js_is_not_misclassified_as_cjs();
+    runtime_object_define_property_exports_are_available_to_esm_imports();
+    runtime_computed_property_cjs_modules_still_work_via_default_import();
+    runtime_exports_bracket_assignment_preserves_default_export_shape();
+    runtime_object_assign_module_exports_exposes_named_esm_imports_via_runtime_fallback();
+    runtime_spread_based_module_exports_still_exposes_the_default_export_shape();
+    runtime_object_create_descriptor_exports_expose_named_esm_imports_via_runtime_fallback();
+    runtime_cjs_reexport_preserves_named_esm_imports_via_runtime_fallback();
+    runtime_require_of_esm_only_packages_either_loads_or_throws_clearly();
+    runtime_type_module_export_subpaths_keep_js_files_in_esm_mode();
+    runtime_require_of_dual_packages_uses_the_cjs_entrypoint();
+    runtime_two_module_circular_require_exposes_partial_exports();
+    runtime_three_module_circular_chains_complete_without_hanging();
+    runtime_circular_requires_use_cache_instead_of_re_evaluating_modules();
+    runtime_require_json_returns_the_parsed_object();
+    runtime_require_invalid_json_surfaces_a_parse_error();
+    runtime_esm_entrypoints_can_use_require_via_the_runtime_prelude();
+    runtime_esm_default_import_of_cjs_uses_module_exports_value();
+    runtime_esm_named_imports_of_cjs_use_the_extracted_names();
+    runtime_builtin_assert_exposes_deep_strict_equal();
+    runtime_builtin_assert_exposes_throws();
+    runtime_builtin_path_normalize_matches_expected_edge_cases();
+    runtime_builtin_path_resolve_and_relative_match_expected_values();
+    runtime_object_assign_module_exports_named_exports_are_visible_to_esm_imports();
+    runtime_spread_based_module_exports_named_exports_are_visible_to_esm_imports();
+    runtime_object_define_properties_reexports_are_visible_to_esm_imports();
+    runtime_esm_json_imports_return_the_parsed_object();
+    runtime_intl_datetime_format_does_not_crash();
+    runtime_buffer_base64url_encoding_matches_node_behavior();
+    runtime_relative_file_urls_preserve_directory_trailing_slashes();
+    runtime_require_module_returns_the_module_constructor_shape();
+    runtime_cjs_entrypoints_can_use_dynamic_import();
 }

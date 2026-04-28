@@ -9,7 +9,7 @@ const pkg = {
 	aptName: "gawk",
 	description: "GNU awk text processing",
 	source: "rust" as const,
-	commands: [{ name: "awk", permissionTier: "read-only" as const }],
+	commands: [{ name: "awk", permissionTier: "full" as const }],
 	get commandDir() {
 		return resolve(__dirname, "..", "wasm");
 	},

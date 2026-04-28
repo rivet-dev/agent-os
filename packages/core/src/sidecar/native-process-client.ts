@@ -1,10 +1,21 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import type { JsonRpcNotification, JsonRpcResponse } from "../json-rpc.js";
+import type {
+	JsonRpcNotification,
+	JsonRpcRequest,
+	JsonRpcResponse,
+} from "../json-rpc.js";
+import { resolveCargoBinary } from "./cargo.js";
 
 const PROTOCOL_SCHEMA = {
 	name: "agent-os-sidecar",
 	version: 1,
 } as const;
+const BRIDGE_CONTRACT_VERSION = 1;
+
+const SIDECAR_GRACEFUL_EXIT_MS = 5_000;
+const SIDECAR_FORCE_EXIT_MS = 2_000;
+const DEFAULT_EVENT_BUFFER_CAPACITY = 4_096;
+const ANY_BUFFERED_EVENT_KEY = "*";
 
 type OwnershipScope =
 	| { scope: "connection"; connection_id: string }
@@ -122,7 +133,7 @@ export interface SidecarProcessSnapshotEntry {
 	command: string;
 	args: string[];
 	cwd: string;
-	status: "running" | "exited";
+	status: "running" | "exited" | "stopped";
 	exitCode: number | null;
 }
 
@@ -168,6 +179,7 @@ type RequestPayload =
 			type: "authenticate";
 			client_name: string;
 			auth_token: string;
+			bridge_version: number;
 	  }
 	| {
 			type: "open_session";
@@ -190,6 +202,8 @@ type RequestPayload =
 			env: Record<string, string>;
 			cwd: string;
 			mcp_servers: unknown[];
+			protocol_version?: number;
+			client_capabilities?: unknown;
 	  }
 	| {
 			type: "session_request";
@@ -200,6 +214,7 @@ type RequestPayload =
 	| {
 			type: "get_session_state";
 			session_id: string;
+			acknowledged_sequence_number?: number;
 	  }
 	| {
 			type: "close_agent_session";
@@ -319,6 +334,14 @@ type RequestPayload =
 			port?: number;
 	  }
 	| {
+			type: "vm_fetch";
+			port: number;
+			method: string;
+			path: string;
+			headers_json: string;
+			body?: string;
+	  }
+	| {
 			type: "get_signal_state";
 			process_id: string;
 	  }
@@ -341,6 +364,11 @@ export type SidecarRequestPayload =
 			params: unknown;
 	  }
 	| {
+			type: "acp_request";
+			session_id: string;
+			request: JsonRpcRequest;
+	  }
+	| {
 			type: "js_bridge_call";
 			call_id: string;
 			mount_id: string;
@@ -359,6 +387,11 @@ export type SidecarResponsePayload =
 			type: "permission_request_result";
 			permission_id: string;
 			reply?: "once" | "always" | "reject";
+			error?: string;
+	  }
+	| {
+			type: "acp_request_result";
+			response?: JsonRpcResponse;
 			error?: string;
 	  }
 	| {
@@ -402,6 +435,42 @@ interface EventFrame {
 				detail: Record<string, string>;
 		  };
 }
+
+type VmLifecycleEventPayload = Extract<
+	EventFrame["payload"],
+	{ type: "vm_lifecycle" }
+>;
+type ProcessOutputEventPayload = Extract<
+	EventFrame["payload"],
+	{ type: "process_output" }
+>;
+
+export type SidecarEventSelector =
+	| {
+			any: true;
+	  }
+	| {
+			type: "vm_lifecycle";
+			ownership?: OwnershipScope;
+			state?: VmLifecycleEventPayload["state"];
+	  }
+	| {
+			type: "process_output";
+			ownership?: OwnershipScope;
+			processId?: string;
+			channel?: ProcessOutputEventPayload["channel"];
+	  }
+	| {
+			type: "process_exited";
+			ownership?: OwnershipScope;
+			processId?: string;
+	  }
+	| {
+			type: "structured";
+			ownership?: OwnershipScope;
+			name?: string;
+			detail?: Record<string, string>;
+	  };
 
 export interface SidecarRequestFrame {
 	frame_type: "sidecar_request";
@@ -551,7 +620,7 @@ interface ResponseFrame {
 					command: string;
 					args?: string[];
 					cwd: string;
-					status: "running" | "exited";
+					status: "running" | "exited" | "stopped";
 					exit_code?: number;
 				}>;
 		  }
@@ -572,6 +641,10 @@ interface ResponseFrame {
 					port?: number;
 					path?: string;
 				};
+		  }
+		| {
+				type: "vm_fetch_result";
+				response_json: string;
 		  }
 		| {
 				type: "signal_state";
@@ -622,6 +695,7 @@ export interface NativeSidecarSpawnOptions {
 	command?: string;
 	args?: string[];
 	frameTimeoutMs?: number;
+	eventBufferCapacity?: number;
 	// Migration-only compatibility path for pre-BARE test fixtures.
 	payloadCodec?: NativeTransportPayloadCodec;
 }
@@ -660,6 +734,10 @@ export interface SidecarSessionState {
 	agentCapabilities?: unknown;
 	agentInfo?: unknown;
 	events: SidecarSequencedNotification[];
+}
+
+export interface GetSessionStateOptions {
+	acknowledgedSequenceNumber?: number;
 }
 
 export interface SidecarMountPluginDescriptor {
@@ -719,14 +797,18 @@ export interface SidecarPermissionsPolicy {
 	fs?: SidecarPermissionScope<SidecarFsPermissionRule>;
 	network?: SidecarPermissionScope<SidecarPatternPermissionRule>;
 	childProcess?: SidecarPermissionScope<SidecarPatternPermissionRule>;
+	process?: SidecarPermissionScope<SidecarPatternPermissionRule>;
 	env?: SidecarPermissionScope<SidecarPatternPermissionRule>;
+	tool?: SidecarPermissionScope<SidecarPatternPermissionRule>;
 }
 
 type WirePermissionsPolicy = {
 	fs?: SidecarPermissionScope<SidecarFsPermissionRule>;
 	network?: SidecarPermissionScope<SidecarPatternPermissionRule>;
 	child_process?: SidecarPermissionScope<SidecarPatternPermissionRule>;
+	process?: SidecarPermissionScope<SidecarPatternPermissionRule>;
 	env?: SidecarPermissionScope<SidecarPatternPermissionRule>;
+	tool?: SidecarPermissionScope<SidecarPatternPermissionRule>;
 };
 
 export interface SidecarProjectedModuleDescriptor {
@@ -739,12 +821,351 @@ type WireProjectedModuleDescriptor = {
 	entrypoint: string;
 };
 
+export class SidecarProcessExited extends Error {
+	readonly exitCode: number | null;
+	readonly signal: NodeJS.Signals | null;
+	readonly stderr: string;
+
+	constructor(options: {
+		exitCode: number | null;
+		signal: NodeJS.Signals | null;
+		stderr: string;
+	}) {
+		const reason =
+			options.signal !== null
+				? `signal ${options.signal}`
+				: options.exitCode !== null
+					? `code ${options.exitCode}`
+					: "disconnect";
+		super(
+			`sidecar process exited with ${reason}${formatSidecarStderrSuffix(options.stderr)}`,
+		);
+		this.name = "SidecarProcessExited";
+		this.exitCode = options.exitCode;
+		this.signal = options.signal;
+		this.stderr = options.stderr;
+	}
+}
+
+export class SidecarProcessError extends Error {
+	readonly childError: Error;
+	readonly stderr: string;
+
+	constructor(error: Error, stderr: string) {
+		super(
+			`sidecar process error: ${error.message}${formatSidecarStderrSuffix(stderr)}`,
+		);
+		this.name = "SidecarProcessError";
+		this.childError = error;
+		this.stderr = stderr;
+	}
+}
+
+export class SidecarEventBufferOverflow extends Error {
+	readonly capacity: number;
+	readonly bufferedEvents: number;
+	readonly eventType: EventFrame["payload"]["type"];
+
+	constructor(options: {
+		capacity: number;
+		bufferedEvents: number;
+		eventType: EventFrame["payload"]["type"];
+	}) {
+		super(
+			`sidecar event buffer overflow after ${options.bufferedEvents} queued events (capacity ${options.capacity}) while buffering ${options.eventType}`,
+		);
+		this.name = "SidecarEventBufferOverflow";
+		this.capacity = options.capacity;
+		this.bufferedEvents = options.bufferedEvents;
+		this.eventType = options.eventType;
+	}
+}
+
+function abortError(reason: unknown): Error {
+	return reason instanceof Error
+		? reason
+		: new Error(reason ? String(reason) : "sidecar event wait aborted");
+}
+
+type BufferedEventRecord = {
+	event: EventFrame;
+	keys: readonly string[];
+};
+
+type EventWaitMatcher = {
+	matches: (event: EventFrame) => boolean;
+	bufferKey: string | null;
+};
+
+function ownershipSelectorKey(ownership: OwnershipScope): string {
+	switch (ownership.scope) {
+		case "connection":
+			return `connection:${ownership.connection_id}`;
+		case "session":
+			return `session:${ownership.connection_id}:${ownership.session_id}`;
+		case "vm":
+			return `vm:${ownership.connection_id}:${ownership.session_id}:${ownership.vm_id}`;
+	}
+}
+
+function ownershipMatchesSelector(
+	selector: OwnershipScope | undefined,
+	ownership: OwnershipScope,
+): boolean {
+	if (!selector) {
+		return true;
+	}
+	switch (selector.scope) {
+		case "connection":
+			return (
+				ownership.scope === "connection" &&
+				selector.connection_id === ownership.connection_id
+			);
+		case "session":
+			return (
+				ownership.scope === "session" &&
+				selector.connection_id === ownership.connection_id &&
+				selector.session_id === ownership.session_id
+			);
+		case "vm":
+			return (
+				ownership.scope === "vm" &&
+				selector.connection_id === ownership.connection_id &&
+				selector.session_id === ownership.session_id &&
+				selector.vm_id === ownership.vm_id
+			);
+	}
+}
+
+function buildBufferKey(
+	type: EventFrame["payload"]["type"],
+	options?: {
+		ownership?: OwnershipScope;
+		state?: string;
+		processId?: string;
+		channel?: string;
+		name?: string;
+	},
+): string {
+	const parts = [`type:${type}`];
+	if (options?.ownership) {
+		parts.push(`ownership:${ownershipSelectorKey(options.ownership)}`);
+	}
+	if (options?.state) {
+		parts.push(`state:${options.state}`);
+	}
+	if (options?.processId) {
+		parts.push(`process:${options.processId}`);
+	}
+	if (options?.channel) {
+		parts.push(`channel:${options.channel}`);
+	}
+	if (options?.name) {
+		parts.push(`name:${options.name}`);
+	}
+	return parts.join("|");
+}
+
+function selectorMatchesEvent(
+	selector: SidecarEventSelector,
+	event: EventFrame,
+): boolean {
+	if ("any" in selector) {
+		return true;
+	}
+	if (event.payload.type !== selector.type) {
+		return false;
+	}
+	if (!ownershipMatchesSelector(selector.ownership, event.ownership)) {
+		return false;
+	}
+	switch (selector.type) {
+		case "vm_lifecycle": {
+			const payload = event.payload as VmLifecycleEventPayload;
+			return selector.state === undefined || payload.state === selector.state;
+		}
+		case "process_output": {
+			const payload = event.payload as ProcessOutputEventPayload;
+			return (
+				(selector.processId === undefined ||
+					payload.process_id === selector.processId) &&
+				(selector.channel === undefined || payload.channel === selector.channel)
+			);
+		}
+		case "process_exited": {
+			const payload = event.payload as Extract<
+				EventFrame["payload"],
+				{ type: "process_exited" }
+			>;
+			return (
+				selector.processId === undefined ||
+				payload.process_id === selector.processId
+			);
+		}
+		case "structured": {
+			const payload = event.payload as Extract<
+				EventFrame["payload"],
+				{ type: "structured" }
+			>;
+			if (selector.name !== undefined && payload.name !== selector.name) {
+				return false;
+			}
+			if (!selector.detail) {
+				return true;
+			}
+			for (const [key, value] of Object.entries(selector.detail)) {
+				if (payload.detail[key] !== value) {
+					return false;
+				}
+			}
+			return true;
+		}
+	}
+}
+
+function selectorBufferKey(selector: SidecarEventSelector): string | null {
+	if ("any" in selector) {
+		return ANY_BUFFERED_EVENT_KEY;
+	}
+	switch (selector.type) {
+		case "vm_lifecycle":
+			return buildBufferKey(selector.type, {
+				ownership: selector.ownership,
+				state: selector.state,
+			});
+		case "process_output":
+			return buildBufferKey(selector.type, {
+				ownership: selector.ownership,
+				processId: selector.processId,
+				channel: selector.channel,
+			});
+		case "process_exited":
+			return buildBufferKey(selector.type, {
+				ownership: selector.ownership,
+				processId: selector.processId,
+			});
+		case "structured":
+			if (selector.detail) {
+				return null;
+			}
+			return buildBufferKey(selector.type, {
+				ownership: selector.ownership,
+				name: selector.name,
+			});
+	}
+}
+
+function normalizeEventMatcher(
+	selector: SidecarEventSelector | ((event: EventFrame) => boolean),
+): EventWaitMatcher {
+	if (typeof selector === "function") {
+		return {
+			matches: selector,
+			bufferKey: null,
+		};
+	}
+	return {
+		matches: (event) => selectorMatchesEvent(selector, event),
+		bufferKey: selectorBufferKey(selector),
+	};
+}
+
+function eventBufferKeys(event: EventFrame): string[] {
+	const owner = event.ownership;
+	const keys = new Set<string>([
+		ANY_BUFFERED_EVENT_KEY,
+		buildBufferKey(event.payload.type),
+		buildBufferKey(event.payload.type, { ownership: owner }),
+	]);
+	switch (event.payload.type) {
+		case "vm_lifecycle":
+			keys.add(
+				buildBufferKey(event.payload.type, {
+					state: event.payload.state,
+				}),
+			);
+			keys.add(
+				buildBufferKey(event.payload.type, {
+					ownership: owner,
+					state: event.payload.state,
+				}),
+			);
+			break;
+		case "process_output":
+			keys.add(
+				buildBufferKey(event.payload.type, {
+					processId: event.payload.process_id,
+				}),
+			);
+			keys.add(
+				buildBufferKey(event.payload.type, {
+					channel: event.payload.channel,
+				}),
+			);
+			keys.add(
+				buildBufferKey(event.payload.type, {
+					processId: event.payload.process_id,
+					channel: event.payload.channel,
+				}),
+			);
+			keys.add(
+				buildBufferKey(event.payload.type, {
+					ownership: owner,
+					processId: event.payload.process_id,
+				}),
+			);
+			keys.add(
+				buildBufferKey(event.payload.type, {
+					ownership: owner,
+					channel: event.payload.channel,
+				}),
+			);
+			keys.add(
+				buildBufferKey(event.payload.type, {
+					ownership: owner,
+					processId: event.payload.process_id,
+					channel: event.payload.channel,
+				}),
+			);
+			break;
+		case "process_exited":
+			keys.add(
+				buildBufferKey(event.payload.type, {
+					processId: event.payload.process_id,
+				}),
+			);
+			keys.add(
+				buildBufferKey(event.payload.type, {
+					ownership: owner,
+					processId: event.payload.process_id,
+				}),
+			);
+			break;
+		case "structured":
+			keys.add(
+				buildBufferKey(event.payload.type, {
+					name: event.payload.name,
+				}),
+			);
+			keys.add(
+				buildBufferKey(event.payload.type, {
+					ownership: owner,
+					name: event.payload.name,
+				}),
+			);
+			break;
+	}
+	return [...keys];
+}
+
 export class NativeSidecarProcessClient {
 	private readonly child: ChildProcessWithoutNullStreams;
-	private readonly bufferedEvents: EventFrame[] = [];
+	private readonly bufferedEvents = new Map<number, BufferedEventRecord>();
+	private readonly bufferedEventQueues = new Map<string, Set<number>>();
 	private readonly eventListeners = new Set<(event: EventFrame) => void>();
 	private readonly stderrChunks: Buffer[] = [];
 	private readonly frameTimeoutMs: number;
+	private readonly eventBufferCapacity: number;
 	private readonly payloadCodec: NativeTransportPayloadCodec;
 	private stdoutBuffer = Buffer.alloc(0);
 	private stdoutClosedError: Error | null = null;
@@ -757,21 +1178,24 @@ export class NativeSidecarProcessClient {
 		}
 	>();
 	private readonly eventWaiters = new Set<{
-		matcher: (event: EventFrame) => boolean;
+		matches: (event: EventFrame) => boolean;
 		resolve: (event: EventFrame) => void;
 		reject: (error: Error) => void;
-		timer: ReturnType<typeof setTimeout>;
+		timer: ReturnType<typeof setTimeout> | null;
 	}>();
 	private nextRequestId = 1;
+	private nextBufferedEventId = 1;
 	private sidecarRequestHandler: SidecarRequestHandler | null = null;
 
 	private constructor(
 		child: ChildProcessWithoutNullStreams,
 		frameTimeoutMs: number,
+		eventBufferCapacity: number,
 		payloadCodec: NativeTransportPayloadCodec,
 	) {
 		this.child = child;
 		this.frameTimeoutMs = frameTimeoutMs;
+		this.eventBufferCapacity = eventBufferCapacity;
 		this.payloadCodec = payloadCodec;
 		this.child.stderr.on("data", (chunk: Buffer | string) => {
 			this.stderrChunks.push(
@@ -785,22 +1209,41 @@ export class NativeSidecarProcessClient {
 			this.drainFrames();
 		});
 		this.child.stdout.on("end", () => {
-			this.stdoutClosedError = new Error(
-				`sidecar stdout closed while reading frame\nstderr:\n${this.stderrText()}`,
+			this.failPermanently(
+				this.currentProcessExitError() ??
+					new SidecarProcessExited({
+						exitCode: this.child.exitCode,
+						signal: this.child.signalCode,
+						stderr: this.stderrText(),
+					}),
 			);
-			this.rejectPending(this.stdoutClosedError);
 		});
 		this.child.stdout.on("error", (error) => {
 			const normalized =
 				error instanceof Error ? error : new Error(String(error));
-			this.stdoutClosedError = normalized;
-			this.rejectPending(normalized);
+			this.failPermanently(this.currentProcessExitError() ?? normalized);
+		});
+		this.child.on("exit", (code, signal) => {
+			this.failPermanently(
+				new SidecarProcessExited({
+					exitCode: code,
+					signal,
+					stderr: this.stderrText(),
+				}),
+			);
+		});
+		this.child.on("error", (error) => {
+			const normalized =
+				error instanceof Error ? error : new Error(String(error));
+			this.failPermanently(
+				new SidecarProcessError(normalized, this.stderrText()),
+			);
 		});
 	}
 
 	static spawn(options: NativeSidecarSpawnOptions): NativeSidecarProcessClient {
 		const child = spawn(
-			options.command ?? "cargo",
+			options.command ?? resolveCargoBinary(),
 			options.args ?? ["run", "-q", "-p", "agent-os-sidecar"],
 			{
 				cwd: options.cwd,
@@ -810,6 +1253,7 @@ export class NativeSidecarProcessClient {
 		return new NativeSidecarProcessClient(
 			child,
 			options.frameTimeoutMs ?? 60_000,
+			options.eventBufferCapacity ?? DEFAULT_EVENT_BUFFER_CAPACITY,
 			options.payloadCodec ?? "bare",
 		);
 	}
@@ -837,6 +1281,7 @@ export class NativeSidecarProcessClient {
 				type: "authenticate",
 				client_name: "packages-core-vitest",
 				auth_token: "packages-core-vitest-token",
+				bridge_version: BRIDGE_CONTRACT_VERSION,
 			},
 		});
 		if (authenticated.payload.type !== "authenticated") {
@@ -916,6 +1361,8 @@ export class NativeSidecarProcessClient {
 			env?: Record<string, string>;
 			cwd: string;
 			mcpServers?: unknown[];
+			protocolVersion?: number;
+			clientCapabilities?: unknown;
 		},
 	): Promise<SidecarSessionCreated> {
 		const response = await this.sendRequest({
@@ -934,6 +1381,8 @@ export class NativeSidecarProcessClient {
 				env: options.env ?? {},
 				cwd: options.cwd,
 				mcp_servers: options.mcpServers ?? [],
+				protocol_version: options.protocolVersion ?? 1,
+				client_capabilities: options.clientCapabilities ?? {},
 			},
 		});
 		if (response.payload.type !== "session_created") {
@@ -988,6 +1437,7 @@ export class NativeSidecarProcessClient {
 		session: AuthenticatedSession,
 		vm: CreatedVm,
 		sessionId: string,
+		options?: GetSessionStateOptions,
 	): Promise<SidecarSessionState> {
 		const response = await this.sendRequest({
 			ownership: {
@@ -999,6 +1449,11 @@ export class NativeSidecarProcessClient {
 			payload: {
 				type: "get_session_state",
 				session_id: sessionId,
+				...(options?.acknowledgedSequenceNumber !== undefined
+					? {
+							acknowledged_sequence_number: options.acknowledgedSequenceNumber,
+						}
+					: {}),
 			},
 		});
 		if (response.payload.type !== "session_state") {
@@ -1788,6 +2243,39 @@ export class NativeSidecarProcessClient {
 			: null;
 	}
 
+	async vmFetch(
+		session: AuthenticatedSession,
+		vm: CreatedVm,
+		request: {
+			port: number;
+			method: string;
+			path: string;
+			headersJson: string;
+			body?: string;
+		},
+	): Promise<string> {
+		const response = await this.sendRequest({
+			ownership: {
+				scope: "vm",
+				connection_id: session.connectionId,
+				session_id: session.sessionId,
+				vm_id: vm.vmId,
+			},
+			payload: {
+				type: "vm_fetch",
+				port: request.port,
+				method: request.method,
+				path: request.path,
+				headers_json: request.headersJson,
+				...(request.body !== undefined ? { body: request.body } : {}),
+			},
+		});
+		if (response.payload.type !== "vm_fetch_result") {
+			throw new Error(`unexpected vm_fetch response: ${response.payload.type}`);
+		}
+		return response.payload.response_json;
+	}
+
 	async getSignalState(
 		session: AuthenticatedSession,
 		vm: CreatedVm,
@@ -1853,64 +2341,135 @@ export class NativeSidecarProcessClient {
 	}
 
 	async waitForEvent(
-		matcher: (event: EventFrame) => boolean,
-		timeoutMs = 30_000,
+		matcher:
+			| SidecarEventSelector
+			| ((event: EventFrame) => boolean),
+		timeoutMs?: number,
+		options?: {
+			signal?: AbortSignal;
+		},
 	): Promise<EventFrame> {
-		const bufferedIndex = this.bufferedEvents.findIndex(matcher);
-		if (bufferedIndex >= 0) {
-			return this.bufferedEvents.splice(bufferedIndex, 1)[0];
+		if (this.stdoutClosedError instanceof SidecarEventBufferOverflow) {
+			throw this.stdoutClosedError;
+		}
+		const normalizedMatcher = normalizeEventMatcher(matcher);
+		const bufferedEvent = this.takeBufferedEvent(normalizedMatcher);
+		if (bufferedEvent) {
+			return bufferedEvent;
 		}
 		if (this.stdoutClosedError) {
 			throw this.stdoutClosedError;
 		}
+		if (options?.signal?.aborted) {
+			throw abortError(options.signal.reason);
+		}
 
 		return await new Promise<EventFrame>((resolve, reject) => {
+			let abortListener: (() => void) | null = null;
 			const waiter = {
-				matcher,
+				matches: normalizedMatcher.matches,
 				resolve: (event: EventFrame) => {
-					clearTimeout(waiter.timer);
+					if (waiter.timer !== null) {
+						clearTimeout(waiter.timer);
+					}
+					if (abortListener) {
+						options?.signal?.removeEventListener("abort", abortListener);
+						abortListener = null;
+					}
 					this.eventWaiters.delete(waiter);
 					resolve(event);
 				},
 				reject: (error: Error) => {
-					clearTimeout(waiter.timer);
+					if (waiter.timer !== null) {
+						clearTimeout(waiter.timer);
+					}
+					if (abortListener) {
+						options?.signal?.removeEventListener("abort", abortListener);
+						abortListener = null;
+					}
 					this.eventWaiters.delete(waiter);
 					reject(error);
 				},
-				timer: setTimeout(() => {
-					this.eventWaiters.delete(waiter);
-					reject(
-						new Error(
-							`timed out waiting for sidecar event\nstderr:\n${this.stderrText()}`,
-						),
-					);
-				}, timeoutMs),
+				timer:
+					timeoutMs === undefined
+						? null
+						: setTimeout(() => {
+								this.eventWaiters.delete(waiter);
+								reject(
+									new Error(
+										`timed out waiting for sidecar event\nstderr:\n${this.stderrText()}`,
+									),
+								);
+						  }, timeoutMs),
 			};
+			if (options?.signal) {
+				abortListener = () => {
+					waiter.reject(abortError(options.signal?.reason));
+				};
+				options.signal.addEventListener("abort", abortListener, { once: true });
+			}
 			this.eventWaiters.add(waiter);
 		});
 	}
 
 	async dispose(): Promise<void> {
-		if (!this.child.stdin.destroyed) {
-			this.child.stdin.end();
+		const disposeError = new Error("native sidecar disposed");
+		if (!this.stdoutClosedError) {
+			this.stdoutClosedError = disposeError;
+			this.rejectPending(disposeError);
 		}
-		const exitCode = await new Promise<number | null>((resolve, reject) => {
+
+		if (!this.child.stdin.destroyed) {
+			try {
+				this.child.stdin.end();
+			} catch {
+				// stdin may already be closing; the child exit watcher below will catch up.
+			}
+		}
+
+		const exitCode = await this.waitForChildExit(SIDECAR_GRACEFUL_EXIT_MS);
+		if (exitCode === null) {
+			try {
+				this.child.kill("SIGKILL");
+			} catch {
+				// child may have just exited between the timeout and the kill attempt.
+			}
+			await this.waitForChildExit(SIDECAR_FORCE_EXIT_MS);
+		}
+
+		try {
+			this.child.stdin.destroy();
+		} catch {
+			// best-effort; the child is gone so the FD will close on its own.
+		}
+		try {
+			this.child.stdout.destroy();
+		} catch {
+			// best-effort; the child is gone so the FD will close on its own.
+		}
+		try {
+			this.child.stderr.destroy();
+		} catch {
+			// best-effort; the child is gone so the FD will close on its own.
+		}
+
+		if (exitCode !== null && exitCode !== 0 && this.child.signalCode === null) {
+			throw new Error(
+				`native sidecar exited with code ${exitCode}\nstderr:\n${this.stderrText()}`,
+			);
+		}
+	}
+
+	private waitForChildExit(timeoutMs: number): Promise<number | null> {
+		return new Promise<number | null>((resolve) => {
+			let timer: ReturnType<typeof setTimeout> | null = null;
 			const cleanup = () => {
-				this.child.off("error", onError);
 				this.child.off("exit", onExit);
 				this.child.off("close", onClose);
-			};
-			const resolveIfExited = (): boolean => {
-				if (this.child.exitCode !== null || this.child.signalCode !== null) {
-					cleanup();
-					resolve(this.child.exitCode);
-					return true;
+				if (timer !== null) {
+					clearTimeout(timer);
+					timer = null;
 				}
-				return false;
-			};
-			const onError = (error: Error) => {
-				cleanup();
-				reject(error);
 			};
 			const onExit = (code: number | null) => {
 				cleanup();
@@ -1920,22 +2479,17 @@ export class NativeSidecarProcessClient {
 				cleanup();
 				resolve(code);
 			};
-
-			if (resolveIfExited()) {
+			if (this.child.exitCode !== null || this.child.signalCode !== null) {
+				resolve(this.child.exitCode);
 				return;
 			}
-
-			this.child.on("error", onError);
 			this.child.on("exit", onExit);
 			this.child.on("close", onClose);
-
-			resolveIfExited();
+			timer = setTimeout(() => {
+				cleanup();
+				resolve(null);
+			}, timeoutMs);
 		});
-		if (exitCode !== 0 && exitCode !== null) {
-			throw new Error(
-				`native sidecar exited with code ${exitCode}\nstderr:\n${this.stderrText()}`,
-			);
-		}
 	}
 
 	private async sendRequest(input: {
@@ -2110,8 +2664,7 @@ export class NativeSidecarProcessClient {
 		} catch (error) {
 			const normalized =
 				error instanceof Error ? error : new Error(String(error));
-			this.stdoutClosedError = normalized;
-			this.rejectPending(normalized);
+			this.failPermanently(normalized);
 		}
 	}
 
@@ -2124,13 +2677,96 @@ export class NativeSidecarProcessClient {
 			}
 		}
 		for (const waiter of this.eventWaiters) {
-			if (!waiter.matcher(event)) {
+			if (!waiter.matches(event)) {
 				continue;
 			}
 			waiter.resolve(event);
 			return;
 		}
-		this.bufferedEvents.push(event);
+		this.bufferEvent(event);
+	}
+
+	private bufferEvent(event: EventFrame): void {
+		if (this.bufferedEvents.size >= this.eventBufferCapacity) {
+			this.failPermanently(
+				new SidecarEventBufferOverflow({
+					capacity: this.eventBufferCapacity,
+					bufferedEvents: this.bufferedEvents.size,
+					eventType: event.payload.type,
+				}),
+			);
+			return;
+		}
+		const eventId = this.nextBufferedEventId++;
+		const keys = eventBufferKeys(event);
+		this.bufferedEvents.set(eventId, {
+			event,
+			keys,
+		});
+		for (const key of keys) {
+			const queue = this.bufferedEventQueues.get(key);
+			if (queue) {
+				queue.add(eventId);
+				continue;
+			}
+			this.bufferedEventQueues.set(key, new Set([eventId]));
+		}
+	}
+
+	private takeBufferedEvent(matcher: EventWaitMatcher): EventFrame | null {
+		if (matcher.bufferKey !== null) {
+			return this.takeBufferedEventFromKey(matcher.bufferKey);
+		}
+		const queue = this.bufferedEventQueues.get(ANY_BUFFERED_EVENT_KEY);
+		if (!queue) {
+			return null;
+		}
+		for (const eventId of queue) {
+			const record = this.bufferedEvents.get(eventId);
+			if (!record) {
+				continue;
+			}
+			if (!matcher.matches(record.event)) {
+				continue;
+			}
+			return this.removeBufferedEvent(eventId);
+		}
+		return null;
+	}
+
+	private takeBufferedEventFromKey(key: string): EventFrame | null {
+		const queue = this.bufferedEventQueues.get(key);
+		if (!queue) {
+			return null;
+		}
+		for (const eventId of queue) {
+			const record = this.bufferedEvents.get(eventId);
+			if (!record) {
+				queue.delete(eventId);
+				continue;
+			}
+			return this.removeBufferedEvent(eventId);
+		}
+		return null;
+	}
+
+	private removeBufferedEvent(eventId: number): EventFrame | null {
+		const record = this.bufferedEvents.get(eventId);
+		if (!record) {
+			return null;
+		}
+		this.bufferedEvents.delete(eventId);
+		for (const key of record.keys) {
+			const queue = this.bufferedEventQueues.get(key);
+			if (!queue) {
+				continue;
+			}
+			queue.delete(eventId);
+			if (queue.size === 0) {
+				this.bufferedEventQueues.delete(key);
+			}
+		}
+		return record.event;
 	}
 
 	private rejectPending(error: Error): void {
@@ -2147,6 +2783,38 @@ export class NativeSidecarProcessClient {
 	private stderrText(): string {
 		return Buffer.concat(this.stderrChunks).toString("utf8").trim();
 	}
+
+	private failPermanently(error: Error): void {
+		if (this.stdoutClosedError) {
+			if (
+				this.stdoutClosedError instanceof SidecarProcessExited &&
+				this.stdoutClosedError.exitCode === null &&
+				this.stdoutClosedError.signal === null &&
+				error instanceof SidecarProcessExited &&
+				(error.exitCode !== null || error.signal !== null)
+			) {
+				this.stdoutClosedError = error;
+			}
+			return;
+		}
+		this.stdoutClosedError = error;
+		this.rejectPending(error);
+	}
+
+	private currentProcessExitError(): SidecarProcessExited | null {
+		if (this.child.exitCode === null && this.child.signalCode === null) {
+			return null;
+		}
+		return new SidecarProcessExited({
+			exitCode: this.child.exitCode,
+			signal: this.child.signalCode,
+			stderr: this.stderrText(),
+		});
+	}
+}
+
+function formatSidecarStderrSuffix(stderr: string): string {
+	return stderr ? `\nstderr:\n${stderr}` : "";
 }
 
 function encodeProtocolFramePayload(
@@ -2214,29 +2882,28 @@ const BARE_DISPOSE_REASON = createBareEnumCodec<
 	["connection_closed", 2],
 	["host_shutdown", 3],
 ]);
-const BARE_GUEST_FILESYSTEM_OPERATION = createBareEnumCodec<
-	GuestFilesystemOperation
->([
-	["read_file", 1],
-	["write_file", 2],
-	["create_dir", 3],
-	["mkdir", 4],
-	["exists", 5],
-	["stat", 6],
-	["lstat", 7],
-	["read_dir", 8],
-	["remove_file", 9],
-	["remove_dir", 10],
-	["rename", 11],
-	["realpath", 12],
-	["symlink", 13],
-	["read_link", 14],
-	["link", 15],
-	["chmod", 16],
-	["chown", 17],
-	["utimes", 18],
-	["truncate", 19],
-]);
+const BARE_GUEST_FILESYSTEM_OPERATION =
+	createBareEnumCodec<GuestFilesystemOperation>([
+		["read_file", 1],
+		["write_file", 2],
+		["create_dir", 3],
+		["mkdir", 4],
+		["exists", 5],
+		["stat", 6],
+		["lstat", 7],
+		["read_dir", 8],
+		["remove_file", 9],
+		["remove_dir", 10],
+		["rename", 11],
+		["realpath", 12],
+		["symlink", 13],
+		["read_link", 14],
+		["link", 15],
+		["chmod", 16],
+		["chown", 17],
+		["utimes", 18],
+		["truncate", 19],
+	]);
 const BARE_PERMISSION_MODE = createBareEnumCodec<SidecarPermissionMode>([
 	["allow", 1],
 	["ask", 2],
@@ -2255,12 +2922,11 @@ const BARE_ROOT_FILESYSTEM_MODE = createBareEnumCodec<
 	["ephemeral", 1],
 	["read_only", 2],
 ]);
-const BARE_ROOT_FILESYSTEM_ENTRY_ENCODING = createBareEnumCodec<
-	RootFilesystemEntryEncoding
->([
-	["utf8", 1],
-	["base64", 2],
-]);
+const BARE_ROOT_FILESYSTEM_ENTRY_ENCODING =
+	createBareEnumCodec<RootFilesystemEntryEncoding>([
+		["utf8", 1],
+		["base64", 2],
+	]);
 const BARE_WASM_PERMISSION_TIER = createBareEnumCodec<WasmPermissionTier>([
 	["full", 1],
 	["read-write", 2],
@@ -2294,6 +2960,7 @@ const BARE_PROCESS_SNAPSHOT_STATUS = createBareEnumCodec<
 >([
 	["running", 1],
 	["exited", 2],
+	["stopped", 3],
 ]);
 
 class BareWriter {
@@ -2653,7 +3320,10 @@ function decodeProtocolSchema(reader: BareReader): typeof PROTOCOL_SCHEMA {
 	} as typeof PROTOCOL_SCHEMA;
 }
 
-function encodeOwnershipScope(writer: BareWriter, ownership: OwnershipScope): void {
+function encodeOwnershipScope(
+	writer: BareWriter,
+	ownership: OwnershipScope,
+): void {
 	switch (ownership.scope) {
 		case "connection":
 			writer.writeVarUint(1);
@@ -2698,12 +3368,16 @@ function decodeOwnershipScope(reader: BareReader): OwnershipScope {
 	}
 }
 
-function encodeRequestPayload(writer: BareWriter, payload: RequestPayload): void {
+function encodeRequestPayload(
+	writer: BareWriter,
+	payload: RequestPayload,
+): void {
 	switch (payload.type) {
 		case "authenticate":
 			writer.writeVarUint(1);
 			writer.writeString(payload.client_name);
 			writer.writeString(payload.auth_token);
+			writer.writeU32(payload.bridge_version);
 			return;
 		case "open_session":
 			writer.writeVarUint(2);
@@ -2739,7 +3413,9 @@ function encodeRequestPayload(writer: BareWriter, payload: RequestPayload): void
 				),
 			);
 			writer.writeString(payload.adapter_entrypoint);
-			writer.writeList(payload.args ?? [], (value) => writer.writeString(value));
+			writer.writeList(payload.args ?? [], (value) =>
+				writer.writeString(value),
+			);
 			writer.writeMap(
 				Object.entries(payload.env ?? {}),
 				(key) => writer.writeString(key),
@@ -2747,7 +3423,16 @@ function encodeRequestPayload(writer: BareWriter, payload: RequestPayload): void
 			);
 			writer.writeString(payload.cwd);
 			writer.writeList(payload.mcp_servers ?? [], (value) =>
-				writer.writeString(stringifyJsonUtf8(value, "create_session.mcp_servers")),
+				writer.writeString(
+					stringifyJsonUtf8(value, "create_session.mcp_servers"),
+				),
+			);
+			writer.writeU64(payload.protocol_version ?? 1);
+			writer.writeString(
+				stringifyJsonUtf8(
+					payload.client_capabilities ?? {},
+					"create_session.client_capabilities",
+				),
 			);
 			return;
 		case "session_request":
@@ -2761,6 +3446,9 @@ function encodeRequestPayload(writer: BareWriter, payload: RequestPayload): void
 		case "get_session_state":
 			writer.writeVarUint(6);
 			writer.writeString(payload.session_id);
+			writer.writeOptional(payload.acknowledged_sequence_number, (value) =>
+				writer.writeU64(value),
+			);
 			return;
 		case "close_agent_session":
 			writer.writeVarUint(7);
@@ -2867,8 +3555,12 @@ function encodeRequestPayload(writer: BareWriter, payload: RequestPayload): void
 			writer.writeOptional(payload.destination_path, (value) =>
 				writer.writeString(value),
 			);
-			writer.writeOptional(payload.target, (value) => writer.writeString(value));
-			writer.writeOptional(payload.content, (value) => writer.writeString(value));
+			writer.writeOptional(payload.target, (value) =>
+				writer.writeString(value),
+			);
+			writer.writeOptional(payload.content, (value) =>
+				writer.writeString(value),
+			);
 			writer.writeOptional(payload.encoding, (value) =>
 				writer.writeVarUint(
 					BARE_ROOT_FILESYSTEM_ENTRY_ENCODING.encode(
@@ -2891,7 +3583,9 @@ function encodeRequestPayload(writer: BareWriter, payload: RequestPayload): void
 		case "execute":
 			writer.writeVarUint(19);
 			writer.writeString(payload.process_id);
-			writer.writeOptional(payload.command, (value) => writer.writeString(value));
+			writer.writeOptional(payload.command, (value) =>
+				writer.writeString(value),
+			);
 			writer.writeOptional(payload.runtime, (value) =>
 				writer.writeVarUint(
 					BARE_GUEST_RUNTIME_KIND.encode(
@@ -2903,7 +3597,9 @@ function encodeRequestPayload(writer: BareWriter, payload: RequestPayload): void
 			writer.writeOptional(payload.entrypoint, (value) =>
 				writer.writeString(value),
 			);
-			writer.writeList(payload.args ?? [], (value) => writer.writeString(value));
+			writer.writeList(payload.args ?? [], (value) =>
+				writer.writeString(value),
+			);
 			writer.writeMap(
 				Object.entries(payload.env ?? {}),
 				(key) => writer.writeString(key),
@@ -2944,6 +3640,14 @@ function encodeRequestPayload(writer: BareWriter, payload: RequestPayload): void
 			writer.writeOptional(payload.host, (value) => writer.writeString(value));
 			writer.writeOptional(payload.port, (value) => writer.writeU16(value));
 			return;
+		case "vm_fetch":
+			writer.writeVarUint(32);
+			writer.writeU16(payload.port);
+			writer.writeString(payload.method);
+			writer.writeString(payload.path);
+			writer.writeString(payload.headers_json);
+			writer.writeOptional(payload.body, (value) => writer.writeString(value));
+			return;
 		case "get_signal_state":
 			writer.writeVarUint(26);
 			writer.writeString(payload.process_id);
@@ -2975,8 +3679,17 @@ function encodeSidecarResponsePayload(
 			writer.writeOptional(payload.reply, (value) => writer.writeString(value));
 			writer.writeOptional(payload.error, (value) => writer.writeString(value));
 			return;
-		case "js_bridge_result":
+		case "acp_request_result":
 			writer.writeVarUint(3);
+			writer.writeOptional(payload.response, (value) =>
+				writer.writeString(
+					stringifyJsonUtf8(value, "acp_request_result.response"),
+				),
+			);
+			writer.writeOptional(payload.error, (value) => writer.writeString(value));
+			return;
+		case "js_bridge_result":
+			writer.writeVarUint(4);
 			writer.writeString(payload.call_id);
 			writer.writeOptional(payload.result, (value) =>
 				writer.writeString(stringifyJsonUtf8(value, "js_bridge_result.result")),
@@ -3086,7 +3799,9 @@ function decodeResponsePayload(reader: BareReader): ResponseFrame["payload"] {
 			);
 			const events = reader.readList(
 				() => ({
-					sequence_number: reader.readU64("session_state.events.sequence_number"),
+					sequence_number: reader.readU64(
+						"session_state.events.sequence_number",
+					),
 					notification: parseJsonUtf8(
 						reader.readString("session_state.events.notification"),
 						"session state notification",
@@ -3136,7 +3851,9 @@ function decodeResponsePayload(reader: BareReader): ResponseFrame["payload"] {
 				type: "toolkit_registered",
 				toolkit: reader.readString("toolkit_registered.toolkit"),
 				command_count: reader.readU32(),
-				prompt_markdown: reader.readString("toolkit_registered.prompt_markdown"),
+				prompt_markdown: reader.readString(
+					"toolkit_registered.prompt_markdown",
+				),
 			};
 		case 12:
 			return {
@@ -3247,7 +3964,9 @@ function decodeResponsePayload(reader: BareReader): ResponseFrame["payload"] {
 				),
 			};
 		case 24: {
-			const listener = reader.readOptional(() => decodeSocketStateEntry(reader));
+			const listener = reader.readOptional(() =>
+				decodeSocketStateEntry(reader),
+			);
 			return {
 				type: "listener_snapshot",
 				...(listener !== undefined ? { listener } : {}),
@@ -3276,6 +3995,11 @@ function decodeResponsePayload(reader: BareReader): ResponseFrame["payload"] {
 			return {
 				type: "zombie_timer_count",
 				count: reader.readU64("zombie_timer_count.count"),
+			};
+		case 33:
+			return {
+				type: "vm_fetch_result",
+				response_json: reader.readString("vm_fetch_result.response_json"),
 			};
 		case 28:
 			throw new Error(
@@ -3373,6 +4097,17 @@ function decodeSidecarRequestPayload(
 				),
 			};
 		case 3:
+			return {
+				type: "acp_request",
+				session_id: reader.readString("acp_request.session_id"),
+				request: toJsonRpcRequest(
+					parseJsonUtf8(
+						reader.readString("acp_request.request"),
+						"ACP request payload",
+					),
+				),
+			};
+		case 4:
 			return {
 				type: "js_bridge_call",
 				call_id: reader.readString("js_bridge_call.call_id"),
@@ -3543,7 +4278,13 @@ function encodeWirePermissionsPolicy(
 	writer.writeOptional(policy.child_process, (value) =>
 		encodePatternPermissionScope(writer, value),
 	);
+	writer.writeOptional(policy.process, (value) =>
+		encodePatternPermissionScope(writer, value),
+	);
 	writer.writeOptional(policy.env, (value) =>
+		encodePatternPermissionScope(writer, value),
+	);
+	writer.writeOptional(policy.tool, (value) =>
 		encodePatternPermissionScope(writer, value),
 	);
 }
@@ -3562,8 +4303,12 @@ function encodeFilesystemPermissionScope(
 		writer.writeVarUint(BARE_PERMISSION_MODE.encode(value, "permission mode")),
 	);
 	writer.writeList(scope.rules, (rule) => {
-		writer.writeVarUint(BARE_PERMISSION_MODE.encode(rule.mode, "permission mode"));
-		writer.writeList(rule.operations ?? [], (value) => writer.writeString(value));
+		writer.writeVarUint(
+			BARE_PERMISSION_MODE.encode(rule.mode, "permission mode"),
+		);
+		writer.writeList(rule.operations ?? [], (value) =>
+			writer.writeString(value),
+		);
 		writer.writeList(rule.paths ?? [], (value) => writer.writeString(value));
 	});
 }
@@ -3582,8 +4327,12 @@ function encodePatternPermissionScope(
 		writer.writeVarUint(BARE_PERMISSION_MODE.encode(value, "permission mode")),
 	);
 	writer.writeList(scope.rules, (rule) => {
-		writer.writeVarUint(BARE_PERMISSION_MODE.encode(rule.mode, "permission mode"));
-		writer.writeList(rule.operations ?? [], (value) => writer.writeString(value));
+		writer.writeVarUint(
+			BARE_PERMISSION_MODE.encode(rule.mode, "permission mode"),
+		);
+		writer.writeList(rule.operations ?? [], (value) =>
+			writer.writeString(value),
+		);
 		writer.writeList(rule.patterns ?? [], (value) => writer.writeString(value));
 	});
 }
@@ -3632,7 +4381,10 @@ function decodeGuestFilesystemStat(reader: BareReader): GuestFilesystemStat {
 
 function decodeProcessSnapshotEntry(
 	reader: BareReader,
-): Extract<ResponseFrame["payload"], { type: "process_snapshot" }>["processes"][number] {
+): Extract<
+	ResponseFrame["payload"],
+	{ type: "process_snapshot" }
+>["processes"][number] {
 	const process_id = reader.readString("process_snapshot.process_id");
 	const pid = reader.readU32();
 	const ppid = reader.readU32();
@@ -3665,13 +4417,20 @@ function decodeProcessSnapshotEntry(
 	};
 }
 
-function decodeSocketStateEntry(
-	reader: BareReader,
-): { process_id: string; host?: string; port?: number; path?: string } {
+function decodeSocketStateEntry(reader: BareReader): {
+	process_id: string;
+	host?: string;
+	port?: number;
+	path?: string;
+} {
 	const process_id = reader.readString("socket_state.process_id");
-	const host = reader.readOptional(() => reader.readString("socket_state.host"));
+	const host = reader.readOptional(() =>
+		reader.readString("socket_state.host"),
+	);
 	const port = reader.readOptional(() => reader.readU16());
-	const path = reader.readOptional(() => reader.readString("socket_state.path"));
+	const path = reader.readOptional(() =>
+		reader.readString("socket_state.path"),
+	);
 	return {
 		process_id,
 		...(host !== undefined ? { host } : {}),
@@ -3680,9 +4439,7 @@ function decodeSocketStateEntry(
 	};
 }
 
-function decodeSignalHandlerRegistration(
-	reader: BareReader,
-): {
+function decodeSignalHandlerRegistration(reader: BareReader): {
 	action: SidecarSignalHandlerRegistration["action"];
 	mask: number[];
 	flags: number;
@@ -3737,6 +4494,8 @@ function isMatchingSidecarResponsePayload(
 			return response.type === "tool_invocation_result";
 		case "permission_request":
 			return response.type === "permission_request_result";
+		case "acp_request":
+			return response.type === "acp_request_result";
 		case "js_bridge_call":
 			return response.type === "js_bridge_result";
 	}
@@ -3758,6 +4517,11 @@ function errorSidecarResponsePayload(
 			return {
 				type: "permission_request_result",
 				permission_id: request.permission_id,
+				error: message,
+			};
+		case "acp_request":
+			return {
+				type: "acp_request_result",
 				error: message,
 			};
 		case "js_bridge_call":
@@ -3793,7 +4557,7 @@ function toSidecarProcessSnapshotEntry(entry: {
 	command: string;
 	args?: string[];
 	cwd: string;
-	status: "running" | "exited";
+	status: "running" | "exited" | "stopped";
 	exit_code?: number;
 }): SidecarProcessSnapshotEntry {
 	return {
@@ -3922,7 +4686,9 @@ function toWirePermissionsPolicy(
 		fs: policy.fs,
 		network: policy.network,
 		child_process: policy.childProcess,
+		process: policy.process,
 		env: policy.env,
+		tool: policy.tool,
 	};
 }
 
@@ -3957,6 +4723,22 @@ function toJsonRpcNotification(value: unknown): JsonRpcNotification {
 		throw new Error("sidecar returned invalid JSON-RPC notification");
 	}
 	return notification as unknown as JsonRpcNotification;
+}
+
+function toJsonRpcRequest(value: unknown): JsonRpcRequest {
+	const request = toJsonRpcRecord(value);
+	if (
+		request.jsonrpc !== "2.0" ||
+		!("id" in request) ||
+		(typeof request.id !== "number" &&
+			typeof request.id !== "string" &&
+			request.id !== null) ||
+		!("method" in request) ||
+		typeof request.method !== "string"
+	) {
+		throw new Error("sidecar returned invalid JSON-RPC request");
+	}
+	return request as unknown as JsonRpcRequest;
 }
 
 function toJsonRpcResponse(value: unknown): JsonRpcResponse {
