@@ -180,7 +180,17 @@ pushd "$SRC_DIR" >/dev/null
 export DUCKDB_CUSTOM_PLATFORM="wasm_eh_pyodide"
 export CMAKE_ARGS="-DDUCKDB_EXPLICIT_PLATFORM=wasm_eh_pyodide $EXTRA_CMAKE_ARGS"
 export CFLAGS="-fwasm-exceptions"
-export LDFLAGS="-fwasm-exceptions"
+# httpfs's emscripten HTTP client uses emscripten_fetch (synchronous mode
+# via ASYNCIFY). FETCH=1 enables the fetch API; ASYNCIFY=1 lets sync
+# wrappers around async JS fetch work on the main thread (Pyodide-on-Node
+# runs in main thread of the worker). Adding these only when building
+# WITH httpfs — bootstrap (no httpfs) doesn't need them and avoids the
+# ~2x binary growth.
+if [ "${HTTPFS_PROBE:-0}" = "1" ] || [ "${RECIPE_PATCHES_OPTIONAL:-0}" = "0" ]; then
+  export LDFLAGS="-fwasm-exceptions -sFETCH=1 -sASYNCIFY=1"
+else
+  export LDFLAGS="-fwasm-exceptions"
+fi
 export OVERRIDE_GIT_DESCRIBE="$DUCKDB_REF"
 # Pin pyodide-build to use the xbuildenv matching the Pyodide runtime
 # version the wheel will run under (else it defaults to a newer xbuildenv

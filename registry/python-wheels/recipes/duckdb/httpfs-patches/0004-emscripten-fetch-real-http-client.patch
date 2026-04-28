@@ -1,0 +1,211 @@
+diff --git a/src/httpfs_client_wasm.cpp b/src/httpfs_client_wasm.cpp
+index 4095281..abc7e73 100644
+--- a/src/httpfs_client_wasm.cpp
++++ b/src/httpfs_client_wasm.cpp
+@@ -1,15 +1,204 @@
++// Pyodide / emscripten HTTP client for httpfs.
++//
++// Replaces the upstream stub (which throws "InitializeClient is not
++// expected to be called") with a real implementation that uses
++// emscripten_fetch in synchronous mode. This works under Pyodide
++// because:
++//   - Pyodide doesn't expose POSIX TCP sockets — direct httplib code
++//     can't make outbound HTTP connections (verified: urllib + raw
++//     socket both fail).
++//   - emscripten_fetch routes through the host JS environment's fetch
++//     API, which Pyodide's runtime allows. Combined with `-sASYNCIFY=1`
++//     at link time, the synchronous flag makes the C++ side block
++//     until the JS fetch resolves.
++//
++// Build flags required (set in build_duckdb_pyodide.sh):
++//   -sFETCH=1      — links the emscripten_fetch implementation
++//   -sASYNCIFY=1   — allows EMSCRIPTEN_FETCH_SYNCHRONOUS on main thread
++//
++// HTTPS works automatically — the JS host's fetch handles TLS, mbedtls
++// is not in the picture. The httplib + WASI/socket gymnastics from the
++// agent-os WASI build is replaced entirely.
+ #include "httpfs_client.hpp"
+ #include "http_state.hpp"
++#include "duckdb/common/exception.hpp"
++
++#include <emscripten/fetch.h>
++#include <cstring>
++#include <sstream>
++#include <vector>
+ 
+ namespace duckdb {
+ 
++// Parse "Header-Name: value\r\n" lines emscripten_fetch returns.
++static void ParseResponseHeaders(const char *raw, HTTPHeaders &out) {
++	if (!raw) return;
++	std::istringstream stream(raw);
++	std::string line;
++	while (std::getline(stream, line)) {
++		if (line.empty() || line == "\r") continue;
++		// Strip trailing \r
++		if (!line.empty() && line.back() == '\r') line.pop_back();
++		auto colon = line.find(':');
++		if (colon == std::string::npos) continue;
++		auto key = line.substr(0, colon);
++		auto val = line.substr(colon + 1);
++		// Trim leading spaces in value
++		while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(0, 1);
++		out.Insert(key, val);
++	}
++}
++
++class EmscriptenFetchClient : public HTTPClient {
++public:
++	EmscriptenFetchClient(HTTPFSParams &http_params_p, const string &proto_host_port_p)
++	    : proto_host_port(proto_host_port_p), state(http_params_p.state) {
++	}
++
++	void Initialize(HTTPParams &http_p) override {
++		HTTPFSParams &http_params = (HTTPFSParams &)http_p;
++		state = http_params.state;
++		bearer_token = http_params.bearer_token;
++		// Note: TLS verification, CA file, proxy settings, timeouts are all
++		// handled by the host JS fetch implementation. We don't pass them
++		// through — emscripten_fetch doesn't expose those knobs and the
++		// host environment's defaults (Node's HTTPS module / browser
++		// security context) are appropriate for both prod S3 and MinIO
++		// dev (the latter typically runs on plain HTTP anyway).
++	}
++
++	unique_ptr<HTTPResponse> DoFetch(const char *method, const string &path, const HTTPHeaders &headers,
++	                                  const_data_ptr_t body_data, idx_t body_len) {
++		emscripten_fetch_attr_t attr;
++		emscripten_fetch_attr_init(&attr);
++		strncpy(attr.requestMethod, method, sizeof(attr.requestMethod) - 1);
++		attr.requestMethod[sizeof(attr.requestMethod) - 1] = '\0';
++		attr.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY | EMSCRIPTEN_FETCH_SYNCHRONOUS;
++
++		// Build the full URL — proto_host_port already has scheme + authority.
++		string full_url = proto_host_port + path;
++
++		// Headers: emscripten wants a NULL-terminated flat array of
++		// alternating key, value pointers. Stash the strings in a
++		// vector so the c_str() pointers stay valid through the call.
++		std::vector<std::string> hdr_storage;
++		hdr_storage.reserve((headers.end() - headers.begin()) * 2 + 2);
++		for (auto it = headers.begin(); it != headers.end(); ++it) {
++			hdr_storage.push_back(it->first);
++			hdr_storage.push_back(it->second);
++		}
++		if (!bearer_token.empty()) {
++			hdr_storage.push_back("Authorization");
++			hdr_storage.push_back("Bearer " + bearer_token);
++		}
++		std::vector<const char *> hdr_array;
++		for (auto &s : hdr_storage) hdr_array.push_back(s.c_str());
++		hdr_array.push_back(nullptr);
++		attr.requestHeaders = hdr_array.data();
++
++		if (body_data && body_len > 0) {
++			attr.requestData = reinterpret_cast<const char *>(body_data);
++			attr.requestDataSize = static_cast<size_t>(body_len);
++		}
++
++		emscripten_fetch_t *fetch = emscripten_fetch(&attr, full_url.c_str());
++
++		auto response = make_uniq<HTTPResponse>(static_cast<HTTPStatusCode>(fetch ? fetch->status : 0));
++		if (state) {
++			if (strcmp(method, "GET") == 0) state->get_count++;
++			else if (strcmp(method, "HEAD") == 0) state->head_count++;
++			else if (strcmp(method, "PUT") == 0) state->put_count++;
++			else if (strcmp(method, "POST") == 0) state->post_count++;
++			else if (strcmp(method, "DELETE") == 0) state->delete_count++;
++		}
++
++		if (!fetch) {
++			response->reason = "emscripten_fetch returned null";
++			return response;
++		}
++
++		if (fetch->statusText[0]) {
++			response->reason = fetch->statusText;
++		}
++
++		if (fetch->numBytes > 0 && fetch->data) {
++			response->body.assign(fetch->data, fetch->numBytes);
++			if (state) state->total_bytes_received += fetch->numBytes;
++		}
++
++		// Parse response headers — emscripten_fetch_get_response_headers
++		// returns a single buffer of "Key: Value\r\n" lines.
++		size_t hdr_size = emscripten_fetch_get_response_headers_length(fetch);
++		if (hdr_size > 0) {
++			std::vector<char> hdr_buf(hdr_size + 1, 0);
++			emscripten_fetch_get_response_headers(fetch, hdr_buf.data(), hdr_buf.size());
++			ParseResponseHeaders(hdr_buf.data(), response->headers);
++		}
++
++		response->success = (fetch->status >= 200 && fetch->status < 300);
++		emscripten_fetch_close(fetch);
++		return response;
++	}
++
++	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
++		auto resp = DoFetch("GET", info.path, info.headers, nullptr, 0);
++		// If a content_handler was supplied, stream the body through it.
++		// emscripten_fetch with LOAD_TO_MEMORY gives us the full body in
++		// one shot; we just deliver it as a single chunk.
++		if (info.content_handler && !resp->body.empty()) {
++			info.content_handler(reinterpret_cast<const_data_ptr_t>(resp->body.data()), resp->body.size());
++		}
++		if (info.response_handler) {
++			info.response_handler(*resp);
++		}
++		return resp;
++	}
++
++	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
++		return DoFetch("HEAD", info.path, info.headers, nullptr, 0);
++	}
++
++	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
++		return DoFetch("PUT", info.path, info.headers, info.buffer_in, info.buffer_in_len);
++	}
++
++	unique_ptr<HTTPResponse> Post(PostRequestInfo &info) override {
++		auto resp = DoFetch(info.send_post_as_get_request ? "GET" : "POST", info.path, info.headers, info.buffer_in,
++		                     info.buffer_in_len);
++		info.buffer_out = resp->body;
++		return resp;
++	}
++
++	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
++		return DoFetch("DELETE", info.path, info.headers, nullptr, 0);
++	}
++
++	string proto_host_port;
++	shared_ptr<HTTPState> state;
++	string bearer_token;
++};
++
+ unique_ptr<HTTPClient> HTTPFSUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
+-	throw InternalException("HTTPFSUtil::InitializeClient is not expected to be called");
++	return make_uniq<EmscriptenFetchClient>(reinterpret_cast<HTTPFSParams &>(http_params), proto_host_port);
+ }
+ 
+ unordered_map<string, string> HTTPFSUtil::ParseGetParameters(const string &text) {
++	// Same simple parser the upstream native path uses — split "k=v&k=v"
++	// on the first '?' and on '&'.
+ 	unordered_map<string, string> result;
+-	// TODO: HTTPFSUtil::ParseGetParameters is currently not implemented
++	auto qmark = text.find('?');
++	std::string query = (qmark == std::string::npos) ? "" : text.substr(qmark + 1);
++	if (query.empty()) return result;
++	std::stringstream ss(query);
++	std::string pair;
++	while (std::getline(ss, pair, '&')) {
++		auto eq = pair.find('=');
++		if (eq == std::string::npos) {
++			result[pair] = "";
++		} else {
++			result[pair.substr(0, eq)] = pair.substr(eq + 1);
++		}
++	}
+ 	return result;
+ }
+ 
