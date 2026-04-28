@@ -51,16 +51,125 @@
  */
 
 /** Pre-built worker source — inlined in WORKER_SOURCE so the side
- *  worker can be spawned via `eval: true` Workers. */
+ *  worker can be spawned via `eval: true` Workers.
+ *
+ *  Includes inline SigV4 signing for `s3://bucket/key` URLs. The side
+ *  worker reads AWS-style credentials from process.env and builds a
+ *  signed `https://<endpoint>/<bucket>/<key>` request. Endpoint comes
+ *  from BUCKET_ENDPOINT or ENDPOINT (set by the host's session env).
+ *  Anonymous endpoints (public S3, MinIO with anonymous access) work
+ *  without credentials — we skip signing if either key is empty. */
 const SAB_SIDE_WORKER_JS = String.raw`
 const { parentPort } = require("node:worker_threads");
+const { createHmac, createHash } = require("node:crypto");
+
+// Tiny SigV4 signer. Inlined to avoid a dep on @aws-sdk/signature-v4
+// (which would balloon the wheel preload bundle by several MB).
+function sha256Hex(buf) {
+  return createHash("sha256").update(buf).digest("hex");
+}
+function hmac(key, data) {
+  return createHmac("sha256", key).update(data).digest();
+}
+function signSigV4(method, url, body, accessKey, secretKey, region, service) {
+  const u = new URL(url);
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
+  const dateStamp = amzDate.slice(0, 8);
+  const payloadHash = sha256Hex(body || "");
+  const canonicalUri = u.pathname || "/";
+  const canonicalQuery = [...u.searchParams.entries()]
+    .sort()
+    .map(([k, v]) => encodeURIComponent(k) + "=" + encodeURIComponent(v))
+    .join("&");
+  const headers = {
+    host: u.host,
+    "x-amz-date": amzDate,
+    "x-amz-content-sha256": payloadHash,
+  };
+  const sortedHeaderKeys = Object.keys(headers).sort();
+  const canonicalHeaders = sortedHeaderKeys.map((k) => k + ":" + headers[k] + "\n").join("");
+  const signedHeaders = sortedHeaderKeys.join(";");
+  const canonicalRequest = [
+    method,
+    canonicalUri,
+    canonicalQuery,
+    canonicalHeaders,
+    signedHeaders,
+    payloadHash,
+  ].join("\n");
+  const credentialScope = dateStamp + "/" + region + "/" + service + "/aws4_request";
+  const stringToSign = [
+    "AWS4-HMAC-SHA256",
+    amzDate,
+    credentialScope,
+    sha256Hex(canonicalRequest),
+  ].join("\n");
+  const kDate = hmac("AWS4" + secretKey, dateStamp);
+  const kRegion = hmac(kDate, region);
+  const kService = hmac(kRegion, service);
+  const kSigning = hmac(kService, "aws4_request");
+  const signature = createHmac("sha256", kSigning)
+    .update(stringToSign)
+    .digest("hex");
+  const authorization =
+    "AWS4-HMAC-SHA256 Credential=" + accessKey + "/" + credentialScope +
+    ", SignedHeaders=" + signedHeaders + ", Signature=" + signature;
+  return { ...headers, Authorization: authorization };
+}
+
+// Translate s3://bucket/key to a signed https://endpoint/bucket/key
+// (path-style addressing — works with both AWS S3 and MinIO without
+// DNS shenanigans). Returns { url, headers } ready to pass to fetch.
+function rewriteS3Url(s3url, init) {
+  if (!s3url.startsWith("s3://")) return null;
+  const stripped = s3url.slice("s3://".length);
+  const slash = stripped.indexOf("/");
+  if (slash < 0) return null;
+  const bucket = stripped.slice(0, slash);
+  const key = stripped.slice(slash + 1);
+  const endpoint =
+    process.env.BUCKET_ENDPOINT || process.env.ENDPOINT || "https://s3.amazonaws.com";
+  const region = process.env.BUCKET_REGION || process.env.REGION || "us-east-1";
+  const access = process.env.BUCKET_ACCESS_KEY_ID || process.env.ACCESS_KEY_ID || "";
+  const secret = process.env.BUCKET_SECRET_ACCESS_KEY || process.env.SECRET_ACCESS_KEY || "";
+
+  // Path-style URL: <endpoint>/<bucket>/<key>. AWS prefers virtual-host
+  // style for new buckets but path-style still works and matches MinIO.
+  const ep = endpoint.replace(/\/$/, "");
+  const url = ep + "/" + encodeURIComponent(bucket) + "/" + key.split("/").map(encodeURIComponent).join("/");
+
+  const method = (init && init.method) || "GET";
+  const userHeaders = (init && init.headers) || {};
+  const body = (init && init.body) || "";
+
+  let signedHeaders = {};
+  if (access && secret) {
+    signedHeaders = signSigV4(method, url, body, access, secret, region, "s3");
+  }
+  return {
+    url,
+    init: {
+      ...init,
+      method,
+      headers: { ...userHeaders, ...signedHeaders },
+    },
+  };
+}
 
 parentPort.on("message", async (msg) => {
   const { url, init, sab } = msg;
   const i32 = new Int32Array(sab, 0, 4);
   const fullView = new Uint8Array(sab);
   try {
-    const r = await fetch(url, init || {});
+    let actualUrl = url;
+    let actualInit = init || {};
+    const rewrite = rewriteS3Url(url, init);
+    if (rewrite) {
+      actualUrl = rewrite.url;
+      actualInit = rewrite.init;
+    }
+    const r = await fetch(actualUrl, actualInit);
     const buf = await r.arrayBuffer();
     const bodyBytes = new Uint8Array(buf);
     const cap = sab.byteLength - 16;
