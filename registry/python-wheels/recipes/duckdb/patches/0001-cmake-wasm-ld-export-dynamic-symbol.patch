@@ -1,30 +1,14 @@
-From: agent-os duckdb-pyodide build
-Subject: [PATCH] CMakeLists.txt: skip GNU ld export flags under emscripten
-
-wasm-ld doesn't support the GNU `--export-dynamic-symbol` linker flag;
-pyodide-build handles symbol exports via `--exports=whole_archive`
-instead. Add an emscripten branch before the generic UNIX branch so
-the linker doesn't choke on an unrecognized flag.
-
-Replicated from xlwings/duckdb-pyodide (scripts/patch_cmake.py — same
-change, pre-applied as a patch in this recipe so the build flow stays
-declarative).
-
----
- CMakeLists.txt | 4 ++++
- 1 file changed, 4 insertions(+)
-
 diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 02a059c..a3bb601 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -1,6 +1,10 @@
- if(APPLE)
-   target_link_options(_duckdb PRIVATE "LINKER:-exported_symbol,_duckdb_adbc_init"
-                                       "LINKER:-exported_symbol,_PyInit__duckdb")
+@@ -103,6 +103,9 @@ if(APPLE)
+   target_link_options(
+     _duckdb PRIVATE "LINKER:-exported_symbol,_duckdb_adbc_init"
+     "LINKER:-exported_symbol,_PyInit__duckdb")
 +elseif(EMSCRIPTEN)
 +  # wasm-ld does not support --export-dynamic-symbol; symbol exports are
 +  # handled by pyodide-build via --exports=whole_archive
  elseif(UNIX AND NOT APPLE)
    target_link_options(
      _duckdb PRIVATE "LINKER:--export-dynamic-symbol=duckdb_adbc_init"
-     "LINKER:--export-dynamic-symbol=PyInit__duckdb")

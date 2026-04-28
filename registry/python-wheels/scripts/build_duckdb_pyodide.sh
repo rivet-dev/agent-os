@@ -33,6 +33,13 @@ VENV_DIR="${1:?missing venv dir}"
 EMSDK_DIR="${2:?missing emsdk dir}"
 OUT_DIR="${3:?missing output dir}"
 
+# Make paths absolute — the build pushd's into the cloned source dir
+# and relative paths to the venv / out-dir would no longer resolve.
+to_abs() { python3 -c "import os, sys; print(os.path.abspath(sys.argv[1]))" "$1"; }
+VENV_DIR="$(to_abs "$VENV_DIR")"
+EMSDK_DIR="$(to_abs "$EMSDK_DIR")"
+OUT_DIR="$(to_abs "$OUT_DIR")"
+
 # Pin must match Makefile:DUCKDB_VERSION (without the "v" prefix —
 # we add it for the git ref). Keep in sync.
 DUCKDB_VERSION="${DUCKDB_VERSION:-1.5.0}"
