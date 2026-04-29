@@ -28,11 +28,11 @@ You don't have to choose: agentOS works with sandboxes through the [sandbox exte
 ## Quick start
 
 ```bash
-npm install @rivet-dev/agent-os @rivet-dev/agent-os-common @rivet-dev/agent-os-pi
+npm install @rivet-dev/agent-os-core @rivet-dev/agent-os-common @rivet-dev/agent-os-pi
 ```
 
 ```ts
-import { AgentOs } from "@rivet-dev/agent-os";
+import { AgentOs } from "@rivet-dev/agent-os-core";
 import common from "@rivet-dev/agent-os-common";
 import pi from "@rivet-dev/agent-os-pi";
 
