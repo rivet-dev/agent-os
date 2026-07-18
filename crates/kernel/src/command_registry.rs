@@ -1,7 +1,7 @@
 use crate::vfs::{VfsError, VfsResult, VirtualFileSystem};
 use std::collections::BTreeMap;
 
-const COMMAND_STUB: &[u8] = b"#!/bin/sh\n# kernel command stub\n";
+pub(crate) const COMMAND_STUB: &[u8] = b"#!/bin/sh\n# kernel command stub\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandDriver {
@@ -66,6 +66,45 @@ impl CommandRegistry {
         }
 
         Ok(())
+    }
+
+    /// Replace the complete command set currently owned by one driver.
+    ///
+    /// Ordinary `register` remains additive for bootstrap compatibility.
+    /// Runtime reconfiguration uses this exact replacement operation so a
+    /// removed package command cannot remain authoritative in the kernel.
+    pub fn replace(&mut self, driver: CommandDriver) -> VfsResult<Vec<String>> {
+        driver.validate_commands()?;
+        let driver_name = driver.name().to_owned();
+        let replacement = driver
+            .commands()
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let obsolete = self
+            .commands
+            .iter()
+            .filter_map(|(command, owner)| {
+                (owner.name() == driver_name && !replacement.contains(command))
+                    .then_some(command.clone())
+            })
+            .collect::<Vec<_>>();
+        for command in &obsolete {
+            self.commands.remove(command);
+        }
+        for command in driver.commands() {
+            if let Some(existing) = self.commands.get(command) {
+                if existing.name() != driver_name {
+                    self.warnings.push(format!(
+                        "command \"{command}\" overridden: {} -> {}",
+                        existing.name(),
+                        driver.name()
+                    ));
+                }
+            }
+            self.commands.insert(command.clone(), driver.clone());
+        }
+        Ok(obsolete)
     }
 
     pub fn warnings(&self) -> &[String] {

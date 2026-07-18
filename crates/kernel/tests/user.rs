@@ -160,8 +160,63 @@ fn getgroups_and_getgrgid_use_kernel_managed_group_state() {
         Some(String::from("group456:x:456:deploy"))
     );
     assert_eq!(
+        user.getgrnam("group456"),
+        Some(String::from("group456:x:456:deploy"))
+    );
+    assert_eq!(
         user.getgrgid(789),
         Some(String::from("group789:x:789:deploy"))
     );
     assert_eq!(user.getgrgid(999), None);
+    assert!(user
+        .group_entries()
+        .contains(&String::from("group789:x:789:deploy")));
+}
+
+#[test]
+fn explicit_groups_win_over_synthesized_account_groups() {
+    let user = UserManager::from_config(UserConfig {
+        gid: Some(123),
+        username: Some(String::from("deploy")),
+        group_name: Some(String::from("default-name")),
+        supplementary_gids: vec![456],
+        groups: vec![agentos_kernel::user::GroupRecord {
+            gid: 123,
+            name: String::from("explicit"),
+            members: vec![String::from("configured-member")],
+        }],
+        ..UserConfig::default()
+    });
+
+    assert_eq!(
+        user.getgrgid(123),
+        Some(String::from("explicit:x:123:configured-member"))
+    );
+    assert_eq!(user.getgrnam("default-name"), None);
+    assert_eq!(
+        user.getgrnam("group456"),
+        Some(String::from("group456:x:456:deploy"))
+    );
+}
+
+#[test]
+fn supplementary_credentials_do_not_rewrite_explicit_group_membership() {
+    let user = UserManager::from_config(UserConfig {
+        gid: Some(123),
+        username: Some(String::from("deploy")),
+        supplementary_gids: vec![456],
+        groups: vec![agentos_kernel::user::GroupRecord {
+            gid: 456,
+            name: String::from("audited"),
+            members: vec![String::from("configured-member")],
+        }],
+        ..UserConfig::default()
+    });
+
+    assert_eq!(user.getgroups(), vec![123, 456]);
+    assert_eq!(
+        user.getgrgid(456),
+        Some(String::from("audited:x:456:configured-member"))
+    );
+    assert_eq!(user.getgrnam("group456"), None);
 }

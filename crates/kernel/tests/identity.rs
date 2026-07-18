@@ -1,3 +1,4 @@
+use agentos_kernel::fd_table::O_RDONLY;
 use agentos_kernel::kernel::{KernelVm, KernelVmConfig, VirtualProcessOptions};
 use agentos_kernel::permissions::Permissions;
 use agentos_kernel::resource_accounting::ResourceLimits;
@@ -150,6 +151,227 @@ fn identity_syscalls_and_process_metadata_use_kernel_managed_values() {
     );
     let unknown_gid = kernel.getgrgid(77).expect_err("unknown gid should fail");
     assert_eq!(unknown_gid.code(), "ENOENT");
+}
+
+#[test]
+fn process_account_lookups_use_live_vfs_databases_with_config_fallback() {
+    let mut kernel = configured_kernel();
+    let process = kernel
+        .create_virtual_process(
+            "identity-driver",
+            "identity-driver",
+            "identity-check",
+            Vec::new(),
+            VirtualProcessOptions::default(),
+        )
+        .expect("create identity process");
+    let pid = process.pid();
+
+    assert_eq!(
+        kernel
+            .getpwnam_for_process("identity-driver", pid, "deploy")
+            .expect("configured passwd fallback"),
+        "deploy:x:501:502:Deploy User:/srv/deploy:/bin/bash"
+    );
+
+    kernel.mkdir("/etc", true).expect("create /etc");
+    kernel
+        .write_file(
+            "/etc/passwd",
+            b"malformed\nroot:x:0:0:root:/root:/bin/sh\nlive:x:42:43::/home/live:/bin/sh\n"
+                .to_vec(),
+        )
+        .expect("write passwd database");
+    kernel
+        .write_file(
+            "/etc/group",
+            b"malformed\nroot:x:0:root\nlive:x:43:live\n".to_vec(),
+        )
+        .expect("write group database");
+
+    assert_eq!(
+        kernel
+            .getpwuid_for_process("identity-driver", pid, 42)
+            .expect("live passwd id lookup"),
+        "live:x:42:43::/home/live:/bin/sh"
+    );
+    assert_eq!(
+        kernel
+            .getpwent_for_process("identity-driver", pid, 0)
+            .expect("live passwd enumeration"),
+        "root:x:0:0:root:/root:/bin/sh"
+    );
+    assert_eq!(
+        kernel
+            .getgrgid_for_process("identity-driver", pid, 43)
+            .expect("live group id lookup"),
+        "live:x:43:live"
+    );
+    assert_eq!(
+        kernel
+            .getgrent_for_process("identity-driver", pid, 0)
+            .expect("live group enumeration"),
+        "root:x:0:root"
+    );
+    assert_eq!(
+        kernel
+            .getpwnam_for_process("identity-driver", pid, "deploy")
+            .expect_err("present passwd database is authoritative")
+            .code(),
+        "ENOENT"
+    );
+
+    kernel
+        .remove_file("/etc/passwd")
+        .expect("remove live passwd database");
+    kernel
+        .symlink("/etc/missing-passwd", "/etc/passwd")
+        .expect("create dangling passwd database symlink");
+    assert_eq!(
+        kernel
+            .getpwnam_for_process("identity-driver", pid, "deploy")
+            .expect_err("present dangling database must not expose configured accounts")
+            .code(),
+        "ENOENT"
+    );
+    kernel
+        .remove_file("/etc/passwd")
+        .expect("remove dangling passwd database symlink");
+
+    kernel
+        .write_file("/etc/passwd", Vec::new())
+        .expect("replace passwd database with empty file");
+    assert_eq!(
+        kernel
+            .getpwnam_for_process("identity-driver", pid, "deploy")
+            .expect_err("empty present passwd database is authoritative")
+            .code(),
+        "ENOENT"
+    );
+
+    kernel
+        .write_file(
+            "/etc/passwd",
+            b"updated:x:42:99::/srv/updated:/bin/bash\n".to_vec(),
+        )
+        .expect("replace passwd database");
+    assert_eq!(
+        kernel
+            .getpwuid_for_process("identity-driver", pid, 42)
+            .expect("lookup observes live replacement"),
+        "updated:x:42:99::/srv/updated:/bin/bash"
+    );
+}
+
+#[test]
+fn process_account_database_reads_obey_the_configured_pread_limit() {
+    let mut config = KernelVmConfig::new("vm-account-database-limit");
+    config.permissions = Permissions::allow_all();
+    config.resources.max_pread_bytes = Some(64);
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    let process = kernel
+        .create_virtual_process(
+            "identity-driver",
+            "identity-driver",
+            "identity-check",
+            Vec::new(),
+            VirtualProcessOptions::default(),
+        )
+        .expect("create identity process");
+    let pid = process.pid();
+    kernel.mkdir("/etc", true).expect("create /etc");
+
+    let prefix = "root:x:0:0::/:";
+    let exact = format!("{prefix}{}", "s".repeat(64 - prefix.len()));
+    assert_eq!(exact.len(), 64);
+    kernel
+        .write_file("/etc/passwd", exact.as_bytes().to_vec())
+        .expect("write exact-limit passwd database");
+    assert_eq!(
+        kernel
+            .getpwuid_for_process("identity-driver", pid, 0)
+            .expect("exact-limit database read"),
+        exact
+    );
+
+    kernel
+        .write_file("/etc/passwd", vec![b'x'; 65])
+        .expect("write oversized passwd database");
+    let error = kernel
+        .getpwuid_for_process("identity-driver", pid, 0)
+        .expect_err("database above pread cap must fail before allocation");
+    assert_eq!(error.code(), "EINVAL");
+    assert!(error
+        .to_string()
+        .contains("limitName=limits.resources.maxPreadBytes"));
+    assert!(error
+        .to_string()
+        .contains("raise limits.resources.maxPreadBytes"));
+}
+
+#[test]
+fn process_full_file_reads_bound_regular_proc_and_device_payloads() {
+    let mut config = KernelVmConfig::new("vm-process-read-limit");
+    config.permissions = Permissions::allow_all();
+    config.resources.max_pread_bytes = Some(4_096);
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    let process = kernel
+        .create_virtual_process(
+            "identity-driver",
+            "identity-driver",
+            "identity-check",
+            vec![String::from("argument")],
+            VirtualProcessOptions::default(),
+        )
+        .expect("create identity process");
+    let pid = process.pid();
+    kernel.mkdir("/tmp", true).expect("create /tmp");
+
+    let exact = vec![b'x'; 4_096];
+    kernel
+        .write_file("/tmp/exact", exact.clone())
+        .expect("write exact-limit regular file");
+    assert_eq!(
+        kernel
+            .read_file_for_process("identity-driver", pid, "/tmp/exact")
+            .expect("read exact-limit regular file"),
+        exact
+    );
+
+    kernel
+        .write_file("/tmp/oversized", vec![b'x'; 4_097])
+        .expect("write oversized regular file");
+    let error = kernel
+        .read_file_for_process("identity-driver", pid, "/tmp/oversized")
+        .expect_err("regular file above pread cap must fail before allocation");
+    assert_eq!(error.code(), "EINVAL");
+    assert!(error
+        .to_string()
+        .contains("limitName=limits.resources.maxPreadBytes"));
+
+    let fd = kernel
+        .fd_open("identity-driver", pid, "/tmp/oversized", O_RDONLY, None)
+        .expect("open oversized file before proc-fd read");
+    let proc_error = kernel
+        .read_file_for_process("identity-driver", pid, &format!("/proc/self/fd/{fd}"))
+        .expect_err("proc fd must not bypass the bounded regular-file read");
+    assert_eq!(proc_error.code(), "EINVAL");
+    assert!(proc_error
+        .to_string()
+        .contains("limitName=limits.resources.maxPreadBytes"));
+
+    assert_eq!(
+        kernel
+            .read_file_for_process("identity-driver", pid, "/proc/self/cmdline")
+            .expect("dynamic proc file remains readable"),
+        b"identity-check\0argument\0".to_vec()
+    );
+    assert_eq!(
+        kernel
+            .read_file_for_process("identity-driver", pid, "/dev/zero")
+            .expect("zero-sized virtual device stat does not truncate its payload"),
+        vec![0; 4_096]
+    );
 }
 
 #[test]
@@ -359,7 +581,7 @@ fn procfs_exposes_linux_like_identity_and_system_files() {
     assert!(idle_seconds >= uptime_seconds);
 
     let version = read_utf8(&mut kernel, "/proc/version");
-    assert!(version.starts_with("Linux version 6.8.0-agentos"));
+    assert!(version.starts_with("Linux version 6.8.0-secure-exec"));
 
     let status_stat = kernel
         .stat(&format!("/proc/{pid}/status"))

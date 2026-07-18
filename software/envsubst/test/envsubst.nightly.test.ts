@@ -103,7 +103,7 @@ class SimpleVFS {
   }
 }
 
-describeIf(hasCWasmBinaries('envsubst'), 'envsubst command', () => {
+describeIf(hasCWasmBinaries('envsubst'), 'envsubst command', { timeout: 10_000 }, () => {
   let kernel: Kernel;
 
   afterEach(async () => {

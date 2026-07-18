@@ -50,6 +50,7 @@ export interface LiveQueueSnapshotEntry {
 
 export interface LiveResourceSnapshot {
 	running_processes: number;
+	stopped_processes: number;
 	exited_processes: number;
 	fd_tables: number;
 	open_fds: number;
@@ -452,6 +453,10 @@ export function fromGeneratedResponsePayload(
 				running_processes: bigIntToSafeNumber(
 					payload.val.runningProcesses,
 					"resource_snapshot.running_processes",
+				),
+				stopped_processes: bigIntToSafeNumber(
+					payload.val.stoppedProcesses,
+					"resource_snapshot.stopped_processes",
 				),
 				exited_processes: bigIntToSafeNumber(
 					payload.val.exitedProcesses,

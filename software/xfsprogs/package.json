@@ -16,7 +16,7 @@
 	"scripts": {
 		"build": "agentos-toolchain stage --commands-dir ../../toolchain/target/wasm32-wasip1/release/commands --if-missing skip && tsc && agentos-toolchain build",
 		"check-types": "tsc --noEmit",
-		"test": "vitest run test/ --passWithNoTests"
+		"test": "vitest run test/"
 	},
 	"devDependencies": {
 		"@agentos-software/manifest": "workspace:*",

@@ -67,7 +67,12 @@ pub fn dispatch_stream_event(scope: &mut v8::HandleScope, event_type: &str, payl
     }
 }
 
-pub fn dispatch_signal_event(scope: &mut v8::HandleScope, signal_name: &str, signal: i32) {
+pub fn dispatch_signal_event(
+    scope: &mut v8::HandleScope,
+    signal_name: &str,
+    signal: i32,
+    delivery_token: u64,
+) {
     let payload = v8::Object::new(scope);
     let signal_key = v8::String::new(scope, "signal").expect("static V8 string");
     let signal_value = v8::String::new(scope, signal_name).expect("signal V8 string");
@@ -78,6 +83,13 @@ pub fn dispatch_signal_event(scope: &mut v8::HandleScope, signal_name: &str, sig
     let action_key = v8::String::new(scope, "action").expect("static V8 string");
     let action_value = v8::String::new(scope, "default").expect("static V8 string");
     payload.set(scope, action_key.into(), action_value.into());
+    let delivery_token_key = v8::String::new(scope, "deliveryToken").expect("static V8 string");
+    let delivery_token_value = v8::Number::new(scope, delivery_token as f64);
+    payload.set(
+        scope,
+        delivery_token_key.into(),
+        delivery_token_value.into(),
+    );
     dispatch_stream_value(scope, "signal", payload.into());
 }
 

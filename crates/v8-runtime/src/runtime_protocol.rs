@@ -52,6 +52,7 @@ pub enum RuntimeCommand {
     PublishSignal {
         session_id: String,
         signal: i32,
+        delivery_token: u64,
     },
     PublishTimer {
         session_id: String,

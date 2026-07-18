@@ -139,6 +139,10 @@ const BUILTIN_EXPECTATIONS: &[BuiltinExpectation] = &[
         status: BuiltinStatus::Polyfilled,
     },
     BuiltinExpectation {
+        name: "assert/strict",
+        status: BuiltinStatus::Polyfilled,
+    },
+    BuiltinExpectation {
         name: "constants",
         status: BuiltinStatus::Polyfilled,
     },
@@ -196,7 +200,7 @@ const BUILTIN_EXPECTATIONS: &[BuiltinExpectation] = &[
     },
     BuiltinExpectation {
         name: "inspector",
-        status: BuiltinStatus::Denied,
+        status: BuiltinStatus::StubOk,
     },
     BuiltinExpectation {
         name: "v8",
@@ -238,6 +242,7 @@ const BUILTIN_EXPECTATIONS: &[BuiltinExpectation] = &[
 
 const EXPECTED_RUNTIME_BUILTINS: &[&str] = &[
     "assert",
+    "assert/strict",
     "async_hooks",
     "buffer",
     "child_process",

@@ -107,7 +107,11 @@ where
         socket_id,
         InetSocketAddress::new(host, port),
     ) {
-        let _ = kernel.socket_close(driver, pid, socket_id);
+        if let Err(cleanup_error) = kernel.socket_close(driver, pid, socket_id) {
+            eprintln!(
+                "ERR_AGENTOS_SOCKET_ROLLBACK: failed to close socket {socket_id} after connect failure: {cleanup_error}"
+            );
+        }
         return Err(kernel_error(error));
     }
     let record = kernel.socket_get(socket_id);
@@ -142,7 +146,11 @@ where
         .socket_bind_inet(driver, pid, socket_id, InetSocketAddress::new(host, port))
         .and_then(|()| kernel.socket_listen(driver, pid, socket_id, backlog));
     if let Err(error) = result {
-        let _ = kernel.socket_close(driver, pid, socket_id);
+        if let Err(cleanup_error) = kernel.socket_close(driver, pid, socket_id) {
+            eprintln!(
+                "ERR_AGENTOS_SOCKET_ROLLBACK: failed to close socket {socket_id} after listen setup failure: {cleanup_error}"
+            );
+        }
         return Err(kernel_error(error));
     }
     let record = kernel.socket_get(socket_id);
@@ -273,7 +281,11 @@ where
     if let Err(error) =
         kernel.socket_bind_inet(driver, pid, socket_id, InetSocketAddress::new(host, port))
     {
-        let _ = kernel.socket_close(driver, pid, socket_id);
+        if let Err(cleanup_error) = kernel.socket_close(driver, pid, socket_id) {
+            eprintln!(
+                "ERR_AGENTOS_SOCKET_ROLLBACK: failed to close socket {socket_id} after UDP bind failure: {cleanup_error}"
+            );
+        }
         return Err(kernel_error(error));
     }
     let record = kernel.socket_get(socket_id);
@@ -364,9 +376,12 @@ where
 {
     let socket_id = require_socket_id(request)?;
     let host = optional_str(request, "host").unwrap_or(DEFAULT_LOOPBACK_HOST);
-    let port = optional_u64(request, "port")
-        .map(|value| u16::try_from(value).unwrap_or(0))
-        .unwrap_or(0);
+    let port = match optional_u64(request, "port") {
+        Some(value) => u16::try_from(value).map_err(|_| {
+            SidecarCoreError::new("guest kernel call field `port` must be a valid port")
+        })?,
+        None => 0,
+    };
     kernel
         .socket_bind_inet(driver, pid, socket_id, InetSocketAddress::new(host, port))
         .map_err(kernel_error)?;
@@ -582,7 +597,7 @@ fn would_block(error: &KernelError) -> bool {
 }
 
 fn kernel_error(error: KernelError) -> SidecarCoreError {
-    SidecarCoreError::new(error.to_string())
+    SidecarCoreError::typed(error.code(), error.message())
 }
 
 #[cfg(test)]
@@ -621,6 +636,62 @@ mod tests {
         let bytes =
             handle_guest_kernel_call(kernel, pid, "shell", operation, &payload).expect("dispatch");
         serde_json::from_slice(&bytes).expect("decode response")
+    }
+
+    fn call_error(
+        kernel: &mut KernelVm<MemoryFileSystem>,
+        pid: u32,
+        operation: &str,
+        request: Value,
+    ) -> SidecarCoreError {
+        let payload = serde_json::to_vec(&request).expect("encode request");
+        handle_guest_kernel_call(kernel, pid, "shell", operation, &payload)
+            .expect_err("guest networking call must fail")
+    }
+
+    #[test]
+    fn failed_socket_setup_rolls_back_allocated_kernel_sockets() {
+        let mut kernel = test_kernel();
+        let pid = guest_pid(&mut kernel);
+        let baseline = kernel.resource_snapshot().sockets;
+
+        let _connect_error = call_error(
+            &mut kernel,
+            pid,
+            "net.connect",
+            json!({ "host": "127.0.0.1", "port": 44991 }),
+        );
+        assert_eq!(kernel.resource_snapshot().sockets, baseline);
+
+        call(
+            &mut kernel,
+            pid,
+            "net.listen",
+            json!({ "host": "127.0.0.1", "port": 44992 }),
+        );
+        let after_listener = kernel.resource_snapshot().sockets;
+        let _listen_error = call_error(
+            &mut kernel,
+            pid,
+            "net.listen",
+            json!({ "host": "127.0.0.1", "port": 44992 }),
+        );
+        assert_eq!(kernel.resource_snapshot().sockets, after_listener);
+
+        call(
+            &mut kernel,
+            pid,
+            "net.udp_bind",
+            json!({ "host": "127.0.0.1", "port": 44993 }),
+        );
+        let after_udp = kernel.resource_snapshot().sockets;
+        let _udp_error = call_error(
+            &mut kernel,
+            pid,
+            "net.udp_bind",
+            json!({ "host": "127.0.0.1", "port": 44993 }),
+        );
+        assert_eq!(kernel.resource_snapshot().sockets, after_udp);
     }
 
     #[test]

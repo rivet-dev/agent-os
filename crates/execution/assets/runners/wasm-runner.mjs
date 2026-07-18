@@ -23,6 +23,7 @@ const WASI_ERRNO_AFNOSUPPORT = 5;
 const WASI_ERRNO_AGAIN = 6;
 const WASI_ERRNO_ALREADY = 7;
 const WASI_ERRNO_BADF = 8;
+const WASI_ERRNO_BUSY = 10;
 const WASI_ERRNO_CHILD = 12;
 const WASI_ERRNO_CONNREFUSED = 14;
 const WASI_ERRNO_CONNRESET = 15;
@@ -103,9 +104,36 @@ const WASM_PAGE_BYTES = 65536;
 // below that ceiling so ordinary allocation can never collide with the
 // private 0x40000000 pathname-preopen tag.
 const LINUX_GUEST_FD_LIMIT = 1 << 20;
+// Linux readv(2)/writev(2) reject vectors larger than UIO_MAXIOV. Keep the
+// same bound for Preview1 iovec arrays and for poll subscriptions, which are
+// likewise attacker-controlled fixed-size guest tables.
+const LINUX_IOV_MAX = 1024;
+const WASI_POLL_MAX_SUBSCRIPTIONS = 1024;
+const XATTR_NAME_MAX = 255;
+const XATTR_SIZE_MAX = 64 * 1024;
 const LINUX_BINPRM_BUF_SIZE = 256;
 const LINUX_MAX_INTERPRETER_DEPTH = 4;
 const DEFAULT_WASM_MAX_MODULE_FILE_BYTES = 256 * 1024 * 1024;
+const warnedFixedRequestLimits = new Set();
+
+function checkFixedRequestLimit(limitName, observed, maximum, errno = WASI_ERRNO_INVAL) {
+  const numericObserved = Number(observed) >>> 0;
+  const warningAt = Math.max(1, Math.ceil(maximum * 0.8));
+  if (
+    numericObserved >= warningAt &&
+    !warnedFixedRequestLimits.has(limitName)
+  ) {
+    warnedFixedRequestLimits.add(limitName);
+    if (typeof process?.stderr?.write === 'function') {
+      process.stderr.write(
+        `[agentos] WASM request is near ${limitName} ` +
+        `(${numericObserved}/${maximum}); split the request if needed\n`,
+      );
+    }
+  }
+  return numericObserved > maximum ? errno : WASI_ERRNO_SUCCESS;
+}
+
 function boundedWasmSyncRpcReadLength(length) {
   return Math.min(
     Number(length) >>> 0,
@@ -117,7 +145,7 @@ const POSIX_SPAWN_SETPGROUP = 2;
 const POSIX_SPAWN_SETSIGDEF = 4;
 const POSIX_SPAWN_SETSIGMASK = 8;
 const LINUX_SA_NODEFER = 0x40000000;
-const LINUX_SA_RESETHAND = 0x80000000;
+const LINUX_SA_RESTART = 0x10000000;
 const POSIX_SPAWN_SETSCHEDPARAM = 16;
 const POSIX_SPAWN_SETSCHEDULER = 32;
 const POSIX_SPAWN_USEVFORK = 64;
@@ -152,29 +180,6 @@ function parseVirtualProcessNumber(value, fallback) {
 
 function parseVirtualProcessString(value, fallback) {
   return typeof value === 'string' && value.length > 0 ? value : fallback;
-}
-
-function parseInitialSignalSet(value, setting) {
-  if (typeof value !== 'string' || value.length === 0) {
-    return [];
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(value);
-  } catch (error) {
-    throw new Error(`${setting} must be a JSON signal-number array: ${error}`);
-  }
-  if (!Array.isArray(parsed) || parsed.length > 64) {
-    throw new Error(`${setting} must contain at most 64 signal numbers`);
-  }
-  const signals = new Set();
-  for (const value of parsed) {
-    if (!Number.isInteger(value) || value <= 0 || value > 64) {
-      throw new Error(`${setting} contains invalid signal ${String(value)}`);
-    }
-    signals.add(value);
-  }
-  return [...signals];
 }
 
 function parseInitialKernelFdMappings(value, limit) {
@@ -513,18 +518,6 @@ function __agentOSWasmEmitPhaseMetrics(reason, extra = {}) {
 
 let guestArgv = JSON.parse(process.env.AGENTOS_GUEST_ARGV ?? '[]');
 let guestEnv = JSON.parse(process.env.AGENTOS_GUEST_ENV ?? '{}');
-const initialWasmSignalMask = parseInitialSignalSet(
-  process.env.AGENTOS_WASM_INITIAL_SIGNAL_MASK,
-  'AGENTOS_WASM_INITIAL_SIGNAL_MASK',
-).filter((signal) => signal !== LINUX_SIGKILL && signal !== LINUX_SIGSTOP);
-const initialWasmSignalIgnores = parseInitialSignalSet(
-  process.env.AGENTOS_WASM_INITIAL_SIGNAL_IGNORES,
-  'AGENTOS_WASM_INITIAL_SIGNAL_IGNORES',
-);
-const initialWasmPendingSignals = parseInitialSignalSet(
-  process.env.AGENTOS_WASM_INITIAL_PENDING_SIGNALS,
-  'AGENTOS_WASM_INITIAL_PENDING_SIGNALS',
-);
 const GUEST_PATH_MAPPINGS = parseGuestPathMappings(process.env.AGENTOS_GUEST_PATH_MAPPINGS);
 const permissionTier = process.env.AGENTOS_WASM_PERMISSION_TIER ?? 'full';
 const prewarmOnly = process.env.AGENTOS_WASM_PREWARM_ONLY === '1';
@@ -559,39 +552,27 @@ const maxStackBytes =
   Number.isFinite(maxStackBytesValue) && maxStackBytesValue > 0
     ? Math.floor(maxStackBytesValue)
     : null;
+const DEFAULT_SYNC_RPC_RESPONSE_LINE_BYTES = 16 * 1024 * 1024;
+const maxSyncRpcResponseLineBytesValue = Number(
+  process.env.AGENTOS_INTERNAL_WASM_SYNC_RPC_RESPONSE_LINE_BYTES,
+);
+const maxSyncRpcResponseLineBytes =
+  Number.isSafeInteger(maxSyncRpcResponseLineBytesValue) && maxSyncRpcResponseLineBytesValue > 0
+    ? maxSyncRpcResponseLineBytesValue
+    : DEFAULT_SYNC_RPC_RESPONSE_LINE_BYTES;
 const maxOpenFdsValue = Number(process.env.AGENTOS_WASM_MAX_OPEN_FDS);
 const configuredMaxOpenFds = Number.isFinite(maxOpenFdsValue) && maxOpenFdsValue >= 0
   ? Math.floor(maxOpenFdsValue)
-  : 256;
-const inheritedNofileHardValue = Number(
-  process.env.AGENTOS_WASM_RLIMIT_NOFILE_HARD,
-);
-let rlimitNofileHard =
-  Number.isSafeInteger(inheritedNofileHardValue) &&
-  inheritedNofileHardValue >= 0 &&
-  inheritedNofileHardValue <= configuredMaxOpenFds
-    ? inheritedNofileHardValue
-    : configuredMaxOpenFds;
-const inheritedNofileSoftValue = Number(
-  process.env.AGENTOS_WASM_RLIMIT_NOFILE_SOFT,
-);
-let rlimitNofileSoft =
-  Number.isSafeInteger(inheritedNofileSoftValue) &&
-  inheritedNofileSoftValue >= 0 &&
-  inheritedNofileSoftValue <= rlimitNofileHard
-    ? inheritedNofileSoftValue
-    : rlimitNofileHard;
-
-function inheritedNofileBootstrapEnv() {
-  return {
-    AGENTOS_WASM_RLIMIT_NOFILE_SOFT: String(rlimitNofileSoft),
-    AGENTOS_WASM_RLIMIT_NOFILE_HARD: String(rlimitNofileHard),
-  };
-}
+  : 1024;
 const maxSocketsValue = Number(process.env.AGENTOS_WASM_MAX_SOCKETS);
 const maxSockets = Number.isFinite(maxSocketsValue) && maxSocketsValue >= 0
   ? Math.floor(maxSocketsValue)
   : null;
+const SIDECAR_MANAGED_PROCESS = globalThis.__agentOSManagedKernelHost === true;
+// Shared with the typed host-dispatch NODE_CWD_FD sentinel. This is an
+// executor ABI value, not a real guest descriptor, so path authorization
+// must never mistake stdin (fd 0) for the absolute/cwd capability.
+const NODE_CWD_FD = 0xffffffff;
 const initialKernelFdMappings = parseInitialKernelFdMappings(
   process.env.AGENTOS_WASM_INHERITED_FD_MAPPINGS,
   configuredMaxOpenFds,
@@ -603,8 +584,22 @@ const initialHostNetDescriptions = parseInitialHostNetFds(
 );
 const initialHostNetGuestFds = initialHostNetDescriptions
   .flatMap((description) => description.guestFds.map((fd) => Number(fd) >>> 0));
+const initialKernelGuestFds = new Set(initialKernelFdMappings.values());
+// Managed host-network metadata describes the same canonical kernel-backed
+// descriptor, rather than a second guest descriptor. Legacy/standalone socket
+// bootstraps remain disjoint from kernel mappings.
+const managedHostNetKernelGuestFds = new Set(
+  SIDECAR_MANAGED_PROCESS
+    ? initialHostNetDescriptions
+        .filter((description) =>
+          typeof description.descriptionId === 'string' &&
+          /^[0-9]+$/.test(description.descriptionId)
+        )
+        .flatMap((description) => description.guestFds.map((fd) => Number(fd) >>> 0))
+    : [],
+);
 const initialMappedGuestFds = new Set([
-  ...initialKernelFdMappings.values(),
+  ...initialKernelGuestFds,
   ...initialHostNetGuestFds,
 ]);
 // Keep explicit inherited guest destinations unavailable while bootstrap
@@ -612,8 +607,10 @@ const initialMappedGuestFds = new Set([
 // this reservation, an earlier unmapped kernel fd can take (for example)
 // guest fd 7 before a later kernel fd is installed at its required guest fd 7.
 const pendingInitialKernelGuestFds = new Set(initialKernelFdMappings.values());
-if (initialMappedGuestFds.size !== initialKernelFdMappings.size + initialHostNetGuestFds.length) {
-  throw new Error('inherited kernel and host-network descriptors overlap in the guest fd table');
+for (const guestFd of initialHostNetGuestFds) {
+  if (initialKernelGuestFds.has(guestFd) && !managedHostNetKernelGuestFds.has(guestFd)) {
+    throw new Error('inherited kernel and host-network descriptors overlap in the guest fd table');
+  }
 }
 if (initialMappedGuestFds.size > configuredMaxOpenFds) {
   throw new Error(
@@ -634,6 +631,20 @@ const maxBlockingReadMs = Number.isFinite(maxBlockingReadMsValue) && maxBlocking
   ? Math.floor(maxBlockingReadMsValue)
   : null;
 const unixConnectTimeoutMs = maxBlockingReadMs ?? 30_000;
+
+function warnNearBlockingReadLimit(operation, startedAt, alreadyWarned, applies = true) {
+  if (
+    !applies ||
+    alreadyWarned ||
+    Date.now() < startedAt + Math.floor(unixConnectTimeoutMs * 0.8)
+  ) {
+    return alreadyWarned;
+  }
+  process.stderr.write(
+    `[agentos] ${operation} is nearing limits.resources.maxBlockingReadMs (${unixConnectTimeoutMs} ms)\n`,
+  );
+  return true;
+}
 
 // A guest can drive WebAssembly into never-returning recursion. V8's default
 // native stack guard already traps that as a generic `RangeError`, but the
@@ -699,22 +710,38 @@ const NODE_SYNC_RPC_ENABLE = process.env.AGENTOS_NODE_SYNC_RPC_ENABLE === '1';
 const NODE_SYNC_RPC_REQUEST_FD = parseControlPipeFd(process.env.AGENTOS_NODE_SYNC_RPC_REQUEST_FD);
 const NODE_SYNC_RPC_RESPONSE_FD = parseControlPipeFd(process.env.AGENTOS_NODE_SYNC_RPC_RESPONSE_FD);
 const KERNEL_STDIO_SYNC_RPC = process.env.AGENTOS_WASI_STDIO_SYNC_RPC === '1';
-const SIDECAR_MANAGED_PROCESS =
-  typeof process?.env?.AGENTOS_SANDBOX_ROOT === 'string' &&
-  process.env.AGENTOS_SANDBOX_ROOT.length > 0;
 const SIDECAR_EXEC_COMMIT_RPC = process.env.AGENTOS_WASM_EXEC_COMMIT_RPC === '1';
 let nextSyncRpcId = 1;
-let syncRpcResponseBuffer = '';
-const spawnedChildren = new Map();
-const spawnedChildrenById = new Map();
+let syncRpcResponseBuffer = Buffer.alloc(0);
+let warnedSyncRpcResponseLineBytes = false;
+// Managed execution keeps only bounded transport correlations here. Child
+// lifecycle, process groups, and wait status remain kernel-authoritative.
+const childCorrelationsByPid = new Map();
+const childCorrelationsById = new Map();
 let nextBlockingChildPumpIndex = 0;
+let nextManagedCorrelationCollectionAtMs = 0;
 let nextSyntheticChildPid = 0x40000000;
-const syntheticFdEntries = new Map();
-const runnerCloexecFds = new Set();
-const delegateManagedFdRefCounts = new Map();
+// Managed entries are projections of live kernel descriptions. Standalone
+// entries emulate Node-WASI descriptors and may own runner-local semantics.
+const managedKernelFdProjections = new Map();
+const standaloneSyntheticFdEntries = new Map();
+const activeFdProjections = SIDECAR_MANAGED_PROCESS
+  ? managedKernelFdProjections
+  : standaloneSyntheticFdEntries;
+
+function setActiveFdProjection(fd, handle) {
+  if (SIDECAR_MANAGED_PROCESS && handle?.kind !== 'kernel-fd') {
+    throw new Error('managed descriptor projections must reference a kernel fd');
+  }
+  activeFdProjections.set(Number(fd) >>> 0, handle);
+}
+
+// Only the standalone Node-WASI fallback lacks kernel descriptor flags.
+const standaloneCloexecFds = new Set();
+const standaloneDelegateFdRefCounts = new Map();
 const closedPassthroughFds = new Set();
 globalThis.__agentOSWasiDelegateFdRefCount = (fd) =>
-  delegateManagedFdRefCounts.get(Number(fd) >>> 0) ?? 0;
+  standaloneDelegateFdRefCounts.get(Number(fd) >>> 0) ?? 0;
 const passthroughHandles = new Map([
   [0, { kind: 'passthrough', targetFd: 0, displayFd: 0, refCount: 0, open: true }],
   [1, { kind: 'passthrough', targetFd: 1, displayFd: 1, refCount: 0, open: true }],
@@ -838,6 +865,49 @@ function readExecutableFdBytes(targetFd, stats, subject, projectedExecutable = f
 }
 
 function readExecutablePathBytes(command) {
+  if (SIDECAR_MANAGED_PROCESS) {
+    const subject = String(command);
+    const image = callSyncRpc('process.exec_image_open', [subject]);
+    const handle = String(image?.handle ?? '');
+    try {
+      const projectedExecutable = isProjectedCommandGuestPath(subject);
+      if (!projectedExecutable && (Number(image?.mode) & 0o111) === 0) {
+        throw execError('EACCES', `${subject} does not have an executable mode bit`);
+      }
+      const size = Number(image?.size);
+      if (!Number.isSafeInteger(size) || size < 0) {
+        throw execError('EFBIG', `${subject} has an invalid executable image size`);
+      }
+      if (size > maxModuleFileBytes) {
+        throw execError(
+          'EFBIG',
+          `${subject} is ${size} bytes, exceeding limits.wasm.maxModuleFileBytes (${maxModuleFileBytes}); raise limits.wasm.maxModuleFileBytes if needed`,
+        );
+      }
+
+      const bytes = Buffer.alloc(size);
+      let offset = 0;
+      while (offset < size) {
+        const requested = boundedWasmSyncRpcReadLength(size - offset);
+        const chunk = Buffer.from(callSyncRpc('process.exec_image_read', [
+          handle,
+          String(offset),
+          requested,
+        ]) ?? []);
+        if (chunk.byteLength === 0 || chunk.byteLength > requested) {
+          throw execError('EIO', `${subject} changed while its executable image was read`);
+        }
+        chunk.copy(bytes, offset);
+        offset += chunk.byteLength;
+      }
+      return bytes;
+    } finally {
+      if (handle.length > 0) {
+        callSyncRpc('process.exec_image_close', [handle]);
+      }
+    }
+  }
+
   const hostPath = resolveExecModulePath(command);
   const stats = fsModule.statSync(hostPath);
   const size = validateExecutableStat(
@@ -864,21 +934,14 @@ function projectedCommandImageBytes(command) {
       mapping?.guestPath !== '/opt/agentos/bin'
     ) continue;
     const guestCandidate = path.posix.join(mapping.guestPath, name);
-    const hostCandidate = resolveExecModulePath(guestCandidate);
     try {
-      const stats = fsModule.statSync(hostCandidate);
-      const size = validateExecutableStat(stats, guestCandidate, true);
-      const bytes = fsModule.readFileSync(hostCandidate);
+      const bytes = readExecutablePathBytes(guestCandidate);
       traceHostProcess('projected-command-image', {
         command,
         guestCandidate,
-        hostCandidate,
         byteLength: bytes.byteLength,
         magic: Array.from(bytes.subarray(0, 4)),
       });
-      if (bytes.byteLength > size || bytes.byteLength > maxModuleFileBytes) {
-        throw execError('EFBIG', `${guestCandidate} grew beyond limits.wasm.maxModuleFileBytes while being read`);
-      }
       return bytes;
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error;
@@ -985,12 +1048,62 @@ function executableTargetForHandle(handle) {
 
 function loadExecImageFromFd(fd, argv, closeFds) {
   const descriptor = Number(fd) >>> 0;
+  const scriptRef = `/proc/self/fd/${descriptor}`;
+  if (SIDECAR_MANAGED_PROCESS) {
+    const image = callSyncRpc('process.exec_image_open_fd', [
+      canonicalKernelFdForSpawnAction(descriptor),
+    ]);
+    const imageHandle = String(image?.handle ?? '');
+    let bytes;
+    try {
+      const projectedExecutable = isProjectedCommandGuestPath(image?.canonicalPath ?? '');
+      if (!projectedExecutable && (Number(image?.mode) & 0o111) === 0) {
+        throw execError('EACCES', `${scriptRef} does not have an executable mode bit`);
+      }
+      const size = Number(image?.size);
+      if (!Number.isSafeInteger(size) || size < 0) {
+        throw execError('EFBIG', `${scriptRef} has an invalid executable image size`);
+      }
+      if (size > maxModuleFileBytes) {
+        throw execError(
+          'EFBIG',
+          `${scriptRef} is ${size} bytes, exceeding limits.wasm.maxModuleFileBytes (${maxModuleFileBytes}); raise limits.wasm.maxModuleFileBytes if needed`,
+        );
+      }
+      bytes = Buffer.alloc(size);
+      let offset = 0;
+      while (offset < size) {
+        const requested = boundedWasmSyncRpcReadLength(size - offset);
+        const chunk = Buffer.from(callSyncRpc('process.exec_image_read', [
+          imageHandle,
+          String(offset),
+          requested,
+        ]) ?? []);
+        if (chunk.byteLength === 0 || chunk.byteLength > requested) {
+          throw execError('EIO', `${scriptRef} changed while its executable image was read`);
+        }
+        chunk.copy(bytes, offset);
+        offset += chunk.byteLength;
+      }
+    } finally {
+      if (imageHandle.length > 0) {
+        callSyncRpc('process.exec_image_close', [imageHandle]);
+      }
+    }
+    if (parseLinuxShebang(bytes) && closeFds.includes(descriptor)) {
+      throw execError('ENOENT', `${scriptRef} will be closed before its interpreter opens it`);
+    }
+    return {
+      ...compileExecImage(bytes, scriptRef, argv),
+      scriptRef,
+    };
+  }
+
   const handle = lookupFdHandle(descriptor);
   const targetFd = executableTargetForHandle(handle);
   if (targetFd === null) {
     throw execError('EBADF', `fexecve descriptor ${descriptor} is not an open file`);
   }
-  const scriptRef = `/proc/self/fd/${descriptor}`;
   const bytes = readExecutableFdBytes(
     targetFd,
     fsModule.fstatSync(targetFd),
@@ -1094,24 +1207,6 @@ const FULL_PREOPEN_RIGHTS_BASE =
   WASI_RIGHT_PATH_REMOVE_DIRECTORY |
   WASI_RIGHT_PATH_UNLINK_FILE;
 const FULL_PREOPEN_RIGHTS_INHERITING = READ_WRITE_PREOPEN_RIGHTS_INHERITING;
-
-function kernelFdRightsBase(flags) {
-  const accessMode = Number(flags) & (KERNEL_O_WRONLY | KERNEL_O_RDWR);
-  let rights =
-    WASI_RIGHT_FD_SEEK |
-    WASI_RIGHT_FD_TELL |
-    WASI_RIGHT_FD_FDSTAT_SET_FLAGS |
-    WASI_RIGHT_FD_FILESTAT_GET |
-    WASI_RIGHT_FD_SYNC |
-    WASI_RIGHT_POLL_FD_READWRITE;
-  if (accessMode !== KERNEL_O_WRONLY) {
-    rights |= WASI_RIGHT_FD_READ;
-  }
-  if (accessMode === KERNEL_O_WRONLY || accessMode === KERNEL_O_RDWR) {
-    rights |= WASI_RIGHT_FD_WRITE;
-  }
-  return rights;
-}
 
 function buildPreopenRights() {
   switch (permissionTier) {
@@ -1368,15 +1463,40 @@ function decodeBase64ToUint8Array(value) {
   return Buffer.from(value, 'base64');
 }
 
-// Memoized kernel-PTY probe for the guest's stdio fds. Rust's
+function decodeFsBytesPayload(value, label) {
+  if (Buffer.isBuffer(value)) return Buffer.from(value);
+  if (ArrayBuffer.isView(value)) {
+    return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (value instanceof ArrayBuffer) return Buffer.from(value);
+  if (Array.isArray(value) && value.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+    return Buffer.from(value);
+  }
+  if (value && typeof value === 'object') {
+    if (value.__agentOSType === 'bytes' && typeof value.base64 === 'string') {
+      return Buffer.from(value.base64, 'base64');
+    }
+    if (value.__type === 'Buffer' && typeof value.data === 'string') {
+      return Buffer.from(value.data, 'base64');
+    }
+    if (typeof value.base64 === 'string') return Buffer.from(value.base64, 'base64');
+  }
+  const error = new Error(`${label} is not a byte payload`);
+  error.code = 'EIO';
+  throw error;
+}
+
+// Live kernel-PTY probe for any guest fd. Rust's
 // `stdin().is_terminal()` (and wasi-libc `isatty`) ask `fd_fdstat_get` for a
 // CHARACTER_DEVICE filetype; the runner-process fds are pipes, so a delegated
 // answer hides the kernel PTY and interactive guests (e.g. brush's prompt)
 // believe stdin is not a terminal. Ask the sidecar's kernel instead.
-const stdioTtyCache = new Map();
 function stdioFdIsKernelTty(fd) {
   const descriptor = Number(fd) >>> 0;
-  if (descriptor > 2) return false;
+  const handle = lookupFdHandle(descriptor);
+  const kernelFd = handle?.kind === 'kernel-fd'
+    ? Number(handle.targetFd) >>> 0
+    : descriptor;
   // Even in kernel-stdio sync-RPC mode the answer must come from the kernel:
   // that mode is on for EVERY sidecar wasm execution, including piped
   // vm.exec() runs whose stdio is NOT a PTY. Hardcoding true here made
@@ -1384,14 +1504,12 @@ function stdioFdIsKernelTty(fd) {
   // CHARACTER_DEVICE, host_tty.isatty said 1), so they enabled raw mode and
   // the kernel's truthful "not a PTY end" refusal trapped the guest with
   // exit 1 after otherwise-successful commands.
-  if (stdioTtyCache.has(descriptor)) return stdioTtyCache.get(descriptor);
   let isTty = false;
   try {
-    isTty = callSyncRpc('__kernel_isatty', [descriptor]) === true;
+    isTty = callSyncRpc('__kernel_isatty', [kernelFd]) === true;
   } catch {
     isTty = false;
   }
-  stdioTtyCache.set(descriptor, isTty);
   return isTty;
 }
 
@@ -1402,14 +1520,14 @@ function stdioFdIsKernelTty(fd) {
 // slice under the 30s guest sync-RPC deadline.
 const KERNEL_WAIT_SLICE_MS = 10_000;
 const KERNEL_STDIN_WOULD_BLOCK = Symbol('kernel-stdin-would-block');
-// A WASM descendant shares this runner's synchronous sidecar dispatch path.
-// While one is active, return to the child event pump frequently enough to
-// preserve the concurrent progress Linux gives separately scheduled processes.
+// Standalone descendants share this runner's cooperative child path. Managed
+// descendants are scheduled and pumped independently by the sidecar.
 const SPAWNED_CHILD_WAIT_SLICE_MS = 10;
 
 function hasActiveSpawnedChildren() {
-  for (const record of spawnedChildren.values()) {
-    if (record && typeof record.exitStatus !== 'number') {
+  if (SIDECAR_MANAGED_PROCESS) return false;
+  for (const record of childCorrelationsByPid.values()) {
+    if (record && !childBridgeTerminal(record)) {
       return true;
     }
   }
@@ -1454,21 +1572,70 @@ if (prewarmOnly) {
   process.exit(0);
 }
 
-const WASI_PREOPENS = buildPreopens();
 const WASI_PREOPEN_FD_BASE = 3;
 // Patched wasi-libc tags descriptors returned by its absolute/cwd pathname
 // resolver. The tag separates hidden WASI capability roots from the Linux
 // guest descriptor namespace, where fd 3 is free to be closed or replaced.
 const AGENTOS_HIDDEN_PREOPEN_FD_TAG = 0x40000000;
 const AGENTOS_HIDDEN_PREOPEN_FD_MASK = 0x3fffffff;
-const WASI_PREOPEN_ENTRIES = Object.entries(WASI_PREOPENS);
+const AMBIENT_WASI_PREOPENS = SIDECAR_MANAGED_PROCESS ? {} : buildPreopens();
+const KERNEL_WASI_PREOPENS = SIDECAR_MANAGED_PROCESS
+  ? callSyncRpc('process.fd_preopens', [])
+  : null;
+if (
+  KERNEL_WASI_PREOPENS !== null &&
+  (!Array.isArray(KERNEL_WASI_PREOPENS) ||
+    KERNEL_WASI_PREOPENS.length > configuredMaxOpenFds)
+) {
+  throw new Error(
+    `kernel WASI preopens exceed the ${configuredMaxOpenFds}-descriptor runtime limit`,
+  );
+}
+const WASI_PREOPEN_ENTRIES = SIDECAR_MANAGED_PROCESS
+  ? KERNEL_WASI_PREOPENS.map((entry, index) => {
+      const kernelFd = Number(entry?.fd);
+      const fd = WASI_PREOPEN_FD_BASE + index;
+      const guestPath = entry?.guestPath;
+      const rightsBase = Number(entry?.rightsBase);
+      const rightsInheriting = Number(entry?.rightsInheriting);
+      if (
+        !Number.isSafeInteger(kernelFd) || kernelFd < WASI_PREOPEN_FD_BASE ||
+        typeof guestPath !== 'string' || !path.posix.isAbsolute(guestPath) ||
+        !Number.isSafeInteger(rightsBase) || rightsBase < 0 ||
+        !Number.isSafeInteger(rightsInheriting) || rightsInheriting < 0
+      ) {
+        throw new Error('kernel returned invalid WASI preopen metadata');
+      }
+      return {
+        fd,
+        kernelFd,
+        guestPath: path.posix.normalize(guestPath),
+        preopenSpec: {
+          readOnly: (BigInt(rightsBase) & WASI_RIGHT_FD_WRITE) === 0n,
+          rightsBase: BigInt(rightsBase),
+          rightsInheriting: BigInt(rightsInheriting),
+        },
+        kernelManaged: true,
+      };
+    })
+  : Object.entries(AMBIENT_WASI_PREOPENS).map(
+      ([guestPath, preopenSpec], index) => ({
+        fd: WASI_PREOPEN_FD_BASE + index,
+        kernelFd: WASI_PREOPEN_FD_BASE + index,
+        guestPath,
+        preopenSpec,
+        kernelManaged: false,
+      }),
+    );
 const hiddenPreopenHandles = new Map();
 
 const wasi = new WASI({
   version: 'preview1',
   args: guestArgv,
   env: guestEnv,
-  preopens: WASI_PREOPENS,
+  // Managed execution must never hand node:wasi an ambient host capability.
+  // Its capability descriptors and metadata come from the sidecar kernel.
+  preopens: AMBIENT_WASI_PREOPENS,
   returnOnExit: true,
 });
 
@@ -1484,7 +1651,7 @@ if (typeof wasiImport.sock_shutdown !== 'function') {
       const handle = lookupFdHandle(numericFd);
       const kernelFd = handle?.kind === 'kernel-fd'
         ? Number(handle.targetFd) >>> 0
-        : delegateManagedFdRefCounts.has(numericFd)
+        : standaloneDelegateFdRefCounts.has(numericFd)
           ? numericFd
           : null;
       if (kernelFd == null) return WASI_ERRNO_SUCCESS;
@@ -1604,6 +1771,27 @@ function canonicalKernelFdForSpawnAction(fd) {
   return handle?.kind === 'kernel-fd' ? Number(handle.targetFd) >>> 0 : numericFd;
 }
 
+function managedKernelFdForDuplicate(fd) {
+  if (!SIDECAR_MANAGED_PROCESS) return null;
+  const numericFd = Number(fd) >>> 0;
+  const handle = lookupFdHandle(numericFd);
+  if (handle?.kind === 'kernel-fd') {
+    return Number(handle.targetFd) >>> 0;
+  }
+  // The managed kernel owns canonical stdin/stdout/stderr even though
+  // node:wasi needs local passthrough handles for the initial 0/1/2 I/O.
+  // Duplicating those descriptions must therefore allocate in the kernel and
+  // project the result back into the guest descriptor namespace.
+  if (
+    numericFd <= 2 &&
+    handle?.kind === 'passthrough' &&
+    Number(handle.targetFd) === numericFd
+  ) {
+    return numericFd;
+  }
+  return null;
+}
+
 function kernelCloexecFdsForCommit(closeFds) {
   return closeFds.flatMap((fd) => {
     const handle = lookupFdHandle(fd);
@@ -1679,7 +1867,7 @@ function decodeSpawnActions(actionsPtr, actionsLen, initialCwd) {
         !actionFdPaths.has(fd) &&
         !actionFdSources.has(fd) &&
         !lookupFdHandle(fd) &&
-        !hostNetSockets.has(fd)
+        !hasHostNetSocket(fd)
       ) {
         throw spawnActionError('EBADF', `posix_spawn close references unopened fd ${fd}`);
       }
@@ -1714,7 +1902,7 @@ function decodeSpawnActions(actionsPtr, actionsLen, initialCwd) {
         !actionFdPaths.has(sourceFd) &&
         !actionFdSources.has(sourceFd) &&
         !lookupFdHandle(sourceFd) &&
-        !hostNetSockets.has(sourceFd)
+        !hasHostNetSocket(sourceFd)
       ) {
         throw spawnActionError(
           'EBADF',
@@ -1734,7 +1922,7 @@ function decodeSpawnActions(actionsPtr, actionsLen, initialCwd) {
       } else {
         actionFdPaths.delete(fd);
         const sourceHandle = lookupFdHandle(sourceFd);
-        if (typeof sourceHandle?.guestPath === 'string') {
+        if (sourceHandle?.kind !== 'kernel-fd' && typeof sourceHandle?.guestPath === 'string') {
           actionFdPaths.set(fd, sourceHandle.guestPath);
           actionFdSources.delete(fd);
         } else {
@@ -1795,7 +1983,7 @@ function decodeSpawnActions(actionsPtr, actionsLen, initialCwd) {
         !actionFdPaths.has(fd) &&
         !actionFdSources.has(fd) &&
         !lookupFdHandle(fd) &&
-        !hostNetSockets.has(fd)
+        !hasHostNetSocket(fd)
       ) {
         throw spawnActionError('EBADF', `posix_spawn fchdir references unopened fd ${fd}`);
       }
@@ -1818,13 +2006,13 @@ function decodeSpawnActions(actionsPtr, actionsLen, initialCwd) {
       // owned only by older children and Node-WASI's private backing table are
       // deliberately excluded: neither is visible in the parent's fd table.
       const inheritedGuestFds = new Set([
-        ...syntheticFdEntries.keys(),
+        ...activeFdProjections.keys(),
         ...passthroughHandles.keys(),
-        ...delegateManagedFdRefCounts.keys(),
-        ...hostNetSockets.keys(),
+        ...standaloneDelegateFdRefCounts.keys(),
+        ...hostNetGuestFds(),
         ...actionFdPaths.keys(),
         ...actionFdSources.keys(),
-        ...WASI_PREOPEN_ENTRIES.map((_, index) => WASI_PREOPEN_FD_BASE + index),
+        ...WASI_PREOPEN_ENTRIES.map((entry) => entry.fd),
       ]);
       for (const guestFd of inheritedGuestFds) {
         if (guestFd >= fd) {
@@ -1955,7 +2143,7 @@ function kernelOpenFlagsFromWasi(oflags, rightsBase, fdflags, lookupflags, direc
 }
 
 function errorHasCode(error, code) {
-  return error?.code === code || String(error?.message ?? error ?? '').includes(code);
+  return error != null && typeof error === 'object' && error.code === code;
 }
 
 function blockingIoDeadline(timeoutMs) {
@@ -1969,9 +2157,12 @@ function throwBlockingFifoOpenTimeout(guestPath) {
 }
 
 function openBlockingGuestFifoForPathOpen(
+  kernelDirFd,
+  relativePath,
   guestPath,
   oflags,
   rightsBase,
+  rightsInheriting,
   fdflags,
   lookupflags,
   openedFdPtr,
@@ -2005,10 +2196,13 @@ function openBlockingGuestFifoForPathOpen(
   for (;;) {
     if (kernelFd === null) {
       try {
-        kernelFd = Number(callSyncRpc('process.fd_open', [
-          guestPath,
+        kernelFd = Number(callSyncRpc('process.path_open_at', [
+          kernelDirFd,
+          relativePath,
           nonblockingFlags,
           mode,
+          rightsBase.toString(),
+          rightsInheriting.toString(),
         ])) >>> 0;
       } catch (error) {
         if (accessMode !== KERNEL_O_WRONLY || !errorHasCode(error, 'ENXIO')) {
@@ -2032,8 +2226,6 @@ function openBlockingGuestFifoForPathOpen(
     Atomics.wait(syntheticWaitArray, 0, 0, 1);
   }
   const openedFd = registerKernelDelegateFd(kernelFd);
-  const handle = lookupFdHandle(openedFd);
-  if (handle) handle.guestPath = guestPath;
   const result = writeGuestUint32(openedFdPtr, openedFd);
   if (result !== WASI_ERRNO_SUCCESS) wasiImport.fd_close(openedFd);
   return result;
@@ -2057,9 +2249,6 @@ function resolvePathOpenGuestPath(fd, pathPtr, pathLen) {
   }
 
   const handle = lookupFdHandle(fd);
-  if (handle && typeof handle.guestPath === 'string') {
-    return path.posix.resolve(handle.guestPath, target);
-  }
   if (handle?.kind === 'kernel-fd' && SIDECAR_MANAGED_PROCESS) {
     try {
       const base = callSyncRpc('process.fd_chdir_path', [Number(handle.targetFd) >>> 0]);
@@ -2071,16 +2260,18 @@ function resolvePathOpenGuestPath(fd, pathPtr, pathLen) {
       return null;
     }
   }
+  if (handle && typeof handle.guestPath === 'string') {
+    return path.posix.resolve(handle.guestPath, target);
+  }
 
   const numericFd = Number(fd) >>> 0;
   const preopenFd =
     (numericFd & AGENTOS_HIDDEN_PREOPEN_FD_TAG) !== 0
       ? numericFd & AGENTOS_HIDDEN_PREOPEN_FD_MASK
       : numericFd;
-  const preopenIndex = preopenFd - WASI_PREOPEN_FD_BASE;
-  const preopen = WASI_PREOPEN_ENTRIES[preopenIndex];
+  const preopen = WASI_PREOPEN_ENTRIES.find((entry) => entry.fd === preopenFd);
   if (preopen) {
-    return path.posix.resolve(guestPathForPreopenKey(preopen[0]), target);
+    return path.posix.resolve(guestPathForPreopenKey(preopen.guestPath), target);
   }
 
   return null;
@@ -2101,9 +2292,17 @@ function resolvedGuestPathIsReadOnly(fd, pathPtr, pathLen) {
   }
 }
 
-// Guest path recorded for a managed (path_open passthrough) fd, if known.
+// Managed paths stay kernel-authoritative; standalone handles may retain a
+// runner-local path because Node-WASI owns that fallback description.
 function guestPathForManagedFd(fd) {
   const handle = lookupFdHandle(fd);
+  if (handle?.kind === 'kernel-fd' && SIDECAR_MANAGED_PROCESS) {
+    try {
+      return String(callSyncRpc('process.fd_path', [Number(handle.targetFd) >>> 0]));
+    } catch {
+      return null;
+    }
+  }
   if (typeof handle?.guestPath === 'string') {
     return handle.guestPath;
   }
@@ -2239,17 +2438,32 @@ function fsOpenFlagForPathOpen(oflags, rightsBase, fdflags) {
 function runnerFdMappingInUse(fd) {
   return (
     pendingInitialKernelGuestFds.has(fd) ||
-    syntheticFdEntries.has(fd) ||
+    activeFdProjections.has(fd) ||
     passthroughHandles.has(fd) ||
     retainedSpawnOutputHandlesByFd.has(fd) ||
     retainedSyntheticHandlesByDisplayFd.has(fd) ||
-    delegateManagedFdRefCounts.has(fd) ||
-    hostNetSockets.has(fd)
+    standaloneDelegateFdRefCounts.has(fd) ||
+    hasHostNetSocket(fd)
   );
 }
 
 function syntheticFdInUse(fd) {
   return runnerFdMappingInUse(fd) || wasi?.fdTable?.has?.(fd) === true;
+}
+
+function currentNofileSoftLimit() {
+  if (!SIDECAR_MANAGED_PROCESS) return configuredMaxOpenFds;
+  try {
+    const limit = callSyncRpc('process.getrlimit', [7]);
+    const soft = BigInt(limit.soft);
+    if (soft > BigInt(Number.MAX_SAFE_INTEGER)) return LINUX_GUEST_FD_LIMIT;
+    return Number(soft);
+  } catch (error) {
+    if (error?.code === 'ERR_AGENTOS_WASM_SYNC_RPC_UNAVAILABLE') {
+      return configuredMaxOpenFds;
+    }
+    throw error;
+  }
 }
 
 function allocateSyntheticFd(minFd = nextSyntheticFd, reservedCapacity = false) {
@@ -2263,7 +2477,7 @@ function allocateSyntheticFd(minFd = nextSyntheticFd, reservedCapacity = false) 
   ) {
     return null;
   }
-  const descriptorLimit = Math.min(LINUX_GUEST_FD_LIMIT, rlimitNofileSoft);
+  const descriptorLimit = Math.min(LINUX_GUEST_FD_LIMIT, currentNofileSoftLimit());
   let fd = Math.max(FIRST_SYNTHETIC_FD, numericMinimum);
   while (
     fd < descriptorLimit &&
@@ -2285,7 +2499,7 @@ function allocateKernelGuestFd(minFd = 3) {
   ) {
     return null;
   }
-  const descriptorLimit = Math.min(LINUX_GUEST_FD_LIMIT, rlimitNofileSoft);
+  const descriptorLimit = Math.min(LINUX_GUEST_FD_LIMIT, currentNofileSoftLimit());
   let fd = Math.max(3, numericMinimum);
   while (
     fd < descriptorLimit &&
@@ -2297,6 +2511,9 @@ function allocateKernelGuestFd(minFd = 3) {
 }
 
 function openGuestFileForPathOpen(fd, pathPtr, pathLen, oflags, rightsBase, fdflags, openedFdPtr) {
+  if (SIDECAR_MANAGED_PROCESS) {
+    throw execError('EIO', 'managed path_open must use a kernel file descriptor');
+  }
   if (!pathOpenMayCreateTarget(oflags, rightsBase, fdflags)) {
     return null;
   }
@@ -2324,7 +2541,7 @@ function openGuestFileForPathOpen(fd, pathPtr, pathLen, oflags, rightsBase, fdfl
     0o666,
   );
   const openedFd = allocateSyntheticFd(nextSyntheticFd, true);
-  syntheticFdEntries.set(openedFd, {
+  setActiveFdProjection(openedFd, {
     kind: 'guest-file',
     targetFd,
     displayFd: openedFd,
@@ -2347,8 +2564,7 @@ function openProcSelfFdAlias(guestPath, oflags, rightsBase, lookupflags, openedF
     return WASI_ERRNO_NOENT;
   }
   const sourceHandle = lookupFdHandle(sourceFd);
-  const targetFd = executableTargetForHandle(sourceHandle);
-  if (targetFd === null) {
+  if (!sourceHandle) {
     return WASI_ERRNO_NOENT;
   }
   if (((Number(lookupflags) >>> 0) & WASI_LOOKUPFLAGS_SYMLINK_FOLLOW) === 0) {
@@ -2363,10 +2579,32 @@ function openProcSelfFdAlias(guestPath, oflags, rightsBase, lookupflags, openedF
   if (!hasRunnerOpenFdCapacity(1)) {
     return WASI_ERRNO_MFILE;
   }
+  if (SIDECAR_MANAGED_PROCESS) {
+    if (sourceHandle.kind !== 'kernel-fd') {
+      return WASI_ERRNO_NOENT;
+    }
+    try {
+      const openedFd = registerKernelDelegateFd(
+        callSyncRpc('process.fd_dup', [Number(sourceHandle.targetFd) >>> 0]),
+      );
+      const writeResult = writeGuestUint32(openedFdPtr, openedFd);
+      if (writeResult !== WASI_ERRNO_SUCCESS) {
+        wasiImport.fd_close(openedFd);
+      }
+      return writeResult;
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
+  }
+
+  const targetFd = executableTargetForHandle(sourceHandle);
+  if (targetFd === null) {
+    return WASI_ERRNO_NOENT;
+  }
 
   sourceHandle.refCount += 1;
   const openedFd = allocateSyntheticFd(nextSyntheticFd, true);
-  syntheticFdEntries.set(openedFd, {
+  setActiveFdProjection(openedFd, {
     kind: 'guest-file',
     targetFd,
     displayFd: openedFd,
@@ -2382,13 +2620,27 @@ function openProcSelfFdAlias(guestPath, oflags, rightsBase, lookupflags, openedF
 }
 
 function kernelProcFdPathForGuestPath(guestPath) {
-  const match = /^\/proc\/self\/fd\/(\d+)$/u.exec(String(guestPath));
+  const match = /^(\/?)proc\/self\/fd\/(\d+)$/u.exec(String(guestPath));
+  if (!match) return guestPath;
+  const guestFd = Number(match[2]);
+  if (!Number.isSafeInteger(guestFd) || guestFd < 0) return guestPath;
+  const handle = lookupFdHandle(guestFd);
+  return handle?.kind === 'kernel-fd'
+    ? `${match[1]}proc/self/fd/${Number(handle.targetFd) >>> 0}`
+    : guestPath;
+}
+
+function kernelOpenPathForGuestPath(guestPath) {
+  const match = /^\/?(?:proc\/self\/fd|dev\/fd)\/(\d+)$/u.exec(String(guestPath));
   if (!match) return guestPath;
   const guestFd = Number(match[1]);
   if (!Number.isSafeInteger(guestFd) || guestFd < 0) return guestPath;
   const handle = lookupFdHandle(guestFd);
+  // Keep the operand relative to its root capability. The kernel recognizes
+  // the normalized /dev/fd path as an open-description alias and intersects
+  // the requested rights with the backing descriptor's rights.
   return handle?.kind === 'kernel-fd'
-    ? `/proc/self/fd/${Number(handle.targetFd) >>> 0}`
+    ? `dev/fd/${Number(handle.targetFd) >>> 0}`
     : guestPath;
 }
 
@@ -2402,7 +2654,10 @@ function fsOpenNumericFlagsForManagedPath(rightsBase, fdflags) {
   return flags;
 }
 
-function openManagedPathIoFd(guestPath, rightsBase, fdflags) {
+function openStandalonePathIoFd(guestPath, rightsBase, fdflags) {
+  if (SIDECAR_MANAGED_PROCESS) {
+    throw execError('EIO', 'managed path I/O must use the kernel descriptor table');
+  }
   if (typeof guestPath !== 'string' || guestPath === '/dev/null') {
     return null;
   }
@@ -2419,6 +2674,9 @@ function openManagedPathIoFd(guestPath, rightsBase, fdflags) {
 }
 
 function retainPathOpenDelegateFd(openedFdPtr, guestPath, fdflags, rightsBase) {
+  if (SIDECAR_MANAGED_PROCESS) {
+    throw execError('EIO', 'managed path_open must not retain an ambient WASI descriptor');
+  }
   if (!(instanceMemory instanceof WebAssembly.Memory)) {
     return WASI_ERRNO_SUCCESS;
   }
@@ -2447,7 +2705,7 @@ function retainPathOpenDelegateFd(openedFdPtr, guestPath, fdflags, rightsBase) {
     const append = (Number(fdflags) & WASI_FDFLAGS_APPEND) !== 0;
     retainDelegateFd(retainedFd);
     if (retainedFd > 2 && !passthroughHandles.has(retainedFd)) {
-      const ioFd = openManagedPathIoFd(guestPath, rightsBase, fdflags);
+      const ioFd = openStandalonePathIoFd(guestPath, rightsBase, fdflags);
       closedPassthroughFds.delete(retainedFd);
       passthroughHandles.set(retainedFd, {
         kind: 'passthrough',
@@ -2485,6 +2743,53 @@ function writeGuestUint32(ptr, value) {
   }
 }
 
+function guestRangeIsValid(ptr, length) {
+  if (!(instanceMemory instanceof WebAssembly.Memory)) return false;
+  const offset = Number(ptr);
+  const byteLength = Number(length);
+  return Number.isInteger(offset) && offset >= 0 &&
+    Number.isInteger(byteLength) && byteLength >= 0 &&
+    offset <= instanceMemory.buffer.byteLength - byteLength;
+}
+
+function guestRangesAreValid(...ranges) {
+  return ranges.every(([ptr, length]) => guestRangeIsValid(ptr, length));
+}
+
+function validateGuestIovRequest(iovs, iovsLen) {
+  const count = Number(iovsLen) >>> 0;
+  const countErrno = checkFixedRequestLimit(
+    'wasm.abi.maxIovecs',
+    count,
+    LINUX_IOV_MAX,
+  );
+  if (countErrno !== WASI_ERRNO_SUCCESS) {
+    return { errno: countErrno, entries: [], totalLength: 0 };
+  }
+  if (!guestRangeIsValid(iovs, count * 8)) {
+    return { errno: WASI_ERRNO_FAULT, entries: [], totalLength: 0 };
+  }
+
+  const view = new DataView(instanceMemory.buffer);
+  const tableOffset = Number(iovs) >>> 0;
+  const entries = [];
+  let totalLength = 0;
+  for (let index = 0; index < count; index += 1) {
+    const entryOffset = tableOffset + index * 8;
+    const ptr = view.getUint32(entryOffset, true);
+    const length = view.getUint32(entryOffset + 4, true);
+    if (!guestRangeIsValid(ptr, length)) {
+      return { errno: WASI_ERRNO_FAULT, entries: [], totalLength: 0 };
+    }
+    totalLength += length;
+    if (!Number.isSafeInteger(totalLength) || totalLength > 0xffffffff) {
+      return { errno: WASI_ERRNO_INVAL, entries: [], totalLength: 0 };
+    }
+    entries.push({ ptr, length });
+  }
+  return { errno: WASI_ERRNO_SUCCESS, entries, totalLength };
+}
+
 function readGuestUint32(ptr) {
   if (!(instanceMemory instanceof WebAssembly.Memory)) {
     throw new Error('WebAssembly memory is unavailable');
@@ -2511,7 +2816,7 @@ function statTimestampNs(value) {
 }
 
 function writeGuestFilestat(ptr, stats, filetype = WASI_FILETYPE_REGULAR_FILE) {
-  if (!(instanceMemory instanceof WebAssembly.Memory)) {
+  if (!guestRangeIsValid(ptr, 64)) {
     return WASI_ERRNO_FAULT;
   }
 
@@ -2546,7 +2851,7 @@ function wasiFiletypeFromStats(stats) {
 }
 
 function writeGuestFdstat(ptr, filetype, flags, rightsBase, rightsInheriting) {
-  if (!(instanceMemory instanceof WebAssembly.Memory)) {
+  if (!guestRangeIsValid(ptr, 24)) {
     return WASI_ERRNO_FAULT;
   }
 
@@ -2580,6 +2885,8 @@ function mapSyntheticFsError(error) {
       return WASI_ERRNO_ROFS;
     case 'EEXIST':
       return WASI_ERRNO_EXIST;
+    case 'EFAULT':
+      return WASI_ERRNO_FAULT;
     case 'EISDIR':
       return WASI_ERRNO_ISDIR;
     case 'ELOOP':
@@ -2626,6 +2933,8 @@ function mapHostProcessError(error) {
       return WASI_ERRNO_2BIG;
     case 'EBADF':
       return WASI_ERRNO_BADF;
+    case 'EBUSY':
+      return WASI_ERRNO_BUSY;
     case 'EACCES':
       return WASI_ERRNO_ACCES;
     case 'EADDRINUSE':
@@ -2639,6 +2948,10 @@ function mapHostProcessError(error) {
       return WASI_ERRNO_AGAIN;
     case 'EALREADY':
       return WASI_ERRNO_ALREADY;
+    case 'ECHILD':
+      return WASI_ERRNO_CHILD;
+    case 'EFAULT':
+      return WASI_ERRNO_FAULT;
     case 'EFBIG':
       return WASI_ERRNO_FBIG;
     case 'EEXIST':
@@ -2655,6 +2968,8 @@ function mapHostProcessError(error) {
       return WASI_ERRNO_HOSTUNREACH;
     case 'EINPROGRESS':
       return WASI_ERRNO_INPROGRESS;
+    case 'EINTR':
+      return WASI_ERRNO_INTR;
     case 'EIO':
       return WASI_ERRNO_IO;
     case 'EILSEQ':
@@ -2710,9 +3025,7 @@ function mapHostProcessError(error) {
     case 'EPROTONOSUPPORT':
       return WASI_ERRNO_PROTONOSUPPORT;
     default:
-      return /command not found:/i.test(String(error?.message ?? error))
-        ? WASI_ERRNO_NOENT
-        : WASI_ERRNO_FAULT;
+      return WASI_ERRNO_FAULT;
   }
 }
 
@@ -2760,8 +3073,11 @@ function createPipeHandle(kind, pipe, displayFd) {
 }
 
 function retainDelegateFd(fd) {
+  if (SIDECAR_MANAGED_PROCESS) {
+    throw new Error('managed execution cannot retain a Node-WASI delegate fd');
+  }
   const numericFd = Number(fd) >>> 0;
-  delegateManagedFdRefCounts.set(numericFd, (delegateManagedFdRefCounts.get(numericFd) ?? 0) + 1);
+  standaloneDelegateFdRefCounts.set(numericFd, (standaloneDelegateFdRefCounts.get(numericFd) ?? 0) + 1);
 }
 
 function registerKernelDelegateFd(
@@ -2770,6 +3086,11 @@ function registerKernelDelegateFd(
   minimumGuestFd = 3,
   shadowsInternalPreopen = false,
 ) {
+  if (!SIDECAR_MANAGED_PROCESS) {
+    const error = new Error('kernel descriptor projection requires managed execution');
+    error.code = 'EIO';
+    throw error;
+  }
   const rawKernelFd = Number(fd);
   if (!Number.isSafeInteger(rawKernelFd) || rawKernelFd < 0 || rawKernelFd > 0xffffffff) {
     const error = new Error(`kernel returned invalid file descriptor ${fd}`);
@@ -2808,14 +3129,14 @@ function registerKernelDelegateFd(
       bootstrapStdioHandle == null &&
       closedPassthroughFds.has(guestFd) &&
       wasi?.fdTable?.has?.(guestFd) === true &&
-      !syntheticFdEntries.has(guestFd) &&
+      !activeFdProjections.has(guestFd) &&
       !retainedSpawnOutputHandlesByFd.has(guestFd);
     const shadowsPrivatePreopen =
       shadowsInternalPreopen ||
       shadowsRetainedBootstrapStdio ||
       (hiddenPreopenHandles.has(guestFd) &&
         (bootstrapStdioHandle == null || bootstrapStdioHandle.internalPreopen === true) &&
-        !syntheticFdEntries.has(guestFd) &&
+        !activeFdProjections.has(guestFd) &&
         !retainedSpawnOutputHandlesByFd.has(guestFd));
     replacesBootstrapStdio =
       guestFd <= 2 &&
@@ -2844,34 +3165,31 @@ function registerKernelDelegateFd(
   const handle = {
     kind: 'kernel-fd',
     targetFd: kernelFd,
-    displayFd: guestFd,
-    refCount: guestFd === kernelFd ? 0 : 1,
-    open: true,
   };
   closedPassthroughFds.delete(guestFd);
   if (replacesBootstrapStdio || passthroughHandles.get(guestFd)?.internalPreopen === true) {
     passthroughHandles.delete(guestFd);
-    delegateManagedFdRefCounts.delete(guestFd);
+    standaloneDelegateFdRefCounts.delete(guestFd);
   }
   if (guestFd === kernelFd) {
     passthroughHandles.set(guestFd, handle);
   } else {
-    syntheticFdEntries.set(guestFd, handle);
+    setActiveFdProjection(guestFd, handle);
   }
   return guestFd;
 }
 
 function releaseDelegateFd(fd) {
   const numericFd = Number(fd) >>> 0;
-  const current = delegateManagedFdRefCounts.get(numericFd);
+  const current = standaloneDelegateFdRefCounts.get(numericFd);
   if (current == null) {
     return false;
   }
   if (current <= 1) {
-    delegateManagedFdRefCounts.delete(numericFd);
+    standaloneDelegateFdRefCounts.delete(numericFd);
     return true;
   }
-  delegateManagedFdRefCounts.set(numericFd, current - 1);
+  standaloneDelegateFdRefCounts.set(numericFd, current - 1);
   return false;
 }
 
@@ -2881,7 +3199,7 @@ function lookupFdHandle(fd) {
     return hiddenPreopenHandles.get(numericFd & AGENTOS_HIDDEN_PREOPEN_FD_MASK) ?? null;
   }
   return (
-    syntheticFdEntries.get(numericFd) ??
+    activeFdProjections.get(numericFd) ??
     retainedSpawnOutputHandlesByFd.get(numericFd)?.handle ??
     passthroughHandles.get(numericFd) ??
     null
@@ -2890,8 +3208,12 @@ function lookupFdHandle(fd) {
 
 function kernelFdMappingsForSpawn() {
   const mappings = new Map();
-  for (const [guestFd, handle] of [...passthroughHandles, ...syntheticFdEntries]) {
-    if (handle?.kind === 'kernel-fd' && handle.open !== false) {
+  for (const [guestFd, handle] of [...passthroughHandles, ...activeFdProjections]) {
+    if (
+      handle?.kind === 'kernel-fd' &&
+      handle.open !== false &&
+      handle.internalPreopen !== true
+    ) {
       mappings.set(Number(guestFd) >>> 0, Number(handle.targetFd) >>> 0);
     }
   }
@@ -2905,8 +3227,45 @@ function kernelFdMappingsForSpawn() {
   return [...mappings.entries()];
 }
 
+function guestFdCloseOnExec(fd) {
+  const numericFd = Number(fd) >>> 0;
+  const handle = lookupFdHandle(numericFd);
+  if (SIDECAR_MANAGED_PROCESS && handle?.kind === 'kernel-fd') {
+    return (
+      Number(callSyncRpc('process.fd_getfd', [Number(handle.targetFd) >>> 0])) & 1
+    ) !== 0;
+  }
+  return standaloneCloexecFds.has(numericFd);
+}
+
 function hostNetFdsForSpawn() {
-  const descriptions = new Set(hostNetSockets.values());
+  if (SIDECAR_MANAGED_PROCESS) {
+    const inherited = [...passthroughHandles, ...activeFdProjections]
+      .filter(([, handle]) =>
+        handle?.kind === 'kernel-fd' &&
+        typeof handle.hostNetDescriptionId === 'string'
+      )
+      .map(([guestFd, handle]) => ({
+        guestFd: Number(guestFd) >>> 0,
+        descriptionId: handle.hostNetDescriptionId,
+        closeOnExec: guestFdCloseOnExec(guestFd),
+      }));
+    if (inherited.length > configuredMaxOpenFds) {
+      const error = new Error(
+        `inherited host-network descriptors exceed limits.resources.maxOpenFds (${configuredMaxOpenFds}); ` +
+          'raise limits.resources.maxOpenFds if needed',
+      );
+      error.code = 'EMFILE';
+      throw error;
+    }
+    return inherited;
+  }
+  const entries = [...standaloneHostNetSockets.entries()].map(([guestFd, socket]) => [
+        guestFd,
+        socket,
+        null,
+      ]);
+  const descriptions = new Set(entries.map(([, socket]) => socket));
   if (maxSockets != null && descriptions.size > maxSockets) {
     const error = new Error(
       `inherited host-network descriptions exceed limits.resources.maxSockets (${maxSockets}); ` +
@@ -2915,9 +3274,10 @@ function hostNetFdsForSpawn() {
     error.code = 'EMFILE';
     throw error;
   }
-  const inherited = [...hostNetSockets.entries()].map(([guestFd, socket]) => ({
+  const inherited = entries.map(([guestFd, socket, descriptionId]) => ({
     guestFd: Number(guestFd) >>> 0,
-    closeOnExec: runnerCloexecFds.has(Number(guestFd) >>> 0),
+    descriptionId,
+    closeOnExec: guestFdCloseOnExec(guestFd),
     socketId: socket.socketId ?? null,
     serverId: socket.serverId ?? null,
     udpSocketId: socket.udpSocketId ?? null,
@@ -2949,7 +3309,7 @@ function hostNetFdsForSpawn() {
 
 function lookupSyntheticHandleByDisplayFd(fd, expectedKind = null) {
   const numericFd = Number(fd) >>> 0;
-  for (const handle of syntheticFdEntries.values()) {
+  for (const handle of activeFdProjections.values()) {
     if (!handle || handle.displayFd !== numericFd) {
       continue;
     }
@@ -2994,6 +3354,9 @@ function cloneFdHandle(fd) {
   const handle = lookupFdHandle(fd);
   if (!handle) {
     return null;
+  }
+  if (handle.kind === 'kernel-fd') {
+    throw new Error('managed kernel descriptors must be duplicated by the kernel');
   }
   handle.refCount += 1;
   return handle;
@@ -3060,15 +3423,13 @@ function releaseFdHandle(handle) {
   }
 
   if (handle.kind === 'kernel-fd') {
-    handle.refCount = Math.max(0, handle.refCount - 1);
-    if (
-      handle.refCount === 0 &&
-      handle.open &&
-      !passthroughHandleHasCanonicalMapping(handle)
-    ) {
-      handle.open = false;
-      callSyncRpc('process.fd_close', [Number(handle.targetFd) >>> 0]);
+    // Managed preopens are hidden capability roots, not guest-owned Linux
+    // descriptors. Closing their untagged guest aliases must not destroy the
+    // backing kernel descriptions used by tagged libc pathname operations.
+    if (handle.internalPreopen === true) {
+      return;
     }
+    callSyncRpc('process.fd_close', [Number(handle.targetFd) >>> 0]);
     return;
   }
 
@@ -3090,7 +3451,7 @@ function releaseFdHandle(handle) {
 
 function closeSyntheticFd(fd) {
   const numericFd = Number(fd) >>> 0;
-  const handle = syntheticFdEntries.get(numericFd);
+  const handle = activeFdProjections.get(numericFd);
   if (!handle) {
     return false;
   }
@@ -3106,7 +3467,7 @@ function closeSyntheticFd(fd) {
   // the parent after close(2). Mask the underlying Node-WASI/bootstrap slot as
   // well; otherwise a later fstat(2) can fall through to a runtime-owned fd
   // with the same number and make a second close appear to be the first.
-  syntheticFdEntries.delete(numericFd);
+  activeFdProjections.delete(numericFd);
   closedPassthroughFds.add(numericFd);
   releaseFdHandle(handle);
   if (shouldRetainMapping) {
@@ -3136,21 +3497,47 @@ function forgetSidecarClosedKernelFd(fd) {
   if (handle?.kind !== 'kernel-fd') {
     return false;
   }
-  if (syntheticFdEntries.get(numericFd) === handle) {
-    syntheticFdEntries.delete(numericFd);
+  if (activeFdProjections.get(numericFd) === handle) {
+    activeFdProjections.delete(numericFd);
   }
   if (passthroughHandles.get(numericFd) === handle) {
     passthroughHandles.delete(numericFd);
   }
-  handle.refCount = 0;
-  handle.open = false;
   closedPassthroughFds.add(numericFd);
-  runnerCloexecFds.delete(numericFd);
+  standaloneCloexecFds.delete(numericFd);
   traceHostProcess('exec-cloexec-kernel-fd-forgotten', {
     fd: numericFd,
     targetFd: Number(handle.targetFd) >>> 0,
   });
   return true;
+}
+
+function forgetSidecarClosedKernelTargetFd(targetFd) {
+  const numericTargetFd = Number(targetFd) >>> 0;
+  const guestFds = new Set([
+    ...activeFdProjections.keys(),
+    ...passthroughHandles.keys(),
+  ]);
+  let forgotten = false;
+  for (const guestFd of guestFds) {
+    const handle = lookupFdHandle(guestFd);
+    if (
+      handle?.kind === 'kernel-fd' &&
+      Number(handle.targetFd) >>> 0 === numericTargetFd
+    ) {
+      forgotten = forgetSidecarClosedKernelFd(guestFd) || forgotten;
+    }
+  }
+  const passthrough = passthroughHandles.get(numericTargetFd);
+  if (
+    passthrough?.kind === 'passthrough' &&
+    passthrough.internalPreopen !== true &&
+    Number(passthrough.targetFd) >>> 0 === numericTargetFd
+  ) {
+    forgotten = closePassthroughFd(numericTargetFd) || forgotten;
+    standaloneCloexecFds.delete(numericTargetFd);
+  }
+  return forgotten;
 }
 
 function rejectClosedPassthroughFd(fd) {
@@ -3171,14 +3558,14 @@ function collectInactivePipeHandles(pipe) {
     return;
   }
 
-  for (const [fd, handle] of Array.from(syntheticFdEntries.entries())) {
+  for (const [fd, handle] of Array.from(activeFdProjections.entries())) {
     if (
       (handle.kind === 'pipe-read' || handle.kind === 'pipe-write') &&
       handle.pipe === pipe &&
       !handle.open &&
       handle.refCount === 0
     ) {
-      syntheticFdEntries.delete(fd);
+      activeFdProjections.delete(fd);
     }
   }
 
@@ -3218,7 +3605,7 @@ function spawnStdinFdIsSyntheticPipe(fd) {
 function spawnFdIsKernelBacked(fd) {
   const numericFd = Number(fd) >>> 0;
   return lookupFdHandle(numericFd)?.kind === 'kernel-fd' ||
-    delegateManagedFdRefCounts.has(numericFd);
+    standaloneDelegateFdRefCounts.has(numericFd);
 }
 
 // Shell input redirects (`cmd < file`) reach proc_spawn as a plain file fd in
@@ -3312,62 +3699,43 @@ function releaseSpawnOutputHandles(retainedHandles) {
   }
 }
 
-function collectGuestIovBytes(iovs, iovsLen) {
-  if (!(instanceMemory instanceof WebAssembly.Memory)) {
-    throw new Error('WebAssembly memory is not available');
+function collectGuestIovBytes(iovs, iovsLen, validatedRequest = null) {
+  const request = validatedRequest ?? validateGuestIovRequest(iovs, iovsLen);
+  if (request.errno !== WASI_ERRNO_SUCCESS) {
+    throw new RangeError(`invalid guest iovec request: WASI errno ${request.errno}`);
   }
-
   const chunks = [];
-  let totalLength = 0;
-
-  for (let index = 0; index < (Number(iovsLen) >>> 0); index += 1) {
-    const view = new DataView(instanceMemory.buffer);
-    const entryOffset = (Number(iovs) >>> 0) + index * 8;
-    const ptr = view.getUint32(entryOffset, true);
-    const len = view.getUint32(entryOffset + 4, true);
-    const chunk = readGuestBytes(ptr, len);
+  for (const { ptr, length } of request.entries) {
+    const chunk = readGuestBytes(ptr, length);
     chunks.push(chunk);
-    totalLength += chunk.length;
   }
-
-  return Buffer.concat(chunks, totalLength);
+  return Buffer.concat(chunks, request.totalLength);
 }
 
-function writeBytesToGuestIovs(iovs, iovsLen, bytes) {
-  if (!(instanceMemory instanceof WebAssembly.Memory)) {
-    throw new Error('WebAssembly memory is not available');
+function writeBytesToGuestIovs(iovs, iovsLen, bytes, validatedRequest = null) {
+  const request = validatedRequest ?? validateGuestIovRequest(iovs, iovsLen);
+  if (request.errno !== WASI_ERRNO_SUCCESS) {
+    throw new RangeError(`invalid guest iovec request: WASI errno ${request.errno}`);
   }
-
   const source = Buffer.from(bytes ?? []);
+  const memory = new Uint8Array(instanceMemory.buffer);
   let written = 0;
-
-  for (let index = 0; index < (Number(iovsLen) >>> 0) && written < source.length; index += 1) {
-    const view = new DataView(instanceMemory.buffer);
-    const memory = new Uint8Array(instanceMemory.buffer);
-    const entryOffset = (Number(iovs) >>> 0) + index * 8;
-    const ptr = view.getUint32(entryOffset, true);
-    const len = view.getUint32(entryOffset + 4, true);
+  for (const { ptr, length } of request.entries) {
+    if (written >= source.length) break;
     const remaining = source.length - written;
-    const chunkLength = Math.min(len >>> 0, remaining);
-    memory.set(source.subarray(written, written + chunkLength), ptr >>> 0);
+    const chunkLength = Math.min(length, remaining);
+    memory.set(source.subarray(written, written + chunkLength), ptr);
     written += chunkLength;
   }
-
   return written >>> 0;
 }
 
-function guestIovByteLength(iovs, iovsLen) {
-  if (!(instanceMemory instanceof WebAssembly.Memory)) {
-    throw new Error('WebAssembly memory is not available');
+function guestIovByteLength(iovs, iovsLen, validatedRequest = null) {
+  const request = validatedRequest ?? validateGuestIovRequest(iovs, iovsLen);
+  if (request.errno !== WASI_ERRNO_SUCCESS) {
+    throw new RangeError(`invalid guest iovec request: WASI errno ${request.errno}`);
   }
-
-  const view = new DataView(instanceMemory.buffer);
-  let total = 0;
-  for (let index = 0; index < (Number(iovsLen) >>> 0); index += 1) {
-    const entryOffset = (Number(iovs) >>> 0) + index * 8;
-    total += view.getUint32(entryOffset + 4, true);
-  }
-  return total >>> 0;
+  return request.totalLength;
 }
 
 function writeHostNetBytesToGuestIovs(iovs, iovsLen, bytes, nreadPtr) {
@@ -3381,11 +3749,55 @@ function writeHostNetBytesToGuestIovs(iovs, iovsLen, bytes, nreadPtr) {
   }
 }
 
-function readHostNetSocketToGuestIovs(socket, iovs, iovsLen, nreadPtr) {
+function readHostNetSocketToGuestIovs(socket, iovs, iovsLen, nreadPtr, iovRequest) {
   try {
-    const requestedLength = guestIovByteLength(iovs, iovsLen);
+    const requestedLength = guestIovByteLength(iovs, iovsLen, iovRequest);
     if (requestedLength === 0) {
       return writeGuestUint32(nreadPtr, 0);
+    }
+
+    if (socket?.managed === true) {
+      const targetFd = managedHostNetTargetFd(socket);
+      const stat = callSyncRpc('process.fd_stat', [targetFd]);
+      const nonblocking = (Number(stat?.flags) & KERNEL_O_NONBLOCK) !== 0;
+      const configured = nonblocking ? null : callSyncRpc(
+        'process.hostnet_get_option',
+        [targetFd, 'receive-timeout'],
+      );
+      const configuredTimeout = Number(configured?.durationMs);
+      const hasConfiguredTimeout = configured?.durationMs != null &&
+        Number.isFinite(configuredTimeout) && configuredTimeout >= 0;
+      const waitLimit = nonblocking
+        ? 0
+        : hasConfiguredTimeout ? configuredTimeout : unixConnectTimeoutMs;
+      const startedAt = Date.now();
+      for (;;) {
+        if (!nonblocking) {
+          const remaining = Math.max(0, waitLimit - (Date.now() - startedAt));
+          const readable = waitManagedHostNetReadable(socket, remaining, true);
+          if (readable === WASI_ERRNO_INTR) return WASI_ERRNO_INTR;
+          if (!readable) {
+            return hasConfiguredTimeout ? WASI_ERRNO_AGAIN : WASI_ERRNO_TIMEDOUT;
+          }
+        }
+        const result = callSyncRpc('process.hostnet_recv', [
+          targetFd,
+          requestedLength,
+          0,
+          0,
+        ]);
+        if (result != null && !isHostNetWouldBlock(result)) {
+          const bytes = result?.type === 'message'
+            ? hostNetDatagramBytes(result)
+            : decodeFsBytesPayload(result, 'managed host-network read');
+          return writeHostNetBytesToGuestIovs(iovs, iovsLen, bytes, nreadPtr);
+        }
+        if (result == null) return writeGuestUint32(nreadPtr, 0);
+        if (nonblocking) return WASI_ERRNO_AGAIN;
+        if (Date.now() - startedAt >= waitLimit) {
+          return hasConfiguredTimeout ? WASI_ERRNO_AGAIN : WASI_ERRNO_TIMEDOUT;
+        }
+      }
     }
 
     if (socket.nonblock) {
@@ -3416,10 +3828,9 @@ function readHostNetSocketToGuestIovs(socket, iovs, iovsLen, nreadPtr) {
       ? null
       : startedAt + Math.max(0, socket.recvTimeoutMs);
     const safeguardDeadline = startedAt + unixConnectTimeoutMs;
-    const warningAt = startedAt + Math.floor(unixConnectTimeoutMs * 0.8);
     let warnedNearLimit = false;
     while (true) {
-      if (dispatchPendingWasmSignals()) return WASI_ERRNO_INTR;
+      if (dispatchPendingWasmSignals(true)) return WASI_ERRNO_INTR;
       const queued = dequeueHostNetBytes(socket, requestedLength);
       if (queued.length > 0) {
         return writeHostNetBytesToGuestIovs(iovs, iovsLen, queued, nreadPtr);
@@ -3433,12 +3844,11 @@ function readHostNetSocketToGuestIovs(socket, iovs, iovsLen, nreadPtr) {
       if (receiveDeadline != null && now >= receiveDeadline) {
         return WASI_ERRNO_AGAIN;
       }
-      if (!warnedNearLimit && now >= warningAt) {
-        warnedNearLimit = true;
-        process.stderr.write(
-          `[agentos] blocking socket read is nearing limits.resources.maxBlockingReadMs (${unixConnectTimeoutMs} ms)\n`,
-        );
-      }
+      warnedNearLimit = warnNearBlockingReadLimit(
+        'blocking socket read',
+        startedAt,
+        warnedNearLimit,
+      );
       if (now >= safeguardDeadline) {
         process.stderr.write(
           `[agentos] blocking socket read exceeded limits.resources.maxBlockingReadMs (${unixConnectTimeoutMs} ms); raise limits.resources.maxBlockingReadMs if needed\n`,
@@ -3457,13 +3867,13 @@ function readHostNetSocketToGuestIovs(socket, iovs, iovsLen, nreadPtr) {
         ? 0
         : Math.max(0, Math.min(50, nextDeadline - now));
       const result = readReadyHostNetSocket(socket, requestedLength, false, pollWaitMs);
-      if (dispatchPendingWasmSignals()) return WASI_ERRNO_INTR;
+      if (dispatchPendingWasmSignals(true)) return WASI_ERRNO_INTR;
       if (result?.kind === 'data' && result.bytes.length > 0) {
         return writeHostNetBytesToGuestIovs(iovs, iovsLen, result.bytes, nreadPtr);
       }
       if (pumpsLocalChildren) {
         pumpSpawnedChildren(SPAWNED_CHILD_WAIT_SLICE_MS);
-        if (dispatchPendingWasmSignals()) return WASI_ERRNO_INTR;
+        if (dispatchPendingWasmSignals(true)) return WASI_ERRNO_INTR;
       }
       if (receiveDeadline != null && Date.now() >= receiveDeadline) {
         return WASI_ERRNO_AGAIN;
@@ -3474,14 +3884,14 @@ function readHostNetSocketToGuestIovs(socket, iovs, iovsLen, nreadPtr) {
   }
 }
 
-function writeHostNetSocketFromGuestIovs(socket, iovs, iovsLen, nwrittenPtr) {
-  if (!socket?.socketId || socket.closed) {
+function writeHostNetSocketFromGuestIovs(socket, iovs, iovsLen, nwrittenPtr, iovRequest) {
+  if (!socket || (socket.managed !== true && (!socket.socketId || socket.closed))) {
     return WASI_ERRNO_BADF;
   }
 
   let bytes;
   try {
-    bytes = collectGuestIovBytes(iovs, iovsLen);
+    bytes = collectGuestIovBytes(iovs, iovsLen, iovRequest);
   } catch {
     return WASI_ERRNO_FAULT;
   }
@@ -3490,9 +3900,15 @@ function writeHostNetSocketFromGuestIovs(socket, iovs, iovsLen, nwrittenPtr) {
   }
 
   try {
-    const written = Number(
-      callSyncRpc('net.write', [socket.socketId, bytes, socket.nonblock === true]),
-    ) >>> 0;
+    const written = Number(socket.managed === true
+      ? callSyncRpc('process.hostnet_send', [
+        managedHostNetTargetFd(socket),
+        bytes,
+        0,
+        null,
+        unixConnectTimeoutMs,
+      ])
+      : callSyncRpc('net.write', [socket.socketId, bytes, socket.nonblock === true])) >>> 0;
     return writeGuestUint32(nwrittenPtr, written);
   } catch (error) {
     return mapHostProcessError(error);
@@ -3629,7 +4045,7 @@ function registerPipeConsumer(fd, childId, stream) {
   }
   handle.pipe.consumers.set(`${childId}:${stream}`, { childId, stream });
   const shouldDeferInitialDelivery =
-    stream === 'stdin' && !spawnedChildrenById.has(childId);
+    stream === 'stdin' && !childCorrelationsById.has(childId);
   traceHostProcess('register-consumer', {
     fd: Number(fd) >>> 0,
     childId,
@@ -3677,7 +4093,7 @@ function flushPipeConsumers(pipe) {
         });
         flushed = true;
       } catch (error) {
-        if (spawnedChildrenById.has(consumer?.childId) && isChildProcessGoneError(error)) {
+        if (childCorrelationsById.has(consumer?.childId) && isChildProcessGoneError(error)) {
           shouldRetryChunk = true;
           continue;
         }
@@ -3712,7 +4128,7 @@ function closePipeConsumers(pipe) {
       });
       closed = true;
     } catch (error) {
-      if (spawnedChildrenById.has(consumer?.childId) && isChildProcessGoneError(error)) {
+      if (childCorrelationsById.has(consumer?.childId) && isChildProcessGoneError(error)) {
         continue;
       }
       traceHostProcess('close-consumer-stdin-failed', {
@@ -3751,7 +4167,12 @@ function parseInitialHostNetFds(value, fdLimit, socketLimit) {
     }
     const ids = [entry.socketId, entry.serverId, entry.udpSocketId]
       .filter((id) => typeof id === 'string' && id.length > 0);
-    if (ids.length !== 1) {
+    const managedPending =
+      SIDECAR_MANAGED_PROCESS &&
+      ids.length === 0 &&
+      typeof entry.descriptionId === 'string' &&
+      /^[0-9]+$/.test(entry.descriptionId);
+    if (ids.length !== 1 && !managedPending) {
       throw new Error('inherited host-network entries require exactly one sidecar resource id');
     }
     if (entry.guestFds.length === 0) {
@@ -3929,6 +4350,21 @@ function routeChunkToDelegateFd(fd, bytes) {
 }
 
 function finalizeChildExit(record, exitCode, signal, coreDumped = false) {
+  if (SIDECAR_MANAGED_PROCESS) {
+    // This flag is only the bridge's "stdout/stderr EOF delivered" gate. The
+    // kernel remains the sole source of terminal kind, status, and reaping.
+    record.terminalEventObserved = true;
+    record.terminalEventObservedAtMs = Date.now();
+    for (const fd of record.delegateRetainedFds ?? []) {
+      if (releaseDelegateFd(fd) && typeof delegateManagedFdClose === 'function') {
+        delegateManagedFdClose(fd);
+      }
+    }
+    releaseSpawnOutputHandles(record.retainedSpawnOutputHandles);
+    unregisterChildPipeProducers(record);
+    unregisterChildPipeConsumers(record);
+    return 0;
+  }
   const signalNumber = signal == null ? 0 : signalNumberFromName(signal) & 0x7f;
   const rawExitCode = signalNumber === 0 ? Number(exitCode ?? 1) & 0xff : 0;
   const status = signalNumber === 0 ? rawExitCode : 128 + signalNumber;
@@ -3951,6 +4387,54 @@ function finalizeChildExit(record, exitCode, signal, coreDumped = false) {
   return status;
 }
 
+function takeManagedWaitTransition(selector, options, _blocking) {
+  const numericSelector = Number(selector) | 0;
+  const normalizedOptions = Number(options) >>> 0;
+  for (;;) {
+    try {
+      const transition = callSyncRpc('process.waitpid', [numericSelector, normalizedOptions]);
+      dispatchPendingWasmSignals();
+      return transition;
+    } catch (error) {
+      const mustInterrupt = dispatchPendingWasmSignals(true);
+      if (error?.code === 'EINTR' && !mustInterrupt) {
+        // The caught handlers all requested SA_RESTART. They have run on the
+        // guest thread, so reissue the kernel-authoritative blocking wait.
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+function reapManagedChildCorrelation(transition) {
+  if (transition?.event !== 'exit') return;
+  reapSpawnedChild(childCorrelationsByPid.get(Number(transition.pid) >>> 0));
+}
+
+function collectStaleManagedChildCorrelations() {
+  if (!SIDECAR_MANAGED_PROCESS) return;
+  const now = Date.now();
+  if (now < nextManagedCorrelationCollectionAtMs) return;
+  nextManagedCorrelationCollectionAtMs = now + 1000;
+  for (const record of childCorrelationsByPid.values()) {
+    if (record?.terminalEventObserved !== true) continue;
+    try {
+      callSyncRpc('process.getpgid', [record.pid]);
+    } catch (error) {
+      if (error?.code === 'ESRCH' || error?.code === 'ECHILD') {
+        reapSpawnedChild(record);
+      } else {
+        traceHostProcess('managed-child-correlation-collection-fault', {
+          pid: record.pid,
+          code: error?.code ?? null,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+}
+
 function pollChildEvent(record, waitMs) {
   if (Array.isArray(record?.pendingEvents) && record.pendingEvents.length > 0) {
     return record.pendingEvents.shift() ?? null;
@@ -3962,12 +4446,7 @@ function pollChildEvent(record, waitMs) {
 }
 
 function isChildProcessGoneError(error) {
-  return (
-    (error instanceof Error && error.code === 'ECHILD') ||
-    (error instanceof Error &&
-      typeof error.message === 'string' &&
-      error.message.startsWith('ECHILD:'))
-  );
+  return error != null && typeof error === 'object' && error.code === 'ECHILD';
 }
 
 function resolveSyntheticGuestPath(value, fromGuestDir = '/') {
@@ -4015,6 +4494,7 @@ function chmodMappedGuestPath(guestPath, hostPath, mode) {
 }
 
 function maybeCreateSyntheticCommandResult(command, args, cwd) {
+  if (SIDECAR_MANAGED_PROCESS) return null;
   const basename = path.posix.basename(String(command || ''));
 
   if (basename === 'chmod') {
@@ -4131,9 +4611,9 @@ function reapSpawnedChild(record) {
     return;
   }
 
-  spawnedChildren.delete(record.pid);
+  childCorrelationsByPid.delete(record.pid);
   if (typeof record.childId === 'string' && record.childId.length > 0) {
-    spawnedChildrenById.delete(record.childId);
+    childCorrelationsById.delete(record.childId);
   }
 }
 
@@ -4144,6 +4624,14 @@ function returnWaitedChild(
   retPidPtr,
   retCoreDumpedPtr,
 ) {
+  if (!guestRangesAreValid(
+    [retExitCodePtr, 4],
+    [retSignalPtr, 4],
+    [retPidPtr, 4],
+    [retCoreDumpedPtr, 4],
+  )) {
+    return WASI_ERRNO_FAULT;
+  }
   // A successful wait may reap the child that generated SIGCHLD. Linux runs
   // the caught handler before returning the status without rewriting that
   // successful wait result to EINTR.
@@ -4165,6 +4653,9 @@ function returnWaitedChild(
 }
 
 function returnLegacyWaitedChild(record, retStatusPtr, retPidPtr) {
+  if (!guestRangesAreValid([retStatusPtr, 4], [retPidPtr, 4])) {
+    return WASI_ERRNO_FAULT;
+  }
   dispatchPendingWasmSignals();
   if (writeGuestUint32(retStatusPtr, record.exitStatus ?? 0) !== WASI_ERRNO_SUCCESS) {
     return WASI_ERRNO_FAULT;
@@ -4177,6 +4668,9 @@ function returnLegacyWaitedChild(record, retStatusPtr, retPidPtr) {
 }
 
 function returnRawWaitedChild(record, retStatusPtr, retPidPtr) {
+  if (!guestRangesAreValid([retStatusPtr, 4], [retPidPtr, 4])) {
+    return WASI_ERRNO_FAULT;
+  }
   dispatchPendingWasmSignals();
   if (writeGuestUint32(retStatusPtr, record.rawWaitStatus ?? 0) !== WASI_ERRNO_SUCCESS) {
     return WASI_ERRNO_FAULT;
@@ -4238,15 +4732,21 @@ function processChildEvent(record, event) {
   return false;
 }
 
+function childBridgeTerminal(record) {
+  return SIDECAR_MANAGED_PROCESS
+    ? record?.terminalEventObserved === true
+    : typeof record?.exitStatus === 'number';
+}
+
 function pumpPipeProducers(pipe, waitMs) {
   let processed = false;
   for (const [producerKey, producer] of Array.from(pipe.producers.entries())) {
-    const record = spawnedChildrenById.get(producer.childId);
+    const record = childCorrelationsById.get(producer.childId);
     if (!record) {
       unregisterPipeProducer(pipe, producerKey);
       continue;
     }
-    if (typeof record.exitStatus === 'number') {
+    if (childBridgeTerminal(record)) {
       unregisterPipeProducer(pipe, producerKey);
       continue;
     }
@@ -4324,8 +4824,16 @@ function pumpChildInputPipe(record, waitMs) {
 }
 
 function pumpSpawnedChildren(waitMs) {
-  const records = Array.from(spawnedChildren.values()).filter(
-    (record) => record && typeof record.exitStatus !== 'number',
+  if (SIDECAR_MANAGED_PROCESS) {
+    // Managed child lifecycle and stream routing are sidecar-owned. Pulling
+    // child events here races the global process pump and deadlocks when this
+    // guest is itself parked in a direct host call. Collection is safe here:
+    // it only queries kernel-owned lifecycle state from the guest thread.
+    collectStaleManagedChildCorrelations();
+    return false;
+  }
+  const records = Array.from(childCorrelationsByPid.values()).filter(
+    (record) => record && !childBridgeTerminal(record),
   );
   if (records.length === 0) {
     return false;
@@ -4363,11 +4871,28 @@ function pumpSpawnedChildren(waitMs) {
 
 function pumpSpawnedChildrenOrWait(waitMs) {
   const boundedWaitMs = Math.max(1, Number(waitMs) >>> 0);
+  if (SIDECAR_MANAGED_PROCESS) {
+    callSyncRpc('process.sleep', [boundedWaitMs]);
+    return false;
+  }
   const progressed = pumpSpawnedChildren(boundedWaitMs);
   if (!progressed) {
     Atomics.wait(syntheticWaitArray, 0, 0, boundedWaitMs);
   }
   return progressed;
+}
+
+function pumpSpawnedChildrenOrWaitRestartable(waitMs) {
+  try {
+    pumpSpawnedChildrenOrWait(waitMs);
+    return false;
+  } catch (error) {
+    if (error?.code !== 'EINTR') throw error;
+    // The sidecar wakes managed sleeps with typed EINTR. Run the handler on
+    // the guest thread, then tell the caller whether its syscall must return or
+    // may be reissued under SA_RESTART.
+    return dispatchPendingWasmSignals(true);
+  }
 }
 
 function encodeGuestBytes(value) {
@@ -4376,11 +4901,19 @@ function encodeGuestBytes(value) {
 
 function readGuestBytes(ptr, len) {
   if (!(instanceMemory instanceof WebAssembly.Memory)) {
-    throw new Error('WebAssembly memory is not available');
+    throw execError('EFAULT', 'WebAssembly memory is not available');
   }
 
   const start = Number(ptr) >>> 0;
   const length = Number(len) >>> 0;
+  const end = start + length;
+  if (
+    !Number.isSafeInteger(end) ||
+    start > instanceMemory.buffer.byteLength ||
+    end > instanceMemory.buffer.byteLength
+  ) {
+    throw execError('EFAULT', 'guest byte range is outside WebAssembly memory');
+  }
   return Buffer.from(new Uint8Array(instanceMemory.buffer, start, length));
 }
 
@@ -4489,31 +5022,108 @@ function decodeSyncRpcValue(value) {
   return value;
 }
 
+// AGENTOS_SYNC_RPC_RESPONSE_LIMIT_HELPERS_BEGIN
+function syncRpcResponseLineLimitError(limit, observed) {
+  const limitName = 'limits.reactor.maxBridgeResponseBytes';
+  const error = new Error(
+    `WASM sync RPC response line exceeds ${limitName} (${limit} encoded bytes); ` +
+      `raise ${limitName} if larger host replies are required`,
+  );
+  error.code = 'ERR_AGENTOS_RESOURCE_LIMIT';
+  error.details = {
+    limitName,
+    limit,
+    observed,
+    resource: 'syncRpcResponseLineBytes',
+  };
+  return error;
+}
+
+function appendSyncRpcResponseChunk(buffer, chunk, limit) {
+  const newlineIndex = chunk.indexOf(0x0a);
+  const lineChunkBytes = newlineIndex >= 0 ? newlineIndex : chunk.byteLength;
+  const observedLineBytes = buffer.byteLength + lineChunkBytes;
+  if (observedLineBytes > limit) {
+    throw syncRpcResponseLineLimitError(limit, observedLineBytes);
+  }
+
+  if (newlineIndex < 0) {
+    return {
+      buffer: Buffer.concat([buffer, chunk], observedLineBytes),
+      line: null,
+      observedLineBytes,
+    };
+  }
+
+  const suffix = chunk.subarray(newlineIndex + 1);
+  if (suffix.byteLength > limit) {
+    throw syncRpcResponseLineLimitError(limit, suffix.byteLength);
+  }
+  const line = buffer.byteLength === 0
+    ? chunk.subarray(0, newlineIndex).toString('utf8')
+    : Buffer.concat([buffer, chunk.subarray(0, newlineIndex)], observedLineBytes).toString('utf8');
+  return {
+    buffer: Buffer.from(suffix),
+    line,
+    observedLineBytes,
+  };
+}
+// AGENTOS_SYNC_RPC_RESPONSE_LIMIT_HELPERS_END
+
+function observeSyncRpcResponseLineBytes(observed) {
+  const warnAt = Math.max(1, Math.ceil(maxSyncRpcResponseLineBytes * 0.8));
+  if (warnedSyncRpcResponseLineBytes || observed < warnAt) return;
+  warnedSyncRpcResponseLineBytes = true;
+  if (typeof process?.stderr?.write === 'function') {
+    process.stderr.write(
+      `[agentos] WASM sync RPC response line usage ${observed}/${maxSyncRpcResponseLineBytes} ` +
+        'encoded bytes is near limits.reactor.maxBridgeResponseBytes; ' +
+        'raise limits.reactor.maxBridgeResponseBytes if larger host replies are required\n',
+    );
+  }
+}
+
 function readSyncRpcLine() {
   while (true) {
-    const newlineIndex = syncRpcResponseBuffer.indexOf('\n');
+    const newlineIndex = syncRpcResponseBuffer.indexOf(0x0a);
     if (newlineIndex >= 0) {
-      const line = syncRpcResponseBuffer.slice(0, newlineIndex);
-      syncRpcResponseBuffer = syncRpcResponseBuffer.slice(newlineIndex + 1);
+      observeSyncRpcResponseLineBytes(newlineIndex);
+      const line = syncRpcResponseBuffer.subarray(0, newlineIndex).toString('utf8');
+      syncRpcResponseBuffer = Buffer.from(syncRpcResponseBuffer.subarray(newlineIndex + 1));
       return line;
     }
 
-    const chunk = Buffer.alloc(4096);
+    const remaining = maxSyncRpcResponseLineBytes - syncRpcResponseBuffer.byteLength;
+    const readCapacity = Math.min(4096, remaining > 4095 ? 4096 : remaining + 1);
+    const chunk = Buffer.alloc(readCapacity);
     const bytesRead = readSync(NODE_SYNC_RPC_RESPONSE_FD, chunk, 0, chunk.length, null);
     if (bytesRead === 0) {
       throw new Error('agentos WASM sync RPC response channel closed unexpectedly');
     }
-    syncRpcResponseBuffer += chunk.subarray(0, bytesRead).toString('utf8');
+    const appended = appendSyncRpcResponseChunk(
+      syncRpcResponseBuffer,
+      chunk.subarray(0, bytesRead),
+      maxSyncRpcResponseLineBytes,
+    );
+    observeSyncRpcResponseLineBytes(appended.observedLineBytes);
+    syncRpcResponseBuffer = appended.buffer;
+    if (appended.line !== null) return appended.line;
   }
 }
 
-// Standard (non-realtime) Linux signals coalesce while pending. A Set both
-// matches that behavior and bounds guest-local pending state to the finite
-// signal-number domain even if the host dispatch hook is spammed.
-const pendingWasmSignals = new Set(initialWasmPendingSignals);
-const wasmSignalRegistrations = new Map();
-const wasmBlockedSignals = new Set(initialWasmSignalMask);
 let activeSpawnCallContext = null;
+
+function currentKernelSignalMask() {
+  try {
+    const response = callSyncRpc('process.signal_mask', [3, []]);
+    return Array.isArray(response?.signals) ? response.signals : [];
+  } catch (error) {
+    if (error?.code === 'ERR_AGENTOS_WASM_SYNC_RPC_UNAVAILABLE') {
+      return [];
+    }
+    throw error;
+  }
+}
 
 function callSyncRpc(method, args = []) {
   if (
@@ -4522,7 +5132,13 @@ function callSyncRpc(method, args = []) {
   ) {
     const startedNs = __agentOSWasmNowNs();
     try {
-      return decodeSyncRpcValue(globalThis.__agentOSSyncRpc.callSync(method, args));
+      // Give the V8 bridge the same explicit, engine-neutral byte projection
+      // used by the pipe fallback. Passing a Node Buffer directly makes its
+      // serialization depend on the bridge serializer and previously lost
+      // binary arguments for newly typed syscall methods such as sendmsg.
+      return decodeSyncRpcValue(
+        globalThis.__agentOSSyncRpc.callSync(method, encodeSyncRpcValue(args)),
+      );
     } finally {
       __agentOSWasiRecordSyncRpc(method, 'glue', startedNs);
     }
@@ -4554,13 +5170,26 @@ function callSyncRpc(method, args = []) {
     if (typeof response?.error?.code === 'string') {
       error.code = response.error.code;
     }
+    if (response?.error?.details !== undefined && response.error.details !== null) {
+      error.details = decodeSyncRpcValue(response.error.details);
+    }
     throw error;
   } finally {
     __agentOSWasiRecordSyncRpc(method, 'pipe', startedNs);
   }
 }
 
-const hostNetSockets = new Map();
+// Standalone Node execution has no kernel descriptor table, so its compatibility
+// fallback remains fd-keyed. Managed execution never consults this map: kernel
+// file descriptions own allocation, aliasing, inheritance, and close lifetime.
+const standaloneHostNetSockets = new Map();
+const initialManagedHostNetDescriptionIds = new Set(
+  SIDECAR_MANAGED_PROCESS
+    ? initialHostNetDescriptions
+        .map((entry) => String(entry?.descriptionId ?? ''))
+        .filter((descriptionId) => /^[0-9]+$/.test(descriptionId))
+    : [],
+);
 for (const inherited of initialHostNetDescriptions) {
   const metadata = inherited.metadata && typeof inherited.metadata === 'object'
     ? inherited.metadata
@@ -4588,8 +5217,10 @@ for (const inherited of initialHostNetDescriptions) {
     lastError: null,
     nonblock: metadata.nonblocking === true,
   };
-  for (const rawFd of inherited.guestFds) {
-    hostNetSockets.set(Number(rawFd) >>> 0, socket);
+  if (!SIDECAR_MANAGED_PROCESS) {
+    for (const rawFd of inherited.guestFds) {
+      standaloneHostNetSockets.set(Number(rawFd) >>> 0, socket);
+    }
   }
 }
 let warnedAboutOpenFdLimit = false;
@@ -4597,12 +5228,12 @@ let warnedAboutOpenFdLimit = false;
 function runnerOpenFdSet() {
   const openFds = new Set([0, 1, 2]);
   for (const table of [
-    syntheticFdEntries,
+    activeFdProjections,
     passthroughHandles,
     retainedSpawnOutputHandlesByFd,
     retainedSyntheticHandlesByDisplayFd,
-    delegateManagedFdRefCounts,
-    hostNetSockets,
+    standaloneDelegateFdRefCounts,
+    standaloneHostNetSockets,
     wasi?.fdTable,
   ]) {
     if (!table || typeof table.keys !== 'function') continue;
@@ -4613,14 +5244,15 @@ function runnerOpenFdSet() {
 
 function hasRunnerOpenFdCapacity(additionalFds) {
   const openCount = runnerOpenFdSet().size;
-  const warnAt = Math.max(1, Math.floor(rlimitNofileSoft * 0.9));
+  const nofileSoft = currentNofileSoftLimit();
+  const warnAt = Math.max(1, Math.floor(nofileSoft * 0.9));
   if (!warnedAboutOpenFdLimit && openCount >= warnAt) {
     warnedAboutOpenFdLimit = true;
     process.stderr.write(
-      `[agentos] WASM open fd usage ${openCount}/${rlimitNofileSoft} is near RLIMIT_NOFILE; raise the soft limit or limits.resources.maxOpenFds if needed\n`,
+      `[agentos] WASM open fd usage ${openCount}/${nofileSoft} is near RLIMIT_NOFILE; raise the soft limit or limits.resources.maxOpenFds if needed\n`,
     );
   }
-  return openCount + Math.max(0, Number(additionalFds) >>> 0) <= rlimitNofileSoft;
+  return openCount + Math.max(0, Number(additionalFds) >>> 0) <= nofileSoft;
 }
 // Host-net socket fds must stay BELOW the guests' FD_SETSIZE (1024 in the
 // wasi-libc sysroot): libcurl's select-based Curl_poll / curl_multi_fdset
@@ -4635,27 +5267,180 @@ const HOST_NET_MSG_PEEK = 0x0002;
 const HOST_NET_MSG_DONTWAIT = 0x0040;
 const HOST_NET_MSG_TRUNC = 0x0020;
 
-function getHostNetSocket(fd) {
-  return hostNetSockets.get(Number(fd) >>> 0) ?? null;
+function isHostNetWouldBlock(value) {
+  return value === HOST_NET_TIMEOUT_SENTINEL || (
+    value != null &&
+    typeof value === 'object' &&
+    value.kind === 'wouldBlock'
+  );
 }
 
-function validateHostNetSocketDescriptor(fd) {
+function waitManagedHostNetReadable(socket, timeoutMs, restartableOperation) {
+  const numericTimeoutMs = Number(timeoutMs);
+  const deadline = timeoutMs == null || numericTimeoutMs < 0
+    ? null
+    : Date.now() + (Number.isFinite(numericTimeoutMs) ? numericTimeoutMs : 0);
+  for (;;) {
+    if (dispatchPendingWasmSignals(restartableOperation === true)) {
+      return WASI_ERRNO_INTR;
+    }
+    const remaining = deadline == null
+      ? SPAWNED_CHILD_WAIT_SLICE_MS
+      : Math.max(0, deadline - Date.now());
+    if (deadline == null || remaining > 0) {
+      // Keep runner-side signal and child-lifecycle checkpoints between
+      // sidecar waits. Managed child execution stays sidecar-owned; this pump
+      // performs only the collection work appropriate to the current mode.
+      pumpSpawnedChildren(0);
+    }
+    const waitMs = deadline == null
+      ? SPAWNED_CHILD_WAIT_SLICE_MS
+      : Math.min(SPAWNED_CHILD_WAIT_SLICE_MS, Math.max(0, deadline - Date.now()));
+    try {
+      const response = callSyncRpc('process.posix_poll', [[{
+        fd: managedHostNetTargetFd(socket),
+        events: 0x001 | 0x040,
+      }], waitMs, null]);
+      if (Number(response?.readyCount) > 0) return true;
+    } catch (error) {
+      if (error?.code !== 'EINTR') throw error;
+      const mustInterrupt = dispatchPendingWasmSignals(restartableOperation === true);
+      if (restartableOperation !== true || mustInterrupt) return WASI_ERRNO_INTR;
+    }
+    if (deadline != null && Date.now() >= deadline) return false;
+  }
+}
+
+function getHostNetSocket(fd) {
   const numericFd = Number(fd) >>> 0;
-  const socket = hostNetSockets.get(numericFd);
-  if (socket && !socket.closed) return WASI_ERRNO_SUCCESS;
-  if (lookupFdHandle(numericFd) || delegateManagedFdRefCounts.has(numericFd)) {
+  if (!SIDECAR_MANAGED_PROCESS) {
+    return standaloneHostNetSockets.get(numericFd) ?? null;
+  }
+  const handle = lookupFdHandle(numericFd);
+  if (
+    handle?.kind !== 'kernel-fd' ||
+    typeof handle.hostNetDescriptionId !== 'string'
+  ) return null;
+  return {
+    managed: true,
+    guestFd: numericFd,
+    targetFd: Number(handle.targetFd) >>> 0,
+  };
+}
+
+function hasHostNetSocket(fd) {
+  return getHostNetSocket(fd) != null;
+}
+
+function attachManagedHostNetDescription(guestFd, descriptionId) {
+  const normalized = String(descriptionId ?? '');
+  if (!/^[0-9]+$/.test(normalized)) {
+    const error = new Error('host-network fd does not match a managed kernel description');
+    error.code = 'EIO';
+    throw error;
+  }
+  const handle = lookupFdHandle(guestFd);
+  if (handle?.kind !== 'kernel-fd') {
+    const error = new Error('managed host-network fd is not kernel-backed');
+    error.code = 'EIO';
+    throw error;
+  }
+  handle.hostNetDescriptionId = normalized;
+  return guestFd;
+}
+
+function copyManagedHostNetDescription(sourceFd, targetFd) {
+  if (!SIDECAR_MANAGED_PROCESS) return;
+  const source = lookupFdHandle(Number(sourceFd) >>> 0);
+  if (typeof source?.hostNetDescriptionId !== 'string') return;
+  const target = lookupFdHandle(Number(targetFd) >>> 0);
+  if (target?.kind === 'kernel-fd') {
+    target.hostNetDescriptionId = source.hostNetDescriptionId;
+  }
+}
+
+function hostNetGuestFds() {
+  if (!SIDECAR_MANAGED_PROCESS) return [...standaloneHostNetSockets.keys()];
+  return [...passthroughHandles, ...activeFdProjections]
+    .filter(([, handle]) =>
+      handle?.kind === 'kernel-fd' &&
+      typeof handle.hostNetDescriptionId === 'string'
+    )
+    .map(([guestFd]) => Number(guestFd) >>> 0);
+}
+
+function registerNewHostNetSocket(socket) {
+  if (!SIDECAR_MANAGED_PROCESS) {
+    const fd = allocateHostNetSocketFd();
+    if (fd == null) return null;
+    standaloneHostNetSockets.set(fd, socket);
+    return fd;
+  }
+  const socketType = Number(socket.sockType) >>> 0;
+  const result = callSyncRpc('process.hostnet_fd_open', [
+    Number(socket.domain) >>> 0,
+    socketType & HOST_NET_SOCKET_TYPE_MASK,
+    socket.nonblock === true,
+    (socketType & HOST_NET_SOCK_CLOEXEC) !== 0,
+  ]);
+  const descriptionId = String(result?.descriptionId ?? '');
+  if (!/^[0-9]+$/.test(descriptionId)) {
+    const error = new Error('kernel returned an invalid host-network description identity');
+    error.code = 'EIO';
+    throw error;
+  }
+  let guestFd;
+  try {
+    guestFd = registerKernelDelegateFd(result?.fd, null, FIRST_SYNTHETIC_FD);
+    if (guestFd > HOST_NET_SOCKET_FD_MAX) {
+      const error = new Error('no host-network descriptor is available below FD_SETSIZE');
+      error.code = 'EMFILE';
+      throw error;
+    }
+    attachManagedHostNetDescription(guestFd, descriptionId);
+    if (!SIDECAR_MANAGED_PROCESS && (socketType & HOST_NET_SOCK_CLOEXEC) !== 0) {
+      standaloneCloexecFds.add(guestFd);
+    }
+    return guestFd;
+  } catch (error) {
+    if (guestFd != null) wasiImport.fd_close(guestFd);
+    throw error;
+  }
+}
+
+function validateHostNetSocketDescriptor(fd, requireListening = false) {
+  const numericFd = Number(fd) >>> 0;
+  if (SIDECAR_MANAGED_PROCESS) {
+    try {
+      callSyncRpc('process.hostnet_validate', [
+        canonicalKernelFdForSpawnAction(numericFd),
+        requireListening === true,
+      ]);
+      return WASI_ERRNO_SUCCESS;
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
+  }
+  const socket = getHostNetSocket(numericFd);
+  if (socket && !socket.closed) {
+    if (!requireListening || (socket.serverId && socket.listening === true)) {
+      return WASI_ERRNO_SUCCESS;
+    }
+    return WASI_ERRNO_INVAL;
+  }
+  if (lookupFdHandle(numericFd) || standaloneDelegateFdRefCounts.has(numericFd)) {
     return WASI_ERRNO_NOTSOCK;
   }
   return WASI_ERRNO_BADF;
 }
 
 function allocateHostNetSocketFd() {
-  if (maxSockets != null && hostNetSockets.size >= maxSockets) {
+  if (maxSockets != null && new Set(standaloneHostNetSockets.values()).size >= maxSockets) {
     return null;
   }
   if (!hasRunnerOpenFdCapacity(1)) return null;
   const openFds = runnerOpenFdSet();
-  const descriptorLimit = Math.min(HOST_NET_SOCKET_FD_MAX + 1, rlimitNofileSoft);
+  const descriptorLimit = Math.min(HOST_NET_SOCKET_FD_MAX + 1, currentNofileSoftLimit());
   for (let fd = FIRST_SYNTHETIC_FD; fd < descriptorLimit; fd += 1) {
     if (!openFds.has(fd)) {
       return fd;
@@ -4671,7 +5456,7 @@ function allocateHostNetDuplicateFd(minimumFd = 0) {
   }
   if (!hasRunnerOpenFdCapacity(1)) return null;
   const openFds = runnerOpenFdSet();
-  const descriptorLimit = Math.min(LINUX_GUEST_FD_LIMIT, rlimitNofileSoft);
+  const descriptorLimit = Math.min(LINUX_GUEST_FD_LIMIT, currentNofileSoftLimit());
   for (let fd = minimum; fd < descriptorLimit; fd += 1) {
     if (!openFds.has(fd)) return fd;
   }
@@ -4734,14 +5519,11 @@ function decodeHostNetSocketReadResult(result) {
     return { kind: 'end' };
   }
 
-  if (result === HOST_NET_TIMEOUT_SENTINEL) {
+  if (isHostNetWouldBlock(result)) {
     return { kind: 'timeout' };
   }
 
   if (typeof result === 'string') {
-    if (result === HOST_NET_TIMEOUT_SENTINEL) {
-      return { kind: 'timeout' };
-    }
     return { kind: 'data', bytes: Buffer.from(result, 'base64') };
   }
 
@@ -4752,7 +5534,7 @@ function decodeHostNetSocketReadResult(result) {
   if (decoded == null) {
     return { kind: 'end' };
   }
-  if (decoded === HOST_NET_TIMEOUT_SENTINEL) {
+  if (isHostNetWouldBlock(decoded)) {
     return { kind: 'timeout' };
   }
   return { kind: 'timeout' };
@@ -4920,6 +5702,39 @@ function formatHostNetUnixAddress(address) {
   return 'unix-unnamed';
 }
 
+function managedHostNetAddressValue(raw) {
+  const unix = parseHostNetUnixAddress(raw);
+  if (unix?.autobind === true) return { type: 'unix-autobind' };
+  if (typeof unix?.abstractPathHex === 'string') {
+    return { type: 'unix-abstract', hex: unix.abstractPathHex };
+  }
+  if (typeof unix?.path === 'string') {
+    return { type: 'unix-path', path: unix.path };
+  }
+  const inet = parseHostNetAddress(raw);
+  return { type: 'inet', host: inet.host, port: inet.port };
+}
+
+function managedHostNetTargetFd(socket) {
+  if (socket?.managed !== true || !Number.isInteger(socket.targetFd)) {
+    const error = new Error('managed host-network socket projection is invalid');
+    error.code = 'EBADF';
+    throw error;
+  }
+  return Number(socket.targetFd) >>> 0;
+}
+
+function managedHostNetAddressText(value) {
+  if (typeof value?.address === 'string' && Number.isInteger(Number(value?.port))) {
+    return formatHostNetAddressInfo(value);
+  }
+  if (typeof value?.abstractPathHex === 'string') {
+    return `unix-abstract:${value.abstractPathHex}`;
+  }
+  if (typeof value?.path === 'string') return `unix:${value.path}`;
+  return 'unix-unnamed';
+}
+
 function hostNetUnixNodePath(address) {
   if (typeof address?.abstractPathHex === 'string') {
     return `\0${Buffer.from(address.abstractPathHex, 'hex').toString('utf8')}`;
@@ -4997,6 +5812,7 @@ const POSIX_SOCK_DGRAM = 2;
 // wasi-libc <sys/socket.h>: SOCK_NONBLOCK / SOCK_CLOEXEC bits OR'd into the
 // socket(2) type argument (Linux-style socket(..., SOCK_STREAM | SOCK_NONBLOCK)).
 const HOST_NET_SOCK_NONBLOCK = 0x4000;
+const HOST_NET_SOCK_CLOEXEC = 0x2000;
 const HOST_NET_SOL_SOCKET = 1;
 const HOST_NET_WASI_SOL_SOCKET = 0x7fffffff;
 const HOST_NET_SO_ERROR = 4;
@@ -5238,6 +6054,8 @@ const LINUX_SIGNAL_NAMES = [
   'SIGSYS',
 ];
 const LINUX_MAX_SIGNAL_NUMBER = 64;
+const MAX_SUPPLEMENTARY_GROUPS = 64;
+const MAX_ACCOUNT_RECORD_BYTES = 4096;
 
 function writeGuestBytes(ptr, maxLen, bytes, actualLenPtr) {
   if (!(instanceMemory instanceof WebAssembly.Memory)) {
@@ -5246,10 +6064,45 @@ function writeGuestBytes(ptr, maxLen, bytes, actualLenPtr) {
 
   try {
     const requestedLength = Number(maxLen) >>> 0;
-    const memory = new Uint8Array(instanceMemory.buffer);
     const written = Math.min(requestedLength, bytes.byteLength);
+    if (!guestRangesAreValid([ptr, written], [actualLenPtr, 4])) {
+      return WASI_ERRNO_FAULT;
+    }
+    const memory = new Uint8Array(instanceMemory.buffer);
     memory.set(bytes.subarray(0, written), Number(ptr));
     return writeGuestUint32(actualLenPtr, written);
+  } catch {
+    return WASI_ERRNO_FAULT;
+  }
+}
+
+// Account lookup records follow the reentrant libc contract: publish the
+// required size and return ERANGE without a partial record when the caller's
+// buffer is short. Validate both output ranges before the first write.
+function writeGuestAccountRecord(ptr, maxLen, bytes, actualLenPtr) {
+  if (!(instanceMemory instanceof WebAssembly.Memory)) {
+    return WASI_ERRNO_FAULT;
+  }
+  const memoryLength = instanceMemory.buffer.byteLength;
+  const outputOffset = Number(ptr) >>> 0;
+  const required = bytes.byteLength >>> 0;
+  const capacity = Number(maxLen) >>> 0;
+  const lengthOffset = Number(actualLenPtr) >>> 0;
+  if (lengthOffset > memoryLength - 4) {
+    return WASI_ERRNO_FAULT;
+  }
+  if (capacity >= required && outputOffset > memoryLength - required) {
+    return WASI_ERRNO_FAULT;
+  }
+  if (writeGuestUint32(lengthOffset, required) !== WASI_ERRNO_SUCCESS) {
+    return WASI_ERRNO_FAULT;
+  }
+  if (capacity < required) {
+    return WASI_ERRNO_RANGE;
+  }
+  try {
+    new Uint8Array(instanceMemory.buffer).set(bytes, outputOffset);
+    return WASI_ERRNO_SUCCESS;
   } catch {
     return WASI_ERRNO_FAULT;
   }
@@ -5264,7 +6117,7 @@ function writeGuestBytes(ptr, maxLen, bytes, actualLenPtr) {
 // server never blocks inside accept() and starves already-connected clients.
 function tryHostNetAcceptOnce(socket) {
   let result = callSyncRpc('net.server_accept', [socket.serverId]);
-  if (!result || result === HOST_NET_TIMEOUT_SENTINEL) {
+  if (!result || isHostNetWouldBlock(result)) {
     return null;
   }
   if (typeof result === 'string') {
@@ -5274,19 +6127,16 @@ function tryHostNetAcceptOnce(socket) {
     return null;
   }
 
-  const acceptedFd = allocateHostNetSocketFd();
-  if (acceptedFd == null) {
-    callSyncRpc('net.destroy', [result.socketId]);
-    return { error: WASI_ERRNO_MFILE };
-  }
   const localUnix = unixAddressFromSidecarInfo(result.info, 'local') ??
     ((socket.bindOptions?.path != null || socket.bindOptions?.abstractPathHex != null)
       ? socket.bindOptions
       : null);
   const remoteUnix = unixAddressFromSidecarInfo(result.info, 'remote');
-  hostNetSockets.set(acceptedFd, {
+  const acceptedSocket = {
     domain: socket.domain,
-    sockType: socket.sockType,
+    // Linux accept(2) does not inherit SOCK_CLOEXEC or O_NONBLOCK from the
+    // listener; accept4(2) supplies those flags explicitly.
+    sockType: Number(socket.sockType) & HOST_NET_SOCKET_TYPE_MASK,
     protocol: socket.protocol,
     bindOptions: null,
     localInfo: normalizeHostNetAddressInfo(result.info?.localAddress, result.info?.localPort),
@@ -5304,7 +6154,18 @@ function tryHostNetAcceptOnce(socket) {
     readableEnded: false,
     closed: false,
     lastError: null,
-  });
+  };
+  let registeredAcceptedFd;
+  try {
+    registeredAcceptedFd = registerNewHostNetSocket(acceptedSocket);
+  } catch (error) {
+    callSyncRpc('net.destroy', [result.socketId]);
+    return { error: mapHostProcessError(error) };
+  }
+  if (registeredAcceptedFd == null) {
+    callSyncRpc('net.destroy', [result.socketId]);
+    return { error: WASI_ERRNO_MFILE };
+  }
 
   let address;
   if (result.info?.remoteAddress != null && result.info?.remotePort != null) {
@@ -5315,24 +6176,67 @@ function tryHostNetAcceptOnce(socket) {
   } else {
     address = Buffer.from(remoteUnix ? formatHostNetUnixAddress(remoteUnix) : 'unix-unnamed', 'utf8');
   }
-  return { acceptedFd, address };
+  return { acceptedFd: registeredAcceptedFd, address };
 }
 
 function cleanupAcceptedHostNetSocket(accepted, reason) {
   const acceptedFd = Number(accepted?.acceptedFd);
   if (!Number.isInteger(acceptedFd)) return null;
-  const acceptedSocket = hostNetSockets.get(acceptedFd);
-  hostNetSockets.delete(acceptedFd);
+  const acceptedSocket = getHostNetSocket(acceptedFd);
   if (!acceptedSocket?.socketId) return null;
+  const result = wasiImport.fd_close(acceptedFd);
+  if (result === WASI_ERRNO_SUCCESS) return null;
   try {
-    callSyncRpc('net.destroy', [acceptedSocket.socketId]);
-    return null;
-  } catch (error) {
+    const error = new Error(`close returned WASI errno ${result}`);
+    error.code = 'EIO';
     process.stderr.write(
       `[agentos] failed to destroy accepted socket during ${reason}: ${error instanceof Error ? error.message : String(error)}\n`,
     );
     return error;
+  } catch (error) {
+    return error;
   }
+}
+
+function cleanupDetachedHostNetSocket(numericFd, socket) {
+  let firstError = null;
+  const cleanup = (label, operation) => {
+    try {
+      operation();
+    } catch (error) {
+      if (firstError == null) firstError = error;
+      process.stderr.write(
+        `[agentos] failed to ${label} while closing host_net fd ${numericFd}: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  };
+  if (Array.isArray(socket.pendingAccepts)) {
+    for (const accepted of socket.pendingAccepts.splice(0)) {
+      const error = cleanupAcceptedHostNetSocket(accepted, 'listener close');
+      if (firstError == null && error != null) firstError = error;
+    }
+  }
+  if (socket.localReservation != null) {
+    cleanup('release TCP port reservation', () => {
+      callSyncRpc('net.release_tcp_port', [socket.localReservation]);
+    });
+  }
+  if (socket.socketId && !socket.closed) {
+    cleanup('destroy connected socket', () => {
+      callSyncRpc('net.destroy', [socket.socketId]);
+    });
+  }
+  if (socket.serverId) {
+    cleanup('close listener', () => {
+      callSyncRpc('net.server_close', [socket.serverId]);
+    });
+  }
+  if (socket.udpSocketId) {
+    cleanup('close datagram socket', () => {
+      callSyncRpc('dgram.close', [socket.udpSocketId]);
+    });
+  }
+  return firstError == null ? WASI_ERRNO_SUCCESS : mapHostProcessError(firstError);
 }
 
 const hostNetImport = {
@@ -5341,9 +6245,19 @@ const hostNetImport = {
   // only when a connection is actually pending (a buffered non-blocking accept), so the
   // server's WaitForSomething does not spin forever inside a blocking accept().
   // POLLOUT is always writable.
-  net_poll(fdsPtr, nfds, timeoutMs, retReadyPtr) {
+  net_poll(fdsPtr, nfds, timeoutMs, retReadyPtr, temporarySignalMask = null) {
     const n = Number(nfds) >>> 0;
     const base0 = Number(fdsPtr) >>> 0;
+    const pollFdLimit = Math.min(LINUX_IOV_MAX, currentNofileSoftLimit());
+    const countErrno = checkFixedRequestLimit(
+      'wasm.abi.maxPollFds',
+      n,
+      pollFdLimit,
+    );
+    if (countErrno !== WASI_ERRNO_SUCCESS) return countErrno;
+    if (!guestRangesAreValid([base0, n * 8], [retReadyPtr, 4])) {
+      return WASI_ERRNO_FAULT;
+    }
     // Match Linux's public poll(2) ABI in the owned sysroot exactly.
     const POLLIN = 0x001;
     const POLLOUT = 0x004;
@@ -5355,25 +6269,110 @@ const hostNetImport = {
     const NORMAL_READ_EVENTS = POLLIN | POLLRDNORM;
     const NORMAL_WRITE_EVENTS = POLLOUT | POLLWRNORM;
     const t = Number(timeoutMs) | 0;
+    if (SIDECAR_MANAGED_PROCESS) {
+      // One sidecar-owned wait snapshots kernel fds and managed TCP/Unix/UDP
+      // sockets/listeners together. The optional ppoll mask travels in this
+      // same RPC; the guest never owns a mask-scope token and never pumps a
+      // managed socket or child while parked.
+      const view = new DataView(instanceMemory.buffer);
+      const targets = [];
+      const targetEntries = [];
+      let ready = 0;
+      for (let i = 0; i < n; i++) {
+        const base = base0 + i * 8;
+        const fd = view.getInt32(base, true);
+        const events = view.getUint16(base + 4, true);
+        let revents = 0;
+        const socket = getHostNetSocket(fd);
+        const handle = fd >= 0 ? lookupFdHandle(fd >>> 0) : undefined;
+        let targetFd = null;
+        if (socket?.managed === true) {
+          targetFd = managedHostNetTargetFd(socket);
+        } else if (handle?.kind === 'kernel-fd' || handle?.kind === 'passthrough') {
+          targetFd = Number(handle.targetFd) >>> 0;
+        } else if (handle) {
+          revents = events & (NORMAL_READ_EVENTS | NORMAL_WRITE_EVENTS);
+        } else if (fd >= 0 && fd <= 2) {
+          targetFd = fd >>> 0;
+        } else if (fd >= 0) {
+          revents = POLLNVAL;
+        }
+        view.setUint16(base + 6, revents, true);
+        if (revents !== 0) ready++;
+        if (targetFd != null) {
+          targets.push({ fd: targetFd, events });
+          targetEntries.push({ base, events });
+        }
+      }
+
+      if (ready > 0) {
+        if (writeGuestUint32(retReadyPtr, ready) !== WASI_ERRNO_SUCCESS) {
+          return WASI_ERRNO_FAULT;
+        }
+        return WASI_ERRNO_SUCCESS;
+      }
+      if (targets.length > 0 || temporarySignalMask != null) {
+        const requestedWait = t < 0 ? null : t;
+        try {
+          const response = callSyncRpc('process.posix_poll', [
+            targets,
+            requestedWait,
+            temporarySignalMask,
+          ]);
+          const observed = Array.isArray(response?.fds) ? response.fds : [];
+          for (let i = 0; i < targetEntries.length; i++) {
+            const revents = Number(observed[i]?.revents) & 0xffff;
+            new DataView(instanceMemory.buffer).setUint16(
+              targetEntries[i].base + 6,
+              revents,
+              true,
+            );
+            if (revents !== 0) ready++;
+          }
+          // A signal released only when ppoll restored the caller's mask is
+          // dispatched before returning to guest code without rewriting an
+          // already-observed successful readiness result.
+          dispatchPendingWasmSignals();
+          if (writeGuestUint32(retReadyPtr, ready) !== WASI_ERRNO_SUCCESS) {
+            return WASI_ERRNO_FAULT;
+          }
+          return WASI_ERRNO_SUCCESS;
+        } catch (error) {
+          if (error?.code === 'EINTR') {
+            dispatchPendingWasmSignals();
+            if (writeGuestUint32(retReadyPtr, 0) !== WASI_ERRNO_SUCCESS) {
+              return WASI_ERRNO_FAULT;
+            }
+            return WASI_ERRNO_INTR;
+          }
+          return mapHostProcessError(error);
+        }
+      }
+      if (t === 0) {
+        if (writeGuestUint32(retReadyPtr, 0) !== WASI_ERRNO_SUCCESS) {
+          return WASI_ERRNO_FAULT;
+        }
+        return WASI_ERRNO_SUCCESS;
+      }
+      // With no waitable descriptor, retain the runner's bounded timer loop
+      // below. It is the only path that can emit the 80%-of-timeout warning
+      // while preserving poll(2)'s zero-fd sleep semantics.
+    }
     const startedAt = Date.now();
     const deadline = t < 0 ? null : startedAt + Math.max(0, t);
     const safeguardDeadline = startedAt + unixConnectTimeoutMs;
     const safeguardApplies = deadline == null || safeguardDeadline < deadline;
     const effectiveDeadline = safeguardApplies ? safeguardDeadline : deadline;
-    const warningAt = startedAt + Math.floor(unixConnectTimeoutMs * 0.8);
     let warnedNearLimit = false;
-    const kernelManagedStdio =
-      KERNEL_STDIO_SYNC_RPC ||
-      (typeof process?.env?.AGENTOS_SANDBOX_ROOT === 'string' &&
-        process.env.AGENTOS_SANDBOX_ROOT.length > 0);
+    const kernelManagedStdio = KERNEL_STDIO_SYNC_RPC || SIDECAR_MANAGED_PROCESS;
     try {
       while (true) {
-        if (safeguardApplies && !warnedNearLimit && Date.now() >= warningAt) {
-          warnedNearLimit = true;
-          process.stderr.write(
-            `[agentos] blocking poll is nearing limits.resources.maxBlockingReadMs (${unixConnectTimeoutMs} ms)\n`,
-          );
-        }
+        warnedNearLimit = warnNearBlockingReadLimit(
+          'blocking poll',
+          startedAt,
+          warnedNearLimit,
+          safeguardApplies,
+        );
         if (dispatchPendingWasmSignals()) {
           if (writeGuestUint32(retReadyPtr, 0) !== WASI_ERRNO_SUCCESS) {
             return WASI_ERRNO_FAULT;
@@ -5407,7 +6406,17 @@ const hostNetImport = {
           let revents = 0;
           const socket = getHostNetSocket(fd);
           const handle = fd >= 0 ? lookupFdHandle(fd >>> 0) : undefined;
-          if (socket && !socket.closed) {
+          if (socket?.managed === true) {
+            hasHostNetWaitTarget = true;
+            const response = callSyncRpc('process.hostnet_poll', [[{
+              fd: managedHostNetTargetFd(socket),
+              readable: (events & NORMAL_READ_EVENTS) !== 0,
+              writable: (events & NORMAL_WRITE_EVENTS) !== 0,
+            }], 0]);
+            const observed = Array.isArray(response?.ready) ? response.ready[0] : null;
+            if (observed?.readable === true) revents |= events & NORMAL_READ_EVENTS;
+            if (observed?.writable === true) revents |= events & NORMAL_WRITE_EVENTS;
+          } else if (socket && !socket.closed) {
             hasHostNetWaitTarget = true;
             if (socket.serverId) {
               if (events & NORMAL_READ_EVENTS) {
@@ -5585,7 +6594,14 @@ const hostNetImport = {
         for (let i = 0; i < n; i++) {
           const fd = v2.getInt32(base0 + i * 8, true);
           const s = getHostNetSocket(fd);
-          if (s && !s.serverId) {
+          if (s?.managed === true) {
+            callSyncRpc('process.hostnet_poll', [[{
+              fd: managedHostNetTargetFd(s),
+              readable: true,
+              writable: false,
+            }], 10]);
+            pumpedSocket = true;
+          } else if (s && !s.serverId) {
             if (s.socketId) {
               pollHostNetSocket(s, 10);
               pumpedSocket = true;
@@ -5609,6 +6625,7 @@ const hostNetImport = {
   },
   net_socket(domain, sockType, protocol, retFdPtr) {
     try {
+      if (!guestRangeIsValid(retFdPtr, 4)) return WASI_ERRNO_FAULT;
       const numericDomain = Number(domain) >>> 0;
       // Rust's WASI networking compatibility path uses POSIX socket type
       // values (1/2), while the owned wasi-libc ABI and sidecar transfer
@@ -5623,11 +6640,7 @@ const hostNetImport = {
         return WASI_ERRNO_NOTSUP;
       }
 
-      const fd = allocateHostNetSocketFd();
-      if (fd == null) {
-        return WASI_ERRNO_MFILE;
-      }
-      hostNetSockets.set(fd, {
+      const socket = {
         domain: numericDomain,
         sockType: numericType,
         protocol: numericProtocol,
@@ -5654,14 +6667,16 @@ const hostNetImport = {
         // early server response mid-upload, and a blocking recv() waits on a
         // server that is itself waiting for the rest of the request body.
         nonblock: (numericType & HOST_NET_SOCK_NONBLOCK) !== 0,
-      });
+      };
+      const fd = registerNewHostNetSocket(socket);
+      if (fd == null) return WASI_ERRNO_MFILE;
       const copyout = writeGuestUint32(retFdPtr, fd);
       if (copyout !== WASI_ERRNO_SUCCESS) {
-        hostNetSockets.delete(fd);
+        wasiImport.fd_close(fd);
       }
       return copyout;
-    } catch {
-      return WASI_ERRNO_FAULT;
+    } catch (error) {
+      return mapHostProcessError(error);
     }
   },
   // Mark a host_net socket non-blocking (O_NONBLOCK). The patched wasi-libc fcntl cannot reach
@@ -5669,8 +6684,23 @@ const hostNetImport = {
   net_set_nonblock(fd, enable) {
     const socket = getHostNetSocket(fd);
     if (!socket) return WASI_ERRNO_BADF;
-    socket.nonblock = (Number(enable) >>> 0) !== 0;
-    return WASI_ERRNO_SUCCESS;
+    const nonblocking = (Number(enable) >>> 0) !== 0;
+    try {
+      if (SIDECAR_MANAGED_PROCESS) {
+        const handle = lookupFdHandle(Number(fd) >>> 0);
+        if (handle?.kind !== 'kernel-fd') return WASI_ERRNO_BADF;
+        const stat = callSyncRpc('process.fd_stat', [Number(handle.targetFd) >>> 0]);
+        const currentFlags = Number(stat?.flags) >>> 0;
+        const nextFlags = nonblocking
+          ? currentFlags | KERNEL_O_NONBLOCK
+          : currentFlags & ~KERNEL_O_NONBLOCK;
+        callSyncRpc('process.fd_set_flags', [Number(handle.targetFd) >>> 0, nextFlags]);
+      }
+      if (socket.managed !== true) socket.nonblock = nonblocking;
+      return WASI_ERRNO_SUCCESS;
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
   },
   net_connect(fd, addrPtr, addrLen) {
     const socket = getHostNetSocket(fd);
@@ -5690,6 +6720,14 @@ const hostNetImport = {
       // padding; cut at the first NUL so the unix path is clean before classification.
       const nulAt = rawAddr.indexOf(String.fromCharCode(0));
       if (nulAt >= 0) rawAddr = rawAddr.slice(0, nulAt);
+      if (socket.managed === true) {
+        callSyncRpc('process.hostnet_connect', [
+          managedHostNetTargetFd(socket),
+          managedHostNetAddressValue(rawAddr),
+          unixConnectTimeoutMs,
+        ]);
+        return WASI_ERRNO_SUCCESS;
+      }
       // AF_UNIX addresses use an explicit wire prefix so relative paths and paths containing ':'
       // cannot be mistaken for TCP host:port strings.
       const unixAddress = parseHostNetUnixAddress(rawAddr);
@@ -5702,31 +6740,36 @@ const hostNetImport = {
         if (socket.serverId) {
           request.boundServerId = socket.serverId;
         }
-        const deadline = Date.now() + unixConnectTimeoutMs;
-        const warningAt = Date.now() + Math.floor(unixConnectTimeoutMs * 0.8);
+        const startedAt = Date.now();
+        const deadline = startedAt + unixConnectTimeoutMs;
         let warnedNearLimit = false;
         let result;
         for (;;) {
-          if (dispatchPendingWasmSignals()) return WASI_ERRNO_INTR;
+          if (dispatchPendingWasmSignals(true)) return WASI_ERRNO_INTR;
           try {
             result = callSyncRpc('net.connect', [request]);
             break;
           } catch (error) {
             if (mapHostProcessError(error) !== WASI_ERRNO_AGAIN) throw error;
             if (socket.nonblock) return WASI_ERRNO_AGAIN;
-            if (!warnedNearLimit && Date.now() >= warningAt) {
-              warnedNearLimit = true;
-              process.stderr.write(
-                `[agentos] blocking AF_UNIX connect is nearing limits.resources.maxBlockingReadMs (${unixConnectTimeoutMs} ms)\n`,
-              );
-            }
+            warnedNearLimit = warnNearBlockingReadLimit(
+              'blocking AF_UNIX connect',
+              startedAt,
+              warnedNearLimit,
+            );
             if (Date.now() >= deadline) {
               process.stderr.write(
                 `[agentos] blocking AF_UNIX connect exceeded limits.resources.maxBlockingReadMs (${unixConnectTimeoutMs} ms); raise limits.resources.maxBlockingReadMs if needed\n`,
               );
               return WASI_ERRNO_TIMEDOUT;
             }
-            pumpSpawnedChildrenOrWait(Math.min(10, Math.max(1, deadline - Date.now())));
+            if (
+              pumpSpawnedChildrenOrWaitRestartable(
+                Math.min(10, Math.max(1, deadline - Date.now())),
+              )
+            ) {
+              return WASI_ERRNO_INTR;
+            }
           }
         }
         if (!result || typeof result.socketId !== 'string') {
@@ -5791,6 +6834,9 @@ const hostNetImport = {
   },
   net_getaddrinfo(hostPtr, hostLen, portPtr, portLen, family, retAddrPtr, retAddrLenPtr) {
     try {
+      if (!guestRangeIsValid(retAddrLenPtr, 4)) return WASI_ERRNO_FAULT;
+      const outputCapacity = readGuestUint32(retAddrLenPtr);
+      if (!guestRangeIsValid(retAddrPtr, outputCapacity)) return WASI_ERRNO_FAULT;
       const hostname = readGuestString(hostPtr, hostLen);
       const numericFamily = Number(family) >>> 0;
       const lookupOptions = { hostname, all: true };
@@ -5819,7 +6865,7 @@ const hostNetImport = {
       const encoded = Buffer.from(JSON.stringify(payload), 'utf8');
       return writeGuestBytes(
         retAddrPtr,
-        readGuestUint32(retAddrLenPtr),
+        outputCapacity,
         encoded,
         retAddrLenPtr,
       );
@@ -5838,6 +6884,15 @@ const hostNetImport = {
     retFlagsPtr,
   ) {
     try {
+      const outputCapacity = Number(outCap) >>> 0;
+      if (!guestRangesAreValid(
+        [outPtr, outputCapacity],
+        [retLenPtr, 4],
+        [retTtlPtr, 4],
+        [retFlagsPtr, 4],
+      )) {
+        return WASI_ERRNO_FAULT;
+      }
       const numericType = Number(rrtype) >>> 0;
       const requestedType = numericType === 12
         ? 'PTR'
@@ -5898,7 +6953,7 @@ const hostNetImport = {
       if (writeGuestUint32(retLenPtr, payloadLength) !== WASI_ERRNO_SUCCESS) {
         return WASI_ERRNO_FAULT;
       }
-      if ((Number(outCap) >>> 0) < payloadLength) {
+      if (outputCapacity < payloadLength) {
         return WASI_ERRNO_NOBUFS;
       }
 
@@ -5936,6 +6991,13 @@ const hostNetImport = {
     }
 
     try {
+      if (socket.managed === true) {
+        callSyncRpc('process.hostnet_bind', [
+          managedHostNetTargetFd(socket),
+          managedHostNetAddressValue(readGuestString(addrPtr, addrLen)),
+        ]);
+        return WASI_ERRNO_SUCCESS;
+      }
       if (socket.bindOptions != null || socket.serverId != null) {
         return WASI_ERRNO_INVAL;
       }
@@ -6033,14 +7095,21 @@ const hostNetImport = {
     if (!socket || socket.closed) {
       return validateHostNetSocketDescriptor(fd);
     }
-    if (socket.socketId != null) {
+    if (socket.managed !== true && socket.socketId != null) {
       return WASI_ERRNO_INVAL;
     }
-    if (!socket.bindOptions) {
+    if (socket.managed !== true && !socket.bindOptions) {
       return WASI_ERRNO_INVAL;
     }
 
     try {
+      if (socket.managed === true) {
+        callSyncRpc('process.hostnet_listen', [
+          managedHostNetTargetFd(socket),
+          Math.max(0, Number(backlog) >>> 0),
+        ]);
+        return WASI_ERRNO_SUCCESS;
+      }
       const request = {
         backlog: Math.max(0, Number(backlog) >>> 0),
       };
@@ -6073,11 +7142,78 @@ const hostNetImport = {
   },
   net_accept(fd, retFdPtr, retAddrPtr, retAddrLenPtr) {
     const socket = getHostNetSocket(fd);
-    const validation = validateHostNetSocketDescriptor(fd);
+    const validation = validateHostNetSocketDescriptor(fd, true);
     if (validation !== WASI_ERRNO_SUCCESS) return validation;
+    if (socket?.managed === true) {
+      if (!guestRangesAreValid([retFdPtr, 4], [retAddrLenPtr, 4])) {
+        return WASI_ERRNO_FAULT;
+      }
+      const addressCapacity = readGuestUint32(retAddrLenPtr);
+      if (!guestRangeIsValid(retAddrPtr, addressCapacity)) return WASI_ERRNO_FAULT;
+      let acceptedGuestFd = null;
+      try {
+        const listenerStat = callSyncRpc('process.fd_stat', [
+          managedHostNetTargetFd(socket),
+        ]);
+        const listenerNonblocking =
+          (Number(listenerStat?.flags) & KERNEL_O_NONBLOCK) !== 0;
+        const startedAt = Date.now();
+        let result = callSyncRpc('process.hostnet_accept', [
+          managedHostNetTargetFd(socket),
+          false,
+          false,
+          0,
+        ]);
+        while (result == null || isHostNetWouldBlock(result)) {
+          if (listenerNonblocking) return WASI_ERRNO_AGAIN;
+          const remaining = Math.max(0, unixConnectTimeoutMs - (Date.now() - startedAt));
+          const readable = waitManagedHostNetReadable(socket, remaining, true);
+          if (readable === WASI_ERRNO_INTR) return WASI_ERRNO_INTR;
+          if (!readable) return WASI_ERRNO_TIMEDOUT;
+          result = callSyncRpc('process.hostnet_accept', [
+            managedHostNetTargetFd(socket),
+            false,
+            false,
+            0,
+          ]);
+          if (result == null || isHostNetWouldBlock(result)) {
+            if (Date.now() - startedAt >= unixConnectTimeoutMs) return WASI_ERRNO_TIMEDOUT;
+          }
+        }
+        acceptedGuestFd = registerKernelDelegateFd(result.fd, null, FIRST_SYNTHETIC_FD);
+        attachManagedHostNetDescription(acceptedGuestFd, result.descriptionId);
+        const info = result.info ?? {};
+        const address = Buffer.from(managedHostNetAddressText({
+          address: info.remoteAddress,
+          port: info.remotePort,
+          path: info.remotePath,
+          abstractPathHex: info.remoteAbstractPathHex,
+        }), 'utf8');
+        if (writeGuestUint32(retFdPtr, acceptedGuestFd) !== WASI_ERRNO_SUCCESS) {
+          wasiImport.fd_close(acceptedGuestFd);
+          return WASI_ERRNO_FAULT;
+        }
+        const copied = writeGuestBytes(
+          retAddrPtr,
+          addressCapacity,
+          address,
+          retAddrLenPtr,
+        );
+        if (copied !== WASI_ERRNO_SUCCESS) wasiImport.fd_close(acceptedGuestFd);
+        return copied;
+      } catch (error) {
+        if (acceptedGuestFd != null) wasiImport.fd_close(acceptedGuestFd);
+        return mapHostProcessError(error);
+      }
+    }
     if (!socket.serverId || socket.listening !== true) {
       return WASI_ERRNO_INVAL;
     }
+    if (!guestRangesAreValid([retFdPtr, 4], [retAddrLenPtr, 4])) {
+      return WASI_ERRNO_FAULT;
+    }
+    const addressCapacity = readGuestUint32(retAddrLenPtr);
+    if (!guestRangeIsValid(retAddrPtr, addressCapacity)) return WASI_ERRNO_FAULT;
 
     let accepted = null;
     try {
@@ -6094,10 +7230,9 @@ const hostNetImport = {
       const receiveDeadline = Number.isFinite(receiveTimeoutMs) && receiveTimeoutMs > 0
         ? startedAt + receiveTimeoutMs
         : null;
-      const warningAt = startedAt + Math.floor(unixConnectTimeoutMs * 0.8);
       let warnedNearLimit = false;
       while (!accepted) {
-        if (dispatchPendingWasmSignals()) return WASI_ERRNO_INTR;
+        if (dispatchPendingWasmSignals(true)) return WASI_ERRNO_INTR;
         accepted = tryHostNetAcceptOnce(socket);
         if (!accepted && socket.nonblock) return WASI_ERRNO_AGAIN;
         if (!accepted) {
@@ -6105,12 +7240,11 @@ const hostNetImport = {
           if (receiveDeadline != null && now >= receiveDeadline) {
             return WASI_ERRNO_AGAIN;
           }
-          if (!warnedNearLimit && now >= warningAt) {
-            warnedNearLimit = true;
-            process.stderr.write(
-              `[agentos] blocking accept is nearing limits.resources.maxBlockingReadMs (${unixConnectTimeoutMs} ms)\n`,
-            );
-          }
+          warnedNearLimit = warnNearBlockingReadLimit(
+            'blocking accept',
+            startedAt,
+            warnedNearLimit,
+          );
           if (now >= safeguardDeadline) {
             process.stderr.write(
               `[agentos] blocking accept exceeded limits.resources.maxBlockingReadMs (${unixConnectTimeoutMs} ms); raise limits.resources.maxBlockingReadMs if needed\n`,
@@ -6120,7 +7254,13 @@ const hostNetImport = {
           const nextDeadline = receiveDeadline == null
             ? safeguardDeadline
             : Math.min(receiveDeadline, safeguardDeadline);
-          pumpSpawnedChildrenOrWait(Math.min(10, Math.max(1, nextDeadline - now)));
+          if (
+            pumpSpawnedChildrenOrWaitRestartable(
+              Math.min(10, Math.max(1, nextDeadline - now)),
+            )
+          ) {
+            return WASI_ERRNO_INTR;
+          }
         }
       }
       if (accepted.error != null) {
@@ -6132,7 +7272,7 @@ const hostNetImport = {
       }
       const addressCopyout = writeGuestBytes(
         retAddrPtr,
-        readGuestUint32(retAddrLenPtr),
+        addressCapacity,
         accepted.address,
         retAddrLenPtr,
       );
@@ -6149,12 +7289,7 @@ const hostNetImport = {
     return validateHostNetSocketDescriptor(fd);
   },
   net_validate_accept(fd) {
-    const validation = validateHostNetSocketDescriptor(fd);
-    if (validation !== WASI_ERRNO_SUCCESS) return validation;
-    const socket = getHostNetSocket(fd);
-    return socket?.serverId && socket.listening === true
-      ? WASI_ERRNO_SUCCESS
-      : WASI_ERRNO_INVAL;
+    return validateHostNetSocketDescriptor(fd, true);
   },
   net_getsockname(fd, addrPtr, addrLenPtr) {
     const socket = getHostNetSocket(fd);
@@ -6162,16 +7297,31 @@ const hostNetImport = {
       return validateHostNetSocketDescriptor(fd);
     }
     try {
+      if (!guestRangeIsValid(addrLenPtr, 4)) return WASI_ERRNO_FAULT;
+      const addressCapacity = readGuestUint32(addrLenPtr);
+      if (!guestRangeIsValid(addrPtr, addressCapacity)) return WASI_ERRNO_FAULT;
+      if (socket.managed === true) {
+        const value = callSyncRpc('process.hostnet_local_address', [
+          managedHostNetTargetFd(socket),
+        ]);
+        if (value == null) return WASI_ERRNO_INVAL;
+        return writeGuestBytes(
+          addrPtr,
+          addressCapacity,
+          Buffer.from(managedHostNetAddressText(value), 'utf8'),
+          addrLenPtr,
+        );
+      }
       refreshHostNetUnixSocketInfo(socket);
       if (socket.localUnixAddress != null) {
         const address = Buffer.from(socket.localUnixAddress, 'utf8');
-        return writeGuestBytes(addrPtr, readGuestUint32(addrLenPtr), address, addrLenPtr);
+        return writeGuestBytes(addrPtr, addressCapacity, address, addrLenPtr);
       }
       if (!socket.localInfo) {
         return WASI_ERRNO_INVAL;
       }
       const address = Buffer.from(formatHostNetAddressInfo(socket.localInfo), 'utf8');
-      return writeGuestBytes(addrPtr, readGuestUint32(addrLenPtr), address, addrLenPtr);
+      return writeGuestBytes(addrPtr, addressCapacity, address, addrLenPtr);
     } catch (error) {
       return mapHostProcessError(error);
     }
@@ -6182,24 +7332,41 @@ const hostNetImport = {
       return validateHostNetSocketDescriptor(fd);
     }
     try {
+      if (!guestRangeIsValid(addrLenPtr, 4)) return WASI_ERRNO_FAULT;
+      const addressCapacity = readGuestUint32(addrLenPtr);
+      if (!guestRangeIsValid(addrPtr, addressCapacity)) return WASI_ERRNO_FAULT;
+      if (socket.managed === true) {
+        const value = callSyncRpc('process.hostnet_peer_address', [
+          managedHostNetTargetFd(socket),
+        ]);
+        return writeGuestBytes(
+          addrPtr,
+          addressCapacity,
+          Buffer.from(managedHostNetAddressText(value), 'utf8'),
+          addrLenPtr,
+        );
+      }
       refreshHostNetUnixSocketInfo(socket);
       if (socket.remoteUnixAddress != null) {
         const address = Buffer.from(socket.remoteUnixAddress, 'utf8');
-        return writeGuestBytes(addrPtr, readGuestUint32(addrLenPtr), address, addrLenPtr);
+        return writeGuestBytes(addrPtr, addressCapacity, address, addrLenPtr);
       }
       if (!socket.remoteInfo) {
         return WASI_ERRNO_NOTCONN;
       }
       const address = Buffer.from(formatHostNetAddressInfo(socket.remoteInfo), 'utf8');
-      return writeGuestBytes(addrPtr, readGuestUint32(addrLenPtr), address, addrLenPtr);
+      return writeGuestBytes(addrPtr, addressCapacity, address, addrLenPtr);
     } catch (error) {
       return mapHostProcessError(error);
     }
   },
   net_send(fd, bufPtr, bufLen, flags, retSentPtr) {
+    if (!guestRangesAreValid([bufPtr, Number(bufLen) >>> 0], [retSentPtr, 4])) {
+      return WASI_ERRNO_FAULT;
+    }
     const socket = getHostNetSocket(fd);
     const handle = lookupFdHandle(Number(fd) >>> 0);
-    if (handle?.kind === 'kernel-fd') {
+    if (!socket && handle?.kind === 'kernel-fd') {
       try {
         const chunk = readGuestBytes(bufPtr, bufLen);
         const written = Number(callSyncRpc('process.fd_sendmsg_rights', [
@@ -6213,12 +7380,22 @@ const hostNetImport = {
         return mapHostProcessError(error);
       }
     }
-    if (!socket?.socketId || socket.closed) {
+    if (!socket || (socket.managed !== true && (!socket.socketId || socket.closed))) {
       return WASI_ERRNO_BADF;
     }
 
     try {
       const chunk = readGuestBytes(bufPtr, bufLen);
+      if (socket.managed === true) {
+        const written = Number(callSyncRpc('process.hostnet_send', [
+          managedHostNetTargetFd(socket),
+          chunk,
+          Number(flags) >>> 0,
+          null,
+          unixConnectTimeoutMs,
+        ])) >>> 0;
+        return writeGuestUint32(retSentPtr, written);
+      }
       if ((Number(flags) >>> 0) !== 0) {
         // Non-zero send flags are currently ignored in the WASM host_net shim.
       }
@@ -6236,9 +7413,12 @@ const hostNetImport = {
     }
   },
   net_recv(fd, bufPtr, bufLen, flags, retReceivedPtr) {
+    if (!guestRangesAreValid([bufPtr, Number(bufLen) >>> 0], [retReceivedPtr, 4])) {
+      return WASI_ERRNO_FAULT;
+    }
     const socket = getHostNetSocket(fd);
     const handle = lookupFdHandle(Number(fd) >>> 0);
-    if (handle?.kind === 'kernel-fd') {
+    if (!socket && handle?.kind === 'kernel-fd') {
       try {
         const recvFlags = Number(flags) >>> 0;
         const result = callSyncRpc('process.fd_recvmsg_rights', [
@@ -6267,6 +7447,52 @@ const hostNetImport = {
 
     try {
       const recvFlags = Number(flags) >>> 0;
+      if (socket.managed === true) {
+        const nonblocking = (recvFlags & HOST_NET_MSG_DONTWAIT) !== 0;
+        const configured = nonblocking ? null : callSyncRpc(
+          'process.hostnet_get_option',
+          [managedHostNetTargetFd(socket), 'receive-timeout'],
+        );
+        const configuredTimeout = Number(configured?.durationMs);
+        const hasConfiguredTimeout = configured?.durationMs != null
+          && Number.isFinite(configuredTimeout) && configuredTimeout >= 0;
+        const waitLimit = nonblocking
+          ? 0
+          : hasConfiguredTimeout ? configuredTimeout : unixConnectTimeoutMs;
+        const startedAt = Date.now();
+        let result;
+        for (;;) {
+          if (!nonblocking) {
+            const remaining = Math.max(0, waitLimit - (Date.now() - startedAt));
+            const readable = waitManagedHostNetReadable(socket, remaining, true);
+            if (readable === WASI_ERRNO_INTR) return WASI_ERRNO_INTR;
+            if (!readable) {
+              return hasConfiguredTimeout ? WASI_ERRNO_AGAIN : WASI_ERRNO_TIMEDOUT;
+            }
+          }
+          result = callSyncRpc('process.hostnet_recv', [
+            managedHostNetTargetFd(socket),
+            Number(bufLen) >>> 0,
+            recvFlags,
+            0,
+          ]);
+          if (!isHostNetWouldBlock(result)) break;
+          if (nonblocking) return WASI_ERRNO_AGAIN;
+          if (Date.now() - startedAt >= waitLimit) {
+            return hasConfiguredTimeout ? WASI_ERRNO_AGAIN : WASI_ERRNO_TIMEDOUT;
+          }
+        }
+        if (result == null) return writeGuestUint32(retReceivedPtr, 0);
+        const bytes = result?.type === 'message'
+          ? hostNetDatagramBytes(result)
+          : decodeFsBytesPayload(result, 'managed host-network receive');
+        const write = writeGuestBytes(bufPtr, bufLen, bytes, retReceivedPtr);
+        if (write !== WASI_ERRNO_SUCCESS) return write;
+        if ((recvFlags & HOST_NET_MSG_TRUNC) !== 0 && bytes.length > (Number(bufLen) >>> 0)) {
+          return writeGuestUint32(retReceivedPtr, bytes.length);
+        }
+        return WASI_ERRNO_SUCCESS;
+      }
       if (hostNetSocketBaseType(socket) === HOST_NET_SOCK_DGRAM) {
         const supportedFlags = HOST_NET_MSG_PEEK | HOST_NET_MSG_DONTWAIT | HOST_NET_MSG_TRUNC;
         if ((recvFlags & ~supportedFlags) !== 0) {
@@ -6329,10 +7555,9 @@ const hostNetImport = {
         ? null
         : startedAt + Math.max(0, socket.recvTimeoutMs);
       const safeguardDeadline = startedAt + unixConnectTimeoutMs;
-      const warningAt = startedAt + Math.floor(unixConnectTimeoutMs * 0.8);
       let warnedNearLimit = false;
       while (true) {
-        if (dispatchPendingWasmSignals()) return WASI_ERRNO_INTR;
+        if (dispatchPendingWasmSignals(true)) return WASI_ERRNO_INTR;
         const queued = peek ? peekHostNetBytes(socket, bufLen) : dequeueHostNetBytes(socket, bufLen);
         if (queued.length > 0) {
           return writeGuestBytes(bufPtr, bufLen, queued, retReceivedPtr);
@@ -6350,12 +7575,11 @@ const hostNetImport = {
         if (receiveDeadline != null && now >= receiveDeadline) {
           return WASI_ERRNO_AGAIN;
         }
-        if (!warnedNearLimit && now >= warningAt) {
-          warnedNearLimit = true;
-          process.stderr.write(
-            `[agentos] blocking socket receive is nearing limits.resources.maxBlockingReadMs (${unixConnectTimeoutMs} ms)\n`,
-          );
-        }
+        warnedNearLimit = warnNearBlockingReadLimit(
+          'blocking socket receive',
+          startedAt,
+          warnedNearLimit,
+        );
         if (now >= safeguardDeadline) {
           process.stderr.write(
             `[agentos] blocking socket receive exceeded limits.resources.maxBlockingReadMs (${unixConnectTimeoutMs} ms); raise limits.resources.maxBlockingReadMs if needed\n`,
@@ -6373,13 +7597,13 @@ const hostNetImport = {
           ? 0
           : Math.max(0, Math.min(50, nextDeadline - now));
         const result = readReadyHostNetSocket(socket, bufLen, peek, pollWaitMs);
-        if (dispatchPendingWasmSignals()) return WASI_ERRNO_INTR;
+        if (dispatchPendingWasmSignals(true)) return WASI_ERRNO_INTR;
         if (result?.kind === 'data' && result.bytes.length > 0) {
           return writeGuestBytes(bufPtr, bufLen, result.bytes, retReceivedPtr);
         }
         if (pumpsLocalChildren) {
           pumpSpawnedChildren(SPAWNED_CHILD_WAIT_SLICE_MS);
-          if (dispatchPendingWasmSignals()) return WASI_ERRNO_INTR;
+          if (dispatchPendingWasmSignals(true)) return WASI_ERRNO_INTR;
         }
         if (receiveDeadline != null && Date.now() >= receiveDeadline) {
           return WASI_ERRNO_AGAIN;
@@ -6390,6 +7614,13 @@ const hostNetImport = {
     }
   },
   net_sendto(fd, bufPtr, bufLen, flags, addrPtr, addrLen, retSentPtr) {
+    if (!guestRangesAreValid(
+      [bufPtr, Number(bufLen) >>> 0],
+      [addrPtr, Number(addrLen) >>> 0],
+      [retSentPtr, 4],
+    )) {
+      return WASI_ERRNO_FAULT;
+    }
     const socket = getHostNetSocket(fd);
     if (!socket || socket.closed) {
       return WASI_ERRNO_BADF;
@@ -6399,13 +7630,23 @@ const hostNetImport = {
       if ((Number(flags) >>> 0) !== 0) {
         return WASI_ERRNO_INVAL;
       }
+      const { host, port } = parseHostNetAddress(readGuestString(addrPtr, addrLen));
+      const chunk = readGuestBytes(bufPtr, bufLen);
+      if (socket.managed === true) {
+        const result = callSyncRpc('process.hostnet_send', [
+          managedHostNetTargetFd(socket),
+          chunk,
+          Number(flags) >>> 0,
+          { type: 'inet', host, port },
+          unixConnectTimeoutMs,
+        ]);
+        const written = Number(result?.bytes ?? result) >>> 0;
+        return writeGuestUint32(retSentPtr, written);
+      }
       const udpSocketId = ensureHostNetUdpSocket(socket);
       if (!udpSocketId) {
         return WASI_ERRNO_FAULT;
       }
-
-      const { host, port } = parseHostNetAddress(readGuestString(addrPtr, addrLen));
-      const chunk = readGuestBytes(bufPtr, bufLen);
       const result = callSyncRpc('dgram.send', [
         udpSocketId,
         chunk,
@@ -6414,8 +7655,8 @@ const hostNetImport = {
       socket.localInfo = normalizeHostNetAddressInfo(result?.localAddress, result?.localPort);
       const written = Number(result?.bytes) >>> 0;
       return writeGuestUint32(retSentPtr, written);
-    } catch {
-      return WASI_ERRNO_FAULT;
+    } catch (error) {
+      return mapHostProcessError(error);
     }
   },
   net_recvfrom(fd, bufPtr, bufLen, flags, retReceivedPtr, retAddrPtr, retAddrLenPtr) {
@@ -6425,10 +7666,68 @@ const hostNetImport = {
     }
 
     try {
+      if (!guestRangesAreValid(
+        [bufPtr, Number(bufLen) >>> 0],
+        [retReceivedPtr, 4],
+        [retAddrLenPtr, 4],
+      )) {
+        return WASI_ERRNO_FAULT;
+      }
+      const addressCapacity = readGuestUint32(retAddrLenPtr);
+      if (!guestRangeIsValid(retAddrPtr, addressCapacity)) return WASI_ERRNO_FAULT;
       const recvFlags = Number(flags) >>> 0;
       const supportedFlags = HOST_NET_MSG_PEEK | HOST_NET_MSG_DONTWAIT | HOST_NET_MSG_TRUNC;
       if ((recvFlags & ~supportedFlags) !== 0) {
         return WASI_ERRNO_INVAL;
+      }
+      if (socket.managed === true) {
+        const nonblocking = (recvFlags & HOST_NET_MSG_DONTWAIT) !== 0;
+        const configured = nonblocking ? null : callSyncRpc(
+          'process.hostnet_get_option',
+          [managedHostNetTargetFd(socket), 'receive-timeout'],
+        );
+        const configuredTimeout = Number(configured?.durationMs);
+        const hasConfiguredTimeout = configured?.durationMs != null
+          && Number.isFinite(configuredTimeout) && configuredTimeout >= 0;
+        const waitLimit = nonblocking
+          ? 0
+          : hasConfiguredTimeout ? configuredTimeout : unixConnectTimeoutMs;
+        const startedAt = Date.now();
+        let event;
+        for (;;) {
+          if (!nonblocking) {
+            const remaining = Math.max(0, waitLimit - (Date.now() - startedAt));
+            const readable = waitManagedHostNetReadable(socket, remaining, true);
+            if (readable === WASI_ERRNO_INTR) return WASI_ERRNO_INTR;
+            if (!readable) {
+              return hasConfiguredTimeout ? WASI_ERRNO_AGAIN : WASI_ERRNO_TIMEDOUT;
+            }
+          }
+          event = callSyncRpc('process.hostnet_recv', [
+            managedHostNetTargetFd(socket),
+            Number(bufLen) >>> 0,
+            recvFlags,
+            0,
+          ]);
+          if (event != null && !isHostNetWouldBlock(event)) break;
+          if (nonblocking) return WASI_ERRNO_AGAIN;
+          if (Date.now() - startedAt >= waitLimit) {
+            return hasConfiguredTimeout ? WASI_ERRNO_AGAIN : WASI_ERRNO_TIMEDOUT;
+          }
+        }
+        const bytes = hostNetDatagramBytes(event);
+        const dataResult = writeGuestBytes(bufPtr, bufLen, bytes, retReceivedPtr);
+        if (dataResult !== WASI_ERRNO_SUCCESS) return dataResult;
+        const address = Buffer.from(formatHostNetAddressInfo({
+          address: event.remoteAddress,
+          port: event.remotePort,
+        }), 'utf8');
+        const addressResult = writeGuestBytes(retAddrPtr, addressCapacity, address, retAddrLenPtr);
+        if (addressResult !== WASI_ERRNO_SUCCESS) return addressResult;
+        if ((recvFlags & HOST_NET_MSG_TRUNC) !== 0 && bytes.length > (Number(bufLen) >>> 0)) {
+          return writeGuestUint32(retReceivedPtr, bytes.length);
+        }
+        return WASI_ERRNO_SUCCESS;
       }
       const udpSocketId = ensureHostNetUdpSocket(socket);
       if (!udpSocketId) {
@@ -6455,12 +7754,6 @@ const hostNetImport = {
       } catch {
         return WASI_ERRNO_INVAL;
       }
-      let addressCapacity;
-      try {
-        addressCapacity = readGuestUint32(retAddrLenPtr);
-      } catch {
-        return WASI_ERRNO_FAULT;
-      }
       const addressResult = writeGuestBytes(retAddrPtr, addressCapacity, address, retAddrLenPtr);
       if (addressResult !== WASI_ERRNO_SUCCESS) {
         return addressResult;
@@ -6469,8 +7762,8 @@ const hostNetImport = {
         return writeGuestUint32(retReceivedPtr, bytes.length);
       }
       return WASI_ERRNO_SUCCESS;
-    } catch {
-      return WASI_ERRNO_FAULT;
+    } catch (error) {
+      return mapHostProcessError(error);
     }
   },
   net_setsockopt(fd, level, optname, optvalPtr, optvalLen) {
@@ -6491,7 +7784,15 @@ const hostNetImport = {
         return WASI_ERRNO_INVAL;
       }
       if (sockoptKind === 'recv-timeout') {
-        socket.recvTimeoutMs = timeoutMs;
+        if (socket.managed === true) {
+          callSyncRpc('process.hostnet_set_option', [
+            managedHostNetTargetFd(socket),
+            'receive-timeout',
+            { durationMs: timeoutMs },
+          ]);
+        } else {
+          socket.recvTimeoutMs = timeoutMs;
+        }
       }
     } catch {
       return WASI_ERRNO_FAULT;
@@ -6505,7 +7806,9 @@ const hostNetImport = {
     }
 
     try {
+      if (!guestRangeIsValid(optvalLenPtr, 4)) return WASI_ERRNO_FAULT;
       const optvalLen = readGuestUint32(optvalLenPtr);
+      if (!guestRangeIsValid(optvalPtr, optvalLen)) return WASI_ERRNO_FAULT;
       const normalizedLevel = Number(level) >>> 0;
       const normalizedOptname = Number(optname) >>> 0;
       if (
@@ -6516,7 +7819,17 @@ const hostNetImport = {
         if (optvalLen < 4) {
           return WASI_ERRNO_INVAL;
         }
-        new DataView(instanceMemory.buffer).setInt32(Number(optvalPtr) >>> 0, 0, true);
+        const socketError = socket.managed === true
+          ? Number(callSyncRpc('process.hostnet_get_option', [
+            managedHostNetTargetFd(socket),
+            'error',
+          ])) | 0
+          : 0;
+        new DataView(instanceMemory.buffer).setInt32(
+          Number(optvalPtr) >>> 0,
+          socketError,
+          true,
+        );
         return writeGuestUint32(optvalLenPtr, 4);
       }
       return WASI_ERRNO_INVAL;
@@ -6526,65 +7839,55 @@ const hostNetImport = {
   },
   net_close(fd) {
     const numericFd = Number(fd) >>> 0;
-    const socket = hostNetSockets.get(numericFd);
+    const socket = getHostNetSocket(numericFd);
     if (!socket) {
       return WASI_ERRNO_BADF;
     }
-
-    hostNetSockets.delete(numericFd);
-    // dup/dup2 and inherited descriptors are aliases of one Linux open-file
-    // description. Closing one descriptor must not destroy the sidecar socket
-    // while another descriptor in this process still refers to it.
-    if ([...hostNetSockets.values()].some((candidate) => candidate === socket)) {
-      return WASI_ERRNO_SUCCESS;
-    }
-    let firstError = null;
-    const cleanup = (label, operation) => {
+    if (SIDECAR_MANAGED_PROCESS) {
+      const handle = lookupFdHandle(numericFd);
+      if (handle?.kind !== 'kernel-fd') {
+        return WASI_ERRNO_BADF;
+      }
       try {
-        operation();
+        const closed = activeFdProjections.get(numericFd) === handle
+          ? closeSyntheticFd(numericFd)
+          : closePassthroughFd(numericFd);
+        if (!closed) return WASI_ERRNO_BADF;
+        return WASI_ERRNO_SUCCESS;
       } catch (error) {
-        if (firstError == null) firstError = error;
-        process.stderr.write(
-          `[agentos] failed to ${label} while closing host_net fd ${numericFd}: ${error instanceof Error ? error.message : String(error)}\n`,
-        );
+        return mapHostProcessError(error);
       }
-    };
-    if (Array.isArray(socket.pendingAccepts)) {
-      for (const accepted of socket.pendingAccepts.splice(0)) {
-        const error = cleanupAcceptedHostNetSocket(accepted, 'listener close');
-        if (firstError == null && error != null) firstError = error;
+    } else {
+      standaloneHostNetSockets.delete(numericFd);
+      // dup/dup2 aliases share one compatibility object when no kernel exists.
+      if ([...standaloneHostNetSockets.values()].some((candidate) => candidate === socket)) {
+        return WASI_ERRNO_SUCCESS;
       }
     }
-    if (socket.localReservation != null) {
-      cleanup('release TCP port reservation', () => {
-        callSyncRpc('net.release_tcp_port', [socket.localReservation]);
-      });
-    }
-    if (socket.socketId && !socket.closed) {
-      cleanup('destroy connected socket', () => {
-        callSyncRpc('net.destroy', [socket.socketId]);
-      });
-    }
-    if (socket.serverId) {
-      cleanup('close listener', () => {
-        callSyncRpc('net.server_close', [socket.serverId]);
-      });
-    }
-    if (socket.udpSocketId) {
-      cleanup('close datagram socket', () => {
-        callSyncRpc('dgram.close', [socket.udpSocketId]);
-      });
-    }
-    return firstError == null ? WASI_ERRNO_SUCCESS : mapHostProcessError(firstError);
+    return SIDECAR_MANAGED_PROCESS
+      ? WASI_ERRNO_SUCCESS
+      : cleanupDetachedHostNetSocket(numericFd, socket);
   },
   net_tls_connect(fd, hostnamePtr, hostnameLen, flags = 0) {
     const socket = getHostNetSocket(fd);
-    if (!socket?.socketId || socket.closed) {
+    if (!socket || (socket.managed !== true && (!socket.socketId || socket.closed))) {
       return WASI_ERRNO_BADF;
     }
 
     try {
       const servername = readGuestString(hostnamePtr, hostnameLen);
+      if (socket.managed === true) {
+        if ((Number(flags) & 1) === 1 || guestEnv.NODE_TLS_REJECT_UNAUTHORIZED === '0') {
+          return WASI_ERRNO_NOTSUP;
+        }
+        callSyncRpc('process.hostnet_tls_connect', [
+          managedHostNetTargetFd(socket),
+          servername,
+          [],
+          unixConnectTimeoutMs,
+        ]);
+        return WASI_ERRNO_SUCCESS;
+      }
       const tlsOptions = { servername };
       if ((Number(flags) & 1) === 1 || guestEnv.NODE_TLS_REJECT_UNAUTHORIZED === '0') {
         tlsOptions.rejectUnauthorized = false;
@@ -6613,6 +7916,7 @@ const hostProcessImport = {
           cwdLen,
           retPidPtr,
         ) {
+          if (!guestRangeIsValid(retPidPtr, 4)) return WASI_ERRNO_FAULT;
           // Legacy ABI used by checked-in command modules. In this contract the
           // executable is argv[0]; newer callers use proc_spawn_v2 so argv[0]
           // can differ from the executable path.
@@ -6662,6 +7966,7 @@ const hostProcessImport = {
           pgroup,
           retPidPtr,
         ) {
+          if (!guestRangeIsValid(retPidPtr, 4)) return WASI_ERRNO_FAULT;
           const flags = Number(attrFlags) >>> 0;
           if ((flags & ~SUPPORTED_POSIX_SPAWN_FLAGS) !== 0) {
             return WASI_ERRNO_NOTSUP;
@@ -6680,17 +7985,7 @@ const hostProcessImport = {
             const signalMask = decodeSignalMask(sigMaskLo, sigMaskHi).filter(
               (signal) => signal !== LINUX_SIGKILL && signal !== LINUX_SIGSTOP,
             );
-            const inheritedIgnores = [...wasmSignalRegistrations.entries()]
-              .filter(
-                ([signal, registration]) =>
-                  registration.action === 'ignore' && !defaultSignals.includes(signal),
-              )
-              .map(([signal]) => signal);
             activeSpawnCallContext = {
-              internalBootstrapEnv: {
-                AGENTOS_WASM_INITIAL_SIGNAL_MASK: JSON.stringify(signalMask),
-                AGENTOS_WASM_INITIAL_SIGNAL_IGNORES: JSON.stringify(inheritedIgnores),
-              },
               attrFlags: flags,
               // v3 implements posix_spawn, not posix_spawnp. Preserve the
               // caller's executable path and argv exactly instead of routing
@@ -6746,6 +8041,7 @@ const hostProcessImport = {
           schedPriority,
           retPidPtr,
         ) {
+          if (!guestRangeIsValid(retPidPtr, 4)) return WASI_ERRNO_FAULT;
           const flags = Number(attrFlags) >>> 0;
           if ((flags & ~SUPPORTED_POSIX_SPAWN_FLAGS) !== 0) {
             return WASI_ERRNO_NOTSUP;
@@ -6797,17 +8093,7 @@ const hostProcessImport = {
             const signalMask = decodeSignalMask(sigMaskLo, sigMaskHi).filter(
               (signal) => signal !== LINUX_SIGKILL && signal !== LINUX_SIGSTOP,
             );
-            const inheritedIgnores = [...wasmSignalRegistrations.entries()]
-              .filter(
-                ([signal, registration]) =>
-                  registration.action === 'ignore' && !defaultSignals.includes(signal),
-              )
-              .map(([signal]) => signal);
             activeSpawnCallContext = {
-              internalBootstrapEnv: {
-                AGENTOS_WASM_INITIAL_SIGNAL_MASK: JSON.stringify(signalMask),
-                AGENTOS_WASM_INITIAL_SIGNAL_IGNORES: JSON.stringify(inheritedIgnores),
-              },
               attrFlags: flags,
               exactExecPath: searchPath === null,
               searchPath,
@@ -6854,6 +8140,7 @@ const hostProcessImport = {
           retPidPtr,
           resolvedCwdOverride,
         ) {
+          if (!guestRangeIsValid(retPidPtr, 4)) return WASI_ERRNO_FAULT;
           if (permissionTier !== 'full') {
             return WASI_ERRNO_FAULT;
           }
@@ -6900,8 +8187,8 @@ const hostProcessImport = {
               record.processGroup = Number(
                 callSyncRpc('process.getpgid', [VIRTUAL_PID]),
               ) >>> 0;
-              spawnedChildren.set(record.pid, record);
-              spawnedChildrenById.set(record.childId, record);
+              childCorrelationsByPid.set(record.pid, record);
+              childCorrelationsById.set(record.childId, record);
               traceHostProcess('proc-spawn-synthetic', {
                 command,
                 childId: record.childId,
@@ -6923,10 +8210,8 @@ const hostProcessImport = {
               stdoutTarget,
               stderrTarget,
               kernelFdMappings: kernelFdMappingsForSpawn(),
-              internalBootstrapEnv: {
-                ...(activeSpawnCallContext?.internalBootstrapEnv ?? {}),
-                ...inheritedNofileBootstrapEnv(),
-              },
+              internalBootstrapEnv:
+                activeSpawnCallContext?.internalBootstrapEnv ?? {},
               spawnAttrFlags: activeSpawnCallContext?.attrFlags ?? 0,
               spawnPgroup: activeSpawnCallContext?.pgroup ?? null,
             });
@@ -6954,10 +8239,8 @@ const hostProcessImport = {
                   argv0,
                   cwd,
                   env,
-                  internalBootstrapEnv: {
-                    ...(activeSpawnCallContext?.internalBootstrapEnv ?? {}),
-                    ...inheritedNofileBootstrapEnv(),
-                  },
+                  internalBootstrapEnv:
+                    activeSpawnCallContext?.internalBootstrapEnv ?? {},
                   spawnAttrFlags: activeSpawnCallContext?.attrFlags ?? 0,
                   spawnExactPath: activeSpawnCallContext?.exactExecPath ?? false,
                   spawnSearchPath: activeSpawnCallContext?.searchPath,
@@ -6994,9 +8277,12 @@ const hostProcessImport = {
             if (!Number.isInteger(pid) || pid === 0 || typeof result?.childId !== 'string') {
               return WASI_ERRNO_FAULT;
             }
-            let processGroup = Number(result?.pgid) >>> 0;
-            if (processGroup === 0) {
-              processGroup = Number(callSyncRpc('process.getpgid', [pid])) >>> 0;
+            let processGroup = 0;
+            if (!SIDECAR_MANAGED_PROCESS) {
+              processGroup = Number(result?.pgid) >>> 0;
+              if (processGroup === 0) {
+                processGroup = Number(callSyncRpc('process.getpgid', [pid])) >>> 0;
+              }
             }
 
             const directPosixStdin =
@@ -7040,7 +8326,7 @@ const hostProcessImport = {
               (fd, index, values) =>
                 fd != null &&
                 fd > 2 &&
-                delegateManagedFdRefCounts.has(fd) &&
+                standaloneDelegateFdRefCounts.has(fd) &&
                 values.indexOf(fd) === index,
             );
             for (const fd of delegateRetainedFds) {
@@ -7063,10 +8349,10 @@ const hostProcessImport = {
               exitSignal: null,
               exitStatus: null,
               rawWaitStatus: null,
-              processGroup,
+              ...(SIDECAR_MANAGED_PROCESS ? {} : { processGroup }),
             };
-            spawnedChildren.set(pid, record);
-            spawnedChildrenById.set(result.childId, record);
+            childCorrelationsByPid.set(pid, record);
+            childCorrelationsById.set(result.childId, record);
             traceHostProcess('proc-spawn-ready', {
               command,
               childId: result.childId,
@@ -7121,9 +8407,6 @@ const hostProcessImport = {
               // an otherwise valid non-WASM image is prepared and committed
               // by the sidecar without ever resuming this image.
               if (SIDECAR_EXEC_COMMIT_RPC && loadError?.code === 'ENOEXEC') {
-                const inheritedIgnores = [...wasmSignalRegistrations.entries()]
-                  .filter(([, registration]) => registration.action === 'ignore')
-                  .map(([signal]) => signal);
                 callSyncRpc('process.exec', [{
                   command,
                   args: argv.slice(1),
@@ -7133,12 +8416,7 @@ const hostProcessImport = {
                     shell: false,
                     cloexecFds: kernelCloexecFdsForCommit(closeFds),
                     localReplacement: false,
-                    internalBootstrapEnv: {
-                      AGENTOS_WASM_INITIAL_SIGNAL_MASK: JSON.stringify([...wasmBlockedSignals]),
-                      AGENTOS_WASM_INITIAL_SIGNAL_IGNORES: JSON.stringify(inheritedIgnores),
-                      AGENTOS_WASM_INITIAL_PENDING_SIGNALS: JSON.stringify([...pendingWasmSignals]),
-                      ...inheritedNofileBootstrapEnv(),
-                    },
+                    internalBootstrapEnv: {},
                   },
                 }]);
                 const returned = new Error(
@@ -7160,7 +8438,7 @@ const hostProcessImport = {
                   shell: false,
                   cloexecFds: kernelCloexecFdsForCommit(closeFds),
                   localReplacement: true,
-                  internalBootstrapEnv: inheritedNofileBootstrapEnv(),
+                  internalBootstrapEnv: {},
                 },
               }]);
               if (result?.committed !== true) {
@@ -7220,7 +8498,7 @@ const hostProcessImport = {
                   cloexecFds: kernelCloexecFdsForCommit(closeFds),
                   localReplacement: true,
                   executableFd: canonicalKernelFdForSpawnAction(descriptor),
-                  internalBootstrapEnv: inheritedNofileBootstrapEnv(),
+                  internalBootstrapEnv: {},
                 },
               }]);
               if (result?.committed !== true) {
@@ -7253,15 +8531,46 @@ const hostProcessImport = {
           }
         },
         proc_waitpid(pid, options, retStatusPtr, retPidPtr) {
+          if (!guestRangesAreValid([retStatusPtr, 4], [retPidPtr, 4])) {
+            return WASI_ERRNO_FAULT;
+          }
           const requestedPid = Number(pid) >>> 0;
           if (permissionTier !== 'full') {
             return WASI_ERRNO_CHILD;
           }
+          if (SIDECAR_MANAGED_PROCESS) {
+            try {
+              const normalizedOptions = Number(options) >>> 0;
+              if ((normalizedOptions & ~1) !== 0) return WASI_ERRNO_INVAL;
+              const transition = takeManagedWaitTransition(
+                Number(pid) | 0,
+                normalizedOptions,
+                (normalizedOptions & 1) === 0,
+              );
+              if (!transition) {
+                if (writeGuestUint32(retStatusPtr, 0) !== WASI_ERRNO_SUCCESS) {
+                  return WASI_ERRNO_FAULT;
+                }
+                return writeGuestUint32(retPidPtr, 0);
+              }
+              if (
+                writeGuestUint32(retStatusPtr, Number(transition.status) >>> 0) !==
+                WASI_ERRNO_SUCCESS
+              ) {
+                return WASI_ERRNO_FAULT;
+              }
+              const result = writeGuestUint32(retPidPtr, Number(transition.pid) >>> 0);
+              if (result === WASI_ERRNO_SUCCESS) reapManagedChildCorrelation(transition);
+              return result;
+            } catch (error) {
+              return mapHostProcessError(error);
+            }
+          }
           const waitAny = requestedPid === 0xffffffff;
-          if (!waitAny && !spawnedChildren.has(requestedPid)) {
+          if (!waitAny && !childCorrelationsByPid.has(requestedPid)) {
             return WASI_ERRNO_CHILD;
           }
-          if (spawnedChildren.size === 0) {
+          if (childCorrelationsByPid.size === 0) {
             return WASI_ERRNO_CHILD;
           }
 
@@ -7273,8 +8582,8 @@ const hostProcessImport = {
             }
             while (true) {
               const records = waitAny
-                ? Array.from(spawnedChildren.values())
-                : [spawnedChildren.get(requestedPid)].filter(Boolean);
+                ? Array.from(childCorrelationsByPid.values())
+                : [childCorrelationsByPid.get(requestedPid)].filter(Boolean);
               if (records.length === 0) {
                 return WASI_ERRNO_CHILD;
               }
@@ -7324,7 +8633,7 @@ const hostProcessImport = {
               // A matching status wins over a simultaneously delivered
               // signal. Otherwise a caught signal (including SIGCHLD from a
               // non-selected sibling) interrupts blocking waitpid on Linux.
-              if (dispatchPendingWasmSignals()) {
+              if (dispatchPendingWasmSignals(true)) {
                 return WASI_ERRNO_INTR;
               }
             }
@@ -7344,17 +8653,51 @@ const hostProcessImport = {
           retPidPtr,
           retCoreDumpedPtr,
         ) {
+          if (!guestRangesAreValid(
+            [retExitCodePtr, 4],
+            [retSignalPtr, 4],
+            [retPidPtr, 4],
+            [retCoreDumpedPtr, 4],
+          )) {
+            return WASI_ERRNO_FAULT;
+          }
           const requestedPid = Number(pid) >>> 0;
           if (permissionTier !== 'full') {
             return WASI_ERRNO_CHILD;
           }
+          if (SIDECAR_MANAGED_PROCESS) {
+            try {
+              const normalizedOptions = Number(options) >>> 0;
+              if ((normalizedOptions & ~1) !== 0) return WASI_ERRNO_INVAL;
+              const transition = takeManagedWaitTransition(
+                Number(pid) | 0,
+                normalizedOptions,
+                (normalizedOptions & 1) === 0,
+              );
+              if (!transition) return writeGuestUint32(retPidPtr, 0);
+              for (const [ptr, value] of [
+                [retExitCodePtr, transition.exitCode],
+                [retSignalPtr, transition.signal],
+                [retCoreDumpedPtr, transition.coreDumped ? 1 : 0],
+                [retPidPtr, transition.pid],
+              ]) {
+                if (writeGuestUint32(ptr, Number(value) >>> 0) !== WASI_ERRNO_SUCCESS) {
+                  return WASI_ERRNO_FAULT;
+                }
+              }
+              reapManagedChildCorrelation(transition);
+              return WASI_ERRNO_SUCCESS;
+            } catch (error) {
+              return mapHostProcessError(error);
+            }
+          }
           const waitAny = requestedPid === 0xffffffff;
-          if (!waitAny && !spawnedChildren.has(requestedPid)) {
+          if (!waitAny && !childCorrelationsByPid.has(requestedPid)) {
             // Linux waitpid reports ECHILD when pid does not name a child of
             // this process. ESRCH is reserved for operations such as kill(2).
             return WASI_ERRNO_CHILD;
           }
-          if (spawnedChildren.size === 0) {
+          if (childCorrelationsByPid.size === 0) {
             return WASI_ERRNO_CHILD;
           }
 
@@ -7371,8 +8714,8 @@ const hostProcessImport = {
 
             while (true) {
               const records = waitAny
-                ? Array.from(spawnedChildren.values())
-                : [spawnedChildren.get(requestedPid)].filter(Boolean);
+                ? Array.from(childCorrelationsByPid.values())
+                : [childCorrelationsByPid.get(requestedPid)].filter(Boolean);
               if (records.length === 0) {
                 return WASI_ERRNO_CHILD;
               }
@@ -7449,7 +8792,7 @@ const hostProcessImport = {
                   retCoreDumpedPtr,
                 );
               }
-              if (dispatchPendingWasmSignals()) {
+              if (dispatchPendingWasmSignals(true)) {
                 return WASI_ERRNO_INTR;
               }
             }
@@ -7462,6 +8805,9 @@ const hostProcessImport = {
           }
         },
         proc_waitpid_v3(pid, options, retStatusPtr, retPidPtr) {
+          if (!guestRangesAreValid([retStatusPtr, 4], [retPidPtr, 4])) {
+            return WASI_ERRNO_FAULT;
+          }
           const requestedPid = Number(pid) | 0;
           if (permissionTier !== 'full') {
             return WASI_ERRNO_CHILD;
@@ -7475,20 +8821,42 @@ const hostProcessImport = {
           }
 
           try {
+            if (SIDECAR_MANAGED_PROCESS) {
+              const transition = takeManagedWaitTransition(
+                requestedPid,
+                normalizedOptions,
+                !waitNoHang,
+              );
+              if (!transition) {
+                if (writeGuestUint32(retStatusPtr, 0) !== WASI_ERRNO_SUCCESS) {
+                  return WASI_ERRNO_FAULT;
+                }
+                return writeGuestUint32(retPidPtr, 0);
+              }
+              if (
+                writeGuestUint32(retStatusPtr, Number(transition.rawStatus) >>> 0) !==
+                WASI_ERRNO_SUCCESS
+              ) {
+                return WASI_ERRNO_FAULT;
+              }
+              const result = writeGuestUint32(retPidPtr, Number(transition.pid) >>> 0);
+              if (result === WASI_ERRNO_SUCCESS) reapManagedChildCorrelation(transition);
+              return result;
+            }
             const callerProcessGroup =
               requestedPid === 0
                 ? Number(callSyncRpc('process.getpgid', [VIRTUAL_PID])) >>> 0
                 : 0;
             const matchingRecords = () => {
               if (requestedPid > 0) {
-                return [spawnedChildren.get(requestedPid)].filter(Boolean);
+                return [childCorrelationsByPid.get(requestedPid)].filter(Boolean);
               }
               if (requestedPid === -1) {
-                return Array.from(spawnedChildren.values());
+                return Array.from(childCorrelationsByPid.values());
               }
               const selectedGroup =
                 requestedPid === 0 ? callerProcessGroup : Math.abs(requestedPid) >>> 0;
-              return Array.from(spawnedChildren.values()).filter(
+              return Array.from(childCorrelationsByPid.values()).filter(
                 (record) => record.processGroup === selectedGroup,
               );
             };
@@ -7512,7 +8880,7 @@ const hostProcessImport = {
                   normalizedOptions,
                 ]);
                 if (transition && typeof transition.pid === 'number') {
-                  const transitionedRecord = spawnedChildren.get(
+                  const transitionedRecord = childCorrelationsByPid.get(
                     Number(transition.pid) >>> 0,
                   );
                   if (transitionedRecord && records.includes(transitionedRecord)) {
@@ -7572,7 +8940,7 @@ const hostProcessImport = {
                   normalizedOptions,
                 ]);
                 if (transition && typeof transition.pid === 'number') {
-                  const transitionedRecord = spawnedChildren.get(
+                  const transitionedRecord = childCorrelationsByPid.get(
                     Number(transition.pid) >>> 0,
                   );
                   if (transitionedRecord && records.includes(transitionedRecord)) {
@@ -7593,7 +8961,7 @@ const hostProcessImport = {
               if (readyRecord) {
                 return returnRawWaitedChild(readyRecord, retStatusPtr, retPidPtr);
               }
-              if (dispatchPendingWasmSignals()) {
+              if (dispatchPendingWasmSignals(true)) {
                 return WASI_ERRNO_INTR;
               }
             }
@@ -7609,96 +8977,89 @@ const hostProcessImport = {
           if (permissionTier !== 'full') {
             return WASI_ERRNO_SRCH;
           }
-          const targetPid = Number(pid) >>> 0;
+          const targetPid = Number(pid) | 0;
           const numericSignal = Number(signal) >>> 0;
-          const signalName = signalNameFromNumber(numericSignal);
+          if (numericSignal > 31) return WASI_ERRNO_INVAL;
+          const signalName = numericSignal === 0 ? '0' : signalNameFromNumber(numericSignal);
 
           try {
             if (targetPid === VIRTUAL_PID) {
-              // Signal zero only probes existence and permissions. Default
-              // dispositions must be enforced by the sidecar so termination,
-              // stop/continue, and wait status remain kernel-owned. A caught
-              // self-signal stays local so blocking, coalescing, sa_mask,
-              // SA_NODEFER, and SA_RESETHAND all use the same delivery path as
-              // externally delivered WASM signals.
-              if (numericSignal === 0) {
-                callSyncRpc('process.kill', [VIRTUAL_PID, signalName]);
-                return WASI_ERRNO_SUCCESS;
-              }
-              const registration = wasmSignalRegistrations.get(numericSignal);
-              if (registration?.action === 'ignore') {
-                return WASI_ERRNO_SUCCESS;
-              }
-              if (registration?.action === 'user') {
-                if (wasmBlockedSignals.has(numericSignal)) {
-                  pendingWasmSignals.add(numericSignal);
-                } else {
-                  dispatchWasmSignal(numericSignal);
-                }
-                return WASI_ERRNO_SUCCESS;
-              }
+              // Self-signals take the same kernel path as external and
+              // kernel-generated signals. The kernel decides ignore/default/
+              // caught behavior and retains blocked standard signals.
               callSyncRpc('process.kill', [VIRTUAL_PID, signalName]);
+              if (numericSignal !== 0) {
+                dispatchPendingWasmSignals();
+              }
               return WASI_ERRNO_SUCCESS;
             }
 
-            const record = spawnedChildren.get(targetPid);
-            if (record) {
-              callSyncRpc('child_process.kill', [record.childId, signalName]);
-              return WASI_ERRNO_SUCCESS;
-            }
-
+            // The sidecar authorizes direct children from the kernel process
+            // table and delivers through the child's runtime endpoint. The
+            // runner's childId map is transport correlation only.
             callSyncRpc('process.kill', [targetPid, signalName]);
             return WASI_ERRNO_SUCCESS;
           } catch (error) {
-            if (error?.code === 'ESRCH') {
-              return WASI_ERRNO_SRCH;
-            }
-            return WASI_ERRNO_FAULT;
+            return mapHostProcessError(error);
           }
         },
         proc_getpid(retPidPtr) {
+          if (!guestRangeIsValid(retPidPtr, 4)) return WASI_ERRNO_FAULT;
           return writeGuestUint32(retPidPtr, VIRTUAL_PID);
         },
         proc_getppid(retPidPtr) {
+          if (!guestRangeIsValid(retPidPtr, 4)) return WASI_ERRNO_FAULT;
           return writeGuestUint32(retPidPtr, VIRTUAL_PPID);
         },
         proc_getrlimit(resource, retSoftPtr, retHardPtr) {
-          // Linux RLIMIT_NOFILE is resource 7. The typed per-execution value
-          // originates at limits.resources.maxOpenFds and is already the
-          // enforcement cap used by this runner's descriptor tables.
-          if ((Number(resource) >>> 0) !== 7) {
-            return WASI_ERRNO_NOTSUP;
+          if (!guestRangesAreValid([retSoftPtr, 8], [retHardPtr, 8])) {
+            return WASI_ERRNO_FAULT;
           }
-          const softResult = writeGuestUint64(retSoftPtr, rlimitNofileSoft);
-          if (softResult !== WASI_ERRNO_SUCCESS) {
-            return softResult;
+          const resourceKind = Number(resource) >>> 0;
+          if (resourceKind > 9) return WASI_ERRNO_INVAL;
+          if (!SIDECAR_MANAGED_PROCESS && resourceKind === 7) {
+            const softResult = writeGuestUint64(retSoftPtr, configuredMaxOpenFds);
+            if (softResult !== WASI_ERRNO_SUCCESS) return softResult;
+            return writeGuestUint64(retHardPtr, configuredMaxOpenFds);
           }
-          return writeGuestUint64(retHardPtr, rlimitNofileHard);
+          try {
+            const limit = callSyncRpc('process.getrlimit', [resourceKind]);
+            const softResult = writeGuestUint64(retSoftPtr, limit.soft);
+            if (softResult !== WASI_ERRNO_SUCCESS) {
+              return softResult;
+            }
+            return writeGuestUint64(retHardPtr, limit.hard);
+          } catch (error) {
+            if (
+              error?.code === 'ERR_AGENTOS_WASM_SYNC_RPC_UNAVAILABLE' &&
+              resourceKind === 7
+            ) {
+              const softResult = writeGuestUint64(retSoftPtr, configuredMaxOpenFds);
+              if (softResult !== WASI_ERRNO_SUCCESS) return softResult;
+              return writeGuestUint64(retHardPtr, configuredMaxOpenFds);
+            }
+            return mapHostProcessError(error);
+          }
         },
         proc_setrlimit(resource, soft, hard) {
-          if ((Number(resource) >>> 0) !== 7) {
-            return WASI_ERRNO_NOTSUP;
-          }
+          const resourceKind = Number(resource) >>> 0;
+          if (resourceKind > 9) return WASI_ERRNO_INVAL;
           const requestedSoft = BigInt.asUintN(64, BigInt(soft));
           const requestedHard = BigInt.asUintN(64, BigInt(hard));
-          if (requestedSoft > requestedHard) {
-            return WASI_ERRNO_INVAL;
+          try {
+            callSyncRpc('process.setrlimit', [
+              resourceKind,
+              requestedSoft.toString(),
+              requestedHard.toString(),
+            ]);
+            warnedAboutOpenFdLimit = false;
+            return WASI_ERRNO_SUCCESS;
+          } catch (error) {
+            return mapHostProcessError(error);
           }
-          if (requestedHard > BigInt(rlimitNofileHard)) {
-            return WASI_ERRNO_PERM;
-          }
-          if (
-            requestedSoft > BigInt(Number.MAX_SAFE_INTEGER) ||
-            requestedHard > BigInt(Number.MAX_SAFE_INTEGER)
-          ) {
-            return WASI_ERRNO_INVAL;
-          }
-          rlimitNofileSoft = Number(requestedSoft);
-          rlimitNofileHard = Number(requestedHard);
-          warnedAboutOpenFdLimit = false;
-          return WASI_ERRNO_SUCCESS;
         },
         proc_umask(mask, retPreviousPtr) {
+          if (!guestRangeIsValid(retPreviousPtr, 4)) return WASI_ERRNO_FAULT;
           try {
             const previous = Number(
               callSyncRpc('process.umask', [Number(mask) & 0o777]),
@@ -7709,6 +9070,7 @@ const hostProcessImport = {
           }
         },
         umask(mask, setMask, retPreviousPtr) {
+          if (!guestRangeIsValid(retPreviousPtr, 4)) return WASI_ERRNO_FAULT;
           try {
             const args = Number(setMask) !== 0 ? [Number(mask) & 0o777] : [];
             const previous = Number(callSyncRpc('process.umask', args)) >>> 0;
@@ -7718,6 +9080,9 @@ const hostProcessImport = {
           }
         },
         proc_itimer_real(operation, valueUs, intervalUs, retRemainingUsPtr, retIntervalUsPtr) {
+          if (!guestRangesAreValid([retRemainingUsPtr, 8], [retIntervalUsPtr, 8])) {
+            return WASI_ERRNO_FAULT;
+          }
           try {
             const numericOperation = Number(operation) >>> 0;
             if (numericOperation > 1) {
@@ -7755,6 +9120,7 @@ const hostProcessImport = {
           }
         },
         proc_getpgid(pid, retPgidPtr) {
+          if (!guestRangeIsValid(retPgidPtr, 4)) return WASI_ERRNO_FAULT;
           if (permissionTier !== 'full') {
             return WASI_ERRNO_SRCH;
           }
@@ -7791,6 +9157,9 @@ const hostProcessImport = {
           }
         },
         fd_pipe(retReadFdPtr, retWriteFdPtr) {
+          if (!guestRangesAreValid([retReadFdPtr, 4], [retWriteFdPtr, 4])) {
+            return WASI_ERRNO_FAULT;
+          }
           let readFd = null;
           let writeFd = null;
           try {
@@ -7807,12 +9176,12 @@ const hostProcessImport = {
               readFd = allocateSyntheticFd(nextSyntheticFd, true);
               writeFd = allocateSyntheticFd(nextSyntheticFd, true);
               if (readFd == null || writeFd == null) return WASI_ERRNO_MFILE;
-              syntheticFdEntries.set(readFd, createPipeHandle('pipe-read', pipe, readFd));
-              syntheticFdEntries.set(writeFd, createPipeHandle('pipe-write', pipe, writeFd));
+              setActiveFdProjection(readFd, createPipeHandle('pipe-read', pipe, readFd));
+              setActiveFdProjection(writeFd, createPipeHandle('pipe-write', pipe, writeFd));
             } else {
-            const result = callSyncRpc('process.fd_pipe');
-            readFd = registerKernelDelegateFd(result?.readFd);
-            writeFd = registerKernelDelegateFd(result?.writeFd);
+              const result = callSyncRpc('process.fd_pipe');
+              readFd = registerKernelDelegateFd(result?.readFd);
+              writeFd = registerKernelDelegateFd(result?.writeFd);
             }
             if (writeGuestUint32(retReadFdPtr, readFd) !== WASI_ERRNO_SUCCESS) {
               wasiImport.fd_close(readFd);
@@ -7832,31 +9201,34 @@ const hostProcessImport = {
           }
         },
         fd_dup(fd, retNewFdPtr) {
+          if (!guestRangeIsValid(retNewFdPtr, 4)) return WASI_ERRNO_FAULT;
           try {
-            const hostNetSource = hostNetSockets.get(Number(fd) >>> 0);
-            if (hostNetSource) {
+            const sourceFd = Number(fd) >>> 0;
+            const hostNetSource = getHostNetSocket(sourceFd);
+            if (!SIDECAR_MANAGED_PROCESS && hostNetSource) {
               const duplicatedFd = allocateHostNetDuplicateFd(0);
               if (duplicatedFd == null) return WASI_ERRNO_MFILE;
-              hostNetSockets.set(duplicatedFd, hostNetSource);
-              runnerCloexecFds.delete(duplicatedFd);
+              standaloneHostNetSockets.set(duplicatedFd, hostNetSource);
+              standaloneCloexecFds.delete(duplicatedFd);
               if (writeGuestUint32(retNewFdPtr, duplicatedFd) !== WASI_ERRNO_SUCCESS) {
                 hostNetImport.net_close(duplicatedFd);
                 return WASI_ERRNO_FAULT;
               }
               return WASI_ERRNO_SUCCESS;
             }
-            const source = lookupFdHandle(fd);
-            if (source?.kind === 'kernel-fd') {
+            const kernelSourceFd = managedKernelFdForDuplicate(sourceFd);
+            if (kernelSourceFd != null) {
               const duplicatedFd = registerKernelDelegateFd(
-                callSyncRpc('process.fd_dup', [Number(source.targetFd) >>> 0]),
+                callSyncRpc('process.fd_dup', [kernelSourceFd]),
               );
+              copyManagedHostNetDescription(sourceFd, duplicatedFd);
               if (writeGuestUint32(retNewFdPtr, duplicatedFd) !== WASI_ERRNO_SUCCESS) {
                 wasiImport.fd_close(duplicatedFd);
                 return WASI_ERRNO_FAULT;
               }
               return WASI_ERRNO_SUCCESS;
             }
-            const handle = cloneFdHandle(fd);
+            const handle = cloneFdHandle(sourceFd);
             if (!handle) {
               return WASI_ERRNO_BADF;
             }
@@ -7865,7 +9237,7 @@ const hostProcessImport = {
               releaseFdHandle(handle);
               return WASI_ERRNO_MFILE;
             }
-            syntheticFdEntries.set(duplicatedFd, handle);
+            setActiveFdProjection(duplicatedFd, handle);
             traceHostProcess('fd-dup', {
               fd: Number(fd) >>> 0,
               duplicatedFd,
@@ -7886,7 +9258,7 @@ const hostProcessImport = {
               return WASI_ERRNO_BADF;
             }
             if (sourceFd === targetFd) {
-              if (!lookupFdHandle(sourceFd) && !hostNetSockets.has(sourceFd)) {
+              if (!lookupFdHandle(sourceFd) && !hasHostNetSocket(sourceFd)) {
                 return WASI_ERRNO_BADF;
               }
               traceHostProcess('fd-dup2-same-fd', {
@@ -7895,12 +9267,12 @@ const hostProcessImport = {
               });
               return WASI_ERRNO_SUCCESS;
             }
-            if (targetFd >= rlimitNofileSoft) {
+            if (targetFd >= currentNofileSoftLimit()) {
               return WASI_ERRNO_BADF;
             }
 
-            const hostNetSource = hostNetSockets.get(sourceFd);
-            if (hostNetSource) {
+            const hostNetSource = getHostNetSocket(sourceFd);
+            if (!SIDECAR_MANAGED_PROCESS && hostNetSource) {
               const targetWasOpen = runnerOpenFdSet().has(targetFd);
               if (!targetWasOpen && !hasRunnerOpenFdCapacity(1)) {
                 return WASI_ERRNO_MFILE;
@@ -7909,15 +9281,15 @@ const hostProcessImport = {
               if (closeResult !== WASI_ERRNO_SUCCESS && closeResult !== WASI_ERRNO_BADF) {
                 return closeResult;
               }
-              hostNetSockets.set(targetFd, hostNetSource);
+              standaloneHostNetSockets.set(targetFd, hostNetSource);
               // dup2(2) always clears FD_CLOEXEC on the replacement descriptor.
-              runnerCloexecFds.delete(targetFd);
+              standaloneCloexecFds.delete(targetFd);
               closedPassthroughFds.delete(targetFd);
               return WASI_ERRNO_SUCCESS;
             }
 
-            const kernelSource = lookupFdHandle(sourceFd);
-            if (kernelSource?.kind === 'kernel-fd') {
+            const kernelSourceFd = managedKernelFdForDuplicate(sourceFd);
+            if (kernelSourceFd != null) {
               const targetHandle = lookupFdHandle(targetFd);
               const targetIsInternalPreopen = targetHandle?.internalPreopen === true;
               const shadowsInternalPreopen = hiddenPreopenHandles.has(targetFd);
@@ -7938,7 +9310,7 @@ const hostProcessImport = {
                       // kernel fd targetFd shadows it; retain fdTable/backing
                       // state for future path resolution.
                       passthroughHandles.delete(targetFd);
-                      delegateManagedFdRefCounts.delete(targetFd);
+                      standaloneDelegateFdRefCounts.delete(targetFd);
                       return WASI_ERRNO_SUCCESS;
                     })()
                   : wasiImport.fd_close(targetFd);
@@ -7963,9 +9335,15 @@ const hostProcessImport = {
               // destination; using the raw guest number as a kernel dup2
               // target can alias the source after preopen collisions.
               const duplicatedKernelFd = callSyncRpc('process.fd_dup', [
-                Number(kernelSource.targetFd) >>> 0,
+                kernelSourceFd,
               ]);
-              registerKernelDelegateFd(duplicatedKernelFd, targetFd, 3, shadowsInternalPreopen);
+              const duplicatedGuestFd = registerKernelDelegateFd(
+                duplicatedKernelFd,
+                targetFd,
+                3,
+                shadowsInternalPreopen,
+              );
+              copyManagedHostNetDescription(sourceFd, duplicatedGuestFd);
               return WASI_ERRNO_SUCCESS;
             }
 
@@ -7984,10 +9362,10 @@ const hostProcessImport = {
               sourceKind: sourceHandle.kind,
               sourceTargetFd: sourceHandle.targetFd ?? null,
               sourceDisplayFd: sourceHandle.displayFd ?? null,
-              existingKind: syntheticFdEntries.get(targetFd)?.kind ?? passthroughHandles.get(targetFd)?.kind ?? null,
+              existingKind: activeFdProjections.get(targetFd)?.kind ?? passthroughHandles.get(targetFd)?.kind ?? null,
             });
 
-            if (hostNetSockets.has(targetFd)) {
+            if (hasHostNetSocket(targetFd)) {
               const closeResult = hostNetImport.net_close(targetFd);
               if (closeResult !== WASI_ERRNO_SUCCESS) {
                 releaseFdHandle(sourceHandle);
@@ -7996,7 +9374,7 @@ const hostProcessImport = {
             }
             closeSyntheticFd(targetFd);
             closePassthroughFd(targetFd);
-            syntheticFdEntries.set(targetFd, sourceHandle);
+            setActiveFdProjection(targetFd, sourceHandle);
             closedPassthroughFds.delete(targetFd);
             traceHostProcess('fd-dup2-installed', {
               oldFd: sourceFd,
@@ -8015,6 +9393,7 @@ const hostProcessImport = {
           }
         },
         fd_dup_min(fd, minFd, retNewFdPtr) {
+          if (!guestRangeIsValid(retNewFdPtr, 4)) return WASI_ERRNO_FAULT;
           try {
             const sourceFd = Number(fd);
             const minimumFdNumber = Number(minFd);
@@ -8027,16 +9406,16 @@ const hostProcessImport = {
             if (minimumFdNumber >= LINUX_GUEST_FD_LIMIT) {
               return WASI_ERRNO_INVAL;
             }
-            if (minimumFdNumber >= rlimitNofileSoft) {
+            if (minimumFdNumber >= currentNofileSoftLimit()) {
               return WASI_ERRNO_INVAL;
             }
 
-            const hostNetSource = hostNetSockets.get(sourceFd);
-            if (hostNetSource) {
+            const hostNetSource = getHostNetSocket(sourceFd);
+            if (!SIDECAR_MANAGED_PROCESS && hostNetSource) {
               const duplicatedFd = allocateHostNetDuplicateFd(minimumFdNumber);
               if (duplicatedFd == null) return WASI_ERRNO_MFILE;
-              hostNetSockets.set(duplicatedFd, hostNetSource);
-              runnerCloexecFds.delete(duplicatedFd);
+              standaloneHostNetSockets.set(duplicatedFd, hostNetSource);
+              standaloneCloexecFds.delete(duplicatedFd);
               if (writeGuestUint32(retNewFdPtr, duplicatedFd) !== WASI_ERRNO_SUCCESS) {
                 hostNetImport.net_close(duplicatedFd);
                 return WASI_ERRNO_FAULT;
@@ -8044,17 +9423,18 @@ const hostProcessImport = {
               return WASI_ERRNO_SUCCESS;
             }
 
-            const kernelSource = lookupFdHandle(sourceFd);
-            if (kernelSource?.kind === 'kernel-fd') {
-              // F_DUPFD's lower bound belongs to the guest descriptor table,
-              // not the sidecar kernel's private backing-fd namespace. Asking
-              // the kernel for fd >= minFd can exceed its bounded table for a
-              // perfectly valid guest request such as F_DUPFD(512).
+            const kernelSourceFd = managedKernelFdForDuplicate(sourceFd);
+            if (kernelSourceFd != null) {
+              // Kernel and guest allocation share the authoritative
+              // RLIMIT_NOFILE. The guest projection still chooses its own
+              // lowest visible alias because hidden preopens can occupy a
+              // different numeric slot than the backing descriptor.
               const duplicatedFd = registerKernelDelegateFd(
-                callSyncRpc('process.fd_dup', [Number(kernelSource.targetFd) >>> 0]),
+                callSyncRpc('process.fd_dup_min', [kernelSourceFd, minimumFdNumber]),
                 null,
                 minimumFdNumber,
               );
+              copyManagedHostNetDescription(sourceFd, duplicatedFd);
               if (writeGuestUint32(retNewFdPtr, duplicatedFd) !== WASI_ERRNO_SUCCESS) {
                 wasiImport.fd_close(duplicatedFd);
                 return WASI_ERRNO_FAULT;
@@ -8074,7 +9454,7 @@ const hostProcessImport = {
               return WASI_ERRNO_MFILE;
             }
 
-            syntheticFdEntries.set(duplicatedFd, handle);
+            setActiveFdProjection(duplicatedFd, handle);
             traceHostProcess('fd-dup-min', {
               fd: sourceFd >>> 0,
               minimumFd: minimumFdNumber >>> 0,
@@ -8095,14 +9475,15 @@ const hostProcessImport = {
           }
         },
         fd_getfd(fd, retFlagsPtr) {
+          if (!guestRangeIsValid(retFlagsPtr, 4)) return WASI_ERRNO_FAULT;
           try {
             const numericFd = Number(fd) >>> 0;
             const handle = lookupFdHandle(numericFd);
             let flags;
             if (handle?.kind === 'kernel-fd') {
               flags = Number(callSyncRpc('process.fd_getfd', [Number(handle.targetFd) >>> 0]));
-            } else if (handle || hostNetSockets.has(numericFd)) {
-              flags = runnerCloexecFds.has(numericFd) ? 1 : 0;
+            } else if (handle || hasHostNetSocket(numericFd)) {
+              flags = standaloneCloexecFds.has(numericFd) ? 1 : 0;
             } else {
               return WASI_ERRNO_BADF;
             }
@@ -8124,13 +9505,14 @@ const hostProcessImport = {
                 Number(handle.targetFd) >>> 0,
                 normalizedFlags,
               ]);
-            } else if (!handle && !hostNetSockets.has(numericFd)) {
+            } else if (!handle && !hasHostNetSocket(numericFd)) {
               return WASI_ERRNO_BADF;
-            }
-            if ((normalizedFlags & 1) !== 0) {
-              runnerCloexecFds.add(numericFd);
             } else {
-              runnerCloexecFds.delete(numericFd);
+              if ((normalizedFlags & 1) !== 0) {
+                standaloneCloexecFds.add(numericFd);
+              } else {
+                standaloneCloexecFds.delete(numericFd);
+              }
             }
             return WASI_ERRNO_SUCCESS;
           } catch (error) {
@@ -8145,7 +9527,7 @@ const hostProcessImport = {
             const normalizedOperation = Number(operation) >>> 0;
             const handle = lookupFdHandle(numericFd);
             if (handle?.kind !== 'kernel-fd') {
-              return handle || hostNetSockets.has(numericFd)
+              return handle || hasHostNetSocket(numericFd)
                 ? WASI_ERRNO_NOTSUP
                 : WASI_ERRNO_BADF;
             }
@@ -8158,7 +9540,6 @@ const hostProcessImport = {
               : normalizedOperation;
             const startedAt = Date.now();
             const deadline = startedAt + unixConnectTimeoutMs;
-            const warningAt = startedAt + Math.floor(unixConnectTimeoutMs * 0.8);
             let warnedNearLimit = false;
             while (true) {
               try {
@@ -8175,23 +9556,24 @@ const hostProcessImport = {
                   return mapHostProcessError(error);
                 }
                 const now = Date.now();
-                if (!warnedNearLimit && now >= warningAt) {
-                  warnedNearLimit = true;
-                  process.stderr.write(
-                    `[agentos] flock is nearing limits.resources.maxBlockingReadMs (${unixConnectTimeoutMs} ms)\n`,
-                  );
-                }
+                warnedNearLimit = warnNearBlockingReadLimit(
+                  'flock',
+                  startedAt,
+                  warnedNearLimit,
+                );
                 if (now >= deadline) {
                   process.stderr.write(
                     `[agentos] flock exceeded limits.resources.maxBlockingReadMs (${unixConnectTimeoutMs} ms); raise limits.resources.maxBlockingReadMs if needed\n`,
                   );
                   return WASI_ERRNO_TIMEDOUT;
                 }
-                if (dispatchPendingWasmSignals()) return WASI_ERRNO_INTR;
+                if (dispatchPendingWasmSignals(true)) return WASI_ERRNO_INTR;
                 // Keep the sidecar dispatcher free so the lock owner can run
                 // and unlock while this guest observes blocking flock semantics.
-                pumpSpawnedChildrenOrWait(SPAWNED_CHILD_WAIT_SLICE_MS);
-                if (dispatchPendingWasmSignals()) return WASI_ERRNO_INTR;
+                if (pumpSpawnedChildrenOrWaitRestartable(SPAWNED_CHILD_WAIT_SLICE_MS)) {
+                  return WASI_ERRNO_INTR;
+                }
+                if (dispatchPendingWasmSignals(true)) return WASI_ERRNO_INTR;
               }
             }
           } catch (error) {
@@ -8210,6 +9592,17 @@ const hostProcessImport = {
           retLengthPtr,
         ) {
           const numericCommand = Number(command) >>> 0;
+          if (
+            numericCommand === 12 &&
+            !guestRangesAreValid(
+              [retTypePtr, 4],
+              [retPidPtr, 4],
+              [retStartPtr, 8],
+              [retLengthPtr, 8],
+            )
+          ) {
+            return WASI_ERRNO_FAULT;
+          }
           let blockingWaitRegistered = false;
           const cancelBlockingLockWait = () => {
             callSyncRpc('process.fd_record_lock_cancel', []);
@@ -8222,7 +9615,7 @@ const hostProcessImport = {
               // A runner-local or host-network descriptor has no stable VFS
               // inode identity. Never report a lock that the kernel cannot
               // enforce against other VM processes.
-              return handle || hostNetSockets.has(numericFd)
+              return handle || hasHostNetSocket(numericFd)
                 ? WASI_ERRNO_NOTSUP
                 : WASI_ERRNO_BADF;
             }
@@ -8233,8 +9626,6 @@ const hostProcessImport = {
             }
             const lockWaitStartedAt = Date.now();
             const lockWaitDeadline = lockWaitStartedAt + unixConnectTimeoutMs;
-            const lockWaitWarningAt =
-              lockWaitStartedAt + Math.floor(unixConnectTimeoutMs * 0.8);
             let warnedNearLockWaitLimit = false;
             let response;
             while (true) {
@@ -8257,12 +9648,11 @@ const hostProcessImport = {
                 }
                 blockingWaitRegistered = true;
                 const now = Date.now();
-                if (!warnedNearLockWaitLimit && now >= lockWaitWarningAt) {
-                  warnedNearLockWaitLimit = true;
-                  process.stderr.write(
-                    `[agentos] F_SETLKW is nearing limits.resources.maxBlockingReadMs (${unixConnectTimeoutMs} ms)\n`,
-                  );
-                }
+                warnedNearLockWaitLimit = warnNearBlockingReadLimit(
+                  'F_SETLKW',
+                  lockWaitStartedAt,
+                  warnedNearLockWaitLimit,
+                );
                 if (now >= lockWaitDeadline) {
                   cancelBlockingLockWait();
                   process.stderr.write(
@@ -8274,12 +9664,15 @@ const hostProcessImport = {
                 // another VM process can reach close/unlock. Suspend in the
                 // runner instead, advancing descendants and yielding briefly
                 // to independently scheduled processes between retries.
-                if (dispatchPendingWasmSignals()) {
+                if (dispatchPendingWasmSignals(true)) {
                   cancelBlockingLockWait();
                   return WASI_ERRNO_INTR;
                 }
-                pumpSpawnedChildrenOrWait(SPAWNED_CHILD_WAIT_SLICE_MS);
-                if (dispatchPendingWasmSignals()) {
+                if (pumpSpawnedChildrenOrWaitRestartable(SPAWNED_CHILD_WAIT_SLICE_MS)) {
+                  cancelBlockingLockWait();
+                  return WASI_ERRNO_INTR;
+                }
+                if (dispatchPendingWasmSignals(true)) {
                   cancelBlockingLockWait();
                   return WASI_ERRNO_INTR;
                 }
@@ -8314,14 +9707,89 @@ const hostProcessImport = {
         proc_closefrom(lowFd) {
           const minimumFd = Number(lowFd) >>> 0;
           const openVirtualFds = new Set([
-            ...syntheticFdEntries.keys(),
+            ...activeFdProjections.keys(),
             ...passthroughHandles.keys(),
             ...retainedSpawnOutputHandlesByFd.keys(),
             ...retainedSyntheticHandlesByDisplayFd.keys(),
-            ...hostNetSockets.keys(),
-            ...delegateManagedFdRefCounts.keys(),
+            ...hostNetGuestFds(),
+            ...standaloneDelegateFdRefCounts.keys(),
             ...(wasi?.fdTable?.keys?.() ?? []),
           ]);
+          if (SIDECAR_MANAGED_PROCESS) {
+            const exactKernelFds = new Set();
+            for (const fd of openVirtualFds) {
+              if (fd < minimumFd) continue;
+              const handle = lookupFdHandle(fd);
+              if (
+                handle?.internalPreopen === true ||
+                hiddenPreopenHandles.has(fd)
+              ) {
+                continue;
+              }
+              if (handle?.kind === 'kernel-fd') {
+                exactKernelFds.add(Number(handle.targetFd) >>> 0);
+              } else if (
+                fd <= 2 &&
+                handle?.kind === 'passthrough' &&
+                Number(handle.targetFd) === fd
+              ) {
+                exactKernelFds.add(fd);
+              }
+            }
+            let response;
+            try {
+              response = callSyncRpc('process.fd_closefrom', [
+                minimumFd,
+                [...exactKernelFds],
+              ]);
+            } catch (error) {
+              return mapHostProcessError(error);
+            }
+            if (!Array.isArray(response?.closedFds)) {
+              return WASI_ERRNO_IO;
+            }
+            const closedKernelFds = new Set(
+              response.closedFds.map((fd) => Number(fd) >>> 0),
+            );
+            for (const fd of closedKernelFds) {
+              forgetSidecarClosedKernelTargetFd(fd);
+            }
+
+            let firstError = WASI_ERRNO_SUCCESS;
+            for (const fd of [...openVirtualFds].sort((left, right) => left - right)) {
+              if (fd < minimumFd) continue;
+              const handle = lookupFdHandle(fd);
+              // Preopens remain private capability roots after closefrom. Only
+              // their ordinary, untagged Linux aliases disappear here.
+              if (
+                handle?.internalPreopen === true ||
+                hiddenPreopenHandles.has(fd)
+              ) {
+                activeFdProjections.delete(fd);
+                passthroughHandles.delete(fd);
+                closedPassthroughFds.add(fd);
+                standaloneCloexecFds.delete(fd);
+                continue;
+              }
+              if (handle?.kind === 'kernel-fd') {
+                // Bulk kernel retirement already removed every canonical
+                // descriptor in its range; never issue a second per-fd close.
+                if (closedKernelFds.has(Number(handle.targetFd) >>> 0)) {
+                  forgetSidecarClosedKernelFd(fd);
+                }
+                continue;
+              }
+              const result = wasiImport.fd_close(fd);
+              if (
+                result !== WASI_ERRNO_SUCCESS &&
+                result !== WASI_ERRNO_BADF &&
+                firstError === WASI_ERRNO_SUCCESS
+              ) {
+                firstError = result;
+              }
+            }
+            return firstError;
+          }
           let firstError = WASI_ERRNO_SUCCESS;
           for (const fd of [...openVirtualFds].sort((left, right) => left - right)) {
             if (fd < minimumFd) {
@@ -8336,7 +9804,7 @@ const hostProcessImport = {
             ) {
               passthroughHandles.delete(fd);
               closedPassthroughFds.add(fd);
-              runnerCloexecFds.delete(fd);
+              standaloneCloexecFds.delete(fd);
               continue;
             }
             const result = wasiImport.fd_close(fd);
@@ -8354,6 +9822,9 @@ const hostProcessImport = {
           let firstFd = null;
           let secondFd = null;
           try {
+            if (!guestRangeIsValid(retFirstPtr, 4) || !guestRangeIsValid(retSecondPtr, 4)) {
+              return WASI_ERRNO_FAULT;
+            }
             if (!hasRunnerOpenFdCapacity(2)) return WASI_ERRNO_MFILE;
             const result = callSyncRpc('process.fd_socketpair', [
               Number(socketKind) >>> 0,
@@ -8377,6 +9848,7 @@ const hostProcessImport = {
           }
         },
         fd_sendmsg_rights(socketFd, dataPtr, dataLen, rightsPtr, rightsLen, flags, retSentPtr) {
+          if (!guestRangeIsValid(retSentPtr, 4)) return WASI_ERRNO_FAULT;
           try {
             if (!(instanceMemory instanceof WebAssembly.Memory)) return WASI_ERRNO_FAULT;
             const byteLength = Number(dataLen) >>> 0;
@@ -8401,32 +9873,21 @@ const hostProcessImport = {
             const rights = [];
             for (let index = 0; index < rightsLength; index += 1) {
               const guestFd = view.getUint32(rightsOffset + index * 4, true);
-              if (hostNetSockets.has(guestFd)) {
-                const socket = hostNetSockets.get(guestFd);
+              if (hasHostNetSocket(guestFd)) {
+                const handle = lookupFdHandle(guestFd);
                 rights.push({
                   kind: 'hostNet',
-                  socketId: socket.socketId ?? null,
-                  serverId: socket.serverId ?? null,
-                  udpSocketId: socket.udpSocketId ?? null,
-                  domain: Number(socket.domain) >>> 0,
-                  socketType: Number(socket.sockType) >>> 0,
-                  protocol: Number(socket.protocol) >>> 0,
-                  nonblocking: socket.nonblock === true,
-                  recvTimeoutMs: socket.recvTimeoutMs ?? null,
-                  bindOptions: socket.bindOptions ?? null,
-                  localInfo: socket.localInfo ?? null,
-                  localUnixAddress: socket.localUnixAddress ?? null,
-                  localReservation: socket.localReservation ?? null,
-                  remoteInfo: socket.remoteInfo ?? null,
-                  remoteUnixAddress: socket.remoteUnixAddress ?? null,
-                  listening: socket.listening === true,
+                  fd: handle?.kind === 'kernel-fd'
+                    ? Number(handle.targetFd) >>> 0
+                    : null,
+                  descriptionId: handle?.hostNetDescriptionId ?? null,
                 });
                 continue;
               }
               const handle = lookupFdHandle(guestFd);
               const kernelFd = handle?.kind === 'kernel-fd'
                 ? Number(handle.targetFd) >>> 0
-                : delegateManagedFdRefCounts.has(guestFd)
+                : standaloneDelegateFdRefCounts.has(guestFd)
                   ? guestFd
                   : null;
               if (kernelFd == null) {
@@ -8532,7 +9993,7 @@ const hostProcessImport = {
                 }
                 const progressed = pumpSpawnedChildren(10);
                 dispatchPendingWasmSignals();
-                if (!progressed && spawnedChildren.size === 0) {
+                if (!progressed && childCorrelationsByPid.size === 0) {
                   Atomics.wait(syntheticWaitArray, 0, 0, 1);
                 }
               }
@@ -8557,7 +10018,48 @@ const hostProcessImport = {
               if (received?.kind === 'kernel') {
                 fd = registerKernelDelegateFd(received.fd);
               } else if (received?.kind === 'hostNet') {
-                fd = allocateHostNetSocketFd();
+                if (SIDECAR_MANAGED_PROCESS) {
+                  const descriptionId = String(received.descriptionId ?? '');
+                  try {
+                    fd = registerKernelDelegateFd(received.fd);
+                    attachManagedHostNetDescription(fd, descriptionId);
+                  } catch (error) {
+                    try {
+                      callSyncRpc('process.fd_close', [Number(received.fd) >>> 0]);
+                    } catch (closeError) {
+                      process.stderr.write(
+                        `[agentos] failed to roll back received managed fd: ${closeError instanceof Error ? closeError.message : String(closeError)}\n`,
+                      );
+                    }
+                    throw error;
+                  }
+                } else {
+                  const socket = {
+                    domain: Number(received.domain) >>> 0,
+                    sockType: Number(received.socketType) >>> 0,
+                    protocol: Number(received.protocol) >>> 0,
+                    bindOptions: received.bindOptions ?? null,
+                    localInfo: received.localInfo ?? null,
+                    localUnixAddress: received.localUnixAddress ?? null,
+                    localReservation: received.localReservation ?? null,
+                    remoteInfo: received.remoteInfo ?? null,
+                    remoteUnixAddress: received.remoteUnixAddress ?? null,
+                    listening: received.listening === true,
+                    serverId: received.serverId ?? null,
+                    socketId: received.socketId ?? null,
+                    udpSocketId: received.udpSocketId ?? null,
+                    pendingDatagram: null,
+                    recvTimeoutMs: received.recvTimeoutMs ?? null,
+                    readChunks: [],
+                    pendingAccepts: [],
+                    readableEnded: false,
+                    closed: false,
+                    lastError: null,
+                    nonblock: received.nonblocking === true,
+                  };
+                  fd = allocateHostNetSocketFd();
+                  if (fd != null) standaloneHostNetSockets.set(fd, socket);
+                }
                 if (fd == null) {
                   localControlTruncated = true;
                   if (typeof received.socketId === 'string') {
@@ -8574,37 +10076,11 @@ const hostProcessImport = {
                   }
                   continue;
                 }
-                hostNetSockets.set(fd, {
-                  domain: Number(received.domain) >>> 0,
-                  sockType: Number(received.socketType) >>> 0,
-                  protocol: Number(received.protocol) >>> 0,
-                  bindOptions: received.bindOptions ?? null,
-                  localInfo: received.localInfo ?? normalizeHostNetAddressInfo(
-                    received.localAddress,
-                    received.localPort,
-                  ),
-                  localUnixAddress: received.localUnixAddress ?? null,
-                  localReservation: received.localReservation ?? null,
-                  remoteInfo: received.remoteInfo ?? normalizeHostNetAddressInfo(
-                    received.remoteAddress,
-                    received.remotePort,
-                  ),
-                  remoteUnixAddress: received.remoteUnixAddress ?? null,
-                  listening: received.listening === true,
-                  serverId: received.serverId ?? null,
-                  socketId: received.socketId ?? null,
-                  udpSocketId: received.udpSocketId ?? null,
-                  pendingDatagram: null,
-                  recvTimeoutMs: received.recvTimeoutMs ?? null,
-                  readChunks: [],
-                  pendingAccepts: [],
-                  readableEnded: false,
-                  closed: false,
-                  lastError: null,
-                  nonblock: received.nonblocking === true,
-                });
               } else {
                 return WASI_ERRNO_FAULT;
+              }
+              if ((numericFlags & 0x40000000) !== 0) {
+                if (!SIDECAR_MANAGED_PROCESS) standaloneCloexecFds.add(fd);
               }
               installedFds.push(fd);
               view.setUint32(rightsOffset + installedCount * 4, fd, true);
@@ -8630,28 +10106,47 @@ const hostProcessImport = {
           }
         },
         sleep_ms(milliseconds) {
+          const durationMs = Number(milliseconds) >>> 0;
+          if (!SIDECAR_MANAGED_PROCESS) {
+            Atomics.wait(syntheticWaitArray, 0, 0, durationMs);
+            return WASI_ERRNO_SUCCESS;
+          }
           try {
-            const waitArray = new Int32Array(new SharedArrayBuffer(4));
-            const deadline = Date.now() + (Number(milliseconds) >>> 0);
-            while (Date.now() < deadline) {
-              // Keep guest sleeps interruptible by V8 termination during SIGTERM,
-              // SIGKILL, and VM disposal. Also drain handled Wasm signals at
-              // syscall boundaries so cooperative handlers run during sleeps.
-              dispatchPendingWasmSignals();
-              Atomics.wait(waitArray, 0, 0, Math.max(1, Math.min(10, deadline - Date.now())));
-            }
+            callSyncRpc('process.sleep', [durationMs]);
             dispatchPendingWasmSignals();
             return WASI_ERRNO_SUCCESS;
-          } catch {
-            return WASI_ERRNO_FAULT;
+          } catch (error) {
+            dispatchPendingWasmSignals();
+            return mapHostProcessError(error);
           }
         },
         pty_open(retMasterFdPtr, retSlaveFdPtr) {
-          return WASI_ERRNO_FAULT;
+          let masterFd = null;
+          let slaveFd = null;
+          try {
+            if (!guestRangeIsValid(retMasterFdPtr, 4) || !guestRangeIsValid(retSlaveFdPtr, 4)) {
+              return WASI_ERRNO_FAULT;
+            }
+            if (!hasRunnerOpenFdCapacity(2)) return WASI_ERRNO_MFILE;
+            const result = callSyncRpc('process.pty_open', []);
+            masterFd = registerKernelDelegateFd(result?.masterFd);
+            slaveFd = registerKernelDelegateFd(result?.slaveFd);
+            writeGuestUint32(retMasterFdPtr, masterFd);
+            writeGuestUint32(retSlaveFdPtr, slaveFd);
+            return WASI_ERRNO_SUCCESS;
+          } catch (error) {
+            if (masterFd != null) wasiImport.fd_close(masterFd);
+            if (slaveFd != null) wasiImport.fd_close(slaveFd);
+            return mapHostProcessError(error);
+          }
         },
         proc_sigaction(signal, action, maskLo, maskHi, flags) {
           if (permissionTier !== 'full') {
             return WASI_ERRNO_FAULT;
+          }
+          const numericSignal = Number(signal) >>> 0;
+          if (numericSignal === 0 || numericSignal > 64) {
+            return WASI_ERRNO_INVAL;
           }
           try {
             const registration = {
@@ -8659,18 +10154,21 @@ const hostProcessImport = {
               mask: decodeSignalMask(maskLo, maskHi),
               flags: Number(flags) >>> 0,
             };
+            if (
+              registration.action === 'user' &&
+              typeof instance?.exports?.__wasi_signal_trampoline !== 'function'
+            ) {
+              // Accepting this registration would let the kernel publish a
+              // caught delivery that this image can never run. Reject it at
+              // registration time instead of silently consuming the token.
+              return WASI_ERRNO_NOTSUP;
+            }
             callSyncRpc('process.signal_state', [
-              Number(signal) >>> 0,
+              numericSignal,
               registration.action,
               JSON.stringify(registration.mask),
               registration.flags,
             ]);
-            const numericSignal = Number(signal) >>> 0;
-            if (registration.action === 'default') {
-              wasmSignalRegistrations.delete(numericSignal);
-            } else {
-              wasmSignalRegistrations.set(numericSignal, registration);
-            }
             traceHostProcess('proc-sigaction', {
               signal: numericSignal,
               action: registration.action,
@@ -8683,37 +10181,24 @@ const hostProcessImport = {
           }
         },
         proc_signal_mask_v2(how, setLo, setHi, retOldLoPtr, retOldHiPtr) {
+          if (!guestRangesAreValid([retOldLoPtr, 4], [retOldHiPtr, 4])) {
+            return WASI_ERRNO_FAULT;
+          }
           if (permissionTier !== 'full') {
             return WASI_ERRNO_FAULT;
           }
           try {
-            const previous = encodeSignalMask(wasmBlockedSignals);
-            writeGuestUint32(retOldLoPtr, previous.lo);
-            writeGuestUint32(retOldHiPtr, previous.hi);
             const operation = Number(how) >>> 0;
-            if (operation === 3) {
-              return WASI_ERRNO_SUCCESS;
-            }
-            if (operation > 2) {
+            if (operation > 3) {
               return WASI_ERRNO_INVAL;
             }
             const requested = decodeSignalMask(setLo, setHi).filter(
               (signal) => signal !== LINUX_SIGKILL && signal !== LINUX_SIGSTOP,
             );
-            if (operation === 0) {
-              for (const signal of requested) {
-                wasmBlockedSignals.add(signal);
-              }
-            } else if (operation === 1) {
-              for (const signal of requested) {
-                wasmBlockedSignals.delete(signal);
-              }
-            } else {
-              wasmBlockedSignals.clear();
-              for (const signal of requested) {
-                wasmBlockedSignals.add(signal);
-              }
-            }
+            const response = callSyncRpc('process.signal_mask', [operation, requested]);
+            const previous = encodeSignalMask(response?.signals ?? []);
+            writeGuestUint32(retOldLoPtr, previous.lo);
+            writeGuestUint32(retOldHiPtr, previous.hi);
             dispatchPendingWasmSignals();
             return WASI_ERRNO_SUCCESS;
           } catch {
@@ -8730,10 +10215,10 @@ const hostProcessImport = {
           hasSigmask,
           retReadyPtr,
         ) {
+          if (!guestRangeIsValid(retReadyPtr, 4)) return WASI_ERRNO_FAULT;
           if (permissionTier !== 'full') {
             return WASI_ERRNO_PERM;
           }
-          const previousMask = new Set(wasmBlockedSignals);
           try {
             const seconds = BigInt(timeoutSec);
             const nanoseconds = BigInt(timeoutNsec);
@@ -8745,30 +10230,20 @@ const hostProcessImport = {
               const milliseconds = seconds * 1000n + (nanoseconds + 999_999n) / 1_000_000n;
               timeoutMs = Number(milliseconds > 2_147_483_647n ? 2_147_483_647n : milliseconds);
             }
-            if ((Number(hasSigmask) >>> 0) !== 0) {
-              wasmBlockedSignals.clear();
-              for (const signal of decodeSignalMask(sigmaskLo, sigmaskHi)) {
-                if (signal !== LINUX_SIGKILL && signal !== LINUX_SIGSTOP) {
-                  wasmBlockedSignals.add(signal);
-                }
-              }
-            }
-            // No guest code runs between the mask swap and the first poll
-            // boundary. That boundary drains pending signals and returns
-            // EINTR when it invokes an unblocked caught handler.
-            return hostNetImport.net_poll(fdsPtr, nfds, timeoutMs, retReadyPtr);
+            const temporaryMask = (Number(hasSigmask) >>> 0) !== 0
+              ? decodeSignalMask(sigmaskLo, sigmaskHi).filter(
+                (signal) => signal !== LINUX_SIGKILL && signal !== LINUX_SIGSTOP,
+              )
+              : null;
+            return hostNetImport.net_poll(
+              fdsPtr,
+              nfds,
+              timeoutMs,
+              retReadyPtr,
+              temporaryMask,
+            );
           } catch {
             return WASI_ERRNO_FAULT;
-          } finally {
-            wasmBlockedSignals.clear();
-            for (const signal of previousMask) {
-              wasmBlockedSignals.add(signal);
-            }
-            // A signal may have arrived while blocked only by ppoll's
-            // temporary mask. Linux runs that now-unblocked handler before
-            // returning to user code without rewriting a successful poll
-            // result, so drain after restoration rather than dropping it.
-            dispatchPendingWasmSignals();
           }
         },
 };
@@ -8785,20 +10260,33 @@ const limitedHostProcessImport = {
   umask: hostProcessImport.umask,
 };
 
-function hostUserLookup(rpcMethod, args, bufPtr, bufLen, retLenPtr) {
+function hostUserLookup(lookup, bufPtr, bufLen, retLenPtr) {
   try {
-    const entry = String(callSyncRpc(rpcMethod, args));
-    return writeGuestBytes(bufPtr, bufLen, encodeGuestBytes(entry), retLenPtr);
+    const capacity = Number(bufLen) >>> 0;
+    if (
+      !guestRangeIsValid(retLenPtr, 4) ||
+      !guestRangeIsValid(bufPtr, capacity)
+    ) {
+      return WASI_ERRNO_FAULT;
+    }
+    const entry = String(lookup());
+    return writeGuestAccountRecord(bufPtr, capacity, encodeGuestBytes(entry), retLenPtr);
   } catch (error) {
     return mapSyntheticFsError(error);
   }
 }
 
-function hostUserNameLookup(rpcMethod, namePtr, nameLen, bufPtr, bufLen, retLenPtr) {
+function hostUserNameLookup(lookup, namePtr, nameLen, bufPtr, bufLen, retLenPtr) {
   try {
+    const nameErrno = checkFixedRequestLimit(
+      'wasm.abi.maxAccountNameBytes',
+      nameLen,
+      MAX_ACCOUNT_RECORD_BYTES,
+      WASI_ERRNO_NAMETOOLONG,
+    );
+    if (nameErrno !== WASI_ERRNO_SUCCESS) return nameErrno;
     return hostUserLookup(
-      rpcMethod,
-      [readGuestString(namePtr, nameLen)],
+      () => lookup(readGuestString(namePtr, nameLen)),
       bufPtr,
       bufLen,
       retLenPtr,
@@ -8816,6 +10304,7 @@ function hostUserOptionalId(value) {
 const hostUserImport = {
   getuid(retUidPtr) {
     try {
+      if (!guestRangeIsValid(retUidPtr, 4)) return WASI_ERRNO_FAULT;
       return writeGuestUint32(retUidPtr, callSyncRpc('process.getuid', []));
     } catch (error) {
       return mapSyntheticFsError(error);
@@ -8823,6 +10312,7 @@ const hostUserImport = {
   },
   getgid(retGidPtr) {
     try {
+      if (!guestRangeIsValid(retGidPtr, 4)) return WASI_ERRNO_FAULT;
       return writeGuestUint32(retGidPtr, callSyncRpc('process.getgid', []));
     } catch (error) {
       return mapSyntheticFsError(error);
@@ -8830,6 +10320,7 @@ const hostUserImport = {
   },
   geteuid(retUidPtr) {
     try {
+      if (!guestRangeIsValid(retUidPtr, 4)) return WASI_ERRNO_FAULT;
       return writeGuestUint32(retUidPtr, callSyncRpc('process.geteuid', []));
     } catch (error) {
       return mapSyntheticFsError(error);
@@ -8837,6 +10328,7 @@ const hostUserImport = {
   },
   getegid(retGidPtr) {
     try {
+      if (!guestRangeIsValid(retGidPtr, 4)) return WASI_ERRNO_FAULT;
       return writeGuestUint32(retGidPtr, callSyncRpc('process.getegid', []));
     } catch (error) {
       return mapSyntheticFsError(error);
@@ -8844,6 +10336,13 @@ const hostUserImport = {
   },
   getresuid(retUidPtr, retEuidPtr, retSuidPtr) {
     try {
+      if (
+        !guestRangeIsValid(retUidPtr, 4) ||
+        !guestRangeIsValid(retEuidPtr, 4) ||
+        !guestRangeIsValid(retSuidPtr, 4)
+      ) {
+        return WASI_ERRNO_FAULT;
+      }
       const [uid, euid, suid] = callSyncRpc('process.getresuid', []);
       return writeGuestUint32(retUidPtr, uid) ||
         writeGuestUint32(retEuidPtr, euid) ||
@@ -8854,6 +10353,13 @@ const hostUserImport = {
   },
   getresgid(retGidPtr, retEgidPtr, retSgidPtr) {
     try {
+      if (
+        !guestRangeIsValid(retGidPtr, 4) ||
+        !guestRangeIsValid(retEgidPtr, 4) ||
+        !guestRangeIsValid(retSgidPtr, 4)
+      ) {
+        return WASI_ERRNO_FAULT;
+      }
       const [gid, egid, sgid] = callSyncRpc('process.getresgid', []);
       return writeGuestUint32(retGidPtr, gid) ||
         writeGuestUint32(retEgidPtr, egid) ||
@@ -8936,10 +10442,25 @@ const hostUserImport = {
   },
   getgroups(size, groupsPtr, retCountPtr) {
     try {
-      const groups = callSyncRpc('process.getgroups', []);
+      if (!guestRangeIsValid(retCountPtr, 4)) {
+        return WASI_ERRNO_FAULT;
+      }
       const capacity = Number(size) >>> 0;
+      if (
+        capacity !== 0 &&
+        !guestRangeIsValid(groupsPtr, Math.min(capacity, MAX_SUPPLEMENTARY_GROUPS) * 4)
+      ) {
+        return WASI_ERRNO_FAULT;
+      }
+      const groups = callSyncRpc('process.getgroups', []);
+      if (!Array.isArray(groups) || groups.length > MAX_SUPPLEMENTARY_GROUPS) {
+        return WASI_ERRNO_INVAL;
+      }
       if (capacity !== 0 && capacity < groups.length) {
         return WASI_ERRNO_INVAL;
+      }
+      if (capacity !== 0 && !guestRangeIsValid(groupsPtr, groups.length * 4)) {
+        return WASI_ERRNO_FAULT;
       }
       if (capacity !== 0) {
         for (let index = 0; index < groups.length; index += 1) {
@@ -8954,8 +10475,18 @@ const hostUserImport = {
   },
   setgroups(count, groupsPtr) {
     try {
+      const groupCount = Number(count) >>> 0;
+      const countErrno = checkFixedRequestLimit(
+        'wasm.abi.maxSupplementaryGroups',
+        groupCount,
+        MAX_SUPPLEMENTARY_GROUPS,
+      );
+      if (countErrno !== WASI_ERRNO_SUCCESS) return countErrno;
+      if (!guestRangeIsValid(groupsPtr, groupCount * 4)) {
+        return WASI_ERRNO_FAULT;
+      }
       const groups = [];
-      for (let index = 0; index < (Number(count) >>> 0); index += 1) {
+      for (let index = 0; index < groupCount; index += 1) {
         groups.push(readGuestUint32(Number(groupsPtr) + index * 4));
       }
       callSyncRpc('process.setgroups', [groups]);
@@ -8966,13 +10497,12 @@ const hostUserImport = {
   },
   isatty(fd, retBoolPtr) {
     const descriptor = Number(fd) >>> 0;
-    const isTerminal = descriptor <= 2 && stdioFdIsKernelTty(descriptor) ? 1 : 0;
+    const isTerminal = stdioFdIsKernelTty(descriptor) ? 1 : 0;
     return writeGuestUint32(retBoolPtr, isTerminal);
   },
   getpwuid(uid, bufPtr, bufLen, retLenPtr) {
     return hostUserLookup(
-      'process.getpwuid',
-      [Number(uid) >>> 0],
+      () => callSyncRpc('process.getpwuid', [Number(uid) >>> 0]),
       bufPtr,
       bufLen,
       retLenPtr,
@@ -8980,7 +10510,7 @@ const hostUserImport = {
   },
   getpwnam(namePtr, nameLen, bufPtr, bufLen, retLenPtr) {
     return hostUserNameLookup(
-      'process.getpwnam',
+      (name) => callSyncRpc('process.getpwnam', [name]),
       namePtr,
       nameLen,
       bufPtr,
@@ -8990,8 +10520,7 @@ const hostUserImport = {
   },
   getpwent(index, bufPtr, bufLen, retLenPtr) {
     return hostUserLookup(
-      'process.getpwent',
-      [Number(index) >>> 0],
+      () => callSyncRpc('process.getpwent', [Number(index) >>> 0]),
       bufPtr,
       bufLen,
       retLenPtr,
@@ -8999,8 +10528,7 @@ const hostUserImport = {
   },
   getgrgid(gid, bufPtr, bufLen, retLenPtr) {
     return hostUserLookup(
-      'process.getgrgid',
-      [Number(gid) >>> 0],
+      () => callSyncRpc('process.getgrgid', [Number(gid) >>> 0]),
       bufPtr,
       bufLen,
       retLenPtr,
@@ -9008,7 +10536,7 @@ const hostUserImport = {
   },
   getgrnam(namePtr, nameLen, bufPtr, bufLen, retLenPtr) {
     return hostUserNameLookup(
-      'process.getgrnam',
+      (name) => callSyncRpc('process.getgrnam', [name]),
       namePtr,
       nameLen,
       bufPtr,
@@ -9018,8 +10546,7 @@ const hostUserImport = {
   },
   getgrent(index, bufPtr, bufLen, retLenPtr) {
     return hostUserLookup(
-      'process.getgrent',
-      [Number(index) >>> 0],
+      () => callSyncRpc('process.getgrent', [Number(index) >>> 0]),
       bufPtr,
       bufLen,
       retLenPtr,
@@ -9035,24 +10562,23 @@ const HOST_FS_GUEST_CWD =
     ? path.posix.normalize(guestEnv.PWD)
     : '/';
 
-for (let index = 0; index < WASI_PREOPEN_ENTRIES.length; index += 1) {
-  const fd = WASI_PREOPEN_FD_BASE + index;
-  const [guestPath, preopenSpec] = WASI_PREOPEN_ENTRIES[index];
+for (const preopen of WASI_PREOPEN_ENTRIES) {
+  const { fd, kernelFd, guestPath, preopenSpec, kernelManaged } = preopen;
   const preopenHandle = {
-    kind: 'passthrough',
-    targetFd: fd,
+    kind: kernelManaged ? 'kernel-fd' : 'passthrough',
+    targetFd: kernelFd,
     displayFd: fd,
     refCount: 0,
     open: true,
     guestPath: guestPathForPreopenKey(guestPath),
     readOnly: preopenSpec?.readOnly === true,
     internalPreopen: true,
+    rightsBase: BigInt(preopenSpec?.rightsBase ?? 0),
+    rightsInheriting: BigInt(preopenSpec?.rightsInheriting ?? 0),
   };
-  // node:wasi always owns this capability descriptor, even when the Linux
-  // guest namespace starts with the same descriptor closed or inherited from
-  // the kernel. Patched libc reaches that private descriptor through the
-  // tagged alias; only expose the untagged descriptor when it is actually free
-  // in the guest descriptor table.
+  // Patched libc reaches capability roots through the tagged alias. Managed
+  // execution points that alias at the kernel fd; standalone execution keeps
+  // node:wasi's private descriptor behind the same bookkeeping layer.
   hiddenPreopenHandles.set(fd, preopenHandle);
   if (initialClosedGuestFds.has(fd)) {
     // Keep the private tagged capability for libc path resolution, but make
@@ -9063,7 +10589,7 @@ for (let index = 0; index < WASI_PREOPEN_ENTRIES.length; index += 1) {
     !initialMappedGuestFds.has(fd) &&
     !passthroughHandles.has(fd)
   ) {
-    retainDelegateFd(fd);
+    if (!kernelManaged) retainDelegateFd(fd);
     closedPassthroughFds.delete(fd);
     passthroughHandles.set(fd, preopenHandle);
   }
@@ -9077,10 +10603,21 @@ if (SIDECAR_MANAGED_PROCESS) {
     );
   }
   inheritedEntries.sort((left, right) => Number(left?.fd) - Number(right?.fd));
+  const projectedPreopenKernelFds = new Set(
+    WASI_PREOPEN_ENTRIES
+      .filter((entry) => entry.kernelManaged)
+      .map((entry) => Number(entry.kernelFd) >>> 0),
+  );
   for (const entry of inheritedEntries) {
     const kernelFd = Number(entry?.fd);
     if (!Number.isSafeInteger(kernelFd) || kernelFd < 0 || kernelFd > 0xffffffff) {
       throw new Error(`kernel descriptor snapshot contains invalid fd ${String(entry?.fd)}`);
+    }
+    // The WASI adapter already projected capability roots into the stable
+    // guest preopen range beginning at fd 3. Kernel allocation order is an
+    // implementation detail and must not create a second Linux-visible alias.
+    if (projectedPreopenKernelFds.has(kernelFd >>> 0)) {
+      continue;
     }
     const mappedGuestFd = initialKernelFdMappings.get(kernelFd);
     // The kernel always has canonical stdio entries. Leave an unmapped entry
@@ -9093,67 +10630,27 @@ if (SIDECAR_MANAGED_PROCESS) {
     if (mappedGuestFd != null) {
       pendingInitialKernelGuestFds.delete(mappedGuestFd);
     }
+    const existingHandle = lookupFdHandle(kernelFd);
+    if (
+      existingHandle?.kind === 'kernel-fd' &&
+      Number(existingHandle.targetFd) === kernelFd &&
+      mappedGuestFd == null
+    ) {
+      const descriptionId = String(entry?.descriptionId ?? '');
+      if (initialManagedHostNetDescriptionIds.has(descriptionId)) {
+        existingHandle.hostNetDescriptionId = descriptionId;
+      }
+      continue;
+    }
     const guestFd = registerKernelDelegateFd(
       kernelFd,
       mappedGuestFd ?? null,
     );
-    if ((Number(entry?.fdFlags) & 1) !== 0) {
-      runnerCloexecFds.add(guestFd);
+    const descriptionId = String(entry?.descriptionId ?? '');
+    if (initialManagedHostNetDescriptionIds.has(descriptionId)) {
+      attachManagedHostNetDescription(guestFd, descriptionId);
     }
   }
-}
-
-function hostFsModeFromStat(stat) {
-  const mode = Number(stat?.mode);
-  return Number.isInteger(mode) && mode > 0 ? mode >>> 0 : 0;
-}
-
-const hostFsSizeByGuestPath = new Map();
-// Bound the per-path size cache so a guest truncating many distinct paths cannot
-// grow it without limit. Entries are insertion-ordered, so evicting the oldest
-// key is a cheap LRU-ish bound.
-const HOST_FS_SIZE_CACHE_MAX_ENTRIES = 4096;
-let hostFsSizeCacheEvictionWarned = false;
-
-function forgetHostFsSize(guestPath) {
-  if (typeof guestPath !== 'string') {
-    return;
-  }
-  hostFsSizeByGuestPath.delete(path.posix.normalize(guestPath));
-}
-
-function rememberHostFsSize(guestPath, size) {
-  if (typeof guestPath !== 'string') {
-    return;
-  }
-  const normalized = path.posix.normalize(guestPath);
-  if (!Number.isFinite(size) || size < 0) {
-    hostFsSizeByGuestPath.delete(normalized);
-    return;
-  }
-  if (
-    !hostFsSizeByGuestPath.has(normalized) &&
-    hostFsSizeByGuestPath.size >= HOST_FS_SIZE_CACHE_MAX_ENTRIES
-  ) {
-    const oldest = hostFsSizeByGuestPath.keys().next().value;
-    if (oldest !== undefined) {
-      hostFsSizeByGuestPath.delete(oldest);
-    }
-    if (!hostFsSizeCacheEvictionWarned) {
-      hostFsSizeCacheEvictionWarned = true;
-      traceHostProcess('host-fs-size-cache-evict', {
-        max: HOST_FS_SIZE_CACHE_MAX_ENTRIES,
-      });
-    }
-  }
-  hostFsSizeByGuestPath.set(normalized, BigInt(Math.trunc(size)));
-}
-
-function rememberedHostFsSize(guestPath) {
-  if (typeof guestPath !== 'string') {
-    return null;
-  }
-  return hostFsSizeByGuestPath.get(path.posix.normalize(guestPath)) ?? null;
 }
 
 function resolveHostFsPath(value, fromGuestDir = HOST_FS_GUEST_CWD) {
@@ -9190,13 +10687,30 @@ function mutateGuestFileRange(fd, offset, length, method, extraArgs = []) {
     ) {
       return WASI_ERRNO_INVAL;
     }
-    callSyncRpc(method, [
+    const args = [
       Number(handle.targetFd) >>> 0,
       rangeOffset,
       rangeLength,
       ...extraArgs,
-    ]);
-    forgetHostFsSize(handle.guestPath);
+    ];
+    switch (method) {
+      case 'fs.fallocateSync':
+        callSyncRpc('fs.fallocateSync', args);
+        break;
+      case 'fs.zeroRangeSync':
+        callSyncRpc('fs.zeroRangeSync', args);
+        break;
+      case 'fs.insertRangeSync':
+        callSyncRpc('fs.insertRangeSync', args);
+        break;
+      case 'fs.collapseRangeSync':
+        callSyncRpc('fs.collapseRangeSync', args);
+        break;
+      default:
+        throw Object.assign(new Error(`unsupported file-range method ${method}`), {
+          code: 'EINVAL',
+        });
+    }
     return WASI_ERRNO_SUCCESS;
   } catch (error) {
     traceHostProcess('guest-file-range-error', {
@@ -9212,6 +10726,7 @@ function mutateGuestFileRange(fd, offset, length, method, extraArgs = []) {
 const hostFsImport = {
   open_tmpfile(dirFd, pathPtr, pathLen, flags, mode, retFdPtr) {
     try {
+      if (!guestRangeIsValid(retFdPtr, 4)) return WASI_ERRNO_FAULT;
       const directory = resolvePathOpenGuestPath(dirFd, pathPtr, pathLen);
       if (typeof directory !== 'string') return WASI_ERRNO_BADF;
       if (isWorkspaceReadOnly() || guestPathIsReadOnly(directory)) return WASI_ERRNO_ROFS;
@@ -9259,7 +10774,6 @@ const hostFsImport = {
         return WASI_ERRNO_ROFS;
       }
       callSyncRpc('fs.linkFdSync', [Number(handle.targetFd) >>> 0, destination]);
-      handle.guestPath = destination;
       return WASI_ERRNO_SUCCESS;
     } catch (error) {
       return mapSyntheticFsError(error);
@@ -9353,6 +10867,15 @@ const hostFsImport = {
   ) {
     let target;
     try {
+      if (!guestRangesAreValid(
+        [retTotalBytesPtr, 8],
+        [retUsedBytesPtr, 8],
+        [retAvailableBytesPtr, 8],
+        [retTotalInodesPtr, 8],
+        [retFreeInodesPtr, 8],
+      )) {
+        return WASI_ERRNO_FAULT;
+      }
       const rawTarget = readGuestString(pathPtr, pathLen);
       target = Number(fd) >>> 0 === 0xffffffff
         ? path.posix.resolve(HOST_FS_GUEST_CWD, rawTarget)
@@ -9379,12 +10902,17 @@ const hostFsImport = {
   },
   fd_fiemap(fd, index, retStartPtr, retEndPtr, retFlagsPtr) {
     try {
+      if (!guestRangesAreValid([retStartPtr, 8], [retEndPtr, 8], [retFlagsPtr, 4])) {
+        return WASI_ERRNO_FAULT;
+      }
       const handle = lookupFdHandle(Number(fd) >>> 0);
       if (handle?.kind !== 'guest-file' && handle?.kind !== 'kernel-fd' || typeof handle.targetFd !== 'number') {
         return WASI_ERRNO_BADF;
       }
-      const ranges = callSyncRpc('fs.fiemapSync', [Number(handle.targetFd) >>> 0]);
-      const range = Array.isArray(ranges) ? ranges[Number(index) >>> 0] : null;
+      const range = callSyncRpc('fs.fiemapAtSync', [
+        Number(handle.targetFd) >>> 0,
+        Number(index) >>> 0,
+      ]);
       if (!range) {
         return WASI_ERRNO_NODATA;
       }
@@ -9451,17 +10979,22 @@ const hostFsImport = {
   },
   path_owner(fd, pathPtr, pathLen, followSymlinks, retUidPtr, retGidPtr) {
     try {
+      if (!guestRangesAreValid([retUidPtr, 4], [retGidPtr, 4])) {
+        return WASI_ERRNO_FAULT;
+      }
+      const numericFd = Number(fd) >>> 0;
       const rawTarget = readGuestString(pathPtr, pathLen);
-      const target = Number(fd) >>> 0 === 0xffffffff
-        ? path.posix.resolve(HOST_FS_GUEST_CWD, rawTarget)
-        : resolvePathOpenGuestPath(fd, pathPtr, pathLen);
-      if (typeof target !== 'string') {
+      const operand = numericFd === NODE_CWD_FD
+        ? { dirFd: NODE_CWD_FD, path: path.posix.resolve(HOST_FS_GUEST_CWD, rawTarget) }
+        : kernelPathOperand(numericFd, pathPtr, pathLen);
+      if (!operand) {
         return WASI_ERRNO_BADF;
       }
-      const stat = callSyncRpc(
-        Number(followSymlinks) === 0 ? 'fs.lstatSync' : 'fs.statSync',
-        [target],
-      );
+      const stat = callSyncRpc('process.path_stat_at', [
+        operand.dirFd,
+        operand.path,
+        Number(followSymlinks) !== 0,
+      ]);
       return writeGuestUint32(retUidPtr, stat.uid) || writeGuestUint32(retGidPtr, stat.gid);
     } catch (error) {
       return mapSyntheticFsError(error);
@@ -9469,6 +11002,9 @@ const hostFsImport = {
   },
   fd_owner(fd, retUidPtr, retGidPtr) {
     try {
+      if (!guestRangesAreValid([retUidPtr, 4], [retGidPtr, 4])) {
+        return WASI_ERRNO_FAULT;
+      }
       const handle = lookupFdHandle(fd);
       if (handle?.kind === 'kernel-fd') {
         const stat = callSyncRpc('process.fd_filestat', [Number(handle.targetFd) >>> 0]);
@@ -9509,21 +11045,22 @@ const hostFsImport = {
     }
   },
   path_chown(fd, pathPtr, pathLen, uid, gid, followSymlinks) {
-    let rawTarget;
-    let target;
     try {
-      rawTarget = readGuestString(pathPtr, pathLen);
-      target = Number(fd) >>> 0 === 0xffffffff
-        ? path.posix.resolve(HOST_FS_GUEST_CWD, rawTarget)
-        : resolvePathOpenGuestPath(fd, pathPtr, pathLen);
-      if (typeof target !== 'string') {
+      const numericFd = Number(fd) >>> 0;
+      const rawTarget = readGuestString(pathPtr, pathLen);
+      const operand = numericFd === NODE_CWD_FD
+        ? { dirFd: NODE_CWD_FD, path: path.posix.resolve(HOST_FS_GUEST_CWD, rawTarget) }
+        : kernelPathOperand(numericFd, pathPtr, pathLen);
+      if (!operand) {
         return WASI_ERRNO_BADF;
       }
-      if (Number(followSymlinks) === 0) {
-        callSyncRpc('fs.lchownSync', [target, Number(uid) >>> 0, Number(gid) >>> 0]);
-      } else {
-        callSyncRpc('fs.chownSync', [target, Number(uid) >>> 0, Number(gid) >>> 0]);
-      }
+      callSyncRpc('process.path_chown_at', [
+        operand.dirFd,
+        operand.path,
+        Number(uid) >>> 0,
+        Number(gid) >>> 0,
+        Number(followSymlinks) !== 0,
+      ]);
       return WASI_ERRNO_SUCCESS;
     } catch (error) {
       traceHostProcess('host-fs-path-chown-error', {
@@ -9531,19 +11068,21 @@ const hostFsImport = {
         message: error?.message,
         followSymlinks: Number(followSymlinks) !== 0,
         fd: Number(fd) >>> 0,
-        rawTarget,
-        target,
       });
       return mapSyntheticFsError(error);
     }
   },
   fd_chown(fd, uid, gid) {
     try {
-      const target = guestPathForManagedFd(fd);
-      if (typeof target !== 'string') {
+      const handle = lookupFdHandle(fd);
+      if (handle?.kind !== 'kernel-fd') {
         return WASI_ERRNO_BADF;
       }
-      callSyncRpc('fs.chownSync', [target, Number(uid) >>> 0, Number(gid) >>> 0]);
+      callSyncRpc('process.fd_chown', [
+        Number(handle.targetFd) >>> 0,
+        Number(uid) >>> 0,
+        Number(gid) >>> 0,
+      ]);
       return WASI_ERRNO_SUCCESS;
     } catch (error) {
       return mapSyntheticFsError(error);
@@ -9561,6 +11100,17 @@ const hostFsImport = {
     retSizePtr,
   ) {
     try {
+      const nameErrno = checkFixedRequestLimit(
+        'wasm.abi.maxXattrNameBytes',
+        nameLen,
+        XATTR_NAME_MAX,
+        WASI_ERRNO_RANGE,
+      );
+      if (nameErrno !== WASI_ERRNO_SUCCESS) return nameErrno;
+      const capacity = Number(size) >>> 0;
+      if (!guestRangesAreValid([retSizePtr, 4], [valuePtr, capacity])) {
+        return WASI_ERRNO_FAULT;
+      }
       const rawTarget = readGuestString(pathPtr, pathLen);
       const target = Number(fd) >>> 0 === 0xffffffff
         ? path.posix.resolve(HOST_FS_GUEST_CWD, rawTarget)
@@ -9574,7 +11124,6 @@ const hostFsImport = {
       const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value ?? []);
       const sizeResult = writeGuestUint32(retSizePtr, bytes.byteLength);
       if (sizeResult !== WASI_ERRNO_SUCCESS) return sizeResult;
-      const capacity = Number(size) >>> 0;
       if (capacity === 0) return WASI_ERRNO_SUCCESS;
       if (capacity < bytes.byteLength) return WASI_ERRNO_RANGE;
       new Uint8Array(instanceMemory.buffer).set(bytes, Number(valuePtr) >>> 0);
@@ -9585,17 +11134,26 @@ const hostFsImport = {
   },
   fd_getxattr(fd, namePtr, nameLen, valuePtr, size, retSizePtr) {
     try {
-      const target = guestPathForManagedFd(fd);
-      if (typeof target !== 'string') return WASI_ERRNO_BADF;
-      const value = callSyncRpc('fs.getxattrSync', [
-        target,
+      const nameErrno = checkFixedRequestLimit(
+        'wasm.abi.maxXattrNameBytes',
+        nameLen,
+        XATTR_NAME_MAX,
+        WASI_ERRNO_RANGE,
+      );
+      if (nameErrno !== WASI_ERRNO_SUCCESS) return nameErrno;
+      const capacity = Number(size) >>> 0;
+      if (!guestRangesAreValid([retSizePtr, 4], [valuePtr, capacity])) {
+        return WASI_ERRNO_FAULT;
+      }
+      const handle = lookupFdHandle(fd);
+      if (handle?.kind !== 'kernel-fd') return WASI_ERRNO_BADF;
+      const value = callSyncRpc('fs.fgetxattrSync', [
+        Number(handle.targetFd) >>> 0,
         readGuestString(namePtr, nameLen),
-        true,
       ]);
       const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value ?? []);
       const sizeResult = writeGuestUint32(retSizePtr, bytes.byteLength);
       if (sizeResult !== WASI_ERRNO_SUCCESS) return sizeResult;
-      const capacity = Number(size) >>> 0;
       if (capacity === 0) return WASI_ERRNO_SUCCESS;
       if (capacity < bytes.byteLength) return WASI_ERRNO_RANGE;
       new Uint8Array(instanceMemory.buffer).set(bytes, Number(valuePtr) >>> 0);
@@ -9606,6 +11164,10 @@ const hostFsImport = {
   },
   path_listxattr(fd, pathPtr, pathLen, listPtr, size, followSymlinks, retSizePtr) {
     try {
+      const capacity = Number(size) >>> 0;
+      if (!guestRangesAreValid([retSizePtr, 4], [listPtr, capacity])) {
+        return WASI_ERRNO_FAULT;
+      }
       const rawTarget = readGuestString(pathPtr, pathLen);
       const target = Number(fd) >>> 0 === 0xffffffff
         ? path.posix.resolve(HOST_FS_GUEST_CWD, rawTarget)
@@ -9615,7 +11177,6 @@ const hostFsImport = {
       const bytes = Buffer.from((Array.isArray(names) ? names : []).map((name) => `${name}\0`).join(''));
       const sizeResult = writeGuestUint32(retSizePtr, bytes.byteLength);
       if (sizeResult !== WASI_ERRNO_SUCCESS) return sizeResult;
-      const capacity = Number(size) >>> 0;
       if (capacity === 0) return WASI_ERRNO_SUCCESS;
       if (capacity < bytes.byteLength) return WASI_ERRNO_RANGE;
       new Uint8Array(instanceMemory.buffer).set(bytes, Number(listPtr) >>> 0);
@@ -9626,13 +11187,16 @@ const hostFsImport = {
   },
   fd_listxattr(fd, listPtr, size, retSizePtr) {
     try {
-      const target = guestPathForManagedFd(fd);
-      if (typeof target !== 'string') return WASI_ERRNO_BADF;
-      const names = callSyncRpc('fs.listxattrSync', [target, true]);
+      const capacity = Number(size) >>> 0;
+      if (!guestRangesAreValid([retSizePtr, 4], [listPtr, capacity])) {
+        return WASI_ERRNO_FAULT;
+      }
+      const handle = lookupFdHandle(fd);
+      if (handle?.kind !== 'kernel-fd') return WASI_ERRNO_BADF;
+      const names = callSyncRpc('fs.flistxattrSync', [Number(handle.targetFd) >>> 0]);
       const bytes = Buffer.from((Array.isArray(names) ? names : []).map((name) => `${name}\0`).join(''));
       const sizeResult = writeGuestUint32(retSizePtr, bytes.byteLength);
       if (sizeResult !== WASI_ERRNO_SUCCESS) return sizeResult;
-      const capacity = Number(size) >>> 0;
       if (capacity === 0) return WASI_ERRNO_SUCCESS;
       if (capacity < bytes.byteLength) return WASI_ERRNO_RANGE;
       new Uint8Array(instanceMemory.buffer).set(bytes, Number(listPtr) >>> 0);
@@ -9654,6 +11218,20 @@ const hostFsImport = {
   ) {
     let target;
     try {
+      const nameErrno = checkFixedRequestLimit(
+        'wasm.abi.maxXattrNameBytes',
+        nameLen,
+        XATTR_NAME_MAX,
+        WASI_ERRNO_RANGE,
+      );
+      if (nameErrno !== WASI_ERRNO_SUCCESS) return nameErrno;
+      const valueErrno = checkFixedRequestLimit(
+        'wasm.abi.maxXattrValueBytes',
+        size,
+        XATTR_SIZE_MAX,
+        WASI_ERRNO_2BIG,
+      );
+      if (valueErrno !== WASI_ERRNO_SUCCESS) return valueErrno;
       const rawTarget = readGuestString(pathPtr, pathLen);
       target = Number(fd) >>> 0 === 0xffffffff
         ? path.posix.resolve(HOST_FS_GUEST_CWD, rawTarget)
@@ -9678,14 +11256,27 @@ const hostFsImport = {
   },
   fd_setxattr(fd, namePtr, nameLen, valuePtr, size, flags) {
     try {
-      const target = guestPathForManagedFd(fd);
-      if (typeof target !== 'string') return WASI_ERRNO_BADF;
-      callSyncRpc('fs.setxattrSync', [
-        target,
+      const nameErrno = checkFixedRequestLimit(
+        'wasm.abi.maxXattrNameBytes',
+        nameLen,
+        XATTR_NAME_MAX,
+        WASI_ERRNO_RANGE,
+      );
+      if (nameErrno !== WASI_ERRNO_SUCCESS) return nameErrno;
+      const valueErrno = checkFixedRequestLimit(
+        'wasm.abi.maxXattrValueBytes',
+        size,
+        XATTR_SIZE_MAX,
+        WASI_ERRNO_2BIG,
+      );
+      if (valueErrno !== WASI_ERRNO_SUCCESS) return valueErrno;
+      const handle = lookupFdHandle(fd);
+      if (handle?.kind !== 'kernel-fd') return WASI_ERRNO_BADF;
+      callSyncRpc('fs.fsetxattrSync', [
+        Number(handle.targetFd) >>> 0,
         readGuestString(namePtr, nameLen),
         readGuestBytes(valuePtr, size),
         Number(flags) >>> 0,
-        true,
       ]);
       return WASI_ERRNO_SUCCESS;
     } catch (error) {
@@ -9694,6 +11285,13 @@ const hostFsImport = {
   },
   path_removexattr(fd, pathPtr, pathLen, namePtr, nameLen, followSymlinks) {
     try {
+      const nameErrno = checkFixedRequestLimit(
+        'wasm.abi.maxXattrNameBytes',
+        nameLen,
+        XATTR_NAME_MAX,
+        WASI_ERRNO_RANGE,
+      );
+      if (nameErrno !== WASI_ERRNO_SUCCESS) return nameErrno;
       const rawTarget = readGuestString(pathPtr, pathLen);
       const target = Number(fd) >>> 0 === 0xffffffff
         ? path.posix.resolve(HOST_FS_GUEST_CWD, rawTarget)
@@ -9711,9 +11309,19 @@ const hostFsImport = {
   },
   fd_removexattr(fd, namePtr, nameLen) {
     try {
-      const target = guestPathForManagedFd(fd);
-      if (typeof target !== 'string') return WASI_ERRNO_BADF;
-      callSyncRpc('fs.removexattrSync', [target, readGuestString(namePtr, nameLen), true]);
+      const nameErrno = checkFixedRequestLimit(
+        'wasm.abi.maxXattrNameBytes',
+        nameLen,
+        XATTR_NAME_MAX,
+        WASI_ERRNO_RANGE,
+      );
+      if (nameErrno !== WASI_ERRNO_SUCCESS) return nameErrno;
+      const handle = lookupFdHandle(fd);
+      if (handle?.kind !== 'kernel-fd') return WASI_ERRNO_BADF;
+      callSyncRpc('fs.fremovexattrSync', [
+        Number(handle.targetFd) >>> 0,
+        readGuestString(namePtr, nameLen),
+      ]);
       return WASI_ERRNO_SUCCESS;
     } catch (error) {
       return mapSyntheticFsError(error);
@@ -9739,44 +11347,15 @@ const hostFsImport = {
       return HOST_FS_MODE_CHARACTER;
     }
 
-    try {
-      const targetFd =
-        typeof handle?.ioFd === 'number'
-          ? Number(handle.ioFd) >>> 0
-          : typeof handle?.targetFd === 'number'
-            ? Number(handle.targetFd) >>> 0
-            : descriptor;
-      return hostFsModeFromStat(fsModule.fstatSync(targetFd)) || HOST_FS_MODE_REGULAR;
-    } catch {
-      return HOST_FS_MODE_REGULAR;
-    }
+    return 0;
   },
   fd_size(fd) {
     const descriptor = Number(fd) >>> 0;
     try {
       const handle = lookupFdHandle(descriptor);
-      if (handle?.kind === 'kernel-fd') {
-        const stat = callSyncRpc('process.fd_filestat', [Number(handle.targetFd) >>> 0]);
-        return BigInt(stat?.size ?? -1);
-      }
-      const rememberedSize = rememberedHostFsSize(handle?.guestPath);
-      if (rememberedSize != null) {
-        return rememberedSize;
-      }
-      if (typeof handle?.ioFd === 'number') {
-        return BigInt(fsModule.fstatSync(Number(handle.ioFd) >>> 0).size ?? -1);
-      }
-      if (typeof handle?.guestPath === 'string') {
-        const hostPath = resolveHostFsPath(handle.guestPath);
-        if (typeof hostPath === 'string') {
-          return BigInt(fsModule.statSync(hostPath).size ?? -1);
-        }
-        return BigInt(fsModule.statSync(handle.guestPath).size ?? -1);
-      }
-      const targetFd = typeof handle?.targetFd === 'number'
-        ? Number(handle.targetFd) >>> 0
-        : descriptor;
-      return BigInt(fsModule.fstatSync(targetFd).size ?? -1);
+      if (handle?.kind !== 'kernel-fd') return (1n << 64n) - 1n;
+      const stat = callSyncRpc('process.fd_filestat', [Number(handle.targetFd) >>> 0]);
+      return BigInt(stat?.size ?? -1);
     } catch {
       return (1n << 64n) - 1n;
     }
@@ -9785,99 +11364,65 @@ const hostFsImport = {
     const descriptor = Number(fd) >>> 0;
     try {
       const handle = lookupFdHandle(descriptor);
-      if (handle?.kind === 'kernel-fd') {
-        const stat = callSyncRpc('process.fd_filestat', [Number(handle.targetFd) >>> 0]);
-        return BigInt(stat?.blocks ?? -1);
-      }
-      if (typeof handle?.ioFd === 'number') {
-        return BigInt(fsModule.fstatSync(Number(handle.ioFd) >>> 0).blocks ?? -1);
-      }
-      if (typeof handle?.guestPath === 'string') {
-        const hostPath = resolveHostFsPath(handle.guestPath);
-        const stat = fsModule.statSync(
-          typeof hostPath === 'string' ? hostPath : handle.guestPath,
-        );
-        return BigInt(stat?.blocks ?? -1);
-      }
-      return BigInt(fsModule.fstatSync(descriptor).blocks ?? -1);
+      if (handle?.kind !== 'kernel-fd') return (1n << 64n) - 1n;
+      const stat = callSyncRpc('process.fd_filestat', [Number(handle.targetFd) >>> 0]);
+      return BigInt(stat?.blocks ?? -1);
     } catch {
       return (1n << 64n) - 1n;
     }
   },
   path_mode(fd, pathPtr, pathLen, followSymlinks) {
     try {
-      const target = resolvePathOpenGuestPath(fd, pathPtr, pathLen);
-      if (typeof target !== 'string') {
-        return 0;
-      }
-      const stat = callSyncRpc(
-        Number(followSymlinks) === 0 ? 'fs.lstatSync' : 'fs.statSync',
-        [target],
-      );
-      const mode = hostFsModeFromStat(stat);
-      traceHostProcess('host-fs-path-mode', {
-        target,
-        followSymlinks: Number(followSymlinks) >>> 0,
-        mode,
-      });
-      return mode;
+      const operand = kernelPathOperand(fd, pathPtr, pathLen);
+      if (!operand) return 0;
+      const stat = callSyncRpc('process.path_stat_at', [
+        operand.dirFd,
+        operand.path,
+        Number(followSymlinks) !== 0,
+      ]);
+      return Number(stat?.mode) >>> 0;
     } catch {
       traceHostProcess('host-fs-path-mode-fault', {});
       return 0;
     }
   },
   path_size(fd, pathPtr, pathLen, followSymlinks) {
-    const target = resolvePathOpenGuestPath(fd, pathPtr, pathLen);
-    if (typeof target !== 'string') {
-      return (1n << 64n) - 1n;
-    }
-    const rememberedSize = rememberedHostFsSize(target);
-    if (rememberedSize != null) {
-      return rememberedSize;
-    }
-
     try {
-      const hostPath = resolveHostFsPath(target);
-      if (typeof hostPath === 'string') {
-        const stat =
-          Number(followSymlinks) === 0
-            ? fsModule.lstatSync(hostPath)
-            : fsModule.statSync(hostPath);
-        return BigInt(stat?.size ?? -1);
-      }
-      const guestStat =
-        Number(followSymlinks) === 0
-          ? fsModule.lstatSync(target)
-          : fsModule.statSync(target);
-      return BigInt(guestStat?.size ?? -1);
+      const operand = kernelPathOperand(fd, pathPtr, pathLen);
+      if (!operand) return (1n << 64n) - 1n;
+      const stat = callSyncRpc('process.path_stat_at', [
+        operand.dirFd,
+        operand.path,
+        Number(followSymlinks) !== 0,
+      ]);
+      return BigInt(stat?.size ?? -1);
     } catch {
       return (1n << 64n) - 1n;
     }
   },
   path_blocks(fd, pathPtr, pathLen, followSymlinks) {
-    const target = resolvePathOpenGuestPath(fd, pathPtr, pathLen);
-    if (typeof target !== 'string') return (1n << 64n) - 1n;
     try {
-      const stat = callSyncRpc(
-        Number(followSymlinks) === 0 ? 'fs.lstatSync' : 'fs.statSync',
-        [target],
-      );
+      const operand = kernelPathOperand(fd, pathPtr, pathLen);
+      if (!operand) return (1n << 64n) - 1n;
+      const stat = callSyncRpc('process.path_stat_at', [
+        operand.dirFd,
+        operand.path,
+        Number(followSymlinks) !== 0,
+      ]);
       return BigInt(stat?.blocks ?? -1);
     } catch {
       return (1n << 64n) - 1n;
     }
   },
   path_rdev(fd, pathPtr, pathLen, followSymlinks) {
-    const rawTarget = readGuestString(pathPtr, pathLen);
-    const target = Number(fd) >>> 0 === 0xffffffff
-      ? path.posix.resolve(HOST_FS_GUEST_CWD, rawTarget)
-      : resolvePathOpenGuestPath(fd, pathPtr, pathLen);
-    if (typeof target !== 'string') return 0n;
     try {
-      const stat = callSyncRpc(
-        Number(followSymlinks) === 0 ? 'fs.lstatSync' : 'fs.statSync',
-        [target],
-      );
+      const operand = kernelPathOperand(fd, pathPtr, pathLen);
+      if (!operand) return 0n;
+      const stat = callSyncRpc('process.path_stat_at', [
+        operand.dirFd,
+        operand.path,
+        Number(followSymlinks) !== 0,
+      ]);
       return BigInt(stat?.rdev ?? 0);
     } catch {
       return 0n;
@@ -9885,24 +11430,14 @@ const hostFsImport = {
   },
   chmod(fd, pathPtr, pathLen, mode) {
     try {
-      const target = resolvePathOpenGuestPath(fd, pathPtr, pathLen);
-      if (typeof target !== 'string') {
-        return WASI_ERRNO_NOENT;
-      }
-      const mapping = resolveHostFsMapping(target);
-      if (!mapping || typeof mapping.hostPath !== 'string') {
-        return WASI_ERRNO_NOENT;
-      }
-      if (mapping.readOnly) {
-        return WASI_ERRNO_ROFS;
-      }
-      traceHostProcess('host-fs-chmod', {
-        target,
-        hostPath: mapping.hostPath,
-        mode: Number(mode) >>> 0,
-      });
-      chmodMappedGuestPath(target, mapping.hostPath, Number(mode) >>> 0);
-      return 0;
+      const operand = kernelPathOperand(fd, pathPtr, pathLen);
+      if (!operand) return WASI_ERRNO_BADF;
+      callSyncRpc('process.path_chmod_at', [
+        operand.dirFd,
+        operand.path,
+        Number(mode) >>> 0,
+      ]);
+      return WASI_ERRNO_SUCCESS;
     } catch (error) {
       traceHostProcess('host-fs-chmod-fault', {
         message: error instanceof Error ? error.message : String(error),
@@ -9914,31 +11449,12 @@ const hostFsImport = {
     try {
       const descriptor = Number(fd) >>> 0;
       const handle = lookupFdHandle(descriptor);
-      if (handle?.kind === 'kernel-fd') {
-        callSyncRpc('process.fd_chmod', [
-          Number(handle.targetFd) >>> 0,
-          Number(mode) >>> 0,
-        ]);
-        return WASI_ERRNO_SUCCESS;
-      }
-      if (handle?.readOnly === true) {
-        return WASI_ERRNO_ROFS;
-      }
-      if (typeof handle?.guestPath === 'string') {
-        const mapping = resolveHostFsMapping(handle.guestPath);
-        if (!mapping || typeof mapping.hostPath !== 'string') {
-          return WASI_ERRNO_NOENT;
-        }
-        if (mapping.readOnly) {
-          return WASI_ERRNO_ROFS;
-        }
-        chmodMappedGuestPath(handle.guestPath, mapping.hostPath, Number(mode) >>> 0);
-        return 0;
-      }
-      const targetFd =
-        typeof handle?.targetFd === 'number' ? Number(handle.targetFd) >>> 0 : descriptor;
-      fsModule.fchmodSync(targetFd, Number(mode) >>> 0);
-      return 0;
+      if (handle?.kind !== 'kernel-fd') return WASI_ERRNO_BADF;
+      callSyncRpc('process.fd_chmod', [
+        Number(handle.targetFd) >>> 0,
+        Number(mode) >>> 0,
+      ]);
+      return WASI_ERRNO_SUCCESS;
     } catch (error) {
       traceHostProcess('host-fs-fchmod-fault', {
         message: error instanceof Error ? error.message : String(error),
@@ -9992,49 +11508,42 @@ const hostFsImport = {
       const descriptor = Number(fd) >>> 0;
       const nextSize = Number(length);
       if (!Number.isFinite(nextSize) || nextSize < 0) {
-        return 1;
+        return WASI_ERRNO_INVAL;
       }
       const handle = lookupFdHandle(descriptor);
-      if (handle?.kind === 'kernel-fd') {
-        callSyncRpc('process.fd_truncate', [
-          Number(handle.targetFd) >>> 0,
-          BigInt(nextSize).toString(),
-        ]);
-        return WASI_ERRNO_SUCCESS;
-      }
-      if (handle?.readOnly === true) {
-        return 1;
-      }
-      if (typeof handle?.ioFd === 'number') {
-        fsModule.ftruncateSync(handle.ioFd, nextSize);
-        if ((handle.position ?? 0) > nextSize) {
-          handle.position = nextSize;
-        }
-        rememberHostFsSize(handle.guestPath, nextSize);
-        return 0;
-      }
-      if (typeof handle?.guestPath === 'string') {
-        const pathFd = fsModule.openSync(handle.guestPath, 0o1, 0o666);
-        try {
-          fsModule.ftruncateSync(pathFd, nextSize);
-          if ((handle.position ?? 0) > nextSize) {
-            handle.position = nextSize;
-          }
-          rememberHostFsSize(handle.guestPath, nextSize);
-        } finally {
-          fsModule.closeSync(pathFd);
-        }
-        return 0;
-      }
-      return 1;
-    } catch {
-      return 1;
+      if (handle?.kind !== 'kernel-fd') return WASI_ERRNO_BADF;
+      callSyncRpc('process.fd_truncate', [
+        Number(handle.targetFd) >>> 0,
+        BigInt(nextSize).toString(),
+      ]);
+      return WASI_ERRNO_SUCCESS;
+    } catch (error) {
+      return mapSyntheticFsError(error);
     }
   },
 };
 
 wasiImport.clock_time_get = (clockId, precision, resultPtr) => {
+  if (!guestRangeIsValid(resultPtr, 8)) return WASI_ERRNO_FAULT;
   const numericClockId = Number(clockId) >>> 0;
+  if (SIDECAR_MANAGED_PROCESS) {
+    try {
+      const deterministicRealtime = numericClockId === 0 ? frozenTimeNs.toString() : null;
+      const value = callSyncRpc('process.clock_time', [
+        numericClockId,
+        BigInt(precision).toString(),
+        deterministicRealtime,
+      ]);
+      const nanoseconds = BigInt(value);
+      if (nanoseconds < 0n || nanoseconds > 0xffffffffffffffffn) {
+        return WASI_ERRNO_OVERFLOW;
+      }
+      new DataView(instanceMemory.buffer).setBigUint64(Number(resultPtr), nanoseconds, true);
+      return WASI_ERRNO_SUCCESS;
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
+  }
   if (numericClockId !== 0 && delegateClockTimeGet) {
     return delegateClockTimeGet(clockId, precision, resultPtr);
   }
@@ -10054,7 +11563,21 @@ wasiImport.clock_time_get = (clockId, precision, resultPtr) => {
 };
 
 wasiImport.clock_res_get = (clockId, resultPtr) => {
+  if (!guestRangeIsValid(resultPtr, 8)) return WASI_ERRNO_FAULT;
   const numericClockId = Number(clockId) >>> 0;
+  if (SIDECAR_MANAGED_PROCESS) {
+    try {
+      const value = callSyncRpc('process.clock_resolution', [numericClockId]);
+      const nanoseconds = BigInt(value);
+      if (nanoseconds < 0n || nanoseconds > 0xffffffffffffffffn) {
+        return WASI_ERRNO_OVERFLOW;
+      }
+      new DataView(instanceMemory.buffer).setBigUint64(Number(resultPtr), nanoseconds, true);
+      return WASI_ERRNO_SUCCESS;
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
+  }
   if (numericClockId !== 0 && delegateClockResGet) {
     return delegateClockResGet(clockId, resultPtr);
   }
@@ -10073,6 +11596,32 @@ wasiImport.clock_res_get = (clockId, resultPtr) => {
   }
 };
 
+// Managed VMs use the shared sidecar entropy source. Validate the complete
+// guest output range and configured total limit before the first host request
+// or write, then use bounded response chunks so neither bridge lane nor host
+// allocation scales with an attacker-selected linear-memory length.
+if (SIDECAR_MANAGED_PROCESS) {
+  wasiImport.random_get = (bufferPtr, bufferLength) => {
+    const length = Number(bufferLength) >>> 0;
+    if (!guestRangeIsValid(bufferPtr, length)) return WASI_ERRNO_FAULT;
+    if (length > __agentOSWasmEntropyLimitBytes) return WASI_ERRNO_2BIG;
+    const output = new Uint8Array(instanceMemory.buffer);
+    const base = Number(bufferPtr) >>> 0;
+    const chunkBytes = 64 * 1024;
+    try {
+      for (let offset = 0; offset < length; offset += chunkBytes) {
+        const requested = Math.min(chunkBytes, length - offset);
+        const bytes = Buffer.from(callSyncRpc('process.random_get', [requested]) ?? []);
+        if (bytes.byteLength !== requested) return WASI_ERRNO_IO;
+        output.set(bytes, base + offset);
+      }
+      return WASI_ERRNO_SUCCESS;
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
+  };
+}
+
 if (delegatePathOpen) {
   wasiImport.path_open = (
     fd,
@@ -10085,6 +11634,9 @@ if (delegatePathOpen) {
     fdflags,
     openedFdPtr,
   ) => {
+    if (!guestRangesAreValid([pathPtr, Number(pathLen) >>> 0], [openedFdPtr, 4])) {
+      return WASI_ERRNO_FAULT;
+    }
     const requestedCreateMode = pendingOpenCreateMode;
     pendingOpenCreateMode = null;
     const requestedDirect = pendingOpenDirect;
@@ -10110,6 +11662,12 @@ if (delegatePathOpen) {
     if (!passthroughDirHandle && rejectClosedPassthroughFd(fd)) {
       return WASI_ERRNO_BADF;
     }
+    if (SIDECAR_MANAGED_PROCESS && passthroughDirHandle?.kind !== 'kernel-fd') {
+      return WASI_ERRNO_BADF;
+    }
+    const managedOpenPath = SIDECAR_MANAGED_PROCESS
+      ? kernelOpenPathForGuestPath(readGuestString(pathPtr, pathLen))
+      : null;
 
     const delegateDirFd =
       passthroughDirHandle?.kind === 'passthrough'
@@ -10138,55 +11696,51 @@ if (delegatePathOpen) {
     if (guestReadOnlyDenied) {
       return denyReadOnlyMutation();
     }
-    const procFdResult = openProcSelfFdAlias(
-      guestPath,
-      oflags,
-      rightsBase,
-      dirflags,
-      openedFdPtr,
-    );
+    const procFdResult = SIDECAR_MANAGED_PROCESS
+      ? null
+      : openProcSelfFdAlias(
+          guestPath,
+          oflags,
+          rightsBase,
+          dirflags,
+          openedFdPtr,
+        );
     if (procFdResult !== null) {
       return procFdResult;
     }
     if (SIDECAR_MANAGED_PROCESS) {
       try {
-        const fifoResult = openBlockingGuestFifoForPathOpen(
-          guestPath,
-          oflags,
-          rightsBase,
-          fdflags,
-          dirflags,
-          openedFdPtr,
-          requestedCreateMode ?? 0o666,
-          requestedDirect,
-        );
-        if (fifoResult !== null) return fifoResult;
+        if (typeof guestPath === 'string') {
+          const fifoResult = openBlockingGuestFifoForPathOpen(
+            Number(passthroughDirHandle.targetFd) >>> 0,
+            managedOpenPath,
+            guestPath,
+            oflags,
+            rightsBase,
+            rightsInheriting,
+            fdflags,
+            dirflags,
+            openedFdPtr,
+            requestedCreateMode ?? 0o666,
+            requestedDirect,
+          );
+          if (fifoResult !== null) return fifoResult;
+        }
       } catch (error) {
         return mapHostProcessError(error);
       }
     }
     if (SIDECAR_MANAGED_PROCESS) {
-      if (typeof guestPath !== 'string') {
-        return WASI_ERRNO_BADF;
-      }
-      if (!hasRunnerOpenFdCapacity(1)) {
-        return WASI_ERRNO_MFILE;
-      }
+      if (!hasRunnerOpenFdCapacity(1)) return WASI_ERRNO_MFILE;
       try {
-        const kernelFd = Number(
-          passthroughDirHandle?.kind === 'kernel-fd'
-            ? callSyncRpc('process.path_open_at', [
-                Number(passthroughDirHandle.targetFd) >>> 0,
-                readGuestString(pathPtr, pathLen),
-                kernelOpenFlagsFromWasi(oflags, rightsBase, fdflags, dirflags, requestedDirect),
-                requestedCreateMode ?? 0o666,
-              ])
-            : callSyncRpc('process.fd_open', [
-                guestPath,
-                kernelOpenFlagsFromWasi(oflags, rightsBase, fdflags, dirflags, requestedDirect),
-                requestedCreateMode ?? 0o666,
-              ])
-        ) >>> 0;
+        const kernelFd = Number(callSyncRpc('process.path_open_at', [
+          Number(passthroughDirHandle.targetFd) >>> 0,
+          managedOpenPath,
+          kernelOpenFlagsFromWasi(oflags, rightsBase, fdflags, dirflags, requestedDirect),
+          requestedCreateMode ?? 0o666,
+          rightsBase.toString(),
+          rightsInheriting.toString(),
+        ])) >>> 0;
         if ((Number(oflags) & WASI_OFLAGS_DIRECTORY) !== 0) {
           const stat = callSyncRpc('process.fd_stat', [kernelFd]);
           if ((Number(stat?.filetype) >>> 0) !== WASI_FILETYPE_DIRECTORY) {
@@ -10197,8 +11751,6 @@ if (delegatePathOpen) {
           }
         }
         const openedFd = registerKernelDelegateFd(kernelFd);
-        const openedHandle = lookupFdHandle(openedFd);
-        if (openedHandle) openedHandle.guestPath = guestPath;
         const writeResult = writeGuestUint32(openedFdPtr, openedFd);
         if (writeResult !== WASI_ERRNO_SUCCESS) {
           wasiImport.fd_close(openedFd);
@@ -10348,6 +11900,9 @@ const kernelPathOperationHandlers = {
     return WASI_ERRNO_SUCCESS;
   },
   path_filestat_get(args) {
+    if (!guestRangesAreValid([args[2], Number(args[3]) >>> 0], [args[4], 64])) {
+      return WASI_ERRNO_FAULT;
+    }
     const operand = kernelPathOperand(args[0], args[2], args[3]);
     if (!operand) return WASI_ERRNO_BADF;
     const stat = callSyncRpc('process.path_stat_at', [
@@ -10632,10 +12187,19 @@ const KERNEL_POLLERR = 0x0008;
 const KERNEL_POLLHUP = 0x0010;
 
 wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
+  const iovRequest = validateGuestIovRequest(iovs, iovsLen);
+  if (iovRequest.errno !== WASI_ERRNO_SUCCESS) return iovRequest.errno;
+  if (!guestRangeIsValid(nreadPtr, 4)) return WASI_ERRNO_FAULT;
   const numericFd = Number(fd) >>> 0;
   const hostNetSocket = getHostNetSocket(numericFd);
   if (hostNetSocket) {
-    return readHostNetSocketToGuestIovs(hostNetSocket, iovs, iovsLen, nreadPtr);
+    return readHostNetSocketToGuestIovs(
+      hostNetSocket,
+      iovs,
+      iovsLen,
+      nreadPtr,
+      iovRequest,
+    );
   }
 
   const handle = __agentOSWasiMeasurePhase('fd_read', 'lookup_handle', () =>
@@ -10644,7 +12208,7 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
   if (handle?.kind === 'kernel-fd') {
     try {
       const requestedLength = boundedWasmSyncRpcReadLength(
-        guestIovByteLength(iovs, iovsLen),
+        guestIovByteLength(iovs, iovsLen, iovRequest),
       );
       const kernelFd = Number(handle.targetFd) >>> 0;
       let bytes;
@@ -10694,7 +12258,7 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
           }
         }
       }
-      const written = writeBytesToGuestIovs(iovs, iovsLen, bytes);
+      const written = writeBytesToGuestIovs(iovs, iovsLen, bytes, iovRequest);
       return writeGuestUint32(nreadPtr, written);
     } catch (error) {
       return mapHostProcessError(error);
@@ -10702,18 +12266,11 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
   }
   if (handle?.kind === 'pipe-read') {
     try {
-      const requestedLength = __agentOSWasiMeasurePhase('fd_read', 'iov_scan', () => {
-        if (!(instanceMemory instanceof WebAssembly.Memory)) {
-          return 0;
-        }
-        const view = new DataView(instanceMemory.buffer);
-        let total = 0;
-        for (let index = 0; index < (Number(iovsLen) >>> 0); index += 1) {
-          const entryOffset = (Number(iovs) >>> 0) + index * 8;
-          total += view.getUint32(entryOffset + 4, true);
-        }
-        return total >>> 0;
-      });
+      const requestedLength = __agentOSWasiMeasurePhase(
+        'fd_read',
+        'iov_scan',
+        () => iovRequest.totalLength,
+      );
 
       const pipeClosed = __agentOSWasiMeasurePhase('fd_read', 'pipe_wait', () => {
         while (handle.pipe.chunks.length === 0) {
@@ -10738,7 +12295,7 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
         dequeuePipeBytes(handle.pipe, requestedLength)
       );
       const written = __agentOSWasiMeasurePhase('fd_read', 'guest_iov_write', () =>
-        writeBytesToGuestIovs(iovs, iovsLen, chunk)
+        writeBytesToGuestIovs(iovs, iovsLen, chunk, iovRequest)
       );
       return __agentOSWasiMeasurePhase('fd_read', 'result_marshal', () =>
         writeGuestUint32(nreadPtr, written)
@@ -10751,18 +12308,7 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
   if (handle?.kind === 'guest-file') {
     try {
       const requestedLength = boundedWasmSyncRpcReadLength(
-        __agentOSWasiMeasurePhase('fd_read', 'iov_scan', () => {
-          if (!(instanceMemory instanceof WebAssembly.Memory)) {
-            return 0;
-          }
-          const view = new DataView(instanceMemory.buffer);
-          let total = 0;
-          for (let index = 0; index < (Number(iovsLen) >>> 0); index += 1) {
-            const entryOffset = (Number(iovs) >>> 0) + index * 8;
-            total += view.getUint32(entryOffset + 4, true);
-          }
-          return total >>> 0;
-        }),
+        __agentOSWasiMeasurePhase('fd_read', 'iov_scan', () => iovRequest.totalLength),
       );
       const buffer = Buffer.alloc(requestedLength);
       const bytesRead = __agentOSWasiMeasurePhase('fd_read', 'host_io', () =>
@@ -10776,7 +12322,12 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
       );
       handle.position = (handle.position ?? 0) + bytesRead;
       const written = __agentOSWasiMeasurePhase('fd_read', 'guest_iov_write', () =>
-        writeBytesToGuestIovs(iovs, iovsLen, buffer.subarray(0, bytesRead))
+        writeBytesToGuestIovs(
+          iovs,
+          iovsLen,
+          buffer.subarray(0, bytesRead),
+          iovRequest,
+        )
       );
       return __agentOSWasiMeasurePhase('fd_read', 'result_marshal', () =>
         writeGuestUint32(nreadPtr, written)
@@ -10789,18 +12340,7 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
   if (handle?.kind === 'passthrough' && typeof handle.ioFd === 'number') {
     try {
       const requestedLength = boundedWasmSyncRpcReadLength(
-        __agentOSWasiMeasurePhase('fd_read', 'iov_scan', () => {
-          if (!(instanceMemory instanceof WebAssembly.Memory)) {
-            return 0;
-          }
-          const view = new DataView(instanceMemory.buffer);
-          let total = 0;
-          for (let index = 0; index < (Number(iovsLen) >>> 0); index += 1) {
-            const entryOffset = (Number(iovs) >>> 0) + index * 8;
-            total += view.getUint32(entryOffset + 4, true);
-          }
-          return total >>> 0;
-        }),
+        __agentOSWasiMeasurePhase('fd_read', 'iov_scan', () => iovRequest.totalLength),
       );
       const buffer = Buffer.alloc(requestedLength);
       const bytesRead = __agentOSWasiMeasurePhase('fd_read', 'host_io', () =>
@@ -10814,7 +12354,12 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
       );
       handle.position = (handle.position ?? 0) + bytesRead;
       const written = __agentOSWasiMeasurePhase('fd_read', 'guest_iov_write', () =>
-        writeBytesToGuestIovs(iovs, iovsLen, buffer.subarray(0, bytesRead))
+        writeBytesToGuestIovs(
+          iovs,
+          iovsLen,
+          buffer.subarray(0, bytesRead),
+          iovRequest,
+        )
       );
       return __agentOSWasiMeasurePhase('fd_read', 'result_marshal', () =>
         writeGuestUint32(nreadPtr, written)
@@ -10833,23 +12378,14 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
     // not the runner process's unrelated host stdin. OpenSSH duplicates stdin
     // before its poll/read loop, so splitting these paths loses pipe EOF.
     // https://man7.org/linux/man-pages/man2/dup.2.html
-    const sidecarManagedProcess =
-      typeof process?.env?.AGENTOS_SANDBOX_ROOT === 'string' &&
-      process.env.AGENTOS_SANDBOX_ROOT.length > 0;
+    const sidecarManagedProcess = SIDECAR_MANAGED_PROCESS;
     if (sidecarManagedProcess || KERNEL_STDIO_SYNC_RPC) {
       try {
-        const requestedLength = __agentOSWasiMeasurePhase('fd_read', 'iov_scan', () => {
-          if (!(instanceMemory instanceof WebAssembly.Memory)) {
-            return 0;
-          }
-          const view = new DataView(instanceMemory.buffer);
-          let total = 0;
-          for (let index = 0; index < (Number(iovsLen) >>> 0); index += 1) {
-            const entryOffset = (Number(iovs) >>> 0) + index * 8;
-            total += view.getUint32(entryOffset + 4, true);
-          }
-          return total >>> 0;
-        });
+        const requestedLength = __agentOSWasiMeasurePhase(
+          'fd_read',
+          'iov_scan',
+          () => iovRequest.totalLength,
+        );
         const nonblocking =
           ((delegatedWasiFdFlags.get(numericFd) ?? 0) & WASI_FDFLAGS_NONBLOCK) !== 0;
         const chunk = __agentOSWasiMeasurePhase('fd_read', 'kernel_stdin_read', () =>
@@ -10864,7 +12400,7 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
           );
         }
         const written = __agentOSWasiMeasurePhase('fd_read', 'guest_iov_write', () =>
-          writeBytesToGuestIovs(iovs, iovsLen, chunk)
+          writeBytesToGuestIovs(iovs, iovsLen, chunk, iovRequest)
         );
         return __agentOSWasiMeasurePhase('fd_read', 'result_marshal', () =>
           writeGuestUint32(nreadPtr, written)
@@ -10901,22 +12437,15 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
 };
 
 wasiImport.fd_readdir = (fd, bufPtr, bufLen, cookie, bufUsedPtr) => {
+  const bufferLength = Number(bufLen) >>> 0;
+  if (!guestRangesAreValid([bufPtr, bufferLength], [bufUsedPtr, 4])) {
+    return WASI_ERRNO_FAULT;
+  }
   const numericFd = Number(fd) >>> 0;
   const handle = lookupFdHandle(numericFd);
   if (handle?.kind === 'kernel-fd') {
-    if (!(instanceMemory instanceof WebAssembly.Memory)) {
-      return WASI_ERRNO_FAULT;
-    }
-
     const bufferOffset = Number(bufPtr) >>> 0;
-    const bufferLength = Number(bufLen) >>> 0;
     const memoryBytes = new Uint8Array(instanceMemory.buffer);
-    if (
-      bufferOffset > memoryBytes.length ||
-      bufferLength > memoryBytes.length - bufferOffset
-    ) {
-      return WASI_ERRNO_FAULT;
-    }
     const zeroResult = writeGuestUint32(bufUsedPtr, 0);
     if (zeroResult !== WASI_ERRNO_SUCCESS || bufferLength === 0) {
       return zeroResult;
@@ -10985,36 +12514,39 @@ wasiImport.fd_readdir = (fd, bufPtr, bufLen, cookie, bufUsedPtr) => {
 };
 
 wasiImport.fd_pread = (fd, iovs, iovsLen, offset, nreadPtr) => {
+  const iovRequest = validateGuestIovRequest(iovs, iovsLen);
+  if (iovRequest.errno !== WASI_ERRNO_SUCCESS) return iovRequest.errno;
+  if (!guestRangeIsValid(nreadPtr, 4)) return WASI_ERRNO_FAULT;
   const handle = lookupFdHandle(fd);
   if (handle?.kind === 'kernel-fd') {
     try {
       const requestedLength = boundedWasmSyncRpcReadLength(
-        guestIovByteLength(iovs, iovsLen),
+        guestIovByteLength(iovs, iovsLen, iovRequest),
       );
       const bytes = Buffer.from(callSyncRpc('process.fd_pread', [
         Number(handle.targetFd) >>> 0,
         requestedLength,
         BigInt(offset).toString(),
       ]) ?? []);
-      return writeGuestUint32(nreadPtr, writeBytesToGuestIovs(iovs, iovsLen, bytes));
+      return writeGuestUint32(
+        nreadPtr,
+        writeBytesToGuestIovs(iovs, iovsLen, bytes, iovRequest),
+      );
     } catch (error) {
       return mapHostProcessError(error);
     }
   }
-  if (handle?.kind === 'guest-file') {
+  // Managed guests must never fall through to Node-WASI's process-local file
+  // descriptors. All production positioned I/O is kernel descriptor I/O.
+  if (SIDECAR_MANAGED_PROCESS) return WASI_ERRNO_BADF;
+  if (!SIDECAR_MANAGED_PROCESS && handle?.kind === 'guest-file') {
     try {
       const requestedLength = boundedWasmSyncRpcReadLength(
         (() => {
           if (!(instanceMemory instanceof WebAssembly.Memory)) {
             return 0;
           }
-          const view = new DataView(instanceMemory.buffer);
-          let total = 0;
-          for (let index = 0; index < (Number(iovsLen) >>> 0); index += 1) {
-            const entryOffset = (Number(iovs) >>> 0) + index * 8;
-            total += view.getUint32(entryOffset + 4, true);
-          }
-          return total >>> 0;
+          return iovRequest.totalLength;
         })(),
       );
       const buffer = Buffer.alloc(requestedLength);
@@ -11025,7 +12557,12 @@ wasiImport.fd_pread = (fd, iovs, iovsLen, offset, nreadPtr) => {
         requestedLength,
         Number(offset),
       );
-      const written = writeBytesToGuestIovs(iovs, iovsLen, buffer.subarray(0, bytesRead));
+      const written = writeBytesToGuestIovs(
+        iovs,
+        iovsLen,
+        buffer.subarray(0, bytesRead),
+        iovRequest,
+      );
       return writeGuestUint32(nreadPtr, written);
     } catch {
       return WASI_ERRNO_FAULT;
@@ -11033,20 +12570,14 @@ wasiImport.fd_pread = (fd, iovs, iovsLen, offset, nreadPtr) => {
   }
 
   if (handle?.kind === 'passthrough') {
-    if (typeof handle.ioFd === 'number') {
+    if (!SIDECAR_MANAGED_PROCESS && typeof handle.ioFd === 'number') {
       try {
         const requestedLength = boundedWasmSyncRpcReadLength(
           (() => {
             if (!(instanceMemory instanceof WebAssembly.Memory)) {
               return 0;
             }
-            const view = new DataView(instanceMemory.buffer);
-            let total = 0;
-            for (let index = 0; index < (Number(iovsLen) >>> 0); index += 1) {
-              const entryOffset = (Number(iovs) >>> 0) + index * 8;
-              total += view.getUint32(entryOffset + 4, true);
-            }
-            return total >>> 0;
+            return iovRequest.totalLength;
           })(),
         );
         const buffer = Buffer.alloc(requestedLength);
@@ -11057,7 +12588,12 @@ wasiImport.fd_pread = (fd, iovs, iovsLen, offset, nreadPtr) => {
           requestedLength,
           Number(offset),
         );
-        const written = writeBytesToGuestIovs(iovs, iovsLen, buffer.subarray(0, bytesRead));
+        const written = writeBytesToGuestIovs(
+          iovs,
+          iovsLen,
+          buffer.subarray(0, bytesRead),
+          iovRequest,
+        );
         return writeGuestUint32(nreadPtr, written);
       } catch (error) {
         return mapSyntheticFsError(error);
@@ -11079,10 +12615,13 @@ wasiImport.fd_pread = (fd, iovs, iovsLen, offset, nreadPtr) => {
 };
 
 wasiImport.fd_pwrite = (fd, iovs, iovsLen, offset, nwrittenPtr) => {
+  const iovRequest = validateGuestIovRequest(iovs, iovsLen);
+  if (iovRequest.errno !== WASI_ERRNO_SUCCESS) return iovRequest.errno;
+  if (!guestRangeIsValid(nwrittenPtr, 4)) return WASI_ERRNO_FAULT;
   const handle = lookupFdHandle(fd);
   if (handle?.kind === 'kernel-fd') {
     try {
-      const bytes = collectGuestIovBytes(iovs, iovsLen);
+      const bytes = collectGuestIovBytes(iovs, iovsLen, iovRequest);
       const written = Number(callSyncRpc('process.fd_pwrite', [
         Number(handle.targetFd) >>> 0,
         bytes,
@@ -11096,12 +12635,15 @@ wasiImport.fd_pwrite = (fd, iovs, iovsLen, offset, nwrittenPtr) => {
       return mapHostProcessError(error);
     }
   }
-  if (handle?.kind === 'guest-file') {
+  // Managed guests must never fall through to Node-WASI's process-local file
+  // descriptors. All production positioned I/O is kernel descriptor I/O.
+  if (SIDECAR_MANAGED_PROCESS) return WASI_ERRNO_BADF;
+  if (!SIDECAR_MANAGED_PROCESS && handle?.kind === 'guest-file') {
     if (handle.readOnly === true) {
       return WASI_ERRNO_ROFS;
     }
     try {
-      const bytes = collectGuestIovBytes(iovs, iovsLen);
+      const bytes = collectGuestIovBytes(iovs, iovsLen, iovRequest);
       const written = fsModule.writeSync(
         handle.targetFd,
         bytes,
@@ -11119,9 +12661,9 @@ wasiImport.fd_pwrite = (fd, iovs, iovsLen, offset, nwrittenPtr) => {
     if (handle.readOnly === true) {
       return WASI_ERRNO_ROFS;
     }
-    if (typeof handle.ioFd === 'number') {
+    if (!SIDECAR_MANAGED_PROCESS && typeof handle.ioFd === 'number') {
       try {
-        const bytes = collectGuestIovBytes(iovs, iovsLen);
+        const bytes = collectGuestIovBytes(iovs, iovsLen, iovRequest);
         const written = fsModule.writeSync(
           handle.ioFd,
           bytes,
@@ -11132,7 +12674,6 @@ wasiImport.fd_pwrite = (fd, iovs, iovsLen, offset, nwrittenPtr) => {
         // A positioned write can grow the file past a size remembered from a
         // prior truncate; drop the stale entry so fd_size/path_size fall
         // through to the authoritative fstat.
-        forgetHostFsSize(handle.guestPath);
         return writeGuestUint32(nwrittenPtr, written);
       } catch (error) {
         return mapSyntheticFsError(error);
@@ -11208,6 +12749,7 @@ wasiImport.fd_datasync = (fd) => {
 };
 
 wasiImport.fd_seek = (fd, offset, whence, newOffsetPtr) => {
+  if (!guestRangeIsValid(newOffsetPtr, 8)) return WASI_ERRNO_FAULT;
   const handle = lookupFdHandle(fd);
   if (handle?.kind === 'kernel-fd') {
     try {
@@ -11264,6 +12806,7 @@ wasiImport.fd_seek = (fd, offset, whence, newOffsetPtr) => {
 };
 
 wasiImport.fd_tell = (fd, offsetPtr) => {
+  if (!guestRangeIsValid(offsetPtr, 8)) return WASI_ERRNO_FAULT;
   const handle = lookupFdHandle(fd);
   if (handle?.kind === 'kernel-fd') {
     try {
@@ -11304,26 +12847,7 @@ wasiImport.fd_tell = (fd, offsetPtr) => {
 };
 
 wasiImport.fd_fdstat_get = (fd, statPtr) => {
-  // Host-net sockets (curl/wget/git TLS transports): report a stream-socket
-  // fdstat with the current O_NONBLOCK state so guest fcntl(F_GETFL) works.
-  // Without this, fcntl-based non-blocking setup fails with EBADF and guests
-  // that expect EAGAIN semantics (libcurl mid-upload reads) block forever.
-  {
-    const hostNetSocket = getHostNetSocket(fd);
-    if (hostNetSocket && !hostNetSocket.closed) {
-      return writeGuestFdstat(
-        statPtr,
-        WASI_FILETYPE_SOCKET_STREAM,
-        hostNetSocket.nonblock ? WASI_FDFLAGS_NONBLOCK : 0,
-        WASI_RIGHT_FD_READ |
-          WASI_RIGHT_FD_WRITE |
-          WASI_RIGHT_FD_FDSTAT_SET_FLAGS |
-          WASI_RIGHT_FD_FILESTAT_GET |
-          WASI_RIGHT_POLL_FD_READWRITE,
-        0n,
-      );
-    }
-  }
+  if (!guestRangeIsValid(statPtr, 24)) return WASI_ERRNO_FAULT;
   const handle = __agentOSWasiMeasurePhase('fd_fdstat_get', 'lookup_handle', () =>
     lookupFdHandle(fd)
   );
@@ -11337,11 +12861,31 @@ wasiImport.fd_fdstat_get = (fd, statPtr) => {
         statPtr,
         Number(stat?.filetype) >>> 0,
         wasiFlags,
-        kernelFdRightsBase(kernelFlags),
-        0n,
+        BigInt(stat?.rightsBase ?? 0),
+        BigInt(stat?.rightsInheriting ?? 0),
       );
     } catch (error) {
       return mapHostProcessError(error);
+    }
+  }
+  // Host-net sockets (curl/wget/git TLS transports): report a stream-socket
+  // fdstat with the current O_NONBLOCK state so guest fcntl(F_GETFL) works.
+  // Without this, fcntl-based non-blocking setup fails with EBADF and guests
+  // that expect EAGAIN semantics (libcurl mid-upload reads) block forever.
+  {
+    const hostNetSocket = getHostNetSocket(fd);
+    if (!SIDECAR_MANAGED_PROCESS && hostNetSocket && !hostNetSocket.closed) {
+      return writeGuestFdstat(
+        statPtr,
+        WASI_FILETYPE_SOCKET_STREAM,
+        hostNetSocket.nonblock ? WASI_FDFLAGS_NONBLOCK : 0,
+        WASI_RIGHT_FD_READ |
+          WASI_RIGHT_FD_WRITE |
+          WASI_RIGHT_FD_FDSTAT_SET_FLAGS |
+          WASI_RIGHT_FD_FILESTAT_GET |
+          WASI_RIGHT_POLL_FD_READWRITE,
+        0n,
+      );
     }
   }
   // Kernel-PTY stdio must report CHARACTER_DEVICE so guest is_terminal()/
@@ -11350,8 +12894,7 @@ wasiImport.fd_fdstat_get = (fd, statPtr) => {
   {
     const stdioFd =
       handle?.kind === 'passthrough' ? Number(handle.targetFd) >>> 0 : Number(fd) >>> 0;
-    if ((handle == null || handle.kind === 'passthrough') && stdioFd <= 2 &&
-        stdioFdIsKernelTty(stdioFd)) {
+    if ((handle == null || handle.kind === 'passthrough') && stdioFdIsKernelTty(stdioFd)) {
       return __agentOSWasiMeasurePhase(
         'fd_fdstat_get',
         'marshal_fdstat',
@@ -11466,16 +13009,6 @@ wasiImport.fd_fdstat_get = (fd, statPtr) => {
 };
 
 wasiImport.fd_fdstat_set_flags = (fd, flags) => {
-  // Host-net sockets: honor O_NONBLOCK (guest fcntl F_SETFL). net_recv/net_send
-  // consult `socket.nonblock` to return EAGAIN instead of blocking, which
-  // non-blocking clients like libcurl rely on to interleave send/recv.
-  {
-    const hostNetSocket = getHostNetSocket(fd);
-    if (hostNetSocket && !hostNetSocket.closed) {
-      hostNetSocket.nonblock = (Number(flags) & WASI_FDFLAGS_NONBLOCK) !== 0;
-      return WASI_ERRNO_SUCCESS;
-    }
-  }
   const handle = lookupFdHandle(fd);
   if (handle?.kind === 'kernel-fd') {
     try {
@@ -11483,9 +13016,23 @@ wasiImport.fd_fdstat_set_flags = (fd, flags) => {
       const kernelFlags = (wasiFlags & WASI_FDFLAGS_APPEND ? KERNEL_O_APPEND : 0)
         | (wasiFlags & WASI_FDFLAGS_NONBLOCK ? KERNEL_O_NONBLOCK : 0);
       callSyncRpc('process.fd_set_flags', [Number(handle.targetFd) >>> 0, kernelFlags]);
+      const hostNetSocket = getHostNetSocket(fd);
+      if (hostNetSocket && !hostNetSocket.closed) {
+        hostNetSocket.nonblock = (wasiFlags & WASI_FDFLAGS_NONBLOCK) !== 0;
+      }
       return WASI_ERRNO_SUCCESS;
     } catch (error) {
       return mapHostProcessError(error);
+    }
+  }
+  // Host-net sockets: honor O_NONBLOCK (guest fcntl F_SETFL). net_recv/net_send
+  // consult `socket.nonblock` to return EAGAIN instead of blocking, which
+  // non-blocking clients like libcurl rely on to interleave send/recv.
+  {
+    const hostNetSocket = getHostNetSocket(fd);
+    if (!SIDECAR_MANAGED_PROCESS && hostNetSocket && !hostNetSocket.closed) {
+      hostNetSocket.nonblock = (Number(flags) & WASI_FDFLAGS_NONBLOCK) !== 0;
+      return WASI_ERRNO_SUCCESS;
     }
   }
   if (handle && handle.kind !== 'passthrough') {
@@ -11516,6 +13063,7 @@ wasiImport.fd_fdstat_set_flags = (fd, flags) => {
 };
 
 wasiImport.fd_filestat_get = (fd, statPtr) => {
+  if (!guestRangeIsValid(statPtr, 64)) return WASI_ERRNO_FAULT;
   const handle = lookupFdHandle(fd);
   if (handle?.kind === 'kernel-fd') {
     try {
@@ -11593,7 +13141,6 @@ wasiImport.fd_filestat_set_size = (fd, size) => {
       if ((handle.position ?? 0) > nextSize) {
         handle.position = nextSize;
       }
-      rememberHostFsSize(handle.guestPath, nextSize);
       return WASI_ERRNO_SUCCESS;
     } catch (error) {
       return mapSyntheticFsError(error);
@@ -11611,7 +13158,6 @@ wasiImport.fd_filestat_set_size = (fd, size) => {
         if ((handle.position ?? 0) > nextSize) {
           handle.position = nextSize;
         }
-        rememberHostFsSize(handle.guestPath, nextSize);
         return WASI_ERRNO_SUCCESS;
       } catch (error) {
         return mapSyntheticFsError(error);
@@ -11626,7 +13172,6 @@ wasiImport.fd_filestat_set_size = (fd, size) => {
           if ((handle.position ?? 0) > nextSize) {
             handle.position = nextSize;
           }
-          rememberHostFsSize(handle.guestPath, nextSize);
         } finally {
           fsModule.closeSync(pathFd);
         }
@@ -11650,7 +13195,28 @@ wasiImport.fd_filestat_set_size = (fd, size) => {
 };
 
 wasiImport.fd_prestat_get = (fd, prestatPtr) => {
+  if (!guestRangeIsValid(prestatPtr, 8)) {
+    return WASI_ERRNO_FAULT;
+  }
   const handle = lookupFdHandle(fd);
+  if (SIDECAR_MANAGED_PROCESS) {
+    if (handle?.kind !== 'kernel-fd') return WASI_ERRNO_BADF;
+    try {
+      const preopen = callSyncRpc('process.fd_preopen', [
+        Number(handle.targetFd) >>> 0,
+      ]);
+      if (!preopen || typeof preopen.guestPath !== 'string') {
+        return WASI_ERRNO_BADF;
+      }
+      const view = new DataView(instanceMemory.buffer);
+      const offset = Number(prestatPtr) >>> 0;
+      view.setUint8(offset, 0);
+      view.setUint32(offset + 4, Buffer.byteLength(preopen.guestPath), true);
+      return WASI_ERRNO_SUCCESS;
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
+  }
   if (handle && handle.kind !== 'passthrough') {
     return WASI_ERRNO_BADF;
   }
@@ -11671,7 +13237,28 @@ wasiImport.fd_prestat_get = (fd, prestatPtr) => {
 };
 
 wasiImport.fd_prestat_dir_name = (fd, pathPtr, pathLen) => {
+  const outputLength = Number(pathLen) >>> 0;
+  if (!guestRangeIsValid(pathPtr, outputLength)) {
+    return WASI_ERRNO_FAULT;
+  }
   const handle = lookupFdHandle(fd);
+  if (SIDECAR_MANAGED_PROCESS) {
+    if (handle?.kind !== 'kernel-fd') return WASI_ERRNO_BADF;
+    try {
+      const preopen = callSyncRpc('process.fd_preopen', [
+        Number(handle.targetFd) >>> 0,
+      ]);
+      if (!preopen || typeof preopen.guestPath !== 'string') {
+        return WASI_ERRNO_BADF;
+      }
+      const bytes = Buffer.from(preopen.guestPath, 'utf8');
+      if (outputLength < bytes.length) return WASI_ERRNO_NAMETOOLONG;
+      new Uint8Array(instanceMemory.buffer, Number(pathPtr), bytes.length).set(bytes);
+      return WASI_ERRNO_SUCCESS;
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
+  }
   if (handle && handle.kind !== 'passthrough') {
     return WASI_ERRNO_BADF;
   }
@@ -11717,11 +13304,66 @@ function writeKernelFdCooperatively(targetFd, bytes) {
   }
 }
 
+function kernelFdStdioStream(targetFd, descriptorPath) {
+  if (descriptorPath === '/dev/stdout') return 'stdout';
+  if (descriptorPath === '/dev/stderr') return 'stderr';
+
+  // PTY descriptions retain their /dev/pts/... path. Match a duplicated
+  // terminal descriptor against canonical fd 1/2 by the kernel's open-file-
+  // description identity; isatty alone would incorrectly classify an
+  // unrelated PTY opened by the guest as host stdio.
+  let isTty = false;
+  try {
+    isTty = callSyncRpc('__kernel_isatty', [targetFd]) === true;
+  } catch (error) {
+    // Anonymous kernel objects (notably socketpairs) have no terminal
+    // identity. Treat the kernel's "not a terminal/path-backed fd" answers as
+    // a negative probe; the descriptor remains a valid ordinary I/O target.
+    if (
+      error?.code !== 'EINVAL'
+      && error?.code !== 'ENOTTY'
+      && error?.code !== 'ENOTSUP'
+    ) {
+      throw error;
+    }
+  }
+  if (!isTty) return null;
+  const targetDescription = String(
+    callSyncRpc('process.fd_description_identity', [targetFd])?.descriptionId ?? '',
+  );
+  for (const [stdioFd, stream] of [[1, 'stdout'], [2, 'stderr']]) {
+    try {
+      const stdioDescription = String(
+        callSyncRpc('process.fd_description_identity', [stdioFd])?.descriptionId ?? '',
+      );
+      if (targetDescription !== '' && targetDescription === stdioDescription) {
+        return stream;
+      }
+    } catch (error) {
+      if (error?.code !== 'EBADF') throw error;
+    }
+  }
+  return null;
+}
+
 wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
+  const iovRequest = validateGuestIovRequest(iovs, iovsLen);
+  if (iovRequest.errno !== WASI_ERRNO_SUCCESS) {
+    return iovRequest.errno;
+  }
+  if (!guestRangeIsValid(nwrittenPtr, 4)) {
+    return WASI_ERRNO_FAULT;
+  }
   const numericFd = Number(fd) >>> 0;
   const hostNetSocket = getHostNetSocket(numericFd);
   if (hostNetSocket) {
-    return writeHostNetSocketFromGuestIovs(hostNetSocket, iovs, iovsLen, nwrittenPtr);
+    return writeHostNetSocketFromGuestIovs(
+      hostNetSocket,
+      iovs,
+      iovsLen,
+      nwrittenPtr,
+      iovRequest,
+    );
   }
 
   const handle = __agentOSWasiMeasurePhase('fd_write', 'lookup_handle', () =>
@@ -11729,11 +13371,24 @@ wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
   );
   if (handle?.kind === 'kernel-fd') {
     try {
-      const bytes = collectGuestIovBytes(iovs, iovsLen);
-      const written = writeKernelFdCooperatively(
-         Number(handle.targetFd) >>> 0,
-         bytes,
-      );
+      const bytes = collectGuestIovBytes(iovs, iovsLen, iovRequest);
+      const kernelFd = Number(handle.targetFd) >>> 0;
+      // The kernel description, not the guest fd number, decides whether an
+      // alias still targets stdout/stderr. Keep the kernel as source of truth
+      // so dup/fcntl aliases and 1>&2/2>&1 redirections surface through the same
+      // ordered output event path as canonical fd 1/2.
+      let descriptorPath = null;
+      try {
+        descriptorPath = String(callSyncRpc('process.fd_path', [kernelFd]));
+      } catch (error) {
+        // Anonymous pipes and sockets have no pathname. They are valid write
+        // targets but cannot be canonical stdout/stderr path aliases.
+        if (error?.code !== 'EINVAL' && error?.code !== 'ENOTSUP') throw error;
+      }
+      const stdioStream = kernelFdStdioStream(kernelFd, descriptorPath);
+      const written = stdioStream != null
+        ? Number(callSyncRpc('__kernel_stdio_write', [kernelFd, bytes])) >>> 0
+        : writeKernelFdCooperatively(kernelFd, bytes);
       if (!Number.isSafeInteger(written) || written < 0 || written > bytes.length) {
         return WASI_ERRNO_FAULT;
       }
@@ -11745,7 +13400,7 @@ wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
   if (handle?.kind === 'pipe-write') {
     try {
       const bytes = __agentOSWasiMeasurePhase('fd_write', 'guest_iov_collect', () =>
-        collectGuestIovBytes(iovs, iovsLen)
+        collectGuestIovBytes(iovs, iovsLen, iovRequest)
       );
       if (bytes.length > 0 && !pipeHasReaders(handle.pipe)) {
         return WASI_ERRNO_PIPE;
@@ -11768,7 +13423,7 @@ wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
     }
     try {
       const bytes = __agentOSWasiMeasurePhase('fd_write', 'guest_iov_collect', () =>
-        collectGuestIovBytes(iovs, iovsLen)
+        collectGuestIovBytes(iovs, iovsLen, iovRequest)
       );
       const written = __agentOSWasiMeasurePhase('fd_write', 'host_io', () =>
         writeBytesToGuestFileHandle(handle, bytes)
@@ -11789,11 +13444,9 @@ wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
   if (passthroughStdioTarget != null) {
     try {
       const bytes = __agentOSWasiMeasurePhase('fd_write', 'guest_iov_collect', () =>
-        collectGuestIovBytes(iovs, iovsLen)
+        collectGuestIovBytes(iovs, iovsLen, iovRequest)
       );
-      const sidecarManagedProcess =
-        typeof process?.env?.AGENTOS_SANDBOX_ROOT === 'string' &&
-        process.env.AGENTOS_SANDBOX_ROOT.length > 0;
+      const sidecarManagedProcess = SIDECAR_MANAGED_PROCESS;
       if (sidecarManagedProcess || KERNEL_STDIO_SYNC_RPC) {
         const written = __agentOSWasiMeasurePhase('fd_write', 'sync_rpc', () =>
           Number(callSyncRpc('__kernel_stdio_write', [passthroughStdioTarget, bytes])) >>> 0
@@ -11820,7 +13473,7 @@ wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
     if (typeof handle.ioFd === 'number') {
       try {
         const bytes = __agentOSWasiMeasurePhase('fd_write', 'guest_iov_collect', () =>
-          collectGuestIovBytes(iovs, iovsLen)
+          collectGuestIovBytes(iovs, iovsLen, iovRequest)
         );
         const written = __agentOSWasiMeasurePhase('fd_write', 'host_io', () =>
           writeBytesToGuestFileHandle({ ...handle, targetFd: handle.ioFd }, bytes)
@@ -11830,10 +13483,6 @@ wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
         } else {
           handle.position = (handle.position ?? 0) + written;
         }
-        // The write grew/changed the file; a size remembered from a prior
-        // truncate is now stale. Drop it so fd_size/path_size fall through to
-        // the authoritative fstat rather than reporting the old length.
-        forgetHostFsSize(handle.guestPath);
         return __agentOSWasiMeasurePhase('fd_write', 'result_marshal', () =>
           writeGuestUint32(nwrittenPtr, written)
         );
@@ -11867,22 +13516,22 @@ wasiImport.fd_close = (fd) => {
   const numericFd = Number(fd) >>> 0;
   traceHostProcess('fd-close-begin', {
     fd: numericFd,
-    syntheticKind: syntheticFdEntries.get(numericFd)?.kind ?? null,
+    syntheticKind: activeFdProjections.get(numericFd)?.kind ?? null,
     passthroughKind: passthroughHandles.get(numericFd)?.kind ?? null,
   });
-  if (hostNetSockets.has(numericFd)) {
+  if (hasHostNetSocket(numericFd)) {
     const result = __agentOSWasiMeasurePhase('fd_close', 'host_socket_close', () =>
       hostNetImport.net_close(numericFd)
     );
     // net_close consumes the runner fd even when a sidecar cleanup RPC fails,
     // matching close(2)'s no-retry rule. Never let a reused fd inherit stale
     // FD_CLOEXEC state from the consumed description.
-    runnerCloexecFds.delete(numericFd);
+    standaloneCloexecFds.delete(numericFd);
     return result;
   }
   try {
     if (__agentOSWasiMeasurePhase('fd_close', 'synthetic_close', () => closeSyntheticFd(fd))) {
-      runnerCloexecFds.delete(numericFd);
+      standaloneCloexecFds.delete(numericFd);
       traceHostProcess('fd-close-synthetic', { fd: Number(fd) >>> 0 });
       return WASI_ERRNO_SUCCESS;
     }
@@ -11900,7 +13549,7 @@ wasiImport.fd_close = (fd) => {
         targetFd: handle.targetFd ?? null,
       });
       closePassthroughFd(fd);
-      runnerCloexecFds.delete(numericFd);
+      standaloneCloexecFds.delete(numericFd);
       return WASI_ERRNO_SUCCESS;
     } catch (error) {
       return mapHostProcessError(error);
@@ -11912,7 +13561,7 @@ wasiImport.fd_close = (fd) => {
       targetFd: handle.targetFd ?? null,
     });
     __agentOSWasiMeasurePhase('fd_close', 'fd_bookkeeping', () => closePassthroughFd(fd));
-    runnerCloexecFds.delete(numericFd);
+    standaloneCloexecFds.delete(numericFd);
     return WASI_ERRNO_SUCCESS;
   }
 
@@ -11924,17 +13573,17 @@ wasiImport.fd_close = (fd) => {
     return WASI_ERRNO_BADF;
   }
 
-  if (delegateManagedFdRefCounts.has(Number(fd) >>> 0)) {
+  if (standaloneDelegateFdRefCounts.has(Number(fd) >>> 0)) {
     const shouldDelegateClose = __agentOSWasiMeasurePhase('fd_close', 'fd_bookkeeping', () =>
       releaseDelegateFd(fd)
     );
     traceHostProcess('fd-close-delegate-tracked', {
       fd: Number(fd) >>> 0,
       shouldDelegateClose,
-      remainingRefs: delegateManagedFdRefCounts.get(Number(fd) >>> 0) ?? 0,
+      remainingRefs: standaloneDelegateFdRefCounts.get(Number(fd) >>> 0) ?? 0,
     });
     if (!shouldDelegateClose) {
-      runnerCloexecFds.delete(numericFd);
+      standaloneCloexecFds.delete(numericFd);
       return WASI_ERRNO_SUCCESS;
     }
     passthroughHandles.delete(Number(fd) >>> 0);
@@ -11946,7 +13595,7 @@ wasiImport.fd_close = (fd) => {
         delegateManagedFdClose(fd)
       )
     : WASI_ERRNO_BADF;
-  if (result === WASI_ERRNO_SUCCESS) runnerCloexecFds.delete(numericFd);
+  if (result === WASI_ERRNO_SUCCESS) standaloneCloexecFds.delete(numericFd);
   return result;
 };
 
@@ -11958,12 +13607,48 @@ wasiImport.fd_renumber = (from, to) => {
       return WASI_ERRNO_BADF;
     }
     if (sourceFd === targetFd) {
-      return lookupFdHandle(sourceFd) || delegateManagedFdRefCounts.has(sourceFd)
+      return lookupFdHandle(sourceFd) || standaloneDelegateFdRefCounts.has(sourceFd)
         ? WASI_ERRNO_SUCCESS
         : WASI_ERRNO_BADF;
     }
 
-    const syntheticHandle = syntheticFdEntries.get(sourceFd);
+    const managedSource = lookupFdHandle(sourceFd);
+    if (SIDECAR_MANAGED_PROCESS && managedSource?.kind === 'kernel-fd') {
+      const sourceHostNetDescriptionId = managedSource.hostNetDescriptionId;
+      const managedTarget = lookupFdHandle(targetFd);
+      if (managedTarget && managedTarget.kind !== 'kernel-fd') {
+        return WASI_ERRNO_BADF;
+      }
+      const shadowsInternalPreopen =
+        managedTarget?.internalPreopen === true && hiddenPreopenHandles.has(targetFd);
+      const movedKernelFd = callSyncRpc('process.fd_move', [
+        Number(managedSource.targetFd) >>> 0,
+        managedTarget?.kind === 'kernel-fd' && !shadowsInternalPreopen
+          ? Number(managedTarget.targetFd) >>> 0
+          : null,
+      ]);
+      // The kernel mutation above is atomic from the guest's perspective.
+      // Only now may the runner replace its bounded identity projections.
+      if (managedTarget?.kind === 'kernel-fd' && !shadowsInternalPreopen) {
+        forgetSidecarClosedKernelFd(targetFd);
+      }
+      forgetSidecarClosedKernelFd(sourceFd);
+      const movedGuestFd = registerKernelDelegateFd(
+        movedKernelFd,
+        targetFd,
+        3,
+        shadowsInternalPreopen,
+      );
+      if (typeof sourceHostNetDescriptionId === 'string') {
+        const movedHandle = lookupFdHandle(movedGuestFd);
+        if (movedHandle?.kind === 'kernel-fd') {
+          movedHandle.hostNetDescriptionId = sourceHostNetDescriptionId;
+        }
+      }
+      return WASI_ERRNO_SUCCESS;
+    }
+
+    const syntheticHandle = activeFdProjections.get(sourceFd);
     const passthroughHandle = passthroughHandles.get(sourceFd);
     const retainedSpawnOutputHandle = retainedSpawnOutputHandlesByFd.get(sourceFd);
     if (!syntheticHandle && !passthroughHandle && !retainedSpawnOutputHandle) {
@@ -11976,10 +13661,10 @@ wasiImport.fd_renumber = (from, to) => {
     }
 
     if (
-      syntheticFdEntries.has(targetFd) ||
+      activeFdProjections.has(targetFd) ||
       passthroughHandles.has(targetFd) ||
       retainedSpawnOutputHandlesByFd.has(targetFd) ||
-      delegateManagedFdRefCounts.has(targetFd)
+      standaloneDelegateFdRefCounts.has(targetFd)
     ) {
       const closeResult = wasiImport.fd_close(targetFd);
       if (closeResult !== WASI_ERRNO_SUCCESS) {
@@ -11988,9 +13673,9 @@ wasiImport.fd_renumber = (from, to) => {
     }
 
     if (syntheticHandle) {
-      syntheticFdEntries.delete(sourceFd);
+      activeFdProjections.delete(sourceFd);
       syntheticHandle.displayFd = targetFd;
-      syntheticFdEntries.set(targetFd, syntheticHandle);
+      setActiveFdProjection(targetFd, syntheticHandle);
     } else if (passthroughHandle) {
       passthroughHandles.delete(sourceFd);
       passthroughHandle.displayFd = targetFd;
@@ -12008,9 +13693,9 @@ wasiImport.fd_renumber = (from, to) => {
     closedPassthroughFds.add(sourceFd);
     closedPassthroughFds.delete(targetFd);
 
-    const sourceWasCloexec = runnerCloexecFds.delete(sourceFd);
-    runnerCloexecFds.delete(targetFd);
-    if (sourceWasCloexec) runnerCloexecFds.add(targetFd);
+    const sourceWasCloexec = standaloneCloexecFds.delete(sourceFd);
+    standaloneCloexecFds.delete(targetFd);
+    if (sourceWasCloexec) standaloneCloexecFds.add(targetFd);
 
     nextSyntheticFd = Math.max(nextSyntheticFd, targetFd + 1);
     traceHostProcess('fd-renumber', {
@@ -12033,20 +13718,31 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
   }
 
   const subscriptionCount = Number(nsubscriptions) >>> 0;
+  const countErrno = checkFixedRequestLimit(
+    'wasm.abi.maxPollSubscriptions',
+    subscriptionCount,
+    WASI_POLL_MAX_SUBSCRIPTIONS,
+  );
+  if (countErrno !== WASI_ERRNO_SUCCESS) return countErrno;
+  const subscriptionSize = 48;
+  const eventSize = 32;
+  if (!guestRangesAreValid(
+    [inPtr, subscriptionCount * subscriptionSize],
+    [outPtr, subscriptionCount * eventSize],
+    [neventsPtr, 4],
+  )) {
+    return WASI_ERRNO_FAULT;
+  }
   if (subscriptionCount === 0) {
     return writeGuestUint32(neventsPtr, 0);
   }
 
-  const subscriptionSize = 48;
-  const eventSize = 32;
   const view = new DataView(instanceMemory.buffer);
   const memory = new Uint8Array(instanceMemory.buffer);
   const subscriptions = [];
   let hasSyntheticSubscription = false;
   let hasRemappedPassthroughSubscription = false;
-  const sidecarManagedProcess =
-    typeof process?.env?.AGENTOS_SANDBOX_ROOT === 'string' &&
-    process.env.AGENTOS_SANDBOX_ROOT.length > 0;
+  const sidecarManagedProcess = SIDECAR_MANAGED_PROCESS;
   let timeoutMs = null;
 
   for (let index = 0; index < subscriptionCount; index += 1) {
@@ -12320,6 +14016,41 @@ wasiImport.poll_oneoff = (inPtr, outPtr, nsubscriptions, neventsPtr) => {
   return writeGuestUint32(neventsPtr, readyEvents.length);
 };
 
+// Immutable VM system identity is sidecar/kernel-owned. The complete guest
+// destination is checked before the RPC so a bad pointer cannot trigger host
+// work and then fail while publishing the result.
+const hostSystemIdentityFields = [
+  'hostname',
+  'type',
+  'release',
+  'version',
+  'machine',
+  'domainName',
+];
+const hostSystemImport = {
+  get_identity(field, bufferPtr, bufferLength) {
+    const fieldIndex = Number(field) >>> 0;
+    const capacity = Number(bufferLength) >>> 0;
+    if (fieldIndex >= hostSystemIdentityFields.length) return WASI_ERRNO_INVAL;
+    if (!guestRangeIsValid(bufferPtr, capacity)) return WASI_ERRNO_FAULT;
+    if (capacity === 0) return WASI_ERRNO_NAMETOOLONG;
+    try {
+      const identity = callSyncRpc('process.system_identity', []);
+      const value = identity?.[hostSystemIdentityFields[fieldIndex]];
+      if (typeof value !== 'string') return WASI_ERRNO_IO;
+      const bytes = Buffer.from(value, 'utf8');
+      if (bytes.length + 1 > capacity) return WASI_ERRNO_NAMETOOLONG;
+      const output = new Uint8Array(instanceMemory.buffer);
+      const base = Number(bufferPtr) >>> 0;
+      output.set(bytes, base);
+      output[base + bytes.length] = 0;
+      return WASI_ERRNO_SUCCESS;
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
+  },
+};
+
 // Terminal event source for crossterm-based guests (brush shell, reedline).
 // The patched crossterm WasiEventSource reads keystrokes through this import:
 //   read(ptr, len, timeout_ms) -> usize
@@ -12335,6 +14066,10 @@ const hostTtyImport = {
   read(ptr, len, timeoutMs) {
     const cap = Number(len) >>> 0;
     if (cap === 0) return 0;
+    // Validate the guest destination before asking the kernel for input. Once
+    // __kernel_stdin_read returns bytes they have been consumed from the PTY;
+    // discovering an invalid pointer afterwards would silently lose them.
+    if (!guestRangeIsValid(ptr, cap)) return 0;
     const blocking = (timeoutMs >>> 0) === 0xffffffff;
     const deadline = blocking ? Infinity : Date.now() + (Number(timeoutMs) >>> 0);
     while (true) {
@@ -12358,19 +14093,99 @@ const hostTtyImport = {
   // `host_tty.isatty(fd)` -> 1 if the guest fd is a kernel PTY, else 0.
   isatty(fd) {
     const descriptor = Number(fd) >>> 0;
-    return descriptor <= 2 && stdioFdIsKernelTty(descriptor) ? 1 : 0;
+    return stdioFdIsKernelTty(descriptor) ? 1 : 0;
   },
   // `host_tty.get_size(fd, colsPtr, rowsPtr)` -> writes the PTY window size as two
   // little-endian u16s and returns 0; non-zero (ENOTTY) if fd is not a PTY.
   get_size(fd, colsPtr, rowsPtr) {
-    const size = callSyncRpc('__kernel_tty_size', [fd >>> 0]);
-    if (!size || typeof size.cols !== 'number' || typeof size.rows !== 'number') {
-      return 25; // ENOTTY
+    if (!guestRangeIsValid(colsPtr, 2) || !guestRangeIsValid(rowsPtr, 2)) {
+      return WASI_ERRNO_FAULT;
     }
-    const view = new DataView(instanceMemory.buffer);
-    view.setUint16(colsPtr >>> 0, size.cols & 0xffff, true);
-    view.setUint16(rowsPtr >>> 0, size.rows & 0xffff, true);
-    return 0;
+    try {
+      const kernelFd = canonicalKernelFdForSpawnAction(fd);
+      const size = callSyncRpc('__kernel_tty_size', [kernelFd]);
+      if (!size || typeof size.cols !== 'number' || typeof size.rows !== 'number') {
+        return 25; // ENOTTY
+      }
+      const view = new DataView(instanceMemory.buffer);
+      view.setUint16(colsPtr >>> 0, size.cols & 0xffff, true);
+      view.setUint16(rowsPtr >>> 0, size.rows & 0xffff, true);
+      return 0;
+    } catch (error) {
+      // host_tty is a libc/POSIX extension and returns native errno values,
+      // not Preview1 errno ordinals.
+      if (error?.code === 'EBADF') return 9;
+      if (error?.code === 'ENOTTY') return 25;
+      return 5; // EIO
+    }
+  },
+  set_size(fd, cols, rows) {
+    try {
+      const numericCols = Number(cols) >>> 0;
+      const numericRows = Number(rows) >>> 0;
+      if (numericCols > 0xffff || numericRows > 0xffff) {
+        return WASI_ERRNO_INVAL;
+      }
+      const kernelFd = canonicalKernelFdForSpawnAction(fd);
+      callSyncRpc('__kernel_tty_set_size', [kernelFd, numericCols, numericRows]);
+      return WASI_ERRNO_SUCCESS;
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
+  },
+  get_attr(fd, flagsPtr, ccPtr) {
+    try {
+      if (!guestRangeIsValid(flagsPtr, 4) || !guestRangeIsValid(ccPtr, 7)) {
+        return WASI_ERRNO_FAULT;
+      }
+      const kernelFd = canonicalKernelFdForSpawnAction(fd);
+      const value = callSyncRpc('__kernel_tcgetattr', [kernelFd]);
+      const cc = Array.isArray(value?.cc) ? value.cc : null;
+      if (cc == null || cc.length !== 7) return WASI_ERRNO_FAULT;
+      writeGuestUint32(flagsPtr, Number(value?.flags) >>> 0);
+      new Uint8Array(instanceMemory.buffer).set(cc.map((byte) => Number(byte) & 0xff), ccPtr >>> 0);
+      return WASI_ERRNO_SUCCESS;
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
+  },
+  set_attr(fd, flags, ccPtr) {
+    try {
+      if (!guestRangeIsValid(ccPtr, 7)) return WASI_ERRNO_FAULT;
+      const cc = Array.from(new Uint8Array(instanceMemory.buffer, ccPtr >>> 0, 7));
+      const kernelFd = canonicalKernelFdForSpawnAction(fd);
+      callSyncRpc('__kernel_tcsetattr', [kernelFd, flags >>> 0, cc]);
+      return WASI_ERRNO_SUCCESS;
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
+  },
+  get_pgrp(fd, retPgidPtr) {
+    try {
+      if (!guestRangeIsValid(retPgidPtr, 4)) return WASI_ERRNO_FAULT;
+      const kernelFd = canonicalKernelFdForSpawnAction(fd);
+      return writeGuestUint32(retPgidPtr, callSyncRpc('__kernel_tcgetpgrp', [kernelFd]));
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
+  },
+  set_pgrp(fd, pgid) {
+    try {
+      const kernelFd = canonicalKernelFdForSpawnAction(fd);
+      callSyncRpc('__kernel_tcsetpgrp', [kernelFd, pgid >>> 0]);
+      return WASI_ERRNO_SUCCESS;
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
+  },
+  get_sid(fd, retSidPtr) {
+    try {
+      if (!guestRangeIsValid(retSidPtr, 4)) return WASI_ERRNO_FAULT;
+      const kernelFd = canonicalKernelFdForSpawnAction(fd);
+      return writeGuestUint32(retSidPtr, callSyncRpc('__kernel_tcgetsid', [kernelFd]));
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
   },
   // Toggle terminal raw mode on the guest's PTY. crossterm/pty_probe/vim call this
   // instead of tcsetattr; route it to the kernel so the guest gets raw keystrokes.
@@ -12409,6 +14224,7 @@ function instantiateWasmModule(targetModule) {
   return __agentOSWasmMeasurePhase('WebAssembly.Instance', () => new WebAssembly.Instance(targetModule, {
     wasi_snapshot_preview1: wasiImport,
     wasi_unstable: wasiImport,
+    host_system: hostSystemImport,
     host_tty: hostTtyImport,
     // Read-write commands like DuckDB need fd_dup_min from the patched
     // wasi-libc surface, but broader host_process capabilities stay
@@ -12432,7 +14248,7 @@ if (instance.exports.memory instanceof WebAssembly.Memory) {
 }
 
 function initializeSignalMaskForInstance(targetInstance) {
-  const mask = encodeSignalMask(wasmBlockedSignals);
+  const mask = encodeSignalMask(currentKernelSignalMask());
   if (mask.lo === 0 && mask.hi === 0) {
     return;
   }
@@ -12446,140 +14262,63 @@ function initializeSignalMaskForInstance(targetInstance) {
 }
 
 initializeSignalMaskForInstance(instance);
-for (const signal of initialWasmSignalIgnores) {
-  callSyncRpc('process.signal_state', [signal, 'ignore', '[]', 0]);
-  wasmSignalRegistrations.set(signal, {
-    action: 'ignore',
-    mask: [],
-    flags: 0,
-  });
-}
 
-function dispatchWasmSignal(signal) {
-  const numeric = Number(signal) | 0;
+function dispatchWasmSignal(delivery) {
+  const numeric = Number(delivery?.signal) | 0;
+  const token = Number(delivery?.token);
   if (numeric <= 0) {
     return false;
   }
-  const registration = wasmSignalRegistrations.get(numeric);
-  if (registration?.action === 'ignore') {
-    return false;
-  }
-  if (registration?.action !== 'user') {
-    // The libc trampoline dispatches user handlers only. Default dispositions
-    // remain sidecar-owned so fatal signals terminate the VM and non-fatal
-    // defaults (SIGCHLD/SIGCONT/...) follow the kernel signal table.
-    callSyncRpc('process.kill', [VIRTUAL_PID, signalNameFromNumber(numeric)]);
-    return false;
-  }
   if (typeof instance?.exports?.__wasi_signal_trampoline !== 'function') {
+    if (Number.isSafeInteger(token)) {
+      callSyncRpc('process.signal_end', [token]);
+    }
     return false;
   }
-  const previousMask = new Set(wasmBlockedSignals);
-  if (registration?.action === 'user') {
-    for (const maskedSignal of registration.mask) {
-      if (maskedSignal !== LINUX_SIGKILL && maskedSignal !== LINUX_SIGSTOP) {
-        wasmBlockedSignals.add(maskedSignal);
-      }
-    }
-    if ((registration.flags & LINUX_SA_NODEFER) === 0) {
-      wasmBlockedSignals.add(numeric);
-    }
-    if ((registration.flags & LINUX_SA_RESETHAND) !== 0) {
-      wasmSignalRegistrations.delete(numeric);
-      callSyncRpc('process.signal_state', [numeric, 'default', '[]', 0]);
-    }
-  }
-  let caught = false;
   try {
     instance.exports.__wasi_signal_trampoline(numeric);
-    caught = true;
+    return true;
   } finally {
-    wasmBlockedSignals.clear();
-    for (const blockedSignal of previousMask) {
-      wasmBlockedSignals.add(blockedSignal);
+    if (Number.isSafeInteger(token)) {
+      callSyncRpc('process.signal_end', [token]);
     }
-    caught = dispatchLocallyPendingWasmSignals() || caught;
   }
-  return caught;
 }
 
-function dispatchLocallyPendingWasmSignals() {
+// Returns true when the current syscall must observe EINTR. For the documented
+// restartable family (blocking fd/socket read/write, accept/connect, waitpid,
+// flock, and record locks), a batch whose every caught handler has SA_RESTART
+// completes its handler checkpoints and lets the operation continue.
+function dispatchPendingWasmSignals(restartableOperation = false) {
   let caught = false;
-  for (const signal of [...pendingWasmSignals]) {
-    // A nested handler may drain another member of this snapshot. Do not
-    // dispatch that stale snapshot entry a second time.
-    if (!pendingWasmSignals.has(signal)) {
-      continue;
-    }
-    if (wasmBlockedSignals.has(signal)) {
-      continue;
-    }
-    pendingWasmSignals.delete(signal);
-    caught = dispatchWasmSignal(signal) || caught;
-  }
-  return caught;
-}
-
-function dispatchPendingWasmSignals() {
-  let caught = dispatchLocallyPendingWasmSignals();
-  // Standard signals coalesce, so at most one pending instance of each of the
-  // 64 supported signals can be transferred from the sidecar per boundary.
+  let everyCaughtHandlerRestarts = true;
+  // Standard signals coalesce in the kernel, so 64 iterations are a strict
+  // bound even when handlers recursively make more signals deliverable.
   for (let index = 0; index < 64; index += 1) {
-    let signal;
+    let delivery;
     try {
-      signal = callSyncRpc('process.take_signal', []);
+      delivery = callSyncRpc('process.take_signal', []);
     } catch (error) {
       if (error?.code === 'ERR_AGENTOS_WASM_SYNC_RPC_UNAVAILABLE') {
-        return caught;
+        return caught && !(restartableOperation && everyCaughtHandlerRestarts);
       }
       throw error;
     }
-    if (typeof signal !== 'number') {
-      return caught;
+    if (delivery == null || typeof delivery?.signal !== 'number') {
+      return caught && !(restartableOperation && everyCaughtHandlerRestarts);
     }
-    if (wasmBlockedSignals.has(signal)) {
-      pendingWasmSignals.add(signal);
-    } else {
-      caught = dispatchWasmSignal(signal) || caught;
+    if ((Number(delivery?.flags) & LINUX_SA_RESTART) === 0) {
+      everyCaughtHandlerRestarts = false;
     }
+    caught = dispatchWasmSignal(delivery) || caught;
   }
-  return caught;
-}
-
-function resetCaughtWasmSignalDispositionsForExec(sidecarCommitted) {
-  for (const [signal, registration] of wasmSignalRegistrations) {
-    if (registration.action !== 'user') {
-      continue;
-    }
-    if (!sidecarCommitted) {
-      try {
-        callSyncRpc('process.signal_state', [signal, 'default', '[]', 0]);
-      } catch (error) {
-        if (typeof process?.stderr?.write === 'function') {
-          process.stderr.write(
-            `[agentos] exec committed locally but failed to reset signal ${signal}: ${
-              error instanceof Error ? error.message : String(error)
-            }\n`,
-          );
-        }
-      }
-    }
-    wasmSignalRegistrations.delete(signal);
-  }
+  return caught && !(restartableOperation && everyCaughtHandlerRestarts);
 }
 
 Object.defineProperty(globalThis, '__agentOsWasmSignalDispatch', {
   configurable: true,
   writable: true,
-  value: (_eventType, payload) => {
-    const signal =
-      typeof payload?.number === 'number'
-        ? payload.number
-        : signalNumberFromName(payload?.signal);
-    if (signal > 0 && signal <= LINUX_MAX_SIGNAL_NUMBER) {
-      pendingWasmSignals.add(signal);
-    }
-  },
+  value: () => dispatchPendingWasmSignals(),
 });
 
 while (typeof instance.exports._start === 'function') {
@@ -12615,7 +14354,6 @@ while (typeof instance.exports._start === 'function') {
           );
         }
       }
-      resetCaughtWasmSignalDispositionsForExec(error.image.sidecarCommitted === true);
       guestArgv = error.image.argv;
       guestEnv = error.image.env;
       wasi.args = guestArgv.map((value) => String(value));

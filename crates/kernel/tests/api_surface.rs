@@ -11,7 +11,7 @@ use agentos_kernel::kernel::{
 use agentos_kernel::mount_table::{MountOptions, MountTable};
 use agentos_kernel::permissions::Permissions;
 use agentos_kernel::pipe_manager::MAX_PIPE_BUFFER_BYTES;
-use agentos_kernel::process_table::{ProcessWaitEvent, SIGWINCH};
+use agentos_kernel::process_table::{ProcessWaitEvent, SignalAction, SignalDisposition, SIGWINCH};
 use agentos_kernel::socket_table::SocketType;
 use agentos_kernel::vfs::{
     MemoryFileSystem, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat, MAX_PATH_LENGTH,
@@ -2011,6 +2011,20 @@ fn pty_resize_delivers_sigwinch_to_the_foreground_process_group() {
             ..OpenShellOptions::default()
         })
         .expect("open shell");
+    shell
+        .process()
+        .signal_action(
+            SIGWINCH,
+            Some(SignalAction {
+                disposition: SignalDisposition::User,
+                ..SignalAction::DEFAULT
+            }),
+        )
+        .expect("catch SIGWINCH");
+    let controls = shell
+        .process()
+        .attach_runtime_control(std::sync::Arc::new(|| {}))
+        .expect("attach runtime controls");
 
     kernel
         .pty_resize("shell", shell.pid(), shell.master_fd(), 120, 40)
@@ -2019,7 +2033,16 @@ fn pty_resize_delivers_sigwinch_to_the_foreground_process_group() {
         .pty_resize("shell", shell.pid(), shell.master_fd(), 120, 40)
         .expect("repeat shell pty resize");
 
-    assert_eq!(shell.process().kill_signals(), vec![SIGWINCH]);
+    let pending = controls.pending();
+    assert!(pending.checkpoint);
+    controls
+        .acknowledge(pending)
+        .expect("acknowledge resize signal checkpoint");
+    assert!(shell
+        .process()
+        .sigpending()
+        .expect("pending signals")
+        .contains(SIGWINCH));
 
     shell.process().finish(0);
     kernel.waitpid(shell.pid()).expect("wait shell");

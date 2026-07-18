@@ -176,7 +176,7 @@ impl crate::state::LoopbackTlsEndpoint {
 
 pub(in crate::execution) fn parse_tls_client_hello_from_bytes(
     buffer: &[u8],
-) -> Result<Option<JavascriptTlsClientHello>, SidecarError> {
+) -> Result<Option<TlsClientHello>, SidecarError> {
     if buffer.is_empty() {
         return Ok(None);
     }
@@ -196,7 +196,7 @@ pub(in crate::execution) fn parse_tls_client_hello_from_bytes(
             .filter_map(|protocol| String::from_utf8(protocol.to_vec()).ok())
             .collect::<Vec<_>>()
     });
-    Ok(Some(JavascriptTlsClientHello {
+    Ok(Some(TlsClientHello {
         servername: client_hello.server_name().map(str::to_owned),
         alpn_protocols,
     }))
@@ -206,7 +206,7 @@ pub(in crate::execution) fn peek_loopback_tls_client_hello(
     vm_id: &str,
     socket_id: SocketId,
     peer_socket_id: SocketId,
-) -> Result<Option<JavascriptTlsClientHello>, SidecarError> {
+) -> Result<Option<TlsClientHello>, SidecarError> {
     let key = loopback_tls_transport_key(vm_id, socket_id, peer_socket_id);
     let registry = loopback_tls_transport_registry();
     let pair = registry
@@ -591,7 +591,7 @@ pub(in crate::execution) fn tls_provider() -> Arc<rustls::crypto::CryptoProvider
 }
 
 pub(in crate::execution) fn tls_local_certificates(
-    options: &JavascriptTlsBridgeOptions,
+    options: &TlsBridgeOptions,
 ) -> Result<Vec<Vec<u8>>, SidecarError> {
     let Some(certificates) = options.cert.as_ref() else {
         return Ok(Vec::new());
@@ -599,26 +599,26 @@ pub(in crate::execution) fn tls_local_certificates(
     tls_material_entries(certificates)
 }
 
-fn tls_material_entries(material: &JavascriptTlsMaterial) -> Result<Vec<Vec<u8>>, SidecarError> {
+fn tls_material_entries(material: &TlsMaterial) -> Result<Vec<Vec<u8>>, SidecarError> {
     match material {
-        JavascriptTlsMaterial::Single(entry) => tls_data_value(entry).map(|value| vec![value]),
-        JavascriptTlsMaterial::Many(entries) => entries.iter().map(tls_data_value).collect(),
+        TlsMaterial::Single(entry) => tls_data_value(entry).map(|value| vec![value]),
+        TlsMaterial::Many(entries) => entries.iter().map(tls_data_value).collect(),
     }
 }
 
-fn tls_data_value(value: &JavascriptTlsDataValue) -> Result<Vec<u8>, SidecarError> {
+fn tls_data_value(value: &TlsDataValue) -> Result<Vec<u8>, SidecarError> {
     match value {
-        JavascriptTlsDataValue::Buffer { data } => base64::engine::general_purpose::STANDARD
+        TlsDataValue::Buffer { data } => base64::engine::general_purpose::STANDARD
             .decode(data)
             .map_err(|error| {
                 SidecarError::InvalidState(format!("TLS material contains invalid base64: {error}"))
             }),
-        JavascriptTlsDataValue::String { data } => Ok(data.as_bytes().to_vec()),
+        TlsDataValue::String { data } => Ok(data.as_bytes().to_vec()),
     }
 }
 
 fn tls_certificates_from_material(
-    material: &JavascriptTlsMaterial,
+    material: &TlsMaterial,
 ) -> Result<Vec<CertificateDer<'static>>, SidecarError> {
     let mut certificates = Vec::new();
     for entry in tls_material_entries(material)? {
@@ -641,7 +641,7 @@ fn tls_certificates_from_material(
 }
 
 fn tls_private_key_from_material(
-    material: &JavascriptTlsMaterial,
+    material: &TlsMaterial,
 ) -> Result<PrivateKeyDer<'static>, SidecarError> {
     for entry in tls_material_entries(material)? {
         let mut reader = std::io::BufReader::new(Cursor::new(entry));
@@ -656,28 +656,119 @@ fn tls_private_key_from_material(
 
 pub(in crate::execution) fn vm_default_ca_bundle_for_tls_options(
     kernel: &mut SidecarKernel,
-    options: &JavascriptTlsBridgeOptions,
+    requester_pid: u32,
+    options: &TlsBridgeOptions,
 ) -> Result<Vec<u8>, SidecarError> {
     if options.is_server || options.reject_unauthorized == Some(false) || options.ca.is_some() {
         return Ok(Vec::new());
     }
-    read_vm_default_ca_bundle(kernel)
+    read_vm_default_ca_bundle(kernel, requester_pid)
 }
 
 pub(in crate::execution) fn read_vm_default_ca_bundle(
     kernel: &mut SidecarKernel,
+    requester_pid: u32,
 ) -> Result<Vec<u8>, SidecarError> {
     kernel
-        .read_file(CA_CERTIFICATES_GUEST_PATH)
-        .map_err(|error| {
-            SidecarError::Execution(format!(
-                "failed to read VM TLS trust store {CA_CERTIFICATES_GUEST_PATH}: {error}"
-            ))
-        })
+        .read_file_for_process(
+            EXECUTION_DRIVER_NAME,
+            requester_pid,
+            CA_CERTIFICATES_GUEST_PATH,
+        )
+        .map_err(kernel_error)
+}
+
+#[cfg(test)]
+mod ca_bundle_tests {
+    use super::*;
+    use agentos_kernel::command_registry::CommandDriver;
+    use agentos_kernel::kernel::{KernelVmConfig, SpawnOptions};
+    use agentos_kernel::mount_table::MountTable;
+    use agentos_kernel::permissions::Permissions;
+    use agentos_kernel::resource_accounting::ResourceLimits;
+    use agentos_kernel::vfs::MemoryFileSystem;
+
+    fn ca_test_kernel() -> (SidecarKernel, u32) {
+        let mut config = KernelVmConfig::new("vm-ca-bundle-bounds");
+        config.permissions = Permissions::allow_all();
+        config.resources = ResourceLimits {
+            max_pread_bytes: Some(4),
+            ..ResourceLimits::default()
+        };
+        let mut kernel = SidecarKernel::new(MountTable::new(MemoryFileSystem::new()), config);
+        kernel
+            .register_driver(CommandDriver::new(EXECUTION_DRIVER_NAME, [WASM_COMMAND]))
+            .expect("register CA test driver");
+        let process = kernel
+            .spawn_process(
+                WASM_COMMAND,
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn CA test process");
+        kernel
+            .mkdir("/etc/ssl/certs", true)
+            .expect("create CA directory");
+        (kernel, process.pid())
+    }
+
+    #[test]
+    fn live_ca_bundle_read_is_process_authorized_and_bounded() {
+        let (mut kernel, pid) = ca_test_kernel();
+        kernel
+            .write_file(CA_CERTIFICATES_GUEST_PATH, b"four".to_vec())
+            .expect("write exact CA bundle");
+        assert_eq!(
+            read_vm_default_ca_bundle(&mut kernel, pid).expect("read exact CA bundle"),
+            b"four"
+        );
+
+        kernel
+            .write_file(CA_CERTIFICATES_GUEST_PATH, b"five!".to_vec())
+            .expect("grow CA bundle");
+        let oversized = read_vm_default_ca_bundle(&mut kernel, pid)
+            .expect_err("oversized CA bundle must fail before allocation");
+        assert_eq!(oversized.code(), Some("EINVAL"));
+        assert!(oversized
+            .to_string()
+            .contains("limits.resources.maxPreadBytes"));
+
+        kernel
+            .write_file(CA_CERTIFICATES_GUEST_PATH, b"four".to_vec())
+            .expect("restore CA bundle");
+        kernel
+            .chmod(CA_CERTIFICATES_GUEST_PATH, 0)
+            .expect("deny CA bundle");
+        assert_eq!(
+            read_vm_default_ca_bundle(&mut kernel, pid)
+                .expect_err("CA read must enforce process DAC")
+                .code(),
+            Some("EACCES")
+        );
+
+        kernel
+            .remove_file(CA_CERTIFICATES_GUEST_PATH)
+            .expect("remove CA bundle");
+        kernel
+            .symlink("/etc/ssl/certs/ca-loop", CA_CERTIFICATES_GUEST_PATH)
+            .expect("first CA loop link");
+        kernel
+            .symlink(CA_CERTIFICATES_GUEST_PATH, "/etc/ssl/certs/ca-loop")
+            .expect("second CA loop link");
+        assert_eq!(
+            read_vm_default_ca_bundle(&mut kernel, pid)
+                .expect_err("CA symlink loop must stay typed")
+                .code(),
+            Some("ELOOP")
+        );
+    }
 }
 
 fn tls_root_store(
-    options: &JavascriptTlsBridgeOptions,
+    options: &TlsBridgeOptions,
     default_ca_bundle: &[u8],
 ) -> Result<RootCertStore, SidecarError> {
     let mut roots = RootCertStore::empty();
@@ -710,7 +801,7 @@ fn tls_root_store(
 }
 
 pub(in crate::execution) fn build_client_tls_config(
-    options: &JavascriptTlsBridgeOptions,
+    options: &TlsBridgeOptions,
     default_ca_bundle: &[u8],
 ) -> Result<ClientConfig, SidecarError> {
     let provider = tls_provider();
@@ -747,7 +838,7 @@ pub(in crate::execution) fn build_client_tls_config(
 }
 
 pub(in crate::execution) fn build_server_tls_config(
-    options: &JavascriptTlsBridgeOptions,
+    options: &TlsBridgeOptions,
 ) -> Result<ServerConfig, SidecarError> {
     let certificates = tls_certificates_from_material(options.cert.as_ref().ok_or_else(|| {
         SidecarError::InvalidState(String::from("TLS server upgrade requires a certificate"))
@@ -952,7 +1043,7 @@ pub(in crate::execution) fn reserve_tls_command(
 }
 
 pub(in crate::execution) fn native_tls_role(
-    options: &JavascriptTlsBridgeOptions,
+    options: &TlsBridgeOptions,
     default_ca_bundle: &[u8],
 ) -> Result<NativeTlsRole, SidecarError> {
     if options.is_server {
@@ -1016,7 +1107,7 @@ fn tls_transport_is_already_closed(error: &std::io::Error) -> bool {
 async fn run_native_tls_transport<S>(
     mut stream: S,
     mut commands: TokioReceiver<NativeTlsCommand>,
-    sender: AsyncCompletionSender<JavascriptTcpSocketEvent>,
+    sender: AsyncCompletionSender<TcpSocketEvent>,
     event_pusher: Arc<SocketReadinessSubscribers>,
     application_read_interest: Arc<AtomicBool>,
     application_read_notify: Arc<tokio::sync::Notify>,
@@ -1052,7 +1143,10 @@ async fn run_native_tls_transport<S>(
                 match command {
                     NativeTlsCommand::Write { payload, completion } => {
                         let payload_len = payload.bytes.len();
-                        let result = tokio::time::timeout(limits.operation_deadline, async {
+                        let result = crate::execution::operation_deadline_timeout(
+                            "TLS socket write",
+                            limits.operation_deadline,
+                            async {
                             let mut offset = 0;
                             while offset < payload.bytes.len() {
                                 let (capability_id, vm_generation) = fairness_identity;
@@ -1111,7 +1205,8 @@ async fn run_native_tls_transport<S>(
                         _command_reservation: _,
                         completion,
                     } => {
-                        let result = tokio::time::timeout(
+                        let result = crate::execution::operation_deadline_timeout(
+                            "TLS socket shutdown",
                             limits.operation_deadline,
                             async {
                                 let (capability_id, vm_generation) = fairness_identity;
@@ -1155,7 +1250,8 @@ async fn run_native_tls_transport<S>(
                         // reacquire a retired capability; the bounded command
                         // reservation and operation deadline already govern the
                         // final transport shutdown.
-                        let result = tokio::time::timeout(
+                        let result = crate::execution::operation_deadline_timeout(
+                            "TLS socket close",
                             limits.operation_deadline,
                             AsyncWriteExt::shutdown(&mut stream),
                         )
@@ -1178,13 +1274,13 @@ async fn run_native_tls_transport<S>(
                 match read_result {
                     Ok(0) => {
                         saw_remote_end.store(true, Ordering::SeqCst);
-                        if sender.send(JavascriptTcpSocketEvent::End).await.is_ok() {
+                        if sender.send(TcpSocketEvent::End).await.is_ok() {
                             push_socket_event(&event_pusher, "end");
                         }
                         if saw_local_shutdown.load(Ordering::SeqCst)
                             && !close_notified.swap(true, Ordering::SeqCst)
                             && sender
-                                .send(JavascriptTcpSocketEvent::Close { had_error: false })
+                                .send(TcpSocketEvent::Close { had_error: false })
                                 .await
                                 .is_ok()
                         {
@@ -1246,7 +1342,7 @@ async fn run_native_tls_transport<S>(
                             .await;
                             break;
                         }
-                        let event = JavascriptTcpSocketEvent::Data {
+                        let event = TcpSocketEvent::Data {
                             bytes: buffer[..bytes_read].to_vec(),
                             reservation: SharedReservation::new(reservation),
                             source_reservations: vec![SharedReservation::new(tls_reservation)],
@@ -1273,13 +1369,13 @@ async fn run_native_tls_transport<S>(
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
                         saw_remote_end.store(true, Ordering::SeqCst);
-                        if sender.send(JavascriptTcpSocketEvent::End).await.is_ok() {
+                        if sender.send(TcpSocketEvent::End).await.is_ok() {
                             push_socket_event(&event_pusher, "end");
                         }
                         if saw_local_shutdown.load(Ordering::SeqCst)
                             && !close_notified.swap(true, Ordering::SeqCst)
                             && sender
-                                .send(JavascriptTcpSocketEvent::Close { had_error: false })
+                                .send(TcpSocketEvent::Close { had_error: false })
                                 .await
                                 .is_ok()
                         {
@@ -1323,7 +1419,7 @@ pub(in crate::execution) fn spawn_native_tls_transport(
     stream: TcpStream,
     role: NativeTlsRole,
     tls_state: Arc<Mutex<Option<ActiveTlsState>>>,
-    sender: AsyncCompletionSender<JavascriptTcpSocketEvent>,
+    sender: AsyncCompletionSender<TcpSocketEvent>,
     event_pusher: Arc<SocketReadinessSubscribers>,
     application_read_interest: Arc<AtomicBool>,
     application_read_notify: Arc<tokio::sync::Notify>,
@@ -1400,7 +1496,8 @@ pub(in crate::execution) fn spawn_native_tls_transport(
                     config,
                     server_name,
                 } => {
-                    let handshake = tokio::time::timeout(
+                    let handshake = crate::execution::operation_deadline_timeout(
+                        "TLS client handshake",
                         limits.operation_deadline,
                         TlsConnector::from(config).connect(server_name, stream),
                     )
@@ -1485,7 +1582,8 @@ pub(in crate::execution) fn spawn_native_tls_transport(
                     .await;
                 }
                 NativeTlsRole::Server { config } => {
-                    let handshake = tokio::time::timeout(
+                    let handshake = crate::execution::operation_deadline_timeout(
+                        "TLS server handshake",
                         limits.operation_deadline,
                         TlsAcceptor::from(config).accept(stream),
                     )
@@ -1582,7 +1680,7 @@ pub(in crate::execution) fn spawn_loopback_tls_transport(
     endpoint: crate::state::LoopbackTlsEndpoint,
     role: NativeTlsRole,
     tls_state: Arc<Mutex<Option<ActiveTlsState>>>,
-    sender: AsyncCompletionSender<JavascriptTcpSocketEvent>,
+    sender: AsyncCompletionSender<TcpSocketEvent>,
     event_pusher: Arc<SocketReadinessSubscribers>,
     application_read_interest: Arc<AtomicBool>,
     application_read_notify: Arc<tokio::sync::Notify>,
@@ -1605,7 +1703,8 @@ pub(in crate::execution) fn spawn_loopback_tls_transport(
                     config,
                     server_name,
                 } => {
-                    let handshake = tokio::time::timeout(
+                    let handshake = crate::execution::operation_deadline_timeout(
+                        "TLS client handshake",
                         limits.operation_deadline,
                         TlsConnector::from(config).connect(server_name, endpoint),
                     )
@@ -1690,7 +1789,8 @@ pub(in crate::execution) fn spawn_loopback_tls_transport(
                     .await;
                 }
                 NativeTlsRole::Server { config } => {
-                    let handshake = tokio::time::timeout(
+                    let handshake = crate::execution::operation_deadline_timeout(
+                        "TLS server handshake",
                         limits.operation_deadline,
                         TlsAcceptor::from(config).accept(endpoint),
                     )
@@ -1786,7 +1886,7 @@ mod loopback_tls_registry_tests {
         loopback_tls_endpoint, loopback_tls_registry_contains, loopback_tls_transport_key,
         native_tls_role, tls_transport_is_already_closed, NativeTlsRole,
     };
-    use crate::state::JavascriptTlsBridgeOptions;
+    use crate::state::TlsBridgeOptions;
     use agentos_runtime::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
     use std::sync::Arc;
 
@@ -1802,11 +1902,11 @@ mod loopback_tls_registry_tests {
 
     #[test]
     fn empty_servername_uses_ip_host_without_sni() {
-        let options = JavascriptTlsBridgeOptions {
+        let options = TlsBridgeOptions {
             host: Some(String::from("127.0.0.1")),
             servername: Some(String::new()),
             reject_unauthorized: Some(false),
-            ..JavascriptTlsBridgeOptions::default()
+            ..TlsBridgeOptions::default()
         };
         let NativeTlsRole::Client {
             config,

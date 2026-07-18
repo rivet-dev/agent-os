@@ -1,0 +1,5994 @@
+{
+  "schemaVersion": 2,
+  "abiVersion": "agentos-wasm-host-v1",
+  "source": {
+    "preview1Module": "wasi_snapshot_preview1",
+    "preview1CompatibilityAlias": "wasi_unstable",
+    "preview1WitxCommit": "d4d3df3072b65ce43cb01c1add72b402d69a79d1",
+    "preview1Witx": [
+      {
+        "path": "crates/execution/abi/wasi_snapshot_preview1/typenames.witx",
+        "sha256": "d8144bbc5fca9b88590ac5ff2cc4920c8a4718ead6711edd2ac7086a9fb4cff3"
+      },
+      {
+        "path": "crates/execution/abi/wasi_snapshot_preview1/wasi_snapshot_preview1.witx",
+        "sha256": "25d7073b323e63171b1430ef380b18e6fc2cc50000b3636a89a4186f9ecab418"
+      }
+    ],
+    "preview1Generator": "agentos-wasm-abi-generator@0.0.1 (witx=0.9.1)",
+    "wasiLibcCommit": "574b88da481569b65a237cb80daf9a2d5aeaf82d",
+    "customAbiInventory": "docs/design/wasmtime-phase-0.md"
+  },
+  "moduleAliases": {
+    "wasi_unstable": "wasi_snapshot_preview1"
+  },
+  "representation": {
+    "byteOrder": "little",
+    "pointerBits": 32,
+    "sizeBits": 32,
+    "layouts": {
+      "ciovec": {
+        "size": 8,
+        "align": 4,
+        "fields": {
+          "buf": 0,
+          "buf_len": 4
+        }
+      },
+      "dirent": {
+        "size": 24,
+        "align": 8,
+        "fields": {
+          "d_ino": 8,
+          "d_namlen": 16,
+          "d_next": 0,
+          "d_type": 20
+        }
+      },
+      "event": {
+        "size": 32,
+        "align": 8,
+        "fields": {
+          "error": 8,
+          "fd_readwrite": 16,
+          "type": 10,
+          "userdata": 0
+        }
+      },
+      "fdstat": {
+        "size": 24,
+        "align": 8,
+        "fields": {
+          "fs_filetype": 0,
+          "fs_flags": 2,
+          "fs_rights_base": 8,
+          "fs_rights_inheriting": 16
+        }
+      },
+      "filestat": {
+        "size": 64,
+        "align": 8,
+        "fields": {
+          "atim": 40,
+          "ctim": 56,
+          "dev": 0,
+          "filetype": 16,
+          "ino": 8,
+          "mtim": 48,
+          "nlink": 24,
+          "size": 32
+        }
+      },
+      "iovec": {
+        "size": 8,
+        "align": 4,
+        "fields": {
+          "buf": 0,
+          "buf_len": 4
+        }
+      },
+      "prestat": {
+        "size": 8,
+        "align": 4,
+        "fields": {
+          "name_len": 4,
+          "tag": 0
+        }
+      },
+      "subscription": {
+        "size": 48,
+        "align": 8,
+        "fields": {
+          "clock_or_fd": 16,
+          "type": 8,
+          "userdata": 0
+        }
+      }
+    }
+  },
+  "modulePolicy": {
+    "wasi_snapshot_preview1": [
+      "isolated",
+      "read-only",
+      "read-write",
+      "full"
+    ],
+    "wasi_unstable": [
+      "isolated",
+      "read-only",
+      "read-write",
+      "full"
+    ],
+    "host_fs": [
+      "isolated",
+      "read-only",
+      "read-write",
+      "full"
+    ],
+    "host_user": [
+      "isolated",
+      "read-only",
+      "read-write",
+      "full"
+    ],
+    "host_tty": [
+      "isolated",
+      "read-only",
+      "read-write",
+      "full"
+    ],
+    "host_system": [
+      "isolated",
+      "read-only",
+      "read-write",
+      "full"
+    ],
+    "host_net": [
+      "full"
+    ],
+    "host_process": [
+      "full"
+    ]
+  },
+  "importPolicyOverrides": {
+    "host_process.fd_dup_min": [
+      "read-only",
+      "read-write",
+      "full"
+    ],
+    "host_process.fd_flock": [
+      "read-only",
+      "read-write",
+      "full"
+    ],
+    "host_process.fd_getfd": [
+      "read-only",
+      "read-write",
+      "full"
+    ],
+    "host_process.fd_record_lock": [
+      "read-only",
+      "read-write",
+      "full"
+    ],
+    "host_process.fd_setfd": [
+      "read-only",
+      "read-write",
+      "full"
+    ],
+    "host_process.proc_getrlimit": [
+      "read-only",
+      "read-write",
+      "full"
+    ],
+    "host_process.proc_setrlimit": [
+      "read-only",
+      "read-write",
+      "full"
+    ],
+    "host_process.proc_umask": [
+      "read-only",
+      "read-write",
+      "full"
+    ],
+    "host_process.umask": [
+      "read-only",
+      "read-write",
+      "full"
+    ]
+  },
+  "coreSignatures": [
+    {
+      "id": "I32I32I32I32I32I64I64I32I32ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i64",
+        "i64",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32I32I32I32I64I64I32ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32I32I32I32I64ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32I32I32I64I32ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32I32I32I64I64I32I32I32I32ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i64",
+        "i64",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32I32I64I64I32I32I32I32ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i64",
+        "i64",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32I64I32I32ToI32",
+      "params": [
+        "i32",
+        "i64",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32I64I32ToI32",
+      "params": [
+        "i32",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32I64I64I32I32ToI32",
+      "params": [
+        "i32",
+        "i64",
+        "i64",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32I64I64I32ToI32",
+      "params": [
+        "i32",
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32I64I64ToI32",
+      "params": [
+        "i32",
+        "i64",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32I64ToI32",
+      "params": [
+        "i32",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32ToI32",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32ToI64",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i64"
+      ]
+    },
+    {
+      "id": "I32ToNoResults",
+      "params": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "id": "I32x10ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32x12ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32x17ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32x21ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32x2ToI32",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32x3ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32x4ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32x4ToI64",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i64"
+      ]
+    },
+    {
+      "id": "I32x5ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32x6ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32x7ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32x8ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "I32x9ToI32",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "id": "NoParamsToI32",
+      "params": [],
+      "results": [
+        "i32"
+      ]
+    }
+  ],
+  "bindings": {
+    "host_fs.chmod": {
+      "id": "HostFsChmod",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "MetadataMode",
+      "decode": "HostFsChmod",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.chown": {
+      "id": "HostFsChown",
+      "status": "canonical",
+      "coreSignature": "I32x6ToI32",
+      "handler": "MetadataOwnership",
+      "decode": "PathOwnership",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fchmod": {
+      "id": "HostFsFchmod",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "MetadataMode",
+      "decode": "HostFsFchmod",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fchown": {
+      "id": "HostFsFchown",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "MetadataOwnership",
+      "decode": "DescriptorOwnership",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_blocks": {
+      "id": "HostFsFdBlocks",
+      "status": "canonical",
+      "coreSignature": "I32ToI64",
+      "handler": "DescriptorMetadata",
+      "decode": "HostFsFdBlocks",
+      "encode": "ScalarI64MaxOnError",
+      "returnKind": "ScalarI64",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_chown": {
+      "id": "HostFsFdChown",
+      "status": "compatibility",
+      "coreSignature": "I32x3ToI32",
+      "handler": "MetadataOwnership",
+      "decode": "DescriptorOwnership",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_collapse_range": {
+      "id": "HostFsFdCollapseRange",
+      "status": "canonical",
+      "coreSignature": "I32I64I64ToI32",
+      "handler": "ExtentRange",
+      "decode": "HostFsFdCollapseRange",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_fiemap": {
+      "id": "HostFsFdFiemap",
+      "status": "canonical",
+      "coreSignature": "I32x5ToI32",
+      "handler": "HostFsFdFiemap",
+      "decode": "HostFsFdFiemap",
+      "encode": "HostFsFdFiemapOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_getxattr": {
+      "id": "HostFsFdGetxattr",
+      "status": "canonical",
+      "coreSignature": "I32x6ToI32",
+      "handler": "DescriptorXattr",
+      "decode": "HostFsFdGetxattr",
+      "encode": "HostFsFdGetxattrOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_insert_range": {
+      "id": "HostFsFdInsertRange",
+      "status": "canonical",
+      "coreSignature": "I32I64I64ToI32",
+      "handler": "ExtentRange",
+      "decode": "HostFsFdInsertRange",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_link": {
+      "id": "HostFsFdLink",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "HostFsFdLink",
+      "decode": "HostFsFdLink",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_listxattr": {
+      "id": "HostFsFdListxattr",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "DescriptorXattr",
+      "decode": "HostFsFdListxattr",
+      "encode": "HostFsFdListxattrOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_mode": {
+      "id": "HostFsFdMode",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "DescriptorMetadata",
+      "decode": "HostFsFdMode",
+      "encode": "ScalarI32ZeroOnError",
+      "returnKind": "ScalarI32",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_owner": {
+      "id": "HostFsFdOwner",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "DescriptorMetadata",
+      "decode": "HostFsFdOwner",
+      "encode": "HostFsFdOwnerOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_punch_hole": {
+      "id": "HostFsFdPunchHole",
+      "status": "canonical",
+      "coreSignature": "I32I64I64ToI32",
+      "handler": "ExtentRange",
+      "decode": "HostFsFdPunchHole",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_removexattr": {
+      "id": "HostFsFdRemovexattr",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "DescriptorXattr",
+      "decode": "HostFsFdRemovexattr",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_setxattr": {
+      "id": "HostFsFdSetxattr",
+      "status": "canonical",
+      "coreSignature": "I32x6ToI32",
+      "handler": "DescriptorXattr",
+      "decode": "HostFsFdSetxattr",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_size": {
+      "id": "HostFsFdSize",
+      "status": "canonical",
+      "coreSignature": "I32ToI64",
+      "handler": "DescriptorMetadata",
+      "decode": "HostFsFdSize",
+      "encode": "ScalarI64MaxOnError",
+      "returnKind": "ScalarI64",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.fd_zero_range": {
+      "id": "HostFsFdZeroRange",
+      "status": "canonical",
+      "coreSignature": "I32I64I64I32ToI32",
+      "handler": "ExtentRange",
+      "decode": "HostFsFdZeroRange",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.ftruncate": {
+      "id": "HostFsFtruncate",
+      "status": "compatibility",
+      "coreSignature": "I32I64ToI32",
+      "handler": "DescriptorSetLength",
+      "decode": "FdSetLength",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.open_tmpfile": {
+      "id": "HostFsOpenTmpfile",
+      "status": "canonical",
+      "coreSignature": "I32x6ToI32",
+      "handler": "HostFsOpenTmpfile",
+      "decode": "HostFsOpenTmpfile",
+      "encode": "HostFsOpenTmpfileOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.path_access": {
+      "id": "HostFsPathAccess",
+      "status": "canonical",
+      "coreSignature": "I32x5ToI32",
+      "handler": "HostFsPathAccess",
+      "decode": "HostFsPathAccess",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.path_blocks": {
+      "id": "HostFsPathBlocks",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI64",
+      "handler": "PathMetadata",
+      "decode": "HostFsPathBlocks",
+      "encode": "ScalarI64MaxOnError",
+      "returnKind": "ScalarI64",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.path_chown": {
+      "id": "HostFsPathChown",
+      "status": "compatibility",
+      "coreSignature": "I32x6ToI32",
+      "handler": "MetadataOwnership",
+      "decode": "PathOwnership",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.path_getxattr": {
+      "id": "HostFsPathGetxattr",
+      "status": "canonical",
+      "coreSignature": "I32x9ToI32",
+      "handler": "PathXattr",
+      "decode": "HostFsPathGetxattr",
+      "encode": "HostFsPathGetxattrOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.path_listxattr": {
+      "id": "HostFsPathListxattr",
+      "status": "canonical",
+      "coreSignature": "I32x7ToI32",
+      "handler": "PathXattr",
+      "decode": "HostFsPathListxattr",
+      "encode": "HostFsPathListxattrOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.path_mknod": {
+      "id": "HostFsPathMknod",
+      "status": "canonical",
+      "coreSignature": "I32I32I32I32I64ToI32",
+      "handler": "HostFsPathMknod",
+      "decode": "HostFsPathMknod",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.path_mode": {
+      "id": "HostFsPathMode",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "PathMetadata",
+      "decode": "HostFsPathMode",
+      "encode": "ScalarI32ZeroOnError",
+      "returnKind": "ScalarI32",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.path_owner": {
+      "id": "HostFsPathOwner",
+      "status": "canonical",
+      "coreSignature": "I32x6ToI32",
+      "handler": "PathMetadata",
+      "decode": "HostFsPathOwner",
+      "encode": "HostFsPathOwnerOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.path_rdev": {
+      "id": "HostFsPathRdev",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI64",
+      "handler": "PathMetadata",
+      "decode": "HostFsPathRdev",
+      "encode": "ScalarI64ZeroOnError",
+      "returnKind": "ScalarI64",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.path_removexattr": {
+      "id": "HostFsPathRemovexattr",
+      "status": "canonical",
+      "coreSignature": "I32x6ToI32",
+      "handler": "PathXattr",
+      "decode": "HostFsPathRemovexattr",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.path_renameat2": {
+      "id": "HostFsPathRenameat2",
+      "status": "canonical",
+      "coreSignature": "I32x7ToI32",
+      "handler": "PathRename",
+      "decode": "HostFsPathRenameat2",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.path_setxattr": {
+      "id": "HostFsPathSetxattr",
+      "status": "canonical",
+      "coreSignature": "I32x9ToI32",
+      "handler": "PathXattr",
+      "decode": "HostFsPathSetxattr",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.path_size": {
+      "id": "HostFsPathSize",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI64",
+      "handler": "PathMetadata",
+      "decode": "HostFsPathSize",
+      "encode": "ScalarI64MaxOnError",
+      "returnKind": "ScalarI64",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.path_statfs": {
+      "id": "HostFsPathStatfs",
+      "status": "canonical",
+      "coreSignature": "I32x8ToI32",
+      "handler": "HostFsPathStatfs",
+      "decode": "HostFsPathStatfs",
+      "encode": "HostFsPathStatfsOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.remount": {
+      "id": "HostFsRemount",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "HostFsRemount",
+      "decode": "HostFsRemount",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.set_open_direct": {
+      "id": "HostFsSetOpenDirect",
+      "status": "compatibility",
+      "coreSignature": "I32ToI32",
+      "handler": "HostFsSetOpenDirect",
+      "decode": "HostFsSetOpenDirect",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Local",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_fs.set_open_mode": {
+      "id": "HostFsSetOpenMode",
+      "status": "compatibility",
+      "coreSignature": "I32ToI32",
+      "handler": "HostFsSetOpenMode",
+      "decode": "HostFsSetOpenMode",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Local",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_net.net_accept": {
+      "id": "HostNetNetAccept",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "HostNetNetAccept",
+      "decode": "HostNetNetAccept",
+      "encode": "HostNetNetAcceptOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_bind": {
+      "id": "HostNetNetBind",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "HostNetNetBind",
+      "decode": "HostNetNetBind",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_close": {
+      "id": "HostNetNetClose",
+      "status": "compatibility",
+      "coreSignature": "I32ToI32",
+      "handler": "DescriptorClose",
+      "decode": "Fd",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_connect": {
+      "id": "HostNetNetConnect",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "HostNetNetConnect",
+      "decode": "HostNetNetConnect",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_dns_query_rr_v1": {
+      "id": "HostNetNetDnsQueryRrV1",
+      "status": "canonical",
+      "coreSignature": "I32x8ToI32",
+      "handler": "HostNetNetDnsQueryRrV1",
+      "decode": "HostNetNetDnsQueryRrV1",
+      "encode": "HostNetNetDnsQueryRrV1Output",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_getaddrinfo": {
+      "id": "HostNetNetGetaddrinfo",
+      "status": "canonical",
+      "coreSignature": "I32x7ToI32",
+      "handler": "HostNetNetGetaddrinfo",
+      "decode": "HostNetNetGetaddrinfo",
+      "encode": "HostNetNetGetaddrinfoOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_getpeername": {
+      "id": "HostNetNetGetpeername",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "NetworkAddress",
+      "decode": "NetworkAddressOutput",
+      "encode": "NetworkAddressOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_getsockname": {
+      "id": "HostNetNetGetsockname",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "NetworkAddress",
+      "decode": "NetworkAddressOutput",
+      "encode": "NetworkAddressOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_getsockopt": {
+      "id": "HostNetNetGetsockopt",
+      "status": "canonical",
+      "coreSignature": "I32x5ToI32",
+      "handler": "NetworkOption",
+      "decode": "HostNetNetGetsockopt",
+      "encode": "HostNetNetGetsockoptOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_listen": {
+      "id": "HostNetNetListen",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "HostNetNetListen",
+      "decode": "HostNetNetListen",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_poll": {
+      "id": "HostNetNetPoll",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "ProcessPoll",
+      "decode": "HostNetNetPoll",
+      "encode": "HostNetNetPollOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_recv": {
+      "id": "HostNetNetRecv",
+      "status": "canonical",
+      "coreSignature": "I32x5ToI32",
+      "handler": "NetworkReceive",
+      "decode": "HostNetNetRecv",
+      "encode": "HostNetNetRecvOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_recvfrom": {
+      "id": "HostNetNetRecvfrom",
+      "status": "canonical",
+      "coreSignature": "I32x7ToI32",
+      "handler": "NetworkReceive",
+      "decode": "HostNetNetRecvfrom",
+      "encode": "HostNetNetRecvfromOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_send": {
+      "id": "HostNetNetSend",
+      "status": "canonical",
+      "coreSignature": "I32x5ToI32",
+      "handler": "NetworkSend",
+      "decode": "HostNetNetSend",
+      "encode": "HostNetNetSendOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_sendto": {
+      "id": "HostNetNetSendto",
+      "status": "canonical",
+      "coreSignature": "I32x7ToI32",
+      "handler": "NetworkSend",
+      "decode": "HostNetNetSendto",
+      "encode": "HostNetNetSendtoOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_set_nonblock": {
+      "id": "HostNetNetSetNonblock",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "DescriptorStatusFlags",
+      "decode": "HostNetNetSetNonblock",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_setsockopt": {
+      "id": "HostNetNetSetsockopt",
+      "status": "canonical",
+      "coreSignature": "I32x5ToI32",
+      "handler": "NetworkOption",
+      "decode": "HostNetNetSetsockopt",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_socket": {
+      "id": "HostNetNetSocket",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "HostNetNetSocket",
+      "decode": "HostNetNetSocket",
+      "encode": "HostNetNetSocketOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_tls_connect": {
+      "id": "HostNetNetTlsConnect",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "HostNetNetTlsConnect",
+      "decode": "HostNetNetTlsConnect",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_validate_accept": {
+      "id": "HostNetNetValidateAccept",
+      "status": "compatibility",
+      "coreSignature": "I32ToI32",
+      "handler": "NetworkValidate",
+      "decode": "Fd",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_net.net_validate_socket": {
+      "id": "HostNetNetValidateSocket",
+      "status": "compatibility",
+      "coreSignature": "I32ToI32",
+      "handler": "NetworkValidate",
+      "decode": "Fd",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.fd_dup": {
+      "id": "HostProcessFdDup",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "DescriptorDuplicate",
+      "decode": "HostProcessFdDup",
+      "encode": "HostProcessFdDupOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.fd_dup_min": {
+      "id": "HostProcessFdDupMin",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "DescriptorDuplicate",
+      "decode": "HostProcessFdDupMin",
+      "encode": "HostProcessFdDupMinOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_process.fd_dup2": {
+      "id": "HostProcessFdDup2",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "DescriptorDuplicate",
+      "decode": "HostProcessFdDup2",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.fd_flock": {
+      "id": "HostProcessFdFlock",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "DescriptorLock",
+      "decode": "HostProcessFdFlock",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_process.fd_getfd": {
+      "id": "HostProcessFdGetfd",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "DescriptorFlags",
+      "decode": "HostProcessFdGetfd",
+      "encode": "HostProcessFdGetfdOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_process.fd_pipe": {
+      "id": "HostProcessFdPipe",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "HostProcessFdPipe",
+      "decode": "HostProcessFdPipe",
+      "encode": "HostProcessFdPipeOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.fd_record_lock": {
+      "id": "HostProcessFdRecordLock",
+      "status": "canonical",
+      "coreSignature": "I32I32I32I64I64I32I32I32I32ToI32",
+      "handler": "DescriptorLock",
+      "decode": "HostProcessFdRecordLock",
+      "encode": "HostProcessFdRecordLockOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_process.fd_recvmsg_rights": {
+      "id": "HostProcessFdRecvmsgRights",
+      "status": "canonical",
+      "coreSignature": "I32x9ToI32",
+      "handler": "DescriptorRights",
+      "decode": "HostProcessFdRecvmsgRights",
+      "encode": "HostProcessFdRecvmsgRightsOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.fd_sendmsg_rights": {
+      "id": "HostProcessFdSendmsgRights",
+      "status": "canonical",
+      "coreSignature": "I32x7ToI32",
+      "handler": "DescriptorRights",
+      "decode": "HostProcessFdSendmsgRights",
+      "encode": "HostProcessFdSendmsgRightsOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.fd_setfd": {
+      "id": "HostProcessFdSetfd",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "DescriptorFlags",
+      "decode": "HostProcessFdSetfd",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_process.fd_socketpair": {
+      "id": "HostProcessFdSocketpair",
+      "status": "canonical",
+      "coreSignature": "I32x5ToI32",
+      "handler": "HostProcessFdSocketpair",
+      "decode": "HostProcessFdSocketpair",
+      "encode": "HostProcessFdSocketpairOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_closefrom": {
+      "id": "HostProcessProcClosefrom",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "HostProcessProcClosefrom",
+      "decode": "HostProcessProcClosefrom",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_exec": {
+      "id": "HostProcessProcExec",
+      "status": "canonical",
+      "coreSignature": "I32x8ToI32",
+      "handler": "ProcessExec",
+      "decode": "HostProcessProcExec",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Terminal",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_fexec": {
+      "id": "HostProcessProcFexec",
+      "status": "canonical",
+      "coreSignature": "I32x7ToI32",
+      "handler": "ProcessExec",
+      "decode": "HostProcessProcFexec",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Terminal",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_getpgid": {
+      "id": "HostProcessProcGetpgid",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "ProcessGroup",
+      "decode": "HostProcessProcGetpgid",
+      "encode": "HostProcessProcGetpgidOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_getpid": {
+      "id": "HostProcessProcGetpid",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "HostProcessProcGetpid",
+      "decode": "HostProcessProcGetpid",
+      "encode": "HostProcessProcGetpidOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_getppid": {
+      "id": "HostProcessProcGetppid",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "HostProcessProcGetppid",
+      "decode": "HostProcessProcGetppid",
+      "encode": "HostProcessProcGetppidOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_getrlimit": {
+      "id": "HostProcessProcGetrlimit",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "HostProcessProcGetrlimit",
+      "decode": "HostProcessProcGetrlimit",
+      "encode": "HostProcessProcGetrlimitOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_process.proc_itimer_real": {
+      "id": "HostProcessProcItimerReal",
+      "status": "canonical",
+      "coreSignature": "I32I64I64I32I32ToI32",
+      "handler": "HostProcessProcItimerReal",
+      "decode": "HostProcessProcItimerReal",
+      "encode": "HostProcessProcItimerRealOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_kill": {
+      "id": "HostProcessProcKill",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "HostProcessProcKill",
+      "decode": "HostProcessProcKill",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_ppoll_v1": {
+      "id": "HostProcessProcPpollV1",
+      "status": "canonical",
+      "coreSignature": "I32I32I64I64I32I32I32I32ToI32",
+      "handler": "ProcessPoll",
+      "decode": "HostProcessProcPpollV1",
+      "encode": "HostProcessProcPpollV1Output",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_setpgid": {
+      "id": "HostProcessProcSetpgid",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "ProcessGroup",
+      "decode": "HostProcessProcSetpgid",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_setrlimit": {
+      "id": "HostProcessProcSetrlimit",
+      "status": "canonical",
+      "coreSignature": "I32I64I64ToI32",
+      "handler": "HostProcessProcSetrlimit",
+      "decode": "HostProcessProcSetrlimit",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_process.proc_sigaction": {
+      "id": "HostProcessProcSigaction",
+      "status": "canonical",
+      "coreSignature": "I32x5ToI32",
+      "handler": "HostProcessProcSigaction",
+      "decode": "HostProcessProcSigaction",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_signal_mask_v2": {
+      "id": "HostProcessProcSignalMaskV2",
+      "status": "canonical",
+      "coreSignature": "I32x5ToI32",
+      "handler": "HostProcessProcSignalMaskV2",
+      "decode": "HostProcessProcSignalMaskV2",
+      "encode": "HostProcessProcSignalMaskV2Output",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_spawn": {
+      "id": "HostProcessProcSpawn",
+      "status": "compatibility",
+      "coreSignature": "I32x10ToI32",
+      "handler": "ProcessSpawn",
+      "decode": "HostProcessProcSpawn",
+      "encode": "ProcessIdOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_spawn_v2": {
+      "id": "HostProcessProcSpawnV2",
+      "status": "compatibility",
+      "coreSignature": "I32x12ToI32",
+      "handler": "ProcessSpawn",
+      "decode": "HostProcessProcSpawnV2",
+      "encode": "ProcessIdOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_spawn_v3": {
+      "id": "HostProcessProcSpawnV3",
+      "status": "compatibility",
+      "coreSignature": "I32x17ToI32",
+      "handler": "ProcessSpawn",
+      "decode": "HostProcessProcSpawnV3",
+      "encode": "ProcessIdOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_spawn_v4": {
+      "id": "HostProcessProcSpawnV4",
+      "status": "canonical",
+      "coreSignature": "I32x21ToI32",
+      "handler": "ProcessSpawn",
+      "decode": "HostProcessProcSpawnV4",
+      "encode": "ProcessIdOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_umask": {
+      "id": "HostProcessProcUmask",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "ProcessUmask",
+      "decode": "HostProcessProcUmask",
+      "encode": "HostProcessProcUmaskOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_process.proc_waitpid": {
+      "id": "HostProcessProcWaitpid",
+      "status": "compatibility",
+      "coreSignature": "I32x4ToI32",
+      "handler": "ProcessWait",
+      "decode": "HostProcessProcWaitpid",
+      "encode": "HostProcessProcWaitpidOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_waitpid_v2": {
+      "id": "HostProcessProcWaitpidV2",
+      "status": "compatibility",
+      "coreSignature": "I32x6ToI32",
+      "handler": "ProcessWait",
+      "decode": "HostProcessProcWaitpidV2",
+      "encode": "HostProcessProcWaitpidV2Output",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.proc_waitpid_v3": {
+      "id": "HostProcessProcWaitpidV3",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "ProcessWait",
+      "decode": "HostProcessProcWaitpidV3",
+      "encode": "HostProcessProcWaitpidV3Output",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.pty_open": {
+      "id": "HostProcessPtyOpen",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "HostProcessPtyOpen",
+      "decode": "HostProcessPtyOpen",
+      "encode": "HostProcessPtyOpenOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.sleep_ms": {
+      "id": "HostProcessSleepMs",
+      "status": "compatibility",
+      "coreSignature": "I32ToI32",
+      "handler": "HostProcessSleepMs",
+      "decode": "HostProcessSleepMs",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "full"
+      ]
+    },
+    "host_process.umask": {
+      "id": "HostProcessUmask",
+      "status": "compatibility",
+      "coreSignature": "I32x3ToI32",
+      "handler": "ProcessUmask",
+      "decode": "HostProcessUmask",
+      "encode": "HostProcessUmaskOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_system.get_identity": {
+      "id": "HostSystemGetIdentity",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "HostSystemGetIdentity",
+      "decode": "HostSystemGetIdentity",
+      "encode": "HostSystemGetIdentityOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_tty.get_attr": {
+      "id": "HostTtyGetAttr",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "TerminalAttributes",
+      "decode": "HostTtyGetAttr",
+      "encode": "HostTtyGetAttrOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_tty.get_pgrp": {
+      "id": "HostTtyGetPgrp",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "TerminalProcessGroup",
+      "decode": "TerminalU32Output",
+      "encode": "TerminalU32Output",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_tty.get_sid": {
+      "id": "HostTtyGetSid",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "HostTtyGetSid",
+      "decode": "TerminalU32Output",
+      "encode": "TerminalU32Output",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_tty.get_size": {
+      "id": "HostTtyGetSize",
+      "status": "compatibility",
+      "coreSignature": "I32x3ToI32",
+      "handler": "TerminalSize",
+      "decode": "HostTtyGetSize",
+      "encode": "HostTtyGetSizeOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_tty.isatty": {
+      "id": "HostTtyIsatty",
+      "status": "compatibility",
+      "coreSignature": "I32ToI32",
+      "handler": "TerminalIsatty",
+      "decode": "Fd",
+      "encode": "ScalarI32ZeroOnError",
+      "returnKind": "ScalarI32",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_tty.read": {
+      "id": "HostTtyRead",
+      "status": "compatibility",
+      "coreSignature": "I32x3ToI32",
+      "handler": "HostTtyRead",
+      "decode": "HostTtyRead",
+      "encode": "HostTtyReadOutput",
+      "returnKind": "ScalarI32",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_tty.set_attr": {
+      "id": "HostTtySetAttr",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "TerminalAttributes",
+      "decode": "HostTtySetAttr",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_tty.set_pgrp": {
+      "id": "HostTtySetPgrp",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "TerminalProcessGroup",
+      "decode": "HostTtySetPgrp",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_tty.set_raw_mode": {
+      "id": "HostTtySetRawMode",
+      "status": "compatibility",
+      "coreSignature": "I32ToI32",
+      "handler": "HostTtySetRawMode",
+      "decode": "HostTtySetRawMode",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_tty.set_size": {
+      "id": "HostTtySetSize",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "TerminalSize",
+      "decode": "HostTtySetSize",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.getegid": {
+      "id": "HostUserGetegid",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "IdentitySnapshot",
+      "decode": "IdentityScalarOutput",
+      "encode": "IdentityScalarOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.geteuid": {
+      "id": "HostUserGeteuid",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "IdentitySnapshot",
+      "decode": "IdentityScalarOutput",
+      "encode": "IdentityScalarOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.getgid": {
+      "id": "HostUserGetgid",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "IdentitySnapshot",
+      "decode": "IdentityScalarOutput",
+      "encode": "IdentityScalarOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.getgrent": {
+      "id": "HostUserGetgrent",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "AccountGroup",
+      "decode": "AccountByIndex",
+      "encode": "AccountRecordOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.getgrgid": {
+      "id": "HostUserGetgrgid",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "AccountGroup",
+      "decode": "AccountById",
+      "encode": "AccountRecordOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.getgrnam": {
+      "id": "HostUserGetgrnam",
+      "status": "canonical",
+      "coreSignature": "I32x5ToI32",
+      "handler": "AccountGroup",
+      "decode": "AccountByName",
+      "encode": "AccountRecordOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.getgroups": {
+      "id": "HostUserGetgroups",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "HostUserGetgroups",
+      "decode": "HostUserGetgroups",
+      "encode": "HostUserGetgroupsOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.getpwent": {
+      "id": "HostUserGetpwent",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "AccountPassword",
+      "decode": "AccountByIndex",
+      "encode": "AccountRecordOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.getpwnam": {
+      "id": "HostUserGetpwnam",
+      "status": "canonical",
+      "coreSignature": "I32x5ToI32",
+      "handler": "AccountPassword",
+      "decode": "AccountByName",
+      "encode": "AccountRecordOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.getpwuid": {
+      "id": "HostUserGetpwuid",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "AccountPassword",
+      "decode": "AccountById",
+      "encode": "AccountRecordOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.getresgid": {
+      "id": "HostUserGetresgid",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "IdentitySnapshot",
+      "decode": "IdentityTripleOutput",
+      "encode": "IdentityTripleOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.getresuid": {
+      "id": "HostUserGetresuid",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "IdentitySnapshot",
+      "decode": "IdentityTripleOutput",
+      "encode": "IdentityTripleOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.getuid": {
+      "id": "HostUserGetuid",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "IdentitySnapshot",
+      "decode": "IdentityScalarOutput",
+      "encode": "IdentityScalarOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.isatty": {
+      "id": "HostUserIsatty",
+      "status": "compatibility",
+      "coreSignature": "I32x2ToI32",
+      "handler": "TerminalIsatty",
+      "decode": "HostUserIsatty",
+      "encode": "HostUserIsattyOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.setegid": {
+      "id": "HostUserSetegid",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "IdentityCredentials",
+      "decode": "IdentitySetOne",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.seteuid": {
+      "id": "HostUserSeteuid",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "IdentityCredentials",
+      "decode": "IdentitySetOne",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.setgid": {
+      "id": "HostUserSetgid",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "IdentityCredentials",
+      "decode": "IdentitySetOne",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.setgroups": {
+      "id": "HostUserSetgroups",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "HostUserSetgroups",
+      "decode": "HostUserSetgroups",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.setregid": {
+      "id": "HostUserSetregid",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "IdentityCredentials",
+      "decode": "IdentitySetTwo",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.setresgid": {
+      "id": "HostUserSetresgid",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "IdentityCredentials",
+      "decode": "IdentitySetThree",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.setresuid": {
+      "id": "HostUserSetresuid",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "IdentityCredentials",
+      "decode": "IdentitySetThree",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.setreuid": {
+      "id": "HostUserSetreuid",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "IdentityCredentials",
+      "decode": "IdentitySetTwo",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "host_user.setuid": {
+      "id": "HostUserSetuid",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "IdentityCredentials",
+      "decode": "IdentitySetOne",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.args_get": {
+      "id": "WasiSnapshotPreview1ArgsGet",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "ProcessArguments",
+      "decode": "WasiSnapshotPreview1ArgsGet",
+      "encode": "WasiSnapshotPreview1ArgsGetOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Bootstrap",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.args_sizes_get": {
+      "id": "WasiSnapshotPreview1ArgsSizesGet",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "ProcessArguments",
+      "decode": "WasiSnapshotPreview1ArgsSizesGet",
+      "encode": "WasiSnapshotPreview1ArgsSizesGetOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Bootstrap",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.clock_res_get": {
+      "id": "WasiSnapshotPreview1ClockResGet",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "ClockSnapshot",
+      "decode": "WasiSnapshotPreview1ClockResGet",
+      "encode": "U64Output",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.clock_time_get": {
+      "id": "WasiSnapshotPreview1ClockTimeGet",
+      "status": "canonical",
+      "coreSignature": "I32I64I32ToI32",
+      "handler": "ClockSnapshot",
+      "decode": "WasiSnapshotPreview1ClockTimeGet",
+      "encode": "U64Output",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.environ_get": {
+      "id": "WasiSnapshotPreview1EnvironGet",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "ProcessEnvironment",
+      "decode": "WasiSnapshotPreview1EnvironGet",
+      "encode": "WasiSnapshotPreview1EnvironGetOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Bootstrap",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.environ_sizes_get": {
+      "id": "WasiSnapshotPreview1EnvironSizesGet",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "ProcessEnvironment",
+      "decode": "WasiSnapshotPreview1EnvironSizesGet",
+      "encode": "WasiSnapshotPreview1EnvironSizesGetOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Bootstrap",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_allocate": {
+      "id": "WasiSnapshotPreview1FdAllocate",
+      "status": "compatibility",
+      "coreSignature": "I32I64I64ToI32",
+      "handler": "ExtentRange",
+      "decode": "WasiSnapshotPreview1FdAllocate",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_close": {
+      "id": "WasiSnapshotPreview1FdClose",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "DescriptorClose",
+      "decode": "Fd",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_datasync": {
+      "id": "WasiSnapshotPreview1FdDatasync",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "DescriptorSync",
+      "decode": "Fd",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_fdstat_get": {
+      "id": "WasiSnapshotPreview1FdFdstatGet",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "DescriptorStatusFlags",
+      "decode": "WasiSnapshotPreview1FdFdstatGet",
+      "encode": "WasiSnapshotPreview1FdFdstatGetOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_fdstat_set_flags": {
+      "id": "WasiSnapshotPreview1FdFdstatSetFlags",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "DescriptorStatusFlags",
+      "decode": "WasiSnapshotPreview1FdFdstatSetFlags",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_filestat_get": {
+      "id": "WasiSnapshotPreview1FdFilestatGet",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "DescriptorMetadata",
+      "decode": "WasiSnapshotPreview1FdFilestatGet",
+      "encode": "WasiSnapshotPreview1FdFilestatGetOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_filestat_set_size": {
+      "id": "WasiSnapshotPreview1FdFilestatSetSize",
+      "status": "canonical",
+      "coreSignature": "I32I64ToI32",
+      "handler": "DescriptorSetLength",
+      "decode": "FdSetLength",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_filestat_set_times": {
+      "id": "WasiSnapshotPreview1FdFilestatSetTimes",
+      "status": "compatibility",
+      "coreSignature": "I32I64I64I32ToI32",
+      "handler": "MetadataSetTimes",
+      "decode": "WasiSnapshotPreview1FdFilestatSetTimes",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_pread": {
+      "id": "WasiSnapshotPreview1FdPread",
+      "status": "canonical",
+      "coreSignature": "I32I32I32I64I32ToI32",
+      "handler": "DescriptorRead",
+      "decode": "WasiSnapshotPreview1FdPread",
+      "encode": "DescriptorReadOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_prestat_dir_name": {
+      "id": "WasiSnapshotPreview1FdPrestatDirName",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "Preopen",
+      "decode": "WasiSnapshotPreview1FdPrestatDirName",
+      "encode": "WasiSnapshotPreview1FdPrestatDirNameOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Bootstrap",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_prestat_get": {
+      "id": "WasiSnapshotPreview1FdPrestatGet",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "Preopen",
+      "decode": "WasiSnapshotPreview1FdPrestatGet",
+      "encode": "WasiSnapshotPreview1FdPrestatGetOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Bootstrap",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_pwrite": {
+      "id": "WasiSnapshotPreview1FdPwrite",
+      "status": "canonical",
+      "coreSignature": "I32I32I32I64I32ToI32",
+      "handler": "DescriptorWrite",
+      "decode": "WasiSnapshotPreview1FdPwrite",
+      "encode": "DescriptorWriteOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_read": {
+      "id": "WasiSnapshotPreview1FdRead",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "DescriptorRead",
+      "decode": "WasiSnapshotPreview1FdRead",
+      "encode": "DescriptorReadOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_readdir": {
+      "id": "WasiSnapshotPreview1FdReaddir",
+      "status": "canonical",
+      "coreSignature": "I32I32I32I64I32ToI32",
+      "handler": "WasiSnapshotPreview1FdReaddir",
+      "decode": "WasiSnapshotPreview1FdReaddir",
+      "encode": "WasiSnapshotPreview1FdReaddirOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_renumber": {
+      "id": "WasiSnapshotPreview1FdRenumber",
+      "status": "compatibility",
+      "coreSignature": "I32x2ToI32",
+      "handler": "WasiSnapshotPreview1FdRenumber",
+      "decode": "WasiSnapshotPreview1FdRenumber",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_seek": {
+      "id": "WasiSnapshotPreview1FdSeek",
+      "status": "canonical",
+      "coreSignature": "I32I64I32I32ToI32",
+      "handler": "DescriptorSeek",
+      "decode": "WasiSnapshotPreview1FdSeek",
+      "encode": "DescriptorOffsetOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_sync": {
+      "id": "WasiSnapshotPreview1FdSync",
+      "status": "canonical",
+      "coreSignature": "I32ToI32",
+      "handler": "DescriptorSync",
+      "decode": "Fd",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_tell": {
+      "id": "WasiSnapshotPreview1FdTell",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "DescriptorSeek",
+      "decode": "WasiSnapshotPreview1FdTell",
+      "encode": "DescriptorOffsetOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.fd_write": {
+      "id": "WasiSnapshotPreview1FdWrite",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "DescriptorWrite",
+      "decode": "WasiSnapshotPreview1FdWrite",
+      "encode": "DescriptorWriteOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.path_create_directory": {
+      "id": "WasiSnapshotPreview1PathCreateDirectory",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "WasiSnapshotPreview1PathCreateDirectory",
+      "decode": "WasiSnapshotPreview1PathCreateDirectory",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.path_filestat_get": {
+      "id": "WasiSnapshotPreview1PathFilestatGet",
+      "status": "canonical",
+      "coreSignature": "I32x5ToI32",
+      "handler": "PathMetadata",
+      "decode": "WasiSnapshotPreview1PathFilestatGet",
+      "encode": "WasiSnapshotPreview1PathFilestatGetOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.path_filestat_set_times": {
+      "id": "WasiSnapshotPreview1PathFilestatSetTimes",
+      "status": "compatibility",
+      "coreSignature": "I32I32I32I32I64I64I32ToI32",
+      "handler": "MetadataSetTimes",
+      "decode": "WasiSnapshotPreview1PathFilestatSetTimes",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.path_link": {
+      "id": "WasiSnapshotPreview1PathLink",
+      "status": "canonical",
+      "coreSignature": "I32x7ToI32",
+      "handler": "WasiSnapshotPreview1PathLink",
+      "decode": "WasiSnapshotPreview1PathLink",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.path_open": {
+      "id": "WasiSnapshotPreview1PathOpen",
+      "status": "canonical",
+      "coreSignature": "I32I32I32I32I32I64I64I32I32ToI32",
+      "handler": "WasiSnapshotPreview1PathOpen",
+      "decode": "WasiSnapshotPreview1PathOpen",
+      "encode": "WasiSnapshotPreview1PathOpenOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "SignalRestartable",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.path_readlink": {
+      "id": "WasiSnapshotPreview1PathReadlink",
+      "status": "canonical",
+      "coreSignature": "I32x6ToI32",
+      "handler": "WasiSnapshotPreview1PathReadlink",
+      "decode": "WasiSnapshotPreview1PathReadlink",
+      "encode": "WasiSnapshotPreview1PathReadlinkOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.path_remove_directory": {
+      "id": "WasiSnapshotPreview1PathRemoveDirectory",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "PathRemove",
+      "decode": "WasiSnapshotPreview1PathRemoveDirectory",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.path_rename": {
+      "id": "WasiSnapshotPreview1PathRename",
+      "status": "canonical",
+      "coreSignature": "I32x6ToI32",
+      "handler": "PathRename",
+      "decode": "WasiSnapshotPreview1PathRename",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.path_symlink": {
+      "id": "WasiSnapshotPreview1PathSymlink",
+      "status": "canonical",
+      "coreSignature": "I32x5ToI32",
+      "handler": "WasiSnapshotPreview1PathSymlink",
+      "decode": "WasiSnapshotPreview1PathSymlink",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.path_unlink_file": {
+      "id": "WasiSnapshotPreview1PathUnlinkFile",
+      "status": "canonical",
+      "coreSignature": "I32x3ToI32",
+      "handler": "PathRemove",
+      "decode": "WasiSnapshotPreview1PathUnlinkFile",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.poll_oneoff": {
+      "id": "WasiSnapshotPreview1PollOneoff",
+      "status": "canonical",
+      "coreSignature": "I32x4ToI32",
+      "handler": "ProcessPoll",
+      "decode": "WasiSnapshotPreview1PollOneoff",
+      "encode": "WasiSnapshotPreview1PollOneoffOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Wait",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.proc_exit": {
+      "id": "WasiSnapshotPreview1ProcExit",
+      "status": "canonical",
+      "coreSignature": "I32ToNoResults",
+      "handler": "WasiSnapshotPreview1ProcExit",
+      "decode": "WasiSnapshotPreview1ProcExit",
+      "encode": "Void",
+      "returnKind": "Void",
+      "executionClass": "Terminal",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.random_get": {
+      "id": "WasiSnapshotPreview1RandomGet",
+      "status": "canonical",
+      "coreSignature": "I32x2ToI32",
+      "handler": "WasiSnapshotPreview1RandomGet",
+      "decode": "WasiSnapshotPreview1RandomGet",
+      "encode": "WasiSnapshotPreview1RandomGetOutput",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": true,
+      "prevalidateOutputs": true,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.sched_yield": {
+      "id": "WasiSnapshotPreview1SchedYield",
+      "status": "canonical",
+      "coreSignature": "NoParamsToI32",
+      "handler": "WasiSnapshotPreview1SchedYield",
+      "decode": "WasiSnapshotPreview1SchedYield",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Local",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    },
+    "wasi_snapshot_preview1.sock_shutdown": {
+      "id": "WasiSnapshotPreview1SockShutdown",
+      "status": "compatibility",
+      "coreSignature": "I32x2ToI32",
+      "handler": "WasiSnapshotPreview1SockShutdown",
+      "decode": "WasiSnapshotPreview1SockShutdown",
+      "encode": "WasiErrno",
+      "returnKind": "WasiErrno",
+      "executionClass": "Host",
+      "restartability": "Never",
+      "transactional": false,
+      "prevalidateOutputs": false,
+      "permissionTiers": [
+        "isolated",
+        "read-only",
+        "read-write",
+        "full"
+      ]
+    }
+  },
+  "imports": [
+    {
+      "module": "host_fs",
+      "name": "chmod",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "chown",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fchmod",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fchown",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_blocks",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i64"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_chown",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_collapse_range",
+      "params": [
+        "i32",
+        "i64",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_fiemap",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_getxattr",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_insert_range",
+      "params": [
+        "i32",
+        "i64",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_link",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_listxattr",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_mode",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_owner",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_punch_hole",
+      "params": [
+        "i32",
+        "i64",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_removexattr",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_setxattr",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_size",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i64"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "fd_zero_range",
+      "params": [
+        "i32",
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "ftruncate",
+      "params": [
+        "i32",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_fs",
+      "name": "open_tmpfile",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "path_access",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "path_blocks",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i64"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "path_chown",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_fs",
+      "name": "path_getxattr",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "path_listxattr",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "path_mknod",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "path_mode",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "path_owner",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "path_rdev",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i64"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "path_removexattr",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "path_renameat2",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "path_setxattr",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "path_size",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i64"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "path_statfs",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "remount",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_fs",
+      "name": "set_open_direct",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_fs",
+      "name": "set_open_mode",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_net",
+      "name": "net_accept",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_bind",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_close",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_net",
+      "name": "net_connect",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_dns_query_rr_v1",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_getaddrinfo",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_getpeername",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_getsockname",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_getsockopt",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_listen",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_poll",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_recv",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_recvfrom",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_send",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_sendto",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_set_nonblock",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_setsockopt",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_socket",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_tls_connect",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_net",
+      "name": "net_validate_accept",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_net",
+      "name": "net_validate_socket",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_process",
+      "name": "fd_dup",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "fd_dup_min",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "fd_dup2",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "fd_flock",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "fd_getfd",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "fd_pipe",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "fd_record_lock",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i64",
+        "i64",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "fd_recvmsg_rights",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "fd_sendmsg_rights",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "fd_setfd",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "fd_socketpair",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_closefrom",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_exec",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_fexec",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_getpgid",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_getpid",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_getppid",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_getrlimit",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_itimer_real",
+      "params": [
+        "i32",
+        "i64",
+        "i64",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_kill",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_ppoll_v1",
+      "params": [
+        "i32",
+        "i32",
+        "i64",
+        "i64",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_setpgid",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_setrlimit",
+      "params": [
+        "i32",
+        "i64",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_sigaction",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_signal_mask_v2",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_spawn",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_spawn_v2",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_spawn_v3",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_spawn_v4",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_umask",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_waitpid",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_waitpid_v2",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_process",
+      "name": "proc_waitpid_v3",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "pty_open",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_process",
+      "name": "sleep_ms",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_process",
+      "name": "umask",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_system",
+      "name": "get_identity",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_tty",
+      "name": "get_attr",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_tty",
+      "name": "get_pgrp",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_tty",
+      "name": "get_sid",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_tty",
+      "name": "get_size",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_tty",
+      "name": "isatty",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_tty",
+      "name": "read",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_tty",
+      "name": "set_attr",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_tty",
+      "name": "set_pgrp",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_tty",
+      "name": "set_raw_mode",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_tty",
+      "name": "set_size",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "getegid",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "geteuid",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "getgid",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "getgrent",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "getgrgid",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "getgrnam",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "getgroups",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "getpwent",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "getpwnam",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "getpwuid",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "getresgid",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "getresuid",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "getuid",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "isatty",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "host_user",
+      "name": "setegid",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "seteuid",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "setgid",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "setgroups",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "setregid",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "setresgid",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "setresuid",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "setreuid",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "host_user",
+      "name": "setuid",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "args_get",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "args_sizes_get",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "clock_res_get",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "clock_time_get",
+      "params": [
+        "i32",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "environ_get",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "environ_sizes_get",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_allocate",
+      "params": [
+        "i32",
+        "i64",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_close",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_datasync",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_fdstat_get",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_fdstat_set_flags",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_filestat_get",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_filestat_set_size",
+      "params": [
+        "i32",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_filestat_set_times",
+      "params": [
+        "i32",
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_pread",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_prestat_dir_name",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_prestat_get",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_pwrite",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_read",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_readdir",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_renumber",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_seek",
+      "params": [
+        "i32",
+        "i64",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_sync",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_tell",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_write",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "path_create_directory",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "path_filestat_get",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "path_filestat_set_times",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "path_link",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "path_open",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i64",
+        "i64",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "path_readlink",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "path_remove_directory",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "path_rename",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "path_symlink",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "path_unlink_file",
+      "params": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "poll_oneoff",
+      "params": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "proc_exit",
+      "params": [
+        "i32"
+      ],
+      "results": [],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "random_get",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "sched_yield",
+      "params": [],
+      "results": [
+        "i32"
+      ],
+      "status": "canonical"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "sock_shutdown",
+      "params": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "status": "compatibility"
+    }
+  ]
+}

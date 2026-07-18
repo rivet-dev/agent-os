@@ -2407,13 +2407,31 @@ async function fsReadFileAsync(path, options) {
   }
 
   const rawPath = normalizePathLike(path);
-  const handle = new FileHandle(fs.openSync(rawPath, "r"));
+  const encoding = typeof options === "string" ? options : options?.encoding;
   try {
-    return await handle.readFile(options);
-  } finally {
-    if (!handle.closed) {
-      await handle.close();
+    if (encoding) {
+      return await _fsAsync.readFile.apply(void 0, [rawPath, encoding]);
     }
+    const base64Content = await _fsAsync.readFileBinary.apply(void 0, [rawPath]);
+    return import_buffer.Buffer.from(base64Content, "base64");
+  } catch (err) {
+    if (bridgeErrorCode(err) === "ENOENT") {
+      throw createFsError(
+        "ENOENT",
+        `ENOENT: no such file or directory, open '${rawPath}'`,
+        "open",
+        rawPath
+      );
+    }
+    if (bridgeErrorCode(err) === "EACCES") {
+      throw createFsError(
+        "EACCES",
+        `EACCES: permission denied, open '${rawPath}'`,
+        "open",
+        rawPath
+      );
+    }
+    throw err;
   }
 }
 async function fsWriteFileAsync(file, data, options) {

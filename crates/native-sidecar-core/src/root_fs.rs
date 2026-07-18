@@ -26,20 +26,44 @@ use vfs::posix::usage::RootFilesystemResourceLimits;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidecarCoreError {
+    code: Option<String>,
     message: String,
 }
 
 impl SidecarCoreError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
+            code: None,
             message: message.into(),
         }
+    }
+
+    /// Construct a stable typed error for an executor-facing operation.
+    ///
+    /// The code is transported independently from the diagnostic message so
+    /// adapters never need to recover errno by parsing `Display` output.
+    pub fn typed(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: Some(code.into()),
+            message: message.into(),
+        }
+    }
+
+    pub fn code(&self) -> Option<&str> {
+        self.code.as_deref()
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
     }
 }
 
 impl fmt::Display for SidecarCoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
+        match &self.code {
+            Some(code) => write!(f, "{code}: {}", self.message),
+            None => f.write_str(&self.message),
+        }
     }
 }
 

@@ -118,6 +118,7 @@ fn default_engine_does_not_silently_select_process_topology() {
         .start_execution(StartWasmExecutionRequest {
             vm_id: String::from("vm-unbound"),
             context_id: String::from("missing-context"),
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: PathBuf::from("/"),

@@ -5,4 +5,9 @@ import type { VmUserAccountConfig } from "./VmUserAccountConfig.js";
 /**
  * Initial Linux-style credentials and account record for processes in a VM.
  */
-export type VmUserConfig = { uid?: number, gid?: number, euid?: number, egid?: number, username?: string, homedir?: string, shell?: string, gecos?: string, groupName?: string, supplementaryGids?: Array<number>, accounts?: Array<VmUserAccountConfig>, groups?: Array<VmGroupConfig>, };
+export type VmUserConfig = { uid?: number, gid?: number, euid?: number, egid?: number, username?: string, homedir?: string, shell?: string, gecos?: string, groupName?: string, 
+/**
+ * Initial supplementary process credentials. An explicit group record is
+ * authoritative and is not given extra members from this list.
+ */
+supplementaryGids?: Array<number>, accounts?: Array<VmUserAccountConfig>, groups?: Array<VmGroupConfig>, };

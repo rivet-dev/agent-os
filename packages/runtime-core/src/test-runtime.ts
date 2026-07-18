@@ -516,6 +516,7 @@ export interface Kernel extends KernelInterface {
 	registerBindings(bindings: Record<string, BindingDefinition>): Promise<void>;
 	getResourceSnapshot(): Promise<{
 		runningProcesses: number;
+		stoppedProcesses: number;
 		exitedProcesses: number;
 		fdTables: number;
 		openFds: number;
@@ -2077,9 +2078,9 @@ function createBootstrapEntries(commandNames: string[]): RootFilesystemEntry[] {
 						? 0o2755
 						: 0o755,
 			uid:
-				entryPath === "/home/agentos" || entryPath === "/workspace" ? 1000 : 0,
+				entryPath === "/workspace" || entryPath === "/home/agentos" ? 1000 : 0,
 			gid:
-				entryPath === "/home/agentos" || entryPath === "/workspace" ? 1000 : 0,
+				entryPath === "/workspace" || entryPath === "/home/agentos" ? 1000 : 0,
 		})),
 		{
 			path: "/usr/bin/env",

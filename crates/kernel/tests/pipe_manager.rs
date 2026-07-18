@@ -480,7 +480,7 @@ fn create_pipe_fds_allocates_pipe_entries_in_the_fd_table() {
 #[test]
 fn create_pipe_fds_propagates_fd_allocation_failures() {
     let manager = PipeManager::new();
-    let mut tables = FdTableManager::new();
+    let mut tables = FdTableManager::with_max_fds(256);
     let table = tables.create(1);
 
     for index in 0..253 {

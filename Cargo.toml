@@ -15,6 +15,7 @@ members = [
     "crates/native-sidecar",
     "crates/native-sidecar-browser",
     "crates/native-sidecar-core",
+    "crates/resource",
     "crates/runtime",
     "crates/sidecar-client",
     "crates/sidecar-protocol",
@@ -22,6 +23,7 @@ members = [
     "crates/vfs",
     "crates/vfs-store",
     "crates/vm-config",
+    "crates/wasm-abi-generator",
 ]
 # Browser support is intentionally retained in-tree but disabled while the
 # unified native sidecar reactor lands. Keep these two crates out of ordinary
@@ -37,6 +39,7 @@ default-members = [
     "crates/native-baseline",
     "crates/native-sidecar",
     "crates/native-sidecar-core",
+    "crates/resource",
     "crates/runtime",
     "crates/sidecar-client",
     "crates/sidecar-protocol",
@@ -65,6 +68,7 @@ agentos-native-baseline = { path = "crates/native-baseline", version = "0.0.1" }
 agentos-native-sidecar = { path = "crates/native-sidecar", version = "0.0.1" }
 agentos-native-sidecar-browser = { path = "crates/native-sidecar-browser", version = "0.0.1" }
 agentos-native-sidecar-core = { path = "crates/native-sidecar-core", version = "0.0.1" }
+agentos-resource = { path = "crates/resource", version = "0.0.1" }
 agentos-runtime = { path = "crates/runtime", version = "0.0.1" }
 agentos-protocol = { path = "crates/agentos-protocol", version = "0.0.1" }
 agentos-sidecar-client = { path = "crates/sidecar-client", version = "0.0.1" }

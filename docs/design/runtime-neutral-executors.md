@@ -30,8 +30,9 @@ executors before adding Wasmtime as a second standalone-WASM backend.
   implementation in the kernel or its kernel-owned resource layer. Executors
   adapt guest ABIs to that implementation; they do not provide per-engine
   versions.
-- The first implementation stays in the existing crates. A new shared crate is
-  not required unless dependency pressure proves that one is necessary.
+- Host operations stay in the existing kernel, execution, and sidecar crates.
+  The proven kernel/runtime/VFS accounting cycle is isolated in the small
+  runtime-neutral `agentos-resource` leaf crate described in Section 11.
 
 This is prerequisite architecture, not Wasmtime adapter work. The Wasmtime
 executor specification depends on the exit gates in this document. All work in
@@ -488,6 +489,11 @@ The target has one mutable source of truth:
   resources, not a mutable shadow copy;
 - a module loader may cache immutable bytes under ordinary bounded cache rules,
   but it cannot maintain writable filesystem state outside the kernel; and
+- an executor may stage one immutable, kernel-authorized executable image into
+  VM-private scratch storage when its engine requires a host path. That staging
+  is a one-way engine input: it is generation-bound, is not exposed as guest
+  filesystem state, is never consulted for later path or module resolution,
+  and is never reconciled back into the kernel VFS;
 - V8 may temporarily retain an ABI fd-alias map while Node-WASI is migrated,
   but aliases resolve to kernel descriptors and cannot own offsets, rights,
   contents, or lifecycle.
@@ -548,11 +554,19 @@ readiness state rather than a polling timer.
   loopback-only interface enumeration, or unsupported `mlock` stay in the
   owned sysroot and behave identically under both engines.
 
-## 11. Proposed code organization
+## 11. Code organization
 
-No new crate is required initially:
+Implementation exposed one real dependency cycle: the kernel and process
+runtime both need the hierarchical reservation ledger, while VFS already
+depends on the process runtime. The ledger therefore lives in the deliberately
+small `agentos-resource` leaf crate. It contains no Tokio, VFS, executor, or
+product dependency; kernel configuration remains the policy authority and the
+runtime can only observe usage for telemetry.
 
 ```text
+crates/resource/src/
+  lib.rs                    runtime-neutral ledger, reservations, change wakes
+
 crates/kernel/src/
   process_table.rs          authoritative process/signal/wait state
   process_runtime.rs        runtime endpoint, control requests, exit reporter
@@ -590,10 +604,10 @@ The exact file split can follow the implementation, but these ownership
 boundaries are normative. Do not put every operation in one `executor.rs`, one
 `host.rs`, or one mega-trait.
 
-A later `agentos-executor-host` crate is justified only if the existing crate
-graph creates a real dependency cycle or if independent fuzzing/linkage needs
-it. Creating a crate merely to hold traits adds packaging and versioning cost
-without improving ownership.
+A later `agentos-executor-host` crate remains unjustified. The resource leaf
+crate exists for the proven kernel/runtime/VFS cycle; creating another crate
+merely to hold executor traits would add packaging and versioning cost without
+improving ownership.
 
 ## 12. Prerequisite-revision workstream sequence
 

@@ -9,15 +9,18 @@ pub fn encoded_bytes_value(bytes: &[u8]) -> Value {
 }
 
 pub fn decode_encoded_bytes_value(value: &Value) -> Result<Vec<u8>, String> {
-    let Some(base64_value) = value
-        .get("__agentOSType")
-        .and_then(Value::as_str)
-        .filter(|kind| *kind == "bytes")
-        .and_then(|_| value.get("base64"))
-        .and_then(Value::as_str)
-    else {
-        return Err(String::from("must be a string or encoded bytes payload"));
-    };
+    let base64_value = if value.get("__agentOSType").and_then(Value::as_str) == Some("bytes") {
+        value.get("base64").and_then(Value::as_str)
+    } else if value.get("__type").and_then(Value::as_str) == Some("Buffer") {
+        // The V8 bridge serializes Uint8Array/Buffer arguments as a CBOR byte
+        // string. Its JSON compatibility projection is this exact tagged
+        // shape; accepting it here keeps every syscall adapter on one strict
+        // byte decoder without admitting arbitrary numeric arrays or objects.
+        value.get("data").and_then(Value::as_str)
+    } else {
+        None
+    }
+    .ok_or_else(|| String::from("must be a string or encoded bytes payload"))?;
 
     decode_base64(base64_value)
 }
@@ -58,6 +61,13 @@ mod tests {
     }
 
     #[test]
+    fn decodes_the_canonical_v8_cbor_byte_projection() {
+        let value = json!({ "__type": "Buffer", "data": "aGVsbG8=" });
+
+        assert_eq!(decode_encoded_bytes_value(&value), Ok(b"hello".to_vec()));
+    }
+
+    #[test]
     fn round_trips_bridge_buffer_payload() {
         let value = bridge_buffer_value(b"secret");
 
@@ -68,6 +78,14 @@ mod tests {
     fn rejects_wrong_payload_shapes() {
         assert_eq!(
             decode_encoded_bytes_value(&json!({ "__agentOSType": "text", "base64": "aGk=" })),
+            Err(String::from("must be a string or encoded bytes payload"))
+        );
+        assert_eq!(
+            decode_encoded_bytes_value(&json!({ "__type": "Buffer", "value": "aGk=" })),
+            Err(String::from("must be a string or encoded bytes payload"))
+        );
+        assert_eq!(
+            decode_encoded_bytes_value(&json!([104, 105])),
             Err(String::from("must be a string or encoded bytes payload"))
         );
         assert_eq!(

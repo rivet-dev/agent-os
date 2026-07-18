@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use support::{
     assert_node_available, authenticate_wire, collect_process_output_wire_with_timeout,
     create_vm_wire_with_metadata, execute_wire, new_sidecar, open_session_wire, temp_dir,
-    wire_request, wire_vm, write_fixture,
+    wire_request, wire_vm, write_fixture, write_guest_file_wire,
 };
 
 fn wait_for_process_output(
@@ -128,7 +128,6 @@ fn embedded_runtime_signal_routes_sigterm_and_process_kill() {
         &cwd,
         HashMap::new(),
     );
-
     execute_wire(
         &mut sidecar,
         4,
@@ -266,7 +265,6 @@ fn embedded_runtime_signal_stop_continue_updates_kernel_state_and_guest_handler(
         &cwd,
         HashMap::new(),
     );
-
     execute_wire(
         &mut sidecar,
         4,
@@ -630,6 +628,15 @@ fn embedded_runtime_process_group_kill_terminates_detached_tree() {
         &cwd,
         HashMap::new(),
     );
+    write_guest_file_wire(
+        &mut sidecar,
+        3_001,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "/group-child.mjs",
+        std::fs::read_to_string(&child_entry).expect("read process-group child fixture"),
+    );
 
     execute_wire(
         &mut sidecar,
@@ -791,6 +798,15 @@ fn pty_resize_delivers_sigwinch_to_nested_foreground_runtime() {
             allowed_builtins,
         )]),
     );
+    write_guest_file_wire(
+        &mut sidecar,
+        3_001,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "/child.mjs",
+        std::fs::read_to_string(&child_entry).expect("read PTY child fixture"),
+    );
     let ownership = wire_vm(&connection_id, &session_id, &vm_id);
     let started = sidecar
         .dispatch_wire_blocking(wire_request(
@@ -936,6 +952,15 @@ fn embedded_runtime_signal_delivers_sigchld_on_child_exit() {
             String::from("env.AGENTOS_ALLOWED_NODE_BUILTINS"),
             allowed_builtins,
         )]),
+    );
+    write_guest_file_wire(
+        &mut sidecar,
+        3_001,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "/child.mjs",
+        std::fs::read_to_string(&child_entry).expect("read SIGCHLD child fixture"),
     );
 
     execute_wire(

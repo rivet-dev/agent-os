@@ -1,8 +1,8 @@
+#[cfg(not(target_arch = "wasm32"))]
+use crate::admission::{Reservation, ResourceClass, ResourceLedger};
 use crate::fd_table::TransferredFd;
 use crate::poll::{PollEvents, POLLERR, POLLHUP, POLLIN, POLLOUT};
 use crate::vfs::normalize_path;
-#[cfg(not(target_arch = "wasm32"))]
-use agentos_runtime::accounting::{Reservation, ResourceClass, ResourceLedger};
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
@@ -544,7 +544,7 @@ impl SocketTableError {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn resource_limit(error: agentos_runtime::accounting::LimitError) -> Self {
+    fn resource_limit(error: crate::admission::LimitError) -> Self {
         Self {
             code: "EAGAIN",
             message: error.to_string(),
@@ -3114,7 +3114,7 @@ fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
 mod tests {
     use super::*;
     #[cfg(not(target_arch = "wasm32"))]
-    use agentos_runtime::accounting::{ResourceLimit, ResourceUsage};
+    use crate::admission::{ResourceLimit, ResourceUsage};
 
     /// Reads the monotonic socket-id counter without advancing it, so a test can
     /// observe whether a code path consumed an id.

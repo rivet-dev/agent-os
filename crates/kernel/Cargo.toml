@@ -8,6 +8,7 @@ description = "Shared kernel plane for agentos native and browser sidecars"
 
 [dependencies]
 agentos-bridge = { workspace = true }
+agentos-resource = { workspace = true }
 vfs = { workspace = true }
 base64 = "0.22"
 event-listener = "5.4"
@@ -19,10 +20,7 @@ serde_json = "1.0"
 web-time = "1.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-agentos-runtime = { workspace = true }
 getrandom = "0.2"
-hickory-resolver = "=0.26.0-beta.3"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }

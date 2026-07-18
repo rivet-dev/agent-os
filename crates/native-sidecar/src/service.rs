@@ -1,21 +1,21 @@
 use crate::bindings::register_host_callbacks;
 use crate::bridge::{build_mount_plugin_registry, MountPluginContext};
 pub(crate) use crate::execution::{
-    apply_active_process_default_signal, build_javascript_socket_path_context,
-    canonical_signal_name, deferred_kernel_wait_request_for_process,
-    dispatch_loopback_http_request_deferred, error_code, flush_pending_kernel_stdin,
-    format_tcp_resource, ignore_stale_javascript_sync_rpc_response, javascript_sync_rpc_arg_i32,
-    javascript_sync_rpc_arg_str, javascript_sync_rpc_arg_u32, javascript_sync_rpc_arg_u32_optional,
-    javascript_sync_rpc_arg_u64, javascript_sync_rpc_arg_u64_optional,
-    javascript_sync_rpc_bytes_arg, javascript_sync_rpc_bytes_value, javascript_sync_rpc_encoding,
-    javascript_sync_rpc_error_code, javascript_sync_rpc_may_make_fd_readable,
+    apply_kernel_signal_registration, build_socket_path_context,
+    deferred_kernel_wait_request_for_process, dispatch_loopback_http_request_deferred, error_code,
+    flush_pending_kernel_stdin, format_tcp_resource, host_bytes_value, host_service_error_code,
+    javascript_sync_rpc_arg_i32, javascript_sync_rpc_arg_str, javascript_sync_rpc_arg_u32,
+    javascript_sync_rpc_arg_u32_optional, javascript_sync_rpc_arg_u64,
+    javascript_sync_rpc_arg_u64_optional, javascript_sync_rpc_bytes_arg,
+    javascript_sync_rpc_encoding, javascript_sync_rpc_may_make_fd_readable,
     javascript_sync_rpc_may_make_fd_writable, javascript_sync_rpc_option_bool,
     javascript_sync_rpc_option_u32, kernel_poll_response, kernel_stdin_read_response,
     mark_execute_exit_event_queued, parse_kernel_poll_args, parse_kernel_stdin_read_args,
     parse_signal, record_execute_exit_event_queue_wait, record_execute_phase,
     sanitize_javascript_child_process_internal_bootstrap_env,
     service_javascript_kernel_fd_write_sync_rpc, service_javascript_sync_rpc,
-    JavascriptSyncRpcServiceRequest, LoopbackHttpDispatchRequest,
+    settle_execution_host_call, HickoryDnsResolver, JavascriptSyncRpcServiceRequest,
+    LoopbackHttpDispatchRequest,
 };
 use crate::extension::{
     Extension, ExtensionBufferedProcessOutput, ExtensionContext, ExtensionFuture, ExtensionHost,
@@ -25,18 +25,17 @@ use crate::filesystem::guest_filesystem_call as filesystem_guest_filesystem_call
 use crate::limits::DEFAULT_ACP_STDOUT_BUFFER_BYTE_LIMIT;
 use crate::protocol::{
     CloseStdinRequest, DisposeReason, EventFrame, EventPayload, ExecuteRequest, ExtEnvelope,
-    GuestFilesystemCallRequest, GuestFilesystemResultResponse, JavascriptChildProcessSpawnOptions,
-    JavascriptChildProcessSpawnRequest, KillProcessRequest, OpenSessionRequest, OwnershipScope,
-    ProcessKilledResponse, ProcessStartedResponse, RejectedResponse, RequestFrame, RequestId,
-    RequestPayload, ResponseFrame, ResponsePayload, SidecarRequestFrame, SidecarRequestPayload,
-    SidecarResponseFrame, SidecarResponsePayload, SidecarResponseTracker,
-    SidecarResponseTrackerError, SignalDispositionAction, StdinClosedResponse,
-    StdinWrittenResponse, VmLifecycleState, WriteStdinRequest,
+    GuestFilesystemCallRequest, GuestFilesystemResultResponse, KillProcessRequest,
+    OpenSessionRequest, OwnershipScope, ProcessKilledResponse, ProcessStartedResponse,
+    RejectedResponse, RequestFrame, RequestId, RequestPayload, ResponseFrame, ResponsePayload,
+    SidecarRequestFrame, SidecarRequestPayload, SidecarResponseFrame, SidecarResponsePayload,
+    SidecarResponseTracker, SidecarResponseTrackerError, StdinClosedResponse, StdinWrittenResponse,
+    VmLifecycleState, WriteStdinRequest,
 };
 use crate::state::{
-    ActiveExecutionEvent, BridgeError, ConnectionState, EventSinkTransport, JavascriptSocketFamily,
-    JavascriptSocketPathContext, ProcessEventEnvelope, QuarantinedVmGeneration, SessionState,
-    SharedBridge, SharedEventSink, SharedSidecarRequestClient, SidecarRequestTransport, VmState,
+    ActiveExecutionEvent, BridgeError, ConnectionState, EventSinkTransport, ExecutionHostCall,
+    ProcessEventEnvelope, QuarantinedVmGeneration, SessionState, SharedBridge, SharedEventSink,
+    SharedSidecarRequestClient, SidecarRequestTransport, SocketFamily, SocketPathContext, VmState,
     EXECUTION_DRIVER_NAME,
 };
 use crate::NativeSidecarBridge;
@@ -46,10 +45,11 @@ use agentos_bridge::{
     FilesystemPermissionRequest, LifecycleEventRecord, LifecycleState, LogLevel, LogRecord,
     NetworkAccess, NetworkPermissionRequest, StructuredEventRecord,
 };
+use agentos_execution::backend::ExecutionBackendKind;
+use agentos_execution::host::{ProcessLaunchOptions, ProcessLaunchRequest};
 use agentos_execution::{
     record_sync_bridge_request_observed, JavascriptExecutionEngine, JavascriptExecutionError,
-    JavascriptSyncRpcRequest, PythonExecutionEngine, PythonExecutionError, WasmExecutionEngine,
-    WasmExecutionError,
+    PythonExecutionEngine, PythonExecutionError, WasmExecutionEngine, WasmExecutionError,
 };
 use agentos_kernel::kernel::KernelError;
 use agentos_kernel::mount_plugin::{FileSystemPluginRegistry, PluginError};
@@ -64,9 +64,9 @@ use agentos_native_sidecar_core::permissions::{
     permission_mode_to_kernel_decision,
 };
 use agentos_native_sidecar_core::{
-    apply_process_signal_state_update, authenticated_response as shared_authenticated_response,
-    parse_process_signal_state_request, reject as shared_reject, respond as shared_respond,
-    route_request_payload, session_opened_response, unsupported_host_callback_direction_dispatch,
+    authenticated_response as shared_authenticated_response, parse_process_signal_state_request,
+    reject as shared_reject, respond as shared_respond, route_request_payload,
+    session_opened_response, unsupported_host_callback_direction_dispatch,
     validate_authenticate_versions, vm_lifecycle_event as shared_vm_lifecycle_event,
     AuthenticateVersionError, RequestRoute,
 };
@@ -75,11 +75,12 @@ use agentos_vm_config::{FsPermissionScope, PermissionMode, PermissionsPolicy};
 // root_fs types moved to crate::vm
 use agentos_kernel::vfs::VfsError;
 use serde::Deserialize;
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -113,20 +114,17 @@ pub(crate) const MAX_OUTBOUND_SIDECAR_REQUESTS: usize =
 pub(crate) const MAX_COMPLETED_SIDECAR_RESPONSES: usize =
     agentos_runtime::DEFAULT_PROTOCOL_MAX_COMPLETED_RESPONSES;
 pub(crate) fn process_event_queue_overflow_error(limit: usize) -> SidecarError {
-    SidecarError::InvalidState(format!(
-        "ERR_AGENTOS_PROCESS_EVENT_LIMIT: process event queue exceeded {limit} pending events; raise runtime.protocol.maxProcessEvents"
+    SidecarError::host("ERR_AGENTOS_PROCESS_EVENT_LIMIT", format!("process event queue exceeded {limit} pending events; raise runtime.protocol.maxProcessEvents"
     ))
 }
 
 fn sidecar_response_pending_overflow_error(limit: usize) -> SidecarError {
-    SidecarError::InvalidState(format!(
-        "ERR_AGENTOS_PENDING_RESPONSE_LIMIT: sidecar response tracker exceeded {limit} pending responses; raise runtime.protocol.maxPendingResponses"
+    SidecarError::host("ERR_AGENTOS_PENDING_RESPONSE_LIMIT", format!("sidecar response tracker exceeded {limit} pending responses; raise runtime.protocol.maxPendingResponses"
     ))
 }
 
 fn outbound_sidecar_request_queue_overflow_error(limit: usize) -> SidecarError {
-    SidecarError::InvalidState(format!(
-        "ERR_AGENTOS_OUTBOUND_REQUEST_LIMIT: outbound sidecar request queue exceeded {limit} pending requests; raise runtime.protocol.maxOutboundRequests"
+    SidecarError::host("ERR_AGENTOS_OUTBOUND_REQUEST_LIMIT", format!("outbound sidecar request queue exceeded {limit} pending requests; raise runtime.protocol.maxOutboundRequests"
     ))
 }
 
@@ -158,7 +156,7 @@ struct LegacyJavascriptChildProcessSpawnOptions {
     // hand-copied field list previously dropped POSIX spawn attributes and fd
     // mappings without an error.
     #[serde(flatten)]
-    options: JavascriptChildProcessSpawnOptions,
+    options: ProcessLaunchOptions,
     #[serde(default, rename = "maxBuffer")]
     max_buffer: Option<usize>,
 }
@@ -180,9 +178,9 @@ fn is_javascript_loopback_host(host: &str) -> bool {
 pub(crate) fn parse_javascript_child_process_spawn_request(
     vm: &VmState,
     args: &[Value],
-) -> Result<(JavascriptChildProcessSpawnRequest, Option<usize>), SidecarError> {
+) -> Result<(ProcessLaunchRequest, Option<usize>), SidecarError> {
     if let Some(value) = args.first().cloned() {
-        if let Ok(request) = serde_json::from_value::<JavascriptChildProcessSpawnRequest>(value) {
+        if let Ok(request) = serde_json::from_value::<ProcessLaunchRequest>(value) {
             return Ok((request, None));
         }
     }
@@ -200,7 +198,7 @@ pub(crate) fn parse_javascript_child_process_spawn_request(
     let options = parsed_options.options;
 
     Ok((
-        JavascriptChildProcessSpawnRequest {
+        ProcessLaunchRequest {
             command,
             args: parsed_args,
             options,
@@ -235,6 +233,8 @@ impl<B> SharedBridge<B> {
             permissions: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(test)]
             set_vm_permissions_outcomes: Arc::new(Mutex::new(VecDeque::new())),
+            #[cfg(test)]
+            emit_lifecycle_outcomes: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 }
@@ -281,6 +281,21 @@ where
         vm_id: &str,
         state: LifecycleState,
     ) -> Result<(), SidecarError> {
+        #[cfg(test)]
+        {
+            let outcome = self
+                .emit_lifecycle_outcomes
+                .lock()
+                .map_err(|_| {
+                    SidecarError::Bridge(String::from(
+                        "native sidecar test lifecycle outcome lock poisoned",
+                    ))
+                })?
+                .pop_front();
+            if let Some(Some(error)) = outcome {
+                return Err(error);
+            }
+        }
         self.with_mut(|bridge| {
             bridge.emit_lifecycle(LifecycleEventRecord {
                 vm_id: vm_id.to_owned(),
@@ -288,6 +303,23 @@ where
                 detail: None,
             })
         })
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn queue_emit_lifecycle_result(
+        &self,
+        result: Result<(), SidecarError>,
+    ) -> Result<(), SidecarError> {
+        self.emit_lifecycle_outcomes
+            .lock()
+            .map_err(|_| {
+                SidecarError::Bridge(String::from(
+                    "native sidecar test lifecycle outcome lock poisoned",
+                ))
+            })?
+            .push_back(result.err());
+        Ok(())
     }
 
     pub(crate) fn emit_log(
@@ -439,10 +471,10 @@ where
         }
 
         let message = match decision.reason.as_deref() {
-            Some(reason) => format!("EACCES: permission denied, {resource}: {reason}"),
-            None => format!("EACCES: permission denied, {resource}"),
+            Some(reason) => format!("permission denied, {resource}: {reason}"),
+            None => format!("permission denied, {resource}"),
         };
-        Err(SidecarError::Execution(message))
+        Err(SidecarError::host("EACCES", message))
     }
 
     /// Revalidate an authority-expanding network operation against both the
@@ -476,10 +508,10 @@ where
                 return Ok(());
             }
             let message = match decision.reason.as_deref() {
-                Some(reason) => format!("EACCES: permission denied, {resource}: {reason}"),
-                None => format!("EACCES: permission denied, {resource}"),
+                Some(reason) => format!("permission denied, {resource}: {reason}"),
+                None => format!("permission denied, {resource}"),
             };
-            Err(SidecarError::Execution(message))
+            Err(SidecarError::host("EACCES", message))
         };
 
         if let Some(permissions) = permissions {
@@ -601,7 +633,17 @@ where
         domain: &str,
         resource: Option<&str>,
     ) -> Option<PermissionDecision> {
-        let stored = self.permissions.lock().ok()?;
+        let stored = match self.permissions.lock() {
+            Ok(stored) => stored,
+            Err(_) => {
+                eprintln!(
+                    "ERR_AGENTOS_PERMISSION_STATE: permission policy lock is poisoned for VM {vm_id}; denying {capability} fail-closed"
+                );
+                return Some(PermissionDecision::deny(
+                    "permission policy state is unavailable",
+                ));
+            }
+        };
         let permissions = stored.get(vm_id)?;
         let mode = evaluate_permissions_policy(permissions, domain, capability, resource);
         Some(permission_mode_to_kernel_decision(mode, capability))
@@ -684,9 +726,9 @@ fn poll_future_once<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> Op
 
 // ConnectionState, SessionState, VmConfiguration, VmState moved to crate::state
 
-// JavascriptSocketPathContext, JavascriptSocketFamily, VmListenPolicy moved to crate::state
+// SocketPathContext, SocketFamily, VmListenPolicy moved to crate::state
 
-impl JavascriptSocketPathContext {
+impl SocketPathContext {
     pub(crate) fn loopback_port_allowed(&self, port: u16) -> bool {
         self.loopback_exempt_ports.contains(&port)
             || self
@@ -701,7 +743,7 @@ impl JavascriptSocketPathContext {
 
     pub(crate) fn translate_tcp_loopback_port(
         &self,
-        family: JavascriptSocketFamily,
+        family: SocketFamily,
         port: u16,
     ) -> Option<u16> {
         self.tcp_loopback_guest_to_host_ports
@@ -711,15 +753,15 @@ impl JavascriptSocketPathContext {
 
     pub(crate) fn http_loopback_target(
         &self,
-        family: JavascriptSocketFamily,
+        family: SocketFamily,
         port: u16,
-    ) -> Option<&crate::state::JavascriptHttpLoopbackTarget> {
+    ) -> Option<&crate::state::HttpLoopbackTarget> {
         self.http_loopback_targets.get(&(family, port))
     }
 
     pub(crate) fn translate_udp_loopback_port(
         &self,
-        family: JavascriptSocketFamily,
+        family: SocketFamily,
         port: u16,
     ) -> Option<u16> {
         self.udp_loopback_guest_to_host_ports
@@ -729,7 +771,7 @@ impl JavascriptSocketPathContext {
 
     pub(crate) fn guest_udp_port_for_host_port(
         &self,
-        family: JavascriptSocketFamily,
+        family: SocketFamily,
         port: u16,
     ) -> Option<u16> {
         self.udp_loopback_host_to_guest_ports
@@ -870,9 +912,8 @@ where
                 "native sidecar expected_auth_token must not be empty",
             )));
         }
-        let dns_resolver: agentos_kernel::dns::SharedDnsResolver = Arc::new(
-            agentos_kernel::dns::HickoryDnsResolver::with_runtime(runtime_context.clone()),
-        );
+        let dns_resolver: agentos_kernel::dns::SharedDnsResolver =
+            Arc::new(HickoryDnsResolver::new(runtime_context.clone()));
 
         let cache_root = config.compile_cache_root.clone().unwrap_or_else(|| {
             std::env::temp_dir().join(format!(
@@ -1057,9 +1098,10 @@ where
         let limit = self.config.runtime.resources.max_capabilities;
         let used = self.vms.len().saturating_add(self.quarantined_vms.len());
         if used >= limit {
-            return Err(SidecarError::InvalidState(format!(
-                "ERR_AGENTOS_VM_GENERATION_LIMIT: tracked={used} limit={limit}; raise runtime.resources.maxCapabilities"
-            )));
+            return Err(SidecarError::host(
+                "ERR_AGENTOS_VM_GENERATION_LIMIT",
+                format!("tracked={used} limit={limit}; raise runtime.resources.maxCapabilities"),
+            ));
         }
         Ok(())
     }
@@ -1076,10 +1118,13 @@ where
         }
         let limit = self.config.runtime.resources.max_capabilities;
         if self.quarantined_vms.len() >= limit {
-            return Err(SidecarError::InvalidState(format!(
-                "ERR_AGENTOS_VM_QUARANTINE_LIMIT: quarantined={} limit={limit}; raise runtime.resources.maxCapabilities",
-                self.quarantined_vms.len()
-            )));
+            return Err(SidecarError::host(
+                "ERR_AGENTOS_VM_QUARANTINE_LIMIT",
+                format!(
+                    "quarantined={} limit={limit}; raise runtime.resources.maxCapabilities",
+                    self.quarantined_vms.len()
+                ),
+            ));
         }
         self.quarantined_vms.insert(generation, quarantined);
         self.observe_active_vm_generations();
@@ -1099,6 +1144,21 @@ where
             return false;
         };
         match event {
+            ActiveExecutionEvent::Common(agentos_execution::backend::ExecutionEvent::Output {
+                stream,
+                bytes,
+            }) => {
+                match stream {
+                    agentos_execution::backend::OutputStream::Stdout => {
+                        buffer.append_stdout(bytes.as_slice(), DEFAULT_ACP_STDOUT_BUFFER_BYTE_LIMIT)
+                    }
+                    agentos_execution::backend::OutputStream::Stderr => {
+                        buffer.append_stderr(bytes.as_slice(), DEFAULT_ACP_STDOUT_BUFFER_BYTE_LIMIT)
+                    }
+                }
+                true
+            }
+            ActiveExecutionEvent::Common(_) => false,
             ActiveExecutionEvent::Stdout(chunk) => {
                 buffer.append_stdout(chunk, DEFAULT_ACP_STDOUT_BUFFER_BYTE_LIMIT);
                 true
@@ -1107,10 +1167,10 @@ where
                 buffer.append_stderr(chunk, DEFAULT_ACP_STDOUT_BUFFER_BYTE_LIMIT);
                 true
             }
-            ActiveExecutionEvent::JavascriptSyncRpcRequest(_)
-            | ActiveExecutionEvent::JavascriptSyncRpcCompletion(_)
-            | ActiveExecutionEvent::PythonVfsRpcRequest(_)
-            | ActiveExecutionEvent::PythonSocketConnectCompletion(_)
+            ActiveExecutionEvent::HostRpcRequest(_)
+            | ActiveExecutionEvent::HostCallCompletion(_)
+            | ActiveExecutionEvent::ManagedStreamReadRecheck(_)
+            | ActiveExecutionEvent::ManagedUdpPollRecheck(_)
             | ActiveExecutionEvent::SignalState { .. }
             | ActiveExecutionEvent::Exited(_) => false,
         }
@@ -1358,17 +1418,27 @@ where
             vm_bytes = vm_bytes.saturating_add(pending.retained_bytes());
         }
         if vm_count >= limits.pending_event_count {
-            return Err(SidecarError::InvalidState(format!(
-                "VM {} process event queue exceeded {} events (limits.process.pendingEventCount)",
-                envelope.vm_id, limits.pending_event_count
-            )));
+            return Err(SidecarError::host_resource_limit(
+                "limits.process.pendingEventCount",
+                limits.pending_event_count,
+                vm_count.saturating_add(1),
+                format!(
+                    "VM {} process event queue exceeded {} events (limits.process.pendingEventCount); raise limits.process.pendingEventCount",
+                    envelope.vm_id, limits.pending_event_count
+                ),
+            ));
         }
         let next_bytes = vm_bytes.saturating_add(envelope.retained_bytes());
         if next_bytes > limits.pending_event_bytes {
-            return Err(SidecarError::InvalidState(format!(
-                "VM {} process event queue exceeded {} retained bytes (limits.process.pendingEventBytes)",
-                envelope.vm_id, limits.pending_event_bytes
-            )));
+            return Err(SidecarError::host_resource_limit(
+                "limits.process.pendingEventBytes",
+                limits.pending_event_bytes,
+                next_bytes,
+                format!(
+                    "VM {} process event queue exceeded {} retained bytes (limits.process.pendingEventBytes); raise limits.process.pendingEventBytes",
+                    envelope.vm_id, limits.pending_event_bytes
+                ),
+            ));
         }
         Ok(())
     }
@@ -1498,8 +1568,7 @@ where
                     .get(&ownership.vm_id)
                     .and_then(|vm| vm.runtime_context.terminal_failure())
                 {
-                    let error = SidecarError::Execution(format!(
-                        "ERR_AGENTOS_VM_TASK_FAILED: vm_id={} class={:?} owner={} reason={:?}; dispose and recreate this VM generation",
+                    let error = SidecarError::host("ERR_AGENTOS_VM_TASK_FAILED", format!("vm_id={} class={:?} owner={} reason={:?}; dispose and recreate this VM generation",
                         ownership.vm_id, report.class, report.owner, report.reason
                     ));
                     return Ok(DispatchResult {
@@ -1884,7 +1953,7 @@ where
         request: &RequestFrame,
         payload: crate::protocol::AuthenticateRequest,
     ) -> Result<DispatchResult, SidecarError> {
-        let _ = self.connection_id_for(&request.ownership)?;
+        self.connection_id_for(&request.ownership)?;
         if let Err(error) = self.validate_auth_token(&payload.auth_token) {
             let mut fields = audit_fields([
                 (String::from("source"), payload.client_name.clone()),
@@ -2087,37 +2156,10 @@ where
 
     // dispose_vm_internal, terminate_vm_processes, wait_for_vm_processes_to_exit moved to crate::vm
 
-    // kill_process_internal, handle_execution_event, handle_python_vfs_rpc_request,
-    // resolve_javascript_child_process_execution, spawn_javascript_child_process,
-    // poll_javascript_child_process, write_javascript_child_process_stdin,
-    // close_javascript_child_process_stdin, kill_javascript_child_process moved to crate::execution
-
-    /// Whether a `__kernel_stdin_read` / `__kernel_poll` RPC may be serviced
-    /// via the non-blocking deferral path. Non-TTY JavaScript keeps its
-    /// in-process local stdin bridge (serviced inline by the fallback arm).
-    fn kernel_wait_rpc_is_deferrable(
-        &self,
-        vm_id: &str,
-        process_id: &str,
-        request: &JavascriptSyncRpcRequest,
-    ) -> bool {
-        let Some(vm) = self.vms.get(vm_id) else {
-            return false;
-        };
-        let Some(process) = vm.active_processes.get(process_id) else {
-            return false;
-        };
-        if request.method == "__kernel_stdin_read"
-            && matches!(
-                process.execution,
-                crate::state::ActiveExecution::Javascript(_)
-            )
-            && process.tty_master_fd.is_none()
-        {
-            return false;
-        }
-        true
-    }
+    // kill_process_internal, handle_execution_event,
+    // resolve_javascript_child_process_execution, spawn_child_process,
+    // poll_child_process, write_child_process_stdin,
+    // Child-process lifecycle operations moved to crate::execution.
 
     /// Service `__kernel_stdin_read` / `__kernel_poll` without blocking the
     /// dispatch loop. Probes readiness with a zero timeout; when not ready and
@@ -2132,8 +2174,9 @@ where
         &mut self,
         vm_id: &str,
         process_id: &str,
-        request: &JavascriptSyncRpcRequest,
-    ) -> Result<Option<crate::execution::JavascriptSyncRpcServiceResponse>, SidecarError> {
+        call: &ExecutionHostCall,
+    ) -> Result<Option<crate::execution::HostServiceResponse>, SidecarError> {
+        let request = &call.request;
         let requested_timeout_ms = match request.method.as_str() {
             "process.fd_write" => None,
             "__kernel_stdin_read" => parse_kernel_stdin_read_args(request)?.1,
@@ -2162,15 +2205,30 @@ where
         } else {
             requested_timeout_ms
         };
+        let requested_deadline = requested_timeout_ms
+            .map(crate::execution::checked_deferred_guest_wait_deadline)
+            .transpose()
+            .map_err(SidecarError::from)?;
         // Reading from the pipe frees capacity. Top it off before every root
         // process read/poll probe, matching the descendant-process path, and
         // deliver a deferred close only after all accepted bytes are written.
         flush_pending_kernel_stdin(&mut vm.kernel, process)?;
         let kernel_pid = process.kernel_pid;
         let kernel_stdin_reader_fd = process.kernel_stdin_reader_fd;
-        let deadline = match &process.deferred_kernel_wait_rpc {
-            Some((parked, parked_deadline)) if parked.id == request.id => *parked_deadline,
-            _ => requested_timeout_ms.map(|timeout_ms| now + Duration::from_millis(timeout_ms)),
+        let same_parked_call = process
+            .deferred_kernel_wait_rpc
+            .as_ref()
+            .is_some_and(|(parked, _)| parked.id == request.id);
+        if !same_parked_call {
+            process.deferred_kernel_wait_deadline_warned = false;
+        }
+        let deadline = if same_parked_call {
+            process
+                .deferred_kernel_wait_rpc
+                .as_ref()
+                .and_then(|(_, deadline)| *deadline)
+        } else {
+            requested_deadline
         };
         let probe = match request.method.as_str() {
             "process.fd_write" => {
@@ -2205,22 +2263,38 @@ where
             }
             Err(error)
                 if request.method == "process.fd_write"
-                    && javascript_sync_rpc_error_code(&error) == "EAGAIN" =>
+                    && host_service_error_code(&error) == "EAGAIN" =>
             {
                 (Value::Null, false)
             }
             Err(error) => {
-                process.deferred_kernel_wait_rpc = None;
+                process.clear_deferred_kernel_wait_rpc();
                 return Err(error);
             }
         };
+        let mut operation_deadline = if request.method == "process.fd_write" {
+            deadline.map(|deadline| {
+                crate::execution::OperationDeadlineTracker::from_deadline(
+                    deadline,
+                    Duration::from_millis(vm.limits.reactor.operation_deadline_ms),
+                    process.deferred_kernel_wait_deadline_warned,
+                )
+            })
+        } else {
+            None
+        };
+        if !ready {
+            if let Some(deadline) = operation_deadline.as_mut() {
+                deadline.observe("deferred root-process fd write");
+                process.deferred_kernel_wait_deadline_warned = deadline.warning_emitted();
+            }
+        }
         if request.method == "process.fd_write"
             && !ready
             && deadline.is_some_and(|deadline| now >= deadline)
         {
-            process.deferred_kernel_wait_rpc = None;
-            return Err(SidecarError::Execution(format!(
-                "ETIMEDOUT: pipe write exceeded limits.reactor.operationDeadlineMs ({} ms); raise that limit for slower readers",
+            process.clear_deferred_kernel_wait_rpc();
+            return Err(SidecarError::host("ETIMEDOUT", format!("pipe write exceeded limits.reactor.operationDeadlineMs ({} ms); raise that limit for slower readers",
                 vm.limits.reactor.operation_deadline_ms
             )));
         }
@@ -2228,17 +2302,20 @@ where
             || requested_timeout_ms == Some(0)
             || deadline.is_some_and(|deadline| now >= deadline)
         {
-            process.deferred_kernel_wait_rpc = None;
+            process.clear_deferred_kernel_wait_rpc();
             return Ok(Some(probe.into()));
         }
 
         let connection_id = vm.connection_id.clone();
         let session_id = vm.session_id.clone();
         let runtime = vm.runtime_context.clone();
-        let remaining = deadline.map(|deadline| deadline.saturating_duration_since(now));
+        let remaining = operation_deadline
+            .as_ref()
+            .map(crate::execution::OperationDeadlineTracker::remaining_until_next_edge)
+            .or_else(|| deadline.map(|deadline| deadline.saturating_duration_since(now)));
         let sender = self.process_event_sender.clone();
         let event_notify = Arc::clone(&self.process_event_notify);
-        let waiter_request = request.clone();
+        let waiter_request = call.clone();
         let envelope_vm_id = vm_id.to_owned();
         let envelope_process_id = process_id.to_owned();
         runtime
@@ -2260,7 +2337,7 @@ where
                     session_id,
                     vm_id: envelope_vm_id,
                     process_id: envelope_process_id,
-                    event: ActiveExecutionEvent::JavascriptSyncRpcRequest(waiter_request),
+                    event: ActiveExecutionEvent::HostRpcRequest(waiter_request),
                 })
                 .await
                 .is_err()
@@ -2279,7 +2356,7 @@ where
         let Some(process) = vm.active_processes.get_mut(process_id) else {
             return Ok(None);
         };
-        process.deferred_kernel_wait_rpc = Some((request.clone(), deadline));
+        process.deferred_kernel_wait_rpc = Some((call.clone(), deadline));
         Ok(None)
     }
 
@@ -2287,8 +2364,9 @@ where
         &mut self,
         vm_id: &str,
         process_id: &str,
-        request: JavascriptSyncRpcRequest,
+        call: ExecutionHostCall,
     ) -> Result<(), SidecarError> {
+        let request = &call.request;
         record_sync_bridge_request_observed(request.id, &request.method);
         let Some(vm) = self.vms.get(vm_id) else {
             log_stale_process_event(&self.bridge, vm_id, process_id, "javascript sync RPC");
@@ -2309,147 +2387,128 @@ where
                 .filter(|request| request.method == "process.fd_write")
         };
 
-        let response: Result<crate::execution::JavascriptSyncRpcServiceResponse, SidecarError> =
-            match request.method.as_str() {
-                _ if deferrable_fd_write.is_some() => {
-                    let normalized = deferrable_fd_write
-                        .as_ref()
-                        .expect("guarded deferred fd_write request");
-                    match self.service_deferrable_kernel_wait_rpc(vm_id, process_id, normalized) {
-                        Ok(Some(response)) => Ok(response),
-                        Ok(None) => return Ok(()),
-                        Err(error) => Err(error),
-                    }
+        let response: Result<crate::execution::HostServiceResponse, SidecarError> = match request
+            .method
+            .as_str()
+        {
+            _ if deferrable_fd_write.is_some() => {
+                let normalized = deferrable_fd_write
+                    .as_ref()
+                    .expect("guarded deferred fd_write request");
+                let normalized_call = ExecutionHostCall {
+                    request: normalized.clone(),
+                    reply: call.reply.clone(),
+                };
+                match self.service_deferrable_kernel_wait_rpc(vm_id, process_id, &normalized_call) {
+                    Ok(Some(response)) => Ok(response),
+                    Ok(None) => return Ok(()),
+                    Err(error) => Err(error),
                 }
-                "child_process.spawn" => {
-                    let Some(vm) = self.vms.get(vm_id) else {
-                        log_stale_process_event(
-                            &self.bridge,
-                            vm_id,
-                            process_id,
-                            "javascript sync RPC child_process.spawn",
-                        );
-                        return Ok(());
-                    };
-                    let (payload, _) =
-                        parse_javascript_child_process_spawn_request(vm, &request.args)?;
-                    self.spawn_javascript_child_process(vm_id, process_id, payload)
-                        .await
-                        .map(Into::into)
-                }
-                "child_process.spawn_sync" => {
-                    let Some(vm) = self.vms.get(vm_id) else {
-                        log_stale_process_event(
-                            &self.bridge,
-                            vm_id,
-                            process_id,
-                            "javascript sync RPC child_process.spawn_sync",
-                        );
-                        return Ok(());
-                    };
-                    let (payload, max_buffer) =
-                        parse_javascript_child_process_spawn_request(vm, &request.args)?;
-                    self.defer_javascript_child_process_sync(vm_id, process_id, payload, max_buffer)
-                        .await
-                }
-                "child_process.poll" => {
-                    let child_process_id = javascript_sync_rpc_arg_str(
-                        &request.args,
-                        0,
-                        "child_process.poll child id",
-                    )?;
-                    let wait_ms = javascript_sync_rpc_arg_u64_optional(
-                        &request.args,
-                        1,
-                        "child_process.poll wait ms",
-                    )?
-                    .unwrap_or_default();
-                    self.poll_javascript_child_process(vm_id, process_id, child_process_id, wait_ms)
-                        .await
-                        .map(Into::into)
-                }
-                "child_process.write_stdin" => {
-                    let child_process_id = javascript_sync_rpc_arg_str(
-                        &request.args,
-                        0,
-                        "child_process.write_stdin child id",
-                    )?;
-                    let chunk = javascript_sync_rpc_bytes_arg(
-                        &request.args,
-                        1,
-                        "child_process.write_stdin chunk",
-                    )?;
-                    self.write_javascript_child_process_stdin(
+            }
+            "child_process.spawn" => {
+                let Some(vm) = self.vms.get(vm_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
                         vm_id,
                         process_id,
-                        child_process_id,
-                        &chunk,
-                    )
-                    .map(|()| Value::Null.into())
-                }
-                "child_process.close_stdin" => {
-                    let child_process_id = javascript_sync_rpc_arg_str(
-                        &request.args,
-                        0,
-                        "child_process.close_stdin child id",
-                    )?;
-                    self.close_javascript_child_process_stdin(vm_id, process_id, child_process_id)
-                        .map(|()| Value::Null.into())
-                }
-                "child_process.kill" => {
-                    let child_process_id = javascript_sync_rpc_arg_str(
-                        &request.args,
-                        0,
-                        "child_process.kill child id",
-                    )?;
-                    let signal =
-                        javascript_sync_rpc_arg_str(&request.args, 1, "child_process.kill signal")?;
-                    self.kill_javascript_child_process(vm_id, process_id, child_process_id, signal)
-                        .map(|()| Value::Null.into())
-                }
-                "process.exec_fd_image_commit" => {
+                        "javascript sync RPC child_process.spawn",
+                    );
+                    return Ok(());
+                };
+                let (payload, _) = parse_javascript_child_process_spawn_request(vm, &request.args)?;
+                self.spawn_child_process(vm_id, process_id, payload)
+                    .await
+                    .map(Into::into)
+            }
+            "child_process.spawn_sync" => {
+                let Some(vm) = self.vms.get(vm_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
+                        vm_id,
+                        process_id,
+                        "javascript sync RPC child_process.spawn_sync",
+                    );
+                    return Ok(());
+                };
+                let (payload, max_buffer) =
+                    parse_javascript_child_process_spawn_request(vm, &request.args)?;
+                self.defer_javascript_child_process_sync(vm_id, process_id, payload, max_buffer)
+                    .await
+            }
+            "child_process.poll" => {
+                let child_process_id =
+                    javascript_sync_rpc_arg_str(&request.args, 0, "child_process.poll child id")?;
+                let wait_ms = javascript_sync_rpc_arg_u64_optional(
+                    &request.args,
+                    1,
+                    "child_process.poll wait ms",
+                )?
+                .unwrap_or_default();
+                self.poll_child_process(vm_id, process_id, child_process_id, wait_ms)
+                    .await
+                    .map(Into::into)
+            }
+            "child_process.write_stdin" => {
+                let child_process_id = javascript_sync_rpc_arg_str(
+                    &request.args,
+                    0,
+                    "child_process.write_stdin child id",
+                )?;
+                let chunk = javascript_sync_rpc_bytes_arg(
+                    &request.args,
+                    1,
+                    "child_process.write_stdin chunk",
+                )?;
+                self.write_child_process_stdin(vm_id, process_id, child_process_id, &chunk)?;
+                Ok(Value::Null.into())
+            }
+            "child_process.close_stdin" => {
+                let child_process_id = javascript_sync_rpc_arg_str(
+                    &request.args,
+                    0,
+                    "child_process.close_stdin child id",
+                )?;
+                self.close_child_process_stdin(vm_id, process_id, child_process_id)?;
+                Ok(Value::Null.into())
+            }
+            "child_process.kill" => {
+                let child_process_id =
+                    javascript_sync_rpc_arg_str(&request.args, 0, "child_process.kill child id")?;
+                let signal =
+                    javascript_sync_rpc_arg_str(&request.args, 1, "child_process.kill signal")?;
+                self.kill_javascript_child_process(vm_id, process_id, child_process_id, signal)?;
+                Ok(Value::Null.into())
+            }
+            "process.kill" => {
+                let target_pid =
+                    javascript_sync_rpc_arg_i32(&request.args, 0, "process.kill target pid")?;
+                let signal = javascript_sync_rpc_arg_str(&request.args, 1, "process.kill signal")?;
+                let parsed_signal = parse_signal(signal)?;
+                if parsed_signal == 0 {
                     let Some(vm) = self.vms.get(vm_id) else {
                         log_stale_process_event(
                             &self.bridge,
                             vm_id,
                             process_id,
-                            "javascript sync RPC process.exec_fd_image_commit",
+                            "javascript sync RPC process.kill",
                         );
                         return Ok(());
                     };
-                    let (payload, _) =
-                        parse_javascript_child_process_spawn_request(vm, &request.args)?;
-                    self.commit_wasm_fd_process_image(vm_id, process_id, &[], payload)?;
-                    Ok(json!({ "committed": true }).into())
-                }
-                "process.exec" => {
-                    let Some(vm) = self.vms.get(vm_id) else {
+                    if !vm.active_processes.contains_key(process_id) {
                         log_stale_process_event(
                             &self.bridge,
                             vm_id,
                             process_id,
-                            "javascript sync RPC process.exec",
+                            "javascript sync RPC process.kill",
                         );
                         return Ok(());
-                    };
-                    let (payload, _) =
-                        parse_javascript_child_process_spawn_request(vm, &request.args)?;
-                    let local_replacement = payload.options.local_replacement;
-                    match self.exec_javascript_process_image(vm_id, process_id, &[], payload) {
-                        Ok(()) if local_replacement => Ok(json!({ "committed": true }).into()),
-                        // Success destroys the blocked old image. Never reply:
-                        // returning would resume instructions after execve.
-                        Ok(()) => return Ok(()),
-                        Err(error) => Err(error),
                     }
-                }
-                "process.kill" => {
-                    let target_pid =
-                        javascript_sync_rpc_arg_i32(&request.args, 0, "process.kill target pid")?;
-                    let signal =
-                        javascript_sync_rpc_arg_str(&request.args, 1, "process.kill signal")?;
-                    let parsed_signal = parse_signal(signal)?;
-                    if parsed_signal == 0 {
+                    vm.kernel
+                        .signal_process(EXECUTION_DRIVER_NAME, target_pid, parsed_signal)
+                        .map(|()| Value::Null.into())
+                        .map_err(kernel_error)
+                } else if target_pid < 0 {
+                    let caller_kernel_pid = {
                         let Some(vm) = self.vms.get(vm_id) else {
                             log_stale_process_event(
                                 &self.bridge,
@@ -2459,7 +2518,7 @@ where
                             );
                             return Ok(());
                         };
-                        if !vm.active_processes.contains_key(process_id) {
+                        let Some(caller) = vm.active_processes.get(process_id) else {
                             log_stale_process_event(
                                 &self.bridge,
                                 vm_id,
@@ -2467,291 +2526,260 @@ where
                                 "javascript sync RPC process.kill",
                             );
                             return Ok(());
-                        }
-                        vm.kernel
-                            .signal_process(EXECUTION_DRIVER_NAME, target_pid, parsed_signal)
-                            .map(|()| Value::Null.into())
-                            .map_err(kernel_error)
-                    } else if target_pid < 0 {
-                        let caller_kernel_pid = {
-                            let Some(vm) = self.vms.get(vm_id) else {
-                                log_stale_process_event(
-                                    &self.bridge,
-                                    vm_id,
-                                    process_id,
-                                    "javascript sync RPC process.kill",
-                                );
-                                return Ok(());
-                            };
-                            let Some(caller) = vm.active_processes.get(process_id) else {
-                                log_stale_process_event(
-                                    &self.bridge,
-                                    vm_id,
-                                    process_id,
-                                    "javascript sync RPC process.kill",
-                                );
-                                return Ok(());
-                            };
-                            caller.kernel_pid
                         };
-                        let pgid = target_pid.unsigned_abs();
-                        match self.signal_vm_process_group(vm_id, caller_kernel_pid, pgid, signal) {
-                            Ok(true) => self
-                                .apply_self_process_kill(vm_id, process_id, parsed_signal)
-                                .map(Into::into),
-                            Ok(false) => Ok(Value::Null.into()),
-                            Err(error) => Err(error),
-                        }
-                    } else {
-                        enum ProcessKillTarget {
-                            SelfProcess,
-                            Child(String),
-                            TopLevel(String),
-                            KernelPid(u32),
-                        }
-                        let target = {
-                            let Some(vm) = self.vms.get(vm_id) else {
-                                log_stale_process_event(
-                                    &self.bridge,
-                                    vm_id,
-                                    process_id,
-                                    "javascript sync RPC process.kill",
-                                );
-                                return Ok(());
-                            };
-                            let Some(caller) = vm.active_processes.get(process_id) else {
-                                log_stale_process_event(
-                                    &self.bridge,
-                                    vm_id,
-                                    process_id,
-                                    "javascript sync RPC process.kill",
-                                );
-                                return Ok(());
-                            };
-                            let caller_pid = i32::try_from(caller.kernel_pid).map_err(|_| {
-                                SidecarError::InvalidState("caller pid exceeds i32".into())
-                            })?;
-                            if caller_pid == target_pid {
-                                ProcessKillTarget::SelfProcess
-                            } else if let Some((child_process_id, _)) =
-                                caller.child_processes.iter().find(|(_, child)| {
-                                    i32::try_from(child.kernel_pid) == Ok(target_pid)
-                                })
-                            {
-                                ProcessKillTarget::Child(child_process_id.clone())
-                            } else if let Some((target_process_id, _)) =
-                                vm.active_processes.iter().find(|(_, process)| {
-                                    i32::try_from(process.kernel_pid) == Ok(target_pid)
-                                })
-                            {
-                                ProcessKillTarget::TopLevel(target_process_id.clone())
-                            } else {
-                                let target_kernel_pid =
-                                    u32::try_from(target_pid).map_err(|_| {
-                                        SidecarError::InvalidState(format!(
-                                            "EINVAL: invalid process pid {target_pid}"
-                                        ))
-                                    })?;
-                                ProcessKillTarget::KernelPid(target_kernel_pid)
-                            }
-                        };
-                        match target {
-                            ProcessKillTarget::SelfProcess => self
-                                .apply_self_process_kill(vm_id, process_id, parsed_signal)
-                                .map(Into::into),
-                            ProcessKillTarget::Child(child_process_id) => {
-                                self.kill_javascript_child_process(
-                                    vm_id,
-                                    process_id,
-                                    &child_process_id,
-                                    signal,
-                                )?;
-                                Ok(Value::Null.into())
-                            }
-                            ProcessKillTarget::TopLevel(target_process_id) => {
-                                self.kill_process_internal(vm_id, &target_process_id, signal)?;
-                                Ok(Value::Null.into())
-                            }
-                            ProcessKillTarget::KernelPid(target_kernel_pid) => {
-                                // Grandchildren and untracked kernel processes are
-                                // resolved VM-wide instead of failing with an
-                                // unknown-pid error.
-                                self.signal_vm_kernel_pid(vm_id, target_kernel_pid, signal)
-                                    .map(|()| Value::Null.into())
-                            }
-                        }
-                    }
-                }
-                "process.signal_state" => {
-                    let (signal, registration) = parse_process_signal_state_request(&request.args)
-                        .map_err(|error| SidecarError::InvalidState(error.to_string()))?;
-                    let Some(vm) = self.vms.get_mut(vm_id) else {
-                        log_stale_process_event(
-                            &self.bridge,
-                            vm_id,
-                            process_id,
-                            "javascript sync RPC process.signal_state",
-                        );
-                        return Ok(());
+                        caller.kernel_pid
                     };
-                    apply_process_signal_state_update(
-                        &mut vm.signal_states,
-                        process_id,
-                        signal,
-                        registration,
-                    );
-                    Ok(Value::Null.into())
-                }
-                "net.http_request" => {
-                    let payload = request
-                        .args
-                        .first()
-                        .cloned()
-                        .ok_or_else(|| {
-                            SidecarError::InvalidState(String::from(
-                                "net.http_request requires a request payload",
-                            ))
-                        })
-                        .and_then(|value| {
-                            serde_json::from_value::<JavascriptHttpLoopbackRequest>(value).map_err(
-                                |error| {
-                                    SidecarError::InvalidState(format!(
-                                        "invalid net.http_request payload: {error}"
-                                    ))
-                                },
-                            )
+                    let pgid = target_pid.unsigned_abs();
+                    match self.signal_vm_process_group(vm_id, caller_kernel_pid, pgid, signal) {
+                        Ok(true) => self
+                            .apply_self_process_kill(vm_id, process_id, parsed_signal)
+                            .map(Into::into),
+                        Ok(false) => Ok(Value::Null.into()),
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    enum ProcessKillTarget {
+                        SelfProcess,
+                        Child(String),
+                        TopLevel(String),
+                        KernelPid(u32),
+                    }
+                    let target = {
+                        let Some(vm) = self.vms.get(vm_id) else {
+                            log_stale_process_event(
+                                &self.bridge,
+                                vm_id,
+                                process_id,
+                                "javascript sync RPC process.kill",
+                            );
+                            return Ok(());
+                        };
+                        let Some(caller) = vm.active_processes.get(process_id) else {
+                            log_stale_process_event(
+                                &self.bridge,
+                                vm_id,
+                                process_id,
+                                "javascript sync RPC process.kill",
+                            );
+                            return Ok(());
+                        };
+                        let caller_pid = i32::try_from(caller.kernel_pid).map_err(|_| {
+                            SidecarError::InvalidState("caller pid exceeds i32".into())
                         })?;
-                    if !is_javascript_loopback_host(&payload.host) {
-                        return Err(SidecarError::Execution(format!(
-                            "EACCES: HTTP loopback request requires a loopback host, got {}",
-                            payload.host
-                        )));
-                    }
-                    self.bridge.require_network_access(
-                        vm_id,
-                        NetworkOperation::Http,
-                        format_tcp_resource(&payload.host, payload.port),
-                    )?;
-                    let Some(vm) = self.vms.get_mut(vm_id) else {
-                        log_stale_process_event(
-                            &self.bridge,
-                            vm_id,
-                            process_id,
-                            "javascript sync RPC net.http_request",
-                        );
-                        return Ok(());
-                    };
-                    let socket_paths = build_javascript_socket_path_context(vm)?;
-                    let target_is_current =
-                        [JavascriptSocketFamily::Ipv4, JavascriptSocketFamily::Ipv6]
+                        if caller_pid == target_pid {
+                            ProcessKillTarget::SelfProcess
+                        } else if let Some((child_process_id, _)) = caller
+                            .child_processes
                             .iter()
-                            .any(|family| {
-                                socket_paths
-                                    .http_loopback_target(*family, payload.port)
-                                    .is_some_and(|target| {
-                                        target.process_id == payload.process_id
-                                            && target.server_id == payload.server_id
-                                    })
-                            });
-                    if !target_is_current {
-                        return Err(SidecarError::InvalidState(format!(
-                            "unknown HTTP loopback target {}:{} for server {} in process {}",
-                            payload.host, payload.port, payload.server_id, payload.process_id
-                        )));
-                    }
-                    let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-                    let capabilities = vm.capabilities.clone();
-                    let Some(target_process) = vm.active_processes.get_mut(&payload.process_id)
-                    else {
-                        return Err(SidecarError::InvalidState(format!(
-                            "unknown HTTP loopback process {}",
-                            payload.process_id
-                        )));
+                            .find(|(_, child)| i32::try_from(child.kernel_pid) == Ok(target_pid))
+                        {
+                            ProcessKillTarget::Child(child_process_id.clone())
+                        } else if let Some((target_process_id, _)) =
+                            vm.active_processes.iter().find(|(_, process)| {
+                                i32::try_from(process.kernel_pid) == Ok(target_pid)
+                            })
+                        {
+                            ProcessKillTarget::TopLevel(target_process_id.clone())
+                        } else {
+                            let target_kernel_pid = u32::try_from(target_pid).map_err(|_| {
+                                SidecarError::host(
+                                    "EINVAL",
+                                    format!("invalid process pid {target_pid}"),
+                                )
+                            })?;
+                            ProcessKillTarget::KernelPid(target_kernel_pid)
+                        }
                     };
-                    dispatch_loopback_http_request_deferred(LoopbackHttpDispatchRequest {
-                        bridge: &self.bridge,
-                        vm_id,
-                        dns: &vm.dns,
-                        socket_paths: &socket_paths,
-                        kernel: &mut vm.kernel,
-                        kernel_readiness,
-                        process: target_process,
-                        server_id: payload.server_id,
-                        request_json: &payload.request,
-                        capabilities,
-                    })
+                    match target {
+                        ProcessKillTarget::SelfProcess => self
+                            .apply_self_process_kill(vm_id, process_id, parsed_signal)
+                            .map(Into::into),
+                        ProcessKillTarget::Child(child_process_id) => {
+                            self.kill_javascript_child_process(
+                                vm_id,
+                                process_id,
+                                &child_process_id,
+                                signal,
+                            )?;
+                            Ok(Value::Null.into())
+                        }
+                        ProcessKillTarget::TopLevel(target_process_id) => {
+                            self.kill_process_internal(vm_id, &target_process_id, signal)?;
+                            Ok(Value::Null.into())
+                        }
+                        ProcessKillTarget::KernelPid(target_kernel_pid) => {
+                            // Grandchildren and untracked kernel processes are
+                            // resolved VM-wide instead of failing with an
+                            // unknown-pid error.
+                            self.signal_vm_kernel_pid(vm_id, target_kernel_pid, signal)
+                                .map(|()| Value::Null.into())
+                        }
+                    }
                 }
-                "__kernel_stdio_write"
-                    if self
+            }
+            "process.signal_state" => {
+                let (signal, registration) = parse_process_signal_state_request(&request.args)
+                    .map_err(SidecarError::from)?;
+                let Some(vm) = self.vms.get_mut(vm_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
+                        vm_id,
+                        process_id,
+                        "javascript sync RPC process.signal_state",
+                    );
+                    return Ok(());
+                };
+                let process = vm.active_processes.get(process_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!(
+                        "VM {vm_id} has no active process {process_id}"
+                    ))
+                })?;
+                apply_kernel_signal_registration(process, signal, &registration)?;
+                Ok(Value::Null.into())
+            }
+            "net.http_request" => {
+                let payload = request
+                    .args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| {
+                        SidecarError::InvalidState(String::from(
+                            "net.http_request requires a request payload",
+                        ))
+                    })
+                    .and_then(|value| {
+                        serde_json::from_value::<JavascriptHttpLoopbackRequest>(value).map_err(
+                            |error| {
+                                SidecarError::InvalidState(format!(
+                                    "invalid net.http_request payload: {error}"
+                                ))
+                            },
+                        )
+                    })?;
+                if !is_javascript_loopback_host(&payload.host) {
+                    return Err(SidecarError::host(
+                        "EACCES",
+                        format!(
+                            "HTTP loopback request requires a loopback host, got {}",
+                            payload.host
+                        ),
+                    ));
+                }
+                self.bridge.require_network_access(
+                    vm_id,
+                    NetworkOperation::Http,
+                    format_tcp_resource(&payload.host, payload.port),
+                )?;
+                let Some(vm) = self.vms.get_mut(vm_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
+                        vm_id,
+                        process_id,
+                        "javascript sync RPC net.http_request",
+                    );
+                    return Ok(());
+                };
+                let socket_paths = build_socket_path_context(vm)?;
+                let target_is_current =
+                    [SocketFamily::Ipv4, SocketFamily::Ipv6]
+                        .iter()
+                        .any(|family| {
+                            socket_paths
+                                .http_loopback_target(*family, payload.port)
+                                .is_some_and(|target| {
+                                    target.process_id == payload.process_id
+                                        && target.server_id == payload.server_id
+                                })
+                        });
+                if !target_is_current {
+                    return Err(SidecarError::InvalidState(format!(
+                        "unknown HTTP loopback target {}:{} for server {} in process {}",
+                        payload.host, payload.port, payload.server_id, payload.process_id
+                    )));
+                }
+                let Some(target_process) = vm.active_processes.get_mut(&payload.process_id) else {
+                    return Err(SidecarError::InvalidState(format!(
+                        "unknown HTTP loopback process {}",
+                        payload.process_id
+                    )));
+                };
+                dispatch_loopback_http_request_deferred(LoopbackHttpDispatchRequest {
+                    process: target_process,
+                    server_id: payload.server_id,
+                    request_json: &payload.request,
+                })
+            }
+            "__kernel_stdio_write"
+                if self
+                    .vms
+                    .get(vm_id)
+                    .and_then(|vm| vm.active_processes.get(process_id))
+                    .is_some_and(|process| process.tty_master_owner.is_some()) =>
+            {
+                let (writer_kernel_pid, owner) = {
+                    let process = self
                         .vms
                         .get(vm_id)
                         .and_then(|vm| vm.active_processes.get(process_id))
-                        .is_some_and(|process| process.tty_master_owner.is_some()) =>
-                {
-                    let (writer_kernel_pid, owner) = {
-                        let process = self
-                            .vms
-                            .get(vm_id)
-                            .and_then(|vm| vm.active_processes.get(process_id))
-                            .expect("guarded by match arm");
-                        (
-                            process.kernel_pid,
-                            process.tty_master_owner.expect("guarded by match arm"),
-                        )
-                    };
-                    self.service_shared_tty_stdio_write(vm_id, writer_kernel_pid, owner, &request)
-                        .map(Into::into)
+                        .expect("guarded by match arm");
+                    (
+                        process.kernel_pid,
+                        process.tty_master_owner.expect("guarded by match arm"),
+                    )
+                };
+                self.service_shared_tty_stdio_write(vm_id, writer_kernel_pid, owner, &request)
+                    .map(Into::into)
+            }
+            "__kernel_stdin_read" | "__kernel_poll" => {
+                match self.service_deferrable_kernel_wait_rpc(vm_id, process_id, &call) {
+                    Ok(Some(response)) => Ok(response),
+                    // Parked: an off-loop waiter re-enqueues this request as a
+                    // process event when kernel poll state changes.
+                    Ok(None) => return Ok(()),
+                    Err(error) => Err(error),
                 }
-                "__kernel_stdin_read" | "__kernel_poll"
-                    if self.kernel_wait_rpc_is_deferrable(vm_id, process_id, &request) =>
-                {
-                    match self.service_deferrable_kernel_wait_rpc(vm_id, process_id, &request) {
-                        Ok(Some(response)) => Ok(response),
-                        // Parked: an off-loop waiter re-enqueues this request as a
-                        // process event when kernel poll state changes.
-                        Ok(None) => return Ok(()),
-                        Err(error) => Err(error),
-                    }
-                }
-                _ => {
-                    let Some(vm) = self.vms.get_mut(vm_id) else {
-                        log_stale_process_event(
-                            &self.bridge,
-                            vm_id,
-                            process_id,
-                            "javascript sync RPC bridge dispatch",
-                        );
-                        return Ok(());
-                    };
-                    let socket_paths = build_javascript_socket_path_context(vm)?;
-                    let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-                    let capabilities = vm.capabilities.clone();
-                    let Some(process) = vm.active_processes.get_mut(process_id) else {
-                        log_stale_process_event(
-                            &self.bridge,
-                            vm_id,
-                            process_id,
-                            "javascript sync RPC bridge dispatch",
-                        );
-                        return Ok(());
-                    };
-                    service_javascript_sync_rpc(JavascriptSyncRpcServiceRequest {
-                        bridge: &self.bridge,
+            }
+            _ => {
+                let Some(vm) = self.vms.get_mut(vm_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
                         vm_id,
-                        dns: &vm.dns,
-                        socket_paths: &socket_paths,
-                        kernel: &mut vm.kernel,
-                        kernel_readiness,
-                        process,
-                        sync_request: &request,
-                        capabilities,
-                    })
-                    .await
-                }
-            };
+                        process_id,
+                        "javascript sync RPC bridge dispatch",
+                    );
+                    return Ok(());
+                };
+                let socket_paths = build_socket_path_context(vm)?;
+                let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
+                let capabilities = vm.capabilities.clone();
+                let managed_descriptions = Arc::clone(&vm.managed_host_net_descriptions);
+                let Some(process) = vm.active_processes.get_mut(process_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
+                        vm_id,
+                        process_id,
+                        "javascript sync RPC bridge dispatch",
+                    );
+                    return Ok(());
+                };
+                service_javascript_sync_rpc(JavascriptSyncRpcServiceRequest {
+                    bridge: &self.bridge,
+                    vm_id,
+                    dns: &vm.dns,
+                    socket_paths: &socket_paths,
+                    kernel: &mut vm.kernel,
+                    kernel_readiness,
+                    process,
+                    sync_request: &request,
+                    capabilities,
+                    managed_descriptions: Some(managed_descriptions),
+                })
+                .await
+            }
+        };
 
         let response = match response {
-            Ok(crate::execution::JavascriptSyncRpcServiceResponse::Deferred {
+            Ok(crate::execution::HostServiceResponse::Deferred {
                 receiver,
                 timeout,
                 task_class,
@@ -2772,7 +2800,7 @@ where
                 let event_notify = Arc::clone(&self.process_event_notify);
                 let envelope_vm_id = vm_id.to_owned();
                 let envelope_process_id = process_id.to_owned();
-                let request_id = request.id;
+                let reply = call.reply.clone();
                 let method = request.method.clone();
                 runtime
                 .spawn(task_class, async move {
@@ -2785,11 +2813,18 @@ where
                                 message: format!(
                                     "deferred sync RPC response channel closed for {method}"
                                 ),
+                                details: None,
                             })
                         })
                     };
                     let result = match timeout {
-                        Some(timeout) => match tokio::time::timeout(timeout, receive).await {
+                        Some(timeout) => match crate::execution::operation_deadline_timeout(
+                            &method,
+                            timeout,
+                            receive,
+                        )
+                        .await
+                        {
                             Ok(result) => result,
                             Err(_) => Err(crate::state::DeferredRpcError {
                                 code: String::from("ERR_AGENTOS_DEFERRED_RPC_TIMEOUT"),
@@ -2797,6 +2832,7 @@ where
                                     "{method} exceeded limits.reactor.operationDeadlineMs ({} ms); raise that limit for slower peers",
                                     timeout.as_millis()
                                 ),
+                                details: None,
                             }),
                         },
                         None => receive.await,
@@ -2807,8 +2843,8 @@ where
                             session_id,
                             vm_id: envelope_vm_id,
                             process_id: envelope_process_id,
-                            event: ActiveExecutionEvent::JavascriptSyncRpcCompletion(
-                                crate::state::JavascriptSyncRpcCompletion { request_id, result },
+                            event: ActiveExecutionEvent::HostCallCompletion(
+                                crate::state::HostCallCompletion { reply, result },
                             ),
                         })
                         .await
@@ -2847,8 +2883,7 @@ where
             );
             return Ok(());
         };
-        let shadow_root = vm.cwd.clone();
-        let Some(process) = vm.active_processes.get_mut(process_id) else {
+        if !vm.active_processes.contains_key(process_id) {
             log_stale_process_event(
                 &self.bridge,
                 vm_id,
@@ -2856,91 +2891,32 @@ where
                 "javascript sync RPC response delivery",
             );
             return Ok(());
-        };
-
-        if response.is_ok()
-            && matches!(
-                request.method.as_str(),
-                "fs.chmodSync" | "fs.promises.chmod"
-            )
-        {
-            let guest_path =
-                javascript_sync_rpc_arg_str(&request.args, 0, "filesystem chmod path")?;
-            let mode =
-                javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem chmod mode")? & 0o7777;
-            let host_path =
-                shadow_host_path_for_process(&shadow_root, &process.guest_cwd, guest_path);
-            if host_path.exists() {
-                fs::set_permissions(&host_path, fs::Permissions::from_mode(mode)).map_err(
-                    |error| {
-                        SidecarError::Io(format!(
-                            "failed to mirror chmod to shadow path {}: {error}",
-                            host_path.display()
-                        ))
-                    },
-                )?;
-            }
         }
 
-        match response {
-            Ok(result) => process
-                .execution
-                .respond_javascript_sync_rpc_response(request.id, result)
-                .or_else(ignore_stale_javascript_sync_rpc_response),
-            Err(error) => {
-                tracing::warn!(
-                    method = %request.method,
-                    error = %error,
-                    "JavaScript sync RPC failed"
-                );
-                process
-                    .execution
-                    .respond_javascript_sync_rpc_error(
-                        request.id,
-                        javascript_sync_rpc_error_code(&error),
-                        error.to_string(),
-                    )
-                    .or_else(ignore_stale_javascript_sync_rpc_response)
-            }
+        if let Err(error) = &response {
+            tracing::warn!(
+                method = %call.request.method,
+                error = %error,
+                "executor host RPC failed"
+            );
         }
+        settle_execution_host_call(&call.reply, response)
     }
 
-    /// Applies a `process.kill` aimed at the calling process itself and
-    /// returns the self-delivery action payload for the bridge.
+    /// Applies a `process.kill` aimed at the calling process itself.
+    ///
+    /// Signal delivery is exclusively kernel-owned. In particular, do not
+    /// return the legacy `self` action payload: the JavaScript shim would
+    /// synchronously deliver that payload in addition to the runtime-neutral
+    /// checkpoint already published by `kill_process_internal`.
     fn apply_self_process_kill(
         &mut self,
         vm_id: &str,
         process_id: &str,
         parsed_signal: i32,
     ) -> Result<Value, SidecarError> {
-        let action = self
-            .vms
-            .get(vm_id)
-            .and_then(|vm| vm.signal_states.get(process_id))
-            .and_then(|handlers| handlers.get(&(parsed_signal as u32)))
-            .map(|registration| registration.action.clone())
-            .unwrap_or(SignalDispositionAction::Default);
-        if action == SignalDispositionAction::Default
-            && parsed_signal != 0
-            && !matches!(
-                canonical_signal_name(parsed_signal),
-                Some("SIGWINCH" | "SIGCHLD" | "SIGCONT" | "SIGURG")
-            )
-        {
-            if let Some(vm) = self.vms.get_mut(vm_id) {
-                if let Some(process) = vm.active_processes.get_mut(process_id) {
-                    apply_active_process_default_signal(&mut vm.kernel, process, parsed_signal)?;
-                }
-            }
-        }
-        Ok(json!({
-            "self": true,
-            "action": match action {
-                SignalDispositionAction::Default => "default",
-                SignalDispositionAction::Ignore => "ignore",
-                SignalDispositionAction::User => "user",
-            },
-        }))
+        self.kill_process_internal(vm_id, process_id, &parsed_signal.to_string())?;
+        Ok(Value::Null)
     }
 
     pub(crate) fn vm_ids_for_scope(
@@ -3024,8 +3000,7 @@ where
                 && quarantined.session_id == session_id
         }) {
             let snapshot = quarantined.reconciliation_snapshot();
-            return Err(SidecarError::InvalidState(format!(
-                "ERR_AGENTOS_VM_QUARANTINED: vm_id={vm_id} generation={} reason={:?} active_tasks={} outstanding_capabilities={} ledger_zero={} integrity_ok={}",
+            return Err(SidecarError::host("ERR_AGENTOS_VM_QUARANTINED", format!("vm_id={vm_id} generation={} reason={:?} active_tasks={} outstanding_capabilities={} ledger_zero={} integrity_ok={}",
                 quarantined.generation,
                 quarantined.reason,
                 snapshot.active_tasks,
@@ -3185,6 +3160,59 @@ where
     }
 
     fn reject_error(&self, request: &RequestFrame, error: &SidecarError) -> ResponseFrame {
+        if let SidecarError::Host(host_error) = error {
+            if host_error.code == "ERR_AGENTOS_RESOURCE_LIMIT" {
+                let details = host_error.details.as_ref();
+                let limit_name = details
+                    .and_then(|value| value.get("limitName"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let configured_limit = details
+                    .and_then(|value| value.get("limit"))
+                    .and_then(Value::as_u64);
+                let requested = details
+                    .and_then(|value| value.get("observed"))
+                    .and_then(Value::as_u64);
+                let configuration_path = details
+                    .and_then(|value| value.get("configPath"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| limit_name.clone());
+                let vm_id = match &request.ownership {
+                    OwnershipScope::VmOwnership(owner) => Some(owner.vm_id.clone()),
+                    OwnershipScope::ConnectionOwnership(_)
+                    | OwnershipScope::SessionOwnership(_) => None,
+                };
+                let session_generation = vm_id
+                    .as_ref()
+                    .and_then(|vm_id| self.vms.get(vm_id))
+                    .map(|vm| vm.generation);
+                return self.respond(
+                    request,
+                    ResponsePayload::Rejected(RejectedResponse {
+                        code: host_error.code.clone(),
+                        message: host_error.message.clone(),
+                        limit_name,
+                        configured_limit,
+                        current_usage: None,
+                        requested,
+                        unit: Some(String::from("items")),
+                        scope: Some(if vm_id.is_some() {
+                            String::from("vm")
+                        } else {
+                            String::from("process")
+                        }),
+                        vm_id,
+                        session_generation,
+                        capability_id: None,
+                        operation: None,
+                        configuration_path,
+                        retryable: Some(false),
+                        errno: Some(String::from("ENOBUFS")),
+                    }),
+                );
+            }
+        }
         let SidecarError::ResourceLimit(limit) = error else {
             return self.reject(request, error_code(error), &error.to_string());
         };
@@ -3320,6 +3348,17 @@ where
         &mut self,
         response: SidecarResponseFrame,
     ) -> Result<(), SidecarError> {
+        let completed_limit = self.config.runtime.protocol.max_completed_responses;
+        if self.completed_sidecar_responses.len() >= completed_limit {
+            return Err(SidecarError::host_resource_limit(
+                "runtime.protocol.maxCompletedResponses",
+                completed_limit,
+                self.completed_sidecar_responses.len().saturating_add(1),
+                format!(
+                    "completed sidecar response queue reached {completed_limit} retained responses; drain responses or raise runtime.protocol.maxCompletedResponses"
+                ),
+            ));
+        }
         match self.pending_sidecar_responses.accept_response(&response) {
             Ok(()) => {}
             // A response for a request that is no longer pending (its owning VM
@@ -3348,29 +3387,6 @@ where
             .insert(response.request_id, response);
         self.completed_sidecar_responses_gauge
             .observe_depth(self.completed_sidecar_responses.len());
-        let completed_limit = self.config.runtime.protocol.max_completed_responses;
-        while self.completed_sidecar_responses.len() > completed_limit {
-            match self.completed_sidecar_response_order.pop_front() {
-                // Only a response that was never retrieved is a real loss; an id
-                // already taken via take_sidecar_response leaves a stale order
-                // entry that removes to None and is not a dropped response.
-                Some(evicted) => {
-                    if self.completed_sidecar_responses.remove(&evicted).is_some() {
-                        tracing::warn!(
-                            code = "WARN_AGENTOS_COMPLETED_RESPONSE_LIMIT",
-                            queue = "completed_sidecar_responses",
-                            evicted_request_id = evicted,
-                            capacity = completed_limit,
-                            configuration_path = "runtime.protocol.maxCompletedResponses",
-                            "dropping an unretrieved completed sidecar response to stay within configured cap; raise runtime.protocol.maxCompletedResponses to retain more completions (response lost)"
-                        );
-                        self.completed_sidecar_responses_gauge
-                            .observe_depth(self.completed_sidecar_responses.len());
-                    }
-                }
-                None => break,
-            }
-        }
         Ok(())
     }
 
@@ -3441,6 +3457,29 @@ where
 
 impl<B> Drop for NativeSidecar<B> {
     fn drop(&mut self) {
+        fn request_shutdown(process: &mut crate::state::ActiveProcess) {
+            for child in process.child_processes.values_mut() {
+                request_shutdown(child);
+            }
+            if let Err(error) = process.execution.terminate() {
+                eprintln!(
+                    "ERR_AGENTOS_PROCESS_DROP_SHUTDOWN: failed to request shutdown for kernel pid {}: {error}",
+                    process.kernel_pid
+                );
+            }
+        }
+
+        // Execution engines are declared before `vms`, so Rust's default field
+        // drop order would tear the engines down while VM-owned execution
+        // handles are still live. Request backend shutdown and release every VM
+        // generation first so sessions can drain against a live engine/runtime.
+        for vm in self.vms.values_mut() {
+            for process in vm.active_processes.values_mut() {
+                request_shutdown(process);
+            }
+        }
+        self.vms.clear();
+        self.quarantined_vms.clear();
         if let Some(task) = self.kernel_reaper_task.take() {
             task.abort();
         }
@@ -3763,27 +3802,6 @@ fn unexpected_extension_host_response(operation: &str, payload: ResponsePayload)
     }
 }
 
-fn shadow_host_path_for_process(
-    shadow_root: &Path,
-    process_guest_cwd: &str,
-    guest_path: &str,
-) -> PathBuf {
-    let normalized_guest_path = if guest_path.starts_with('/') {
-        normalize_path(guest_path)
-    } else {
-        normalize_path(&format!(
-            "{}/{}",
-            process_guest_cwd.trim_end_matches('/'),
-            guest_path
-        ))
-    };
-    if normalized_guest_path == "/" {
-        shadow_root.to_path_buf()
-    } else {
-        shadow_root.join(normalized_guest_path.trim_start_matches('/'))
-    }
-}
-
 fn sidecar_response_tracker_error(error: SidecarResponseTrackerError) -> SidecarError {
     SidecarError::InvalidState(format!(
         "invalid sidecar response correlation state: {error}"
@@ -3908,12 +3926,16 @@ pub(crate) fn log_stale_process_event<B>(
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    let _ = bridge.emit_log(
+    if let Err(error) = bridge.emit_log(
         vm_id,
         format!(
             "Ignoring stale process event during {context}: VM {vm_id} process {process_id} was already reaped"
         ),
-    );
+    ) {
+        eprintln!(
+            "ERR_AGENTOS_DIAGNOSTIC_EMIT: failed to emit stale process diagnostic for VM {vm_id} process {process_id}: {error:?}"
+        );
+    }
 }
 
 // filesystem_operation_label moved to crate::vm
@@ -3992,7 +4014,10 @@ pub(crate) fn dirname(path: &str) -> String {
 }
 
 pub(crate) fn kernel_error(error: KernelError) -> SidecarError {
-    SidecarError::Kernel(error.to_string())
+    SidecarError::Host(agentos_execution::backend::HostServiceError::new(
+        error.code(),
+        error.to_string(),
+    ))
 }
 
 pub(crate) fn plugin_error(error: PluginError) -> SidecarError {
@@ -4000,19 +4025,88 @@ pub(crate) fn plugin_error(error: PluginError) -> SidecarError {
 }
 
 pub(crate) fn javascript_error(error: JavascriptExecutionError) -> SidecarError {
-    SidecarError::Execution(error.to_string())
+    match error {
+        JavascriptExecutionError::EventChannelClosed => SidecarError::ExecutionEventChannelClosed {
+            backend: ExecutionBackendKind::Javascript,
+        },
+        other => SidecarError::Execution(other.to_string()),
+    }
 }
 
 pub(crate) fn wasm_error(error: WasmExecutionError) -> SidecarError {
-    SidecarError::Execution(error.to_string())
+    let message = error.to_string();
+    match error {
+        WasmExecutionError::EventChannelClosed => SidecarError::ExecutionEventChannelClosed {
+            backend: ExecutionBackendKind::WebAssembly,
+        },
+        WasmExecutionError::NativeBinaryNotSupported { .. } => {
+            SidecarError::host("ERR_NATIVE_BINARY_NOT_SUPPORTED", message)
+        }
+        WasmExecutionError::DeterministicFuelUnsupported { .. } => {
+            SidecarError::host("ENOTSUP", message)
+        }
+        _ => SidecarError::Execution(message),
+    }
+}
+
+#[cfg(test)]
+mod execution_error_tests {
+    use super::*;
+    use agentos_execution::wasm::NativeBinaryFormat;
+
+    #[test]
+    fn native_binary_rejection_preserves_its_guest_error_code() {
+        let error = wasm_error(WasmExecutionError::NativeBinaryNotSupported {
+            path: PathBuf::from("/tmp/fake-rg"),
+            header: vec![0x7f, b'E', b'L', b'F'],
+            format: NativeBinaryFormat::Elf,
+        });
+
+        assert_eq!(error.code(), Some("ERR_NATIVE_BINARY_NOT_SUPPORTED"));
+    }
+
+    #[test]
+    fn deterministic_fuel_rejection_preserves_enotsup() {
+        let error = wasm_error(WasmExecutionError::DeterministicFuelUnsupported { fuel: 42 });
+
+        assert_eq!(error.code(), Some("ENOTSUP"));
+        assert!(error.to_string().contains("deterministic WebAssembly fuel"));
+    }
+
+    #[test]
+    fn closed_execution_channels_preserve_the_backend_kind() {
+        assert_eq!(
+            javascript_error(JavascriptExecutionError::EventChannelClosed),
+            SidecarError::ExecutionEventChannelClosed {
+                backend: ExecutionBackendKind::Javascript,
+            }
+        );
+        assert_eq!(
+            python_error(PythonExecutionError::EventChannelClosed),
+            SidecarError::ExecutionEventChannelClosed {
+                backend: ExecutionBackendKind::Python,
+            }
+        );
+        assert_eq!(
+            wasm_error(WasmExecutionError::EventChannelClosed),
+            SidecarError::ExecutionEventChannelClosed {
+                backend: ExecutionBackendKind::WebAssembly,
+            }
+        );
+    }
 }
 
 pub(crate) fn python_error(error: PythonExecutionError) -> SidecarError {
-    SidecarError::Execution(error.to_string())
+    match error {
+        PythonExecutionError::EventChannelClosed => SidecarError::ExecutionEventChannelClosed {
+            backend: ExecutionBackendKind::Python,
+        },
+        other => SidecarError::Execution(other.to_string()),
+    }
 }
 
 pub(crate) fn vfs_error(error: VfsError) -> SidecarError {
-    SidecarError::Kernel(error.to_string())
+    SidecarError::host(error.code(), error.message())
 }
 
 /// Actionable guidance shown when guest package resolution fails because the packages live in a
@@ -4144,13 +4238,9 @@ mod legacy_child_spawn_options_tests {
                 .map(String::as_str),
             Some("node:path")
         );
-        assert_eq!(
-            options
-                .internal_bootstrap_env
-                .get("AGENTOS_WASM_INITIAL_SIGNAL_MASK")
-                .map(String::as_str),
-            Some("[10]")
-        );
+        assert!(!options
+            .internal_bootstrap_env
+            .contains_key("AGENTOS_WASM_INITIAL_SIGNAL_MASK"));
         assert!(!options
             .internal_bootstrap_env
             .contains_key("AGENTOS_NOT_ALLOWED"));

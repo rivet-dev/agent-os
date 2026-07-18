@@ -42,13 +42,18 @@ fn path_open_preserves_directory_and_nofollow_before_kernel_mutation() {
         "path_open must pass O_DIRECTORY and a missing SYMLINK_FOLLOW lookup flag to the kernel"
     );
     assert!(
-        source.contains("kernelOpenFlagsFromWasi(oflags, rightsBase, fdflags, dirflags)"),
+        source.contains(
+            "kernelOpenFlagsFromWasi(oflags, rightsBase, fdflags, dirflags, requestedDirect)"
+        ),
         "path_open must include its WASI lookup flags in the kernel conversion"
     );
     assert!(
         source.contains(
             "function openProcSelfFdAlias(guestPath, oflags, rightsBase, lookupflags, openedFdPtr)"
-        ) && source.contains("return WASI_ERRNO_LOOP;"),
-        "runner-local /proc/self/fd and /dev/fd aliases must not bypass O_NOFOLLOW"
+        ) && source.contains("return WASI_ERRNO_LOOP;")
+            && source.contains(
+                "const procFdResult = SIDECAR_MANAGED_PROCESS\n      ? null\n      : openProcSelfFdAlias("
+            ),
+        "standalone aliases must honor O_NOFOLLOW and managed aliases must use kernel path_open"
     );
 }

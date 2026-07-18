@@ -73,7 +73,7 @@ dependencies = [
  "serde",
  "serde_bare",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "vbare",
 ]
@@ -113,7 +113,7 @@ dependencies = [
  "serde",
  "serde_bare",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
@@ -128,6 +128,7 @@ dependencies = [
  "agentos-build-support",
  "agentos-runtime",
  "agentos-v8-runtime",
+ "agentos-wasm-abi-generator",
  "base64 0.22.1",
  "ciborium",
  "flume",
@@ -146,16 +147,14 @@ name = "agentos-kernel"
 version = "0.0.1"
 dependencies = [
  "agentos-bridge",
- "agentos-runtime",
+ "agentos-resource",
  "agentos-vfs-core",
  "base64 0.22.1",
  "event-listener",
  "getrandom 0.2.17",
  "hickory-proto",
- "hickory-resolver",
  "serde",
  "serde_json",
- "tokio",
  "web-time",
 ]
 
@@ -179,6 +178,7 @@ dependencies = [
  "agentos-vfs",
  "agentos-vfs-core",
  "agentos-vm-config",
+ "agentos-wasm-abi-generator",
  "async-trait",
  "aws-config",
  "aws-credential-types",
@@ -188,6 +188,7 @@ dependencies = [
  "command-fds",
  "ctr",
  "filetime",
+ "getrandom 0.2.17",
  "h2 0.4.15",
  "hickory-resolver",
  "hmac 0.12.1",
@@ -220,7 +221,7 @@ dependencies = [
  "socket2 0.6.4",
  "tar",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-rustls 0.26.4",
  "tracing",
@@ -273,9 +274,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentos-resource"
+version = "0.0.1"
+dependencies = [
+ "event-listener",
+]
+
+[[package]]
 name = "agentos-runtime"
 version = "0.0.1"
 dependencies = [
+ "agentos-resource",
  "tokio",
 ]
 
@@ -331,7 +340,7 @@ dependencies = [
  "futures",
  "parking_lot",
  "scc",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -423,6 +432,16 @@ dependencies = [
  "serde",
  "serde_json",
  "ts-rs",
+]
+
+[[package]]
+name = "agentos-wasm-abi-generator"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wat",
+ "witx",
 ]
 
 [[package]]
@@ -1264,7 +1283,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b60b5124979fccd9addd89d8b97a1d6eebb4950694520c75ddd722535ea443f"
 dependencies = [
  "nix 0.31.3",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -2089,7 +2108,7 @@ dependencies = [
  "ipnet",
  "jni",
  "rand",
- "thiserror",
+ "thiserror 2.0.18",
  "tinyvec",
  "tokio",
  "tracing",
@@ -2110,7 +2129,7 @@ dependencies = [
  "prefix-trie",
  "rand",
  "ring 0.17.14",
- "thiserror",
+ "thiserror 2.0.18",
  "tinyvec",
  "tracing",
  "url",
@@ -2137,7 +2156,7 @@ dependencies = [
  "resolv-conf",
  "smallvec",
  "system-configuration",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -2576,7 +2595,7 @@ dependencies = [
  "jni-sys",
  "log",
  "simd_cesu8",
- "thiserror",
+ "thiserror 2.0.18",
  "walkdir",
  "windows-link",
 ]
@@ -2653,6 +2672,12 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+
+[[package]]
+name = "leb128"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c83bff1d572d6b9aeef67ddfc8448e4a3737909cb28e81f97c791b9018703e52"
 
 [[package]]
 name = "leb128fmt"
@@ -3034,7 +3059,7 @@ dependencies = [
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
  "time",
 ]
 
@@ -3048,7 +3073,7 @@ dependencies = [
  "owo-colors",
  "oxc-miette-derive",
  "textwrap",
- "thiserror",
+ "thiserror 2.0.18",
  "unicode-segmentation",
  "unicode-width",
 ]
@@ -4375,7 +4400,7 @@ checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
 dependencies = [
  "num-bigint",
  "num-traits",
- "thiserror",
+ "thiserror 2.0.18",
  "time",
 ]
 
@@ -4606,11 +4631,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.18",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -4790,7 +4835,7 @@ checksum = "050686193eb999b4bb3bc2acfa891a13da00f79734704c4b8b4ef1a10b368a3c"
 dependencies = [
  "crossbeam-channel",
  "symlink",
- "thiserror",
+ "thiserror 2.0.18",
  "time",
  "tracing-subscriber",
 ]
@@ -4871,7 +4916,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e640d9b0964e9d39df633548591090ab92f7a4567bc31d3891af23471a3365c6"
 dependencies = [
  "lazy_static",
- "thiserror",
+ "thiserror 2.0.18",
  "ts-rs-macros",
 ]
 
@@ -5153,6 +5198,15 @@ dependencies = [
 
 [[package]]
 name = "wast"
+version = "35.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ef140f1b49946586078353a453a1d28ba90adfc54dde75710bc1931de204d68"
+dependencies = [
+ "leb128",
+]
+
+[[package]]
+name = "wast"
 version = "248.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "acc54622ed5a5cddafcdf152043f9d4aed54d4a653d686b7dfe874809fca99d7"
@@ -5170,7 +5224,7 @@ version = "1.248.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d75cd9e510603909748e6ebab89f27cd04472c1d9d85a3c88a7a6fc51a1a7934"
 dependencies = [
- "wast",
+ "wast 248.0.0",
 ]
 
 [[package]]
@@ -5435,6 +5489,18 @@ name = "winsafe"
 version = "0.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
+
+[[package]]
+name = "witx"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e366f27a5cabcddb2706a78296a40b8fcc451e1a6aba2fc1d94b4a01bdaaef4b"
+dependencies = [
+ "anyhow",
+ "log",
+ "thiserror 1.0.69",
+ "wast 35.0.2",
+]
 
 [[package]]
 name = "writeable"

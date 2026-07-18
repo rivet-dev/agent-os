@@ -962,6 +962,7 @@ type QueueSnapshotEntry struct {
 
 type ResourceSnapshotResponse struct {
   runningProcesses: u64
+  stoppedProcesses: u64
   exitedProcesses: u64
   fdTables: u64
   openFds: u64

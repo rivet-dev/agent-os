@@ -132,9 +132,9 @@ fn native_sidecar_bounds_popped_unanswered_sidecar_requests() {
 #[test]
 fn native_sidecar_bounds_completed_sidecar_responses() {
     let (mut sidecar, ownership) = new_vm_scope("bidirectional-completed-bound");
-    let mut latest_request_id = 0;
+    let mut oldest_request_id = None;
 
-    for index in 0..=SIDECAR_CALLBACK_LIMIT {
+    for index in 0..SIDECAR_CALLBACK_LIMIT {
         let request_id = sidecar
             .queue_wire_sidecar_request(ownership.clone(), host_callback(index))
             .expect("queue wire sidecar request");
@@ -151,22 +151,47 @@ fn native_sidecar_bounds_completed_sidecar_responses() {
                 payload: host_callback_response(index),
             })
             .expect("accept wire sidecar response");
-        latest_request_id = request_id;
+        oldest_request_id.get_or_insert(request_id);
     }
 
+    let rejected_request_id = sidecar
+        .queue_wire_sidecar_request(ownership.clone(), host_callback(SIDECAR_CALLBACK_LIMIT))
+        .expect("queue completion-pressure request");
+    sidecar
+        .pop_wire_sidecar_request()
+        .expect("pop completion-pressure request")
+        .expect("completion-pressure request must be queued");
+    let error = sidecar
+        .accept_wire_sidecar_response(SidecarResponseFrame {
+            schema: agentos_native_sidecar::wire::protocol_schema(),
+            request_id: rejected_request_id,
+            ownership: ownership.clone(),
+            payload: host_callback_response(SIDECAR_CALLBACK_LIMIT),
+        })
+        .expect_err("completed response pressure must reject without eviction");
+    assert!(
+        error.to_string().contains("ERR_AGENTOS_RESOURCE_LIMIT"),
+        "completion pressure must return the typed resource limit: {error}"
+    );
+
+    let oldest_request_id = oldest_request_id.expect("at least one accepted response");
     assert!(
         sidecar
-            .take_wire_sidecar_response(-1)
-            .expect("take evicted wire sidecar response")
-            .is_none(),
-        "oldest completed response should be evicted"
+            .take_wire_sidecar_response(oldest_request_id)
+            .expect("take retained oldest wire sidecar response")
+            .is_some(),
+        "completion pressure must not evict the oldest response"
     );
-    assert_eq!(
-        sidecar
-            .take_wire_sidecar_response(latest_request_id)
-            .expect("take latest wire sidecar response")
-            .expect("latest completed response should remain")
-            .request_id,
-        latest_request_id
-    );
+    sidecar
+        .accept_wire_sidecar_response(SidecarResponseFrame {
+            schema: agentos_native_sidecar::wire::protocol_schema(),
+            request_id: rejected_request_id,
+            ownership,
+            payload: host_callback_response(SIDECAR_CALLBACK_LIMIT),
+        })
+        .expect("draining one completion permits retry");
+    assert!(sidecar
+        .take_wire_sidecar_response(rejected_request_id)
+        .expect("take retried wire sidecar response")
+        .is_some());
 }

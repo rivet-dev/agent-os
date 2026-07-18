@@ -6,6 +6,7 @@
     "builtAt": "2026-06-23T03:47:12.644Z",
     "transforms": [
       "Normalize HOSTNAME to agentos",
+      "Allow traversal into the agentOS /root/node_modules compatibility projection",
       "Preserve the captured user-level environment and filesystem layout as the agentos base layer",
       "Add the non-Alpine /workspace directory (default agent working directory) owned by the base user",
       "Restore Alpine 3.22's /etc/services database and add the VM's Docker-style /etc/hosts entries for libc lookup parity"
@@ -336,7 +337,7 @@
       {
         "path": "/root",
         "type": "directory",
-        "mode": "700",
+        "mode": "711",
         "uid": 0,
         "gid": 0
       },

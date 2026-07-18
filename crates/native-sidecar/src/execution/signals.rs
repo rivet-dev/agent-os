@@ -1,5 +1,69 @@
 use super::*;
 
+fn kernel_signal_action_from_registration(
+    registration: &SignalHandlerRegistration,
+) -> Result<agentos_kernel::process_table::SignalAction, SidecarError> {
+    use agentos_kernel::process_table::{SignalAction, SignalDisposition};
+
+    let mask_signals = registration
+        .mask
+        .iter()
+        .copied()
+        .map(|signal| {
+            i32::try_from(signal).map_err(|_| {
+                SidecarError::host("EINVAL", format!("invalid signal number {signal}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mask = SignalSet::from_signals(mask_signals)
+        .map_err(|error| SidecarError::host(error.code(), error.to_string()))?;
+    Ok(SignalAction {
+        disposition: match registration.action {
+            SignalDispositionAction::Default => SignalDisposition::Default,
+            SignalDispositionAction::Ignore => SignalDisposition::Ignore,
+            SignalDispositionAction::User => SignalDisposition::User,
+        },
+        mask,
+        flags: registration.flags,
+    })
+}
+
+pub(crate) fn apply_kernel_signal_registration(
+    process: &ActiveProcess,
+    signal: u32,
+    registration: &SignalHandlerRegistration,
+) -> Result<(), SidecarError> {
+    let signal = i32::try_from(signal)
+        .map_err(|_| SidecarError::host("EINVAL", format!("invalid signal number {signal}")))?;
+    let action = kernel_signal_action_from_registration(registration)?;
+    process
+        .kernel_handle
+        .signal_action(signal, Some(action))
+        .map_err(kernel_error)?;
+    Ok(())
+}
+
+pub(crate) fn protocol_signal_registration(
+    action: agentos_kernel::process_table::SignalAction,
+) -> SignalHandlerRegistration {
+    use agentos_kernel::process_table::SignalDisposition;
+
+    SignalHandlerRegistration {
+        action: match action.disposition {
+            SignalDisposition::Default => SignalDispositionAction::Default,
+            SignalDisposition::Ignore => SignalDispositionAction::Ignore,
+            SignalDisposition::User => SignalDispositionAction::User,
+        },
+        mask: action
+            .mask
+            .signals()
+            .into_iter()
+            .map(|signal| signal as u32)
+            .collect(),
+        flags: action.flags,
+    }
+}
+
 /// Applies a kill signal to a tracked child execution. Shared-runtime
 /// executions for lethal signals are terminated directly with a synthetic
 /// signal exit so child polls observe a prompt close; everything else routes
@@ -8,182 +72,41 @@ pub(super) fn terminate_tracked_child_process_for_signal(
     kernel: &mut SidecarKernel,
     child: &mut ActiveProcess,
     signal: i32,
-    registration: Option<&SignalHandlerRegistration>,
+    _registration: Option<&SignalHandlerRegistration>,
 ) -> Result<(), SidecarError> {
-    if signal == 0 {
-        return kernel
-            .kill_process(EXECUTION_DRIVER_NAME, child.kernel_pid, signal)
-            .map_err(kernel_error);
-    }
-
     // The runtime may have published its terminal event before the parent has
     // polled and reaped it. Keep that queued exit authoritative and make a
     // cleanup kill idempotent instead of sending a late terminate command to a
-    // completed V8 session.
-    if child.execution.has_exited() {
+    // completed execution session.
+    if signal != 0 && child.execution.has_exited() {
         return Ok(());
     }
-
-    if signal == libc::SIGCONT {
-        apply_active_process_default_signal(kernel, child, signal)?;
-        match registration.map(|registration| &registration.action) {
-            Some(SignalDispositionAction::User) => {
-                if matches!(&child.execution, ActiveExecution::Wasm(execution) if execution.uses_shared_v8_runtime())
-                {
-                    child.queue_pending_wasm_signal(signal)?;
-                } else if let Some(session) = child.execution.javascript_v8_session_handle() {
-                    dispatch_v8_session_signal(session, signal);
-                } else if !dispatch_v8_process_signal(child, signal)? {
-                    return Err(SidecarError::InvalidState(format!(
-                        "unsupported guest SIGCONT handler delivery for pid {}",
-                        child.kernel_pid
-                    )));
-                }
-            }
-            Some(SignalDispositionAction::Default | SignalDispositionAction::Ignore) | None => {}
-        }
-        return Ok(());
-    }
-
-    // SIGKILL and SIGSTOP are uncatchable. Every other signal first honors the
-    // guest disposition. Shared WASM consumes user signals cooperatively at
-    // syscall boundaries instead of receiving an OS signal on a Tokio worker.
-    if !matches!(signal, libc::SIGKILL | libc::SIGSTOP) {
-        match registration.map(|registration| &registration.action) {
-            Some(SignalDispositionAction::Ignore) => return Ok(()),
-            Some(SignalDispositionAction::User) => {
-                if matches!(&child.execution, ActiveExecution::Wasm(execution) if execution.uses_shared_v8_runtime())
-                {
-                    return child.queue_pending_wasm_signal(signal);
-                }
-                if let Some(session) = child.execution.javascript_v8_session_handle().filter(|_| {
-                    matches!(&child.execution, ActiveExecution::Javascript(execution) if execution.uses_shared_v8_runtime())
-                }) {
-                    dispatch_v8_session_signal(session, signal);
-                    return Ok(());
-                }
-                if dispatch_v8_process_signal(child, signal)? {
-                    return Ok(());
-                }
-                return Err(SidecarError::InvalidState(format!(
-                    "unsupported guest signal handler delivery for pid {}",
-                    child.kernel_pid
-                )));
-            }
-            Some(SignalDispositionAction::Default) | None => {}
-        }
-    }
-
-    if matches!(
-        canonical_signal_name(signal),
-        Some("SIGWINCH" | "SIGCHLD" | "SIGURG")
-    ) {
-        return Ok(());
-    }
-    apply_active_process_default_signal(kernel, child, signal)
+    kernel
+        .kill_process(EXECUTION_DRIVER_NAME, child.kernel_pid, signal)
+        .map_err(kernel_error)?;
+    child.apply_runtime_controls()
 }
 
 fn sidecar_error_is_esrch(error: &SidecarError) -> bool {
-    error.to_string().contains("ESRCH")
+    guest_error_code(error) == Some("ESRCH")
 }
 
-pub(crate) fn apply_active_process_default_signal(
-    kernel: &mut SidecarKernel,
-    process: &mut ActiveProcess,
-    signal: i32,
-) -> Result<(), SidecarError> {
-    if matches!(
-        signal,
-        libc::SIGSTOP | libc::SIGTSTP | libc::SIGTTIN | libc::SIGTTOU
-    ) {
-        if process.execution.uses_shared_v8_runtime() {
-            process.execution.pause()?;
-        } else {
-            signal_runtime_process(process.execution.child_pid(), signal)?;
-        }
-        return kernel
-            .kill_process(EXECUTION_DRIVER_NAME, process.kernel_pid, signal)
-            .map_err(kernel_error);
-    }
-    if signal == libc::SIGCONT {
-        // Linux resumes a stopped process even when SIGCONT is ignored or has
-        // a handler. Handler delivery is layered on by the caller afterwards.
-        if process.execution.uses_shared_v8_runtime() {
-            process.execution.resume()?;
-        } else {
-            signal_runtime_process(process.execution.child_pid(), signal)?;
-        }
-        return kernel
-            .kill_process(EXECUTION_DRIVER_NAME, process.kernel_pid, signal)
-            .map_err(kernel_error);
-    }
-
-    if signal != 0 && matches!(process.execution, ActiveExecution::Python(_)) {
-        close_kernel_process_stdin(kernel, process)?;
-    }
-
-    if process.execution.uses_shared_v8_runtime() {
-        process.exit_signal = (signal != 0).then_some(signal);
-        process.exit_core_dumped = false;
-        process.execution.terminate()?;
-        if signal != 0 && matches!(process.execution, ActiveExecution::Wasm(_)) {
-            process.queue_pending_execution_event(ActiveExecutionEvent::Exited(128 + signal))?;
-        }
-        return Ok(());
-    }
-
-    signal_runtime_process(process.execution.child_pid(), signal)
+pub(crate) fn canonical_signal_name(signal: i32) -> Option<&'static str> {
+    agentos_native_sidecar_core::canonical_signal_name(signal)
 }
 
-pub(super) fn map_wasm_signal_registration(
-    registration: agentos_execution::wasm::WasmSignalHandlerRegistration,
+pub(super) fn map_execution_signal_registration(
+    registration: ExecutionSignalHandlerRegistration,
 ) -> SignalHandlerRegistration {
     SignalHandlerRegistration {
         action: match registration.action {
-            agentos_execution::wasm::WasmSignalDispositionAction::Default => {
-                crate::protocol::SignalDispositionAction::Default
-            }
-            agentos_execution::wasm::WasmSignalDispositionAction::Ignore => {
-                crate::protocol::SignalDispositionAction::Ignore
-            }
-            agentos_execution::wasm::WasmSignalDispositionAction::User => {
-                crate::protocol::SignalDispositionAction::User
-            }
+            ExecutionSignalDispositionAction::Default => SignalDispositionAction::Default,
+            ExecutionSignalDispositionAction::Ignore => SignalDispositionAction::Ignore,
+            ExecutionSignalDispositionAction::User => SignalDispositionAction::User,
         },
         mask: registration.mask,
         flags: registration.flags,
     }
-}
-
-pub(super) fn map_node_signal_registration(
-    registration: NodeSignalHandlerRegistration,
-) -> SignalHandlerRegistration {
-    SignalHandlerRegistration {
-        action: match registration.action {
-            NodeSignalDispositionAction::Default => SignalDispositionAction::Default,
-            NodeSignalDispositionAction::Ignore => SignalDispositionAction::Ignore,
-            NodeSignalDispositionAction::User => SignalDispositionAction::User,
-        },
-        mask: registration.mask,
-        flags: registration.flags,
-    }
-}
-
-fn process_signal_state_key<'a>(process_id: &'a str, child_path: &[&'a str]) -> &'a str {
-    child_path.last().copied().unwrap_or(process_id)
-}
-
-pub(super) fn reset_caught_signal_dispositions_after_exec(
-    signal_states: &mut BTreeMap<String, BTreeMap<u32, SignalHandlerRegistration>>,
-    process_id: &str,
-    child_path: &[&str],
-) -> String {
-    let signal_key = process_signal_state_key(process_id, child_path).to_owned();
-    if let Some(registrations) = signal_states.get_mut(&signal_key) {
-        registrations
-            .retain(|_, registration| registration.action == SignalDispositionAction::Ignore);
-    }
-    signal_key
 }
 
 pub(super) fn javascript_child_process_sync_input_bytes(
@@ -208,49 +131,6 @@ pub(super) fn javascript_child_process_sync_input_bytes(
 // bridge_permissions moved to crate::bridge
 
 // reconcile_mounts, resolve_cwd moved to crate::vm
-
-fn signal_name_for_stream_event(signal: i32) -> Option<&'static str> {
-    match signal {
-        libc::SIGHUP => Some("SIGHUP"),
-        libc::SIGINT => Some("SIGINT"),
-        libc::SIGUSR1 => Some("SIGUSR1"),
-        libc::SIGALRM => Some("SIGALRM"),
-        libc::SIGCONT => Some("SIGCONT"),
-        libc::SIGTERM => Some("SIGTERM"),
-        libc::SIGCHLD => Some("SIGCHLD"),
-        libc::SIGWINCH => Some("SIGWINCH"),
-        _ => None,
-    }
-}
-
-pub(crate) fn canonical_signal_name(signal: i32) -> Option<&'static str> {
-    agentos_native_sidecar_core::canonical_signal_name(signal)
-}
-
-pub(super) fn dispatch_v8_process_signal(
-    process: &ActiveProcess,
-    signal: i32,
-) -> Result<bool, SidecarError> {
-    if signal_name_for_stream_event(signal).is_none() {
-        return Ok(false);
-    }
-    let Some(session) = process.execution.javascript_v8_session_handle() else {
-        return Ok(false);
-    };
-    session
-        .publish_signal(signal)
-        .map_err(|error| SidecarError::Execution(error.to_string()))?;
-    Ok(true)
-}
-
-pub(super) fn dispatch_v8_session_signal(session: V8SessionHandle, signal: i32) {
-    if signal_name_for_stream_event(signal).is_none() {
-        return;
-    }
-    if let Err(error) = session.publish_signal(signal) {
-        eprintln!("ERR_AGENTOS_SIGNAL_DELIVERY: could not enqueue signal {signal}: {error}");
-    }
-}
 
 pub(crate) fn parse_signal(signal: &str) -> Result<i32, SidecarError> {
     let trimmed = signal.trim();
@@ -448,207 +328,21 @@ where
             .vms
             .get_mut(vm_id)
             .ok_or_else(|| SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}")))?;
-        let signal_action = vm
-            .signal_states
-            .get(process_id)
-            .and_then(|handlers| handlers.get(&(signal as u32)))
-            .map(|registration| registration.action.clone())
-            .unwrap_or(SignalDispositionAction::Default);
         let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
             SidecarError::InvalidState(format!("VM {vm_id} has no active process {process_id}"))
         })?;
-        let kernel_pid = process.kernel_pid;
+
         if !matches!(signal, 0 | libc::SIGCONT) {
-            // A guest parked in a deferred kernel-wait sync RPC is blocked in a
-            // native bridge wait the kill cannot interrupt; answer the parked
-            // RPC first so the termination can take effect.
+            // An executor blocked in a deferred kernel wait must be released so
+            // it can observe the durable control checkpoint/termination.
             flush_parked_kernel_wait_rpc(process);
         }
 
-        enum KillBehavior {
-            Binding,
-            SharedV8StateOnly,
-            SharedV8Pause,
-            SharedV8Continue,
-            SharedV8Terminate,
-            SharedV8DispatchOrTerminate,
-            Noop,
-            HostPid(u32),
-        }
+        vm.kernel
+            .kill_process(EXECUTION_DRIVER_NAME, process.kernel_pid, signal)
+            .map_err(kernel_error)?;
+        process.apply_runtime_controls()?;
 
-        let behavior = match &process.execution {
-            ActiveExecution::Binding(_) => KillBehavior::Binding,
-            _ if process.execution.uses_shared_v8_runtime() && signal == 0 => {
-                KillBehavior::SharedV8StateOnly
-            }
-            _ if process.execution.uses_shared_v8_runtime()
-                && matches!(
-                    signal,
-                    libc::SIGSTOP | libc::SIGTSTP | libc::SIGTTIN | libc::SIGTTOU
-                )
-                && (signal == libc::SIGSTOP
-                    || signal_action == SignalDispositionAction::Default) =>
-            {
-                KillBehavior::SharedV8Pause
-            }
-            _ if process.execution.uses_shared_v8_runtime()
-                && matches!(signal, libc::SIGTSTP | libc::SIGTTIN | libc::SIGTTOU)
-                && signal_action == SignalDispositionAction::Ignore =>
-            {
-                KillBehavior::Noop
-            }
-            _ if process.execution.uses_shared_v8_runtime() && signal == libc::SIGCONT => {
-                KillBehavior::SharedV8Continue
-            }
-            ActiveExecution::Javascript(execution)
-                if execution.uses_shared_v8_runtime() && signal == SIGKILL =>
-            {
-                KillBehavior::SharedV8Terminate
-            }
-            ActiveExecution::Wasm(execution)
-                if execution.uses_shared_v8_runtime() && signal == SIGKILL =>
-            {
-                KillBehavior::SharedV8Terminate
-            }
-            ActiveExecution::Javascript(execution) if execution.uses_shared_v8_runtime() => {
-                KillBehavior::SharedV8DispatchOrTerminate
-            }
-            ActiveExecution::Wasm(execution) if execution.uses_shared_v8_runtime() => {
-                KillBehavior::SharedV8DispatchOrTerminate
-            }
-            ActiveExecution::Python(execution)
-                if execution.uses_shared_v8_runtime()
-                    && signal_action != SignalDispositionAction::Default =>
-            {
-                KillBehavior::SharedV8DispatchOrTerminate
-            }
-            ActiveExecution::Python(execution) if execution.uses_shared_v8_runtime() => {
-                KillBehavior::SharedV8Terminate
-            }
-            ActiveExecution::Javascript(execution) if execution.child_pid() == 0 => {
-                KillBehavior::Noop
-            }
-            _ => KillBehavior::HostPid(process.execution.child_pid()),
-        };
-
-        match behavior {
-            KillBehavior::Binding => {
-                let ActiveExecution::Binding(execution) = &process.execution else {
-                    unreachable!("kill behavior must match tool execution");
-                };
-                if signal != 0 {
-                    execution.cancelled.store(true, Ordering::Relaxed);
-                    process.exit_signal = Some(signal);
-                    process.exit_core_dumped = false;
-                    process.queue_pending_execution_event(ActiveExecutionEvent::Exited(
-                        128 + signal,
-                    ))?;
-                }
-            }
-            KillBehavior::SharedV8StateOnly => {
-                vm.kernel
-                    .kill_process(EXECUTION_DRIVER_NAME, kernel_pid, signal)
-                    .map_err(kernel_error)?;
-            }
-            KillBehavior::SharedV8Pause => {
-                process.execution.pause()?;
-                vm.kernel
-                    .kill_process(EXECUTION_DRIVER_NAME, kernel_pid, signal)
-                    .map_err(kernel_error)?;
-            }
-            KillBehavior::SharedV8Continue => {
-                process.execution.resume()?;
-                vm.kernel
-                    .kill_process(EXECUTION_DRIVER_NAME, kernel_pid, signal)
-                    .map_err(kernel_error)?;
-                if matches!(&process.execution, ActiveExecution::Javascript(_)) {
-                    if !dispatch_v8_process_signal(process, signal)? {
-                        return Err(SidecarError::InvalidState(format!(
-                            "unsupported guest SIGCONT handler delivery for pid {kernel_pid}"
-                        )));
-                    }
-                } else if signal_action == SignalDispositionAction::User {
-                    if matches!(&process.execution, ActiveExecution::Wasm(execution) if execution.uses_shared_v8_runtime())
-                    {
-                        process.queue_pending_wasm_signal(signal)?;
-                    } else {
-                        return Err(SidecarError::InvalidState(format!(
-                            "unsupported guest SIGCONT handler delivery for pid {kernel_pid}"
-                        )));
-                    }
-                }
-            }
-            KillBehavior::SharedV8Terminate => {
-                if signal != 0 && matches!(process.execution, ActiveExecution::Python(_)) {
-                    close_kernel_process_stdin(&mut vm.kernel, process)?;
-                }
-                process.exit_signal = (signal != 0).then_some(signal);
-                process.exit_core_dumped = false;
-                process.execution.terminate()?;
-                let needs_synthetic_exit = matches!(process.execution, ActiveExecution::Wasm(_))
-                    || (signal == SIGKILL
-                        && matches!(process.execution, ActiveExecution::Javascript(_)));
-                if signal != 0 && needs_synthetic_exit {
-                    process.queue_pending_execution_event(ActiveExecutionEvent::Exited(
-                        128 + signal,
-                    ))?;
-                }
-            }
-            KillBehavior::SharedV8DispatchOrTerminate => {
-                if signal != 0 {
-                    let is_shared_wasm = matches!(
-                        &process.execution,
-                        ActiveExecution::Wasm(execution) if execution.uses_shared_v8_runtime()
-                    );
-                    if is_shared_wasm {
-                        match signal_action {
-                            SignalDispositionAction::Ignore => {}
-                            SignalDispositionAction::User => {
-                                process.queue_pending_wasm_signal(signal)?;
-                            }
-                            SignalDispositionAction::Default => {
-                                if !matches!(
-                                    canonical_signal_name(signal),
-                                    Some("SIGWINCH" | "SIGCHLD" | "SIGURG")
-                                ) {
-                                    process.exit_signal = Some(signal);
-                                    process.exit_core_dumped = false;
-                                    process.execution.terminate()?;
-                                    process.queue_pending_execution_event(
-                                        ActiveExecutionEvent::Exited(128 + signal),
-                                    )?;
-                                }
-                            }
-                        }
-                    } else if matches!(process.execution, ActiveExecution::Python(_)) {
-                        match signal_action {
-                            SignalDispositionAction::Ignore => {}
-                            SignalDispositionAction::User => {
-                                return Err(SidecarError::InvalidState(format!(
-                                    "unsupported guest signal handler delivery for pid {kernel_pid}"
-                                )));
-                            }
-                            SignalDispositionAction::Default => {
-                                process.exit_signal = Some(signal);
-                                process.exit_core_dumped = false;
-                                process.execution.terminate()?;
-                            }
-                        }
-                    } else if !dispatch_v8_process_signal(process, signal)? {
-                        process.exit_signal = Some(signal);
-                        process.exit_core_dumped = false;
-                        process.execution.terminate()?;
-                    }
-                }
-            }
-            KillBehavior::Noop => {}
-            KillBehavior::HostPid(pid) => {
-                if signal != 0 && matches!(process.execution, ActiveExecution::Python(_)) {
-                    close_kernel_process_stdin(&mut vm.kernel, process)?;
-                }
-                signal_runtime_process(pid, signal)?;
-            }
-        }
         emit_security_audit_event(
             &self.bridge,
             vm_id,
@@ -661,7 +355,11 @@ where
                 (String::from("signal"), signal_name),
                 (
                     String::from("host_pid"),
-                    process.execution.child_pid().to_string(),
+                    process
+                        .execution
+                        .native_process_id()
+                        .map(|process_id| process_id.to_string())
+                        .unwrap_or_else(|| String::from("embedded")),
                 ),
             ]),
         );
@@ -682,9 +380,10 @@ where
         let signal = parse_signal(signal_name)?;
         let located = {
             let Some(vm) = self.vms.get(vm_id) else {
-                return Err(SidecarError::InvalidState(String::from(
-                    "ESRCH: unknown VM during process.kill",
-                )));
+                return Err(SidecarError::host(
+                    "ESRCH",
+                    String::from("unknown VM during process.kill"),
+                ));
             };
             let alive = vm
                 .kernel
@@ -692,9 +391,10 @@ where
                 .get(&target_kernel_pid)
                 .is_some_and(|info| info.status != ProcessStatus::Exited);
             if !alive {
-                return Err(SidecarError::InvalidState(format!(
-                    "ESRCH: no such process {target_kernel_pid}"
-                )));
+                return Err(SidecarError::host(
+                    "ESRCH",
+                    format!("no such process {target_kernel_pid}"),
+                ));
             }
             vm.active_processes.iter().find_map(|(process_id, root)| {
                 Self::active_process_path_by_kernel_pid(root, target_kernel_pid)
@@ -710,26 +410,16 @@ where
                 let Some(vm) = self.vms.get_mut(vm_id) else {
                     return Ok(());
                 };
-                let signal_key = path.last().map(String::as_str).unwrap_or(&process_id);
-                let registration = vm
-                    .signal_states
-                    .get(signal_key)
-                    .and_then(|handlers| handlers.get(&(signal as u32)))
-                    .cloned();
                 let Some(root) = vm.active_processes.get_mut(&process_id) else {
                     return Ok(());
                 };
                 let Some(target) = Self::active_process_by_owned_path_mut(root, &path) else {
-                    return Err(SidecarError::InvalidState(format!(
-                        "ESRCH: no such process {target_kernel_pid}"
-                    )));
+                    return Err(SidecarError::host(
+                        "ESRCH",
+                        format!("no such process {target_kernel_pid}"),
+                    ));
                 };
-                terminate_tracked_child_process_for_signal(
-                    &mut vm.kernel,
-                    target,
-                    signal,
-                    registration.as_ref(),
-                )?;
+                terminate_tracked_child_process_for_signal(&mut vm.kernel, target, signal, None)?;
                 emit_security_audit_event(
                     &self.bridge,
                     vm_id,
@@ -748,9 +438,7 @@ where
                     return Ok(());
                 };
                 let target_pid = i32::try_from(target_kernel_pid).map_err(|_| {
-                    SidecarError::InvalidState(format!(
-                        "EINVAL: invalid process pid {target_kernel_pid}"
-                    ))
+                    SidecarError::host("EINVAL", format!("invalid process pid {target_kernel_pid}"))
                 })?;
                 vm.kernel
                     .signal_process(EXECUTION_DRIVER_NAME, target_pid, signal)
@@ -784,9 +472,10 @@ where
         parse_signal(signal_name)?;
         let members = {
             let Some(vm) = self.vms.get(vm_id) else {
-                return Err(SidecarError::InvalidState(String::from(
-                    "ESRCH: unknown VM during process.kill",
-                )));
+                return Err(SidecarError::host(
+                    "ESRCH",
+                    String::from("unknown VM during process.kill"),
+                ));
             };
             vm.kernel
                 .list_processes()
@@ -796,9 +485,10 @@ where
                 .collect::<Vec<_>>()
         };
         if members.is_empty() {
-            return Err(SidecarError::InvalidState(format!(
-                "ESRCH: no such process group {pgid}"
-            )));
+            return Err(SidecarError::host(
+                "ESRCH",
+                format!("no such process group {pgid}"),
+            ));
         }
 
         let mut caller_is_member = false;
@@ -852,7 +542,11 @@ where
         };
 
         for kernel_pid in tracked_members {
-            match self.signal_vm_kernel_pid(vm_id, kernel_pid, signal_name) {
+            match self.apply_kernel_generated_signal_to_tracked_runtime(
+                vm_id,
+                kernel_pid,
+                signal_name,
+            ) {
                 Ok(()) => {}
                 // A process can exit after the group snapshot but before the
                 // tracked runtime is notified. Linux still considers the
@@ -862,6 +556,43 @@ where
             }
         }
         Ok(())
+    }
+
+    /// Applies control state that the kernel has already published to a
+    /// tracked runtime endpoint. This must not call a kernel signal API: doing
+    /// so would enqueue the same kernel-generated signal twice (for example,
+    /// the `SIGWINCH` emitted by `KernelVm::pty_resize`).
+    fn apply_kernel_generated_signal_to_tracked_runtime(
+        &mut self,
+        vm_id: &str,
+        target_kernel_pid: u32,
+        signal_name: &str,
+    ) -> Result<(), SidecarError> {
+        let signal = parse_signal(signal_name)?;
+        let vm = self
+            .vms
+            .get_mut(vm_id)
+            .ok_or_else(|| SidecarError::host("ESRCH", format!("unknown VM {vm_id}")))?;
+        let (process_id, path) = vm
+            .active_processes
+            .iter()
+            .find_map(|(process_id, root)| {
+                Self::active_process_path_by_kernel_pid(root, target_kernel_pid)
+                    .map(|path| (process_id.clone(), path))
+            })
+            .ok_or_else(|| {
+                SidecarError::host("ESRCH", format!("no tracked process {target_kernel_pid}"))
+            })?;
+        let root = vm
+            .active_processes
+            .get_mut(&process_id)
+            .ok_or_else(|| SidecarError::host("ESRCH", "tracked process disappeared"))?;
+        let target = Self::active_process_by_owned_path_mut(root, &path)
+            .ok_or_else(|| SidecarError::host("ESRCH", "tracked process disappeared"))?;
+        if !matches!(signal, 0 | libc::SIGCONT) {
+            flush_parked_kernel_wait_rpc(target);
+        }
+        target.apply_runtime_controls()
     }
 }
 

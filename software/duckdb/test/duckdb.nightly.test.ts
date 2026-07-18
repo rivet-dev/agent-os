@@ -39,6 +39,9 @@ async function mountKernel(
   filesystem: ReturnType<typeof createInMemoryFileSystem>,
   options: { loopbackExemptPorts?: number[] } = {},
 ) {
+  // Keep /tmp out of the supplied snapshot: the kernel bootstrap owns its
+  // Linux 01777 temp directory, and generated database files must not be
+  // mirrored through the bounded host bridge.
   const kernel = createKernel({
     filesystem,
     cwd: '/tmp',
@@ -69,12 +72,12 @@ function closeServer(server: Server) {
 }
 
 async function waitForFilesystemPath(
-  filesystem: ReturnType<typeof createInMemoryFileSystem>,
+  kernel: Kernel,
   path: string,
   timeoutMs = 30_000,
 ) {
   const start = Date.now();
-  while (!(await filesystem.exists(path))) {
+  while (!(await kernel.exists(path))) {
     if (Date.now() - start >= timeoutMs) {
       throw new Error(`timed out waiting for ${path}`);
     }
@@ -93,7 +96,6 @@ describeIf(hasWasmDuckDB, 'duckdb command', { timeout: 120_000 }, () => {
 
   it('executes basic SQL against an in-memory database', async () => {
     const filesystem = createInMemoryFileSystem();
-    await filesystem.mkdir('/tmp');
     kernel = await mountKernel(filesystem);
 
     const result = await kernel.exec('duckdb -csv -c "SELECT 41 + 1 AS answer"');
@@ -101,23 +103,17 @@ describeIf(hasWasmDuckDB, 'duckdb command', { timeout: 120_000 }, () => {
     expect(result.stdout.trim()).toBe('answer\n42');
   });
 
-  it('persists database files on the shared VFS and reopens them in a new process', async () => {
+  it('persists database files on the kernel VFS and reopens them in a new process', async () => {
     const filesystem = createInMemoryFileSystem();
-    await filesystem.mkdir('/tmp');
-    await filesystem.writeFile('/tmp/input.csv', 'name,value\nalpha,1\nbeta,2\n');
-
     kernel = await mountKernel(filesystem);
+    await kernel.writeFile('/tmp/input.csv', 'name,value\nalpha,1\nbeta,2\n');
     let result = await kernel.exec(
       `duckdb -csv /tmp/app.duckdb -c "CREATE TABLE items AS SELECT * FROM read_csv_auto('/tmp/input.csv');"`
     );
     expect(result.exitCode).toBe(0);
-    await kernel.dispose();
-    kernel = undefined;
+    expect(await kernel.exists('/tmp/app.duckdb')).toBe(true);
+    expect((await kernel.stat('/tmp/app.duckdb')).size).toBeGreaterThan(0);
 
-    expect(await filesystem.exists('/tmp/app.duckdb')).toBe(true);
-    expect((await filesystem.stat('/tmp/app.duckdb')).size).toBeGreaterThan(0);
-
-    kernel = await mountKernel(filesystem);
     result = await kernel.exec(
       `duckdb -csv /tmp/app.duckdb -c "SELECT name, value FROM items ORDER BY value;"`
     );
@@ -127,7 +123,6 @@ describeIf(hasWasmDuckDB, 'duckdb command', { timeout: 120_000 }, () => {
 
   it('persists inserted and updated rows across process reopens', async () => {
     const filesystem = createInMemoryFileSystem();
-    await filesystem.mkdir('/tmp');
     kernel = await mountKernel(filesystem);
 
     let result = await kernel.exec(
@@ -144,7 +139,6 @@ describeIf(hasWasmDuckDB, 'duckdb command', { timeout: 120_000 }, () => {
 
   it('supports joins and indexes on file-backed tables', async () => {
     const filesystem = createInMemoryFileSystem();
-    await filesystem.mkdir('/tmp');
     kernel = await mountKernel(filesystem);
 
     const result = await kernel.exec(
@@ -156,7 +150,6 @@ describeIf(hasWasmDuckDB, 'duckdb command', { timeout: 120_000 }, () => {
 
   it('keeps temp tables scoped to a single DuckDB process', async () => {
     const filesystem = createInMemoryFileSystem();
-    await filesystem.mkdir('/tmp');
     kernel = await mountKernel(filesystem);
 
     let result = await kernel.exec(
@@ -174,7 +167,6 @@ describeIf(hasWasmDuckDB, 'duckdb command', { timeout: 120_000 }, () => {
 
   it('drops uncommitted rows after a hard-killed process is reopened', async () => {
     const filesystem = createInMemoryFileSystem();
-    await filesystem.mkdir('/tmp');
     kernel = await mountKernel(filesystem);
 
     let result = await kernel.exec(
@@ -189,7 +181,7 @@ describeIf(hasWasmDuckDB, 'duckdb command', { timeout: 120_000 }, () => {
       "BEGIN; INSERT INTO items VALUES (42); COPY (SELECT COUNT(*) AS rows_in_tx FROM items) TO '/tmp/tx-ready.csv' (HEADER, DELIMITER ','); SELECT SUM(i) FROM range(100000000000) tbl(i);",
     ]);
 
-    await waitForFilesystemPath(filesystem, '/tmp/tx-ready.csv');
+    await waitForFilesystemPath(kernel, '/tmp/tx-ready.csv');
 
     proc.kill(9);
     await proc.wait().catch(() => undefined);
@@ -203,23 +195,21 @@ describeIf(hasWasmDuckDB, 'duckdb command', { timeout: 120_000 }, () => {
 
   it('handles large sorted exports with a configured temp directory under constrained memory', async () => {
     const filesystem = createInMemoryFileSystem();
-    await filesystem.mkdir('/tmp');
     kernel = await mountKernel(filesystem);
 
     const result = await kernel.exec(
       `duckdb -csv /tmp/spill.duckdb -c "PRAGMA temp_directory='/tmp/duckdb-spill'; SET threads=1; SET preserve_insertion_order=false; SET memory_limit='64MB'; COPY (SELECT i, repeat('x', 256) AS payload FROM range(200000) tbl(i) ORDER BY i DESC) TO '/tmp/spilled.csv' (HEADER, DELIMITER ',');"`
     );
     expect(result.exitCode).toBe(0);
-    expect(await filesystem.exists('/tmp/spilled.csv')).toBe(true);
-    expect((await filesystem.stat('/tmp/spilled.csv')).size).toBeGreaterThan(50_000_000);
+    expect(await kernel.exists('/tmp/spilled.csv')).toBe(true);
+    expect((await kernel.stat('/tmp/spilled.csv')).size).toBeGreaterThan(50_000_000);
   });
 
   itIf(
     hasWasmCurl,
-    'queries data fetched over the network through the shared VFS',
+    'queries data fetched over the network through the kernel VFS',
     async () => {
       const filesystem = createInMemoryFileSystem();
-      await filesystem.mkdir('/tmp');
 
       const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         if (req.url === '/' || req.url === '/remote.csv') {
@@ -248,7 +238,9 @@ describeIf(hasWasmDuckDB, 'duckdb command', { timeout: 120_000 }, () => {
         );
         expect(result.exitCode).toBe(0);
 
-        expect(await filesystem.readTextFile('/tmp/remote.csv')).toContain('city,value');
+        expect(new TextDecoder().decode(await kernel.readFile('/tmp/remote.csv'))).toContain(
+          'city,value'
+        );
 
         result = await kernel.exec(
           `duckdb -csv -c "SELECT SUM(value) AS total FROM read_csv_auto('/tmp/remote.csv');"`

@@ -1,14 +1,20 @@
+use crate::backend::{
+    DescendantOutputOwnership, DescendantWaitOwnership, ExecutionBackend, ExecutionBackendKind,
+    ExecutionExit, ExecutionWakeHandle, ExecutionWakeIdentity, HostServiceError,
+    PublishedSignalCheckpoint, ShutdownOutcome, ShutdownReason, SignalCheckpointOutcome,
+    SynchronousFdWritePolicy,
+};
 use crate::common::{
     encode_json_string, encode_json_string_array, encode_json_string_map, frozen_time_ms,
 };
 use crate::javascript::{
-    CreateJavascriptContextRequest, GuestRuntimeConfig, JavascriptExecution,
+    CreateJavascriptContextRequest, GuestRuntimeConfig, HostRpcRequest, JavascriptExecution,
     JavascriptExecutionEngine, JavascriptExecutionError, JavascriptExecutionEvent,
-    JavascriptExecutionLimits, JavascriptSyncRpcRequest, StartJavascriptExecutionRequest,
+    JavascriptExecutionLimits, JavascriptSyncRpcResponder, StartJavascriptExecutionRequest,
 };
 use crate::node_import_cache::NodeImportCache;
 use crate::runtime_support::{env_flag_enabled, file_fingerprint, warmup_marker_path};
-use crate::signal::{NodeSignalDispositionAction, NodeSignalHandlerRegistration};
+use crate::signal::{ExecutionSignalDispositionAction, ExecutionSignalHandlerRegistration};
 use crate::v8_host::{V8RuntimeHost, V8SessionHandle};
 use crate::v8_runtime;
 use agentos_bridge::queue_tracker::{
@@ -36,7 +42,6 @@ const WASM_PREWARM_ONLY_ENV: &str = "AGENTOS_WASM_PREWARM_ONLY";
 const WASM_HOST_CWD_ENV: &str = "AGENTOS_WASM_HOST_CWD";
 const WASM_SANDBOX_ROOT_ENV: &str = "AGENTOS_SANDBOX_ROOT";
 const WASM_WARMUP_DEBUG_ENV: &str = "AGENTOS_WASM_WARMUP_DEBUG";
-pub const WASM_MAX_FUEL_ENV: &str = "AGENTOS_WASM_MAX_FUEL";
 pub const WASM_MAX_MEMORY_BYTES_ENV: &str = "AGENTOS_WASM_MAX_MEMORY_BYTES";
 pub const WASM_MAX_STACK_BYTES_ENV: &str = "AGENTOS_WASM_MAX_STACK_BYTES";
 pub const WASM_MAX_MODULE_FILE_BYTES_ENV: &str = "AGENTOS_WASM_MAX_MODULE_FILE_BYTES";
@@ -46,6 +51,8 @@ const WASM_MAX_SPAWN_FILE_ACTION_BYTES_ENV: &str = "AGENTOS_WASM_MAX_SPAWN_FILE_
 const WASM_MAX_SOCKETS_ENV: &str = "AGENTOS_WASM_MAX_SOCKETS";
 const WASM_MAX_BLOCKING_READ_MS_ENV: &str = "AGENTOS_WASM_MAX_BLOCKING_READ_MS";
 const WASM_INTERNAL_MAX_STACK_BYTES_ENV: &str = "AGENTOS_INTERNAL_WASM_MAX_STACK_BYTES";
+const WASM_INTERNAL_SYNC_RPC_RESPONSE_LINE_BYTES_ENV: &str =
+    "AGENTOS_INTERNAL_WASM_SYNC_RPC_RESPONSE_LINE_BYTES";
 const WASM_WARMUP_METRICS_PREFIX: &str = "__AGENTOS_WASM_WARMUP_METRICS__:";
 const WASM_SIGNAL_STATE_PREFIX: &str = "__AGENTOS_WASM_SIGNAL_STATE__:";
 const WASM_WARMUP_MARKER_VERSION: &str = "1";
@@ -88,7 +95,10 @@ const DEFAULT_WASM_RUNNER_HEAP_LIMIT_MB: u32 = 2048;
 const _: () = assert!(DEFAULT_WASM_RUNNER_HEAP_LIMIT_MB > 128);
 const MAX_SYNC_WASM_PREWARM_MODULE_BYTES: u64 = 16 * 1024 * 1024;
 const WASM_CAPTURED_OUTPUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_WASM_PENDING_EVENT_COUNT: usize = 512;
+const DEFAULT_WASM_PENDING_EVENT_BYTES: usize = 16 * 1024 * 1024;
 const WASM_SYNC_READ_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_WASM_SYNC_RPC_RESPONSE_LINE_BYTES: u64 = 16 * 1024 * 1024;
 // `_processWasmSyncRpc` returns file-read bytes as one CBOR byte string. The
 // bridge contract bounds the encoded response payload, not the unencoded file
 // bytes, so the runner must leave room for CBOR's byte-string header.
@@ -110,6 +120,7 @@ const WASM_SIDECAR_ROUTED_FS_SYNC_METHODS: &[&str] = &[
     "fs.fallocateSync",
     "fs.fdatasyncSync",
     "fs.fiemapSync",
+    "fs.fiemapAtSync",
     "fs.fstatSync",
     "fs.fsyncSync",
     "fs.ftruncateSync",
@@ -154,13 +165,6 @@ const WASM_SIDECAR_ROUTED_KERNEL_SYNC_METHODS: &[&str] = &[
     "__pty_set_raw_mode",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WasmSignalDispositionAction {
-    Default,
-    Ignore,
-    User,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WasmPermissionTier {
@@ -179,13 +183,6 @@ impl WasmPermissionTier {
             Self::Isolated => "isolated",
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WasmSignalHandlerRegistration {
-    pub action: WasmSignalDispositionAction,
-    pub mask: Vec<u32>,
-    pub flags: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,8 +205,14 @@ pub struct WasmContext {
 /// `crates/sidecar/CLAUDE.md`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WasmExecutionLimits {
-    /// Fuel budget, enforced as a wall-clock timeout (ms) by the WASI runtime.
-    pub max_fuel: Option<u64>,
+    /// Active CPU-time budget in milliseconds. The V8 compatibility backend
+    /// maps this to the trusted runner isolate's CPU watchdog.
+    pub active_cpu_time_limit_ms: Option<u32>,
+    /// Optional elapsed wall-clock backstop in milliseconds.
+    pub wall_clock_limit_ms: Option<u64>,
+    /// Optional deterministic instruction budget. V8 cannot meter this and
+    /// rejects an explicit value before starting guest execution.
+    pub deterministic_fuel: Option<u64>,
     /// Linear-memory cap in bytes, validated against the module's declared
     /// initial/maximum memory before execution.
     pub max_memory_bytes: Option<u64>,
@@ -234,18 +237,28 @@ pub struct WasmExecutionLimits {
     pub prewarm_timeout_ms: Option<u64>,
     /// V8 heap cap for the trusted JS runner isolate that hosts WASI/WASM.
     pub runner_heap_limit_mb: Option<u32>,
-    /// Active-CPU cap for the trusted JS runner isolate that hosts WASI/WASM.
-    pub runner_cpu_time_limit_ms: Option<u32>,
     /// VM readiness work bound forwarded unchanged to the WASI V8 runner.
     pub reactor_work_quantum: Option<usize>,
     /// Per-call host bridge deadline forwarded unchanged to the WASI V8 runner.
     pub bridge_call_timeout_ms: Option<u64>,
+    /// Maximum encoded line retained by the fallback synchronous RPC response
+    /// pipe. Sidecar VMs supply `limits.reactor.maxBridgeResponseBytes` here.
+    pub max_sync_rpc_response_line_bytes: Option<u64>,
+    /// Maximum compatibility-adapter events retained before the sidecar
+    /// consumes them. Sidecar VMs supply limits.process.pendingEventCount.
+    pub pending_event_count: Option<usize>,
+    /// Maximum aggregate bytes retained by compatibility-adapter event queues.
+    /// Sidecar VMs supply limits.process.pendingEventBytes.
+    pub pending_event_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartWasmExecutionRequest {
     pub vm_id: String,
     pub context_id: String,
+    /// Whether this execution is attached to the sidecar's authoritative
+    /// kernel host. This is trusted adapter configuration, not guest env.
+    pub managed_kernel_host: bool,
     pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: PathBuf,
@@ -262,10 +275,10 @@ pub struct StartWasmExecutionRequest {
 pub enum WasmExecutionEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
-    SyncRpcRequest(JavascriptSyncRpcRequest),
+    SyncRpcRequest(HostRpcRequest),
     SignalState {
         signal: u32,
-        registration: WasmSignalHandlerRegistration,
+        registration: ExecutionSignalHandlerRegistration,
     },
     Exited(i32),
 }
@@ -310,6 +323,9 @@ pub enum WasmExecutionError {
     },
     MissingModulePath,
     InvalidLimit(String),
+    DeterministicFuelUnsupported {
+        fuel: u64,
+    },
     InvalidModule(String),
     NativeBinaryNotSupported {
         path: PathBuf,
@@ -337,6 +353,15 @@ pub enum WasmExecutionError {
         stream: &'static str,
         limit: usize,
     },
+    PendingEventLimit {
+        limit_name: &'static str,
+        limit: usize,
+        observed: usize,
+    },
+    Internal {
+        code: &'static str,
+        message: &'static str,
+    },
     EventChannelClosed,
 }
 
@@ -356,6 +381,10 @@ impl fmt::Display for WasmExecutionError {
                 f.write_str("guest WebAssembly execution requires a module path")
             }
             Self::InvalidLimit(message) => write!(f, "invalid WebAssembly limit: {message}"),
+            Self::DeterministicFuelUnsupported { fuel } => write!(
+                f,
+                "deterministic WebAssembly fuel budget {fuel} is not supported by the V8 compatibility backend"
+            ),
             Self::InvalidModule(message) => write!(f, "invalid WebAssembly module: {message}"),
             Self::NativeBinaryNotSupported {
                 path,
@@ -439,6 +468,15 @@ impl fmt::Display for WasmExecutionError {
                     "guest WebAssembly {stream} exceeded the captured output limit of {limit} bytes"
                 )
             }
+            Self::PendingEventLimit {
+                limit_name,
+                limit,
+                observed,
+            } => write!(
+                f,
+                "ERR_AGENTOS_RESOURCE_LIMIT: {limit_name} limit is {limit}, observed {observed}; raise {limit_name} if needed"
+            ),
+            Self::Internal { code, message } => write!(f, "{code}: {message}"),
             Self::EventChannelClosed => {
                 f.write_str("guest WebAssembly event channel closed unexpectedly")
             }
@@ -456,9 +494,10 @@ pub struct WasmExecution {
     execution_timeout: Option<Duration>,
     execution_started_at: Instant,
     timeout_reported: bool,
-    fuel_gauge: Option<Arc<QueueGauge>>,
+    wall_clock_gauge: Option<Arc<QueueGauge>>,
     internal_sync_rpc: WasmInternalSyncRpc,
-    pending_events: VecDeque<WasmExecutionEvent>,
+    pending_events: WasmEventQueue,
+    signal_checkpoints: WasmSignalCheckpointInbox,
     stdout_stream_buffer: Vec<u8>,
     stderr_stream_buffer: Vec<u8>,
     max_stack_bytes: Option<u64>,
@@ -476,7 +515,281 @@ struct WasmInternalSyncRpc {
     route_fs_through_sidecar: bool,
     next_fd: u32,
     open_files: BTreeMap<u32, fs::File>,
-    pending_events: VecDeque<WasmExecutionEvent>,
+    pending_events: WasmEventQueue,
+}
+
+#[derive(Debug)]
+struct QueuedSignalCheckpoint {
+    identity: ExecutionWakeIdentity,
+    delivery: PublishedSignalCheckpoint,
+    retained_bytes: usize,
+    budget: Arc<WasmPendingEventBudget>,
+}
+
+impl Drop for QueuedSignalCheckpoint {
+    fn drop(&mut self) {
+        self.budget.release(self.retained_bytes);
+    }
+}
+
+#[derive(Debug)]
+struct WasmSignalCheckpointInbox {
+    checkpoints: Mutex<VecDeque<QueuedSignalCheckpoint>>,
+    budget: Arc<WasmPendingEventBudget>,
+}
+
+impl WasmSignalCheckpointInbox {
+    fn new(budget: Arc<WasmPendingEventBudget>) -> Self {
+        Self {
+            checkpoints: Mutex::new(VecDeque::new()),
+            budget,
+        }
+    }
+
+    fn publish(
+        &self,
+        identity: ExecutionWakeIdentity,
+        delivery: PublishedSignalCheckpoint,
+    ) -> Result<(), HostServiceError> {
+        let retained_bytes = std::mem::size_of::<QueuedSignalCheckpoint>();
+        self.budget.reserve(retained_bytes).map_err(|error| {
+            HostServiceError::new("ERR_AGENTOS_RESOURCE_LIMIT", error.to_string())
+        })?;
+        let mut checkpoints = match self.checkpoints.lock() {
+            Ok(checkpoints) => checkpoints,
+            Err(_) => {
+                self.budget.release(retained_bytes);
+                return Err(HostServiceError::new(
+                    "EIO",
+                    "ERR_AGENTOS_WASM_SIGNAL_INBOX_POISONED: signal checkpoint state was poisoned by a prior panic",
+                ));
+            }
+        };
+        checkpoints.push_back(QueuedSignalCheckpoint {
+            identity,
+            delivery,
+            retained_bytes,
+            budget: Arc::clone(&self.budget),
+        });
+        Ok(())
+    }
+
+    fn take(
+        &self,
+        identity: ExecutionWakeIdentity,
+    ) -> Result<Option<PublishedSignalCheckpoint>, HostServiceError> {
+        let mut checkpoints = self
+            .checkpoints
+            .lock()
+            .map_err(|_| {
+                HostServiceError::new(
+                    "EIO",
+                    "ERR_AGENTOS_WASM_SIGNAL_INBOX_POISONED: signal checkpoint state was poisoned by a prior panic",
+                )
+            })?;
+        let Some(pending) = checkpoints.front() else {
+            return Ok(None);
+        };
+        if pending.identity != identity {
+            return Err(HostServiceError::new(
+                "ESTALE",
+                "published signal delivery identity does not match the active execution",
+            ));
+        }
+        Ok(checkpoints.pop_front().map(|pending| pending.delivery))
+    }
+
+    fn discard(
+        &self,
+        identity: ExecutionWakeIdentity,
+        delivery_token: u64,
+    ) -> Result<(), HostServiceError> {
+        let mut checkpoints = self.checkpoints.lock().map_err(|_| {
+            HostServiceError::new(
+                "EIO",
+                "ERR_AGENTOS_WASM_SIGNAL_INBOX_POISONED: signal checkpoint state was poisoned by a prior panic",
+            )
+        })?;
+        let index = checkpoints
+            .iter()
+            .rposition(|pending| {
+                pending.identity == identity && pending.delivery.delivery_token == delivery_token
+            })
+            .ok_or_else(|| {
+                HostServiceError::new(
+                    "ESTALE",
+                    "failed compatibility-WASM signal publication was no longer queued",
+                )
+            })?;
+        checkpoints.remove(index);
+        Ok(())
+    }
+
+    fn discard_identity(&self, identity: ExecutionWakeIdentity) -> Result<(), HostServiceError> {
+        let mut checkpoints = self.checkpoints.lock().map_err(|_| {
+            HostServiceError::new(
+                "EIO",
+                "ERR_AGENTOS_WASM_SIGNAL_INBOX_POISONED: signal checkpoint state was poisoned by a prior panic",
+            )
+        })?;
+        checkpoints.retain(|pending| pending.identity != identity);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct WasmPendingEventBudget {
+    state: Mutex<(usize, usize)>,
+    count_limit: usize,
+    byte_limit: usize,
+    count_gauge: Arc<QueueGauge>,
+    byte_gauge: Arc<QueueGauge>,
+}
+
+impl WasmPendingEventBudget {
+    fn new(count_limit: usize, byte_limit: usize) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new((0, 0)),
+            count_limit,
+            byte_limit,
+            count_gauge: agentos_bridge::queue_tracker::register_queue(
+                TrackedLimit::PendingExecutionEvents,
+                count_limit,
+            ),
+            byte_gauge: agentos_bridge::queue_tracker::register_queue(
+                TrackedLimit::PendingExecutionEventBytes,
+                byte_limit,
+            ),
+        })
+    }
+
+    fn reserve(&self, bytes: usize) -> Result<(), WasmExecutionError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| WasmExecutionError::Internal {
+                code: "ERR_AGENTOS_WASM_EVENT_ACCOUNTING_POISONED",
+                message: "pending-event accounting was poisoned by a prior panic",
+            })?;
+        let observed_count = state.0.saturating_add(1);
+        if observed_count > self.count_limit {
+            return Err(WasmExecutionError::PendingEventLimit {
+                limit_name: "limits.process.pendingEventCount",
+                limit: self.count_limit,
+                observed: observed_count,
+            });
+        }
+        let observed_bytes = state.1.saturating_add(bytes);
+        if observed_bytes > self.byte_limit {
+            return Err(WasmExecutionError::PendingEventLimit {
+                limit_name: "limits.process.pendingEventBytes",
+                limit: self.byte_limit,
+                observed: observed_bytes,
+            });
+        }
+        *state = (observed_count, observed_bytes);
+        self.count_gauge.observe_depth(observed_count);
+        self.byte_gauge.observe_depth(observed_bytes);
+        Ok(())
+    }
+
+    fn release(&self, bytes: usize) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                eprintln!(
+                    "ERR_AGENTOS_WASM_EVENT_ACCOUNTING_POISONED: recovering pending-event accounting while releasing a reservation"
+                );
+                poisoned.into_inner()
+            }
+        };
+        state.0 = state.0.saturating_sub(1);
+        state.1 = state.1.saturating_sub(bytes);
+        self.count_gauge.observe_depth(state.0);
+        self.byte_gauge.observe_depth(state.1);
+    }
+
+    #[cfg(test)]
+    fn usage(&self) -> (usize, usize) {
+        *self.state.lock().expect("pending-event accounting")
+    }
+}
+
+#[derive(Debug)]
+struct QueuedWasmEvent {
+    event: Option<WasmExecutionEvent>,
+    retained_bytes: usize,
+    budget: Arc<WasmPendingEventBudget>,
+}
+
+impl Drop for QueuedWasmEvent {
+    fn drop(&mut self) {
+        self.budget.release(self.retained_bytes);
+    }
+}
+
+#[derive(Debug)]
+struct WasmEventQueue {
+    events: VecDeque<QueuedWasmEvent>,
+    budget: Arc<WasmPendingEventBudget>,
+}
+
+impl WasmEventQueue {
+    fn new(budget: Arc<WasmPendingEventBudget>) -> Self {
+        Self {
+            events: VecDeque::new(),
+            budget,
+        }
+    }
+
+    fn push_back(&mut self, event: WasmExecutionEvent) -> Result<(), WasmExecutionError> {
+        let retained_bytes = wasm_event_retained_bytes(&event);
+        self.budget.reserve(retained_bytes)?;
+        self.events.push_back(QueuedWasmEvent {
+            event: Some(event),
+            retained_bytes,
+            budget: Arc::clone(&self.budget),
+        });
+        Ok(())
+    }
+
+    fn pop_front(&mut self) -> Option<WasmExecutionEvent> {
+        self.events
+            .pop_front()
+            .and_then(|mut queued| queued.event.take())
+    }
+}
+
+impl Default for WasmEventQueue {
+    fn default() -> Self {
+        Self::new(WasmPendingEventBudget::new(
+            DEFAULT_WASM_PENDING_EVENT_COUNT,
+            DEFAULT_WASM_PENDING_EVENT_BYTES,
+        ))
+    }
+}
+
+fn wasm_event_retained_bytes(event: &WasmExecutionEvent) -> usize {
+    let envelope = std::mem::size_of::<WasmExecutionEvent>();
+    match event {
+        WasmExecutionEvent::Stdout(bytes) | WasmExecutionEvent::Stderr(bytes) => {
+            envelope.saturating_add(bytes.len())
+        }
+        WasmExecutionEvent::SyncRpcRequest(request) => envelope
+            .saturating_add(request.method.len())
+            .saturating_add(request.raw_bytes_args.values().map(Vec::len).sum::<usize>())
+            // JSON args arrive through an independently frame-bounded bridge;
+            // retain a conservative envelope without reserializing attacker
+            // input merely to account it.
+            .saturating_add(4 * 1024),
+        WasmExecutionEvent::SignalState { registration, .. } => envelope.saturating_add(
+            registration
+                .mask
+                .len()
+                .saturating_mul(std::mem::size_of::<u32>()),
+        ),
+        WasmExecutionEvent::Exited(_) => envelope,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -487,20 +800,20 @@ struct WasmGuestPathMapping {
 }
 
 impl WasmExecution {
+    pub fn sync_rpc_responder(&self) -> JavascriptSyncRpcResponder {
+        self.inner.sync_rpc_responder()
+    }
+
     pub fn execution_id(&self) -> &str {
         &self.execution_id
     }
 
-    pub fn child_pid(&self) -> u32 {
-        self.child_pid
+    pub fn native_process_id(&self) -> Option<u32> {
+        (self.child_pid != 0).then_some(self.child_pid)
     }
 
     pub fn v8_session_handle(&self) -> V8SessionHandle {
         self.inner.v8_session_handle()
-    }
-
-    pub fn uses_shared_v8_runtime(&self) -> bool {
-        self.inner.uses_shared_v8_runtime()
     }
 
     pub fn start_prepared(&mut self) -> Result<(), WasmExecutionError> {
@@ -641,9 +954,6 @@ impl WasmExecution {
                         if self.handle_internal_sync_rpc(request)? {
                             continue;
                         }
-                        if let Some(signal_state) = self.handle_signal_state_sync_rpc(request)? {
-                            return Ok(Some(signal_state));
-                        }
                     }
                     self.enqueue_javascript_event(event)?;
                 }
@@ -671,9 +981,6 @@ impl WasmExecution {
             if let JavascriptExecutionEvent::SyncRpcRequest(request) = &event {
                 if self.handle_internal_sync_rpc(request)? {
                     continue;
-                }
-                if let Some(signal_state) = self.handle_signal_state_sync_rpc(request)? {
-                    return Ok(Some(signal_state));
                 }
             }
             self.enqueue_javascript_event(event)?;
@@ -705,9 +1012,6 @@ impl WasmExecution {
                     if let JavascriptExecutionEvent::SyncRpcRequest(request) = &event {
                         if self.handle_internal_sync_rpc(request)? {
                             continue;
-                        }
-                        if let Some(signal_state) = self.handle_signal_state_sync_rpc(request)? {
-                            return Ok(Some(signal_state));
                         }
                     }
                     self.enqueue_javascript_event(event)?;
@@ -794,9 +1098,6 @@ impl WasmExecution {
                 if self.handle_internal_sync_rpc(request)? {
                     continue;
                 }
-                if let Some(signal_state) = self.handle_signal_state_sync_rpc(request)? {
-                    return Ok(signal_state);
-                }
             }
             self.enqueue_javascript_event(event)?;
         }
@@ -828,7 +1129,7 @@ impl WasmExecution {
         // Observe elapsed usage on real event boundaries. The terminal path
         // below records the exact configured capacity when the one-shot
         // deadline wait expires.
-        if let Some(gauge) = &self.fuel_gauge {
+        if let Some(gauge) = &self.wall_clock_gauge {
             gauge.observe_depth(duration_millis_saturating_usize(elapsed));
         }
         if elapsed < limit {
@@ -838,9 +1139,9 @@ impl WasmExecution {
         self.inner.terminate().map_err(map_javascript_error)?;
         self.timeout_reported = true;
         let capacity = duration_millis_saturating_usize(limit);
-        warn_limit_exhausted(TrackedLimit::WasmFuelMs, capacity, capacity);
+        warn_limit_exhausted(TrackedLimit::WasmWallClockMs, capacity, capacity);
         self.enqueue_wasm_event(WasmExecutionEvent::Stderr(
-            b"WebAssembly fuel budget exhausted\n".to_vec(),
+            b"WebAssembly wall-clock limit exceeded\n".to_vec(),
         ))?;
         self.enqueue_wasm_event(WasmExecutionEvent::Exited(WASM_TIMEOUT_EXIT_CODE))?;
         Ok(self.pending_events.pop_front())
@@ -848,16 +1149,9 @@ impl WasmExecution {
 
     fn handle_internal_sync_rpc(
         &mut self,
-        request: &JavascriptSyncRpcRequest,
+        request: &HostRpcRequest,
     ) -> Result<bool, WasmExecutionError> {
         handle_internal_wasm_sync_rpc_request(&mut self.inner, &mut self.internal_sync_rpc, request)
-    }
-
-    fn handle_signal_state_sync_rpc(
-        &mut self,
-        request: &JavascriptSyncRpcRequest,
-    ) -> Result<Option<WasmExecutionEvent>, WasmExecutionError> {
-        translate_wasm_signal_state_sync_rpc_request(&mut self.inner, request)
     }
 
     fn enqueue_javascript_event(
@@ -883,7 +1177,7 @@ impl WasmExecution {
             }
             JavascriptExecutionEvent::SyncRpcRequest(request) => {
                 self.pending_events
-                    .push_back(WasmExecutionEvent::SyncRpcRequest(request));
+                    .push_back(WasmExecutionEvent::SyncRpcRequest(request))?;
             }
             JavascriptExecutionEvent::SignalState {
                 signal,
@@ -892,8 +1186,8 @@ impl WasmExecution {
                 self.pending_events
                     .push_back(WasmExecutionEvent::SignalState {
                         signal,
-                        registration: registration.into(),
-                    });
+                        registration,
+                    })?;
             }
             JavascriptExecutionEvent::Exited(code) => {
                 if let Some(original) = self.pending_v8_stack_overflow.take() {
@@ -908,9 +1202,9 @@ impl WasmExecution {
                     };
                     self.enqueue_stream_chunk(StreamChannel::Stderr, chunk)?;
                 }
-                self.flush_stream_buffers();
+                self.flush_stream_buffers()?;
                 self.pending_events
-                    .push_back(WasmExecutionEvent::Exited(code));
+                    .push_back(WasmExecutionEvent::Exited(code))?;
             }
         }
         Ok(())
@@ -925,11 +1219,11 @@ impl WasmExecution {
                 self.enqueue_stream_chunk(StreamChannel::Stderr, chunk)?
             }
             WasmExecutionEvent::Exited(code) => {
-                self.flush_stream_buffers();
+                self.flush_stream_buffers()?;
                 self.pending_events
-                    .push_back(WasmExecutionEvent::Exited(code));
+                    .push_back(WasmExecutionEvent::Exited(code))?;
             }
-            other => self.pending_events.push_back(other),
+            other => self.pending_events.push_back(other)?,
         }
         Ok(())
     }
@@ -962,9 +1256,9 @@ impl WasmExecution {
                         StreamChannel::Stderr => {
                             WasmExecutionEvent::Stderr(std::mem::take(&mut pending_stream_chunk))
                         }
-                    });
+                    })?;
                 }
-                self.pending_events.push_back(signal_state);
+                self.pending_events.push_back(signal_state)?;
                 continue;
             }
             pending_stream_chunk.extend_from_slice(&line);
@@ -973,30 +1267,31 @@ impl WasmExecution {
             self.pending_events.push_back(match channel {
                 StreamChannel::Stdout => WasmExecutionEvent::Stdout(pending_stream_chunk),
                 StreamChannel::Stderr => WasmExecutionEvent::Stderr(pending_stream_chunk),
-            });
+            })?;
         }
 
         Ok(())
     }
 
-    fn flush_stream_buffers(&mut self) {
+    fn flush_stream_buffers(&mut self) -> Result<(), WasmExecutionError> {
         if !self.stdout_stream_buffer.is_empty() {
             self.pending_events
                 .push_back(WasmExecutionEvent::Stdout(std::mem::take(
                     &mut self.stdout_stream_buffer,
-                )));
+                )))?;
         }
         if !self.stderr_stream_buffer.is_empty() {
             self.pending_events
                 .push_back(WasmExecutionEvent::Stderr(std::mem::take(
                     &mut self.stderr_stream_buffer,
-                )));
+                )))?;
         }
+        Ok(())
     }
 
     fn handle_wait_sync_rpc_request(
         &mut self,
-        request: &JavascriptSyncRpcRequest,
+        request: &HostRpcRequest,
         stdout: &mut Vec<u8>,
         stderr: &mut Vec<u8>,
     ) -> Result<bool, WasmExecutionError> {
@@ -1006,6 +1301,59 @@ impl WasmExecution {
             .map_err(map_javascript_error)?
         {
             return Ok(true);
+        }
+
+        // `wait()` is the standalone compatibility helper and has no kernel
+        // process table to own signal dispositions. Keep its historical
+        // best-effort behavior for direct engine consumers, but never take
+        // this path while the sidecar is driving events: pollers receive the
+        // request and reply only after committing it to the kernel.
+        if request.method == "process.signal_state" {
+            self.respond_sync_rpc_success(request.id, Value::Null)?;
+            return Ok(true);
+        }
+        if request.method == "process.signal_mask" {
+            self.respond_sync_rpc_success(request.id, json!({ "signals": [] }))?;
+            return Ok(true);
+        }
+        if request.method == "process.signal_mask_scope_begin" {
+            self.respond_sync_rpc_success(request.id, json!(1))?;
+            return Ok(true);
+        }
+        if matches!(
+            request.method.as_str(),
+            "process.signal_mask_scope_end" | "process.signal_end"
+        ) {
+            self.respond_sync_rpc_success(request.id, Value::Null)?;
+            return Ok(true);
+        }
+        if matches!(
+            request.method.as_str(),
+            "process.take_signal" | "process.signal_begin"
+        ) {
+            self.respond_sync_rpc_success(request.id, Value::Null)?;
+            return Ok(true);
+        }
+        if request.method == "process.wasm_sync_rpc" {
+            match request.args.first().and_then(Value::as_str) {
+                Some("process.signal_mask") => {
+                    self.respond_sync_rpc_success(request.id, json!({ "signals": [] }))?;
+                    return Ok(true);
+                }
+                Some("process.signal_mask_scope_begin") => {
+                    self.respond_sync_rpc_success(request.id, json!(1))?;
+                    return Ok(true);
+                }
+                Some("process.signal_mask_scope_end" | "process.signal_end") => {
+                    self.respond_sync_rpc_success(request.id, Value::Null)?;
+                    return Ok(true);
+                }
+                Some("process.take_signal" | "process.signal_begin") => {
+                    self.respond_sync_rpc_success(request.id, Value::Null)?;
+                    return Ok(true);
+                }
+                _ => {}
+            }
         }
 
         if request.method != "__kernel_stdio_write" {
@@ -1035,6 +1383,133 @@ impl WasmExecution {
 
         self.respond_sync_rpc_success(request.id, json!(bytes.len()))?;
         Ok(true)
+    }
+}
+
+impl ExecutionBackend for WasmExecution {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::WebAssembly
+    }
+
+    fn synchronous_fd_write_policy(&self) -> SynchronousFdWritePolicy {
+        SynchronousFdWritePolicy::NonblockingRetry
+    }
+
+    fn descendant_wait_ownership(&self) -> DescendantWaitOwnership {
+        DescendantWaitOwnership::Guest
+    }
+
+    fn descendant_output_ownership(&self) -> DescendantOutputOwnership {
+        DescendantOutputOwnership::GuestDescriptors
+    }
+
+    fn native_process_id(&self) -> Option<u32> {
+        WasmExecution::native_process_id(self)
+    }
+
+    fn wake_handle(&self, identity: ExecutionWakeIdentity) -> Option<ExecutionWakeHandle> {
+        self.inner.wake_handle(identity)
+    }
+
+    fn is_prepared_for_start(&self) -> bool {
+        WasmExecution::is_prepared_for_start(self)
+    }
+
+    fn start_prepared(&mut self) -> Result<(), HostServiceError> {
+        WasmExecution::start_prepared(self).map_err(|error| {
+            HostServiceError::new("ERR_AGENTOS_EXECUTION_START", error.to_string())
+        })
+    }
+
+    fn begin_shutdown(
+        &mut self,
+        reason: ShutdownReason,
+    ) -> Result<ShutdownOutcome, HostServiceError> {
+        if let ShutdownReason::Signal(signal) = reason {
+            if let Some(process_id) = self.native_process_id() {
+                return Ok(ShutdownOutcome::ForwardSignal { process_id, signal });
+            }
+            self.terminate().map_err(|error| {
+                HostServiceError::new("ERR_AGENTOS_EXECUTION_SHUTDOWN", error.to_string())
+            })?;
+            return Ok(ShutdownOutcome::Exited(ExecutionExit::Signaled {
+                signal,
+                core_dumped: false,
+            }));
+        }
+        self.terminate().map_err(|error| {
+            HostServiceError::new("ERR_AGENTOS_EXECUTION_SHUTDOWN", error.to_string())
+        })?;
+        Ok(if reason == ShutdownReason::RuntimeFault {
+            ShutdownOutcome::Exited(ExecutionExit::Exited(1))
+        } else {
+            ShutdownOutcome::AwaitExit
+        })
+    }
+
+    fn set_paused(&self, paused: bool) -> Result<(), HostServiceError> {
+        let result = if paused {
+            WasmExecution::pause(self)
+        } else {
+            WasmExecution::resume(self)
+        };
+        result.map_err(|error| {
+            HostServiceError::new("ERR_AGENTOS_EXECUTION_CONTROL", error.to_string())
+        })
+    }
+
+    fn write_stdin(&mut self, _bytes: &[u8]) -> Result<(), HostServiceError> {
+        // Sidecar-managed compatibility WASM reads fd 0 from the kernel pipe.
+        Ok(())
+    }
+
+    fn close_stdin(&mut self) -> Result<(), HostServiceError> {
+        WasmExecution::close_stdin(self).map_err(|error| {
+            HostServiceError::new("ERR_AGENTOS_EXECUTION_STDIN", error.to_string())
+        })
+    }
+
+    fn deliver_signal_checkpoint(
+        &self,
+        identity: ExecutionWakeIdentity,
+        signal: i32,
+        delivery_token: u64,
+        flags: u32,
+    ) -> Result<SignalCheckpointOutcome, HostServiceError> {
+        let Some(wake) = self.wake_handle(identity) else {
+            return Ok(if let Some(process_id) = self.native_process_id() {
+                SignalCheckpointOutcome::ForwardToProcess { process_id }
+            } else {
+                SignalCheckpointOutcome::Unsupported
+            });
+        };
+        self.signal_checkpoints.publish(
+            identity,
+            PublishedSignalCheckpoint {
+                signal,
+                delivery_token,
+                flags,
+            },
+        )?;
+        if let Err(error) = wake.publish_signal(signal, delivery_token) {
+            self.signal_checkpoints.discard(identity, delivery_token)?;
+            return Err(HostServiceError::new(error.code(), error.to_string()));
+        }
+        Ok(SignalCheckpointOutcome::Published)
+    }
+
+    fn take_signal_checkpoint(
+        &self,
+        identity: ExecutionWakeIdentity,
+    ) -> Result<Option<PublishedSignalCheckpoint>, HostServiceError> {
+        self.signal_checkpoints.take(identity)
+    }
+
+    fn discard_signal_checkpoints(
+        &self,
+        identity: ExecutionWakeIdentity,
+    ) -> Result<(), HostServiceError> {
+        self.signal_checkpoints.discard_identity(identity)
     }
 }
 
@@ -1205,6 +1680,8 @@ impl WasmExecutionEngine {
             });
         }
 
+        reject_v8_deterministic_fuel(&request)?;
+
         let resolved_module = resolve_wasm_module(&context, &request)?;
         verify_wasm_module_header(&resolved_module)?;
         let prewarm_timeout = resolve_wasm_prewarm_timeout(&request)?;
@@ -1225,7 +1702,7 @@ impl WasmExecutionEngine {
         // not yet expose a per-module stack lever, so accepting the value would
         // claim to enforce a policy that the runtime actually ignores.
         wasm_stack_limit_bytes(&request)?;
-        let execution_timeout = resolve_wasm_execution_timeout(&request)?;
+        let execution_timeout = resolve_wasm_wall_clock_limit(&request)?;
         let import_cache = self
             .import_caches
             .get(&context.vm_id)
@@ -1281,6 +1758,8 @@ impl WasmExecutionEngine {
             });
         }
 
+        reject_v8_deterministic_fuel(&request)?;
+
         let resolved_module = resolve_wasm_module(&context, &request)?;
         verify_wasm_module_header(&resolved_module)?;
         let prewarm_timeout = resolve_wasm_prewarm_timeout(&request)?;
@@ -1299,7 +1778,7 @@ impl WasmExecutionEngine {
         let frozen_time_ms = frozen_time_ms();
         validate_module_limits(&resolved_module, &request)?;
         wasm_stack_limit_bytes(&request)?;
-        let execution_timeout = resolve_wasm_execution_timeout(&request)?;
+        let execution_timeout = resolve_wasm_wall_clock_limit(&request)?;
         let import_cache = self
             .import_caches
             .get(&context.vm_id)
@@ -1369,9 +1848,10 @@ impl WasmExecutionEngine {
                 defer_execute,
             },
         )?;
-        let child_pid = javascript_execution.child_pid();
+        let child_pid = javascript_execution.native_process_id().unwrap_or_default();
         let sandbox_root = wasm_sandbox_root(&request.env);
         let guest_path_mappings = wasm_guest_path_mappings(&request);
+        let pending_event_budget = wasm_pending_event_budget(&request.limits)?;
 
         Ok(WasmExecution {
             execution_id,
@@ -1380,15 +1860,16 @@ impl WasmExecutionEngine {
             execution_timeout,
             execution_started_at: Instant::now(),
             timeout_reported: false,
-            // Approach-warn (~80%) before the WASM execution budget is exhausted;
-            // only registered when a timeout is actually set.
-            fuel_gauge: execution_timeout.map(|limit| {
+            // Approach-warn (~80%) before the optional WASM elapsed deadline;
+            // only registered when a wall-clock limit is configured.
+            wall_clock_gauge: execution_timeout.map(|limit| {
                 register_limit(
-                    TrackedLimit::WasmFuelMs,
+                    TrackedLimit::WasmWallClockMs,
                     duration_millis_saturating_usize(limit),
                 )
             }),
-            pending_events: VecDeque::new(),
+            pending_events: WasmEventQueue::new(Arc::clone(&pending_event_budget)),
+            signal_checkpoints: WasmSignalCheckpointInbox::new(Arc::clone(&pending_event_budget)),
             stdout_stream_buffer: Vec::new(),
             stderr_stream_buffer: Vec::new(),
             max_stack_bytes: request.limits.max_stack_bytes,
@@ -1406,7 +1887,7 @@ impl WasmExecutionEngine {
                 route_fs_through_sidecar: sandbox_root.is_some(),
                 next_fd: 64,
                 open_files: BTreeMap::new(),
-                pending_events: VecDeque::new(),
+                pending_events: WasmEventQueue::new(pending_event_budget),
             },
         })
     }
@@ -1418,6 +1899,28 @@ impl WasmExecutionEngine {
         self.import_caches.remove(vm_id);
         self.javascript_engine.dispose_vm(vm_id);
     }
+}
+
+fn wasm_pending_event_budget(
+    limits: &WasmExecutionLimits,
+) -> Result<Arc<WasmPendingEventBudget>, WasmExecutionError> {
+    let count_limit = limits
+        .pending_event_count
+        .unwrap_or(DEFAULT_WASM_PENDING_EVENT_COUNT);
+    let byte_limit = limits
+        .pending_event_bytes
+        .unwrap_or(DEFAULT_WASM_PENDING_EVENT_BYTES);
+    if count_limit == 0 {
+        return Err(WasmExecutionError::InvalidLimit(String::from(
+            "limits.process.pendingEventCount must be greater than zero",
+        )));
+    }
+    if byte_limit == 0 {
+        return Err(WasmExecutionError::InvalidLimit(String::from(
+            "limits.process.pendingEventBytes must be greater than zero",
+        )));
+    }
+    Ok(WasmPendingEventBudget::new(count_limit, byte_limit))
 }
 
 fn map_javascript_error(error: JavascriptExecutionError) -> WasmExecutionError {
@@ -1442,10 +1945,20 @@ fn map_javascript_error(error: JavascriptExecutionError) -> WasmExecutionError {
         JavascriptExecutionError::PendingSyncRpcRequest(id) => WasmExecutionError::RpcResponse(
             format!("guest WebAssembly sync RPC request {id} is still pending"),
         ),
+        JavascriptExecutionError::PendingSyncRpcLimit { limit, observed } => {
+            WasmExecutionError::PendingEventLimit {
+                limit_name: "limits.reactor.maxBridgeCalls",
+                limit,
+                observed,
+            }
+        }
         JavascriptExecutionError::ExpiredSyncRpcRequest(id) => WasmExecutionError::RpcResponse(
             format!("guest WebAssembly sync RPC request {id} is no longer pending"),
         ),
         JavascriptExecutionError::RpcResponse(message) => WasmExecutionError::RpcResponse(message),
+        JavascriptExecutionError::BridgeSettlement(error) => {
+            WasmExecutionError::RpcResponse(error.to_string())
+        }
         JavascriptExecutionError::Terminate(error) => WasmExecutionError::Spawn(error),
         JavascriptExecutionError::Control(error) => WasmExecutionError::Control(error),
         JavascriptExecutionError::StdinClosed => WasmExecutionError::StdinClosed,
@@ -1460,7 +1973,7 @@ fn map_javascript_error(error: JavascriptExecutionError) -> WasmExecutionError {
 fn handle_internal_wasm_sync_rpc_request(
     execution: &mut JavascriptExecution,
     internal_sync_rpc: &mut WasmInternalSyncRpc,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<bool, WasmExecutionError> {
     // Module-resolution sync RPCs (the wasm runner imports node builtins +
     // its own ESM) are serviced host-directly via the execution's own
@@ -1901,7 +2414,7 @@ fn handle_internal_wasm_sync_rpc_request(
                 WasmExecutionEvent::Stdout(bytes)
             } else {
                 WasmExecutionEvent::Stderr(bytes)
-            });
+            })?;
             execution
                 .respond_sync_rpc_success(request.id, json!(bytes_len))
                 .map_err(map_javascript_error)?;
@@ -1958,7 +2471,7 @@ fn handle_internal_wasm_sync_rpc_request(
 }
 
 fn wasm_sync_rpc_method_routes_through_sidecar_kernel(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
     internal_sync_rpc: &WasmInternalSyncRpc,
 ) -> bool {
     internal_sync_rpc.route_fs_through_sidecar
@@ -2235,7 +2748,7 @@ fn wasm_read_only_filesystem_error(path: &str) -> std::io::Error {
 
 fn respond_wasm_sync_rpc_metadata(
     execution: &mut JavascriptExecution,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
     label: &str,
     metadata: Result<fs::Metadata, std::io::Error>,
 ) -> Result<(), WasmExecutionError> {
@@ -2249,7 +2762,7 @@ fn respond_wasm_sync_rpc_metadata(
 
 fn respond_wasm_sync_rpc_unit(
     execution: &mut JavascriptExecution,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
     label: &str,
     result: Result<(), std::io::Error>,
 ) -> Result<(), WasmExecutionError> {
@@ -2258,7 +2771,7 @@ fn respond_wasm_sync_rpc_unit(
 
 fn respond_wasm_sync_rpc_value(
     execution: &mut JavascriptExecution,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
     label: &str,
     result: Result<Value, std::io::Error>,
 ) -> Result<(), WasmExecutionError> {
@@ -2503,61 +3016,6 @@ fn open_wasm_guest_file(path: &Path, flags: &Value) -> std::io::Result<fs::File>
     })
 }
 
-fn translate_wasm_signal_state_sync_rpc_request(
-    execution: &mut JavascriptExecution,
-    request: &JavascriptSyncRpcRequest,
-) -> Result<Option<WasmExecutionEvent>, WasmExecutionError> {
-    if request.method != "process.signal_state" {
-        return Ok(None);
-    }
-
-    let signal = request
-        .args
-        .first()
-        .and_then(Value::as_u64)
-        .ok_or_else(|| WasmExecutionError::RpcResponse(String::from("missing signal number")))?;
-    let action = match request
-        .args
-        .get(1)
-        .and_then(Value::as_str)
-        .unwrap_or("default")
-    {
-        "ignore" => WasmSignalDispositionAction::Ignore,
-        "user" => WasmSignalDispositionAction::User,
-        _ => WasmSignalDispositionAction::Default,
-    };
-    let mask = request
-        .args
-        .get(2)
-        .and_then(Value::as_str)
-        .map(serde_json::from_str::<Vec<u32>>)
-        .transpose()
-        .map_err(|error| WasmExecutionError::RpcResponse(error.to_string()))?
-        .unwrap_or_default();
-    let flags = request
-        .args
-        .get(3)
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_i64().map(|signed| signed as u64))
-        })
-        .unwrap_or_default() as u32;
-
-    execution
-        .respond_sync_rpc_success(request.id, Value::Null)
-        .map_err(map_javascript_error)?;
-
-    Ok(Some(WasmExecutionEvent::SignalState {
-        signal: signal as u32,
-        registration: WasmSignalHandlerRegistration {
-            action,
-            mask,
-            flags,
-        },
-    }))
-}
-
 fn parse_wasm_signal_state_line(
     line: &[u8],
 ) -> Result<Option<WasmExecutionEvent>, WasmExecutionError> {
@@ -2586,9 +3044,9 @@ fn parse_wasm_signal_state_line(
         .and_then(Value::as_str)
         .unwrap_or("default")
     {
-        "ignore" => WasmSignalDispositionAction::Ignore,
-        "user" => WasmSignalDispositionAction::User,
-        _ => WasmSignalDispositionAction::Default,
+        "ignore" => ExecutionSignalDispositionAction::Ignore,
+        "user" => ExecutionSignalDispositionAction::User,
+        _ => ExecutionSignalDispositionAction::Default,
     };
     let mask = registration
         .get("mask")
@@ -2608,7 +3066,7 @@ fn parse_wasm_signal_state_line(
 
     Ok(Some(WasmExecutionEvent::SignalState {
         signal: signal as u32,
-        registration: WasmSignalHandlerRegistration {
+        registration: ExecutionSignalHandlerRegistration {
             action,
             mask,
             flags,
@@ -2673,7 +3131,12 @@ fn start_wasm_javascript_execution(
                     .iter()
                     .map(|(key, value)| (key.clone(), value.clone())),
             );
-            build_wasm_runner_module_source(import_cache, &internal_env, options.warmup_metrics)?
+            build_wasm_runner_module_source(
+                import_cache,
+                &internal_env,
+                options.warmup_metrics,
+                request.managed_kernel_host,
+            )?
         }
         WasmSnapshotRunnerMode::Auto | WasmSnapshotRunnerMode::Block => {
             let userland_bundle = build_wasm_runner_userland_bundle(import_cache)?;
@@ -2730,7 +3193,10 @@ fn start_wasm_javascript_execution(
                         .map(|(key, value)| (key.clone(), value.clone())),
                 );
                 guest_runtime.snapshot_userland_code = Some(userland_bundle);
-                build_wasm_snapshot_runner_inline_code(options.warmup_metrics)
+                build_wasm_snapshot_runner_inline_code(
+                    options.warmup_metrics,
+                    request.managed_kernel_host,
+                )
             } else {
                 env.extend(
                     internal_env
@@ -2741,6 +3207,7 @@ fn start_wasm_javascript_execution(
                     import_cache,
                     &internal_env,
                     options.warmup_metrics,
+                    request.managed_kernel_host,
                 )?
             }
         }
@@ -2780,7 +3247,7 @@ fn wasm_runner_javascript_limits(
 ) -> JavascriptExecutionLimits {
     JavascriptExecutionLimits {
         v8_heap_limit_mb: Some(runner_heap_limit_mb),
-        cpu_time_limit_ms: limits.runner_cpu_time_limit_ms,
+        cpu_time_limit_ms: limits.active_cpu_time_limit_ms,
         reactor_work_quantum: limits.reactor_work_quantum,
         bridge_call_timeout_ms: limits.bridge_call_timeout_ms,
         ..JavascriptExecutionLimits::default()
@@ -2899,6 +3366,14 @@ fn build_wasm_internal_env(
         request.limits.max_stack_bytes,
     );
     internal_env.insert(
+        WASM_INTERNAL_SYNC_RPC_RESPONSE_LINE_BYTES_ENV.to_string(),
+        request
+            .limits
+            .max_sync_rpc_response_line_bytes
+            .unwrap_or(DEFAULT_WASM_SYNC_RPC_RESPONSE_LINE_BYTES)
+            .to_string(),
+    );
+    internal_env.insert(
         WASM_MODULE_PATH_ENV.to_string(),
         resolved_module.specifier.clone(),
     );
@@ -2959,7 +3434,6 @@ fn wasm_snapshot_runner_base_env(request: &StartWasmExecutionRequest) -> BTreeMa
 
 fn scrub_migrated_wasm_limit_env(env: &mut BTreeMap<String, String>) {
     for key in [
-        WASM_MAX_FUEL_ENV,
         WASM_MAX_MEMORY_BYTES_ENV,
         WASM_MAX_STACK_BYTES_ENV,
         WASM_MAX_MODULE_FILE_BYTES_ENV,
@@ -2968,6 +3442,7 @@ fn scrub_migrated_wasm_limit_env(env: &mut BTreeMap<String, String>) {
         WASM_MAX_SPAWN_FILE_ACTION_BYTES_ENV,
         WASM_MAX_SOCKETS_ENV,
         WASM_MAX_BLOCKING_READ_MS_ENV,
+        WASM_INTERNAL_SYNC_RPC_RESPONSE_LINE_BYTES_ENV,
         "AGENTOS_WASM_PREWARM_TIMEOUT_MS",
         "AGENTOS_WASM_RUNNER_HEAP_LIMIT_MB",
     ] {
@@ -3013,9 +3488,14 @@ fn build_wasm_runner_module_source(
     import_cache: &NodeImportCache,
     internal_env: &BTreeMap<String, String>,
     warmup_metrics: Option<&[u8]>,
+    managed_kernel_host: bool,
 ) -> Result<String, WasmExecutionError> {
     let runner_source = transformed_wasm_runner_source(import_cache)?;
     let bootstrap = build_wasm_runner_bootstrap(internal_env, warmup_metrics);
+    let bootstrap = format!(
+        "{}\n{bootstrap}",
+        managed_kernel_host_bootstrap(managed_kernel_host)
+    );
     Ok(insert_wasm_runner_bootstrap(&runner_source, &bootstrap))
 }
 
@@ -3100,10 +3580,26 @@ fn build_wasm_runner_snapshot_prelude() -> String {
     bootstrap.replace(wasm_internal_env_merge_source(), "")
 }
 
-fn build_wasm_snapshot_runner_inline_code(warmup_metrics: Option<&[u8]>) -> String {
-    let warmup_emit = wasm_warmup_metrics_emit_source(warmup_metrics);
+fn managed_kernel_host_bootstrap(managed_kernel_host: bool) -> String {
     format!(
-        r#"{warmup_emit}if (typeof process !== "undefined" && typeof globalThis.__agentOSProcessConfigEnv === "object") {{
+        r#"Object.defineProperty(globalThis, "__agentOSManagedKernelHost", {{
+  configurable: false,
+  enumerable: false,
+  value: {managed_kernel_host},
+  writable: false,
+}});"#
+    )
+}
+
+fn build_wasm_snapshot_runner_inline_code(
+    warmup_metrics: Option<&[u8]>,
+    managed_kernel_host: bool,
+) -> String {
+    let warmup_emit = wasm_warmup_metrics_emit_source(warmup_metrics);
+    let managed_kernel_host = managed_kernel_host_bootstrap(managed_kernel_host);
+    format!(
+        r#"{managed_kernel_host}
+{warmup_emit}if (typeof process !== "undefined" && typeof globalThis.__agentOSProcessConfigEnv === "object") {{
   process.env = {{ ...(process.env || {{}}), ...globalThis.__agentOSProcessConfigEnv }};
 }}
 await globalThis.__agentOSWasmRunnerRun();"#
@@ -3124,7 +3620,8 @@ fn build_wasm_runner_bootstrap(
 
     format!(
         r#"const __agentOSWasmInternalEnv = {internal_env_json};
-const __agentOSWasmSyncRpcReadPayloadBytes = {wasm_sync_rpc_read_payload_bytes};
+	const __agentOSWasmSyncRpcReadPayloadBytes = {wasm_sync_rpc_read_payload_bytes};
+	const __agentOSWasmEntropyLimitBytes = {WASM_SYNC_READ_LIMIT_BYTES};
 const __agentOSRequireBuiltin = (specifier) => {{
   if (typeof globalThis.require === "function") {{
     return globalThis.require(specifier);
@@ -3424,7 +3921,14 @@ if (typeof globalThis !== "undefined") {{
             throw new Error("agentos WASM signal-drain bridge is unavailable");
           }}
           return _processTakeSignal.applySync(void 0, args);
+        case "process.exec_image_open":
+        case "process.exec_image_open_fd":
+        case "process.exec_image_read":
+        case "process.exec_image_close":
+        case "process.image":
         case "process.getpgid":
+        case "process.getrlimit":
+        case "process.setrlimit":
         case "process.getuid":
         case "process.getgid":
         case "process.geteuid":
@@ -3448,6 +3952,21 @@ if (typeof globalThis !== "undefined") {{
         case "process.setresgid":
         case "process.setgroups":
         case "process.umask":
+        case "process.clock_time":
+        case "process.clock_resolution":
+        case "process.sleep":
+        case "process.system_identity":
+        case "process.signal_begin":
+        case "process.signal_end":
+        case "process.signal_mask":
+        case "process.signal_mask_scope_begin":
+        case "process.signal_mask_scope_end":
+        case "__kernel_tcgetattr":
+        case "__kernel_tcsetattr":
+        case "__kernel_tcgetpgrp":
+        case "__kernel_tcsetpgrp":
+        case "__kernel_tcgetsid":
+        case "__kernel_tty_set_size":
         case "fs.accessSync":
         case "fs.blockingIoTimeoutMsSync":
         case "fs.chmodForProcessSync":
@@ -3455,6 +3974,11 @@ if (typeof globalThis !== "undefined") {{
         case "fs.collapseRangeSync":
         case "fs.fallocateSync":
         case "fs.fiemapSync":
+        case "fs.fiemapAtSync":
+        case "fs.fgetxattrSync":
+        case "fs.flistxattrSync":
+        case "fs.fsetxattrSync":
+        case "fs.fremovexattrSync":
         case "fs.getxattrSync":
         case "fs.insertRangeSync":
         case "fs.lchownSync":
@@ -3473,12 +3997,14 @@ if (typeof globalThis !== "undefined") {{
         case "fs.zeroRangeSync":
         case "process.setpgid":
         case "process.waitpid_transition":
+        case "process.waitpid":
         case "process.itimer_real":
         case "process.fd_pipe":
         case "process.fd_open":
         case "process.path_open_at":
         case "process.path_mkdir_at":
         case "process.path_stat_at":
+        case "process.path_chmod_at":
         case "process.path_utimes_at":
         case "process.path_chown_at":
         case "process.path_link_at":
@@ -3487,7 +4013,27 @@ if (typeof globalThis !== "undefined") {{
         case "process.path_rename_at":
         case "process.path_symlink_at":
         case "process.path_unlink_at":
+        case "process.random_get":
         case "process.fd_snapshot":
+        case "process.hostnet_fd_open":
+        case "process.hostnet_bind":
+        case "process.hostnet_connect":
+        case "process.hostnet_listen":
+        case "process.hostnet_accept":
+        case "process.hostnet_validate":
+        case "process.hostnet_recv":
+        case "process.hostnet_send":
+        case "process.hostnet_local_address":
+        case "process.hostnet_peer_address":
+        case "process.hostnet_get_option":
+        case "process.hostnet_set_option":
+        case "process.hostnet_poll":
+        case "process.hostnet_tls_connect":
+        case "process.posix_poll":
+        case "process.fd_description_identity":
+        case "process.fd_description_alias_count":
+        case "process.fd_preopens":
+        case "process.fd_preopen":
         case "process.fd_read":
         case "process.fd_pread":
         case "process.fd_write":
@@ -3496,6 +4042,7 @@ if (typeof globalThis !== "undefined") {{
         case "process.fd_datasync":
         case "process.fd_readdir":
         case "process.fd_close":
+        case "process.fd_closefrom":
         case "process.fd_stat":
         case "process.fd_filestat":
         case "process.fd_chmod":
@@ -3508,14 +4055,18 @@ if (typeof globalThis !== "undefined") {{
         case "process.fd_record_lock":
         case "process.fd_record_lock_cancel":
         case "process.fd_dup":
+        case "process.fd_move":
         case "process.fd_dup2":
         case "process.fd_dup_min":
         case "process.fd_seek":
+        case "process.fd_path":
         case "process.fd_chdir_path":
         case "process.fd_socketpair":
+        case "process.pty_open":
         case "process.fd_sendmsg_rights":
         case "process.fd_recvmsg_rights":
         case "process.fd_socket_shutdown":
+        case "dns.resolveRawRr":
           if (typeof _processWasmSyncRpc === "undefined") {{
             throw new Error("agentos WASM process-syscall bridge is unavailable");
           }}
@@ -3690,7 +4241,7 @@ fn prewarm_wasm_path(
         route_fs_through_sidecar: false,
         next_fd: 64,
         open_files: BTreeMap::new(),
-        pending_events: VecDeque::new(),
+        pending_events: WasmEventQueue::default(),
     };
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -3832,7 +4383,7 @@ async fn prewarm_wasm_path_async(
         route_fs_through_sidecar: false,
         next_fd: 64,
         open_files: BTreeMap::new(),
-        pending_events: VecDeque::new(),
+        pending_events: WasmEventQueue::default(),
     };
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -4186,22 +4737,30 @@ fn warmup_metrics_line(
     )
 }
 
-fn resolve_wasm_execution_timeout(
+fn resolve_wasm_wall_clock_limit(
     request: &StartWasmExecutionRequest,
 ) -> Result<Option<Duration>, WasmExecutionError> {
-    // Node's WASI runtime does not expose per-instruction fuel metering, so an
-    // EXPLICITLY configured "fuel" budget is enforced as a tight wall-clock
-    // timeout. The value rides the typed `limits.max_fuel` (from the BARE-wire
-    // resource limits), not an `AGENTOS_WASM_MAX_FUEL` env var.
-    //
-    // With no explicit fuel budget there is NO default wall-clock timeout —
-    // matching the JS execution philosophy (wall-clock backstop is opt-in).
+    // Wall-clock time is an independent, opt-in elapsed deadline. With no
+    // explicit value there is no outer timeout, matching interactive command
+    // semantics.
     // The guest stays bounded by default anyway: the wasm module executes on
     // the runner isolate's thread, whose TRUE-CPU budget (the V8 CPU-time
     // watchdog, default 30s ACTIVE CPU) terminates an infinite-loop module
     // while letting an idle interactive guest (vim blocked in a kernel input
     // wait) live indefinitely, exactly like native Linux.
-    Ok(request.limits.max_fuel.map(Duration::from_millis))
+    Ok(request
+        .limits
+        .wall_clock_limit_ms
+        .map(Duration::from_millis))
+}
+
+fn reject_v8_deterministic_fuel(
+    request: &StartWasmExecutionRequest,
+) -> Result<(), WasmExecutionError> {
+    match request.limits.deterministic_fuel {
+        Some(fuel) => Err(WasmExecutionError::DeterministicFuelUnsupported { fuel }),
+        None => Ok(()),
+    }
 }
 
 /// Resolve the per-execution WASM stack cap from the typed wire limit. The V8
@@ -4649,26 +5208,6 @@ fn read_varuint_usize(
     })
 }
 
-impl From<NodeSignalDispositionAction> for WasmSignalDispositionAction {
-    fn from(value: NodeSignalDispositionAction) -> Self {
-        match value {
-            NodeSignalDispositionAction::Default => Self::Default,
-            NodeSignalDispositionAction::Ignore => Self::Ignore,
-            NodeSignalDispositionAction::User => Self::User,
-        }
-    }
-}
-
-impl From<NodeSignalHandlerRegistration> for WasmSignalHandlerRegistration {
-    fn from(value: NodeSignalHandlerRegistration) -> Self {
-        Self {
-            action: value.action.into(),
-            mask: value.mask,
-            flags: value.flags,
-        }
-    }
-}
-
 fn resolve_path_like_specifier(cwd: &Path, specifier: &str) -> Option<PathBuf> {
     if specifier.starts_with("file://") {
         return Some(PathBuf::from(specifier.trim_start_matches("file://")));
@@ -4689,32 +5228,38 @@ fn resolve_path_like_specifier(cwd: &Path, specifier: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_wasm_internal_env, build_wasm_runner_bootstrap, max_cbor_byte_string_payload_bytes,
-        open_wasm_guest_file, resolve_wasm_execution_timeout, resolve_wasm_prewarm_timeout,
-        resolve_wasm_stack_limit_bytes, resolved_module_path, translate_wasm_guest_path,
+        build_wasm_internal_env, build_wasm_runner_bootstrap,
+        build_wasm_snapshot_runner_inline_code, managed_kernel_host_bootstrap,
+        max_cbor_byte_string_payload_bytes, open_wasm_guest_file, reject_v8_deterministic_fuel,
+        resolve_wasm_prewarm_timeout, resolve_wasm_stack_limit_bytes,
+        resolve_wasm_wall_clock_limit, resolved_module_path, translate_wasm_guest_path,
         translate_wasm_host_symlink_target, wasm_guest_module_paths, wasm_host_path_is_read_only,
         wasm_memory_limit_bytes, wasm_memory_limit_pages, wasm_mutation_touches_read_only_mapping,
         wasm_read_only_filesystem_error, wasm_runner_base_env, wasm_runner_heap_limit_mb,
         wasm_runner_javascript_limits, wasm_sandbox_root, wasm_snapshot_runner_base_env,
         wasm_sync_read_length, wasm_sync_rpc_error_code,
         wasm_sync_rpc_method_routes_through_sidecar_kernel, CreateWasmContextRequest,
-        GuestRuntimeConfig, JavascriptSyncRpcRequest, ResolvedWasmModule,
-        StartWasmExecutionRequest, Value, WasmExecutionEngine, WasmExecutionError,
-        WasmExecutionLimits, WasmInternalSyncRpc, WasmPermissionTier,
+        ExecutionSignalDispositionAction, ExecutionSignalHandlerRegistration, GuestRuntimeConfig,
+        HostRpcRequest, ResolvedWasmModule, StartWasmExecutionRequest, Value, WasmEventQueue,
+        WasmExecutionEngine, WasmExecutionError, WasmExecutionEvent, WasmExecutionLimits,
+        WasmInternalSyncRpc, WasmPendingEventBudget, WasmPermissionTier, WasmSignalCheckpointInbox,
         DEFAULT_WASM_PREWARM_TIMEOUT_MS, DEFAULT_WASM_RUNNER_HEAP_LIMIT_MB,
         NODE_WASI_MODULE_SOURCE, WASM_CAPTURED_OUTPUT_LIMIT_BYTES,
-        WASM_INTERNAL_MAX_STACK_BYTES_ENV, WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV,
-        WASM_MAX_MODULE_FILE_BYTES_ENV, WASM_MAX_SPAWN_FILE_ACTIONS_ENV,
+        WASM_INTERNAL_MAX_STACK_BYTES_ENV, WASM_INTERNAL_SYNC_RPC_RESPONSE_LINE_BYTES_ENV,
+        WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_MODULE_FILE_BYTES_ENV, WASM_MAX_SPAWN_FILE_ACTIONS_ENV,
         WASM_MAX_SPAWN_FILE_ACTION_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV, WASM_PAGE_BYTES,
         WASM_PROCESS_SYNC_RPC_RESPONSE_BYTES, WASM_SANDBOX_ROOT_ENV,
         WASM_SIDECAR_ROUTED_FS_SYNC_METHODS, WASM_SYNC_READ_LIMIT_BYTES,
     };
-    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    use crate::backend::{ExecutionWakeIdentity, PublishedSignalCheckpoint};
 
     #[test]
     fn wasm_runner_forwards_vm_reactor_limits_to_javascript() {
@@ -4728,6 +5273,367 @@ mod tests {
         assert_eq!(javascript.v8_heap_limit_mb, Some(192));
         assert_eq!(javascript.reactor_work_quantum, Some(17));
         assert_eq!(javascript.bridge_call_timeout_ms, Some(12_345));
+    }
+
+    #[test]
+    fn managed_kernel_host_mode_is_trusted_frozen_bootstrap_not_guest_env() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        assert!(runner.contains(
+            "const SIDECAR_MANAGED_PROCESS = globalThis.__agentOSManagedKernelHost === true;"
+        ));
+        assert!(!runner.contains("typeof process?.env?.AGENTOS_SANDBOX_ROOT === 'string'"));
+
+        let managed = managed_kernel_host_bootstrap(true);
+        assert!(managed.contains("configurable: false"));
+        assert!(managed.contains("writable: false"));
+        assert!(managed.contains("value: true"));
+
+        let standalone = managed_kernel_host_bootstrap(false);
+        assert!(standalone.contains("value: false"));
+
+        let snapshot = build_wasm_snapshot_runner_inline_code(None, true);
+        let mode = snapshot
+            .find("__agentOSManagedKernelHost")
+            .expect("trusted mode bootstrap");
+        let run = snapshot
+            .find("__agentOSWasmRunnerRun")
+            .expect("snapshotted runner invocation");
+        assert!(
+            mode < run,
+            "mode must be frozen before runner code executes"
+        );
+    }
+
+    #[test]
+    fn managed_stdio_duplication_uses_kernel_descriptions() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let helper = runner
+            .find("function managedKernelFdForDuplicate(fd) {")
+            .expect("managed duplicate helper");
+        let dup = runner
+            .find("        fd_dup(fd, retNewFdPtr) {")
+            .expect("fd_dup import");
+        let dup_min = runner
+            .find("        fd_dup_min(fd, minFd, retNewFdPtr) {")
+            .expect("fd_dup_min import");
+        assert!(helper < dup);
+
+        let dup_min_end = runner[dup_min..]
+            .find("        fd_getfd(")
+            .map(|offset| dup_min + offset)
+            .expect("fd_dup_min terminator");
+        for (section, rpc) in [
+            (
+                &runner[dup..dup_min],
+                "callSyncRpc('process.fd_dup', [kernelSourceFd])",
+            ),
+            (
+                &runner[dup_min..dup_min_end],
+                "callSyncRpc('process.fd_dup_min', [kernelSourceFd, minimumFdNumber])",
+            ),
+        ] {
+            let kernel_source = section
+                .find("managedKernelFdForDuplicate(sourceFd)")
+                .expect("managed stdio duplicate source");
+            let kernel_dup = section.find(rpc).expect("kernel duplicate call");
+            let local_clone = section
+                .find("cloneFdHandle(sourceFd)")
+                .expect("standalone duplicate fallback");
+            assert!(kernel_source < kernel_dup);
+            assert!(kernel_dup < local_clone);
+        }
+        assert!(
+            runner[dup_min..dup_min_end].contains("authoritative\n              // RLIMIT_NOFILE")
+        );
+        assert!(runner[dup_min..dup_min_end].contains(
+            "registerKernelDelegateFd(\n                callSyncRpc('process.fd_dup_min', [kernelSourceFd, minimumFdNumber]),\n                null,\n                minimumFdNumber,"
+        ));
+
+        let fdstat_get = runner
+            .find("wasiImport.fd_fdstat_get = (fd, statPtr) => {")
+            .expect("fdstat get override");
+        let fdstat_set = runner
+            .find("wasiImport.fd_fdstat_set_flags = (fd, flags) => {")
+            .expect("fdstat set override");
+        let get_section = &runner[fdstat_get..fdstat_set];
+        assert!(
+            get_section
+                .find("callSyncRpc('process.fd_stat'")
+                .expect("kernel fdstat projection")
+                < get_section
+                    .find("if (!SIDECAR_MANAGED_PROCESS && hostNetSocket")
+                    .expect("standalone host-net fallback")
+        );
+        assert!(get_section.contains("BigInt(stat?.rightsBase ?? 0)"));
+
+        let set_end = runner[fdstat_set..]
+            .find("wasiImport.fd_filestat_get")
+            .map(|offset| fdstat_set + offset)
+            .expect("fdstat set terminator");
+        let set_section = &runner[fdstat_set..set_end];
+        assert!(
+            set_section
+                .find("callSyncRpc('process.fd_set_flags'")
+                .expect("kernel status flag update")
+                < set_section
+                    .find("hostNetSocket.nonblock =")
+                    .expect("managed transport metadata update")
+        );
+        assert!(set_section.contains("if (!SIDECAR_MANAGED_PROCESS && hostNetSocket"));
+
+        let open_alias = runner
+            .find("function kernelOpenPathForGuestPath(guestPath) {")
+            .expect("managed proc-fd open translation");
+        let open_alias_end = runner[open_alias..]
+            .find("function fsOpenNumericFlagsForManagedPath")
+            .map(|offset| open_alias + offset)
+            .expect("managed proc-fd helper terminator");
+        let open_alias = &runner[open_alias..open_alias_end];
+        assert!(open_alias.contains("(?:proc\\/self\\/fd|dev\\/fd)"));
+        assert!(open_alias.contains("lookupFdHandle(guestFd)"));
+        assert!(open_alias.contains("handle.targetFd"));
+        assert!(open_alias.contains("`dev/fd/${Number(handle.targetFd) >>> 0}`"));
+        let path_open = &runner[runner
+            .find("  wasiImport.path_open = (")
+            .expect("path_open override")..];
+        assert!(path_open.contains(
+            "const managedOpenPath = SIDECAR_MANAGED_PROCESS\n      ? kernelOpenPathForGuestPath"
+        ));
+        assert!(path_open.matches("managedOpenPath,").count() >= 2);
+
+        let write_start = runner
+            .find("wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {")
+            .expect("fd_write override");
+        let write_end = runner[write_start..]
+            .find("wasiImport.fd_close = (fd) => {")
+            .map(|offset| write_start + offset)
+            .expect("fd_write terminator");
+        let write = &runner[write_start..write_end];
+        assert!(runner.contains("function kernelFdStdioStream(targetFd, descriptorPath) {"));
+        assert!(runner.contains("callSyncRpc('__kernel_isatty', [targetFd])"));
+        assert!(runner
+            .contains("callSyncRpc('process.fd_description_identity', [targetFd])?.descriptionId"));
+        let path_lookup = write
+            .find("callSyncRpc('process.fd_path', [kernelFd])")
+            .expect("kernel output aliases must resolve their authoritative path");
+        let stdio_write = write
+            .find("callSyncRpc('__kernel_stdio_write', [kernelFd, bytes])")
+            .expect("stdout/stderr aliases must use the ordered output path");
+        let ordinary_write = write
+            .find("writeKernelFdCooperatively(kernelFd, bytes)")
+            .expect("non-output descriptions retain the generic kernel write path");
+        assert!(path_lookup < stdio_write);
+        assert!(path_lookup < ordinary_write);
+    }
+
+    #[test]
+    fn optional_posix_identity_ids_use_explicit_null_on_the_typed_bridge() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        assert!(runner.contains(
+            "function hostUserOptionalId(value) {\n  const id = Number(value) >>> 0;\n  return id === 0xffffffff ? null : id;\n}"
+        ));
+        for method in ["setreuid", "setresuid", "setregid", "setresgid"] {
+            assert!(
+                runner.contains(&format!("callSyncRpc('process.{method}', [")),
+                "{method} must use the typed identity bridge"
+            );
+        }
+    }
+
+    #[test]
+    fn path_owner_accepts_libc_at_fdcwd_sentinel() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let start = runner
+            .find("  path_owner(fd, pathPtr, pathLen, followSymlinks, retUidPtr, retGidPtr) {")
+            .expect("path-owner import");
+        let section = &runner[start..];
+        let end = section.find("  fd_owner(").expect("path-owner import end");
+        let section = &section[..end];
+
+        assert!(section.contains("const numericFd = Number(fd) >>> 0;"));
+        assert!(runner.contains("const NODE_CWD_FD = 0xffffffff;"));
+        assert!(section.contains("numericFd === NODE_CWD_FD"));
+        assert!(section.contains("dirFd: NODE_CWD_FD"));
+        assert!(section.contains("path.posix.resolve(HOST_FS_GUEST_CWD, rawTarget)"));
+        assert!(section.contains("kernelPathOperand(numericFd, pathPtr, pathLen)"));
+
+        let chown_start = runner
+            .find("  path_chown(fd, pathPtr, pathLen, uid, gid, followSymlinks) {")
+            .expect("path-chown import");
+        let chown = &runner[chown_start..];
+        let chown_end = chown.find("  fd_chown(").expect("path-chown import end");
+        let chown = &chown[..chown_end];
+        assert!(chown.contains("numericFd === NODE_CWD_FD"));
+        assert!(chown.contains("dirFd: NODE_CWD_FD"));
+    }
+
+    #[test]
+    fn proc_fd_readlink_rewrites_absolute_and_preopen_relative_guest_paths() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let start = runner
+            .find("function kernelProcFdPathForGuestPath(guestPath) {")
+            .expect("proc-fd path rewrite");
+        let section = &runner[start..];
+        let end = section
+            .find("function fsOpenNumericFlagsForManagedPath")
+            .expect("proc-fd path rewrite end");
+        let section = &section[..end];
+
+        assert!(section.contains(r"/^(\/?)proc\/self\/fd\/(\d+)$/u"));
+        assert!(section.contains("const guestFd = Number(match[2]);"));
+        assert!(section.contains("`${match[1]}proc/self/fd/${Number(handle.targetFd) >>> 0}`"));
+    }
+
+    #[test]
+    fn wasm_pending_event_queue_rejects_count_limit_without_leaking_reservation() {
+        let budget = WasmPendingEventBudget::new(1, usize::MAX);
+        let mut queue = WasmEventQueue::new(Arc::clone(&budget));
+
+        queue
+            .push_back(WasmExecutionEvent::Exited(0))
+            .expect("event at count limit");
+        let usage_at_limit = budget.usage();
+        let error = queue
+            .push_back(WasmExecutionEvent::Exited(1))
+            .expect_err("event over count limit");
+
+        assert!(matches!(
+            error,
+            WasmExecutionError::PendingEventLimit {
+                limit_name: "limits.process.pendingEventCount",
+                limit: 1,
+                observed: 2,
+            }
+        ));
+        assert_eq!(budget.usage(), usage_at_limit, "rejection must roll back");
+        assert_eq!(queue.pop_front(), Some(WasmExecutionEvent::Exited(0)));
+        assert_eq!(budget.usage(), (0, 0), "dequeue must release reservation");
+    }
+
+    #[test]
+    fn wasm_pending_event_queue_rejects_byte_limit_without_leaking_reservation() {
+        let event = WasmExecutionEvent::Stdout(vec![7; 8]);
+        let retained_bytes = super::wasm_event_retained_bytes(&event);
+        let budget = WasmPendingEventBudget::new(2, retained_bytes);
+        let mut queue = WasmEventQueue::new(Arc::clone(&budget));
+
+        queue.push_back(event.clone()).expect("event at byte limit");
+        let error = queue
+            .push_back(event.clone())
+            .expect_err("event over byte limit");
+
+        assert!(matches!(
+            error,
+            WasmExecutionError::PendingEventLimit {
+                limit_name: "limits.process.pendingEventBytes",
+                limit,
+                observed,
+            } if limit == retained_bytes && observed == retained_bytes * 2
+        ));
+        assert_eq!(budget.usage(), (1, retained_bytes));
+        assert_eq!(queue.pop_front(), Some(event));
+        assert_eq!(budget.usage(), (0, 0));
+    }
+
+    #[test]
+    fn wasm_outer_and_internal_signal_events_share_one_budget() {
+        let signal_event = WasmExecutionEvent::SignalState {
+            signal: 15,
+            registration: ExecutionSignalHandlerRegistration {
+                action: ExecutionSignalDispositionAction::User,
+                mask: vec![1, 2, 3],
+                flags: 0,
+            },
+        };
+        let retained_bytes = super::wasm_event_retained_bytes(&signal_event);
+        let budget = WasmPendingEventBudget::new(1, retained_bytes * 2);
+        let mut outer = WasmEventQueue::new(Arc::clone(&budget));
+        let mut internal = WasmEventQueue::new(Arc::clone(&budget));
+
+        outer
+            .push_back(signal_event.clone())
+            .expect("first expanded signal event");
+        let error = internal
+            .push_back(signal_event.clone())
+            .expect_err("signal expansion cannot bypass the shared count bound");
+        assert!(matches!(
+            error,
+            WasmExecutionError::PendingEventLimit {
+                limit_name: "limits.process.pendingEventCount",
+                limit: 1,
+                observed: 2,
+            }
+        ));
+        assert_eq!(budget.usage(), (1, retained_bytes));
+
+        assert_eq!(outer.pop_front(), Some(signal_event.clone()));
+        internal
+            .push_back(signal_event.clone())
+            .expect("released capacity is reusable by internal queue");
+        assert_eq!(internal.pop_front(), Some(signal_event));
+        assert_eq!(budget.usage(), (0, 0));
+    }
+
+    #[test]
+    fn wasm_signal_checkpoint_inbox_is_bounded_and_generation_scoped() {
+        let retained_bytes = std::mem::size_of::<super::QueuedSignalCheckpoint>();
+        let budget = WasmPendingEventBudget::new(1, retained_bytes);
+        let inbox = WasmSignalCheckpointInbox::new(Arc::clone(&budget));
+        let identity = ExecutionWakeIdentity {
+            generation: 7,
+            pid: 42,
+        };
+        let delivery = PublishedSignalCheckpoint {
+            signal: 15,
+            delivery_token: 99,
+            flags: 0x8000_0000,
+        };
+
+        inbox
+            .publish(identity, delivery)
+            .expect("first checkpoint fits the shared pending-event budget");
+        let limit_error = inbox
+            .publish(identity, delivery)
+            .expect_err("second checkpoint must hit the count limit");
+        assert_eq!(limit_error.code, "ERR_AGENTOS_RESOURCE_LIMIT");
+        assert!(limit_error
+            .message
+            .contains("limits.process.pendingEventCount"));
+        assert_eq!(budget.usage(), (1, retained_bytes));
+
+        let stale_error = inbox
+            .take(ExecutionWakeIdentity {
+                generation: identity.generation + 1,
+                ..identity
+            })
+            .expect_err("another execution generation cannot consume the checkpoint");
+        assert_eq!(stale_error.code, "ESTALE");
+        assert_eq!(budget.usage(), (1, retained_bytes));
+
+        assert_eq!(
+            inbox.take(identity).expect("matching execution identity"),
+            Some(delivery)
+        );
+        assert_eq!(budget.usage(), (0, 0), "take must release the budget");
+        assert_eq!(inbox.take(identity).expect("empty inbox"), None);
+
+        inbox
+            .publish(identity, delivery)
+            .expect("checkpoint can be queued again after take");
+        inbox
+            .discard(identity, delivery.delivery_token)
+            .expect("failed wake publication can roll back its checkpoint");
+        assert_eq!(budget.usage(), (0, 0), "discard must release the budget");
+        assert_eq!(inbox.take(identity).expect("discarded inbox"), None);
+
+        inbox
+            .publish(identity, delivery)
+            .expect("old exec image checkpoint");
+        inbox
+            .discard_identity(identity)
+            .expect("successful exec discards old-image checkpoints");
+        assert_eq!(budget.usage(), (0, 0), "exec discard must release budget");
+        assert_eq!(inbox.take(identity).expect("exec-discarded inbox"), None);
     }
 
     #[test]
@@ -4746,10 +5652,592 @@ mod tests {
         assert!(bootstrap.contains(&format!(
             "const __agentOSWasmSyncRpcReadPayloadBytes = {raw_limit};"
         )));
+        for method in [
+            "process.exec_image_open",
+            "process.exec_image_open_fd",
+            "process.exec_image_read",
+            "process.exec_image_close",
+        ] {
+            assert!(
+                bootstrap.contains(&format!("case \"{method}\":")),
+                "{method} must route through the V8 host-process bridge"
+            );
+        }
         let runner = include_str!("../assets/runners/wasm-runner.mjs");
         assert!(runner.contains("boundedWasmSyncRpcReadLength("));
         assert!(runner.contains("callSyncRpc('process.fd_read'"));
         assert!(runner.contains("callSyncRpc('process.fd_pread'"));
+        assert!(runner.contains("callSyncRpc('process.exec_image_open'"));
+        assert!(runner.contains("callSyncRpc('process.exec_image_open_fd'"));
+        assert!(runner.contains("callSyncRpc('process.exec_image_read'"));
+        assert!(runner.contains("callSyncRpc('process.exec_image_close'"));
+        assert!(runner.contains("finally {"));
+    }
+
+    #[test]
+    fn wasm_sync_rpc_response_line_limit_is_internal_config_and_source_guarded() {
+        let mut request = request_with_typed_limits_and_misleading_env(WasmExecutionLimits {
+            max_sync_rpc_response_line_bytes: Some(8_192),
+            ..WasmExecutionLimits::default()
+        });
+        request.env.insert(
+            WASM_INTERNAL_SYNC_RPC_RESPONSE_LINE_BYTES_ENV.to_string(),
+            String::from("999999"),
+        );
+        let resolved_module = ResolvedWasmModule {
+            specifier: String::from("./guest.wasm"),
+            resolved_path: PathBuf::from("/tmp/guest.wasm"),
+        };
+
+        let internal_env =
+            build_wasm_internal_env(&resolved_module, &request, 1_234, false).expect("env");
+        assert_eq!(
+            internal_env.get(WASM_INTERNAL_SYNC_RPC_RESPONSE_LINE_BYTES_ENV),
+            Some(&String::from("8192")),
+            "the typed limit must override an ambient internal env value"
+        );
+        assert!(
+            !wasm_runner_base_env(&request)
+                .contains_key(WASM_INTERNAL_SYNC_RPC_RESPONSE_LINE_BYTES_ENV),
+            "the internal line cap must not remain guest-configurable"
+        );
+
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        assert!(runner.contains("Math.ceil(maxSyncRpcResponseLineBytes * 0.8)"));
+        assert!(runner.contains("ERR_AGENTOS_RESOURCE_LIMIT"));
+        assert!(runner.contains("raise limits.reactor.maxBridgeResponseBytes"));
+        assert!(runner.contains("remaining > 4095 ? 4096 : remaining + 1"));
+    }
+
+    #[test]
+    fn wasm_sync_rpc_response_line_runtime_rejects_before_retaining_overflow() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let marker_begin = "// AGENTOS_SYNC_RPC_RESPONSE_LIMIT_HELPERS_BEGIN";
+        let marker_end = "// AGENTOS_SYNC_RPC_RESPONSE_LIMIT_HELPERS_END";
+        let helper_start = runner.find(marker_begin).expect("helper begin marker");
+        let helper_end = runner.find(marker_end).expect("helper end marker");
+        let helpers = &runner[helper_start + marker_begin.len()..helper_end];
+        let script = format!(
+            r#"{helpers}
+let retained = Buffer.alloc(0);
+retained = appendSyncRpcResponseChunk(retained, Buffer.from('12345678'), 8).buffer;
+let overflow;
+try {{
+  appendSyncRpcResponseChunk(retained, Buffer.from('9'), 8);
+}} catch (error) {{
+  overflow = {{
+    code: error.code,
+    details: error.details,
+    message: error.message,
+    retainedBytes: retained.byteLength,
+  }};
+}}
+const exact = appendSyncRpcResponseChunk(Buffer.alloc(0), Buffer.from('12345678\n'), 8);
+process.stdout.write(JSON.stringify({{ overflow, exactLine: exact.line, exactRetained: exact.buffer.byteLength }}));
+"#
+        );
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval", script.as_str()])
+            .output()
+            .expect("run node response-line helper");
+        assert!(
+            output.status.success(),
+            "node helper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).expect("helper JSON");
+        assert_eq!(result["overflow"]["code"], "ERR_AGENTOS_RESOURCE_LIMIT");
+        assert_eq!(
+            result["overflow"]["details"]["limitName"],
+            "limits.reactor.maxBridgeResponseBytes"
+        );
+        assert_eq!(result["overflow"]["details"]["limit"], 8);
+        assert_eq!(result["overflow"]["details"]["observed"], 9);
+        assert_eq!(result["overflow"]["retainedBytes"], 8);
+        assert_eq!(result["exactLine"], "12345678");
+        assert_eq!(result["exactRetained"], 0);
+    }
+
+    #[test]
+    fn wasm_host_tty_read_prevalidates_guest_destination_before_kernel_read() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let tty_start = runner
+            .find("const hostTtyImport = {")
+            .expect("host_tty import must exist");
+        let tty_end = runner[tty_start..]
+            .find("  isatty(fd) {")
+            .map(|offset| tty_start + offset)
+            .expect("host_tty read must precede isatty");
+        let tty_read = &runner[tty_start..tty_end];
+        let validation = tty_read
+            .find("guestRangeIsValid(ptr, cap)")
+            .expect("host_tty read must validate its full output range");
+        let consuming_read = tty_read
+            .find("callSyncRpc('__kernel_stdin_read'")
+            .expect("host_tty read must call the kernel stdin RPC");
+
+        assert!(
+            validation < consuming_read,
+            "guest output memory must be validated before PTY bytes are consumed"
+        );
+    }
+
+    #[test]
+    fn wasm_host_tty_size_returns_typed_native_errno_instead_of_throwing_rpc_errors() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let size_start = runner
+            .find("  get_size(fd, colsPtr, rowsPtr) {")
+            .expect("host_tty get_size must exist");
+        let size_end = runner[size_start..]
+            .find("  set_size(fd, cols, rows) {")
+            .map(|offset| size_start + offset)
+            .expect("host_tty get_size must precede set_size");
+        let get_size = &runner[size_start..size_end];
+
+        assert!(get_size.contains("try {"));
+        assert!(get_size.contains("if (error?.code === 'EBADF') return 9;"));
+        assert!(get_size.contains("if (error?.code === 'ENOTTY') return 25;"));
+        assert!(
+            get_size.find("guestRangeIsValid(colsPtr, 2)").unwrap()
+                < get_size.find("callSyncRpc('__kernel_tty_size'").unwrap(),
+            "guest output pointers must be validated before the tty-size RPC"
+        );
+    }
+
+    #[test]
+    fn wasm_preview1_memory_is_prevalidated_before_host_side_effects() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+
+        let assert_precedes = |start: &str, validation: &str, effect: &str| {
+            let section_start = runner
+                .rfind(start)
+                .unwrap_or_else(|| panic!("missing {start}"));
+            let section = &runner[section_start..];
+            let validation_offset = section
+                .find(validation)
+                .unwrap_or_else(|| panic!("missing validation {validation} in {start}"));
+            let effect_offset = section
+                .find(effect)
+                .unwrap_or_else(|| panic!("missing effect {effect} in {start}"));
+            assert!(
+                validation_offset < effect_offset,
+                "{start} must validate guest memory before {effect}"
+            );
+        };
+
+        assert!(runner.contains("const LINUX_IOV_MAX = 1024;"));
+        assert_precedes(
+            "wasiImport.fd_read =",
+            "validateGuestIovRequest(iovs, iovsLen)",
+            "getHostNetSocket(numericFd)",
+        );
+        assert_precedes(
+            "wasiImport.fd_write =",
+            "validateGuestIovRequest(iovs, iovsLen)",
+            "getHostNetSocket(numericFd)",
+        );
+        assert_precedes(
+            "wasiImport.fd_pread =",
+            "guestRangeIsValid(nreadPtr, 4)",
+            "callSyncRpc('process.fd_pread'",
+        );
+        assert_precedes(
+            "wasiImport.fd_pwrite =",
+            "guestRangeIsValid(nwrittenPtr, 4)",
+            "callSyncRpc('process.fd_pwrite'",
+        );
+        assert_precedes(
+            "wasiImport.fd_readdir =",
+            "guestRangesAreValid([bufPtr, bufferLength], [bufUsedPtr, 4])",
+            "lookupFdHandle(numericFd)",
+        );
+        assert_precedes(
+            "wasiImport.fd_seek =",
+            "guestRangeIsValid(newOffsetPtr, 8)",
+            "callSyncRpc('process.fd_seek'",
+        );
+        assert_precedes(
+            "wasiImport.fd_tell =",
+            "guestRangeIsValid(offsetPtr, 8)",
+            "callSyncRpc('process.fd_seek'",
+        );
+        assert_precedes(
+            "wasiImport.fd_filestat_get =",
+            "guestRangeIsValid(statPtr, 64)",
+            "callSyncRpc('process.fd_filestat'",
+        );
+        assert_precedes(
+            "wasiImport.poll_oneoff =",
+            "guestRangesAreValid(",
+            "new DataView(instanceMemory.buffer)",
+        );
+
+        let path_filestat = runner
+            .find("  path_filestat_get(args) {")
+            .expect("kernel path_filestat_get handler");
+        let path_filestat = &runner[path_filestat..];
+        assert!(
+            path_filestat
+                .find("guestRangesAreValid([args[2]")
+                .expect("path_filestat_get validation")
+                < path_filestat
+                    .find("callSyncRpc('process.path_stat_at'")
+                    .expect("path_filestat_get RPC")
+        );
+
+        for (start, end, ambient_io) in [
+            (
+                "wasiImport.fd_pread =",
+                "wasiImport.fd_pwrite =",
+                "fsModule.readSync(",
+            ),
+            (
+                "wasiImport.fd_pwrite =",
+                "wasiImport.fd_sync =",
+                "fsModule.writeSync(",
+            ),
+        ] {
+            let start = runner.rfind(start).expect("positioned I/O wrapper");
+            let section = &runner[start..];
+            let end = section.find(end).expect("positioned I/O wrapper end");
+            let section = &section[..end];
+            assert!(
+                section
+                    .find("if (SIDECAR_MANAGED_PROCESS) return WASI_ERRNO_BADF;")
+                    .expect("managed ambient-I/O guard")
+                    < section.find(ambient_io).expect("standalone ambient I/O"),
+                "managed positioned I/O must stop before {ambient_io}"
+            );
+        }
+
+        let path_open = runner
+            .find("  wasiImport.path_open = (")
+            .expect("path_open wrapper");
+        let section = &runner[path_open..];
+        assert!(
+            section
+                .find("guestRangesAreValid([pathPtr")
+                .expect("path_open validation")
+                < section
+                    .find("pendingOpenCreateMode")
+                    .expect("path_open state consumption")
+        );
+    }
+
+    #[test]
+    fn wasm_clock_and_system_outputs_are_prevalidated_before_process_rpc() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        for (start, end, validation, rpc) in [
+            (
+                "\nwasiImport.clock_time_get = (",
+                "\nwasiImport.clock_res_get = (",
+                "guestRangeIsValid(resultPtr, 8)",
+                "callSyncRpc('process.clock_time'",
+            ),
+            (
+                "\nwasiImport.clock_res_get = (",
+                "// Managed VMs use the shared sidecar entropy source.",
+                "guestRangeIsValid(resultPtr, 8)",
+                "callSyncRpc('process.clock_resolution'",
+            ),
+            (
+                "const hostSystemImport = {",
+                "// Terminal event source",
+                "guestRangeIsValid(bufferPtr, capacity)",
+                "callSyncRpc('process.system_identity'",
+            ),
+        ] {
+            let start_offset = runner.find(start).expect("provider start marker");
+            let provider = &runner[start_offset..];
+            let end_offset = provider.find(end).expect("provider end marker");
+            let provider = &provider[..end_offset];
+            let validation_offset = provider.find(validation).expect("output validation");
+            let rpc_offset = provider.find(rpc).expect("shared process RPC");
+            assert!(
+                validation_offset < rpc_offset,
+                "{start} must validate guest output before host work"
+            );
+        }
+
+        let bootstrap = build_wasm_runner_bootstrap(&BTreeMap::new(), None);
+        for method in [
+            "process.clock_time",
+            "process.clock_resolution",
+            "process.system_identity",
+        ] {
+            assert!(bootstrap.contains(&format!("case \"{method}\":")));
+        }
+    }
+
+    #[test]
+    fn wasm_process_outputs_are_prevalidated_before_side_effects() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let cases = [
+            (
+                "function returnWaitedChild(\n",
+                "function returnLegacyWaitedChild(",
+                "guestRangesAreValid(\n",
+                "dispatchPendingWasmSignals()",
+            ),
+            (
+                "function returnLegacyWaitedChild(",
+                "function returnRawWaitedChild(",
+                "guestRangesAreValid([retStatusPtr, 4], [retPidPtr, 4])",
+                "dispatchPendingWasmSignals()",
+            ),
+            (
+                "function returnRawWaitedChild(",
+                "function processChildEvent(",
+                "guestRangesAreValid([retStatusPtr, 4], [retPidPtr, 4])",
+                "dispatchPendingWasmSignals()",
+            ),
+            (
+                "        proc_spawn(\n",
+                "        proc_spawn_v3(\n",
+                "guestRangeIsValid(retPidPtr, 4)",
+                "readGuestBytes(argvPtr, argvLen)",
+            ),
+            (
+                "        proc_spawn_v3(\n",
+                "        proc_spawn_v4(\n",
+                "guestRangeIsValid(retPidPtr, 4)",
+                "activeSpawnCallContext = {",
+            ),
+            (
+                "        proc_spawn_v4(\n",
+                "        proc_spawn_v2(\n",
+                "guestRangeIsValid(retPidPtr, 4)",
+                "activeSpawnCallContext = {",
+            ),
+            (
+                "        proc_spawn_v2(\n",
+                "        proc_exec(\n",
+                "guestRangeIsValid(retPidPtr, 4)",
+                "callSyncRpc('child_process.spawn'",
+            ),
+            (
+                "        proc_waitpid(pid, options, retStatusPtr, retPidPtr) {",
+                "        proc_waitpid_v2(\n",
+                "guestRangesAreValid([retStatusPtr, 4], [retPidPtr, 4])",
+                "pollChildEvent(record, 0)",
+            ),
+            (
+                "        proc_waitpid_v2(\n",
+                "        proc_waitpid_v3(",
+                "guestRangesAreValid(\n",
+                "pollChildEvent(record, 0)",
+            ),
+            (
+                "        proc_waitpid_v3(",
+                "        proc_kill(",
+                "guestRangesAreValid([retStatusPtr, 4], [retPidPtr, 4])",
+                "callSyncRpc('process.waitpid_transition'",
+            ),
+            (
+                "        proc_getrlimit(",
+                "        proc_setrlimit(",
+                "guestRangesAreValid([retSoftPtr, 8], [retHardPtr, 8])",
+                "callSyncRpc('process.getrlimit'",
+            ),
+            (
+                "        proc_umask(",
+                "        umask(",
+                "guestRangeIsValid(retPreviousPtr, 4)",
+                "callSyncRpc('process.umask'",
+            ),
+            (
+                "        umask(",
+                "        proc_itimer_real(",
+                "guestRangeIsValid(retPreviousPtr, 4)",
+                "callSyncRpc('process.umask'",
+            ),
+            (
+                "        proc_itimer_real(",
+                "        proc_getpgid(",
+                "guestRangesAreValid([retRemainingUsPtr, 8], [retIntervalUsPtr, 8])",
+                "callSyncRpc('process.itimer_real'",
+            ),
+            (
+                "        proc_getpgid(",
+                "        proc_setpgid(",
+                "guestRangeIsValid(retPgidPtr, 4)",
+                "callSyncRpc('process.getpgid'",
+            ),
+            (
+                "        fd_pipe(",
+                "        fd_dup(",
+                "guestRangesAreValid([retReadFdPtr, 4], [retWriteFdPtr, 4])",
+                "hasRunnerOpenFdCapacity(2)",
+            ),
+            (
+                "        fd_dup(fd, retNewFdPtr) {",
+                "        fd_dup2(",
+                "guestRangeIsValid(retNewFdPtr, 4)",
+                "allocateHostNetDuplicateFd(0)",
+            ),
+            (
+                "        fd_dup_min(",
+                "        fd_getfd(",
+                "guestRangeIsValid(retNewFdPtr, 4)",
+                "allocateHostNetDuplicateFd(minimumFdNumber)",
+            ),
+            (
+                "        fd_getfd(",
+                "        fd_setfd(",
+                "guestRangeIsValid(retFlagsPtr, 4)",
+                "callSyncRpc('process.fd_getfd'",
+            ),
+            (
+                "        fd_socketpair(",
+                "        fd_sendmsg_rights(",
+                "guestRangeIsValid(retFirstPtr, 4)",
+                "callSyncRpc('process.fd_socketpair'",
+            ),
+            (
+                "        fd_sendmsg_rights(",
+                "        fd_recvmsg_rights(",
+                "guestRangeIsValid(retSentPtr, 4)",
+                "callSyncRpc('process.fd_sendmsg_rights'",
+            ),
+            (
+                "        proc_signal_mask_v2(",
+                "        proc_ppoll_v1(",
+                "guestRangesAreValid([retOldLoPtr, 4], [retOldHiPtr, 4])",
+                "callSyncRpc('process.signal_mask'",
+            ),
+            (
+                "        proc_ppoll_v1(",
+                "\n};\n\nconst limitedHostProcessImport",
+                "guestRangeIsValid(retReadyPtr, 4)",
+                "return hostNetImport.net_poll(",
+            ),
+        ];
+
+        for (start, end, validation, side_effect) in cases {
+            let start_offset = runner
+                .find(start)
+                .unwrap_or_else(|| panic!("missing process import marker {start:?}"));
+            let tail = &runner[start_offset..];
+            let end_offset = tail
+                .find(end)
+                .unwrap_or_else(|| panic!("missing process import terminator {end:?}"));
+            let import = &tail[..end_offset];
+            let validation_offset = import
+                .find(validation)
+                .unwrap_or_else(|| panic!("{start:?} must validate {validation:?}"));
+            let side_effect_offset = import
+                .find(side_effect)
+                .unwrap_or_else(|| panic!("{start:?} must retain {side_effect:?}"));
+            assert!(
+                validation_offset < side_effect_offset,
+                "{start:?} must validate guest output before {side_effect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn guest_byte_reads_use_typed_bounds_checks() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let start = runner
+            .find("function readGuestBytes(ptr, len) {")
+            .expect("guest byte reader");
+        let section = &runner[start..];
+        let end = section
+            .find("function readGuestString")
+            .expect("guest byte reader end");
+        let section = &section[..end];
+        assert!(section.contains("const end = start + length;"));
+        assert!(section.contains("end > instanceMemory.buffer.byteLength"));
+        assert!(section.contains("throw execError('EFAULT'"));
+        assert!(
+            section.find("throw execError('EFAULT'").unwrap()
+                < section.find("new Uint8Array(").unwrap()
+        );
+        assert_eq!(
+            runner
+                .matches("case 'EFAULT':\n      return WASI_ERRNO_FAULT;")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn record_lock_query_prevalidates_its_atomic_copyout() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let start = runner
+            .find("        fd_record_lock(\n")
+            .expect("record-lock import");
+        let section = &runner[start..];
+        let end = section
+            .find("        proc_closefrom(")
+            .expect("record-lock import end");
+        let section = &section[..end];
+        let validation = section
+            .find("!guestRangesAreValid(\n              [retTypePtr, 4],")
+            .expect("record-lock output validation");
+        let host_query = section
+            .find("callSyncRpc('process.fd_record_lock'")
+            .expect("record-lock host query");
+        assert!(validation < host_query);
+    }
+
+    #[test]
+    fn managed_fexecve_snapshots_the_exact_kernel_description() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let start = runner
+            .find("function loadExecImageFromFd(fd, argv, closeFds) {")
+            .expect("fd exec loader");
+        let section = &runner[start..];
+        let end = section
+            .find("function traceHostProcess")
+            .expect("fd exec loader end");
+        let section = &section[..end];
+        let managed = section.find("if (SIDECAR_MANAGED_PROCESS) {").unwrap();
+        let projection = section
+            .find("const handle = lookupFdHandle(descriptor);")
+            .unwrap();
+        assert!(managed < projection);
+        assert!(section.contains("canonicalKernelFdForSpawnAction(descriptor)"));
+        assert!(section.contains("callSyncRpc('process.exec_image_open_fd'"));
+        assert!(section.contains("callSyncRpc('process.exec_image_read'"));
+        assert!(section.contains("callSyncRpc('process.exec_image_close'"));
+        assert!(!section[managed..projection].contains("fsModule."));
+    }
+
+    #[test]
+    fn managed_closefrom_uses_one_bulk_kernel_mutation() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let start = runner
+            .find("        proc_closefrom(")
+            .expect("closefrom import");
+        let section = &runner[start..];
+        let end = section
+            .find("        fd_socketpair(")
+            .expect("closefrom end");
+        let section = &section[..end];
+        assert_eq!(
+            section
+                .matches("callSyncRpc('process.fd_closefrom'")
+                .count(),
+            1
+        );
+        assert!(section.contains("exactKernelFds.add(Number(handle.targetFd) >>> 0)"));
+        assert!(section.contains("[...exactKernelFds]"));
+        assert!(section.contains("response?.closedFds"));
+        assert!(section.contains("forgetSidecarClosedKernelTargetFd(fd)"));
+        assert!(section.contains("handle?.internalPreopen === true"));
+    }
+
+    #[test]
+    fn managed_fiemap_reads_one_indexed_extent() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let start = runner.find("  fd_fiemap(").expect("fiemap import");
+        let section = &runner[start..];
+        let end = section.find("  fd_punch_hole(").expect("fiemap end");
+        let section = &section[..end];
+        assert!(section.contains("callSyncRpc('fs.fiemapAtSync'"));
+        assert!(!section.contains("callSyncRpc('fs.fiemapSync'"));
+        assert!(section.contains("return WASI_ERRNO_NODATA;"));
     }
 
     #[test]
@@ -4777,12 +6265,13 @@ mod tests {
     }
 
     fn request_with_env(cwd: &Path, env: BTreeMap<String, String>) -> StartWasmExecutionRequest {
-        // Translate the legacy `AGENTOS_WASM_*` limit env keys these tests still
-        // express into the typed limits the engine now reads (mirrors the
-        // sidecar's config→limits flow).
+        // Translate the remaining runner-bootstrap `AGENTOS_WASM_*` limit env
+        // keys these tests express into typed limits.
         let parse = |key: &str| env.get(key).and_then(|value| value.parse::<u64>().ok());
         let limits = WasmExecutionLimits {
-            max_fuel: parse(WASM_MAX_FUEL_ENV),
+            active_cpu_time_limit_ms: None,
+            wall_clock_limit_ms: None,
+            deterministic_fuel: None,
             max_memory_bytes: parse(WASM_MAX_MEMORY_BYTES_ENV),
             max_stack_bytes: parse(WASM_MAX_STACK_BYTES_ENV),
             max_module_file_bytes: None,
@@ -4793,15 +6282,18 @@ mod tests {
             max_sockets: None,
             max_blocking_read_ms: None,
             runner_heap_limit_mb: None,
-            runner_cpu_time_limit_ms: None,
             reactor_work_quantum: None,
             bridge_call_timeout_ms: None,
+            max_sync_rpc_response_line_bytes: None,
+            pending_event_count: None,
+            pending_event_bytes: None,
         };
         StartWasmExecutionRequest {
             limits,
             guest_runtime: GuestRuntimeConfig::default(),
             vm_id: String::from("vm-wasm"),
             context_id: String::from("ctx-wasm"),
+            managed_kernel_host: false,
             argv: Vec::new(),
             env,
             cwd: cwd.to_path_buf(),
@@ -4829,8 +6321,8 @@ mod tests {
             .collect()
     }
 
-    fn wasm_sync_rpc_request(method: &str) -> JavascriptSyncRpcRequest {
-        JavascriptSyncRpcRequest {
+    fn wasm_sync_rpc_request(method: &str) -> HostRpcRequest {
+        HostRpcRequest {
             id: 1,
             method: method.to_string(),
             args: Vec::new(),
@@ -4848,11 +6340,11 @@ mod tests {
             guest_runtime: GuestRuntimeConfig::default(),
             vm_id: String::from("vm-wasm"),
             context_id: String::from("ctx-wasm"),
+            managed_kernel_host: false,
             argv: Vec::new(),
-            // Deliberately huge env values: if any limit were still sourced from
-            // env, the assertions below would observe these instead.
+            // Deliberately huge remaining bootstrap env values: if any migrated
+            // limit were still sourced from env, assertions would observe these.
             env: BTreeMap::from([
-                (String::from(WASM_MAX_FUEL_ENV), String::from("999999")),
                 (
                     String::from(WASM_MAX_MEMORY_BYTES_ENV),
                     String::from("999999"),
@@ -4886,7 +6378,9 @@ mod tests {
     #[test]
     fn wasm_limits_are_read_from_typed_fields_and_env_is_inert() {
         let request = request_with_typed_limits_and_misleading_env(WasmExecutionLimits {
-            max_fuel: Some(25),
+            active_cpu_time_limit_ms: Some(1_234),
+            wall_clock_limit_ms: Some(25),
+            deterministic_fuel: None,
             max_memory_bytes: Some(65_536),
             max_stack_bytes: Some(131_072),
             max_module_file_bytes: Some(262_144),
@@ -4897,15 +6391,17 @@ mod tests {
             max_sockets: None,
             max_blocking_read_ms: None,
             runner_heap_limit_mb: Some(512),
-            runner_cpu_time_limit_ms: Some(1_234),
             reactor_work_quantum: Some(64),
             bridge_call_timeout_ms: Some(30_000),
+            max_sync_rpc_response_line_bytes: None,
+            pending_event_count: None,
+            pending_event_bytes: None,
         });
 
         assert_eq!(
-            resolve_wasm_execution_timeout(&request).expect("fuel timeout"),
+            resolve_wasm_wall_clock_limit(&request).expect("wall-clock limit"),
             Some(Duration::from_millis(25)),
-            "fuel must come from the typed wire limit, not AGENTOS_WASM_MAX_FUEL"
+            "wall-clock time must come from the typed wire limit"
         );
         assert_eq!(
             wasm_memory_limit_bytes(&request).expect("memory limit"),
@@ -4936,14 +6432,14 @@ mod tests {
     }
 
     #[test]
-    fn wasm_limits_default_to_bounded_timeout_when_unset_even_with_env_present() {
-        // Same misleading env, but no typed limits: no wall-clock fuel timeout
+    fn wasm_limits_leave_wall_clock_disabled_when_unset_even_with_env_present() {
+        // Same misleading env, but no typed limits: no wall-clock timeout
         // (the runner's V8 TRUE-CPU budget bounds runaways), and memory and
         // stack limits remain absent.
         let request = request_with_typed_limits_and_misleading_env(WasmExecutionLimits::default());
 
         assert_eq!(
-            resolve_wasm_execution_timeout(&request).expect("fuel"),
+            resolve_wasm_wall_clock_limit(&request).expect("wall clock"),
             None
         );
         assert_eq!(wasm_memory_limit_bytes(&request).expect("memory"), None);
@@ -4964,7 +6460,9 @@ mod tests {
     #[test]
     fn wasm_internal_env_scrubs_migrated_limit_env_keys() {
         let request = request_with_typed_limits_and_misleading_env(WasmExecutionLimits {
-            max_fuel: Some(25),
+            active_cpu_time_limit_ms: Some(1_234),
+            wall_clock_limit_ms: Some(25),
+            deterministic_fuel: None,
             max_memory_bytes: Some(65_536),
             max_stack_bytes: Some(131_072),
             max_module_file_bytes: Some(262_144),
@@ -4975,9 +6473,11 @@ mod tests {
             max_sockets: None,
             max_blocking_read_ms: None,
             runner_heap_limit_mb: Some(512),
-            runner_cpu_time_limit_ms: Some(1_234),
             reactor_work_quantum: Some(64),
             bridge_call_timeout_ms: Some(30_000),
+            max_sync_rpc_response_line_bytes: None,
+            pending_event_count: None,
+            pending_event_bytes: None,
         });
         let resolved_module = ResolvedWasmModule {
             specifier: String::from("./guest.wasm"),
@@ -5008,7 +6508,6 @@ mod tests {
             Some(&String::from("131072"))
         );
         assert!(!internal_env.contains_key(WASM_MAX_STACK_BYTES_ENV));
-        assert!(!internal_env.contains_key(WASM_MAX_FUEL_ENV));
         assert!(!internal_env.contains_key("AGENTOS_WASM_PREWARM_TIMEOUT_MS"));
         assert!(!internal_env.contains_key("AGENTOS_WASM_RUNNER_HEAP_LIMIT_MB"));
     }
@@ -5016,7 +6515,9 @@ mod tests {
     #[test]
     fn wasm_runner_base_env_scrubs_migrated_limit_env_keys() {
         let mut request = request_with_typed_limits_and_misleading_env(WasmExecutionLimits {
-            max_fuel: Some(25),
+            active_cpu_time_limit_ms: Some(1_234),
+            wall_clock_limit_ms: Some(25),
+            deterministic_fuel: None,
             max_memory_bytes: Some(65_536),
             max_stack_bytes: Some(131_072),
             max_module_file_bytes: Some(262_144),
@@ -5027,9 +6528,11 @@ mod tests {
             max_sockets: None,
             max_blocking_read_ms: None,
             runner_heap_limit_mb: Some(512),
-            runner_cpu_time_limit_ms: Some(1_234),
             reactor_work_quantum: Some(64),
             bridge_call_timeout_ms: Some(30_000),
+            max_sync_rpc_response_line_bytes: None,
+            pending_event_count: None,
+            pending_event_bytes: None,
         });
         request
             .env
@@ -5042,7 +6545,6 @@ mod tests {
 
         assert_eq!(env.get("USER_VISIBLE"), Some(&String::from("kept")));
         assert_eq!(env.get("AGENTOS_TRACE_ID"), Some(&String::from("kept")));
-        assert!(!env.contains_key(WASM_MAX_FUEL_ENV));
         assert!(!env.contains_key(WASM_MAX_MEMORY_BYTES_ENV));
         assert!(!env.contains_key(WASM_MAX_MODULE_FILE_BYTES_ENV));
         assert!(!env.contains_key(WASM_MAX_STACK_BYTES_ENV));
@@ -5053,7 +6555,9 @@ mod tests {
     #[test]
     fn wasm_snapshot_runner_base_env_scrubs_internal_and_migrated_limit_env_keys() {
         let mut request = request_with_typed_limits_and_misleading_env(WasmExecutionLimits {
-            max_fuel: Some(25),
+            active_cpu_time_limit_ms: Some(1_234),
+            wall_clock_limit_ms: Some(25),
+            deterministic_fuel: None,
             max_memory_bytes: Some(65_536),
             max_stack_bytes: Some(131_072),
             max_module_file_bytes: Some(262_144),
@@ -5064,9 +6568,11 @@ mod tests {
             max_sockets: None,
             max_blocking_read_ms: None,
             runner_heap_limit_mb: Some(512),
-            runner_cpu_time_limit_ms: Some(1_234),
             reactor_work_quantum: Some(64),
             bridge_call_timeout_ms: Some(30_000),
+            max_sync_rpc_response_line_bytes: None,
+            pending_event_count: None,
+            pending_event_bytes: None,
         });
         request
             .env
@@ -5080,7 +6586,6 @@ mod tests {
 
         assert_eq!(env.get("USER_VISIBLE"), Some(&String::from("kept")));
         assert!(!env.contains_key("NODE_SYNC_RPC_WAIT_TIMEOUT_MS"));
-        assert!(!env.contains_key(WASM_MAX_FUEL_ENV));
         assert!(!env.contains_key(WASM_MAX_MEMORY_BYTES_ENV));
         assert!(!env.contains_key(WASM_MAX_STACK_BYTES_ENV));
         assert!(!env.contains_key("AGENTOS_WASM_PREWARM_TIMEOUT_MS"));
@@ -5117,16 +6622,14 @@ mod tests {
     }
 
     #[test]
-    fn wasm_prewarm_timeout_is_separate_from_execution_timeout() {
+    fn wasm_prewarm_timeout_is_separate_from_wall_clock_limit() {
         let temp = tempdir().expect("create temp dir");
-        let mut request = request_with_env(
-            temp.path(),
-            BTreeMap::from([(String::from(WASM_MAX_FUEL_ENV), String::from("25"))]),
-        );
+        let mut request = request_with_env(temp.path(), BTreeMap::new());
+        request.limits.wall_clock_limit_ms = Some(25);
         request.limits.prewarm_timeout_ms = Some(750);
 
         assert_eq!(
-            resolve_wasm_execution_timeout(&request).expect("execution timeout"),
+            resolve_wasm_wall_clock_limit(&request).expect("wall-clock limit"),
             Some(Duration::from_millis(25))
         );
         assert_eq!(
@@ -5135,24 +6638,38 @@ mod tests {
         );
     }
 
-    // No explicit fuel budget means no wasm-specific wall-clock timeout. Runaway
+    // No explicit wall-clock budget means no wasm-specific elapsed timeout. Runaway
     // wasm stays bounded by the runner isolate's active-CPU watchdog, so idle
     // interactive guests are not killed on wall time.
     #[test]
-    fn wasm_execution_timeout_is_unset_without_fuel_budget() {
+    fn wasm_wall_clock_limit_is_unset_by_default() {
         let temp = tempdir().expect("create temp dir");
         let request = request_with_env(temp.path(), BTreeMap::new());
 
-        let timeout = resolve_wasm_execution_timeout(&request)
-            .expect("execution timeout resolves without fuel env");
+        let timeout =
+            resolve_wasm_wall_clock_limit(&request).expect("wall-clock limit resolves when unset");
 
         assert_eq!(
             timeout, None,
-            "no explicit fuel budget means no wall-clock timeout; the runner \
+            "no explicit wall-clock limit means no elapsed timeout; the runner \
              isolate's TRUE-CPU budget (default 30s active CPU) is the bound \
              that terminates an infinite-loop module (F-004), so an idle \
              interactive guest is not killed on wall time"
         );
+    }
+
+    #[test]
+    fn v8_rejects_explicit_deterministic_fuel_with_typed_error() {
+        let temp = tempdir().expect("create temp dir");
+        let mut request = request_with_env(temp.path(), BTreeMap::new());
+        request.limits.deterministic_fuel = Some(123_456);
+
+        let error =
+            reject_v8_deterministic_fuel(&request).expect_err("V8 cannot meter deterministic fuel");
+        assert!(matches!(
+            error,
+            WasmExecutionError::DeterministicFuelUnsupported { fuel: 123_456 }
+        ));
     }
 
     #[test]
@@ -5227,12 +6744,17 @@ mod tests {
 
     #[test]
     fn wasi_preview1_import_manifest_matches_native_runner() {
-        let expected: BTreeSet<String> = serde_json::from_str::<Vec<String>>(include_str!(
-            "../assets/wasi-preview1-imports.json"
-        ))
-        .expect("parse WASI preview1 import manifest")
-        .into_iter()
-        .collect();
+        let manifest: Value = serde_json::from_str(include_str!("../assets/agentos-wasm-abi.json"))
+            .expect("parse AgentOS WASM ABI manifest");
+        let expected = manifest["imports"]
+            .as_array()
+            .expect("ABI imports array")
+            .iter()
+            .filter(|entry| {
+                entry["module"] == "wasi_snapshot_preview1" && entry["status"] != "compatibility"
+            })
+            .map(|entry| entry["name"].as_str().expect("ABI import name").to_string())
+            .collect::<BTreeSet<_>>();
 
         assert_eq!(expected, wasi_imports_from_source(NODE_WASI_MODULE_SOURCE));
     }
@@ -5277,7 +6799,7 @@ mod tests {
             route_fs_through_sidecar: false,
             next_fd: 64,
             open_files: Default::default(),
-            pending_events: VecDeque::new(),
+            pending_events: WasmEventQueue::default(),
         };
 
         assert_eq!(
@@ -5311,7 +6833,7 @@ mod tests {
             route_fs_through_sidecar: false,
             next_fd: 64,
             open_files: Default::default(),
-            pending_events: VecDeque::new(),
+            pending_events: WasmEventQueue::default(),
         };
 
         assert_eq!(
@@ -5350,7 +6872,7 @@ mod tests {
             route_fs_through_sidecar: false,
             next_fd: 64,
             open_files: Default::default(),
-            pending_events: VecDeque::new(),
+            pending_events: WasmEventQueue::default(),
         };
 
         assert_eq!(
@@ -5390,7 +6912,7 @@ mod tests {
             route_fs_through_sidecar: false,
             next_fd: 64,
             open_files: Default::default(),
-            pending_events: VecDeque::new(),
+            pending_events: WasmEventQueue::default(),
         };
 
         assert_eq!(
@@ -5447,7 +6969,7 @@ mod tests {
             route_fs_through_sidecar: false,
             next_fd: 64,
             open_files: Default::default(),
-            pending_events: VecDeque::new(),
+            pending_events: WasmEventQueue::default(),
         };
 
         assert_eq!(
@@ -5483,7 +7005,7 @@ mod tests {
             route_fs_through_sidecar: false,
             next_fd: 64,
             open_files: Default::default(),
-            pending_events: VecDeque::new(),
+            pending_events: WasmEventQueue::default(),
         };
 
         let host_path = translate_wasm_guest_path("/node_modules/package.json", &internal_sync_rpc)
@@ -5544,7 +7066,7 @@ mod tests {
             route_fs_through_sidecar: false,
             next_fd: 64,
             open_files: Default::default(),
-            pending_events: VecDeque::new(),
+            pending_events: WasmEventQueue::default(),
         };
 
         assert!(wasm_mutation_touches_read_only_mapping(
@@ -5596,7 +7118,7 @@ mod tests {
             route_fs_through_sidecar: false,
             next_fd: 64,
             open_files: Default::default(),
-            pending_events: VecDeque::new(),
+            pending_events: WasmEventQueue::default(),
         };
 
         assert_eq!(
@@ -5632,7 +7154,7 @@ mod tests {
             route_fs_through_sidecar: false,
             next_fd: 64,
             open_files: Default::default(),
-            pending_events: VecDeque::new(),
+            pending_events: WasmEventQueue::default(),
         };
         let sidecar_managed = WasmInternalSyncRpc {
             module_guest_paths: Vec::new(),
@@ -5644,7 +7166,7 @@ mod tests {
             route_fs_through_sidecar: true,
             next_fd: 64,
             open_files: Default::default(),
-            pending_events: VecDeque::new(),
+            pending_events: WasmEventQueue::default(),
         };
 
         for method in WASM_SIDECAR_ROUTED_FS_SYNC_METHODS {
@@ -5800,6 +7322,186 @@ mod tests {
         assert!(bootstrap.contains(
             "if (entry.readOnly === true) {\n          return __agentOSWasiErrnoRofs;\n        }\n        const written = __agentOSFs().writeSync("
         ));
+    }
+
+    #[test]
+    fn managed_host_network_fds_use_kernel_description_authority() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+
+        assert!(runner.contains("const HOST_NET_SOCK_NONBLOCK = 0x4000;"));
+        assert!(runner.contains("const HOST_NET_SOCK_CLOEXEC = 0x2000;"));
+        assert!(runner.contains("const standaloneHostNetSockets = new Map();"));
+        assert!(!runner.contains("const managedHostNetDescriptions = new Map();"));
+        assert!(!runner.contains("const hostNetSockets = new Map();"));
+        assert!(runner.contains("callSyncRpc('process.hostnet_fd_open'"));
+        assert!(runner.contains("callSyncRpc('process.hostnet_validate'"));
+        assert!(runner.contains("validateHostNetSocketDescriptor(fd, true)"));
+        assert!(!runner.contains("callSyncRpc('process.fd_description_alias_count'"));
+        assert!(runner.contains("callSyncRpc('process.fd_dup'"));
+        assert!(runner.contains("attachManagedHostNetDescription(guestFd, descriptionId);"));
+        assert!(runner.contains("descriptionId: handle?.hostNetDescriptionId ?? null"));
+        assert!(runner.contains("fd = registerKernelDelegateFd(received.fd);"));
+        assert!(runner.contains("const managedHostNetKernelGuestFds = new Set("));
+        assert!(runner.contains(
+            "initialKernelGuestFds.has(guestFd) && !managedHostNetKernelGuestFds.has(guestFd)"
+        ));
+    }
+
+    #[test]
+    fn managed_runner_keeps_only_bounded_process_and_fd_projections() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+
+        for obsolete in [
+            "const spawnedChildren =",
+            "const spawnedChildrenById =",
+            "const syntheticFdEntries =",
+            "runnerCloexecFds",
+            "delegateManagedFdRefCounts",
+        ] {
+            assert!(
+                !runner.contains(obsolete),
+                "obsolete authority map: {obsolete}"
+            );
+        }
+        for required in [
+            "const childCorrelationsByPid = new Map();",
+            "const childCorrelationsById = new Map();",
+            "const managedKernelFdProjections = new Map();",
+            "const standaloneSyntheticFdEntries = new Map();",
+            "const standaloneCloexecFds = new Set();",
+            "const standaloneDelegateFdRefCounts = new Map();",
+            "managed descriptor projections must reference a kernel fd",
+            "managed execution cannot retain a Node-WASI delegate fd",
+            "callSyncRpc('process.fd_getfd'",
+            "callSyncRpc('process.fd_path'",
+            "callSyncRpc('process.fd_move'",
+            "callSyncRpc('process.waitpid'",
+            "record.terminalEventObserved = true;",
+            "function collectStaleManagedChildCorrelations()",
+            "...(SIDECAR_MANAGED_PROCESS ? {} : { processGroup })",
+        ] {
+            assert!(
+                runner.contains(required),
+                "missing managed-mode guard: {required}"
+            );
+        }
+        assert!(runner
+            .contains("const handle = {\n    kind: 'kernel-fd',\n    targetFd: kernelFd,\n  };"));
+        assert!(!runner.contains("openedHandle.guestPath ="));
+        assert!(!runner.contains("callSyncRpc('child_process.kill'"));
+        assert!(runner.contains("collectStaleManagedChildCorrelations();\n    return false;"));
+    }
+
+    #[test]
+    fn managed_guest_fd_reuse_does_not_close_or_replace_hidden_preopen_backing_descriptors() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        assert!(runner.contains(
+            "if (handle.kind === 'kernel-fd') {\n    // Managed preopens are hidden capability roots"
+        ));
+        assert!(runner.contains(
+            "if (handle.internalPreopen === true) {\n      return;\n    }\n    callSyncRpc('process.fd_close'"
+        ));
+        assert!(runner.contains("function kernelFdMappingsForSpawn()"));
+        assert!(runner.contains("handle.open !== false &&\n      handle.internalPreopen !== true"));
+        let start = runner
+            .find("wasiImport.fd_renumber = (from, to) => {")
+            .expect("fd_renumber implementation");
+        let end = runner[start..]
+            .find("wasiImport.poll_oneoff =")
+            .map(|offset| start + offset)
+            .expect("fd_renumber implementation end");
+        let implementation = &runner[start..end];
+        assert!(implementation.contains(
+            "managedTarget?.internalPreopen === true && hiddenPreopenHandles.has(targetFd)"
+        ));
+        assert!(implementation
+            .contains("managedTarget?.kind === 'kernel-fd' && !shadowsInternalPreopen"));
+        assert!(implementation.contains("shadowsInternalPreopen,"));
+    }
+
+    #[test]
+    fn host_process_errno_mapping_uses_only_typed_error_codes() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let start = runner
+            .find("function mapHostProcessError(error) {")
+            .expect("host process errno mapper");
+        let end = runner[start..]
+            .find("function seekGuestFileHandle")
+            .map(|offset| start + offset)
+            .expect("host process errno mapper end");
+        let mapper = &runner[start..end];
+        assert!(mapper.contains("case 'ENOENT':\n      return WASI_ERRNO_NOENT;"));
+        assert!(mapper.contains("case 'EINTR':\n      return WASI_ERRNO_INTR;"));
+        assert!(mapper.contains("default:\n      return WASI_ERRNO_FAULT;"));
+        assert!(!mapper.contains("command not found"));
+        assert!(!mapper.contains("error?.message"));
+    }
+
+    #[test]
+    fn managed_signal_dispatch_drains_the_published_delivery_without_double_claiming() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let start = runner
+            .find("function dispatchPendingWasmSignals(")
+            .expect("signal dispatch helper");
+        let helper = &runner[start..];
+        let end = helper
+            .find("Object.defineProperty(globalThis, '__secureExecWasmSignalDispatch'")
+            .expect("signal dispatch helper end");
+        let helper = &helper[..end];
+
+        assert_eq!(
+            helper.matches("callSyncRpc('process.take_signal'").count(),
+            1
+        );
+        assert!(!helper.contains("callSyncRpc('process.signal_begin'"));
+        assert!(runner.contains("callSyncRpc('process.signal_end', [token])"));
+        assert!(runner.contains("function pumpSpawnedChildrenOrWaitRestartable(waitMs)"));
+        assert!(runner.contains("return dispatchPendingWasmSignals(true);"));
+        assert!(runner.contains("numericSignal === 0 || numericSignal > 64"));
+        assert!(runner.contains(
+            "registration.action === 'user' &&\n              typeof instance?.exports?.__wasi_signal_trampoline !== 'function'"
+        ));
+    }
+
+    #[test]
+    fn managed_wait_uses_one_kernel_authoritative_direct_reply() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let start = runner
+            .find("function takeManagedWaitTransition(")
+            .expect("managed wait helper");
+        let end = runner[start..]
+            .find("function reapManagedChildCorrelation(")
+            .map(|offset| start + offset)
+            .expect("managed wait helper end");
+        let helper = &runner[start..end];
+        assert_eq!(helper.matches("callSyncRpc('process.waitpid'").count(), 1);
+        assert!(!helper.contains("process.waitpid_transition"));
+        assert!(!helper.contains("pumpSpawnedChildren"));
+        assert!(!helper.contains("Atomics.wait"));
+        assert!(helper.contains("dispatchPendingWasmSignals(true)"));
+        assert!(helper.contains("error?.code === 'EINTR' && !mustInterrupt"));
+        assert!(helper.contains("continue;"));
+        assert!(runner.contains("case 'ECHILD':\n      return WASI_ERRNO_CHILD;"));
+
+        let pump = runner
+            .find("function pumpSpawnedChildren(waitMs) {")
+            .expect("child pump");
+        let pump = &runner[pump..];
+        let pump_end = pump
+            .find("function pumpSpawnedChildrenOrWait")
+            .expect("child pump end");
+        assert!(pump[..pump_end]
+            .contains("if (SIDECAR_MANAGED_PROCESS) {\n    // Managed child lifecycle"));
+        assert!(pump[pump_end..].contains("callSyncRpc('process.sleep', [boundedWaitMs])"));
+        let sleep = runner
+            .find("        sleep_ms(milliseconds) {")
+            .expect("sleep import");
+        let sleep = &runner[sleep..];
+        let sleep_end = sleep.find("        pty_open(").expect("sleep import end");
+        let sleep = &sleep[..sleep_end];
+        assert!(sleep.contains("if (!SIDECAR_MANAGED_PROCESS)"));
+        assert!(sleep.contains("Atomics.wait(syntheticWaitArray, 0, 0, durationMs)"));
+        assert!(sleep.contains("callSyncRpc('process.sleep', [durationMs])"));
     }
 
     #[test]

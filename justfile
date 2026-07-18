@@ -30,9 +30,17 @@ toolchain-preflight:
 	make programs
 
 toolchain-copy-commands:
-	node packages/runtime-core/scripts/copy-wasm-commands.mjs
+	node packages/runtime-core/scripts/copy-wasm-commands.mjs --require
+
+toolchain-check-abi:
+	node scripts/generate-wasm-abi-manifest.mjs
+
+toolchain-audit-imports:
+	just toolchain-check-abi
+	node scripts/audit-wasm-imports.mjs
 
 software-build:
+	pnpm --filter @rivet-dev/agentos-toolchain build
 	pnpm --filter '@agentos-software/*' build
 
 # Rebuild and stage the complete default WASM tool set from source. All outputs
@@ -41,6 +49,7 @@ tools-rebuild:
 	just toolchain-build
 	just toolchain-copy-commands
 	just software-build
+	just toolchain-audit-imports
 
 install-shell:
 	#!/usr/bin/env bash

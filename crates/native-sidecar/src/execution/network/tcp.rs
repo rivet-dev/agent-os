@@ -87,8 +87,8 @@ pub(in crate::execution) struct ActiveTcpConnectRequest<'a, B> {
     pub(in crate::execution) family: Option<u8>,
     pub(in crate::execution) local_address: Option<&'a str>,
     pub(in crate::execution) local_port: Option<u16>,
-    pub(in crate::execution) local_reservation: Option<(JavascriptSocketFamily, u16)>,
-    pub(in crate::execution) context: &'a JavascriptSocketPathContext,
+    pub(in crate::execution) local_reservation: Option<(SocketFamily, u16)>,
+    pub(in crate::execution) context: &'a SocketPathContext,
     pub(in crate::execution) resources: Arc<ResourceLedger>,
     pub(in crate::execution) runtime_context: agentos_runtime::RuntimeContext,
     pub(in crate::execution) reactor_limits: ReactorIoLimits,
@@ -100,14 +100,16 @@ impl ActiveTcpSocket {
         identity: Option<(u64, u64)>,
     ) -> Result<(), SidecarError> {
         let identity = identity.ok_or_else(|| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_FAIRNESS_IDENTITY: TCP socket capability was committed outside a VM runtime scope",
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_FAIRNESS_IDENTITY",
+                String::from("TCP socket capability was committed outside a VM runtime scope"),
+            )
         })?;
         self.fairness_identity.set(identity).map_err(|_| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_FAIRNESS_IDENTITY: TCP socket capability identity was committed more than once",
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_FAIRNESS_IDENTITY",
+                String::from("TCP socket capability identity was committed more than once"),
+            )
         })?;
         self.fairness_identity_committed.notify_waiters();
         Ok(())
@@ -154,19 +156,14 @@ impl ActiveTcpSocket {
             );
         }
 
-        let stream =
-            TcpStream::connect_timeout(&resolved.actual_addr, reactor_limits.operation_deadline)
-                .map_err(sidecar_net_error)?;
-        let guest_local_addr = stream.local_addr().map_err(sidecar_net_error)?;
-        Self::from_stream(
-            stream,
-            None,
-            guest_local_addr,
-            resolved.guest_remote_addr,
-            resources,
-            runtime_context,
-            reactor_limits,
-        )
+        // Native connects must have been converted to a reactor-owned deferred
+        // operation before entering this synchronous constructor. Keeping a
+        // blocking socket-connect fallback here would let a new adapter
+        // accidentally park a bounded VM-executor worker.
+        Err(SidecarError::host(
+            "EIO",
+            "native TCP connect reached the synchronous constructor without reactor deferral",
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -176,14 +173,14 @@ impl ActiveTcpSocket {
         resolved: ResolvedTcpConnectAddr,
         local_address: Option<&str>,
         local_port: Option<u16>,
-        local_reservation: Option<(JavascriptSocketFamily, u16)>,
-        context: &JavascriptSocketPathContext,
+        local_reservation: Option<(SocketFamily, u16)>,
+        context: &SocketPathContext,
         resources: Arc<ResourceLedger>,
         runtime_context: agentos_runtime::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
         debug_assert!(resolved.use_kernel_loopback);
-        let family = JavascriptSocketFamily::from_ip(resolved.guest_remote_addr.ip());
+        let family = SocketFamily::from_ip(resolved.guest_remote_addr.ip());
         let requested_local_port = local_port.unwrap_or(0);
         let local_port = if requested_local_port != 0
             && local_reservation == Some((family, requested_local_port))
@@ -198,31 +195,35 @@ impl ActiveTcpSocket {
             )?
         };
         let local_ip = match (family, local_address) {
-            (JavascriptSocketFamily::Ipv4, Some("0.0.0.0")) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            (JavascriptSocketFamily::Ipv4, Some("127.0.0.1") | Some("localhost") | None) => {
+            (SocketFamily::Ipv4, Some("0.0.0.0")) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            (SocketFamily::Ipv4, Some("127.0.0.1") | Some("localhost") | None) => {
                 IpAddr::V4(Ipv4Addr::LOCALHOST)
             }
-            (JavascriptSocketFamily::Ipv6, Some("::")) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            (JavascriptSocketFamily::Ipv6, Some("::1") | Some("localhost") | None) => {
+            (SocketFamily::Ipv6, Some("::")) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            (SocketFamily::Ipv6, Some("::1") | Some("localhost") | None) => {
                 IpAddr::V6(Ipv6Addr::LOCALHOST)
             }
-            (JavascriptSocketFamily::Ipv4, Some(other)) => {
-                return Err(SidecarError::Execution(format!(
-                    "EACCES: TCP sockets must bind to loopback or unspecified addresses, got {other}"
-                )));
+            (SocketFamily::Ipv4, Some(other)) => {
+                return Err(SidecarError::host(
+                    "EACCES",
+                    format!(
+                        "TCP sockets must bind to loopback or unspecified addresses, got {other}"
+                    ),
+                ));
             }
-            (JavascriptSocketFamily::Ipv6, Some(other)) => {
-                return Err(SidecarError::Execution(format!(
-                    "EACCES: TCP sockets must bind to loopback or unspecified addresses, got {other}"
-                )));
+            (SocketFamily::Ipv6, Some(other)) => {
+                return Err(SidecarError::host(
+                    "EACCES",
+                    format!(
+                        "TCP sockets must bind to loopback or unspecified addresses, got {other}"
+                    ),
+                ));
             }
         };
         let local_addr = SocketAddr::new(local_ip, local_port);
         let spec = match family {
-            JavascriptSocketFamily::Ipv4 => SocketSpec::tcp(),
-            JavascriptSocketFamily::Ipv6 => {
-                SocketSpec::new(SocketDomain::Inet6, SocketType::Stream)
-            }
+            SocketFamily::Ipv4 => SocketSpec::tcp(),
+            SocketFamily::Ipv6 => SocketSpec::new(SocketDomain::Inet6, SocketType::Stream),
         };
         let socket_id = kernel
             .socket_create(EXECUTION_DRIVER_NAME, kernel_pid, spec)
@@ -285,6 +286,7 @@ impl ActiveTcpSocket {
         let (sender, events) = async_completion_channel(
             runtime_context.clone(),
             socket_completion_capacity(reactor_limits),
+            tcp_socket_event_retained_bytes,
         );
         let read_event_notify = Arc::new(tokio::sync::Notify::new());
         let application_read_interest = Arc::new(AtomicBool::new(false));
@@ -333,7 +335,7 @@ impl ActiveTcpSocket {
             saw_remote_end,
             close_notified,
             pending_read_event: Arc::new(Mutex::new(None)),
-            read_buffer: Arc::new(Mutex::new(VecDeque::new())),
+            read_state: Arc::new(Mutex::new(SocketReadState::default())),
             description_handles: Arc::new(()),
             listener_connection_retirement: None,
             kernel_transfer_guard: None,
@@ -353,6 +355,7 @@ impl ActiveTcpSocket {
         let (sender, events) = async_completion_channel(
             runtime_context.clone(),
             socket_completion_capacity(reactor_limits),
+            tcp_socket_event_retained_bytes,
         );
         let fairness_identity = Arc::new(OnceLock::new());
         let fairness_retirement =
@@ -397,7 +400,7 @@ impl ActiveTcpSocket {
             saw_remote_end: Arc::new(AtomicBool::new(false)),
             close_notified: Arc::new(AtomicBool::new(false)),
             pending_read_event: Arc::new(Mutex::new(None)),
-            read_buffer: Arc::new(Mutex::new(VecDeque::new())),
+            read_state: Arc::new(Mutex::new(SocketReadState::default())),
             description_handles: Arc::new(()),
             listener_connection_retirement: None,
             kernel_transfer_guard: None,
@@ -443,7 +446,7 @@ impl ActiveTcpSocket {
             saw_remote_end: Arc::clone(&self.saw_remote_end),
             close_notified: Arc::clone(&self.close_notified),
             pending_read_event: Arc::clone(&self.pending_read_event),
-            read_buffer: Arc::clone(&self.read_buffer),
+            read_state: Arc::clone(&self.read_state),
             description_handles: Arc::clone(&self.description_handles),
             listener_connection_retirement: self.listener_connection_retirement.clone(),
             kernel_transfer_guard: self.kernel_transfer_guard.clone(),
@@ -464,11 +467,12 @@ impl ActiveTcpSocket {
 
     pub(in crate::execution) fn set_event_pusher(
         &self,
-        session: Option<V8SessionHandle>,
+        session: Option<ExecutionWakeHandle>,
         identity: Option<(
             agentos_runtime::capability::CapabilityId,
             agentos_runtime::capability::CapabilityGeneration,
         )>,
+        owner_notify: Arc<tokio::sync::Notify>,
     ) {
         let (Some(session), Some((capability_id, capability_generation))) = (session, identity)
         else {
@@ -477,6 +481,7 @@ impl ActiveTcpSocket {
         self.readiness_registration.register(
             Some(session),
             Some((capability_id, capability_generation)),
+            owner_notify,
             agentos_runtime::readiness::ReadyFlags::READABLE,
         );
     }
@@ -500,7 +505,7 @@ impl ActiveTcpSocket {
         kernel_pid: u32,
         _wait: Duration,
         trace_enabled: bool,
-    ) -> Result<Option<JavascriptTcpSocketEvent>, SidecarError> {
+    ) -> Result<Option<TcpSocketEvent>, SidecarError> {
         if let Some(event) = self
             .pending_read_event
             .lock()
@@ -583,7 +588,7 @@ impl ActiveTcpSocket {
                         }
                         let unused = READ_QUANTUM.saturating_sub(bytes.len());
                         drop(reservation.split(unused));
-                        Ok(Some(JavascriptTcpSocketEvent::Data {
+                        Ok(Some(TcpSocketEvent::Data {
                             bytes,
                             reservation: SharedReservation::new(reservation),
                             source_reservations: Vec::new(),
@@ -596,7 +601,7 @@ impl ActiveTcpSocket {
                                 .fetch_add(1, Ordering::Relaxed);
                         }
                         drop(reservation.split(READ_QUANTUM));
-                        Ok(Some(JavascriptTcpSocketEvent::Data {
+                        Ok(Some(TcpSocketEvent::Data {
                             bytes: Vec::new(),
                             reservation: SharedReservation::new(reservation),
                             source_reservations: Vec::new(),
@@ -609,7 +614,7 @@ impl ActiveTcpSocket {
                                 .fetch_add(1, Ordering::Relaxed);
                         }
                         self.saw_remote_end.store(true, Ordering::SeqCst);
-                        Ok(Some(JavascriptTcpSocketEvent::End))
+                        Ok(Some(TcpSocketEvent::End))
                     }
                     Err(error) if error.code() == "EAGAIN" => {
                         if trace_enabled {
@@ -625,7 +630,7 @@ impl ActiveTcpSocket {
                                 .socket_read_errors
                                 .fetch_add(1, Ordering::Relaxed);
                         }
-                        Ok(Some(JavascriptTcpSocketEvent::Error {
+                        Ok(Some(TcpSocketEvent::Error {
                             code: Some(error.code().to_string()),
                             message: error.to_string(),
                         }))
@@ -634,10 +639,10 @@ impl ActiveTcpSocket {
             }
             if revents.intersects(POLLHUP) {
                 self.saw_remote_end.store(true, Ordering::SeqCst);
-                return Ok(Some(JavascriptTcpSocketEvent::End));
+                return Ok(Some(TcpSocketEvent::End));
             }
             if revents.intersects(POLLERR) {
-                return Ok(Some(JavascriptTcpSocketEvent::Error {
+                return Ok(Some(TcpSocketEvent::Error {
                     code: Some(String::from("EPIPE")),
                     message: String::from("kernel TCP socket reported POLLERR"),
                 }));
@@ -768,20 +773,23 @@ impl ActiveTcpSocket {
         &self,
         vm_id: &str,
         kernel: &mut SidecarKernel,
-        options: JavascriptTlsBridgeOptions,
+        requester_pid: u32,
+        options: TlsBridgeOptions,
     ) -> Result<
         tokio::sync::oneshot::Receiver<Result<Value, crate::state::DeferredRpcError>>,
         SidecarError,
     > {
         if self.tls_mode.load(Ordering::SeqCst) {
-            return Err(SidecarError::Execution(String::from(
-                "EALREADY: socket is already upgraded to TLS",
-            )));
+            return Err(SidecarError::host(
+                "EALREADY",
+                String::from("socket is already upgraded to TLS"),
+            ));
         }
         let fairness_identity = self.fairness_identity.get().copied().ok_or_else(|| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_FAIRNESS_IDENTITY: TLS transport has no committed TCP capability identity",
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_FAIRNESS_IDENTITY",
+                String::from("TLS transport has no committed TCP capability identity"),
+            )
         })?;
 
         let client_hello = if options.is_server {
@@ -806,7 +814,8 @@ impl ActiveTcpSocket {
             *state = Some(tls_state);
         }
 
-        let default_ca_bundle = vm_default_ca_bundle_for_tls_options(kernel, &options)?;
+        let default_ca_bundle =
+            vm_default_ca_bundle_for_tls_options(kernel, requester_pid, &options)?;
         if self.kernel_socket_id.is_none() {
             let role = native_tls_role(&options, &default_ca_bundle)?;
             self.tls_mode.store(true, Ordering::SeqCst);
@@ -873,8 +882,7 @@ impl ActiveTcpSocket {
             .socket_get(socket_id)
             .and_then(|record| record.peer_socket_id())
             .ok_or_else(|| {
-                SidecarError::InvalidState(format!(
-                    "ERR_AGENTOS_LOOPBACK_PEER_MISSING: kernel-backed loopback socket {socket_id} has no connected peer for TLS upgrade"
+                SidecarError::host("ERR_AGENTOS_LOOPBACK_PEER_MISSING", format!("kernel-backed loopback socket {socket_id} has no connected peer for TLS upgrade"
                 ))
             })?;
         let endpoint = loopback_tls_endpoint(
@@ -937,7 +945,7 @@ impl ActiveTcpSocket {
         &self,
         vm_id: &str,
         kernel: &SidecarKernel,
-    ) -> Result<Option<JavascriptTlsClientHello>, SidecarError> {
+    ) -> Result<Option<TlsClientHello>, SidecarError> {
         if let Some(socket_id) = self.kernel_socket_id {
             let Some(peer_socket_id) = kernel
                 .socket_get(socket_id)
@@ -983,7 +991,7 @@ impl ActiveTcpSocket {
             .as_ref()
             .and_then(|state| state.client_hello.clone())
         {
-            return javascript_net_json_string(
+            return encode_net_json_string(
                 serde_json::to_value(client_hello).map_err(|error| {
                     SidecarError::InvalidState(format!(
                         "failed to serialize TLS client hello: {error}"
@@ -993,7 +1001,7 @@ impl ActiveTcpSocket {
             );
         }
 
-        javascript_net_json_string(
+        encode_net_json_string(
             serde_json::to_value(
                 self.peek_tls_client_hello(vm_id, kernel)?
                     .unwrap_or_default(),
@@ -1059,7 +1067,7 @@ impl ActiveTcpSocket {
                 )));
             }
         };
-        javascript_net_json_string(payload, "net.socket_tls_query")
+        encode_net_json_string(payload, "net.socket_tls_query")
     }
 
     pub(in crate::execution) fn begin_tls_write(
@@ -1204,7 +1212,7 @@ impl ActiveTcpSocket {
             && !self.close_notified.swap(true, Ordering::SeqCst)
             && self.event_sender.as_ref().is_some_and(|sender| {
                 sender
-                    .try_send(JavascriptTcpSocketEvent::Close { had_error: false })
+                    .try_send(TcpSocketEvent::Close { had_error: false })
                     .is_ok()
             })
         {
@@ -1285,7 +1293,7 @@ impl ActiveTcpSocket {
                 .ok_or_else(|| {
                     SidecarError::InvalidState(String::from("TCP socket event sender missing"))
                 })?
-                .try_send(JavascriptTcpSocketEvent::Close { had_error: false })
+                .try_send(TcpSocketEvent::Close { had_error: false })
             {
                 eprintln!(
                     "ERR_AGENTOS_SOCKET_EVENT_DROPPED: TCP close event was not admitted: {error}"
@@ -1315,8 +1323,7 @@ impl ActiveTcpSocket {
                 }) {
                     Ok(()) => {}
                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        return Err(SidecarError::Execution(format!(
-                            "ERR_AGENTOS_TLS_COMMAND_LIMIT: TLS command queue exceeded {}; raise limits.reactor.maxHandleCommands",
+                        return Err(SidecarError::host("ERR_AGENTOS_TLS_COMMAND_LIMIT", format!("TLS command queue exceeded {}; raise limits.reactor.maxHandleCommands",
                             self.reactor_limits.max_handle_commands,
                         )));
                     }
@@ -1347,7 +1354,7 @@ impl ActiveTcpSocket {
         wait: Duration,
         trace_enabled: bool,
         max_bytes: usize,
-    ) -> Result<Option<JavascriptTcpSocketEvent>, SidecarError> {
+    ) -> Result<Option<TcpSocketEvent>, SidecarError> {
         let pending = self
             .pending_read_event
             .lock()
@@ -1370,13 +1377,10 @@ impl ActiveTcpSocket {
 }
 
 pub(in crate::execution) fn limit_tcp_socket_event(
-    event: Option<JavascriptTcpSocketEvent>,
+    event: Option<TcpSocketEvent>,
     max_bytes: usize,
-) -> (
-    Option<JavascriptTcpSocketEvent>,
-    Option<JavascriptTcpSocketEvent>,
-) {
-    let Some(JavascriptTcpSocketEvent::Data {
+) -> (Option<TcpSocketEvent>, Option<TcpSocketEvent>) {
+    let Some(TcpSocketEvent::Data {
         mut bytes,
         reservation,
         source_reservations,
@@ -1386,7 +1390,7 @@ pub(in crate::execution) fn limit_tcp_socket_event(
     };
     if bytes.len() <= max_bytes {
         return (
-            Some(JavascriptTcpSocketEvent::Data {
+            Some(TcpSocketEvent::Data {
                 bytes,
                 reservation,
                 source_reservations,
@@ -1396,13 +1400,13 @@ pub(in crate::execution) fn limit_tcp_socket_event(
     }
 
     let remainder_bytes = bytes.split_off(max_bytes);
-    let remainder = JavascriptTcpSocketEvent::Data {
+    let remainder = TcpSocketEvent::Data {
         bytes: remainder_bytes,
         reservation: reservation.clone(),
         source_reservations: source_reservations.clone(),
     };
     (
-        Some(JavascriptTcpSocketEvent::Data {
+        Some(TcpSocketEvent::Data {
             bytes,
             reservation,
             source_reservations,
@@ -1426,7 +1430,7 @@ pub(in crate::execution) fn close_kernel_socket_idempotent(
 pub(in crate::execution) fn register_kernel_readiness_target(
     registry: &KernelSocketReadinessRegistry,
     kernel_socket_id: Option<SocketId>,
-    session: Option<V8SessionHandle>,
+    session: Option<ExecutionWakeHandle>,
     notify: Option<Arc<tokio::sync::Notify>>,
     capability: Option<(
         agentos_runtime::capability::CapabilityId,
@@ -1454,15 +1458,21 @@ pub(in crate::execution) fn register_kernel_readiness_target(
         capability_generation,
         target_id,
         event,
+        live: Arc::new(AtomicBool::new(true)),
     };
     if let Err(error) = registry.register(kernel_socket_id, target.clone()) {
         eprintln!("{error}");
         return;
     }
-    if let Some(notify) = &target.notify {
-        notify.notify_one();
+    if target.live.load(Ordering::Acquire) {
+        if let Some(notify) = &target.notify {
+            notify.notify_one();
+        }
     }
-    if let Some(session) = &target.session {
+    if target.live.load(Ordering::Acquire) {
+        let Some(session) = &target.session else {
+            return;
+        };
         let flags = match target.event {
             KernelSocketReadinessEvent::Data => agentos_runtime::readiness::ReadyFlags::READABLE,
             KernelSocketReadinessEvent::Datagram => {
@@ -1502,6 +1512,7 @@ pub(in crate::execution) fn release_tcp_socket_handle(
     kernel: &mut SidecarKernel,
     kernel_readiness: &KernelSocketReadinessRegistry,
 ) {
+    socket.readiness_registration.retire();
     let identity = process
         .capability_readiness_identity(&NativeCapabilityKey::TcpSocket(socket_id.to_owned()));
     unregister_kernel_readiness_target(kernel_readiness, socket.kernel_socket_id, identity);
@@ -1546,6 +1557,7 @@ pub(in crate::execution) fn release_unix_socket_handle(
     mut socket: ActiveUnixSocket,
     unix_bound_addresses: &GuestUnixAddressRegistry,
 ) {
+    socket.readiness_registration.retire();
     if socket.is_final_description_handle() {
         if let Err(error) = socket.cache_remote_peer_metadata(unix_bound_addresses) {
             eprintln!("ERR_AGENTOS_UNIX_SOCKET_METADATA: {error}");
@@ -1575,10 +1587,7 @@ pub(in crate::execution) fn release_unix_socket_handle(
 pub(in crate::execution) fn deferred_connect_error(
     error: SidecarError,
 ) -> crate::state::DeferredRpcError {
-    crate::state::DeferredRpcError {
-        code: javascript_sync_rpc_error_code(&error),
-        message: javascript_sync_rpc_error_message(&error),
-    }
+    crate::state::DeferredRpcError::from(host_service_error(&error))
 }
 
 pub(in crate::execution) fn defer_native_tcp_connect(
@@ -1587,28 +1596,27 @@ pub(in crate::execution) fn defer_native_tcp_connect(
     pending_capability: PendingCapability,
     resolved: ResolvedTcpConnectAddr,
     local_reservation_id: Option<String>,
-) -> Result<JavascriptSyncRpcServiceResponse, SidecarError> {
+) -> Result<HostServiceResponse, SidecarError> {
     let socket_id = process.allocate_tcp_socket_id();
     let runtime = process.runtime_context.clone();
     let task_runtime = runtime.clone();
     let resources = Arc::clone(process.runtime_context.resources());
     let limits = reactor_io_limits(&process.limits);
-    let connected = Arc::new(Mutex::new(PendingJavascriptNetConnectState::default()));
+    let connected = Arc::new(Mutex::new(PendingNetConnectState::default()));
     let task_connected = Arc::clone(&connected);
-    if process
-        .pending_javascript_net_connects
-        .contains_key(&request_id)
-    {
-        return Err(SidecarError::InvalidState(format!(
-            "ERR_AGENTOS_SOCKET_CONNECT_STATE: request {request_id} already has a pending connect"
-        )));
+    if process.pending_net_connects.contains_key(&request_id) {
+        return Err(SidecarError::host(
+            "ERR_AGENTOS_SOCKET_CONNECT_STATE",
+            format!("request {request_id} already has a pending connect"),
+        ));
     }
     process
-        .pending_javascript_net_connects
+        .pending_net_connects
         .insert(request_id, Arc::clone(&connected));
     let (respond_to, receiver) = tokio::sync::oneshot::channel();
     let spawn = runtime.spawn(agentos_runtime::TaskClass::Socket, async move {
-        let result = match tokio::time::timeout(
+        let result = match crate::execution::operation_deadline_timeout(
+            "TCP connect",
             limits.operation_deadline,
             tokio::net::TcpStream::connect(resolved.actual_addr),
         )
@@ -1639,7 +1647,7 @@ pub(in crate::execution) fn defer_native_tcp_connect(
                         task_connected
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .connected = Some(PendingJavascriptNetConnect::Tcp {
+                            .connected = Some(PendingNetConnect::Tcp {
                             socket_id,
                             socket: Box::new(socket),
                             pending_capability,
@@ -1657,6 +1665,7 @@ pub(in crate::execution) fn defer_native_tcp_connect(
                     "TCP connect exceeded {}ms; raise limits.reactor.operationDeadlineMs",
                     limits.operation_deadline.as_millis()
                 ),
+                details: None,
             }),
         };
         if respond_to.send(result).is_err() {
@@ -1664,10 +1673,10 @@ pub(in crate::execution) fn defer_native_tcp_connect(
         }
     });
     if let Err(error) = spawn {
-        process.pending_javascript_net_connects.remove(&request_id);
+        process.pending_net_connects.remove(&request_id);
         return Err(SidecarError::from(error));
     }
-    Ok(JavascriptSyncRpcServiceResponse::Deferred {
+    Ok(HostServiceResponse::Deferred {
         receiver,
         timeout: None,
         task_class: agentos_runtime::TaskClass::Socket,
@@ -1691,12 +1700,13 @@ impl ActiveTcpListener {
             kernel_socket_id: None,
             local_addr: Some(local_addr),
             guest_local_addr: guest_addr,
-            backlog: usize::try_from(backlog.unwrap_or(DEFAULT_JAVASCRIPT_NET_BACKLOG))
+            backlog: usize::try_from(backlog.unwrap_or(DEFAULT_NET_BACKLOG))
                 .expect("default backlog fits within usize"),
             active_connection_ids: Arc::new(Mutex::new(BTreeSet::new())),
             description_handles: Arc::new(()),
             description_lease: Arc::new(SocketDescriptionLease::default()),
             kernel_transfer_guard: None,
+            pending_event: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1728,7 +1738,7 @@ impl ActiveTcpListener {
                 EXECUTION_DRIVER_NAME,
                 kernel_pid,
                 socket_id,
-                usize::try_from(backlog.unwrap_or(DEFAULT_JAVASCRIPT_NET_BACKLOG))
+                usize::try_from(backlog.unwrap_or(DEFAULT_NET_BACKLOG))
                     .expect("default backlog fits within usize"),
             )
             .map_err(kernel_error)?;
@@ -1737,12 +1747,13 @@ impl ActiveTcpListener {
             kernel_socket_id: Some(socket_id),
             local_addr: Some(guest_addr),
             guest_local_addr: guest_addr,
-            backlog: usize::try_from(backlog.unwrap_or(DEFAULT_JAVASCRIPT_NET_BACKLOG))
+            backlog: usize::try_from(backlog.unwrap_or(DEFAULT_NET_BACKLOG))
                 .expect("default backlog fits within usize"),
             active_connection_ids: Arc::new(Mutex::new(BTreeSet::new())),
             description_handles: Arc::new(()),
             description_lease: Arc::new(SocketDescriptionLease::default()),
             kernel_transfer_guard: None,
+            pending_event: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1762,6 +1773,7 @@ impl ActiveTcpListener {
             description_handles: Arc::clone(&self.description_handles),
             description_lease: Arc::clone(&self.description_lease),
             kernel_transfer_guard: self.kernel_transfer_guard.clone(),
+            pending_event: Arc::clone(&self.pending_event),
         })
     }
 
@@ -1783,7 +1795,15 @@ impl ActiveTcpListener {
         kernel_pid: u32,
         wait: Duration,
         trace_enabled: bool,
-    ) -> Result<Option<JavascriptTcpListenerEvent>, SidecarError> {
+    ) -> Result<Option<TcpListenerEvent>, SidecarError> {
+        if let Some(event) = self
+            .pending_event
+            .lock()
+            .map_err(|_| SidecarError::host("EIO", "TCP listener pending event lock poisoned"))?
+            .take()
+        {
+            return Ok(Some(event));
+        }
         if let Some(socket_id) = self.kernel_socket_id {
             let poll_started = Instant::now();
             let result = kernel
@@ -1821,7 +1841,7 @@ impl ActiveTcpListener {
                                 .server_accept_errors
                                 .fetch_add(1, Ordering::Relaxed);
                         }
-                        return Ok(Some(JavascriptTcpListenerEvent::Error {
+                        return Ok(Some(TcpListenerEvent::Error {
                             code: Some(error.code().to_string()),
                             message: error.to_string(),
                         }));
@@ -1847,17 +1867,12 @@ impl ActiveTcpListener {
                     .server_accept_connections
                     .fetch_add(1, Ordering::Relaxed);
             }
-            return Ok(Some(JavascriptTcpListenerEvent::Connection(
-                PendingTcpSocket {
-                    stream: None,
-                    kernel_socket_id: Some(accepted_socket_id),
-                    guest_local_addr: resolve_tcp_bind_addr(local_addr.host(), local_addr.port())?,
-                    guest_remote_addr: resolve_tcp_bind_addr(
-                        remote_addr.host(),
-                        remote_addr.port(),
-                    )?,
-                },
-            )));
+            return Ok(Some(TcpListenerEvent::Connection(PendingTcpSocket {
+                stream: None,
+                kernel_socket_id: Some(accepted_socket_id),
+                guest_local_addr: resolve_tcp_bind_addr(local_addr.host(), local_addr.port())?,
+                guest_remote_addr: resolve_tcp_bind_addr(remote_addr.host(), remote_addr.port())?,
+            })));
         }
 
         let deadline = Instant::now() + wait;
@@ -1878,20 +1893,22 @@ impl ActiveTcpListener {
                         .len()
                         >= self.backlog
                     {
-                        let _ = stream.shutdown(Shutdown::Both);
+                        if let Err(error) = stream.shutdown(Shutdown::Both) {
+                            eprintln!(
+                                "ERR_AGENTOS_TCP_BACKLOG_CLEANUP: failed to shut down rejected connection: {error}"
+                            );
+                        }
                         if wait.is_zero() || Instant::now() >= deadline {
                             return Ok(None);
                         }
                         continue;
                     }
-                    return Ok(Some(JavascriptTcpListenerEvent::Connection(
-                        PendingTcpSocket {
-                            stream: Some(stream),
-                            kernel_socket_id: None,
-                            guest_local_addr: self.guest_local_addr,
-                            guest_remote_addr: remote_addr,
-                        },
-                    )));
+                    return Ok(Some(TcpListenerEvent::Connection(PendingTcpSocket {
+                        stream: Some(stream),
+                        kernel_socket_id: None,
+                        guest_local_addr: self.guest_local_addr,
+                        guest_remote_addr: remote_addr,
+                    })));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if wait.is_zero() || Instant::now() >= deadline {
@@ -1908,13 +1925,37 @@ impl ActiveTcpListener {
                     }
                 }
                 Err(error) => {
-                    return Ok(Some(JavascriptTcpListenerEvent::Error {
+                    return Ok(Some(TcpListenerEvent::Error {
                         code: io_error_code(&error),
                         message: error.to_string(),
                     }));
                 }
             }
         }
+    }
+
+    /// Non-destructive listener readiness probe used by combined POSIX poll.
+    pub(in crate::execution) fn probe_readable(
+        &mut self,
+        kernel: &mut SidecarKernel,
+        kernel_pid: u32,
+        trace_enabled: bool,
+    ) -> Result<bool, SidecarError> {
+        if self
+            .pending_event
+            .lock()
+            .map_err(|_| SidecarError::host("EIO", "TCP listener pending event lock poisoned"))?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        let event = self.poll(kernel, kernel_pid, Duration::ZERO, trace_enabled)?;
+        let mut pending = self
+            .pending_event
+            .lock()
+            .map_err(|_| SidecarError::host("EIO", "TCP listener pending event lock poisoned"))?;
+        *pending = event;
+        Ok(pending.is_some())
     }
 
     pub(in crate::execution) fn close(
@@ -1956,9 +1997,7 @@ impl ActiveTcpListener {
 
 // UDP types moved to crate::state
 
-pub(crate) fn build_javascript_socket_path_context(
-    vm: &VmState,
-) -> Result<JavascriptSocketPathContext, SidecarError> {
+pub(crate) fn build_socket_path_context(vm: &VmState) -> Result<SocketPathContext, SidecarError> {
     let mut abstract_namespace_digest = Sha256::new();
     abstract_namespace_digest.update(b"agentos-vm-unix-abstract-v1\0");
     abstract_namespace_digest.update(vm.connection_id.as_bytes());
@@ -1974,7 +2013,7 @@ pub(crate) fn build_javascript_socket_path_context(
     let mut used_tcp_guest_ports = BTreeMap::new();
     let mut used_udp_guest_ports = BTreeMap::new();
     for (process_id, process) in &vm.active_processes {
-        collect_javascript_socket_port_state(
+        collect_socket_port_state(
             &vm.kernel,
             process_id,
             process,
@@ -1986,8 +2025,8 @@ pub(crate) fn build_javascript_socket_path_context(
             &mut used_udp_guest_ports,
         );
     }
-    Ok(JavascriptSocketPathContext {
-        sandbox_root: vm.cwd.clone(),
+    Ok(SocketPathContext {
+        sandbox_root: vm.runtime_scratch_root.clone(),
         unix_abstract_namespace,
         unix_socket_host_dir: vm.unix_socket_host_dir.clone(),
         unix_bound_addresses: Arc::clone(&vm.unix_address_registry),
@@ -2004,25 +2043,27 @@ pub(crate) fn build_javascript_socket_path_context(
     })
 }
 
-pub(crate) fn finalize_javascript_net_connect(
+pub(crate) fn finalize_net_connect(
     process: &mut ActiveProcess,
     kernel_readiness: &KernelSocketReadinessRegistry,
-    connected: Arc<Mutex<PendingJavascriptNetConnectState>>,
+    connected: Arc<Mutex<PendingNetConnectState>>,
 ) -> Result<Value, SidecarError> {
     let mut state = connected.lock().map_err(|_| {
-        SidecarError::InvalidState(String::from(
-            "ERR_AGENTOS_SOCKET_CONNECT_STATE: completion lock poisoned",
-        ))
+        SidecarError::host(
+            "ERR_AGENTOS_SOCKET_CONNECT_STATE",
+            String::from("completion lock poisoned"),
+        )
     })?;
     let connected = state.connected.take().ok_or_else(|| {
-        SidecarError::InvalidState(String::from(
-            "ERR_AGENTOS_SOCKET_CONNECT_STATE: successful connect had no socket",
-        ))
+        SidecarError::host(
+            "ERR_AGENTOS_SOCKET_CONNECT_STATE",
+            String::from("successful connect had no socket"),
+        )
     })?;
     let bound_unix_listener = state.bound_unix_listener.take();
     drop(state);
     match connected {
-        PendingJavascriptNetConnect::Tcp {
+        PendingNetConnect::Tcp {
             socket_id,
             socket,
             pending_capability,
@@ -2042,8 +2083,11 @@ pub(crate) fn finalize_javascript_net_connect(
                 process.tcp_port_reservations.remove(&reservation_id);
             }
             socket.set_event_pusher(
-                process.execution.javascript_v8_session_handle(),
+                process
+                    .execution
+                    .execution_wake_handle(process.kernel_handle.runtime_identity()),
                 Some(identity),
+                Arc::clone(&process.process_event_notify),
             );
             socket.set_fairness_identity(process.capability_fairness_identity(&capability_key))?;
             socket.retain_description_lease(
@@ -2054,7 +2098,9 @@ pub(crate) fn finalize_javascript_net_connect(
             register_kernel_readiness_target(
                 kernel_readiness,
                 socket.kernel_socket_id,
-                process.execution.javascript_v8_session_handle(),
+                process
+                    .execution
+                    .execution_wake_handle(process.kernel_handle.runtime_identity()),
                 Some(Arc::clone(&socket.read_event_notify)),
                 process.capability_readiness_identity(&capability_key),
                 socket_id.clone(),
@@ -2072,7 +2118,7 @@ pub(crate) fn finalize_javascript_net_connect(
                 "remoteFamily": socket_addr_family(&remote_addr),
             }))
         }
-        PendingJavascriptNetConnect::Unix {
+        PendingNetConnect::Unix {
             socket_id,
             socket,
             pending_capability,
@@ -2096,8 +2142,11 @@ pub(crate) fn finalize_javascript_net_connect(
                 None,
             )?;
             socket.set_event_pusher(
-                process.execution.javascript_v8_session_handle(),
+                process
+                    .execution
+                    .execution_wake_handle(process.kernel_handle.runtime_identity()),
                 Some(identity),
+                Arc::clone(&process.process_event_notify),
             );
             socket.set_fairness_identity(process.capability_fairness_identity(&capability_key))?;
             socket.retain_description_lease(
@@ -2121,14 +2170,15 @@ pub(crate) fn finalize_javascript_net_connect(
 
 pub(crate) fn restore_pending_bound_unix_connect(
     process: &mut ActiveProcess,
-    pending: &Arc<Mutex<PendingJavascriptNetConnectState>>,
+    pending: &Arc<Mutex<PendingNetConnectState>>,
 ) -> Result<(), SidecarError> {
     let bound = pending
         .lock()
         .map_err(|_| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_SOCKET_CONNECT_STATE: completion lock poisoned",
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_SOCKET_CONNECT_STATE",
+                String::from("completion lock poisoned"),
+            )
         })?
         .bound_unix_listener
         .take();
@@ -2140,50 +2190,51 @@ pub(crate) fn restore_pending_bound_unix_connect(
 
 pub(in crate::execution) fn normalize_tcp_listen_host(
     host: Option<&str>,
-) -> Result<(JavascriptSocketFamily, &'static str, &'static str), SidecarError> {
+) -> Result<(SocketFamily, &'static str, &'static str), SidecarError> {
     match host.unwrap_or("127.0.0.1") {
-        "127.0.0.1" | "localhost" => Ok((JavascriptSocketFamily::Ipv4, "127.0.0.1", "127.0.0.1")),
-        "::1" => Ok((JavascriptSocketFamily::Ipv6, "::1", "::1")),
-        "0.0.0.0" => Ok((JavascriptSocketFamily::Ipv4, "127.0.0.1", "0.0.0.0")),
-        "::" => Ok((JavascriptSocketFamily::Ipv6, "::1", "::")),
-        other => Err(SidecarError::Execution(format!(
-            "EACCES: TCP listeners must bind to loopback or unspecified addresses, got {other}"
-        ))),
+        "127.0.0.1" | "localhost" => Ok((SocketFamily::Ipv4, "127.0.0.1", "127.0.0.1")),
+        "::1" => Ok((SocketFamily::Ipv6, "::1", "::1")),
+        "0.0.0.0" => Ok((SocketFamily::Ipv4, "127.0.0.1", "0.0.0.0")),
+        "::" => Ok((SocketFamily::Ipv6, "::1", "::")),
+        other => Err(SidecarError::host(
+            "EACCES",
+            format!("TCP listeners must bind to loopback or unspecified addresses, got {other}"),
+        )),
     }
 }
 
 pub(in crate::execution) fn normalize_udp_bind_host(
     host: Option<&str>,
-    family: JavascriptUdpFamily,
-) -> Result<(&'static str, &'static str, JavascriptSocketFamily), SidecarError> {
+    family: UdpFamily,
+) -> Result<(&'static str, &'static str, SocketFamily), SidecarError> {
     match (family, host) {
-        (JavascriptUdpFamily::Ipv4, None) | (JavascriptUdpFamily::Ipv4, Some("0.0.0.0")) => {
-            Ok(("127.0.0.1", "0.0.0.0", JavascriptSocketFamily::Ipv4))
+        (UdpFamily::Ipv4, None) | (UdpFamily::Ipv4, Some("0.0.0.0")) => {
+            Ok(("127.0.0.1", "0.0.0.0", SocketFamily::Ipv4))
         }
-        (JavascriptUdpFamily::Ipv4, Some("127.0.0.1"))
-        | (JavascriptUdpFamily::Ipv4, Some("localhost")) => {
-            Ok(("127.0.0.1", "127.0.0.1", JavascriptSocketFamily::Ipv4))
+        (UdpFamily::Ipv4, Some("127.0.0.1")) | (UdpFamily::Ipv4, Some("localhost")) => {
+            Ok(("127.0.0.1", "127.0.0.1", SocketFamily::Ipv4))
         }
-        (JavascriptUdpFamily::Ipv6, None) | (JavascriptUdpFamily::Ipv6, Some("::")) => {
-            Ok(("::1", "::", JavascriptSocketFamily::Ipv6))
+        (UdpFamily::Ipv6, None) | (UdpFamily::Ipv6, Some("::")) => {
+            Ok(("::1", "::", SocketFamily::Ipv6))
         }
-        (JavascriptUdpFamily::Ipv6, Some("::1"))
-        | (JavascriptUdpFamily::Ipv6, Some("localhost")) => {
-            Ok(("::1", "::1", JavascriptSocketFamily::Ipv6))
+        (UdpFamily::Ipv6, Some("::1")) | (UdpFamily::Ipv6, Some("localhost")) => {
+            Ok(("::1", "::1", SocketFamily::Ipv6))
         }
-        (JavascriptUdpFamily::Ipv4, Some(other)) => Err(SidecarError::Execution(format!(
-            "EACCES: udp4 sockets must bind to 127.0.0.1 or 0.0.0.0, got {other}"
-        ))),
-        (JavascriptUdpFamily::Ipv6, Some(other)) => Err(SidecarError::Execution(format!(
-            "EACCES: udp6 sockets must bind to ::1 or ::, got {other}"
-        ))),
+        (UdpFamily::Ipv4, Some(other)) => Err(SidecarError::host(
+            "EACCES",
+            format!("udp4 sockets must bind to 127.0.0.1 or 0.0.0.0, got {other}"),
+        )),
+        (UdpFamily::Ipv6, Some(other)) => Err(SidecarError::host(
+            "EACCES",
+            format!("udp6 sockets must bind to ::1 or ::, got {other}"),
+        )),
     }
 }
 
 pub(in crate::execution) fn allocate_guest_listen_port(
     requested_port: u16,
-    family: JavascriptSocketFamily,
-    used_ports: &BTreeMap<JavascriptSocketFamily, BTreeSet<u16>>,
+    family: SocketFamily,
+    used_ports: &BTreeMap<SocketFamily, BTreeSet<u16>>,
     policy: VmListenPolicy,
 ) -> Result<u16, SidecarError> {
     let is_allowed = |port: u16| {
@@ -2323,12 +2374,13 @@ fn tls_command_admission_error(
     limit: usize,
 ) -> SidecarError {
     match error {
-        tokio::sync::mpsc::error::TrySendError::Full(_) => SidecarError::Execution(format!(
-            "ERR_AGENTOS_TLS_COMMAND_LIMIT: TLS command queue exceeded {limit}; raise limits.reactor.maxHandleCommands"
-        )),
-        tokio::sync::mpsc::error::TrySendError::Closed(_) => SidecarError::Execution(
-            String::from("EPIPE: TLS transport task is closed"),
+        tokio::sync::mpsc::error::TrySendError::Full(_) => SidecarError::host(
+            "ERR_AGENTOS_TLS_COMMAND_LIMIT",
+            format!("TLS command queue exceeded {limit}; raise limits.reactor.maxHandleCommands"),
         ),
+        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+            SidecarError::host("EPIPE", String::from("TLS transport task is closed"))
+        }
     }
 }
 
@@ -2336,11 +2388,12 @@ pub(in crate::execution) fn plain_socket_command_admission_error(
     error: tokio::sync::mpsc::error::TrySendError<NativePlainSocketCommand>,
 ) -> SidecarError {
     match error {
-        tokio::sync::mpsc::error::TrySendError::Full(_) => SidecarError::Execution(String::from(
-            "ERR_AGENTOS_HANDLE_COMMAND_LIMIT: socket command queue is full; raise runtime.resources.maxHandleCommands",
-        )),
+        tokio::sync::mpsc::error::TrySendError::Full(_) => SidecarError::host(
+            "ERR_AGENTOS_HANDLE_COMMAND_LIMIT",
+            String::from("socket command queue is full; raise runtime.resources.maxHandleCommands"),
+        ),
         tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-            SidecarError::Execution(String::from("EPIPE: socket transport task is closed"))
+            SidecarError::host("EPIPE", "socket transport task is closed")
         }
     }
 }
@@ -2470,52 +2523,57 @@ pub(in crate::execution) async fn run_plain_socket_transport(
                 completion,
             } => {
                 let written = payload.bytes.len();
-                let result = match tokio::time::timeout(limits.operation_deadline, async {
-                    let mut offset = 0;
-                    while offset < payload.bytes.len() {
-                        stream.writable().await?;
-                        let (capability_id, vm_generation) = committed_socket_fairness_identity(
-                            &fairness_identity,
-                            &fairness_identity_committed,
-                        )
-                        .await;
-                        let turn = runtime
-                            .fairness()
-                            .acquire(
-                                vm_generation,
-                                capability_id,
-                                FairBudget::new(
-                                    limits.operation_quantum.max(1),
-                                    limits.byte_quantum.max(1),
-                                ),
-                            )
-                            .await
-                            .map_err(std::io::Error::other)?;
-                        let chunk_len = turn
-                            .allowance()
-                            .bytes
-                            .min(limits.byte_quantum.max(1))
-                            .min(payload.bytes.len() - offset)
-                            .max(1);
-                        match stream.try_write(&payload.bytes[offset..offset + chunk_len]) {
-                            Ok(bytes) => {
-                                turn.complete(FairBudget::new(1, bytes), false)
-                                    .map_err(std::io::Error::other)?;
-                                offset += bytes;
-                            }
-                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                                turn.complete(FairBudget::new(1, 0), false)
-                                    .map_err(std::io::Error::other)?;
-                            }
-                            Err(error) => {
-                                turn.complete(FairBudget::new(1, 0), false)
-                                    .map_err(std::io::Error::other)?;
-                                return Err(error);
+                let result = match crate::execution::operation_deadline_timeout(
+                    "TCP socket write",
+                    limits.operation_deadline,
+                    async {
+                        let mut offset = 0;
+                        while offset < payload.bytes.len() {
+                            stream.writable().await?;
+                            let (capability_id, vm_generation) =
+                                committed_socket_fairness_identity(
+                                    &fairness_identity,
+                                    &fairness_identity_committed,
+                                )
+                                .await;
+                            let turn = runtime
+                                .fairness()
+                                .acquire(
+                                    vm_generation,
+                                    capability_id,
+                                    FairBudget::new(
+                                        limits.operation_quantum.max(1),
+                                        limits.byte_quantum.max(1),
+                                    ),
+                                )
+                                .await
+                                .map_err(std::io::Error::other)?;
+                            let chunk_len = turn
+                                .allowance()
+                                .bytes
+                                .min(limits.byte_quantum.max(1))
+                                .min(payload.bytes.len() - offset)
+                                .max(1);
+                            match stream.try_write(&payload.bytes[offset..offset + chunk_len]) {
+                                Ok(bytes) => {
+                                    turn.complete(FairBudget::new(1, bytes), false)
+                                        .map_err(std::io::Error::other)?;
+                                    offset += bytes;
+                                }
+                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                    turn.complete(FairBudget::new(1, 0), false)
+                                        .map_err(std::io::Error::other)?;
+                                }
+                                Err(error) => {
+                                    turn.complete(FairBudget::new(1, 0), false)
+                                        .map_err(std::io::Error::other)?;
+                                    return Err(error);
+                                }
                             }
                         }
-                    }
-                    Ok(())
-                })
+                        Ok(())
+                    },
+                )
                 .await
                 {
                     Ok(Ok(())) => Ok(json!(written)),
@@ -2541,7 +2599,10 @@ pub(in crate::execution) async fn run_plain_socket_transport(
                 _command_reservation: _,
                 completion,
             } => {
-                let result = match tokio::time::timeout(limits.operation_deadline, async {
+                let result = match crate::execution::operation_deadline_timeout(
+                    "TCP socket shutdown",
+                    limits.operation_deadline,
+                    async {
                     run_plain_socket_fair_step(
                         &runtime,
                         limits,
@@ -2584,9 +2645,10 @@ pub(in crate::execution) fn plain_socket_command_capacity(
         .limit
         .filter(|limit| *limit > 0)
         .ok_or_else(|| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_HANDLE_COMMAND_UNBOUNDED: runtime.resources.maxHandleCommands must be non-zero",
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_HANDLE_COMMAND_UNBOUNDED",
+                String::from("runtime.resources.maxHandleCommands must be non-zero"),
+            )
         })
 }
 
@@ -2636,6 +2698,7 @@ pub(in crate::execution) fn deferred_rpc_error(
     crate::state::DeferredRpcError {
         code: String::from(code),
         message: message.into(),
+        details: None,
     }
 }
 
@@ -2657,14 +2720,12 @@ fn blocked_dns_resolution_error(
     cidr: &str,
     label: &str,
 ) -> SidecarError {
-    SidecarError::Execution(format!(
-        "EACCES: blocked outbound network access to {resource}: {ip} is within restricted {label} range {cidr}"
+    SidecarError::host("EACCES", format!("blocked outbound network access to {resource}: {ip} is within restricted {label} range {cidr}"
     ))
 }
 
 fn blocked_loopback_connect_error(resource: &str, ip: IpAddr, port: u16) -> SidecarError {
-    SidecarError::Execution(format!(
-        "EACCES: blocked outbound network access to {resource}: {ip} is loopback ({}) and port {port} is not owned by this VM and is not listed in {LOOPBACK_EXEMPT_PORTS_ENV}",
+    SidecarError::host("EACCES", format!("blocked outbound network access to {resource}: {ip} is loopback ({}) and port {port} is not owned by this VM and is not listed in {LOOPBACK_EXEMPT_PORTS_ENV}",
         loopback_cidr(ip)
     ))
 }
@@ -2698,7 +2759,7 @@ pub(in crate::execution) fn filter_dns_safe_ip_addrs(
     Ok(allowed)
 }
 
-fn loopback_connect_allowed(context: &JavascriptSocketPathContext, port: u16) -> bool {
+fn loopback_connect_allowed(context: &SocketPathContext, port: u16) -> bool {
     context.loopback_port_allowed(port)
 }
 
@@ -2706,7 +2767,7 @@ fn filter_tcp_connect_ip_addrs(
     addresses: Vec<IpAddr>,
     host: &str,
     port: u16,
-    context: &JavascriptSocketPathContext,
+    context: &SocketPathContext,
 ) -> Result<Vec<IpAddr>, SidecarError> {
     let resource = format_tcp_resource(host, port);
     let mut allowed = Vec::new();
@@ -2746,7 +2807,7 @@ pub(in crate::execution) fn resolve_tcp_connect_addr<B>(
     host: &str,
     port: u16,
     family: Option<u8>,
-    context: &JavascriptSocketPathContext,
+    context: &SocketPathContext,
 ) -> Result<ResolvedTcpConnectAddr, SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,
@@ -2781,7 +2842,7 @@ where
         .iter()
         .copied()
         .find(|candidate| {
-            let family = JavascriptSocketFamily::from_ip(*candidate);
+            let family = SocketFamily::from_ip(*candidate);
             context.translate_tcp_loopback_port(family, port).is_some()
         })
         // We do not implement Happy Eyeballs yet, so prefer IPv4 over a
@@ -2791,7 +2852,7 @@ where
         .ok_or_else(|| {
             SidecarError::Execution(format!("failed to resolve TCP address {host}:{port}"))
         })?;
-    let family = JavascriptSocketFamily::from_ip(ip);
+    let family = SocketFamily::from_ip(ip);
     let translated_loopback_port = context.translate_tcp_loopback_port(family, port);
     let use_kernel_loopback = is_loopback_ip(ip) && translated_loopback_port == Some(port);
     let actual_port = if is_loopback_ip(ip) {
@@ -2899,7 +2960,7 @@ pub(in crate::execution) fn filter_dns_ip_addrs(
 pub(in crate::execution) fn resolve_udp_bind_addr(
     host: &str,
     port: u16,
-    family: JavascriptUdpFamily,
+    family: UdpFamily,
 ) -> Result<SocketAddr, SidecarError> {
     (host, port)
         .to_socket_addrs()
@@ -2955,7 +3016,7 @@ where
     allowed
         .into_iter()
         .map(|ip| {
-            let family_key = JavascriptSocketFamily::from_ip(ip);
+            let family_key = SocketFamily::from_ip(ip);
             let actual_port = if is_loopback_ip(ip) {
                 context
                     .translate_udp_loopback_port(family_key, port)
@@ -2974,11 +3035,11 @@ where
         })
 }
 
-pub(in crate::execution) fn javascript_net_timeout_value() -> Value {
-    Value::String(String::from(JAVASCRIPT_NET_TIMEOUT_SENTINEL))
+pub(in crate::execution) fn net_timeout_value() -> Value {
+    Value::String(String::from(NET_TIMEOUT_SENTINEL))
 }
 
-pub(in crate::execution) fn javascript_net_json_string(
+pub(in crate::execution) fn encode_net_json_string(
     value: Value,
     label: &str,
 ) -> Result<Value, SidecarError> {
@@ -2989,38 +3050,48 @@ pub(in crate::execution) fn javascript_net_json_string(
         })
 }
 
-pub(in crate::execution) fn javascript_net_read_value(
-    event: Option<JavascriptTcpSocketEvent>,
+pub(in crate::execution) fn net_read_value(
+    event: Option<TcpSocketEvent>,
 ) -> Result<Value, SidecarError> {
     match event {
-        Some(JavascriptTcpSocketEvent::Data { bytes, .. }) => Ok(Value::String(
+        Some(TcpSocketEvent::Data { bytes, .. }) => Ok(Value::String(
             base64::engine::general_purpose::STANDARD.encode(bytes),
         )),
-        Some(JavascriptTcpSocketEvent::End | JavascriptTcpSocketEvent::Close { .. }) => {
-            Ok(Value::Null)
-        }
-        Some(JavascriptTcpSocketEvent::Error { code, message }) => {
-            let detail = code.unwrap_or_else(|| String::from("socket read"));
-            Err(SidecarError::Execution(format!("{detail}: {message}")))
-        }
-        None => Ok(javascript_net_timeout_value()),
+        Some(TcpSocketEvent::End | TcpSocketEvent::Close { .. }) => Ok(Value::Null),
+        Some(TcpSocketEvent::Error { code, message }) => Err(SidecarError::host(
+            code.as_deref().unwrap_or("EIO"),
+            message,
+        )),
+        None => Ok(net_timeout_value()),
     }
 }
 
 pub(in crate::execution) fn io_error_code(error: &std::io::Error) -> Option<String> {
     match error.raw_os_error() {
         Some(libc::EACCES) => Some(String::from("EACCES")),
+        Some(libc::EAGAIN) => Some(String::from("EAGAIN")),
+        Some(libc::EALREADY) => Some(String::from("EALREADY")),
         Some(libc::EADDRINUSE) => Some(String::from("EADDRINUSE")),
         Some(libc::EADDRNOTAVAIL) => Some(String::from("EADDRNOTAVAIL")),
         Some(libc::EBADF) => Some(String::from("EBADF")),
+        Some(libc::ECONNABORTED) => Some(String::from("ECONNABORTED")),
         Some(libc::ECONNREFUSED) => Some(String::from("ECONNREFUSED")),
         Some(libc::ECONNRESET) => Some(String::from("ECONNRESET")),
         Some(libc::EDESTADDRREQ) => Some(String::from("EDESTADDRREQ")),
+        Some(libc::EEXIST) => Some(String::from("EEXIST")),
+        Some(libc::EINPROGRESS) => Some(String::from("EINPROGRESS")),
         Some(libc::EINVAL) => Some(String::from("EINVAL")),
+        Some(libc::EISCONN) => Some(String::from("EISCONN")),
+        Some(libc::EMFILE) => Some(String::from("EMFILE")),
+        Some(libc::ENETDOWN) => Some(String::from("ENETDOWN")),
         Some(libc::ENOPROTOOPT) => Some(String::from("ENOPROTOOPT")),
+        Some(libc::ENOSPC) => Some(String::from("ENOSPC")),
         Some(libc::ENOTCONN) => Some(String::from("ENOTCONN")),
+        Some(libc::ENOENT) => Some(String::from("ENOENT")),
         Some(libc::EOPNOTSUPP) => Some(String::from("EOPNOTSUPP")),
         Some(libc::EPIPE) => Some(String::from("EPIPE")),
+        Some(libc::EPROTONOSUPPORT) => Some(String::from("EPROTONOSUPPORT")),
+        Some(libc::ESRCH) => Some(String::from("ESRCH")),
         Some(libc::ETIMEDOUT) => Some(String::from("ETIMEDOUT")),
         Some(libc::EHOSTUNREACH) => Some(String::from("EHOSTUNREACH")),
         Some(libc::ENETUNREACH) => Some(String::from("ENETUNREACH")),
@@ -3029,11 +3100,11 @@ pub(in crate::execution) fn io_error_code(error: &std::io::Error) -> Option<Stri
 }
 
 pub(in crate::execution) fn sidecar_net_error(error: std::io::Error) -> SidecarError {
-    let message = match io_error_code(&error) {
-        Some(code) => format!("{code}: {error}"),
-        None => error.to_string(),
-    };
-    SidecarError::Execution(message)
+    let code = io_error_code(&error).unwrap_or_else(|| String::from("EIO"));
+    SidecarError::Host(agentos_execution::backend::HostServiceError::new(
+        code,
+        error.to_string(),
+    ))
 }
 
 struct PlainTcpReaderLease {
@@ -3055,7 +3126,7 @@ impl Drop for PlainTcpReaderLease {
 fn spawn_tcp_socket_reader(
     runtime: agentos_runtime::RuntimeContext,
     stream: TcpStream,
-    sender: AsyncCompletionSender<JavascriptTcpSocketEvent>,
+    sender: AsyncCompletionSender<TcpSocketEvent>,
     read_event_notify: Arc<tokio::sync::Notify>,
     event_pusher: Arc<SocketReadinessSubscribers>,
     application_read_interest: Arc<AtomicBool>,
@@ -3185,7 +3256,7 @@ fn spawn_tcp_socket_reader(
                     match read_result {
                         Ok(0) => {
                             saw_remote_end.store(true, Ordering::SeqCst);
-                            if sender.send(JavascriptTcpSocketEvent::End).await.is_err() {
+                            if sender.send(TcpSocketEvent::End).await.is_err() {
                                 break;
                             }
                             read_event_notify.notify_one();
@@ -3193,7 +3264,7 @@ fn spawn_tcp_socket_reader(
                             if saw_local_shutdown.load(Ordering::SeqCst)
                                 && !close_notified.swap(true, Ordering::SeqCst)
                                 && sender
-                                    .send(JavascriptTcpSocketEvent::Close { had_error: false })
+                                    .send(TcpSocketEvent::Close { had_error: false })
                                     .await
                                     .is_ok()
                             {
@@ -3216,7 +3287,7 @@ fn spawn_tcp_socket_reader(
                                 break;
                             };
                             if sender
-                                .send(JavascriptTcpSocketEvent::Data {
+                                .send(TcpSocketEvent::Data {
                                     bytes: buffer[..bytes_read].to_vec(),
                                     reservation: SharedReservation::new(reservation),
                                     source_reservations: Vec::new(),
@@ -3258,7 +3329,7 @@ fn spawn_tcp_socket_reader(
 pub(in crate::execution) async fn reserve_socket_event_bytes_or_close(
     resources: &ResourceLedger,
     bytes: usize,
-    sender: &AsyncCompletionSender<JavascriptTcpSocketEvent>,
+    sender: &AsyncCompletionSender<TcpSocketEvent>,
     event_pusher: &Arc<SocketReadinessSubscribers>,
     close_notified: &Arc<AtomicBool>,
 ) -> Option<Reservation> {
@@ -3284,7 +3355,7 @@ pub(in crate::execution) async fn reserve_socket_event_bytes_or_close(
 pub(in crate::execution) async fn reserve_tls_event_bytes_or_close(
     resources: &ResourceLedger,
     bytes: usize,
-    sender: &AsyncCompletionSender<JavascriptTcpSocketEvent>,
+    sender: &AsyncCompletionSender<TcpSocketEvent>,
     event_pusher: &Arc<SocketReadinessSubscribers>,
     close_notified: &Arc<AtomicBool>,
 ) -> Option<(Reservation, Reservation)> {
@@ -3326,14 +3397,14 @@ pub(in crate::execution) async fn reserve_tls_event_bytes_or_close(
 }
 
 pub(in crate::execution) async fn send_async_socket_error_and_close(
-    sender: &AsyncCompletionSender<JavascriptTcpSocketEvent>,
+    sender: &AsyncCompletionSender<TcpSocketEvent>,
     event_pusher: &Arc<SocketReadinessSubscribers>,
     close_notified: &Arc<AtomicBool>,
     code: Option<String>,
     message: String,
 ) {
     if sender
-        .send(JavascriptTcpSocketEvent::Error { code, message })
+        .send(TcpSocketEvent::Error { code, message })
         .await
         .is_ok()
     {
@@ -3341,7 +3412,7 @@ pub(in crate::execution) async fn send_async_socket_error_and_close(
     }
     if !close_notified.swap(true, Ordering::SeqCst)
         && sender
-            .send(JavascriptTcpSocketEvent::Close { had_error: true })
+            .send(TcpSocketEvent::Close { had_error: true })
             .await
             .is_ok()
     {
@@ -3497,7 +3568,7 @@ fn record_net_tcp_kernel_poll(
 mod socket_read_limit_tests {
     use super::*;
 
-    fn data_event(bytes: &[u8]) -> JavascriptTcpSocketEvent {
+    fn data_event(bytes: &[u8]) -> TcpSocketEvent {
         let resources = ResourceLedger::root(
             "tcp-partial-read-test",
             [(
@@ -3508,16 +3579,16 @@ mod socket_read_limit_tests {
         let reservation = resources
             .reserve(ResourceClass::BufferedBytes, bytes.len())
             .expect("reserve test socket bytes");
-        JavascriptTcpSocketEvent::Data {
+        TcpSocketEvent::Data {
             bytes: bytes.to_vec(),
             reservation: SharedReservation::new(reservation),
             source_reservations: Vec::new(),
         }
     }
 
-    fn event_bytes(event: Option<JavascriptTcpSocketEvent>) -> Vec<u8> {
+    fn event_bytes(event: Option<TcpSocketEvent>) -> Vec<u8> {
         match event.expect("expected socket data event") {
-            JavascriptTcpSocketEvent::Data { bytes, .. } => bytes,
+            TcpSocketEvent::Data { bytes, .. } => bytes,
             other => panic!("expected socket data, got {other:?}"),
         }
     }
@@ -3724,7 +3795,7 @@ mod transferred_alias_transport_tests {
             .try_recv()
             .expect("surviving alias reads queued data");
         match event {
-            JavascriptTcpSocketEvent::Data { bytes, .. } => {
+            TcpSocketEvent::Data { bytes, .. } => {
                 assert_eq!(bytes, b"host-to-survivor")
             }
             other => panic!("expected TCP data after alias close, got {other:?}"),
@@ -3774,16 +3845,15 @@ mod ssrf_egress_classifier_tests {
     // deterministically. See FAILURES.md#F-005, #F-006, #F-007.
     use super::{
         filter_dns_ip_addrs, filter_dns_safe_ip_addrs, filter_tcp_connect_ip_addrs, is_loopback_ip,
-        restricted_non_loopback_ip_range, JavascriptSocketFamily, JavascriptSocketPathContext,
-        SidecarError, VmListenPolicy,
+        restricted_non_loopback_ip_range, SocketFamily, SocketPathContext, VmListenPolicy,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
-    fn socket_policy_context() -> JavascriptSocketPathContext {
-        JavascriptSocketPathContext {
+    fn socket_policy_context() -> SocketPathContext {
+        SocketPathContext {
             sandbox_root: PathBuf::from("/tmp/agentos-egress-policy-test"),
             unix_abstract_namespace: [0; 32],
             unix_socket_host_dir: PathBuf::from("/tmp/agentos-egress-policy-test/unix"),
@@ -3816,10 +3886,7 @@ mod ssrf_egress_classifier_tests {
 
     fn assert_dns_denied(ip: IpAddr, label: &str) {
         match filter_dns_safe_ip_addrs(vec![ip], "attacker.example") {
-            Err(SidecarError::Execution(message)) => assert!(
-                message.starts_with("EACCES:"),
-                "{label}: egress filter must deny with EACCES, got: {message}"
-            ),
+            Err(error) if error.code() == Some("EACCES") => {}
             other => panic!("{label}: expected EACCES denial, got {other:?}"),
         }
     }
@@ -3832,11 +3899,11 @@ mod ssrf_egress_classifier_tests {
         let mixed_error =
             filter_tcp_connect_ip_addrs(vec![private, public], "mixed.example", 53, &context)
                 .expect_err("a mixed safe/blocked answer must fail closed as a unit");
-        assert!(mixed_error.to_string().starts_with("EACCES:"));
+        assert_eq!(mixed_error.code(), Some("EACCES"));
 
         let error = filter_tcp_connect_ip_addrs(vec![private], "rebound.example", 53, &context)
             .expect_err("a DNS answer that rebinds entirely into private space is denied");
-        assert!(error.to_string().starts_with("EACCES:"));
+        assert_eq!(error.code(), Some("EACCES"));
     }
 
     #[test]
@@ -3860,7 +3927,7 @@ mod ssrf_egress_classifier_tests {
         let guest_port = 4242;
         context
             .udp_loopback_guest_to_host_ports
-            .insert((JavascriptSocketFamily::Ipv4, guest_port), guest_port);
+            .insert((SocketFamily::Ipv4, guest_port), guest_port);
 
         assert_eq!(
             filter_tcp_connect_ip_addrs(

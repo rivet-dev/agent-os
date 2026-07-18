@@ -9,10 +9,8 @@ use nix::libc;
 // performed fd-relative (`fstat`/`fchmod`/`fchown`/`futimens`), so `O_RDONLY` is
 // the portable anchor open mode.
 const O_PATH_ANCHOR: OFlag = OFlag::O_RDONLY;
-use agentos_execution::{
-    GuestModuleReader, LocalModuleResolutionCache, ModuleFsReader, ModuleResolveMode,
-    ModuleResolver,
-};
+#[cfg(test)]
+use agentos_execution::ModuleFsReader;
 use agentos_kernel::mount_plugin::{
     FileSystemPluginFactory, OpenFileSystemPluginRequest, PluginError,
 };
@@ -34,6 +32,7 @@ use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+#[cfg(test)]
 use vfs::posix::TarFileSystem;
 
 const MAX_HOST_DIR_READ_BYTES: usize = DEFAULT_MAX_PREAD_BYTES;
@@ -957,6 +956,12 @@ impl HostDirFilesystem {
         };
         let stat = fstatat(Some(parent_dir.as_raw_fd()), name, flags)
             .map_err(|error| io_error_to_vfs("utimes", virtual_path, nix_to_io(error)))?;
+        Self::utime_specs_from_file_stat(stat)
+    }
+
+    fn utime_specs_from_file_stat(
+        stat: nix::sys::stat::FileStat,
+    ) -> VfsResult<(VirtualTimeSpec, VirtualTimeSpec)> {
         let atime = VirtualTimeSpec::new(
             stat.st_atime,
             stat.st_atime_nsec.clamp(0, 999_999_999) as u32,
@@ -983,6 +988,39 @@ impl HostDirFilesystem {
         mtime: VirtualUtimeSpec,
         follow_symlinks: bool,
     ) -> VfsResult<()> {
+        let (normalized, relative) = self.relative_virtual_path(path);
+        if relative.file_name().is_none() {
+            let existing = match (atime, mtime) {
+                (VirtualUtimeSpec::Omit, _) | (_, VirtualUtimeSpec::Omit) => {
+                    let stat = fstat(self.host_root_dir.as_raw_fd()).map_err(|error| {
+                        io_error_to_vfs("utimes", &normalized, nix_to_io(error))
+                    })?;
+                    Some(Self::utime_specs_from_file_stat(stat)?)
+                }
+                _ => None,
+            };
+            let existing_atime = existing
+                .as_ref()
+                .map(|(atime, _)| *atime)
+                .unwrap_or(VirtualTimeSpec { sec: 0, nsec: 0 });
+            let existing_mtime = existing
+                .as_ref()
+                .map(|(_, mtime)| *mtime)
+                .unwrap_or(VirtualTimeSpec { sec: 0, nsec: 0 });
+            let times = [
+                Self::resolve_utime_timespec(atime, existing_atime),
+                Self::resolve_utime_timespec(mtime, existing_mtime),
+            ];
+            return utimensat(
+                Some(self.host_root_dir.as_raw_fd()),
+                Path::new("."),
+                &times[0],
+                &times[1],
+                UtimensatFlags::NoFollowSymlink,
+            )
+            .map_err(|error| io_error_to_vfs("utimes", &normalized, nix_to_io(error)));
+        }
+
         let (parent_dir, _, name, normalized) = self.split_parent(path, false)?;
         if follow_symlinks {
             // `utimes` (follow) rejects a symlink leaf, matching `chmod`/`chown`;
@@ -1531,6 +1569,7 @@ impl VirtualFileSystem for HostDirFilesystem {
 // plugin and not the module-reader path (which the real lib build does use).
 #[allow(dead_code)]
 #[derive(Clone)]
+#[cfg(test)]
 struct HostDirModuleMount {
     /// Normalized guest mount point, e.g. `/root/node_modules`.
     guest_prefix: String,
@@ -1544,12 +1583,14 @@ struct HostDirModuleMount {
 /// from the shared identity-keyed archive cache and never touches the kernel.
 #[allow(dead_code)]
 #[derive(Clone)]
+#[cfg(test)]
 enum ModuleMountBackend {
     Host(HostDirFilesystem),
     Tar(TarFileSystem),
 }
 
 #[allow(dead_code)]
+#[cfg(test)]
 impl ModuleMountBackend {
     fn realpath(&self, path: &str) -> VfsResult<String> {
         match self {
@@ -1581,6 +1622,7 @@ impl ModuleMountBackend {
 }
 
 #[allow(dead_code)]
+#[cfg(test)]
 impl HostDirModuleMount {
     /// If `guest_path` falls under this mount, return the mount-relative virtual
     /// path (always absolute, e.g. `/foo/index.js`).
@@ -1627,6 +1669,7 @@ impl HostDirModuleMount {
 /// `session/new` bootstrap awaiting the adapter's response on that same loop).
 #[allow(dead_code)]
 #[derive(Clone)]
+#[cfg(test)]
 pub(crate) struct HostDirModuleReader {
     /// Mounts sorted longest-`guest_prefix`-first so the most specific mount
     /// wins (mirrors the kernel mount table's longest-prefix dispatch).
@@ -1634,6 +1677,7 @@ pub(crate) struct HostDirModuleReader {
 }
 
 #[allow(dead_code)]
+#[cfg(test)]
 impl HostDirModuleReader {
     /// Build a reader from `(guest_path, host_path)` pairs for the VM's read-only
     /// `host_dir`/`module_access` mounts. Mounts whose host root cannot be opened
@@ -1725,71 +1769,77 @@ impl HostDirModuleReader {
     }
 }
 
+#[cfg(test)]
 impl ModuleFsReader for HostDirModuleReader {
-    fn canonical_guest_path(&mut self, guest_path: &str) -> Option<String> {
-        let (index, relative) = self.mount_index_for(guest_path)?;
+    fn canonical_guest_path(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<Option<String>, agentos_execution::backend::HostServiceError> {
+        let Some((index, relative)) = self.mount_index_for(guest_path) else {
+            return Ok(None);
+        };
         let mount = &self.mounts[index];
         // `realpath` returns a mount-relative virtual path; re-express it as a
         // guest path so the resolver keeps operating in the guest namespace.
-        let resolved = mount.filesystem.realpath(&relative).ok()?;
-        Some(mount.guest_path_for_relative(&resolved))
+        let Some(resolved) = module_vfs_optional(mount.filesystem.realpath(&relative))? else {
+            return Ok(None);
+        };
+        Ok(Some(mount.guest_path_for_relative(&resolved)))
     }
 
-    fn read_to_string(&mut self, guest_path: &str) -> Option<String> {
-        let (index, relative) = self.mount_index_for(guest_path)?;
-        let bytes = self.mounts[index].filesystem.read_file(&relative).ok()?;
-        String::from_utf8(bytes).ok()
+    fn read_to_string(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<Option<String>, agentos_execution::backend::HostServiceError> {
+        let Some((index, relative)) = self.mount_index_for(guest_path) else {
+            return Ok(None);
+        };
+        let Some(bytes) = module_vfs_optional(self.mounts[index].filesystem.read_file(&relative))?
+        else {
+            return Ok(None);
+        };
+        String::from_utf8(bytes).map(Some).map_err(|error| {
+            agentos_execution::backend::HostServiceError::new(
+                "EILSEQ",
+                format!("module filesystem file {guest_path} is not valid UTF-8: {error}"),
+            )
+        })
     }
 
-    fn path_is_dir(&mut self, guest_path: &str) -> Option<bool> {
-        let (index, relative) = self.mount_index_for(guest_path)?;
+    fn path_is_dir(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<Option<bool>, agentos_execution::backend::HostServiceError> {
+        let Some((index, relative)) = self.mount_index_for(guest_path) else {
+            return Ok(None);
+        };
         // `stat` follows symlinks (O_PATH, no O_NOFOLLOW), so a symlinked package
         // directory reports as a directory just like `fs.statSync` would.
-        self.mounts[index]
-            .filesystem
-            .stat(&relative)
-            .ok()
-            .map(|stat| stat.is_directory)
+        Ok(
+            module_vfs_optional(self.mounts[index].filesystem.stat(&relative))?
+                .map(|stat| stat.is_directory),
+        )
     }
 
-    fn path_exists(&mut self, guest_path: &str) -> bool {
-        match self.mount_index_for(guest_path) {
-            Some((index, relative)) => self.mounts[index].filesystem.exists(&relative),
-            None => false,
-        }
-    }
-}
-
-/// Session-thread module reader: the mounted `HostDirModuleReader` plus a
-/// persistent resolution cache, so the V8 isolate thread can both resolve
-/// specifiers and read source DIRECTLY (same mount + resolve-beneath
-/// confinement, same `ModuleResolver` semantics as the bridge), skipping the
-/// per-module `_resolveModule`/`_loadFile` bridge round-trips.
-pub(crate) struct SessionModuleReader {
-    reader: HostDirModuleReader,
-    cache: LocalModuleResolutionCache,
-}
-
-impl SessionModuleReader {
-    pub(crate) fn new(reader: HostDirModuleReader) -> Self {
-        Self {
-            reader,
-            cache: LocalModuleResolutionCache::default(),
-        }
+    fn path_exists(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<bool, agentos_execution::backend::HostServiceError> {
+        Ok(self.path_is_dir(guest_path)?.is_some())
     }
 }
 
-impl GuestModuleReader for SessionModuleReader {
-    fn read_module_source(&mut self, resolved_guest_path: &str) -> Option<String> {
-        self.reader.read_to_string(resolved_guest_path)
-    }
-
-    fn resolve_module(&mut self, specifier: &str, referrer: &str) -> Option<String> {
-        // Mirror the bridge's `_resolveModule` exactly: import mode, same reader,
-        // same persisted cache.
-        let reader: &mut dyn ModuleFsReader = &mut self.reader;
-        let mut resolver = ModuleResolver::new(reader, &mut self.cache);
-        resolver.resolve_module(specifier, referrer, ModuleResolveMode::Import)
+#[cfg(test)]
+fn module_vfs_optional<T>(
+    result: VfsResult<T>,
+) -> Result<Option<T>, agentos_execution::backend::HostServiceError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if matches!(error.code(), "ENOENT" | "ENOTDIR") => Ok(None),
+        Err(error) => Err(agentos_execution::backend::HostServiceError::new(
+            error.code(),
+            error.to_string(),
+        )),
     }
 }
 
@@ -1915,28 +1965,38 @@ mod tar_module_reader_tests {
         )
         .expect("reader");
         let probe = "/opt/agentos/pkgs/pi/0.2.1/node_modules/@anthropic-ai/sdk/package.json";
-        assert!(reader.path_exists(probe), "packed package.json must exist");
         assert!(
-            reader.read_to_string(probe).is_some(),
+            reader.path_exists(probe).expect("stat packed package.json"),
+            "packed package.json must exist"
+        );
+        assert!(
+            reader
+                .read_to_string(probe)
+                .expect("read packed package.json")
+                .is_some(),
             "packed package.json must read"
         );
         let mut cache = Default::default();
         let dyn_reader: &mut dyn ModuleFsReader = &mut reader;
         let mut resolver = ModuleResolver::new(dyn_reader, &mut cache);
-        let resolved = resolver.resolve_module(
-            "@anthropic-ai/sdk",
-            "/opt/agentos/pkgs/pi/0.2.1/node_modules/@agentos-software/pi/dist/adapter.js",
-            ModuleResolveMode::Require,
-        );
+        let resolved = resolver
+            .resolve_module(
+                "@anthropic-ai/sdk",
+                "/opt/agentos/pkgs/pi/0.2.1/node_modules/@agentos-software/pi/dist/adapter.js",
+                ModuleResolveMode::Require,
+            )
+            .expect("resolve require from packed tar");
         assert!(
             resolved.is_some(),
             "require-mode resolution from the packed tar"
         );
-        let resolved_import = resolver.resolve_module(
-            "@anthropic-ai/sdk",
-            "/opt/agentos/pkgs/pi/0.2.1/node_modules/@agentos-software/pi/dist/adapter.js",
-            ModuleResolveMode::Import,
-        );
+        let resolved_import = resolver
+            .resolve_module(
+                "@anthropic-ai/sdk",
+                "/opt/agentos/pkgs/pi/0.2.1/node_modules/@agentos-software/pi/dist/adapter.js",
+                ModuleResolveMode::Import,
+            )
+            .expect("resolve import from packed tar");
         assert!(
             resolved_import.is_some(),
             "import-mode resolution from the packed tar"

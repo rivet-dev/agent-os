@@ -613,6 +613,110 @@ fn bridge_response_payload_to_v8<'s>(
     raw_bytes_to_uint8array(scope, payload)
 }
 
+struct DecodedBridgeError {
+    code: String,
+    message: String,
+    details: Option<ciborium::Value>,
+}
+
+fn decode_bridge_error(payload: &[u8]) -> Option<DecodedBridgeError> {
+    let LimitedCborValue(ciborium::Value::Map(entries)) =
+        ciborium::de::from_reader_with_recursion_limit(payload, MAX_CBOR_BRIDGE_DEPTH).ok()?
+    else {
+        return None;
+    };
+    let mut code = None;
+    let mut message = None;
+    let mut details = None;
+    for (key, value) in entries {
+        let ciborium::Value::Text(key) = key else {
+            continue;
+        };
+        match key.as_str() {
+            "code" => {
+                if let ciborium::Value::Text(value) = value {
+                    code = Some(value);
+                }
+            }
+            "message" => {
+                if let ciborium::Value::Text(value) = value {
+                    message = Some(value);
+                }
+            }
+            "details" if value != ciborium::Value::Null => details = Some(value),
+            _ => {}
+        }
+    }
+    Some(DecodedBridgeError {
+        code: code?,
+        message: message?,
+        details,
+    })
+}
+
+fn bridge_error_exception<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    payload: &[u8],
+) -> v8::Local<'s, v8::Value> {
+    let decoded = decode_bridge_error(payload);
+    let message = decoded
+        .as_ref()
+        .map(|error| error.message.as_str())
+        .unwrap_or_else(|| std::str::from_utf8(payload).unwrap_or("bridge host call failed"));
+    let message = v8::String::new(scope, message).expect("bridge error message allocation");
+    let exception = v8::Exception::error(scope, message);
+    let Some(decoded) = decoded else {
+        return exception;
+    };
+    let object = exception
+        .to_object(scope)
+        .expect("Error exceptions are objects");
+    let code_key = v8::String::new(scope, "code").expect("code property key");
+    let code = v8::String::new(scope, &decoded.code).expect("bridge error code allocation");
+    if object.set(scope, code_key.into(), code.into()) != Some(true) {
+        eprintln!(
+            "ERR_AGENTOS_BRIDGE_ERROR_PROPERTY: failed to attach the typed bridge error code"
+        );
+    }
+    if let Some(details) = decoded.details {
+        match cbor_to_v8_inner(scope, &details, 0) {
+            Ok(details) => {
+                let details_key =
+                    v8::String::new(scope, "details").expect("details property key");
+                if object.set(scope, details_key.into(), details) != Some(true) {
+                    eprintln!(
+                        "ERR_AGENTOS_BRIDGE_ERROR_PROPERTY: failed to attach typed bridge error details"
+                    );
+                }
+            }
+            Err(error) => eprintln!(
+                "ERR_AGENTOS_BRIDGE_ERROR_DETAILS: failed to decode typed bridge error details: {error}"
+            ),
+        }
+    }
+    exception
+}
+
+fn runtime_error_exception<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    message: &str,
+) -> v8::Local<'s, v8::Value> {
+    let message = v8::String::new(scope, message).expect("runtime error message allocation");
+    let exception = v8::Exception::error(scope, message);
+    let object = exception
+        .to_object(scope)
+        .expect("Error exceptions are objects");
+    let code_key = v8::String::new(scope, "code").expect("code property key");
+    let code = v8::String::new(scope, "ERR_AGENTOS_BRIDGE_RUNTIME")
+        .expect("runtime error code allocation");
+    if object.set(scope, code_key.into(), code.into()) != Some(true) {
+        eprintln!(
+            "ERR_AGENTOS_BRIDGE_ERROR_PROPERTY: failed to attach the bridge runtime error code"
+        );
+    }
+    exception
+}
+
 /// Serialize a V8 value to CBOR bytes.
 pub fn serialize_cbor_value(
     scope: &mut v8::HandleScope,
@@ -1883,12 +1987,17 @@ fn sync_bridge_callback<'s>(
 
     // Perform sync-blocking bridge call
     let max_response_bytes = bridge_response_declaration(scope, &data.method, &args);
-    match ctx.sync_call_response_with_max_response_bytes(
+    match ctx.sync_call_frame_with_max_response_bytes(
         &data.method,
         encoded_args,
         max_response_bytes,
     ) {
         Ok(Some(response)) => {
+            if response.status == 1 {
+                let exception = bridge_error_exception(scope, &response.payload);
+                scope.throw_exception(exception);
+                return;
+            }
             let v8_val = bridge_response_payload_to_v8(scope, response.status, &response.payload);
             if let Some(val) = v8_val {
                 rv.set(val);
@@ -1902,14 +2011,7 @@ fn sync_bridge_callback<'s>(
             rv.set_undefined();
         }
         Err(err_msg) => {
-            let msg = v8::String::new(scope, &err_msg).unwrap();
-            let exc = v8::Exception::error(scope, msg);
-            if let Some(code) = bridge_error_code(&err_msg) {
-                let exc_object = exc.to_object(scope).unwrap();
-                let code_key = v8::String::new(scope, "code").unwrap();
-                let code_value = v8::String::new(scope, code).unwrap();
-                let _ = exc_object.set(scope, code_key.into(), code_value.into());
-            }
+            let exc = runtime_error_exception(scope, &err_msg);
             scope.throw_exception(exc);
         }
     }
@@ -2181,26 +2283,19 @@ pub fn resolve_pending_promise(
     pending: &PendingPromises,
     call_id: u64,
     status: u8,
-    result: Option<Vec<u8>>,
-    error: Option<String>,
+    payload: Option<Vec<u8>>,
 ) -> Result<(), String> {
     let resolver_global = pending
         .remove(call_id)
         .ok_or_else(|| format!("no pending promise for call_id {}", call_id))?;
     let resolver = v8::Local::new(scope, &resolver_global);
 
-    if let Some(err_msg) = error {
-        let msg = v8::String::new(scope, &err_msg).unwrap();
-        let exc = v8::Exception::error(scope, msg);
-        if let Some(code) = bridge_error_code(&err_msg) {
-            let exc_object = exc.to_object(scope).unwrap();
-            let code_key = v8::String::new(scope, "code").unwrap();
-            let code_value = v8::String::new(scope, code).unwrap();
-            let _ = exc_object.set(scope, code_key.into(), code_value.into());
-        }
+    if status == 1 {
+        let payload = payload.as_deref().unwrap_or_default();
+        let exc = bridge_error_exception(scope, payload);
         resolver.reject(scope, exc);
-    } else if let Some(result_bytes) = result {
-        let v8_val = bridge_response_payload_to_v8(scope, status, &result_bytes);
+    } else if let Some(payload) = payload {
+        let v8_val = bridge_response_payload_to_v8(scope, status, &payload);
         if let Some(val) = v8_val {
             resolver.resolve(scope, val);
         } else {
@@ -2219,42 +2314,10 @@ pub fn resolve_pending_promise(
     Ok(())
 }
 
-fn bridge_error_code(message: &str) -> Option<&str> {
-    const TRUSTED_PREFIXES: &[&str] = &[
-        "ERR_AGENTOS_NODE_SYNC_RPC",
-        "ERR_AGENTOS_PYTHON_VFS_RPC",
-        "ERR_AGENTOS_BRIDGE",
-    ];
-
-    let mut segments = message.split(':').map(str::trim);
-    let first = segments.next()?;
-    if is_errno_segment(first) {
-        return Some(first);
-    }
-
-    if TRUSTED_PREFIXES.contains(&first) {
-        let second = segments.next()?;
-        if is_errno_segment(second) {
-            return Some(second);
-        }
-    }
-
-    None
-}
-
-fn is_errno_segment(segment: &str) -> bool {
-    segment.len() >= 2
-        && segment.starts_with('E')
-        && !segment.starts_with("ERR_")
-        && segment[1..]
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        bridge_error_code, clear_vm_context_registry_for_test, declared_bridge_response_bytes,
+        clear_vm_context_registry_for_test, declared_bridge_response_bytes, decode_bridge_error,
         deserialize_cbor_value, fill_vm_context_registry_for_test, register_async_bridge_fns,
         register_sync_bridge_fns, reserve_vm_context_slot, reset_vm_context_registry,
         serialize_cbor_value, vm_context_capacity_error, vm_context_registry_len_for_test,
@@ -2309,13 +2372,9 @@ mod tests {
     }
 
     #[test]
-    fn bridge_error_code_rejects_guest_controlled_errno_segments() {
-        assert_eq!(bridge_error_code("user said 'EACCES: denied'"), None);
-        assert_eq!(
-            bridge_error_code("prefix: user said 'EPERM': more text"),
-            None
-        );
-        assert_eq!(bridge_error_code("ERR_AGENTOS_FAKE: EACCES: denied"), None);
+    fn bridge_error_decoder_rejects_unstructured_diagnostics() {
+        assert!(decode_bridge_error(b"user said 'EACCES: denied'").is_none());
+        assert!(decode_bridge_error(b"ERR_AGENTOS_FAKE: EACCES: denied").is_none());
     }
 
     #[test]
@@ -2329,6 +2388,36 @@ mod tests {
             Some("ENOENT")
         );
         assert_eq!(bridge_error_code("EEXIST: already exists"), Some("EEXIST"));
+    }
+
+    #[test]
+    fn bridge_error_decoder_preserves_structured_fields() {
+        let mut payload = Vec::new();
+        ciborium::into_writer(
+            &ciborium::Value::Map(vec![
+                (
+                    ciborium::Value::Text(String::from("code")),
+                    ciborium::Value::Text(String::from("EACCES")),
+                ),
+                (
+                    ciborium::Value::Text(String::from("message")),
+                    ciborium::Value::Text(String::from("permission denied")),
+                ),
+                (
+                    ciborium::Value::Text(String::from("details")),
+                    ciborium::Value::Map(vec![(
+                        ciborium::Value::Text(String::from("limitName")),
+                        ciborium::Value::Text(String::from("maxBytes")),
+                    )]),
+                ),
+            ]),
+            &mut payload,
+        )
+        .expect("encode structured error");
+        let decoded = decode_bridge_error(&payload).expect("decode structured error");
+        assert_eq!(decoded.code, "EACCES");
+        assert_eq!(decoded.message, "permission denied");
+        assert!(decoded.details.is_some());
     }
 
     #[test]

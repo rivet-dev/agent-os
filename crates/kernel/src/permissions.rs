@@ -1,6 +1,6 @@
 use crate::vfs::{
-    validate_path, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
-    VirtualUtimeSpec,
+    validate_path, FileExtent, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem,
+    VirtualStat, VirtualUtimeSpec,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
@@ -854,6 +854,11 @@ impl<F: VirtualFileSystem> VirtualFileSystem for PermissionedFileSystem<F> {
     fn unwritten_ranges(&mut self, path: &str) -> VfsResult<Vec<(u64, u64)>> {
         self.check_subject(FsOperation::Read, path)?;
         self.inner.unwritten_ranges(path)
+    }
+
+    fn extent_at(&mut self, path: &str, index: usize) -> VfsResult<Option<FileExtent>> {
+        self.check_subject(FsOperation::Read, path)?;
+        self.inner.extent_at(path, index)
     }
 
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {

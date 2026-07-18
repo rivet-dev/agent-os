@@ -372,7 +372,7 @@ export async function loadPyodide(options) {
             Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
                 panic!("unexpected VFS RPC request during stdout test: {request:?}");
             }
-            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+            Some(PythonExecutionEvent::HostRpcRequest(request)) => {
                 // Module-resolution sync RPCs now surface here (the runner
                 // module imports node builtins); service them host-directly.
                 let serviced = execution
@@ -545,7 +545,7 @@ export async function loadPyodide(options) {
                     break;
                 }
             }
-            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+            Some(PythonExecutionEvent::HostRpcRequest(request)) => {
                 assert!(
                     execution
                         .try_service_standalone_module_sync_rpc(&request)
@@ -582,7 +582,7 @@ export async function loadPyodide(options) {
             Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
                 panic!("unexpected VFS RPC request during stdin test: {request:?}");
             }
-            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+            Some(PythonExecutionEvent::HostRpcRequest(request)) => {
                 assert!(
                     execution
                         .try_service_standalone_module_sync_rpc(&request)
@@ -744,7 +744,7 @@ export async function loadPyodide(options) {
                     }
                 }
             }
-            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+            Some(PythonExecutionEvent::HostRpcRequest(request)) => {
                 assert!(
                     execution
                         .try_service_standalone_module_sync_rpc(&request)
@@ -832,8 +832,7 @@ export async function loadPyodide() {
             cwd: temp.path().to_path_buf(),
         })
         .expect("start Python execution");
-    let child_pid = execution.child_pid();
-    let uses_shared_v8_runtime = execution.uses_shared_v8_runtime();
+    let native_process_id = execution.native_process_id();
 
     let error = execution
         .wait(Some(Duration::from_millis(100)))
@@ -845,8 +844,8 @@ export async function loadPyodide() {
         other => panic!("expected timeout error, got {other:?}"),
     }
 
-    if !uses_shared_v8_runtime {
-        assert_process_exits(child_pid);
+    if let Some(process_id) = native_process_id {
+        assert_process_exits(process_id);
     }
 }
 
@@ -898,8 +897,7 @@ export async function loadPyodide() {
             cwd: temp.path().to_path_buf(),
         })
         .expect("start Python execution");
-    let child_pid = execution.child_pid();
-    let uses_shared_v8_runtime = execution.uses_shared_v8_runtime();
+    let native_process_id = execution.native_process_id();
 
     let error = execution
         .wait(None)
@@ -911,8 +909,8 @@ export async function loadPyodide() {
         other => panic!("expected timeout error, got {other:?}"),
     }
 
-    if !uses_shared_v8_runtime {
-        assert_process_exits(child_pid);
+    if let Some(process_id) = native_process_id {
+        assert_process_exits(process_id);
     }
 }
 
@@ -963,8 +961,7 @@ export async function loadPyodide() {
             cwd: temp.path().to_path_buf(),
         })
         .expect("start Python execution");
-    let child_pid = execution.child_pid();
-    let uses_shared_v8_runtime = execution.uses_shared_v8_runtime();
+    let native_process_id = execution.native_process_id();
 
     let mut saw_request = false;
     let mut stderr = Vec::new();
@@ -980,7 +977,7 @@ export async function loadPyodide() {
                 assert_eq!(request.method, PythonVfsRpcMethod::Read);
                 assert_eq!(request.path, "/workspace/never.txt");
             }
-            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+            Some(PythonExecutionEvent::HostRpcRequest(request)) => {
                 assert!(
                     execution
                         .try_service_standalone_module_sync_rpc(&request)
@@ -1015,8 +1012,8 @@ export async function loadPyodide() {
             || stderr.contains("timed out after 50ms"),
         "unexpected stderr: {stderr}"
     );
-    if !uses_shared_v8_runtime {
-        assert_process_exits(child_pid);
+    if let Some(process_id) = native_process_id {
+        assert_process_exits(process_id);
     }
 }
 
@@ -1116,8 +1113,7 @@ export async function loadPyodide(options) {
             cwd: temp.path().to_path_buf(),
         })
         .expect("start Python execution");
-    let child_pid = execution.child_pid();
-    let uses_shared_v8_runtime = execution.uses_shared_v8_runtime();
+    let native_process_id = execution.native_process_id();
 
     let ready_deadline = Instant::now() + Duration::from_secs(5);
     let mut saw_ready = false;
@@ -1144,7 +1140,7 @@ export async function loadPyodide(options) {
             Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
                 panic!("unexpected VFS RPC request during kill test: {request:?}");
             }
-            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+            Some(PythonExecutionEvent::HostRpcRequest(request)) => {
                 assert!(
                     execution
                         .try_service_standalone_module_sync_rpc(&request)
@@ -1180,7 +1176,7 @@ export async function loadPyodide(options) {
             Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
                 panic!("unexpected VFS RPC request after kill: {request:?}");
             }
-            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+            Some(PythonExecutionEvent::HostRpcRequest(request)) => {
                 assert!(
                     execution
                         .try_service_standalone_module_sync_rpc(&request)
@@ -1193,8 +1189,8 @@ export async function loadPyodide(options) {
     }
 
     assert_eq!(exit_code, Some(1));
-    if !uses_shared_v8_runtime {
-        assert_process_exits(child_pid);
+    if let Some(process_id) = native_process_id {
+        assert_process_exits(process_id);
     }
 }
 

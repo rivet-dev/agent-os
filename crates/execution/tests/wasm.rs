@@ -1,24 +1,24 @@
 mod support;
 
 use agentos_execution::wasm::{
-    NativeBinaryFormat, WASM_MAX_FUEL_ENV, WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV,
+    NativeBinaryFormat, WASM_MAX_MEMORY_BYTES_ENV, WASM_MAX_STACK_BYTES_ENV,
 };
 use agentos_execution::{
-    CreateWasmContextRequest, StartWasmExecutionRequest, WasmExecutionEngine, WasmExecutionError,
-    WasmExecutionEvent, WasmExecutionLimits, WasmPermissionTier,
+    CreateWasmContextRequest, StartWasmExecutionRequest, WasmExecution, WasmExecutionEngine,
+    WasmExecutionError, WasmExecutionEvent, WasmExecutionLimits, WasmPermissionTier,
 };
 use base64::Engine;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::Command;
-use std::sync::mpsc;
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
+
+const TEST_WASM_WALL_CLOCK_LIMIT_MS: &str = "TEST_WASM_WALL_CLOCK_LIMIT_MS";
 
 const WASM_WARMUP_METRICS_PREFIX: &str = "__AGENTOS_WASM_WARMUP_METRICS__:";
 
@@ -113,6 +113,33 @@ fn decode_sync_rpc_bytes(value: &serde_json::Value) -> Vec<u8> {
         .expect("decode sync rpc bytes")
 }
 
+fn poll_wasm_event_after_initial_signal_mask(
+    execution: &mut WasmExecution,
+    timeout: Duration,
+) -> Option<WasmExecutionEvent> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .expect("timed out after acknowledging the initial signal mask");
+        match execution
+            .poll_event_blocking(remaining)
+            .expect("poll wasm event")
+        {
+            Some(WasmExecutionEvent::SyncRpcRequest(request))
+                if request.method == "process.wasm_sync_rpc"
+                    && request.args.first().and_then(Value::as_str)
+                        == Some("process.signal_mask") =>
+            {
+                execution
+                    .respond_sync_rpc_success(request.id, json!({ "signals": [] }))
+                    .expect("commit the initial standalone signal mask");
+            }
+            event => return event,
+        }
+    }
+}
+
 fn write_fake_node_binary(path: &Path, log_path: &Path) {
     let script = format!(
         "#!/bin/sh\nset -eu\nprintf 'host-node-invoked\\n' >> \"{}\"\nexit 1\n",
@@ -204,14 +231,15 @@ fn parse_unicode_escape_unit(chars: &mut std::str::Chars<'_>) -> u16 {
     u16::from_str_radix(&hex, 16).expect("unicode escape value")
 }
 
-/// Mirror the sidecar's config→limits flow for tests that still express WASM
-/// limits via the historical `AGENTOS_WASM_*` env keys: translate them into the
-/// typed `WasmExecutionLimits` the engine now reads. Production sources these
-/// from the BARE-wire resource limits, never env.
+/// Mirror the sidecar's config→limits flow for tests that express selected WASM
+/// limits through fixture env values. Production sources these from typed VM
+/// config, never env.
 fn wasm_limits_from_env(env: &BTreeMap<String, String>) -> WasmExecutionLimits {
     let parse = |key: &str| env.get(key).and_then(|value| value.parse::<u64>().ok());
     WasmExecutionLimits {
-        max_fuel: parse(WASM_MAX_FUEL_ENV),
+        active_cpu_time_limit_ms: None,
+        wall_clock_limit_ms: parse(TEST_WASM_WALL_CLOCK_LIMIT_MS),
+        deterministic_fuel: None,
         max_memory_bytes: parse(WASM_MAX_MEMORY_BYTES_ENV),
         max_stack_bytes: parse(WASM_MAX_STACK_BYTES_ENV),
         max_module_file_bytes: None,
@@ -222,9 +250,11 @@ fn wasm_limits_from_env(env: &BTreeMap<String, String>) -> WasmExecutionLimits {
         max_sockets: None,
         max_blocking_read_ms: None,
         runner_heap_limit_mb: None,
-        runner_cpu_time_limit_ms: None,
         reactor_work_quantum: None,
         bridge_call_timeout_ms: None,
+        max_sync_rpc_response_line_bytes: None,
+        pending_event_count: None,
+        pending_event_bytes: None,
     }
 }
 
@@ -255,6 +285,7 @@ fn run_wasm_execution_with_limits(
             guest_runtime: Default::default(),
             vm_id: String::from("vm-wasm"),
             context_id,
+            managed_kernel_host: false,
             argv,
             env,
             cwd: cwd.to_path_buf(),
@@ -354,6 +385,46 @@ fn wasm_getrlimit_nofile_module(expected_limit: u64) -> Vec<u8> {
 "#,
     ))
     .expect("compile getrlimit nofile fixture")
+}
+
+fn wasm_process_output_prevalidation_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"
+(module
+  (type $getrlimit_t (func (param i32 i32 i32) (result i32)))
+  (type $waitpid_t (func (param i32 i32 i32 i32) (result i32)))
+  (type $exit_t (func (param i32)))
+  (import "host_process" "proc_getrlimit" (func $getrlimit (type $getrlimit_t)))
+  (import "host_process" "proc_waitpid" (func $waitpid (type $waitpid_t)))
+  (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (type $exit_t)))
+  (memory (export "memory") 1)
+  (func $_start (export "_start")
+    (i64.store (i32.const 0) (i64.const 1234605616436508552))
+    ;; The soft output is valid but the hard output crosses memory. EFAULT must
+    ;; be returned before the valid first output is partially overwritten.
+    (if
+      (i32.ne
+        (call $getrlimit (i32.const 7) (i32.const 0) (i32.const 65532))
+        (i32.const 21))
+      (then (call $proc_exit (i32.const 41))))
+    (if
+      (i64.ne
+        (i64.load (i32.const 0))
+        (i64.const 1234605616436508552))
+      (then (call $proc_exit (i32.const 42))))
+    ;; With no children, output validation must still win over ECHILD and must
+    ;; happen before the wait implementation inspects or pumps child state.
+    (if
+      (i32.ne
+        (call $waitpid
+          (i32.const -1) (i32.const 1)
+          (i32.const 65534) (i32.const 65534))
+        (i32.const 21))
+      (then (call $proc_exit (i32.const 43)))))
+)
+"#,
+    )
+    .expect("compile process output prevalidation fixture")
 }
 
 fn wasm_stdin_echo_module() -> Vec<u8> {
@@ -513,6 +584,7 @@ fn wasm_signal_state_module() -> Vec<u8> {
   (import "host_process" "proc_sigaction" (func $proc_sigaction (type $proc_sigaction_t)))
   (memory (export "memory") 1)
   (data (i32.const 32) "signal:ready\n")
+  (func (export "__wasi_signal_trampoline") (param i32))
   (func $_start (export "_start")
     (drop
       (call $proc_sigaction
@@ -995,6 +1067,7 @@ fn wasm_execution_runs_guest_module_through_v8() {
             limits: Default::default(),
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: vec![String::from("guest.wasm")],
             env: BTreeMap::from([(String::from("IGNORED_FOR_NOW"), String::from("ok"))]),
             cwd: temp.path().to_path_buf(),
@@ -1112,6 +1185,31 @@ fn wasm_getrlimit_nofile_reports_typed_fd_limit() {
     assert_eq!(exit_code, 0, "stdout={stdout} stderr={stderr}");
     assert!(stdout.is_empty(), "unexpected stdout: {stdout:?}");
     assert!(stderr.is_empty(), "unexpected stderr: {stderr:?}");
+}
+
+fn wasm_process_outputs_fault_before_partial_write_or_wait_state() {
+    assert_node_available();
+
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("guest.wasm"),
+        &wasm_process_output_prevalidation_module(),
+    );
+    let mut engine = support::wasm_engine();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
+    let (stdout, stderr, exit_code) = run_wasm_execution_with_limits(
+        &mut engine,
+        context.context_id,
+        temp.path(),
+        Vec::new(),
+        BTreeMap::new(),
+        WasmPermissionTier::Full,
+        WasmExecutionLimits::default(),
+    );
+    assert_eq!(exit_code, 0, "stdout={stdout} stderr={stderr}");
 }
 
 fn wasm_snapshot_runner_block_round_trips_twice() {
@@ -1470,6 +1568,7 @@ fn wasm_execution_rejects_vm_mismatch() {
             limits: Default::default(),
             vm_id: String::from("vm-other"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: Path::new("/tmp").to_path_buf(),
@@ -1482,7 +1581,7 @@ fn wasm_execution_rejects_vm_mismatch() {
         .contains("guest WebAssembly context belongs to vm vm-wasm, not vm-other"));
 }
 
-fn wasm_execution_streams_exit_event() {
+fn wasm_execution_streams_exit_event_after_signal_mask_commit() {
     assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
@@ -1500,6 +1599,7 @@ fn wasm_execution_streams_exit_event() {
             limits: Default::default(),
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
@@ -1508,6 +1608,7 @@ fn wasm_execution_streams_exit_event() {
         .expect("start wasm execution");
 
     let mut saw_stdout = false;
+    let mut saw_initial_signal_mask = false;
     let mut saw_exit = false;
 
     while !saw_exit {
@@ -1527,12 +1628,27 @@ fn wasm_execution_streams_exit_event() {
             Some(WasmExecutionEvent::Stderr(chunk)) => {
                 panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
             }
-            Some(WasmExecutionEvent::SyncRpcRequest(_)) => {}
+            Some(WasmExecutionEvent::SyncRpcRequest(request)) => {
+                assert_eq!(request.method, "process.wasm_sync_rpc");
+                assert_eq!(
+                    request.args.first().and_then(Value::as_str),
+                    Some("process.signal_mask"),
+                    "the smoke guest should only await its initial kernel signal mask"
+                );
+                execution
+                    .respond_sync_rpc_success(request.id, json!({ "signals": [] }))
+                    .expect("commit the initial standalone signal mask");
+                saw_initial_signal_mask = true;
+            }
             Some(WasmExecutionEvent::SignalState { .. }) => {}
             None => panic!("timed out waiting for wasm execution event"),
         }
     }
 
+    assert!(
+        saw_initial_signal_mask,
+        "the exit lifecycle must cross the reply-bearing signal-mask boundary"
+    );
     assert!(saw_stdout, "expected stdout event before exit");
 }
 
@@ -1554,6 +1670,7 @@ fn wasm_execution_can_route_stdio_through_kernel_sync_rpc() {
             limits: Default::default(),
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::from([(
                 String::from("AGENTOS_WASI_STDIO_SYNC_RPC"),
@@ -1564,13 +1681,11 @@ fn wasm_execution_can_route_stdio_through_kernel_sync_rpc() {
         })
         .expect("start wasm execution");
 
-    let request = match execution
-        .poll_event_blocking(Duration::from_secs(5))
-        .expect("poll wasm event")
-    {
-        Some(WasmExecutionEvent::SyncRpcRequest(request)) => request,
-        other => panic!("expected kernel stdio sync RPC request, got {other:?}"),
-    };
+    let request =
+        match poll_wasm_event_after_initial_signal_mask(&mut execution, Duration::from_secs(5)) {
+            Some(WasmExecutionEvent::SyncRpcRequest(request)) => request,
+            other => panic!("expected kernel stdio sync RPC request, got {other:?}"),
+        };
 
     assert_eq!(request.method, "__kernel_stdio_write");
     assert_eq!(request.args.first(), Some(&json!(1)));
@@ -1611,6 +1726,7 @@ fn wasm_execution_reads_streaming_stdin_via_kernel_bridge() {
             limits: Default::default(),
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::from([(
                 String::from("AGENTOS_WASI_STDIO_SYNC_RPC"),
@@ -1653,6 +1769,7 @@ fn wasm_execution_poll_oneoff_uses_kernel_poll_for_multiple_fds() {
             limits: Default::default(),
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
@@ -1660,13 +1777,11 @@ fn wasm_execution_poll_oneoff_uses_kernel_poll_for_multiple_fds() {
         })
         .expect("start wasm execution");
 
-    let request = match execution
-        .poll_event_blocking(Duration::from_secs(5))
-        .expect("poll wasm event")
-    {
-        Some(WasmExecutionEvent::SyncRpcRequest(request)) => request,
-        other => panic!("expected sync RPC request, got {other:?}"),
-    };
+    let request =
+        match poll_wasm_event_after_initial_signal_mask(&mut execution, Duration::from_secs(5)) {
+            Some(WasmExecutionEvent::SyncRpcRequest(request)) => request,
+            other => panic!("expected sync RPC request, got {other:?}"),
+        };
 
     assert_eq!(request.method, "__kernel_poll");
     assert_eq!(
@@ -1701,7 +1816,7 @@ fn wasm_execution_poll_oneoff_uses_kernel_poll_for_multiple_fds() {
     assert_eq!(stdout, "poll-ready\n");
 }
 
-fn wasm_execution_emits_signal_state_from_control_channel() {
+fn wasm_execution_waits_for_kernel_signal_state_commit_before_continuing() {
     assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
@@ -1719,6 +1834,7 @@ fn wasm_execution_emits_signal_state_from_control_channel() {
             limits: Default::default(),
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
@@ -1727,7 +1843,7 @@ fn wasm_execution_emits_signal_state_from_control_channel() {
         .expect("start wasm execution");
 
     let mut saw_stdout = false;
-    let mut saw_signal = false;
+    let mut saw_signal_request = false;
     let mut saw_exit = false;
 
     while !saw_exit {
@@ -1740,18 +1856,28 @@ fn wasm_execution_emits_signal_state_from_control_channel() {
                     .expect("stdout utf8")
                     .contains("signal:ready");
             }
-            Some(WasmExecutionEvent::SignalState {
-                signal,
-                registration,
-            }) => {
-                assert_eq!(signal, 2);
+            Some(WasmExecutionEvent::SyncRpcRequest(request)) => {
+                if request.method == "process.wasm_sync_rpc"
+                    && request.args.first().and_then(Value::as_str) == Some("process.signal_mask")
+                {
+                    execution
+                        .respond_sync_rpc_success(request.id, json!({ "signals": [] }))
+                        .expect("return the initial kernel signal mask");
+                    continue;
+                }
+                assert_eq!(request.method, "process.signal_state");
                 assert_eq!(
-                    registration.action,
-                    agentos_execution::wasm::WasmSignalDispositionAction::User
+                    request.args,
+                    vec![json!(2), json!("user"), json!("[15]"), json!(4660)]
                 );
-                assert_eq!(registration.mask, vec![15]);
-                assert_eq!(registration.flags, 0x1234);
-                saw_signal = true;
+                assert!(
+                    !saw_stdout,
+                    "the guest must remain blocked until the host commits signal state"
+                );
+                execution
+                    .respond_sync_rpc_success(request.id, Value::Null)
+                    .expect("acknowledge committed signal state");
+                saw_signal_request = true;
             }
             Some(WasmExecutionEvent::Exited(code)) => {
                 assert_eq!(code, 0);
@@ -1760,13 +1886,18 @@ fn wasm_execution_emits_signal_state_from_control_channel() {
             Some(WasmExecutionEvent::Stderr(chunk)) => {
                 panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
             }
-            Some(WasmExecutionEvent::SyncRpcRequest(_)) => {}
+            Some(WasmExecutionEvent::SignalState { .. }) => {
+                panic!("managed signal state must use the reply-bearing host-call path")
+            }
             None => panic!("timed out waiting for wasm execution event"),
         }
     }
 
     assert!(saw_stdout, "expected stdout event before exit");
-    assert!(saw_signal, "expected signal-state event before exit");
+    assert!(
+        saw_signal_request,
+        "expected a reply-bearing signal-state request before exit"
+    );
 }
 
 fn wasm_execution_preserves_stdout_when_signal_state_marker_shares_stdout_chunk() {
@@ -1790,6 +1921,7 @@ fn wasm_execution_preserves_stdout_when_signal_state_marker_shares_stdout_chunk(
             limits: Default::default(),
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
@@ -1802,10 +1934,7 @@ fn wasm_execution_preserves_stdout_when_signal_state_marker_shares_stdout_chunk(
     let mut saw_exit = false;
 
     while !saw_exit {
-        match execution
-            .poll_event_blocking(Duration::from_secs(5))
-            .expect("poll wasm event")
-        {
+        match poll_wasm_event_after_initial_signal_mask(&mut execution, Duration::from_secs(5)) {
             Some(WasmExecutionEvent::Stdout(chunk)) => stdout.push(chunk),
             Some(WasmExecutionEvent::SignalState {
                 signal,
@@ -1814,7 +1943,7 @@ fn wasm_execution_preserves_stdout_when_signal_state_marker_shares_stdout_chunk(
                 assert_eq!(signal, 2);
                 assert_eq!(
                     registration.action,
-                    agentos_execution::wasm::WasmSignalDispositionAction::User
+                    agentos_execution::ExecutionSignalDispositionAction::User
                 );
                 assert_eq!(registration.mask, vec![15]);
                 assert_eq!(registration.flags, 0x1234);
@@ -1827,7 +1956,9 @@ fn wasm_execution_preserves_stdout_when_signal_state_marker_shares_stdout_chunk(
             Some(WasmExecutionEvent::Stderr(chunk)) => {
                 panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
             }
-            Some(WasmExecutionEvent::SyncRpcRequest(_)) => {}
+            Some(WasmExecutionEvent::SyncRpcRequest(request)) => {
+                panic!("unexpected sync RPC request: {request:?}")
+            }
             None => panic!("timed out waiting for wasm execution event"),
         }
     }
@@ -1857,6 +1988,7 @@ fn wasm_execution_reassembles_split_signal_state_marker_across_stdout_chunks() {
             limits: Default::default(),
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
@@ -1869,10 +2001,7 @@ fn wasm_execution_reassembles_split_signal_state_marker_across_stdout_chunks() {
     let mut stdout = Vec::new();
 
     while !saw_exit {
-        match execution
-            .poll_event_blocking(Duration::from_secs(5))
-            .expect("poll wasm event")
-        {
+        match poll_wasm_event_after_initial_signal_mask(&mut execution, Duration::from_secs(5)) {
             Some(WasmExecutionEvent::Stdout(chunk)) => stdout.push(chunk),
             Some(WasmExecutionEvent::SignalState {
                 signal,
@@ -1881,7 +2010,7 @@ fn wasm_execution_reassembles_split_signal_state_marker_across_stdout_chunks() {
                 assert_eq!(signal, 2);
                 assert_eq!(
                     registration.action,
-                    agentos_execution::wasm::WasmSignalDispositionAction::User
+                    agentos_execution::ExecutionSignalDispositionAction::User
                 );
                 assert_eq!(registration.mask, vec![15]);
                 assert_eq!(registration.flags, 0x1234);
@@ -1894,7 +2023,9 @@ fn wasm_execution_reassembles_split_signal_state_marker_across_stdout_chunks() {
             Some(WasmExecutionEvent::Stderr(chunk)) => {
                 panic!("unexpected stderr: {}", String::from_utf8_lossy(&chunk));
             }
-            Some(WasmExecutionEvent::SyncRpcRequest(_)) => {}
+            Some(WasmExecutionEvent::SyncRpcRequest(request)) => {
+                panic!("unexpected sync RPC request: {request:?}")
+            }
             None => panic!("timed out waiting for wasm execution event"),
         }
     }
@@ -2244,7 +2375,7 @@ fn wasm_warmup_metrics_encode_emoji_module_paths_as_json() {
     assert!(stderr.contains("\\ud83d\\ude00"), "stderr: {stderr}");
 }
 
-fn wasm_execution_times_out_when_fuel_budget_is_exhausted() {
+fn wasm_execution_times_out_when_wall_clock_limit_is_exceeded() {
     assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
@@ -2264,19 +2395,22 @@ fn wasm_execution_times_out_when_fuel_budget_is_exhausted() {
         context.context_id,
         temp.path(),
         Vec::new(),
-        BTreeMap::from([(String::from(WASM_MAX_FUEL_ENV), String::from("25"))]),
+        BTreeMap::from([(
+            String::from(TEST_WASM_WALL_CLOCK_LIMIT_MS),
+            String::from("25"),
+        )]),
         WasmPermissionTier::Full,
     );
 
     assert_eq!(exit_code, 124, "stdout={stdout} stderr={stderr}");
     assert!(stdout.is_empty(), "stdout={stdout}");
     assert!(
-        stderr.contains("fuel budget exhausted"),
-        "stderr should mention the exhausted fuel budget: {stderr}"
+        stderr.contains("wall-clock limit exceeded"),
+        "stderr should mention the elapsed wall-clock limit: {stderr}"
     );
 }
 
-fn wasm_execution_poll_path_times_out_when_fuel_budget_is_exhausted() {
+fn wasm_execution_poll_path_times_out_at_wall_clock_limit() {
     assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
@@ -2295,11 +2429,12 @@ fn wasm_execution_poll_path_times_out_when_fuel_budget_is_exhausted() {
         .start_execution(StartWasmExecutionRequest {
             guest_runtime: Default::default(),
             limits: WasmExecutionLimits {
-                max_fuel: Some(25),
+                wall_clock_limit_ms: Some(25),
                 ..Default::default()
             },
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
@@ -2314,18 +2449,20 @@ fn wasm_execution_poll_path_times_out_when_fuel_budget_is_exhausted() {
         let remaining = deadline
             .checked_duration_since(std::time::Instant::now())
             .expect("poll path did not time out within the bounded test window");
-        match execution
-            .poll_event_blocking(remaining.min(Duration::from_millis(250)))
-            .expect("poll wasm event")
-        {
+        match poll_wasm_event_after_initial_signal_mask(
+            &mut execution,
+            remaining.min(Duration::from_millis(250)),
+        ) {
             Some(WasmExecutionEvent::Stderr(chunk)) => {
                 stderr.push_str(&String::from_utf8_lossy(&chunk));
             }
             Some(WasmExecutionEvent::Exited(code)) => {
                 exit_code = Some(code);
             }
+            Some(WasmExecutionEvent::SyncRpcRequest(request)) => {
+                panic!("unexpected sync RPC request: {request:?}")
+            }
             Some(WasmExecutionEvent::Stdout(_))
-            | Some(WasmExecutionEvent::SyncRpcRequest(_))
             | Some(WasmExecutionEvent::SignalState { .. })
             | None => {}
         }
@@ -2333,12 +2470,12 @@ fn wasm_execution_poll_path_times_out_when_fuel_budget_is_exhausted() {
 
     assert_eq!(exit_code, Some(124), "stderr={stderr}");
     assert!(
-        stderr.contains("fuel budget exhausted"),
-        "stderr should mention the exhausted fuel budget: {stderr}"
+        stderr.contains("wall-clock limit exceeded"),
+        "stderr should mention the elapsed wall-clock limit: {stderr}"
     );
 }
 
-fn wasm_execution_allows_prewarm_timeout_to_differ_from_execution_timeout() {
+fn wasm_execution_allows_prewarm_timeout_to_differ_from_wall_clock_limit() {
     assert_node_available();
 
     let temp = tempdir().expect("create temp dir");
@@ -2358,15 +2495,18 @@ fn wasm_execution_allows_prewarm_timeout_to_differ_from_execution_timeout() {
         context.context_id,
         temp.path(),
         Vec::new(),
-        BTreeMap::from([(String::from(WASM_MAX_FUEL_ENV), String::from("25"))]),
+        BTreeMap::from([(
+            String::from(TEST_WASM_WALL_CLOCK_LIMIT_MS),
+            String::from("25"),
+        )]),
         WasmPermissionTier::Full,
     );
 
     assert_eq!(exit_code, 124, "stdout={stdout} stderr={stderr}");
     assert!(stdout.is_empty(), "stdout={stdout}");
     assert!(
-        stderr.contains("fuel budget exhausted"),
-        "stderr should mention the exhausted fuel budget: {stderr}"
+        stderr.contains("wall-clock limit exceeded"),
+        "stderr should mention the elapsed wall-clock limit: {stderr}"
     );
 }
 
@@ -2395,6 +2535,7 @@ fn wasm_execution_rejects_modules_whose_memory_cap_exceeds_limit() {
             },
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
@@ -2468,6 +2609,7 @@ fn wasm_execution_rejects_modules_that_exceed_parser_file_size_cap() {
             },
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
@@ -2510,6 +2652,7 @@ fn wasm_execution_rejects_modules_with_too_many_import_entries() {
             },
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
@@ -2550,6 +2693,7 @@ fn wasm_execution_rejects_modules_with_too_many_memory_entries() {
             },
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
@@ -2592,6 +2736,7 @@ fn wasm_execution_rejects_varuints_that_exceed_parser_iteration_cap() {
             },
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
@@ -2652,6 +2797,7 @@ fi\n";
             limits: Default::default(),
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: vec![shim_path.to_string_lossy().into_owned()],
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
@@ -2717,6 +2863,7 @@ fn wasm_execution_rejects_random_non_wasm_bytes_with_typed_error() {
             limits: Default::default(),
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: Vec::new(),
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
@@ -2782,6 +2929,7 @@ fn wasm_execution_rejects_native_binary_headers_with_explicit_error() {
                 limits: Default::default(),
                 vm_id: String::from("vm-wasm"),
                 context_id: context.context_id,
+                managed_kernel_host: false,
                 argv: Vec::new(),
                 env: BTreeMap::new(),
                 cwd: temp.path().to_path_buf(),
@@ -2849,74 +2997,49 @@ fn wasm_unbounded_recursion_module() -> Vec<u8> {
     .expect("compile unbounded-recursion wasm fixture")
 }
 
-// Watchdog runner for WASM cases that may run unbounded. The whole execution
-// (engine + context + wait) happens on a spawned thread, so a guest that the
-// engine never terminates cannot hang the test binary: the test thread reclaims
-// control after `wall_clock_budget` and reports `None`.
-fn run_wasm_execution_with_watchdog(
-    module_bytes: Vec<u8>,
-    env: BTreeMap<String, String>,
-    wall_clock_budget: Duration,
-) -> Option<(String, String, i32)> {
-    let (tx, rx) = mpsc::channel::<(String, String, i32)>();
-    thread::spawn(move || {
-        let temp = match tempdir() {
-            Ok(temp) => temp,
-            Err(_) => return,
-        };
-        write_fixture(&temp.path().join("guest.wasm"), &module_bytes);
-
-        let mut engine = support::wasm_engine();
-        let context = engine.create_context(CreateWasmContextRequest {
-            vm_id: String::from("vm-wasm"),
-            module_path: Some(String::from("./guest.wasm")),
-        });
-
-        let result = run_wasm_execution(
-            &mut engine,
-            context.context_id,
-            temp.path(),
-            Vec::new(),
-            env,
-            WasmPermissionTier::Full,
-        );
-        let _ = tx.send(result);
-    });
-
-    rx.recv_timeout(wall_clock_budget).ok()
-}
-
-// SE-EXEC-05 (B.1) SAFEGUARD [x-ref FAILURES.md#F-002]: with
-// `AGENTOS_WASM_MAX_STACK_BYTES` configured, never-returning recursion must be
-// terminated nonzero AND the failure must cite the operator-configured stack
-// byte budget instead of the engine's generic default-guard message. Before the
-// fix the env was never read by the engine (dead cap), so the guest trapped on
-// V8's default `RangeError` with a generic message. The run is watchdog-bound so
-// it cannot hang CI, and the configured cap makes it terminate fast.
-fn wasm_deep_recursion_respects_configured_stack_byte_limit() {
+// SE-EXEC-05 (B.1) SAFEGUARD [x-ref FAILURES.md#F-002]: V8 has no enforceable
+// per-module stack-byte lever. A configured limit must therefore fail closed at
+// admission and name the unenforceable requested bound instead of starting an
+// unbounded guest or relying on V8's generic RangeError guard.
+fn wasm_configured_stack_byte_limit_fails_closed_for_v8() {
     assert_node_available();
 
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("guest.wasm"),
+        &wasm_unbounded_recursion_module(),
+    );
+
+    let mut engine = support::wasm_engine();
+    let context = engine.create_context(CreateWasmContextRequest {
+        vm_id: String::from("vm-wasm"),
+        module_path: Some(String::from("./guest.wasm")),
+    });
     let env = BTreeMap::from([(
         String::from(WASM_MAX_STACK_BYTES_ENV),
         String::from("65536"),
     )]);
-    let outcome = run_wasm_execution_with_watchdog(
-        wasm_unbounded_recursion_module(),
-        env,
-        Duration::from_secs(45),
-    );
+    let error = engine
+        .start_execution(StartWasmExecutionRequest {
+            guest_runtime: Default::default(),
+            limits: wasm_limits_from_env(&env),
+            vm_id: String::from("vm-wasm"),
+            context_id: context.context_id,
+            managed_kernel_host: false,
+            argv: Vec::new(),
+            env,
+            cwd: temp.path().to_path_buf(),
+            permission_tier: WasmPermissionTier::Full,
+        })
+        .expect_err("V8 must reject an unenforceable stack-byte limit");
 
-    let (stdout, stderr, exit_code) =
-        outcome.expect("deep recursion run did not finish within the watchdog budget");
-
-    assert_ne!(
-        exit_code, 0,
-        "deep recursion should be terminated, not run unbounded: stdout={stdout} stderr={stderr}"
-    );
-    assert!(
-        stderr.contains("65536") || stderr.to_lowercase().contains("configured"),
-        "termination should cite the configured stack byte limit, not a generic default guard: stderr={stderr}"
-    );
+    match error {
+        WasmExecutionError::InvalidLimit(message) => assert_eq!(
+            message,
+            "configured wasm max stack byte limit 65536 cannot be enforced by the V8 runner"
+        ),
+        other => panic!("expected InvalidLimit, got {other:?}"),
+    }
 }
 
 // Separate libtest cases in this binary still trip a V8 teardown/init crash, so
@@ -2924,7 +3047,7 @@ fn wasm_deep_recursion_respects_configured_stack_byte_limit() {
 //
 // NOT split for cargo-nextest (unlike `python_suite`/`kill_cleanup_suite`): three
 // cases here run an infinite-loop guest module (`wasm_execution_times_out_when_
-// fuel_budget_is_exhausted`, `..._poll_path_times_out_...`, `..._allows_prewarm_
+// wall_clock_limit_is_exceeded`, `..._poll_path_times_out_...`, `..._allows_prewarm_
 // timeout_to_differ_...`). In this collapsed run they are cheap because earlier
 // cases warmed the process-global V8 state, but in a COLD nextest process the
 // infinite loop is bounded only by the ~30s V8 CPU-time watchdog, so each costs
@@ -2939,6 +3062,7 @@ fn wasm_suite() {
     wasm_execution_runs_guest_module_through_v8();
     wasm_spawn_action_decoder_enforces_typed_limits_with_e2big();
     wasm_getrlimit_nofile_reports_typed_fd_limit();
+    wasm_process_outputs_fault_before_partial_write_or_wait_state();
     wasm_snapshot_runner_block_round_trips_twice();
     wasm_snapshot_runner_warm_worker_pool_hits();
     wasm_snapshot_runner_warm_worker_pool_disabled_falls_back();
@@ -2949,11 +3073,11 @@ fn wasm_suite() {
     wasm_execution_ignores_guest_overrides_for_internal_node_env();
     wasm_execution_freezes_wasi_clock_time();
     wasm_execution_rejects_vm_mismatch();
-    wasm_execution_streams_exit_event();
+    wasm_execution_streams_exit_event_after_signal_mask_commit();
     wasm_execution_can_route_stdio_through_kernel_sync_rpc();
     wasm_execution_reads_streaming_stdin_via_kernel_bridge();
     wasm_execution_poll_oneoff_uses_kernel_poll_for_multiple_fds();
-    wasm_execution_emits_signal_state_from_control_channel();
+    wasm_execution_waits_for_kernel_signal_state_commit_before_continuing();
     wasm_execution_preserves_stdout_when_signal_state_marker_shares_stdout_chunk();
     wasm_execution_reassembles_split_signal_state_marker_across_stdout_chunks();
     wasm_read_only_tier_blocks_workspace_writes_but_read_write_allows_them();
@@ -2964,9 +3088,9 @@ fn wasm_suite() {
     wasm_execution_reuses_shared_warmup_path_across_contexts();
     wasm_execution_rewarms_when_symlink_target_changes_with_same_size_module();
     wasm_warmup_metrics_encode_emoji_module_paths_as_json();
-    wasm_execution_times_out_when_fuel_budget_is_exhausted();
-    wasm_execution_poll_path_times_out_when_fuel_budget_is_exhausted();
-    wasm_execution_allows_prewarm_timeout_to_differ_from_execution_timeout();
+    wasm_execution_times_out_when_wall_clock_limit_is_exceeded();
+    wasm_execution_poll_path_times_out_at_wall_clock_limit();
+    wasm_execution_allows_prewarm_timeout_to_differ_from_wall_clock_limit();
     wasm_execution_rejects_modules_whose_memory_cap_exceeds_limit();
     wasm_execution_enforces_runtime_memory_growth_limit_for_modules_without_declared_maximum();
     wasm_execution_rejects_modules_that_exceed_parser_file_size_cap();
@@ -2979,7 +3103,7 @@ fn wasm_suite() {
 
     // SE-EXEC-05 (B.1) SAFEGUARD [x-ref FAILURES.md#F-002]: the configured WASM
     // stack byte cap must now bound runaway recursion and attribute the failure.
-    wasm_deep_recursion_respects_configured_stack_byte_limit();
+    wasm_configured_stack_byte_limit_fails_closed_for_v8();
 
     // Convergence item C: the official WASI preview1 conformance subset runs on
     // the native backend of the SINGLE shared runner (same manifest the browser

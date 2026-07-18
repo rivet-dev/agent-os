@@ -1314,6 +1314,7 @@ function execSync(command, options) {
       input: opts.input == null ? null : encodeBridgeBytes(opts.input),
       maxBuffer,
       shell: true,
+      stdio: childProcessBridgeStdio(opts.stdio),
       timeout: Number.isInteger(opts.timeout) && opts.timeout > 0 ? opts.timeout : null,
       killSignal: normalizeChildProcessSignal(opts.killSignal).signalCode ?? "SIGTERM"
     })
@@ -1358,6 +1359,12 @@ function execSync(command, options) {
   }
   return result.stdout;
 }
+function normalizeChildProcessStdio(stdio) {
+  return Array.isArray(stdio) ? stdio : typeof stdio === "string" ? [stdio, stdio, stdio] : ["pipe", "pipe", "pipe"];
+}
+function childProcessBridgeStdio(stdio) {
+  return normalizeChildProcessStdio(stdio).map((mode) => typeof mode === "string" ? mode : "pipe");
+}
 function spawn(command, args, options) {
   let argsArray = [];
   let opts = {};
@@ -1375,7 +1382,7 @@ function spawn(command, args, options) {
   child.spawnfile = command;
   child.spawnargs = [command, ...argsArray];
   child.detached = opts.detached === true;
-  const stdio = Array.isArray(opts.stdio) ? opts.stdio : opts.stdio === "inherit" ? ["inherit", "inherit", "inherit"] : [];
+  const stdio = normalizeChildProcessStdio(opts.stdio);
   // Node fd inheritance: when stdio[1]/stdio[2] is a numeric fd the child's
   // stdout/stderr is wired to that (host/VFS) descriptor, so the bytes are
   // written there instead of being delivered on child.stdout/child.stderr
@@ -1407,7 +1414,11 @@ function spawn(command, args, options) {
           pty: opts.agentosPty && typeof opts.agentosPty === "object" ? {
             cols: Number.isInteger(opts.agentosPty.cols) && opts.agentosPty.cols > 0 ? opts.agentosPty.cols : 80,
             rows: Number.isInteger(opts.agentosPty.rows) && opts.agentosPty.rows > 0 ? opts.agentosPty.rows : 24
-          } : opts.agentosPty === true ? { cols: 80, rows: 24 } : null
+          } : opts.agentosPty === true ? { cols: 80, rows: 24 } : null,
+          // A non-empty stdio vector marks this as Node child_process
+          // ownership. The sidecar must return output to this bridge even
+          // though the Linux kernel process inherits fd 1/2 internally.
+          stdio: childProcessBridgeStdio(stdio)
         })
       ]));
     } catch (error) {
@@ -1568,6 +1579,7 @@ function spawnSync(command, args, options) {
         input: opts.input == null ? null : encodeBridgeBytes(opts.input),
         maxBuffer,
         shell: opts.shell === true || typeof opts.shell === "string",
+        stdio: childProcessBridgeStdio(opts.stdio),
         timeout,
         killSignal
       })

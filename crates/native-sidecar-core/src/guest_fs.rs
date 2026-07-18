@@ -383,7 +383,7 @@ pub fn guest_filesystem_stat(stat: VirtualStat) -> GuestFilesystemStat {
 }
 
 fn kernel_error(error: agentos_kernel::kernel::KernelError) -> SidecarCoreError {
-    SidecarCoreError::new(error.to_string())
+    SidecarCoreError::typed(error.code(), error.message())
 }
 
 #[cfg(test)]
@@ -465,6 +465,19 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.to_string(), "guest filesystem pwrite requires offset");
+    }
+
+    #[test]
+    fn preserves_kernel_errno_separately_from_the_diagnostic() {
+        let mut kernel = test_kernel();
+        let error = handle_guest_filesystem_call(
+            &mut kernel,
+            request(GuestFilesystemOperation::ReadFile, "/missing"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), Some("ENOENT"));
+        assert!(!error.message().starts_with("ENOENT:"));
+        assert!(error.to_string().starts_with("ENOENT:"));
     }
 
     #[test]

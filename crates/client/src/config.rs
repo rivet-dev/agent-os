@@ -378,12 +378,6 @@ pub struct ResourceLimits {
     pub max_readdir_entries: Option<u64>,
     #[serde(
         default,
-        rename = "maxWasmFuel",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub max_wasm_fuel: Option<u64>,
-    #[serde(
-        default,
         rename = "maxWasmMemoryBytes",
         skip_serializing_if = "Option::is_none"
     )]
@@ -716,10 +710,22 @@ pub struct WasmLimits {
     pub runner_heap_limit_mb: Option<u64>,
     #[serde(
         default,
-        rename = "runnerCpuTimeLimitMs",
+        rename = "activeCpuTimeLimitMs",
         skip_serializing_if = "Option::is_none"
     )]
-    pub runner_cpu_time_limit_ms: Option<u64>,
+    pub active_cpu_time_limit_ms: Option<u64>,
+    #[serde(
+        default,
+        rename = "wallClockLimitMs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub wall_clock_limit_ms: Option<u64>,
+    #[serde(
+        default,
+        rename = "deterministicFuel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub deterministic_fuel: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -754,6 +760,18 @@ pub struct ProcessLimits {
         skip_serializing_if = "Option::is_none"
     )]
     pub pending_event_bytes: Option<u64>,
+    #[serde(
+        default,
+        rename = "maxPendingChildSyncCount",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_pending_child_sync_count: Option<u64>,
+    #[serde(
+        default,
+        rename = "maxPendingChildSyncBytes",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_pending_child_sync_bytes: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------

@@ -24,10 +24,13 @@ static int poll_abi_matches_linux(void) {
 
 static int normal_read_write_aliases(void) {
     int descriptors[2];
-    if (pipe(descriptors) != 0)
+    if (pipe(descriptors) != 0) {
+        fprintf(stderr, "normal aliases: pipe errno=%d\n", errno);
         return 0;
+    }
     char byte = 'x';
     if (write(descriptors[1], &byte, 1) != 1) {
+        fprintf(stderr, "normal aliases: write errno=%d\n", errno);
         close(descriptors[0]);
         close(descriptors[1]);
         return 0;
@@ -42,6 +45,11 @@ static int normal_read_write_aliases(void) {
     close(descriptors[0]);
     close(descriptors[1]);
     printf("poll_normal_aliases=%s\n", ok ? "yes" : "no");
+    if (!ok)
+        fprintf(stderr,
+            "normal aliases: rc=%d errno=%d read_revents=0x%x "
+            "write_revents=0x%x\n",
+            result, errno, fds[0].revents, fds[1].revents);
     return ok;
 }
 

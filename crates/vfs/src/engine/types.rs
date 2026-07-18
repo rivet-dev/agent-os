@@ -26,32 +26,40 @@ pub const S_IFIFO: u32 = 0o010000;
 pub(crate) fn decode_unwritten_extents(
     xattrs: &BTreeMap<String, Vec<u8>>,
 ) -> VfsResult<Vec<(u64, u64)>> {
-    let Some(encoded) = xattrs.get(INODE_UNWRITTEN_EXTENTS_XATTR) else {
-        return Ok(Vec::new());
-    };
-    if encoded.len() % 16 != 0 {
+    Ok(unwritten_sector_ranges(xattrs)?.collect())
+}
+
+pub(crate) fn unwritten_sector_ranges(
+    xattrs: &BTreeMap<String, Vec<u8>>,
+) -> VfsResult<impl Iterator<Item = (u64, u64)> + Clone + '_> {
+    let encoded = xattrs
+        .get(INODE_UNWRITTEN_EXTENTS_XATTR)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if !encoded.len().is_multiple_of(16) {
         return Err(VfsError::new(
             "EIO",
             "corrupt internal unwritten-extent metadata",
         ));
     }
-    let mut ranges = Vec::with_capacity(encoded.len() / 16);
+    let mut prior_end = None;
     for chunk in encoded.chunks_exact(16) {
-        let start = u64::from_le_bytes(chunk[..8].try_into().expect("eight-byte extent start"));
-        let end = u64::from_le_bytes(chunk[8..].try_into().expect("eight-byte extent end"));
-        if start >= end
-            || ranges
-                .last()
-                .is_some_and(|(_, prior_end)| *prior_end >= start)
-        {
+        let (start, end) = decode_unwritten_extent(chunk);
+        if start >= end || prior_end.is_some_and(|prior_end| prior_end >= start) {
             return Err(VfsError::new(
                 "EIO",
                 "corrupt internal unwritten-extent ordering",
             ));
         }
-        ranges.push((start, end));
+        prior_end = Some(end);
     }
-    Ok(ranges)
+    Ok(encoded.chunks_exact(16).map(decode_unwritten_extent))
+}
+
+fn decode_unwritten_extent(chunk: &[u8]) -> (u64, u64) {
+    let start = u64::from_le_bytes(chunk[..8].try_into().expect("eight-byte extent start"));
+    let end = u64::from_le_bytes(chunk[8..].try_into().expect("eight-byte extent end"));
+    (start, end)
 }
 
 pub(crate) fn encode_unwritten_extents(
@@ -74,14 +82,7 @@ pub(crate) fn unwritten_byte_ranges(
     xattrs: &BTreeMap<String, Vec<u8>>,
     size: u64,
 ) -> VfsResult<Vec<(u64, u64)>> {
-    Ok(decode_unwritten_extents(xattrs)?
-        .into_iter()
-        .filter_map(|(start, end)| {
-            let start = start.saturating_mul(512).min(size);
-            let end = end.saturating_mul(512).min(size);
-            (start < end).then_some((start, end))
-        })
-        .collect())
+    Ok(crate::extent::sector_byte_ranges(unwritten_sector_ranges(xattrs)?, size).collect())
 }
 
 fn normalize_sector_extents(mut extents: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
@@ -545,19 +546,13 @@ pub fn set_xattr_value(
             format!("extended attribute does not exist: {name}"),
         ));
     }
-    let old_len = xattrs.get(name).map_or(0, Vec::len);
     let list_bytes = xattrs.keys().map(|key| key.len() + 1).sum::<usize>();
-    let value_bytes = xattrs.values().map(Vec::len).sum::<usize>();
-    let new_total = list_bytes
-        .saturating_add(value_bytes)
-        .saturating_sub(old_len)
-        .saturating_add(if exists { 0 } else { name.len() + 1 })
-        .saturating_add(value.len());
+    let new_total = list_bytes.saturating_add(if exists { 0 } else { name.len() + 1 });
     if new_total > XATTR_LIST_MAX {
         return Err(VfsError::new(
             "ENOSPC",
             format!(
-                "inode extended attributes require {new_total} bytes; Linux-compatible limit is {XATTR_LIST_MAX} bytes"
+                "inode extended attribute name list requires {new_total} bytes; Linux-compatible limit is {XATTR_LIST_MAX} bytes"
             ),
         ));
     }
@@ -583,6 +578,13 @@ pub struct ObjectMeta {
     pub link_id: Option<String>,
     #[serde(default)]
     pub xattrs: BTreeMap<String, Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileExtent {
+    pub start: u64,
+    pub end: u64,
+    pub unwritten: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

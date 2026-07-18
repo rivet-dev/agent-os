@@ -3,6 +3,7 @@
 //! Shared per-VM kernel plane for the agentos runtime migration.
 
 pub use agentos_bridge as bridge;
+pub use agentos_resource as admission;
 pub mod command_registry;
 pub mod device_layer;
 pub mod dns;
@@ -12,10 +13,12 @@ pub mod network_policy;
 pub mod permissions;
 pub mod pipe_manager;
 pub mod poll;
+pub mod process_runtime;
 pub mod process_table;
 pub mod pty;
 pub mod resource_accounting;
 pub mod socket_table;
+pub mod system;
 pub mod user;
 
 pub use ::vfs::posix as vfs;

@@ -183,19 +183,13 @@ pub fn set_xattr_value(
             format!("extended attribute does not exist: {name}"),
         ));
     }
-    let old_len = xattrs.get(name).map_or(0, Vec::len);
     let list_bytes = xattrs.keys().map(|key| key.len() + 1).sum::<usize>();
-    let value_bytes = xattrs.values().map(Vec::len).sum::<usize>();
-    let new_total = list_bytes
-        .saturating_add(value_bytes)
-        .saturating_sub(old_len)
-        .saturating_add(if exists { 0 } else { name.len() + 1 })
-        .saturating_add(value.len());
+    let new_total = list_bytes.saturating_add(if exists { 0 } else { name.len() + 1 });
     if new_total > XATTR_LIST_MAX {
         return Err(VfsError::new(
             "ENOSPC",
             format!(
-                "inode extended attributes require {new_total} bytes; Linux-compatible limit is {XATTR_LIST_MAX} bytes"
+                "inode extended attribute name list requires {new_total} bytes; Linux-compatible limit is {XATTR_LIST_MAX} bytes"
             ),
         ));
     }
@@ -285,6 +279,13 @@ pub enum VirtualUtimeSpec {
     Set(VirtualTimeSpec),
     Now,
     Omit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileExtent {
+    pub start: u64,
+    pub end: u64,
+    pub unwritten: bool,
 }
 
 pub trait VirtualFileSystem {
@@ -669,6 +670,24 @@ pub trait VirtualFileSystem {
     /// first written, as half-open `(start, end)` intervals.
     fn unwritten_ranges(&mut self, _path: &str) -> VfsResult<Vec<(u64, u64)>> {
         Ok(Vec::new())
+    }
+    /// Returns one allocated extent, split at written/unwritten boundaries.
+    ///
+    /// Implementations with native extent metadata should override this so an
+    /// indexed FIEMAP query does not allocate complete range lists.
+    fn extent_at(&mut self, path: &str, index: usize) -> VfsResult<Option<FileExtent>> {
+        let allocated = self.allocated_ranges(path)?;
+        let unwritten = self.unwritten_ranges(path)?;
+        Ok(crate::extent::classified_file_extent_at(
+            allocated.iter().copied(),
+            unwritten.iter().copied(),
+            index,
+        )
+        .map(|extent| FileExtent {
+            start: extent.start,
+            end: extent.end,
+            unwritten: extent.unwritten,
+        }))
     }
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>>;
     /// Writes caller-owned bytes at an offset after checking that the in-memory
@@ -2117,6 +2136,33 @@ impl VirtualFileSystem for MemoryFileSystem {
         }
     }
 
+    fn extent_at(&mut self, path: &str, index: usize) -> VfsResult<Option<FileExtent>> {
+        let inode = self.inode_mut_for_existing_path(path, "fiemap", true)?;
+        match &inode.kind {
+            InodeKind::File { data } => Ok(crate::extent::classified_file_extent_at(
+                crate::extent::sector_byte_ranges(
+                    inode.metadata.allocated_extents.iter().copied(),
+                    data.len() as u64,
+                ),
+                crate::extent::sector_byte_ranges(
+                    inode.metadata.unwritten_extents.iter().copied(),
+                    data.len() as u64,
+                ),
+                index,
+            )
+            .map(|extent| FileExtent {
+                start: extent.start,
+                end: extent.end,
+                unwritten: extent.unwritten,
+            })),
+            InodeKind::Directory => Err(VfsError::is_directory("fiemap", path)),
+            InodeKind::SymbolicLink { .. } => Err(VfsError::not_found("fiemap", path)),
+            InodeKind::CharacterDevice { .. } | InodeKind::BlockDevice { .. } | InodeKind::Fifo => {
+                Ok(None)
+            }
+        }
+    }
+
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {
         let inode = self.inode_mut_for_existing_path(path, "open", true)?;
         match &mut inode.kind {
@@ -2453,14 +2499,7 @@ fn allocated_block_count(extents: &[(u64, u64)]) -> u64 {
 }
 
 fn allocation_byte_ranges(extents: &[(u64, u64)], size: u64) -> Vec<(u64, u64)> {
-    extents
-        .iter()
-        .filter_map(|&(start, end)| {
-            let start = start.saturating_mul(512).min(size);
-            let end = end.saturating_mul(512).min(size);
-            (start < end).then_some((start, end))
-        })
-        .collect()
+    crate::extent::sector_byte_ranges(extents.iter().copied(), size).collect()
 }
 
 fn checked_file_len(value: u64, description: &'static str) -> VfsResult<usize> {

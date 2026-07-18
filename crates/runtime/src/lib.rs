@@ -25,11 +25,16 @@ use metrics::{
 
 pub mod accounting;
 pub mod capability;
+pub mod executor;
 pub mod fairness;
 pub mod metrics;
 pub mod readiness;
 pub mod supervision;
 
+pub use executor::{
+    VmExecutorAdmission, VmExecutorAdmissionError, VmExecutorAdmissionSnapshot, VmExecutorPermit,
+    VM_EXECUTOR_LIMIT_CONFIG_PATH,
+};
 pub use supervision::{
     TaskClass, TaskClassSnapshot, TaskOwner, TaskSpawnError, TaskSupervisor, TaskTerminalReason,
     TaskTerminalReport,
@@ -1114,7 +1119,7 @@ pub struct RuntimeContext {
     fairness: FairWorkBroker,
     terminal_failure: Arc<Mutex<Option<TaskTerminalReport>>>,
     task_poll_watchdog: Duration,
-    max_active_vm_executors: usize,
+    vm_executors: VmExecutorAdmission,
     vm_executor_teardown_timeout: Duration,
     blocking_job_timeout: Duration,
     admission_open: Arc<AtomicBool>,
@@ -1146,7 +1151,11 @@ impl RuntimeContext {
     }
 
     pub fn max_active_vm_executors(&self) -> usize {
-        self.max_active_vm_executors
+        self.vm_executors.maximum()
+    }
+
+    pub fn vm_executor_admission(&self) -> &VmExecutorAdmission {
+        &self.vm_executors
     }
 
     pub fn vm_executor_teardown_timeout(&self) -> Duration {
@@ -1257,7 +1266,7 @@ impl RuntimeContext {
             fairness: self.fairness.clone(),
             terminal_failure: Arc::new(Mutex::new(None)),
             task_poll_watchdog: self.task_poll_watchdog,
-            max_active_vm_executors: self.max_active_vm_executors,
+            vm_executors: self.vm_executors.clone(),
             vm_executor_teardown_timeout: self.vm_executor_teardown_timeout,
             blocking_job_timeout: self.blocking_job_timeout,
             admission_open,
@@ -1482,16 +1491,18 @@ impl SidecarRuntime {
             ),
         ));
         let metrics = RuntimeMetrics::new();
+        let vm_executors =
+            VmExecutorAdmission::new(config.max_active_vm_executors, metrics.clone());
         let fairness = FairWorkBroker::new(config.fairness.scheduler_config(), metrics.clone())
             .map_err(|error| {
                 RuntimeBuildError(format!(
                     "ERR_AGENTOS_RUNTIME_FAIRNESS_START: failed to build process fairness broker: {error}"
                 ))
             })?;
-        let resources = Arc::new(ResourceLedger::root_with_metrics(
+        let resources = Arc::new(ResourceLedger::root_with_observer(
             "sidecar-process",
             resource_limits,
-            metrics.clone(),
+            Arc::new(metrics.clone()),
         ));
         let admission_open = Arc::new(AtomicBool::new(true));
         let admission_gate = Arc::new(Mutex::new(()));
@@ -1535,7 +1546,7 @@ impl SidecarRuntime {
             fairness,
             terminal_failure: Arc::new(Mutex::new(None)),
             task_poll_watchdog: Duration::from_millis(config.task_poll_watchdog_ms),
-            max_active_vm_executors: config.max_active_vm_executors,
+            vm_executors,
             vm_executor_teardown_timeout: Duration::from_millis(
                 config.vm_executor_teardown_timeout_ms,
             ),

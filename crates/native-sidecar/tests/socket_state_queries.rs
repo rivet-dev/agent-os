@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use support::{
     assert_node_available, authenticate_wire, create_vm_wire_with_metadata, execute_wire,
     new_sidecar, open_session_wire, temp_dir, wasm_signal_state_module, wire_request, wire_vm,
-    write_fixture,
+    write_fixture, write_guest_file_wire,
 };
 
 fn wait_for_process_output(
@@ -692,6 +692,15 @@ fn sidecar_tracks_javascript_sigchld_and_delivers_it_on_child_exit() {
             String::from("env.AGENTOS_ALLOWED_NODE_BUILTINS"),
             allowed_builtins,
         )]),
+    );
+    write_guest_file_wire(
+        &mut sidecar,
+        3_001,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "/child.mjs",
+        fs::read_to_string(&child_entry).expect("read SIGCHLD child fixture"),
     );
 
     execute_wire(

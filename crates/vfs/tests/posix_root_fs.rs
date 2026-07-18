@@ -86,6 +86,16 @@ fn assert_error_code<T: std::fmt::Debug>(result: Result<T, vfs::posix::VfsError>
 }
 
 #[test]
+fn bundled_root_allows_compatibility_module_traversal_without_directory_listing() {
+    let mut root = RootFileSystem::from_descriptor(RootFilesystemDescriptor::default())
+        .expect("create bundled root filesystem");
+
+    let stat = root.stat("/root").expect("stat /root");
+    assert_eq!(stat.mode & 0o7777, 0o711);
+    assert_eq!((stat.uid, stat.gid), (0, 0));
+}
+
+#[test]
 fn overlay_filesystem_prefers_higher_lowers_and_hides_whiteouts() {
     let mut higher = MemoryFileSystem::new();
     let mut lower = MemoryFileSystem::new();

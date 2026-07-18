@@ -2,6 +2,30 @@ use super::*;
 
 static NEXT_SQLITE_HOST_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 
+pub(super) fn admit_one_slot_rpc(
+    pending_call_id: Option<u64>,
+    incoming_call_id: u64,
+    slot_name: &'static str,
+) -> Result<(), HostServiceError> {
+    let Some(pending_call_id) = pending_call_id else {
+        return Ok(());
+    };
+    if pending_call_id == incoming_call_id {
+        return Ok(());
+    }
+    Err(HostServiceError::new(
+        "EBUSY",
+        format!(
+            "{slot_name} already retains call {pending_call_id}; call {incoming_call_id} was not admitted"
+        ),
+    )
+    .with_details(json!({
+        "slotName": slot_name,
+        "pendingCallId": pending_call_id,
+        "incomingCallId": incoming_call_id,
+    })))
+}
+
 /// Ownership of VM-wide retained-byte accounting for an event temporarily
 /// removed from a process queue. Keeping this reservation alive across a
 /// capacity check prevents a concurrent producer from consuming the bytes an
@@ -48,6 +72,81 @@ impl PolledExecutionEvent {
 }
 
 impl ActiveProcess {
+    /// Attach the generation-bound kernel control receiver before any guest
+    /// engine is started. Controls requested while the adapter is being
+    /// constructed remain durable in this receiver and are applied before the
+    /// process is published in the sidecar's active-process map.
+    pub(crate) fn attach_runtime_control_before_start(
+        kernel_handle: &KernelProcessHandle,
+        event_notify: Arc<tokio::sync::Notify>,
+    ) -> Result<agentos_kernel::process_runtime::RuntimeControlReceiver, SidecarError> {
+        kernel_handle
+            .attach_runtime_control(Arc::new(move || event_notify.notify_one()))
+            .map_err(|error| SidecarError::host(error.code(), error.message()))
+    }
+
+    pub(crate) fn install_executable_image(
+        &mut self,
+        bytes: Vec<u8>,
+        retained_bytes: Reservation,
+    ) -> Result<u64, HostServiceError> {
+        if self.executable_image.is_some() {
+            return Err(HostServiceError::new(
+                "EBUSY",
+                "this process already owns an executable-image snapshot",
+            ));
+        }
+        let handle = self.next_executable_image_handle;
+        self.next_executable_image_handle = handle.checked_add(1).ok_or_else(|| {
+            HostServiceError::new("EOVERFLOW", "executable-image handle space exhausted")
+        })?;
+        self.executable_image = Some(ActiveExecutableImage {
+            handle,
+            bytes,
+            _retained_bytes: retained_bytes,
+        });
+        Ok(handle)
+    }
+
+    pub(crate) fn read_executable_image(
+        &self,
+        handle: u64,
+        offset: u64,
+        maximum: usize,
+    ) -> Result<&[u8], HostServiceError> {
+        let image = self.executable_image.as_ref().ok_or_else(|| {
+            HostServiceError::new("EBADF", "no executable-image snapshot is open")
+        })?;
+        if image.handle != handle {
+            return Err(HostServiceError::new(
+                "ESTALE",
+                "executable-image handle does not name the active snapshot",
+            ));
+        }
+        let start = usize::try_from(offset)
+            .map_err(|_| HostServiceError::new("EOVERFLOW", "exec image offset exceeds usize"))?;
+        if start >= image.bytes.len() {
+            return Ok(&[]);
+        }
+        let end = start.saturating_add(maximum).min(image.bytes.len());
+        Ok(&image.bytes[start..end])
+    }
+
+    pub(crate) fn close_executable_image(&mut self, handle: u64) -> Result<(), HostServiceError> {
+        let image = self.executable_image.as_ref().ok_or_else(|| {
+            HostServiceError::new("EBADF", "no executable-image snapshot is open")
+        })?;
+        if image.handle != handle {
+            return Err(HostServiceError::new(
+                "ESTALE",
+                "executable-image handle does not name the active snapshot",
+            ));
+        }
+        self.executable_image = None;
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(crate) fn new(
         kernel_pid: u32,
         kernel_handle: KernelProcessHandle,
@@ -57,32 +156,95 @@ impl ActiveProcess {
         runtime: GuestRuntimeKind,
         execution: ActiveExecution,
     ) -> Self {
+        let process_event_notify = Arc::new(tokio::sync::Notify::new());
+        let runtime_control = Self::attach_runtime_control_before_start(
+            &kernel_handle,
+            Arc::clone(&process_event_notify),
+        )
+        .expect("a kernel process must attach exactly one runtime control receiver");
+        Self::new_with_attached_runtime_control(
+            kernel_pid,
+            kernel_handle,
+            runtime_context,
+            limits,
+            process_event_capacity,
+            runtime,
+            execution,
+            runtime_control,
+            process_event_notify,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_attached_runtime_control(
+        kernel_pid: u32,
+        kernel_handle: KernelProcessHandle,
+        runtime_context: agentos_runtime::RuntimeContext,
+        limits: crate::limits::VmLimits,
+        process_event_capacity: usize,
+        runtime: GuestRuntimeKind,
+        mut execution: ActiveExecution,
+        runtime_control: agentos_kernel::process_runtime::RuntimeControlReceiver,
+        process_event_notify: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        assert_eq!(
+            runtime_control.identity(),
+            kernel_handle.runtime_identity(),
+            "the attached runtime control receiver must match its kernel process"
+        );
         let pending_event_count_limit =
             process_event_capacity.min(limits.process.pending_event_count);
         let pending_stdin_bytes_limit = limits.process.pending_stdin_bytes;
         let pending_event_bytes_limit = limits.process.pending_event_bytes;
-        if let ActiveExecution::Binding(binding) = &execution {
-            binding
-                .pending_event_count_limit
-                .store(pending_event_count_limit, Ordering::Release);
-            binding
-                .pending_event_bytes_limit
-                .store(pending_event_bytes_limit, Ordering::Release);
-        }
+        execution
+            .configure_adapter_event_limits(pending_event_count_limit, pending_event_bytes_limit);
         // Binding producers lease retained-byte reservations from their own
         // queue before an event can be moved into the ActiveProcess queue.
         // Both queues must therefore start with the same budget identity; a
         // signal-state drain may temporarily lease stdout/exit and requeue it.
-        let vm_pending_event_bytes_budget = match &execution {
-            ActiveExecution::Binding(binding) => Arc::clone(&binding.vm_pending_event_bytes_budget),
-            _ => VmPendingByteBudget::new(
+        let vm_pending_event_bytes_budget =
+            execution.adapter_event_bytes_budget().unwrap_or_else(|| {
+                VmPendingByteBudget::new(
+                    pending_event_bytes_limit,
+                    queue_tracker::TrackedLimit::PendingExecutionEventBytes,
+                )
+            });
+        let common_event_notify = Arc::new(Mutex::new(Arc::clone(&process_event_notify)));
+        let common_event_wake = Arc::clone(&common_event_notify);
+        let identity = kernel_handle.runtime_identity();
+        let (event_submission, common_execution_events) = bounded_execution_event_channel(
+            HostProcessContext {
+                generation: identity.generation,
+                pid: identity.pid,
+            },
+            pending_event_count_limit,
+            PayloadLimit::new(
+                "limits.process.pendingEventBytes",
                 pending_event_bytes_limit,
-                queue_tracker::TrackedLimit::PendingExecutionEventBytes,
-            ),
-        };
+            )
+            .expect("an admitted process must have a nonzero common event byte limit"),
+            Arc::new(move || {
+                let notify = match common_event_wake.lock() {
+                    Ok(notify) => Arc::clone(&notify),
+                    Err(poisoned) => {
+                        eprintln!(
+                            "ERR_AGENTOS_EXECUTION_WAKE_LOCK_POISONED: recovering the execution wake target after a prior panic"
+                        );
+                        Arc::clone(&poisoned.into_inner())
+                    }
+                };
+                notify.notify_one();
+            }),
+        )
+        .expect("an admitted process must have a nonzero common event capacity");
+        let host_capabilities = ProcessHostCapabilitySet::from_event_submission(event_submission);
+        ExecutionBackend::configure_host_services(&mut execution, host_capabilities.clone());
+        let control_notify = Arc::clone(&process_event_notify);
+        runtime_control.set_wake(Arc::new(move || control_notify.notify_one()));
         Self {
             kernel_pid,
             kernel_handle,
+            runtime_control,
             runtime_context,
             limits,
             kernel_stdin_writer_fd: None,
@@ -99,16 +261,18 @@ impl ActiveProcess {
             ),
             tty_master_fd: None,
             runtime,
+            adapter_policy: ExecutionAdapterPolicy::BINDING,
             detached: false,
             execution,
             guest_cwd: String::from("/"),
             env: BTreeMap::new(),
             host_cwd: PathBuf::from("/"),
-            shadow_root: None,
-            host_write_dirty: false,
-            mapped_host_fds: BTreeMap::new(),
-            next_mapped_host_fd: MAPPED_HOST_FD_START,
-            process_event_notify: Arc::new(tokio::sync::Notify::new()),
+            executable_image: None,
+            next_executable_image_handle: 1,
+            process_event_notify,
+            common_event_notify,
+            host_capabilities,
+            common_execution_events,
             process_event_capacity,
             wasm_flock_fds: BTreeMap::new(),
             pending_execution_events: VecDeque::new(),
@@ -124,19 +288,16 @@ impl ActiveProcess {
                 pending_event_bytes_limit,
             ),
             vm_pending_event_bytes_budget,
-            pending_javascript_net_connects: BTreeMap::new(),
-            pending_self_signal_exit: None,
+            pending_net_connects: BTreeMap::new(),
+            pending_managed_host_net_connects: BTreeMap::new(),
+            pending_runtime_exit: None,
             exit_signal: None,
             exit_core_dumped: false,
-            pending_wasm_signals: BTreeSet::new(),
-            pending_wasm_signals_gauge: queue_tracker::register_queue(
-                queue_tracker::TrackedLimit::PendingWasmSignals,
-                64,
-            ),
             real_interval_timer: ActiveRealIntervalTimer::new(),
             child_processes: BTreeMap::new(),
             next_child_process_id: 0,
             pending_child_process_sync: BTreeMap::new(),
+            child_process_bridge_owns_output: false,
             http_servers: BTreeMap::new(),
             pending_http_requests: BTreeMap::new(),
             http2: Default::default(),
@@ -153,8 +314,6 @@ impl ActiveProcess {
             next_unix_socket_id: 0,
             udp_sockets: BTreeMap::new(),
             next_udp_socket_id: 0,
-            python_sockets: BTreeMap::new(),
-            next_python_socket_id: 0,
             hash_sessions: BTreeMap::new(),
             next_hash_session_id: 0,
             cipher_sessions: BTreeMap::new(),
@@ -173,16 +332,263 @@ impl ActiveProcess {
             tty_master_owner: None,
             tty_raw_mode_generation: None,
             deferred_kernel_wait_rpc: None,
+            deferred_kernel_wait_deadline_warned: false,
             deferred_child_write_timer: None,
+            deferred_guest_wait: None,
+            deferred_guest_wait_interrupted: false,
+            guest_signal_checkpoint_pending: false,
+            deferred_kernel_poll: None,
+            deferred_kernel_read: None,
             module_resolution_cache: agentos_execution::LocalModuleResolutionCache::default(),
         }
     }
 
     pub(crate) fn clear_deferred_kernel_wait_rpc(&mut self) {
         self.deferred_kernel_wait_rpc = None;
+        self.deferred_kernel_wait_deadline_warned = false;
         if let Some(timer) = self.deferred_child_write_timer.take() {
             timer.abort();
         }
+    }
+
+    pub(crate) fn clear_deferred_guest_wait(&mut self) -> Option<DeferredGuestWait> {
+        self.deferred_guest_wait_interrupted = false;
+        let mut wait = self.deferred_guest_wait.take()?;
+        if let Some(task) = wait.wake_task.take() {
+            task.abort();
+        }
+        Some(wait)
+    }
+
+    pub(crate) fn clear_deferred_kernel_poll(&mut self) -> Option<DeferredKernelPoll> {
+        let mut poll = self.deferred_kernel_poll.take()?;
+        if let Some(task) = poll.wake_task.take() {
+            task.abort();
+        }
+        Some(poll)
+    }
+
+    pub(crate) fn clear_deferred_kernel_read(&mut self) -> Option<DeferredKernelRead> {
+        let mut read = self.deferred_kernel_read.take()?;
+        if let Some(task) = read.wake_task.take() {
+            task.abort();
+        }
+        Some(read)
+    }
+
+    fn apply_backend_shutdown_outcome(
+        &mut self,
+        outcome: ShutdownOutcome,
+    ) -> Result<(), SidecarError> {
+        use agentos_kernel::process_runtime::ProcessExit;
+
+        match outcome {
+            ShutdownOutcome::AwaitExit => Ok(()),
+            ShutdownOutcome::Exited(exit) => {
+                self.pending_runtime_exit.get_or_insert(match exit {
+                    ExecutionExit::Exited(code) => ProcessExit::Exited(code),
+                    ExecutionExit::Signaled {
+                        signal,
+                        core_dumped,
+                    } => ProcessExit::Signaled {
+                        signal,
+                        core_dumped,
+                    },
+                });
+                Ok(())
+            }
+            ShutdownOutcome::ForwardSignal { process_id, signal } => {
+                signal_runtime_process(process_id, signal)
+            }
+        }
+    }
+
+    pub(crate) fn apply_runtime_controls(&mut self) -> Result<(), SidecarError> {
+        use agentos_kernel::process_runtime::{ProcessCancellationReason, ProcessTermination};
+
+        let controls = self.runtime_control.pending();
+        if controls.is_empty() {
+            return Ok(());
+        }
+
+        let result = (|| {
+            if let Some(stopped) = controls.stopped {
+                if stopped {
+                    self.execution.pause()?;
+                } else {
+                    self.execution.resume()?;
+                }
+            }
+
+            let cancellation_shutdown_reason = controls.cancellation.map(|reason| match reason {
+                ProcessCancellationReason::VmTeardown => ShutdownReason::VmTeardown,
+                ProcessCancellationReason::Deadline => ShutdownReason::Deadline,
+                ProcessCancellationReason::HostRequest => ShutdownReason::HostRequest,
+                ProcessCancellationReason::RuntimeFault => ShutdownReason::RuntimeFault,
+            });
+            if let Some(termination) = controls.termination {
+                let outcome = match termination {
+                    ProcessTermination::Signal { signal, .. } => self
+                        .execution
+                        .begin_shutdown(ShutdownReason::Signal(signal))?,
+                    ProcessTermination::RuntimeFault => self
+                        .execution
+                        .begin_shutdown(ShutdownReason::RuntimeFault)?,
+                };
+                self.apply_backend_shutdown_outcome(outcome)?;
+            } else if let Some(reason) = cancellation_shutdown_reason {
+                let outcome = self.execution.begin_shutdown(reason)?;
+                self.apply_backend_shutdown_outcome(outcome)?;
+            }
+
+            if controls.checkpoint {
+                // A combined ppoll owns its temporary mask. Select a signal
+                // while that mask is still active, but atomically restore the
+                // caller's mask before constructing the handler frame. This is
+                // what lets a signal unblocked only by ppoll interrupt the
+                // wait while nested handlers still observe the real mask.
+                let first_delivery = if let Some(token) = self
+                    .deferred_kernel_poll
+                    .as_mut()
+                    .and_then(|poll| poll.temporary_signal_mask_token.take())
+                {
+                    match self
+                        .kernel_handle
+                        .end_temporary_signal_mask_and_begin_signal_delivery(token)
+                    {
+                        Ok(delivery) => delivery,
+                        Err(error) => {
+                            let failure = HostServiceError::new(error.code(), error.to_string());
+                            if let Some(poll) = self.clear_deferred_kernel_poll() {
+                                poll.reply.fail(failure).map_err(SidecarError::from)?;
+                            }
+                            return Err(kernel_error(error));
+                        }
+                    }
+                } else {
+                    None
+                };
+                for index in 0..64 {
+                    let delivery = if index == 0 {
+                        match first_delivery {
+                            Some(delivery) => Some(delivery),
+                            None => self
+                                .kernel_handle
+                                .begin_signal_delivery()
+                                .map_err(kernel_error)?,
+                        }
+                    } else {
+                        self.kernel_handle
+                            .begin_signal_delivery()
+                            .map_err(kernel_error)?
+                    };
+                    let Some(delivery) = delivery else { break };
+                    let identity = self.kernel_handle.runtime_identity();
+                    let delivery_result = match self.execution.deliver_signal_checkpoint(
+                        ExecutionWakeIdentity {
+                            generation: identity.generation,
+                            pid: identity.pid,
+                        },
+                        delivery.signal,
+                        delivery.token,
+                        delivery.action.flags,
+                    ) {
+                        Ok(SignalCheckpointOutcome::Published) => {
+                            // Every caught signal must release a parked guest syscall so
+                            // its handler can run promptly. The guest adapter applies
+                            // SA_RESTART after dispatching the handler and transparently
+                            // reissues only the documented restartable operations.
+                            if self.deferred_guest_wait.is_some() {
+                                self.deferred_guest_wait_interrupted = true;
+                            }
+                            self.guest_signal_checkpoint_pending = true;
+                            let interrupted = HostServiceError::new(
+                                "EINTR",
+                                "caught signal interrupted the pending guest host call",
+                            );
+                            let mut interrupted_replies = Vec::new();
+                            if let Some(wait) = self.clear_deferred_guest_wait() {
+                                interrupted_replies.push(wait.reply);
+                            }
+                            if let Some(poll) = self.clear_deferred_kernel_poll() {
+                                interrupted_replies.push(poll.reply);
+                            }
+                            if let Some(read) = self.clear_deferred_kernel_read() {
+                                interrupted_replies.push(read.reply);
+                            }
+                            if let Some((request, _)) = self.deferred_kernel_wait_rpc.clone() {
+                                self.clear_deferred_kernel_wait_rpc();
+                                interrupted_replies.push(request.reply);
+                            }
+                            let mut settlement_error = None;
+                            for reply in interrupted_replies {
+                                if let Err(error) = reply.fail(interrupted.clone()) {
+                                    if settlement_error.is_none() {
+                                        settlement_error = Some(SidecarError::from(error));
+                                    }
+                                }
+                            }
+                            if let Some(error) = settlement_error {
+                                return Err(error);
+                            }
+                            // The guest bridge owns exactly this one delivery
+                            // until `signal_end`. Kernel delivery scopes are
+                            // strict LIFO, so never preclaim a second token.
+                            break;
+                        }
+                        Ok(SignalCheckpointOutcome::ForwardToProcess { process_id }) => {
+                            signal_runtime_process(process_id, delivery.signal)
+                        }
+                        Ok(SignalCheckpointOutcome::Unsupported) => {
+                            Err(SidecarError::InvalidState(format!(
+                                "unsupported guest signal handler delivery for kernel pid {}",
+                                self.kernel_pid
+                            )))
+                        }
+                        Err(error) => Err(error),
+                    };
+                    let end_result = self
+                        .kernel_handle
+                        .end_signal_delivery(delivery.token)
+                        .map_err(kernel_error);
+                    delivery_result?;
+                    end_result?;
+                }
+            }
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => match self.runtime_control.acknowledge(controls) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    self.runtime_control.retry_pending();
+                    Err(SidecarError::host(error.code(), error.message()))
+                }
+            },
+            Err(error) => {
+                self.runtime_control.retry_pending();
+                Err(error)
+            }
+        }
+    }
+
+    fn take_pending_runtime_exit_event(&mut self) -> Option<ActiveExecutionEvent> {
+        use agentos_kernel::process_runtime::ProcessExit;
+
+        self.pending_runtime_exit
+            .take()
+            .map(|termination| match termination {
+                ProcessExit::Exited(code) => ActiveExecutionEvent::Exited(code),
+                ProcessExit::Signaled {
+                    signal,
+                    core_dumped,
+                } => {
+                    self.exit_signal = Some(signal);
+                    self.exit_core_dumped = core_dumped;
+                    ActiveExecutionEvent::Exited(termination.shell_status())
+                }
+            })
     }
 
     pub(crate) fn queue_pending_execution_event(
@@ -202,33 +608,51 @@ impl ActiveProcess {
     ) -> Result<(), (SidecarError, ActiveExecutionEvent)> {
         let event_bytes = event.retained_bytes();
         if self.pending_execution_events.len() >= self.pending_execution_event_count_limit {
+            let limit = self.pending_execution_event_count_limit;
             return Err((
-                SidecarError::InvalidState(format!(
-                    "process execution event queue exceeded {} events (limits.process.pendingEventCount/runtime.protocol.maxProcessEvents); raise the limiting setting",
-                    self.pending_execution_event_count_limit
-                )),
+                SidecarError::host_resource_limit(
+                    "limits.process.pendingEventCount/runtime.protocol.maxProcessEvents",
+                    limit,
+                    self.pending_execution_events.len().saturating_add(1),
+                    format!(
+                        "process execution event queue exceeded {limit} events (limits.process.pendingEventCount/runtime.protocol.maxProcessEvents); raise the limiting setting"
+                    ),
+                ),
                 event,
             ));
         }
-        if self
+        let observed_process_bytes = self
             .pending_execution_event_bytes
-            .saturating_add(event_bytes)
-            > self.pending_execution_event_bytes_limit
-        {
+            .saturating_add(event_bytes);
+        if observed_process_bytes > self.pending_execution_event_bytes_limit {
+            let limit = self.pending_execution_event_bytes_limit;
             return Err((
-                SidecarError::InvalidState(format!(
-                    "process execution event queue exceeded {} retained bytes (limits.process.pendingEventBytes); raise limits.process.pendingEventBytes",
-                    self.pending_execution_event_bytes_limit
-                )),
+                SidecarError::host_resource_limit(
+                    "limits.process.pendingEventBytes",
+                    limit,
+                    observed_process_bytes,
+                    format!(
+                        "process execution event queue exceeded {limit} retained bytes (limits.process.pendingEventBytes); raise limits.process.pendingEventBytes"
+                    ),
+                ),
                 event,
             ));
         }
         if !self.vm_pending_event_bytes_budget.try_reserve(event_bytes) {
+            let limit = self.vm_pending_event_bytes_budget.limit();
+            let observed = self
+                .vm_pending_event_bytes_budget
+                .used()
+                .saturating_add(event_bytes);
             return Err((
-                SidecarError::InvalidState(format!(
-                    "VM process execution event queues exceeded {} retained bytes (limits.process.pendingEventBytes); raise limits.process.pendingEventBytes",
-                    self.vm_pending_event_bytes_budget.limit()
-                )),
+                SidecarError::host_resource_limit(
+                    "limits.process.pendingEventBytes",
+                    limit,
+                    observed,
+                    format!(
+                        "VM process execution event queues exceeded {limit} retained bytes (limits.process.pendingEventBytes); raise limits.process.pendingEventBytes"
+                    ),
+                ),
                 event,
             ));
         }
@@ -281,6 +705,12 @@ impl ActiveProcess {
             .observe_depth(self.pending_execution_events.len());
         self.pending_execution_event_bytes_gauge
             .observe_depth(self.pending_execution_event_bytes);
+        // A parent queue may have backpressured an already-accounted child
+        // output event. Consuming one parent event creates capacity, so rearm
+        // the coalesced process pump when descendants exist.
+        if !self.child_processes.is_empty() {
+            self.process_event_notify.notify_one();
+        }
         Some(PolledExecutionEvent {
             event,
             reservation: Some(PendingExecutionEventReservation {
@@ -300,61 +730,166 @@ impl ActiveProcess {
         &mut self,
         polled: PolledExecutionEvent,
     ) -> Result<(), SidecarError> {
-        self.queue_polled_execution_event(polled, true)
+        self.queue_polled_execution_event(polled, true, true)
     }
 
     pub(super) fn queue_pending_polled_execution_event(
         &mut self,
         polled: PolledExecutionEvent,
     ) -> Result<(), SidecarError> {
-        self.queue_polled_execution_event(polled, false)
+        self.queue_polled_execution_event(polled, false, true)
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub(super) fn try_queue_pending_polled_execution_event(
+        &mut self,
+        polled: PolledExecutionEvent,
+    ) -> Result<(), (SidecarError, PolledExecutionEvent)> {
+        self.try_queue_polled_execution_event(polled, false, true)
+    }
+
+    /// Return a public child event to the pull owner's durable queue without
+    /// waking the global pump that deliberately declined to consume it. The
+    /// parent's next `child_process.poll` HostCall supplies the next broker
+    /// edge; self-notifying here would spin on the same event indefinitely.
+    pub(super) fn queue_pull_owned_polled_execution_event(
+        &mut self,
+        polled: PolledExecutionEvent,
+    ) -> Result<(), SidecarError> {
+        self.queue_polled_execution_event(polled, false, false)
+    }
+
+    pub(super) fn check_pending_polled_execution_event_admission(
+        &self,
+        polled: &PolledExecutionEvent,
+    ) -> Result<(), SidecarError> {
+        let event_bytes = polled.event.retained_bytes();
+        if self.pending_execution_events.len() >= self.pending_execution_event_count_limit {
+            let limit = self.pending_execution_event_count_limit;
+            return Err(SidecarError::host_resource_limit(
+                "limits.process.pendingEventCount/runtime.protocol.maxProcessEvents",
+                limit,
+                self.pending_execution_events.len().saturating_add(1),
+                format!(
+                    "process execution event queue exceeded {limit} events (limits.process.pendingEventCount/runtime.protocol.maxProcessEvents); raise the limiting setting"
+                ),
+            ));
+        }
+        let observed_process_bytes = self
+            .pending_execution_event_bytes
+            .saturating_add(event_bytes);
+        if observed_process_bytes > self.pending_execution_event_bytes_limit {
+            let limit = self.pending_execution_event_bytes_limit;
+            return Err(SidecarError::host_resource_limit(
+                "limits.process.pendingEventBytes",
+                limit,
+                observed_process_bytes,
+                format!(
+                    "process execution event queue exceeded {limit} retained bytes (limits.process.pendingEventBytes); raise limits.process.pendingEventBytes"
+                ),
+            ));
+        }
+        if let Some(reservation) = polled.reservation.as_ref() {
+            if reservation.bytes != event_bytes
+                || !Arc::ptr_eq(&reservation.budget, &self.vm_pending_event_bytes_budget)
+            {
+                return Err(SidecarError::InvalidState(String::from(
+                    "process execution event reservation no longer matches its VM queue; event requeue aborted",
+                )));
+            }
+        } else if self
+            .vm_pending_event_bytes_budget
+            .used()
+            .saturating_add(event_bytes)
+            > self.vm_pending_event_bytes_budget.limit()
+        {
+            let limit = self.vm_pending_event_bytes_budget.limit();
+            let observed = self
+                .vm_pending_event_bytes_budget
+                .used()
+                .saturating_add(event_bytes);
+            return Err(SidecarError::host_resource_limit(
+                "limits.process.pendingEventBytes",
+                limit,
+                observed,
+                format!(
+                    "VM process execution event queues exceeded {limit} retained bytes (limits.process.pendingEventBytes); raise limits.process.pendingEventBytes"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Collapse duplicate terminal events before ordering one authoritative
+    /// exit behind already queued output/internal events. Some runtimes expose
+    /// both their adapter exit and the kernel runtime-control exit; retaining
+    /// both makes two exits endlessly rotate ahead of one another.
+    pub(super) fn discard_pending_exit_events(&mut self) -> usize {
+        let previous_len = self.pending_execution_events.len();
+        let previous_bytes = self.pending_execution_event_bytes;
+        self.pending_execution_events.retain(|event| {
+            !matches!(
+                event,
+                ActiveExecutionEvent::Exited(_)
+                    | ActiveExecutionEvent::Common(ExecutionEvent::Exited(_))
+            )
+        });
+        self.pending_execution_event_bytes = self
+            .pending_execution_events
+            .iter()
+            .map(ActiveExecutionEvent::retained_bytes)
+            .fold(0usize, usize::saturating_add);
+        self.vm_pending_event_bytes_budget
+            .release(previous_bytes.saturating_sub(self.pending_execution_event_bytes));
+        self.pending_execution_event_count_gauge
+            .observe_depth(self.pending_execution_events.len());
+        self.pending_execution_event_bytes_gauge
+            .observe_depth(self.pending_execution_event_bytes);
+        previous_len.saturating_sub(self.pending_execution_events.len())
     }
 
     fn queue_polled_execution_event(
         &mut self,
         polled: PolledExecutionEvent,
         front: bool,
+        notify: bool,
     ) -> Result<(), SidecarError> {
-        let PolledExecutionEvent { event, reservation } = polled;
-        let event_bytes = event.retained_bytes();
-        if self.pending_execution_events.len() >= self.pending_execution_event_count_limit {
-            return Err(SidecarError::InvalidState(format!(
-                "process execution event queue exceeded {} events (limits.process.pendingEventCount/runtime.protocol.maxProcessEvents); raise the limiting setting",
-                self.pending_execution_event_count_limit
-            )));
-        }
-        if self
-            .pending_execution_event_bytes
-            .saturating_add(event_bytes)
-            > self.pending_execution_event_bytes_limit
-        {
-            return Err(SidecarError::InvalidState(format!(
-                "process execution event queue exceeded {} retained bytes (limits.process.pendingEventBytes); raise limits.process.pendingEventBytes",
-                self.pending_execution_event_bytes_limit
-            )));
-        }
+        self.try_queue_polled_execution_event(polled, front, notify)
+            .map_err(|(error, _polled)| error)
+    }
 
-        let reservation = match reservation {
-            Some(reservation) => {
-                if reservation.bytes != event_bytes
-                    || !Arc::ptr_eq(&reservation.budget, &self.vm_pending_event_bytes_budget)
-                {
-                    return Err(SidecarError::InvalidState(String::from(
-                        "process execution event reservation no longer matches its VM queue; event requeue aborted",
-                    )));
-                }
-                Some(reservation)
-            }
-            None => {
-                if !self.vm_pending_event_bytes_budget.try_reserve(event_bytes) {
-                    return Err(SidecarError::InvalidState(format!(
-                        "VM process execution event queues exceeded {} retained bytes (limits.process.pendingEventBytes); raise limits.process.pendingEventBytes",
-                        self.vm_pending_event_bytes_budget.limit()
-                    )));
-                }
-                None
-            }
-        };
+    #[allow(clippy::result_large_err)]
+    fn try_queue_polled_execution_event(
+        &mut self,
+        polled: PolledExecutionEvent,
+        front: bool,
+        notify: bool,
+    ) -> Result<(), (SidecarError, PolledExecutionEvent)> {
+        if let Err(error) = self.check_pending_polled_execution_event_admission(&polled) {
+            return Err((error, polled));
+        }
+        let event_bytes = polled.event.retained_bytes();
+        if polled.reservation.is_none()
+            && !self.vm_pending_event_bytes_budget.try_reserve(event_bytes)
+        {
+            let limit = self.vm_pending_event_bytes_budget.limit();
+            let observed = self
+                .vm_pending_event_bytes_budget
+                .used()
+                .saturating_add(event_bytes);
+            return Err((
+                SidecarError::host_resource_limit(
+                    "limits.process.pendingEventBytes",
+                    limit,
+                    observed,
+                    format!(
+                        "VM process execution event queues exceeded {limit} retained bytes (limits.process.pendingEventBytes); raise limits.process.pendingEventBytes"
+                    ),
+                ),
+                polled,
+            ));
+        }
+        let PolledExecutionEvent { event, reservation } = polled;
 
         self.pending_execution_event_bytes = self
             .pending_execution_event_bytes
@@ -371,7 +906,9 @@ impl ActiveProcess {
         if let Some(reservation) = reservation {
             reservation.transfer_to_queue();
         }
-        self.process_event_notify.notify_one();
+        if notify {
+            self.process_event_notify.notify_one();
+        }
         Ok(())
     }
 
@@ -379,24 +916,91 @@ impl ActiveProcess {
         &mut self,
         timeout: Duration,
     ) -> Result<Option<PolledExecutionEvent>, SidecarError> {
-        if let ActiveExecution::Binding(execution) = &mut self.execution {
-            return poll_binding_process_event_leased(execution);
+        self.apply_runtime_controls()?;
+        if let Some(event) = self.take_pending_runtime_exit_event() {
+            return Ok(Some(PolledExecutionEvent::unreserved(event)));
         }
-        self.execution
-            .poll_event(timeout)
+        if let Some(event) = self.execution.poll_adapter_event_leased() {
+            return event;
+        }
+        if let Some(event) = self
+            .common_execution_events
+            .try_recv()
+            .map_err(SidecarError::from)?
+        {
+            return Ok(Some(PolledExecutionEvent::unreserved(
+                ActiveExecutionEvent::Common(event),
+            )));
+        }
+        let host_capabilities = self.host_capabilities.clone();
+        let event = self
+            .execution
+            .poll_event_with_host(
+                self.kernel_handle.runtime_identity(),
+                self.limits.reactor.max_bridge_response_bytes,
+                timeout,
+                &host_capabilities,
+            )
             .await
-            .map(|event| event.map(PolledExecutionEvent::unreserved))
+            .map_err(|error| SidecarError::Execution(error.to_string()))?;
+        if let Some(event) = event {
+            return Ok(Some(PolledExecutionEvent::unreserved(event)));
+        }
+        Ok(self
+            .common_execution_events
+            .try_recv()
+            .map_err(SidecarError::from)?
+            .map(ActiveExecutionEvent::Common)
+            .map(PolledExecutionEvent::unreserved))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn poll_execution_event_for_test(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
+        self.poll_execution_event(timeout)
+            .await
+            .map(|event| event.map(PolledExecutionEvent::into_event))
     }
 
     pub(super) fn try_poll_execution_event(
         &mut self,
     ) -> Result<Option<PolledExecutionEvent>, SidecarError> {
-        if let ActiveExecution::Binding(execution) = &mut self.execution {
-            return poll_binding_process_event_leased(execution);
+        self.apply_runtime_controls()?;
+        if let Some(event) = self.take_pending_runtime_exit_event() {
+            return Ok(Some(PolledExecutionEvent::unreserved(event)));
         }
-        self.execution
-            .try_poll_event()
-            .map(|event| event.map(PolledExecutionEvent::unreserved))
+        if let Some(event) = self.execution.poll_adapter_event_leased() {
+            return event;
+        }
+        if let Some(event) = self
+            .common_execution_events
+            .try_recv()
+            .map_err(SidecarError::from)?
+        {
+            return Ok(Some(PolledExecutionEvent::unreserved(
+                ActiveExecutionEvent::Common(event),
+            )));
+        }
+        let host_capabilities = self.host_capabilities.clone();
+        let event = self
+            .execution
+            .try_poll_event_with_host(
+                self.kernel_handle.runtime_identity(),
+                self.limits.reactor.max_bridge_response_bytes,
+                &host_capabilities,
+            )
+            .map_err(|error| SidecarError::Execution(error.to_string()))?;
+        if let Some(event) = event {
+            return Ok(Some(PolledExecutionEvent::unreserved(event)));
+        }
+        Ok(self
+            .common_execution_events
+            .try_recv()
+            .map_err(SidecarError::from)?
+            .map(ActiveExecutionEvent::Common)
+            .map(PolledExecutionEvent::unreserved))
     }
 
     pub(crate) fn with_process_event_limits(
@@ -406,14 +1010,10 @@ impl ActiveProcess {
         self.pending_execution_event_count_limit =
             self.process_event_capacity.min(limits.pending_event_count);
         self.pending_execution_event_bytes_limit = limits.pending_event_bytes;
-        if let ActiveExecution::Binding(execution) = &self.execution {
-            execution
-                .pending_event_count_limit
-                .store(self.pending_execution_event_count_limit, Ordering::Release);
-            execution
-                .pending_event_bytes_limit
-                .store(limits.pending_event_bytes, Ordering::Release);
-        }
+        self.execution.configure_adapter_event_limits(
+            self.pending_execution_event_count_limit,
+            limits.pending_event_bytes,
+        );
         self.pending_kernel_stdin_gauge = queue_tracker::register_queue(
             queue_tracker::TrackedLimit::PendingKernelStdinBytes,
             limits.pending_stdin_bytes,
@@ -438,23 +1038,24 @@ impl ActiveProcess {
         debug_assert_eq!(self.pending_execution_event_bytes, 0);
         self.vm_pending_stdin_bytes_budget = stdin;
         self.vm_pending_event_bytes_budget = Arc::clone(&events);
-        if let ActiveExecution::Binding(execution) = &mut self.execution {
-            if !Arc::ptr_eq(&execution.vm_pending_event_bytes_budget, &events) {
-                debug_assert_eq!(execution.pending_event_bytes.load(Ordering::Acquire), 0);
-                execution.vm_pending_event_bytes_budget = events;
-            }
-        }
+        self.execution.bind_adapter_event_bytes_budget(events);
         self
     }
 
-    pub(crate) fn queue_pending_wasm_signal(&mut self, signal: i32) -> Result<(), SidecarError> {
-        self.pending_wasm_signals.insert(signal);
-        self.pending_wasm_signals_gauge
-            .observe_depth(self.pending_wasm_signals.len());
-        Ok(())
-    }
-
+    #[cfg(test)]
     pub(crate) fn with_event_notify(mut self, event_notify: Arc<tokio::sync::Notify>) -> Self {
+        let control_notify = Arc::clone(&event_notify);
+        self.runtime_control
+            .set_wake(Arc::new(move || control_notify.notify_one()));
+        match self.common_event_notify.lock() {
+            Ok(mut notify) => *notify = Arc::clone(&event_notify),
+            Err(poisoned) => {
+                eprintln!(
+                    "ERR_AGENTOS_EXECUTION_WAKE_LOCK_POISONED: recovering the execution wake target after a prior panic"
+                );
+                *poisoned.into_inner() = Arc::clone(&event_notify);
+            }
+        }
         self.process_event_notify = event_notify;
         self
     }
@@ -462,38 +1063,6 @@ impl ActiveProcess {
     pub(crate) fn with_host_cwd(mut self, host_cwd: PathBuf) -> Self {
         self.host_cwd = host_cwd;
         self
-    }
-
-    pub(crate) fn with_shadow_root(mut self, shadow_root: PathBuf) -> Self {
-        self.shadow_root = Some(shadow_root);
-        self
-    }
-
-    pub(crate) fn mark_host_write_dirty(&mut self) {
-        self.host_write_dirty = true;
-    }
-
-    pub(crate) fn host_write_dirty_recursive(&self) -> bool {
-        self.host_write_dirty
-            || self
-                .child_processes
-                .values()
-                .any(ActiveProcess::host_write_dirty_recursive)
-    }
-
-    pub(crate) fn clean_host_writes_are_observable(&self) -> bool {
-        matches!(
-            self.execution,
-            ActiveExecution::Javascript(_) | ActiveExecution::Python(_) | ActiveExecution::Wasm(_)
-        )
-    }
-
-    pub(crate) fn clean_host_writes_are_observable_recursive(&self) -> bool {
-        self.clean_host_writes_are_observable()
-            && self
-                .child_processes
-                .values()
-                .all(ActiveProcess::clean_host_writes_are_observable_recursive)
     }
 
     pub(crate) fn with_guest_cwd(mut self, guest_cwd: String) -> Self {
@@ -521,26 +1090,9 @@ impl ActiveProcess {
         self
     }
 
-    pub(crate) fn allocate_mapped_host_fd(&mut self, fd: ActiveMappedHostFd) -> u32 {
-        let handle = self.next_mapped_host_fd;
-        self.next_mapped_host_fd = self
-            .next_mapped_host_fd
-            .checked_add(1)
-            .unwrap_or(MAPPED_HOST_FD_START);
-        self.mapped_host_fds.insert(handle, fd);
-        handle
-    }
-
-    pub(crate) fn mapped_host_fd(&self, fd: u32) -> Option<&ActiveMappedHostFd> {
-        self.mapped_host_fds.get(&fd)
-    }
-
-    pub(crate) fn mapped_host_fd_mut(&mut self, fd: u32) -> Option<&mut ActiveMappedHostFd> {
-        self.mapped_host_fds.get_mut(&fd)
-    }
-
-    pub(crate) fn close_mapped_host_fd(&mut self, fd: u32) -> bool {
-        self.mapped_host_fds.remove(&fd).is_some()
+    pub(crate) fn with_adapter_policy(mut self, adapter_policy: ExecutionAdapterPolicy) -> Self {
+        self.adapter_policy = adapter_policy;
+        self
     }
 
     pub(crate) fn allocate_child_process_id(&mut self) -> String {
@@ -593,7 +1145,7 @@ impl ActiveProcess {
         descriptions: &mut BTreeMap<usize, bool>,
         counts: &mut NetworkResourceCounts,
     ) {
-        counts.sockets += self.http_servers.len() + self.python_sockets.len();
+        counts.sockets += self.http_servers.len();
         let http2 = self
             .http2
             .shared
@@ -645,8 +1197,9 @@ impl ActiveProcess {
                 entry.insert(Arc::new(lease));
                 Ok(())
             }
-            std::collections::btree_map::Entry::Occupied(_) => Err(SidecarError::InvalidState(
-                format!("ERR_AGENTOS_CAPABILITY_DUPLICATE: process already owns {key:?}"),
+            std::collections::btree_map::Entry::Occupied(_) => Err(SidecarError::host(
+                "ERR_AGENTOS_CAPABILITY_DUPLICATE",
+                format!("process already owns {key:?}"),
             )),
         }
     }
@@ -674,11 +1227,15 @@ impl ActiveProcess {
         preserved_identity: Option<(u64, u64)>,
     ) -> Result<(), SidecarError> {
         let lease = self.capability_leases.remove(key).ok_or_else(|| {
-            SidecarError::InvalidState(format!(
-                "ERR_AGENTOS_CAPABILITY_MISSING: process does not own {key:?}"
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_CAPABILITY_MISSING",
+                format!("process does not own {key:?}"),
+            )
         })?;
-        if let Some(session) = self.execution.javascript_v8_session_handle() {
+        if let Some(session) = self
+            .execution
+            .execution_wake_handle(self.kernel_handle.runtime_identity())
+        {
             if let Err(error) = session.remove_readiness(lease.id(), lease.generation()) {
                 eprintln!(
                     "ERR_AGENTOS_READY_REMOVE: capability={} generation={}: {error}",
@@ -710,14 +1267,18 @@ impl ActiveProcess {
         if description_lease.is_retained() {
             return Ok(());
         }
-        Err(SidecarError::InvalidState(format!(
-            "ERR_AGENTOS_CAPABILITY_MISSING: process does not own {key:?} and the open description has no retained lease"
-        )))
+        Err(SidecarError::host(
+            "ERR_AGENTOS_CAPABILITY_MISSING",
+            format!("process does not own {key:?} and the open description has no retained lease"),
+        ))
     }
 
     pub(super) fn release_capability_if_present(&mut self, key: &NativeCapabilityKey) {
         if let Some(lease) = self.capability_leases.remove(key) {
-            if let Some(session) = self.execution.javascript_v8_session_handle() {
+            if let Some(session) = self
+                .execution
+                .execution_wake_handle(self.kernel_handle.runtime_identity())
+            {
                 if let Err(error) = session.remove_readiness(lease.id(), lease.generation()) {
                     eprintln!(
                         "ERR_AGENTOS_READY_REMOVE: capability={} generation={}: {error}",
@@ -773,14 +1334,16 @@ impl ActiveProcess {
         kind: CapabilityKind,
     ) -> Result<(), SidecarError> {
         let generation = self.runtime_context.vm_generation().ok_or_else(|| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_CAPABILITY_SESSION: process runtime is not VM-generation scoped",
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_CAPABILITY_SESSION",
+                String::from("process runtime is not VM-generation scoped"),
+            )
         })?;
         let lease = self.capability_leases.get(key).ok_or_else(|| {
-            SidecarError::InvalidState(format!(
-                "ERR_AGENTOS_CAPABILITY_MISSING: process does not own {key:?}"
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_CAPABILITY_MISSING",
+                format!("process does not own {key:?}"),
+            )
         })?;
         lease.validate(generation, kind).map_err(SidecarError::from)
     }
@@ -815,11 +1378,192 @@ mod pending_event_reservation_tests {
     use agentos_kernel::mount_table::MountTable;
     use agentos_kernel::permissions::Permissions;
     use agentos_kernel::vfs::MemoryFileSystem;
+    use std::future::Future as _;
+    use std::task::{Context, Poll, Waker};
 
     fn test_runtime_context() -> agentos_runtime::RuntimeContext {
         agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
             .expect("create test runtime")
             .context()
+    }
+
+    fn take_notify_permit(notify: &tokio::sync::Notify) -> bool {
+        let mut notified = Box::pin(notify.notified());
+        let mut context = Context::from_waker(Waker::noop());
+        matches!(notified.as_mut().poll(&mut context), Poll::Ready(()))
+    }
+
+    #[test]
+    fn startup_signal_is_durable_across_backend_construction() {
+        use agentos_kernel::process_runtime::ProcessExit;
+
+        let mut config = KernelVmConfig::new("vm-startup-signal-endpoint");
+        config.permissions = Permissions::allow_all();
+        let mut kernel = SidecarKernel::new(MountTable::new(MemoryFileSystem::new()), config);
+        kernel
+            .register_driver(CommandDriver::new(EXECUTION_DRIVER_NAME, [WASM_COMMAND]))
+            .expect("register execution driver");
+        let kernel_handle = kernel
+            .spawn_process(
+                WASM_COMMAND,
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn kernel process");
+        let pid = kernel_handle.pid();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let runtime_control =
+            ActiveProcess::attach_runtime_control_before_start(&kernel_handle, Arc::clone(&notify))
+                .expect("attach runtime endpoint before backend construction");
+
+        kernel
+            .kill_process(EXECUTION_DRIVER_NAME, pid, SIGTERM)
+            .expect("signal process during backend construction");
+        assert!(take_notify_permit(&notify));
+        assert!(runtime_control.pending().termination.is_some());
+
+        let mut process = ActiveProcess::new_with_attached_runtime_control(
+            pid,
+            kernel_handle,
+            test_runtime_context(),
+            crate::limits::VmLimits::default(),
+            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            super::GuestRuntimeKind::WebAssembly,
+            ActiveExecution::Binding(BindingExecution::default()),
+            runtime_control,
+            Arc::clone(&notify),
+        );
+        process
+            .apply_runtime_controls()
+            .expect("apply durable startup signal to constructed backend");
+        assert_eq!(
+            process.pending_runtime_exit,
+            Some(ProcessExit::Signaled {
+                signal: SIGTERM,
+                core_dumped: false,
+            })
+        );
+
+        process.kernel_handle.finish_signaled(SIGTERM, false);
+        drop(process);
+        kernel.waitpid(pid).expect("reap signaled startup process");
+        assert!(kernel.list_processes().is_empty());
+    }
+
+    #[test]
+    fn one_slot_rpc_admission_is_typed_and_never_overwrites() {
+        admit_one_slot_rpc(None, 8, "deferredKernelWaitRpc").expect("empty slot");
+        admit_one_slot_rpc(Some(8), 8, "deferredKernelWaitRpc").expect("same call recheck");
+        let error = admit_one_slot_rpc(Some(7), 8, "deferredKernelWaitRpc")
+            .expect_err("different call must not replace the retained waiter");
+        assert_eq!(error.code, "EBUSY");
+        assert_eq!(
+            error.details.as_ref().expect("slot details")["pendingCallId"],
+            7
+        );
+        assert_eq!(
+            error.details.as_ref().expect("slot details")["incomingCallId"],
+            8
+        );
+    }
+
+    #[test]
+    fn executable_image_snapshot_is_single_bounded_and_releases_accounting() {
+        let mut config = KernelVmConfig::new("vm-executable-image-snapshot");
+        config.permissions = Permissions::allow_all();
+        let mut kernel = SidecarKernel::new(MountTable::new(MemoryFileSystem::new()), config);
+        kernel
+            .register_driver(CommandDriver::new(EXECUTION_DRIVER_NAME, [WASM_COMMAND]))
+            .expect("register execution driver");
+        let handle = kernel
+            .spawn_process(
+                WASM_COMMAND,
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn process");
+        let pid = handle.pid();
+        let runtime = test_runtime_context();
+        let resources = Arc::clone(runtime.resources());
+        let baseline = resources.usage(ResourceClass::ExecutorBytes).used;
+        let mut process = ActiveProcess::new(
+            pid,
+            handle,
+            runtime,
+            crate::limits::VmLimits::default(),
+            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            GuestRuntimeKind::WebAssembly,
+            ActiveExecution::Binding(BindingExecution::default()),
+        );
+        let retained = resources
+            .reserve(ResourceClass::ExecutorBytes, 4)
+            .expect("reserve first image");
+        let image_handle = process
+            .install_executable_image(vec![1, 2, 3, 4], retained)
+            .expect("install first image");
+        assert_eq!(
+            resources.usage(ResourceClass::ExecutorBytes).used,
+            baseline + 4
+        );
+        assert_eq!(
+            process
+                .read_executable_image(image_handle, 1, 2)
+                .expect("bounded image read"),
+            &[2, 3]
+        );
+        assert_eq!(
+            process
+                .read_executable_image(image_handle, 99, usize::MAX)
+                .expect("read beyond EOF"),
+            &[] as &[u8]
+        );
+
+        let duplicate = resources
+            .reserve(ResourceClass::ExecutorBytes, 1)
+            .expect("reserve duplicate attempt");
+        let error = process
+            .install_executable_image(vec![9], duplicate)
+            .expect_err("a second image must not replace the live snapshot");
+        assert_eq!(error.code, "EBUSY");
+        assert_eq!(
+            resources.usage(ResourceClass::ExecutorBytes).used,
+            baseline + 4,
+            "rejected image reservation must be released"
+        );
+        let error = process
+            .close_executable_image(image_handle + 1)
+            .expect_err("a stale handle must not close the live snapshot");
+        assert_eq!(error.code, "ESTALE");
+        assert_eq!(
+            resources.usage(ResourceClass::ExecutorBytes).used,
+            baseline + 4
+        );
+
+        process
+            .close_executable_image(image_handle)
+            .expect("close active image");
+        assert_eq!(resources.usage(ResourceClass::ExecutorBytes).used, baseline);
+
+        let retained = resources
+            .reserve(ResourceClass::ExecutorBytes, 3)
+            .expect("reserve teardown image");
+        process
+            .install_executable_image(vec![5, 6, 7], retained)
+            .expect("install teardown image");
+        process.kernel_handle.finish(0);
+        drop(process);
+        assert_eq!(
+            resources.usage(ResourceClass::ExecutorBytes).used,
+            baseline,
+            "process teardown must release the retained image"
+        );
+        kernel.waitpid(pid).expect("reap process");
     }
 
     #[test]
@@ -919,6 +1663,430 @@ mod pending_event_reservation_tests {
         ));
         assert!(internal_budget.try_reserve(internal_bytes));
         internal_budget.release(internal_bytes);
+
+        process.kernel_handle.finish(0);
+        kernel.waitpid(process.kernel_pid).expect("reap process");
+    }
+
+    #[test]
+    fn leased_event_transfers_at_exact_vm_cap_without_loss_or_double_charge() {
+        let event = ActiveExecutionEvent::Stdout(vec![0x51; 32]);
+        let event_bytes = event.retained_bytes();
+        let budget = VmPendingByteBudget::new(
+            event_bytes,
+            queue_tracker::TrackedLimit::PendingExecutionEventBytes,
+        );
+        let mut config = KernelVmConfig::new("vm-exact-cap-event-transfer");
+        config.permissions = Permissions::allow_all();
+        let mut kernel = SidecarKernel::new(MountTable::new(MemoryFileSystem::new()), config);
+        kernel
+            .register_driver(CommandDriver::new(EXECUTION_DRIVER_NAME, [WASM_COMMAND]))
+            .expect("register execution driver");
+        let source_handle = kernel
+            .spawn_process(
+                WASM_COMMAND,
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn source process");
+        let target_handle = kernel
+            .spawn_process(
+                WASM_COMMAND,
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn target process");
+        let source_pid = source_handle.pid();
+        let target_pid = target_handle.pid();
+        let mut source = ActiveProcess::new(
+            source_pid,
+            source_handle,
+            test_runtime_context(),
+            crate::limits::VmLimits::default(),
+            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            GuestRuntimeKind::WebAssembly,
+            ActiveExecution::Binding(BindingExecution::default()),
+        )
+        .with_vm_pending_byte_budgets(
+            VmPendingByteBudget::new(
+                event_bytes,
+                queue_tracker::TrackedLimit::PendingKernelStdinBytes,
+            ),
+            Arc::clone(&budget),
+        );
+        let mut target = ActiveProcess::new(
+            target_pid,
+            target_handle,
+            test_runtime_context(),
+            crate::limits::VmLimits::default(),
+            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            GuestRuntimeKind::WebAssembly,
+            ActiveExecution::Binding(BindingExecution::default()),
+        )
+        .with_vm_pending_byte_budgets(
+            VmPendingByteBudget::new(
+                event_bytes,
+                queue_tracker::TrackedLimit::PendingKernelStdinBytes,
+            ),
+            Arc::clone(&budget),
+        );
+
+        source
+            .queue_pending_execution_event(event)
+            .expect("source event exactly fills the VM cap");
+        let leased = source
+            .lease_pending_execution_event()
+            .expect("lease source event");
+        target
+            .try_queue_pending_polled_execution_event(leased)
+            .expect("the existing reservation transfers at the exact cap");
+        assert_eq!(
+            budget.used(),
+            event_bytes,
+            "transfer must not double charge"
+        );
+        assert!(source.pending_execution_events.is_empty());
+
+        let overflow = PolledExecutionEvent::unreserved(ActiveExecutionEvent::Exited(0));
+        let (error, overflow) = target
+            .try_queue_pending_polled_execution_event(overflow)
+            .expect_err("one additional retained event must exceed the exact cap");
+        assert_eq!(error.code(), Some("ERR_AGENTOS_RESOURCE_LIMIT"));
+        assert!(matches!(overflow.event(), ActiveExecutionEvent::Exited(0)));
+        assert_eq!(budget.used(), event_bytes, "rejection must not leak bytes");
+
+        assert!(matches!(
+            target.pop_pending_execution_event(),
+            Some(ActiveExecutionEvent::Stdout(bytes)) if bytes == vec![0x51; 32]
+        ));
+        assert_eq!(
+            budget.used(),
+            0,
+            "consumption must release the one reservation"
+        );
+
+        let backpressure_budget = VmPendingByteBudget::new(
+            event_bytes.saturating_mul(2),
+            queue_tracker::TrackedLimit::PendingExecutionEventBytes,
+        );
+        source = source.with_vm_pending_byte_budgets(
+            VmPendingByteBudget::new(
+                event_bytes.saturating_mul(2),
+                queue_tracker::TrackedLimit::PendingKernelStdinBytes,
+            ),
+            Arc::clone(&backpressure_budget),
+        );
+        target = target.with_vm_pending_byte_budgets(
+            VmPendingByteBudget::new(
+                event_bytes.saturating_mul(2),
+                queue_tracker::TrackedLimit::PendingKernelStdinBytes,
+            ),
+            Arc::clone(&backpressure_budget),
+        );
+        source.pending_execution_event_count_limit = 1;
+        target.pending_execution_event_count_limit = 1;
+        target
+            .queue_pending_execution_event(ActiveExecutionEvent::Stdout(vec![0x41; 32]))
+            .expect("fill the parent process queue");
+        source
+            .queue_pending_execution_event(ActiveExecutionEvent::Stdout(vec![0x42; 32]))
+            .expect("fill the remaining VM aggregate bytes in the child");
+        assert_eq!(backpressure_budget.used(), event_bytes * 2);
+        target.child_processes.insert(String::from("child"), source);
+        while take_notify_permit(&target.process_event_notify) {}
+
+        let child_event = target
+            .child_processes
+            .get_mut("child")
+            .unwrap()
+            .lease_pending_execution_event()
+            .expect("lease child output for parent transfer");
+        let (error, child_event) = target
+            .try_queue_pending_polled_execution_event(child_event)
+            .expect_err("a full parent process queue must backpressure the transfer");
+        assert_eq!(error.code(), Some("ERR_AGENTOS_RESOURCE_LIMIT"));
+        target
+            .child_processes
+            .get_mut("child")
+            .unwrap()
+            .queue_pull_owned_polled_execution_event(child_event)
+            .expect("return the same reservation to the child queue");
+        assert_eq!(
+            backpressure_budget.used(),
+            event_bytes * 2,
+            "backpressure and requeue must neither lose nor double-charge bytes"
+        );
+
+        assert!(matches!(
+            target.pop_pending_execution_event(),
+            Some(ActiveExecutionEvent::Stdout(bytes)) if bytes == vec![0x41; 32]
+        ));
+        assert!(
+            take_notify_permit(&target.process_event_notify),
+            "draining a parent with descendants must rearm the global pump"
+        );
+        let child_event = target
+            .child_processes
+            .get_mut("child")
+            .unwrap()
+            .lease_pending_execution_event()
+            .expect("the pull-owned child event remains durable");
+        target
+            .try_queue_pending_polled_execution_event(child_event)
+            .expect("the rearmed transfer succeeds after parent capacity is freed");
+        assert_eq!(backpressure_budget.used(), event_bytes);
+        assert!(matches!(
+            target.pop_pending_execution_event(),
+            Some(ActiveExecutionEvent::Stdout(bytes)) if bytes == vec![0x42; 32]
+        ));
+        assert_eq!(backpressure_budget.used(), 0);
+        source = target
+            .child_processes
+            .remove("child")
+            .expect("recover child for orderly teardown");
+
+        source.kernel_handle.finish(0);
+        target.kernel_handle.finish(0);
+        kernel.waitpid(source_pid).expect("reap source process");
+        kernel.waitpid(target_pid).expect("reap target process");
+    }
+
+    #[test]
+    fn duplicate_exit_events_cannot_spin_ahead_of_trailing_output() {
+        let mut config = KernelVmConfig::new("duplicate-child-exit-ordering");
+        config.permissions = Permissions::allow_all();
+        let mut kernel = SidecarKernel::new(MountTable::new(MemoryFileSystem::new()), config);
+        kernel
+            .register_driver(CommandDriver::new(EXECUTION_DRIVER_NAME, [WASM_COMMAND]))
+            .expect("register execution driver");
+        let handle = kernel
+            .spawn_process(
+                WASM_COMMAND,
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn process");
+        let mut process = ActiveProcess::new(
+            handle.pid(),
+            handle,
+            test_runtime_context(),
+            crate::limits::VmLimits::default(),
+            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            GuestRuntimeKind::WebAssembly,
+            ActiveExecution::Binding(BindingExecution::default()),
+        );
+
+        process
+            .queue_pending_execution_event(ActiveExecutionEvent::Stdout(b"late\n".to_vec()))
+            .expect("queue trailing output");
+        process
+            .queue_pending_execution_event(ActiveExecutionEvent::Exited(0))
+            .expect("queue adapter exit");
+        process
+            .queue_pending_execution_event(ActiveExecutionEvent::Common(ExecutionEvent::Exited(
+                agentos_execution::backend::ExecutionExit::Exited(0),
+            )))
+            .expect("queue runtime-control exit");
+        assert!(take_notify_permit(&process.process_event_notify));
+
+        assert_eq!(process.discard_pending_exit_events(), 2);
+        let trailing_output = process
+            .lease_pending_execution_event()
+            .expect("lease trailing output for its pull owner");
+        process
+            .queue_pull_owned_polled_execution_event(trailing_output)
+            .expect("return pull-owned output without a global rearm");
+        assert!(
+            !take_notify_permit(&process.process_event_notify),
+            "returning a pull-owned event must not self-rearm the global pump"
+        );
+        process
+            .queue_pending_polled_execution_event(PolledExecutionEvent::unreserved(
+                ActiveExecutionEvent::Exited(0),
+            ))
+            .expect("queue one authoritative exit behind output");
+        assert!(take_notify_permit(&process.process_event_notify));
+
+        assert!(matches!(
+            process.pop_pending_execution_event(),
+            Some(ActiveExecutionEvent::Stdout(bytes)) if bytes == b"late\n"
+        ));
+        assert!(matches!(
+            process.pop_pending_execution_event(),
+            Some(ActiveExecutionEvent::Exited(0))
+        ));
+        assert!(process.pop_pending_execution_event().is_none());
+
+        process.kernel_handle.finish(0);
+        kernel.waitpid(process.kernel_pid).expect("reap process");
+    }
+
+    #[test]
+    fn synthetic_runtime_termination_preserves_exact_signal_until_event_emission() {
+        let mut config = KernelVmConfig::new("exact-synthetic-runtime-exit");
+        config.permissions = Permissions::allow_all();
+        let mut kernel = SidecarKernel::new(MountTable::new(MemoryFileSystem::new()), config);
+        kernel
+            .register_driver(CommandDriver::new(EXECUTION_DRIVER_NAME, [WASM_COMMAND]))
+            .expect("register execution driver");
+        let handle = kernel
+            .spawn_process(
+                WASM_COMMAND,
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn binding process");
+        let mut process = ActiveProcess::new(
+            handle.pid(),
+            handle,
+            test_runtime_context(),
+            crate::limits::VmLimits::default(),
+            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            GuestRuntimeKind::JavaScript,
+            ActiveExecution::Binding(BindingExecution::default()),
+        );
+
+        kernel
+            .kill_process(EXECUTION_DRIVER_NAME, process.kernel_pid, SIGTERM)
+            .expect("request SIGTERM");
+        assert_eq!(process.exit_signal, None, "a request is not an exit report");
+
+        let event = process
+            .try_poll_execution_event()
+            .expect("poll runtime control")
+            .expect("synthetic terminal event")
+            .into_event();
+        assert!(matches!(event, ActiveExecutionEvent::Exited(143)));
+        assert_eq!(process.exit_signal, Some(SIGTERM));
+        assert!(!process.exit_core_dumped);
+
+        process.kernel_handle.finish_signaled(SIGTERM, false);
+        kernel.waitpid(process.kernel_pid).expect("reap process");
+    }
+
+    #[test]
+    fn stop_and_continue_wait_state_follow_runtime_control_acknowledgement() {
+        let mut config = KernelVmConfig::new("runtime-control-stop-ack");
+        config.permissions = Permissions::allow_all();
+        let mut kernel = SidecarKernel::new(MountTable::new(MemoryFileSystem::new()), config);
+        kernel
+            .register_driver(CommandDriver::new(EXECUTION_DRIVER_NAME, [WASM_COMMAND]))
+            .expect("register execution driver");
+        let handle = kernel
+            .spawn_process(
+                WASM_COMMAND,
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn binding process");
+        let mut process = ActiveProcess::new(
+            handle.pid(),
+            handle,
+            test_runtime_context(),
+            crate::limits::VmLimits::default(),
+            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            GuestRuntimeKind::JavaScript,
+            ActiveExecution::Binding(BindingExecution::default()),
+        );
+        let ActiveExecution::Binding(binding) = &process.execution else {
+            unreachable!("test process must retain binding execution");
+        };
+        let paused = Arc::clone(&binding.paused);
+        let cancelled = Arc::clone(&binding.cancelled);
+        let pending_events = Arc::clone(&binding.pending_events);
+        let overflow_reason = Arc::clone(&binding.event_overflow_reason);
+        let pending_bytes = Arc::clone(&binding.pending_event_bytes);
+        let count_limit = Arc::clone(&binding.pending_event_count_limit);
+        let bytes_limit = Arc::clone(&binding.pending_event_bytes_limit);
+        let event_budget = Arc::clone(&binding.vm_pending_event_bytes_budget);
+
+        kernel
+            .kill_process(EXECUTION_DRIVER_NAME, process.kernel_pid, libc::SIGTSTP)
+            .expect("request stop");
+        assert_eq!(
+            kernel
+                .list_processes()
+                .get(&process.kernel_pid)
+                .expect("kernel process")
+                .status,
+            agentos_kernel::process_table::ProcessStatus::Running
+        );
+        process
+            .apply_runtime_controls()
+            .expect("apply and acknowledge stop");
+        assert_eq!(
+            kernel
+                .list_processes()
+                .get(&process.kernel_pid)
+                .expect("kernel process")
+                .status,
+            agentos_kernel::process_table::ProcessStatus::Stopped
+        );
+        assert!(process.runtime_control.pending().is_empty());
+        assert!(paused.load(Ordering::Acquire));
+        assert!(send_binding_process_event(
+            &cancelled,
+            &pending_events,
+            &overflow_reason,
+            &pending_bytes,
+            &count_limit,
+            &bytes_limit,
+            &event_budget,
+            ActiveExecutionEvent::Stdout(b"paused-output".to_vec()),
+        ));
+        assert!(process
+            .try_poll_execution_event()
+            .expect("poll stopped binding")
+            .is_none());
+
+        kernel
+            .kill_process(EXECUTION_DRIVER_NAME, process.kernel_pid, libc::SIGCONT)
+            .expect("request continue");
+        assert_eq!(
+            kernel
+                .list_processes()
+                .get(&process.kernel_pid)
+                .expect("kernel process")
+                .status,
+            agentos_kernel::process_table::ProcessStatus::Stopped
+        );
+        process
+            .apply_runtime_controls()
+            .expect("apply and acknowledge continue");
+        assert_eq!(
+            kernel
+                .list_processes()
+                .get(&process.kernel_pid)
+                .expect("kernel process")
+                .status,
+            agentos_kernel::process_table::ProcessStatus::Running
+        );
+        assert!(process.runtime_control.pending().is_empty());
+        assert!(!paused.load(Ordering::Acquire));
+        let event = process
+            .try_poll_execution_event()
+            .expect("poll resumed binding")
+            .expect("queued binding event after resume")
+            .into_event();
+        assert!(matches!(
+            event,
+            ActiveExecutionEvent::Stdout(bytes) if bytes == b"paused-output"
+        ));
 
         process.kernel_handle.finish(0);
         kernel.waitpid(process.kernel_pid).expect("reap process");
@@ -1179,9 +2347,29 @@ impl BindingExecution {
         debug_assert!(self
             .pending_events
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("binding pending-event queue")
             .is_empty());
         self.vm_pending_event_bytes_budget = budget;
+        self
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn with_descendant_wait_ownership(
+        mut self,
+        ownership: DescendantWaitOwnership,
+    ) -> Self {
+        self.descendant_wait_ownership = ownership;
+        self
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn with_descendant_output_ownership(
+        mut self,
+        ownership: DescendantOutputOwnership,
+    ) -> Self {
+        self.descendant_output_ownership = ownership;
         self
     }
 }
@@ -1192,10 +2380,16 @@ impl Drop for BindingExecution {
         // producer checks this flag while holding the same queue lock, so it
         // cannot enqueue after the retained-byte total is released here.
         self.cancelled.store(true, Ordering::Release);
-        let mut pending_events = self
-            .pending_events
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.pause_notify.notify_waiters();
+        let mut pending_events = match self.pending_events.lock() {
+            Ok(pending_events) => pending_events,
+            Err(poisoned) => {
+                eprintln!(
+                    "ERR_AGENTOS_BINDING_EVENT_QUEUE_POISONED: recovering the binding event queue while releasing reservations"
+                );
+                poisoned.into_inner()
+            }
+        };
         pending_events.clear();
         let pending_bytes = self.pending_event_bytes.swap(0, Ordering::AcqRel);
         self.vm_pending_event_bytes_budget.release(pending_bytes);
@@ -1217,7 +2411,15 @@ pub(super) fn add_live_host_net_transfer_descriptions(
     registry: &HostNetTransferDescriptionRegistry,
     descriptions: &mut BTreeMap<usize, bool>,
 ) {
-    let mut transfers = registry.lock().unwrap_or_else(|error| error.into_inner());
+    let mut transfers = match registry.lock() {
+        Ok(transfers) => transfers,
+        Err(poisoned) => {
+            eprintln!(
+                "ERR_AGENTOS_HOST_NET_TRANSFER_REGISTRY_POISONED: recovering the transfer registry during resource accounting"
+            );
+            poisoned.into_inner()
+        }
+    };
     transfers.retain(|description_id, transfer| {
         let alive = transfer.handles.upgrade().is_some();
         if alive {
@@ -1251,12 +2453,18 @@ pub(super) fn rebind_process_runtime_event_targets(
     process: &mut ActiveProcess,
     kernel_readiness: &KernelSocketReadinessRegistry,
 ) {
-    let session = process.execution.javascript_v8_session_handle();
+    let session = process
+        .execution
+        .execution_wake_handle(process.kernel_handle.runtime_identity());
 
     for (socket_id, socket) in &process.tcp_sockets {
         let key = NativeCapabilityKey::TcpSocket(socket_id.clone());
         let identity = process.capability_readiness_identity(&key);
-        socket.set_event_pusher(session.clone(), identity);
+        socket.set_event_pusher(
+            session.clone(),
+            identity,
+            Arc::clone(&process.process_event_notify),
+        );
         register_kernel_readiness_target(
             kernel_readiness,
             socket.kernel_socket_id,
@@ -1269,7 +2477,11 @@ pub(super) fn rebind_process_runtime_event_targets(
     }
     for (socket_id, socket) in &process.unix_sockets {
         let key = NativeCapabilityKey::UnixSocket(socket_id.clone());
-        socket.set_event_pusher(session.clone(), process.capability_readiness_identity(&key));
+        socket.set_event_pusher(
+            session.clone(),
+            process.capability_readiness_identity(&key),
+            Arc::clone(&process.process_event_notify),
+        );
     }
     for (listener_id, listener) in &process.tcp_listeners {
         let key = NativeCapabilityKey::TcpListener(listener_id.clone());
@@ -1285,12 +2497,20 @@ pub(super) fn rebind_process_runtime_event_targets(
     }
     for (listener_id, listener) in &process.unix_listeners {
         let key = NativeCapabilityKey::UnixListener(listener_id.clone());
-        listener.set_event_pusher(session.clone(), process.capability_readiness_identity(&key));
+        listener.set_event_pusher(
+            session.clone(),
+            process.capability_readiness_identity(&key),
+            Arc::clone(&process.process_event_notify),
+        );
     }
     for (socket_id, socket) in &process.udp_sockets {
         let key = NativeCapabilityKey::UdpSocket(socket_id.clone());
         let identity = process.capability_readiness_identity(&key);
-        socket.set_event_pusher(session.clone(), identity);
+        socket.set_event_pusher(
+            session.clone(),
+            identity,
+            Arc::clone(&process.process_event_notify),
+        );
         register_kernel_readiness_target(
             kernel_readiness,
             socket.kernel_socket_id,
@@ -1336,16 +2556,26 @@ pub(super) fn discard_replaced_image_pending_events(process: &mut ActiveProcess)
 impl ActiveExecutionEvent {
     pub(crate) fn retained_bytes(&self) -> usize {
         match self {
+            Self::Common(ExecutionEvent::Output { bytes, .. }) => {
+                std::mem::size_of::<Self>().saturating_add(bytes.len())
+            }
+            Self::Common(ExecutionEvent::HostCall { .. })
+            | Self::Common(ExecutionEvent::Exited(_)) => 4 * 1024,
+            Self::Common(ExecutionEvent::Warning(error))
+            | Self::Common(ExecutionEvent::RuntimeFault(error)) => {
+                std::mem::size_of::<Self>().saturating_add(error.encoded_bytes())
+            }
+            Self::Common(_) => 4 * 1024,
             Self::Stdout(bytes) | Self::Stderr(bytes) => {
                 std::mem::size_of::<Self>().saturating_add(bytes.len())
             }
             // Internal RPC events are serviced eagerly rather than retained;
             // account a conservative fixed envelope if briefly deferred. The
             // wire payload is independently frame-bounded.
-            Self::JavascriptSyncRpcRequest(_)
-            | Self::JavascriptSyncRpcCompletion(_)
-            | Self::PythonVfsRpcRequest(_)
-            | Self::PythonSocketConnectCompletion(_) => 4 * 1024,
+            Self::HostRpcRequest(_)
+            | Self::HostCallCompletion(_)
+            | Self::ManagedStreamReadRecheck(_)
+            | Self::ManagedUdpPollRecheck(_) => 4 * 1024,
             Self::SignalState { .. } | Self::Exited(_) => std::mem::size_of::<Self>(),
         }
     }
@@ -1372,10 +2602,18 @@ fn poll_binding_process_event(
 fn poll_binding_process_event_leased(
     execution: &BindingExecution,
 ) -> Result<Option<PolledExecutionEvent>, SidecarError> {
+    if execution.paused.load(Ordering::Acquire) && !execution.cancelled.load(Ordering::Acquire) {
+        return Ok(None);
+    }
     let event = execution
         .pending_events
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .map_err(|_| {
+            SidecarError::host(
+                "EIO",
+                "ERR_AGENTOS_BINDING_EVENT_QUEUE_POISONED: binding event queue was poisoned by a prior panic",
+            )
+        })?
         .pop_front();
     if let Some(event) = event {
         let event_bytes = event.retained_bytes();
@@ -1393,10 +2631,15 @@ fn poll_binding_process_event_leased(
     if let Some(reason) = execution
         .event_overflow_reason
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .map_err(|_| {
+            SidecarError::host(
+                "EIO",
+                "ERR_AGENTOS_BINDING_OVERFLOW_STATE_POISONED: binding overflow state was poisoned by a prior panic",
+            )
+        })?
         .clone()
     {
-        return Err(SidecarError::InvalidState(reason));
+        return Err(SidecarError::Host(reason));
     }
     Ok(None)
 }
@@ -1421,124 +2664,156 @@ pub(super) fn poll_child_execution_after_exit(
 ) -> Result<Option<PolledExecutionEvent>, SidecarError> {
     match child.try_poll_execution_event() {
         Ok(event) => Ok(event),
-        Err(SidecarError::Execution(message))
-            if child.runtime == GuestRuntimeKind::WebAssembly
-                && message == WasmExecutionError::EventChannelClosed.to_string() =>
-        {
-            Ok(None)
-        }
+        Err(SidecarError::ExecutionEventChannelClosed { .. }) => Ok(None),
         Err(error) => Err(error),
     }
 }
 
-impl ActiveExecution {
-    pub(crate) fn is_prepared_for_start(&self) -> bool {
-        match self {
-            Self::Javascript(execution) => execution.is_prepared_for_start(),
-            Self::Python(execution) => execution.is_prepared_for_start(),
-            Self::Wasm(execution) => execution.is_prepared_for_start(),
-            Self::Binding(_) => false,
+impl ExecutionBackend for BindingExecution {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::Binding
+    }
+
+    fn descendant_wait_ownership(&self) -> DescendantWaitOwnership {
+        self.descendant_wait_ownership
+    }
+
+    fn descendant_output_ownership(&self) -> DescendantOutputOwnership {
+        self.descendant_output_ownership
+    }
+
+    fn configure_host_services(&mut self, host: ProcessHostCapabilitySet) {
+        self.host_capabilities = Some(host);
+    }
+
+    fn is_prepared_for_start(&self) -> bool {
+        false
+    }
+
+    fn start_prepared(&mut self) -> Result<(), HostServiceError> {
+        Err(HostServiceError::new(
+            "ERR_AGENTOS_EXECUTION_NOT_PREPARED",
+            "binding execution cannot be a prepared execve image",
+        ))
+    }
+
+    fn begin_shutdown(
+        &mut self,
+        reason: ShutdownReason,
+    ) -> Result<ShutdownOutcome, HostServiceError> {
+        self.cancelled.store(true, Ordering::Release);
+        self.pause_notify.notify_waiters();
+        self.event_notify.notify_one();
+        Ok(match reason {
+            ShutdownReason::Signal(signal) => ShutdownOutcome::Exited(ExecutionExit::Signaled {
+                signal,
+                core_dumped: false,
+            }),
+            ShutdownReason::RuntimeFault => ShutdownOutcome::Exited(ExecutionExit::Exited(1)),
+            ShutdownReason::Deadline | ShutdownReason::VmTeardown | ShutdownReason::HostRequest => {
+                ShutdownOutcome::Exited(ExecutionExit::Exited(137))
+            }
+            ShutdownReason::Completed => ShutdownOutcome::Exited(ExecutionExit::Exited(0)),
+        })
+    }
+
+    fn set_paused(&self, paused: bool) -> Result<(), HostServiceError> {
+        self.paused.store(paused, Ordering::Release);
+        if !paused {
+            self.pause_notify.notify_waiters();
+            self.event_notify.notify_one();
         }
+        Ok(())
+    }
+
+    fn write_stdin(&mut self, _bytes: &[u8]) -> Result<(), HostServiceError> {
+        Ok(())
+    }
+
+    fn close_stdin(&mut self) -> Result<(), HostServiceError> {
+        Ok(())
+    }
+
+    fn deliver_signal_checkpoint(
+        &self,
+        _identity: ExecutionWakeIdentity,
+        _signal: i32,
+        _delivery_token: u64,
+        _flags: u32,
+    ) -> Result<SignalCheckpointOutcome, HostServiceError> {
+        Ok(SignalCheckpointOutcome::Unsupported)
+    }
+}
+
+impl ActiveExecution {
+    fn backend(&self) -> &dyn ExecutionBackend {
+        match self {
+            Self::Javascript(execution) => execution,
+            Self::Python(execution) => execution,
+            Self::Wasm(execution) => execution.as_ref(),
+            Self::Binding(execution) => execution,
+        }
+    }
+
+    fn backend_mut(&mut self) -> &mut dyn ExecutionBackend {
+        match self {
+            Self::Javascript(execution) => execution,
+            Self::Python(execution) => execution,
+            Self::Wasm(execution) => execution.as_mut(),
+            Self::Binding(execution) => execution,
+        }
+    }
+
+    /// Poll an adapter-owned queue whose retained-byte reservation cannot be
+    /// represented by the generic backend event alone. `None` means the
+    /// adapter uses the common backend/event channel; `Some` owns the complete
+    /// poll result, including an empty queue.
+    fn poll_adapter_event_leased(
+        &mut self,
+    ) -> Option<Result<Option<PolledExecutionEvent>, SidecarError>> {
+        match self {
+            Self::Binding(execution) => Some(poll_binding_process_event_leased(execution)),
+            Self::Javascript(_) | Self::Python(_) | Self::Wasm(_) => None,
+        }
+    }
+
+    fn configure_adapter_event_limits(&self, count: usize, bytes: usize) {
+        if let Self::Binding(execution) = self {
+            execution
+                .pending_event_count_limit
+                .store(count, Ordering::Release);
+            execution
+                .pending_event_bytes_limit
+                .store(bytes, Ordering::Release);
+        }
+    }
+
+    fn adapter_event_bytes_budget(&self) -> Option<Arc<VmPendingByteBudget>> {
+        match self {
+            Self::Binding(execution) => Some(Arc::clone(&execution.vm_pending_event_bytes_budget)),
+            Self::Javascript(_) | Self::Python(_) | Self::Wasm(_) => None,
+        }
+    }
+
+    fn bind_adapter_event_bytes_budget(&mut self, budget: Arc<VmPendingByteBudget>) {
+        if let Self::Binding(execution) = self {
+            if !Arc::ptr_eq(&execution.vm_pending_event_bytes_budget, &budget) {
+                debug_assert_eq!(execution.pending_event_bytes.load(Ordering::Acquire), 0);
+                execution.vm_pending_event_bytes_budget = budget;
+            }
+        }
+    }
+
+    pub(crate) fn is_prepared_for_start(&self) -> bool {
+        ExecutionBackend::is_prepared_for_start(self)
     }
 
     pub(crate) fn start_prepared(&mut self) -> Result<(), SidecarError> {
-        match self {
-            Self::Javascript(execution) => execution
-                .start_prepared()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Python(execution) => execution
-                .start_prepared()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Wasm(execution) => execution
-                .start_prepared()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Binding(_) => Err(SidecarError::InvalidState(String::from(
-                "binding execution cannot be a prepared execve image",
-            ))),
-        }
+        ExecutionBackend::start_prepared(self).map_err(SidecarError::from)
     }
 
-    pub(crate) fn python_vfs_rpc_responder(&self) -> Result<PythonVfsRpcResponder, SidecarError> {
-        match self {
-            Self::Python(execution) => Ok(execution.vfs_rpc_responder()),
-            _ => Err(SidecarError::InvalidState(String::from(
-                "only Python executions expose a Python VFS RPC responder",
-            ))),
-        }
-    }
-
-    pub(crate) fn claim_javascript_sync_rpc_response(
-        &mut self,
-        id: u64,
-    ) -> Result<bool, SidecarError> {
-        match self {
-            Self::Javascript(execution) => execution
-                .claim_sync_rpc_response(id)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Python(execution) => execution
-                .claim_javascript_sync_rpc_response(id)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Wasm(execution) => execution
-                .claim_sync_rpc_response(id)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Binding(_) => Err(SidecarError::InvalidState(String::from(
-                "binding executions cannot claim JavaScript sync RPC responses",
-            ))),
-        }
-    }
-
-    pub(crate) fn respond_claimed_javascript_sync_rpc_success(
-        &mut self,
-        id: u64,
-        result: Value,
-    ) -> Result<(), SidecarError> {
-        match self {
-            Self::Javascript(execution) => execution
-                .respond_claimed_sync_rpc_success(id, result)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Python(execution) => execution
-                .respond_claimed_javascript_sync_rpc_success(id, result)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Wasm(execution) => execution
-                .respond_claimed_sync_rpc_success(id, result)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Binding(_) => Err(SidecarError::InvalidState(String::from(
-                "binding executions cannot service claimed JavaScript sync RPC responses",
-            ))),
-        }
-    }
-
-    pub(crate) fn respond_claimed_javascript_sync_rpc_error(
-        &mut self,
-        id: u64,
-        code: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Result<(), SidecarError> {
-        let code = code.into();
-        let message = message.into();
-        match self {
-            Self::Javascript(execution) => execution
-                .respond_claimed_sync_rpc_error(id, code, message)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Python(execution) => execution
-                .respond_claimed_javascript_sync_rpc_error(id, code, message)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Wasm(execution) => execution
-                .respond_claimed_sync_rpc_error(id, code, message)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Binding(_) => Err(SidecarError::InvalidState(String::from(
-                "binding executions cannot service claimed JavaScript sync RPC errors",
-            ))),
-        }
-    }
-
-    pub(crate) fn uses_shared_v8_runtime(&self) -> bool {
-        match self {
-            Self::Javascript(execution) => execution.uses_shared_v8_runtime(),
-            Self::Python(execution) => execution.uses_shared_v8_runtime(),
-            Self::Wasm(execution) => execution.uses_shared_v8_runtime(),
-            Self::Binding(_) => false,
-        }
+    pub(crate) fn native_process_id(&self) -> Option<u32> {
+        ExecutionBackend::native_process_id(self)
     }
 
     pub(crate) fn has_exited(&self) -> bool {
@@ -1565,74 +2840,6 @@ impl ActiveExecution {
         }
     }
 
-    pub(crate) fn child_pid(&self) -> u32 {
-        match self {
-            Self::Javascript(execution) => execution.child_pid(),
-            Self::Python(execution) => execution.child_pid(),
-            Self::Wasm(execution) => execution.child_pid(),
-            Self::Binding(_) => 0,
-        }
-    }
-
-    pub(crate) fn write_stdin(&mut self, chunk: &[u8]) -> Result<(), SidecarError> {
-        match self {
-            Self::Javascript(execution) => execution
-                .write_stdin(chunk)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            // Sidecar Python and WASM read fd 0 from the sidecar kernel pipe.
-            // Their in-process stdin bridges are bypassed in this mode, so
-            // duplicating input into those bridges only fills an unread buffer.
-            Self::Python(_) | Self::Wasm(_) => Ok(()),
-            Self::Binding(_) => Ok(()),
-        }
-    }
-
-    pub(crate) fn close_stdin(&mut self) -> Result<(), SidecarError> {
-        match self {
-            Self::Javascript(execution) => execution
-                .close_stdin()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Python(execution) => execution
-                .close_stdin()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Wasm(execution) => execution
-                .close_stdin()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Binding(_) => Ok(()),
-        }
-    }
-
-    pub(crate) fn respond_python_vfs_rpc_success(
-        &mut self,
-        id: u64,
-        payload: PythonVfsRpcResponsePayload,
-    ) -> Result<(), SidecarError> {
-        match self {
-            Self::Python(execution) => execution
-                .respond_vfs_rpc_success(id, payload)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            _ => Err(SidecarError::InvalidState(String::from(
-                "only Python executions can service Python VFS RPC responses",
-            ))),
-        }
-    }
-
-    pub(crate) fn respond_python_vfs_rpc_error(
-        &mut self,
-        id: u64,
-        code: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Result<(), SidecarError> {
-        match self {
-            Self::Python(execution) => execution
-                .respond_vfs_rpc_error(id, code, message)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            _ => Err(SidecarError::InvalidState(String::from(
-                "only Python executions can service Python VFS RPC responses",
-            ))),
-        }
-    }
-
     pub(crate) fn send_javascript_stream_event(
         &self,
         event_type: &str,
@@ -1651,224 +2858,128 @@ impl ActiveExecution {
         }
     }
 
-    pub(crate) fn javascript_v8_session_handle(&self) -> Option<V8SessionHandle> {
-        match self {
-            Self::Javascript(execution) => Some(execution.v8_session_handle()),
-            Self::Wasm(execution) => Some(execution.v8_session_handle()),
-            _ => None,
-        }
+    pub(crate) fn execution_wake_handle(
+        &self,
+        identity: ProcessRuntimeIdentity,
+    ) -> Option<ExecutionWakeHandle> {
+        ExecutionBackend::wake_handle(
+            self,
+            ExecutionWakeIdentity {
+                generation: identity.generation,
+                pid: identity.pid,
+            },
+        )
     }
 
     pub(crate) fn terminate(&mut self) -> Result<(), SidecarError> {
-        match self {
-            Self::Javascript(execution) => execution
-                .terminate()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Python(execution) => execution
-                .kill()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Wasm(execution) => execution
-                .terminate()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Binding(_) => Ok(()),
-        }
+        self.begin_shutdown(ShutdownReason::HostRequest).map(|_| ())
+    }
+
+    pub(crate) fn begin_shutdown(
+        &mut self,
+        reason: ShutdownReason,
+    ) -> Result<ShutdownOutcome, SidecarError> {
+        ExecutionBackend::begin_shutdown(self, reason).map_err(SidecarError::from)
     }
 
     pub(crate) fn pause(&self) -> Result<(), SidecarError> {
-        match self {
-            Self::Javascript(execution) => execution
-                .pause()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Python(execution) => execution
-                .pause()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Wasm(execution) => execution
-                .pause()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Binding(_) => Ok(()),
-        }
+        ExecutionBackend::set_paused(self, true).map_err(SidecarError::from)
     }
 
     pub(crate) fn resume(&self) -> Result<(), SidecarError> {
-        match self {
-            Self::Javascript(execution) => execution
-                .resume()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Python(execution) => execution
-                .resume()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Wasm(execution) => execution
-                .resume()
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Binding(_) => Ok(()),
-        }
+        ExecutionBackend::set_paused(self, false).map_err(SidecarError::from)
     }
 
-    pub(crate) fn respond_javascript_sync_rpc_success(
-        &mut self,
-        id: u64,
-        result: Value,
-    ) -> Result<(), SidecarError> {
-        match self {
-            Self::Javascript(execution) => execution
-                .respond_sync_rpc_success(id, result)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Python(execution) => execution
-                .respond_javascript_sync_rpc_success(id, result)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Wasm(execution) => execution
-                .respond_sync_rpc_success(id, result)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            _ => Err(SidecarError::InvalidState(String::from(
-                "only JavaScript, Python, and WebAssembly executions can service JavaScript sync RPC responses",
-            ))),
-        }
+    pub(crate) fn deliver_signal_checkpoint(
+        &self,
+        identity: ExecutionWakeIdentity,
+        signal: i32,
+        delivery_token: u64,
+        flags: u32,
+    ) -> Result<SignalCheckpointOutcome, SidecarError> {
+        ExecutionBackend::deliver_signal_checkpoint(self, identity, signal, delivery_token, flags)
+            .map_err(SidecarError::from)
     }
 
-    pub(crate) fn respond_javascript_sync_rpc_raw_success(
-        &mut self,
-        id: u64,
-        payload: Vec<u8>,
-    ) -> Result<(), SidecarError> {
-        match self {
-            Self::Javascript(execution) => execution
-                .respond_sync_rpc_raw_success(id, payload)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Wasm(execution) => execution
-                .respond_sync_rpc_raw_success(id, payload)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            _ => Err(SidecarError::InvalidState(String::from(
-                "only embedded V8 executions can service raw JavaScript sync RPC responses",
-            ))),
-        }
-    }
-
-    pub(crate) fn respond_javascript_sync_rpc_response(
-        &mut self,
-        id: u64,
-        response: JavascriptSyncRpcServiceResponse,
-    ) -> Result<(), SidecarError> {
-        match response {
-            JavascriptSyncRpcServiceResponse::Json(result) => {
-                self.respond_javascript_sync_rpc_success(id, result)
-            }
-            JavascriptSyncRpcServiceResponse::Raw(payload) => {
-                self.respond_javascript_sync_rpc_raw_success(id, payload)
-            }
-            JavascriptSyncRpcServiceResponse::Deferred { .. } => Err(SidecarError::InvalidState(
-                String::from("deferred response must be awaited by the sidecar dispatcher"),
-            )),
-            JavascriptSyncRpcServiceResponse::SourceBackedJson {
-                value,
-                source_reservations,
-            } => {
-                let result = self.respond_javascript_sync_rpc_success(id, value);
-                drop(source_reservations);
-                result
-            }
-            JavascriptSyncRpcServiceResponse::SourceBackedRaw {
-                payload,
-                source_reservations,
-            } => {
-                let result = self.respond_javascript_sync_rpc_raw_success(id, payload);
-                drop(source_reservations);
-                result
-            }
-        }
-    }
-
-    pub(crate) fn respond_javascript_sync_rpc_error(
-        &mut self,
-        id: u64,
-        code: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Result<(), SidecarError> {
-        match self {
-            Self::Javascript(execution) => execution
-                .respond_sync_rpc_error(id, code, message)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Python(execution) => execution
-                .respond_javascript_sync_rpc_error(id, code, message)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Wasm(execution) => execution
-                .respond_sync_rpc_error(id, code, message)
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            _ => Err(SidecarError::InvalidState(String::from(
-                "only JavaScript, Python, and WebAssembly executions can service JavaScript sync RPC responses",
-            ))),
-        }
-    }
-
+    // Source-included integration tests exercise the adapter without a host
+    // capability set. Production event pumps always use `poll_event_with_host`.
+    #[allow(dead_code)]
     pub(crate) async fn poll_event(
         &mut self,
+        identity: ProcessRuntimeIdentity,
+        max_reply_bytes: usize,
         timeout: Duration,
     ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
+        self.poll_event_inner(identity, max_reply_bytes, timeout, None)
+            .await
+    }
+
+    pub(crate) async fn poll_event_with_host(
+        &mut self,
+        identity: ProcessRuntimeIdentity,
+        max_reply_bytes: usize,
+        timeout: Duration,
+        host: &ProcessHostCapabilitySet,
+    ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
+        self.poll_event_inner(identity, max_reply_bytes, timeout, Some(host))
+            .await
+    }
+
+    async fn poll_event_inner(
+        &mut self,
+        identity: ProcessRuntimeIdentity,
+        max_reply_bytes: usize,
+        timeout: Duration,
+        host: Option<&ProcessHostCapabilitySet>,
+    ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
         match self {
-            Self::Javascript(execution) => execution
-                .poll_event(timeout)
-                .await
-                .map(|event| {
-                    event.map(|event| match event {
-                        JavascriptExecutionEvent::Stdout(chunk) => {
-                            ActiveExecutionEvent::Stdout(chunk)
-                        }
-                        JavascriptExecutionEvent::Stderr(chunk) => {
-                            ActiveExecutionEvent::Stderr(chunk)
-                        }
-                        JavascriptExecutionEvent::SyncRpcRequest(request) => {
-                            ActiveExecutionEvent::JavascriptSyncRpcRequest(request)
-                        }
-                        JavascriptExecutionEvent::SignalState {
-                            signal,
-                            registration,
-                        } => ActiveExecutionEvent::SignalState {
-                            signal,
-                            registration: map_node_signal_registration(registration),
-                        },
-                        JavascriptExecutionEvent::Exited(code) => {
-                            ActiveExecutionEvent::Exited(code)
-                        }
-                    })
-                })
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Python(execution) => execution
-                .poll_event(timeout)
-                .await
-                .map(|event| {
-                    event.map(|event| match event {
-                        PythonExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
-                        PythonExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
-                        PythonExecutionEvent::JavascriptSyncRpcRequest(request) => {
-                            ActiveExecutionEvent::JavascriptSyncRpcRequest(request)
-                        }
-                        PythonExecutionEvent::VfsRpcRequest(request) => {
-                            ActiveExecutionEvent::PythonVfsRpcRequest(request)
-                        }
-                        PythonExecutionEvent::Exited(code) => ActiveExecutionEvent::Exited(code),
-                    })
-                })
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Wasm(execution) => execution
-                .poll_event(timeout)
-                .await
-                .map(|event| {
-                    event.map(|event| match event {
-                        WasmExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
-                        WasmExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
-                        WasmExecutionEvent::SyncRpcRequest(request) => {
-                            ActiveExecutionEvent::JavascriptSyncRpcRequest(request)
-                        }
-                        WasmExecutionEvent::SignalState {
-                            signal,
-                            registration,
-                        } => ActiveExecutionEvent::SignalState {
-                            signal,
-                            registration: map_wasm_signal_registration(registration),
-                        },
-                        WasmExecutionEvent::Exited(code) => ActiveExecutionEvent::Exited(code),
-                    })
-                })
-                .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Javascript(execution) => {
+                let responder = execution.sync_rpc_responder();
+                let event = execution
+                    .poll_event(timeout)
+                    .await
+                    .map_err(javascript_error)?;
+                match event {
+                    Some(event) => map_javascript_execution_event_with_host(
+                        event,
+                        responder,
+                        identity,
+                        max_reply_bytes,
+                        host,
+                    ),
+                    None => Ok(None),
+                }
+            }
+            Self::Python(execution) => {
+                let responder = execution.javascript_sync_rpc_responder();
+                let python_responder = execution.vfs_rpc_responder();
+                let event = execution.poll_event(timeout).await.map_err(python_error)?;
+                match event {
+                    Some(event) => map_python_execution_event_with_host(
+                        event,
+                        responder,
+                        python_responder,
+                        identity,
+                        max_reply_bytes,
+                        host,
+                    ),
+                    None => Ok(None),
+                }
+            }
+            Self::Wasm(execution) => {
+                let responder = execution.sync_rpc_responder();
+                let event = execution.poll_event(timeout).await.map_err(wasm_error)?;
+                match event {
+                    Some(event) => map_wasm_execution_event_with_host(
+                        event,
+                        responder,
+                        identity,
+                        max_reply_bytes,
+                        host,
+                    ),
+                    None => Ok(None),
+                }
+            }
             Self::Binding(execution) => {
                 let _ = timeout;
                 poll_binding_process_event(execution)
@@ -1878,72 +2989,568 @@ impl ActiveExecution {
 
     /// Probe the runtime event queue once without parking the sidecar thread or
     /// registering a waker outside the coalesced process-event broker.
-    pub(crate) fn try_poll_event(&mut self) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
+    pub(crate) fn try_poll_event(
+        &mut self,
+        identity: ProcessRuntimeIdentity,
+        max_reply_bytes: usize,
+    ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
+        self.try_poll_event_inner(identity, max_reply_bytes, None)
+    }
+
+    pub(crate) fn try_poll_event_with_host(
+        &mut self,
+        identity: ProcessRuntimeIdentity,
+        max_reply_bytes: usize,
+        host: &ProcessHostCapabilitySet,
+    ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
+        self.try_poll_event_inner(identity, max_reply_bytes, Some(host))
+    }
+
+    fn try_poll_event_inner(
+        &mut self,
+        identity: ProcessRuntimeIdentity,
+        max_reply_bytes: usize,
+        host: Option<&ProcessHostCapabilitySet>,
+    ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
         match self {
-            Self::Javascript(execution) => execution
-                .try_poll_event()
-                .map(|event| {
-                    event.map(|event| match event {
-                        JavascriptExecutionEvent::Stdout(chunk) => {
-                            ActiveExecutionEvent::Stdout(chunk)
-                        }
-                        JavascriptExecutionEvent::Stderr(chunk) => {
-                            ActiveExecutionEvent::Stderr(chunk)
-                        }
-                        JavascriptExecutionEvent::SyncRpcRequest(request) => {
-                            ActiveExecutionEvent::JavascriptSyncRpcRequest(request)
-                        }
-                        JavascriptExecutionEvent::SignalState {
-                            signal,
-                            registration,
-                        } => ActiveExecutionEvent::SignalState {
-                            signal,
-                            registration: map_node_signal_registration(registration),
-                        },
-                        JavascriptExecutionEvent::Exited(code) => {
-                            ActiveExecutionEvent::Exited(code)
-                        }
-                    })
-                })
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Python(execution) => execution
-                .try_poll_event()
-                .map(|event| {
-                    event.map(|event| match event {
-                        PythonExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
-                        PythonExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
-                        PythonExecutionEvent::JavascriptSyncRpcRequest(request) => {
-                            ActiveExecutionEvent::JavascriptSyncRpcRequest(request)
-                        }
-                        PythonExecutionEvent::VfsRpcRequest(request) => {
-                            ActiveExecutionEvent::PythonVfsRpcRequest(request)
-                        }
-                        PythonExecutionEvent::Exited(code) => ActiveExecutionEvent::Exited(code),
-                    })
-                })
-                .map_err(|error| SidecarError::Execution(error.to_string())),
-            Self::Wasm(execution) => execution
-                .try_poll_event()
-                .map(|event| {
-                    event.map(|event| match event {
-                        WasmExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
-                        WasmExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
-                        WasmExecutionEvent::SyncRpcRequest(request) => {
-                            ActiveExecutionEvent::JavascriptSyncRpcRequest(request)
-                        }
-                        WasmExecutionEvent::SignalState {
-                            signal,
-                            registration,
-                        } => ActiveExecutionEvent::SignalState {
-                            signal,
-                            registration: map_wasm_signal_registration(registration),
-                        },
-                        WasmExecutionEvent::Exited(code) => ActiveExecutionEvent::Exited(code),
-                    })
-                })
-                .map_err(|error| SidecarError::Execution(error.to_string())),
+            Self::Javascript(execution) => {
+                let responder = execution.sync_rpc_responder();
+                let event = execution.try_poll_event().map_err(javascript_error)?;
+                match event {
+                    Some(event) => map_javascript_execution_event_with_host(
+                        event,
+                        responder,
+                        identity,
+                        max_reply_bytes,
+                        host,
+                    ),
+                    None => Ok(None),
+                }
+            }
+            Self::Python(execution) => {
+                let responder = execution.javascript_sync_rpc_responder();
+                let python_responder = execution.vfs_rpc_responder();
+                let event = execution.try_poll_event().map_err(python_error)?;
+                match event {
+                    Some(event) => map_python_execution_event_with_host(
+                        event,
+                        responder,
+                        python_responder,
+                        identity,
+                        max_reply_bytes,
+                        host,
+                    ),
+                    None => Ok(None),
+                }
+            }
+            Self::Wasm(execution) => {
+                let responder = execution.sync_rpc_responder();
+                let event = execution.try_poll_event().map_err(wasm_error)?;
+                match event {
+                    Some(event) => map_wasm_execution_event_with_host(
+                        event,
+                        responder,
+                        identity,
+                        max_reply_bytes,
+                        host,
+                    ),
+                    None => Ok(None),
+                }
+            }
             Self::Binding(execution) => poll_binding_process_event(execution),
         }
+    }
+}
+
+impl ExecutionBackend for ActiveExecution {
+    fn kind(&self) -> ExecutionBackendKind {
+        self.backend().kind()
+    }
+
+    fn synchronous_fd_write_policy(&self) -> agentos_execution::backend::SynchronousFdWritePolicy {
+        self.backend().synchronous_fd_write_policy()
+    }
+
+    fn descendant_wait_ownership(&self) -> DescendantWaitOwnership {
+        self.backend().descendant_wait_ownership()
+    }
+
+    fn descendant_output_ownership(&self) -> DescendantOutputOwnership {
+        self.backend().descendant_output_ownership()
+    }
+
+    fn native_process_id(&self) -> Option<u32> {
+        self.backend().native_process_id()
+    }
+
+    fn wake_handle(&self, identity: ExecutionWakeIdentity) -> Option<ExecutionWakeHandle> {
+        self.backend().wake_handle(identity)
+    }
+
+    fn configure_host_services(&mut self, host: ProcessHostCapabilitySet) {
+        self.backend_mut().configure_host_services(host)
+    }
+
+    fn is_prepared_for_start(&self) -> bool {
+        self.backend().is_prepared_for_start()
+    }
+
+    fn start_prepared(&mut self) -> Result<(), HostServiceError> {
+        self.backend_mut().start_prepared()
+    }
+
+    fn begin_shutdown(
+        &mut self,
+        reason: ShutdownReason,
+    ) -> Result<ShutdownOutcome, HostServiceError> {
+        self.backend_mut().begin_shutdown(reason)
+    }
+
+    fn set_paused(&self, paused: bool) -> Result<(), HostServiceError> {
+        self.backend().set_paused(paused)
+    }
+
+    fn write_stdin(&mut self, bytes: &[u8]) -> Result<(), HostServiceError> {
+        self.backend_mut().write_stdin(bytes)
+    }
+
+    fn close_stdin(&mut self) -> Result<(), HostServiceError> {
+        self.backend_mut().close_stdin()
+    }
+
+    fn deliver_signal_checkpoint(
+        &self,
+        identity: ExecutionWakeIdentity,
+        signal: i32,
+        delivery_token: u64,
+        flags: u32,
+    ) -> Result<SignalCheckpointOutcome, HostServiceError> {
+        self.backend()
+            .deliver_signal_checkpoint(identity, signal, delivery_token, flags)
+    }
+
+    fn take_signal_checkpoint(
+        &self,
+        identity: ExecutionWakeIdentity,
+    ) -> Result<Option<PublishedSignalCheckpoint>, HostServiceError> {
+        self.backend().take_signal_checkpoint(identity)
+    }
+
+    fn discard_signal_checkpoints(
+        &self,
+        identity: ExecutionWakeIdentity,
+    ) -> Result<(), HostServiceError> {
+        self.backend().discard_signal_checkpoints(identity)
+    }
+}
+
+pub(super) fn discard_exec_signal_state(process: &mut ActiveProcess) {
+    let identity = process.kernel_handle.runtime_identity();
+    if let Err(error) = process
+        .execution
+        .discard_signal_checkpoints(ExecutionWakeIdentity {
+            generation: identity.generation,
+            pid: identity.pid,
+        })
+    {
+        eprintln!("ERR_AGENTOS_EXEC_SIGNAL_CHECKPOINT_DISCARD: {error}");
+    }
+    process.guest_signal_checkpoint_pending = false;
+}
+
+#[cfg(test)]
+mod execution_backend_lifecycle_tests {
+    use super::*;
+
+    fn assert_execution_backend<T: ExecutionBackend>() {}
+
+    #[test]
+    fn binding_and_active_execution_use_the_common_lifecycle_contract() {
+        assert_execution_backend::<BindingExecution>();
+        assert_execution_backend::<ActiveExecution>();
+
+        let binding = BindingExecution::default();
+        let cancelled = Arc::clone(&binding.cancelled);
+        let mut execution = ActiveExecution::Binding(binding);
+
+        let process = HostProcessContext {
+            generation: 11,
+            pid: 29,
+        };
+        let (events, _receiver) = bounded_execution_event_channel(
+            process,
+            1,
+            PayloadLimit::new("limits.process.pendingEventBytes", 1024).expect("byte limit"),
+            Arc::new(|| {}),
+        )
+        .expect("host event lane");
+        ExecutionBackend::configure_host_services(
+            &mut execution,
+            ProcessHostCapabilitySet::from_event_submission(events),
+        );
+        let ActiveExecution::Binding(binding) = &execution else {
+            unreachable!("binding execution")
+        };
+        assert_eq!(
+            binding
+                .host_capabilities
+                .as_ref()
+                .expect("backend received host services")
+                .process(),
+            process
+        );
+
+        assert_eq!(
+            ExecutionBackend::kind(&execution),
+            ExecutionBackendKind::Binding
+        );
+        assert!(!execution.is_prepared_for_start());
+
+        let error = ExecutionBackend::start_prepared(&mut execution)
+            .expect_err("binding adapters are never prepared exec images");
+        assert_eq!(error.code, "ERR_AGENTOS_EXECUTION_NOT_PREPARED");
+
+        let outcome = ExecutionBackend::begin_shutdown(&mut execution, ShutdownReason::VmTeardown)
+            .expect("binding shutdown uses the shared lifecycle");
+        assert_eq!(outcome, ShutdownOutcome::Exited(ExecutionExit::Exited(137)));
+        assert!(cancelled.load(Ordering::Acquire));
+
+        let outcome = ExecutionBackend::begin_shutdown(&mut execution, ShutdownReason::Signal(15))
+            .expect("binding signal shutdown uses the shared lifecycle");
+        assert_eq!(
+            outcome,
+            ShutdownOutcome::Exited(ExecutionExit::Signaled {
+                signal: 15,
+                core_dumped: false,
+            })
+        );
+    }
+}
+
+fn execution_host_call(
+    request: HostRpcRequest,
+    responder: JavascriptSyncRpcResponder,
+    identity: ProcessRuntimeIdentity,
+    max_reply_bytes: usize,
+) -> Result<ExecutionHostCall, SidecarError> {
+    let reply = DirectHostReplyHandle::new(
+        HostCallIdentity {
+            generation: identity.generation,
+            pid: identity.pid,
+            call_id: request.id,
+        },
+        Arc::new(responder),
+        max_reply_bytes,
+    )
+    .map_err(|error| SidecarError::InvalidState(error.to_string()))?;
+    Ok(ExecutionHostCall { request, reply })
+}
+
+pub(crate) fn settle_execution_host_call(
+    reply: &DirectHostReplyHandle,
+    response: Result<HostServiceResponse, SidecarError>,
+) -> Result<(), SidecarError> {
+    let result = match response {
+        Ok(HostServiceResponse::Json(value)) => reply.succeed(HostCallReply::Json(value)),
+        Ok(HostServiceResponse::Raw(payload)) => reply.succeed(HostCallReply::Raw(payload)),
+        Ok(HostServiceResponse::SourceBackedJson {
+            value,
+            source_reservations,
+        }) => reply.succeed_retained(HostCallReply::Json(value), source_reservations),
+        Ok(HostServiceResponse::SourceBackedRaw {
+            payload,
+            source_reservations,
+        }) => reply.succeed_retained(HostCallReply::Raw(payload), source_reservations),
+        Ok(HostServiceResponse::Deferred { .. }) => Err(HostServiceError::new(
+            "EINVAL",
+            "deferred response must be awaited before direct settlement",
+        )),
+        Err(error) => reply.fail(host_service_error(&error)),
+    };
+    result.map_err(SidecarError::from)
+}
+
+#[cfg(test)]
+mod typed_direct_error_tests {
+    use super::*;
+    use agentos_execution::backend::{
+        DirectHostReplyTarget, HostCallIdentity, HostCallReply, HostServiceError,
+    };
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct RecordingTarget {
+        replies: Mutex<Vec<Result<HostCallReply, HostServiceError>>>,
+    }
+
+    impl DirectHostReplyTarget for RecordingTarget {
+        fn claim(&self, _call_id: u64) -> Result<bool, HostServiceError> {
+            Ok(true)
+        }
+
+        fn respond(
+            &self,
+            _call_id: u64,
+            _claimed: bool,
+            result: Result<HostCallReply, HostServiceError>,
+        ) -> Result<(), HostServiceError> {
+            self.replies.lock().expect("reply lock").push(result);
+            Ok(())
+        }
+    }
+
+    fn reply(target: Arc<RecordingTarget>, call_id: u64) -> DirectHostReplyHandle {
+        DirectHostReplyHandle::new(
+            HostCallIdentity {
+                generation: 3,
+                pid: 41,
+                call_id,
+            },
+            target,
+            64 * 1024,
+        )
+        .expect("direct reply")
+    }
+
+    #[test]
+    fn direct_settlement_preserves_limit_details_and_typed_errno() {
+        let target = Arc::new(RecordingTarget::default());
+        let limit = SidecarError::ResourceLimit(agentos_runtime::accounting::LimitError {
+            scope: String::from("vm=vm-typed-errors"),
+            resource: agentos_runtime::accounting::ResourceClass::BridgeResponseBytes,
+            used: 60,
+            requested: 8,
+            limit: 64,
+            config_path: String::from("runtime.resources.maxBridgeResponseBytes"),
+        });
+        let deferred = crate::state::DeferredRpcError::from(host_service_error(&limit));
+        settle_execution_host_call(
+            &reply(Arc::clone(&target), 1),
+            Err(SidecarError::from(deferred)),
+        )
+        .expect("settle deferred limit error");
+
+        let denied = HostServiceError::new(
+            "EACCES",
+            "permission denied; diagnostic mentions ENOENT but must not change the code",
+        )
+        .with_details(serde_json::json!({ "path": "/private/config" }));
+        settle_execution_host_call(
+            &reply(Arc::clone(&target), 2),
+            Err(SidecarError::Host(denied)),
+        )
+        .expect("settle permission error");
+
+        let replies = target.replies.lock().expect("reply lock");
+        let limit = replies[0].as_ref().expect_err("limit error response");
+        assert_eq!(limit.code, "ERR_AGENTOS_RESOURCE_LIMIT");
+        let details = limit.details.as_ref().expect("limit details");
+        assert_eq!(details["limitName"], "bridgeResponseBytes");
+        assert_eq!(details["limit"], 64);
+        assert_eq!(details["observed"], 68);
+        assert_eq!(
+            details["configPath"],
+            "runtime.resources.maxBridgeResponseBytes"
+        );
+
+        let denied = replies[1].as_ref().expect_err("permission error response");
+        assert_eq!(denied.code, "EACCES");
+        assert_eq!(
+            denied.details.as_ref().expect("errno details")["path"],
+            "/private/config"
+        );
+    }
+}
+
+fn map_javascript_execution_event_with_host(
+    event: JavascriptExecutionEvent,
+    responder: JavascriptSyncRpcResponder,
+    identity: ProcessRuntimeIdentity,
+    max_reply_bytes: usize,
+    host: Option<&ProcessHostCapabilitySet>,
+) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
+    let event = match event {
+        JavascriptExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
+        JavascriptExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
+        JavascriptExecutionEvent::SyncRpcRequest(request) => {
+            return route_compatibility_host_call(
+                execution_host_call(request, responder, identity, max_reply_bytes)?,
+                false,
+                max_reply_bytes,
+                host,
+            );
+        }
+        JavascriptExecutionEvent::SignalState {
+            signal,
+            registration,
+        } => ActiveExecutionEvent::SignalState {
+            signal,
+            registration: map_execution_signal_registration(registration),
+        },
+        JavascriptExecutionEvent::Exited(code) => ActiveExecutionEvent::Exited(code),
+    };
+    Ok(Some(event))
+}
+
+fn map_python_execution_event_with_host(
+    event: PythonExecutionEvent,
+    responder: JavascriptSyncRpcResponder,
+    python_responder: PythonVfsRpcResponder,
+    identity: ProcessRuntimeIdentity,
+    max_reply_bytes: usize,
+    host: Option<&ProcessHostCapabilitySet>,
+) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
+    let event = match event {
+        PythonExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
+        PythonExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
+        PythonExecutionEvent::HostRpcRequest(request) => {
+            return route_compatibility_host_call(
+                execution_host_call(request, responder, identity, max_reply_bytes)?,
+                false,
+                max_reply_bytes,
+                host,
+            );
+        }
+        PythonExecutionEvent::VfsRpcRequest(request) => {
+            let Some(host) = host else {
+                python_responder
+                    .respond_host_error(
+                        request.id,
+                        HostServiceError::new(
+                            "ENOTSUP",
+                            "Python host capabilities are unavailable",
+                        )
+                        .with_details(json!({
+                            "generation": identity.generation,
+                            "pid": identity.pid,
+                        })),
+                    )
+                    .map_err(python_error)?;
+                return Ok(None);
+            };
+            let admission = match host.admit_json_request(&*request, 0) {
+                Ok(admission) => admission,
+                Err(error) => {
+                    python_responder
+                        .respond_host_error(request.id, error)
+                        .map_err(python_error)?;
+                    return Ok(None);
+                }
+            };
+            let call_id = request.id;
+            let Some(call) = (match python_responder.try_host_call(
+                *request,
+                HostCallIdentity {
+                    generation: identity.generation,
+                    pid: identity.pid,
+                    call_id,
+                },
+                max_reply_bytes,
+                max_reply_bytes,
+            ) {
+                Ok(call) => call,
+                Err(error) => {
+                    python_responder
+                        .respond_host_error(call_id, error)
+                        .map_err(python_error)?;
+                    return Ok(None);
+                }
+            }) else {
+                return Err(SidecarError::host(
+                    "ENOSYS",
+                    "Python request was not converted to a common host operation",
+                ));
+            };
+            if let Err(error) = host.submit(call.operation, call.reply.clone(), admission) {
+                call.reply.fail(error).map_err(SidecarError::from)?;
+            }
+            return Ok(None);
+        }
+        PythonExecutionEvent::Exited(code) => ActiveExecutionEvent::Exited(code),
+    };
+    Ok(Some(event))
+}
+
+fn map_wasm_execution_event_with_host(
+    event: WasmExecutionEvent,
+    responder: JavascriptSyncRpcResponder,
+    identity: ProcessRuntimeIdentity,
+    max_reply_bytes: usize,
+    host: Option<&ProcessHostCapabilitySet>,
+) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
+    let event = match event {
+        WasmExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
+        WasmExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
+        WasmExecutionEvent::SyncRpcRequest(request) => {
+            return route_compatibility_host_call(
+                execution_host_call(request, responder, identity, max_reply_bytes)?,
+                true,
+                max_reply_bytes,
+                host,
+            );
+        }
+        WasmExecutionEvent::SignalState {
+            signal,
+            registration,
+        } => ActiveExecutionEvent::SignalState {
+            signal,
+            registration: map_execution_signal_registration(registration),
+        },
+        WasmExecutionEvent::Exited(code) => ActiveExecutionEvent::Exited(code),
+    };
+    Ok(Some(event))
+}
+
+fn route_compatibility_host_call(
+    call: ExecutionHostCall,
+    full_filesystem: bool,
+    max_reply_bytes: usize,
+    host: Option<&ProcessHostCapabilitySet>,
+) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
+    #[derive(Serialize)]
+    struct CompatibilityRequestCharge<'a> {
+        method: &'a str,
+        args: &'a [Value],
+    }
+
+    let admission = host
+        .map(|host| {
+            let raw_bytes = call
+                .request
+                .raw_bytes_args
+                .values()
+                .try_fold(0usize, |total, bytes| total.checked_add(bytes.len()))
+                .ok_or_else(|| {
+                    HostServiceError::new(
+                        "EOVERFLOW",
+                        "compatibility host-call raw payload size overflowed",
+                    )
+                })?;
+            host.admit_json_request(
+                &CompatibilityRequestCharge {
+                    method: &call.request.method,
+                    args: &call.request.args,
+                },
+                raw_bytes,
+            )
+        })
+        .transpose()
+        .map_err(SidecarError::from)?;
+    let event = decode_compatibility_host_call(call, full_filesystem, max_reply_bytes)?;
+    let Some(host) = host else {
+        return Ok(Some(event));
+    };
+    match event {
+        ActiveExecutionEvent::Common(ExecutionEvent::HostCall { operation, reply }) => {
+            host.submit(
+                operation,
+                reply,
+                admission.expect("host-backed routing always creates request admission"),
+            )
+            .map_err(SidecarError::from)?;
+            Ok(None)
+        }
+        other => Ok(Some(other)),
     }
 }
 
@@ -2049,7 +3656,9 @@ pub(super) fn find_socket_state_entry(
             }
         }
 
-        let child_pid = process.execution.child_pid();
+        let Some(child_pid) = process.execution.native_process_id() else {
+            continue;
+        };
         let inodes = socket_inodes_for_pid(child_pid)?;
         if inodes.is_empty() {
             continue;
@@ -2109,9 +3718,10 @@ where
     let reason = decision
         .and_then(|decision| decision.reason)
         .unwrap_or_else(|| format!("{capability} permission required"));
-    Err(SidecarError::Execution(format!(
-        "EACCES: permission denied, {resource}: {reason}"
-    )))
+    Err(SidecarError::host(
+        "EACCES",
+        format!("permission denied, {resource}: {reason}"),
+    ))
 }
 
 pub(super) fn socket_query_resource(
@@ -2312,7 +3922,12 @@ fn socket_inodes_for_pid(pid: u32) -> Result<BTreeSet<u64>, SidecarError> {
         })?;
         let target = match fs::read_link(entry.path()) {
             Ok(target) => target,
-            Err(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(SidecarError::Io(format!(
+                    "failed to inspect socket descriptor target for process {pid}: {error}"
+                )));
+            }
         };
         if let Some(inode) = parse_socket_inode(&target) {
             inodes.insert(inode);
@@ -2429,26 +4044,23 @@ pub(super) fn vm_spawn_host_net_resource_counts(vm: &VmState) -> NetworkResource
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn collect_javascript_socket_port_state(
+pub(super) fn collect_socket_port_state(
     kernel: &SidecarKernel,
     process_id: &str,
     process: &ActiveProcess,
-    tcp_guest_to_host: &mut BTreeMap<(JavascriptSocketFamily, u16), u16>,
-    http_loopback_targets: &mut BTreeMap<
-        (JavascriptSocketFamily, u16),
-        JavascriptHttpLoopbackTarget,
-    >,
-    udp_guest_to_host: &mut BTreeMap<(JavascriptSocketFamily, u16), u16>,
-    udp_host_to_guest: &mut BTreeMap<(JavascriptSocketFamily, u16), u16>,
-    used_tcp_ports: &mut BTreeMap<JavascriptSocketFamily, BTreeSet<u16>>,
-    used_udp_ports: &mut BTreeMap<JavascriptSocketFamily, BTreeSet<u16>>,
+    tcp_guest_to_host: &mut BTreeMap<(SocketFamily, u16), u16>,
+    http_loopback_targets: &mut BTreeMap<(SocketFamily, u16), HttpLoopbackTarget>,
+    udp_guest_to_host: &mut BTreeMap<(SocketFamily, u16), u16>,
+    udp_host_to_guest: &mut BTreeMap<(SocketFamily, u16), u16>,
+    used_tcp_ports: &mut BTreeMap<SocketFamily, BTreeSet<u16>>,
+    used_udp_ports: &mut BTreeMap<SocketFamily, BTreeSet<u16>>,
 ) {
     for (family, port) in process.tcp_port_reservations.values() {
         used_tcp_ports.entry(*family).or_default().insert(*port);
     }
 
     let mut record_tcp_listener = |guest_addr: SocketAddr, host_port: u16| {
-        let family = JavascriptSocketFamily::from_ip(guest_addr.ip());
+        let family = SocketFamily::from_ip(guest_addr.ip());
         used_tcp_ports
             .entry(family)
             .or_default()
@@ -2471,22 +4083,34 @@ pub(super) fn collect_javascript_socket_port_state(
     for (server_id, server) in &process.http_servers {
         let host_port = match server.listener.local_addr() {
             Ok(addr) => addr.port(),
-            Err(_) => continue,
+            Err(error) => {
+                eprintln!(
+                    "ERR_AGENTOS_SOCKET_INVENTORY: failed to inspect HTTP listener {server_id} for process {process_id}: {error}"
+                );
+                continue;
+            }
         };
         record_tcp_listener(server.guest_local_addr, host_port);
-        let family = JavascriptSocketFamily::from_ip(server.guest_local_addr.ip());
+        let family = SocketFamily::from_ip(server.guest_local_addr.ip());
         http_loopback_targets.insert(
             (family, server.guest_local_addr.port()),
-            JavascriptHttpLoopbackTarget {
+            HttpLoopbackTarget {
                 process_id: process_id.to_owned(),
                 server_id: *server_id,
             },
         );
     }
 
-    if let Ok(http2) = process.http2.shared.lock() {
-        for server in http2.servers.values() {
-            record_tcp_listener(server.guest_local_addr, server.actual_local_addr.port());
+    match process.http2.shared.lock() {
+        Ok(http2) => {
+            for server in http2.servers.values() {
+                record_tcp_listener(server.guest_local_addr, server.actual_local_addr.port());
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "ERR_AGENTOS_SOCKET_INVENTORY: failed to inspect HTTP/2 listeners for process {process_id}: {error}"
+            );
         }
     }
 
@@ -2497,7 +4121,7 @@ pub(super) fn collect_javascript_socket_port_state(
             .and_then(|record| record.local_address().cloned())
             .and_then(|address| resolve_tcp_bind_addr(address.host(), address.port()).ok())
             .unwrap_or(socket.guest_local_addr);
-        let family = JavascriptSocketFamily::from_ip(guest_addr.ip());
+        let family = SocketFamily::from_ip(guest_addr.ip());
         used_tcp_ports
             .entry(family)
             .or_default()
@@ -2516,7 +4140,7 @@ pub(super) fn collect_javascript_socket_port_state(
         let Some(guest_addr) = guest_addr else {
             continue;
         };
-        let family = JavascriptSocketFamily::from_ip(guest_addr.ip());
+        let family = SocketFamily::from_ip(guest_addr.ip());
         used_udp_ports
             .entry(family)
             .or_default()
@@ -2536,7 +4160,7 @@ pub(super) fn collect_javascript_socket_port_state(
 
     for (child_process_id, child) in &process.child_processes {
         let child_id = format!("{process_id}/{child_process_id}");
-        collect_javascript_socket_port_state(
+        collect_socket_port_state(
             kernel,
             &child_id,
             child,
@@ -2590,10 +4214,41 @@ pub(super) fn flush_parked_kernel_wait_rpc(process: &mut ActiveProcess) {
         .map(|(request, _)| request.clone());
     process.clear_deferred_kernel_wait_rpc();
     if let Some(request) = request {
-        let _ = process
-            .execution
-            .respond_javascript_sync_rpc_error(request.id, "EINTR", "process teardown")
-            .or_else(ignore_stale_javascript_sync_rpc_response);
+        if let Err(error) = request.reply.fail(HostServiceError::new(
+            "EINTR",
+            "process teardown interrupted the pending host call",
+        )) {
+            eprintln!("ERR_AGENTOS_PARKED_HOST_REPLY_TEARDOWN: {error}");
+        }
+    }
+    if let Some(wait) = process.clear_deferred_guest_wait() {
+        if let Err(error) = wait.reply.fail(HostServiceError::new(
+            "EINTR",
+            "process teardown interrupted the pending wait",
+        )) {
+            eprintln!("ERR_AGENTOS_PARKED_GUEST_WAIT_TEARDOWN: {error}");
+        }
+    }
+    if let Some(poll) = process.clear_deferred_kernel_poll() {
+        if let Some(token) = poll.temporary_signal_mask_token {
+            if let Err(error) = process.kernel_handle.end_temporary_signal_mask(token) {
+                eprintln!("ERR_AGENTOS_PPOLL_MASK_RESTORE_TEARDOWN: {error}");
+            }
+        }
+        if let Err(error) = poll.reply.fail(HostServiceError::new(
+            "EINTR",
+            "process teardown interrupted the pending kernel poll",
+        )) {
+            eprintln!("ERR_AGENTOS_PARKED_KERNEL_POLL_TEARDOWN: {error}");
+        }
+    }
+    if let Some(read) = process.clear_deferred_kernel_read() {
+        if let Err(error) = read.reply.fail(HostServiceError::new(
+            "EINTR",
+            "process teardown interrupted the pending descriptor read",
+        )) {
+            eprintln!("ERR_AGENTOS_PARKED_KERNEL_READ_TEARDOWN: {error}");
+        }
     }
 }
 
@@ -2608,7 +4263,7 @@ pub(crate) fn terminate_child_process_tree(
     for database_id in sqlite_database_ids {
         if let Err(error) = close_sqlite_database(kernel, process, database_id, true) {
             eprintln!(
-                "ERR_AGENTOS_SQLITE_CLOSE: pid={} database_id={database_id} error={error}",
+                "ERR_AGENTOS_SQLITE_TEARDOWN: failed to close database {database_id} while terminating process {}: {error}",
                 process.kernel_pid
             );
         }
@@ -2694,20 +4349,31 @@ pub(crate) fn terminate_child_process_tree(
         }
     }
 
-    // Python handles are adapter references to the TCP/UDP capabilities closed
-    // above, not independent descriptors or leases. Dropping them also releases
-    // any charged partial-read view still retained by the adapter.
-    process.python_sockets.clear();
-
     let child_ids = process.child_processes.keys().cloned().collect::<Vec<_>>();
     for child_id in child_ids {
         let Some(mut child) = process.child_processes.remove(&child_id) else {
             continue;
         };
         terminate_child_process_tree(kernel, &mut child, kernel_readiness, unix_address_registry);
-        let _ = kernel.kill_process(EXECUTION_DRIVER_NAME, child.kernel_pid, SIGTERM);
-        let _ = signal_runtime_process(child.execution.child_pid(), SIGTERM);
+        if let Err(error) = kernel.kill_process(EXECUTION_DRIVER_NAME, child.kernel_pid, SIGTERM) {
+            eprintln!(
+                "ERR_AGENTOS_CHILD_TEARDOWN_SIGNAL: failed to signal child kernel pid {}: {error}",
+                child.kernel_pid
+            );
+        }
+        if let Some(native_process_id) = child.execution.native_process_id() {
+            if let Err(error) = signal_runtime_process(native_process_id, SIGTERM) {
+                eprintln!(
+                    "ERR_AGENTOS_CHILD_TEARDOWN_SIGNAL: failed to signal native child pid {native_process_id}: {error}"
+                );
+            }
+        }
         child.kernel_handle.finish(0);
-        let _ = kernel.wait_and_reap(child.kernel_pid);
+        if let Err(error) = kernel.wait_and_reap(child.kernel_pid) {
+            eprintln!(
+                "ERR_AGENTOS_CHILD_TEARDOWN_REAP: failed to reap child kernel pid {}: {error}",
+                child.kernel_pid
+            );
+        }
     }
 }

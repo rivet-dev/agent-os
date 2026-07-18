@@ -54,7 +54,10 @@ fn chunk_contains(chunk: &[u8], needle: &str) -> bool {
 }
 
 fn root_dir(path: impl Into<String>) -> RootFilesystemEntry {
-    root_entry(path, RootFilesystemEntryKind::Directory, None, None)
+    let mut entry = root_entry(path, RootFilesystemEntryKind::Directory, None, None);
+    entry.uid = Some(1000);
+    entry.gid = Some(1000);
+    entry
 }
 
 fn root_file(
@@ -940,7 +943,6 @@ fn python_runtime_executes_code_end_to_end() {
         GuestRuntimeKind::Python,
         &cwd,
     );
-
     execute_inline_python(
         &mut sidecar,
         4,
@@ -3109,7 +3111,8 @@ print(json.dumps(result))
     );
     assert_eq!(
         parsed["http"]["type"],
-        Value::String(String::from("PermissionError"))
+        Value::String(String::from("PermissionError")),
+        "stdout: {stdout}"
     );
 }
 
@@ -3118,7 +3121,6 @@ fn python_runtime_runs_node_subprocesses_through_sidecar_bridge() {
 
     let mut sidecar = new_sidecar("python-subprocess-bridge");
     let cwd = temp_dir("python-subprocess-bridge-cwd");
-    write_fixture(&cwd.join("child.mjs"), "console.log('child-ready')\n");
     let connection_id = authenticate_wire(&mut sidecar, "conn-python");
     let session_id = open_session_wire(&mut sidecar, 2, &connection_id);
     let (vm_id, _) = create_vm_wire(
@@ -3129,10 +3131,22 @@ fn python_runtime_runs_node_subprocesses_through_sidecar_bridge() {
         GuestRuntimeKind::Python,
         &cwd,
     );
+    bootstrap_root_filesystem(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        vec![root_file(
+            "/child.mjs",
+            "console.log('child-ready')\n",
+            None,
+        )],
+    );
 
     execute_inline_python(
         &mut sidecar,
-        4,
+        5,
         &connection_id,
         &session_id,
         &vm_id,
@@ -3848,6 +3862,18 @@ fn python_pip_installs_persist_across_invocations() {
     assert!(
         stdout1.contains("Successfully installed"),
         "stdout: {stdout1}\nstderr: {stderr1}"
+    );
+    let home_install_exists = guest_exists(
+        &mut sidecar,
+        50,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "/home/agentos/.agentos/site-packages/click/__init__.py",
+    );
+    assert!(
+        home_install_exists,
+        "pip must persist the installed module under the kernel-owned guest home directory"
     );
 
     // Process 2: a FRESH Python interpreter imports the package from the VFS

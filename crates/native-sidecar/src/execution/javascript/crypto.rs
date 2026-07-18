@@ -27,7 +27,7 @@ struct JavascriptScryptOptions {
 
 pub(crate) fn service_javascript_crypto_sync_rpc(
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     match request.method.as_str() {
         "crypto.hashDigest" => {
@@ -186,7 +186,7 @@ pub(crate) fn service_javascript_crypto_sync_rpc(
 
 fn service_javascript_crypto_hash_create_sync_rpc(
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     ensure_per_process_state_handle_capacity(process.hash_sessions.len(), "hash session")?;
     let algorithm =
@@ -204,7 +204,7 @@ fn service_javascript_crypto_hash_create_sync_rpc(
 
 fn service_javascript_crypto_hash_update_sync_rpc(
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let session_id = javascript_sync_rpc_arg_u64(&request.args, 0, "crypto.hashUpdate session id")?;
     let data = request
@@ -226,7 +226,7 @@ fn service_javascript_crypto_hash_update_sync_rpc(
 
 fn service_javascript_crypto_hash_final_sync_rpc(
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let session_id = javascript_sync_rpc_arg_u64(&request.args, 0, "crypto.hashFinal session id")?;
     let mut session = process.hash_sessions.remove(&session_id).ok_or_else(|| {
@@ -383,20 +383,20 @@ struct JavascriptDirectKeyInput {
 }
 
 fn service_javascript_crypto_cipheriv_sync_rpc(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     service_javascript_crypto_cipheriv_inner(request, false)
 }
 
 fn service_javascript_crypto_decipheriv_sync_rpc(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     service_javascript_crypto_cipheriv_inner(request, true)
 }
 
 fn service_javascript_crypto_cipheriv_create_sync_rpc(
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     ensure_per_process_state_handle_capacity(process.cipher_sessions.len(), "cipher session")?;
     let mode = javascript_sync_rpc_arg_str(&request.args, 0, "crypto.cipherivCreate mode")?;
@@ -424,7 +424,7 @@ fn service_javascript_crypto_cipheriv_create_sync_rpc(
 
 fn service_javascript_crypto_cipheriv_update_sync_rpc(
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let session_id =
         javascript_sync_rpc_arg_u64(&request.args, 0, "crypto.cipherivUpdate session id")?;
@@ -443,7 +443,7 @@ fn service_javascript_crypto_cipheriv_update_sync_rpc(
 
 fn service_javascript_crypto_cipheriv_final_sync_rpc(
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let session_id =
         javascript_sync_rpc_arg_u64(&request.args, 0, "crypto.cipherivFinal session id")?;
@@ -471,7 +471,7 @@ fn service_javascript_crypto_cipheriv_final_sync_rpc(
 }
 
 fn service_javascript_crypto_sign_sync_rpc(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let algorithm = request.args.first().and_then(Value::as_str);
     let data = javascript_sync_rpc_base64_arg(&request.args, 1, "crypto.sign data")?;
@@ -498,7 +498,7 @@ fn service_javascript_crypto_sign_sync_rpc(
 }
 
 fn service_javascript_crypto_verify_sync_rpc(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let algorithm = request.args.first().and_then(Value::as_str);
     let data = javascript_sync_rpc_base64_arg(&request.args, 1, "crypto.verify data")?;
@@ -522,7 +522,7 @@ fn service_javascript_crypto_verify_sync_rpc(
 }
 
 fn service_javascript_crypto_asymmetric_op_sync_rpc(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let operation = javascript_sync_rpc_arg_str(&request.args, 0, "crypto.asymmetricOp operation")?;
     let key_json = javascript_sync_rpc_arg_str(&request.args, 1, "crypto.asymmetricOp key")?;
@@ -577,7 +577,7 @@ fn service_javascript_crypto_asymmetric_op_sync_rpc(
 }
 
 fn service_javascript_crypto_create_key_object_sync_rpc(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let operation =
         javascript_sync_rpc_arg_str(&request.args, 0, "crypto.createKeyObject operation")?;
@@ -604,7 +604,7 @@ fn service_javascript_crypto_create_key_object_sync_rpc(
 }
 
 fn service_javascript_crypto_generate_key_pair_sync_rpc(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let key_type =
         javascript_sync_rpc_arg_str(&request.args, 0, "crypto.generateKeyPairSync type")?;
@@ -678,7 +678,7 @@ fn service_javascript_crypto_generate_key_pair_sync_rpc(
 }
 
 fn service_javascript_crypto_generate_key_sync_rpc(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let key_type = javascript_sync_rpc_arg_str(&request.args, 0, "crypto.generateKeySync type")?;
     let options = javascript_crypto_parse_serialized_options_arg(
@@ -716,7 +716,7 @@ fn service_javascript_crypto_generate_key_sync_rpc(
 }
 
 fn service_javascript_crypto_generate_prime_sync_rpc(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let bits =
         javascript_sync_rpc_arg_u64(&request.args, 0, "crypto.generatePrimeSync size")? as i32;
@@ -763,7 +763,7 @@ fn service_javascript_crypto_generate_prime_sync_rpc(
 }
 
 fn service_javascript_crypto_diffie_hellman_sync_rpc(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let options = javascript_sync_rpc_arg_str(&request.args, 0, "crypto.diffieHellman options")?;
     let parsed: Value = serde_json::from_str(options).map_err(|error| {
@@ -808,7 +808,7 @@ fn service_javascript_crypto_diffie_hellman_sync_rpc(
 }
 
 fn service_javascript_crypto_diffie_hellman_group_sync_rpc(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let name = javascript_sync_rpc_arg_str(&request.args, 0, "crypto.diffieHellmanGroup name")?;
     let params = javascript_crypto_named_dh_group(name)?;
@@ -831,7 +831,7 @@ fn service_javascript_crypto_diffie_hellman_group_sync_rpc(
 
 fn service_javascript_crypto_diffie_hellman_session_create_sync_rpc(
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     ensure_per_process_state_handle_capacity(
         process.diffie_hellman_sessions.len(),
@@ -900,7 +900,7 @@ fn service_javascript_crypto_diffie_hellman_session_create_sync_rpc(
 
 fn service_javascript_crypto_diffie_hellman_session_call_sync_rpc(
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let session_id = javascript_sync_rpc_arg_u64(
         &request.args,
@@ -954,7 +954,7 @@ fn service_javascript_crypto_diffie_hellman_session_call_sync_rpc(
 
 fn service_javascript_crypto_diffie_hellman_session_destroy_sync_rpc(
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let session_id = javascript_sync_rpc_arg_u64(
         &request.args,
@@ -971,7 +971,7 @@ fn service_javascript_crypto_diffie_hellman_session_destroy_sync_rpc(
 }
 
 fn service_javascript_crypto_subtle_sync_rpc(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let raw = javascript_sync_rpc_arg_str(&request.args, 0, "crypto.subtle request")?;
     let parsed: Value = serde_json::from_str(raw).map_err(|error| {
@@ -1414,7 +1414,7 @@ fn javascript_crypto_subtle_aes_gcm_tag_len(algorithm: &Value) -> Result<usize, 
 }
 
 fn service_javascript_crypto_cipheriv_inner(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
     decrypt: bool,
 ) -> Result<Value, SidecarError> {
     let label = if decrypt {

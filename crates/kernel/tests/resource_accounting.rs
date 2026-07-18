@@ -1,8 +1,10 @@
+use agentos_bridge::queue_tracker::{set_limit_warning_handler, LimitWarning, TrackedLimit};
 use agentos_kernel::command_registry::CommandDriver;
 use agentos_kernel::fd_table::O_RDWR;
 use agentos_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions, SEEK_SET};
 use agentos_kernel::mount_table::{MountOptions, MountTable};
 use agentos_kernel::permissions::Permissions;
+use agentos_kernel::process_table::SIGSTOP;
 use agentos_kernel::pty::LineDisciplineConfig;
 use agentos_kernel::resource_accounting::{
     ResourceLimits, DEFAULT_BLOCKING_READ_TIMEOUT_MS, DEFAULT_MAX_CONNECTIONS,
@@ -17,6 +19,7 @@ use agentos_kernel::root_fs::{
 use agentos_kernel::socket_table::{InetSocketAddress, SocketSpec};
 use agentos_kernel::vfs::{MemoryFileSystem, VirtualFileSystem};
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[test]
@@ -334,6 +337,62 @@ fn resource_limits_reject_extra_processes_pipes_and_ptys() {
     let error = kernel
         .open_pty("shell", process.pid())
         .expect_err("second PTY should exceed PTY limit");
+    assert_eq!(error.code(), "EAGAIN");
+
+    process.finish(0);
+    kernel.wait_and_reap(process.pid()).expect("reap process");
+}
+
+#[test]
+fn stopped_processes_remain_visible_to_the_process_limit() {
+    let mut config = KernelVmConfig::new("vm-stopped-process-limit");
+    config.permissions = Permissions::allow_all();
+    config.resources = ResourceLimits {
+        max_processes: Some(1),
+        ..ResourceLimits::default()
+    };
+
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+    let process = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn initial process");
+    let runtime_control = process
+        .attach_runtime_control(Arc::new(|| {}))
+        .expect("attach runtime control");
+
+    kernel
+        .signal_process("shell", process.pid() as i32, SIGSTOP)
+        .expect("stop process");
+    let stop = runtime_control.pending();
+    assert_eq!(stop.stopped, Some(true));
+    runtime_control
+        .acknowledge(stop)
+        .expect("acknowledge stopped runtime state");
+    let snapshot = kernel.resource_snapshot();
+    assert_eq!(snapshot.running_processes, 0);
+    assert_eq!(snapshot.stopped_processes, 1);
+    assert_eq!(snapshot.exited_processes, 0);
+
+    let error = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect_err("stopped process should still consume the process slot");
     assert_eq!(error.code(), "EAGAIN");
 
     process.finish(0);
@@ -1448,6 +1507,16 @@ fn filesystem_limits_reject_overlay_rename_copy_up_in_nested_root_mount() {
 
 #[test]
 fn blocking_pipe_and_pty_reads_time_out_instead_of_hanging_forever() {
+    let captured: Arc<Mutex<Vec<LimitWarning>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&captured);
+    set_limit_warning_handler(Box::new(move |warning| {
+        if warning.name == TrackedLimit::VmBlockingReadMs {
+            sink.lock()
+                .expect("blocking-read warning sink")
+                .push(warning.clone());
+        }
+    }));
+
     let mut config = KernelVmConfig::new("vm-read-timeouts");
     config.permissions = Permissions::allow_all();
     config.resources = ResourceLimits {
@@ -1509,6 +1578,17 @@ fn blocking_pipe_and_pty_reads_time_out_instead_of_hanging_forever() {
         started.elapsed()
     );
 
+    let warnings = captured.lock().expect("blocking-read warnings");
+    assert_eq!(warnings.len(), 2, "pipe and PTY must each warn once");
+    for warning in warnings.iter() {
+        assert_eq!(warning.capacity, 25);
+        assert!(
+            warning.observed >= 20 && warning.observed < 25,
+            "warning must precede the hard deadline: {warning:?}"
+        );
+        assert!(warning.fill_percent >= 80 && warning.fill_percent < 100);
+    }
+
     process.finish(0);
     kernel.wait_and_reap(process.pid()).expect("reap shell");
 }
@@ -1528,6 +1608,37 @@ fn resource_limits_reject_oversized_spawn_payloads() {
         .register_driver(CommandDriver::new("shell", ["sh"]))
         .expect("register shell");
 
+    let exact_argv = kernel
+        .spawn_process(
+            "sh",
+            vec![String::from("123456789")],
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("exact argv byte boundary should be admitted");
+    exact_argv.finish(0);
+    kernel
+        .wait_and_reap(exact_argv.pid())
+        .expect("reap exact argv process");
+
+    let exact_env = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                env: BTreeMap::from([(String::from("LONG"), String::from("123456789"))]),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("exact environment byte boundary should be admitted");
+    exact_env.finish(0);
+    kernel
+        .wait_and_reap(exact_env.pid())
+        .expect("reap exact environment process");
+
     let argv_error = kernel
         .spawn_process(
             "sh",
@@ -1539,6 +1650,14 @@ fn resource_limits_reject_oversized_spawn_payloads() {
         )
         .expect_err("oversized argv should be rejected");
     assert_eq!(argv_error.code(), "EINVAL");
+    assert!(argv_error
+        .to_string()
+        .contains("limits.resources.maxProcessArgvBytes"));
+    assert_eq!(
+        kernel.resource_snapshot().running_processes,
+        0,
+        "rejected argv must not create a process"
+    );
 
     let env_error = kernel
         .spawn_process(
@@ -1552,6 +1671,14 @@ fn resource_limits_reject_oversized_spawn_payloads() {
         )
         .expect_err("oversized environment should be rejected");
     assert_eq!(env_error.code(), "EINVAL");
+    assert!(env_error
+        .to_string()
+        .contains("limits.resources.maxProcessEnvBytes"));
+    assert_eq!(
+        kernel.resource_snapshot().running_processes,
+        0,
+        "rejected environment must not create a process"
+    );
 }
 
 #[test]
@@ -1583,18 +1710,40 @@ fn resource_limits_reject_oversized_pread_and_write_operations() {
         )
         .expect("spawn shell");
     let fd = kernel
-        .fd_open("shell", process.pid(), "/tmp/data.txt", 0, None)
+        .fd_open("shell", process.pid(), "/tmp/data.txt", O_RDWR, None)
         .expect("open file");
+
+    assert_eq!(
+        kernel
+            .fd_pread("shell", process.pid(), fd, 4, 0)
+            .expect("exact pread byte boundary"),
+        b"hell"
+    );
+    assert_eq!(
+        kernel
+            .fd_pwrite("shell", process.pid(), fd, b"xyz", 0)
+            .expect("exact write byte boundary"),
+        3
+    );
+    kernel
+        .write_file("/tmp/data.txt", b"hello".to_vec())
+        .expect("restore rollback sentinel");
 
     let pread_error = kernel
         .fd_pread("shell", process.pid(), fd, 5, 0)
         .expect_err("oversized pread should be rejected");
     assert_eq!(pread_error.code(), "EINVAL");
+    assert!(pread_error
+        .to_string()
+        .contains("limits.resources.maxPreadBytes"));
 
     let write_error = kernel
         .fd_write("shell", process.pid(), fd, b"four")
         .expect_err("oversized fd_write should be rejected");
     assert_eq!(write_error.code(), "EINVAL");
+    assert!(write_error
+        .to_string()
+        .contains("limits.resources.maxFdWriteBytes"));
 
     let pwrite_error = kernel
         .fd_pwrite("shell", process.pid(), fd, b"four", 0)
@@ -1800,6 +1949,20 @@ fn resource_limits_reject_oversized_readdir_batches() {
     };
 
     let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel.create_dir("/exact").expect("create exact directory");
+    kernel
+        .write_file("/exact/a.txt", b"a".to_vec())
+        .expect("write exact first entry");
+    kernel
+        .write_file("/exact/b.txt", b"b".to_vec())
+        .expect("write exact second entry");
+    assert_eq!(
+        kernel
+            .read_dir("/exact")
+            .expect("exact readdir entry boundary")
+            .len(),
+        2
+    );
     kernel.create_dir("/tmp").expect("create tmp");
     kernel
         .write_file("/tmp/a.txt", b"a".to_vec())
@@ -1815,4 +1978,7 @@ fn resource_limits_reject_oversized_readdir_batches() {
         .read_dir("/tmp")
         .expect_err("oversized readdir batch should be rejected");
     assert_eq!(error.code(), "ENOMEM");
+    assert!(error
+        .to_string()
+        .contains("limits.resources.maxReaddirEntries"));
 }

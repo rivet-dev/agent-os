@@ -5,9 +5,9 @@ use crate::engine::types::{
     decode_unwritten_extents, encode_unwritten_extents, normalize_path, set_xattr_value,
     unwritten_after_allocate, unwritten_after_collapse, unwritten_after_insert,
     unwritten_after_truncate, unwritten_after_write, unwritten_after_zero, unwritten_byte_ranges,
-    validate_xattr_name, BlockKey, ChunkEdit, ChunkRange, CreateInodeAttrs, Dentry, InodeMeta,
-    InodePatch, InodeType, SnapshotId, Storage, Timespec, VirtualStat, DEFAULT_CHUNK_SIZE,
-    DEFAULT_INLINE_THRESHOLD, INTERNAL_XATTR_PREFIX,
+    unwritten_sector_ranges, validate_xattr_name, BlockKey, ChunkEdit, ChunkRange,
+    CreateInodeAttrs, Dentry, FileExtent, InodeMeta, InodePatch, InodeType, SnapshotId, Storage,
+    Timespec, VirtualStat, DEFAULT_CHUNK_SIZE, DEFAULT_INLINE_THRESHOLD, INTERNAL_XATTR_PREFIX,
 };
 use crate::engine::vfs::{Snapshottable, VirtualFileSystem};
 use async_trait::async_trait;
@@ -1152,6 +1152,22 @@ impl<M: MetadataStore, B: BlockStore> VirtualFileSystem for ChunkedFs<M, B> {
         let meta = self.metadata.resolve(path).await?;
         self.ensure_file(path, &meta)?;
         unwritten_byte_ranges(&meta.xattrs, meta.size)
+    }
+
+    async fn extent_at(&self, path: &str, index: usize) -> VfsResult<Option<FileExtent>> {
+        let meta = self.metadata.resolve(path).await?;
+        self.ensure_file(path, &meta)?;
+        let unwritten = unwritten_sector_ranges(&meta.xattrs)?;
+        let extent = crate::extent::classified_file_extent_at(
+            crate::extent::sector_byte_ranges(meta.allocated_extents.iter().copied(), meta.size),
+            crate::extent::sector_byte_ranges(unwritten, meta.size),
+            index,
+        );
+        Ok(extent.map(|extent| FileExtent {
+            start: extent.start,
+            end: extent.end,
+            unwritten: extent.unwritten,
+        }))
     }
 
     async fn pread(&self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {

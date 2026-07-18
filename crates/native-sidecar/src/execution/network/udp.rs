@@ -9,7 +9,7 @@ pub(in crate::execution) struct ActiveUdpSendToRequest<'a, B> {
     pub(in crate::execution) dns: &'a VmDnsConfig,
     pub(in crate::execution) host: &'a str,
     pub(in crate::execution) port: u16,
-    pub(in crate::execution) context: &'a JavascriptSocketPathContext,
+    pub(in crate::execution) context: &'a SocketPathContext,
     pub(in crate::execution) contents: &'a [u8],
 }
 
@@ -21,7 +21,7 @@ pub(in crate::execution) struct ActiveUdpConnectRequest<'a, B> {
     dns: &'a VmDnsConfig,
     host: &'a str,
     port: u16,
-    context: &'a JavascriptSocketPathContext,
+    context: &'a SocketPathContext,
 }
 
 pub(in crate::execution) struct UdpRemoteAddrRequest<'a, B> {
@@ -31,23 +31,152 @@ pub(in crate::execution) struct UdpRemoteAddrRequest<'a, B> {
     pub(in crate::execution) dns: &'a VmDnsConfig,
     pub(in crate::execution) host: &'a str,
     pub(in crate::execution) port: u16,
-    pub(in crate::execution) family: JavascriptUdpFamily,
-    pub(in crate::execution) context: &'a JavascriptSocketPathContext,
+    pub(in crate::execution) family: UdpFamily,
+    pub(in crate::execution) context: &'a SocketPathContext,
 }
 
-pub(in crate::execution) struct JavascriptDgramSyncRpcServiceRequest<'a, B> {
+pub(in crate::execution) struct DgramServiceRequest<'a, B> {
     pub(in crate::execution) bridge: &'a SharedBridge<B>,
     pub(in crate::execution) kernel: &'a mut SidecarKernel,
     pub(in crate::execution) vm_id: &'a str,
     pub(in crate::execution) dns: &'a VmDnsConfig,
-    pub(in crate::execution) socket_paths: &'a JavascriptSocketPathContext,
+    pub(in crate::execution) socket_paths: &'a SocketPathContext,
     pub(in crate::execution) process: &'a mut ActiveProcess,
     pub(in crate::execution) kernel_readiness: KernelSocketReadinessRegistry,
-    pub(in crate::execution) sync_request: &'a JavascriptSyncRpcRequest,
+    pub(in crate::execution) operation: DgramOperation,
+    pub(in crate::execution) capabilities: CapabilityRegistry,
+}
+
+pub(in crate::execution) enum DgramOperation {
+    Create {
+        family: UdpFamily,
+    },
+    Bind {
+        socket_id: String,
+        address: Option<String>,
+        port: u16,
+    },
+    Send {
+        socket_id: String,
+        bytes: Vec<u8>,
+        address: Option<String>,
+        port: Option<u16>,
+    },
+    Connect {
+        socket_id: String,
+        address: Option<String>,
+        port: u16,
+    },
+    Disconnect {
+        socket_id: String,
+    },
+    RemoteAddress {
+        socket_id: String,
+    },
+    Close {
+        socket_id: String,
+    },
+    Address {
+        socket_id: String,
+    },
+    SetOption {
+        socket_id: String,
+        name: String,
+        payload: Value,
+    },
+    SetBufferSize {
+        socket_id: String,
+        which: String,
+        size: usize,
+    },
+    GetBufferSize {
+        socket_id: String,
+        which: String,
+    },
+}
+
+pub(in crate::execution) struct ManagedUdpServiceRequest<'a, B> {
+    pub(in crate::execution) bridge: &'a SharedBridge<B>,
+    pub(in crate::execution) kernel: &'a mut SidecarKernel,
+    pub(in crate::execution) vm_id: &'a str,
+    pub(in crate::execution) dns: &'a VmDnsConfig,
+    pub(in crate::execution) socket_paths: &'a SocketPathContext,
+    pub(in crate::execution) process: &'a mut ActiveProcess,
+    pub(in crate::execution) kernel_readiness: KernelSocketReadinessRegistry,
     pub(in crate::execution) capabilities: CapabilityRegistry,
 }
 
 const UDP_MAX_DATAGRAM_BYTES: usize = 64 * 1024;
+
+/// Cloneable poll-side capabilities only. This deliberately excludes socket
+/// description handles, transfer guards, and capability leases: using a
+/// descriptor clone as an async poll token would corrupt close/SCM_RIGHTS
+/// lifetime accounting.
+#[derive(Clone)]
+pub(in crate::execution) struct ActiveUdpPollHandle {
+    pub(in crate::execution) native_commands: Option<TokioSender<NativeUdpCommand>>,
+    resources: Arc<ResourceLedger>,
+    runtime_context: agentos_runtime::RuntimeContext,
+    reactor_limits: ReactorIoLimits,
+    fairness_identity: Arc<OnceLock<(u64, u64)>>,
+    fairness_identity_committed: Arc<tokio::sync::Notify>,
+    pub(in crate::execution) read_event_notify: Arc<tokio::sync::Notify>,
+    pub(in crate::execution) pending_datagram: Arc<Mutex<Option<DatagramEvent>>>,
+}
+
+impl ActiveUdpPollHandle {
+    pub(in crate::execution) fn operation_deadline(&self) -> Duration {
+        self.reactor_limits.operation_deadline
+    }
+    pub(in crate::execution) async fn acquire_fair_turn(
+        &self,
+    ) -> Result<FairWorkTurn, SidecarError> {
+        acquire_native_udp_fair_turn(
+            &self.runtime_context,
+            self.reactor_limits,
+            &self.fairness_identity,
+            &self.fairness_identity_committed,
+        )
+        .await
+    }
+
+    pub(in crate::execution) async fn poll_native_once(
+        &self,
+    ) -> Result<Option<DatagramEvent>, SidecarError> {
+        let Some(commands) = self.native_commands.as_ref() else {
+            return Ok(None);
+        };
+        let (completion, receiver) = tokio::sync::oneshot::channel();
+        commands
+            .try_send(NativeUdpCommand::Poll {
+                _command_reservation: reserve_udp_command(&self.resources)?,
+                completion,
+            })
+            .map_err(|error| {
+                udp_command_admission_error(error, self.reactor_limits.max_handle_commands)
+            })?;
+        match crate::execution::operation_deadline_timeout(
+            "UDP poll completion",
+            self.reactor_limits.operation_deadline,
+            receiver,
+        )
+        .await
+        {
+            Ok(Ok(result)) => result.map_err(SidecarError::from),
+            Ok(Err(_)) => Err(SidecarError::host(
+                "EPIPE",
+                "native UDP owner dropped poll completion",
+            )),
+            Err(_) => Err(SidecarError::host(
+                "ETIMEDOUT",
+                format!(
+                    "UDP poll exceeded {}ms; raise limits.reactor.operationDeadlineMs",
+                    self.reactor_limits.operation_deadline.as_millis()
+                ),
+            )),
+        }
+    }
+}
 
 fn udp_receive_capacity(resources: &ResourceLedger, limits: ReactorIoLimits) -> usize {
     let aggregate_limit = resources
@@ -109,10 +238,10 @@ pub(in crate::execution) enum ActiveUdpValueResult {
 fn udp_value_service_response(
     result: ActiveUdpValueResult,
     task_class: agentos_runtime::TaskClass,
-) -> JavascriptSyncRpcServiceResponse {
+) -> HostServiceResponse {
     match result {
-        ActiveUdpValueResult::Immediate(value) => JavascriptSyncRpcServiceResponse::Json(value),
-        ActiveUdpValueResult::Deferred(receiver) => JavascriptSyncRpcServiceResponse::Deferred {
+        ActiveUdpValueResult::Immediate(value) => HostServiceResponse::Json(value),
+        ActiveUdpValueResult::Deferred(receiver) => HostServiceResponse::Deferred {
             receiver,
             timeout: None,
             task_class,
@@ -120,55 +249,22 @@ fn udp_value_service_response(
     }
 }
 
-fn udp_send_service_response(result: ActiveUdpSendResult) -> JavascriptSyncRpcServiceResponse {
+fn udp_send_service_response(result: ActiveUdpSendResult) -> HostServiceResponse {
     match result {
         ActiveUdpSendResult::Immediate {
             written,
             local_addr,
-        } => JavascriptSyncRpcServiceResponse::Json(json!({
+        } => HostServiceResponse::Json(json!({
             "bytes": written,
             "localAddress": local_addr.ip().to_string(),
             "localPort": local_addr.port(),
             "family": socket_addr_family(&local_addr),
         })),
-        ActiveUdpSendResult::Deferred { receiver } => JavascriptSyncRpcServiceResponse::Deferred {
+        ActiveUdpSendResult::Deferred { receiver } => HostServiceResponse::Deferred {
             receiver,
             timeout: None,
             task_class: agentos_runtime::TaskClass::Udp,
         },
-    }
-}
-
-pub(in crate::execution) async fn await_udp_send_result(
-    result: ActiveUdpSendResult,
-) -> Result<usize, SidecarError> {
-    match result {
-        ActiveUdpSendResult::Immediate { written, .. } => Ok(written),
-        ActiveUdpSendResult::Deferred { receiver } => {
-            let value = receiver.await.map_err(|_| {
-                SidecarError::Execution(String::from(
-                    "EPIPE: native UDP owner dropped send completion",
-                ))
-            })?;
-            let value = value.map_err(|error| {
-                SidecarError::Execution(format!("{}: {}", error.code, error.message))
-            })?;
-            value
-                .get("bytes")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| {
-                    SidecarError::Execution(String::from(
-                        "ERR_AGENTOS_UDP_COMPLETION: native UDP send omitted byte count",
-                    ))
-                })
-                .and_then(|written| {
-                    usize::try_from(written).map_err(|_| {
-                        SidecarError::Execution(String::from(
-                            "ERR_AGENTOS_UDP_COMPLETION: native UDP byte count overflow",
-                        ))
-                    })
-                })
-        }
     }
 }
 
@@ -177,11 +273,12 @@ fn udp_command_admission_error(
     limit: usize,
 ) -> SidecarError {
     match error {
-        tokio::sync::mpsc::error::TrySendError::Full(_) => SidecarError::Execution(format!(
-            "ERR_AGENTOS_UDP_COMMAND_LIMIT: UDP command queue exceeded {limit}; raise limits.reactor.maxHandleCommands"
-        )),
+        tokio::sync::mpsc::error::TrySendError::Full(_) => SidecarError::host(
+            "ERR_AGENTOS_UDP_COMMAND_LIMIT",
+            format!("UDP command queue exceeded {limit}; raise limits.reactor.maxHandleCommands"),
+        ),
         tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-            SidecarError::Execution(String::from("EBADF: native UDP owner task is closed"))
+            SidecarError::host("EBADF", "native UDP owner task is closed")
         }
     }
 }
@@ -219,16 +316,14 @@ fn reserve_udp_send_payload(
 }
 
 fn udp_deferred_error(error: SidecarError) -> crate::state::DeferredRpcError {
-    crate::state::DeferredRpcError {
-        code: javascript_sync_rpc_error_code(&error),
-        message: javascript_sync_rpc_error_message(&error),
-    }
+    crate::state::DeferredRpcError::from(host_service_error(&error))
 }
 
 fn udp_io_deferred_error(error: std::io::Error) -> crate::state::DeferredRpcError {
     crate::state::DeferredRpcError {
         code: io_error_code(&error).unwrap_or_else(|| String::from("ERR_AGENTOS_UDP_NATIVE")),
         message: error.to_string(),
+        details: None,
     }
 }
 
@@ -252,12 +347,10 @@ fn ipv4_interface(interface: Option<&str>) -> Result<Ipv4Addr, std::io::Error> {
         .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))
 }
 
-fn interface_name_to_index(interface: &str) -> Result<u32, std::io::Error> {
-    nix::net::if_::if_nametoindex(interface)
-        .map_err(|error| std::io::Error::from_raw_os_error(error as i32))
-}
-
-fn ipv6_interface_index(interface: Option<&str>) -> Result<u32, std::io::Error> {
+fn ipv6_interface_index(
+    socket: &tokio::net::UdpSocket,
+    interface: Option<&str>,
+) -> Result<u32, std::io::Error> {
     let Some(interface) = interface.filter(|value| !value.is_empty()) else {
         return Ok(0);
     };
@@ -276,7 +369,8 @@ fn ipv6_interface_index(interface: Option<&str>) -> Result<u32, std::io::Error> 
                     .map(|_| interface.interface_name)
             })
             .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EADDRNOTAVAIL))?;
-        return interface_name_to_index(interface_name.as_str());
+        return rustix::net::netdevice::name_to_index(socket, interface_name.as_str())
+            .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()));
     }
     let scope = interface
         .rsplit_once('%')
@@ -284,22 +378,23 @@ fn ipv6_interface_index(interface: Option<&str>) -> Result<u32, std::io::Error> 
     if let Ok(index) = scope.parse::<u32>() {
         return Ok(index);
     }
-    interface_name_to_index(scope)
+    rustix::net::netdevice::name_to_index(socket, scope)
+        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))
 }
 
 fn set_udp_multicast_interface(
     socket: &tokio::net::UdpSocket,
-    family: JavascriptUdpFamily,
+    family: UdpFamily,
     interface: &str,
 ) -> Result<(), std::io::Error> {
     let socket_ref = SockRef::from(socket);
     match family {
-        JavascriptUdpFamily::Ipv4 => {
+        UdpFamily::Ipv4 => {
             let address = ipv4_interface(Some(interface))?;
             socket_ref.set_multicast_if_v4(&address)
         }
-        JavascriptUdpFamily::Ipv6 => {
-            let index = ipv6_interface_index(Some(interface))?;
+        UdpFamily::Ipv6 => {
+            let index = ipv6_interface_index(socket, Some(interface))?;
             socket_ref.set_multicast_if_v6(index)
         }
     }
@@ -337,7 +432,7 @@ fn disconnect_native_udp(socket: &tokio::net::UdpSocket) -> Result<(), std::io::
 
 fn apply_native_udp_option(
     socket: &tokio::net::UdpSocket,
-    family: JavascriptUdpFamily,
+    family: UdpFamily,
     option: NativeUdpSocketOption,
 ) -> Result<Value, std::io::Error> {
     let socket_ref = SockRef::from(socket);
@@ -348,13 +443,13 @@ fn apply_native_udp_option(
         }
         NativeUdpSocketOption::Ttl(ttl) => {
             match family {
-                JavascriptUdpFamily::Ipv4 => socket_ref.set_ttl_v4(ttl)?,
-                JavascriptUdpFamily::Ipv6 => socket_ref.set_unicast_hops_v6(ttl)?,
+                UdpFamily::Ipv4 => socket_ref.set_ttl_v4(ttl)?,
+                UdpFamily::Ipv6 => socket_ref.set_unicast_hops_v6(ttl)?,
             }
             Ok(json!(ttl))
         }
         NativeUdpSocketOption::MulticastTtl(ttl) => {
-            if family != JavascriptUdpFamily::Ipv4 {
+            if family != UdpFamily::Ipv4 {
                 return Err(std::io::Error::from_raw_os_error(libc::ENOPROTOOPT));
             }
             socket_ref.set_multicast_ttl_v4(ttl)?;
@@ -362,8 +457,8 @@ fn apply_native_udp_option(
         }
         NativeUdpSocketOption::MulticastLoopback(enabled) => {
             match family {
-                JavascriptUdpFamily::Ipv4 => socket_ref.set_multicast_loop_v4(enabled)?,
-                JavascriptUdpFamily::Ipv6 => socket_ref.set_multicast_loop_v6(enabled)?,
+                UdpFamily::Ipv4 => socket_ref.set_multicast_loop_v4(enabled)?,
+                UdpFamily::Ipv6 => socket_ref.set_multicast_loop_v6(enabled)?,
             }
             Ok(json!(if enabled { 1 } else { 0 }))
         }
@@ -377,7 +472,7 @@ fn apply_native_udp_option(
             join,
         } => {
             match group {
-                IpAddr::V4(group) if family == JavascriptUdpFamily::Ipv4 => {
+                IpAddr::V4(group) if family == UdpFamily::Ipv4 => {
                     let interface = ipv4_interface(interface.as_deref())?;
                     if join {
                         socket_ref.join_multicast_v4(&group, &interface)?;
@@ -385,8 +480,8 @@ fn apply_native_udp_option(
                         socket_ref.leave_multicast_v4(&group, &interface)?;
                     }
                 }
-                IpAddr::V6(group) if family == JavascriptUdpFamily::Ipv6 => {
-                    let index = ipv6_interface_index(interface.as_deref())?;
+                IpAddr::V6(group) if family == UdpFamily::Ipv6 => {
+                    let index = ipv6_interface_index(socket, interface.as_deref())?;
                     if join {
                         socket_ref.join_multicast_v6(&group, index)?;
                     } else {
@@ -453,8 +548,7 @@ where
     if payload_len > allowance.bytes {
         turn.complete(FairBudget::default(), false)
             .map_err(|error| SidecarError::Execution(error.to_string()))?;
-        return Err(SidecarError::Execution(format!(
-            "ERR_AGENTOS_FAIRNESS_BYTE_BUDGET: UDP datagram uses {payload_len} bytes, allowance {} bytes; raise limits.reactor.byteQuantum",
+        return Err(SidecarError::host("ERR_AGENTOS_FAIRNESS_BYTE_BUDGET", format!("UDP datagram uses {payload_len} bytes, allowance {} bytes; raise limits.reactor.byteQuantum",
             allowance.bytes
         )));
     }
@@ -559,7 +653,7 @@ async fn connect_native_udp_socket_fair(
 }
 
 struct NativeUdpOwnerRegistration {
-    family: JavascriptUdpFamily,
+    family: UdpFamily,
     resources: Arc<ResourceLedger>,
     limits: ReactorIoLimits,
     fairness_identity: Arc<OnceLock<(u64, u64)>>,
@@ -643,9 +737,9 @@ async fn run_native_udp_owner(task: NativeUdpOwnerTask) {
                             udp_datagram_reservation,
                         ));
                         let was_empty = receive_queue.is_empty();
-                        receive_queue.push_back(JavascriptUdpSocketEvent::Error {
-                            code: Some(javascript_sync_rpc_error_code(&error)),
-                            message: javascript_sync_rpc_error_message(&error),
+                        receive_queue.push_back(DatagramEvent::Error {
+                            code: Some(host_service_error_code(&error)),
+                            message: host_service_error_message(&error),
                         });
                         if was_empty {
                             notify_native_udp_readable(
@@ -671,7 +765,7 @@ async fn run_native_udp_owner(task: NativeUdpOwnerTask) {
                             );
                         }
                         let was_empty = receive_queue.is_empty();
-                        receive_queue.push_back(JavascriptUdpSocketEvent::Message {
+                        receive_queue.push_back(DatagramEvent::Message {
                             data: buffer,
                             remote_addr,
                             _byte_reservation: SharedReservation::new(byte_reservation),
@@ -722,7 +816,7 @@ async fn run_native_udp_owner(task: NativeUdpOwnerTask) {
                             );
                         }
                         let was_empty = receive_queue.is_empty();
-                        receive_queue.push_back(JavascriptUdpSocketEvent::Error {
+                        receive_queue.push_back(DatagramEvent::Error {
                             code: io_error_code(&error),
                             message: error.to_string(),
                         });
@@ -774,6 +868,7 @@ async fn run_native_udp_owner(task: NativeUdpOwnerTask) {
                                 message: String::from(
                                     "Already connected: send() does not accept a destination",
                                 ),
+                                details: None,
                             }));
                             continue;
                         }
@@ -783,10 +878,12 @@ async fn run_native_udp_owner(task: NativeUdpOwnerTask) {
                                 message: String::from(
                                     "Destination port is required for an unconnected UDP socket",
                                 ),
+                                details: None,
                             }));
                             continue;
                         }
-                        let result = match tokio::time::timeout(
+                        let result = match crate::execution::operation_deadline_timeout(
+                            "UDP send",
                             limits.operation_deadline,
                             send_native_udp_datagram_fair(
                                 &socket,
@@ -812,6 +909,7 @@ async fn run_native_udp_owner(task: NativeUdpOwnerTask) {
                                     "partial UDP datagram write: {written} of {} bytes",
                                     payload.bytes.len()
                                 ),
+                                details: None,
                             }),
                             Ok(Ok(Err(error))) => Err(udp_io_deferred_error(error)),
                             Ok(Err(error)) => Err(udp_deferred_error(error)),
@@ -821,6 +919,7 @@ async fn run_native_udp_owner(task: NativeUdpOwnerTask) {
                                     "UDP send exceeded {}ms; raise limits.reactor.operationDeadlineMs",
                                     limits.operation_deadline.as_millis()
                                 ),
+                                details: None,
                             }),
                         };
                         completion.settle(result);
@@ -836,10 +935,12 @@ async fn run_native_udp_owner(task: NativeUdpOwnerTask) {
                             completion.settle(Err(crate::state::DeferredRpcError {
                                 code: String::from("ERR_SOCKET_DGRAM_IS_CONNECTED"),
                                 message: String::from("Already connected"),
+                                details: None,
                             }));
                             continue;
                         }
-                        let result = match tokio::time::timeout(
+                        let result = match crate::execution::operation_deadline_timeout(
+                            "UDP connect",
                             limits.operation_deadline,
                             connect_native_udp_socket_fair(
                                 &socket,
@@ -871,6 +972,7 @@ async fn run_native_udp_owner(task: NativeUdpOwnerTask) {
                                     "UDP connect exceeded {}ms; raise limits.reactor.operationDeadlineMs",
                                     limits.operation_deadline.as_millis()
                                 ),
+                                details: None,
                             }),
                         };
                         completion.settle(result);
@@ -880,6 +982,7 @@ async fn run_native_udp_owner(task: NativeUdpOwnerTask) {
                             completion.settle(Err(crate::state::DeferredRpcError {
                                 code: String::from("ERR_SOCKET_DGRAM_NOT_CONNECTED"),
                                 message: String::from("Not connected"),
+                                details: None,
                             }));
                             continue;
                         }
@@ -901,6 +1004,7 @@ async fn run_native_udp_owner(task: NativeUdpOwnerTask) {
                             .ok_or_else(|| crate::state::DeferredRpcError {
                                 code: String::from("ERR_SOCKET_DGRAM_NOT_CONNECTED"),
                                 message: String::from("Not connected"),
+                                details: None,
                             });
                         completion.settle(result);
                     }
@@ -963,7 +1067,7 @@ async fn run_native_udp_owner(task: NativeUdpOwnerTask) {
                     Ok(()) => read_ready = true,
                     Err(error) => {
                         let was_empty = receive_queue.is_empty();
-                        receive_queue.push_back(JavascriptUdpSocketEvent::Error {
+                        receive_queue.push_back(DatagramEvent::Error {
                             code: io_error_code(&error),
                             message: error.to_string(),
                         });
@@ -1008,6 +1112,109 @@ fn spawn_native_udp_owner(
 }
 
 impl ActiveUdpSocket {
+    pub(in crate::execution) fn poll_handle(&self) -> ActiveUdpPollHandle {
+        ActiveUdpPollHandle {
+            native_commands: self.native_commands.clone(),
+            resources: Arc::clone(&self.resources),
+            runtime_context: self.runtime_context.clone(),
+            reactor_limits: self.reactor_limits,
+            fairness_identity: Arc::clone(&self.fairness_identity),
+            fairness_identity_committed: Arc::clone(&self.fairness_identity_committed),
+            read_event_notify: Arc::clone(&self.read_event_notify),
+            pending_datagram: Arc::clone(&self.pending_datagram),
+        }
+    }
+
+    pub(in crate::execution) fn kernel_readable(
+        &self,
+        kernel: &SidecarKernel,
+        kernel_pid: u32,
+    ) -> Result<bool, SidecarError> {
+        let Some(socket_id) = self.kernel_socket_id else {
+            return Ok(false);
+        };
+        let result = kernel
+            .poll_targets(
+                EXECUTION_DRIVER_NAME,
+                kernel_pid,
+                vec![PollTargetEntry::socket(socket_id, POLLIN)],
+                0,
+            )
+            .map_err(kernel_error)?;
+        Ok(result
+            .targets
+            .first()
+            .is_some_and(|entry| !entry.revents.is_empty()))
+    }
+
+    pub(in crate::execution) fn consume_kernel_datagram(
+        &self,
+        kernel: &mut SidecarKernel,
+        kernel_pid: u32,
+        turn: FairWorkTurn,
+    ) -> Result<Option<DatagramEvent>, SidecarError> {
+        let Some(socket_id) = self.kernel_socket_id else {
+            turn.complete(FairBudget::default(), false)
+                .map_err(|error| SidecarError::Execution(error.to_string()))?;
+            return Ok(None);
+        };
+        let receive_capacity = udp_receive_capacity(&self.resources, self.reactor_limits)
+            .min(turn.allowance().bytes)
+            .max(1);
+        let (event, used_bytes) = match kernel.socket_recv_datagram_charged(
+            EXECUTION_DRIVER_NAME,
+            kernel_pid,
+            socket_id,
+            receive_capacity,
+        ) {
+            Ok(Some(datagram)) => {
+                let (source_address, payload, reservations) = datagram.into_parts();
+                let used_bytes = payload.len();
+                let (
+                    byte_reservation,
+                    datagram_reservation,
+                    udp_byte_reservation,
+                    udp_datagram_reservation,
+                ) = reservations.ok_or_else(|| {
+                    SidecarError::host(
+                        "ERR_AGENTOS_RESOURCE_ACCOUNTING_INVARIANT",
+                        "kernel UDP handoff did not transfer its queue reservations",
+                    )
+                })?;
+                let remote_addr = source_address
+                    .map(|source| resolve_udp_bind_addr(source.host(), source.port(), self.family))
+                    .transpose()?
+                    .unwrap_or_else(|| match self.family {
+                        UdpFamily::Ipv4 => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                        UdpFamily::Ipv6 => SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
+                    });
+                (
+                    Some(DatagramEvent::Message {
+                        data: payload,
+                        remote_addr,
+                        _byte_reservation: SharedReservation::new(byte_reservation),
+                        _datagram_reservation: SharedReservation::new(datagram_reservation),
+                        _udp_byte_reservation: SharedReservation::new(udp_byte_reservation),
+                        _udp_datagram_reservation: SharedReservation::new(udp_datagram_reservation),
+                    }),
+                    used_bytes,
+                )
+            }
+            Ok(None) => (None, 0),
+            Err(error) if error.code() == "EAGAIN" => (None, 0),
+            Err(error) => (
+                Some(DatagramEvent::Error {
+                    code: Some(error.code().to_owned()),
+                    message: error.to_string(),
+                }),
+                0,
+            ),
+        };
+        turn.complete(FairBudget::new(1, used_bytes), false)
+            .map_err(|error| SidecarError::Execution(error.to_string()))?;
+        Ok(event)
+    }
+
     pub(in crate::execution) fn set_fairness_identity(&mut self, identity: Option<(u64, u64)>) {
         let Some(identity) = identity else {
             return;
@@ -1024,15 +1231,17 @@ impl ActiveUdpSocket {
 
     pub(in crate::execution) fn set_event_pusher(
         &self,
-        session: Option<V8SessionHandle>,
+        session: Option<ExecutionWakeHandle>,
         identity: Option<(
             agentos_runtime::capability::CapabilityId,
             agentos_runtime::capability::CapabilityGeneration,
         )>,
+        owner_notify: Arc<tokio::sync::Notify>,
     ) {
         self.readiness_registration.register(
             session,
             identity,
+            owner_notify,
             agentos_runtime::readiness::ReadyFlags::DATAGRAM,
         );
     }
@@ -1050,14 +1259,14 @@ impl ActiveUdpSocket {
     pub(in crate::execution) fn new(
         kernel: &mut SidecarKernel,
         kernel_pid: u32,
-        family: JavascriptUdpFamily,
+        family: UdpFamily,
         resources: Arc<ResourceLedger>,
         runtime_context: agentos_runtime::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
         let spec = match family {
-            JavascriptUdpFamily::Ipv4 => SocketSpec::udp(),
-            JavascriptUdpFamily::Ipv6 => SocketSpec::new(SocketDomain::Inet6, SocketType::Datagram),
+            UdpFamily::Ipv4 => SocketSpec::udp(),
+            UdpFamily::Ipv6 => SocketSpec::new(SocketDomain::Inet6, SocketType::Datagram),
         };
         let socket_id = kernel
             .socket_create(EXECUTION_DRIVER_NAME, kernel_pid, spec)
@@ -1085,70 +1294,10 @@ impl ActiveUdpSocket {
             fairness_retirement,
             description_lease: Arc::new(SocketDescriptionLease::default()),
             read_event_notify: Arc::new(tokio::sync::Notify::new()),
+            pending_datagram: Arc::new(Mutex::new(None)),
             event_pusher: Arc::clone(&event_pusher),
             readiness_registration: SocketReadinessRegistration::new(event_pusher, None, None),
             native_read_wake_pending: Arc::new(AtomicBool::new(false)),
-        })
-    }
-
-    /// Create a native-backed UDP capability without an adapter-owned task or
-    /// descriptor registry. The socket is bound lazily by the same `bind`,
-    /// `send_to`, and `poll` operations used by every native UDP consumer.
-    pub(in crate::execution) fn new_native(
-        family: JavascriptUdpFamily,
-        resources: Arc<ResourceLedger>,
-        runtime_context: agentos_runtime::RuntimeContext,
-        reactor_limits: ReactorIoLimits,
-    ) -> Result<Self, SidecarError> {
-        let bind_addr = match family {
-            JavascriptUdpFamily::Ipv4 => "127.0.0.1:0",
-            JavascriptUdpFamily::Ipv6 => "[::1]:0",
-        };
-        let socket = UdpSocket::bind(bind_addr).map_err(sidecar_net_error)?;
-        let local_addr = socket.local_addr().map_err(sidecar_net_error)?;
-        let fairness_identity = Arc::new(OnceLock::new());
-        let fairness_identity_committed = Arc::new(tokio::sync::Notify::new());
-        let fairness_retirement =
-            SocketFairnessRetirement::new(Arc::clone(&fairness_identity), runtime_context.clone());
-        let read_event_notify = Arc::new(tokio::sync::Notify::new());
-        let event_pusher = SocketReadinessSubscribers::new(&resources);
-        let native_read_wake_pending = Arc::new(AtomicBool::new(false));
-        let native_commands = spawn_native_udp_owner(
-            &runtime_context,
-            socket,
-            NativeUdpOwnerRegistration {
-                family,
-                resources: Arc::clone(&resources),
-                limits: reactor_limits,
-                fairness_identity: Arc::clone(&fairness_identity),
-                fairness_identity_committed: Arc::clone(&fairness_identity_committed),
-                event_pusher: Arc::clone(&event_pusher),
-                read_event_notify: Arc::clone(&read_event_notify),
-                wake_pending: Arc::clone(&native_read_wake_pending),
-            },
-        )?;
-        Ok(Self {
-            family,
-            native_commands: Some(native_commands),
-            kernel_socket_id: None,
-            guest_local_addr: Some(local_addr),
-            native_local_addr: Some(local_addr),
-            kernel_connected_remote_addr: None,
-            recv_buffer_size: 0,
-            send_buffer_size: 0,
-            description_handles: Arc::new(()),
-            kernel_transfer_guard: None,
-            resources,
-            runtime_context,
-            reactor_limits,
-            fairness_identity,
-            fairness_identity_committed,
-            fairness_retirement,
-            description_lease: Arc::new(SocketDescriptionLease::default()),
-            read_event_notify,
-            event_pusher: Arc::clone(&event_pusher),
-            readiness_registration: SocketReadinessRegistration::new(event_pusher, None, None),
-            native_read_wake_pending,
         })
     }
 
@@ -1172,6 +1321,7 @@ impl ActiveUdpSocket {
             fairness_retirement: Arc::clone(&self.fairness_retirement),
             description_lease: Arc::clone(&self.description_lease),
             read_event_notify: Arc::clone(&self.read_event_notify),
+            pending_datagram: Arc::clone(&self.pending_datagram),
             event_pusher: Arc::clone(&self.event_pusher),
             readiness_registration: SocketReadinessRegistration::new(
                 Arc::clone(&self.event_pusher),
@@ -1203,12 +1353,13 @@ impl ActiveUdpSocket {
         kernel_pid: u32,
         host: Option<&str>,
         port: u16,
-        context: &JavascriptSocketPathContext,
+        context: &SocketPathContext,
     ) -> Result<SocketAddr, SidecarError> {
         if self.native_commands.is_some() || self.guest_local_addr.is_some() {
-            return Err(SidecarError::Execution(String::from(
-                "EINVAL: agentos dgram socket is already bound",
-            )));
+            return Err(SidecarError::host(
+                "EINVAL",
+                String::from("agentos dgram socket is already bound"),
+            ));
         }
 
         let (_bind_host, guest_host, guest_family) = normalize_udp_bind_host(host, self.family)?;
@@ -1229,9 +1380,10 @@ impl ActiveUdpSocket {
                 )
                 .map_err(kernel_error)?;
         } else {
-            return Err(SidecarError::Execution(String::from(
-                "EINVAL: native UDP socket is already bound",
-            )));
+            return Err(SidecarError::host(
+                "EINVAL",
+                String::from("native UDP socket is already bound"),
+            ));
         }
         self.guest_local_addr = Some(local_addr);
         Ok(local_addr)
@@ -1241,7 +1393,7 @@ impl ActiveUdpSocket {
         &mut self,
         kernel: &mut SidecarKernel,
         kernel_pid: u32,
-        context: &JavascriptSocketPathContext,
+        context: &SocketPathContext,
     ) -> Result<SocketAddr, SidecarError> {
         if let Some(local_addr) = self.local_addr() {
             return Ok(local_addr);
@@ -1253,9 +1405,10 @@ impl ActiveUdpSocket {
     fn ensure_native_owner(&mut self) -> Result<&TokioSender<NativeUdpCommand>, SidecarError> {
         if self.native_commands.is_none() {
             let guest_addr = self.guest_local_addr.ok_or_else(|| {
-                SidecarError::InvalidState(String::from(
-                    "ERR_AGENTOS_UDP_NOT_BOUND: UDP socket must have a guest address before native activation",
-                ))
+                SidecarError::host(
+                    "ERR_AGENTOS_UDP_NOT_BOUND",
+                    String::from("UDP socket must have a guest address before native activation"),
+                )
             })?;
             let socket =
                 UdpSocket::bind(SocketAddr::new(guest_addr.ip(), 0)).map_err(sidecar_net_error)?;
@@ -1289,9 +1442,9 @@ impl ActiveUdpSocket {
             self.native_commands = Some(commands);
             self.native_local_addr = Some(native_local_addr);
         }
-        self.native_commands.as_ref().ok_or_else(|| {
-            SidecarError::Execution(String::from("EBADF: native UDP owner is unavailable"))
-        })
+        self.native_commands
+            .as_ref()
+            .ok_or_else(|| SidecarError::host("EBADF", "native UDP owner is unavailable"))
     }
 
     pub(in crate::execution) fn send_to<B>(
@@ -1303,9 +1456,10 @@ impl ActiveUdpSocket {
         BridgeError<B>: fmt::Debug + Send + Sync + 'static,
     {
         if self.kernel_connected_remote_addr.is_some() {
-            return Err(SidecarError::Execution(String::from(
-                "ERR_SOCKET_DGRAM_IS_CONNECTED: send() does not accept a destination on a connected UDP socket",
-            )));
+            return Err(SidecarError::host(
+                "ERR_SOCKET_DGRAM_IS_CONNECTED",
+                String::from("send() does not accept a destination on a connected UDP socket"),
+            ));
         }
         let ActiveUdpSendToRequest {
             bridge,
@@ -1373,7 +1527,7 @@ impl ActiveUdpSocket {
         &mut self,
         kernel: &mut SidecarKernel,
         kernel_pid: u32,
-        context: &JavascriptSocketPathContext,
+        context: &SocketPathContext,
         contents: &[u8],
     ) -> Result<ActiveUdpSendResult, SidecarError> {
         let local_addr = self.ensure_bound_for_send(kernel, kernel_pid, context)?;
@@ -1416,8 +1570,10 @@ impl ActiveUdpSocket {
         kernel: &mut SidecarKernel,
         kernel_pid: u32,
         wait: Duration,
-    ) -> Result<Option<JavascriptUdpSocketEvent>, SidecarError> {
-        let wait = wait.min(self.reactor_limits.operation_deadline);
+    ) -> Result<Option<DatagramEvent>, SidecarError> {
+        let operation_deadline = self.reactor_limits.operation_deadline;
+        let warn_operation_deadline = wait >= operation_deadline;
+        let wait = wait.min(operation_deadline);
         let receive_capacity = udp_receive_capacity(&self.resources, self.reactor_limits);
         if let Some(socket_id) = self.kernel_socket_id {
             // A hybrid socket may be readable through either the VM-local
@@ -1457,30 +1613,33 @@ impl ActiveUdpSocket {
                         let (source_address, payload, reservations) = datagram.into_parts();
                         let used_bytes = payload.len();
                         let (
-                        byte_reservation,
-                        datagram_reservation,
-                        udp_byte_reservation,
-                        udp_datagram_reservation,
-                    ) = reservations.ok_or_else(|| {
-                        SidecarError::Execution(String::from(
-                            "ERR_AGENTOS_RESOURCE_ACCOUNTING_INVARIANT: kernel UDP handoff did not transfer its queue reservations",
-                        ))
-                    })?;
+                            byte_reservation,
+                            datagram_reservation,
+                            udp_byte_reservation,
+                            udp_datagram_reservation,
+                        ) = reservations.ok_or_else(|| {
+                            SidecarError::host(
+                                "ERR_AGENTOS_RESOURCE_ACCOUNTING_INVARIANT",
+                                String::from(
+                                    "kernel UDP handoff did not transfer its queue reservations",
+                                ),
+                            )
+                        })?;
                         let remote_addr = source_address
                             .map(|source| {
                                 resolve_udp_bind_addr(source.host(), source.port(), self.family)
                             })
                             .transpose()?
                             .unwrap_or_else(|| match self.family {
-                                JavascriptUdpFamily::Ipv4 => {
+                                UdpFamily::Ipv4 => {
                                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
                                 }
-                                JavascriptUdpFamily::Ipv6 => {
+                                UdpFamily::Ipv6 => {
                                     SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)
                                 }
                             });
                         (
-                            Some(JavascriptUdpSocketEvent::Message {
+                            Some(DatagramEvent::Message {
                                 data: payload,
                                 remote_addr,
                                 _byte_reservation: SharedReservation::new(byte_reservation),
@@ -1496,7 +1655,7 @@ impl ActiveUdpSocket {
                     Ok(None) => (None, 0),
                     Err(error) if error.code() == "EAGAIN" => (None, 0),
                     Err(error) => (
-                        Some(JavascriptUdpSocketEvent::Error {
+                        Some(DatagramEvent::Error {
                             code: Some(error.code().to_string()),
                             message: error.to_string(),
                         }),
@@ -1522,17 +1681,25 @@ impl ActiveUdpSocket {
             commands.try_send(command).map_err(|error| {
                 udp_command_admission_error(error, self.reactor_limits.max_handle_commands)
             })?;
-            match tokio::time::timeout(self.reactor_limits.operation_deadline, receiver).await {
-                Ok(Ok(result)) => result.map_err(|error| {
-                    SidecarError::Execution(format!("{}: {}", error.code, error.message))
-                }),
-                Ok(Err(_)) => Err(SidecarError::Execution(String::from(
-                    "EPIPE: native UDP owner dropped poll completion",
-                ))),
-                Err(_) => Err(SidecarError::Execution(format!(
-                    "ETIMEDOUT: UDP poll exceeded {}ms; raise limits.reactor.operationDeadlineMs",
-                    self.reactor_limits.operation_deadline.as_millis()
-                ))),
+            match crate::execution::operation_deadline_timeout(
+                "UDP poll completion",
+                self.reactor_limits.operation_deadline,
+                receiver,
+            )
+            .await
+            {
+                Ok(Ok(result)) => result.map_err(SidecarError::from),
+                Ok(Err(_)) => Err(SidecarError::host(
+                    "EPIPE",
+                    String::from("native UDP owner dropped poll completion"),
+                )),
+                Err(_) => Err(SidecarError::host(
+                    "ETIMEDOUT",
+                    format!(
+                        "UDP poll exceeded {}ms; raise limits.reactor.operationDeadlineMs",
+                        self.reactor_limits.operation_deadline.as_millis()
+                    ),
+                )),
             }
         };
         let event = poll_once().await?;
@@ -1540,7 +1707,14 @@ impl ActiveUdpSocket {
             return Ok(event);
         }
         let notified = self.read_event_notify.notified();
-        if tokio::time::timeout(wait, notified).await.is_err() {
+        let timed_out = if warn_operation_deadline {
+            crate::execution::operation_deadline_timeout("UDP poll wait", wait, notified)
+                .await
+                .is_err()
+        } else {
+            tokio::time::timeout(wait, notified).await.is_err()
+        };
+        if timed_out {
             return Ok(None);
         }
         poll_once().await
@@ -1572,9 +1746,10 @@ impl ActiveUdpSocket {
         BridgeError<B>: fmt::Debug + Send + Sync + 'static,
     {
         if self.kernel_connected_remote_addr.is_some() {
-            return Err(SidecarError::Execution(String::from(
-                "ERR_SOCKET_DGRAM_IS_CONNECTED: Already connected",
-            )));
+            return Err(SidecarError::host(
+                "ERR_SOCKET_DGRAM_IS_CONNECTED",
+                String::from("Already connected"),
+            ));
         }
         let ActiveUdpConnectRequest {
             bridge,
@@ -1654,9 +1829,10 @@ impl ActiveUdpSocket {
             return Ok(ActiveUdpValueResult::Immediate(Value::Null));
         }
         if self.native_commands.is_none() {
-            return Err(SidecarError::Execution(String::from(
-                "ERR_SOCKET_DGRAM_NOT_CONNECTED: Not connected",
-            )));
+            return Err(SidecarError::host(
+                "ERR_SOCKET_DGRAM_NOT_CONNECTED",
+                String::from("Not connected"),
+            ));
         }
         self.submit_native_value_command(|command_reservation, completion| {
             NativeUdpCommand::Disconnect {
@@ -1677,9 +1853,10 @@ impl ActiveUdpSocket {
             })));
         }
         if self.native_commands.is_none() {
-            return Err(SidecarError::Execution(String::from(
-                "ERR_SOCKET_DGRAM_NOT_CONNECTED: Not connected",
-            )));
+            return Err(SidecarError::host(
+                "ERR_SOCKET_DGRAM_NOT_CONNECTED",
+                String::from("Not connected"),
+            ));
         }
         self.submit_native_value_command(|command_reservation, completion| {
             NativeUdpCommand::RemoteAddress {
@@ -1693,7 +1870,7 @@ impl ActiveUdpSocket {
         &mut self,
         kernel: &mut SidecarKernel,
         kernel_pid: u32,
-        context: &JavascriptSocketPathContext,
+        context: &SocketPathContext,
         option: NativeUdpSocketOption,
     ) -> Result<ActiveUdpValueResult, SidecarError> {
         let permits_implicit_bind = matches!(
@@ -1702,9 +1879,10 @@ impl ActiveUdpSocket {
                 | NativeUdpSocketOption::SourceMembership { join: true, .. }
         );
         if self.guest_local_addr.is_none() && !permits_implicit_bind {
-            return Err(SidecarError::Execution(String::from(
-                "EBADF: UDP socket option requires a bound socket",
-            )));
+            return Err(SidecarError::host(
+                "EBADF",
+                String::from("UDP socket option requires a bound socket"),
+            ));
         }
         let guest_local_addr = self.ensure_bound_for_send(kernel, kernel_pid, context)?;
         self.submit_native_value_command(|command_reservation, completion| {
@@ -1721,7 +1899,11 @@ impl ActiveUdpSocket {
         self.native_read_wake_pending
             .store(false, Ordering::Release);
         if let Some(socket_id) = self.kernel_socket_id {
-            let _ = close_kernel_socket_idempotent(kernel, kernel_pid, socket_id);
+            if let Err(error) = close_kernel_socket_idempotent(kernel, kernel_pid, socket_id) {
+                eprintln!(
+                    "ERR_AGENTOS_UDP_CLOSE: failed to close kernel socket {socket_id}: {error}"
+                );
+            }
         }
         self.native_commands.take();
         self.guest_local_addr = None;
@@ -1792,9 +1974,9 @@ fn dgram_option_ip(payload: &Value, field: &str) -> Result<IpAddr, SidecarError>
     let value = dgram_option_field(payload, field)?
         .as_str()
         .ok_or_else(|| SidecarError::InvalidState(format!("{field} must be an IP address")))?;
-    value.parse().map_err(|_| {
-        SidecarError::Execution(format!("EINVAL: invalid UDP {field} address {value}"))
-    })
+    value
+        .parse()
+        .map_err(|_| SidecarError::host("EINVAL", format!("invalid UDP {field} address {value}")))
 }
 
 fn dgram_option_interface(payload: &Value) -> Result<Option<String>, SidecarError> {
@@ -1831,7 +2013,7 @@ fn parse_native_udp_option(
                         ))
                     })?,
             )
-            .map_err(|_| SidecarError::Execution(String::from("EINVAL: UDP TTL overflow")))?,
+            .map_err(|_| SidecarError::host("EINVAL", "UDP TTL overflow"))?,
         )),
         "multicastTtl" => Ok(NativeUdpSocketOption::MulticastTtl(
             u32::try_from(
@@ -1843,9 +2025,7 @@ fn parse_native_udp_option(
                         ))
                     })?,
             )
-            .map_err(|_| {
-                SidecarError::Execution(String::from("EINVAL: UDP multicast TTL overflow"))
-            })?,
+            .map_err(|_| SidecarError::host("EINVAL", "UDP multicast TTL overflow"))?,
         )),
         "multicastLoopback" => Ok(NativeUdpSocketOption::MulticastLoopback(
             dgram_option_field(payload, "enabled")?
@@ -1898,6 +2078,7 @@ pub(in crate::execution) fn release_udp_socket_handle(
     kernel: &mut SidecarKernel,
     kernel_readiness: &KernelSocketReadinessRegistry,
 ) -> Result<(), SidecarError> {
+    socket.readiness_registration.retire();
     let identity = process
         .capability_readiness_identity(&NativeCapabilityKey::UdpSocket(socket_id.to_owned()));
     unregister_kernel_readiness_target(kernel_readiness, socket.kernel_socket_id, identity);
@@ -1911,14 +2092,15 @@ pub(in crate::execution) fn release_udp_socket_handle(
     )
 }
 
-pub(in crate::execution) fn service_javascript_dgram_sync_rpc<B>(
-    request: JavascriptDgramSyncRpcServiceRequest<'_, B>,
-) -> Result<JavascriptSyncRpcServiceResponse, SidecarError>
+pub(in crate::execution) fn service_managed_udp_operation<B>(
+    request: ManagedUdpServiceRequest<'_, B>,
+    operation: agentos_execution::host::NetworkOperation,
+) -> Result<HostServiceResponse, SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    let JavascriptDgramSyncRpcServiceRequest {
+    let ManagedUdpServiceRequest {
         bridge,
         kernel,
         vm_id,
@@ -1926,31 +2108,15 @@ where
         socket_paths,
         process,
         kernel_readiness,
-        sync_request: request,
         capabilities,
     } = request;
-    match request.method.as_str() {
-        "dgram.createSocket" => {
+    match operation {
+        agentos_execution::host::NetworkOperation::ManagedUdpCreate { family } => {
             let pending = reserve_capability(&capabilities, CapabilityKind::UdpSocket)?;
-            let payload = request
-                .args
-                .first()
-                .cloned()
-                .ok_or_else(|| {
-                    SidecarError::InvalidState(String::from(
-                        "dgram.createSocket requires a request payload",
-                    ))
-                })
-                .and_then(|value| {
-                    serde_json::from_value::<JavascriptDgramCreateSocketRequest>(value).map_err(
-                        |error| {
-                            SidecarError::InvalidState(format!(
-                                "invalid dgram.createSocket payload: {error}"
-                            ))
-                        },
-                    )
-                })?;
-            let family = JavascriptUdpFamily::from_socket_type(&payload.socket_type)?;
+            let family = match family {
+                agentos_execution::host::ManagedUdpFamily::Inet4 => UdpFamily::Ipv4,
+                agentos_execution::host::ManagedUdpFamily::Inet6 => UdpFamily::Ipv6,
+            };
             let socket_id = process.allocate_udp_socket_id();
             let mut socket = ActiveUdpSocket::new(
                 kernel,
@@ -1981,13 +2147,18 @@ where
                     .expect("committed UDP capability lease"),
             );
             socket.set_event_pusher(
-                process.execution.javascript_v8_session_handle(),
+                process
+                    .execution
+                    .execution_wake_handle(process.kernel_handle.runtime_identity()),
                 process.capability_readiness_identity(&capability_key),
+                Arc::clone(&process.process_event_notify),
             );
             register_kernel_readiness_target(
                 &kernel_readiness,
                 socket.kernel_socket_id,
-                process.execution.javascript_v8_session_handle(),
+                process
+                    .execution
+                    .execution_wake_handle(process.kernel_handle.runtime_identity()),
                 Some(Arc::clone(&socket.read_event_notify)),
                 process.capability_readiness_identity(&capability_key),
                 socket_id.clone(),
@@ -2002,92 +2173,197 @@ where
             })
             .into())
         }
-        "dgram.bind" => {
-            let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "dgram.bind socket id")?;
-            let payload = request
-                .args
-                .get(1)
-                .cloned()
-                .ok_or_else(|| {
-                    SidecarError::InvalidState(String::from(
-                        "dgram.bind requires a request payload",
-                    ))
-                })
-                .and_then(|value| {
-                    serde_json::from_value::<JavascriptDgramBindRequest>(value).map_err(|error| {
-                        SidecarError::InvalidState(format!("invalid dgram.bind payload: {error}"))
-                    })
-                })?;
-            let socket = process.udp_sockets.get_mut(socket_id).ok_or_else(|| {
+        agentos_execution::host::NetworkOperation::ManagedUdpBind {
+            socket_id,
+            host,
+            port,
+        } => {
+            let socket_id = socket_id.into_string();
+            let host = host.map(agentos_execution::host::BoundedString::into_string);
+            let socket = process.udp_sockets.get_mut(&socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
             })?;
             let local_addr = socket.bind(
                 kernel,
                 process.kernel_pid,
-                payload.address.as_deref(),
-                payload.port,
+                host.as_deref(),
+                port,
                 socket_paths,
             )?;
             Ok(local_endpoint_value(&local_addr).into())
         }
-        "dgram.send" => {
-            let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "dgram.send socket id")?;
-            let chunk = javascript_sync_rpc_bytes_arg(&request.args, 1, "dgram.send payload")?;
-            let payload = request
-                .args
-                .get(2)
-                .cloned()
-                .ok_or_else(|| {
-                    SidecarError::InvalidState(String::from(
-                        "dgram.send requires a request payload",
-                    ))
-                })
-                .and_then(|value| {
-                    serde_json::from_value::<JavascriptDgramSendRequest>(value).map_err(|error| {
-                        SidecarError::InvalidState(format!("invalid dgram.send payload: {error}"))
-                    })
-                })?;
-            let socket = process.udp_sockets.get_mut(socket_id).ok_or_else(|| {
+        agentos_execution::host::NetworkOperation::ManagedUdpSend {
+            socket_id,
+            bytes,
+            host,
+            port,
+        } => {
+            let socket_id = socket_id.into_string();
+            let host = host.map(agentos_execution::host::BoundedString::into_string);
+            let socket = process.udp_sockets.get_mut(&socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
             })?;
-            let result = match payload.port {
+            let result = match port {
                 Some(port) => socket.send_to(ActiveUdpSendToRequest {
                     bridge,
                     kernel,
                     kernel_pid: process.kernel_pid,
                     vm_id,
                     dns,
-                    host: payload.address.as_deref().unwrap_or("localhost"),
+                    host: host.as_deref().unwrap_or("localhost"),
                     port,
                     context: socket_paths,
-                    contents: &chunk,
+                    contents: bytes.as_slice(),
                 })?,
-                None => socket.send_connected(kernel, process.kernel_pid, socket_paths, &chunk)?,
+                None => socket.send_connected(
+                    kernel,
+                    process.kernel_pid,
+                    socket_paths,
+                    bytes.as_slice(),
+                )?,
             };
             Ok(udp_send_service_response(result))
         }
-        "dgram.connect" => {
-            let socket_id =
-                javascript_sync_rpc_arg_str(&request.args, 0, "dgram.connect socket id")?;
-            let payload = request
-                .args
-                .get(1)
-                .cloned()
-                .ok_or_else(|| {
-                    SidecarError::InvalidState(String::from(
-                        "dgram.connect requires a request payload",
-                    ))
-                })
-                .and_then(|value| {
-                    serde_json::from_value::<JavascriptDgramConnectRequest>(value).map_err(
-                        |error| {
-                            SidecarError::InvalidState(format!(
-                                "invalid dgram.connect payload: {error}"
-                            ))
-                        },
-                    )
-                })?;
-            let socket = process.udp_sockets.get_mut(socket_id).ok_or_else(|| {
+        agentos_execution::host::NetworkOperation::ManagedUdpClose { socket_id } => {
+            let socket_id = socket_id.into_string();
+            let socket = process.udp_sockets.remove(&socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
+            })?;
+            release_udp_socket_handle(process, &socket_id, socket, kernel, &kernel_readiness)?;
+            Ok(Value::Null.into())
+        }
+        other => Err(SidecarError::host(
+            "EINVAL",
+            format!("managed UDP executor received non-UDP operation: {other:?}"),
+        )),
+    }
+}
+
+pub(in crate::execution) fn service_dgram_operation<B>(
+    request: DgramServiceRequest<'_, B>,
+) -> Result<HostServiceResponse, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let DgramServiceRequest {
+        bridge,
+        kernel,
+        vm_id,
+        dns,
+        socket_paths,
+        process,
+        kernel_readiness,
+        operation,
+        capabilities,
+    } = request;
+    match operation {
+        DgramOperation::Create { family } => {
+            let pending = reserve_capability(&capabilities, CapabilityKind::UdpSocket)?;
+            let socket_id = process.allocate_udp_socket_id();
+            let mut socket = ActiveUdpSocket::new(
+                kernel,
+                process.kernel_pid,
+                family,
+                capabilities.resources(),
+                process.runtime_context.clone(),
+                reactor_io_limits(&process.limits),
+            )?;
+            let capability_key = NativeCapabilityKey::UdpSocket(socket_id.clone());
+            let identity = match commit_process_capability(
+                process,
+                pending,
+                capability_key.clone(),
+                socket_id.clone(),
+                socket.kernel_socket_id,
+            ) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    socket.close(kernel, process.kernel_pid);
+                    return Err(error);
+                }
+            };
+            socket.set_fairness_identity(process.capability_fairness_identity(&capability_key));
+            socket.retain_description_lease(
+                process
+                    .shared_capability_lease(&capability_key)
+                    .expect("committed UDP capability lease"),
+            );
+            socket.set_event_pusher(
+                process
+                    .execution
+                    .execution_wake_handle(process.kernel_handle.runtime_identity()),
+                process.capability_readiness_identity(&capability_key),
+                Arc::clone(&process.process_event_notify),
+            );
+            register_kernel_readiness_target(
+                &kernel_readiness,
+                socket.kernel_socket_id,
+                process
+                    .execution
+                    .execution_wake_handle(process.kernel_handle.runtime_identity()),
+                Some(Arc::clone(&socket.read_event_notify)),
+                process.capability_readiness_identity(&capability_key),
+                socket_id.clone(),
+                KernelSocketReadinessEvent::Datagram,
+            );
+            process.udp_sockets.insert(socket_id.clone(), socket);
+            Ok(json!({
+                "socketId": socket_id,
+                "capabilityId": identity.0,
+                "capabilityGeneration": identity.1,
+                "type": family.socket_type(),
+            })
+            .into())
+        }
+        DgramOperation::Bind {
+            socket_id,
+            address,
+            port,
+        } => {
+            let socket = process.udp_sockets.get_mut(&socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
+            })?;
+            let local_addr = socket.bind(
+                kernel,
+                process.kernel_pid,
+                address.as_deref(),
+                port,
+                socket_paths,
+            )?;
+            Ok(local_endpoint_value(&local_addr).into())
+        }
+        DgramOperation::Send {
+            socket_id,
+            bytes,
+            address,
+            port,
+        } => {
+            let socket = process.udp_sockets.get_mut(&socket_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
+            })?;
+            let result = match port {
+                Some(port) => socket.send_to(ActiveUdpSendToRequest {
+                    bridge,
+                    kernel,
+                    kernel_pid: process.kernel_pid,
+                    vm_id,
+                    dns,
+                    host: address.as_deref().unwrap_or("localhost"),
+                    port,
+                    context: socket_paths,
+                    contents: &bytes,
+                })?,
+                None => socket.send_connected(kernel, process.kernel_pid, socket_paths, &bytes)?,
+            };
+            Ok(udp_send_service_response(result))
+        }
+        DgramOperation::Connect {
+            socket_id,
+            address,
+            port,
+        } => {
+            let socket = process.udp_sockets.get_mut(&socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
             })?;
             let result = socket.connect(ActiveUdpConnectRequest {
@@ -2096,8 +2372,8 @@ where
                 kernel_pid: process.kernel_pid,
                 vm_id,
                 dns,
-                host: payload.address.as_deref().unwrap_or("localhost"),
-                port: payload.port,
+                host: address.as_deref().unwrap_or("localhost"),
+                port,
                 context: socket_paths,
             })?;
             Ok(udp_value_service_response(
@@ -2105,10 +2381,8 @@ where
                 agentos_runtime::TaskClass::Udp,
             ))
         }
-        "dgram.disconnect" => {
-            let socket_id =
-                javascript_sync_rpc_arg_str(&request.args, 0, "dgram.disconnect socket id")?;
-            let socket = process.udp_sockets.get_mut(socket_id).ok_or_else(|| {
+        DgramOperation::Disconnect { socket_id } => {
+            let socket = process.udp_sockets.get_mut(&socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
             })?;
             let result = socket.disconnect(kernel, process.kernel_pid)?;
@@ -2117,10 +2391,8 @@ where
                 agentos_runtime::TaskClass::Udp,
             ))
         }
-        "dgram.remoteAddress" => {
-            let socket_id =
-                javascript_sync_rpc_arg_str(&request.args, 0, "dgram.remoteAddress socket id")?;
-            let socket = process.udp_sockets.get_mut(socket_id).ok_or_else(|| {
+        DgramOperation::RemoteAddress { socket_id } => {
+            let socket = process.udp_sockets.get_mut(&socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
             })?;
             let result = socket.remote_address()?;
@@ -2129,24 +2401,21 @@ where
                 agentos_runtime::TaskClass::Udp,
             ))
         }
-        "dgram.close" => {
-            let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "dgram.close socket id")?;
-            let socket = process.udp_sockets.remove(socket_id).ok_or_else(|| {
+        DgramOperation::Close { socket_id } => {
+            let socket = process.udp_sockets.remove(&socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
             })?;
-            release_udp_socket_handle(process, socket_id, socket, kernel, &kernel_readiness)?;
+            release_udp_socket_handle(process, &socket_id, socket, kernel, &kernel_readiness)?;
             Ok(Value::Null.into())
         }
-        "dgram.address" => {
-            let socket_id =
-                javascript_sync_rpc_arg_str(&request.args, 0, "dgram.address socket id")?;
-            let socket = process.udp_sockets.get(socket_id).ok_or_else(|| {
+        DgramOperation::Address { socket_id } => {
+            let socket = process.udp_sockets.get(&socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
             })?;
-            let local_addr = socket.local_addr().ok_or_else(|| {
-                SidecarError::Execution(String::from("EBADF: bad file descriptor"))
-            })?;
-            javascript_net_json_string(
+            let local_addr = socket
+                .local_addr()
+                .ok_or_else(|| SidecarError::host("EBADF", "bad file descriptor"))?;
+            encode_net_json_string(
                 json!({
                     "address": local_addr.ip().to_string(),
                     "port": local_addr.port(),
@@ -2156,18 +2425,13 @@ where
             )
             .map(Into::into)
         }
-        "dgram.setOption" => {
-            let socket_id =
-                javascript_sync_rpc_arg_str(&request.args, 0, "dgram.setOption socket id")?;
-            let name =
-                javascript_sync_rpc_arg_str(&request.args, 1, "dgram.setOption option name")?;
-            let payload = request.args.get(2).ok_or_else(|| {
-                SidecarError::InvalidState(String::from(
-                    "dgram.setOption requires an option payload",
-                ))
-            })?;
-            let option = parse_native_udp_option(name, payload)?;
-            let socket = process.udp_sockets.get_mut(socket_id).ok_or_else(|| {
+        DgramOperation::SetOption {
+            socket_id,
+            name,
+            payload,
+        } => {
+            let option = parse_native_udp_option(&name, &payload)?;
+            let socket = process.udp_sockets.get_mut(&socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
             })?;
             let result = socket.set_option(kernel, process.kernel_pid, socket_paths, option)?;
@@ -2176,43 +2440,30 @@ where
                 agentos_runtime::TaskClass::Udp,
             ))
         }
-        "dgram.setBufferSize" => {
-            let socket_id =
-                javascript_sync_rpc_arg_str(&request.args, 0, "dgram.setBufferSize socket id")?;
-            let which =
-                javascript_sync_rpc_arg_str(&request.args, 1, "dgram.setBufferSize buffer kind")?;
-            let size = javascript_sync_rpc_arg_u64(&request.args, 2, "dgram.setBufferSize size")?;
-            let size = usize::try_from(size).map_err(|_| {
-                SidecarError::InvalidState(String::from(
-                    "dgram.setBufferSize size must fit within usize",
-                ))
-            })?;
-            let socket = process.udp_sockets.get_mut(socket_id).ok_or_else(|| {
+        DgramOperation::SetBufferSize {
+            socket_id,
+            which,
+            size,
+        } => {
+            let socket = process.udp_sockets.get_mut(&socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
             })?;
-            let result = socket.set_buffer_size(which, size)?;
+            let result = socket.set_buffer_size(&which, size)?;
             Ok(udp_value_service_response(
                 result,
                 agentos_runtime::TaskClass::Udp,
             ))
         }
-        "dgram.getBufferSize" => {
-            let socket_id =
-                javascript_sync_rpc_arg_str(&request.args, 0, "dgram.getBufferSize socket id")?;
-            let which =
-                javascript_sync_rpc_arg_str(&request.args, 1, "dgram.getBufferSize buffer kind")?;
-            let socket = process.udp_sockets.get_mut(socket_id).ok_or_else(|| {
+        DgramOperation::GetBufferSize { socket_id, which } => {
+            let socket = process.udp_sockets.get_mut(&socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
             })?;
-            let result = socket.get_buffer_size(which)?;
+            let result = socket.get_buffer_size(&which)?;
             Ok(udp_value_service_response(
                 result,
                 agentos_runtime::TaskClass::Udp,
             ))
         }
-        other => Err(SidecarError::InvalidState(format!(
-            "unsupported JavaScript dgram sync RPC method {other}"
-        ))),
     }
 }
 
@@ -2425,6 +2676,7 @@ mod native_udp_owner_tests {
         fairness_identity
             .set((8001, 7001))
             .expect("commit test fairness identity");
+        let fairness_identity_committed = Arc::new(tokio::sync::Notify::new());
         let limits = reactor_io_limits(&crate::limits::VmLimits::default());
         let commands = {
             let _runtime_guard = runtime.handle().enter();
@@ -2432,17 +2684,27 @@ mod native_udp_owner_tests {
                 &runtime,
                 socket,
                 NativeUdpOwnerRegistration {
-                    family: JavascriptUdpFamily::Ipv4,
+                    family: UdpFamily::Ipv4,
                     resources: Arc::clone(&resources),
                     limits,
-                    fairness_identity,
-                    fairness_identity_committed: Arc::new(tokio::sync::Notify::new()),
+                    fairness_identity: Arc::clone(&fairness_identity),
+                    fairness_identity_committed: Arc::clone(&fairness_identity_committed),
                     event_pusher: SocketReadinessSubscribers::new(&resources),
                     read_event_notify: Arc::clone(&read_event_notify),
                     wake_pending: Arc::clone(&wake_pending),
                 },
             )
             .expect("spawn UDP owner")
+        };
+        let poll_handle = ActiveUdpPollHandle {
+            native_commands: Some(commands.clone()),
+            resources: Arc::clone(&resources),
+            runtime_context: runtime.clone(),
+            reactor_limits: limits,
+            fairness_identity,
+            fairness_identity_committed,
+            read_event_notify: Arc::clone(&read_event_notify),
+            pending_datagram: Arc::new(Mutex::new(None)),
         };
         let sender = UdpSocket::bind("127.0.0.1:0").expect("bind UDP sender");
 
@@ -2458,20 +2720,12 @@ mod native_udp_owner_tests {
                 .await
                 .expect("first coalesced receive wake");
 
-            let (first_completion, first_response) = tokio::sync::oneshot::channel();
-            commands
-                .try_send(NativeUdpCommand::Poll {
-                    _command_reservation: reserve_udp_command(&resources)
-                        .expect("reserve first poll command"),
-                    completion: first_completion,
-                })
-                .expect("submit first poll");
-            let first = first_response
+            let first = poll_handle
+                .poll_native_once()
                 .await
-                .expect("first poll completion")
-                .expect("first poll success")
+                .expect("owned poll-handle completion")
                 .expect("first queued datagram");
-            let JavascriptUdpSocketEvent::Message { data, .. } = &first else {
+            let DatagramEvent::Message { data, .. } = &first else {
                 panic!("first UDP event was not a datagram");
             };
             assert_eq!(data, b"first");
@@ -2511,7 +2765,7 @@ mod native_udp_owner_tests {
                 .expect("second poll completion")
                 .expect("second poll success")
                 .expect("second queued datagram");
-            let JavascriptUdpSocketEvent::Message { data, .. } = &second else {
+            let DatagramEvent::Message { data, .. } = &second else {
                 panic!("second UDP event was not a datagram");
             };
             assert_eq!(data, b"second");
@@ -2519,6 +2773,7 @@ mod native_udp_owner_tests {
             drop(second);
         });
 
+        drop(poll_handle);
         drop(commands);
         runtime.handle().block_on(async {
             tokio::time::timeout(Duration::from_secs(2), async {

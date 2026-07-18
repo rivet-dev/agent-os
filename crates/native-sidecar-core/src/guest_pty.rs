@@ -290,7 +290,7 @@ fn would_block(error: &KernelError) -> bool {
 }
 
 fn kernel_error(error: KernelError) -> SidecarCoreError {
-    SidecarCoreError::new(error.to_string())
+    SidecarCoreError::typed(error.code(), error.message())
 }
 
 #[cfg(test)]

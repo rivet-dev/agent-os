@@ -1,5 +1,6 @@
 use crate::vfs::{
-    VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat, VirtualUtimeSpec,
+    FileExtent, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
+    VirtualUtimeSpec,
 };
 use getrandom::getrandom;
 use web_time::{SystemTime, UNIX_EPOCH};
@@ -439,6 +440,16 @@ impl<V: VirtualFileSystem> VirtualFileSystem for DeviceLayer<V> {
             ));
         }
         self.inner.unwritten_ranges(path)
+    }
+
+    fn extent_at(&mut self, path: &str, index: usize) -> VfsResult<Option<FileExtent>> {
+        if is_device_path(path) || is_device_dir(path) {
+            return Err(VfsError::new(
+                "EINVAL",
+                format!("device does not support extent mapping: {path}"),
+            ));
+        }
+        self.inner.extent_at(path, index)
     }
 
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {

@@ -387,7 +387,7 @@ fn vm_resource_limits_cap_active_processes_without_poisoning_followup_execs() {
         .expect("dispatch second execute");
     match second.response.payload {
         ResponsePayload::RejectedResponse(rejected) => {
-            assert_eq!(rejected.code, "kernel_error");
+            assert_eq!(rejected.code, "EAGAIN");
             assert!(rejected.message.contains("maximum process limit reached"));
         }
         other => panic!("unexpected resource-limit response: {other:?}"),

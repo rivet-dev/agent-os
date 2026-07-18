@@ -4,9 +4,13 @@ use agentos_kernel::command_registry::CommandDriver;
 use agentos_kernel::fd_table::O_RDWR;
 use agentos_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions};
 use agentos_kernel::permissions::Permissions;
+use agentos_kernel::process_runtime::{
+    ProcessControlRequest, ProcessExit, ProcessRuntimeEndpoint, ProcessRuntimeEndpointError,
+    ProcessRuntimeIdentity, ProcessTermination,
+};
 use agentos_kernel::process_table::{
-    DriverProcess, ProcessContext, ProcessExitCallback, ProcessResult, ProcessTable,
-    ProcessWaitEvent, WaitPidFlags, SIGCHLD, SIGTERM,
+    ProcessContext, ProcessEntry, ProcessResult, ProcessTable, ProcessWaitEvent, SignalAction,
+    SignalDisposition, WaitPidFlags, SIGCHLD, SIGTERM,
 };
 use agentos_kernel::vfs::MemoryFileSystem;
 use agentos_native_sidecar::wire::{
@@ -16,7 +20,7 @@ use agentos_native_sidecar::wire::{
 use nix::libc;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use support::{
     assert_node_available, authenticate_wire, create_vm_wire, execute_wire, new_sidecar,
@@ -120,13 +124,12 @@ fn wait_for_process_output(
 struct MockProcessState {
     kills: Vec<i32>,
     exit_code: Option<i32>,
-    on_exit: Option<ProcessExitCallback>,
+    binding: Option<(ProcessTable, u32)>,
 }
 
 #[derive(Default)]
 struct MockDriverProcess {
     state: Mutex<MockProcessState>,
-    exited: Condvar,
 }
 
 impl MockDriverProcess {
@@ -142,55 +145,89 @@ impl MockDriverProcess {
             .clone()
     }
 
+    fn bind(&self, table: &ProcessTable, pid: u32) {
+        self.state
+            .lock()
+            .expect("mock process lock poisoned")
+            .binding = Some((table.clone(), pid));
+    }
+
     fn exit(&self, exit_code: i32) {
-        let callback = {
+        let binding = {
             let mut state = self.state.lock().expect("mock process lock poisoned");
             if state.exit_code.is_some() {
                 return;
             }
             state.exit_code = Some(exit_code);
-            self.exited.notify_all();
-            state.on_exit.clone()
+            state.binding.clone()
         };
 
-        if let Some(callback) = callback {
-            callback(exit_code);
+        if let Some((table, pid)) = binding {
+            table
+                .report_exit(pid, ProcessExit::Exited(exit_code))
+                .expect("mock process exit must reach the bound kernel process");
         }
     }
 }
 
-impl DriverProcess for MockDriverProcess {
-    fn kill(&self, signal: i32) {
-        let should_exit = {
+impl ProcessRuntimeEndpoint for MockDriverProcess {
+    fn identity(&self) -> Option<ProcessRuntimeIdentity> {
+        None
+    }
+
+    fn request_control(
+        &self,
+        request: ProcessControlRequest,
+    ) -> Result<(), ProcessRuntimeEndpointError> {
+        let (binding, termination) = {
             let mut state = self.state.lock().expect("mock process lock poisoned");
-            state.kills.push(signal);
-            signal == SIGTERM
+            let signal = match request {
+                ProcessControlRequest::Checkpoint => state
+                    .binding
+                    .as_ref()
+                    .and_then(|(table, pid)| table.sigpending(*pid).ok())
+                    .and_then(|pending| pending.signals().into_iter().next()),
+                ProcessControlRequest::Terminate(ProcessTermination::Signal { signal, .. }) => {
+                    Some(signal)
+                }
+                _ => None,
+            };
+            if let Some(signal) = signal {
+                state.kills.push(signal);
+            }
+            let termination = match request {
+                ProcessControlRequest::Terminate(ProcessTermination::Signal { signal, .. }) => {
+                    Some(ProcessExit::Signaled {
+                        signal,
+                        core_dumped: false,
+                    })
+                }
+                ProcessControlRequest::Terminate(ProcessTermination::RuntimeFault)
+                | ProcessControlRequest::Cancel(_) => Some(ProcessExit::Exited(1)),
+                _ => None,
+            };
+            (state.binding.clone(), termination)
         };
 
-        if should_exit {
-            self.exit(128 + signal);
+        if let (Some((table, pid)), Some(termination)) = (binding, termination) {
+            table
+                .report_exit(pid, termination)
+                .expect("mock termination must reach the bound kernel process");
         }
+        Ok(())
     }
+}
 
-    fn wait(&self, timeout: Duration) -> Option<i32> {
-        let state = self.state.lock().expect("mock process lock poisoned");
-        if state.exit_code.is_some() {
-            return state.exit_code;
-        }
-
-        let (state, _) = self
-            .exited
-            .wait_timeout(state, timeout)
-            .expect("mock process wait lock poisoned");
-        state.exit_code
-    }
-
-    fn set_on_exit(&self, callback: ProcessExitCallback) {
-        self.state
-            .lock()
-            .expect("mock process lock poisoned")
-            .on_exit = Some(callback);
-    }
+fn register_mock_process(
+    table: &ProcessTable,
+    pid: u32,
+    command: &str,
+    context: ProcessContext,
+    process: Arc<MockDriverProcess>,
+) -> ProcessEntry {
+    let entry = table.register(pid, "wasmvm", command, Vec::new(), context, process.clone());
+    process.bind(table, pid);
+    entry
 }
 
 fn create_context(ppid: u32) -> ProcessContext {
@@ -473,22 +510,30 @@ fn process_table_delivers_sigchld_and_reaps_zombies_via_waitpid() {
     let parent_pid = allocate_pid(&table);
     let child_pid = allocate_pid(&table);
 
-    table.register(
+    register_mock_process(
+        &table,
         parent_pid,
-        "wasmvm",
         "parent",
-        Vec::new(),
         create_context(0),
         parent.clone(),
     );
-    table.register(
+    register_mock_process(
+        &table,
         child_pid,
-        "wasmvm",
         "child",
-        Vec::new(),
         create_context(parent_pid),
         child.clone(),
     );
+    table
+        .signal_action(
+            parent_pid,
+            SIGCHLD,
+            Some(SignalAction {
+                disposition: SignalDisposition::User,
+                ..SignalAction::DEFAULT
+            }),
+        )
+        .expect("catch SIGCHLD");
 
     assert_eq!(
         table
@@ -526,19 +571,17 @@ fn process_table_negative_pid_kill_targets_entire_process_groups() {
     let leader_pid = allocate_pid(&table);
     let peer_pid = allocate_pid(&table);
 
-    table.register(
+    register_mock_process(
+        &table,
         leader_pid,
-        "wasmvm",
         "leader",
-        Vec::new(),
         create_context(0),
         leader.clone(),
     );
-    table.register(
+    register_mock_process(
+        &table,
         peer_pid,
-        "wasmvm",
         "peer",
-        Vec::new(),
         create_context(leader_pid),
         peer.clone(),
     );

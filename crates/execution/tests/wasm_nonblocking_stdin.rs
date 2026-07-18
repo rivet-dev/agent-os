@@ -1,8 +1,10 @@
+mod support;
+
 use std::{collections::BTreeMap, fs, process::Command, time::Duration};
 
 use agentos_execution::{
-    CreateWasmContextRequest, JavascriptSyncRpcRequest, StartWasmExecutionRequest, WasmExecution,
-    WasmExecutionEngine, WasmExecutionEvent, WasmPermissionTier,
+    CreateWasmContextRequest, HostRpcRequest, StartWasmExecutionRequest, WasmExecution,
+    WasmExecutionEvent, WasmPermissionTier,
 };
 use base64::Engine;
 use serde_json::{json, Value};
@@ -52,17 +54,43 @@ fn module() -> Vec<u8> {
     .expect("compile WASI stdin fixture")
 }
 
-fn request(execution: &mut WasmExecution) -> JavascriptSyncRpcRequest {
-    match execution
-        .poll_event_blocking(Duration::from_secs(5))
-        .expect("poll WASM event")
-    {
-        Some(WasmExecutionEvent::SyncRpcRequest(request)) => request,
-        other => panic!("expected sync RPC request, got {other:?}"),
+fn request(execution: &mut WasmExecution) -> HostRpcRequest {
+    loop {
+        let mut request = match execution
+            .poll_event_blocking(Duration::from_secs(5))
+            .expect("poll WASM event")
+        {
+            Some(WasmExecutionEvent::SyncRpcRequest(request)) => request,
+            other => panic!("expected sync RPC request, got {other:?}"),
+        };
+        if request.method == "process.wasm_sync_rpc" {
+            request.method = request.args.remove(0).as_str().unwrap().to_owned();
+            request.raw_bytes_args = request
+                .raw_bytes_args
+                .into_iter()
+                .filter_map(|(index, bytes)| index.checked_sub(1).map(|index| (index, bytes)))
+                .collect();
+        }
+        let fallback = match request.method.as_str() {
+            "process.signal_mask" => Some(json!({ "signals": [] })),
+            "process.signal_mask_scope_begin" => Some(json!(1)),
+            "process.signal_mask_scope_end"
+            | "process.signal_end"
+            | "process.take_signal"
+            | "process.signal_begin" => Some(Value::Null),
+            _ => None,
+        };
+        if let Some(value) = fallback {
+            execution
+                .respond_sync_rpc_success(request.id, value)
+                .expect("respond to standalone signal-state RPC");
+            continue;
+        }
+        return request;
     }
 }
 
-fn request_bytes(request: &JavascriptSyncRpcRequest) -> Vec<u8> {
+fn request_bytes(request: &HostRpcRequest) -> Vec<u8> {
     let encoded = request.args[1]
         .get("base64")
         .and_then(Value::as_str)
@@ -83,7 +111,7 @@ fn fd0_nonblocking_returns_eagain_without_starving_progress_and_blocking_still_w
 
     let temp = tempdir().expect("create temp dir");
     fs::write(temp.path().join("guest.wasm"), module()).expect("write WASM fixture");
-    let mut engine = WasmExecutionEngine::default();
+    let mut engine = support::wasm_engine();
     let context = engine.create_context(CreateWasmContextRequest {
         vm_id: "vm-wasm-nonblock".into(),
         module_path: Some("./guest.wasm".into()),
@@ -98,6 +126,7 @@ fn fd0_nonblocking_returns_eagain_without_starving_progress_and_blocking_still_w
             env: BTreeMap::from([("AGENTOS_WASI_STDIO_SYNC_RPC".into(), "1".into())]),
             cwd: temp.path().to_path_buf(),
             permission_tier: WasmPermissionTier::Full,
+            managed_kernel_host: false,
         })
         .expect("start WASM fixture");
 

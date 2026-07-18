@@ -210,6 +210,7 @@ describe("response payload conversion", () => {
 				tag: "ResourceSnapshotResponse",
 				val: {
 					runningProcesses: 2n,
+					stoppedProcesses: 3n,
 					exitedProcesses: 1n,
 					fdTables: 2n,
 					openFds: 6n,
@@ -238,6 +239,7 @@ describe("response payload conversion", () => {
 		).toEqual({
 			type: "resource_snapshot",
 			running_processes: 2,
+			stopped_processes: 3,
 			exited_processes: 1,
 			fd_tables: 2,
 			open_fds: 6,

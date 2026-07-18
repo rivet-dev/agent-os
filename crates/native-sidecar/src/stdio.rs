@@ -1007,6 +1007,9 @@ async fn run_async(
     } else {
         // Rivet's V8 child-process bridge cannot currently inherit fd 3. Keep
         // the logical lane priorities, but multiplex both lanes over stdio.
+        // This branch is mutually exclusive with the fd-3 reader above, so the
+        // process still owns exactly one constant stdio reader thread.
+        // AGENTOS_THREAD_SITE: constant-stdio-reader
         thread::spawn({
             let read_error_tx = write_error_tx.clone();
             move || {
@@ -1069,7 +1072,17 @@ async fn run_async(
             biased;
             maybe_shutdown = shutdown_rx.recv() => {
                 let Some(control) = maybe_shutdown else {
-                    break 'protocol;
+                    // The response/control reader owns the only shutdown
+                    // sender. Its disappearance without a typed shutdown
+                    // frame is therefore a transport failure, not a graceful
+                    // ordinary-stdin EOF. Returning an error here also avoids
+                    // racing the identical error notification on the lower-
+                    // priority transport-error branch of this biased select.
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "response/control stream closed",
+                    )
+                    .into());
                 };
                 match control.payload {
                     wire::ControlPayload::ShutdownControl(shutdown) => {
@@ -1821,6 +1834,7 @@ fn spawn_heartbeat_thread(
     write_tx: ProtocolFrameWriter,
     interval: Duration,
 ) -> thread::JoinHandle<()> {
+    // AGENTOS_THREAD_SITE: constant-heartbeat
     thread::spawn(move || {
         loop {
             thread::sleep(interval);

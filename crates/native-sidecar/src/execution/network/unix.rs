@@ -95,14 +95,35 @@ pub(in crate::execution) fn register_guest_unix_binding(
             generation: NEXT_GUEST_UNIX_BINDING_GENERATION.fetch_add(1, Ordering::Relaxed),
             active_bindings: 1,
             queued_by_target: BTreeMap::new(),
+            // A bound-but-not-yet-listening socket cannot accept peers. The
+            // listener path installs its configured bounded capacity before
+            // starting the acceptor.
+            pending_connection_limit: 1,
             pending_connections: VecDeque::new(),
         },
     );
     Ok(())
 }
 
+fn set_guest_unix_pending_connection_limit(
+    registry: &GuestUnixAddressRegistry,
+    binding_id: &str,
+    maximum: usize,
+) -> Result<(), SidecarError> {
+    let mut registry = registry
+        .lock()
+        .map_err(|_| SidecarError::InvalidState(String::from("Unix address registry poisoned")))?;
+    let entry = registry.get_mut(binding_id).ok_or_else(|| {
+        SidecarError::InvalidState(format!(
+            "missing bound Unix address metadata for {binding_id}"
+        ))
+    })?;
+    entry.pending_connection_limit = maximum.max(1);
+    Ok(())
+}
+
 pub(in crate::execution) fn guest_unix_path_target(
-    context: &JavascriptSocketPathContext,
+    context: &SocketPathContext,
     guest_device_inode: (u64, u64),
 ) -> Result<Option<(PathBuf, String, GuestUnixAddress)>, SidecarError> {
     let registry = context
@@ -184,6 +205,15 @@ pub(in crate::execution) fn register_guest_unix_connection(
             "missing target Unix address metadata for {target_binding_id}"
         ))
     })?;
+    if target.pending_connections.len() >= target.pending_connection_limit {
+        return Err(SidecarError::host(
+            "EAGAIN",
+            format!(
+                "Unix listener pending connection limit is {}; raise the listen backlog or limits.reactor.maxAsyncCompletions",
+                target.pending_connection_limit
+            ),
+        ));
+    }
     let state = Arc::new(GuestUnixConnectionState {
         accepted_peer_open: AtomicBool::new(true),
     });
@@ -446,7 +476,7 @@ pub(in crate::execution) fn purge_guest_unix_target(
 }
 
 pub(in crate::execution) fn host_abstract_unix_name(
-    context: &JavascriptSocketPathContext,
+    context: &SocketPathContext,
     guest_name: &[u8],
 ) -> [u8; 32] {
     let mut digest = Sha256::new();
@@ -549,10 +579,12 @@ impl ActiveUnixSocket {
         let (sender, events) = async_completion_channel(
             runtime_context.clone(),
             socket_completion_capacity(reactor_limits),
+            tcp_socket_event_retained_bytes,
         );
         let event_pusher = SocketReadinessSubscribers::new(&resources);
         let application_read_interest = Arc::new(AtomicBool::new(false));
         let application_read_notify = Arc::new(tokio::sync::Notify::new());
+        let read_event_notify = Arc::new(tokio::sync::Notify::new());
         let saw_local_shutdown = Arc::new(AtomicBool::new(false));
         let saw_remote_end = Arc::new(AtomicBool::new(false));
         let close_notified = Arc::new(AtomicBool::new(false));
@@ -561,6 +593,7 @@ impl ActiveUnixSocket {
             read_stream,
             sender.clone(),
             Arc::clone(&event_pusher),
+            Arc::clone(&read_event_notify),
             Arc::clone(&application_read_interest),
             Arc::clone(&application_read_notify),
             Arc::clone(&saw_local_shutdown),
@@ -582,6 +615,7 @@ impl ActiveUnixSocket {
             plain_commands,
             events: Arc::new(Mutex::new(events)),
             event_sender: sender,
+            read_event_notify,
             event_pusher: Arc::clone(&event_pusher),
             readiness_registration: SocketReadinessRegistration::new(
                 event_pusher,
@@ -603,7 +637,7 @@ impl ActiveUnixSocket {
             saw_remote_end,
             close_notified,
             pending_read_event: Arc::new(Mutex::new(None)),
-            read_buffer: Arc::new(Mutex::new(VecDeque::new())),
+            read_state: Arc::new(Mutex::new(SocketReadState::default())),
             description_handles: Arc::new(()),
             listener_connection_retirement: None,
             resources,
@@ -621,6 +655,7 @@ impl ActiveUnixSocket {
             plain_commands: self.plain_commands.clone(),
             events: Arc::clone(&self.events),
             event_sender: self.event_sender.clone(),
+            read_event_notify: Arc::clone(&self.read_event_notify),
             event_pusher: Arc::clone(&self.event_pusher),
             readiness_registration: SocketReadinessRegistration::new(
                 Arc::clone(&self.event_pusher),
@@ -642,7 +677,7 @@ impl ActiveUnixSocket {
             saw_remote_end: Arc::clone(&self.saw_remote_end),
             close_notified: Arc::clone(&self.close_notified),
             pending_read_event: Arc::clone(&self.pending_read_event),
-            read_buffer: Arc::clone(&self.read_buffer),
+            read_state: Arc::clone(&self.read_state),
             description_handles: Arc::clone(&self.description_handles),
             listener_connection_retirement: self.listener_connection_retirement.clone(),
             resources: Arc::clone(&self.resources),
@@ -662,11 +697,12 @@ impl ActiveUnixSocket {
 
     pub(in crate::execution) fn set_event_pusher(
         &self,
-        session: Option<V8SessionHandle>,
+        session: Option<ExecutionWakeHandle>,
         identity: Option<(
             agentos_runtime::capability::CapabilityId,
             agentos_runtime::capability::CapabilityGeneration,
         )>,
+        owner_notify: Arc<tokio::sync::Notify>,
     ) {
         let (Some(session), Some((capability_id, capability_generation))) = (session, identity)
         else {
@@ -675,6 +711,7 @@ impl ActiveUnixSocket {
         self.readiness_registration.register(
             Some(session),
             Some((capability_id, capability_generation)),
+            owner_notify,
             agentos_runtime::readiness::ReadyFlags::READABLE,
         );
     }
@@ -684,14 +721,16 @@ impl ActiveUnixSocket {
         identity: Option<(u64, u64)>,
     ) -> Result<(), SidecarError> {
         let identity = identity.ok_or_else(|| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_FAIRNESS_IDENTITY: Unix socket capability was committed outside a VM runtime scope",
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_FAIRNESS_IDENTITY",
+                String::from("Unix socket capability was committed outside a VM runtime scope"),
+            )
         })?;
         self.fairness_identity.set(identity).map_err(|_| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_FAIRNESS_IDENTITY: Unix socket capability identity was committed more than once",
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_FAIRNESS_IDENTITY",
+                String::from("Unix socket capability identity was committed more than once"),
+            )
         })?;
         self.fairness_identity_committed.notify_waiters();
         Ok(())
@@ -709,7 +748,7 @@ impl ActiveUnixSocket {
     pub(in crate::execution) fn poll(
         &mut self,
         _wait: Duration,
-    ) -> Result<Option<JavascriptTcpSocketEvent>, SidecarError> {
+    ) -> Result<Option<TcpSocketEvent>, SidecarError> {
         if let Some(event) = self
             .pending_read_event
             .lock()
@@ -737,7 +776,7 @@ impl ActiveUnixSocket {
         &mut self,
         wait: Duration,
         max_bytes: usize,
-    ) -> Result<Option<JavascriptTcpSocketEvent>, SidecarError> {
+    ) -> Result<Option<TcpSocketEvent>, SidecarError> {
         let pending = self
             .pending_read_event
             .lock()
@@ -937,7 +976,7 @@ impl ActiveUnixSocket {
             && !self.close_notified.swap(true, Ordering::SeqCst)
             && self
                 .event_sender
-                .try_send(JavascriptTcpSocketEvent::Close { had_error: false })
+                .try_send(TcpSocketEvent::Close { had_error: false })
                 .is_ok()
         {
             push_socket_event(&self.event_pusher, "close");
@@ -959,7 +998,7 @@ impl ActiveUnixSocket {
         {
             if let Err(error) = self
                 .event_sender
-                .try_send(JavascriptTcpSocketEvent::Close { had_error: false })
+                .try_send(TcpSocketEvent::Close { had_error: false })
             {
                 eprintln!(
                     "ERR_AGENTOS_SOCKET_EVENT_DROPPED: Unix socket close event was not admitted: {error}"
@@ -1009,8 +1048,7 @@ async fn connect_native_unix_socket(
         NativeUnixConnectTarget::Abstract(_) => return Err(abstract_unix_unsupported()),
     };
     if let Err(error) = connect_result {
-        let message = error.to_string();
-        let code = guest_errno_code(&message);
+        let code = guest_error_code(&error);
         if !matches!(code, Some("EINPROGRESS" | "EALREADY" | "EAGAIN")) {
             return Err(error);
         }
@@ -1036,7 +1074,7 @@ pub(in crate::execution) fn defer_native_unix_connect(
     unix_bound_addresses: GuestUnixAddressRegistry,
     target_binding_id: String,
     bound_listener: Option<(String, ActiveUnixListener)>,
-) -> Result<JavascriptSyncRpcServiceResponse, SidecarError> {
+) -> Result<HostServiceResponse, SidecarError> {
     let socket_id = process.allocate_unix_socket_id();
     let runtime = process.runtime_context.clone();
     let task_runtime = runtime.clone();
@@ -1071,19 +1109,17 @@ pub(in crate::execution) fn defer_native_unix_connect(
     let private_host_path = bound_listener
         .as_ref()
         .and_then(|(_, listener)| listener.private_host_path.clone());
-    let connected = Arc::new(Mutex::new(PendingJavascriptNetConnectState {
+    let connected = Arc::new(Mutex::new(PendingNetConnectState {
         connected: None,
         bound_unix_listener: bound_listener,
     }));
     let task_connected = Arc::clone(&connected);
-    if process
-        .pending_javascript_net_connects
-        .contains_key(&request_id)
-    {
+    if process.pending_net_connects.contains_key(&request_id) {
         restore_pending_bound_unix_connect(process, &connected)?;
-        return Err(SidecarError::InvalidState(format!(
-            "ERR_AGENTOS_SOCKET_CONNECT_STATE: request {request_id} already has a pending connect"
-        )));
+        return Err(SidecarError::host(
+            "ERR_AGENTOS_SOCKET_CONNECT_STATE",
+            format!("request {request_id} already has a pending connect"),
+        ));
     }
     let connect_metadata = match PendingGuestUnixConnectMetadata::register(
         Arc::clone(&unix_bound_addresses),
@@ -1097,11 +1133,12 @@ pub(in crate::execution) fn defer_native_unix_connect(
         }
     };
     process
-        .pending_javascript_net_connects
+        .pending_net_connects
         .insert(request_id, Arc::clone(&connected));
     let (respond_to, receiver) = tokio::sync::oneshot::channel();
     let spawn = runtime.spawn(agentos_runtime::TaskClass::Socket, async move {
-        let result = match tokio::time::timeout(
+        let result = match crate::execution::operation_deadline_timeout(
+            "Unix socket connect",
             limits.operation_deadline,
             connect_native_unix_socket(bound_socket, &target),
         )
@@ -1130,7 +1167,7 @@ pub(in crate::execution) fn defer_native_unix_connect(
                         task_connected
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .connected = Some(PendingJavascriptNetConnect::Unix {
+                            .connected = Some(PendingNetConnect::Unix {
                             socket_id,
                             socket: Box::new(socket),
                             pending_capability,
@@ -1149,6 +1186,7 @@ pub(in crate::execution) fn defer_native_unix_connect(
                     "Unix connect exceeded {}ms; raise limits.reactor.operationDeadlineMs",
                     limits.operation_deadline.as_millis()
                 ),
+                details: None,
             }),
         };
         if respond_to.send(result).is_err() {
@@ -1156,12 +1194,12 @@ pub(in crate::execution) fn defer_native_unix_connect(
         }
     });
     if let Err(error) = spawn {
-        if let Some(pending) = process.pending_javascript_net_connects.remove(&request_id) {
+        if let Some(pending) = process.pending_net_connects.remove(&request_id) {
             restore_pending_bound_unix_connect(process, &pending)?;
         }
         return Err(SidecarError::from(error));
     }
-    Ok(JavascriptSyncRpcServiceResponse::Deferred {
+    Ok(HostServiceResponse::Deferred {
         receiver,
         timeout: None,
         task_class: agentos_runtime::TaskClass::Socket,
@@ -1183,7 +1221,8 @@ impl ActiveUnixListener {
         backlog: Option<u32>,
     ) -> Self {
         let event_pusher = SocketReadinessSubscribers::new(runtime_context.resources());
-        let (sender, events) = async_completion_channel(runtime_context, 1);
+        let (sender, events) =
+            async_completion_channel(runtime_context, 1, unix_listener_event_retained_bytes);
         drop(sender);
         let (close_sender, close_completion) = tokio::sync::oneshot::channel();
         drop(close_sender);
@@ -1201,11 +1240,12 @@ impl ActiveUnixListener {
             registry_binding_id,
             private_host_path,
             guest_node_path,
-            backlog: usize::try_from(backlog.unwrap_or(DEFAULT_JAVASCRIPT_NET_BACKLOG))
+            backlog: usize::try_from(backlog.unwrap_or(DEFAULT_NET_BACKLOG))
                 .expect("default backlog fits within usize"),
             active_connection_ids: Arc::new(Mutex::new(BTreeSet::new())),
             description_handles: Arc::new(()),
             description_lease: Arc::new(SocketDescriptionLease::default()),
+            pending_event: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1272,17 +1312,22 @@ impl ActiveUnixListener {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::execution) fn listen_bound(
         mut self,
-        context: JavascriptSocketPathContext,
+        context: SocketPathContext,
         backlog: Option<u32>,
         capabilities: CapabilityRegistry,
         runtime_context: agentos_runtime::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
+        set_guest_unix_pending_connection_limit(
+            &context.unix_bound_addresses,
+            &self.registry_binding_id,
+            listener_accept_capacity(backlog, reactor_limits),
+        )?;
         let socket = self
             .bound_socket
             .take()
             .ok_or_else(|| sidecar_net_error(std::io::Error::from_raw_os_error(libc::EINVAL)))?;
-        let backlog_value = backlog.unwrap_or(DEFAULT_JAVASCRIPT_NET_BACKLOG);
+        let backlog_value = backlog.unwrap_or(DEFAULT_NET_BACKLOG);
         socket
             .listen(i32::try_from(backlog_value).unwrap_or(i32::MAX))
             .map_err(sidecar_net_error)?;
@@ -1312,12 +1357,34 @@ impl ActiveUnixListener {
         Ok(listened)
     }
 
+    pub(in crate::execution) fn relisten(
+        &mut self,
+        registry: &GuestUnixAddressRegistry,
+        backlog: u32,
+        reactor_limits: ReactorIoLimits,
+    ) -> Result<(), SidecarError> {
+        let listener = self
+            .listener
+            .as_ref()
+            .ok_or_else(|| sidecar_net_error(std::io::Error::from_raw_os_error(libc::EINVAL)))?;
+        SockRef::from(listener)
+            .listen(i32::try_from(backlog).unwrap_or(i32::MAX))
+            .map_err(sidecar_net_error)?;
+        set_guest_unix_pending_connection_limit(
+            registry,
+            &self.registry_binding_id,
+            listener_accept_capacity(Some(backlog), reactor_limits),
+        )?;
+        self.backlog = usize::try_from(backlog).unwrap_or(usize::MAX);
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(in crate::execution) fn bind(
         host_path: &Path,
         guest_path: &str,
         registry_binding_id: String,
-        context: JavascriptSocketPathContext,
+        context: SocketPathContext,
         backlog: Option<u32>,
         capabilities: CapabilityRegistry,
         runtime_context: agentos_runtime::RuntimeContext,
@@ -1349,7 +1416,7 @@ impl ActiveUnixListener {
         host_name: &[u8],
         guest_name: &[u8],
         registry_binding_id: String,
-        context: JavascriptSocketPathContext,
+        context: SocketPathContext,
         backlog: Option<u32>,
         capabilities: CapabilityRegistry,
         runtime_context: agentos_runtime::RuntimeContext,
@@ -1361,10 +1428,7 @@ impl ActiveUnixListener {
         bind_socket(socket.as_raw_fd(), &address)
             .map_err(|error| sidecar_net_error(std::io::Error::from_raw_os_error(error as i32)))?;
         socket
-            .listen(
-                i32::try_from(backlog.unwrap_or(DEFAULT_JAVASCRIPT_NET_BACKLOG))
-                    .unwrap_or(i32::MAX),
-            )
+            .listen(i32::try_from(backlog.unwrap_or(DEFAULT_NET_BACKLOG)).unwrap_or(i32::MAX))
             .map_err(sidecar_net_error)?;
         socket.set_nonblocking(true).map_err(sidecar_net_error)?;
         Self::from_listener(
@@ -1388,7 +1452,7 @@ impl ActiveUnixListener {
         _host_name: &[u8],
         _guest_name: &[u8],
         _registry_binding_id: String,
-        _context: JavascriptSocketPathContext,
+        _context: SocketPathContext,
         _backlog: Option<u32>,
         _capabilities: CapabilityRegistry,
         _runtime_context: agentos_runtime::RuntimeContext,
@@ -1405,13 +1469,18 @@ impl ActiveUnixListener {
         registry_binding_id: String,
         private_host_path: Option<PathBuf>,
         guest_node_path: Option<String>,
-        context: JavascriptSocketPathContext,
+        context: SocketPathContext,
         backlog: Option<u32>,
         capabilities: CapabilityRegistry,
         runtime_context: agentos_runtime::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
         let accept_capacity = listener_accept_capacity(backlog, reactor_limits);
+        set_guest_unix_pending_connection_limit(
+            &context.unix_bound_addresses,
+            &registry_binding_id,
+            accept_capacity,
+        )?;
         let event_pusher = SocketReadinessSubscribers::new(capabilities.resources().as_ref());
         let close_notify = Arc::new(tokio::sync::Notify::new());
         let (close_complete, close_completion) = tokio::sync::oneshot::channel();
@@ -1443,11 +1512,12 @@ impl ActiveUnixListener {
             registry_binding_id,
             private_host_path,
             guest_node_path,
-            backlog: usize::try_from(backlog.unwrap_or(DEFAULT_JAVASCRIPT_NET_BACKLOG))
+            backlog: usize::try_from(backlog.unwrap_or(DEFAULT_NET_BACKLOG))
                 .expect("default backlog fits within usize"),
             active_connection_ids: Arc::new(Mutex::new(BTreeSet::new())),
             description_handles: Arc::new(()),
             description_lease: Arc::new(SocketDescriptionLease::default()),
+            pending_event: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1484,6 +1554,7 @@ impl ActiveUnixListener {
             active_connection_ids: Arc::clone(&self.active_connection_ids),
             description_handles: Arc::clone(&self.description_handles),
             description_lease: Arc::clone(&self.description_lease),
+            pending_event: Arc::clone(&self.pending_event),
         })
     }
 
@@ -1497,11 +1568,12 @@ impl ActiveUnixListener {
 
     pub(in crate::execution) fn set_event_pusher(
         &self,
-        session: Option<V8SessionHandle>,
+        session: Option<ExecutionWakeHandle>,
         identity: Option<(
             agentos_runtime::capability::CapabilityId,
             agentos_runtime::capability::CapabilityGeneration,
         )>,
+        owner_notify: Arc<tokio::sync::Notify>,
     ) {
         let (Some(session), Some((capability_id, capability_generation))) = (session, identity)
         else {
@@ -1510,6 +1582,7 @@ impl ActiveUnixListener {
         self.readiness_registration.register(
             Some(session),
             Some((capability_id, capability_generation)),
+            owner_notify,
             agentos_runtime::readiness::ReadyFlags::ACCEPT,
         );
     }
@@ -1517,7 +1590,15 @@ impl ActiveUnixListener {
     pub(in crate::execution) fn poll(
         &mut self,
         wait: Duration,
-    ) -> Result<Option<JavascriptUnixListenerEvent>, SidecarError> {
+    ) -> Result<Option<UnixListenerEvent>, SidecarError> {
+        if let Some(event) = self
+            .pending_event
+            .lock()
+            .map_err(|_| SidecarError::host("EIO", "Unix listener pending event lock poisoned"))?
+            .take()
+        {
+            return Ok(Some(event));
+        }
         let _ = wait;
         match self
             .events
@@ -1532,6 +1613,25 @@ impl ActiveUnixListener {
             Ok(event) => Ok(Some(event)),
             Err(TokioTryRecvError::Empty | TokioTryRecvError::Disconnected) => Ok(None),
         }
+    }
+
+    /// Non-destructive listener readiness probe used by combined POSIX poll.
+    pub(in crate::execution) fn probe_readable(&mut self) -> Result<bool, SidecarError> {
+        if self
+            .pending_event
+            .lock()
+            .map_err(|_| SidecarError::host("EIO", "Unix listener pending event lock poisoned"))?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        let event = self.poll(Duration::ZERO)?;
+        let mut pending = self
+            .pending_event
+            .lock()
+            .map_err(|_| SidecarError::host("EIO", "Unix listener pending event lock poisoned"))?;
+        *pending = event;
+        Ok(pending.is_some())
     }
 
     pub(in crate::execution) fn close(
@@ -1604,6 +1704,7 @@ pub(in crate::execution) fn release_unix_listener_capability(
     listener_id: &str,
     listener: &ActiveUnixListener,
 ) -> Result<(), SidecarError> {
+    listener.readiness_registration.retire();
     process.release_description_capability(
         &NativeCapabilityKey::UnixListener(listener_id.to_owned()),
         None,
@@ -1699,6 +1800,33 @@ mod guest_unix_metadata_tests {
             .expect("target")
             .pending_connections
             .is_empty());
+    }
+
+    #[test]
+    fn pending_connection_metadata_is_bounded_by_listener_capacity() {
+        let registry = registry();
+        register_abstract(&registry, "target", "abstract:target");
+        set_guest_unix_pending_connection_limit(&registry, "target", 1)
+            .expect("set pending connection limit");
+
+        let first = register_guest_unix_connection(&registry, "target")
+            .expect("first pending connection fits");
+        let error = register_guest_unix_connection(&registry, "target")
+            .expect_err("second pending connection exceeds listener capacity");
+
+        assert_eq!(guest_error_code(&error), Some("EAGAIN"));
+        assert!(error.to_string().contains("listen backlog"));
+        assert_eq!(
+            registry
+                .lock()
+                .expect("registry")
+                .get("target")
+                .expect("target")
+                .pending_connections
+                .len(),
+            1
+        );
+        assert!(guest_unix_connection_peer_open(Some(&first)));
     }
 
     #[test]
@@ -1829,7 +1957,7 @@ mod transferred_unix_alias_transport_tests {
             .expect("surviving Unix alias receives a transport wake")
         });
         match event {
-            JavascriptTcpSocketEvent::Data { bytes, .. } => assert_eq!(bytes, b"host-to-unix"),
+            TcpSocketEvent::Data { bytes, .. } => assert_eq!(bytes, b"host-to-unix"),
             other => panic!("expected Unix data after alias close, got {other:?}"),
         }
 
@@ -1917,8 +2045,12 @@ fn spawn_unix_listener_acceptor(
     accept_capacity: usize,
     capabilities: CapabilityRegistry,
     limits: ReactorIoLimits,
-) -> Result<AsyncCompletionReceiver<JavascriptUnixListenerEvent>, SidecarError> {
-    let (sender, receiver) = async_completion_channel(runtime.clone(), accept_capacity);
+) -> Result<AsyncCompletionReceiver<UnixListenerEvent>, SidecarError> {
+    let (sender, receiver) = async_completion_channel(
+        runtime.clone(),
+        accept_capacity,
+        unix_listener_event_retained_bytes,
+    );
     let completion = UnixListenerTaskCompletion(Some(close_complete));
     runtime
         .spawn(agentos_runtime::TaskClass::Listener, async move {
@@ -1927,7 +2059,7 @@ fn spawn_unix_listener_acceptor(
                 Ok(listener) => listener,
                 Err(error) => {
                     if sender
-                        .send(JavascriptUnixListenerEvent::Error {
+                        .send(UnixListenerEvent::Error {
                             code: io_error_code(&error),
                             message: error.to_string(),
                         })
@@ -1947,7 +2079,7 @@ fn spawn_unix_listener_acceptor(
                             Ok(ready) => ready,
                             Err(error) => {
                                 if sender
-                                    .send(JavascriptUnixListenerEvent::Error {
+                                    .send(UnixListenerEvent::Error {
                                         code: io_error_code(&error),
                                         message: error.to_string(),
                                     })
@@ -1967,7 +2099,7 @@ fn spawn_unix_listener_acceptor(
                         match capability {
                             Ok(capability) => capability,
                             Err(error) => {
-                                if sender.send(JavascriptUnixListenerEvent::Error {
+                                if sender.send(UnixListenerEvent::Error {
                                     code: Some(String::from("ERR_AGENTOS_RESOURCE_LIMIT")),
                                     message: error.to_string(),
                                 }).await.is_ok() {
@@ -1997,7 +2129,7 @@ fn spawn_unix_listener_acceptor(
                             Ok::<_, SidecarError>((connection_state, remote))
                         })();
                         match metadata {
-                            Ok((connection_state, remote)) => JavascriptUnixListenerEvent::Connection {
+                            Ok((connection_state, remote)) => UnixListenerEvent::Connection {
                                 socket: PendingUnixSocket {
                                     stream,
                                     local_path: Some(guest_path.clone()),
@@ -2011,15 +2143,19 @@ fn spawn_unix_listener_acceptor(
                                 capability,
                             },
                             Err(error) => {
-                                let _ = stream.shutdown(Shutdown::Both);
-                                JavascriptUnixListenerEvent::Error {
-                                    code: Some(javascript_sync_rpc_error_code(&error)),
+                                if let Err(shutdown_error) = stream.shutdown(Shutdown::Both) {
+                                    eprintln!(
+                                        "ERR_AGENTOS_UNIX_SOCKET_CLEANUP: failed to shut down rejected accepted socket: {shutdown_error}"
+                                    );
+                                }
+                                UnixListenerEvent::Error {
+                                    code: Some(host_service_error_code(&error)),
                                     message: error.to_string(),
                                 }
                             }
                         }
                     }
-                    Ok(Err(error)) => JavascriptUnixListenerEvent::Error {
+                    Ok(Err(error)) => UnixListenerEvent::Error {
                         code: io_error_code(&error),
                         message: error.to_string(),
                     },
@@ -2057,11 +2193,8 @@ impl Drop for UnixListenerTaskCompletion {
 
 fn push_listener_event(event_pusher: &Arc<SocketReadinessSubscribers>) {
     for target in event_pusher.targets() {
-        if let Err(error) = target.session.publish_readiness(
-            target.capability_id,
-            target.capability_generation,
-            agentos_runtime::readiness::ReadyFlags::ACCEPT,
-        ) {
+        if let Err(error) = target.publish_readiness(agentos_runtime::readiness::ReadyFlags::ACCEPT)
+        {
             eprintln!("ERR_AGENTOS_NET_LISTENER_WAKE: failed to queue listener wake: {error}");
         }
     }
@@ -2095,16 +2228,13 @@ pub(in crate::execution) fn push_socket_event(
         }
     };
     for target in targets {
-        match target.session.publish_readiness(
-            target.capability_id,
-            target.capability_generation,
-            flags,
-        ) {
-            Ok(()) => {
+        match target.publish_readiness(flags) {
+            Ok(true) => {
                 NET_TCP_TRACE_COUNTERS
                     .socket_read_push_sent
                     .fetch_add(1, Ordering::Relaxed);
             }
+            Ok(false) => {}
             Err(error) => {
                 NET_TCP_TRACE_COUNTERS
                     .socket_read_push_errors
@@ -2125,8 +2255,9 @@ pub(in crate::execution) fn push_socket_event(
 fn spawn_unix_socket_reader(
     runtime: agentos_runtime::RuntimeContext,
     stream: UnixStream,
-    sender: AsyncCompletionSender<JavascriptTcpSocketEvent>,
+    sender: AsyncCompletionSender<TcpSocketEvent>,
     event_pusher: Arc<SocketReadinessSubscribers>,
+    read_event_notify: Arc<tokio::sync::Notify>,
     application_read_interest: Arc<AtomicBool>,
     application_read_notify: Arc<tokio::sync::Notify>,
     saw_local_shutdown: Arc<AtomicBool>,
@@ -2153,6 +2284,7 @@ fn spawn_unix_socket_reader(
                         error.to_string(),
                     )
                     .await;
+                    read_event_notify.notify_one();
                     return;
                 }
                 let stream = match tokio::net::UnixStream::from_std(stream) {
@@ -2166,6 +2298,7 @@ fn spawn_unix_socket_reader(
                             error.to_string(),
                         )
                         .await;
+                        read_event_notify.notify_one();
                         return;
                     }
                 };
@@ -2191,6 +2324,7 @@ fn spawn_unix_socket_reader(
                             error.to_string(),
                         )
                         .await;
+                        read_event_notify.notify_one();
                         break;
                     }
                     let turn = match acquire_plain_socket_fair_turn(
@@ -2211,6 +2345,7 @@ fn spawn_unix_socket_reader(
                                 error.to_string(),
                             )
                             .await;
+                            read_event_notify.notify_one();
                             break;
                         }
                     };
@@ -2226,23 +2361,26 @@ fn spawn_unix_socket_reader(
                             error.to_string(),
                         )
                         .await;
+                        read_event_notify.notify_one();
                         break;
                     }
                     match read_result {
                         Ok(0) => {
                             saw_remote_end.store(true, Ordering::SeqCst);
-                            if sender.send(JavascriptTcpSocketEvent::End).await.is_err() {
+                            if sender.send(TcpSocketEvent::End).await.is_err() {
                                 break;
                             }
                             push_socket_event(&event_pusher, "end");
+                            read_event_notify.notify_one();
                             if saw_local_shutdown.load(Ordering::SeqCst)
                                 && !close_notified.swap(true, Ordering::SeqCst)
                                 && sender
-                                    .send(JavascriptTcpSocketEvent::Close { had_error: false })
+                                    .send(TcpSocketEvent::Close { had_error: false })
                                     .await
                                     .is_ok()
                             {
                                 push_socket_event(&event_pusher, "close");
+                                read_event_notify.notify_one();
                             }
                             break;
                         }
@@ -2256,10 +2394,11 @@ fn spawn_unix_socket_reader(
                             )
                             .await
                             else {
+                                read_event_notify.notify_one();
                                 break;
                             };
                             if sender
-                                .send(JavascriptTcpSocketEvent::Data {
+                                .send(TcpSocketEvent::Data {
                                     bytes: buffer[..bytes_read].to_vec(),
                                     reservation: SharedReservation::new(reservation),
                                     source_reservations: Vec::new(),
@@ -2270,6 +2409,7 @@ fn spawn_unix_socket_reader(
                                 break;
                             }
                             push_socket_event(&event_pusher, "data");
+                            read_event_notify.notify_one();
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
                         Err(error) => {
@@ -2282,6 +2422,7 @@ fn spawn_unix_socket_reader(
                                 error.to_string(),
                             )
                             .await;
+                            read_event_notify.notify_one();
                             break;
                         }
                     }

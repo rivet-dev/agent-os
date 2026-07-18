@@ -1,7 +1,11 @@
+use agentos_kernel::process_runtime::{
+    ProcessControlRequest, ProcessExit, ProcessRuntimeEndpoint, ProcessRuntimeEndpointError,
+    ProcessRuntimeIdentity, ProcessTermination,
+};
 use agentos_kernel::process_table::{
-    DriverProcess, ProcessContext, ProcessExitCallback, ProcessResult, ProcessStatus, ProcessTable,
-    ProcessWaitEvent, SigmaskHow, SignalSet, WaitPidFlags, SIGCHLD, SIGCONT, SIGHUP, SIGSTOP,
-    SIGTERM, SIGTSTP,
+    ProcessContext, ProcessEntry, ProcessResult, ProcessStatus, ProcessTable, ProcessWaitEvent,
+    SigmaskHow, SignalAction, SignalDisposition, SignalSet, WaitPidFlags, SIGCHLD, SIGCONT, SIGHUP,
+    SIGSTOP, SIGTERM, SIGTSTP,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -18,14 +22,13 @@ fn assert_error_code<T: Debug>(result: ProcessResult<T>, expected: &str) {
 struct MockProcessState {
     kills: Vec<i32>,
     exit_code: Option<i32>,
-    on_exit: Option<ProcessExitCallback>,
+    binding: Option<(ProcessTable, u32)>,
     ignore_sigterm: bool,
 }
 
 #[derive(Default)]
 struct MockDriverProcess {
     state: Mutex<MockProcessState>,
-    exited: Condvar,
 }
 
 impl MockDriverProcess {
@@ -39,8 +42,14 @@ impl MockDriverProcess {
                 ignore_sigterm: true,
                 ..MockProcessState::default()
             }),
-            exited: Condvar::new(),
         })
+    }
+
+    fn bind(&self, table: &ProcessTable, pid: u32) {
+        self.state
+            .lock()
+            .expect("mock process lock poisoned")
+            .binding = Some((table.clone(), pid));
     }
 
     fn schedule_exit(self: &Arc<Self>, delay: Duration, exit_code: i32) {
@@ -52,18 +61,19 @@ impl MockDriverProcess {
     }
 
     fn exit(&self, exit_code: i32) {
-        let callback = {
+        let binding = {
             let mut state = self.state.lock().expect("mock process lock poisoned");
             if state.exit_code.is_some() {
                 return;
             }
             state.exit_code = Some(exit_code);
-            self.exited.notify_all();
-            state.on_exit.clone()
+            state.binding.clone()
         };
 
-        if let Some(callback) = callback {
-            callback(exit_code);
+        if let Some((table, pid)) = binding {
+            table
+                .report_exit(pid, ProcessExit::Exited(exit_code))
+                .expect("mock process exit must be reported");
         }
     }
 
@@ -76,38 +86,102 @@ impl MockDriverProcess {
     }
 }
 
-impl DriverProcess for MockDriverProcess {
-    fn kill(&self, signal: i32) {
-        let should_exit = {
+impl ProcessRuntimeEndpoint for MockDriverProcess {
+    fn identity(&self) -> Option<ProcessRuntimeIdentity> {
+        None
+    }
+
+    fn request_control(
+        &self,
+        request: ProcessControlRequest,
+    ) -> Result<(), ProcessRuntimeEndpointError> {
+        let (binding, stop_transition, termination) = {
             let mut state = self.state.lock().expect("mock process lock poisoned");
-            state.kills.push(signal);
-            signal == 9 || (signal == 15 && !state.ignore_sigterm)
+            let signal = match request {
+                ProcessControlRequest::Checkpoint => state
+                    .binding
+                    .as_ref()
+                    .and_then(|(table, pid)| table.sigpending(*pid).ok())
+                    .and_then(|pending| pending.signals().into_iter().next()),
+                ProcessControlRequest::Stop { signal } => Some(signal),
+                ProcessControlRequest::Continue => Some(SIGCONT),
+                ProcessControlRequest::Terminate(ProcessTermination::Signal { signal, .. }) => {
+                    Some(signal)
+                }
+                ProcessControlRequest::Terminate(ProcessTermination::RuntimeFault)
+                | ProcessControlRequest::Cancel(_) => None,
+            };
+            if let Some(signal) = signal {
+                state.kills.push(signal);
+            }
+            let termination = match request {
+                ProcessControlRequest::Terminate(ProcessTermination::Signal { signal, .. })
+                    if signal == 9 || (signal == SIGTERM && !state.ignore_sigterm) =>
+                {
+                    Some(ProcessExit::Signaled {
+                        signal,
+                        core_dumped: false,
+                    })
+                }
+                ProcessControlRequest::Terminate(ProcessTermination::RuntimeFault)
+                | ProcessControlRequest::Cancel(_) => Some(ProcessExit::Exited(1)),
+                _ => None,
+            };
+            let stop_transition = match request {
+                ProcessControlRequest::Stop { signal } => Some((true, Some(signal))),
+                ProcessControlRequest::Continue => Some((false, None)),
+                _ => None,
+            };
+            (state.binding.clone(), stop_transition, termination)
         };
 
-        if should_exit {
-            self.exit(128 + signal);
+        if let Some((table, pid)) = binding {
+            if let Some((stopped, signal)) = stop_transition {
+                if stopped {
+                    table
+                        .mark_stopped(pid, signal.expect("stop transition signal"))
+                        .expect("mock stop transition must be recorded");
+                } else {
+                    table
+                        .mark_continued(pid)
+                        .expect("mock continue transition must be recorded");
+                }
+            }
+            if let Some(termination) = termination {
+                table
+                    .report_exit(pid, termination)
+                    .expect("mock termination must be reported");
+            }
         }
+        Ok(())
     }
+}
 
-    fn wait(&self, timeout: Duration) -> Option<i32> {
-        let state = self.state.lock().expect("mock process lock poisoned");
-        if state.exit_code.is_some() {
-            return state.exit_code;
-        }
+fn register(
+    table: &ProcessTable,
+    pid: u32,
+    driver: impl Into<String>,
+    command: impl Into<String>,
+    args: Vec<String>,
+    context: ProcessContext,
+    process: Arc<MockDriverProcess>,
+) -> ProcessEntry {
+    let entry = ProcessTable::register(table, pid, driver, command, args, context, process.clone());
+    process.bind(table, pid);
+    entry
+}
 
-        let (state, _) = self
-            .exited
-            .wait_timeout(state, timeout)
-            .expect("mock process wait lock poisoned");
-        state.exit_code
-    }
-
-    fn set_on_exit(&self, callback: ProcessExitCallback) {
-        self.state
-            .lock()
-            .expect("mock process lock poisoned")
-            .on_exit = Some(callback);
-    }
+fn catch_signal(table: &ProcessTable, pid: u32, signal: i32) {
+    table
+        .signal_action(
+            pid,
+            signal,
+            Some(SignalAction {
+                disposition: SignalDisposition::User,
+                ..SignalAction::DEFAULT
+            }),
+        )
+        .expect("install caught signal");
 }
 
 fn create_context(ppid: u32) -> ProcessContext {
@@ -145,7 +219,8 @@ fn register_allocates_expected_process_metadata_and_parent_groups() {
     let parent_pid = allocate_pid(&table);
     let child_pid = allocate_pid(&table);
 
-    let parent_entry = table.register(
+    let parent_entry = register(
+        &table,
         parent_pid,
         "wasmvm",
         "grep",
@@ -153,7 +228,8 @@ fn register_allocates_expected_process_metadata_and_parent_groups() {
         create_context(0),
         parent,
     );
-    let child_entry = table.register(
+    let child_entry = register(
+        &table,
         child_pid,
         "node",
         "node",
@@ -176,7 +252,8 @@ fn waitpid_resolves_for_exiting_and_already_exited_processes() {
     let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
     let process = MockDriverProcess::new();
     let pid = allocate_pid(&table);
-    table.register(
+    register(
+        &table,
         pid,
         "wasmvm",
         "echo",
@@ -197,7 +274,8 @@ fn waitpid_resolves_for_exiting_and_already_exited_processes() {
     );
 
     let exited_pid = allocate_pid(&table);
-    table.register(
+    register(
+        &table,
         exited_pid,
         "wasmvm",
         "true",
@@ -205,7 +283,9 @@ fn waitpid_resolves_for_exiting_and_already_exited_processes() {
         create_context(0),
         MockDriverProcess::new(),
     );
-    table.mark_exited(exited_pid, 42);
+    table
+        .mark_exited(exited_pid, 42)
+        .expect("exit must be recorded");
 
     assert_eq!(
         table
@@ -227,7 +307,8 @@ fn long_lived_parent_retains_zombies_until_waited_under_pressure() {
     let parent_pid = allocate_pid(&table);
     let mut child_pids = Vec::new();
 
-    table.register(
+    register(
+        &table,
         parent_pid,
         "wasmvm",
         "parent",
@@ -239,7 +320,8 @@ fn long_lived_parent_retains_zombies_until_waited_under_pressure() {
     for index in 0..100 {
         let child = MockDriverProcess::new();
         let child_pid = allocate_pid(&table);
-        table.register(
+        register(
+            &table,
             child_pid,
             "wasmvm",
             format!("child-{index}"),
@@ -287,7 +369,8 @@ fn allocate_pid_wraps_without_reusing_live_or_zombie_entries() {
     let live_one = MockDriverProcess::new();
 
     // Registering max_pid - 2 after the high PIDs moves the public allocation cursor back to max_pid - 1.
-    table.register(
+    register(
+        &table,
         max_pid - 1,
         "wasmvm",
         "live-high",
@@ -295,7 +378,8 @@ fn allocate_pid_wraps_without_reusing_live_or_zombie_entries() {
         create_context(0),
         live_high,
     );
-    table.register(
+    register(
+        &table,
         max_pid,
         "wasmvm",
         "zombie-high",
@@ -303,7 +387,8 @@ fn allocate_pid_wraps_without_reusing_live_or_zombie_entries() {
         create_context(0),
         zombie_high.clone(),
     );
-    table.register(
+    register(
+        &table,
         max_pid - 2,
         "wasmvm",
         "cursor-seed",
@@ -311,7 +396,8 @@ fn allocate_pid_wraps_without_reusing_live_or_zombie_entries() {
         create_context(0),
         cursor_seed,
     );
-    table.register(
+    register(
+        &table,
         1,
         "wasmvm",
         "live-one",
@@ -344,7 +430,8 @@ fn waitpid_for_supports_wnohang_and_waiting_for_any_child() {
     let child_a_pid = allocate_pid(&table);
     let child_b_pid = allocate_pid(&table);
 
-    table.register(
+    register(
+        &table,
         parent_pid,
         "wasmvm",
         "parent",
@@ -352,7 +439,8 @@ fn waitpid_for_supports_wnohang_and_waiting_for_any_child() {
         create_context(0),
         parent,
     );
-    table.register(
+    register(
+        &table,
         child_a_pid,
         "wasmvm",
         "child-a",
@@ -360,7 +448,8 @@ fn waitpid_for_supports_wnohang_and_waiting_for_any_child() {
         create_context(parent_pid),
         child_a,
     );
-    table.register(
+    register(
+        &table,
         child_b_pid,
         "wasmvm",
         "child-b",
@@ -402,7 +491,8 @@ fn on_process_exit_runs_before_waitpid_waiters_are_notified() {
     let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
     let process = MockDriverProcess::new();
     let pid = allocate_pid(&table);
-    table.register(
+    register(
+        &table,
         pid,
         "wasmvm",
         "sleep",
@@ -468,7 +558,8 @@ fn waitpid_for_reports_stopped_and_continued_children_once() {
 
     let parent_pid = allocate_pid(&table);
     let child_pid = allocate_pid(&table);
-    table.register(
+    register(
+        &table,
         parent_pid,
         "wasmvm",
         "parent",
@@ -476,7 +567,8 @@ fn waitpid_for_reports_stopped_and_continued_children_once() {
         create_context(0),
         parent.clone(),
     );
-    table.register(
+    register(
+        &table,
         child_pid,
         "wasmvm",
         "child",
@@ -484,8 +576,11 @@ fn waitpid_for_reports_stopped_and_continued_children_once() {
         create_context(parent_pid),
         child,
     );
+    catch_signal(&table, parent_pid, SIGCHLD);
 
-    table.mark_stopped(child_pid, SIGSTOP);
+    table
+        .mark_stopped(child_pid, SIGSTOP)
+        .expect("stop must be recorded");
     assert_eq!(
         table
             .waitpid_for(parent_pid, child_pid as i32, WaitPidFlags::WNOHANG)
@@ -514,7 +609,9 @@ fn waitpid_for_reports_stopped_and_continued_children_once() {
         ProcessStatus::Stopped
     );
 
-    table.mark_continued(child_pid);
+    table
+        .mark_continued(child_pid)
+        .expect("continue must be recorded");
     assert_eq!(
         table
             .waitpid_for(
@@ -546,7 +643,8 @@ fn nonterminal_wait_query_never_reaps_an_exited_child() {
     let child = MockDriverProcess::new();
     let parent_pid = allocate_pid(&table);
     let child_pid = allocate_pid(&table);
-    table.register(
+    register(
+        &table,
         parent_pid,
         "wasmvm",
         "parent",
@@ -554,7 +652,8 @@ fn nonterminal_wait_query_never_reaps_an_exited_child() {
         create_context(0),
         parent,
     );
-    table.register(
+    register(
+        &table,
         child_pid,
         "wasmvm",
         "child",
@@ -563,17 +662,16 @@ fn nonterminal_wait_query_never_reaps_an_exited_child() {
         child.clone(),
     );
 
-    table.mark_stopped(child_pid, SIGSTOP);
+    table
+        .mark_stopped(child_pid, SIGSTOP)
+        .expect("stop must be recorded");
     child.exit(17);
     assert_eq!(
         table
             .take_nonterminal_wait_event_for(parent_pid, child_pid as i32, WaitPidFlags::WUNTRACED,)
             .expect("nonterminal wait should succeed"),
-        Some(agentos_kernel::process_table::ProcessWaitResult {
-            pid: child_pid,
-            status: SIGSTOP,
-            event: ProcessWaitEvent::Stopped,
-        })
+        None,
+        "terminal state must supersede an unconsumed stop notification"
     );
     assert_eq!(
         table
@@ -596,11 +694,56 @@ fn nonterminal_wait_query_never_reaps_an_exited_child() {
 }
 
 #[test]
+fn detailed_wait_preserves_exact_signaled_termination() {
+    let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+    let parent = MockDriverProcess::new();
+    let child = MockDriverProcess::new();
+    let parent_pid = allocate_pid(&table);
+    let child_pid = allocate_pid(&table);
+    register(
+        &table,
+        parent_pid,
+        "wasmvm",
+        "parent",
+        Vec::new(),
+        create_context(0),
+        parent,
+    );
+    register(
+        &table,
+        child_pid,
+        "wasmvm",
+        "child",
+        Vec::new(),
+        create_context(parent_pid),
+        child,
+    );
+
+    let termination = ProcessExit::Signaled {
+        signal: SIGTERM,
+        core_dumped: true,
+    };
+    table
+        .report_exit(child_pid, termination)
+        .expect("termination must be reported");
+    let transition = table
+        .waitpid_for_detailed(parent_pid, child_pid as i32, WaitPidFlags::WNOHANG)
+        .expect("detailed wait should succeed")
+        .expect("terminal transition should be ready");
+    assert_eq!(transition.result.pid, child_pid);
+    assert_eq!(transition.result.status, 128 + SIGTERM);
+    assert_eq!(transition.result.event, ProcessWaitEvent::Exited);
+    assert_eq!(transition.termination, Some(termination));
+    assert!(table.get(child_pid).is_none());
+}
+
+#[test]
 fn kill_routes_signals_and_validates_process_existence() {
     let table = ProcessTable::new();
     let process = MockDriverProcess::new();
     let pid = allocate_pid(&table);
-    table.register(
+    register(
+        &table,
         pid,
         "wasmvm",
         "sleep",
@@ -632,7 +775,8 @@ fn kill_updates_job_control_state_for_stop_and_continue_signals() {
 
     let parent_pid = allocate_pid(&table);
     let child_pid = allocate_pid(&table);
-    table.register(
+    register(
+        &table,
         parent_pid,
         "wasmvm",
         "parent",
@@ -640,7 +784,8 @@ fn kill_updates_job_control_state_for_stop_and_continue_signals() {
         create_context(0),
         parent.clone(),
     );
-    table.register(
+    register(
+        &table,
         child_pid,
         "wasmvm",
         "child",
@@ -648,6 +793,7 @@ fn kill_updates_job_control_state_for_stop_and_continue_signals() {
         create_context(parent_pid),
         child.clone(),
     );
+    catch_signal(&table, parent_pid, SIGCHLD);
 
     table
         .kill(child_pid as i32, SIGTSTP)
@@ -711,7 +857,8 @@ fn exiting_child_delivers_sigchld_to_living_parent() {
     let parent_pid = allocate_pid(&table);
     let child_pid = allocate_pid(&table);
 
-    table.register(
+    register(
+        &table,
         parent_pid,
         "wasmvm",
         "parent",
@@ -719,7 +866,8 @@ fn exiting_child_delivers_sigchld_to_living_parent() {
         create_context(0),
         parent.clone(),
     );
-    table.register(
+    register(
+        &table,
         child_pid,
         "wasmvm",
         "child",
@@ -727,6 +875,7 @@ fn exiting_child_delivers_sigchld_to_living_parent() {
         create_context(parent_pid),
         child.clone(),
     );
+    catch_signal(&table, parent_pid, SIGCHLD);
 
     child.exit(0);
 
@@ -749,7 +898,8 @@ fn blocked_sigchld_is_queued_until_the_parent_unblocks_it() {
     let child_pid = allocate_pid(&table);
     let sigchld_mask = SignalSet::from_signal(SIGCHLD).expect("SIGCHLD should be valid");
 
-    table.register(
+    register(
+        &table,
         parent_pid,
         "wasmvm",
         "parent",
@@ -757,7 +907,8 @@ fn blocked_sigchld_is_queued_until_the_parent_unblocks_it() {
         create_context(0),
         parent.clone(),
     );
-    table.register(
+    register(
+        &table,
         child_pid,
         "wasmvm",
         "child",
@@ -765,6 +916,7 @@ fn blocked_sigchld_is_queued_until_the_parent_unblocks_it() {
         create_context(parent_pid),
         child.clone(),
     );
+    catch_signal(&table, parent_pid, SIGCHLD);
 
     assert_eq!(
         table
@@ -799,6 +951,19 @@ fn blocked_sigchld_is_queued_until_the_parent_unblocks_it() {
     );
     assert_eq!(
         table.sigpending(parent_pid).expect("pending signals"),
+        sigchld_mask,
+        "checkpoint wake does not consume a caught signal"
+    );
+    let delivery = table
+        .begin_signal_delivery(parent_pid)
+        .expect("begin signal delivery")
+        .expect("caught SIGCHLD delivery");
+    assert_eq!(delivery.signal, SIGCHLD);
+    table
+        .end_signal_delivery(parent_pid, delivery.token)
+        .expect("finish signal delivery");
+    assert_eq!(
+        table.sigpending(parent_pid).expect("pending signals"),
         SignalSet::empty()
     );
 }
@@ -811,7 +976,8 @@ fn killed_child_delivers_sigchld_to_living_parent() {
     let parent_pid = allocate_pid(&table);
     let child_pid = allocate_pid(&table);
 
-    table.register(
+    register(
+        &table,
         parent_pid,
         "wasmvm",
         "parent",
@@ -819,7 +985,8 @@ fn killed_child_delivers_sigchld_to_living_parent() {
         create_context(0),
         parent.clone(),
     );
-    table.register(
+    register(
+        &table,
         child_pid,
         "wasmvm",
         "child",
@@ -827,6 +994,7 @@ fn killed_child_delivers_sigchld_to_living_parent() {
         create_context(parent_pid),
         child.clone(),
     );
+    catch_signal(&table, parent_pid, SIGCHLD);
 
     table
         .kill(child_pid as i32, 15)
@@ -849,7 +1017,8 @@ fn blocked_sigterm_is_delivered_when_the_process_unblocks_it() {
     let pid = allocate_pid(&table);
     let sigterm_mask = SignalSet::from_signal(SIGTERM).expect("SIGTERM should be valid");
 
-    table.register(
+    register(
+        &table,
         pid,
         "wasmvm",
         "sleep",
@@ -894,7 +1063,8 @@ fn process_groups_and_sessions_follow_legacy_rules() {
     let p3 = allocate_pid(&table);
     let p4 = allocate_pid(&table);
 
-    table.register(
+    register(
+        &table,
         p1,
         "wasmvm",
         "sh",
@@ -902,7 +1072,8 @@ fn process_groups_and_sessions_follow_legacy_rules() {
         create_context(0),
         MockDriverProcess::new(),
     );
-    table.register(
+    register(
+        &table,
         p2,
         "wasmvm",
         "child",
@@ -910,7 +1081,8 @@ fn process_groups_and_sessions_follow_legacy_rules() {
         create_context(p1),
         MockDriverProcess::new(),
     );
-    table.register(
+    register(
+        &table,
         p3,
         "wasmvm",
         "peer",
@@ -918,7 +1090,8 @@ fn process_groups_and_sessions_follow_legacy_rules() {
         create_context(p1),
         MockDriverProcess::new(),
     );
-    table.register(
+    register(
+        &table,
         p4,
         "wasmvm",
         "other",
@@ -950,7 +1123,8 @@ fn negative_pid_kill_targets_entire_process_groups() {
     let pid1 = allocate_pid(&table);
     let pid2 = allocate_pid(&table);
 
-    table.register(
+    register(
+        &table,
         pid1,
         "wasmvm",
         "leader",
@@ -958,7 +1132,8 @@ fn negative_pid_kill_targets_entire_process_groups() {
         create_context(0),
         leader.clone(),
     );
-    table.register(
+    register(
+        &table,
         pid2,
         "wasmvm",
         "peer",
@@ -984,7 +1159,8 @@ fn negative_pid_signal_zero_checks_process_group_liveness() {
     let leader_pid = allocate_pid(&table);
     let peer_pid = allocate_pid(&table);
 
-    table.register(
+    register(
+        &table,
         leader_pid,
         "wasmvm",
         "leader",
@@ -992,7 +1168,8 @@ fn negative_pid_signal_zero_checks_process_group_liveness() {
         create_context(0),
         leader.clone(),
     );
-    table.register(
+    register(
+        &table,
         peer_pid,
         "wasmvm",
         "peer",
@@ -1014,7 +1191,7 @@ fn negative_pid_signal_zero_checks_process_group_liveness() {
 }
 
 #[test]
-fn negative_pid_kill_reaches_stopped_and_exited_group_members() {
+fn negative_pid_kill_reaches_stopped_but_not_exited_group_members() {
     let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
     let init = MockDriverProcess::new();
     let parent = MockDriverProcess::new();
@@ -1027,7 +1204,8 @@ fn negative_pid_kill_reaches_stopped_and_exited_group_members() {
     let stopped_pid = allocate_pid(&table);
     let zombie_pid = allocate_pid(&table);
 
-    table.register(
+    register(
+        &table,
         init_pid,
         "wasmvm",
         "init",
@@ -1035,7 +1213,8 @@ fn negative_pid_kill_reaches_stopped_and_exited_group_members() {
         create_context(0),
         init,
     );
-    table.register(
+    register(
+        &table,
         parent_pid,
         "wasmvm",
         "parent",
@@ -1043,7 +1222,8 @@ fn negative_pid_kill_reaches_stopped_and_exited_group_members() {
         create_context(init_pid),
         parent,
     );
-    table.register(
+    register(
+        &table,
         leader_pid,
         "wasmvm",
         "leader",
@@ -1051,7 +1231,8 @@ fn negative_pid_kill_reaches_stopped_and_exited_group_members() {
         create_context(parent_pid),
         leader.clone(),
     );
-    table.register(
+    register(
+        &table,
         stopped_pid,
         "wasmvm",
         "stopped",
@@ -1059,7 +1240,8 @@ fn negative_pid_kill_reaches_stopped_and_exited_group_members() {
         create_context(parent_pid),
         stopped.clone(),
     );
-    table.register(
+    register(
+        &table,
         zombie_pid,
         "wasmvm",
         "zombie",
@@ -1076,16 +1258,18 @@ fn negative_pid_kill_reaches_stopped_and_exited_group_members() {
     table
         .setpgid(zombie_pid, leader_pid)
         .expect("zombie peer joins leader group");
-    table.mark_stopped(stopped_pid, SIGSTOP);
+    table
+        .mark_stopped(stopped_pid, SIGSTOP)
+        .expect("stop must be recorded");
     zombie.exit(23);
 
     table
         .kill(-(leader_pid as i32), 15)
-        .expect("group kill should include stopped and zombie members");
+        .expect("group kill should include live stopped members");
 
     assert_eq!(leader.kills(), vec![15]);
     assert_eq!(stopped.kills(), vec![15]);
-    assert_eq!(zombie.kills(), vec![15]);
+    assert!(zombie.kills().is_empty());
 }
 
 #[test]
@@ -1098,7 +1282,8 @@ fn exiting_parent_reparents_children_to_pid_one_when_available() {
     let parent_pid = allocate_pid(&table);
     let child_pid = allocate_pid(&table);
 
-    table.register(
+    register(
+        &table,
         init_pid,
         "wasmvm",
         "init",
@@ -1106,7 +1291,8 @@ fn exiting_parent_reparents_children_to_pid_one_when_available() {
         create_context(0),
         init,
     );
-    table.register(
+    register(
+        &table,
         parent_pid,
         "wasmvm",
         "parent",
@@ -1114,7 +1300,8 @@ fn exiting_parent_reparents_children_to_pid_one_when_available() {
         create_context(init_pid),
         parent.clone(),
     );
-    table.register(
+    register(
+        &table,
         child_pid,
         "wasmvm",
         "child",
@@ -1145,7 +1332,8 @@ fn orphaned_stopped_process_groups_receive_sighup_and_sigcont() {
     let leader_pid = allocate_pid(&table);
     let stopped_pid = allocate_pid(&table);
 
-    table.register(
+    register(
+        &table,
         init_pid,
         "wasmvm",
         "init",
@@ -1153,7 +1341,8 @@ fn orphaned_stopped_process_groups_receive_sighup_and_sigcont() {
         create_context(0),
         init,
     );
-    table.register(
+    register(
+        &table,
         parent_pid,
         "wasmvm",
         "parent",
@@ -1161,7 +1350,8 @@ fn orphaned_stopped_process_groups_receive_sighup_and_sigcont() {
         create_context(init_pid),
         parent.clone(),
     );
-    table.register(
+    register(
+        &table,
         leader_pid,
         "wasmvm",
         "leader",
@@ -1169,7 +1359,8 @@ fn orphaned_stopped_process_groups_receive_sighup_and_sigcont() {
         create_context(parent_pid),
         leader.clone(),
     );
-    table.register(
+    register(
+        &table,
         stopped_pid,
         "wasmvm",
         "stopped",
@@ -1183,7 +1374,9 @@ fn orphaned_stopped_process_groups_receive_sighup_and_sigcont() {
     table
         .setpgid(stopped_pid, leader_pid)
         .expect("stopped peer joins leader group");
-    table.mark_stopped(stopped_pid, SIGSTOP);
+    table
+        .mark_stopped(stopped_pid, SIGSTOP)
+        .expect("stop must be recorded");
 
     parent.exit(0);
 
@@ -1196,10 +1389,13 @@ fn terminate_all_escalates_from_sigterm_to_sigkill_for_survivors() {
     let table = ProcessTable::new();
     let graceful = MockDriverProcess::new();
     let stubborn = MockDriverProcess::stubborn();
+    let stopped = MockDriverProcess::new();
 
     let pid1 = allocate_pid(&table);
     let pid2 = allocate_pid(&table);
-    table.register(
+    let pid3 = allocate_pid(&table);
+    register(
+        &table,
         pid1,
         "wasmvm",
         "graceful",
@@ -1207,7 +1403,8 @@ fn terminate_all_escalates_from_sigterm_to_sigkill_for_survivors() {
         create_context(0),
         graceful.clone(),
     );
-    table.register(
+    register(
+        &table,
         pid2,
         "wasmvm",
         "stubborn",
@@ -1215,11 +1412,24 @@ fn terminate_all_escalates_from_sigterm_to_sigkill_for_survivors() {
         create_context(0),
         stubborn.clone(),
     );
+    register(
+        &table,
+        pid3,
+        "wasmvm",
+        "stopped",
+        Vec::new(),
+        create_context(0),
+        stopped.clone(),
+    );
+    table
+        .mark_stopped(pid3, SIGSTOP)
+        .expect("stop must be recorded");
 
     table.terminate_all();
 
     assert_eq!(graceful.kills(), vec![15]);
     assert_eq!(stubborn.kills(), vec![15, 9]);
+    assert_eq!(stopped.kills(), vec![15]);
     assert_eq!(
         table
             .get(pid1)
@@ -1234,6 +1444,13 @@ fn terminate_all_escalates_from_sigterm_to_sigkill_for_survivors() {
             .status,
         ProcessStatus::Exited
     );
+    assert_eq!(
+        table
+            .get(pid3)
+            .expect("stopped process should remain as zombie")
+            .status,
+        ProcessStatus::Exited
+    );
     assert_eq!(table.zombie_timer_count(), 0);
 }
 
@@ -1243,7 +1460,8 @@ fn list_processes_returns_a_snapshot_of_registered_processes() {
     let pid1 = allocate_pid(&table);
     let pid2 = allocate_pid(&table);
 
-    table.register(
+    register(
+        &table,
         pid1,
         "wasmvm",
         "ls",
@@ -1251,7 +1469,8 @@ fn list_processes_returns_a_snapshot_of_registered_processes() {
         create_context(0),
         MockDriverProcess::new(),
     );
-    table.register(
+    register(
+        &table,
         pid2,
         "node",
         "node",
@@ -1283,7 +1502,8 @@ fn waitpid_for_supports_pid_zero_and_negative_process_group_selectors() {
     let same_group_child_pid = allocate_pid(&table);
     let other_group_child_pid = allocate_pid(&table);
 
-    table.register(
+    register(
+        &table,
         parent_pid,
         "wasmvm",
         "parent",
@@ -1291,7 +1511,8 @@ fn waitpid_for_supports_pid_zero_and_negative_process_group_selectors() {
         create_context(0),
         parent,
     );
-    table.register(
+    register(
+        &table,
         same_group_child_pid,
         "wasmvm",
         "same-group",
@@ -1299,7 +1520,8 @@ fn waitpid_for_supports_pid_zero_and_negative_process_group_selectors() {
         create_context(parent_pid),
         same_group_child.clone(),
     );
-    table.register(
+    register(
+        &table,
         other_group_child_pid,
         "wasmvm",
         "other-group",
@@ -1354,7 +1576,8 @@ fn zombie_reaper_is_cooperatively_driven_for_many_exits() {
     for index in 0..100 {
         let process = MockDriverProcess::new();
         let pid = allocate_pid(&table);
-        table.register(
+        register(
+            &table,
             pid,
             "wasmvm",
             format!("proc-{index}"),
@@ -1389,7 +1612,8 @@ fn zombie_reaper_preserves_child_exit_code_while_parent_is_alive() {
 
     let parent_pid = allocate_pid(&table);
     let child_pid = allocate_pid(&table);
-    table.register(
+    register(
+        &table,
         parent_pid,
         "wasmvm",
         "parent",
@@ -1397,7 +1621,8 @@ fn zombie_reaper_preserves_child_exit_code_while_parent_is_alive() {
         create_context(0),
         parent,
     );
-    table.register(
+    register(
+        &table,
         child_pid,
         "wasmvm",
         "child",
@@ -1425,7 +1650,8 @@ fn zombie_reaper_reaps_exited_children_after_their_parent_exits() {
 
     let parent_pid = allocate_pid(&table);
     let child_pid = allocate_pid(&table);
-    table.register(
+    register(
+        &table,
         parent_pid,
         "wasmvm",
         "parent",
@@ -1433,7 +1659,8 @@ fn zombie_reaper_reaps_exited_children_after_their_parent_exits() {
         create_context(0),
         parent.clone(),
     );
-    table.register(
+    register(
+        &table,
         child_pid,
         "wasmvm",
         "child",

@@ -2,9 +2,11 @@ use agentos_kernel::bridge::LifecycleState;
 use agentos_kernel::command_registry::CommandDriver;
 use agentos_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions};
 use agentos_kernel::permissions::Permissions;
+use agentos_kernel::process_runtime::ProcessExit;
 use agentos_kernel::process_table::SIGPIPE;
 use agentos_kernel::pty::LineDisciplineConfig;
 use agentos_kernel::vfs::MemoryFileSystem;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[test]
@@ -63,6 +65,45 @@ fn minimal_vm_lifecycle_transitions_between_ready_busy_and_terminated() {
 
     kernel.dispose().expect("dispose kernel");
     assert_eq!(kernel.state(), LifecycleState::Terminated);
+}
+
+#[test]
+fn isatty_recognizes_both_kernel_pty_ends() {
+    let mut config = KernelVmConfig::new("vm-kernel-pty-isatty");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+    let process = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn shell");
+    let (master_fd, slave_fd, _) = kernel
+        .open_pty("shell", process.pid())
+        .expect("open kernel PTY");
+
+    assert!(
+        kernel
+            .isatty("shell", process.pid(), master_fd)
+            .expect("classify PTY master"),
+        "Linux PTY masters are terminal descriptors"
+    );
+    assert!(
+        kernel
+            .isatty("shell", process.pid(), slave_fd)
+            .expect("classify PTY slave"),
+        "PTY slaves are terminal descriptors"
+    );
+
+    process.finish(0);
+    kernel.wait_and_reap(process.pid()).expect("reap shell");
 }
 
 #[test]
@@ -155,10 +196,21 @@ fn dispose_kills_running_processes_and_cleans_special_resources() {
     let _ = kernel.open_pipe("shell", process.pid()).expect("open pipe");
     let _ = kernel.open_pty("shell", process.pid()).expect("open pty");
 
+    let exit_reporter = process.exit_reporter();
+    let _controls = process
+        .attach_runtime_control(Arc::new(move || {
+            exit_reporter
+                .report_exit(ProcessExit::Signaled {
+                    signal: 15,
+                    core_dumped: false,
+                })
+                .expect("report SIGTERM exit");
+        }))
+        .expect("attach runtime controls");
+
     kernel.dispose().expect("dispose kernel");
     assert_eq!(kernel.state(), LifecycleState::Terminated);
     assert_eq!(process.wait(Duration::from_millis(50)), Some(143));
-    assert_eq!(process.kill_signals(), vec![15]);
 
     let snapshot = kernel.resource_snapshot();
     assert_eq!(snapshot.fd_tables, 0);
@@ -254,11 +306,22 @@ fn broken_pipe_writes_deliver_sigpipe_and_return_epipe() {
         .fd_close("shell", writer.pid(), read_fd)
         .expect("close inherited read end");
 
+    let exit_reporter = writer.exit_reporter();
+    let _controls = writer
+        .attach_runtime_control(Arc::new(move || {
+            exit_reporter
+                .report_exit(ProcessExit::Signaled {
+                    signal: SIGPIPE,
+                    core_dumped: false,
+                })
+                .expect("report SIGPIPE exit");
+        }))
+        .expect("attach runtime controls");
+
     let error = kernel
         .fd_write("shell", writer.pid(), write_fd, b"fail")
         .expect_err("broken pipe writes should fail");
     assert_eq!(error.code(), "EPIPE");
-    assert_eq!(writer.kill_signals(), vec![SIGPIPE]);
     assert_eq!(writer.wait(Duration::from_millis(50)), Some(128 + SIGPIPE));
 }
 

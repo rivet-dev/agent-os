@@ -9,6 +9,7 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 use vfs::posix::usage::RootFilesystemResourceLimits;
+use web_time::{Duration, Instant};
 
 pub use vfs::posix::usage::{
     measure_filesystem_usage, FileSystemStats, FileSystemUsage, DEFAULT_MAX_FILESYSTEM_BYTES,
@@ -16,7 +17,10 @@ pub use vfs::posix::usage::{
 };
 
 pub const DEFAULT_MAX_PROCESSES: usize = 256;
-pub const DEFAULT_MAX_OPEN_FDS: usize = 256;
+// Keep the Linux-visible default high enough for conventional applications
+// that deliberately reserve sparse descriptor ranges (for example
+// F_DUPFD/closefrom at fd 512), while retaining a fixed bounded table.
+pub const DEFAULT_MAX_OPEN_FDS: usize = 1024;
 pub const DEFAULT_MAX_PIPES: usize = 128;
 pub const DEFAULT_MAX_PTYS: usize = 128;
 pub const DEFAULT_MAX_SOCKETS: usize = 256;
@@ -34,9 +38,16 @@ pub const DEFAULT_MAX_RECURSIVE_FS_ENTRIES: usize = 65_536;
 pub const DEFAULT_VIRTUAL_CPU_COUNT: usize = 1;
 pub const DEFAULT_MAX_WASM_MEMORY_BYTES: u64 = 128 * 1024 * 1024;
 
+const MAX_PREAD_BYTES_LIMIT: &str = "limits.resources.maxPreadBytes";
+const MAX_FD_WRITE_BYTES_LIMIT: &str = "limits.resources.maxFdWriteBytes";
+const MAX_PROCESS_ARGV_BYTES_LIMIT: &str = "limits.resources.maxProcessArgvBytes";
+const MAX_PROCESS_ENV_BYTES_LIMIT: &str = "limits.resources.maxProcessEnvBytes";
+const MAX_READDIR_ENTRIES_LIMIT: &str = "limits.resources.maxReaddirEntries";
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResourceSnapshot {
     pub running_processes: usize,
+    pub stopped_processes: usize,
     pub exited_processes: usize,
     pub fd_tables: usize,
     pub open_fds: usize,
@@ -73,7 +84,6 @@ pub struct ResourceLimits {
     pub max_readdir_entries: Option<usize>,
     pub max_recursive_fs_depth: Option<usize>,
     pub max_recursive_fs_entries: Option<usize>,
-    pub max_wasm_fuel: Option<u64>,
     pub max_wasm_memory_bytes: Option<u64>,
     pub max_wasm_stack_bytes: Option<usize>,
 }
@@ -100,7 +110,6 @@ impl Default for ResourceLimits {
             max_readdir_entries: Some(DEFAULT_MAX_READDIR_ENTRIES),
             max_recursive_fs_depth: Some(DEFAULT_MAX_RECURSIVE_FS_DEPTH),
             max_recursive_fs_entries: Some(DEFAULT_MAX_RECURSIVE_FS_ENTRIES),
-            max_wasm_fuel: None,
             // Match the Workers-style default memory envelope where sensible:
             // guests are bounded unless the trusted VM config raises the cap.
             max_wasm_memory_bytes: Some(DEFAULT_MAX_WASM_MEMORY_BYTES),
@@ -113,6 +122,9 @@ impl Default for ResourceLimits {
 pub struct ResourceError {
     code: &'static str,
     message: String,
+    limit_name: Option<&'static str>,
+    limit: Option<usize>,
+    observed: Option<usize>,
 }
 
 impl RootFilesystemResourceLimits for ResourceLimits {
@@ -134,6 +146,9 @@ impl ResourceError {
         Self {
             code: "EAGAIN",
             message: message.into(),
+            limit_name: None,
+            limit: None,
+            observed: None,
         }
     }
 
@@ -141,6 +156,9 @@ impl ResourceError {
         Self {
             code: "ENFILE",
             message: message.into(),
+            limit_name: None,
+            limit: None,
+            observed: None,
         }
     }
 
@@ -148,13 +166,9 @@ impl ResourceError {
         Self {
             code: "ENOSPC",
             message: message.into(),
-        }
-    }
-
-    fn invalid_input(message: impl Into<String>) -> Self {
-        Self {
-            code: "EINVAL",
-            message: message.into(),
+            limit_name: None,
+            limit: None,
+            observed: None,
         }
     }
 
@@ -162,7 +176,41 @@ impl ResourceError {
         Self {
             code: "ENOMEM",
             message: message.into(),
+            limit_name: None,
+            limit: None,
+            observed: None,
         }
+    }
+
+    fn point_limit(
+        code: &'static str,
+        limit_name: &'static str,
+        limit: usize,
+        observed: usize,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            code,
+            message: format!(
+                "{}; limitName={limit_name} limit={limit} observed={observed}; raise {limit_name}",
+                description.into()
+            ),
+            limit_name: Some(limit_name),
+            limit: Some(limit),
+            observed: Some(observed),
+        }
+    }
+
+    pub fn limit_name(&self) -> Option<&'static str> {
+        self.limit_name
+    }
+
+    pub fn limit(&self) -> Option<usize> {
+        self.limit
+    }
+
+    pub fn observed(&self) -> Option<usize> {
+        self.observed
     }
 }
 
@@ -190,6 +238,12 @@ struct ResourceGauges {
     socket_datagram_queue_len: Option<Arc<QueueGauge>>,
     filesystem_bytes: Option<Arc<QueueGauge>>,
     inodes: Option<Arc<QueueGauge>>,
+    pread_bytes: Option<Arc<QueueGauge>>,
+    fd_write_bytes: Option<Arc<QueueGauge>>,
+    process_argv_bytes: Option<Arc<QueueGauge>>,
+    process_env_bytes: Option<Arc<QueueGauge>>,
+    readdir_entries: Option<Arc<QueueGauge>>,
+    blocking_read_ms: Option<Arc<QueueGauge>>,
     recursive_fs_depth: Option<Arc<QueueGauge>>,
     recursive_fs_entries: Option<Arc<QueueGauge>>,
 }
@@ -231,6 +285,30 @@ impl ResourceGauges {
                 limits.max_filesystem_bytes,
             ),
             inodes: register_resource_gauge(TrackedLimit::VmInodes, limits.max_inode_count),
+            pread_bytes: register_resource_gauge(
+                TrackedLimit::VmPreadBytes,
+                limits.max_pread_bytes,
+            ),
+            fd_write_bytes: register_resource_gauge(
+                TrackedLimit::VmFdWriteBytes,
+                limits.max_fd_write_bytes,
+            ),
+            process_argv_bytes: register_resource_gauge(
+                TrackedLimit::VmProcessArgvBytes,
+                limits.max_process_argv_bytes,
+            ),
+            process_env_bytes: register_resource_gauge(
+                TrackedLimit::VmProcessEnvBytes,
+                limits.max_process_env_bytes,
+            ),
+            readdir_entries: register_resource_gauge(
+                TrackedLimit::VmReaddirEntries,
+                limits.max_readdir_entries,
+            ),
+            blocking_read_ms: register_resource_gauge_u64(
+                TrackedLimit::VmBlockingReadMs,
+                limits.max_blocking_read_ms,
+            ),
             recursive_fs_depth: register_resource_gauge(
                 TrackedLimit::VmRecursiveFsDepth,
                 limits.max_recursive_fs_depth,
@@ -248,6 +326,69 @@ pub struct ResourceAccountant {
     gauges: ResourceGauges,
 }
 
+/// One kernel blocking wait governed by `maxBlockingReadMs`. Callers wait only
+/// until the next edge returned by [`Self::wait_slice`], then retry readiness;
+/// the 80% edge emits through the same structured limit-warning registry as
+/// byte/count caps without restarting or duplicating the operation.
+#[derive(Debug)]
+pub struct BlockingReadDeadline {
+    started: Instant,
+    limit: Duration,
+    warning_at: Duration,
+    warning_emitted: bool,
+    gauge: Arc<QueueGauge>,
+}
+
+impl BlockingReadDeadline {
+    fn new(limit: Duration, gauge: Arc<QueueGauge>) -> Self {
+        Self {
+            started: Instant::now(),
+            limit,
+            warning_at: limit.saturating_mul(4) / 5,
+            warning_emitted: false,
+            gauge,
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.started.elapsed().min(self.limit)
+    }
+
+    fn observe_warning_edge(&mut self) {
+        let elapsed = self.elapsed();
+        if !self.warning_emitted && elapsed >= self.warning_at {
+            self.warning_emitted = true;
+            self.gauge
+                .observe_depth(usize::try_from(elapsed.as_millis()).unwrap_or(usize::MAX));
+        }
+    }
+
+    pub fn wait_slice(&mut self) -> Option<Duration> {
+        self.observe_warning_edge();
+        let elapsed = self.elapsed();
+        if elapsed >= self.limit {
+            return None;
+        }
+        let next_edge = if self.warning_emitted {
+            self.limit
+        } else {
+            self.warning_at
+        };
+        Some(next_edge.saturating_sub(elapsed))
+    }
+
+    pub fn expired(&mut self) -> bool {
+        self.observe_warning_edge();
+        self.elapsed() >= self.limit
+    }
+}
+
+impl Drop for BlockingReadDeadline {
+    fn drop(&mut self) {
+        self.gauge.observe_depth(0);
+    }
+}
+
 impl ResourceAccountant {
     pub fn new(limits: ResourceLimits) -> Self {
         let gauges = ResourceGauges::new(&limits);
@@ -258,7 +399,7 @@ impl ResourceAccountant {
     /// registry tracks usage and warns before any cap is reached.
     fn observe_resource_gauges(&self, snapshot: &ResourceSnapshot) {
         if let Some(gauge) = &self.gauges.processes {
-            gauge.observe_depth(snapshot.running_processes + snapshot.exited_processes);
+            gauge.observe_depth(tracked_processes(snapshot));
         }
         if let Some(gauge) = &self.gauges.open_fds {
             gauge.observe_depth(snapshot.open_fds);
@@ -287,6 +428,15 @@ impl ResourceAccountant {
         &self.limits
     }
 
+    pub fn blocking_read_deadline(&self) -> Option<BlockingReadDeadline> {
+        let limit = self.limits.max_blocking_read_ms?;
+        let gauge = Arc::clone(self.gauges.blocking_read_ms.as_ref()?);
+        Some(BlockingReadDeadline::new(
+            Duration::from_millis(limit),
+            gauge,
+        ))
+    }
+
     pub fn snapshot(
         &self,
         processes: &ProcessTable,
@@ -304,10 +454,15 @@ impl ResourceAccountant {
             .values()
             .filter(|process| process.status == ProcessStatus::Exited)
             .count();
+        let stopped_processes = process_list
+            .values()
+            .filter(|process| process.status == ProcessStatus::Stopped)
+            .count();
         let socket_snapshot = sockets.snapshot();
 
         let snapshot = ResourceSnapshot {
             running_processes,
+            stopped_processes,
             exited_processes,
             fd_tables: fd_tables.len(),
             open_fds: fd_tables.total_open_fds(),
@@ -332,7 +487,7 @@ impl ResourceAccountant {
         additional_fds: usize,
     ) -> Result<(), ResourceError> {
         if let Some(limit) = self.limits.max_processes {
-            if snapshot.running_processes + snapshot.exited_processes >= limit {
+            if tracked_processes(snapshot) >= limit {
                 return Err(ResourceError::exhausted("maximum process limit reached"));
             }
         }
@@ -345,12 +500,19 @@ impl ResourceAccountant {
         command: &str,
         args: &[String],
     ) -> Result<(), ResourceError> {
+        let total = argv_payload_bytes(command, args);
+        if let Some(gauge) = &self.gauges.process_argv_bytes {
+            gauge.observe_depth(total);
+        }
         if let Some(limit) = self.limits.max_process_argv_bytes {
-            let total = argv_payload_bytes(command, args);
             if total > limit {
-                return Err(ResourceError::invalid_input(format!(
-                    "process argv payload {total} bytes exceeds configured limit {limit}"
-                )));
+                return Err(ResourceError::point_limit(
+                    "EINVAL",
+                    MAX_PROCESS_ARGV_BYTES_LIMIT,
+                    limit,
+                    total,
+                    format!("process argv payload {total} bytes exceeds configured limit {limit}"),
+                ));
             }
         }
 
@@ -362,12 +524,21 @@ impl ResourceAccountant {
         inherited_env: &BTreeMap<String, String>,
         overrides: &BTreeMap<String, String>,
     ) -> Result<(), ResourceError> {
+        let total = merged_env_payload_bytes(inherited_env, overrides);
+        if let Some(gauge) = &self.gauges.process_env_bytes {
+            gauge.observe_depth(total);
+        }
         if let Some(limit) = self.limits.max_process_env_bytes {
-            let total = merged_env_payload_bytes(inherited_env, overrides);
             if total > limit {
-                return Err(ResourceError::invalid_input(format!(
-                    "process environment payload {total} bytes exceeds configured limit {limit}"
-                )));
+                return Err(ResourceError::point_limit(
+                    "EINVAL",
+                    MAX_PROCESS_ENV_BYTES_LIMIT,
+                    limit,
+                    total,
+                    format!(
+                        "process environment payload {total} bytes exceeds configured limit {limit}"
+                    ),
+                ));
             }
         }
 
@@ -462,11 +633,18 @@ impl ResourceAccountant {
     }
 
     pub fn check_pread_length(&self, length: usize) -> Result<(), ResourceError> {
+        if let Some(gauge) = &self.gauges.pread_bytes {
+            gauge.observe_depth(length);
+        }
         if let Some(limit) = self.limits.max_pread_bytes {
             if length > limit {
-                return Err(ResourceError::invalid_input(format!(
-                    "pread length {length} exceeds limits.resources.maxPreadBytes {limit}; raise limits.resources.maxPreadBytes to permit a larger single read"
-                )));
+                return Err(ResourceError::point_limit(
+                    "EINVAL",
+                    MAX_PREAD_BYTES_LIMIT,
+                    limit,
+                    length,
+                    format!("pread length {length} exceeds configured limit {limit}"),
+                ));
             }
         }
 
@@ -474,11 +652,18 @@ impl ResourceAccountant {
     }
 
     pub fn check_fd_write_size(&self, size: usize) -> Result<(), ResourceError> {
+        if let Some(gauge) = &self.gauges.fd_write_bytes {
+            gauge.observe_depth(size);
+        }
         if let Some(limit) = self.limits.max_fd_write_bytes {
             if size > limit {
-                return Err(ResourceError::invalid_input(format!(
-                    "write size {size} exceeds limits.resources.maxFdWriteBytes {limit}; raise limits.resources.maxFdWriteBytes to permit a larger single write"
-                )));
+                return Err(ResourceError::point_limit(
+                    "EINVAL",
+                    MAX_FD_WRITE_BYTES_LIMIT,
+                    limit,
+                    size,
+                    format!("write size {size} exceeds configured limit {limit}"),
+                ));
             }
         }
 
@@ -506,11 +691,20 @@ impl ResourceAccountant {
     }
 
     pub fn check_readdir_entries(&self, entries: usize) -> Result<(), ResourceError> {
+        if let Some(gauge) = &self.gauges.readdir_entries {
+            gauge.observe_depth(entries);
+        }
         if let Some(limit) = self.limits.max_readdir_entries {
             if entries > limit {
-                return Err(ResourceError::out_of_memory(format!(
-                    "directory listing with {entries} entries exceeds configured limit {limit}"
-                )));
+                return Err(ResourceError::point_limit(
+                    "ENOMEM",
+                    MAX_READDIR_ENTRIES_LIMIT,
+                    limit,
+                    entries,
+                    format!(
+                        "directory listing with {entries} entries exceeds configured limit {limit}"
+                    ),
+                ));
             }
         }
 
@@ -598,6 +792,13 @@ impl ResourceAccountant {
     }
 }
 
+fn tracked_processes(snapshot: &ResourceSnapshot) -> usize {
+    snapshot
+        .running_processes
+        .saturating_add(snapshot.stopped_processes)
+        .saturating_add(snapshot.exited_processes)
+}
+
 fn argv_payload_bytes(command: &str, args: &[String]) -> usize {
     let command_bytes = command.len().saturating_add(1);
     command_bytes.saturating_add(
@@ -645,13 +846,26 @@ mod gauge_tests {
         let sink = Arc::clone(&captured);
         // Filter by name so a gauge from a concurrently-running test can't pollute.
         set_limit_warning_handler(Box::new(move |warning| {
-            if warning.name == TrackedLimit::VmOpenFds {
+            if matches!(
+                warning.name,
+                TrackedLimit::VmOpenFds
+                    | TrackedLimit::VmPreadBytes
+                    | TrackedLimit::VmFdWriteBytes
+                    | TrackedLimit::VmProcessArgvBytes
+                    | TrackedLimit::VmProcessEnvBytes
+                    | TrackedLimit::VmReaddirEntries
+            ) {
                 sink.lock().expect("sink mutex").push(warning.clone());
             }
         }));
 
         let limits = ResourceLimits {
             max_open_fds: Some(10),
+            max_pread_bytes: Some(100),
+            max_fd_write_bytes: Some(100),
+            max_process_argv_bytes: Some(100),
+            max_process_env_bytes: Some(100),
+            max_readdir_entries: Some(100),
             ..ResourceLimits::default()
         };
         let accountant = ResourceAccountant::new(limits);
@@ -660,6 +874,61 @@ mod gauge_tests {
             ..ResourceSnapshot::default()
         };
         accountant.observe_resource_gauges(&snapshot);
+
+        // Point-in-time limits use the same central 80% warning mechanism.
+        // Exercise each at its exact accepted boundary before checking +1.
+        accountant
+            .check_process_argv_bytes(&"a".repeat(99), &[])
+            .expect("exact argv byte limit");
+        accountant
+            .check_process_env_bytes(
+                &BTreeMap::new(),
+                &BTreeMap::from([(String::new(), "e".repeat(98))]),
+            )
+            .expect("exact environment byte limit");
+        accountant
+            .check_pread_length(100)
+            .expect("exact pread byte limit");
+        accountant
+            .check_fd_write_size(100)
+            .expect("exact write byte limit");
+        accountant
+            .check_readdir_entries(100)
+            .expect("exact readdir entry limit");
+
+        let errors = [
+            accountant
+                .check_process_argv_bytes(&"a".repeat(100), &[])
+                .expect_err("argv limit +1"),
+            accountant
+                .check_process_env_bytes(
+                    &BTreeMap::new(),
+                    &BTreeMap::from([(String::new(), "e".repeat(99))]),
+                )
+                .expect_err("environment limit +1"),
+            accountant
+                .check_pread_length(101)
+                .expect_err("pread limit +1"),
+            accountant
+                .check_fd_write_size(101)
+                .expect_err("write limit +1"),
+            accountant
+                .check_readdir_entries(101)
+                .expect_err("readdir limit +1"),
+        ];
+        for (error, (code, name)) in errors.iter().zip([
+            ("EINVAL", MAX_PROCESS_ARGV_BYTES_LIMIT),
+            ("EINVAL", MAX_PROCESS_ENV_BYTES_LIMIT),
+            ("EINVAL", MAX_PREAD_BYTES_LIMIT),
+            ("EINVAL", MAX_FD_WRITE_BYTES_LIMIT),
+            ("ENOMEM", MAX_READDIR_ENTRIES_LIMIT),
+        ]) {
+            assert_eq!(error.code(), code);
+            assert_eq!(error.limit_name(), Some(name));
+            assert_eq!(error.limit(), Some(100));
+            assert_eq!(error.observed(), Some(101));
+            assert!(error.to_string().contains("raise limits.resources."));
+        }
 
         // The gauge reflects the sampled usage...
         let gauge = accountant
@@ -680,6 +949,24 @@ mod gauge_tests {
                 .any(|warning| warning.name == TrackedLimit::VmOpenFds),
             "open_fds at 90% of cap must emit an approach warning"
         );
+        let warning_names = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|warning| warning.name)
+            .collect::<std::collections::HashSet<_>>();
+        for expected in [
+            TrackedLimit::VmPreadBytes,
+            TrackedLimit::VmFdWriteBytes,
+            TrackedLimit::VmProcessArgvBytes,
+            TrackedLimit::VmProcessEnvBytes,
+            TrackedLimit::VmReaddirEntries,
+        ] {
+            assert!(
+                warning_names.contains(&expected),
+                "{expected:?} must warn at the exact configured boundary"
+            );
+        }
     }
 
     #[test]

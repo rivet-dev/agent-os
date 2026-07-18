@@ -288,9 +288,9 @@ The first implementation will:
 
 - treat the patched sysroot and `toolchain/crates/wasi-ext` imports as the
   guest ABI source of truth;
-- link exactly the Preview1 subset listed in
-  `crates/execution/assets/wasi-preview1-imports.json` plus the custom imports
-  required by built software;
+- link exactly the Preview1 and custom-import surface generated in
+  `crates/execution/assets/agentos-wasm-abi.json` and required by built
+  software;
 - route every resource-bearing operation to an AgentOS kernel or sidecar
   service;
 - avoid constructing a default ambient `WasiCtx` with host preopens, host
@@ -372,6 +372,32 @@ This introduces an owned-buffer copy for asynchronous I/O. The current V8 path
 already performs JavaScript and bridge copies, so the Wasmtime path may still
 reduce total copying, but the benchmark must measure this rather than assume it.
 
+Signal handlers follow the same memory rule and the existing cooperative
+AgentOS ABI. A caught signal may run at an import, `sched_yield`, top-level
+call boundary, or another declared safe point; neither V8-WASM nor Wasmtime can
+inject `__wasi_signal_trampoline(i32)` into arbitrary pure guest computation
+and then resume that computation. Epochs provide bounded STOP scheduling and
+terminal interruption, not caught-handler injection. The adapter must:
+
+- claim exactly one kernel delivery token, invoke the trampoline, and close or
+  explicitly disarm that token before claiming the next signal; it must never
+  preclaim a FIFO batch against the kernel's LIFO delivery scopes;
+- validate the trampoline's exact type before accepting a user disposition and
+  initialize the inherited mask through `__agentos_set_initial_sigmask` before
+  `_start` and after successful exec replacement;
+- keep a restartable operation's same durable waiter alive across a handler,
+  so retry cannot duplicate an accept, read, write, lock, or other side effect;
+- let an atomically committed or partial operation result win a simultaneous
+  signal race; otherwise return `EINTR` unless every delivered handler carried
+  `SA_RESTART`; and
+- reacquire and revalidate memory after the handler, because the handler may
+  grow or mutate linear memory. Handler trap, exit, exec, nested delivery, and
+  terminal interruption each have an explicit token-cleanup path.
+
+The shared host-operation API owns the authoritative restartability enum and
+completion-versus-signal arbitration. Engine adapters do not scatter their own
+restart booleans or cancel and reissue side-effecting operations.
+
 ## 10. Runtime placement and scheduling
 
 The normative async/blocking ownership and waiter sequence are defined in
@@ -442,6 +468,17 @@ insufficient because the current AgentOS sysroot links emulated single-thread
 pthreads. Real pthread support requires a threaded sysroot, a bounded
 thread-spawn ABI, real mutex/condvar/TLS behavior, group cancellation, and
 per-VM plus process-wide thread admission.
+
+Wasmtime 46 does not expose a supported host hook that can replace or cancel a
+guest blocked in `memory.atomic.wait`. Epoch interruption, fuel, dropping an
+async call future, and dropping ordinary Store handles do not provide a hard
+reap guarantee for that parked native thread. The threaded profile must
+therefore run each WASM thread group in a killable worker process unless a
+reviewed later Wasmtime API supplies an equivalent bounded interruption
+primitive. The parent sidecar remains the sole kernel and policy authority;
+the worker receives typed host operations over a bounded control lane, never
+ambient filesystem or network resources. Teardown must first request an orderly
+group stop, then terminate and reap the worker at a fixed deadline.
 
 The first executor rejects modules that define or import shared memories and
 does not expose a thread-spawn import, regardless of Wasmtime's compile-time
@@ -540,8 +577,10 @@ memory-growth relocation.
 
 Wasmtime async execution also allocates a separate native stack used for stack
 switching when an async host function suspends. Measure this per active Store at
-the target concurrency; configure a bounded `async_stack_size` rather than
-assuming the default is negligible.
+the target concurrency. Configure `async_stack_size` as the selected WASM stack
+cap plus 1.5 MiB of host-call headroom (2 MiB for the default 512 KiB profile),
+charge the whole reservation before Store admission, and reject overflow rather
+than assuming the engine default is negligible.
 
 The pooling allocator is deferred. It can improve reuse and high-concurrency
 instantiation, but requires fixed process-wide slot counts, can reserve roughly
@@ -620,7 +659,7 @@ is checked only when every required item under that phase is checked and the
 revision has been sealed:
 
 - [x] Phase 0: specification, inventory, baseline, and locked decisions.
-- [ ] Phase 1: complete runtime-neutral kernel/executor prerequisite.
+- [x] Phase 1: complete runtime-neutral kernel/executor prerequisite.
 - [ ] Phase 2: production Wasmtime executor at current V8-WASM parity.
 - [ ] Phase 3: performance decision, preferred-backend rollout, and initial
       project completion.
@@ -648,80 +687,85 @@ revision has been sealed:
 
 ### Phase 1 revision: Complete the runtime-neutral executor prerequisite
 
-- [ ] Resolve the duplicate ownership symbols in the owned wasi-libc and make
+- [x] Resolve the duplicate ownership symbols in the owned wasi-libc and make
       `just tools-rebuild` produce the complete canonical command set.
-- [ ] Add the narrow, generation-bound `ProcessRuntimeEndpoint`, durable
+- [x] Add the narrow, generation-bound `ProcessRuntimeEndpoint`, durable
       bounded/coalesced control state, and executor-to-kernel exit reporter.
-- [ ] Register real runtime endpoints for every production V8, Python,
+- [x] Register real runtime endpoints for every production V8, Python,
       binding, and compatibility-WASM process; restrict `StubDriverProcess` to
       tests and explicitly virtual processes.
-- [ ] Introduce the runtime-neutral execution lifecycle, control handle,
+- [x] Introduce the runtime-neutral execution lifecycle, control handle,
       bounded event types, and direct host-call reply handles without requiring
       V8's owned backend object to be `Send`.
-- [ ] Split executor-facing operations into typed filesystem, fd, network,
+- [x] Split executor-facing operations into typed filesystem, fd, network,
       process, terminal, signal, identity, clock, and entropy capabilities;
       reject a single mega-trait or executor switchboard.
-- [ ] Preserve typed `{ code, message, details }` errors from the kernel through
+- [x] Preserve typed `{ code, message, details }` errors from the kernel through
       the sidecar and adapters without string-to-errno reconstruction.
-- [ ] Make the kernel process table the only owner of signal dispositions,
+- [x] Make the kernel process table the only owner of signal dispositions,
       masks, pending state, stop/continue state, terminating state, and wait
       events.
-- [ ] Route external signals, `SIGPIPE`, `SIGCHLD`, PTY control signals,
+- [x] Route external signals, `SIGPIPE`, `SIGCHLD`, PTY control signals,
       process-group signals, cancellation, and termination through one bounded
       delivery path.
-- [ ] Add handler begin/end checkpoints, exec disposition reset, restart
+- [x] Add handler begin/end checkpoints, exec disposition reset, restart
       behavior, and atomic temporary signal masks for `ppoll`.
-- [ ] Replace every `V8SessionHandle` readiness target with a runtime-neutral,
+- [x] Replace every `V8SessionHandle` readiness target with a runtime-neutral,
       bounded, coalesced execution wake handle.
-- [ ] Make kernel VFS, fd tables, permission tier, preopens, descriptor rights,
+- [x] Make kernel VFS, fd tables, permission tier, preopens, descriptor rights,
       rlimits, identity, umask, and mount policy the sole mutable filesystem and
       descriptor authority.
-- [ ] Route embedded V8 filesystem calls and module resolution through the
+- [x] Route embedded V8 filesystem calls and module resolution through the
       shared kernel-backed filesystem service.
-- [ ] Delete mutable host-shadow inventories, bidirectional reconciliation,
+- [x] Delete mutable host-shadow inventories, bidirectional reconciliation,
       and adapter-owned descriptor/socket state that duplicates kernel state;
       retain host access only through explicit confined mounts and plugins.
-- [ ] Move shared DNS, TCP, UDP, Unix socket, TLS, options, polling, and
+- [x] Move shared DNS, TCP, UDP, Unix socket, TLS, options, polling, and
       readiness behavior behind the same sidecar reactor capabilities used by
       all executors.
-- [ ] Move spawn, exec, wait, fd actions, rlimits, locks, terminal/PTY,
+- [x] Move spawn, exec, wait, fd actions, rlimits, locks, terminal/PTY,
       credentials, account lookup, clocks, timers, entropy, and system identity
       behind the shared operations.
-- [ ] Enforce the async/blocking contract: one process Tokio runtime, guest
+- [x] Enforce the async/blocking contract: one process Tokio runtime, guest
       execution on the bounded non-Tokio executor, direct async waiters, and
       bounded admission to fixed workers for unavoidable blocking work.
-- [ ] Bound and account every request, reply, queue, waiter, decoded array,
+- [x] Bound and account every request, reply, queue, waiter, decoded array,
       retained buffer, blocking job, deadline, fd, socket, process, PTY, and
       guest-visible output path; warn near limits and return named typed limit
       errors.
-- [ ] Fix process-aware DAC/sticky/read-only checks for link, remove, rename,
+- [x] Fix process-aware DAC/sticky/read-only checks for link, remove, rename,
       symlink, and unlink operations.
-- [ ] Reject oversized writes, iovecs, subscriptions, pollfds, groups, argv,
+- [x] Reject oversized writes, iovecs, subscriptions, pollfds, groups, argv,
       env, paths, records, and result encodings before allocation, copying, or
       side effects.
-- [ ] Return `ERANGE` with required lengths for short account buffers and cap
+- [x] Return `ERANGE` with required lengths for short account buffers and cap
       supplementary groups before reading guest memory.
-- [ ] Correct the `socketpair(kind, nonblock, cloexec)` ABI and implement the
+- [x] Correct the `socketpair(kind, nonblock, cloexec)` ABI and implement the
       existing bounded kernel `pty_open` path.
-- [ ] Make fd xattrs and metadata operate on canonical open descriptions after
+- [x] Make fd xattrs and metadata operate on canonical open descriptions after
       rename/unlink; remove ambient Node filesystem fallbacks and sentinel
       errors.
-- [ ] Replace terminal fd caches and libc shadow state with live kernel
+- [x] Replace terminal fd caches and libc shadow state with live kernel
       terminal identity, termios, foreground-group, resize, and raw-mode state.
-- [ ] Generate and check in the pinned Preview1 types/layouts and AgentOS custom
-      ABI manifest used by both adapters and import-audit tooling.
-- [ ] Rebuild and inspect every owned-sysroot command; require zero undeclared
+- [x] Generate and check in the pinned Preview1 types/layouts and AgentOS custom
+      ABI manifest used by both adapters and import-audit tooling. The generated
+      runtime-neutral registry must cover all 169 manifest imports, 29 core
+      signatures, 40 `wasi_unstable` aliases, and 110 supported semantic binding
+      groups, including handler/codec identity, execution class,
+      restartability, return convention, permissions, and transactional
+      prevalidation metadata.
+- [x] Rebuild and inspect every owned-sysroot command; require zero undeclared
       imports and explain or remove every compatibility alias/version.
-- [ ] Pass the raw ABI, software, filesystem, process/signal, network, terminal,
+- [x] Pass the raw ABI, software, filesystem, process/signal, network, terminal,
       identity/system, hostile-import, and resource-attack suites listed in
       [`wasmtime-phase-0.md`](./wasmtime-phase-0.md#9-required-differential-proof-suites)
       through V8-WASM.
-- [ ] Pass all exit gates in
+- [x] Pass all exit gates in
       [`runtime-neutral-executors.md`](./runtime-neutral-executors.md#13-exit-gates)
       for V8, Python, and compatibility WASM.
-- [ ] Verify common host services contain no V8, JavaScript, Python, or
+- [x] Verify common host services contain no V8, JavaScript, Python, or
       Wasmtime types and that the Phase 1 tree contains no Wasmtime executor.
-- [ ] Seal all Phase 1 work as one independently reviewable JJ revision on top
+- [x] Seal all Phase 1 work as one independently reviewable JJ revision on top
       of Phase 0.
 
 ### Phase 2 revision: Add Wasmtime at full current feature parity
@@ -748,9 +792,16 @@ revision has been sealed:
       with typed errors.
 - [ ] Implement epoch-based termination and active-CPU accounting that pauses
       while an import is asynchronously waiting.
+- [ ] Implement cooperative caught-signal delivery at import/safe-point
+      boundaries with exact trampoline validation, inherited-mask setup,
+      one-at-a-time LIFO token settlement, nested delivery, and shared
+      completion/partial-result versus `SA_RESTART` arbitration; use epochs
+      only for STOP scheduling and terminal interruption.
 - [ ] Generate and link the owned Preview1 ABI, `wasi_unstable` alias, and every
       `host_fs`, `host_net`, `host_process`, `host_tty`, and `host_user`
-      function/version over the Phase 1 shared operations.
+      function/version over the Phase 1 shared operations using the generated
+      registry and one dynamic `func_new_async` trampoline; no handwritten
+      import-name switchboard is permitted.
 - [ ] Do not create a `wasmtime-wasi` context or install ambient filesystem,
       network, process, environment, clock, random, or stdio capabilities.
 - [ ] Apply the three-phase async guest-memory contract to every waiting import:
@@ -837,6 +888,10 @@ revision has been sealed:
 - [ ] Implement bounded per-VM and process-wide thread admission, one accounted
       Store/instance/native stack per admitted guest thread where required, and
       transactional failure when capacity is unavailable.
+- [ ] Isolate each threaded WASM thread group in a killable worker process,
+      keep AgentOS kernel state in the parent, use bounded typed host-operation
+      IPC, and prove fixed-deadline termination/reaping for a guest parked in
+      `memory.atomic.wait`.
 - [ ] Implement pthread mutex, condition variable, TLS, join/detach, exit,
       cancellation, robust teardown, and required libc behavior.
 - [ ] Move masks and in-progress signal delivery to per-thread kernel records
@@ -869,6 +924,7 @@ revision has been sealed:
 | Readiness remains tied to `V8SessionHandle` | High | Add runtime-neutral bounded execution readiness sinks. |
 | Separate Wasmtime and kernel descriptor namespaces | High | Use the kernel fd table directly and delete Node-WASI shadow descriptor machinery. |
 | Signal masks, dispositions, and pending state remain split across three layers | Critical | Consolidate a bounded runtime-neutral signal broker before Wasmtime admission; test `SIGPIPE`, `SIGCHLD`, `ppoll`, and stop/continue. |
+| An adapter preclaims multiple caught signals against the kernel's LIFO delivery scopes | Critical | Claim, invoke, and settle exactly one token at a time; test two-signal ordering, nested `SA_NODEFER`, `SA_RESETHAND`, exec, exit, and trap cleanup. |
 | Ambient clocks, randomness, hostname, procfs, or devfs leak host state | Critical | Link owned providers only and add hostile raw-import escape tests. |
 | Runner-local identity and rlimits become Wasmtime Store state | High | Move mutable process state into the kernel and keep only process identity handles in the Store. |
 | Kernel errno is converted to text and reparsed by adapters | High | Carry typed error code/message/details across the shared boundary. |
@@ -880,6 +936,7 @@ revision has been sealed:
 | Wasmtime compile/binary cost affects all builds | Medium | Measure; use Cargo feature composition or later crate extraction only if justified. |
 | Permanent dual backends drift | High | Run the same owned-ABI and software parity corpus against both in CI; keep all Linux semantics below the adapters; version one explicit engine feature profile. |
 | Thread support is mistaken for pthread compatibility | Critical | Keep threads out of initial scope and require a separate sysroot/runtime milestone. |
+| A threaded guest parks forever in `memory.atomic.wait` | Critical | Put each threaded thread group in a killable worker process and prove deadline-bounded whole-group reaping. |
 | Fake libc terminal state diverges from kernel PTYs | High | Replace process-global termios/pgid/winsize stubs with live typed kernel operations. |
 
 ## 18. Resolved implementation decisions

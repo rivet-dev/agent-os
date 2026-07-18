@@ -16,7 +16,7 @@ impl<T> DeferredResponseSettlement<T> for tokio::sync::oneshot::Sender<T> {
 
 pub(super) fn validate_guest_network_capability_alias(
     process: &ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<(), SidecarError> {
     if !(request.method.starts_with("net.")
         || request.method.starts_with("dgram.")
@@ -72,9 +72,10 @@ pub(super) fn validate_guest_network_capability_alias(
         .lock()
         .map_err(|_| SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned")))?;
     let generation = process.runtime_context.vm_generation().ok_or_else(|| {
-        SidecarError::InvalidState(String::from(
-            "ERR_AGENTOS_CAPABILITY_SESSION: process runtime is not VM-generation scoped",
-        ))
+        SidecarError::host(
+            "ERR_AGENTOS_CAPABILITY_SESSION",
+            String::from("process runtime is not VM-generation scoped"),
+        )
     })?;
     for (key, kind) in [
         (
@@ -99,18 +100,6 @@ pub(super) fn validate_guest_network_capability_alias(
     Ok(())
 }
 
-pub(super) fn closed_javascript_event_channel(message: &str) -> bool {
-    message == "guest JavaScript event channel closed unexpectedly"
-}
-
-pub(super) fn closed_python_event_channel(message: &str) -> bool {
-    message == "guest Python event channel closed unexpectedly"
-}
-
-pub(super) fn closed_wasm_event_channel(message: &str) -> bool {
-    message == WasmExecutionError::EventChannelClosed.to_string()
-}
-
 pub(super) fn missing_vm_error(vm_id: &str) -> SidecarError {
     SidecarError::InvalidState(format!("VM {vm_id} is no longer active"))
 }
@@ -121,27 +110,13 @@ pub(super) fn missing_process_error(vm_id: &str, process_id: &str) -> SidecarErr
     ))
 }
 
-/// Map a shared guest-kernel-call dispatcher error into a sidecar error,
-/// preserving POSIX errno codes (`ECODE: message`) as kernel errors so guest
-/// callers observe Linux-faithful failures, mirroring the filesystem path.
+/// Map a shared guest-kernel-call dispatcher error without reconstructing an
+/// errno from its human-readable diagnostic.
 fn guest_kernel_core_error(error: agentos_native_sidecar_core::SidecarCoreError) -> SidecarError {
-    let message = error.to_string();
-    let is_errno = message.split_once(':').is_some_and(|(code, _)| {
-        code.len() >= 2
-            && code.starts_with('E')
-            && code[1..]
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-    });
-    if is_errno {
-        SidecarError::Kernel(message)
-    } else {
-        SidecarError::InvalidState(message)
+    match error.code() {
+        Some(code) => SidecarError::Host(HostServiceError::new(code, error.message())),
+        None => SidecarError::InvalidState(error.to_string()),
     }
-}
-
-pub(super) fn is_broken_pipe_error(error: &SidecarError) -> bool {
-    matches!(error, SidecarError::Execution(message) if message.contains("Broken pipe") || message.contains("os error 32") || message.contains("EPIPE"))
 }
 
 pub(super) fn javascript_child_process_gone_error(
@@ -153,16 +128,14 @@ pub(super) fn javascript_child_process_gone_error(
     } else {
         format!("{process_id}/{}", child_path.join("/"))
     };
-    SidecarError::Execution(format!(
-        "ECHILD: child_process {child_label} is no longer available"
+    SidecarError::Host(HostServiceError::new(
+        "ECHILD",
+        format!("child_process {child_label} is no longer available"),
     ))
 }
 
 pub(super) fn is_javascript_child_process_gone_error(error: &SidecarError) -> bool {
-    matches!(
-        error,
-        SidecarError::Execution(message) if guest_errno_code(message) == Some("ECHILD")
-    )
+    guest_error_code(error) == Some("ECHILD")
 }
 
 pub(super) fn missing_javascript_child_cleanup_result(
@@ -304,16 +277,7 @@ where
                 } else {
                     match process.try_poll_execution_event() {
                         Ok(event) => event,
-                        Err(SidecarError::Execution(message))
-                            if (process.runtime == GuestRuntimeKind::JavaScript
-                                && closed_javascript_event_channel(&message))
-                                || (process.runtime == GuestRuntimeKind::Python
-                                    && closed_python_event_channel(&message))
-                                || (process.runtime == GuestRuntimeKind::WebAssembly
-                                    && closed_wasm_event_channel(&message)) =>
-                        {
-                            None
-                        }
+                        Err(SidecarError::ExecutionEventChannelClosed { .. }) => None,
                         Err(error) => return Err(error),
                     }
                 }
@@ -329,13 +293,12 @@ where
                     let signal = *signal;
                     let registration = registration.clone();
                     drop(event);
-                    if let Some(vm) = self.vms.get_mut(vm_id) {
-                        apply_process_signal_state_update(
-                            &mut vm.signal_states,
-                            process_id,
-                            signal,
-                            registration,
-                        );
+                    if let Some(process) = self
+                        .vms
+                        .get(vm_id)
+                        .and_then(|vm| vm.active_processes.get(process_id))
+                    {
+                        apply_kernel_signal_registration(process, signal, &registration)?;
                     }
                 }
                 _ => deferred.push_back(event),
@@ -375,16 +338,10 @@ where
                     payload.process_id
                 ))
             })?;
-        // For a TTY JavaScript process, host stdin must go ONLY to the kernel PTY
-        // master (so line discipline + echo apply); feeding the in-process local
-        // stdin bridge as well would double-deliver the input. Non-TTY JS (piped
-        // stdin) still uses the local bridge; wasm/python always take the
-        // streaming/no-op `write_stdin` path plus the kernel master write below.
-        let tty_js =
-            process.runtime == GuestRuntimeKind::JavaScript && process.tty_master_fd.is_some();
-        if !tty_js {
-            process.execution.write_stdin(&payload.chunk)?;
-        }
+        // Managed processes consume stdin exclusively through their kernel fd
+        // table. Executor-local stdin remains available to standalone execution
+        // users, but feeding it here would replicate state and can double-deliver
+        // bytes when the guest also reads fd 0 through the host bridge.
         write_kernel_process_stdin(&mut vm.kernel, process, &payload.chunk)?;
 
         Ok(DispatchResult {
@@ -418,7 +375,6 @@ where
                     payload.process_id
                 ))
             })?;
-        process.execution.close_stdin()?;
         close_kernel_process_stdin(&mut vm.kernel, process)?;
 
         Ok(DispatchResult {
@@ -558,6 +514,7 @@ where
                 request,
                 ResponsePayload::ResourceSnapshot(ResourceSnapshotResponse {
                     running_processes: snapshot.running_processes as u64,
+                    stopped_processes: snapshot.stopped_processes as u64,
                     exited_processes: snapshot.exited_processes as u64,
                     fd_tables: snapshot.fd_tables as u64,
                     open_fds: snapshot.open_fds as u64,
@@ -784,9 +741,7 @@ where
                 "binary vm.fetch bodies require a kernel-backed HTTP listener",
             )));
         }
-        let socket_paths = build_javascript_socket_path_context(vm)?;
-        let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-        let capabilities = vm.capabilities.clone();
+        let request_json = serialize_http_loopback_request(&request_url, &options, &headers)?;
         let process = vm
             .active_processes
             .get_mut(&target_process_id)
@@ -795,20 +750,75 @@ where
                     "vm.fetch target process disappeared: {target_process_id}"
                 ))
             })?;
-        let request_json = serialize_http_loopback_request(&request_url, &options, &headers)?;
-        let response_json = dispatch_loopback_http_request(LoopbackHttpDispatchRequest {
-            bridge: &self.bridge,
-            vm_id: &vm_id,
-            dns: &vm.dns,
-            socket_paths: &socket_paths,
-            kernel: &mut vm.kernel,
-            kernel_readiness,
-            process,
-            server_id,
-            request_json: &request_json,
-            capabilities,
-        })
-        .await?;
+        let request_key = begin_loopback_http_request(process, server_id, &request_json, || {
+            PendingHttpRequest::Buffered(None)
+        })?;
+
+        // A loopback HTTP server is still an ordinary guest process. Drive it
+        // through the same VM-scoped event pump as every other execution so
+        // filesystem, network, process, signal, and deferred host operations
+        // retain their normal context. The old inline poll loop dispatched
+        // common HostCalls through the kernel-only fallback and could strand
+        // operations such as managed connect or UDP poll.
+        let ownership = OwnershipScope::vm(&connection_id, &session_id, &vm_id);
+        let process_event_notify = Arc::clone(&self.process_event_notify);
+        let deadline = Instant::now() + http_loopback_request_timeout();
+        let response_json = loop {
+            // Register before inspecting durable state so completion racing
+            // the probe cannot lose its only wake edge.
+            let notified = process_event_notify.notified();
+            let response = {
+                let vm = self.vms.get_mut(&vm_id).ok_or_else(|| {
+                    SidecarError::InvalidState(format!("VM {vm_id} is no longer active"))
+                })?;
+                let process = vm
+                    .active_processes
+                    .get_mut(&target_process_id)
+                    .ok_or_else(|| {
+                        SidecarError::Execution(format!(
+                            "vm.fetch target process disappeared: {target_process_id}"
+                        ))
+                    })?;
+                take_loopback_http_response(process, request_key)
+            };
+            if let Some(response) = response {
+                break response;
+            }
+
+            if Instant::now() >= deadline {
+                if let Some(process) = self
+                    .vms
+                    .get_mut(&vm_id)
+                    .and_then(|vm| vm.active_processes.get_mut(&target_process_id))
+                {
+                    process.pending_http_requests.remove(&request_key);
+                }
+                return Err(SidecarError::Execution(String::from(
+                    "HTTP loopback request timed out waiting for net.http_respond",
+                )));
+            }
+
+            match self.pump_process_events(&ownership).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    if let Some(process) = self
+                        .vms
+                        .get_mut(&vm_id)
+                        .and_then(|vm| vm.active_processes.get_mut(&target_process_id))
+                    {
+                        process.pending_http_requests.remove(&request_key);
+                    }
+                    return Err(error);
+                }
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(remaining) => {}
+            }
+        };
 
         let response = self.respond(
             request,
@@ -832,12 +842,22 @@ where
 
         self.drain_root_signal_state_events(&vm_id, &payload.process_id)?;
 
-        let handlers = self
+        let mut handlers = BTreeMap::new();
+        if let Some(process) = self
             .vms
             .get(&vm_id)
-            .and_then(|vm| vm.signal_states.get(&payload.process_id))
-            .cloned()
-            .unwrap_or_default();
+            .and_then(|vm| vm.active_processes.get(&payload.process_id))
+        {
+            for signal in 1..=64 {
+                let action = process
+                    .kernel_handle
+                    .signal_action(signal, None)
+                    .map_err(kernel_error)?;
+                if action.disposition != agentos_kernel::process_table::SignalDisposition::Default {
+                    handlers.insert(signal as u32, protocol_signal_registration(action));
+                }
+            }
+        }
 
         Ok(DispatchResult {
             response: signal_state_response(request, payload.process_id, handlers),

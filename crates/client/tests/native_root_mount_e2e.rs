@@ -164,7 +164,11 @@ impl MemBridgeFs {
             }
             "pwrite" => {
                 let path = path()?;
-                let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let offset = args
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| "EINVAL missing offset".to_string())?
+                    as usize;
                 let content = args
                     .get("content")
                     .and_then(Value::as_str)
@@ -180,7 +184,7 @@ impl MemBridgeFs {
                 }
                 let end = offset
                     .checked_add(content.len())
-                    .ok_or_else(|| "EFBIG write offset overflow".to_string())?;
+                    .ok_or_else(|| "EFBIG pwrite range overflow".to_string())?;
                 if entry.content.len() < end {
                     entry.content.resize(end, 0);
                 }
@@ -449,9 +453,9 @@ impl MemBridgeFs {
             }
             "utimes" => {
                 let path = path()?;
-                if !entries.contains_key(&path) {
-                    return Err(format!("ENOENT no such entry: {path}"));
-                }
+                entries
+                    .get(&path)
+                    .ok_or_else(|| format!("ENOENT no such entry: {path}"))?;
                 Ok(None)
             }
             "truncate" => {

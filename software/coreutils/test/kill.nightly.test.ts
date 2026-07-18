@@ -59,7 +59,7 @@ describeIf(hasWasmBinaries, "upstream kill", () => {
 
 		const nativeProbe = await runNative("sh", ["-c", "env kill -0 -- $$"]);
 		const wasmProbe = await vm.exec("sh -c 'env kill -0 -- $$'");
-		expect(wasmProbe.exitCode).toBe(nativeProbe.exitCode);
+		expect(wasmProbe.exitCode, wasmProbe.stderr).toBe(nativeProbe.exitCode);
 		expect(wasmProbe.exitCode).toBe(0);
 	}, 20_000);
 

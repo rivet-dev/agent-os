@@ -72,13 +72,32 @@ fn host_net_fd_read_keeps_guest_faults_separate_from_socket_errors() {
 #[test]
 fn host_net_fd_write_keeps_guest_faults_separate_from_socket_errors() {
     let source = runner_source();
+    let fd_write = between(
+        &source,
+        "wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {",
+        "wasiImport.fd_close = (fd) => {",
+    );
+    let prevalidation = fd_write
+        .find("const iovRequest = validateGuestIovRequest(iovs, iovsLen);")
+        .expect("fd_write must prevalidate the guest iovec table");
+    let socket_lookup = fd_write
+        .find("const hostNetSocket = getHostNetSocket(numericFd);")
+        .expect("fd_write must look up a host-net socket");
+    let admitted_request = fd_write
+        .find("iovsLen,\n      nwrittenPtr,\n      iovRequest,")
+        .expect("fd_write must pass the admitted iovec request to host-net");
+    assert!(
+        prevalidation < socket_lookup && socket_lookup < admitted_request,
+        "host-net fd_write must validate guest ranges before socket work"
+    );
+
     let socket_write = between(
         &source,
         "function writeHostNetSocketFromGuestIovs(",
         "function dequeuePipeBytes(",
     );
     let guest_fault = socket_write
-        .find("bytes = collectGuestIovBytes(iovs, iovsLen);")
+        .find("bytes = collectGuestIovBytes(iovs, iovsLen, iovRequest);")
         .expect("host-net fd_write must collect guest iovecs");
     let rpc = socket_write
         .find("callSyncRpc('net.write'")
@@ -166,8 +185,8 @@ fn host_net_empty_read_invalidates_cached_poll_readiness() {
 fn blocking_kernel_pipe_writes_pump_wasm_children_on_backpressure() {
     let source = runner_source();
     let start = source
-        .rfind("wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {")
-        .expect("missing final WASM fd_write override");
+        .rfind("function writeKernelFdCooperatively(targetFd, bytes) {")
+        .expect("missing cooperative kernel fd writer");
     let end = source[start..]
         .find("wasiImport.poll_oneoff =")
         .expect("missing poll_oneoff after final fd_write");
@@ -175,7 +194,9 @@ fn blocking_kernel_pipe_writes_pump_wasm_children_on_backpressure() {
     assert!(
         fd_write.contains("error?.code !== 'EAGAIN'")
             && fd_write.contains("process.fd_stat")
-            && fd_write.contains("pumpSpawnedChildrenOrWait(SPAWNED_CHILD_WAIT_SLICE_MS)"),
-        "blocking kernel-pipe writes must schedule the child that can free pipe capacity"
+            && fd_write.contains("pumpSpawnedChildren(0)")
+            && fd_write.contains("callSyncRpc('__kernel_poll'")
+            && fd_write.contains("events: KERNEL_POLLOUT"),
+        "blocking kernel-pipe writes must schedule children and wait for kernel write readiness"
     );
 }

@@ -1,5 +1,138 @@
 use super::*;
 use crate::protocol::ExecutionStreamChannel;
+use crate::state::{DeferredRpcError, ManagedHostNetDescriptionRegistry};
+
+fn rollback_new_deferred_connect_resources(
+    process: &mut ActiveProcess,
+    kernel: &mut SidecarKernel,
+    kernel_readiness: &KernelSocketReadinessRegistry,
+    unix_addresses: &GuestUnixAddressRegistry,
+    previous_tcp_ids: &BTreeSet<String>,
+    previous_unix_ids: &BTreeSet<String>,
+) {
+    let new_tcp_ids = process
+        .tcp_sockets
+        .keys()
+        .filter(|socket_id| !previous_tcp_ids.contains(*socket_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    for socket_id in new_tcp_ids {
+        if let Some(socket) = process.tcp_sockets.remove(&socket_id) {
+            release_tcp_socket_handle(process, &socket_id, socket, kernel, kernel_readiness);
+        }
+    }
+    let new_unix_ids = process
+        .unix_sockets
+        .keys()
+        .filter(|socket_id| !previous_unix_ids.contains(*socket_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    for socket_id in new_unix_ids {
+        if let Some(socket) = process.unix_sockets.remove(&socket_id) {
+            release_unix_socket_handle(process, &socket_id, socket, unix_addresses);
+        }
+    }
+}
+
+pub(super) fn settle_host_call_completion_for_process(
+    kernel: &mut SidecarKernel,
+    kernel_readiness: &KernelSocketReadinessRegistry,
+    unix_addresses: &GuestUnixAddressRegistry,
+    managed_descriptions: &ManagedHostNetDescriptionRegistry,
+    process: &mut ActiveProcess,
+    completion: crate::state::HostCallCompletion,
+) -> Result<(), SidecarError> {
+    let previous_tcp_ids = process.tcp_sockets.keys().cloned().collect::<BTreeSet<_>>();
+    let previous_unix_ids = process
+        .unix_sockets
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let request_id = completion.reply.identity().call_id;
+    let connected = process.pending_net_connects.remove(&request_id);
+    let managed_description_id = process
+        .pending_managed_host_net_connects
+        .remove(&request_id);
+    let completion_result = match (completion.result, connected) {
+        (Ok(_), Some(connected)) => finalize_net_connect(process, kernel_readiness, connected)
+            .map_err(|error| crate::state::DeferredRpcError::from(host_service_error(&error))),
+        (result @ Err(_), Some(connected)) => {
+            match restore_pending_bound_unix_connect(process, &connected) {
+                Ok(()) => result,
+                Err(error) => Err(crate::state::DeferredRpcError::from(host_service_error(
+                    &error,
+                ))),
+            }
+        }
+        (result, None) => result,
+    };
+    let result = match completion_result {
+        Ok(value) => {
+            if let Some(description_id) = managed_description_id {
+                let update = (|| -> Result<(), SidecarError> {
+                    let socket_id = value
+                        .get("socketId")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            SidecarError::host(
+                                "EIO",
+                                "managed connect completion omitted socket id",
+                            )
+                        })?
+                        .to_owned();
+                    let local_address =
+                        crate::execution::host_dispatch::managed_socket_address_from_info(
+                            &value, false,
+                        )?;
+                    let peer_address =
+                        crate::execution::host_dispatch::managed_socket_address_from_info(
+                            &value, true,
+                        )?;
+                    let mut descriptions = managed_descriptions.lock().map_err(|_| {
+                        SidecarError::host("EIO", "managed description registry lock poisoned")
+                    })?;
+                    let description = descriptions.get_mut(&description_id).ok_or_else(|| {
+                        SidecarError::host(
+                            "ESTALE",
+                            "managed connect description disappeared before completion",
+                        )
+                    })?;
+                    let route = if description.domain == agentos_execution::host::SocketDomain::Unix
+                    {
+                        crate::state::ManagedHostNetRoute::UnixSocket(socket_id)
+                    } else {
+                        crate::state::ManagedHostNetRoute::TcpSocket(socket_id)
+                    };
+                    description.routes.insert(process.kernel_pid, route);
+                    description.local_address = local_address;
+                    description.peer_address = peer_address;
+                    Ok(())
+                })();
+                if let Err(error) = update {
+                    rollback_new_deferred_connect_resources(
+                        process,
+                        kernel,
+                        kernel_readiness,
+                        unix_addresses,
+                        &previous_tcp_ids,
+                        &previous_unix_ids,
+                    );
+                    return completion
+                        .reply
+                        .fail(host_service_error(&error))
+                        .map_err(SidecarError::from);
+                }
+            }
+            completion.reply.succeed(HostCallReply::Json(value))
+        }
+        Err(error) => completion.reply.fail(HostServiceError {
+            code: error.code,
+            message: error.message,
+            details: error.details,
+        }),
+    };
+    result.map_err(SidecarError::from)
+}
 
 pub(super) struct BindingProcessEventRequest {
     pub(super) runtime_context: agentos_runtime::RuntimeContext,
@@ -9,13 +142,106 @@ pub(super) struct BindingProcessEventRequest {
     pub(super) vm_id: String,
     pub(super) binding_resolution: BindingCommandResolution,
     pub(super) cancelled: Arc<AtomicBool>,
+    pub(super) paused: Arc<AtomicBool>,
+    pub(super) pause_notify: Arc<tokio::sync::Notify>,
     pub(super) pending_events: Arc<Mutex<VecDeque<ActiveExecutionEvent>>>,
-    pub(super) event_overflow_reason: Arc<Mutex<Option<String>>>,
+    pub(super) event_overflow_reason: Arc<Mutex<Option<HostServiceError>>>,
     pub(super) pending_event_bytes: Arc<AtomicUsize>,
     pub(super) pending_event_count_limit: Arc<AtomicUsize>,
     pub(super) pending_event_bytes_limit: Arc<AtomicUsize>,
     pub(super) vm_pending_event_bytes_budget: Arc<VmPendingByteBudget>,
     pub(super) event_notify: Arc<tokio::sync::Notify>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::execution) fn enqueue_deferred_host_service_completion<B>(
+    sidecar: &NativeSidecar<B>,
+    vm_id: &str,
+    process_id: &str,
+    runtime: agentos_runtime::RuntimeContext,
+    reply: DirectHostReplyHandle,
+    operation: &str,
+    receiver: tokio::sync::oneshot::Receiver<Result<Value, DeferredRpcError>>,
+    timeout: Option<Duration>,
+    task_class: agentos_runtime::TaskClass,
+) -> Result<(), SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let task_reply = reply.clone();
+    let method = operation.to_owned();
+    let vm = sidecar
+        .vms
+        .get(vm_id)
+        .expect("validated deferred-service VM remains registered");
+    let connection_id = vm.connection_id.clone();
+    let session_id = vm.session_id.clone();
+    let sender = sidecar.process_event_sender.clone();
+    let event_notify = Arc::clone(&sidecar.process_event_notify);
+    let envelope_vm_id = vm_id.to_owned();
+    let envelope_process_id = process_id.to_owned();
+    if let Err(error) = runtime.spawn(task_class, async move {
+        let receive = async {
+            receiver.await.unwrap_or_else(|_| {
+                Err(DeferredRpcError {
+                    code: "ERR_AGENTOS_DEFERRED_RPC_RESPONSE_CHANNEL_CLOSED".to_owned(),
+                    message: format!("deferred host-service response channel closed for {method}"),
+                    details: None,
+                })
+            })
+        };
+        let result = match timeout {
+            Some(timeout) => {
+                match crate::execution::operation_deadline_timeout(&method, timeout, receive).await {
+                    Ok(result) => result,
+                    Err(_) => Err(DeferredRpcError {
+                        code: "ETIMEDOUT".to_owned(),
+                        message: format!(
+                            "{method} exceeded limits.reactor.operationDeadlineMs ({} ms)",
+                            timeout.as_millis()
+                        ),
+                        details: None,
+                    }),
+                }
+            }
+            None => receive.await,
+        };
+        let envelope = ProcessEventEnvelope {
+            connection_id,
+            session_id,
+            vm_id: envelope_vm_id,
+            process_id: envelope_process_id,
+            event: ActiveExecutionEvent::HostCallCompletion(
+                crate::state::HostCallCompletion {
+                    reply: task_reply,
+                    result,
+                },
+            ),
+        };
+        if let Err(error) = sender.send(envelope).await {
+            if let ActiveExecutionEvent::HostCallCompletion(completion) = error.0.event {
+                if let Err(reply_error) = completion.reply.fail(HostServiceError::new(
+                    "ECANCELED",
+                    "deferred host-service completion lane closed",
+                )) {
+                    eprintln!(
+                        "ERR_AGENTOS_HOST_REPLY_SETTLEMENT: failed to cancel deferred host-service completion after lane closure: {reply_error}"
+                    );
+                }
+            }
+            eprintln!(
+                "ERR_AGENTOS_PROCESS_EVENT_CHANNEL_CLOSED: deferred host-service completion could not be delivered"
+            );
+        } else {
+            event_notify.notify_one();
+        }
+    }) {
+        reply
+            .fail(host_service_error(&SidecarError::from(error)))
+            .map_err(SidecarError::from)?;
+    }
+    Ok(())
 }
 
 // The producer owns these independent atomics/queues; keeping them explicit
@@ -24,7 +250,7 @@ pub(super) struct BindingProcessEventRequest {
 pub(crate) fn send_binding_process_event(
     cancelled: &AtomicBool,
     pending_events: &Arc<Mutex<VecDeque<ActiveExecutionEvent>>>,
-    event_overflow_reason: &Mutex<Option<String>>,
+    event_overflow_reason: &Mutex<Option<HostServiceError>>,
     pending_event_bytes: &AtomicUsize,
     pending_event_count_limit: &AtomicUsize,
     pending_event_bytes_limit: &AtomicUsize,
@@ -45,10 +271,18 @@ pub(crate) fn send_binding_process_event(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         reason.get_or_insert_with(|| {
-            format!(
-                "process execution event queue exceeded {count_limit} events \
-                 (limits.process.pendingEventCount); raise limits.process.pendingEventCount"
+            HostServiceError::new(
+                "ERR_AGENTOS_RESOURCE_LIMIT",
+                format!(
+                    "process execution event queue exceeded {count_limit} events \
+                     (limits.process.pendingEventCount); raise limits.process.pendingEventCount"
+                ),
             )
+            .with_details(json!({
+                "limitName": "limits.process.pendingEventCount",
+                "limit": count_limit,
+                "observed": pending_events.len().saturating_add(1),
+            }))
         });
         return false;
     }
@@ -58,23 +292,42 @@ pub(crate) fn send_binding_process_event(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         reason.get_or_insert_with(|| {
-            format!(
-                "process execution event queue exceeded {byte_limit} bytes \
-                 (limits.process.pendingEventBytes); raise limits.process.pendingEventBytes"
+            HostServiceError::new(
+                "ERR_AGENTOS_RESOURCE_LIMIT",
+                format!(
+                    "process execution event queue exceeded {byte_limit} bytes \
+                     (limits.process.pendingEventBytes); raise limits.process.pendingEventBytes"
+                ),
             )
+            .with_details(json!({
+                "limitName": "limits.process.pendingEventBytes",
+                "limit": byte_limit,
+                "observed": bytes.saturating_add(event_bytes),
+            }))
         });
         return false;
     }
     if !vm_pending_event_bytes_budget.try_reserve(event_bytes) {
+        let limit = vm_pending_event_bytes_budget.limit();
+        let observed = vm_pending_event_bytes_budget
+            .used()
+            .saturating_add(event_bytes);
         let mut reason = event_overflow_reason
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         reason.get_or_insert_with(|| {
-            format!(
-                "VM process execution event queues exceeded {} bytes \
-                 (limits.process.pendingEventBytes); raise limits.process.pendingEventBytes",
-                vm_pending_event_bytes_budget.limit()
+            HostServiceError::new(
+                "ERR_AGENTOS_RESOURCE_LIMIT",
+                format!(
+                    "VM process execution event queues exceeded {limit} bytes \
+                     (limits.process.pendingEventBytes); raise limits.process.pendingEventBytes"
+                ),
             )
+            .with_details(json!({
+                "limitName": "limits.process.pendingEventBytes",
+                "limit": limit,
+                "observed": observed,
+            }))
         });
         return false;
     }
@@ -87,7 +340,7 @@ pub(crate) fn send_binding_process_event(
 fn send_binding_process_event_and_notify(
     cancelled: &AtomicBool,
     pending_events: &Arc<Mutex<VecDeque<ActiveExecutionEvent>>>,
-    event_overflow_reason: &Mutex<Option<String>>,
+    event_overflow_reason: &Mutex<Option<HostServiceError>>,
     pending_event_bytes: &AtomicUsize,
     pending_event_count_limit: &AtomicUsize,
     pending_event_bytes_limit: &AtomicUsize,
@@ -112,6 +365,43 @@ fn send_binding_process_event_and_notify(
 }
 
 pub(super) fn spawn_binding_process_events(request: BindingProcessEventRequest) {
+    // A STOP acknowledged before producer admission must prevent the trusted
+    // callback from starting. Resume wakes this one bounded gate task. A
+    // callback already in flight may finish, but its events remain hidden by
+    // the paused adapter poll gate until CONT.
+    if request.paused.load(Ordering::Acquire) {
+        let runtime = request.runtime_context.clone();
+        let paused = Arc::clone(&request.paused);
+        let pause_notify = Arc::clone(&request.pause_notify);
+        let cancelled = Arc::clone(&request.cancelled);
+        let failure_reason = Arc::clone(&request.event_overflow_reason);
+        let failure_notify = Arc::clone(&request.event_notify);
+        if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Vm, async move {
+            loop {
+                let notified = pause_notify.notified();
+                if cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                if !paused.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
+            }
+            spawn_binding_process_events(request);
+        }) {
+            let mut reason = failure_reason
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            reason.get_or_insert_with(|| {
+                HostServiceError::new(
+                    "ERR_AGENTOS_BINDING_PAUSE_GATE",
+                    format!("failed to schedule paused binding producer gate: {error}"),
+                )
+            });
+            failure_notify.notify_one();
+        }
+        return;
+    }
     let BindingProcessEventRequest {
         runtime_context,
         sidecar_requests,
@@ -120,6 +410,8 @@ pub(super) fn spawn_binding_process_events(request: BindingProcessEventRequest) 
         vm_id,
         binding_resolution,
         cancelled,
+        paused: _,
+        pause_notify: _,
         pending_events,
         event_overflow_reason,
         pending_event_bytes,
@@ -155,10 +447,23 @@ pub(super) fn spawn_binding_process_events(request: BindingProcessEventRequest) 
                 };
                 match binding_resolution {
                     BindingCommandResolution::Failure(message) => {
-                        if enqueue(ActiveExecutionEvent::Stderr(format_binding_failure_output(
+                        let output_enqueued = enqueue(ActiveExecutionEvent::Stderr(
+                            format_binding_failure_output(
                             &message,
-                        ))) {
-                            let _ = enqueue(ActiveExecutionEvent::Exited(1));
+                            ),
+                        ));
+                        if !output_enqueued && !cancelled.load(Ordering::Acquire) {
+                            eprintln!(
+                                "ERR_AGENTOS_BINDING_EVENT_DELIVERY: failed to enqueue binding failure output; queue limit state retains the typed failure"
+                            );
+                        } else if output_enqueued {
+                            if !enqueue(ActiveExecutionEvent::Exited(1))
+                                && !cancelled.load(Ordering::Acquire)
+                            {
+                                eprintln!(
+                                    "ERR_AGENTOS_BINDING_EVENT_DELIVERY: failed to enqueue binding failure exit event; queue limit state retains the typed failure"
+                                );
+                            }
                         }
                     }
                     BindingCommandResolution::Invoke { request, timeout } => {
@@ -210,8 +515,19 @@ pub(super) fn spawn_binding_process_events(request: BindingProcessEventRequest) 
                         } else {
                             ActiveExecutionEvent::Stderr(output)
                         };
-                        if enqueue(output_event) {
-                            let _ = enqueue(ActiveExecutionEvent::Exited(exit_code));
+                        let output_enqueued = enqueue(output_event);
+                        if !output_enqueued && !cancelled.load(Ordering::Acquire) {
+                            eprintln!(
+                                "ERR_AGENTOS_BINDING_EVENT_DELIVERY: failed to enqueue binding result output; queue limit state retains the typed failure"
+                            );
+                        } else if output_enqueued {
+                            if !enqueue(ActiveExecutionEvent::Exited(exit_code))
+                                && !cancelled.load(Ordering::Acquire)
+                            {
+                                eprintln!(
+                                    "ERR_AGENTOS_BINDING_EVENT_DELIVERY: failed to enqueue binding exit event; queue limit state retains the typed failure"
+                                );
+                            }
                         }
                     }
                 }
@@ -230,10 +546,21 @@ pub(super) fn spawn_binding_process_events(request: BindingProcessEventRequest) 
                 event,
             )
         };
-        if enqueue_failure(ActiveExecutionEvent::Stderr(format_binding_failure_output(
-            &error.to_string(),
-        ))) {
-            let _ = enqueue_failure(ActiveExecutionEvent::Exited(1));
+        let output_enqueued = enqueue_failure(ActiveExecutionEvent::Stderr(
+            format_binding_failure_output(&error.to_string()),
+        ));
+        if !output_enqueued && !failure_cancelled.load(Ordering::Acquire) {
+            eprintln!(
+                "ERR_AGENTOS_BINDING_EVENT_DELIVERY: failed to enqueue blocking-admission failure output; queue limit state retains the typed failure"
+            );
+        } else if output_enqueued {
+            if !enqueue_failure(ActiveExecutionEvent::Exited(1))
+                && !failure_cancelled.load(Ordering::Acquire)
+            {
+                eprintln!(
+                    "ERR_AGENTOS_BINDING_EVENT_DELIVERY: failed to enqueue blocking-admission exit event; queue limit state retains the typed failure"
+                );
+            }
         }
     }
 }
@@ -267,6 +594,7 @@ pub(crate) fn record_execute_phase(stage: &str, elapsed: Duration) {
     }
     let phases = EXECUTE_PHASES.get_or_init(|| Mutex::new(BTreeMap::new()));
     let Ok(mut phases) = phases.lock() else {
+        eprintln!("ERR_AGENTOS_DIAGNOSTIC_STATE: execute-phase statistics lock is poisoned");
         return;
     };
     let stats = phases.entry(stage.to_string()).or_default();
@@ -292,7 +620,12 @@ pub(crate) fn record_execute_phase(stage: &str, elapsed: Duration) {
             stats.calls
         ));
     }
-    let _ = fs::write(path, output);
+    if let Err(error) = fs::write(&path, output) {
+        eprintln!(
+            "ERR_AGENTOS_DIAGNOSTIC_WRITE: failed to write process execute-phase statistics to {}: {error}",
+            path.to_string_lossy()
+        );
+    }
 }
 
 pub(super) fn mark_execute_response_ready(vm_id: &str, process_id: &str) {
@@ -300,8 +633,13 @@ pub(super) fn mark_execute_response_ready(vm_id: &str, process_id: &str) {
         return;
     }
     let lifetimes = EXECUTE_LIFETIMES.get_or_init(|| Mutex::new(BTreeMap::new()));
-    if let Ok(mut lifetimes) = lifetimes.lock() {
-        lifetimes.insert(execute_phase_key(vm_id, process_id), Instant::now());
+    match lifetimes.lock() {
+        Ok(mut lifetimes) => {
+            lifetimes.insert(execute_phase_key(vm_id, process_id), Instant::now());
+        }
+        Err(_) => {
+            eprintln!("ERR_AGENTOS_DIAGNOSTIC_STATE: execute-lifetime lock is poisoned");
+        }
     }
 }
 
@@ -310,15 +648,20 @@ pub(crate) fn mark_execute_exit_event_queued(vm_id: &str, process_id: &str) {
         return;
     }
     let queued = EXECUTE_EXIT_EVENT_QUEUED.get_or_init(|| Mutex::new(BTreeMap::new()));
-    if let Ok(mut queued) = queued.lock() {
-        let key = execute_phase_key(vm_id, process_id);
-        if let std::collections::btree_map::Entry::Vacant(entry) = queued.entry(key) {
-            record_execute_response_to_exit_milestone(
-                "execute_response_to_exit_event_queued",
-                vm_id,
-                process_id,
-            );
-            entry.insert(Instant::now());
+    match queued.lock() {
+        Ok(mut queued) => {
+            let key = execute_phase_key(vm_id, process_id);
+            if let std::collections::btree_map::Entry::Vacant(entry) = queued.entry(key) {
+                record_execute_response_to_exit_milestone(
+                    "execute_response_to_exit_event_queued",
+                    vm_id,
+                    process_id,
+                );
+                entry.insert(Instant::now());
+            }
+        }
+        Err(_) => {
+            eprintln!("ERR_AGENTOS_DIAGNOSTIC_STATE: execute-exit queue timing lock is poisoned");
         }
     }
 }
@@ -331,6 +674,7 @@ pub(crate) fn record_execute_exit_event_queue_wait(stage: &str, vm_id: &str, pro
         return;
     };
     let Ok(mut queued) = queued.lock() else {
+        eprintln!("ERR_AGENTOS_DIAGNOSTIC_STATE: execute-exit queue timing lock is poisoned");
         return;
     };
     if let Some(started) = queued.remove(&execute_phase_key(vm_id, process_id)) {
@@ -350,6 +694,7 @@ pub(crate) fn record_execute_response_to_exit_milestone(
         return;
     };
     let Ok(lifetimes) = lifetimes.lock() else {
+        eprintln!("ERR_AGENTOS_DIAGNOSTIC_STATE: execute-lifetime lock is poisoned");
         return;
     };
     if let Some(started) = lifetimes.get(&execute_phase_key(vm_id, process_id)) {
@@ -365,6 +710,7 @@ fn record_execute_response_to_exit(vm_id: &str, process_id: &str) {
         return;
     };
     let Ok(mut lifetimes) = lifetimes.lock() else {
+        eprintln!("ERR_AGENTOS_DIAGNOSTIC_STATE: execute-lifetime lock is poisoned");
         return;
     };
     if let Some(started) = lifetimes.remove(&execute_phase_key(vm_id, process_id)) {
@@ -380,6 +726,7 @@ pub(super) fn record_sync_rpc(method: &str) {
     let stats =
         SYNC_RPC_STATS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
     let Ok(mut map) = stats.lock() else {
+        eprintln!("ERR_AGENTOS_DIAGNOSTIC_STATE: sync-RPC statistics lock is poisoned");
         return;
     };
     *map.entry(method.to_string()).or_insert(0) += 1;
@@ -467,6 +814,9 @@ where
                     {
                         continue;
                     }
+                    self.recheck_root_deferred_guest_wait(&vm_id, &process_id)?;
+                    self.recheck_root_deferred_kernel_poll(&vm_id, &process_id)?;
+                    self.recheck_root_deferred_kernel_read(&vm_id, &process_id)?;
                     enum ProcessPollResult {
                         Event(Box<Option<PolledExecutionEvent>>),
                         RecoverClosedChannel,
@@ -483,14 +833,7 @@ where
                         } else {
                             match process.poll_execution_event(Duration::ZERO).await {
                                 Ok(event) => ProcessPollResult::Event(Box::new(event)),
-                                Err(SidecarError::Execution(message))
-                                    if (process.runtime == GuestRuntimeKind::JavaScript
-                                        && closed_javascript_event_channel(&message))
-                                        || (process.runtime == GuestRuntimeKind::Python
-                                            && closed_python_event_channel(&message))
-                                        || (process.runtime == GuestRuntimeKind::WebAssembly
-                                            && closed_wasm_event_channel(&message)) =>
-                                {
+                                Err(SidecarError::ExecutionEventChannelClosed { .. }) => {
                                     ProcessPollResult::RecoverClosedChannel
                                 }
                                 Err(other) => return Err(other),
@@ -569,6 +912,128 @@ where
         Ok(emitted_any)
     }
 
+    fn recheck_root_deferred_guest_wait(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+    ) -> Result<(), SidecarError> {
+        let notify = Arc::clone(&self.process_event_notify);
+        let Some(vm) = self.vms.get_mut(vm_id) else {
+            return Ok(());
+        };
+        let runtime = vm.runtime_context.clone();
+        let wait_handle = vm.kernel.process_wait_handle();
+        let generation = vm.generation;
+        let (kernel, active_processes) = (&mut vm.kernel, &mut vm.active_processes);
+        let Some(process) = active_processes.get_mut(process_id) else {
+            return Ok(());
+        };
+        process.apply_runtime_controls()?;
+        if process.deferred_guest_wait.is_none() {
+            return Ok(());
+        }
+        service_deferred_guest_wait(
+            generation,
+            &runtime,
+            wait_handle,
+            notify,
+            kernel,
+            process,
+            None,
+        )
+    }
+
+    fn recheck_root_deferred_kernel_poll(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+    ) -> Result<(), SidecarError> {
+        let notify = Arc::clone(&self.process_event_notify);
+        let socket_paths = self
+            .vms
+            .get(vm_id)
+            .map(build_socket_path_context)
+            .transpose()?;
+        let Some(vm) = self.vms.get_mut(vm_id) else {
+            return Ok(());
+        };
+        let runtime = vm.runtime_context.clone();
+        let wait_handle = vm.kernel.poll_wait_handle();
+        let generation = vm.generation;
+        let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
+        let capabilities = vm.capabilities.clone();
+        let managed_descriptions = Arc::clone(&vm.managed_host_net_descriptions);
+        let (kernel, active_processes) = (&mut vm.kernel, &mut vm.active_processes);
+        let Some(process) = active_processes.get_mut(process_id) else {
+            return Ok(());
+        };
+        process.apply_runtime_controls()?;
+        if process.deferred_kernel_poll.is_none() {
+            return Ok(());
+        }
+        if process
+            .deferred_kernel_poll
+            .as_ref()
+            .is_some_and(|poll| poll.combined)
+        {
+            return host_dispatch::service_deferred_posix_poll(
+                generation,
+                &runtime,
+                wait_handle,
+                notify,
+                socket_paths
+                    .as_ref()
+                    .expect("registered VM has a socket path context"),
+                kernel_readiness,
+                capabilities,
+                managed_descriptions,
+                kernel,
+                process,
+                None,
+            );
+        }
+        service_deferred_kernel_poll(
+            generation,
+            &runtime,
+            wait_handle,
+            notify,
+            kernel,
+            process,
+            None,
+        )
+    }
+
+    fn recheck_root_deferred_kernel_read(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+    ) -> Result<(), SidecarError> {
+        let notify = Arc::clone(&self.process_event_notify);
+        let Some(vm) = self.vms.get_mut(vm_id) else {
+            return Ok(());
+        };
+        let runtime = vm.runtime_context.clone();
+        let wait_handle = vm.kernel.poll_wait_handle();
+        let generation = vm.generation;
+        let (kernel, active_processes) = (&mut vm.kernel, &mut vm.active_processes);
+        let Some(process) = active_processes.get_mut(process_id) else {
+            return Ok(());
+        };
+        process.apply_runtime_controls()?;
+        if process.deferred_kernel_read.is_none() {
+            return Ok(());
+        }
+        service_deferred_kernel_read(
+            generation,
+            &runtime,
+            wait_handle,
+            notify,
+            kernel,
+            process,
+            None,
+        )
+    }
+
     /// Arm exactly one sidecar task for the earliest zombie deadline across
     /// every VM. Kernel process tables remain runtime-neutral and are reaped on
     /// the next process-event turn after this coalesced wake.
@@ -604,9 +1069,10 @@ where
             task.abort();
         }
         let runtime = self.runtime_context.clone().ok_or_else(|| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_RUNTIME_UNAVAILABLE: kernel zombie reaper requires the process RuntimeContext",
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_RUNTIME_UNAVAILABLE",
+                String::from("kernel zombie reaper requires the process RuntimeContext"),
+            )
         })?;
         let notify = Arc::clone(&self.process_event_notify);
         let delay = next_deadline.saturating_duration_since(Instant::now());
@@ -625,9 +1091,11 @@ where
     fn internal_execution_event(event: &ActiveExecutionEvent) -> bool {
         matches!(
             event,
-            ActiveExecutionEvent::JavascriptSyncRpcRequest(_)
-                | ActiveExecutionEvent::PythonVfsRpcRequest(_)
-                | ActiveExecutionEvent::PythonSocketConnectCompletion(_)
+            ActiveExecutionEvent::Common(ExecutionEvent::HostCall { .. })
+                | ActiveExecutionEvent::Common(ExecutionEvent::Warning(_))
+                | ActiveExecutionEvent::Common(ExecutionEvent::RuntimeFault(_))
+                | ActiveExecutionEvent::HostRpcRequest(_)
+                | ActiveExecutionEvent::ManagedUdpPollRecheck(_)
                 | ActiveExecutionEvent::SignalState { .. }
         )
     }
@@ -643,19 +1111,9 @@ where
         let Some(process) = vm.active_processes.get_mut(process_id) else {
             return Ok(None);
         };
-        if process.execution.uses_shared_v8_runtime() {
+        let Some(runtime_child_pid) = process.execution.native_process_id() else {
             return Ok(None);
-        }
-        if process.runtime != GuestRuntimeKind::JavaScript
-            && process.runtime != GuestRuntimeKind::Python
-            && process.runtime != GuestRuntimeKind::WebAssembly
-        {
-            return Ok(None);
-        }
-        let runtime_child_pid = process.execution.child_pid();
-        if runtime_child_pid == 0 {
-            return Ok(None);
-        }
+        };
         match runtime_child_exit_status(runtime_child_pid)? {
             RuntimeChildStatusObservation::Exited(status) => {
                 process.exit_signal = status.signal;
@@ -663,8 +1121,7 @@ where
                 Ok(Some(ActiveExecutionEvent::Exited(status.status)))
             }
             RuntimeChildStatusObservation::Running => Ok(None),
-            RuntimeChildStatusObservation::NotWaitable => Err(SidecarError::Execution(format!(
-                "ECHILD: guest runtime process {runtime_child_pid} exited without an observable wait status"
+            RuntimeChildStatusObservation::NotWaitable => Err(SidecarError::host("ECHILD", format!("guest runtime process {runtime_child_pid} exited without an observable wait status"
             ))),
         }
     }
@@ -721,15 +1178,6 @@ where
         None
     }
 
-    pub(super) fn descendant_parent_process<'a>(
-        vm: &'a VmState,
-        process_id: &str,
-        child_path: &[&str],
-    ) -> Option<&'a ActiveProcess> {
-        let root = vm.active_processes.get(process_id)?;
-        Self::active_process_by_path(root, child_path)
-    }
-
     pub(super) fn descendant_parent_process_mut<'a>(
         vm: &'a mut VmState,
         process_id: &str,
@@ -772,11 +1220,19 @@ where
         adopted
     }
 
-    pub(super) fn child_process_signal_key<'a>(
-        process_id: &'a str,
-        child_path: &[&'a str],
-    ) -> &'a str {
-        child_path.last().copied().unwrap_or(process_id)
+    pub(super) fn terminating_process_tree_kernel_pids(process: &ActiveProcess) -> Vec<u32> {
+        fn collect(process: &ActiveProcess, pids: &mut Vec<u32>) {
+            pids.push(process.kernel_pid);
+            for child in process.child_processes.values() {
+                if !child.detached {
+                    collect(child, pids);
+                }
+            }
+        }
+
+        let mut pids = Vec::new();
+        collect(process, &mut pids);
+        pids
     }
 
     pub(super) fn resolve_detached_child_process_path(
@@ -838,6 +1294,55 @@ where
         process_id: &str,
         event: ActiveExecutionEvent,
     ) -> Result<Option<EventFrame>, SidecarError> {
+        let event = match event {
+            ActiveExecutionEvent::Common(ExecutionEvent::RuntimeFault(fault)) => {
+                let fault = fault.into_error();
+                let kernel_fault = agentos_kernel::process_runtime::ProcessRuntimeFault::try_new(
+                    fault.code.clone(),
+                    fault.message.clone(),
+                    fault.details.clone(),
+                )
+                .map_err(|error| SidecarError::host(error.code(), error.message()))?;
+                let Some(vm) = self.vms.get_mut(vm_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
+                        vm_id,
+                        process_id,
+                        "runtime fault dispatch",
+                    );
+                    return Ok(None);
+                };
+                let Some(process) = vm.active_processes.get_mut(process_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
+                        vm_id,
+                        process_id,
+                        "runtime fault dispatch",
+                    );
+                    return Ok(None);
+                };
+                process.kernel_handle.finish_runtime_fault(kernel_fault);
+                tracing::error!(
+                    vm_id,
+                    process_id,
+                    code = %fault.code,
+                    message = %fault.message,
+                    details = ?fault.details,
+                    "executor reported a typed runtime fault"
+                );
+                ActiveExecutionEvent::Exited(1)
+            }
+            ActiveExecutionEvent::Common(ExecutionEvent::Exited(exit)) => {
+                let exit_code = match exit {
+                    agentos_execution::backend::ExecutionExit::Exited(code) => code,
+                    agentos_execution::backend::ExecutionExit::Signaled { signal, .. } => {
+                        128_i32.saturating_add(signal)
+                    }
+                };
+                ActiveExecutionEvent::Exited(exit_code)
+            }
+            event => event,
+        };
         let Some(vm) = self.vms.get(vm_id) else {
             log_stale_process_event(&self.bridge, vm_id, process_id, "execution event dispatch");
             return Ok(None);
@@ -871,6 +1376,71 @@ where
                     chunk,
                 )
                 .map(|payload| EventFrame::new(ownership, payload))),
+            ActiveExecutionEvent::Common(ExecutionEvent::HostCall { operation, reply }) => {
+                let Some((operation, reply)) =
+                    dispatch_context_host_operation(self, vm_id, process_id, operation, reply)
+                        .await?
+                else {
+                    return Ok(None);
+                };
+                let Some(vm) = self.vms.get_mut(vm_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
+                        vm_id,
+                        process_id,
+                        "common host operation",
+                    );
+                    return Ok(None);
+                };
+                let generation = vm.generation;
+                let (kernel, active_processes) = (&mut vm.kernel, &mut vm.active_processes);
+                let Some(process) = active_processes.get_mut(process_id) else {
+                    log_stale_process_event(
+                        &self.bridge,
+                        vm_id,
+                        process_id,
+                        "common host operation",
+                    );
+                    return Ok(None);
+                };
+                let effects =
+                    dispatch_host_operation(generation, kernel, process, operation, reply)?;
+                if effects.may_make_fd_readable {
+                    Self::wake_ready_deferred_fd_reads(vm)?;
+                }
+                if effects.may_make_fd_writable {
+                    Self::wake_ready_deferred_fd_writes(vm)?;
+                }
+                Ok(None)
+            }
+            ActiveExecutionEvent::Common(ExecutionEvent::Output { stream, bytes }) => {
+                let channel = match stream {
+                    agentos_execution::backend::OutputStream::Stdout => StreamChannel::Stdout,
+                    agentos_execution::backend::OutputStream::Stderr => StreamChannel::Stderr,
+                };
+                Ok(Some(EventFrame::new(
+                    ownership,
+                    EventPayload::ProcessOutput(ProcessOutputEvent {
+                        process_id: process_id.to_owned(),
+                        channel,
+                        chunk: bytes.into_vec(),
+                    }),
+                )))
+            }
+            ActiveExecutionEvent::Common(ExecutionEvent::Warning(error)) => {
+                eprintln!("ERR_AGENTOS_EXECUTION_WARNING: {error}");
+                Ok(None)
+            }
+            ActiveExecutionEvent::Common(ExecutionEvent::RuntimeFault(_)) => {
+                unreachable!("runtime fault events are normalized before dispatch")
+            }
+            ActiveExecutionEvent::Common(ExecutionEvent::Exited(_)) => {
+                unreachable!("common exit events are normalized before dispatch")
+            }
+            ActiveExecutionEvent::Common(_) => Err(SidecarError::host(
+                "ENOSYS",
+                "execution backend emitted an unsupported common event",
+            )),
             ActiveExecutionEvent::Stdout(chunk) => Ok(Some(EventFrame::new(
                 ownership,
                 EventPayload::ProcessOutput(ProcessOutputEvent {
@@ -887,22 +1457,21 @@ where
                     chunk,
                 }),
             ))),
-            ActiveExecutionEvent::JavascriptSyncRpcRequest(request) => {
+            ActiveExecutionEvent::HostRpcRequest(request) => {
                 self.handle_javascript_sync_rpc_request(vm_id, process_id, request)
                     .await?;
                 Ok(None)
             }
-            ActiveExecutionEvent::JavascriptSyncRpcCompletion(completion) => {
-                self.handle_javascript_sync_rpc_completion(vm_id, process_id, completion)?;
+            ActiveExecutionEvent::HostCallCompletion(completion) => {
+                self.handle_host_call_completion(vm_id, process_id, completion)?;
                 Ok(None)
             }
-            ActiveExecutionEvent::PythonVfsRpcRequest(request) => {
-                self.handle_python_vfs_rpc_request(vm_id, process_id, *request)
-                    .await?;
+            ActiveExecutionEvent::ManagedStreamReadRecheck(pending) => {
+                dispatch_claimed_context_stream_read(self, vm_id, process_id, *pending)?;
                 Ok(None)
             }
-            ActiveExecutionEvent::PythonSocketConnectCompletion(completion) => {
-                self.handle_python_socket_connect_completion(vm_id, process_id, *completion)?;
+            ActiveExecutionEvent::ManagedUdpPollRecheck(pending) => {
+                dispatch_claimed_context_udp_poll(self, vm_id, process_id, *pending)?;
                 Ok(None)
             }
             ActiveExecutionEvent::SignalState {
@@ -912,13 +1481,10 @@ where
                 let Some(vm) = self.vms.get_mut(vm_id) else {
                     return Ok(None);
                 };
-                if !vm.active_processes.contains_key(process_id) {
+                let Some(process) = vm.active_processes.get(process_id) else {
                     return Ok(None);
-                }
-                vm.signal_states
-                    .entry(process_id.to_owned())
-                    .or_default()
-                    .insert(signal, registration);
+                };
+                apply_kernel_signal_registration(process, signal, &registration)?;
                 Ok(None)
             }
             ActiveExecutionEvent::Exited(exit_code) => {
@@ -963,144 +1529,42 @@ where
         }
     }
 
-    pub(super) fn handle_javascript_sync_rpc_completion(
+    pub(super) fn handle_host_call_completion(
         &mut self,
         vm_id: &str,
         process_id: &str,
-        completion: crate::state::JavascriptSyncRpcCompletion,
+        completion: crate::state::HostCallCompletion,
     ) -> Result<(), SidecarError> {
         let Some(vm) = self.vms.get_mut(vm_id) else {
+            completion
+                .reply
+                .fail(HostServiceError::new(
+                    "ESTALE",
+                    "deferred host-call VM no longer exists",
+                ))
+                .map_err(SidecarError::from)?;
             return Ok(());
         };
         let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
+        let unix_addresses = Arc::clone(&vm.unix_address_registry);
+        let managed_descriptions = Arc::clone(&vm.managed_host_net_descriptions);
         let Some(process) = vm.active_processes.get_mut(process_id) else {
+            completion
+                .reply
+                .fail(HostServiceError::new(
+                    "ESTALE",
+                    "deferred host-call process no longer exists",
+                ))
+                .map_err(SidecarError::from)?;
             return Ok(());
         };
-        let connected = process
-            .pending_javascript_net_connects
-            .remove(&completion.request_id);
-        let completion_result = match (completion.result, connected) {
-            (Ok(_), Some(connected)) => {
-                finalize_javascript_net_connect(process, &kernel_readiness, connected).map_err(
-                    |error| crate::state::DeferredRpcError {
-                        code: javascript_sync_rpc_error_code(&error),
-                        message: javascript_sync_rpc_error_message(&error),
-                    },
-                )
-            }
-            (result @ Err(_), Some(connected)) => {
-                restore_pending_bound_unix_connect(process, &connected)?;
-                result
-            }
-            (result, None) => result,
-        };
-        let result = match completion_result {
-            Ok(value) => process
-                .execution
-                .respond_javascript_sync_rpc_success(completion.request_id, value),
-            Err(error) => process.execution.respond_javascript_sync_rpc_error(
-                completion.request_id,
-                error.code,
-                error.message,
-            ),
-        };
-        result.or_else(ignore_stale_javascript_sync_rpc_response)
-    }
-
-    pub(super) fn handle_python_socket_connect_completion(
-        &mut self,
-        vm_id: &str,
-        process_id: &str,
-        completion: PythonSocketConnectCompletion,
-    ) -> Result<(), SidecarError> {
-        let request_id = completion.request_id;
-        let connected = match completion.result {
-            Ok(connected) => connected,
-            Err(error) => {
-                return self.respond_python_rpc(
-                    vm_id,
-                    process_id,
-                    request_id,
-                    Err(SidecarError::Execution(format!(
-                        "{}: {}",
-                        error.code, error.message
-                    ))),
-                );
-            }
-        };
-        let Some(vm) = self.vms.get_mut(vm_id) else {
-            return Ok(());
-        };
-        let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-        let Some(process) = vm.active_processes.get_mut(process_id) else {
-            return Ok(());
-        };
-        let PendingPythonTcpConnect {
-            native_socket_id,
-            python_socket_id,
-            socket,
-            pending_capability,
-        } = connected;
-        let capability_key = NativeCapabilityKey::TcpSocket(native_socket_id.clone());
-        if let Err(error) = commit_process_capability(
-            process,
-            pending_capability,
-            capability_key.clone(),
-            native_socket_id.clone(),
-            socket.kernel_socket_id,
-        ) {
-            if let Err(close_error) = socket.close(&mut vm.kernel, process.kernel_pid) {
-                eprintln!(
-                    "ERR_AGENTOS_PYTHON_SOCKET_CLOSE: deferred TCP connect rollback failed: {close_error}"
-                );
-            }
-            return self.respond_python_rpc(vm_id, process_id, request_id, Err(error));
-        }
-        if let Err(error) =
-            socket.set_fairness_identity(process.capability_fairness_identity(&capability_key))
-        {
-            if let Err(release_error) = process.release_capability(&capability_key) {
-                eprintln!(
-                    "ERR_AGENTOS_CAPABILITY_RELEASE: deferred Python TCP rollback failed: {release_error}"
-                );
-            }
-            if let Err(close_error) = socket.close(&mut vm.kernel, process.kernel_pid) {
-                eprintln!(
-                    "ERR_AGENTOS_PYTHON_SOCKET_CLOSE: deferred TCP fairness rollback failed: {close_error}"
-                );
-            }
-            return self.respond_python_rpc(vm_id, process_id, request_id, Err(error));
-        }
-        socket.retain_description_lease(
-            process
-                .shared_capability_lease(&capability_key)
-                .expect("committed deferred Python TCP capability lease"),
-        );
-        register_kernel_readiness_target(
+        settle_host_call_completion_for_process(
+            &mut vm.kernel,
             &kernel_readiness,
-            socket.kernel_socket_id,
-            None,
-            Some(Arc::clone(&socket.read_event_notify)),
-            process.capability_readiness_identity(&capability_key),
-            native_socket_id.clone(),
-            KernelSocketReadinessEvent::Data,
-        );
-        process.tcp_sockets.insert(native_socket_id.clone(), socket);
-        process.python_sockets.insert(
-            python_socket_id,
-            PythonHostSocket::Tcp {
-                socket_id: native_socket_id,
-                pending_read: None,
-            },
-        );
-        debug_assert!(process.capability_leases.contains_key(&capability_key));
-        self.respond_python_rpc(
-            vm_id,
-            process_id,
-            request_id,
-            Ok(PythonVfsRpcResponsePayload::SocketCreated {
-                socket_id: python_socket_id,
-            }),
+            &unix_addresses,
+            &managed_descriptions,
+            process,
+            completion,
         )
     }
 
@@ -1129,6 +1593,19 @@ where
         let process_table = vm.kernel.list_processes();
         record_execute_phase("process_exit_cleanup_list_processes", phase_start.elapsed());
         let phase_start = Instant::now();
+        let terminating_kernel_pids = Self::terminating_process_tree_kernel_pids(
+            vm.active_processes
+                .get(process_id)
+                .expect("validated exiting process remains registered"),
+        );
+        for kernel_pid in terminating_kernel_pids {
+            retire_managed_process_routes(&self.bridge, vm_id, vm, kernel_pid)?;
+        }
+        record_execute_phase(
+            "process_exit_cleanup_managed_network_routes",
+            phase_start.elapsed(),
+        );
+        let phase_start = Instant::now();
         let Some(mut process) = vm.active_processes.remove(process_id) else {
             return Ok(None);
         };
@@ -1150,22 +1627,6 @@ where
         let phase_start = Instant::now();
         let detached_children = Self::adopt_detached_child_processes(process_id, &mut process);
         record_execute_phase("process_exit_cleanup_adopt_detached", phase_start.elapsed());
-        let phase_start = Instant::now();
-        let should_sync_host_writes = process.host_write_dirty_recursive()
-            || !process.clean_host_writes_are_observable_recursive();
-        let host_sync_result = if should_sync_host_writes {
-            sync_process_host_writes_to_kernel(vm, &process)
-        } else {
-            record_execute_phase(
-                "process_exit_cleanup_sync_host_writes_clean_skip",
-                Duration::ZERO,
-            );
-            Ok(())
-        };
-        record_execute_phase(
-            "process_exit_cleanup_sync_host_writes",
-            phase_start.elapsed(),
-        );
         let raw_mode_result = release_inherited_child_raw_mode(&mut vm.kernel, &process);
         let phase_start = Instant::now();
         let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
@@ -1181,13 +1642,24 @@ where
             phase_start.elapsed(),
         );
         let phase_start = Instant::now();
-        process.kernel_handle.finish(exit_code);
+        if let Some(signal) = process.exit_signal {
+            process
+                .kernel_handle
+                .finish_signaled(signal, process.exit_core_dumped);
+        } else {
+            process.kernel_handle.finish(exit_code);
+        }
         record_execute_phase("process_exit_cleanup_kernel_finish", phase_start.elapsed());
         let phase_start = Instant::now();
-        let _ = vm.kernel.wait_and_reap(process.kernel_pid);
+        if let Err(error) = vm.kernel.wait_and_reap(process.kernel_pid) {
+            eprintln!(
+                "ERR_AGENTOS_PROCESS_REAP: failed to reap exited kernel pid {}: {error}",
+                process.kernel_pid
+            );
+        }
+        retire_orphaned_managed_descriptions(vm)?;
         record_execute_phase("process_exit_cleanup_wait_and_reap", phase_start.elapsed());
         let phase_start = Instant::now();
-        vm.signal_states.remove(process_id);
         record_execute_phase(
             "process_exit_cleanup_signal_state_remove",
             phase_start.elapsed(),
@@ -1211,10 +1683,8 @@ where
         record_execute_phase("process_exit_cleanup_prune_resource", phase_start.elapsed());
 
         // The process was removed from active_processes before the fallible
-        // host/raw-mode cleanup. Surface those errors only after all process-
-        // owned resources (especially host-materialized SQLite state) have
-        // been copied back and finalized.
-        host_sync_result?;
+        // raw-mode cleanup. Surface the error only after all process-owned
+        // resources have been finalized.
         raw_mode_result?;
         Ok(Some(became_idle))
     }

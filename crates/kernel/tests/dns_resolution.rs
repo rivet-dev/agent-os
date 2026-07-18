@@ -7,9 +7,12 @@ use agentos_kernel::permissions::{
     NetworkAccessRequest, NetworkOperation, PermissionDecision, Permissions,
 };
 use agentos_kernel::vfs::MemoryFileSystem;
-use hickory_resolver::proto::rr::{Record, RecordType};
+use hickory_proto::rr::{Record, RecordType};
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Wake, Waker};
 
 #[derive(Debug, Clone)]
 struct MockDnsResolver {
@@ -69,8 +72,89 @@ impl DnsResolver for MockDnsResolver {
     }
 }
 
+struct AsyncOnlyDnsResolver;
+
+impl DnsResolver for AsyncOnlyDnsResolver {
+    fn lookup_ip(&self, _: &DnsLookupRequest) -> Result<Vec<IpAddr>, DnsResolverError> {
+        panic!("reactor DNS path called the synchronous resolver")
+    }
+
+    fn lookup_records(&self, _: &DnsRecordLookupRequest) -> Result<Vec<Record>, DnsResolverError> {
+        panic!("reactor DNS path called the synchronous record resolver")
+    }
+
+    fn lookup_ip_async<'a>(
+        &'a self,
+        _: DnsLookupRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<IpAddr>, DnsResolverError>> + Send + 'a>> {
+        Box::pin(async { Ok(vec![IpAddr::V4(Ipv4Addr::new(198, 51, 100, 91))]) })
+    }
+
+    fn lookup_records_async<'a>(
+        &'a self,
+        _: DnsRecordLookupRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Record>, DnsResolverError>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
 fn new_kernel(config: KernelVmConfig) -> KernelVm<MemoryFileSystem> {
     KernelVm::new(MemoryFileSystem::new(), config)
+}
+
+struct NoopWake;
+
+impl Wake for NoopWake {
+    fn wake(self: Arc<Self>) {}
+}
+
+fn poll_ready<F: Future>(future: F) -> F::Output {
+    let waker = Waker::from(Arc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("transport-neutral test resolver unexpectedly returned Pending"),
+    }
+}
+
+#[test]
+fn kernel_async_dns_path_never_calls_the_synchronous_resolver_on_a_runtime_worker() {
+    let mut config = KernelVmConfig::new("vm-async-dns");
+    config.permissions = Permissions::allow_all();
+    config.dns_resolver = Arc::new(AsyncOnlyDnsResolver);
+    let kernel = new_kernel(config);
+    let resolution = poll_ready(
+        kernel.resolve_dns_async("async.example.test", DnsLookupPolicy::CheckPermissions),
+    )
+    .expect("async resolver path");
+    assert_eq!(
+        resolution.addresses(),
+        &[IpAddr::V4(Ipv4Addr::new(198, 51, 100, 91))]
+    );
+}
+
+#[test]
+fn kernel_default_resolver_is_transport_neutral_and_unavailable() {
+    let mut config = KernelVmConfig::new("vm-no-host-dns");
+    config.permissions = Permissions::allow_all();
+    let kernel = new_kernel(config);
+
+    let error = kernel
+        .resolve_dns("example.test", DnsLookupPolicy::CheckPermissions)
+        .expect_err("kernel must not perform ambient host DNS without injection");
+    assert_eq!(error.code(), "EHOSTUNREACH");
+    assert!(error
+        .to_string()
+        .contains("host DNS resolver is unavailable"));
+
+    let literal = kernel
+        .resolve_dns("192.0.2.1", DnsLookupPolicy::CheckPermissions)
+        .expect("literal resolution remains kernel-owned");
+    assert_eq!(
+        literal.addresses(),
+        &["192.0.2.1".parse::<IpAddr>().expect("IP")]
+    );
 }
 
 #[test]

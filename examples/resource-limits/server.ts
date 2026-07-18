@@ -9,7 +9,6 @@ const vm = agentOS({
 			maxOpenFds: 256, // open file descriptors
 			maxSockets: 128, // open sockets
 			maxFilesystemBytes: 256 * 1024 * 1024, // VFS storage budget
-			maxWasmFuel: 30_000, // WASM execution budget
 			maxWasmMemoryBytes: 128 * 1024 * 1024, // WASM linear memory
 			maxWasmStackBytes: 4 * 1024 * 1024, // WASM call-stack ceiling
 		},
@@ -32,6 +31,8 @@ const vm = agentOS({
 		wasm: {
 			prewarmTimeoutMs: 30_000, // WASM compile-cache warmup
 			runnerHeapLimitMb: 2048, // trusted WASI runner V8 heap
+			activeCpuTimeLimitMs: 30_000, // active standalone-WASM CPU time
+			wallClockLimitMs: 120_000, // optional elapsed-time backstop
 		},
 	},
 });

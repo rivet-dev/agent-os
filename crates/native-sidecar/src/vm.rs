@@ -4,18 +4,17 @@
 //! Contains VM lifecycle methods on NativeSidecar<B> and associated helpers.
 
 use crate::bootstrap::{
-    apply_root_filesystem_entry, discover_command_guest_paths, root_snapshot_entries,
-    root_snapshot_entry, root_snapshot_from_entries,
+    apply_root_filesystem_entry, discover_kernel_commands, root_snapshot_entries,
+    root_snapshot_entry, root_snapshot_from_entries, KernelCommandInventory,
 };
 use crate::bridge::{bridge_permissions, MountPluginContext};
-use crate::execution::{sync_process_host_writes_to_kernel, terminate_child_process_tree};
+use crate::execution::terminate_child_process_tree;
 use crate::protocol::{
     AgentosProjectedAgent, ConfigureVmRequest, CreateLayerRequest, CreateOverlayRequest,
     DisposeReason, EventFrame, ExportSnapshotRequest, ImportSnapshotRequest, LinkPackageRequest,
     ListMountsRequest, MountDescriptor, MountInfo, MountPluginDescriptor, PackageCommands,
     ProjectedCommand, ProvidedCommandsRequest, RootFilesystemDescriptor, RootFilesystemEntry,
-    RootFilesystemEntryEncoding, RootFilesystemLowerDescriptor, SealLayerRequest,
-    SnapshotRootFilesystemRequest, VmLifecycleState,
+    SealLayerRequest, SnapshotRootFilesystemRequest, VmLifecycleState,
 };
 use crate::service::{
     audit_fields, dirname, emit_security_audit_event, emit_structured_event, kernel_error,
@@ -38,11 +37,9 @@ use agentos_kernel::kernel::{KernelVm, KernelVmConfig};
 use agentos_kernel::mount_plugin::OpenFileSystemPluginRequest;
 use agentos_kernel::mount_table::{MountOptions, MountTable, MountedFileSystem};
 use agentos_kernel::permissions::filter_env;
-use agentos_kernel::resource_accounting::ResourceLimits;
 use agentos_kernel::root_fs::{
-    decode_snapshot_with_import_limits, encode_snapshot as encode_root_snapshot,
-    is_supported_root_filesystem_snapshot_format, FilesystemEntryKind as KernelFilesystemEntryKind,
-    RootFilesystemImportLimits, ROOT_FILESYSTEM_SNAPSHOT_FORMAT,
+    encode_snapshot as encode_root_snapshot, FilesystemEntryKind as KernelFilesystemEntryKind,
+    ROOT_FILESYSTEM_SNAPSHOT_FORMAT,
 };
 use agentos_kernel::socket_table::{SocketReadiness, SocketReadinessKind};
 use agentos_native_sidecar_core::ca::{
@@ -61,7 +58,6 @@ use agentos_native_sidecar_core::{
 use agentos_runtime::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
 use agentos_runtime::capability::CapabilityRegistry;
 use agentos_vm_config as vm_config;
-use base64::Engine;
 use openssl::rand::rand_bytes;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -69,54 +65,57 @@ use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const SHADOW_ROOT_BOOTSTRAP_DIRS: &[(&str, u32)] = &[
-    ("/dev", 0o755),
-    ("/proc", 0o755),
-    ("/tmp", 0o1777),
-    ("/bin", 0o755),
-    ("/lib", 0o755),
-    ("/sbin", 0o755),
-    ("/boot", 0o755),
-    ("/etc", 0o755),
-    ("/root", 0o700),
-    ("/run", 0o755),
-    ("/srv", 0o755),
-    ("/sys", 0o555),
-    ("/opt", 0o755),
-    ("/mnt", 0o755),
-    ("/media", 0o755),
-    ("/home", 0o755),
-    ("/home/agentos", 0o2755),
-    ("/usr", 0o755),
-    ("/usr/bin", 0o755),
-    ("/usr/games", 0o755),
-    ("/usr/include", 0o755),
-    ("/usr/lib", 0o755),
-    ("/usr/libexec", 0o755),
-    ("/usr/man", 0o755),
-    ("/usr/local", 0o755),
-    ("/usr/local/bin", 0o755),
-    ("/usr/sbin", 0o755),
-    ("/usr/share", 0o755),
-    ("/usr/share/man", 0o755),
-    ("/var", 0o755),
-    ("/var/cache", 0o755),
-    ("/var/empty", 0o555),
-    ("/var/lib", 0o755),
-    ("/var/lock", 0o777),
-    ("/var/log", 0o755),
-    ("/var/run", 0o777),
-    ("/var/spool", 0o755),
-    ("/var/tmp", 0o1777),
-    ("/etc/agentos", 0o755),
+const ROOT_BOOTSTRAP_DIRS: &[(&str, u32, u32, u32)] = &[
+    ("/dev", 0o755, 0, 0),
+    ("/proc", 0o755, 0, 0),
+    ("/tmp", 0o1777, 0, 0),
+    ("/bin", 0o755, 0, 0),
+    ("/lib", 0o755, 0, 0),
+    ("/sbin", 0o755, 0, 0),
+    ("/boot", 0o755, 0, 0),
+    ("/etc", 0o755, 0, 0),
+    // AgentOS retains `/root/node_modules` as a compatibility projection.
+    // Permit traversal without allowing the default guest to list `/root`.
+    ("/root", 0o711, 0, 0),
+    ("/run", 0o755, 0, 0),
+    ("/srv", 0o755, 0, 0),
+    ("/sys", 0o555, 0, 0),
+    ("/opt", 0o755, 0, 0),
+    ("/mnt", 0o755, 0, 0),
+    ("/media", 0o755, 0, 0),
+    ("/home", 0o755, 0, 0),
+    ("/home/agentos", 0o2755, 1000, 1000),
+    ("/usr", 0o755, 0, 0),
+    ("/usr/bin", 0o755, 0, 0),
+    ("/usr/games", 0o755, 0, 0),
+    ("/usr/include", 0o755, 0, 0),
+    ("/usr/lib", 0o755, 0, 0),
+    ("/usr/libexec", 0o755, 0, 0),
+    ("/usr/man", 0o755, 0, 0),
+    ("/usr/local", 0o755, 0, 0),
+    ("/usr/local/bin", 0o755, 0, 0),
+    ("/usr/sbin", 0o755, 0, 0),
+    ("/usr/share", 0o755, 0, 0),
+    ("/usr/share/man", 0o755, 0, 0),
+    ("/var", 0o755, 0, 0),
+    ("/var/cache", 0o755, 0, 0),
+    ("/var/empty", 0o555, 0, 0),
+    ("/var/lib", 0o755, 0, 0),
+    ("/var/lock", 0o777, 0, 0),
+    ("/var/log", 0o755, 0, 0),
+    ("/var/run", 0o777, 0, 0),
+    ("/var/spool", 0o755, 0, 0),
+    ("/var/tmp", 0o1777, 0, 0),
+    ("/etc/agentos", 0o755, 0, 0),
     // Non-Alpine default agent working directory (also present in the base
     // filesystem snapshot); scaffold it here so it exists even when the
     // default base layer is disabled. It is the default cwd and mount root,
     // kept separate from $HOME (/home/agentos).
-    ("/workspace", 0o755),
+    ("/workspace", 0o755, 1000, 1000),
 ];
 
 fn create_vm_unix_socket_host_dir() -> Result<PathBuf, SidecarError> {
@@ -164,6 +163,9 @@ fn send_kernel_socket_readiness_event(
     target: KernelSocketReadinessTarget,
     readiness: SocketReadiness,
 ) {
+    if !target.live.load(Ordering::Acquire) {
+        return;
+    }
     let flags = match (target.event, readiness.kind) {
         (KernelSocketReadinessEvent::Accept, SocketReadinessKind::Accept) => {
             agentos_runtime::readiness::ReadyFlags::ACCEPT
@@ -176,10 +178,15 @@ fn send_kernel_socket_readiness_event(
         }
         _ => return,
     };
-    if let Some(notify) = target.notify {
-        notify.notify_one();
+    if target.live.load(Ordering::Acquire) {
+        if let Some(notify) = &target.notify {
+            notify.notify_one();
+        }
     }
-    if let Some(session) = target.session {
+    if target.live.load(Ordering::Acquire) {
+        let Some(session) = &target.session else {
+            return;
+        };
         if let Err(error) =
             session.publish_readiness(target.capability_id, target.capability_generation, flags)
         {
@@ -200,19 +207,40 @@ fn projected_command_guest_path(command: &str) -> String {
     format!("{}/{command}", crate::package_projection::OPT_AGENTOS_BIN)
 }
 
-fn projected_commands_from_guest_paths(
-    command_guest_paths: &BTreeMap<String, String>,
+fn projected_commands_from_provided_commands(
+    provided_commands: &BTreeMap<String, Vec<String>>,
+    kernel_commands: &KernelCommandInventory,
 ) -> Vec<ProjectedCommand> {
-    command_guest_paths
-        .iter()
-        .filter(|(_, guest_path)| {
-            guest_path.starts_with(crate::package_projection::OPT_AGENTOS_BIN)
-        })
-        .map(|(name, guest_path)| ProjectedCommand {
-            name: name.clone(),
-            guest_path: guest_path.clone(),
-        })
-        .collect()
+    let mut commands = BTreeMap::new();
+    for command in provided_commands.values().flatten() {
+        if kernel_commands.names.contains(command) {
+            continue;
+        }
+        commands
+            .entry(command.clone())
+            .or_insert_with(|| ProjectedCommand {
+                name: command.clone(),
+                guest_path: projected_command_guest_path(command),
+            });
+    }
+    commands.into_values().collect()
+}
+
+fn execution_driver_commands(
+    kernel_commands: &KernelCommandInventory,
+    provided_commands: &BTreeMap<String, Vec<String>>,
+    additional_commands: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let mut commands = BTreeSet::from([
+        String::from(JAVASCRIPT_COMMAND),
+        String::from(PYTHON_COMMAND),
+        String::from("python3"),
+        String::from(WASM_COMMAND),
+    ]);
+    commands.extend(kernel_commands.names.iter().cloned());
+    commands.extend(provided_commands.values().flatten().cloned());
+    commands.extend(additional_commands);
+    commands.into_iter().collect()
 }
 // ---------------------------------------------------------------------------
 // NativeSidecar VM lifecycle methods
@@ -227,17 +255,19 @@ where
         self.reap_reconciled_quarantined_vms();
         self.ensure_vm_generation_capacity()?;
         let next = self.next_vm_id.checked_add(1).ok_or_else(|| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_VM_ID_EXHAUSTED: VM id counter overflowed",
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_VM_ID_EXHAUSTED",
+                String::from("VM id counter overflowed"),
+            )
         })?;
         let generation = self
             .runtime_context
             .as_ref()
             .ok_or_else(|| {
-                SidecarError::InvalidState(String::from(
-                    "ERR_AGENTOS_RUNTIME_UNAVAILABLE: VM generation allocation requires RuntimeContext",
-                ))
+                SidecarError::host(
+                    "ERR_AGENTOS_RUNTIME_UNAVAILABLE",
+                    String::from("VM generation allocation requires RuntimeContext"),
+                )
             })?
             .allocate_vm_generation()
             .map_err(|error| SidecarError::InvalidState(error.to_string()))?;
@@ -271,8 +301,9 @@ where
         validate_permissions_policy(&permissions_policy)?;
 
         let (vm_id, vm_generation) = self.allocate_vm_identity()?;
-        let cwd = create_vm_shadow_root(&vm_id)?;
-        let (guest_cwd, host_cwd) = resolve_vm_cwds(create_config.cwd.as_ref(), &cwd)?;
+        let runtime_scratch_root = create_vm_runtime_scratch_root(&vm_id)?;
+        let (guest_cwd, host_cwd) =
+            resolve_vm_cwds(create_config.cwd.as_ref(), &runtime_scratch_root)?;
         fs::create_dir_all(&host_cwd)
             .map_err(|error| SidecarError::Io(format!("failed to create VM cwd: {error}")))?;
         let limits = crate::limits::vm_limits_from_config(
@@ -281,9 +312,10 @@ where
         )?;
         let resource_limits = limits.resources.clone();
         let process_runtime_context = self.runtime_context.as_ref().cloned().ok_or_else(|| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_RUNTIME_UNAVAILABLE: VM admission requires RuntimeContext",
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_RUNTIME_UNAVAILABLE",
+                String::from("VM admission requires RuntimeContext"),
+            )
         })?;
         let process_resources = Arc::clone(process_runtime_context.resources());
         let vm_resources = Arc::new(vm_resource_ledger(
@@ -340,8 +372,8 @@ where
             .set_vm_permissions(&vm_id, &permissions_policy)?;
         let permissions = bridge_permissions(self.bridge.clone(), &vm_id);
         let mut guest_env = filter_env(&vm_id, &create_config.env, &permissions);
-        // Sidecar-owned bootstrap work still needs to reconcile command stubs and the root
-        // filesystem before the guest-visible policy takes effect.
+        // Sidecar-owned bootstrap work still needs to install command stubs and
+        // the root filesystem before the guest-visible policy takes effect.
         self.bridge
             .set_vm_permissions(&vm_id, &allow_all_policy())?;
         let native_root = native_root_plugin_from_config(create_config.native_root.as_ref())?;
@@ -354,16 +386,8 @@ where
                 })
             })?
         };
-        if native_root.is_none() {
-            materialize_shadow_root_snapshot_entries(
-                &cwd,
-                &root_filesystem,
-                loaded_snapshot.as_ref(),
-                &resource_limits,
-            )?;
-        }
-
         let mut config = KernelVmConfig::new(vm_id.clone());
+        config.vm_generation = vm_generation;
         config.cwd = guest_cwd.clone();
         config.env = guest_env.clone();
         if let Some(user) = create_config.user.as_ref() {
@@ -456,30 +480,22 @@ where
                 send_kernel_socket_readiness_event(target, readiness);
             }
         }));
-        let command_guest_paths = discover_command_guest_paths(&mut kernel);
-        refresh_guest_command_path_env(&mut guest_env, &command_guest_paths);
-        let mut execution_commands = vec![
-            String::from(JAVASCRIPT_COMMAND),
-            String::from(PYTHON_COMMAND),
-            // `python3` resolves to the same Pyodide runtime; register it so the
-            // guest shell can find `/bin/python3` on PATH (the command resolver
-            // already rewrites the alias to `python`).
-            String::from("python3"),
-            String::from(WASM_COMMAND),
-        ];
-        if let Some(bootstrap_commands) = &create_config.bootstrap_commands {
-            execution_commands.extend(bootstrap_commands.iter().cloned());
-        }
-        execution_commands.extend(command_guest_paths.keys().cloned());
+        let kernel_commands = discover_kernel_commands(&mut kernel);
+        refresh_guest_command_path_env(&mut guest_env, &kernel_commands.search_roots);
+        let execution_commands = execution_driver_commands(
+            &kernel_commands,
+            &BTreeMap::new(),
+            create_config.bootstrap_commands.iter().flatten().cloned(),
+        );
         kernel
             .register_driver(CommandDriver::new(
                 EXECUTION_DRIVER_NAME,
                 execution_commands,
             ))
             .map_err(kernel_error)?;
-        if let Some(root) = kernel.root_filesystem_mut() {
-            root.finish_bootstrap();
-        }
+        kernel
+            .finish_root_filesystem_bootstrap()
+            .map_err(kernel_error)?;
         self.bridge
             .set_vm_permissions(&vm_id, &permissions_policy)?;
 
@@ -496,10 +512,6 @@ where
             .expect("owned session should exist")
             .vm_ids
             .insert(vm_id.clone());
-        // Seed the baseline during VM creation. Otherwise a host-side deletion
-        // that happens before the first shadow sync has no prior inventory and
-        // the deleted kernel entry is resurrected/order-dependent.
-        let shadow_sync_inventory = crate::execution::initial_shadow_sync_inventory(&cwd)?;
         let unix_socket_host_dir = create_vm_unix_socket_host_dir()?;
         let pending_stdin_bytes_budget = VmPendingByteBudget::new(
             limits.process.pending_stdin_bytes,
@@ -508,6 +520,14 @@ where
         let pending_event_bytes_budget = VmPendingByteBudget::new(
             limits.process.pending_event_bytes,
             agentos_bridge::queue_tracker::TrackedLimit::PendingExecutionEventBytes,
+        );
+        let pending_child_sync_count_budget = VmPendingByteBudget::new(
+            limits.process.max_pending_child_sync_count,
+            agentos_bridge::queue_tracker::TrackedLimit::PendingChildProcessSyncCount,
+        );
+        let pending_child_sync_bytes_budget = VmPendingByteBudget::new(
+            limits.process.max_pending_child_sync_bytes,
+            agentos_bridge::queue_tracker::TrackedLimit::PendingChildProcessSyncBytes,
         );
         self.vms.insert(
             vm_id.clone(),
@@ -518,6 +538,8 @@ where
                 limits,
                 pending_stdin_bytes_budget,
                 pending_event_bytes_budget,
+                pending_child_sync_count_budget,
+                pending_child_sync_bytes_budget,
                 resources: vm_resources,
                 runtime_context: vm_runtime_context,
                 database,
@@ -529,10 +551,11 @@ where
                 requested_runtime: payload.runtime,
                 root_filesystem_mode: protocol_root_filesystem_mode(root_filesystem.mode),
                 guest_cwd,
-                cwd,
+                runtime_scratch_root,
                 host_cwd,
                 kernel,
                 kernel_socket_readiness,
+                managed_host_net_descriptions: Arc::new(Mutex::new(BTreeMap::new())),
                 host_net_transfer_descriptions: Arc::new(Mutex::new(BTreeMap::new())),
                 loaded_snapshot,
                 configuration: VmConfiguration {
@@ -541,7 +564,6 @@ where
                     ..VmConfiguration::default()
                 },
                 layers: VmLayerStore::default(),
-                command_guest_paths,
                 provided_commands: BTreeMap::new(),
                 command_permissions: BTreeMap::new(),
                 bindings: BTreeMap::new(),
@@ -559,10 +581,8 @@ where
                 detached_child_processes: BTreeSet::new(),
                 attached_child_event_cursor: 0,
                 detached_child_event_cursor: 0,
-                signal_states: BTreeMap::new(),
                 packages_staging_root: None,
                 projected_agent_launch: BTreeMap::new(),
-                shadow_sync_inventory,
                 unix_address_registry: Arc::new(Mutex::new(BTreeMap::new())),
                 unix_socket_host_dir,
             },
@@ -636,9 +656,10 @@ where
         let mount_plugins = &self.mount_plugins;
         let bridge = self.bridge.clone();
         let snapshot_runtime_context = self.runtime_context.as_ref().cloned().ok_or_else(|| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_RUNTIME_UNAVAILABLE: snapshot pre-warm requires RuntimeContext",
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_RUNTIME_UNAVAILABLE",
+                String::from("snapshot pre-warm requires RuntimeContext"),
+            )
         })?;
         let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
         let max_pread_bytes = vm.kernel.resource_limits().max_pread_bytes;
@@ -686,36 +707,23 @@ where
             },
         )
         .and_then(|()| {
-            vm.command_guest_paths = discover_command_guest_paths(&mut vm.kernel);
-            // The `{ packageDir }` projection lands each package's `bin/<cmd>` at
-            // `/opt/agentos/bin/<cmd>` (on `$PATH`) but does NOT populate
-            // `/__agentos/commands`, so `discover_command_guest_paths` alone misses
-            // projected commands and every projected wasm/js command resolves to
-            // ENOEXEC (absolute path) / ENOENT (bare name). Register each projected
-            // command by name -> its `/opt/agentos/bin/<cmd>` entrypoint so both the
-            // kernel command table (via `execution_commands` below) and the sidecar
-            // entrypoint resolver (`resolve_guest_command_entrypoint`) can find it.
-            for commands in provided_commands.values() {
-                for command in commands {
-                    let entrypoint =
-                        format!("{}/{command}", crate::package_projection::OPT_AGENTOS_BIN);
-                    vm.command_guest_paths
-                        .entry(command.clone())
-                        .or_insert(entrypoint);
-                }
-            }
-            refresh_guest_command_path_env(&mut vm.guest_env, &vm.command_guest_paths);
-            let mut execution_commands =
-                vec![String::from(JAVASCRIPT_COMMAND), String::from(WASM_COMMAND)];
-            execution_commands.extend(payload.bootstrap_commands.iter().cloned());
-            execution_commands.extend(payload.binding_shim_commands.iter().cloned());
-            execution_commands.extend(vm.command_guest_paths.keys().cloned());
+            let kernel_commands = discover_kernel_commands(&mut vm.kernel);
+            let execution_commands = execution_driver_commands(
+                &kernel_commands,
+                &provided_commands,
+                payload
+                    .bootstrap_commands
+                    .iter()
+                    .chain(payload.binding_shim_commands.iter())
+                    .cloned(),
+            );
             vm.kernel
-                .register_driver(CommandDriver::new(
+                .replace_driver(CommandDriver::new(
                     EXECUTION_DRIVER_NAME,
                     execution_commands,
                 ))
                 .map_err(kernel_error)?;
+            refresh_guest_command_path_env(&mut vm.guest_env, &kernel_commands.search_roots);
             vm.command_permissions = payload.command_permissions.clone().into_iter().collect();
             let mut loopback_exempt_ports = vm.create_loopback_exempt_ports.clone();
             loopback_exempt_ports.extend(payload.loopback_exempt_ports.iter().copied());
@@ -763,7 +771,9 @@ where
 
         let applied_mounts = effective_mounts.len() as u32;
         let configured_software = payload.software.len() as u32;
-        let projected_commands = projected_commands_from_guest_paths(&vm.command_guest_paths);
+        let kernel_commands = discover_kernel_commands(&mut vm.kernel);
+        let projected_commands =
+            projected_commands_from_provided_commands(&vm.provided_commands, &kernel_commands);
         let agents = projected_agents_from_descriptors(&package_descriptors);
         vm.projected_agent_launch = projected_agent_launch_from_descriptors(&package_descriptors);
         let _ = vm;
@@ -887,22 +897,25 @@ where
         vm.configuration
             .provided_commands
             .insert(descriptor.name.clone(), commands.clone());
-        for command in &commands {
-            let entrypoint = projected_command_guest_path(command);
-            vm.command_guest_paths
-                .entry(command.clone())
-                .or_insert(entrypoint);
-        }
-        refresh_guest_command_path_env(&mut vm.guest_env, &vm.command_guest_paths);
-        let mut execution_commands =
-            vec![String::from(JAVASCRIPT_COMMAND), String::from(WASM_COMMAND)];
-        execution_commands.extend(vm.command_guest_paths.keys().cloned());
+        let retained_execution_commands = vm
+            .kernel
+            .commands()
+            .into_iter()
+            .filter_map(|(command, driver)| (driver == EXECUTION_DRIVER_NAME).then_some(command))
+            .collect::<Vec<_>>();
+        let kernel_commands = discover_kernel_commands(&mut vm.kernel);
+        let execution_commands = execution_driver_commands(
+            &kernel_commands,
+            &vm.provided_commands,
+            retained_execution_commands,
+        );
         vm.kernel
-            .register_driver(CommandDriver::new(
+            .replace_driver(CommandDriver::new(
                 EXECUTION_DRIVER_NAME,
                 execution_commands,
             ))
             .map_err(kernel_error)?;
+        refresh_guest_command_path_env(&mut vm.guest_env, &kernel_commands.search_roots);
         let projected_commands = commands
             .iter()
             .map(|command| ProjectedCommand {
@@ -932,19 +945,18 @@ where
         let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
         self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
 
-        let packages = self
+        let vm = self
             .vms
             .get(&vm_id)
-            .map(|vm| {
-                vm.provided_commands
-                    .iter()
-                    .map(|(package_name, commands)| PackageCommands {
-                        package_name: package_name.clone(),
-                        commands: commands.clone(),
-                    })
-                    .collect()
+            .ok_or_else(|| SidecarError::host("ESTALE", "VM disappeared during command lookup"))?;
+        let packages = vm
+            .provided_commands
+            .iter()
+            .map(|(package_name, commands)| PackageCommands {
+                package_name: package_name.clone(),
+                commands: commands.clone(),
             })
-            .unwrap_or_default();
+            .collect();
 
         Ok(DispatchResult {
             response: provided_commands_response(request, packages),
@@ -1188,7 +1200,12 @@ where
             database: vm.database.clone(),
             max_pread_bytes: vm.kernel.resource_limits().max_pread_bytes,
         };
-        let _ = shutdown_configured_mounts(&mut vm, &mount_context, "dispose_vm", true);
+        if let Err(error) = shutdown_configured_mounts(&mut vm, &mount_context, "dispose_vm", true)
+        {
+            eprintln!(
+                "ERR_AGENTOS_MOUNT_TEARDOWN: mount shutdown returned an unexpected error for VM {vm_id}: {error}"
+            );
+        }
 
         // Snapshot/flush/kernel-dispose/permission-reset can each fail; run them
         // in a helper whose result is captured so cleanup below is unconditional.
@@ -1199,9 +1216,23 @@ where
         // steps' `?`, so any failure stranded the engine/extension maps (H1) and
         // the output-buffer map was never reclaimed at all (M6).
         self.reclaim_vm_tracking(session_id, vm_id);
-        let _ = fs::remove_dir_all(&vm.cwd);
+        if let Err(error) = fs::remove_dir_all(&vm.runtime_scratch_root) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "ERR_AGENTOS_VM_SCRATCH_CLEANUP: failed to remove {}: {error}",
+                    vm.runtime_scratch_root.display()
+                );
+            }
+        }
         if let Some(staging_root) = vm.packages_staging_root.take() {
-            let _ = fs::remove_dir_all(&staging_root);
+            if let Err(error) = fs::remove_dir_all(&staging_root) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "ERR_AGENTOS_PACKAGE_STAGING_CLEANUP: failed to remove {}: {error}",
+                        staging_root.display()
+                    );
+                }
+            }
         }
         if let Err(error) = fs::remove_dir_all(&vm.unix_socket_host_dir) {
             if error.kind() != std::io::ErrorKind::NotFound {
@@ -1413,11 +1444,6 @@ where
                 remaining.len()
             );
             for (process_id, mut process) in remaining {
-                let should_sync_host_writes = process.host_write_dirty_recursive()
-                    || !process.clean_host_writes_are_observable_recursive();
-                if should_sync_host_writes {
-                    sync_process_host_writes_to_kernel(vm, &process)?;
-                }
                 terminate_child_process_tree(
                     &mut vm.kernel,
                     &mut process,
@@ -1425,8 +1451,12 @@ where
                     &unix_address_registry,
                 );
                 process.kernel_handle.finish(137);
-                let _ = vm.kernel.wait_and_reap(process.kernel_pid);
-                vm.signal_states.remove(&process_id);
+                if let Err(error) = vm.kernel.wait_and_reap(process.kernel_pid) {
+                    eprintln!(
+                        "ERR_AGENTOS_VM_FORCED_PROCESS_REAP: vm_id={vm_id} process_id={process_id} pid={} error={error}",
+                        process.kernel_pid
+                    );
+                }
             }
         }
 
@@ -1498,9 +1528,10 @@ fn retire_vm_fairness(
         .retire_vm(vm_generation)
         .map(|_| ())
         .map_err(|error| {
-            SidecarError::Execution(format!(
-                "ERR_AGENTOS_FAIRNESS_RETIRE_VM: generation={vm_generation}: {error}"
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_FAIRNESS_RETIRE_VM",
+                format!("generation={vm_generation}: {error}"),
+            )
         })
 }
 
@@ -1965,14 +1996,12 @@ fn bootstrap_native_root_filesystem(
     filesystem: &mut dyn MountedFileSystem,
     descriptor: &RootFilesystemDescriptor,
 ) -> Result<(), SidecarError> {
-    for (guest_path, mode) in SHADOW_ROOT_BOOTSTRAP_DIRS {
+    for (guest_path, mode, uid, gid) in ROOT_BOOTSTRAP_DIRS {
         filesystem.mkdir(guest_path, true).map_err(vfs_error)?;
-        let (uid, gid) = match *guest_path {
-            "/home/agentos" | "/workspace" => (1000, 1000),
-            _ => (0, 0),
-        };
-        filesystem.chown(guest_path, uid, gid).map_err(vfs_error)?;
         filesystem.chmod(guest_path, *mode).map_err(vfs_error)?;
+        filesystem
+            .chown(guest_path, *uid, *gid)
+            .map_err(vfs_error)?;
     }
 
     seed_native_ca_certificates_bundle(filesystem)?;
@@ -2218,7 +2247,7 @@ where
             ),
             Err(error) if error.code() == "EINVAL" => {}
             Err(error) => {
-                let _ = emit_structured_event(
+                if let Err(emit_error) = emit_structured_event(
                     &context.bridge,
                     &context.vm_id,
                     "filesystem.mount.shutdown_failed",
@@ -2230,7 +2259,12 @@ where
                         (String::from("error_code"), String::from(error.code())),
                         (String::from("error"), error.to_string()),
                     ]),
-                );
+                ) {
+                    eprintln!(
+                        "ERR_AGENTOS_DIAGNOSTIC_EMIT: failed to emit mount shutdown failure for VM {} at {}: {emit_error:?}",
+                        context.vm_id, existing.guest_path
+                    );
+                }
 
                 if !continue_on_error {
                     return Err(kernel_error(error));
@@ -2580,7 +2614,7 @@ fn resolve_guest_cwd(value: Option<&String>) -> String {
 
 fn resolve_vm_cwds(
     metadata_cwd: Option<&String>,
-    shadow_root: &Path,
+    runtime_scratch_root: &Path,
 ) -> Result<(String, PathBuf), SidecarError> {
     if let Some(raw_cwd) = metadata_cwd {
         let candidate = PathBuf::from(raw_cwd);
@@ -2591,7 +2625,7 @@ fn resolve_vm_cwds(
     }
 
     let guest_cwd = resolve_guest_cwd(metadata_cwd);
-    let host_cwd = shadow_path_for_guest(shadow_root, &guest_cwd);
+    let host_cwd = runtime_scratch_path_for_guest(runtime_scratch_root, &guest_cwd);
     Ok((guest_cwd, host_cwd))
 }
 
@@ -2616,32 +2650,30 @@ fn resolve_host_path(value: Option<&String>) -> Result<PathBuf, SidecarError> {
     }
 }
 
-fn create_vm_shadow_root(vm_id: &str) -> Result<PathBuf, SidecarError> {
+fn create_vm_runtime_scratch_root(vm_id: &str) -> Result<PathBuf, SidecarError> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| SidecarError::Io(format!("failed to compute shadow-root nonce: {error}")))?
+        .map_err(|error| {
+            SidecarError::Io(format!("failed to compute scratch-root nonce: {error}"))
+        })?
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("agentos-native-sidecar-shadow-{vm_id}-{nonce}"));
+    let root = std::env::temp_dir().join(format!("agentos-native-sidecar-runtime-{vm_id}-{nonce}"));
     fs::create_dir_all(&root)
-        .map_err(|error| SidecarError::Io(format!("failed to create VM shadow root: {error}")))?;
-    initialize_vm_shadow_root(root)
+        .map_err(|error| SidecarError::Io(format!("failed to create VM runtime root: {error}")))?;
+    initialize_vm_runtime_scratch_root(root)
 }
 
-fn initialize_vm_shadow_root(root: PathBuf) -> Result<PathBuf, SidecarError> {
+fn initialize_vm_runtime_scratch_root(root: PathBuf) -> Result<PathBuf, SidecarError> {
     let cleanup_root = root.clone();
     // macOS: `std::env::temp_dir()` lives under `/var/folders/…`, but `/var` is a
     // symlink to `/private/var`, and macOS fd→path recovery (`fcntl(F_GETPATH)`)
-    // reports the resolved `/private/var/…` form. Canonicalize the shadow root up
-    // front so the stored host-root matches those resolved paths; otherwise the
-    // mapped-runtime confinement prefix checks (`strip_prefix(host_root)`) reject
-    // every child and guest `readdir` of a populated dir returns empty. host_dir
-    // mounts already canonicalize their root for the same reason.
+    // reports the resolved `/private/var/…` form. Canonicalize the private
+    // runtime root so executor confinement compares the same host path form.
     let initialized = (|| {
         #[cfg(target_os = "macos")]
         let root = fs::canonicalize(&root).map_err(|error| {
-            SidecarError::Io(format!("failed to canonicalize VM shadow root: {error}"))
+            SidecarError::Io(format!("failed to canonicalize VM runtime root: {error}"))
         })?;
-        bootstrap_shadow_root(&root)?;
         Ok(root)
     })();
 
@@ -2650,413 +2682,21 @@ fn initialize_vm_shadow_root(root: PathBuf) -> Result<PathBuf, SidecarError> {
         Err(error) => match fs::remove_dir_all(&cleanup_root) {
             Ok(()) => Err(error),
             Err(cleanup_error) => Err(SidecarError::Io(format!(
-                "{error}; additionally failed to clean shadow root {}: {cleanup_error}",
+                "{error}; additionally failed to clean runtime root {}: {cleanup_error}",
                 cleanup_root.display()
             ))),
         },
     }
 }
 
-fn bootstrap_shadow_root(root: &Path) -> Result<(), SidecarError> {
-    for (guest_path, mode) in SHADOW_ROOT_BOOTSTRAP_DIRS {
-        let host_path = shadow_path_for_guest(root, guest_path);
-        fs::create_dir_all(&host_path).map_err(|error| {
-            SidecarError::Io(format!(
-                "failed to create shadow directory {}: {error}",
-                host_path.display()
-            ))
-        })?;
-        fs::set_permissions(&host_path, fs::Permissions::from_mode(*mode)).map_err(|error| {
-            SidecarError::Io(format!(
-                "failed to set shadow directory mode {mode:o} on {}: {error}",
-                host_path.display()
-            ))
-        })?;
-    }
-    seed_ca_certificates_bundle(root)?;
-    Ok(())
-}
-
-/// Seed the Mozilla CA bundle into the shadow root at
-/// `/etc/ssl/certs/ca-certificates.crt` (plus the conventional
-/// `/etc/ssl/cert.pem` symlink) so guest TLS clients resolve trust the standard
-/// Linux way.
-fn seed_ca_certificates_bundle(root: &Path) -> Result<(), SidecarError> {
-    if CA_CERTIFICATES_BUNDLE.is_empty() {
-        return Err(SidecarError::Io(
-            "embedded Mozilla CA certificate bundle is empty".to_string(),
-        ));
-    }
-
-    let bundle_path = shadow_path_for_guest(root, CA_CERTIFICATES_GUEST_PATH);
-    if let Some(parent) = bundle_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            SidecarError::Io(format!(
-                "failed to create shadow CA certs directory {}: {error}",
-                parent.display()
-            ))
-        })?;
-    }
-    match fs::symlink_metadata(&bundle_path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::write(&bundle_path, CA_CERTIFICATES_BUNDLE).map_err(|error| {
-                SidecarError::Io(format!(
-                    "failed to seed CA bundle {}: {error}",
-                    bundle_path.display()
-                ))
-            })?;
-            fs::set_permissions(&bundle_path, fs::Permissions::from_mode(0o644)).map_err(
-                |error| {
-                    SidecarError::Io(format!(
-                        "failed to set CA bundle mode on {}: {error}",
-                        bundle_path.display()
-                    ))
-                },
-            )?;
-        }
-        Err(error) => {
-            return Err(SidecarError::Io(format!(
-                "failed to inspect shadow CA bundle {}: {error}",
-                bundle_path.display()
-            )));
-        }
-    }
-
-    let symlink_path = shadow_path_for_guest(root, CA_CERTIFICATES_SYMLINK_PATH);
-    match fs::symlink_metadata(&symlink_path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::os::unix::fs::symlink(CA_CERTIFICATES_SYMLINK_TARGET, &symlink_path).map_err(
-                |error| {
-                    SidecarError::Io(format!(
-                        "failed to seed CA bundle symlink {}: {error}",
-                        symlink_path.display()
-                    ))
-                },
-            )?;
-        }
-        Err(error) => {
-            return Err(SidecarError::Io(format!(
-                "failed to inspect shadow CA bundle symlink {}: {error}",
-                symlink_path.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn materialize_shadow_root_snapshot_entries(
-    shadow_root: &Path,
-    descriptor: &RootFilesystemDescriptor,
-    loaded_snapshot: Option<&FilesystemSnapshot>,
-    resource_limits: &ResourceLimits,
-) -> Result<(), SidecarError> {
-    let import_limits = RootFilesystemImportLimits::from_resource_limits(resource_limits);
-    if let Some(snapshot) = loaded_snapshot
-        .filter(|snapshot| is_supported_root_filesystem_snapshot_format(&snapshot.format))
-        .map(|snapshot| {
-            decode_snapshot_with_import_limits(&snapshot.bytes, &import_limits)
-                .map_err(root_filesystem_error)
-        })
-        .transpose()?
-    {
-        materialize_shadow_entries(shadow_root, &root_snapshot_entries(&snapshot))?;
-        materialize_shadow_entries(shadow_root, &descriptor.bootstrap_entries)?;
-        return Ok(());
-    }
-
-    validate_shadow_descriptor_import_limits(descriptor, &import_limits)?;
-    for lower in &descriptor.lowers {
-        if let RootFilesystemLowerDescriptor::SnapshotRootFilesystemLower(inner) = lower {
-            materialize_shadow_entries(shadow_root, &inner.entries)?;
-        }
-    }
-    materialize_shadow_entries(shadow_root, &descriptor.bootstrap_entries)?;
-    Ok(())
-}
-
-fn validate_shadow_descriptor_import_limits(
-    descriptor: &RootFilesystemDescriptor,
-    limits: &RootFilesystemImportLimits,
-) -> Result<(), SidecarError> {
-    let mut explicit_entry_count = descriptor.bootstrap_entries.len();
-    let mut inode_paths = BTreeSet::new();
-    collect_root_protocol_entry_paths(&descriptor.bootstrap_entries, &mut inode_paths);
-    let mut bytes = root_protocol_entry_content_bytes(&descriptor.bootstrap_entries)?;
-
-    for lower in &descriptor.lowers {
-        match lower {
-            RootFilesystemLowerDescriptor::SnapshotRootFilesystemLower(inner) => {
-                let entries = &inner.entries;
-                explicit_entry_count = explicit_entry_count.saturating_add(entries.len());
-                collect_root_protocol_entry_paths(entries, &mut inode_paths);
-                bytes = bytes.saturating_add(root_protocol_entry_content_bytes(entries)?);
-            }
-            RootFilesystemLowerDescriptor::BundledBaseFilesystemLower => {}
-        }
-    }
-
-    if let Some(limit) = limits.max_inode_count {
-        if explicit_entry_count > limit {
-            return Err(root_filesystem_error(format!(
-                "root filesystem descriptor contains {explicit_entry_count} entries, exceeding limit {limit}"
-            )));
-        }
-
-        let entry_count = inode_paths.len();
-        if entry_count > limit {
-            return Err(root_filesystem_error(format!(
-                "root filesystem descriptor contains {entry_count} entries, exceeding limit {limit}"
-            )));
-        }
-    }
-
-    if let Some(limit) = limits.max_filesystem_bytes {
-        if bytes > limit {
-            return Err(root_filesystem_error(format!(
-                "root filesystem descriptor contains {bytes} bytes, exceeding limit {limit}"
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-fn collect_root_protocol_entry_paths(
-    entries: &[RootFilesystemEntry],
-    paths: &mut BTreeSet<String>,
-) {
-    for entry in entries {
-        collect_root_protocol_path(&entry.path, paths);
-    }
-}
-
-fn collect_root_protocol_path(path: &str, paths: &mut BTreeSet<String>) {
-    let normalized = normalize_guest_path(path);
-    paths.insert(normalized.clone());
-
-    let mut parent = String::new();
-    let segments = normalized
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>();
-    for segment in segments.iter().take(segments.len().saturating_sub(1)) {
-        parent.push('/');
-        parent.push_str(segment);
-        paths.insert(parent.clone());
-    }
-}
-
-fn root_protocol_entry_content_bytes(entries: &[RootFilesystemEntry]) -> Result<u64, SidecarError> {
-    entries.iter().try_fold(0_u64, |total, entry| {
-        let bytes = match entry.kind {
-            crate::protocol::RootFilesystemEntryKind::Directory => 0,
-            crate::protocol::RootFilesystemEntryKind::File => {
-                root_protocol_file_content_bytes(entry)?
-            }
-            crate::protocol::RootFilesystemEntryKind::Symlink => entry
-                .target
-                .as_ref()
-                .map(|target| usize_to_u64(target.len()))
-                .unwrap_or(0),
-        };
-        Ok(total.saturating_add(bytes))
-    })
-}
-
-fn root_protocol_file_content_bytes(entry: &RootFilesystemEntry) -> Result<u64, SidecarError> {
-    let Some(content) = entry.content.as_deref() else {
-        return Ok(0);
-    };
-
-    let bytes = match entry
-        .encoding
-        .clone()
-        .unwrap_or(RootFilesystemEntryEncoding::Utf8)
-    {
-        RootFilesystemEntryEncoding::Utf8 => content.len(),
-        RootFilesystemEntryEncoding::Base64 => estimated_base64_decoded_len(content),
-    };
-    Ok(usize_to_u64(bytes))
-}
-
-fn estimated_base64_decoded_len(content: &str) -> usize {
-    let padding = content
-        .as_bytes()
-        .iter()
-        .rev()
-        .take_while(|byte| **byte == b'=')
-        .count()
-        .min(2);
-    content
-        .len()
-        .div_ceil(4)
-        .saturating_mul(3)
-        .saturating_sub(padding)
-}
-
-fn usize_to_u64(value: usize) -> u64 {
-    u64::try_from(value).unwrap_or(u64::MAX)
-}
-
-fn materialize_shadow_entries(
-    shadow_root: &Path,
-    entries: &[RootFilesystemEntry],
-) -> Result<(), SidecarError> {
-    let mut ordered = entries.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|entry| {
-        let depth = entry.path.matches('/').count();
-        let kind_rank = match entry.kind {
-            crate::protocol::RootFilesystemEntryKind::Directory => 0,
-            crate::protocol::RootFilesystemEntryKind::File => 1,
-            crate::protocol::RootFilesystemEntryKind::Symlink => 2,
-        };
-        (kind_rank, depth, entry.path.as_str())
-    });
-
-    for entry in ordered {
-        let shadow_path = shadow_path_for_guest(shadow_root, &entry.path);
-        if let Some(parent) = shadow_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                SidecarError::Io(format!(
-                    "failed to create shadow parent for {}: {error}",
-                    entry.path
-                ))
-            })?;
-        }
-        prepare_shadow_destination(&shadow_path, &entry.kind, &entry.path)?;
-
-        match entry.kind {
-            crate::protocol::RootFilesystemEntryKind::Directory => {
-                fs::create_dir_all(&shadow_path).map_err(|error| {
-                    SidecarError::Io(format!(
-                        "failed to materialize shadow directory {}: {error}",
-                        entry.path
-                    ))
-                })?;
-            }
-            crate::protocol::RootFilesystemEntryKind::File => {
-                let bytes = decode_root_entry_content(entry)?;
-                fs::write(&shadow_path, bytes).map_err(|error| {
-                    SidecarError::Io(format!(
-                        "failed to materialize shadow file {}: {error}",
-                        entry.path
-                    ))
-                })?;
-            }
-            crate::protocol::RootFilesystemEntryKind::Symlink => {
-                std::os::unix::fs::symlink(
-                    entry.target.as_deref().ok_or_else(|| {
-                        SidecarError::InvalidState(format!(
-                            "root filesystem symlink {} requires a target",
-                            entry.path
-                        ))
-                    })?,
-                    &shadow_path,
-                )
-                .map_err(|error| {
-                    SidecarError::Io(format!(
-                        "failed to materialize shadow symlink {}: {error}",
-                        entry.path
-                    ))
-                })?;
-                continue;
-            }
-        }
-
-        let mode = entry.mode.unwrap_or(match entry.kind {
-            crate::protocol::RootFilesystemEntryKind::Directory => 0o755,
-            crate::protocol::RootFilesystemEntryKind::File => {
-                if entry.executable {
-                    0o755
-                } else {
-                    0o644
-                }
-            }
-            crate::protocol::RootFilesystemEntryKind::Symlink => 0o777,
-        });
-        fs::set_permissions(&shadow_path, fs::Permissions::from_mode(mode & 0o7777)).map_err(
-            |error| {
-                SidecarError::Io(format!(
-                    "failed to set shadow mode on {}: {error}",
-                    entry.path
-                ))
-            },
-        )?;
-    }
-
-    Ok(())
-}
-
-fn prepare_shadow_destination(
-    path: &Path,
-    desired_kind: &crate::protocol::RootFilesystemEntryKind,
-    guest_path: &str,
-) -> Result<(), SidecarError> {
-    let existing = match fs::symlink_metadata(path) {
-        Ok(existing) => existing,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(SidecarError::Io(format!(
-                "failed to inspect shadow entry {guest_path}: {error}"
-            )));
-        }
-    };
-    let file_type = existing.file_type();
-    let already_compatible = match desired_kind {
-        crate::protocol::RootFilesystemEntryKind::Directory => {
-            file_type.is_dir() && !file_type.is_symlink()
-        }
-        crate::protocol::RootFilesystemEntryKind::File => {
-            file_type.is_file() && !file_type.is_symlink()
-        }
-        crate::protocol::RootFilesystemEntryKind::Symlink => false,
-    };
-    if already_compatible {
-        return Ok(());
-    }
-
-    let result = if file_type.is_dir() && !file_type.is_symlink() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    };
-    result.map_err(|error| {
-        SidecarError::Io(format!(
-            "failed to replace incompatible shadow entry {guest_path}: {error}"
-        ))
-    })
-}
-
-fn decode_root_entry_content(entry: &RootFilesystemEntry) -> Result<Vec<u8>, SidecarError> {
-    let content = entry.content.as_deref().unwrap_or_default();
-    match entry
-        .encoding
-        .clone()
-        .unwrap_or(crate::protocol::RootFilesystemEntryEncoding::Utf8)
-    {
-        crate::protocol::RootFilesystemEntryEncoding::Utf8 => Ok(content.as_bytes().to_vec()),
-        crate::protocol::RootFilesystemEntryEncoding::Base64 => {
-            base64::engine::general_purpose::STANDARD
-                .decode(content)
-                .map_err(|error| {
-                    SidecarError::InvalidState(format!(
-                        "invalid base64 root filesystem content for {}: {error}",
-                        entry.path
-                    ))
-                })
-        }
-    }
-}
-
-fn shadow_path_for_guest(shadow_root: &std::path::Path, guest_path: &str) -> PathBuf {
-    let normalized = normalize_guest_path(guest_path);
-    let relative = normalized.trim_start_matches('/');
+fn runtime_scratch_path_for_guest(runtime_root: &Path, guest_path: &str) -> PathBuf {
+    let relative = normalize_guest_path(guest_path);
+    let relative = relative.trim_start_matches('/');
     if relative.is_empty() {
-        return shadow_root.to_path_buf();
+        runtime_root.to_path_buf()
+    } else {
+        runtime_root.join(relative)
     }
-    shadow_root.join(relative)
 }
 
 fn normalize_guest_path(path: &str) -> String {
@@ -3099,19 +2739,13 @@ fn parse_vm_dns_nameserver(value: &str) -> Result<SocketAddr, SidecarError> {
 
 fn refresh_guest_command_path_env(
     guest_env: &mut BTreeMap<String, String>,
-    command_guest_paths: &BTreeMap<String, String>,
+    command_search_roots: &[String],
 ) {
     let mut merged = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for guest_path in command_guest_paths.values() {
-        let Some(parent) = Path::new(guest_path)
-            .parent()
-            .and_then(|path| path.to_str())
-        else {
-            continue;
-        };
-        let normalized = normalize_path(parent);
+    for root in command_search_roots {
+        let normalized = normalize_path(root);
         if normalized == "/" {
             continue;
         }
@@ -3127,6 +2761,10 @@ fn refresh_guest_command_path_env(
         }
     }
 
+    // PATH is derived state. Strip roots managed by the command projection
+    // before preserving caller-supplied extras, so a removed numeric legacy
+    // mount cannot survive forever merely because it appeared in the previous
+    // synthesized PATH value.
     if let Some(existing_path) = guest_env.get("PATH") {
         for segment in existing_path.split(':') {
             let trimmed = segment.trim();
@@ -3138,6 +2776,9 @@ fn refresh_guest_command_path_env(
             } else {
                 trimmed.to_owned()
             };
+            if is_managed_guest_command_path_segment(&normalized) {
+                continue;
+            }
             if seen.insert(normalized.clone()) {
                 merged.push(normalized);
             }
@@ -3145,6 +2786,25 @@ fn refresh_guest_command_path_env(
     }
 
     guest_env.insert(String::from("PATH"), merged.join(":"));
+}
+
+fn is_managed_guest_command_path_segment(segment: &str) -> bool {
+    let normalized = if segment.starts_with('/') {
+        normalize_path(segment)
+    } else {
+        segment.to_owned()
+    };
+    if DEFAULT_GUEST_PATH_ENV
+        .split(':')
+        .any(|default| normalize_path(default) == normalized)
+    {
+        return true;
+    }
+    normalized
+        .strip_prefix("/__secure_exec/commands/")
+        .is_some_and(|root| {
+            !root.is_empty() && !root.contains('/') && root.chars().all(|ch| ch.is_ascii_digit())
+        })
 }
 
 pub(crate) fn normalize_dns_hostname(hostname: &str) -> Result<String, SidecarError> {
@@ -3179,33 +2839,28 @@ fn prune_kernel_command_stub(
 #[cfg(test)]
 mod tests {
     use super::{
-        bootstrap_native_root_filesystem, bootstrap_shadow_root, close_vm_admission,
-        create_vm_unix_socket_host_dir, initialize_vm_shadow_root,
-        materialize_shadow_root_snapshot_entries, native_root_plugin_from_config,
-        prune_kernel_command_stub, retire_vm_fairness, shadow_path_for_guest, vm_quarantine_reason,
+        bootstrap_native_root_filesystem, close_vm_admission, create_vm_unix_socket_host_dir,
+        execution_driver_commands, native_root_plugin_from_config,
+        projected_commands_from_provided_commands, prune_kernel_command_stub,
+        refresh_guest_command_path_env, retire_vm_fairness, vm_quarantine_reason,
         vm_resource_ledger, wait_for_vm_reconciliation, CA_CERTIFICATES_BUNDLE,
-        CA_CERTIFICATES_GUEST_PATH, CA_CERTIFICATES_SYMLINK_PATH, CA_CERTIFICATES_SYMLINK_TARGET,
+        CA_CERTIFICATES_GUEST_PATH, CA_CERTIFICATES_SYMLINK_PATH, DEFAULT_GUEST_PATH_ENV,
         KERNEL_COMMAND_STUB,
     };
+    use crate::bootstrap::KernelCommandInventory;
     use crate::bridge::MountPluginContext;
     use crate::plugins::chunked_local::ChunkedLocalMountPlugin;
-    use crate::protocol::{
-        RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryKind,
-        RootFilesystemLowerDescriptor,
-    };
+    use crate::protocol::{RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryKind};
     use crate::service::NativeSidecar;
     use crate::state::{
         ConnectionState, QuarantinedVmGeneration, SessionState, VmQuarantineReason,
         VmReconciliationSnapshot,
     };
     use crate::stdio::LocalBridge;
-    use agentos_bridge::FilesystemSnapshot;
     use agentos_kernel::kernel::{KernelVm, KernelVmConfig};
     use agentos_kernel::mount_plugin::{FileSystemPluginFactory, OpenFileSystemPluginRequest};
     use agentos_kernel::mount_table::{MountOptions, MountTable};
     use agentos_kernel::permissions::Permissions;
-    use agentos_kernel::resource_accounting::ResourceLimits;
-    use agentos_kernel::root_fs::{encode_snapshot, FilesystemEntry, RootFilesystemSnapshot};
     use agentos_kernel::vfs::VirtualFileSystem;
     use agentos_runtime::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
     use agentos_runtime::capability::{CapabilityKind, CapabilityRegistry};
@@ -3215,7 +2870,6 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3247,6 +2901,73 @@ mod tests {
         let runtime_context = process.scoped_for_vm(Arc::clone(&resources), generation);
         let capabilities = CapabilityRegistry::new(generation, Arc::clone(&resources));
         (resources, runtime_context, capabilities)
+    }
+
+    #[test]
+    fn guest_command_path_rebuild_drops_removed_managed_roots() {
+        let mut guest_env = BTreeMap::from([(
+            String::from("PATH"),
+            format!(
+                "/__secure_exec/commands/001:{DEFAULT_GUEST_PATH_ENV}:/custom/bin:relative:/__secure_exec/commands/custom"
+            ),
+        )]);
+
+        refresh_guest_command_path_env(
+            &mut guest_env,
+            &[String::from("/__secure_exec/commands/002")],
+        );
+
+        assert_eq!(
+            guest_env.get("PATH").map(String::as_str),
+            Some(
+                "/__secure_exec/commands/002:/usr/local/sbin:/usr/local/bin:/opt/agentos/bin:/usr/sbin:/usr/bin:/sbin:/bin:/custom/bin:relative:/__secure_exec/commands/custom"
+            )
+        );
+    }
+
+    #[test]
+    fn transient_inventory_drives_registration_and_projection_reporting() {
+        let kernel_commands = KernelCommandInventory {
+            names: BTreeSet::from([String::from("legacy"), String::from("shadowed")]),
+            search_roots: vec![String::from("/__secure_exec/commands/001")],
+        };
+        let provided_commands = BTreeMap::from([
+            (
+                String::from("pkg-a"),
+                vec![String::from("visible"), String::from("shadowed")],
+            ),
+            (String::from("pkg-b"), vec![String::from("second")]),
+        ]);
+
+        let registered = execution_driver_commands(
+            &kernel_commands,
+            &provided_commands,
+            [String::from("binding"), String::from("visible")],
+        );
+        assert_eq!(
+            registered.iter().collect::<BTreeSet<_>>().len(),
+            registered.len()
+        );
+        for expected in [
+            "binding", "legacy", "node", "python", "python3", "second", "shadowed", "visible",
+            "wasm",
+        ] {
+            assert!(registered.iter().any(|command| command == expected));
+        }
+
+        assert_eq!(
+            projected_commands_from_provided_commands(&provided_commands, &kernel_commands),
+            vec![
+                crate::protocol::ProjectedCommand {
+                    name: String::from("second"),
+                    guest_path: String::from("/opt/agentos/bin/second"),
+                },
+                crate::protocol::ProjectedCommand {
+                    name: String::from("visible"),
+                    guest_path: String::from("/opt/agentos/bin/visible"),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -3594,95 +3315,6 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn bootstrap_shadow_root_seeds_standard_directories() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be monotonic")
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("agentos-native-sidecar-shadow-test-{unique}"));
-        fs::create_dir_all(&root).expect("temp shadow root should be created");
-
-        bootstrap_shadow_root(&root).expect("shadow bootstrap should succeed");
-
-        let tmp = shadow_path_for_guest(&root, "/tmp");
-        let etc_agentos = shadow_path_for_guest(&root, "/etc/agentos");
-        let usr_local_bin = shadow_path_for_guest(&root, "/usr/local/bin");
-
-        assert!(tmp.is_dir(), "/tmp should exist in the shadow root");
-        assert!(
-            etc_agentos.is_dir(),
-            "/etc/agentos should exist in the shadow root"
-        );
-        assert!(
-            usr_local_bin.is_dir(),
-            "/usr/local/bin should exist in the shadow root"
-        );
-        assert_eq!(
-            fs::metadata(&tmp)
-                .expect("/tmp metadata should be readable")
-                .permissions()
-                .mode()
-                & 0o7777,
-            0o1777,
-            "/tmp should preserve its sticky-bit mode in the shadow root"
-        );
-
-        fs::remove_dir_all(&root).expect("temp shadow root should be removed");
-    }
-
-    #[test]
-    fn bootstrap_shadow_root_seeds_ca_bundle_when_present() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be monotonic")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("agentos-native-sidecar-ca-test-{unique}"));
-        fs::create_dir_all(&root).expect("temp shadow root should be created");
-
-        bootstrap_shadow_root(&root).expect("shadow bootstrap should succeed");
-
-        let bundle = shadow_path_for_guest(&root, CA_CERTIFICATES_GUEST_PATH);
-        let symlink = shadow_path_for_guest(&root, CA_CERTIFICATES_SYMLINK_PATH);
-
-        assert!(!CA_CERTIFICATES_BUNDLE.is_empty());
-        let seeded = fs::read(&bundle).expect("CA bundle should be seeded");
-        assert_eq!(
-            seeded, CA_CERTIFICATES_BUNDLE,
-            "seeded CA bundle should match the embedded asset"
-        );
-        let target = fs::read_link(&symlink).expect("cert.pem symlink should be seeded");
-        assert_eq!(
-            target,
-            Path::new(CA_CERTIFICATES_SYMLINK_TARGET),
-            "cert.pem should point at certs/ca-certificates.crt"
-        );
-
-        fs::remove_dir_all(&root).expect("temp shadow root should be removed");
-    }
-
-    #[test]
-    fn failed_shadow_bootstrap_removes_temporary_root() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be monotonic")
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("agentos-native-sidecar-shadow-failure-{unique}"));
-        fs::create_dir_all(&root).expect("temp shadow root should be created");
-        fs::write(root.join("dev"), b"blocks directory creation")
-            .expect("blocking file should be created");
-
-        initialize_vm_shadow_root(root.clone())
-            .expect_err("invalid shadow scaffold should fail bootstrap");
-        assert!(
-            !root.exists(),
-            "failed bootstrap must not leak its temporary shadow root"
-        );
-    }
-
     #[test]
     fn native_root_config_opens_chunked_local_as_persistent_root() {
         let unique = SystemTime::now()
@@ -3757,17 +3389,15 @@ mod tests {
             filesystem,
             MountOptions::new(native_root.plugin.id.clone()),
         );
-        assert!(mount_table.exists("/home/agentos"));
-        let home = mount_table
-            .stat("/home/agentos")
-            .expect("native AgentOS home metadata should be readable");
-        assert_eq!((home.uid, home.gid), (1000, 1000));
+        let home = mount_table.stat("/home/agentos").expect("stat guest home");
         assert_eq!(home.mode & 0o7777, 0o2755);
-        let workspace = mount_table
-            .stat("/workspace")
-            .expect("native workspace metadata should be readable");
-        assert_eq!((workspace.uid, workspace.gid), (1000, 1000));
+        assert_eq!((home.uid, home.gid), (1000, 1000));
+        let workspace = mount_table.stat("/workspace").expect("stat workspace");
         assert_eq!(workspace.mode & 0o7777, 0o755);
+        assert_eq!((workspace.uid, workspace.gid), (1000, 1000));
+        let root_home = mount_table.stat("/root").expect("stat root home");
+        assert_eq!(root_home.mode & 0o7777, 0o711);
+        assert_eq!((root_home.uid, root_home.gid), (0, 0));
         assert_eq!(
             mount_table
                 .read_file("/etc/agentos/boot.txt")
@@ -3828,308 +3458,5 @@ mod tests {
 
         let _ = fs::remove_file(database_path);
         let _ = fs::remove_dir_all(block_root);
-    }
-
-    #[test]
-    fn custom_shadow_ca_files_replace_seeded_defaults_without_following_symlinks() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be monotonic")
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("agentos-native-sidecar-shadow-custom-ca-{unique}"));
-        fs::create_dir_all(&root).expect("temp shadow root should be created");
-        bootstrap_shadow_root(&root).expect("shadow bootstrap should succeed");
-
-        let descriptor = RootFilesystemDescriptor {
-            bootstrap_entries: vec![
-                RootFilesystemEntry {
-                    path: "/custom/ca.pem".to_string(),
-                    kind: RootFilesystemEntryKind::File,
-                    content: Some("custom bundle\n".to_string()),
-                    ..Default::default()
-                },
-                RootFilesystemEntry {
-                    path: CA_CERTIFICATES_GUEST_PATH.to_string(),
-                    kind: RootFilesystemEntryKind::Symlink,
-                    target: Some("../../../custom/ca.pem".to_string()),
-                    ..Default::default()
-                },
-                RootFilesystemEntry {
-                    path: CA_CERTIFICATES_SYMLINK_PATH.to_string(),
-                    kind: RootFilesystemEntryKind::File,
-                    content: Some("custom cert.pem\n".to_string()),
-                    ..Default::default()
-                },
-            ],
-            ..RootFilesystemDescriptor::default()
-        };
-
-        materialize_shadow_root_snapshot_entries(
-            &root,
-            &descriptor,
-            None,
-            &ResourceLimits::default(),
-        )
-        .expect("custom CA entries should materialize");
-
-        let bundle = shadow_path_for_guest(&root, CA_CERTIFICATES_GUEST_PATH);
-        let cert_pem = shadow_path_for_guest(&root, CA_CERTIFICATES_SYMLINK_PATH);
-        assert_eq!(
-            fs::read(&bundle).expect("read custom bundle through custom symlink"),
-            b"custom bundle\n"
-        );
-        assert_eq!(
-            fs::read_link(&bundle).expect("read custom CA bundle symlink"),
-            Path::new("../../../custom/ca.pem"),
-            "a custom symlink must replace the seeded regular bundle"
-        );
-        assert_eq!(
-            fs::read(&cert_pem).expect("read custom regular cert.pem"),
-            b"custom cert.pem\n"
-        );
-        assert!(
-            !fs::symlink_metadata(cert_pem)
-                .expect("lstat custom cert.pem")
-                .file_type()
-                .is_symlink(),
-            "custom cert.pem must replace rather than follow the seeded symlink"
-        );
-
-        fs::remove_dir_all(&root).expect("temp shadow root should be removed");
-    }
-
-    #[test]
-    fn materialize_shadow_root_snapshot_entries_rejects_oversized_legacy_restored_snapshots() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be monotonic")
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("agentos-native-sidecar-shadow-limit-{unique}"));
-        fs::create_dir_all(&root).expect("temp shadow root should be created");
-        bootstrap_shadow_root(&root).expect("shadow bootstrap should succeed");
-
-        let snapshot = RootFilesystemSnapshot {
-            entries: vec![FilesystemEntry::file("/large.txt", b"four".to_vec())],
-        };
-        let loaded_snapshot = FilesystemSnapshot {
-            format: String::from("agentos_filesystem_snapshot_v1"),
-            bytes: encode_snapshot(&snapshot).expect("encode restored snapshot"),
-        };
-        let resource_limits = ResourceLimits {
-            max_filesystem_bytes: Some(3),
-            ..ResourceLimits::default()
-        };
-
-        let error = materialize_shadow_root_snapshot_entries(
-            &root,
-            &RootFilesystemDescriptor::default(),
-            Some(&loaded_snapshot),
-            &resource_limits,
-        )
-        .expect_err("oversized restored snapshot should be rejected");
-
-        assert!(error.to_string().contains("exceeding limit 3"));
-        fs::remove_dir_all(&root).expect("temp shadow root should be removed");
-    }
-
-    #[test]
-    fn materialize_shadow_root_snapshot_entries_rejects_oversized_descriptor_before_writes() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be monotonic")
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("agentos-native-sidecar-shadow-descriptor-{unique}"));
-        fs::create_dir_all(&root).expect("temp shadow root should be created");
-        bootstrap_shadow_root(&root).expect("shadow bootstrap should succeed");
-
-        let descriptor = RootFilesystemDescriptor {
-            lowers: vec![RootFilesystemLowerDescriptor::SnapshotRootFilesystemLower(
-                crate::protocol::SnapshotRootFilesystemLower {
-                    entries: vec![RootFilesystemEntry {
-                        path: String::from("/large.txt"),
-                        kind: RootFilesystemEntryKind::File,
-                        mode: Some(0o644),
-                        uid: Some(0),
-                        gid: Some(0),
-                        content: Some(String::from("four")),
-                        encoding: Some(crate::protocol::RootFilesystemEntryEncoding::Utf8),
-                        target: None,
-                        executable: false,
-                    }],
-                },
-            )],
-            ..RootFilesystemDescriptor::default()
-        };
-        let resource_limits = ResourceLimits {
-            max_filesystem_bytes: Some(3),
-            ..ResourceLimits::default()
-        };
-
-        let error =
-            materialize_shadow_root_snapshot_entries(&root, &descriptor, None, &resource_limits)
-                .expect_err("oversized descriptor should be rejected");
-
-        assert!(error.to_string().contains("exceeding limit 3"));
-        assert!(
-            !shadow_path_for_guest(&root, "/large.txt").exists(),
-            "oversized descriptor must be rejected before materializing files"
-        );
-        fs::remove_dir_all(&root).expect("temp shadow root should be removed");
-    }
-
-    #[test]
-    fn materialize_shadow_root_snapshot_entries_counts_implicit_parent_directories() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be monotonic")
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("agentos-native-sidecar-shadow-parents-{unique}"));
-        fs::create_dir_all(&root).expect("temp shadow root should be created");
-        bootstrap_shadow_root(&root).expect("shadow bootstrap should succeed");
-
-        let descriptor = RootFilesystemDescriptor {
-            lowers: vec![RootFilesystemLowerDescriptor::SnapshotRootFilesystemLower(
-                crate::protocol::SnapshotRootFilesystemLower {
-                    entries: vec![RootFilesystemEntry {
-                        path: String::from("/deep/nested/file.txt"),
-                        kind: RootFilesystemEntryKind::File,
-                        mode: Some(0o644),
-                        uid: Some(0),
-                        gid: Some(0),
-                        content: Some(String::from("x")),
-                        encoding: Some(crate::protocol::RootFilesystemEntryEncoding::Utf8),
-                        target: None,
-                        executable: false,
-                    }],
-                },
-            )],
-            ..RootFilesystemDescriptor::default()
-        };
-        let resource_limits = ResourceLimits {
-            max_inode_count: Some(1),
-            ..ResourceLimits::default()
-        };
-
-        let error =
-            materialize_shadow_root_snapshot_entries(&root, &descriptor, None, &resource_limits)
-                .expect_err("implicit parents should be rejected");
-
-        assert!(error.to_string().contains("exceeding limit 1"));
-        assert!(
-            !shadow_path_for_guest(&root, "/deep").exists(),
-            "implicit parents must not be materialized after rejection"
-        );
-        fs::remove_dir_all(&root).expect("temp shadow root should be removed");
-    }
-
-    #[test]
-    fn materialize_shadow_root_snapshot_entries_rejects_duplicate_descriptor_entries() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be monotonic")
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("agentos-native-sidecar-shadow-duplicates-{unique}"));
-        fs::create_dir_all(&root).expect("temp shadow root should be created");
-        bootstrap_shadow_root(&root).expect("shadow bootstrap should succeed");
-
-        let duplicate_entry = RootFilesystemEntry {
-            path: String::from("/dup.txt"),
-            kind: RootFilesystemEntryKind::File,
-            mode: Some(0o644),
-            uid: Some(0),
-            gid: Some(0),
-            content: Some(String::new()),
-            encoding: Some(crate::protocol::RootFilesystemEntryEncoding::Utf8),
-            target: None,
-            executable: false,
-        };
-        let descriptor = RootFilesystemDescriptor {
-            lowers: vec![RootFilesystemLowerDescriptor::SnapshotRootFilesystemLower(
-                crate::protocol::SnapshotRootFilesystemLower {
-                    entries: vec![duplicate_entry.clone(), duplicate_entry],
-                },
-            )],
-            ..RootFilesystemDescriptor::default()
-        };
-        let resource_limits = ResourceLimits {
-            max_inode_count: Some(1),
-            ..ResourceLimits::default()
-        };
-
-        let error =
-            materialize_shadow_root_snapshot_entries(&root, &descriptor, None, &resource_limits)
-                .expect_err("duplicate descriptor entries should be rejected");
-
-        assert!(error.to_string().contains("exceeding limit 1"));
-        assert!(
-            !shadow_path_for_guest(&root, "/dup.txt").exists(),
-            "duplicate descriptor must be rejected before materializing files"
-        );
-        fs::remove_dir_all(&root).expect("temp shadow root should be removed");
-    }
-
-    #[test]
-    fn materialize_shadow_root_snapshot_entries_copies_custom_snapshot_files() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be monotonic")
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("agentos-native-sidecar-shadow-snapshot-{unique}"));
-        fs::create_dir_all(&root).expect("temp shadow root should be created");
-        bootstrap_shadow_root(&root).expect("shadow bootstrap should succeed");
-
-        let descriptor = RootFilesystemDescriptor {
-            lowers: vec![RootFilesystemLowerDescriptor::SnapshotRootFilesystemLower(
-                crate::protocol::SnapshotRootFilesystemLower {
-                    entries: vec![
-                        RootFilesystemEntry {
-                            path: String::from("/"),
-                            kind: RootFilesystemEntryKind::Directory,
-                            mode: Some(0o755),
-                            uid: Some(0),
-                            gid: Some(0),
-                            content: None,
-                            encoding: None,
-                            target: None,
-                            executable: false,
-                        },
-                        RootFilesystemEntry {
-                            path: String::from("/hello.txt"),
-                            kind: RootFilesystemEntryKind::File,
-                            mode: Some(0o644),
-                            uid: Some(0),
-                            gid: Some(0),
-                            content: Some(String::from("hello from snapshot\n")),
-                            encoding: Some(crate::protocol::RootFilesystemEntryEncoding::Utf8),
-                            target: None,
-                            executable: false,
-                        },
-                    ],
-                },
-            )],
-            ..RootFilesystemDescriptor::default()
-        };
-
-        materialize_shadow_root_snapshot_entries(
-            &root,
-            &descriptor,
-            None,
-            &ResourceLimits::default(),
-        )
-        .expect("snapshot entries should materialize into the shadow root");
-
-        assert_eq!(
-            fs::read_to_string(shadow_path_for_guest(&root, "/hello.txt"))
-                .expect("shadow file should be readable"),
-            "hello from snapshot\n"
-        );
-
-        fs::remove_dir_all(&root).expect("temp shadow root should be removed");
     }
 }

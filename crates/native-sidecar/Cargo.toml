@@ -33,6 +33,7 @@ base64 = "0.22"
 bytes = "1"
 ctr = "0.9"
 filetime = "0.2"
+getrandom = "0.2"
 h2 = "0.4"
 http = "1"
 hmac = "0.12"
@@ -82,6 +83,7 @@ uuid = { version = "1", features = ["v4"] }
 vfs = { workspace = true }
 
 [dev-dependencies]
+agentos-wasm-abi-generator = { path = "../wasm-abi-generator" }
 command-fds = "0.3"
 tar = "0.4"
 tempfile = "3"

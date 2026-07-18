@@ -4081,7 +4081,9 @@ mod tests {
                 wasm: Some(WasmLimits {
                     prewarm_timeout_ms: Some(30_000),
                     runner_heap_limit_mb: Some(2_048),
-                    runner_cpu_time_limit_ms: Some(60_000),
+                    active_cpu_time_limit_ms: Some(60_000),
+                    wall_clock_limit_ms: Some(120_000),
+                    deterministic_fuel: Some(1_000_000),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -4133,6 +4135,8 @@ mod tests {
         let wasm = limits.wasm.expect("wasm limits");
         assert_eq!(wasm.prewarm_timeout_ms, Some(30_000));
         assert_eq!(wasm.runner_heap_limit_mb, Some(2_048));
-        assert_eq!(wasm.runner_cpu_time_limit_ms, Some(60_000));
+        assert_eq!(wasm.active_cpu_time_limit_ms, Some(60_000));
+        assert_eq!(wasm.wall_clock_limit_ms, Some(120_000));
+        assert_eq!(wasm.deterministic_fuel, Some(1_000_000));
     }
 }

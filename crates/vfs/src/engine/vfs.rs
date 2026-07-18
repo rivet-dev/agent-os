@@ -1,5 +1,5 @@
 use crate::engine::error::{VfsError, VfsResult};
-use crate::engine::types::{Dentry, SnapshotId, VirtualStat};
+use crate::engine::types::{Dentry, FileExtent, SnapshotId, VirtualStat};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -200,6 +200,21 @@ pub trait VirtualFileSystem: Send + Sync {
     /// Returns unwritten allocated byte ranges as half-open `(start, end)` intervals.
     async fn unwritten_ranges(&self, _path: &str) -> VfsResult<Vec<(u64, u64)>> {
         Ok(Vec::new())
+    }
+    /// Returns one allocated extent, split at written/unwritten boundaries.
+    async fn extent_at(&self, path: &str, index: usize) -> VfsResult<Option<FileExtent>> {
+        let allocated = self.allocated_ranges(path).await?;
+        let unwritten = self.unwritten_ranges(path).await?;
+        Ok(crate::extent::classified_file_extent_at(
+            allocated.iter().copied(),
+            unwritten.iter().copied(),
+            index,
+        )
+        .map(|extent| FileExtent {
+            start: extent.start,
+            end: extent.end,
+            unwritten: extent.unwritten,
+        }))
     }
     async fn pread(&self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>>;
     async fn pwrite(&self, path: &str, content: &[u8], offset: u64) -> VfsResult<()>;

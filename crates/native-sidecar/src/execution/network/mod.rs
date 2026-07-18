@@ -1,8 +1,7 @@
 mod tcp;
 pub(in crate::execution) use self::tcp::*;
 pub(crate) use self::tcp::{
-    build_javascript_socket_path_context, finalize_javascript_net_connect,
-    restore_pending_bound_unix_connect,
+    build_socket_path_context, finalize_net_connect, restore_pending_bound_unix_connect,
 };
 mod unix;
 pub(in crate::execution) use self::unix::*;
@@ -19,3 +18,11 @@ pub(in crate::execution) use self::http2::*;
 mod dns;
 pub(crate) use self::dns::format_dns_resource;
 pub(in crate::execution) use self::dns::*;
+mod resolver;
+pub(crate) use self::resolver::HickoryDnsResolver;
+mod managed;
+pub(in crate::execution) use self::managed::*;
+mod managed_endpoint;
+pub(in crate::execution) use self::managed_endpoint::*;
+mod http_client;
+pub(in crate::execution) use self::http_client::*;

@@ -2,8 +2,8 @@ mod support;
 
 use agentos_native_sidecar::wire::{
     CloseStdinRequest, CreateVmRequest, DisposeReason, DisposeVmRequest, EventPayload,
-    GuestRuntimeKind, PatternPermissionScope, PermissionMode, PermissionsPolicy, RequestPayload,
-    ResponsePayload, RootFilesystemDescriptor, RootFilesystemMode, StreamChannel,
+    ExecuteRequest, GuestRuntimeKind, PatternPermissionScope, PermissionMode, PermissionsPolicy,
+    RequestPayload, ResponsePayload, RootFilesystemDescriptor, RootFilesystemMode, StreamChannel,
     WriteStdinRequest,
 };
 use hickory_resolver::proto::op::{Message, Query};
@@ -1483,6 +1483,181 @@ fn readline_question_reads_real_stdin() {
     run_isolated_builtin_conformance_test("readline-question");
 }
 
+fn tty_stdin_uses_kernel_canonical_and_raw_discipline_impl() {
+    assert_node_available();
+
+    let cwd = temp_dir("builtin-tty-stdin-discipline");
+    let entrypoint = cwd.join("entry.mjs");
+    write_fixture(
+        &entrypoint,
+        r#"
+process.stdin.setEncoding("utf8");
+process.stdout.write("__READY_CANON__\n");
+
+process.stdin.once("data", (canonical) => {
+  process.stdout.write(`__CANON__${JSON.stringify(canonical)}\n`);
+  process.stdin.setRawMode(true);
+  process.stdout.write("__READY_RAW__\n");
+  process.stdin.once("data", (raw) => {
+    process.stdout.write(`__RAW__${JSON.stringify(raw)}\n`);
+  });
+});
+"#,
+    );
+
+    let mut sidecar = new_sidecar("builtin-tty-stdin-discipline");
+    let connection_id = authenticate_wire(&mut sidecar, "conn-tty-stdin-discipline");
+    let session_id = open_session_wire(&mut sidecar, 2, &connection_id);
+    let vm_id = create_vm_with_metadata_and_permissions(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::JavaScript,
+        &cwd,
+        HashMap::new(),
+        wire_permissions_allow_all(),
+    );
+    let process_id = "proc-tty-stdin-discipline";
+    let start = sidecar
+        .dispatch_wire_blocking(wire_request(
+            4,
+            wire_vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::ExecuteRequest(ExecuteRequest {
+                process_id: process_id.to_owned(),
+                command: None,
+                runtime: Some(GuestRuntimeKind::JavaScript),
+                entrypoint: Some(entrypoint.to_string_lossy().into_owned()),
+                args: Vec::new(),
+                env: HashMap::from([(String::from("AGENTOS_EXEC_TTY"), String::from("1"))]),
+                cwd: None,
+                wasm_permission_tier: None,
+            }),
+        ))
+        .expect("start TTY stdin discipline probe");
+    assert!(matches!(
+        start.response.payload,
+        ResponsePayload::ProcessStartedResponse(_)
+    ));
+
+    let ownership = wire_session(&connection_id, &session_id);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut canonical_partial_sent_at = None;
+    let mut canonical_line_sent = false;
+    let mut raw_byte_sent = false;
+    let mut stdin_closed = false;
+    let mut exit = None;
+
+    loop {
+        if let Some(event) = sidecar
+            .poll_event_wire_blocking(&ownership, Duration::from_millis(25))
+            .expect("poll TTY stdin discipline event")
+        {
+            match event.payload {
+                EventPayload::ProcessOutputEvent(output) if output.process_id == process_id => {
+                    match output.channel {
+                        StreamChannel::Stdout => {
+                            append_probe_output(&mut stdout, &output.chunk, process_id, "stdout")
+                        }
+                        StreamChannel::Stderr => {
+                            append_probe_output(&mut stderr, &output.chunk, process_id, "stderr")
+                        }
+                    }
+                }
+                EventPayload::ProcessExitedEvent(exited) if exited.process_id == process_id => {
+                    exit = Some((exited.exit_code, Instant::now()));
+                }
+                _ => {}
+            }
+        }
+
+        if canonical_partial_sent_at.is_none() && stdout.contains("__READY_CANON__") {
+            write_process_stdin(
+                &mut sidecar,
+                5,
+                &connection_id,
+                &session_id,
+                &vm_id,
+                process_id,
+                "alpha",
+            );
+            canonical_partial_sent_at = Some(Instant::now());
+        }
+        if !canonical_line_sent
+            && canonical_partial_sent_at
+                .is_some_and(|sent_at| sent_at.elapsed() >= Duration::from_millis(100))
+        {
+            assert!(
+                !stdout.contains("__CANON__"),
+                "canonical TTY input became readable before newline: {stdout:?}"
+            );
+            write_process_stdin(
+                &mut sidecar,
+                6,
+                &connection_id,
+                &session_id,
+                &vm_id,
+                process_id,
+                "\n",
+            );
+            canonical_line_sent = true;
+        }
+        if !raw_byte_sent && stdout.contains("__READY_RAW__") {
+            write_process_stdin(
+                &mut sidecar,
+                7,
+                &connection_id,
+                &session_id,
+                &vm_id,
+                process_id,
+                "z",
+            );
+            raw_byte_sent = true;
+        }
+        if !stdin_closed && stdout.contains("__RAW__") {
+            close_process_stdin(
+                &mut sidecar,
+                8,
+                &connection_id,
+                &session_id,
+                &vm_id,
+                process_id,
+            );
+            stdin_closed = true;
+        }
+
+        if let Some((exit_code, seen_at)) = exit {
+            if seen_at.elapsed() >= Duration::from_millis(200) {
+                dispose_vm_and_close_session_wire(
+                    &mut sidecar,
+                    &connection_id,
+                    &session_id,
+                    &vm_id,
+                );
+                assert_eq!(exit_code, 0, "TTY probe failed: {stderr}");
+                assert!(stderr.trim().is_empty(), "unexpected TTY stderr: {stderr}");
+                assert_eq!(stdout.matches("__CANON__").count(), 1, "{stdout:?}");
+                assert_eq!(stdout.matches("__RAW__").count(), 1, "{stdout:?}");
+                assert!(stdout.contains(r#"__CANON__"alpha\n""#), "{stdout:?}");
+                assert!(stdout.contains(r#"__RAW__"z""#), "{stdout:?}");
+                return;
+            }
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for TTY stdin discipline probe\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn tty_stdin_uses_kernel_canonical_and_raw_discipline() {
+    run_isolated_builtin_conformance_test("tty-stdin-discipline");
+}
+
 fn vm_is_context_only_accepts_create_context_tagged_sandboxes_impl() {
     assert_conformance(
         "vm-is-context",
@@ -2464,10 +2639,14 @@ console.log(JSON.stringify({
 fn child_process_fork_supports_basic_ipc_impl() {
     let cwd = temp_dir("builtin-child-process-fork-ipc");
     let entrypoint = cwd.join("entry.mjs");
-    let worker = cwd.join("worker.mjs");
     write_fixture(
-        &worker,
+        &entrypoint,
         r#"
+import childProcess from "node:child_process";
+import { Buffer } from "node:buffer";
+import fs from "node:fs";
+
+fs.writeFileSync("./worker.mjs", `
 process.send({
   type: "ready",
   connected: process.connected,
@@ -2482,13 +2661,7 @@ process.on("message", (message) => {
   });
   process.exit(0);
 });
-"#,
-    );
-    write_fixture(
-        &entrypoint,
-        r#"
-import childProcess from "node:child_process";
-import { Buffer } from "node:buffer";
+`);
 
 const child = childProcess.fork("./worker.mjs", ["worker-arg"]);
 const stdout = [];
@@ -2509,9 +2682,21 @@ child.on("message", (message) => {
   }
 });
 
+const diagnosticTimer = setTimeout(() => {
+  console.error(JSON.stringify({
+    marker: "fork-ipc-timeout",
+    connected: child.connected,
+    sendReturn,
+    messages,
+    errors,
+    stdoutBase64: Buffer.concat(stdout).toString("base64"),
+  }));
+  child.kill("SIGTERM");
+}, 8000);
 const exit = await new Promise((resolve) => {
   child.on("close", (code, signal) => resolve({ code, signal }));
 });
+clearTimeout(diagnosticTimer);
 
 console.log(JSON.stringify({
   connectedAfterFork: child.connected,
@@ -4944,6 +5129,7 @@ fn __builtin_conformance_extra_test_runner() {
             readable_on_data_respects_explicit_pause_matches_host_node_impl()
         }
         "readline-question" => readline_question_reads_real_stdin_impl(),
+        "tty-stdin-discipline" => tty_stdin_uses_kernel_canonical_and_raw_discipline_impl(),
         "vm-is-context" => vm_is_context_only_accepts_create_context_tagged_sandboxes_impl(),
         "vm-context-isolation" => vm_context_isolation_and_script_options_match_host_node_impl(),
         "vm-optional-surface" => {

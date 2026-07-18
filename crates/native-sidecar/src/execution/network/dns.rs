@@ -1,4 +1,175 @@
 use super::super::*;
+use agentos_execution::backend::{HostCallReply, HostServiceError};
+use agentos_execution::host::{DnsAddressFamily, NetworkOperation};
+
+fn enforce_dns_result_limit(maximum: usize, observed: usize) -> Result<(), SidecarError> {
+    if observed > maximum {
+        return Err(SidecarError::Host(HostServiceError::limit(
+            "ERR_AGENTOS_RESOURCE_LIMIT",
+            "runtime.network.maxDnsResults",
+            maximum as u64,
+            observed as u64,
+        )));
+    }
+    Ok(())
+}
+
+/// Runtime-neutral DNS service used by every executor adapter after it has
+/// copied and bounded its guest inputs. No adapter request or response type
+/// crosses this boundary.
+pub(in crate::execution) fn service_host_dns_operation<B>(
+    bridge: SharedBridge<B>,
+    kernel: &SidecarKernel,
+    vm_id: String,
+    dns: VmDnsConfig,
+    operation: NetworkOperation,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<HostCallReply, HostServiceError>> + Send + 'static>,
+>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let future: std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Value, SidecarError>> + Send>,
+    > = match operation {
+        NetworkOperation::ResolveDns {
+            host,
+            port: _,
+            family,
+            max_results,
+        } => {
+            let lookup = kernel.resolve_dns_async(host.as_str(), DnsLookupPolicy::CheckPermissions);
+            let host = host.into_string();
+            let family = match family {
+                DnsAddressFamily::Any => None,
+                DnsAddressFamily::Inet4 => Some(4),
+                DnsAddressFamily::Inet6 => Some(6),
+            };
+            Box::pin(async move {
+                let resolution = match lookup.await {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        let sidecar_error = kernel_error(error.clone());
+                        if error.code() != "EACCES" {
+                            emit_dns_resolution_failure_event(
+                                &bridge,
+                                &vm_id,
+                                &host,
+                                &dns,
+                                &sidecar_error,
+                            );
+                        }
+                        return Err(sidecar_error);
+                    }
+                };
+                emit_dns_resolution_event(
+                    &bridge,
+                    &vm_id,
+                    &host,
+                    resolution.source(),
+                    resolution.addresses(),
+                    &dns,
+                );
+                let addresses = filter_dns_safe_ip_addrs(
+                    filter_dns_ip_addrs(resolution.addresses().to_vec(), family)?,
+                    &host,
+                )?;
+                enforce_dns_result_limit(max_results.get(), addresses.len())?;
+                Ok(Value::Array(
+                    addresses
+                        .into_iter()
+                        .map(|ip| {
+                            json!({
+                                "address": ip.to_string(),
+                                "family": if ip.is_ipv6() { 6 } else { 4 },
+                            })
+                        })
+                        .collect(),
+                ))
+            })
+        }
+        NetworkOperation::ResolveDnsRecord {
+            host,
+            record_type,
+            raw,
+            max_results,
+        } => {
+            let host = host.into_string();
+            let requested_type = record_type.into_string().to_ascii_uppercase();
+            let record_type = match parse_dns_record_type(&requested_type) {
+                Ok(record_type) => record_type,
+                Err(error) => return Box::pin(async move { Err(host_service_error(&error)) }),
+            };
+            if raw && !matches!(requested_type.as_str(), "PTR" | "SSHFP") {
+                return Box::pin(async move {
+                    Err(HostServiceError::new(
+                        "EINVAL",
+                        format!("raw DNS RR bridge does not support {requested_type}"),
+                    ))
+                });
+            }
+            let lookup = kernel.resolve_dns_records_async(
+                &host,
+                record_type,
+                DnsLookupPolicy::CheckPermissions,
+            );
+            Box::pin(async move {
+                let resolution = match lookup.await {
+                    Ok(resolution) => resolution,
+                    Err(error) if raw => {
+                        if let Some(response) = dns_raw_rr_negative_response(error.code()) {
+                            return Ok(response);
+                        }
+                        let sidecar_error = kernel_error(error.clone());
+                        if error.code() != "EACCES" {
+                            emit_dns_resolution_failure_event(
+                                &bridge,
+                                &vm_id,
+                                &host,
+                                &dns,
+                                &sidecar_error,
+                            );
+                        }
+                        return Err(sidecar_error);
+                    }
+                    Err(error) => {
+                        let sidecar_error = kernel_error(error.clone());
+                        if error.code() != "EACCES" {
+                            emit_dns_resolution_failure_event(
+                                &bridge,
+                                &vm_id,
+                                &host,
+                                &dns,
+                                &sidecar_error,
+                            );
+                        }
+                        return Err(sidecar_error);
+                    }
+                };
+                emit_dns_record_resolution_event(&bridge, &vm_id, &host, &resolution, &dns);
+                enforce_dns_result_limit(max_results.get(), resolution.records().len())?;
+                if raw {
+                    Ok(dns_raw_rr_response(&resolution, &requested_type))
+                } else {
+                    dns_resolution_to_node_value(&resolution, &requested_type)
+                }
+            })
+        }
+        other => Box::pin(async move {
+            Err(SidecarError::host(
+                "ENOSYS",
+                format!("DNS service received non-DNS operation {other:?}"),
+            ))
+        }),
+    };
+    Box::pin(async move {
+        future
+            .await
+            .map(HostCallReply::Json)
+            .map_err(|error| host_service_error(&error))
+    })
+}
 
 pub(in crate::execution) fn emit_dns_resolution_event<B>(
     bridge: &SharedBridge<B>,
@@ -137,9 +308,10 @@ fn parse_dns_record_type(rrtype: &str) -> Result<RecordType, SidecarError> {
         "NAPTR" => Ok(RecordType::NAPTR),
         "CAA" => Ok(RecordType::CAA),
         "ANY" => Ok(RecordType::ANY),
-        other => Err(SidecarError::Execution(format!(
-            "ERR_NOT_IMPLEMENTED: dns rrtype {other} is not supported by the agentos dns bridge"
-        ))),
+        other => Err(SidecarError::host(
+            "ERR_NOT_IMPLEMENTED",
+            format!("dns rrtype {other} is not supported by the agentos dns bridge"),
+        )),
     }
 }
 
@@ -323,9 +495,10 @@ fn dns_resolution_to_node_value(
                 .filter_map(|record| dns_any_record_to_value(record, &safe_ips))
                 .collect(),
         )),
-        other => Err(SidecarError::Execution(format!(
-            "ERR_NOT_IMPLEMENTED: dns rrtype {other} is not supported by the agentos dns bridge"
-        ))),
+        other => Err(SidecarError::host(
+            "ERR_NOT_IMPLEMENTED",
+            format!("dns rrtype {other} is not supported by the agentos dns bridge"),
+        )),
     }
 }
 
@@ -530,47 +703,43 @@ pub(crate) fn format_dns_resource(hostname: &str) -> String {
     format!("dns://{hostname}")
 }
 
-// --- Guest Python socket bridge helpers ------------------------------------
+pub(in crate::execution) enum DnsOperation {
+    Lookup {
+        hostname: String,
+        family: Option<u8>,
+    },
+    Resolve {
+        hostname: String,
+        requested_type: String,
+        raw_record: bool,
+    },
+}
 
-pub(in crate::execution) fn service_javascript_dns_sync_rpc<B>(
+pub(in crate::execution) fn service_dns_operation<B>(
     bridge: &SharedBridge<B>,
     kernel: &SidecarKernel,
     vm_id: &str,
     dns: &VmDnsConfig,
-    request: &JavascriptSyncRpcRequest,
+    operation: DnsOperation,
 ) -> Result<Value, SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    match request.method.as_str() {
-        "dns.lookup" => {
-            let payload = request
-                .args
-                .first()
-                .cloned()
-                .ok_or_else(|| {
-                    SidecarError::InvalidState(String::from(
-                        "dns.lookup requires a request payload",
-                    ))
-                })
-                .and_then(|value| {
-                    serde_json::from_value::<JavascriptDnsLookupRequest>(value).map_err(|error| {
-                        SidecarError::InvalidState(format!("invalid dns.lookup payload: {error}"))
-                    })
-                })?;
+    match operation {
+        DnsOperation::Lookup { hostname, family } => {
             let addresses = filter_dns_ip_addrs(
                 resolve_dns_ip_addrs(
                     bridge,
                     kernel,
                     vm_id,
                     dns,
-                    &payload.hostname,
+                    &hostname,
                     DnsLookupPolicy::CheckPermissions,
                 )?,
-                payload.family,
+                family,
             )?;
-            let addresses = filter_dns_safe_ip_addrs(addresses, &payload.hostname)?;
+            let addresses = filter_dns_safe_ip_addrs(addresses, &hostname)?;
             Ok(Value::Array(
                 addresses
                     .into_iter()
@@ -583,39 +752,21 @@ where
                     .collect(),
             ))
         }
-        "dns.resolve" | "dns.resolve4" | "dns.resolve6" | "dns.resolveRawRr" => {
-            let payload = request
-                .args
-                .first()
-                .cloned()
-                .ok_or_else(|| {
-                    SidecarError::InvalidState(String::from(
-                        "dns.resolve requires a request payload",
-                    ))
-                })
-                .and_then(|value| {
-                    serde_json::from_value::<JavascriptDnsResolveRequest>(value).map_err(|error| {
-                        SidecarError::InvalidState(format!("invalid dns.resolve payload: {error}"))
-                    })
-                })?;
-            let requested_type = match request.method.as_str() {
-                "dns.resolve4" => String::from("A"),
-                "dns.resolve6" => String::from("AAAA"),
-                _ => payload
-                    .rrtype
-                    .as_deref()
-                    .unwrap_or("A")
-                    .to_ascii_uppercase(),
-            };
+        DnsOperation::Resolve {
+            hostname,
+            requested_type,
+            raw_record,
+        } => {
             let record_type = parse_dns_record_type(&requested_type)?;
-            if request.method == "dns.resolveRawRr" {
+            if raw_record {
                 if !matches!(requested_type.as_str(), "PTR" | "SSHFP") {
-                    return Err(SidecarError::InvalidState(format!(
-                        "EINVAL: raw DNS RR bridge does not support {requested_type}"
-                    )));
+                    return Err(SidecarError::host(
+                        "EINVAL",
+                        format!("raw DNS RR bridge does not support {requested_type}"),
+                    ));
                 }
                 let resolution = match kernel.resolve_dns_records(
-                    &payload.hostname,
+                    &hostname,
                     record_type,
                     DnsLookupPolicy::CheckPermissions,
                 ) {
@@ -623,7 +774,7 @@ where
                         emit_dns_record_resolution_event(
                             bridge,
                             vm_id,
-                            &payload.hostname,
+                            &hostname,
                             &resolution,
                             dns,
                         );
@@ -638,7 +789,7 @@ where
                             emit_dns_resolution_failure_event(
                                 bridge,
                                 vm_id,
-                                &payload.hostname,
+                                &hostname,
                                 dns,
                                 &sidecar_error,
                             );
@@ -653,16 +804,13 @@ where
                     kernel,
                     vm_id,
                     dns,
-                    &payload.hostname,
+                    &hostname,
                     record_type,
                     DnsLookupPolicy::CheckPermissions,
                 )?;
                 dns_resolution_to_node_value(&resolution, &requested_type)
             }
         }
-        other => Err(SidecarError::InvalidState(format!(
-            "unsupported JavaScript dns sync RPC method {other}"
-        ))),
     }
 }
 
@@ -674,6 +822,21 @@ mod raw_rr_tests {
         rdata::{PTR, SSHFP},
         Name,
     };
+
+    #[test]
+    fn dns_result_limit_rejects_instead_of_truncating() {
+        enforce_dns_result_limit(2, 2).expect("exact limit is admitted");
+        let SidecarError::Host(error) =
+            enforce_dns_result_limit(2, 3).expect_err("limit plus one is rejected")
+        else {
+            panic!("expected typed host error");
+        };
+        assert_eq!(error.code, "ERR_AGENTOS_RESOURCE_LIMIT");
+        let details = error.details.expect("typed limit details");
+        assert_eq!(details["configPath"], "runtime.network.maxDnsResults");
+        assert_eq!(details["limit"], 2);
+        assert_eq!(details["observed"], 3);
+    }
 
     #[test]
     fn raw_rr_record_type_accepts_sshfp() {

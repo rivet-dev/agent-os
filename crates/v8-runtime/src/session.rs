@@ -13,12 +13,11 @@ use agentos_bridge::queue_tracker::warn_limit_exhausted;
 use agentos_bridge::queue_tracker::{register_queue, QueueGauge, TrackedLimit};
 use agentos_bridge::{bridge_contract, BridgeCallConvention};
 use agentos_runtime::accounting::{Reservation, ResourceClass, ResourceLedger};
-use agentos_runtime::metrics::{ExecutorMetricClass, RuntimeMetrics};
 use agentos_runtime::readiness::{
     ReadyAcknowledgement, ReadyBatch as RuntimeReadyBatch, ReadyFlags, ReadyObservation, ReadyWake,
     SessionReadyBroker as RuntimeSessionReadyBroker,
 };
-use agentos_runtime::RuntimeContext;
+use agentos_runtime::{RuntimeContext, VmExecutorPermit};
 use crossbeam_channel::{Receiver, Select, Sender};
 
 use crate::execution;
@@ -133,9 +132,9 @@ impl SessionReadiness {
         self.forward_runtime_wake_locked(&mut state)
     }
 
-    fn publish_signal(&self, signal: i32) -> Result<(), String> {
+    fn publish_signal(&self, signal: i32, delivery_token: u64) -> Result<(), String> {
         self.broker
-            .mark_signal_ready(self.generation, signal)
+            .mark_signal_ready(self.generation, signal, delivery_token)
             .map_err(|error| error.to_string())?;
         let mut state = self.wakes.lock().map_err(|_| {
             String::from("ERR_AGENTOS_READY_STATE_POISONED: session readiness lock poisoned")
@@ -202,7 +201,10 @@ impl SessionReadiness {
             .map_err(|error| error.to_string())
     }
 
-    fn drain_signals(&self, batch: &RuntimeReadyBatch) -> Result<Vec<i32>, String> {
+    fn drain_signals(
+        &self,
+        batch: &RuntimeReadyBatch,
+    ) -> Result<Vec<agentos_runtime::readiness::SignalObservation>, String> {
         self.broker
             .drain_signals(batch.generation, batch.epoch, self.max_batch_handles)
             .map_err(|error| error.to_string())
@@ -502,6 +504,119 @@ struct WarmWorkerPool {
     state: Mutex<WarmWorkerPoolState>,
 }
 
+#[derive(Default)]
+struct SessionManagerAdmissionState {
+    active: usize,
+    near_limit_warning_emitted: bool,
+}
+
+struct SessionManagerAdmissionInner {
+    state: Mutex<SessionManagerAdmissionState>,
+    maximum: usize,
+}
+
+/// Manager-local executor ceiling. This is intentionally distinct from the
+/// process-wide `VmExecutorAdmission`: a local cap constrains only generations
+/// owned by this manager, while the runtime admission constrains the aggregate
+/// across every manager and engine in the process.
+#[derive(Clone)]
+struct SessionManagerAdmission {
+    inner: Arc<SessionManagerAdmissionInner>,
+}
+
+impl SessionManagerAdmission {
+    fn new(maximum: usize) -> Self {
+        Self {
+            inner: Arc::new(SessionManagerAdmissionInner {
+                state: Mutex::new(SessionManagerAdmissionState::default()),
+                maximum,
+            }),
+        }
+    }
+
+    fn try_acquire(&self) -> Result<SessionManagerPermit, String> {
+        let mut state = self.inner.state.lock().map_err(|_| {
+            String::from(
+                "ERR_AGENTOS_VM_EXECUTOR_POISONED: V8 session-manager admission lock poisoned",
+            )
+        })?;
+        if state.active >= self.inner.maximum {
+            return Err(format!(
+                "ERR_AGENTOS_VM_EXECUTOR_LIMIT: active V8 session executors reached manager-local limit of {} (active={}); raise the embedded V8 max_concurrency without exceeding runtime.executor.maxActiveVms",
+                self.inner.maximum, state.active
+            ));
+        }
+        state.active += 1;
+        let warning_threshold = self
+            .inner
+            .maximum
+            .saturating_sub(self.inner.maximum / 5)
+            .max(1);
+        if state.active >= warning_threshold && !state.near_limit_warning_emitted {
+            state.near_limit_warning_emitted = true;
+            eprintln!(
+                "WARN_AGENTOS_V8_SESSION_EXECUTOR_NEAR_LIMIT: active={} limit={} threshold={}; raise the embedded V8 max_concurrency without exceeding runtime.executor.maxActiveVms",
+                state.active, self.inner.maximum, warning_threshold
+            );
+        }
+        Ok(SessionManagerPermit {
+            admission: self.clone(),
+        })
+    }
+
+    fn active(&self) -> usize {
+        self.inner
+            .state
+            .lock()
+            .map(|state| state.active)
+            .unwrap_or_else(|_| {
+                eprintln!(
+                    "ERR_AGENTOS_VM_EXECUTOR_POISONED: V8 session-manager admission snapshot failed"
+                );
+                self.inner.maximum
+            })
+    }
+
+    #[cfg(test)]
+    fn maximum(&self) -> usize {
+        self.inner.maximum
+    }
+}
+
+struct SessionManagerPermit {
+    admission: SessionManagerAdmission,
+}
+
+impl Drop for SessionManagerPermit {
+    fn drop(&mut self) {
+        match self.admission.inner.state.lock() {
+            Ok(mut state) if state.active > 0 => {
+                state.active -= 1;
+                let warning_threshold = self
+                    .admission
+                    .inner
+                    .maximum
+                    .saturating_sub(self.admission.inner.maximum / 5)
+                    .max(1);
+                if state.active < warning_threshold {
+                    state.near_limit_warning_emitted = false;
+                }
+            }
+            Ok(_) => eprintln!(
+                "ERR_AGENTOS_VM_EXECUTOR_ACCOUNTING_UNDERFLOW: V8 session-manager permit released at zero"
+            ),
+            Err(_) => eprintln!(
+                "ERR_AGENTOS_VM_EXECUTOR_POISONED: V8 session-manager permit could not be released"
+            ),
+        }
+    }
+}
+
+struct SessionExecutorPermit {
+    _process: VmExecutorPermit,
+    _manager: SessionManagerPermit,
+}
+
 struct SessionAssignment {
     heap_limit_mb: Option<u32>,
     cpu_time_limit_ms: Option<u32>,
@@ -510,7 +625,7 @@ struct SessionAssignment {
     shutdown_rx: Receiver<()>,
     ready_rx: Receiver<ReadyWake>,
     ready_broker: Arc<SessionReadiness>,
-    slot_permit: SessionSlotPermit,
+    slot_permit: SessionExecutorPermit,
     event_tx: RuntimeEventSender,
     call_id_router: CallIdRouter,
     shared_call_id: SharedCallIdCounter,
@@ -570,12 +685,15 @@ fn record_v8_session_phase(stage: &str, elapsed: Duration) {
     }
     let phases = V8_SESSION_PHASES.get_or_init(|| Mutex::new(BTreeMap::new()));
     let Ok(mut phases) = phases.lock() else {
+        eprintln!(
+            "ERR_AGENTOS_V8_SESSION_PHASE_METRICS_POISONED: V8 session phase metrics lock poisoned"
+        );
         return;
     };
     let stats = phases.entry(stage.to_string()).or_default();
-    stats.calls += 1;
+    stats.calls = stats.calls.saturating_add(1);
     let elapsed_ns = elapsed.as_nanos();
-    stats.total_ns += elapsed_ns;
+    stats.total_ns = stats.total_ns.saturating_add(elapsed_ns);
     stats.max_ns = stats.max_ns.max(elapsed_ns);
 
     let Some(path) = std::env::var_os("AGENTOS_V8_SESSION_PHASES_FILE") else {
@@ -595,7 +713,12 @@ fn record_v8_session_phase(stage: &str, elapsed: Duration) {
             stats.calls
         ));
     }
-    let _ = std::fs::write(path, output);
+    if let Err(error) = std::fs::write(&path, output) {
+        eprintln!(
+            "WARN_AGENTOS_V8_SESSION_PHASE_METRICS_WRITE: path={} error={error}",
+            std::path::Path::new(&path).display()
+        );
+    }
 }
 
 #[cfg(not(test))]
@@ -649,6 +772,16 @@ fn warm_key_prefix(key: &WarmPoolKey) -> String {
         .collect()
 }
 
+fn join_warm_worker(join_handle: thread::JoinHandle<()>, action: &'static str, key: &WarmPoolKey) {
+    if join_handle.join().is_err() {
+        eprintln!(
+            "FATAL_AGENTOS_V8_WARM_WORKER_PANIC: action={action} key={} heap={} warm worker panicked",
+            warm_key_prefix(key),
+            key.heap_limit_mb
+        );
+    }
+}
+
 impl WarmWorkerPool {
     fn claim(&self, key: &WarmPoolKey) -> Option<ParkedWorker> {
         let mut state = self.state.lock().expect("warm worker pool lock poisoned");
@@ -675,7 +808,6 @@ impl WarmWorkerPool {
         self: &Arc<Self>,
         runtime: RuntimeContext,
         snapshot_cache: Arc<SnapshotCache>,
-        slot_control: SlotControl,
         bridge_code: String,
         userland_code: String,
         heap_limit_mb: Option<u32>,
@@ -703,7 +835,6 @@ impl WarmWorkerPool {
         if let Err(error) = runtime.blocking().submit(requested_bytes, move || {
             pool.refill_until(
                 snapshot_cache,
-                slot_control,
                 spawn_key,
                 bridge_code,
                 userland_code,
@@ -725,7 +856,6 @@ impl WarmWorkerPool {
     fn refill_until(
         &self,
         snapshot_cache: Arc<SnapshotCache>,
-        slot_control: SlotControl,
         key: WarmPoolKey,
         bridge_code: String,
         userland_code: String,
@@ -772,7 +902,7 @@ impl WarmWorkerPool {
             };
             if let Some((evicted_key, worker)) = evicted {
                 drop(worker.assignment_tx);
-                let _ = worker.join_handle.join();
+                join_warm_worker(worker.join_handle, "evict", &evicted_key);
                 eprintln!(
                     "agentos-v8-runtime: warm worker evicted key={} heap={}",
                     warm_key_prefix(&evicted_key),
@@ -783,7 +913,6 @@ impl WarmWorkerPool {
 
             let worker = spawn_warm_worker(
                 Arc::clone(&snapshot_cache),
-                Arc::clone(&slot_control),
                 key.clone(),
                 bridge_code.clone(),
                 userland_code.clone(),
@@ -798,7 +927,7 @@ impl WarmWorkerPool {
             let workers = state.workers.entry(key.clone()).or_default();
             if workers.len() >= desired {
                 drop(worker.assignment_tx);
-                let _ = worker.join_handle.join();
+                join_warm_worker(worker.join_handle, "discard_excess", &key);
                 break;
             }
             workers.push(worker);
@@ -821,7 +950,6 @@ impl WarmWorkerPool {
 #[cfg(not(test))]
 fn spawn_warm_worker(
     snapshot_cache: Arc<SnapshotCache>,
-    slot_control: SlotControl,
     key: WarmPoolKey,
     bridge_code: String,
     userland_code: String,
@@ -837,7 +965,6 @@ fn spawn_warm_worker(
         .spawn(move || {
             let precreated = precreate_warm_isolate(
                 snapshot_cache,
-                slot_control,
                 worker_bridge_code,
                 worker_userland_code,
                 heap_limit_mb,
@@ -876,7 +1003,7 @@ fn spawn_warm_worker(
                 warm_key_prefix(&key),
                 key.heap_limit_mb
             );
-            let _ = join_handle.join();
+            join_warm_worker(join_handle, "startup_failure", &key);
             None
         }
         Err(error) => {
@@ -885,7 +1012,7 @@ fn spawn_warm_worker(
                 warm_key_prefix(&key),
                 key.heap_limit_mb
             );
-            let _ = join_handle.join();
+            join_warm_worker(join_handle, "startup_disconnect", &key);
             None
         }
     }
@@ -894,7 +1021,6 @@ fn spawn_warm_worker(
 #[cfg(test)]
 fn spawn_warm_worker(
     _snapshot_cache: Arc<SnapshotCache>,
-    _slot_control: SlotControl,
     _key: WarmPoolKey,
     _bridge_code: String,
     _userland_code: String,
@@ -906,7 +1032,6 @@ fn spawn_warm_worker(
 #[cfg(not(test))]
 fn precreate_warm_isolate(
     snapshot_cache: Arc<SnapshotCache>,
-    _slot_control: SlotControl,
     bridge_code: String,
     userland_code: String,
     heap_limit_mb: Option<u32>,
@@ -1043,62 +1168,6 @@ impl SessionShutdown {
     }
 }
 
-/// Concurrency slot tracker shared across session threads
-type SlotControl = Arc<(Mutex<usize>, Condvar)>;
-
-/// An admitted V8 executor slot. It is acquired before spawning or assigning
-/// an OS thread and remains owned by that generation until the thread exits.
-/// Detached/stuck generations therefore stay quarantined instead of lending
-/// their capacity to a successor VM.
-struct SessionSlotPermit {
-    control: SlotControl,
-    metrics: RuntimeMetrics,
-}
-
-impl SessionSlotPermit {
-    fn try_acquire(
-        control: &SlotControl,
-        maximum: usize,
-        metrics: RuntimeMetrics,
-    ) -> Result<Self, String> {
-        let (lock, _) = &**control;
-        let mut active = lock
-            .lock()
-            .map_err(|_| String::from("ERR_AGENTOS_VM_EXECUTOR_POISONED: slot lock poisoned"))?;
-        if *active >= maximum {
-            return Err(format!(
-                "ERR_AGENTOS_VM_EXECUTOR_LIMIT: active V8 executors reached limit of {maximum}; raise runtime.executor.maxActiveVms"
-            ));
-        }
-        *active += 1;
-        metrics.observe_executor(ExecutorMetricClass::Vm, *active, 0);
-        Ok(Self {
-            control: Arc::clone(control),
-            metrics,
-        })
-    }
-}
-
-impl Drop for SessionSlotPermit {
-    fn drop(&mut self) {
-        let (lock, cvar) = &*self.control;
-        match lock.lock() {
-            Ok(mut active) if *active > 0 => {
-                *active -= 1;
-                self.metrics
-                    .observe_executor(ExecutorMetricClass::Vm, *active, 0);
-                cvar.notify_all();
-            }
-            Ok(_) => eprintln!(
-                "ERR_AGENTOS_VM_EXECUTOR_ACCOUNTING_UNDERFLOW: executor permit released at zero"
-            ),
-            Err(_) => {
-                eprintln!("ERR_AGENTOS_VM_EXECUTOR_POISONED: executor permit could not be released")
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ExecutionAbortReason {
     /// Caller explicitly terminated the execution (e.g. session destroy).
@@ -1222,8 +1291,9 @@ pub struct SessionManager {
     /// thread itself retains the concurrency permit, so a successor cannot
     /// consume capacity that is still running untrusted code.
     quarantined: Vec<QuarantinedSession>,
-    max_concurrency: usize,
-    slot_control: SlotControl,
+    /// Every admitted generation also holds a process-owned permit, so this
+    /// manager-local ceiling can narrow but never raise the process limit.
+    manager_executor_admission: SessionManagerAdmission,
     /// Typed runtime event sender shared across session threads.
     event_tx: RuntimeEventSender,
     /// Call_id → session_id routing table for BridgeResponse dispatch
@@ -1260,8 +1330,7 @@ impl SessionManager {
         SessionManager {
             sessions: HashMap::new(),
             quarantined: Vec::new(),
-            max_concurrency,
-            slot_control: Arc::new((Mutex::new(0), Condvar::new())),
+            manager_executor_admission: SessionManagerAdmission::new(max_concurrency),
             event_tx: event_tx.into(),
             call_id_router,
             shared_call_id: Arc::new(AtomicU64::new(1)),
@@ -1274,7 +1343,7 @@ impl SessionManager {
 
     #[cfg(test)]
     pub(crate) fn max_concurrency(&self) -> usize {
-        self.max_concurrency
+        self.manager_executor_admission.maximum()
     }
 
     /// Get the snapshot cache for pre-warming from WarmSnapshot messages.
@@ -1293,7 +1362,6 @@ impl SessionManager {
         self.warm_pool.ensure_count(
             self.runtime.clone(),
             Arc::clone(&self.snapshot_cache),
-            Arc::clone(&self.slot_control),
             bridge_code,
             userland_code,
             heap_limit_mb,
@@ -1397,11 +1465,16 @@ impl SessionManager {
             return Err(format!("session {} already exists", session_id));
         }
 
-        let slot_permit = SessionSlotPermit::try_acquire(
-            &self.slot_control,
-            self.max_concurrency,
-            self.runtime.metrics().clone(),
-        )?;
+        let manager_permit = self.manager_executor_admission.try_acquire()?;
+        let process_permit = self
+            .runtime
+            .vm_executor_admission()
+            .try_acquire()
+            .map_err(|error| error.to_string())?;
+        let slot_permit = SessionExecutorPermit {
+            _process: process_permit,
+            _manager: manager_permit,
+        };
 
         let cpu_time_limit_ms = normalize_cpu_time_limit_ms(cpu_time_limit_ms);
         let wall_clock_limit_ms = normalize_wall_clock_limit_ms(wall_clock_limit_ms);
@@ -1451,7 +1524,6 @@ impl SessionManager {
                     self.warm_pool.ensure_count(
                         self.runtime.clone(),
                         Arc::clone(&self.snapshot_cache),
-                        Arc::clone(&self.slot_control),
                         hint.bridge_code,
                         hint.userland_code,
                         hint.heap_limit_mb,
@@ -1466,7 +1538,6 @@ impl SessionManager {
                     self.warm_pool.ensure_count(
                         self.runtime.clone(),
                         Arc::clone(&self.snapshot_cache),
-                        Arc::clone(&self.slot_control),
                         hint.bridge_code,
                         hint.userland_code,
                         hint.heap_limit_mb,
@@ -1538,7 +1609,7 @@ impl SessionManager {
             }
             Err(error) => {
                 record_warm_worker_miss();
-                let _ = worker.join_handle.join();
+                join_warm_worker(worker.join_handle, "assignment_disconnect", &key);
                 Err(error.0)
             }
         }
@@ -1592,6 +1663,18 @@ impl SessionManager {
     }
 
     pub(crate) fn detach_session(&mut self, session_id: &str) -> Result<(), String> {
+        self.detach_session_inner(session_id, true)
+    }
+
+    pub(crate) fn detach_session_for_destroy(&mut self, session_id: &str) -> Result<(), String> {
+        self.detach_session_inner(session_id, false)
+    }
+
+    fn detach_session_inner(
+        &mut self,
+        session_id: &str,
+        report_quarantine_warning: bool,
+    ) -> Result<(), String> {
         let entry = self
             .sessions
             .get(session_id)
@@ -1613,10 +1696,12 @@ impl SessionManager {
         signal_session_shutdown(&entry.shutdown_tx, session_id);
         drop(entry.tx);
         if let Some(join_handle) = entry.join_handle.take() {
-            eprintln!(
-                "WARN_AGENTOS_VM_EXECUTOR_QUARANTINED: session={} generation={:?}",
-                session_id, entry.output_generation
-            );
+            if report_quarantine_warning {
+                eprintln!(
+                    "WARN_AGENTOS_VM_EXECUTOR_QUARANTINED: session={} generation={:?}",
+                    session_id, entry.output_generation
+                );
+            }
             self.quarantined.push(QuarantinedSession {
                 session_id: session_id.to_owned(),
                 output_generation: entry.output_generation,
@@ -1864,12 +1949,17 @@ impl SessionManager {
             .publish(capability_id, capability_generation, flags)
     }
 
-    pub fn publish_signal(&self, session_id: &str, signal: i32) -> Result<(), String> {
+    pub fn publish_signal(
+        &self,
+        session_id: &str,
+        signal: i32,
+        delivery_token: u64,
+    ) -> Result<(), String> {
         let entry = self
             .sessions
             .get(session_id)
             .ok_or_else(|| format!("session {session_id} does not exist"))?;
-        entry.ready_broker.publish_signal(signal)
+        entry.ready_broker.publish_signal(signal, delivery_token)
     }
 
     pub fn remove_readiness(
@@ -2010,8 +2100,7 @@ impl SessionManager {
     /// Number of sessions that have acquired a concurrency slot.
     #[allow(dead_code)]
     pub fn active_slot_count(&self) -> usize {
-        let (lock, _) = &*self.slot_control;
-        *lock.lock().unwrap()
+        self.manager_executor_admission.active()
     }
 
     pub fn session_output_generation(&self, session_id: &str) -> Option<u64> {
@@ -3503,7 +3592,11 @@ fn run_event_loop_with_readiness(
                             }
                         } else if let Some((abort_index, abort)) = abort_selection {
                             debug_assert_eq!(index, abort_index);
-                            let _ = operation.recv(abort);
+                            if let Err(error) = operation.recv(abort) {
+                                eprintln!(
+                                    "WARN_AGENTOS_SESSION_ABORT_LANE_DISCONNECTED: error={error}"
+                                );
+                            }
                             scope.terminate_execution();
                             return EventLoopStatus::Terminated;
                         } else {
@@ -3511,7 +3604,11 @@ fn run_event_loop_with_readiness(
                         }
                     } else if let Some((abort_index, abort)) = abort_selection {
                         debug_assert_eq!(index, abort_index);
-                        let _ = operation.recv(abort);
+                        if let Err(error) = operation.recv(abort) {
+                            eprintln!(
+                                "WARN_AGENTOS_SESSION_ABORT_LANE_DISCONNECTED: error={error}"
+                            );
+                        }
                         scope.terminate_execution();
                         return EventLoopStatus::Terminated;
                     } else {
@@ -3700,11 +3797,16 @@ fn dispatch_ready_batch_callbacks(
             Err(error) => return readiness_dispatch_failure(error),
         };
         for signal in signals {
-            let Some(signal_name) = signal_name_for_stream_event(signal) else {
+            let Some(signal_name) = signal_name_for_stream_event(signal.signal) else {
                 continue;
             };
             let tc = &mut v8::TryCatch::new(scope);
-            crate::stream::dispatch_signal_event(tc, signal_name, signal);
+            crate::stream::dispatch_signal_event(
+                tc,
+                signal_name,
+                signal.signal,
+                signal.delivery_token,
+            );
             tc.perform_microtask_checkpoint();
             if let Some(exception) = tc.exception() {
                 let (code, error) = execution::exception_to_result(tc, exception);
@@ -3882,19 +3984,28 @@ fn dispatch_event_loop_frame(
             payload,
             reservation: _reservation,
         }) => {
-            let (result, error) = if status == 1 {
-                (None, Some(String::from_utf8_lossy(&payload).to_string()))
-            } else if status == 2 || !payload.is_empty() {
+            let result = if status == 1 || status == 2 || !payload.is_empty() {
                 // status=0: V8-serialized, status=2: raw binary (Uint8Array)
-                (Some(payload), None)
+                // status=1: structured CBOR host error, rejected by the bridge.
+                Some(payload)
             } else {
-                (None, None)
+                None
             };
-            let _ = crate::bridge::resolve_pending_promise(
-                scope, pending, call_id, status, result, error,
-            );
-            // Microtasks already flushed in resolve_pending_promise
-            EventLoopStatus::Completed
+            match crate::bridge::resolve_pending_promise(scope, pending, call_id, status, result) {
+                Ok(()) => {
+                    // Microtasks already flushed in resolve_pending_promise.
+                    EventLoopStatus::Completed
+                }
+                Err(message) => EventLoopStatus::Failed(
+                    1,
+                    ExecutionError {
+                        error_type: String::from("Error"),
+                        message: format!("ERR_AGENTOS_BRIDGE_RESPONSE_SETTLEMENT: {message}"),
+                        stack: String::new(),
+                        code: Some(String::from("ERR_AGENTOS_BRIDGE_RESPONSE_SETTLEMENT")),
+                    },
+                ),
+            }
         }
         SessionMessage::StreamEvent(StreamEvent {
             event_type,
@@ -3939,12 +4050,20 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let router: CallIdRouter = Arc::new(BridgeCallRegistry::with_default_limit());
         let snap_cache = Arc::new(SnapshotCache::new(4));
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create test process runtime")
-                .context();
+        let runtime = crate::test_runtime_context();
         let manager = SessionManager::new(max, tx, router, snap_cache, runtime);
         (manager, _rx)
+    }
+
+    #[test]
+    fn warm_worker_join_contains_worker_panic() {
+        let key = WarmPoolKey {
+            snapshot_key_digest: [0; 32],
+            heap_limit_mb: 64,
+        };
+        let handle = std::thread::spawn(|| panic!("injected warm worker panic"));
+
+        join_warm_worker(handle, "test", &key);
     }
 
     #[test]
@@ -3952,33 +4071,6 @@ mod tests {
         assert_eq!(normalize_cpu_time_limit_ms(None), None);
         assert_eq!(normalize_cpu_time_limit_ms(Some(0)), None);
         assert_eq!(normalize_cpu_time_limit_ms(Some(1)), Some(1));
-    }
-
-    #[test]
-    fn vm_executor_permits_report_active_and_high_water_metrics() {
-        let control: SlotControl = Arc::new((Mutex::new(0), Condvar::new()));
-        let metrics = RuntimeMetrics::new();
-
-        let first = SessionSlotPermit::try_acquire(&control, 2, metrics.clone())
-            .expect("acquire first VM executor");
-        let second = SessionSlotPermit::try_acquire(&control, 2, metrics.clone())
-            .expect("acquire second VM executor");
-        let active = metrics.snapshot().executors[ExecutorMetricClass::Vm.index()].active;
-        assert_eq!(active.current, 2);
-        assert_eq!(active.high_water, 2);
-
-        drop(first);
-        assert_eq!(
-            metrics.snapshot().executors[ExecutorMetricClass::Vm.index()]
-                .active
-                .current,
-            1
-        );
-
-        drop(second);
-        let released = metrics.snapshot().executors[ExecutorMetricClass::Vm.index()].active;
-        assert_eq!(released.current, 0);
-        assert_eq!(released.high_water, 2);
     }
 
     #[test]
@@ -4017,21 +4109,91 @@ mod tests {
         let router: CallIdRouter = Arc::new(BridgeCallRegistry::with_default_limit());
         let mut manager = SessionManager::new(
             runtime.max_active_vm_executors(),
+            event_tx.clone(),
+            Arc::clone(&router),
+            Arc::new(SnapshotCache::new(1)),
+            runtime.clone(),
+        );
+        let mut second_manager = SessionManager::new(
+            runtime.max_active_vm_executors(),
             event_tx,
             router,
             Arc::new(SnapshotCache::new(1)),
             runtime,
         );
 
-        assert_eq!(manager.max_concurrency, 3);
+        assert_eq!(manager.max_concurrency(), 3);
         assert_eq!(manager.executor_teardown_timeout, Duration::from_millis(23));
         manager
             .create_session("configured-bounds".into(), None, None, None)
             .expect("create bounded session");
         assert_eq!(manager.sessions["configured-bounds"].command_capacity, 7);
         manager
+            .create_session("shared-process-a".into(), None, None, None)
+            .expect("second permit through first manager");
+        second_manager
+            .create_session("shared-process-b".into(), None, None, None)
+            .expect("third permit through second manager");
+        assert_eq!(manager.active_slot_count(), 2);
+        assert_eq!(second_manager.active_slot_count(), 1);
+        assert_eq!(
+            manager.runtime.vm_executor_admission().snapshot().active,
+            3,
+            "the process runtime must aggregate permits from both managers"
+        );
+        let saturation = second_manager
+            .create_session("shared-process-overflow".into(), None, None, None)
+            .expect_err("all V8 managers must share the process executor quota");
+        assert!(saturation.contains("ERR_AGENTOS_VM_EXECUTOR_LIMIT"));
+
+        manager
             .destroy_session("configured-bounds")
             .expect("destroy bounded session");
+        second_manager
+            .create_session("shared-process-successor".into(), None, None, None)
+            .expect("joined executor must release capacity across managers");
+        manager
+            .destroy_session("shared-process-a")
+            .expect("destroy first-manager session");
+        second_manager
+            .destroy_session("shared-process-b")
+            .expect("destroy second-manager session");
+        second_manager
+            .destroy_session("shared-process-successor")
+            .expect("destroy cross-manager successor");
+        assert_eq!(manager.active_slot_count(), 0);
+        assert_eq!(second_manager.active_slot_count(), 0);
+        assert_eq!(manager.runtime.vm_executor_admission().snapshot().active, 0);
+    }
+
+    #[test]
+    fn manager_local_executor_caps_do_not_block_other_managers() {
+        let mut first = test_manager(1);
+        let mut second = test_manager(1);
+
+        first
+            .create_session("manager-local-first".into(), None, None, None)
+            .expect("first manager admits its one local executor");
+        second
+            .create_session("manager-local-second".into(), None, None, None)
+            .expect("second manager has an independent local executor ceiling");
+        assert_eq!(first.active_slot_count(), 1);
+        assert_eq!(second.active_slot_count(), 1);
+
+        let error = first
+            .create_session("manager-local-overflow".into(), None, None, None)
+            .expect_err("first manager must enforce its own local ceiling");
+        assert!(error.contains("ERR_AGENTOS_VM_EXECUTOR_LIMIT"));
+        assert!(error.contains("manager-local limit of 1"));
+
+        first
+            .destroy_session("manager-local-first")
+            .expect("destroy first manager session");
+        second
+            .destroy_session("manager-local-second")
+            .expect("destroy second manager session");
+        assert_eq!(first.active_slot_count(), 0);
+        assert_eq!(second.active_slot_count(), 0);
     }
 
     fn expect_late_message_warning(
@@ -4468,7 +4630,9 @@ mod tests {
             },
         )))
         .expect("queue ordinary session command");
-        broker.publish_signal(15).expect("publish later SIGTERM");
+        broker
+            .publish_signal(15, 29)
+            .expect("publish later SIGTERM");
 
         assert!(matches!(
             recv_session_command(&rx, &shutdown_rx, &ready_rx, &broker),
@@ -4482,7 +4646,10 @@ mod tests {
         assert!(batch.signals_ready);
         assert_eq!(
             broker.drain_signals(&batch).expect("drain signal"),
-            vec![15]
+            vec![agentos_runtime::readiness::SignalObservation {
+                signal: 15,
+                delivery_token: 29,
+            }]
         );
         broker
             .complete_batch(&batch, &[])

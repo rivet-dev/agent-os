@@ -490,7 +490,7 @@ fn oversized_raw_write_fails_atomically() {
             vec![b'x'; MAX_PTY_BUFFER_BYTES + 1],
         )
         .expect_err("oversized write should fail");
-    assert_eq!(error.code(), "EAGAIN");
+    assert_eq!(error.code(), "E2BIG");
 
     manager
         .write(pty.master.description.id(), vec![b'a'; MAX_CANON.min(8)])

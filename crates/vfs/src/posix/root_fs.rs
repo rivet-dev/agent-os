@@ -3,8 +3,8 @@ use super::usage::{
     RootFilesystemResourceLimits, DEFAULT_MAX_FILESYSTEM_BYTES, DEFAULT_MAX_INODE_COUNT,
 };
 use super::vfs::{
-    normalize_path, MemoryFileSystem, VfsError, VfsResult, VirtualFileSystem, VirtualStat,
-    VirtualUtimeSpec, MAX_PATH_LENGTH,
+    normalize_path, FileExtent, MemoryFileSystem, VfsError, VfsResult, VirtualFileSystem,
+    VirtualStat, VirtualUtimeSpec, MAX_PATH_LENGTH,
 };
 use crate::posix::vfs::VirtualDirEntry;
 use base64::Engine;
@@ -274,6 +274,10 @@ impl RootFileSystem {
         Ok(())
     }
 
+    pub fn is_read_only_mode(&self) -> bool {
+        self.mode == RootFilesystemMode::ReadOnly
+    }
+
     pub fn finish_bootstrap(&mut self) {
         if self.bootstrap_finished {
             return;
@@ -480,6 +484,10 @@ impl VirtualFileSystem for RootFileSystem {
 
     fn unwritten_ranges(&mut self, path: &str) -> VfsResult<Vec<(u64, u64)>> {
         self.overlay.unwritten_ranges(path)
+    }
+
+    fn extent_at(&mut self, path: &str, index: usize) -> VfsResult<Option<FileExtent>> {
+        self.overlay.extent_at(path, index)
     }
 
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {

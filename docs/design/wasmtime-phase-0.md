@@ -20,7 +20,7 @@ This document closes Phase 0 of the Wasmtime executor project. It records:
 
 The inventory was checked against:
 
-- `crates/execution/assets/wasi-preview1-imports.json`;
+- `crates/execution/assets/agentos-wasm-abi.json`;
 - `crates/execution/assets/runners/wasm-runner.mjs`;
 - `crates/execution/assets/runners/wasi-module.js`;
 - `toolchain/crates/wasi-ext/src/lib.rs`;
@@ -51,16 +51,18 @@ The tables use these abbreviations:
 - **in/out**: bytes copied from/to guest memory. All ranges and aggregate sizes
   are validated before a side effect. No guest-memory borrow crosses an await.
 
-Common default limits are `maxOpenFds=256`, `maxPipes=128`, `maxPtys=128`,
+Common default limits are `maxOpenFds=1024`, `maxPipes=128`, `maxPtys=128`,
 `maxSockets=256`, `maxConnections=256`, `maxSocketBufferedBytes=4 MiB`,
 `maxSocketDatagramQueueLen=1024`, `maxPreadBytes=64 MiB`,
 `maxFdWriteBytes=64 MiB`, `maxProcessArgvBytes=1 MiB`,
 `maxProcessEnvBytes=1 MiB`, `maxReaddirEntries=4096`, a 4096-byte path, 40
 symlink traversals, 64 supplementary groups, 255-byte xattr names, and 64 KiB
-xattr values. Every adapter additionally caps one decoded iovec/subscription/fd
-array at 4096 entries and its encoded descriptor bytes at 1 MiB before copying.
-These two adapter caps become named configurable limits if real software reaches
-them; they never silently become unbounded.
+xattr values. Every adapter additionally caps one decoded iovec, pollfd, or
+poll-subscription array at the Linux-aligned 1024 entries and its encoded
+descriptor bytes at 1 MiB before copying. Spawn file actions have their own
+4096-entry and 1 MiB encoded-byte caps; SCM_RIGHTS carries at most 253
+descriptors. These adapter caps become named configurable limits if real
+software reaches them; they never silently become unbounded.
 
 Multi-output imports prevalidate every output range before committing a side
 effect. Operations that allocate guest fds reserve fd capacity before the host
@@ -76,7 +78,7 @@ The runner exposes the same object as `wasi_snapshot_preview1` and
 | --- | --- | --- | --- |
 | `args_sizes_get`, `args_get` | C; sync; out | `GuestProcessHost::image(pid).argv` from the committed kernel process image | 1 MiB argv cap; prevalidate pointer table and strings; direct-WAT exact bytes/order/OOB plus spawn/exec corpus |
 | `environ_sizes_get`, `environ_get` | C; sync; out | `GuestProcessHost::image(pid).env`, after the one sidecar-owned guest filtering/default pass | 1 MiB env cap; deterministic ordering; internal-key exclusion and exec replacement tests |
-| `clock_time_get`, `clock_res_get` | C; sync; out | `GuestClockHost`; frozen execution realtime plus monotonic/process/thread clocks | One u64 output; exact realtime/resolution, monotonicity, invalid-id and OOB tests |
+| `clock_time_get`, `clock_res_get` | C; sync; out | `GuestClockHost`; frozen execution realtime plus monotonic | One u64 output; exact realtime/resolution, monotonicity, invalid-id and OOB tests. Process/thread CPU clock IDs retain the current stable `ENOTSUP` behavior; implementing per-executor CPU clocks is beyond the current V8-WASM parity target. |
 | `random_get` | C; sync/chunked; out | `GuestEntropyHost`, same provider as kernel `/dev/urandom` | Validate full guest range first; fill in at most 64 KiB host chunks with a 16 MiB per-call cap; zero/OOB/limit/provider-failure tests |
 | `fd_close` | C; sync; none | `GuestFdHost::close` on the kernel fd table | fd ownership; reuse/refcount/EBADF parity |
 | `fd_datasync`, `fd_sync` | C; sync; none | `GuestFdHost::sync(DataOnly/All)` | writable/open fd; synchronous-VFS commit and exact errno tests |
@@ -85,7 +87,7 @@ The runner exposes the same object as `wasi_snapshot_preview1` and
 | `fd_filestat_get` | C; sync; out | `GuestMetadataHost::stat_fd` | Exact dev/ino/type/nlink/size/time encoding; open-unlinked fd test |
 | `fd_filestat_set_size` | C; sync; scalar in | `GuestFdHost::set_len` | write right, read-only mount, filesystem quota; position and rollback tests |
 | `fd_filestat_set_times` | C compatibility export; sync; scalar in | `GuestMetadataHost::set_times_fd` | NOW/OMIT validation; open-unlinked fd and DAC tests |
-| `fd_pread` | C; sync; in iovecs/out bytes+count | `GuestFdHost::read_at` | 4096 iovecs/1 MiB descriptors/64 MiB payload; offset unchanged and malformed-iovec tests |
+| `fd_pread` | C; sync; in iovecs/out bytes+count | `GuestFdHost::read_at` | 1024 iovecs/1 MiB descriptors/64 MiB payload; offset unchanged and malformed-iovec tests |
 | `fd_pwrite` | C; sync; in iovecs/out count | `GuestFdHost::write_at` | Pre-copy 64 MiB cap, quota and read-only checks; vector ordering/rollback tests |
 | `fd_read` | C; async for pipe/PTY/socket/FIFO; in iovecs/out bytes+count | `GuestFdHost::read` | Same iovec caps, configured blocking deadline, signal/cancel; EOF/EAGAIN/EINTR/backpressure tests |
 | `fd_write` | C; async for backpressured pipe/socket/PTY; in iovecs/out count | `GuestFdHost::write` or sidecar `write_stdio` for host-visible stdio | Pre-copy 64 MiB cap; partial write, EPIPE/SIGPIPE, ordering and backpressure tests |
@@ -105,7 +107,7 @@ The runner exposes the same object as `wasi_snapshot_preview1` and
 | `path_rename` | C; sync; two paths in | `GuestPathHost::rename_at` | Phase 1 replaces current generic `rename`; atomic/DAC/sticky/cross-mount tests |
 | `path_symlink` | C; sync; target/path in | `GuestPathHost::symlink_at` | Phase 1 replaces current generic `symlink`; parent DAC/read-only/dangling tests |
 | `path_unlink_file` | C; sync; path in | `GuestPathHost::unlink_at` | Phase 1 replaces current generic `remove_file`; sticky/open-description tests |
-| `poll_oneoff` | C; async; subscriptions in/events+count out | `GuestProcessHost::poll` over kernel readiness, shared clock, signal and cancel broker | 4096 subscriptions/1 MiB descriptors; fd+clock, HUP, timeout, signal race and lost-wakeup tests |
+| `poll_oneoff` | C; async; subscriptions in/events+count out | `GuestProcessHost::poll` over kernel readiness, shared clock, signal and cancel broker | 1024 subscriptions/1 MiB descriptors; fd+clock, HUP, timeout, signal race and lost-wakeup tests |
 | `proc_exit` | C; terminal control flow; none | `GuestProcessHost::exit(status) -> !`; sidecar finalizes kernel process once | Normal exit distinct from trap/signal; 0/42/137, output-drain and child-wait tests |
 | `sched_yield` | C; async yield/checkpoint; none | VM executor yield plus cancellation/signal checkpoint | Fairness, STOP/terminate observation and no-busy-spin tests |
 | `fd_advise`, `fd_fdstat_set_rights` | U | No current runner function | Direct import must fail with stable unsupported-import validation error |
@@ -122,7 +124,7 @@ Full permission links the whole module. Read-only/read-write link only
 | `proc_spawn`, `proc_spawn_v2`, `proc_spawn_v3`, `proc_spawn_v4` | A/A/A/C; sync setup with async lifecycle; in/out | Decode all versions to one `GuestProcessHost::spawn(SpawnRequest)` | 256 processes, 1 MiB argv/env, 4096 actions/1 MiB action bytes, fd limits; legacy artifact plus full posix_spawn actions/masks/groups tests |
 | `proc_exec`, `proc_fexec` | C; terminal control flow; in | `GuestProcessHost::prepare_exec -> ExecPlan`; validate/compile before atomic kernel commit, then replace Store outside import | 256 MiB module, argv/env/fd limits; failed-exec atomicity, CLOEXEC, fd-offset and deleted-fd tests |
 | `proc_waitpid`, `proc_waitpid_v2`, `proc_waitpid_v3` | A/A/C; async; out | `GuestProcessHost::wait(selector, flags) -> WaitEvent`, with three encoders | Child-count bound; exit-vs-signal/core/stopped/continued/selectors/EINTR tests |
-| `proc_kill` | C; sync; none | `GuestSignalHost::send` through kernel signal broker | Signals 0..64, standard pending coalescing; self/child/group/permission/default/caught tests |
+| `proc_kill` | C; sync; none | `GuestSignalHost::send` through kernel signal broker | Raw owned ABI and kernel accept signals 0..64 with standard pending coalescing; the current libc deliberately exposes `_NSIG=32` and no realtime-signal API, which remains the parity target until a separate sysroot expansion; self/child/group/permission/default/caught and raw 64/65 boundary tests |
 | `proc_getpid`, `proc_getppid` | C; sync; out | Kernel process identity accessors | Spawn/exec/reparent stability tests; no environment-derived PID state |
 | `proc_getrlimit`, `proc_setrlimit` | C; sync; out/none | Kernel-owned `GuestProcessHost::get/set_rlimit` | Initial `RLIMIT_NOFILE`; lowering/inheritance/EMFILE/EPERM tests; no runner shadow |
 | `proc_umask`, `umask` | C/A; sync; out | Kernel `GuestProcessHost::set/query_umask` | 0777 mask; create/mkdir/spawn/exec/query tests |
@@ -139,7 +141,7 @@ Full permission links the whole module. Read-only/read-write link only
 | `pty_open` | S, but active library surface; sync allocation; out | Phase 1 wires existing kernel/sidecar `open_pty` | 128 PTYs and fd limits; master/slave/isatty/spawn/resize/SIGWINCH tests |
 | `proc_sigaction` | C; sync; none | Kernel-owned dispositions/masks/flags; guest handler pointer remains adapter state | KILL/STOP rejection, IGN/DFL/user, NODEFER/RESETHAND/RESTART/exec tests |
 | `proc_signal_mask_v2` | C; sync; out | Kernel signal broker `update_mask` | KILL/STOP filtering, pending-on-unblock and future per-thread tests |
-| `proc_ppoll_v1` | C; async; in/out | Atomic temporary-mask registration plus shared poll/signal/timer broker | Same 4096/1 MiB poll caps; signal/readiness ordering, restore and lost-wakeup tests |
+| `proc_ppoll_v1` | C; async; in/out | Atomic temporary-mask registration plus shared poll/signal/timer broker | Same 1024-entry/1 MiB poll caps; signal/readiness ordering, restore and lost-wakeup tests |
 
 ## 5. `host_net` inventory
 
@@ -166,7 +168,7 @@ continues to own external DNS and socket I/O.
 | `net_recvfrom` | C; async; capacities in/data+address out | `GuestNetworkHost::recv_from` | UDP 64 KiB, queue/buffer limits; truncation/source/nonblock/cancel tests |
 | `net_setsockopt` | C; sync command; option bytes in | `GuestNetworkHost::set_option` | Option payload capped at 64 KiB; exact supported level/name/type and timeout tests |
 | `net_getsockopt` | C; sync snapshot; option bytes out | `GuestNetworkHost::get_option` | Caller/64 KiB cap; error/length/value parity |
-| `net_poll` | C; async; pollfds in/out+ready count | Shared readiness broker, not a network-private loop | 4096 fds/1 MiB descriptors, bounded deadline; mixed fd, duplicate, signal/cancel/HUP tests |
+| `net_poll` | C; async; pollfds in/out+ready count | Shared readiness broker, not a network-private loop | 1024 fds/1 MiB descriptors, bounded deadline; mixed fd, duplicate, signal/cancel/HUP tests |
 | `net_close` | A explicit close; async-capable teardown; none | `GuestFdHost::close` | Idempotence is not promised; resource-release and waiter-cancel tests |
 | `net_tls_connect` | C; async handshake; hostname in | `GuestNetworkHost::upgrade_tls` | TLS buffer/reactor/deadline limits, 4096-byte hostname, permission/cert/SNI/cancel tests |
 
@@ -188,7 +190,14 @@ and live fd/PTY state remain authoritative.
 | `host_tty.read` | A active crossterm ABI; async; bytes out | `GuestFdHost::read(fd=0, deadline)` | 64 KiB; legacy zero conflates EOF/timeout; byte/EOF/timeout/signal/OOB tests |
 | `host_tty.isatty` | A; sync; no memory | Same live terminal lookup | Same fd identity tests; no runner cache |
 | `host_tty.get_size` | A; sync; two u16 out | `GuestTerminalHost::window_size` | Prevalidate both outputs; resize/ENOTTY/OOB tests |
+| `host_tty.set_size` | C; sync; scalar in | `GuestTerminalHost::set_window_size` | Validate u16 columns/rows; SIGWINCH, permission, ENOTTY and resize-observation tests |
+| `host_tty.get_attr` | C; sync; flags plus seven control bytes out | `GuestTerminalHost::get_attributes` | Prevalidate both output ranges; live termios, dup/replacement, ENOTTY and OOB tests |
+| `host_tty.set_attr` | C; sync; flags plus seven control bytes in | `GuestTerminalHost::set_attributes` | Snapshot bounded input before mutation; live termios, inheritance, ENOTTY and OOB tests |
+| `host_tty.get_pgrp` | C; sync; pgid out | `GuestTerminalHost::foreground_process_group` | Prevalidate output; session/foreground-group, dup/replacement, ENOTTY and OOB tests |
+| `host_tty.set_pgrp` | C; sync; pgid in | `GuestTerminalHost::set_foreground_process_group` | Kernel session/group authority; permission, orphan/session, ENOTTY and signal-routing tests |
+| `host_tty.get_sid` | C; sync; sid out | `GuestTerminalHost::session` | Prevalidate output; controlling-terminal/session, dup/replacement, ENOTTY and OOB tests |
 | `host_tty.set_raw_mode` | A; sync; none | Sidecar `GuestTerminalHost::set_raw_mode`, including generation lease bookkeeping | Enable/disable/nesting/exit restore/background/ENOTTY tests |
+| `host_system.get_identity` | C; sync; field selector in/string+required length out | Kernel `SystemIdentity` snapshot (`sysname`, node name, release, version, machine, domain name) | 4096-byte result cap; exact Linux identity, short-buffer `ERANGE`, invalid selector, and OOB tests |
 
 Phase 1 also replaces libc's process-global shadow termios, fixed foreground
 process group, no-op `tcsetpgrp`, and missing resize path with live
@@ -261,28 +270,113 @@ Both backend selections execute the same corpus. Tests compare stdout, stderr,
 bytes, errno, exit status, terminating signal, kernel side effects, and resource
 accounting—not engine error strings.
 
+### Resource-attack cap evidence map
+
+This map scopes the Resource attacks row to the named executor-facing limits in
+Sections 2–7 and the runtime-neutral request/reply paths. A checked row has
+boundary, limit-plus-one, warning, typed-error, and rollback evidence either at
+the semantic owner or through a shared admission primitive that the operation
+is required to use. An unchecked row is a release-gate test gap; the existence
+of a hard-coded rejection alone does not close it.
+
+- [x] **Owned adapter payloads and counts.** `PayloadLimit` proves exact-limit
+  admission, limit-plus-one rejection with structured `{limitName, limit,
+  observed}` details, coalesced 80% warning/rearm, and allocation-free JSON
+  measurement in
+  `crates/execution/src/backend/payload.rs`. The bounded byte, string, vector,
+  and count constructors are required to receive that named limit and reject
+  before operation construction (`bounded_values_reject_before_admission` and
+  `common_payload_constructors_require_named_limits`).
+- [x] **Runtime-neutral retained resources.** `ResourceLedger` proves exact
+  child-scope admission, 80% warning/rearm, limit-plus-one typed fields, parent
+  rollback, and release-to-zero in
+  `named_limit_proves_boundary_warning_typed_rejection_and_rollback` and
+  `failed_child_admission_rolls_back_parent`. This is the shared evidence for
+  reactor sockets/connections/buffers, blocking jobs/bytes, capabilities,
+  tasks, completions, and other ledger-backed runtime resources.
+- [x] **Common execution events and direct replies.** The backend submission
+  tests prove a full count queue settles only the rejected call's waiter, the
+  byte boundary remains charged after dequeue until settlement, limit-plus-one
+  carries the configured name, and settlement releases the charge. Direct
+  reply and common event tests prove bounded raw/JSON replies, stdout/stderr,
+  warnings, and runtime faults, including near-limit delivery
+  (`crates/execution/src/backend/{submission,reply,event}.rs` and
+  `crates/execution/tests/backend_payload_bounds.rs`).
+- [x] **Spawn file actions.** `wasm_spawn_action_decoder_enforces_typed_limits_with_e2big`
+  covers the 4096-action and 1 MiB encoded-byte families with independent
+  count/byte rejection and near-limit warnings. The raw ABI spawn-result
+  prevalidation cases followed by `waitpid(...)=ECHILD` prove rejected requests
+  do not create a child.
+- [x] **Kernel saturation resources.** Kernel resource-accounting and socket
+  table tests fill and exceed process, open-fd, pipe, PTY, socket, connection,
+  socket-buffer-byte, and datagram-queue limits, verify stable usage after
+  rejection, and verify capacity returns after close/drain/reap. The shared
+  resource-gauge registration and `resource_gauges_track_usage_and_warn_on_approach`
+  cover the common near-limit warning path.
+- [x] **Fixed ABI table caps.**
+  `raw_abi_fixed_tables_lists_and_strings_prove_boundary_plus_one_and_warning`
+  proves exact-1024 admission, limit-plus-one rejection before table access,
+  and the common warning contract for iovecs, pollfds, and Preview1
+  subscriptions. `raw_abi_memory_directions_reject_hostile_ranges_before_host_work`
+  proves malformed tables cannot partially copy out. Spawn actions remain 4096
+  and SCM_RIGHTS remains 253.
+- [x] **Point-in-time kernel byte/count caps.**
+  `resource_limits_reject_oversized_spawn_payloads`,
+  `resource_limits_reject_oversized_pread_and_write_operations`, and
+  `resource_limits_reject_oversized_readdir_batches` prove exact-boundary
+  admission, limit-plus-one rejection, and no file/process mutation for argv,
+  environment, pread, write, and readdir. The shared
+  `resource_gauges_track_usage_and_warn_on_approach` proof checks the five
+  stable names plus structured `{limitName, limit, observed}` error details.
+- [x] **Fixed semantic string/list caps.**
+  `raw_abi_fixed_tables_lists_and_strings_prove_boundary_plus_one_and_warning`
+  covers supplementary groups, account names, xattr names, and xattr values at
+  the adapter boundary. `xattr_value_and_name_list_limits_accept_boundary_and_rollback_plus_one`
+  and `xattr_value_limit_accepts_linux_boundary_and_rejects_plus_one_transactionally`
+  prove the semantic owner accepts 64 KiB, rejects limit plus one with Linux
+  errno, and preserves the previous path/fd value and encoded name list.
+- [x] **Deadlines.** `BlockingReadDeadline` and
+  `OperationDeadlineTracker` are the common one-shot 80% warning state machines
+  required by every `maxBlockingReadMs` and `operationDeadlineMs` path,
+  including synchronous poll and readiness re-park paths. The focused
+  `operation_deadline_warns_at_eighty_percent_before_success_or_typed_expiry`
+  proof covers near-limit success, typed expiry, synchronous socket writes, and
+  reconstruction without clock reset or duplicate warning. Kernel
+  `blocking_pipe_and_pty_reads_time_out_instead_of_hanging_forever`, raw
+  `raw_abi_blocking_read_warns_at_eighty_percent_before_typed_expiry`, and
+  `wasm_parent_child_write_deadline_wakes_after_parent_stops_polling` cover
+  guest-visible warning/expiry and teardown behavior.
+
 ### Phase 0 artifact evidence
 
-On the rebased `main` tree, `pnpm install --frozen-lockfile` completed and the
-Rust half of `just tools-rebuild` produced 139 command modules. The C build
-produced 33 top-level modules before stopping in the upstream Git link. Auditing
-all 172 produced modules with Binaryen `wasm-dis` found 121 unique
-module/function import pairs. Every pair is declared in Sections 3–7; the
-artifact set specifically confirms that both `path_chown`/`fd_chown` legacy
-aliases and `proc_spawn_v3`/`proc_spawn_v4` plus
-`proc_waitpid_v2`/`proc_waitpid_v3` version pairs remain live.
+The Phase 1 tree completed `just tools-rebuild` after removing the obsolete
+`wasi-libc-overrides/ownership.c` definitions and retaining the canonical
+patched-libc ownership implementation. The rebuild produced 119 standalone
+Rust commands, compiled 98 C programs, installed the selected C commands, and
+confirmed 166 entries in the default command corpus. Because a focused Vim
+build was already present in `toolchain/target`, that completed rebuild/copy
+invocation staged and audited 167 command entries. The generated ABI remained
+current at 169 functions.
 
-The complete release-artifact gate is not green on this base revision. The
-owned `libc.a` contains duplicate `chown`, `fchown`, `lchown`, and `fchownat`
-definitions from patched `posix.o` and `override_ownership.o`, so upstream Git
-cannot link and later C tools are not produced. This is a pre-existing
-toolchain correctness defect: patch
-`0034-posix-ownership-and-access.patch` added the canonical implementation while
-`wasi-libc-overrides/ownership.c` retained the old implementation. The
-runtime-neutral revision must select one implementation, rerun the complete
-rebuild, and commit an automated import audit before satisfying its exit gate.
-Phase 0's source inventory remains complete; it does not misreport the partial
-artifact build as release validation.
+Those 169 manifest rows have 29 distinct core function signatures. The 40
+Preview1 rows also link through the `wasi_unstable` module alias, yielding 209
+effective linker names without duplicating implementations. The inventory
+tables contain 111 semantic rows: 110 supported binding groups plus the one
+intentional unsupported-import group. The generated registry must preserve
+those counts and map every import to explicit handler, decoder, encoder,
+execution-class, restartability, return-convention, permission, and
+transaction/prevalidation metadata.
+
+The automated Binaryen audit inspected all 167 staged command entries (136 distinct
+modules) and found 145 unique module/function imports. Every observed import
+has the exact signature declared in Sections 3–7; no undeclared import or
+conflicting signature remains. The artifact set specifically confirms that
+both `path_chown`/`fd_chown` legacy aliases and `proc_spawn_v3`/`proc_spawn_v4`
+plus `proc_waitpid_v2`/`proc_waitpid_v3` version pairs remain live. Generated
+command and package outputs are ignored build evidence and are not committed.
+A subsequent focused DuckDB build expanded the optional staged corpus to 168
+commands and 137 distinct modules without changing the 145-import inventory or
+the 169-function ABI manifest; it is not part of the 166-command default corpus.
 
 ## 10. V8-WASM performance and memory baseline
 
@@ -359,7 +453,12 @@ by `just tools-rebuild` before a release-quality capture.
 5. **Engine profiles.** The process caches Engines by exact feature profile and
    exact stack cap. Unspecified stack uses 512 KiB. Admit at most eight distinct
    profiles process-wide by default, warn at 80%, and reject the ninth with a
-   typed limit naming the engine-profile setting. Modules never cross Engines.
+   typed limit naming the engine-profile setting. Set the async stack to the
+   WASM stack cap plus 1.5 MiB of host-call headroom (2 MiB for the default
+   profile), reject arithmetic/platform-size overflow as typed configuration
+   errors, and charge the complete async-stack reservation per active Store.
+   This preserves Wasmtime 46's default host-call headroom while making custom
+   stack profiles explicit and accounted. Modules never cross Engines.
 6. **Module cache.** Per Engine, use a 32-entry LRU and a 256 MiB conservative
    admission budget. Charge `max(module_bytes * 8, 1 MiB)` per compiled Module,
    warn at 80%, never deserialize native artifacts, and expose hits, misses,

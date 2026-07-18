@@ -3207,10 +3207,7 @@ fn add_esm_runtime_prelude(source: &str) -> String {
     if source.contains("require(")
         && !source.contains("createRequire(import.meta.url)")
         && !source.contains("createRequire(")
-        && !source.contains("const require =")
-        && !source.contains("let require =")
-        && !source.contains("var require =")
-        && !source.contains("function require(")
+        && !source_declares_identifier(source, "require")
     {
         prelude
             .push_str("const require = globalThis._moduleModule.createRequire(import.meta.url);\n");
@@ -3221,6 +3218,33 @@ fn add_esm_runtime_prelude(source: &str) -> String {
     } else {
         format!("{prelude}{source}")
     }
+}
+
+fn source_declares_identifier(source: &str, name: &str) -> bool {
+    for keyword in ["const", "let", "var", "function", "class"] {
+        let mut cursor = 0usize;
+        while let Some(start) = find_code_pattern(source, keyword, cursor) {
+            let mut index = start + keyword.len();
+            while source
+                .as_bytes()
+                .get(index)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                index += 1;
+            }
+            let end = index.saturating_add(name.len());
+            if source.get(index..end) == Some(name)
+                && source
+                    .as_bytes()
+                    .get(end)
+                    .is_none_or(|byte| !is_js_ident_continue(*byte))
+            {
+                return true;
+            }
+            cursor = start + keyword.len();
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -3495,6 +3519,20 @@ mod tests {
         assert_eq!(strip_leading_shebang("#!/usr/bin/env node"), "");
     }
 
+    #[test]
+    fn esm_runtime_prelude_does_not_redeclare_minified_require_binding() {
+        let source = "const require=H(import.meta.url); require(\"node:fs\");";
+        assert_eq!(add_esm_runtime_prelude(source), source);
+    }
+
+    #[test]
+    fn esm_runtime_prelude_injects_require_when_it_is_only_called() {
+        let source = "const fs = require(\"node:fs\");";
+        assert!(add_esm_runtime_prelude(source).starts_with(
+            "const require = globalThis._moduleModule.createRequire(import.meta.url);\n"
+        ));
+    }
+
     /// Shared writer that captures output for test inspection
     struct SharedWriter(Arc<Mutex<Vec<u8>>>);
 
@@ -3672,10 +3710,7 @@ export const file = new File([], "empty.txt");
     #[test]
     fn v8_consolidated_tests() {
         isolate::init_v8_platform();
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("test process runtime")
-                .context();
+        let runtime = crate::test_runtime_context();
 
         // --- Isolate lifecycle (moved from isolate::tests to consolidate V8 tests) ---
         // Create and destroy 3 isolates sequentially without crash
@@ -4396,13 +4431,35 @@ export const file = new File([], "empty.txt");
             let ctx = isolate::create_context(&mut iso);
 
             let mut response_buf = Vec::new();
+            let mut error_payload = Vec::new();
+            ciborium::into_writer(
+                &ciborium::Value::Map(vec![
+                    (
+                        ciborium::Value::Text(String::from("code")),
+                        ciborium::Value::Text(String::from("ENOENT")),
+                    ),
+                    (
+                        ciborium::Value::Text(String::from("message")),
+                        ciborium::Value::Text(String::from("file not found")),
+                    ),
+                    (
+                        ciborium::Value::Text(String::from("details")),
+                        ciborium::Value::Map(vec![(
+                            ciborium::Value::Text(String::from("path")),
+                            ciborium::Value::Text(String::from("/missing")),
+                        )]),
+                    ),
+                ]),
+                &mut error_payload,
+            )
+            .unwrap();
             crate::ipc_binary::write_frame(
                 &mut response_buf,
                 &crate::ipc_binary::BinaryFrame::BridgeResponse {
                     session_id: String::new(),
                     call_id: 1,
                     status: 1,
-                    payload: "ENOENT: file not found".as_bytes().to_vec(),
+                    payload: error_payload,
                 },
             )
             .unwrap();
@@ -4425,7 +4482,14 @@ export const file = new File([], "empty.txt");
                 );
             }
 
-            assert!(eval_throws(&mut iso, &ctx, "_testBridge('arg')"));
+            assert_eq!(
+                eval(
+                    &mut iso,
+                    &ctx,
+                    "try { _testBridge('arg'); 'no-error' } catch (error) { `${error.code}:${error.message}:${error.details.path}` }",
+                ),
+                "ENOENT:file not found:/missing"
+            );
         }
 
         // --- Part 10: Multiple bridge functions with argument passing ---
@@ -4574,8 +4638,7 @@ export const file = new File([], "empty.txt");
                 let scope = &mut v8::HandleScope::new(&mut iso);
                 let local = v8::Local::new(scope, &ctx);
                 let scope = &mut v8::ContextScope::new(scope, local);
-                bridge::resolve_pending_promise(scope, &pending, 1, 0, Some(result_v8), None)
-                    .unwrap();
+                bridge::resolve_pending_promise(scope, &pending, 1, 0, Some(result_v8)).unwrap();
             }
 
             assert_eq!(pending.len(), 0);
@@ -4634,9 +4697,32 @@ export const file = new File([], "empty.txt");
                     scope,
                     &pending,
                     1,
-                    0,
-                    None,
-                    Some("ENOENT: file not found".into()),
+                    1,
+                    Some({
+                        let mut payload = Vec::new();
+                        ciborium::into_writer(
+                            &ciborium::Value::Map(vec![
+                                (
+                                    ciborium::Value::Text(String::from("code")),
+                                    ciborium::Value::Text(String::from("ENOENT")),
+                                ),
+                                (
+                                    ciborium::Value::Text(String::from("message")),
+                                    ciborium::Value::Text(String::from("file not found")),
+                                ),
+                                (
+                                    ciborium::Value::Text(String::from("details")),
+                                    ciborium::Value::Map(vec![(
+                                        ciborium::Value::Text(String::from("path")),
+                                        ciborium::Value::Text(String::from("/missing")),
+                                    )]),
+                                ),
+                            ]),
+                            &mut payload,
+                        )
+                        .expect("encode async bridge error");
+                        payload
+                    }),
                 )
                 .unwrap();
             }
@@ -4655,11 +4741,65 @@ export const file = new File([], "empty.txt");
                 assert_eq!(promise.state(), v8::PromiseState::Rejected);
                 let rejection = promise.result(scope);
                 let obj = v8::Local::<v8::Object>::try_from(rejection).unwrap();
+                let code_key = v8::String::new(scope, "code").unwrap();
+                let code_val = obj.get(scope, code_key.into()).unwrap();
+                assert_eq!(code_val.to_rust_string_lossy(scope), "ENOENT");
                 let msg_key = v8::String::new(scope, "message").unwrap();
                 let msg_val = obj.get(scope, msg_key.into()).unwrap();
+                assert_eq!(msg_val.to_rust_string_lossy(scope), "file not found");
+                let details_key = v8::String::new(scope, "details").unwrap();
+                let details = obj.get(scope, details_key.into()).unwrap();
+                let details = v8::Local::<v8::Object>::try_from(details).unwrap();
+                let path_key = v8::String::new(scope, "path").unwrap();
                 assert_eq!(
-                    msg_val.to_rust_string_lossy(scope),
-                    "ENOENT: file not found"
+                    details
+                        .get(scope, path_key.into())
+                        .unwrap()
+                        .to_rust_string_lossy(scope),
+                    "/missing"
+                );
+            }
+
+            // A diagnostic string that looks like an errno must remain only a
+            // message. Stable codes come exclusively from the structured field.
+            eval(
+                &mut iso,
+                &ctx,
+                "var _spoofedErrorPromise = _asyncFn('spoof')",
+            );
+            assert_eq!(pending.len(), 1);
+            {
+                let scope = &mut v8::HandleScope::new(&mut iso);
+                let local = v8::Local::new(scope, &ctx);
+                let scope = &mut v8::ContextScope::new(scope, local);
+                bridge::resolve_pending_promise(
+                    scope,
+                    &pending,
+                    2,
+                    1,
+                    Some(b"EACCES: guest-controlled diagnostic".to_vec()),
+                )
+                .unwrap();
+            }
+            {
+                let scope = &mut v8::HandleScope::new(&mut iso);
+                let local = v8::Local::new(scope, &ctx);
+                let scope = &mut v8::ContextScope::new(scope, local);
+                let source = v8::String::new(scope, "_spoofedErrorPromise").unwrap();
+                let script = v8::Script::compile(scope, source, None).unwrap();
+                let promise =
+                    v8::Local::<v8::Promise>::try_from(script.run(scope).unwrap()).unwrap();
+                assert_eq!(promise.state(), v8::PromiseState::Rejected);
+                let error = v8::Local::<v8::Object>::try_from(promise.result(scope)).unwrap();
+                let code_key = v8::String::new(scope, "code").unwrap();
+                assert!(error.get(scope, code_key.into()).unwrap().is_undefined());
+                let message_key = v8::String::new(scope, "message").unwrap();
+                assert_eq!(
+                    error
+                        .get(scope, message_key.into())
+                        .unwrap()
+                        .to_rust_string_lossy(scope),
+                    "EACCES: guest-controlled diagnostic"
                 );
             }
         }
@@ -4702,7 +4842,7 @@ export const file = new File([], "empty.txt");
                 let scope = &mut v8::HandleScope::new(&mut iso);
                 let local = v8::Local::new(scope, &ctx);
                 let scope = &mut v8::ContextScope::new(scope, local);
-                bridge::resolve_pending_promise(scope, &pending, 2, 0, Some(r2), None).unwrap();
+                bridge::resolve_pending_promise(scope, &pending, 2, 0, Some(r2)).unwrap();
             }
             assert_eq!(pending.len(), 1);
 
@@ -4711,7 +4851,7 @@ export const file = new File([], "empty.txt");
                 let scope = &mut v8::HandleScope::new(&mut iso);
                 let local = v8::Local::new(scope, &ctx);
                 let scope = &mut v8::ContextScope::new(scope, local);
-                bridge::resolve_pending_promise(scope, &pending, 1, 0, Some(r1), None).unwrap();
+                bridge::resolve_pending_promise(scope, &pending, 1, 0, Some(r1)).unwrap();
             }
             assert_eq!(pending.len(), 0);
 
@@ -4775,7 +4915,7 @@ export const file = new File([], "empty.txt");
                 let scope = &mut v8::HandleScope::new(&mut iso);
                 let local = v8::Local::new(scope, &ctx);
                 let scope = &mut v8::ContextScope::new(scope, local);
-                bridge::resolve_pending_promise(scope, &pending, 1, 0, None, None).unwrap();
+                bridge::resolve_pending_promise(scope, &pending, 1, 0, None).unwrap();
             }
 
             // Promise should be fulfilled with undefined
@@ -4832,7 +4972,7 @@ export const file = new File([], "empty.txt");
                 let scope = &mut v8::HandleScope::new(&mut iso);
                 let local = v8::Local::new(scope, &ctx);
                 let scope = &mut v8::ContextScope::new(scope, local);
-                bridge::resolve_pending_promise(scope, &pending, 1, 0, None, None).unwrap();
+                bridge::resolve_pending_promise(scope, &pending, 1, 0, None).unwrap();
             }
 
             // After resolution + microtask flush, _thenRan should be true
@@ -5450,6 +5590,63 @@ export const file = new File([], "empty.txt");
             assert_eq!(
                 eval(&mut iso, &ctx, "_eventLoopResult"),
                 "event-loop-resolved"
+            );
+
+            // The asynchronous session lane must preserve the same structured
+            // error object as the synchronous bridge callback.
+            eval(
+                &mut iso,
+                &ctx,
+                "var _eventLoopError = 'pending'; _asyncFn('error').catch(function(error) { _eventLoopError = `${error.code}:${error.message}:${error.details.path}`; })",
+            );
+            assert_eq!(pending.len(), 1);
+            let mut error_payload = Vec::new();
+            ciborium::into_writer(
+                &ciborium::Value::Map(vec![
+                    (
+                        ciborium::Value::Text(String::from("code")),
+                        ciborium::Value::Text(String::from("EACCES")),
+                    ),
+                    (
+                        ciborium::Value::Text(String::from("message")),
+                        ciborium::Value::Text(String::from("permission denied")),
+                    ),
+                    (
+                        ciborium::Value::Text(String::from("details")),
+                        ciborium::Value::Map(vec![(
+                            ciborium::Value::Text(String::from("path")),
+                            ciborium::Value::Text(String::from("/private")),
+                        )]),
+                    ),
+                ]),
+                &mut error_payload,
+            )
+            .expect("encode asynchronous session error");
+            tx.send(crate::session::SessionCommand::Message(
+                crate::runtime_protocol::SessionMessage::BridgeResponse(
+                    crate::runtime_protocol::BridgeResponse {
+                        call_id: 2,
+                        status: 1,
+                        payload: error_payload,
+                        reservation: None,
+                    },
+                ),
+            ))
+            .unwrap();
+            let completed = {
+                let scope = &mut v8::HandleScope::new(&mut iso);
+                let local = v8::Local::new(scope, &ctx);
+                let scope = &mut v8::ContextScope::new(scope, local);
+                crate::session::run_event_loop(scope, &rx, &pending, None, None, None)
+            };
+            assert!(matches!(
+                completed,
+                crate::session::EventLoopStatus::Completed
+            ));
+            assert_eq!(pending.len(), 0);
+            assert_eq!(
+                eval(&mut iso, &ctx, "_eventLoopError"),
+                "EACCES:permission denied:/private"
             );
         }
 
@@ -7321,15 +7518,30 @@ export const file = new File([], "empty.txt");
             let mut response_buf = Vec::new();
 
             // Batch response (call_id=1): error (simulating unsupported batch method)
+            let mut batch_error_payload = Vec::new();
+            ciborium::into_writer(
+                &ciborium::Value::Map(vec![
+                    (
+                        ciborium::Value::Text(String::from("code")),
+                        ciborium::Value::Text(String::from("ENOSYS")),
+                    ),
+                    (
+                        ciborium::Value::Text(String::from("message")),
+                        ciborium::Value::Text(String::from(
+                            "No handler for bridge method: _batchResolveModules",
+                        )),
+                    ),
+                ]),
+                &mut batch_error_payload,
+            )
+            .unwrap();
             crate::ipc_binary::write_frame(
                 &mut response_buf,
                 &crate::ipc_binary::BinaryFrame::BridgeResponse {
                     session_id: String::new(),
                     call_id: 1,
                     status: 1,
-                    payload: "No handler for bridge method: _batchResolveModules"
-                        .as_bytes()
-                        .to_vec(),
+                    payload: batch_error_payload,
                 },
             )
             .unwrap();

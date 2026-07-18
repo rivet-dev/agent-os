@@ -70,6 +70,8 @@ impl LimitCategory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrackedLimit {
     JavascriptEventChannel,
+    PendingSyncRpcCalls,
+    PendingPythonVfsRpcCalls,
     V8SessionFrames,
     SidecarStdinFrames,
     SidecarStdoutFrames,
@@ -78,6 +80,10 @@ pub enum TrackedLimit {
     PendingProcessEventBytes,
     PendingExecutionEvents,
     PendingExecutionEventBytes,
+    PendingChildProcessSyncCount,
+    PendingChildProcessSyncBytes,
+    AsyncCompletionCount,
+    AsyncCompletionBytes,
     PendingKernelStdinBytes,
     PendingWasmSignals,
     PendingSidecarResponses,
@@ -92,12 +98,18 @@ pub enum TrackedLimit {
     VmSocketDatagramQueueLen,
     VmFilesystemBytes,
     VmInodes,
+    VmPreadBytes,
+    VmFdWriteBytes,
+    VmProcessArgvBytes,
+    VmProcessEnvBytes,
+    VmReaddirEntries,
+    VmBlockingReadMs,
     VmRecursiveFsDepth,
     VmRecursiveFsEntries,
     V8HeapBytes,
     V8CpuTimeMs,
     V8WallClockMs,
-    WasmFuelMs,
+    WasmWallClockMs,
     WasmMemoryBytes,
 }
 
@@ -107,6 +119,8 @@ impl TrackedLimit {
     pub fn as_str(self) -> &'static str {
         match self {
             TrackedLimit::JavascriptEventChannel => "javascript_event_channel",
+            TrackedLimit::PendingSyncRpcCalls => "pending_sync_rpc_calls",
+            TrackedLimit::PendingPythonVfsRpcCalls => "pending_python_vfs_rpc_calls",
             TrackedLimit::V8SessionFrames => "v8_session_frames",
             TrackedLimit::SidecarStdinFrames => "sidecar_stdin_frames",
             TrackedLimit::SidecarStdoutFrames => "sidecar_stdout_frames",
@@ -115,6 +129,10 @@ impl TrackedLimit {
             TrackedLimit::PendingProcessEventBytes => "pending_process_event_bytes",
             TrackedLimit::PendingExecutionEvents => "pending_execution_events",
             TrackedLimit::PendingExecutionEventBytes => "pending_execution_event_bytes",
+            TrackedLimit::PendingChildProcessSyncCount => "pending_child_process_sync_count",
+            TrackedLimit::PendingChildProcessSyncBytes => "pending_child_process_sync_bytes",
+            TrackedLimit::AsyncCompletionCount => "async_completion_count",
+            TrackedLimit::AsyncCompletionBytes => "async_completion_bytes",
             TrackedLimit::PendingKernelStdinBytes => "pending_kernel_stdin_bytes",
             TrackedLimit::PendingWasmSignals => "pending_wasm_signals",
             TrackedLimit::PendingSidecarResponses => "pending_sidecar_responses",
@@ -129,12 +147,18 @@ impl TrackedLimit {
             TrackedLimit::VmSocketDatagramQueueLen => "vm_socket_datagram_queue_len",
             TrackedLimit::VmFilesystemBytes => "vm_filesystem_bytes",
             TrackedLimit::VmInodes => "vm_inodes",
+            TrackedLimit::VmPreadBytes => "vm_pread_bytes",
+            TrackedLimit::VmFdWriteBytes => "vm_fd_write_bytes",
+            TrackedLimit::VmProcessArgvBytes => "vm_process_argv_bytes",
+            TrackedLimit::VmProcessEnvBytes => "vm_process_env_bytes",
+            TrackedLimit::VmReaddirEntries => "vm_readdir_entries",
+            TrackedLimit::VmBlockingReadMs => "vm_blocking_read_ms",
             TrackedLimit::VmRecursiveFsDepth => "vm_recursive_fs_depth",
             TrackedLimit::VmRecursiveFsEntries => "vm_recursive_fs_entries",
             TrackedLimit::V8HeapBytes => "v8_heap_bytes",
             TrackedLimit::V8CpuTimeMs => "v8_cpu_time_ms",
             TrackedLimit::V8WallClockMs => "v8_wall_clock_ms",
-            TrackedLimit::WasmFuelMs => "wasm_fuel_ms",
+            TrackedLimit::WasmWallClockMs => "wasm_wall_clock_ms",
             TrackedLimit::WasmMemoryBytes => "wasm_memory_bytes",
         }
     }
@@ -142,6 +166,8 @@ impl TrackedLimit {
     pub fn category(self) -> LimitCategory {
         match self {
             TrackedLimit::JavascriptEventChannel
+            | TrackedLimit::PendingSyncRpcCalls
+            | TrackedLimit::PendingPythonVfsRpcCalls
             | TrackedLimit::V8SessionFrames
             | TrackedLimit::SidecarStdinFrames
             | TrackedLimit::SidecarStdoutFrames
@@ -150,6 +176,10 @@ impl TrackedLimit {
             | TrackedLimit::PendingProcessEventBytes
             | TrackedLimit::PendingExecutionEvents
             | TrackedLimit::PendingExecutionEventBytes
+            | TrackedLimit::PendingChildProcessSyncCount
+            | TrackedLimit::PendingChildProcessSyncBytes
+            | TrackedLimit::AsyncCompletionCount
+            | TrackedLimit::AsyncCompletionBytes
             | TrackedLimit::PendingKernelStdinBytes
             | TrackedLimit::PendingWasmSignals
             | TrackedLimit::PendingSidecarResponses
@@ -164,12 +194,18 @@ impl TrackedLimit {
             | TrackedLimit::VmSocketDatagramQueueLen
             | TrackedLimit::VmFilesystemBytes
             | TrackedLimit::VmInodes
+            | TrackedLimit::VmPreadBytes
+            | TrackedLimit::VmFdWriteBytes
+            | TrackedLimit::VmProcessArgvBytes
+            | TrackedLimit::VmProcessEnvBytes
+            | TrackedLimit::VmReaddirEntries
             | TrackedLimit::VmRecursiveFsDepth
             | TrackedLimit::VmRecursiveFsEntries => LimitCategory::Resource,
             TrackedLimit::V8HeapBytes | TrackedLimit::WasmMemoryBytes => LimitCategory::Memory,
-            TrackedLimit::V8CpuTimeMs | TrackedLimit::V8WallClockMs | TrackedLimit::WasmFuelMs => {
-                LimitCategory::Cpu
-            }
+            TrackedLimit::VmBlockingReadMs
+            | TrackedLimit::V8CpuTimeMs
+            | TrackedLimit::V8WallClockMs
+            | TrackedLimit::WasmWallClockMs => LimitCategory::Cpu,
         }
     }
 }

@@ -765,6 +765,33 @@ fn pnpm_symlinked_referrer_can_resolve_sibling_dependency() {
 }
 
 #[test]
+fn host_module_resolution_preserves_symlink_loop_errors() {
+    let fixture = Fixture::new();
+    fixture.mkdir("node_modules");
+    symlink("loop-b", fixture.host_path("node_modules/loop-a")).expect("create first loop symlink");
+    symlink("loop-a", fixture.host_path("node_modules/loop-b"))
+        .expect("create second loop symlink");
+
+    let mut resolver = fixture.resolver();
+    let error = resolver
+        .try_resolve_require("loop-a", "/root/project/index.js")
+        .expect_err("symlink loop must be a typed filesystem error, not a module miss");
+    assert_eq!(error.code, "ELOOP");
+}
+
+#[test]
+fn malformed_present_package_json_is_a_typed_error() {
+    let fixture = Fixture::new();
+    fixture.write("node_modules/bad/package.json", "{");
+
+    let mut resolver = fixture.resolver();
+    let error = resolver
+        .try_resolve_require("bad", "/root/project/index.js")
+        .expect_err("malformed present package.json must not become MODULE_NOT_FOUND");
+    assert_eq!(error.code, "ERR_INVALID_PACKAGE_CONFIG");
+}
+
+#[test]
 fn pnpm_symlinked_referrer_prefers_package_store_dependency_over_generic_hoist() {
     let fixture = Fixture::new();
     fixture.write_json(

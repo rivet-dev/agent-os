@@ -6,14 +6,34 @@
  * Registers only when the WASM shell binary is available.
  */
 
-import { describe, it, expect, afterEach } from "vitest";
-import { TerminalHarness } from '@rivet-dev/agentos-test-harness';
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { TerminalHarness as BaseTerminalHarness } from '@rivet-dev/agentos-test-harness';
 import { createWasmVmRuntime } from '@rivet-dev/agentos-test-harness';
 import { COMMANDS_DIR, createKernel, describeIf, hasWasmBinaries } from '@rivet-dev/agentos-test-harness';
 import type { Kernel } from '@rivet-dev/agentos-test-harness';
 
 /** brush-shell interactive prompt (captured empirically). */
 const PROMPT = "sh-0.4$ ";
+const TERMINAL_TEST_TIMEOUT_MS = 15_000;
+
+// Starting and driving a real sidecar-backed shell can exceed Vitest's 5s
+// unit-test default under the package's parallel file load. Keep this
+// integration suite bounded without weakening any runtime deadline or screen
+// assertion.
+vi.setConfig({
+	testTimeout: TERMINAL_TEST_TIMEOUT_MS,
+	hookTimeout: TERMINAL_TEST_TIMEOUT_MS,
+});
+
+class TerminalHarness extends BaseTerminalHarness {
+	override waitFor(
+		text: string,
+		occurrence: number = 1,
+		timeoutMs: number = TERMINAL_TEST_TIMEOUT_MS,
+	): Promise<void> {
+		return super.waitFor(text, occurrence, timeoutMs);
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Simple in-memory VFS for kernel tests

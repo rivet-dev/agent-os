@@ -54,7 +54,7 @@ import { brotliCompressSync, gzipSync, zstdCompressSync } from 'node:zlib';
 // The upstream curl parity assertions below only hold for the C-built curl
 // artifact; the Rust fallback in COMMANDS_DIR intentionally supports a smaller
 // flag surface and should not be used for these cases.
-const hasHttpGetTest = hasWasmBinaries && existsSync(resolve(COMMANDS_DIR, 'http_get_test'));
+const hasHttpGetTest = hasWasmBinaries && existsSync(resolve(C_BUILD_DIR, 'http_get_test'));
 const hasCurl = hasCWasmBinaries('curl');
 const runExternalNetwork = process.env.AGENTOS_E2E_NETWORK === '1';
 const EXTERNAL_HOST = 'example.com';

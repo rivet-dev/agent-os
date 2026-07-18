@@ -298,6 +298,11 @@ var NODE_CUSTOM_GLOBAL_INVENTORY = [
 		rationale: "Host process signal-listener state bridge reference.",
 	},
 	{
+		name: "_processSignalEnd",
+		classification: "hardened",
+		rationale: "Host process signal-delivery completion bridge reference.",
+	},
+	{
 		name: "_processTakeSignal",
 		classification: "hardened",
 		rationale: "Host process pending-signal drain bridge reference.",

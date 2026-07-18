@@ -61,7 +61,7 @@ fn run_python_execution(
         {
             Some(PythonExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
             Some(PythonExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
-            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+            Some(PythonExecutionEvent::HostRpcRequest(request)) => {
                 let serviced = execution
                     .try_service_standalone_module_sync_rpc(&request)
                     .expect("service module sync RPC");

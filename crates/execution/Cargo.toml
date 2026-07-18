@@ -36,6 +36,7 @@ tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
 
 [dev-dependencies]
+agentos-wasm-abi-generator = { path = "../wasm-abi-generator" }
 tempfile = "3"
 wat = "1"
 

@@ -380,7 +380,7 @@ fn permission_flags_single_star_paths_do_not_cross_path_separators() {
         .expect("attempt nested child directory create");
     match deny_nested_child.response.payload {
         ResponsePayload::RejectedResponse(rejected) => {
-            assert_eq!(rejected.code, "kernel_error");
+            assert_eq!(rejected.code, "EACCES");
             assert!(rejected.message.contains("EACCES"));
         }
         other => panic!("expected rejected nested mkdir response, got {other:?}"),

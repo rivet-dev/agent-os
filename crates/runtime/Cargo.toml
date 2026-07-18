@@ -7,4 +7,5 @@ repository.workspace = true
 description = "Process-owned AgentOS async runtime and bounded blocking executor"
 
 [dependencies]
+agentos-resource = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "net"] }

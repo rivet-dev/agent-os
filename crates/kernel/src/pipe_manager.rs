@@ -3,6 +3,7 @@ use crate::fd_table::{
     FILETYPE_PIPE, O_NONBLOCK, O_RDONLY, O_RDWR, O_WRONLY,
 };
 use crate::poll::{PollEvents, PollNotifier, POLLERR, POLLHUP, POLLIN, POLLOUT};
+use crate::resource_accounting::BlockingReadDeadline;
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
@@ -50,6 +51,20 @@ impl PipeError {
     fn no_reader(message: impl Into<String>) -> Self {
         Self {
             code: "ENXIO",
+            message: message.into(),
+        }
+    }
+
+    fn io(message: impl Into<String>) -> Self {
+        Self {
+            code: "EIO",
+            message: message.into(),
+        }
+    }
+
+    fn overflow(message: impl Into<String>) -> Self {
+        Self {
+            code: "EOVERFLOW",
             message: message.into(),
         }
     }
@@ -267,6 +282,24 @@ impl PipeManager {
         flags: u32,
         timeout: Option<Duration>,
     ) -> PipeResult<PipeEnd> {
+        self.open_named_pipe_with_deadline(key, path, flags, timeout, None)
+    }
+
+    pub(crate) fn open_named_pipe_with_deadline(
+        &self,
+        key: (u64, u64),
+        path: &str,
+        flags: u32,
+        timeout: Option<Duration>,
+        mut blocking_deadline: Option<BlockingReadDeadline>,
+    ) -> PipeResult<PipeEnd> {
+        let timeout_deadline = timeout
+            .map(|timeout| {
+                Instant::now().checked_add(timeout).ok_or_else(|| {
+                    PipeError::overflow("FIFO open timeout exceeds the supported deadline range")
+                })
+            })
+            .transpose()?;
         let access_mode = flags & 0b11;
         if !matches!(access_mode, O_RDONLY | O_WRONLY | O_RDWR) {
             return Err(PipeError::bad_file_descriptor("invalid FIFO access mode"));
@@ -333,26 +366,44 @@ impl PipeManager {
                     PipeSide::ReadWrite => true,
                 })
             };
-            if let Some(timeout) = timeout {
-                let (next, result) = self
-                    .inner
-                    .waiters
-                    .wait_timeout_while(state, timeout, |state| !ready(state))
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state = next;
-                if result.timed_out() && !ready(&state) {
-                    drop(state);
-                    self.close(description_id);
-                    return Err(PipeError::would_block(format!(
-                        "FIFO open timed out: {path}"
-                    )));
+            if let Some(deadline) = timeout_deadline {
+                while !ready(&state) {
+                    let remaining = blocking_deadline
+                        .as_mut()
+                        .and_then(BlockingReadDeadline::wait_slice)
+                        .unwrap_or_else(|| deadline.saturating_duration_since(Instant::now()));
+                    let (next, result) = self
+                        .inner
+                        .waiters
+                        .wait_timeout_while(state, remaining, |state| !ready(state))
+                        .map_err(|_| {
+                            PipeError::io("FIFO wait state was poisoned by a prior panic")
+                        })?;
+                    state = next;
+                    if ready(&state) {
+                        break;
+                    }
+                    if result.timed_out()
+                        && blocking_deadline
+                            .as_mut()
+                            .is_some_and(|deadline| !deadline.expired())
+                    {
+                        continue;
+                    }
+                    if result.timed_out() || Instant::now() >= deadline {
+                        drop(state);
+                        self.close(description_id);
+                        return Err(PipeError::would_block(format!(
+                            "FIFO open timed out: {path}"
+                        )));
+                    }
                 }
             } else {
                 state = self
                     .inner
                     .waiters
                     .wait_while(state, |state| !ready(state))
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    .map_err(|_| PipeError::io("FIFO wait state was poisoned by a prior panic"))?;
             }
         }
         drop(state);
@@ -524,6 +575,16 @@ impl PipeManager {
         length: usize,
         timeout: Option<Duration>,
     ) -> PipeResult<Option<Vec<u8>>> {
+        self.read_with_timeout_and_deadline(description_id, length, timeout, None)
+    }
+
+    pub(crate) fn read_with_timeout_and_deadline(
+        &self,
+        description_id: u64,
+        length: usize,
+        timeout: Option<Duration>,
+        mut blocking_deadline: Option<BlockingReadDeadline>,
+    ) -> PipeResult<Option<Vec<u8>>> {
         let mut state = lock_or_recover(&self.inner.state);
         let pipe_ref = state
             .desc_to_pipe
@@ -607,6 +668,9 @@ impl PipeManager {
 
             let now = Instant::now();
             if now >= deadline {
+                if let Some(blocking_deadline) = &mut blocking_deadline {
+                    blocking_deadline.expired();
+                }
                 if let Some(id) = waiter_id.take() {
                     state.waiters.remove(&id);
                     if let Some(pipe) = state.pipes.get_mut(&pipe_ref.pipe_id) {
@@ -617,7 +681,10 @@ impl PipeManager {
                 return Err(PipeError::would_block("pipe read timed out"));
             }
 
-            let remaining = deadline.saturating_duration_since(now);
+            let remaining = blocking_deadline
+                .as_mut()
+                .and_then(BlockingReadDeadline::wait_slice)
+                .unwrap_or_else(|| deadline.saturating_duration_since(now));
             let (next_state, wait_result) =
                 wait_timeout_or_recover(&self.inner.waiters, state, remaining);
             state = next_state;
@@ -625,6 +692,12 @@ impl PipeManager {
                 waiter_id = None;
             }
             if wait_result.timed_out() {
+                if blocking_deadline
+                    .as_mut()
+                    .is_some_and(|deadline| !deadline.expired())
+                {
+                    continue;
+                }
                 if let Some(id) = waiter_id.take() {
                     state.waiters.remove(&id);
                     if let Some(pipe) = state.pipes.get_mut(&pipe_ref.pipe_id) {
@@ -869,14 +942,22 @@ fn drain_buffer(buffer: &mut VecDeque<Vec<u8>>, length: usize) -> Vec<u8> {
 fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
     match mutex.lock() {
         Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+        Err(poisoned) => {
+            eprintln!("ERR_AGENTOS_PIPE_STATE_POISONED: recovering pipe state after a prior panic");
+            poisoned.into_inner()
+        }
     }
 }
 
 fn wait_or_recover<'a, T>(condvar: &Condvar, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
     match condvar.wait(guard) {
         Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+        Err(poisoned) => {
+            eprintln!(
+                "ERR_AGENTOS_PIPE_WAIT_POISONED: recovering pipe wait state after a prior panic"
+            );
+            poisoned.into_inner()
+        }
     }
 }
 
@@ -887,13 +968,33 @@ fn wait_timeout_or_recover<'a, T>(
 ) -> (MutexGuard<'a, T>, std::sync::WaitTimeoutResult) {
     match condvar.wait_timeout(guard, timeout) {
         Ok(result) => result,
-        Err(poisoned) => poisoned.into_inner(),
+        Err(poisoned) => {
+            eprintln!(
+                "ERR_AGENTOS_PIPE_WAIT_POISONED: recovering timed pipe wait state after a prior panic"
+            );
+            poisoned.into_inner()
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_named_pipe_timeout_fails_before_allocating_state() {
+        let manager = PipeManager::new();
+
+        let error = manager
+            .open_named_pipe((1, 2), "/fifo", O_RDONLY, Some(Duration::MAX))
+            .expect_err("an unrepresentable deadline must fail");
+
+        assert_eq!(error.code(), "EOVERFLOW");
+        assert_eq!(manager.pipe_count(), 0);
+        assert!(lock_or_recover(&manager.inner.state)
+            .desc_to_pipe
+            .is_empty());
+    }
 
     #[test]
     fn zero_timeout_empty_read_does_not_publish_false_readiness() {

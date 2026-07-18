@@ -77,6 +77,42 @@ fn records_warning_when_overriding_existing_command() {
 }
 
 #[test]
+fn replace_makes_one_driver_command_set_exact() {
+    let mut registry = CommandRegistry::new();
+    registry
+        .register(CommandDriver::new("runtime", ["old", "keep", "shared"]))
+        .expect("register initial commands");
+    registry
+        .register(CommandDriver::new("other", ["overridden", "shared"]))
+        .expect("register other driver");
+
+    let obsolete = registry
+        .replace(CommandDriver::new("runtime", ["keep", "new"]))
+        .expect("replace runtime commands");
+    assert_eq!(obsolete, vec![String::from("old")]);
+    assert!(registry.resolve("old").is_none());
+    assert_eq!(
+        registry.resolve("keep").expect("kept command").name(),
+        "runtime"
+    );
+    assert_eq!(
+        registry.resolve("new").expect("new command").name(),
+        "runtime"
+    );
+    assert_eq!(
+        registry
+            .resolve("overridden")
+            .expect("other command remains")
+            .name(),
+        "other"
+    );
+    assert_eq!(
+        registry.resolve("shared").expect("override remains").name(),
+        "other"
+    );
+}
+
+#[test]
 fn populate_bin_creates_stub_entries() {
     let mut vfs = MemoryFileSystem::new();
     let mut registry = CommandRegistry::new();

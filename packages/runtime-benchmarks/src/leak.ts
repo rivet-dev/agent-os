@@ -82,6 +82,7 @@ await new Promise((resolve, reject) => {
 			guestHeapRss: slope(samples, "guestHeapRss"),
 			sidecarRss: slope(samples, "sidecarRss"),
 			runningProcesses: slope(samples, "runningProcesses"),
+			stoppedProcesses: slope(samples, "stoppedProcesses"),
 			exitedProcesses: slope(samples, "exitedProcesses"),
 			openFds: slope(samples, "openFds"),
 			sockets: slope(samples, "sockets"),

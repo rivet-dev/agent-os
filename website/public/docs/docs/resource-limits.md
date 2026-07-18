@@ -4,7 +4,7 @@ Cap per-VM resources, JavaScript CPU/wall-clock time, Python execution, and WASM
 
 Every agentOS VM runs with **per-VM resource and runtime caps**. These caps contain runaway or malicious guest work to its VM and give the host an explicit failure instead of silent data loss.
 
-- **Secure defaults**: unset fields fall back to built-in defaults that match the runtime's historical constants. Optional execution budgets such as WASM fuel explicitly document when their default has no additional budget.
+- **Secure defaults**: unset fields fall back to built-in defaults. Standalone WASM gets a 30-second active-CPU safeguard, while elapsed wall-clock and deterministic-fuel budgets remain opt-in.
 - **Per-VM**: every VM gets its own budget. Limits are not shared across VMs.
 - **Enforced by the sidecar/runtime**: a guest that exceeds a cap fails inside the VM (out-of-memory, `EMFILE`, `EAGAIN`, runtime timeout, etc.) instead of consuming past the configured budget.
 - **Operator-raisable**: the operator (the trusted process that creates the VM) may raise any cap for trusted workloads. Guest code can never raise its own caps.
@@ -22,7 +22,6 @@ Set caps on the `limits` object in the `agentOS` config. Limits are grouped by s
 | `resources.maxSockets` | Open sockets in the socket table | Bounds concurrent connections; excess `connect`/`accept` fail. |
 | `resources.maxFilesystemBytes` | Total bytes stored in the virtual filesystem | Bounds VFS storage; writes past the budget fail with a no-space error. |
 | `resources.maxInodeCount` | Inodes retained by the virtual filesystem | Default is `16384`; creating another file or directory fails with a no-space error. This is the expected upper bound for filesystem-schema sizing and benchmarks. |
-| `resources.maxWasmFuel` | WASM execution budget | Bounds WASM execution work; unset means no explicit fuel budget. |
 | `resources.maxWasmMemoryBytes` | WASM linear memory, in bytes | Default is `128 MiB`. |
 | `resources.maxWasmStackBytes` | Maximum WASM call-stack size, in bytes | Deep recursion fails with a stack overflow instead of crashing the VM. |
 | `resources.maxBlockingReadMs` | AgentOS safety backstop for otherwise-blocking guest operations | Default is `30000`. Socket waits, poll, and contended `F_SETLKW` warn near the limit and fail with `ETIMEDOUT` if it expires; raise it for workloads that intentionally wait longer. Linux has no equivalent global backstop. |
@@ -36,6 +35,8 @@ Set caps on the `limits` object in the `agentOS` config. Limits are grouped by s
 | `acp.maxPendingPermissionsPerVm` | Actionable ACP permission requests across one VM | Default is `10000`. |
 | `acp.maxPermissionOutcomesPerSession` | Terminal ACP permission outcomes retained for one session | Default is `10000`; it must not exceed `acp.maxPermissionOutcomesPerVm`. |
 | `acp.maxPermissionOutcomesPerVm` | Terminal ACP permission outcomes retained across one VM | Default is `100000`. Old outcomes are bounded independently from pending requests. |
+| `process.maxPendingChildSyncCount` | Concurrent `spawnSync` and Python synchronous subprocess calls retained across one VM | Default is `64`. Admission fails before the child is spawned and reports `limits.process.maxPendingChildSyncCount`. |
+| `process.maxPendingChildSyncBytes` | Aggregate input plus stdout/stderr capture capacity reserved by synchronous child-process calls across one VM | Default is `64 MiB`. Capacity is reclaimed on rejection, child completion, or process teardown. |
 | `jsRuntime.v8HeapLimitMb` | Guest JavaScript V8 heap, in MiB | Default is `128`. |
 | `jsRuntime.cpuTimeLimitMs` | Active JavaScript CPU time | Default is `30000`; `0` disables the CPU watchdog. |
 | `jsRuntime.wallClockLimitMs` | JavaScript elapsed wall-clock backstop | Default is `0`, disabled. Use this for finite commands, not long-lived adapters. |
@@ -46,12 +47,16 @@ Set caps on the `limits` object in the `agentOS` config. Limits are grouped by s
 | `wasm.prewarmTimeoutMs` | WASM compile-cache warmup timeout | Default is `30000`. |
 | `wasm.runnerHeapLimitMb` | Trusted WASI/WASM runner V8 heap, in MiB | Default is `2048`; this is not guest linear memory. |
 | `wasm.runnerCpuTimeLimitMs` | Trusted WASI/WASM runner active-CPU budget | Default is `30000`; `0` disables this budget for trusted configurations. |
+| `wasm.activeCpuTimeLimitMs` | Active standalone-WASM CPU time | Default is `30000`; `0` disables this safeguard for trusted configurations. Time blocked on terminal, network, filesystem, child, or timer waits does not consume it. |
+| `wasm.wallClockLimitMs` | Standalone-WASM elapsed wall-clock backstop | Optional and disabled when omitted. It includes time spent blocked or awaiting host work. |
+| `wasm.deterministicFuel` | Deterministic standalone-WASM instruction budget | Optional. The V8 compatibility backend rejects an explicit value with `ENOTSUP` because V8 cannot meter deterministic fuel. |
 | `process.maxSpawnFileActions` | File actions decoded for one `posix_spawn` call | Default is `4096`; excess actions fail with `E2BIG`. |
 | `process.maxSpawnFileActionBytes` | Serialized file-action bytes for one `posix_spawn` call | Default is `1 MiB`; excess input fails with `E2BIG`. |
 
 ## Behavior at the limit
 
 - **WASM stack**: deep recursion throws a stack-overflow error in the guest, never a host crash.
+- **WASM CPU time**: CPU-bound modules terminate after `wasm.activeCpuTimeLimitMs`, while idle interactive commands do not consume that budget. `wasm.wallClockLimitMs` is the independent opt-in elapsed deadline.
 - **JavaScript CPU time**: CPU-bound loops terminate with a CPU-budget error once active JS CPU exceeds `jsRuntime.cpuTimeLimitMs`.
 - **JavaScript wall time**: awaiting or blocked JS terminates only when you set `jsRuntime.wallClockLimitMs`; the default is disabled for long-lived adapters.
 - **Filesystem bytes**: writing past the VFS budget fails with a no-space error to the guest.

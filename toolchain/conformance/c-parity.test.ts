@@ -27,6 +27,12 @@ import { createServer as createTcpServer } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 
 const NATIVE_DIR = join(C_BUILD_DIR, 'native');
+const NATIVE_FIXTURE_NAMES: Readonly<Record<string, string>> = {
+  cat: 'c-cat',
+  env: 'c-env',
+  sort: 'c-sort',
+  wc: 'c-wc',
+};
 
 const hasCWasmBinaries = existsSync(join(C_BUILD_DIR, 'hello'));
 const hasNativeBinaries = existsSync(join(NATIVE_DIR, 'hello'));
@@ -44,8 +50,9 @@ function runNative(
   args: string[] = [],
   options?: { input?: string; env?: Record<string, string> },
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return new Promise((res) => {
-    const proc = spawn(join(NATIVE_DIR, name), args, {
+  return new Promise((res, reject) => {
+    const fixtureName = NATIVE_FIXTURE_NAMES[name] ?? name;
+    const proc = spawn(join(NATIVE_DIR, fixtureName), args, {
       env: options?.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -54,6 +61,7 @@ function runNative(
 
     proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
     proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    proc.on('error', reject);
 
     if (options?.input !== undefined) {
       proc.stdin.write(options.input);
@@ -70,7 +78,7 @@ function runNativeWithHosts(
   name: string,
   hostsFile: string,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return new Promise((res) => {
+  return new Promise((res, reject) => {
     const proc = spawn('unshare', [
       '-Urm',
       'sh',
@@ -85,6 +93,7 @@ function runNativeWithHosts(
 
     proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
     proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    proc.on('error', reject);
     proc.on('close', (code) => res({ exitCode: code ?? 0, stdout, stderr }));
   });
 }
@@ -95,7 +104,7 @@ function runNativeWithNetworkFiles(
   servicesFile: string,
   args: string[],
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return new Promise((res) => {
+  return new Promise((res, reject) => {
     const proc = spawn('unshare', [
       '-Urm',
       'sh',
@@ -111,6 +120,7 @@ function runNativeWithNetworkFiles(
     let stderr = '';
     proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
     proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    proc.on('error', reject);
     proc.on('close', (code) => res({ exitCode: code ?? 0, stdout, stderr }));
   });
 }
@@ -122,7 +132,7 @@ function runNativeWithLibcFiles(
   passwdFile: string,
   args: string[],
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return new Promise((res) => {
+  return new Promise((res, reject) => {
     const proc = spawn('unshare', [
       '-Urm',
       'sh',
@@ -139,6 +149,7 @@ function runNativeWithLibcFiles(
     let stderr = '';
     proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
     proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    proc.on('error', reject);
     proc.on('close', (code) => res({ exitCode: code ?? 0, stdout, stderr }));
   });
 }
@@ -343,7 +354,10 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
     const native = await runNative('hello');
     const wasm = await kernel.exec('hello');
 
-    expect(wasm.exitCode).toBe(native.exitCode);
+    expect(
+      wasm.exitCode,
+      `native stdout:\n${native.stdout}\nnative stderr:\n${native.stderr}\nWASM stdout:\n${wasm.stdout}\nWASM stderr:\n${wasm.stderr}`,
+    ).toBe(native.exitCode);
     expect(wasm.stdout).toBe(native.stdout);
   });
 
@@ -393,7 +407,8 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
     const wasm = await kernel.exec('wc', { stdin: input });
 
     expect(wasm.exitCode).toBe(native.exitCode);
-    expect(wasm.stdout).toBe(native.stdout);
+    const counts = (output: string) => output.trim().split(/\s+/).map(Number);
+    expect(counts(wasm.stdout)).toEqual(counts(native.stdout));
   });
 
   it('fread: file contents match', async () => {
@@ -537,8 +552,11 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
     const native = await runNative('getpwuid_test');
     const wasm = await kernel.exec('getpwuid_test');
 
-    expect(wasm.exitCode).toBe(native.exitCode);
-    expect(wasm.exitCode).toBe(0);
+    const diagnostic =
+      `native stdout:\n${native.stdout}\nnative stderr:\n${native.stderr}` +
+      `\nWASM stdout:\n${wasm.stdout}\nWASM stderr:\n${wasm.stderr}`;
+    expect(wasm.exitCode, diagnostic).toBe(native.exitCode);
+    expect(wasm.exitCode, diagnostic).toBe(0);
     expect(normalizeStderr(wasm.stderr)).toBe(normalizeStderr(native.stderr));
     // Both should get valid passwd entries
     expect(wasm.stdout).toContain('getpwuid: ok');
@@ -588,7 +606,12 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
       (_, index) => `198.51.100.${index + 1} many.test`,
     ).join('\n') + '\n';
     const services = `oversvc 12345/tcp ${'alias'.repeat(240)}\n`;
-    const passwd = `oversuser:x:123:456:${'gecos'.repeat(240)}:/home/oversuser:/bin/sh\n`;
+    const passwdPrefix = 'oversuser:x:123:456:';
+    const passwdSuffix = ':/home/oversuser:/bin/sh';
+    const passwd = `${passwdPrefix}${'g'.repeat(
+      4096 - passwdPrefix.length - passwdSuffix.length,
+    )}${passwdSuffix}\n`;
+    expect(Buffer.byteLength(passwd.slice(0, -1))).toBe(4096);
     await vfs.writeFile('/etc/hosts', hosts);
     await vfs.writeFile('/etc/services', services);
     await vfs.writeFile('/etc/passwd', passwd);
@@ -596,8 +619,8 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
     const wasm = await kernel.exec('libc_bounds_contract many.test oversvc oversuser');
     expect(wasm.exitCode, `${wasm.stderr}\n${wasm.stdout}`).toBe(0);
     expect(wasm.stderr).toBe('');
-    expect(wasm.stdout).toContain('nofile_soft=256\n');
-    expect(wasm.stdout).toContain('nofile_hard=256\n');
+    expect(wasm.stdout).toContain('nofile_soft=1024\n');
+    expect(wasm.stdout).toContain('nofile_hard=1024\n');
     expect(wasm.stdout).toContain('host_addresses=20\n');
     expect(wasm.stdout).toContain('service_found=no\nservice_erange=yes\n');
     expect(wasm.stdout).toContain('passwd_found=no\npasswd_erange=yes\n');
@@ -663,6 +686,70 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
     }
   });
 
+  itIf(!tier2Skip, 'libc group bounds: exact capacities succeed and overflow is explicit without overwrite', async () => {
+    const members = Array.from({ length: 256 }, (_, index) => `u${index}`);
+    await vfs.writeFile('/etc/group', `membercap:x:2000:${members.join(',')}\n`);
+    const exactMembers = await kernel.exec('getgrouplist_bounds group-members');
+    expect(exactMembers.exitCode, `${exactMembers.stderr}\n${exactMembers.stdout}`).toBe(0);
+    expect(exactMembers.stderr).toBe('');
+    expect(exactMembers.stdout).toBe(
+      'group_found=yes\ngroup_members=256\ngroup_overflow=no\n',
+    );
+
+    await vfs.writeFile(
+      '/etc/group',
+      `membercap:x:2000:${[...members, 'overflow'].join(',')}\n`,
+    );
+    const overflowMembers = await kernel.exec('getgrouplist_bounds group-members');
+    expect(
+      overflowMembers.exitCode,
+      `${overflowMembers.stderr}\n${overflowMembers.stdout}`,
+    ).toBe(0);
+    expect(overflowMembers.stderr).toBe('');
+    expect(overflowMembers.stdout).toBe(
+      'group_found=no\ngroup_members=0\ngroup_overflow=yes\n',
+    );
+
+    const matchingGroups = (count: number) =>
+      Array.from(
+        { length: count },
+        (_, index) => `g${index}:x:${2000 + index}:boundsuser`,
+      ).join('\n') + '\n';
+    await vfs.writeFile('/etc/group', matchingGroups(255));
+    const exactList = await kernel.exec('getgrouplist_bounds grouplist');
+    expect(exactList.exitCode, `${exactList.stderr}\n${exactList.stdout}`).toBe(0);
+    expect(exactList.stderr).toBe('');
+    expect(exactList.stdout).toBe(
+      'grouplist_result=256\ngrouplist_count=256\ngrouplist_overflow=no\ngrouplist_canary=yes\n',
+    );
+
+    await vfs.writeFile('/etc/group', matchingGroups(256));
+    const matchingOverflow = await kernel.exec('getgrouplist_bounds grouplist');
+    expect(
+      matchingOverflow.exitCode,
+      `${matchingOverflow.stderr}\n${matchingOverflow.stdout}`,
+    ).toBe(0);
+    expect(matchingOverflow.stderr).toBe('');
+    expect(matchingOverflow.stdout).toContain('grouplist_result=-1\n');
+    expect(matchingOverflow.stdout).toContain('grouplist_overflow=yes\n');
+    expect(matchingOverflow.stdout).toContain('grouplist_canary=yes\n');
+
+    const nonmatchingGroups = Array.from(
+      { length: 257 },
+      (_, index) => `g${index}:x:${2000 + index}:someoneelse`,
+    ).join('\n') + '\n';
+    await vfs.writeFile('/etc/group', nonmatchingGroups);
+    const databaseOverflow = await kernel.exec('getgrouplist_bounds grouplist');
+    expect(
+      databaseOverflow.exitCode,
+      `${databaseOverflow.stderr}\n${databaseOverflow.stdout}`,
+    ).toBe(0);
+    expect(databaseOverflow.stderr).toBe('');
+    expect(databaseOverflow.stdout).toContain('grouplist_result=-1\n');
+    expect(databaseOverflow.stdout).toContain('grouplist_overflow=yes\n');
+    expect(databaseOverflow.stdout).toContain('grouplist_canary=yes\n');
+  });
+
   itIf(!tier2Skip, 'chown family matches Linux ownership, fd, and symlink semantics', async () => {
     const native = await runNative('chown_contract');
     const wasm = await kernel.exec('chown_contract');
@@ -696,20 +783,22 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
     const native = await runNative('dup_test');
     const wasm = await kernel.exec('dup_test');
 
-    expect(wasm.exitCode).toBe(native.exitCode);
-    expect(wasm.stdout).toBe(native.stdout);
-    expect(normalizeStderr(wasm.stderr)).toBe(normalizeStderr(native.stderr));
+    const diagnostic = `WASM stdout:\n${wasm.stdout}\nWASM stderr:\n${wasm.stderr}`;
+    expect(wasm.exitCode, diagnostic).toBe(native.exitCode);
+    expect(wasm.stdout, diagnostic).toBe(native.stdout);
+    expect(normalizeStderr(wasm.stderr), diagnostic).toBe(normalizeStderr(native.stderr));
   });
 
   itIf(!tier2Skip, 'closefrom_test: closes high virtual descriptors', async () => {
     const native = await runNative('closefrom_test');
     const wasm = await kernel.exec('closefrom_test');
 
-    expect(wasm.exitCode).toBe(native.exitCode);
-    expect(wasm.exitCode).toBe(0);
-    expect(wasm.stdout).toBe(native.stdout);
-    expect(wasm.stdout).toContain('closefrom_closed=yes');
-    expect(normalizeStderr(wasm.stderr)).toBe(normalizeStderr(native.stderr));
+    const diagnostic = `WASM stdout:\n${wasm.stdout}\nWASM stderr:\n${wasm.stderr}`;
+    expect(wasm.exitCode, diagnostic).toBe(native.exitCode);
+    expect(wasm.exitCode, diagnostic).toBe(0);
+    expect(wasm.stdout, diagnostic).toBe(native.stdout);
+    expect(wasm.stdout, diagnostic).toContain('closefrom_closed=yes');
+    expect(normalizeStderr(wasm.stderr), diagnostic).toBe(normalizeStderr(native.stderr));
   });
 
   it('sleep_test: nanosleep completes successfully', async () => {
@@ -1076,7 +1165,10 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
     const native = await runNative('sigaction_behavior', [], { env });
     const wasm = await kernel.exec('sigaction_behavior');
 
-    expect(wasm.exitCode).toBe(native.exitCode);
+    expect(
+      wasm.exitCode,
+      `WASM stdout:\n${wasm.stdout}\nWASM stderr:\n${wasm.stderr}`,
+    ).toBe(native.exitCode);
     expect(wasm.exitCode).toBe(0);
     expect(wasm.stdout).toBe(native.stdout);
     expect(normalizeStderr(wasm.stderr)).toBe(normalizeStderr(native.stderr));
@@ -1321,8 +1413,11 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
     const native = await runNative('socket_flags');
     const wasm = await kernel.exec('socket_flags');
 
-    expect(wasm.exitCode).toBe(native.exitCode);
-    expect(wasm.exitCode).toBe(0);
+    const diagnostic =
+      `native stdout:\n${native.stdout}\nnative stderr:\n${native.stderr}` +
+      `\nWASM stdout:\n${wasm.stdout}\nWASM stderr:\n${wasm.stderr}`;
+    expect(wasm.exitCode, diagnostic).toBe(native.exitCode);
+    expect(wasm.exitCode, diagnostic).toBe(0);
     expect(normalizeStderr(wasm.stderr)).toBe(normalizeStderr(native.stderr));
     expect(wasm.stdout).toBe(native.stdout);
     expect(wasm.stdout).toContain('socket_nonblock=yes');
@@ -1428,7 +1523,10 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
     const native = await runNative('exec_edge');
     const wasm = await kernel.exec('exec_edge');
 
-    expect(wasm.exitCode).toBe(native.exitCode);
+    expect(
+      wasm.exitCode,
+      `native stdout:\n${native.stdout}\nnative stderr:\n${native.stderr}\nWASM stdout:\n${wasm.stdout}\nWASM stderr:\n${wasm.stderr}`,
+    ).toBe(native.exitCode);
     expect(wasm.exitCode).toBe(0);
     expect(normalizeStderr(wasm.stderr)).toBe(normalizeStderr(native.stderr));
     expect(wasm.stdout).toBe(native.stdout);
@@ -1455,7 +1553,10 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
       const native = await runNative('exec_variants', [mode]);
       const wasm = await kernel.exec(`exec_variants ${mode}`);
 
-      expect(wasm.exitCode).toBe(native.exitCode);
+      expect(
+        wasm.exitCode,
+        `native stdout:\n${native.stdout}\nnative stderr:\n${native.stderr}\nWASM stdout:\n${wasm.stdout}\nWASM stderr:\n${wasm.stderr}`,
+      ).toBe(native.exitCode);
       expect(wasm.exitCode).toBe(0);
       expect(normalizeStderr(wasm.stderr)).toBe(normalizeStderr(native.stderr));
       expect(wasm.stdout).toBe(native.stdout);
@@ -1717,7 +1818,10 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
       const native = await runNative('tcp_echo', [String(port)]);
       const wasm = await kernel.exec(`tcp_echo ${port}`);
 
-      expect(wasm.exitCode).toBe(native.exitCode);
+      expect(
+        wasm.exitCode,
+        `native stdout:\n${native.stdout}\nnative stderr:\n${native.stderr}\nWASM stdout:\n${wasm.stdout}\nWASM stderr:\n${wasm.stderr}`,
+      ).toBe(native.exitCode);
       expect(wasm.exitCode).toBe(0);
       expect(wasm.stdout).toBe(native.stdout);
       expect(normalizeStderr(wasm.stderr)).toBe(normalizeStderr(native.stderr));

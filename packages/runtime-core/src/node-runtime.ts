@@ -495,6 +495,7 @@ export interface NodeRuntimeProcess {
 
 export interface NodeRuntimeResourceSnapshot {
 	runningProcesses: number;
+	stoppedProcesses: number;
 	exitedProcesses: number;
 	fdTables: number;
 	openFds: number;

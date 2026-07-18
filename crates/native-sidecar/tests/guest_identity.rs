@@ -5,6 +5,7 @@ use agentos_native_sidecar::wire::{
     RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryEncoding,
     RootFilesystemEntryKind, RootFilesystemMode,
 };
+use base64::Engine as _;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -18,7 +19,14 @@ use support::{
 
 const DEFAULT_GUEST_PATH_ENV: &str =
     "/usr/local/sbin:/usr/local/bin:/opt/agentos/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-const GUEST_IDENTITY_CASES: &[&str] = &["javascript", "python", "wasm_identity", "wasm_env"];
+const GUEST_IDENTITY_CASES: &[&str] = &[
+    "javascript",
+    "python",
+    "wasm_identity",
+    "wasm_pty",
+    "wasm_env",
+    "wasm_preopen",
+];
 
 fn create_vm_with_root_filesystem(
     sidecar: &mut agentos_native_sidecar::NativeSidecar<support::RecordingBridge>,
@@ -29,13 +37,39 @@ fn create_vm_with_root_filesystem(
     cwd: &std::path::Path,
     root_filesystem: RootFilesystemDescriptor,
 ) -> String {
+    create_vm_with_root_filesystem_and_metadata(
+        sidecar,
+        request_id,
+        connection_id,
+        session_id,
+        runtime,
+        cwd,
+        root_filesystem,
+        HashMap::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_vm_with_root_filesystem_and_metadata(
+    sidecar: &mut agentos_native_sidecar::NativeSidecar<support::RecordingBridge>,
+    request_id: RequestId,
+    connection_id: &str,
+    session_id: &str,
+    runtime: GuestRuntimeKind,
+    cwd: &std::path::Path,
+    root_filesystem: RootFilesystemDescriptor,
+    mut metadata: HashMap<String, String>,
+) -> String {
+    metadata
+        .entry(String::from("cwd"))
+        .or_insert_with(|| cwd.to_string_lossy().into_owned());
     let result = sidecar
         .dispatch_wire_blocking(wire_request(
             request_id,
             wire_session(connection_id, session_id),
             RequestPayload::CreateVmRequest(CreateVmRequest::legacy_test_config(
                 runtime,
-                HashMap::from([(String::from("cwd"), cwd.to_string_lossy().into_owned())]),
+                metadata,
                 root_filesystem,
                 Some(wire_permissions_allow_all()),
             )),
@@ -58,6 +92,20 @@ fn parse_env_stdout(stdout: &str) -> BTreeMap<String, String> {
         .filter_map(|line| line.split_once('='))
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect()
+}
+
+fn executable_wasm_root_entry(path: &str, bytes: &[u8]) -> RootFilesystemEntry {
+    RootFilesystemEntry {
+        path: path.to_owned(),
+        kind: RootFilesystemEntryKind::File,
+        mode: None,
+        uid: None,
+        gid: None,
+        content: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        encoding: Some(RootFilesystemEntryEncoding::Base64),
+        target: None,
+        executable: true,
+    }
 }
 
 fn javascript_guest_identity_uses_kernel_owned_defaults() {
@@ -267,20 +315,8 @@ fn wasm_guest_identity_commands_use_kernel_owned_defaults() {
     let cwd = temp_dir("guest-identity-wasm-cwd");
     let connection_id = authenticate_wire(&mut sidecar, "conn-guest-identity-wasm");
     let session_id = open_session_wire(&mut sidecar, 2, &connection_id);
-    let (vm_id, _) = create_vm_wire(
-        &mut sidecar,
-        3,
-        &connection_id,
-        &session_id,
-        GuestRuntimeKind::WebAssembly,
-        &cwd,
-    );
-
-    let wasm_path = cwd.join("identity.wasm");
-    fs::write(
-        &wasm_path,
-        wat::parse_str(
-            r#"
+    let wasm_bytes = wat::parse_str(
+        r#"
 (module
   (type $fd_write_t (func (param i32 i32 i32 i32) (result i32)))
   (type $getid_t (func (param i32) (result i32)))
@@ -338,6 +374,19 @@ fn wasm_guest_identity_commands_use_kernel_owned_defaults() {
     i32.const 0
     i32.load
     i32.const 128
+    i32.const 1
+    i32.const 8
+    call $getpwuid
+    i32.const 68
+    call $assert_value
+    i32.const 8
+    i32.load
+    i32.const 42
+    call $assert_value
+
+    i32.const 0
+    i32.load
+    i32.const 128
     i32.const 256
     i32.const 8
     call $getpwuid
@@ -349,10 +398,26 @@ fn wasm_guest_identity_commands_use_kernel_owned_defaults() {
     call $write_stdout
   ))
 "#,
-        )
-        .expect("compile wasm identity fixture"),
     )
-    .expect("write wasm identity fixture");
+    .expect("compile wasm identity fixture");
+    let wasm_path = std::path::Path::new("/identity.wasm");
+    let vm_id = create_vm_with_root_filesystem(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::WebAssembly,
+        &cwd,
+        RootFilesystemDescriptor {
+            mode: RootFilesystemMode::Ephemeral,
+            disable_default_base_layer: false,
+            lowers: Vec::new(),
+            bootstrap_entries: vec![executable_wasm_root_entry(
+                wasm_path.to_str().unwrap(),
+                &wasm_bytes,
+            )],
+        },
+    );
 
     execute_wire(
         &mut sidecar,
@@ -382,6 +447,216 @@ fn wasm_guest_identity_commands_use_kernel_owned_defaults() {
     assert_eq!(stdout, "agentos:x:1000:1000::/home/agentos:/bin/sh");
 }
 
+fn wasm_guest_created_pty_uses_live_bounded_kernel_state() {
+    assert_node_available();
+
+    let mut sidecar = new_sidecar("guest-created-pty-wasm");
+    let cwd = temp_dir("guest-created-pty-wasm-cwd");
+    let connection_id = authenticate_wire(&mut sidecar, "conn-guest-created-pty-wasm");
+    let session_id = open_session_wire(&mut sidecar, 2, &connection_id);
+    let wasm_bytes = wat::parse_str(
+        r#"
+(module
+  (type $pty_open_t (func (param i32 i32) (result i32)))
+  (type $isatty_t (func (param i32) (result i32)))
+  (type $get_size_t (func (param i32 i32 i32) (result i32)))
+  (type $fd_close_t (func (param i32) (result i32)))
+  (type $fd_write_t (func (param i32 i32 i32 i32) (result i32)))
+  (type $proc_exit_t (func (param i32)))
+  (import "host_process" "pty_open" (func $pty_open (type $pty_open_t)))
+  (import "host_tty" "isatty" (func $isatty (type $isatty_t)))
+  (import "host_tty" "get_size" (func $get_size (type $get_size_t)))
+  (import "wasi_snapshot_preview1" "fd_close" (func $fd_close (type $fd_close_t)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (type $fd_write_t)))
+  (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (type $proc_exit_t)))
+  (memory (export "memory") 1)
+  (data (i32.const 64) "pty:kernel-bounded\n")
+  (func $fail (param $code i32)
+    local.get $code
+    call $proc_exit
+    unreachable)
+  (func $_start (export "_start")
+    ;; The first guest-created PTY must be backed by live kernel descriptors.
+    i32.const 0
+    i32.const 4
+    call $pty_open
+    i32.eqz
+    if
+    else
+      i32.const 41
+      call $fail
+    end
+    i32.const 0
+    i32.load
+    i32.const 4
+    i32.load
+    i32.eq
+    if
+      i32.const 42
+      call $fail
+    end
+    i32.const 0
+    i32.load
+    call $isatty
+    i32.const 1
+    i32.ne
+    if
+      i32.const 43
+      call $fail
+    end
+    i32.const 4
+    i32.load
+    call $isatty
+    i32.const 1
+    i32.ne
+    if
+      i32.const 44
+      call $fail
+    end
+    i32.const 0
+    i32.load
+    i32.const 8
+    i32.const 10
+    call $get_size
+    i32.eqz
+    if
+    else
+      i32.const 45
+      call $fail
+    end
+    i32.const 8
+    i32.load16_u
+    i32.const 80
+    i32.ne
+    if
+      i32.const 46
+      call $fail
+    end
+    i32.const 10
+    i32.load16_u
+    i32.const 24
+    i32.ne
+    if
+      i32.const 47
+      call $fail
+    end
+
+    ;; This VM admits exactly one PTY. A second request must fail atomically
+    ;; with EAGAIN and leave both guest output pointers untouched.
+    i32.const 12
+    i32.const 287454020
+    i32.store
+    i32.const 16
+    i32.const 1432778632
+    i32.store
+    i32.const 12
+    i32.const 16
+    call $pty_open
+    i32.const 6
+    i32.ne
+    if
+      i32.const 48
+      call $fail
+    end
+    i32.const 12
+    i32.load
+    i32.const 287454020
+    i32.ne
+    if
+      i32.const 49
+      call $fail
+    end
+    i32.const 16
+    i32.load
+    i32.const 1432778632
+    i32.ne
+    if
+      i32.const 50
+      call $fail
+    end
+
+    i32.const 0
+    i32.load
+    call $fd_close
+    i32.eqz
+    if
+    else
+      i32.const 51
+      call $fail
+    end
+    i32.const 4
+    i32.load
+    call $fd_close
+    i32.eqz
+    if
+    else
+      i32.const 52
+      call $fail
+    end
+    i32.const 24
+    i32.const 64
+    i32.store
+    i32.const 28
+    i32.const 19
+    i32.store
+    i32.const 1
+    i32.const 24
+    i32.const 1
+    i32.const 32
+    call $fd_write
+    i32.eqz
+    if
+    else
+      i32.const 53
+      call $fail
+    end))
+"#,
+    )
+    .expect("compile guest-created PTY fixture");
+    let wasm_path = std::path::Path::new("/guest-pty.wasm");
+    let vm_id = create_vm_with_root_filesystem_and_metadata(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::WebAssembly,
+        &cwd,
+        RootFilesystemDescriptor {
+            mode: RootFilesystemMode::Ephemeral,
+            disable_default_base_layer: false,
+            lowers: Vec::new(),
+            bootstrap_entries: vec![executable_wasm_root_entry(
+                wasm_path.to_str().unwrap(),
+                &wasm_bytes,
+            )],
+        },
+        HashMap::from([(String::from("resource.max_ptys"), String::from("1"))]),
+    );
+
+    execute_wire(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-wasm-guest-pty",
+        GuestRuntimeKind::WebAssembly,
+        &wasm_path,
+        Vec::new(),
+    );
+    let (stdout, stderr, exit_code) = collect_guest_identity_process_output(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-wasm-guest-pty",
+    );
+    dispose_vm_and_close_session(&mut sidecar, &connection_id, &session_id, &vm_id);
+    assert_eq!(exit_code, 0, "stderr:\n{stderr}");
+    assert!(stderr.is_empty(), "unexpected PTY stderr: {stderr}");
+    assert_eq!(stdout, "pty:kernel-bounded\n");
+}
+
 fn wasm_guest_env_filters_internal_control_vars_and_uses_kernel_defaults() {
     assert_node_available();
 
@@ -389,19 +664,7 @@ fn wasm_guest_env_filters_internal_control_vars_and_uses_kernel_defaults() {
     let cwd = temp_dir("guest-env-wasm-cwd");
     let connection_id = authenticate_wire(&mut sidecar, "conn-guest-env-wasm");
     let session_id = open_session_wire(&mut sidecar, 2, &connection_id);
-    let (vm_id, _) = create_vm_wire(
-        &mut sidecar,
-        3,
-        &connection_id,
-        &session_id,
-        GuestRuntimeKind::WebAssembly,
-        &cwd,
-    );
-
-    let wasm_path = cwd.join("env.wasm");
-    fs::write(
-        &wasm_path,
-        wat::parse_str(
+    let wasm_bytes = wat::parse_str(
             r#"
 (module
   (type $fd_write_t (func (param i32 i32 i32 i32) (result i32)))
@@ -492,9 +755,25 @@ fn wasm_guest_env_filters_internal_control_vars_and_uses_kernel_defaults() {
       end)))
 "#,
         )
-        .expect("compile wasm env fixture"),
-    )
-    .expect("write wasm env fixture");
+        .expect("compile wasm env fixture");
+    let wasm_path = std::path::Path::new("/env.wasm");
+    let vm_id = create_vm_with_root_filesystem(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::WebAssembly,
+        &cwd,
+        RootFilesystemDescriptor {
+            mode: RootFilesystemMode::Ephemeral,
+            disable_default_base_layer: false,
+            lowers: Vec::new(),
+            bootstrap_entries: vec![executable_wasm_root_entry(
+                wasm_path.to_str().unwrap(),
+                &wasm_bytes,
+            )],
+        },
+    );
 
     execute_wire(
         &mut sidecar,
@@ -541,12 +820,150 @@ fn wasm_guest_env_filters_internal_control_vars_and_uses_kernel_defaults() {
     );
 }
 
+fn wasm_preopens_and_rights_are_kernel_authoritative() {
+    assert_node_available();
+
+    let mut sidecar = new_sidecar("guest-preopen-wasm");
+    let cwd = temp_dir("guest-preopen-wasm-cwd");
+    let connection_id = authenticate_wire(&mut sidecar, "conn-guest-preopen-wasm");
+    let session_id = open_session_wire(&mut sidecar, 2, &connection_id);
+    let wasm_bytes = wat::parse_str(
+            r#"
+(module
+  (type $fd_prestat_get_t (func (param i32 i32) (result i32)))
+  (type $fd_prestat_dir_name_t (func (param i32 i32 i32) (result i32)))
+  (type $fd_fdstat_get_t (func (param i32 i32) (result i32)))
+  (type $fd_close_t (func (param i32) (result i32)))
+  (type $fd_write_t (func (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_prestat_get" (func $fd_prestat_get (type $fd_prestat_get_t)))
+  (import "wasi_snapshot_preview1" "fd_prestat_dir_name" (func $fd_prestat_dir_name (type $fd_prestat_dir_name_t)))
+  (import "wasi_snapshot_preview1" "fd_fdstat_get" (func $fd_fdstat_get (type $fd_fdstat_get_t)))
+  (import "wasi_snapshot_preview1" "fd_close" (func $fd_close (type $fd_close_t)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (type $fd_write_t)))
+  (memory (export "memory") 1)
+  (data (i32.const 128) "preopen:kernel\n")
+  (func $assert_zero (param $value i32)
+    local.get $value
+    i32.eqz
+    if
+    else
+      unreachable
+    end)
+  (func $_start (export "_start")
+    i32.const 3
+    i32.const 0
+    call $fd_prestat_get
+    call $assert_zero
+    i32.const 4
+    i32.load
+    i32.eqz
+    if unreachable end
+
+    i32.const 3
+    i32.const 16
+    i32.const 1
+    call $fd_prestat_dir_name
+    call $assert_zero
+    i32.const 16
+    i32.load8_u
+    i32.const 47
+    i32.ne
+    if unreachable end
+
+    i32.const 3
+    i32.const 32
+    call $fd_fdstat_get
+    call $assert_zero
+    i32.const 40
+    i64.load
+    i64.const 8192
+    i64.and
+    i64.eqz
+    if unreachable end
+    i32.const 40
+    i64.load
+    i64.const 64
+    i64.and
+    i64.eqz
+    if unreachable end
+
+    i32.const 3
+    call $fd_close
+    call $assert_zero
+    ;; Closing the public Linux descriptor must not revoke wasi-libc's private
+    ;; tagged capability root, but the public descriptor itself is now bad.
+    i32.const 3
+    i32.const 0
+    call $fd_prestat_get
+    i32.const 8
+    i32.ne
+    if unreachable end
+
+    i32.const 96
+    i32.const 128
+    i32.store
+    i32.const 100
+    i32.const 15
+    i32.store
+    i32.const 1
+    i32.const 96
+    i32.const 1
+    i32.const 104
+    call $fd_write
+    call $assert_zero))
+"#,
+        )
+        .expect("compile hostile WASI preopen fixture");
+    let wasm_path = std::path::Path::new("/preopen.wasm");
+    let vm_id = create_vm_with_root_filesystem(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        GuestRuntimeKind::WebAssembly,
+        &cwd,
+        RootFilesystemDescriptor {
+            mode: RootFilesystemMode::Ephemeral,
+            disable_default_base_layer: false,
+            lowers: Vec::new(),
+            bootstrap_entries: vec![executable_wasm_root_entry(
+                wasm_path.to_str().unwrap(),
+                &wasm_bytes,
+            )],
+        },
+    );
+
+    execute_wire(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-wasm-preopen",
+        GuestRuntimeKind::WebAssembly,
+        &wasm_path,
+        Vec::new(),
+    );
+    let (stdout, stderr, exit_code) = collect_guest_identity_process_output(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "proc-wasm-preopen",
+    );
+    dispose_vm_and_close_session(&mut sidecar, &connection_id, &session_id, &vm_id);
+    assert_eq!(exit_code, 0, "stderr:\n{stderr}");
+    assert_eq!(stdout, "preopen:kernel\n");
+}
+
 fn run_named_case(case_name: &str) {
     match case_name {
         "javascript" => javascript_guest_identity_uses_kernel_owned_defaults(),
         "python" => python_guest_identity_uses_kernel_owned_defaults(),
         "wasm_identity" => wasm_guest_identity_commands_use_kernel_owned_defaults(),
+        "wasm_pty" => wasm_guest_created_pty_uses_live_bounded_kernel_state(),
         "wasm_env" => wasm_guest_env_filters_internal_control_vars_and_uses_kernel_defaults(),
+        "wasm_preopen" => wasm_preopens_and_rights_are_kernel_authoritative(),
         other => panic!("unknown guest_identity case: {other}"),
     }
 }

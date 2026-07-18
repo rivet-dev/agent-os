@@ -8,6 +8,7 @@ export interface MemorySample {
 	guestHeapRss: number;
 	sidecarRss: number;
 	runningProcesses: number;
+	stoppedProcesses: number;
 	exitedProcesses: number;
 	openFds: number;
 	sockets: number;
@@ -256,6 +257,7 @@ export async function sampleMemory(vm: BenchVm, cycle: number): Promise<MemorySa
 		guestHeapRss,
 		sidecarRss: readRssBytes(findSidecarPid()),
 		runningProcesses: resource.runningProcesses,
+		stoppedProcesses: resource.stoppedProcesses,
 		exitedProcesses: resource.exitedProcesses,
 		openFds: resource.openFds,
 		sockets: resource.sockets,

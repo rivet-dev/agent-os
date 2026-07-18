@@ -6,7 +6,7 @@ use crate::SidecarError;
 
 use agentos_kernel::root_fs::{FilesystemEntry as KernelFilesystemEntry, RootFilesystemSnapshot};
 use agentos_kernel::vfs::VirtualFileSystem;
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 pub(crate) fn root_snapshot_entry(entry: &KernelFilesystemEntry) -> RootFilesystemEntry {
     agentos_native_sidecar_core::root_snapshot_entry(entry)
@@ -34,10 +34,19 @@ where
         .map_err(|error| SidecarError::InvalidState(error.to_string()))
 }
 
-pub(crate) fn discover_command_guest_paths(kernel: &mut SidecarKernel) -> BTreeMap<String, String> {
-    let mut command_guest_paths = BTreeMap::new();
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct KernelCommandInventory {
+    pub(crate) names: BTreeSet<String>,
+    pub(crate) search_roots: Vec<String>,
+}
+
+/// Enumerate legacy command mounts from the live kernel VFS for one immediate
+/// registration/PATH rebuild. Nothing returned here is retained as pathname
+/// authority; launch resolution revalidates the selected file in the kernel.
+pub(crate) fn discover_kernel_commands(kernel: &mut SidecarKernel) -> KernelCommandInventory {
+    let mut inventory = KernelCommandInventory::default();
     let Ok(command_roots) = kernel.read_dir("/__agentos/commands") else {
-        return command_guest_paths;
+        return inventory;
     };
 
     let mut ordered_roots = command_roots
@@ -52,13 +61,82 @@ pub(crate) fn discover_command_guest_paths(kernel: &mut SidecarKernel) -> BTreeM
             continue;
         };
 
+        let mut root_has_commands = false;
         for entry in entries {
-            if entry.starts_with('.') || command_guest_paths.contains_key(&entry) {
+            if entry.starts_with('.') || entry.contains('/') {
                 continue;
             }
-            command_guest_paths.insert(entry.clone(), format!("{guest_root}/{entry}"));
+            let candidate = format!("{guest_root}/{entry}");
+            let Some(canonical) = kernel.realpath(&candidate).ok() else {
+                continue;
+            };
+            let Some(stat) = kernel.lstat(&canonical).ok() else {
+                continue;
+            };
+            if stat.is_directory || stat.is_symbolic_link {
+                continue;
+            }
+            root_has_commands = true;
+            inventory.names.insert(entry);
+        }
+        if root_has_commands {
+            inventory.search_roots.push(guest_root);
         }
     }
 
-    command_guest_paths
+    inventory
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentos_kernel::kernel::KernelVmConfig;
+    use agentos_kernel::mount_table::MountTable;
+    use agentos_kernel::permissions::Permissions;
+    use agentos_kernel::vfs::MemoryFileSystem;
+
+    fn test_kernel() -> SidecarKernel {
+        let mut config = KernelVmConfig::new("vm-transient-command-discovery");
+        config.permissions = Permissions::allow_all();
+        SidecarKernel::new(MountTable::new(MemoryFileSystem::new()), config)
+    }
+
+    #[test]
+    fn kernel_command_inventory_tracks_live_files_and_roots() {
+        let mut kernel = test_kernel();
+        kernel
+            .mkdir("/__secure_exec/commands/001", true)
+            .expect("create first command root");
+        kernel
+            .mkdir("/__secure_exec/commands/002/directory", true)
+            .expect("create non-command directory");
+        kernel
+            .write_file(
+                "/__secure_exec/commands/001/alpha",
+                b"#!/usr/bin/env node\n".to_vec(),
+            )
+            .expect("write command");
+        kernel
+            .write_file(
+                "/__secure_exec/commands/001/.hidden",
+                b"#!/usr/bin/env node\n".to_vec(),
+            )
+            .expect("write hidden entry");
+
+        let discovered = discover_kernel_commands(&mut kernel);
+        assert_eq!(discovered.names, BTreeSet::from([String::from("alpha")]));
+        assert_eq!(
+            discovered.search_roots,
+            vec![String::from("/__secure_exec/commands/001")]
+        );
+
+        kernel
+            .remove_file("/__secure_exec/commands/001/alpha")
+            .expect("remove command after initial discovery");
+        assert_eq!(
+            discover_kernel_commands(&mut kernel),
+            KernelCommandInventory::default(),
+            "transient discovery must not retain deleted commands or roots"
+        );
+    }
 }

@@ -1,6 +1,6 @@
 use super::vfs::{
-    normalize_path, MemoryFileSystem, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem,
-    VirtualStat, VirtualUtimeSpec,
+    normalize_path, FileExtent, MemoryFileSystem, VfsError, VfsResult, VirtualDirEntry,
+    VirtualFileSystem, VirtualStat, VirtualUtimeSpec,
 };
 use base64::Engine;
 use std::collections::BTreeSet;
@@ -2102,6 +2102,20 @@ impl VirtualFileSystem for OverlayFileSystem {
                 return Err(Self::entry_not_found(path));
             };
             self.lowers[index].unwritten_ranges(path)
+        }
+    }
+
+    fn extent_at(&mut self, path: &str, index: usize) -> VfsResult<Option<FileExtent>> {
+        if self.touches_internal_metadata(path) || self.is_whited_out(path) {
+            return Err(Self::entry_not_found(path));
+        }
+        if self.exists_in_upper(path) {
+            self.writable_upper(path)?.extent_at(path, index)
+        } else {
+            let Some(lower_index) = self.find_lower_by_exists(path) else {
+                return Err(Self::entry_not_found(path));
+            };
+            self.lowers[lower_index].extent_at(path, index)
         }
     }
 

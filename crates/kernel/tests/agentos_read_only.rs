@@ -22,6 +22,15 @@ fn seeded_kernel() -> KernelVm<MemoryFileSystem> {
     filesystem
         .write_file(INSTRUCTIONS, b"original instructions".to_vec())
         .expect("seed instructions before kernel starts");
+    filesystem
+        .mkdir("/etc/agentos/protected-dir", true)
+        .expect("seed protected directory before kernel starts");
+    filesystem
+        .write_file(
+            "/etc/agentos/protected-dir/sentinel",
+            b"protected sentinel".to_vec(),
+        )
+        .expect("seed protected directory contents before kernel starts");
     filesystem.mkdir("/tmp", true).expect("seed tmp directory");
 
     let mut config = KernelVmConfig::new("vm-agentos-read-only");
@@ -335,5 +344,244 @@ fn agentos_protection_rejects_creates_through_symlinked_parent() {
         read_instructions(&mut kernel)
             .expect("read instructions after failed symlinked-parent creates"),
         "original instructions"
+    );
+}
+
+#[test]
+fn process_mutation_matrix_rejects_read_only_sources_and_destinations_without_mutation() {
+    let mut kernel = seeded_kernel();
+    let pid = spawn_shell(&mut kernel);
+    kernel
+        .write_file("/tmp/link-source", "link source")
+        .expect("seed writable hard-link source");
+    kernel
+        .write_file("/tmp/rename-source", "rename source")
+        .expect("seed writable rename source");
+    kernel
+        .write_file("/tmp/replacement", "replacement")
+        .expect("seed writable replacement");
+
+    assert_erofs(kernel.link_for_process(
+        DRIVER,
+        pid,
+        INSTRUCTIONS,
+        "/tmp/protected-source-hardlink",
+    ));
+    assert!(!kernel
+        .exists("/tmp/protected-source-hardlink")
+        .expect("check rejected hard-link destination"));
+    assert_eq!(
+        read_instructions(&mut kernel).expect("read protected hard-link source"),
+        "original instructions"
+    );
+
+    assert_erofs(kernel.link_for_process(
+        DRIVER,
+        pid,
+        "/tmp/link-source",
+        "/etc/agentos/new-hardlink",
+    ));
+    assert_eq!(
+        kernel
+            .read_file("/tmp/link-source")
+            .expect("read writable hard-link source after denial"),
+        b"link source"
+    );
+    assert!(!kernel
+        .exists("/etc/agentos/new-hardlink")
+        .expect("check rejected protected hard-link destination"));
+
+    assert_erofs(kernel.remove_file_for_process(DRIVER, pid, INSTRUCTIONS));
+    assert_eq!(
+        read_instructions(&mut kernel).expect("read protected file after rejected unlink"),
+        "original instructions"
+    );
+
+    assert_erofs(kernel.remove_dir_for_process(DRIVER, pid, "/etc/agentos/protected-dir"));
+    assert_eq!(
+        kernel
+            .read_file("/etc/agentos/protected-dir/sentinel")
+            .expect("read protected directory contents after rejected removal"),
+        b"protected sentinel"
+    );
+
+    assert_erofs(kernel.rename_for_process(DRIVER, pid, INSTRUCTIONS, "/tmp/moved-instructions"));
+    assert_eq!(
+        read_instructions(&mut kernel).expect("read protected rename source"),
+        "original instructions"
+    );
+    assert!(!kernel
+        .exists("/tmp/moved-instructions")
+        .expect("check rejected rename destination"));
+
+    assert_erofs(kernel.rename_for_process(
+        DRIVER,
+        pid,
+        "/tmp/rename-source",
+        "/etc/agentos/new-name",
+    ));
+    assert_eq!(
+        kernel
+            .read_file("/tmp/rename-source")
+            .expect("read writable rename source after denial"),
+        b"rename source"
+    );
+    assert!(!kernel
+        .exists("/etc/agentos/new-name")
+        .expect("check rejected protected rename destination"));
+
+    assert_erofs(kernel.rename_for_process(DRIVER, pid, "/tmp/replacement", INSTRUCTIONS));
+    assert_eq!(
+        kernel
+            .read_file("/tmp/replacement")
+            .expect("read rejected replacement source"),
+        b"replacement"
+    );
+    assert_eq!(
+        read_instructions(&mut kernel).expect("read rejected replacement destination"),
+        "original instructions"
+    );
+
+    assert_erofs(kernel.symlink_for_process(
+        DRIVER,
+        pid,
+        "/tmp/target-does-not-need-to-exist",
+        "/etc/agentos/new-symlink",
+    ));
+    assert_eq!(
+        kernel
+            .lstat("/etc/agentos/new-symlink")
+            .expect_err("rejected protected symlink destination must not be created")
+            .code(),
+        "ENOENT"
+    );
+}
+
+#[test]
+fn process_mutation_read_only_checks_follow_symlinked_parents_without_mutation() {
+    let mut kernel = seeded_kernel();
+    let pid = spawn_shell(&mut kernel);
+    kernel
+        .symlink("/etc/agentos", "/tmp/agentos-alias")
+        .expect("create writable-path alias to protected directory");
+    kernel
+        .write_file("/tmp/link-source", "link source")
+        .expect("seed writable hard-link source");
+    kernel
+        .write_file("/tmp/rename-source", "rename source")
+        .expect("seed writable rename source");
+    kernel
+        .write_file("/tmp/replacement", "replacement")
+        .expect("seed writable replacement");
+
+    assert_erofs(kernel.link_for_process(
+        DRIVER,
+        pid,
+        "/tmp/agentos-alias/instructions.md",
+        "/tmp/aliased-source-hardlink",
+    ));
+    assert!(!kernel
+        .exists("/tmp/aliased-source-hardlink")
+        .expect("check rejected aliased-source hard link"));
+    assert_eq!(
+        read_instructions(&mut kernel).expect("read aliased hard-link source after denial"),
+        "original instructions"
+    );
+
+    assert_erofs(kernel.link_for_process(
+        DRIVER,
+        pid,
+        "/tmp/link-source",
+        "/tmp/agentos-alias/new-hardlink",
+    ));
+    assert_eq!(
+        kernel
+            .read_file("/tmp/link-source")
+            .expect("read hard-link source after aliased destination denial"),
+        b"link source"
+    );
+    assert!(!kernel
+        .exists("/etc/agentos/new-hardlink")
+        .expect("check protected hard-link destination"));
+
+    assert_erofs(kernel.remove_file_for_process(DRIVER, pid, "/tmp/agentos-alias/instructions.md"));
+    assert_eq!(
+        read_instructions(&mut kernel).expect("read aliased unlink target after denial"),
+        "original instructions"
+    );
+
+    assert_erofs(kernel.remove_dir_for_process(DRIVER, pid, "/tmp/agentos-alias/protected-dir"));
+    assert_eq!(
+        kernel
+            .read_file("/etc/agentos/protected-dir/sentinel")
+            .expect("read aliased protected directory after denial"),
+        b"protected sentinel"
+    );
+
+    assert_erofs(kernel.rename_for_process(
+        DRIVER,
+        pid,
+        "/tmp/agentos-alias/instructions.md",
+        "/tmp/moved-aliased-instructions",
+    ));
+    assert_eq!(
+        read_instructions(&mut kernel).expect("read aliased rename source after denial"),
+        "original instructions"
+    );
+    assert!(!kernel
+        .exists("/tmp/moved-aliased-instructions")
+        .expect("check rejected writable rename destination"));
+
+    assert_erofs(kernel.rename_for_process(
+        DRIVER,
+        pid,
+        "/tmp/rename-source",
+        "/tmp/agentos-alias/new-name",
+    ));
+    assert_eq!(
+        kernel
+            .read_file("/tmp/rename-source")
+            .expect("read rename source after aliased destination denial"),
+        b"rename source"
+    );
+    assert!(!kernel
+        .exists("/etc/agentos/new-name")
+        .expect("check rejected protected rename destination"));
+
+    assert_erofs(kernel.rename_for_process(
+        DRIVER,
+        pid,
+        "/tmp/replacement",
+        "/tmp/agentos-alias/instructions.md",
+    ));
+    assert_eq!(
+        kernel
+            .read_file("/tmp/replacement")
+            .expect("read replacement after aliased destination denial"),
+        b"replacement"
+    );
+    assert_eq!(
+        read_instructions(&mut kernel).expect("read aliased replacement destination"),
+        "original instructions"
+    );
+
+    assert_erofs(kernel.symlink_for_process(
+        DRIVER,
+        pid,
+        "/tmp/target-does-not-need-to-exist",
+        "/tmp/agentos-alias/new-symlink",
+    ));
+    assert_eq!(
+        kernel
+            .lstat("/etc/agentos/new-symlink")
+            .expect_err("rejected aliased symlink destination must not be created")
+            .code(),
+        "ENOENT"
+    );
+    assert_eq!(
+        kernel
+            .read_link("/tmp/agentos-alias")
+            .expect("read parent alias after rejected mutations"),
+        "/etc/agentos"
     );
 }

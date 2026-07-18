@@ -31,10 +31,10 @@ describeIf(hasCWasmBinaries("zip"), "zip command", { timeout: 10_000 }, () => {
 			createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
 		);
 
-		const result = await kernel.exec("zip /archive.zip /hello.txt");
+		const result = await kernel.exec("zip /workspace/archive.zip /hello.txt");
 		expect(result.exitCode, result.stderr).toBe(0);
 
-		const archive = await vfs.readFile("/archive.zip");
+		const archive = await vfs.readFile("/workspace/archive.zip");
 		expect(archive.length).toBeGreaterThan(0);
 		expect(Array.from(archive.slice(0, 2))).toEqual([0x50, 0x4b]);
 	});
@@ -50,8 +50,8 @@ describeIf(hasCWasmBinaries("zip"), "zip command", { timeout: 10_000 }, () => {
 			createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
 		);
 
-		const result = await kernel.exec("zip -r /dir.zip /mydir");
+		const result = await kernel.exec("zip -r /workspace/dir.zip /mydir");
 		expect(result.exitCode, result.stderr).toBe(0);
-		expect(await vfs.exists("/dir.zip")).toBe(true);
+		expect(await vfs.exists("/workspace/dir.zip")).toBe(true);
 	});
 });

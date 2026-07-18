@@ -24,7 +24,9 @@ import {
 } from '@rivet-dev/agentos-test-harness';
 import type { Kernel } from '@rivet-dev/agentos-test-harness';
 
-vi.setConfig({ testTimeout: 30_000 });
+// Several integration cases intentionally sequence multiple fresh WASM Git
+// executions, so their aggregate harness budget must cover all cold starts.
+vi.setConfig({ testTimeout: 60_000 });
 
 /** Check git binary exists in addition to base WASM binaries */
 const hasGit = hasWasmBinaries && existsSync(resolve(COMMANDS_DIR, 'git'));

@@ -224,7 +224,7 @@ fn create_xfstests_vm_wire(
             ..agentos_vm_config::ResourceLimitsConfig::default()
         }),
         wasm: Some(agentos_vm_config::WasmLimitsConfig {
-            runner_cpu_time_limit_ms: Some(
+            active_cpu_time_limit_ms: Some(
                 u64::try_from((xfstest_timeout() + Duration::from_secs(30)).as_millis())
                     .expect("bounded xfstests timeout fits u64 milliseconds"),
             ),

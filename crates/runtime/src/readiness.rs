@@ -80,6 +80,12 @@ pub struct ReadyObservation {
     pub revision: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SignalObservation {
+    pub signal: i32,
+    pub delivery_token: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReadyBatch {
     pub generation: u64,
@@ -236,7 +242,7 @@ impl WakeFailure {
 struct ReadyState {
     handles: BTreeMap<CapabilityId, ReadyEntry>,
     last_delivered_capability: Option<CapabilityId>,
-    signals: BTreeSet<i32>,
+    signals: BTreeMap<i32, u64>,
     timers: BTreeSet<u64>,
     wake: WakeState,
     next_epoch: u64,
@@ -323,7 +329,7 @@ impl SessionReadyBroker {
                 state: Arc::new(Mutex::new(ReadyState {
                     handles: BTreeMap::new(),
                     last_delivered_capability: None,
-                    signals: BTreeSet::new(),
+                    signals: BTreeMap::new(),
                     timers: BTreeSet::new(),
                     wake: WakeState::Idle,
                     next_epoch: 1,
@@ -343,13 +349,18 @@ impl SessionReadyBroker {
         self.max_batch_handles
     }
 
-    pub fn mark_signal_ready(&self, generation: u64, signal: i32) -> Result<(), ReadyError> {
+    pub fn mark_signal_ready(
+        &self,
+        generation: u64,
+        signal: i32,
+        delivery_token: u64,
+    ) -> Result<(), ReadyError> {
         self.validate_generation(generation)?;
         if !(1..=64).contains(&signal) {
             return Err(ReadyError::InvalidSignal { signal });
         }
         let mut state = self.state.lock().map_err(|_| ReadyError::Poisoned)?;
-        state.signals.insert(signal);
+        state.signals.insert(signal, delivery_token);
         self.schedule_wake_locked(&mut state, false)
     }
 
@@ -372,18 +383,21 @@ impl SessionReadyBroker {
         generation: u64,
         epoch: u64,
         max: usize,
-    ) -> Result<Vec<i32>, ReadyError> {
+    ) -> Result<Vec<SignalObservation>, ReadyError> {
         self.validate_generation(generation)?;
         let mut state = self.state.lock().map_err(|_| ReadyError::Poisoned)?;
         self.validate_epoch(&state, epoch)?;
         let values = state
             .signals
             .iter()
-            .copied()
+            .map(|(signal, delivery_token)| SignalObservation {
+                signal: *signal,
+                delivery_token: *delivery_token,
+            })
             .take(max.max(1))
             .collect::<Vec<_>>();
         for value in &values {
-            state.signals.remove(value);
+            state.signals.remove(&value.signal);
         }
         Ok(values)
     }
@@ -826,7 +840,9 @@ mod tests {
     async fn signals_and_timers_share_one_wake_but_keep_durable_control_state() {
         let (broker, mut wakes) = SessionReadyBroker::new(8, 8).expect("broker");
         for _ in 0..10_000 {
-            broker.mark_signal_ready(8, 15).expect("coalesce SIGTERM");
+            broker
+                .mark_signal_ready(8, 15, 41)
+                .expect("coalesce SIGTERM");
             broker.mark_timer_ready(8, 91).expect("coalesce timer");
         }
         let wake = wakes.recv().await.expect("one control wake");
@@ -837,7 +853,13 @@ mod tests {
         let batch = broker.ready_batch(8, wake.epoch, 8).expect("control batch");
         assert!(batch.signals_ready);
         assert!(batch.timers_ready);
-        assert_eq!(broker.drain_signals(8, wake.epoch, 8).unwrap(), vec![15]);
+        assert_eq!(
+            broker.drain_signals(8, wake.epoch, 8).unwrap(),
+            vec![SignalObservation {
+                signal: 15,
+                delivery_token: 41,
+            }]
+        );
         assert_eq!(broker.drain_timers(8, wake.epoch, 8).unwrap(), vec![91]);
         broker
             .complete_wake(8, wake.epoch, &[])

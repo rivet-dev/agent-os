@@ -1,8 +1,19 @@
+use crate::backend::{
+    DirectHostReplyHandle, DirectHostReplyTarget, ExecutionBackend, ExecutionBackendKind,
+    ExecutionExit, ExecutionWakeHandle, ExecutionWakeIdentity, HostCallIdentity, HostCallReply,
+    HostServiceError, PayloadLimit, ShutdownOutcome, ShutdownReason, SignalCheckpointOutcome,
+};
 use crate::common::{encode_json_string, frozen_time_ms};
+use crate::host::{
+    BoundedBytes, BoundedProcessLaunchRequest, BoundedString, BoundedUsize, BoundedVec,
+    DnsAddressFamily, FilesystemOperation, HostOperation, HttpHeader, ManagedTcpEndpoint,
+    ManagedUdpFamily, NetworkOperation, PathAttributeUpdate, ProcessLaunchOptions,
+    ProcessLaunchRequest, ProcessOperation,
+};
 use crate::javascript::{
-    CreateJavascriptContextRequest, GuestRuntimeConfig, JavascriptExecution,
+    CreateJavascriptContextRequest, GuestRuntimeConfig, HostRpcRequest, JavascriptExecution,
     JavascriptExecutionEngine, JavascriptExecutionError, JavascriptExecutionEvent,
-    JavascriptExecutionLimits, JavascriptSyncRpcRequest, StartJavascriptExecutionRequest,
+    JavascriptExecutionLimits, JavascriptSyncRpcResponder, StartJavascriptExecutionRequest,
 };
 use crate::node_import_cache::{NodeImportCache, NODE_IMPORT_CACHE_ASSET_ROOT_ENV};
 use crate::runtime_support::{
@@ -10,6 +21,8 @@ use crate::runtime_support::{
     NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
 };
 use crate::v8_runtime;
+use agentos_bridge::queue_tracker::{register_queue, QueueGauge, TrackedLimit};
+use agentos_runtime::accounting::ResourceClass;
 use agentos_runtime::RuntimeContext;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -41,11 +54,12 @@ const DEFAULT_PYTHON_OUTPUT_BUFFER_MAX_BYTES: usize = 1024 * 1024;
 const DEFAULT_PYTHON_EXECUTION_TIMEOUT_MS: u64 = 5 * 60 * 1000;
 const DEFAULT_PYTHON_MAX_OLD_SPACE_MB: usize = 0;
 const DEFAULT_PYTHON_VFS_RPC_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_PYTHON_PENDING_VFS_RPCS: usize = 512;
 const PYTHON_SYNC_RPC_DATA_BYTES: usize = 20 * 1024 * 1024;
 const PYTHON_SYNC_RPC_WAIT_TIMEOUT_MS: u64 = 120_000;
 const PYTHON_PREWARM_TIMEOUT: Duration = Duration::from_secs(120);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PythonVfsRpcMethod {
     Read,
     Write,
@@ -101,7 +115,7 @@ impl PythonVfsRpcMethod {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PythonVfsRpcRequest {
     pub id: u64,
     pub method: PythonVfsRpcMethod,
@@ -323,7 +337,7 @@ pub struct StartPythonExecutionRequest {
 pub enum PythonExecutionEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
-    JavascriptSyncRpcRequest(JavascriptSyncRpcRequest),
+    HostRpcRequest(HostRpcRequest),
     VfsRpcRequest(Box<PythonVfsRpcRequest>),
     Exited(i32),
 }
@@ -360,6 +374,10 @@ pub enum PythonExecutionError {
     Control(std::io::Error),
     TimedOut(Duration),
     PendingVfsRpcRequest(u64),
+    PendingVfsRpcLimit {
+        limit: usize,
+        observed: usize,
+    },
     RpcResponse(String),
     OutputBufferExceeded {
         stream: &'static str,
@@ -419,6 +437,10 @@ impl fmt::Display for PythonExecutionError {
                     "guest Python execution requires servicing pending VFS RPC request {id}"
                 )
             }
+            Self::PendingVfsRpcLimit { limit, observed } => write!(
+                f,
+                "ERR_AGENTOS_RESOURCE_LIMIT: pending Python VFS RPC calls observed {observed}, exceeding limits.reactor.maxBridgeCalls ({limit})"
+            ),
             Self::RpcResponse(message) => {
                 write!(
                     f,
@@ -462,7 +484,8 @@ pub struct PythonExecution {
     inner: JavascriptExecution,
     pyodide_dist_path: PathBuf,
     managed_host_files: PythonManagedHostFiles,
-    pending_vfs_rpc: Arc<Mutex<Option<PendingVfsRpc>>>,
+    pending_vfs_rpc: Arc<Mutex<PendingVfsRpcRegistry>>,
+    managed_network: Arc<Mutex<PythonManagedNetworkState>>,
     v8_session: crate::v8_host::V8SessionHandle,
     output_buffer_max_bytes: usize,
     execution_timeout: Option<Duration>,
@@ -477,14 +500,256 @@ pub struct PythonExecution {
 /// parking the dispatcher or borrowing the process table across an await.
 #[derive(Debug, Clone)]
 pub struct PythonVfsRpcResponder {
-    pending_vfs_rpc: Arc<Mutex<Option<PendingVfsRpc>>>,
-    v8_session: crate::v8_host::V8SessionHandle,
+    pending_vfs_rpc: Arc<Mutex<PendingVfsRpcRegistry>>,
+    managed_network: Arc<Mutex<PythonManagedNetworkState>>,
+    javascript_responder: JavascriptSyncRpcResponder,
+}
+
+/// One Python adapter request normalized to the common host-service boundary.
+#[derive(Debug)]
+pub struct PythonHostCall {
+    pub operation: HostOperation,
+    pub reply: DirectHostReplyHandle,
+}
+
+#[derive(Debug, Clone)]
+enum PythonHostReplyKind {
+    Empty,
+    FileRead,
+    Stat,
+    ReadDirectory,
+    ReadLink,
+    RunCaptured,
+    Http,
+    Dns,
+    SocketCreated(PythonManagedSocketReservation),
+    SocketSent,
+    SocketReceived,
+    SocketClosed(u64),
+    UdpReceived,
+}
+
+impl PythonHostReplyKind {
+    fn rollback_socket_reservation(&self) {
+        if let Self::SocketCreated(reservation) = self {
+            reservation.rollback();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PythonManagedSocketKind {
+    Tcp,
+    Udp,
+}
+
+#[derive(Debug, Clone)]
+struct PythonManagedSocket {
+    kind: PythonManagedSocketKind,
+    host_socket_id: String,
+}
+
+#[derive(Debug)]
+enum PythonManagedSocketSlot {
+    Reserved(PythonManagedSocketKind),
+    Live(PythonManagedSocket),
+}
+
+#[derive(Debug)]
+struct PythonManagedSocketReservationInner {
+    socket_id: u64,
+    kind: PythonManagedSocketKind,
+    state: Arc<Mutex<PythonManagedNetworkState>>,
+}
+
+impl Drop for PythonManagedSocketReservationInner {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| {
+            eprintln!(
+                "ERR_AGENTOS_PYTHON_NETWORK_STATE_POISONED: recovering reserved socket {}",
+                self.socket_id
+            );
+            poisoned.into_inner()
+        });
+        if matches!(
+            state.sockets.get(&self.socket_id),
+            Some(PythonManagedSocketSlot::Reserved(kind)) if *kind == self.kind
+        ) {
+            state.sockets.remove(&self.socket_id);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PythonManagedSocketReservation(Arc<PythonManagedSocketReservationInner>);
+
+impl PythonManagedSocketReservation {
+    fn commit(&self, host_socket_id: String) -> Result<u64, HostServiceError> {
+        let mut state = self.0.state.lock().unwrap_or_else(|poisoned| {
+            eprintln!(
+                "ERR_AGENTOS_PYTHON_NETWORK_STATE_POISONED: recovering socket reservation {} during commit",
+                self.0.socket_id
+            );
+            poisoned.into_inner()
+        });
+        match state.sockets.get(&self.0.socket_id) {
+            Some(PythonManagedSocketSlot::Reserved(kind)) if *kind == self.0.kind => {}
+            _ => {
+                return Err(HostServiceError::new(
+                    "ESTALE",
+                    format!(
+                        "Python socket reservation {} is no longer live",
+                        self.0.socket_id
+                    ),
+                ))
+            }
+        }
+        state.sockets.insert(
+            self.0.socket_id,
+            PythonManagedSocketSlot::Live(PythonManagedSocket {
+                kind: self.0.kind,
+                host_socket_id,
+            }),
+        );
+        Ok(self.0.socket_id)
+    }
+
+    fn rollback(&self) {
+        let mut state = self.0.state.lock().unwrap_or_else(|poisoned| {
+            eprintln!(
+                "ERR_AGENTOS_PYTHON_NETWORK_STATE_POISONED: recovering socket reservation {}",
+                self.0.socket_id
+            );
+            poisoned.into_inner()
+        });
+        if matches!(
+            state.sockets.get(&self.0.socket_id),
+            Some(PythonManagedSocketSlot::Reserved(kind)) if *kind == self.0.kind
+        ) {
+            state.sockets.remove(&self.0.socket_id);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PythonManagedNetworkState {
+    next_socket_id: u64,
+    maximum: usize,
+    sockets: BTreeMap<u64, PythonManagedSocketSlot>,
+}
+
+impl PythonManagedNetworkState {
+    fn new(maximum: usize) -> Self {
+        Self {
+            next_socket_id: 1,
+            maximum,
+            sockets: BTreeMap::new(),
+        }
+    }
+
+    fn reserve(
+        state: &Arc<Mutex<Self>>,
+        kind: PythonManagedSocketKind,
+    ) -> Result<PythonManagedSocketReservation, HostServiceError> {
+        let mut locked = state.lock().map_err(|_| {
+            HostServiceError::new(
+                "ERR_AGENTOS_PYTHON_NETWORK_STATE_POISONED",
+                "Python managed-network state lock poisoned",
+            )
+        })?;
+        let observed = locked.sockets.len().saturating_add(1);
+        if observed > locked.maximum {
+            return Err(HostServiceError::limit(
+                "ERR_AGENTOS_RESOURCE_LIMIT",
+                "limits.resources.maxOpenFds",
+                locked.maximum as u64,
+                observed as u64,
+            ));
+        }
+        let socket_id = locked.next_socket_id;
+        let next_socket_id = locked.next_socket_id.checked_add(1).ok_or_else(|| {
+            HostServiceError::new("EOVERFLOW", "Python managed socket id space exhausted")
+        })?;
+        locked.next_socket_id = next_socket_id;
+        locked
+            .sockets
+            .insert(socket_id, PythonManagedSocketSlot::Reserved(kind));
+        drop(locked);
+        Ok(PythonManagedSocketReservation(Arc::new(
+            PythonManagedSocketReservationInner {
+                socket_id,
+                kind,
+                state: Arc::clone(state),
+            },
+        )))
+    }
+
+    fn socket(
+        &self,
+        socket_id: u64,
+        expected: Option<PythonManagedSocketKind>,
+    ) -> Result<PythonManagedSocket, HostServiceError> {
+        let socket = self.sockets.get(&socket_id).ok_or_else(|| {
+            HostServiceError::new("EBADF", format!("unknown Python socket {socket_id}"))
+                .with_details(json!({ "socketId": socket_id }))
+        })?;
+        let PythonManagedSocketSlot::Live(socket) = socket else {
+            return Err(HostServiceError::new(
+                "EBUSY",
+                format!("Python socket {socket_id} is still being created"),
+            )
+            .with_details(json!({ "socketId": socket_id })));
+        };
+        let socket = socket.clone();
+        if let Some(expected) = expected {
+            if socket.kind != expected {
+                return Err(HostServiceError::new(
+                    "EINVAL",
+                    format!("Python socket {socket_id} has the wrong socket kind"),
+                )
+                .with_details(json!({
+                    "socketId": socket_id,
+                    "expected": format!("{expected:?}"),
+                    "actual": format!("{:?}", socket.kind),
+                })));
+            }
+        }
+        Ok(socket)
+    }
+}
+
+#[derive(Debug)]
+struct PythonHostReplyTarget {
+    responder: PythonVfsRpcResponder,
+    kind: PythonHostReplyKind,
 }
 
 #[derive(Debug)]
 struct PendingVfsRpc {
     state: PendingVfsRpcState,
     timeout_abort: Option<tokio::task::AbortHandle>,
+}
+
+#[derive(Debug)]
+struct PendingVfsRpcRegistry {
+    entries: BTreeMap<u64, PendingVfsRpc>,
+    maximum: usize,
+    gauge: Arc<QueueGauge>,
+}
+
+impl PendingVfsRpcRegistry {
+    fn new(maximum: usize) -> Self {
+        let maximum = maximum.max(1);
+        Self {
+            entries: BTreeMap::new(),
+            maximum,
+            gauge: register_queue(TrackedLimit::PendingPythonVfsRpcCalls, maximum),
+        }
+    }
+
+    fn observe_depth(&self) {
+        self.gauge.observe_depth(self.entries.len());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -504,20 +769,21 @@ impl PythonExecution {
     pub fn vfs_rpc_responder(&self) -> PythonVfsRpcResponder {
         PythonVfsRpcResponder {
             pending_vfs_rpc: Arc::clone(&self.pending_vfs_rpc),
-            v8_session: self.v8_session.clone(),
+            managed_network: Arc::clone(&self.managed_network),
+            javascript_responder: self.inner.sync_rpc_responder(),
         }
+    }
+
+    pub fn javascript_sync_rpc_responder(&self) -> crate::JavascriptSyncRpcResponder {
+        self.inner.sync_rpc_responder()
     }
 
     pub fn execution_id(&self) -> &str {
         &self.execution_id
     }
 
-    pub fn child_pid(&self) -> u32 {
-        self.child_pid
-    }
-
-    pub fn uses_shared_v8_runtime(&self) -> bool {
-        self.inner.uses_shared_v8_runtime()
+    pub fn native_process_id(&self) -> Option<u32> {
+        (self.child_pid != 0).then_some(self.child_pid)
     }
 
     /// Run another sidecar-managed operation in the retained Pyodide
@@ -693,7 +959,7 @@ impl PythonExecution {
     /// manually without a kernel/service loop.
     pub fn try_service_standalone_module_sync_rpc(
         &mut self,
-        request: &JavascriptSyncRpcRequest,
+        request: &HostRpcRequest,
     ) -> Result<bool, PythonExecutionError> {
         self.inner
             .try_service_standalone_module_sync_rpc(request)
@@ -705,7 +971,7 @@ impl PythonExecution {
     #[doc(hidden)]
     pub fn try_service_standalone_stdin_sync_rpc(
         &mut self,
-        request: &JavascriptSyncRpcRequest,
+        request: &HostRpcRequest,
     ) -> Result<bool, PythonExecutionError> {
         self.inner
             .handle_kernel_stdin_sync_rpc(request)
@@ -716,7 +982,7 @@ impl PythonExecution {
         &mut self,
         timeout: Duration,
     ) -> Result<Option<PythonExecutionEvent>, PythonExecutionError> {
-        let deadline = Instant::now() + timeout;
+        let deadline = checked_python_poll_deadline(timeout)?;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match self
@@ -775,7 +1041,7 @@ impl PythonExecution {
             match event {
                 Some(PythonExecutionEvent::Stdout(chunk)) => stdout.extend(&chunk),
                 Some(PythonExecutionEvent::Stderr(chunk)) => stderr.extend(&chunk),
-                Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+                Some(PythonExecutionEvent::HostRpcRequest(request)) => {
                     // Module-resolution sync RPCs are serviced host-directly via
                     // the JS execution's own translator (the standalone Python
                     // wait loop runs without a kernel/service loop).
@@ -798,6 +1064,10 @@ impl PythonExecution {
                     )));
                 }
                 Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
+                    if let Some((code, message)) = python_vfs_rpc_standalone_error(request.method) {
+                        self.respond_vfs_rpc_error(request.id, code, message)?;
+                        continue;
+                    }
                     return Err(PythonExecutionError::PendingVfsRpcRequest(request.id));
                 }
                 Some(PythonExecutionEvent::Exited(exit_code)) => {
@@ -836,13 +1106,20 @@ impl PythonExecution {
             JavascriptExecutionEvent::SyncRpcRequest(request) => {
                 if request.method == "_pythonRpc" {
                     let request = parse_python_bridge_sync_rpc_request(&request)?;
-                    set_pending_vfs_rpc_state(&self.pending_vfs_rpc, request.id)?;
+                    if let Err(error) = set_pending_vfs_rpc_state(&self.pending_vfs_rpc, request.id)
+                    {
+                        self.inner
+                            .sync_rpc_responder()
+                            .respond_host_error(request.id, python_vfs_rpc_admission_error(error))
+                            .map_err(map_javascript_error)?;
+                        return Ok(None);
+                    }
                     spawn_python_vfs_rpc_timeout(
                         &self.runtime,
                         request.id,
                         self.vfs_rpc_timeout,
                         self.pending_vfs_rpc.clone(),
-                        self.v8_session.clone(),
+                        self.inner.sync_rpc_responder(),
                     )?;
                     Ok(Some(PythonExecutionEvent::VfsRpcRequest(Box::new(request))))
                 } else {
@@ -861,13 +1138,131 @@ impl PythonExecution {
                         )?;
                         Ok(None)
                     } else {
-                        Ok(Some(PythonExecutionEvent::JavascriptSyncRpcRequest(
-                            request,
-                        )))
+                        Ok(Some(PythonExecutionEvent::HostRpcRequest(request)))
                     }
                 }
             }
         }
+    }
+}
+
+fn checked_python_poll_deadline(timeout: Duration) -> Result<Instant, PythonExecutionError> {
+    Instant::now().checked_add(timeout).ok_or_else(|| {
+        PythonExecutionError::InvalidLimit(format!(
+            "blocking poll timeout of {}ms exceeds the host clock range",
+            timeout.as_millis()
+        ))
+    })
+}
+
+fn validate_python_captured_reply_limit(
+    max_buffer: usize,
+    max_reply_bytes: usize,
+) -> Result<(), HostServiceError> {
+    let worst_case_reply_bytes = max_buffer
+        .saturating_mul(2)
+        .saturating_mul(6)
+        .saturating_add(512);
+    if worst_case_reply_bytes > max_reply_bytes {
+        return Err(HostServiceError::limit(
+            "ERR_AGENTOS_RESOURCE_LIMIT",
+            "limits.reactor.maxBridgeResponseBytes",
+            max_reply_bytes as u64,
+            worst_case_reply_bytes as u64,
+        ));
+    }
+    Ok(())
+}
+
+impl ExecutionBackend for PythonExecution {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::Python
+    }
+
+    fn native_process_id(&self) -> Option<u32> {
+        PythonExecution::native_process_id(self)
+    }
+
+    fn wake_handle(&self, identity: ExecutionWakeIdentity) -> Option<ExecutionWakeHandle> {
+        Some(ExecutionWakeHandle::new(
+            identity,
+            Arc::new(self.v8_session.clone()),
+        ))
+    }
+
+    fn is_prepared_for_start(&self) -> bool {
+        PythonExecution::is_prepared_for_start(self)
+    }
+
+    fn start_prepared(&mut self) -> Result<(), HostServiceError> {
+        PythonExecution::start_prepared(self).map_err(|error| {
+            HostServiceError::new("ERR_AGENTOS_EXECUTION_START", error.to_string())
+        })
+    }
+
+    fn begin_shutdown(
+        &mut self,
+        reason: ShutdownReason,
+    ) -> Result<ShutdownOutcome, HostServiceError> {
+        if let ShutdownReason::Signal(signal) = reason {
+            if let Some(process_id) = self.native_process_id() {
+                return Ok(ShutdownOutcome::ForwardSignal { process_id, signal });
+            }
+            // Shared Python runs inside V8 and therefore has no OS wait status
+            // from which to recover the terminating signal.
+            self.kill().map_err(|error| {
+                HostServiceError::new("ERR_AGENTOS_EXECUTION_SHUTDOWN", error.to_string())
+            })?;
+            return Ok(ShutdownOutcome::Exited(ExecutionExit::Signaled {
+                signal,
+                core_dumped: false,
+            }));
+        }
+        self.kill().map_err(|error| {
+            HostServiceError::new("ERR_AGENTOS_EXECUTION_SHUTDOWN", error.to_string())
+        })?;
+        Ok(ShutdownOutcome::AwaitExit)
+    }
+
+    fn set_paused(&self, paused: bool) -> Result<(), HostServiceError> {
+        let result = if paused {
+            PythonExecution::pause(self)
+        } else {
+            PythonExecution::resume(self)
+        };
+        result.map_err(|error| {
+            HostServiceError::new("ERR_AGENTOS_EXECUTION_CONTROL", error.to_string())
+        })
+    }
+
+    fn write_stdin(&mut self, _bytes: &[u8]) -> Result<(), HostServiceError> {
+        // Sidecar-managed Python reads fd 0 from the kernel pipe.
+        Ok(())
+    }
+
+    fn close_stdin(&mut self) -> Result<(), HostServiceError> {
+        PythonExecution::close_stdin(self).map_err(|error| {
+            HostServiceError::new("ERR_AGENTOS_EXECUTION_STDIN", error.to_string())
+        })
+    }
+
+    fn deliver_signal_checkpoint(
+        &self,
+        identity: ExecutionWakeIdentity,
+        signal: i32,
+        delivery_token: u64,
+        _flags: u32,
+    ) -> Result<SignalCheckpointOutcome, HostServiceError> {
+        let Some(wake) = self.wake_handle(identity) else {
+            return Ok(if let Some(process_id) = self.native_process_id() {
+                SignalCheckpointOutcome::ForwardToProcess { process_id }
+            } else {
+                SignalCheckpointOutcome::Unsupported
+            });
+        };
+        wake.publish_signal(signal, delivery_token)
+            .map_err(|error| HostServiceError::new(error.code(), error.to_string()))?;
+        Ok(SignalCheckpointOutcome::Published)
     }
 }
 
@@ -876,6 +1271,454 @@ fn python_wait_remaining(timeout: Option<Duration>, started: Instant) -> Option<
 }
 
 impl PythonVfsRpcResponder {
+    pub fn try_host_call(
+        &self,
+        request: PythonVfsRpcRequest,
+        identity: HostCallIdentity,
+        max_request_bytes: usize,
+        max_reply_bytes: usize,
+    ) -> Result<Option<PythonHostCall>, HostServiceError> {
+        const CWD_FD: u32 = u32::MAX;
+        const MAX_PATH_BYTES: usize = 4096;
+        const MAX_HOST_BYTES: usize = 253;
+        const MAX_HTTP_URL_BYTES: usize = 8 * 1024;
+        const MAX_HTTP_METHOD_BYTES: usize = 32;
+        const MAX_HTTP_HEADERS: usize = 256;
+        const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
+        const MAX_DNS_RESULTS: usize = 64;
+        const PYTHON_SOCKET_DEFAULT_RECV: usize = 65_536;
+        const PYTHON_SOCKET_MAX_RECV: usize = 4 * 1024 * 1024;
+
+        let request_limit =
+            PayloadLimit::new("limits.reactor.maxBridgeRequestBytes", max_request_bytes)?;
+        let reply_limit =
+            PayloadLimit::new("limits.reactor.maxBridgeResponseBytes", max_reply_bytes)?;
+        let path_limit = PayloadLimit::new("runtime.filesystem.maxPathBytes", MAX_PATH_BYTES)?;
+        let host_limit = PayloadLimit::new("runtime.network.maxHostnameBytes", MAX_HOST_BYTES)?;
+        let socket_id_limit =
+            PayloadLimit::new("limits.reactor.maxBridgeRequestBytes", max_request_bytes)?;
+        let bounded_host = |host: String, label: &str| {
+            if host.is_empty() {
+                return Err(HostServiceError::new(
+                    "EINVAL",
+                    format!("{label} must not be empty"),
+                ));
+            }
+            BoundedString::try_new(host, &host_limit)
+        };
+        let decode_body = |encoded: Option<&str>, label: &str| {
+            let Some(encoded) = encoded else {
+                return Ok(Vec::new());
+            };
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| {
+                    HostServiceError::new("EINVAL", format!("{label} is invalid: {error}"))
+                })
+        };
+        let managed_socket = |socket_id: Option<u64>, expected| {
+            let socket_id = socket_id.ok_or_else(|| {
+                HostServiceError::new("EINVAL", "Python socket operation requires socketId")
+            })?;
+            let state = self.managed_network.lock().map_err(|_| {
+                HostServiceError::new(
+                    "ERR_AGENTOS_PYTHON_NETWORK_STATE_POISONED",
+                    "Python managed-network state lock poisoned",
+                )
+            })?;
+            Ok((socket_id, state.socket(socket_id, expected)?))
+        };
+        let bounded_path = |path: String, label: &str| {
+            if !path.starts_with('/') {
+                return Err(HostServiceError::new(
+                    "EINVAL",
+                    format!("{label} must be an absolute guest path"),
+                )
+                .with_details(json!({ "path": path })));
+            }
+            BoundedString::try_new(path, &path_limit)
+        };
+
+        let path = || bounded_path(request.path.clone(), "Python filesystem path");
+        let (operation, kind) = match request.method {
+            PythonVfsRpcMethod::Read => {
+                // Account for base64 expansion and the small Python response
+                // envelope before any file body is allocated by the kernel.
+                let body_limit = max_reply_bytes.saturating_sub(128) / 4 * 3;
+                (
+                    HostOperation::Filesystem(FilesystemOperation::ReadFileAt {
+                        dir_fd: CWD_FD,
+                        path: path()?,
+                        max_bytes: BoundedUsize::try_new(body_limit, &reply_limit)?,
+                    }),
+                    PythonHostReplyKind::FileRead,
+                )
+            }
+            PythonVfsRpcMethod::Write => {
+                let encoded = request.content_base64.as_deref().ok_or_else(|| {
+                    HostServiceError::new("EINVAL", "Python fsWrite requires contentBase64")
+                })?;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|error| {
+                        HostServiceError::new(
+                            "EINVAL",
+                            format!("Python fsWrite contentBase64 is invalid: {error}"),
+                        )
+                    })?;
+                (
+                    HostOperation::Filesystem(FilesystemOperation::WriteFileAt {
+                        dir_fd: CWD_FD,
+                        path: path()?,
+                        bytes: BoundedBytes::try_new(bytes, &request_limit)?,
+                        mode: request.mode,
+                    }),
+                    PythonHostReplyKind::Empty,
+                )
+            }
+            PythonVfsRpcMethod::Stat => (
+                HostOperation::Filesystem(FilesystemOperation::NodeStatAt {
+                    dir_fd: CWD_FD,
+                    path: path()?,
+                }),
+                PythonHostReplyKind::Stat,
+            ),
+            PythonVfsRpcMethod::Lstat => (
+                HostOperation::Filesystem(FilesystemOperation::NodeLstatAt {
+                    dir_fd: CWD_FD,
+                    path: path()?,
+                }),
+                PythonHostReplyKind::Stat,
+            ),
+            PythonVfsRpcMethod::ReadDir => (
+                HostOperation::Filesystem(FilesystemOperation::ReadDirectoryAt {
+                    dir_fd: CWD_FD,
+                    path: path()?,
+                    max_entries: BoundedUsize::try_new(
+                        4096,
+                        &PayloadLimit::new("runtime.filesystem.maxReaddirEntries", 4096)?,
+                    )?,
+                    max_reply_bytes: BoundedUsize::try_new(max_reply_bytes, &reply_limit)?,
+                }),
+                PythonHostReplyKind::ReadDirectory,
+            ),
+            PythonVfsRpcMethod::Mkdir => (
+                HostOperation::Filesystem(if request.recursive {
+                    FilesystemOperation::CreateDirectoriesAt {
+                        dir_fd: CWD_FD,
+                        path: path()?,
+                        mode: request.mode,
+                    }
+                } else {
+                    FilesystemOperation::CreateDirectoryAt {
+                        dir_fd: CWD_FD,
+                        path: path()?,
+                        mode: request.mode.unwrap_or(0o777),
+                    }
+                }),
+                PythonHostReplyKind::Empty,
+            ),
+            PythonVfsRpcMethod::Unlink | PythonVfsRpcMethod::Rmdir => (
+                HostOperation::Filesystem(FilesystemOperation::UnlinkAt {
+                    dir_fd: CWD_FD,
+                    path: path()?,
+                    remove_directory: request.method == PythonVfsRpcMethod::Rmdir,
+                }),
+                PythonHostReplyKind::Empty,
+            ),
+            PythonVfsRpcMethod::Rename => {
+                let destination = request.destination.clone().ok_or_else(|| {
+                    HostServiceError::new("EINVAL", "Python fsRename requires destination")
+                })?;
+                (
+                    HostOperation::Filesystem(FilesystemOperation::RenameAt {
+                        old_dir_fd: CWD_FD,
+                        old_path: path()?,
+                        new_dir_fd: CWD_FD,
+                        new_path: bounded_path(destination, "Python rename destination")?,
+                        flags: 0,
+                    }),
+                    PythonHostReplyKind::Empty,
+                )
+            }
+            PythonVfsRpcMethod::Symlink => {
+                let target = request.target.clone().ok_or_else(|| {
+                    HostServiceError::new("EINVAL", "Python fsSymlink requires target")
+                })?;
+                (
+                    HostOperation::Filesystem(FilesystemOperation::SymlinkAt {
+                        target: BoundedString::try_new(target, &path_limit)?,
+                        dir_fd: CWD_FD,
+                        path: path()?,
+                    }),
+                    PythonHostReplyKind::Empty,
+                )
+            }
+            PythonVfsRpcMethod::ReadLink => (
+                HostOperation::Filesystem(FilesystemOperation::ReadLinkAt {
+                    dir_fd: CWD_FD,
+                    path: path()?,
+                    max_bytes: BoundedUsize::try_new(
+                        MAX_PATH_BYTES.min(max_reply_bytes),
+                        &reply_limit,
+                    )?,
+                }),
+                PythonHostReplyKind::ReadLink,
+            ),
+            PythonVfsRpcMethod::Setattr => (
+                HostOperation::Filesystem(FilesystemOperation::SetAttributesAt {
+                    dir_fd: CWD_FD,
+                    path: path()?,
+                    update: PathAttributeUpdate {
+                        mode: request.mode,
+                        uid: request.uid,
+                        gid: request.gid,
+                        atime_ms: request.atime_ms,
+                        mtime_ms: request.mtime_ms,
+                    },
+                    follow_symlinks: true,
+                }),
+                PythonHostReplyKind::Empty,
+            ),
+            PythonVfsRpcMethod::SubprocessRun => {
+                let command = request.command.clone().ok_or_else(|| {
+                    HostServiceError::new("EINVAL", "Python subprocessRun requires a command")
+                })?;
+                let launch = ProcessLaunchRequest {
+                    command,
+                    args: request.args.clone(),
+                    options: ProcessLaunchOptions {
+                        argv0: request.argv0.clone(),
+                        cwd: request.cwd.clone(),
+                        env: request.env.clone(),
+                        shell: request.shell,
+                        stdio: vec![
+                            String::from("pipe"),
+                            String::from("pipe"),
+                            String::from("pipe"),
+                        ],
+                        ..ProcessLaunchOptions::default()
+                    },
+                };
+                let max_buffer = request.max_buffer.unwrap_or(1024 * 1024);
+                // The child service may retain maxBuffer independently for
+                // stdout and stderr. Each arbitrary input byte can require up
+                // to six JSON bytes (for example a control-character escape),
+                // plus the fixed result envelope. Reject before spawn when the
+                // final direct reply cannot be admitted.
+                validate_python_captured_reply_limit(max_buffer, max_reply_bytes)?;
+                (
+                    HostOperation::Process(ProcessOperation::RunCaptured {
+                        request: BoundedProcessLaunchRequest::try_new(launch, &request_limit)?,
+                        max_buffer: BoundedUsize::try_new(max_buffer, &reply_limit)?,
+                    }),
+                    PythonHostReplyKind::RunCaptured,
+                )
+            }
+            PythonVfsRpcMethod::HttpRequest => {
+                let url = request.url.clone().ok_or_else(|| {
+                    HostServiceError::new("EINVAL", "Python httpRequest requires a url")
+                })?;
+                let url_limit =
+                    PayloadLimit::new("runtime.network.maxHttpUrlBytes", MAX_HTTP_URL_BYTES)?;
+                let method_limit =
+                    PayloadLimit::new("runtime.network.maxHttpMethodBytes", MAX_HTTP_METHOD_BYTES)?;
+                let header_count_limit =
+                    PayloadLimit::new("runtime.network.maxHttpHeaders", MAX_HTTP_HEADERS)?;
+                let mut headers = Vec::with_capacity(request.headers.len());
+                for (name, value) in &request.headers {
+                    headers.push(HttpHeader {
+                        name: BoundedString::try_new(name.clone(), &request_limit)?,
+                        value: BoundedString::try_new(value.clone(), &request_limit)?,
+                    });
+                }
+                let body = decode_body(request.body_base64.as_deref(), "Python HTTP bodyBase64")?;
+                let response_body_max = max_reply_bytes.saturating_sub(512) / 4 * 3;
+                let header_max = MAX_HTTP_HEADER_BYTES.min(max_reply_bytes.saturating_sub(256));
+                (
+                    HostOperation::Network(NetworkOperation::HttpRequest {
+                        url: BoundedString::try_new(url, &url_limit)?,
+                        method: BoundedString::try_new(
+                            request
+                                .http_method
+                                .clone()
+                                .unwrap_or_else(|| String::from("GET")),
+                            &method_limit,
+                        )?,
+                        headers: BoundedVec::try_new(headers, &header_count_limit)?,
+                        body: BoundedBytes::try_new(body, &request_limit)?,
+                        max_response_bytes: BoundedUsize::try_new(max_reply_bytes, &reply_limit)?,
+                        max_header_bytes: BoundedUsize::try_new(header_max, &reply_limit)?,
+                        max_body_bytes: BoundedUsize::try_new(response_body_max, &reply_limit)?,
+                    }),
+                    PythonHostReplyKind::Http,
+                )
+            }
+            PythonVfsRpcMethod::DnsLookup => {
+                let host = request.hostname.clone().ok_or_else(|| {
+                    HostServiceError::new("EINVAL", "Python dnsLookup requires a hostname")
+                })?;
+                let family = match request.family.unwrap_or(0) {
+                    0 => DnsAddressFamily::Any,
+                    4 => DnsAddressFamily::Inet4,
+                    6 => DnsAddressFamily::Inet6,
+                    family => {
+                        return Err(HostServiceError::new(
+                            "EINVAL",
+                            format!("unsupported Python DNS address family {family}"),
+                        ))
+                    }
+                };
+                let maximum = MAX_DNS_RESULTS.min(max_reply_bytes / 64);
+                (
+                    HostOperation::Network(NetworkOperation::ResolveDns {
+                        host: bounded_host(host, "Python DNS hostname")?,
+                        port: None,
+                        family,
+                        max_results: BoundedUsize::try_new(
+                            maximum,
+                            &PayloadLimit::new("runtime.network.maxDnsResults", MAX_DNS_RESULTS)?,
+                        )?,
+                    }),
+                    PythonHostReplyKind::Dns,
+                )
+            }
+            PythonVfsRpcMethod::SocketConnect => {
+                let host = request.hostname.clone().ok_or_else(|| {
+                    HostServiceError::new("EINVAL", "Python socketConnect requires a hostname")
+                })?;
+                let port = request.port.ok_or_else(|| {
+                    HostServiceError::new("EINVAL", "Python socketConnect requires a port")
+                })?;
+                let host = bounded_host(host, "Python TCP hostname")?;
+                let reservation = PythonManagedNetworkState::reserve(
+                    &self.managed_network,
+                    PythonManagedSocketKind::Tcp,
+                )?;
+                (
+                    HostOperation::Network(NetworkOperation::ManagedConnect {
+                        endpoint: ManagedTcpEndpoint {
+                            host: Some(host),
+                            port: Some(port),
+                            unix: None,
+                            bound_server_id: None,
+                            local_address: None,
+                            local_port: None,
+                            local_reservation: None,
+                            backlog: None,
+                        },
+                    }),
+                    PythonHostReplyKind::SocketCreated(reservation),
+                )
+            }
+            PythonVfsRpcMethod::SocketSend => {
+                let (_, socket) =
+                    managed_socket(request.socket_id, Some(PythonManagedSocketKind::Tcp))?;
+                let body = decode_body(request.body_base64.as_deref(), "Python TCP bodyBase64")?;
+                (
+                    HostOperation::Network(NetworkOperation::ManagedWrite {
+                        socket_id: BoundedString::try_new(socket.host_socket_id, &socket_id_limit)?,
+                        bytes: BoundedBytes::try_new(body, &request_limit)?,
+                    }),
+                    PythonHostReplyKind::SocketSent,
+                )
+            }
+            PythonVfsRpcMethod::SocketRecv => {
+                let (_, socket) =
+                    managed_socket(request.socket_id, Some(PythonManagedSocketKind::Tcp))?;
+                let requested = request
+                    .max_buffer
+                    .unwrap_or(PYTHON_SOCKET_DEFAULT_RECV)
+                    .clamp(1, PYTHON_SOCKET_MAX_RECV);
+                let maximum = requested.min(max_reply_bytes.saturating_sub(128) / 4 * 3);
+                (
+                    HostOperation::Network(NetworkOperation::ManagedRead {
+                        socket_id: BoundedString::try_new(socket.host_socket_id, &socket_id_limit)?,
+                        max_bytes: maximum as u64,
+                        peek: false,
+                        wait_ms: request
+                            .timeout_ms
+                            .unwrap_or(DEFAULT_PYTHON_VFS_RPC_TIMEOUT_MS),
+                    }),
+                    PythonHostReplyKind::SocketReceived,
+                )
+            }
+            PythonVfsRpcMethod::SocketClose => {
+                let (socket_id, socket) = managed_socket(request.socket_id, None)?;
+                let operation = match socket.kind {
+                    PythonManagedSocketKind::Tcp => NetworkOperation::ManagedDestroy {
+                        socket_id: BoundedString::try_new(socket.host_socket_id, &socket_id_limit)?,
+                    },
+                    PythonManagedSocketKind::Udp => NetworkOperation::ManagedUdpClose {
+                        socket_id: BoundedString::try_new(socket.host_socket_id, &socket_id_limit)?,
+                    },
+                };
+                (
+                    HostOperation::Network(operation),
+                    PythonHostReplyKind::SocketClosed(socket_id),
+                )
+            }
+            PythonVfsRpcMethod::UdpCreate => {
+                let reservation = PythonManagedNetworkState::reserve(
+                    &self.managed_network,
+                    PythonManagedSocketKind::Udp,
+                )?;
+                (
+                    HostOperation::Network(NetworkOperation::ManagedUdpCreate {
+                        family: ManagedUdpFamily::Inet4,
+                    }),
+                    PythonHostReplyKind::SocketCreated(reservation),
+                )
+            }
+            PythonVfsRpcMethod::UdpSendto => {
+                let (_, socket) =
+                    managed_socket(request.socket_id, Some(PythonManagedSocketKind::Udp))?;
+                let host = request.hostname.clone().ok_or_else(|| {
+                    HostServiceError::new("EINVAL", "Python udpSendto requires a hostname")
+                })?;
+                let port = request.port.ok_or_else(|| {
+                    HostServiceError::new("EINVAL", "Python udpSendto requires a port")
+                })?;
+                let body = decode_body(request.body_base64.as_deref(), "Python UDP bodyBase64")?;
+                (
+                    HostOperation::Network(NetworkOperation::ManagedUdpSend {
+                        socket_id: BoundedString::try_new(socket.host_socket_id, &socket_id_limit)?,
+                        bytes: BoundedBytes::try_new(body, &request_limit)?,
+                        host: Some(bounded_host(host, "Python UDP hostname")?),
+                        port: Some(port),
+                    }),
+                    PythonHostReplyKind::SocketSent,
+                )
+            }
+            PythonVfsRpcMethod::UdpRecvfrom => {
+                let (_, socket) =
+                    managed_socket(request.socket_id, Some(PythonManagedSocketKind::Udp))?;
+                let requested = request
+                    .max_buffer
+                    .unwrap_or(PYTHON_SOCKET_DEFAULT_RECV)
+                    .clamp(1, PYTHON_SOCKET_MAX_RECV);
+                let maximum = requested.min(max_reply_bytes.saturating_sub(256) / 4 * 3);
+                (
+                    HostOperation::Network(NetworkOperation::ManagedUdpPoll {
+                        socket_id: BoundedString::try_new(socket.host_socket_id, &socket_id_limit)?,
+                        wait_ms: request
+                            .timeout_ms
+                            .unwrap_or(DEFAULT_PYTHON_VFS_RPC_TIMEOUT_MS),
+                        peek: false,
+                        max_bytes: Some(BoundedUsize::try_new(maximum, &reply_limit)?),
+                    }),
+                    PythonHostReplyKind::UdpReceived,
+                )
+            }
+        };
+        let target = Arc::new(PythonHostReplyTarget {
+            responder: self.clone(),
+            kind,
+        });
+        let reply = DirectHostReplyHandle::new(identity, target, max_reply_bytes)?;
+        Ok(Some(PythonHostCall { operation, reply }))
+    }
+
     pub fn respond_success(
         &self,
         id: u64,
@@ -964,11 +1807,9 @@ impl PythonVfsRpcResponder {
             }),
         };
 
-        let payload = v8_runtime::json_to_cbor_payload(&result)
-            .map_err(|error| PythonExecutionError::RpcResponse(error.to_string()))?;
-        self.v8_session
-            .send_bridge_response(id, 0, payload)
-            .map_err(|error| PythonExecutionError::RpcResponse(error.to_string()))
+        self.javascript_responder
+            .respond_success(id, result)
+            .map_err(map_javascript_error)
     }
 
     pub fn respond_error(
@@ -986,47 +1827,373 @@ impl PythonVfsRpcResponder {
             }
         }
 
-        let error = format!("{}: {}", code.into(), message.into());
-        self.v8_session
-            .send_bridge_response(id, 1, error.into_bytes())
-            .map_err(|error| PythonExecutionError::RpcResponse(error.to_string()))
+        self.javascript_responder
+            .respond_host_error(id, HostServiceError::new(code.into(), message.into()))
+            .map_err(map_javascript_error)
+    }
+
+    pub fn respond_host_error(
+        &self,
+        id: u64,
+        error: HostServiceError,
+    ) -> Result<(), PythonExecutionError> {
+        match clear_pending_vfs_rpc(&self.pending_vfs_rpc, id)? {
+            PendingVfsRpcResolution::Pending => {}
+            PendingVfsRpcResolution::TimedOut | PendingVfsRpcResolution::Missing => {
+                return Err(PythonExecutionError::RpcResponse(format!(
+                    "VFS RPC request {id} is no longer pending"
+                )));
+            }
+        }
+        self.javascript_responder
+            .respond_host_error(id, error)
+            .map_err(map_javascript_error)
     }
 }
 
+impl DirectHostReplyTarget for PythonHostReplyTarget {
+    fn claim(&self, call_id: u64) -> Result<bool, HostServiceError> {
+        let claimed = claim_pending_vfs_rpc(&self.responder.pending_vfs_rpc, call_id, || {
+            self.responder
+                .javascript_responder
+                .claim(call_id)
+                .map_err(crate::javascript::host_reply_adapter_error)
+        })?;
+        if !claimed {
+            self.kind.rollback_socket_reservation();
+        }
+        Ok(claimed)
+    }
+
+    fn respond(
+        &self,
+        call_id: u64,
+        claimed: bool,
+        result: Result<HostCallReply, HostServiceError>,
+    ) -> Result<(), HostServiceError> {
+        if !claimed {
+            match clear_pending_vfs_rpc(&self.responder.pending_vfs_rpc, call_id)
+                .map_err(python_host_reply_adapter_error)?
+            {
+                PendingVfsRpcResolution::Pending => {}
+                PendingVfsRpcResolution::TimedOut | PendingVfsRpcResolution::Missing => {
+                    return Err(HostServiceError::new(
+                        "ESTALE",
+                        format!("Python host call {call_id} is no longer pending"),
+                    )
+                    .with_details(json!({ "callId": call_id })));
+                }
+            }
+        }
+
+        if result.is_err() {
+            self.kind.rollback_socket_reservation();
+        }
+        let response = match result {
+            Ok(reply) => match map_python_host_reply(
+                &self.responder.managed_network,
+                self.kind.clone(),
+                reply,
+            ) {
+                Ok(value) if claimed => self
+                    .responder
+                    .javascript_responder
+                    .respond_claimed_success(call_id, value),
+                Ok(value) => self
+                    .responder
+                    .javascript_responder
+                    .respond_success(call_id, value),
+                Err(error) if claimed => self
+                    .responder
+                    .javascript_responder
+                    .respond_claimed_host_error(call_id, error),
+                Err(error) => self
+                    .responder
+                    .javascript_responder
+                    .respond_host_error(call_id, error),
+            },
+            Err(error) if claimed => self
+                .responder
+                .javascript_responder
+                .respond_claimed_host_error(call_id, error),
+            Err(error) => self
+                .responder
+                .javascript_responder
+                .respond_host_error(call_id, error),
+        };
+        crate::javascript::map_host_reply_adapter_response(response)
+    }
+}
+
+fn python_host_reply_adapter_error(error: PythonExecutionError) -> HostServiceError {
+    match error {
+        PythonExecutionError::PendingVfsRpcRequest(call_id) => HostServiceError::new(
+            "EBUSY",
+            format!("Python host call {call_id} is already pending"),
+        )
+        .with_details(json!({ "callId": call_id })),
+        PythonExecutionError::PendingVfsRpcLimit { limit, observed } => HostServiceError::limit(
+            "ERR_AGENTOS_RESOURCE_LIMIT",
+            "limits.reactor.maxBridgeCalls",
+            limit as u64,
+            observed as u64,
+        ),
+        other => HostServiceError::new("ERR_AGENTOS_PYTHON_ADAPTER_REPLY", other.to_string()),
+    }
+}
+
+fn map_python_host_reply(
+    managed_network: &Arc<Mutex<PythonManagedNetworkState>>,
+    kind: PythonHostReplyKind,
+    reply: HostCallReply,
+) -> Result<Value, HostServiceError> {
+    let reply_kind = format!("{kind:?}");
+    let protocol_error = |expected: &'static str| {
+        HostServiceError::new("EPROTO", format!("Python host reply expected {expected}"))
+            .with_details(json!({ "replyKind": reply_kind }))
+    };
+    match (kind, reply) {
+        (PythonHostReplyKind::Empty, HostCallReply::Empty)
+        | (PythonHostReplyKind::Empty, HostCallReply::Json(Value::Null)) => Ok(json!({})),
+        (PythonHostReplyKind::FileRead, HostCallReply::Raw(bytes)) => Ok(json!({
+            "contentBase64": base64::engine::general_purpose::STANDARD.encode(bytes),
+        })),
+        (PythonHostReplyKind::Stat, HostCallReply::Json(Value::Object(stat))) => Ok(json!({
+            "stat": {
+                "mode": stat.get("mode").cloned().unwrap_or(Value::Null),
+                "size": stat.get("size").cloned().unwrap_or(Value::Null),
+                "isDirectory": stat.get("isDirectory").cloned().unwrap_or(Value::Bool(false)),
+                "isSymbolicLink": stat.get("isSymbolicLink").cloned().unwrap_or(Value::Bool(false)),
+            }
+        })),
+        (PythonHostReplyKind::ReadDirectory, HostCallReply::Json(Value::Array(entries))) => {
+            Ok(json!({ "entries": entries }))
+        }
+        (PythonHostReplyKind::ReadLink, HostCallReply::Json(Value::String(target))) => {
+            Ok(json!({ "target": target }))
+        }
+        (PythonHostReplyKind::RunCaptured, HostCallReply::Json(Value::Object(result))) => {
+            Ok(json!({
+                "exitCode": result.get("code").cloned().unwrap_or(Value::from(1)),
+                "stdout": result.get("stdout").cloned().unwrap_or(Value::String(String::new())),
+                "stderr": result.get("stderr").cloned().unwrap_or(Value::String(String::new())),
+                "maxBufferExceeded": result.get("maxBufferExceeded").cloned().unwrap_or(Value::Bool(false)),
+            }))
+        }
+        (PythonHostReplyKind::Http, HostCallReply::Json(Value::Object(result))) => {
+            Ok(Value::Object(result))
+        }
+        (PythonHostReplyKind::Dns, HostCallReply::Json(Value::Array(addresses))) => {
+            let addresses = addresses
+                .into_iter()
+                .map(|entry| {
+                    entry
+                        .get("address")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| protocol_error("DNS address objects"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(json!({ "addresses": addresses }))
+        }
+        (
+            PythonHostReplyKind::SocketCreated(reservation),
+            HostCallReply::Json(Value::Object(created)),
+        ) => {
+            let host_socket_id = created
+                .get("socketId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| protocol_error("a managed socket object"))?
+                .to_owned();
+            let socket_id = reservation.commit(host_socket_id)?;
+            Ok(json!({ "socketId": socket_id }))
+        }
+        (PythonHostReplyKind::SocketSent, HostCallReply::Json(Value::Number(written))) => {
+            Ok(json!({ "bytesSent": written }))
+        }
+        (PythonHostReplyKind::SocketSent, HostCallReply::Json(Value::Object(result))) => {
+            let written = result
+                .get("bytes")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| protocol_error("a managed socket byte count"))?;
+            Ok(json!({ "bytesSent": written }))
+        }
+        (PythonHostReplyKind::SocketReceived, HostCallReply::Raw(bytes)) => Ok(json!({
+            "dataBase64": base64::engine::general_purpose::STANDARD.encode(bytes),
+            "closed": false,
+            "timedOut": false,
+        })),
+        (PythonHostReplyKind::SocketReceived, HostCallReply::Json(Value::Null)) => Ok(json!({
+            "dataBase64": "",
+            "closed": true,
+            "timedOut": false,
+        })),
+        (PythonHostReplyKind::SocketReceived, HostCallReply::Json(Value::String(timeout)))
+            if timeout == "__agentos_net_timeout__" =>
+        {
+            Ok(json!({
+                "dataBase64": "",
+                "closed": false,
+                "timedOut": true,
+            }))
+        }
+        (
+            PythonHostReplyKind::SocketClosed(socket_id),
+            HostCallReply::Empty | HostCallReply::Json(Value::Null),
+        ) => {
+            managed_network
+                .lock()
+                .map_err(|_| {
+                    HostServiceError::new(
+                        "ERR_AGENTOS_PYTHON_NETWORK_STATE_POISONED",
+                        "Python managed-network state lock poisoned",
+                    )
+                })?
+                .sockets
+                .remove(&socket_id);
+            Ok(json!({}))
+        }
+        (PythonHostReplyKind::UdpReceived, HostCallReply::Json(Value::Null)) => Ok(json!({
+            "dataBase64": "",
+            "host": "",
+            "port": 0,
+            "timedOut": true,
+        })),
+        (PythonHostReplyKind::UdpReceived, HostCallReply::Json(Value::Object(message))) => {
+            if message.get("type").and_then(Value::as_str) == Some("error") {
+                return Err(HostServiceError::new(
+                    message.get("code").and_then(Value::as_str).unwrap_or("EIO"),
+                    message
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("managed UDP receive failed"),
+                ));
+            }
+            let encoded = message
+                .get("data")
+                .and_then(Value::as_object)
+                .ok_or_else(|| protocol_error("a managed UDP datagram"))?;
+            if encoded.get("__agentOSType").and_then(Value::as_str) != Some("bytes") {
+                return Err(protocol_error("encoded managed UDP datagram bytes"));
+            }
+            let data_base64 = encoded
+                .get("base64")
+                .and_then(Value::as_str)
+                .ok_or_else(|| protocol_error("encoded managed UDP datagram bytes"))?;
+            base64::engine::general_purpose::STANDARD
+                .decode(data_base64)
+                .map_err(|_| protocol_error("valid managed UDP datagram base64"))?;
+            let host = message
+                .get("remoteAddress")
+                .and_then(Value::as_str)
+                .ok_or_else(|| protocol_error("a managed UDP remote address"))?;
+            let port = message
+                .get("remotePort")
+                .and_then(Value::as_u64)
+                .and_then(|port| u16::try_from(port).ok())
+                .ok_or_else(|| protocol_error("a managed UDP remote port"))?;
+            Ok(json!({
+                "dataBase64": data_base64,
+                "host": host,
+                "port": port,
+                "timedOut": false,
+            }))
+        }
+        (PythonHostReplyKind::Empty, _) => Err(protocol_error("an empty reply")),
+        (PythonHostReplyKind::FileRead, _) => Err(protocol_error("raw file bytes")),
+        (PythonHostReplyKind::Stat, _) => Err(protocol_error("a stat object")),
+        (PythonHostReplyKind::ReadDirectory, _) => Err(protocol_error("a directory-entry array")),
+        (PythonHostReplyKind::ReadLink, _) => Err(protocol_error("a symlink target")),
+        (PythonHostReplyKind::RunCaptured, _) => Err(protocol_error("a captured-process result")),
+        (PythonHostReplyKind::Http, _) => Err(protocol_error("an HTTP response object")),
+        (PythonHostReplyKind::Dns, _) => Err(protocol_error("a DNS address array")),
+        (PythonHostReplyKind::SocketCreated(_), _) => {
+            Err(protocol_error("a managed socket object"))
+        }
+        (PythonHostReplyKind::SocketSent, _) => Err(protocol_error("a socket byte count")),
+        (PythonHostReplyKind::SocketReceived, _) => Err(protocol_error("a TCP receive reply")),
+        (PythonHostReplyKind::SocketClosed(_), _) => Err(protocol_error("an empty close reply")),
+        (PythonHostReplyKind::UdpReceived, _) => Err(protocol_error("a UDP receive reply")),
+    }
+}
+
+fn claim_pending_vfs_rpc(
+    pending_vfs_rpc: &Arc<Mutex<PendingVfsRpcRegistry>>,
+    id: u64,
+    downstream_claim: impl FnOnce() -> Result<bool, HostServiceError>,
+) -> Result<bool, HostServiceError> {
+    let mut pending = pending_vfs_rpc.lock().map_err(|_| {
+        HostServiceError::new(
+            "ERR_AGENTOS_PYTHON_ADAPTER_REPLY",
+            "Python pending host-call registry lock poisoned",
+        )
+    })?;
+    let Some(rpc) = pending.entries.get(&id) else {
+        return Ok(false);
+    };
+    if rpc.state == PendingVfsRpcState::TimedOut(id) {
+        let rpc = pending
+            .entries
+            .remove(&id)
+            .expect("timed-out call remains registered");
+        pending.observe_depth();
+        if let Some(timeout_abort) = rpc.timeout_abort {
+            timeout_abort.abort();
+        }
+        return Ok(false);
+    }
+    let claimed = downstream_claim()?;
+    let rpc = pending
+        .entries
+        .remove(&id)
+        .expect("pending call remains registered while its registry lock is held");
+    pending.observe_depth();
+    if let Some(timeout_abort) = rpc.timeout_abort {
+        timeout_abort.abort();
+    }
+    Ok(claimed)
+}
+
 fn clear_pending_vfs_rpc(
-    pending_vfs_rpc: &Arc<Mutex<Option<PendingVfsRpc>>>,
+    pending_vfs_rpc: &Arc<Mutex<PendingVfsRpcRegistry>>,
     id: u64,
 ) -> Result<PendingVfsRpcResolution, PythonExecutionError> {
     let mut pending = pending_vfs_rpc
         .lock()
         .map_err(|_| PythonExecutionError::EventChannelClosed)?;
-    let resolution = match pending.as_ref().map(|rpc| rpc.state) {
-        Some(PendingVfsRpcState::Pending(current)) if current == id => {
-            PendingVfsRpcResolution::Pending
-        }
-        Some(PendingVfsRpcState::TimedOut(current)) if current == id => {
-            PendingVfsRpcResolution::TimedOut
-        }
-        _ => return Ok(PendingVfsRpcResolution::Missing),
+    let Some(rpc) = pending.entries.remove(&id) else {
+        return Ok(PendingVfsRpcResolution::Missing);
     };
-    if let Some(rpc) = pending.take() {
-        if let Some(timeout_abort) = rpc.timeout_abort {
-            timeout_abort.abort();
-        }
+    let resolution = match rpc.state {
+        PendingVfsRpcState::Pending(_) => PendingVfsRpcResolution::Pending,
+        PendingVfsRpcState::TimedOut(_) => PendingVfsRpcResolution::TimedOut,
+    };
+    if let Some(timeout_abort) = rpc.timeout_abort {
+        timeout_abort.abort();
     }
+    pending.observe_depth();
     Ok(resolution)
 }
 
-fn cancel_pending_vfs_rpc(pending_vfs_rpc: &Arc<Mutex<Option<PendingVfsRpc>>>) {
+fn cancel_pending_vfs_rpc(pending_vfs_rpc: &Arc<Mutex<PendingVfsRpcRegistry>>) {
     let pending = pending_vfs_rpc
         .lock()
-        .map(|mut pending| pending.take())
+        .map(|mut pending| {
+            let entries = std::mem::take(&mut pending.entries);
+            pending.observe_depth();
+            entries
+        })
         .unwrap_or_else(|poisoned| {
-            eprintln!("ERR_AGENTOS_PYTHON_VFS_RPC_STATE_POISONED: cancelling pending timeout");
-            poisoned.into_inner().take()
+            eprintln!("ERR_AGENTOS_PYTHON_VFS_RPC_STATE_POISONED: cancelling pending timeouts");
+            let mut pending = poisoned.into_inner();
+            let entries = std::mem::take(&mut pending.entries);
+            pending.observe_depth();
+            entries
         });
-    if let Some(timeout_abort) = pending.and_then(|rpc| rpc.timeout_abort) {
-        timeout_abort.abort();
+    for rpc in pending.into_values() {
+        if let Some(timeout_abort) = rpc.timeout_abort {
+            timeout_abort.abort();
+        }
     }
 }
 
@@ -1360,13 +2527,21 @@ impl PythonExecutionEngine {
                 defer_execute,
             },
         )?;
-        let pending_vfs_rpc = Arc::new(Mutex::new(None));
+        let max_pending_vfs_rpcs = runtime
+            .resources()
+            .configured_limit(ResourceClass::BridgeCalls)
+            .map_or(DEFAULT_PYTHON_PENDING_VFS_RPCS, |limit| limit.maximum);
+        let pending_vfs_rpc =
+            Arc::new(Mutex::new(PendingVfsRpcRegistry::new(max_pending_vfs_rpcs)));
+        let managed_network = Arc::new(Mutex::new(PythonManagedNetworkState::new(
+            python_managed_host_file_limit(&request),
+        )));
         let vfs_rpc_timeout = python_vfs_rpc_timeout(&request);
 
         Ok(PythonExecution {
             runtime,
             execution_id,
-            child_pid: javascript_execution.child_pid(),
+            child_pid: javascript_execution.native_process_id().unwrap_or_default(),
             v8_session: javascript_execution.v8_session_handle(),
             inner: javascript_execution,
             pyodide_dist_path,
@@ -1374,6 +2549,7 @@ impl PythonExecutionEngine {
                 &request,
             )),
             pending_vfs_rpc,
+            managed_network,
             output_buffer_max_bytes: python_output_buffer_max_bytes(&request),
             execution_timeout: python_execution_timeout(&request),
             vfs_rpc_timeout,
@@ -1390,29 +2566,48 @@ impl PythonExecutionEngine {
 }
 
 fn set_pending_vfs_rpc_state(
-    pending_vfs_rpc: &Arc<Mutex<Option<PendingVfsRpc>>>,
+    pending_vfs_rpc: &Arc<Mutex<PendingVfsRpcRegistry>>,
     id: u64,
 ) -> Result<(), PythonExecutionError> {
     let mut pending = pending_vfs_rpc
         .lock()
         .map_err(|_| PythonExecutionError::EventChannelClosed)?;
-    if let Some(PendingVfsRpc {
-        state: PendingVfsRpcState::Pending(current),
-        ..
-    }) = pending.as_ref()
-    {
-        return Err(PythonExecutionError::PendingVfsRpcRequest(*current));
+    if pending.entries.contains_key(&id) {
+        return Err(PythonExecutionError::PendingVfsRpcRequest(id));
     }
-    if let Some(previous) = pending.take() {
-        if let Some(timeout_abort) = previous.timeout_abort {
-            timeout_abort.abort();
-        }
+    let observed = pending.entries.len().saturating_add(1);
+    if observed > pending.maximum {
+        return Err(PythonExecutionError::PendingVfsRpcLimit {
+            limit: pending.maximum,
+            observed,
+        });
     }
-    *pending = Some(PendingVfsRpc {
-        state: PendingVfsRpcState::Pending(id),
-        timeout_abort: None,
-    });
+    pending.entries.insert(
+        id,
+        PendingVfsRpc {
+            state: PendingVfsRpcState::Pending(id),
+            timeout_abort: None,
+        },
+    );
+    pending.observe_depth();
     Ok(())
+}
+
+fn python_vfs_rpc_admission_error(error: PythonExecutionError) -> HostServiceError {
+    match error {
+        PythonExecutionError::PendingVfsRpcRequest(id) => HostServiceError::new(
+            "EBUSY",
+            PythonExecutionError::PendingVfsRpcRequest(id).to_string(),
+        )
+        .with_details(json!({ "callId": id })),
+        PythonExecutionError::PendingVfsRpcLimit { limit, observed } => HostServiceError::limit(
+            "ERR_AGENTOS_RESOURCE_LIMIT",
+            "limits.reactor.maxBridgeCalls",
+            limit as u64,
+            observed as u64,
+        ),
+        other => HostServiceError::new("ERR_AGENTOS_PYTHON_VFS_RPC", other.to_string()),
+    }
 }
 
 fn map_javascript_error(error: JavascriptExecutionError) -> PythonExecutionError {
@@ -1437,11 +2632,19 @@ fn map_javascript_error(error: JavascriptExecutionError) -> PythonExecutionError
         JavascriptExecutionError::PendingSyncRpcRequest(id) => {
             PythonExecutionError::PendingVfsRpcRequest(id)
         }
+        JavascriptExecutionError::PendingSyncRpcLimit { limit, observed } => {
+            PythonExecutionError::RpcResponse(format!(
+                "ERR_AGENTOS_RESOURCE_LIMIT: pending sync RPC calls observed {observed}, exceeding limits.reactor.maxBridgeCalls ({limit})"
+            ))
+        }
         JavascriptExecutionError::ExpiredSyncRpcRequest(id) => {
             PythonExecutionError::RpcResponse(format!("VFS RPC request {id} is no longer pending"))
         }
         JavascriptExecutionError::RpcResponse(message) => {
             PythonExecutionError::RpcResponse(message)
+        }
+        JavascriptExecutionError::BridgeSettlement(error) => {
+            PythonExecutionError::RpcResponse(error.to_string())
         }
         JavascriptExecutionError::Terminate(error) => PythonExecutionError::Kill(error),
         JavascriptExecutionError::Control(error) => PythonExecutionError::Control(error),
@@ -1645,8 +2848,6 @@ fn build_python_runner_module_source(
 ) -> Result<String, PythonExecutionError> {
     let runner_source = fs::read_to_string(import_cache.python_runner_path())
         .map_err(PythonExecutionError::PrepareRuntime)?;
-    let runner_source =
-        format!("import * as __agentOSConstantsBinding from 'node:constants';\n{runner_source}");
     let bootstrap = build_python_runner_bootstrap(internal_env, warmup_metrics);
     Ok(insert_python_runner_bootstrap(&runner_source, &bootstrap))
 }
@@ -1697,7 +2898,7 @@ fn insert_python_runner_bootstrap(source: &str, bootstrap: &str) -> String {
 }
 
 fn parse_python_bridge_sync_rpc_request(
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<PythonVfsRpcRequest, PythonExecutionError> {
     if request.method != "_pythonRpc" {
         return Err(PythonExecutionError::RpcResponse(format!(
@@ -1825,8 +3026,8 @@ fn spawn_python_vfs_rpc_timeout(
     runtime: &RuntimeContext,
     id: u64,
     timeout: Duration,
-    pending: Arc<Mutex<Option<PendingVfsRpc>>>,
-    v8_session: crate::v8_host::V8SessionHandle,
+    pending: Arc<Mutex<PendingVfsRpcRegistry>>,
+    javascript_responder: JavascriptSyncRpcResponder,
 ) -> Result<(), PythonExecutionError> {
     let cancellation = runtime.clone();
     let pending_for_task = Arc::clone(&pending);
@@ -1841,10 +3042,11 @@ fn spawn_python_vfs_rpc_timeout(
                         );
                         poisoned.into_inner()
                     });
-                    if guard.as_ref().map(|rpc| rpc.state)
+                    if guard.entries.get(&id).map(|rpc| rpc.state)
                         == Some(PendingVfsRpcState::Pending(id))
                     {
-                        *guard = None;
+                        guard.entries.remove(&id);
+                        guard.observe_depth();
                     }
                     return;
                 }
@@ -1856,30 +3058,30 @@ fn spawn_python_vfs_rpc_timeout(
             );
             poisoned.into_inner()
         });
-        let should_timeout =
-            if guard.as_ref().map(|rpc| rpc.state) == Some(PendingVfsRpcState::Pending(id)) {
-                *guard = Some(PendingVfsRpc {
-                    state: PendingVfsRpcState::TimedOut(id),
-                    timeout_abort: None,
-                });
+        let should_timeout = if let Some(rpc) = guard.entries.get_mut(&id) {
+            if rpc.state == PendingVfsRpcState::Pending(id) {
+                rpc.state = PendingVfsRpcState::TimedOut(id);
+                rpc.timeout_abort = None;
                 true
             } else {
                 false
-            };
+            }
+        } else {
+            false
+        };
         drop(guard);
 
         if !should_timeout {
             return;
         }
 
-        if let Err(error) = v8_session.send_bridge_response(
+        if let Err(error) = javascript_responder.respond_error(
             id,
-            1,
+            "ERR_AGENTOS_PYTHON_VFS_RPC_TIMEOUT",
             format!(
-                "ERR_AGENTOS_PYTHON_VFS_RPC_TIMEOUT: guest Python VFS RPC request {id} timed out after {}ms",
+                "guest Python VFS RPC request {id} timed out after {}ms",
                 timeout.as_millis()
-            )
-            .into_bytes(),
+            ),
         ) {
             eprintln!(
                 "ERR_AGENTOS_PYTHON_VFS_RPC_TIMEOUT_DELIVERY: could not deliver timeout for request {id}: {error}"
@@ -1896,7 +3098,7 @@ fn spawn_python_vfs_rpc_timeout(
     let mut guard = pending
         .lock()
         .map_err(|_| PythonExecutionError::EventChannelClosed)?;
-    if let Some(rpc) = guard.as_mut() {
+    if let Some(rpc) = guard.entries.get_mut(&id) {
         if rpc.state == PendingVfsRpcState::Pending(id) {
             rpc.timeout_abort = Some(timeout_abort);
             return Ok(());
@@ -2236,7 +3438,7 @@ fn python_managed_host_file_limit(request: &StartPythonExecutionRequest) -> usiz
 fn python_javascript_sync_rpc_action(
     pyodide_dist_path: &Path,
     managed_host_files: &mut PythonManagedHostFiles,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Option<PythonJavascriptSyncRpcAction>, PythonExecutionError> {
     if matches!(request.method.as_str(), "fs.readSync" | "_fsReadRaw") {
         let Some(fd) = request.args.first().and_then(Value::as_u64) else {
@@ -2752,9 +3954,7 @@ fn python_prewarm_sync_rpc_encoding(args: &[Value]) -> Option<String> {
     })
 }
 
-fn python_javascript_sync_rpc_error(
-    request: &JavascriptSyncRpcRequest,
-) -> Option<(&'static str, String)> {
+fn python_javascript_sync_rpc_error(request: &HostRpcRequest) -> Option<(&'static str, String)> {
     if matches!(
         request.method.as_str(),
         "net.connect"
@@ -2768,6 +3968,30 @@ fn python_javascript_sync_rpc_error(
             | "http.request"
             | "https.request"
             | "tls.connect"
+    ) {
+        return Some((
+            "ERR_ACCESS_DENIED",
+            String::from(
+                "network access is not available during standalone guest Python execution",
+            ),
+        ));
+    }
+
+    None
+}
+
+fn python_vfs_rpc_standalone_error(method: PythonVfsRpcMethod) -> Option<(&'static str, String)> {
+    if matches!(
+        method,
+        PythonVfsRpcMethod::HttpRequest
+            | PythonVfsRpcMethod::DnsLookup
+            | PythonVfsRpcMethod::SocketConnect
+            | PythonVfsRpcMethod::SocketSend
+            | PythonVfsRpcMethod::SocketRecv
+            | PythonVfsRpcMethod::SocketClose
+            | PythonVfsRpcMethod::UdpCreate
+            | PythonVfsRpcMethod::UdpSendto
+            | PythonVfsRpcMethod::UdpRecvfrom
     ) {
         return Some((
             "ERR_ACCESS_DENIED",
@@ -2841,13 +4065,15 @@ fn warmup_metrics_line(
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_pending_vfs_rpc, python_javascript_sync_rpc_action, python_managed_path_kind,
-        python_runner_javascript_limits, python_wait_remaining, CreatePythonContextRequest,
-        JavascriptSyncRpcRequest, PendingVfsRpc, PendingVfsRpcResolution, PendingVfsRpcState,
-        PythonExecutionEngine, PythonExecutionLimits, PythonJavascriptSyncRpcAction,
-        PythonManagedHostFiles, PythonManagedPathKind, PYODIDE_CACHE_GUEST_ROOT,
-        PYODIDE_GUEST_ROOT,
+        cancel_pending_vfs_rpc, clear_pending_vfs_rpc, python_javascript_sync_rpc_action,
+        python_managed_path_kind, python_runner_javascript_limits, python_vfs_rpc_admission_error,
+        python_wait_remaining, set_pending_vfs_rpc_state, CreatePythonContextRequest,
+        HostRpcRequest, PendingVfsRpc, PendingVfsRpcRegistry, PendingVfsRpcResolution,
+        PendingVfsRpcState, PythonExecutionEngine, PythonExecutionError, PythonExecutionLimits,
+        PythonHostReplyKind, PythonJavascriptSyncRpcAction, PythonManagedHostFiles,
+        PythonManagedPathKind, PYODIDE_CACHE_GUEST_ROOT, PYODIDE_GUEST_ROOT,
     };
+    use crate::backend::HostCallReply;
     use std::collections::HashMap;
     use std::fs;
     #[cfg(unix)]
@@ -2868,6 +4094,174 @@ mod tests {
         assert_eq!(javascript.v8_heap_limit_mb, Some(256));
         assert_eq!(javascript.reactor_work_quantum, Some(23));
         assert_eq!(javascript.bridge_call_timeout_ms, Some(54_321));
+    }
+
+    #[test]
+    fn common_host_replies_keep_the_python_wire_shape() {
+        let network = Arc::new(Mutex::new(super::PythonManagedNetworkState::new(8)));
+        assert_eq!(
+            super::map_python_host_reply(
+                &network,
+                PythonHostReplyKind::RunCaptured,
+                HostCallReply::Json(serde_json::json!({
+                    "pid": 17,
+                    "code": 3,
+                    "stdout": "out",
+                    "stderr": "err",
+                    "maxBufferExceeded": true,
+                })),
+            )
+            .expect("map captured process reply"),
+            serde_json::json!({
+                "exitCode": 3,
+                "stdout": "out",
+                "stderr": "err",
+                "maxBufferExceeded": true,
+            })
+        );
+        assert_eq!(
+            super::map_python_host_reply(
+                &network,
+                PythonHostReplyKind::FileRead,
+                HostCallReply::Raw(b"shared-kernel".to_vec()),
+            )
+            .expect("map file read reply"),
+            serde_json::json!({ "contentBase64": "c2hhcmVkLWtlcm5lbA==" })
+        );
+    }
+
+    #[test]
+    fn canonical_udp_host_reply_maps_to_python_socket_shape() {
+        let network = Arc::new(Mutex::new(super::PythonManagedNetworkState::new(8)));
+        let reply = super::map_python_host_reply(
+            &network,
+            PythonHostReplyKind::UdpReceived,
+            HostCallReply::Json(serde_json::json!({
+                "type": "message",
+                "data": {
+                    "__agentOSType": "bytes",
+                    "base64": "cGluZyB1ZHA=",
+                },
+                "remoteAddress": "127.0.0.1",
+                "remotePort": 43123,
+                "remoteFamily": "IPv4",
+            })),
+        )
+        .expect("map canonical UDP reply");
+
+        assert_eq!(
+            reply,
+            serde_json::json!({
+                "dataBase64": "cGluZyB1ZHA=",
+                "host": "127.0.0.1",
+                "port": 43123,
+                "timedOut": false,
+            })
+        );
+    }
+
+    #[test]
+    fn mismatched_common_host_reply_is_a_typed_protocol_error() {
+        let network = Arc::new(Mutex::new(super::PythonManagedNetworkState::new(8)));
+        let error = super::map_python_host_reply(
+            &network,
+            PythonHostReplyKind::ReadDirectory,
+            HostCallReply::Empty,
+        )
+        .expect_err("reject mismatched host reply");
+        assert_eq!(error.code, "EPROTO");
+        assert_eq!(
+            error.details.expect("protocol error details")["replyKind"],
+            "ReadDirectory"
+        );
+    }
+
+    #[test]
+    fn managed_socket_reservations_admit_exactly_the_configured_cap() {
+        let state = Arc::new(Mutex::new(super::PythonManagedNetworkState::new(1)));
+        let reservation =
+            super::PythonManagedNetworkState::reserve(&state, super::PythonManagedSocketKind::Tcp)
+                .expect("exact cap reservation");
+        let error =
+            super::PythonManagedNetworkState::reserve(&state, super::PythonManagedSocketKind::Udp)
+                .expect_err("cap plus one is rejected before a host operation exists");
+        assert_eq!(error.code, "ERR_AGENTOS_RESOURCE_LIMIT");
+        assert_eq!(state.lock().expect("state").sockets.len(), 1);
+        drop(reservation);
+        assert!(state.lock().expect("state").sockets.is_empty());
+    }
+
+    #[test]
+    fn managed_socket_id_exhaustion_leaves_no_reserved_operation() {
+        let state = Arc::new(Mutex::new(super::PythonManagedNetworkState::new(1)));
+        state.lock().expect("state").next_socket_id = u64::MAX;
+        let error =
+            super::PythonManagedNetworkState::reserve(&state, super::PythonManagedSocketKind::Tcp)
+                .expect_err("id exhaustion");
+        assert_eq!(error.code, "EOVERFLOW");
+        assert!(state.lock().expect("state").sockets.is_empty());
+    }
+
+    #[test]
+    fn managed_socket_reply_commits_the_pre_reserved_adapter_handle() {
+        let state = Arc::new(Mutex::new(super::PythonManagedNetworkState::new(1)));
+        let reservation =
+            super::PythonManagedNetworkState::reserve(&state, super::PythonManagedSocketKind::Tcp)
+                .expect("reservation");
+        let socket_id = reservation.0.socket_id;
+        let reply = super::map_python_host_reply(
+            &state,
+            PythonHostReplyKind::SocketCreated(reservation),
+            HostCallReply::Json(serde_json::json!({ "socketId": "tcp-7" })),
+        )
+        .expect("commit host socket");
+        assert_eq!(reply, serde_json::json!({ "socketId": socket_id }));
+        let socket = state
+            .lock()
+            .expect("state")
+            .socket(socket_id, Some(super::PythonManagedSocketKind::Tcp))
+            .expect("live socket");
+        assert_eq!(socket.host_socket_id, "tcp-7");
+    }
+
+    #[test]
+    fn downstream_claim_error_preserves_python_pending_state() {
+        let pending = Arc::new(Mutex::new(PendingVfsRpcRegistry::new(4)));
+        pending.lock().expect("pending").entries.insert(
+            42,
+            PendingVfsRpc {
+                state: PendingVfsRpcState::Pending(42),
+                timeout_abort: None,
+            },
+        );
+        let error = super::claim_pending_vfs_rpc(&pending, 42, || {
+            Err(crate::backend::HostServiceError::new(
+                "EIO",
+                "downstream claim failed",
+            ))
+        })
+        .expect_err("claim error");
+        assert_eq!(error.code, "EIO");
+        assert!(pending.lock().expect("pending").entries.contains_key(&42));
+    }
+
+    #[test]
+    fn captured_process_reply_bound_is_enforced_before_spawn() {
+        super::validate_python_captured_reply_limit(10, 632).expect("exact bound");
+        let error = super::validate_python_captured_reply_limit(11, 632)
+            .expect_err("reply expansion exceeds bridge bound");
+        assert_eq!(error.code, "ERR_AGENTOS_RESOURCE_LIMIT");
+        assert_eq!(
+            error.details.expect("details")["configPath"],
+            "limits.reactor.maxBridgeResponseBytes"
+        );
+    }
+
+    #[test]
+    fn blocking_poll_rejects_an_unrepresentable_deadline() {
+        let error = super::checked_python_poll_deadline(Duration::MAX)
+            .expect_err("Duration::MAX cannot fit in Instant");
+        assert!(matches!(error, PythonExecutionError::InvalidLimit(_)));
     }
 
     #[test]
@@ -2908,7 +4302,7 @@ mod tests {
 
     #[test]
     fn stale_python_vfs_completion_has_no_pending_waiter() {
-        let pending = Arc::new(Mutex::new(None));
+        let pending = Arc::new(Mutex::new(PendingVfsRpcRegistry::new(2)));
 
         assert_eq!(
             clear_pending_vfs_rpc(&pending, 41).expect("inspect pending request"),
@@ -2918,16 +4312,80 @@ mod tests {
 
     #[test]
     fn timed_out_python_vfs_completion_is_consumed_as_stale() {
-        let pending = Arc::new(Mutex::new(Some(PendingVfsRpc {
-            state: PendingVfsRpcState::TimedOut(42),
-            timeout_abort: None,
-        })));
+        let mut registry = PendingVfsRpcRegistry::new(2);
+        registry.entries.insert(
+            42,
+            PendingVfsRpc {
+                state: PendingVfsRpcState::TimedOut(42),
+                timeout_abort: None,
+            },
+        );
+        registry.observe_depth();
+        let pending = Arc::new(Mutex::new(registry));
 
         assert_eq!(
             clear_pending_vfs_rpc(&pending, 42).expect("clear timed-out request"),
             PendingVfsRpcResolution::TimedOut
         );
-        assert!(pending.lock().expect("pending request lock").is_none());
+        assert!(pending
+            .lock()
+            .expect("pending request lock")
+            .entries
+            .is_empty());
+    }
+
+    #[test]
+    fn pending_python_vfs_rpc_registry_is_bounded_keyed_and_nonlossy() {
+        let pending = Arc::new(Mutex::new(PendingVfsRpcRegistry::new(2)));
+        set_pending_vfs_rpc_state(&pending, 41).expect("first concurrent VFS waiter");
+        set_pending_vfs_rpc_state(&pending, 42).expect("second concurrent VFS waiter");
+
+        let duplicate = set_pending_vfs_rpc_state(&pending, 41)
+            .expect_err("duplicate call ID must not replace its waiter");
+        assert!(matches!(
+            duplicate,
+            PythonExecutionError::PendingVfsRpcRequest(41)
+        ));
+        let duplicate_host_error = python_vfs_rpc_admission_error(duplicate);
+        assert_eq!(duplicate_host_error.code, "EBUSY");
+        assert_eq!(duplicate_host_error.details.as_ref().unwrap()["callId"], 41);
+
+        let over_limit = set_pending_vfs_rpc_state(&pending, 43)
+            .expect_err("third distinct VFS waiter exceeds admission");
+        assert!(matches!(
+            over_limit,
+            PythonExecutionError::PendingVfsRpcLimit {
+                limit: 2,
+                observed: 3,
+            }
+        ));
+        let limit_host_error = python_vfs_rpc_admission_error(over_limit);
+        assert_eq!(limit_host_error.code, "ERR_AGENTOS_RESOURCE_LIMIT");
+        assert_eq!(
+            limit_host_error.details.as_ref().unwrap()["limitName"],
+            "limits.reactor.maxBridgeCalls"
+        );
+
+        assert_eq!(
+            clear_pending_vfs_rpc(&pending, 42).expect("settle exact second waiter"),
+            PendingVfsRpcResolution::Pending
+        );
+        assert_eq!(
+            pending
+                .lock()
+                .expect("pending request lock")
+                .entries
+                .get(&41)
+                .map(|rpc| rpc.state),
+            Some(PendingVfsRpcState::Pending(41))
+        );
+
+        cancel_pending_vfs_rpc(&pending);
+        assert!(pending
+            .lock()
+            .expect("pending request lock")
+            .entries
+            .is_empty());
     }
 
     #[test]
@@ -2937,7 +4395,7 @@ mod tests {
         fs::create_dir_all(&pyodide).expect("create pyodide root");
         fs::write(pyodide.join("python_stdlib.zip"), b"stdlib-bytes").expect("write managed asset");
         let mut files = PythonManagedHostFiles::default();
-        let open = JavascriptSyncRpcRequest {
+        let open = HostRpcRequest {
             id: 1,
             method: String::from("fs.openSync"),
             args: vec![
@@ -2957,7 +4415,7 @@ mod tests {
             other => panic!("unexpected managed open action: {other:?}"),
         };
 
-        let read = JavascriptSyncRpcRequest {
+        let read = HostRpcRequest {
             id: 2,
             method: String::from("fs.readSync"),
             args: vec![
@@ -2977,7 +4435,7 @@ mod tests {
             other => panic!("unexpected managed read action: {other:?}"),
         }
 
-        let close = JavascriptSyncRpcRequest {
+        let close = HostRpcRequest {
             id: 3,
             method: String::from("fs.closeSync"),
             args: vec![serde_json::json!(fd)],
@@ -3000,7 +4458,7 @@ mod tests {
         fs::create_dir_all(&pyodide).expect("create pyodide root");
         fs::write(pyodide.join("python_stdlib.zip"), b"stdlib-bytes").expect("write managed asset");
         let mut files = PythonManagedHostFiles::new(2);
-        let open = |id| JavascriptSyncRpcRequest {
+        let open = |id| HostRpcRequest {
             id,
             method: String::from("fs.openSync"),
             args: vec![
@@ -3037,7 +4495,7 @@ mod tests {
         ));
         assert_eq!(files.files.len(), 2);
 
-        let close = JavascriptSyncRpcRequest {
+        let close = HostRpcRequest {
             id: 4,
             method: String::from("fs.closeSync"),
             args: vec![serde_json::json!(first)],

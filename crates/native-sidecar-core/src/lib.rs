@@ -58,7 +58,10 @@ pub use guest_fs::{
     targeted_guest_filesystem_response,
 };
 pub use guest_net::handle_guest_kernel_call;
-pub use identity::{shared_guest_runtime_identity, SharedGuestRuntimeIdentity};
+pub use identity::{
+    shared_guest_runtime_identity, shared_guest_runtime_identity_with_system,
+    SharedGuestRuntimeIdentity,
+};
 pub use layers::{VmLayerStore, MAX_VM_LAYERS};
 pub use limits::{
     validate_vm_limits, virtual_os_cpu_count, virtual_os_freemem_bytes, virtual_os_totalmem_bytes,

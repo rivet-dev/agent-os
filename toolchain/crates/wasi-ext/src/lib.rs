@@ -21,6 +21,8 @@ pub const ERRNO_BADF: Errno = 8;
 pub const ERRNO_INVAL: Errno = 28;
 pub const ERRNO_IO: Errno = 29;
 pub const ERRNO_NOSYS: Errno = 52;
+pub const ERRNO_NOTSUP: Errno = 58;
+pub const ERRNO_PROTONOSUPPORT: Errno = 66;
 pub const ERRNO_NOENT: Errno = 44;
 pub const ERRNO_SRCH: Errno = 71; // No such process
 pub const ERRNO_CHILD: Errno = 12; // No child processes
@@ -205,10 +207,11 @@ extern "C" {
     ///
     /// On success, the two socket FDs are written to `ret_fd0` and `ret_fd1`.
     /// Returns errno.
-    fn fd_socketpair(
-        domain: u32,
-        sock_type: u32,
-        protocol: u32,
+    #[link_name = "fd_socketpair"]
+    fn fd_socketpair_import(
+        socket_kind: u32,
+        nonblocking: u32,
+        close_on_exec: u32,
         ret_fd0: *mut u32,
         ret_fd1: *mut u32,
     ) -> Errno;
@@ -398,19 +401,22 @@ pub fn spawn(
     // Encode them in the same ordered action stream used by libc posix_spawn.
     let mut actions = [0_u8; (ACTION_BYTES * 3) + (b"/dev/null".len() * 3)];
     let mut actions_len = 0;
-    for (source, target) in [
-        (stdin_fd, 0_u32),
-        (stdout_fd, 1_u32),
-        (stderr_fd, 2_u32),
-    ]
-    .into_iter()
+    for (source, target) in [(stdin_fd, 0_u32), (stdout_fd, 1_u32), (stderr_fd, 2_u32)].into_iter()
     {
         if source == target {
             continue;
         }
-        let path = if source == u32::MAX { b"/dev/null".as_slice() } else { &[] };
+        let path = if source == u32::MAX {
+            b"/dev/null".as_slice()
+        } else {
+            &[]
+        };
         let base = actions_len;
-        let command = if path.is_empty() { FDOP_DUP2 } else { FDOP_OPEN };
+        let command = if path.is_empty() {
+            FDOP_DUP2
+        } else {
+            FDOP_OPEN
+        };
         actions[base..base + 4].copy_from_slice(&command.to_le_bytes());
         actions[base + 4..base + 8].copy_from_slice(&target.to_le_bytes());
         if command == FDOP_DUP2 {
@@ -418,10 +424,8 @@ pub fn spawn(
         } else if target != 0 {
             actions[base + 12..base + 16].copy_from_slice(&O_WRONLY.to_le_bytes());
         }
-        actions[base + 20..base + 24]
-            .copy_from_slice(&(path.len() as u32).to_le_bytes());
-        actions[base + ACTION_BYTES..base + ACTION_BYTES + path.len()]
-            .copy_from_slice(path);
+        actions[base + 20..base + 24].copy_from_slice(&(path.len() as u32).to_le_bytes());
+        actions[base + ACTION_BYTES..base + ACTION_BYTES + path.len()].copy_from_slice(path);
         actions_len += ACTION_BYTES + path.len();
     }
     let (sigmask_lo, sigmask_hi) = signal_mask(3, 0, 0)?;
@@ -462,9 +466,7 @@ pub fn spawn(
 pub fn signal_mask(how: u32, set_lo: u32, set_hi: u32) -> Result<(u32, u32), Errno> {
     let mut old_lo = 0;
     let mut old_hi = 0;
-    let errno = unsafe {
-        proc_signal_mask_v2(how, set_lo, set_hi, &mut old_lo, &mut old_hi)
-    };
+    let errno = unsafe { proc_signal_mask_v2(how, set_lo, set_hi, &mut old_lo, &mut old_hi) };
     if errno == ERRNO_SUCCESS {
         Ok((old_lo, old_hi))
     } else {
@@ -701,9 +703,40 @@ pub fn closefrom(low_fd: u32) -> Result<(), Errno> {
 ///
 /// Returns `Ok((fd0, fd1))` on success, `Err(errno)` on failure.
 pub fn socketpair(domain: u32, sock_type: u32, protocol: u32) -> Result<(u32, u32), Errno> {
+    const AF_UNIX: u32 = 1;
+    const SOCK_TYPE_MASK: u32 = 0x0f;
+    const SOCK_STREAM: u32 = 1;
+    const SOCK_DGRAM: u32 = 2;
+    const SOCK_SEQPACKET: u32 = 5;
+    const SOCK_NONBLOCK: u32 = 0o4000;
+    const SOCK_CLOEXEC: u32 = 0o2000000;
+
+    if domain != AF_UNIX {
+        return Err(ERRNO_NOTSUP);
+    }
+    if protocol != 0 && protocol != AF_UNIX {
+        return Err(ERRNO_PROTONOSUPPORT);
+    }
+    if sock_type & !(SOCK_TYPE_MASK | SOCK_NONBLOCK | SOCK_CLOEXEC) != 0 {
+        return Err(ERRNO_INVAL);
+    }
+    let socket_kind = match sock_type & SOCK_TYPE_MASK {
+        SOCK_STREAM => 1,
+        SOCK_DGRAM => 2,
+        SOCK_SEQPACKET => 3,
+        _ => return Err(ERRNO_NOTSUP),
+    };
     let mut fd0 = 0;
     let mut fd1 = 0;
-    let errno = unsafe { fd_socketpair(domain, sock_type, protocol, &mut fd0, &mut fd1) };
+    let errno = unsafe {
+        fd_socketpair_import(
+            socket_kind,
+            u32::from(sock_type & SOCK_NONBLOCK != 0),
+            u32::from(sock_type & SOCK_CLOEXEC != 0),
+            &mut fd0,
+            &mut fd1,
+        )
+    };
     if errno == ERRNO_SUCCESS {
         Ok((fd0, fd1))
     } else {
@@ -1448,9 +1481,7 @@ pub fn get_groups() -> Result<Vec<u32>, Errno> {
 }
 
 pub fn set_groups(groups: &[u32]) -> Result<(), Errno> {
-    errno_result(unsafe {
-        host_setgroups(checked_u32_len(groups.len())?, groups.as_ptr())
-    })
+    errno_result(unsafe { host_setgroups(checked_u32_len(groups.len())?, groups.as_ptr()) })
 }
 
 pub fn path_ids(path: &str, follow_symlinks: bool) -> Result<(u32, u32), Errno> {
@@ -1545,7 +1576,12 @@ pub fn get_pwnam(name: &str, buf: &mut [u8]) -> Result<u32, Errno> {
 pub fn get_pwent(index: u32, buf: &mut [u8]) -> Result<u32, Errno> {
     let mut len = 0;
     let errno = unsafe {
-        host_getpwent(index, buf.as_mut_ptr(), checked_u32_len(buf.len())?, &mut len)
+        host_getpwent(
+            index,
+            buf.as_mut_ptr(),
+            checked_u32_len(buf.len())?,
+            &mut len,
+        )
     };
     if errno == ERRNO_SUCCESS {
         validate_returned_len(len, buf.len())
@@ -1556,9 +1592,8 @@ pub fn get_pwent(index: u32, buf: &mut [u8]) -> Result<u32, Errno> {
 
 pub fn get_grgid(gid: u32, buf: &mut [u8]) -> Result<u32, Errno> {
     let mut len = 0;
-    let errno = unsafe {
-        host_getgrgid(gid, buf.as_mut_ptr(), checked_u32_len(buf.len())?, &mut len)
-    };
+    let errno =
+        unsafe { host_getgrgid(gid, buf.as_mut_ptr(), checked_u32_len(buf.len())?, &mut len) };
     if errno == ERRNO_SUCCESS {
         validate_returned_len(len, buf.len())
     } else {
@@ -1587,7 +1622,12 @@ pub fn get_grnam(name: &str, buf: &mut [u8]) -> Result<u32, Errno> {
 pub fn get_grent(index: u32, buf: &mut [u8]) -> Result<u32, Errno> {
     let mut len = 0;
     let errno = unsafe {
-        host_getgrent(index, buf.as_mut_ptr(), checked_u32_len(buf.len())?, &mut len)
+        host_getgrent(
+            index,
+            buf.as_mut_ptr(),
+            checked_u32_len(buf.len())?,
+            &mut len,
+        )
     };
     if errno == ERRNO_SUCCESS {
         validate_returned_len(len, buf.len())

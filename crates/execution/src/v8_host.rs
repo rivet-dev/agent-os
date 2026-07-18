@@ -290,8 +290,8 @@ impl V8SessionHandle {
             .set_application_read_interest(capability_id, capability_generation, enabled)
     }
 
-    pub fn publish_signal(&self, signal: i32) -> io::Result<()> {
-        self.inner.publish_signal(signal)
+    pub fn publish_signal(&self, signal: i32, delivery_token: u64) -> io::Result<()> {
+        self.inner.publish_signal(signal, delivery_token)
     }
 
     pub fn publish_timer(&self, timer_id: u64) -> io::Result<()> {
@@ -363,6 +363,86 @@ impl Clone for V8SessionHandle {
         Self {
             inner: self.inner.clone(),
         }
+    }
+}
+
+impl crate::backend::ExecutionWakeTarget for V8SessionHandle {
+    fn publish_readiness(
+        &self,
+        capability_id: u64,
+        capability_generation: u64,
+        flags: agentos_runtime::readiness::ReadyFlags,
+    ) -> Result<(), crate::backend::ExecutionWakeError> {
+        V8SessionHandle::publish_readiness(self, capability_id, capability_generation, flags)
+            .map_err(|error| crate::backend::ExecutionWakeError::new("EIO", error.to_string()))
+    }
+
+    fn remove_readiness(
+        &self,
+        capability_id: u64,
+        capability_generation: u64,
+    ) -> Result<(), crate::backend::ExecutionWakeError> {
+        V8SessionHandle::remove_readiness(self, capability_id, capability_generation)
+            .map_err(|error| crate::backend::ExecutionWakeError::new("EIO", error.to_string()))
+    }
+
+    fn set_application_read_interest(
+        &self,
+        capability_id: u64,
+        capability_generation: u64,
+        enabled: bool,
+    ) -> Result<(), crate::backend::ExecutionWakeError> {
+        V8SessionHandle::set_application_read_interest(
+            self,
+            capability_id,
+            capability_generation,
+            enabled,
+        )
+        .map_err(|error| crate::backend::ExecutionWakeError::new("EIO", error.to_string()))
+    }
+
+    fn publish_signal(
+        &self,
+        signal: i32,
+        delivery_token: u64,
+    ) -> Result<(), crate::backend::ExecutionWakeError> {
+        V8SessionHandle::publish_signal(self, signal, delivery_token)
+            .map_err(|error| crate::backend::ExecutionWakeError::new("EIO", error.to_string()))
+    }
+
+    fn send_adapter_event(
+        &self,
+        event_type: &str,
+        payload: &serde_json::Value,
+        encoded_limit_name: &'static str,
+        max_encoded_bytes: usize,
+    ) -> Result<(), crate::backend::ExecutionWakeError> {
+        let encoded_limit =
+            crate::backend::PayloadLimit::new(encoded_limit_name, max_encoded_bytes).map_err(
+                |error| {
+                    crate::backend::ExecutionWakeError::new("EINVAL", error.message)
+                        .with_details(error.details)
+                },
+            )?;
+        // Reject an oversized structured value with a counting writer before
+        // the adapter constructs a CBOR value and encoded Vec.
+        encoded_limit.admit_json(payload).map_err(|error| {
+            crate::backend::ExecutionWakeError::new("E2BIG", error.message)
+                .with_details(error.details)
+        })?;
+        let encoded = crate::v8_runtime::json_to_cbor_payload(payload).map_err(|error| {
+            crate::backend::ExecutionWakeError::new(
+                "ERR_AGENTOS_ADAPTER_EVENT_ENCODE",
+                error.to_string(),
+            )
+        })?;
+        let encoded =
+            crate::host::BoundedBytes::try_new(encoded, &encoded_limit).map_err(|error| {
+                crate::backend::ExecutionWakeError::new("E2BIG", error.message)
+                    .with_details(error.details)
+            })?;
+        V8SessionHandle::send_stream_event(self, event_type, encoded.into_vec())
+            .map_err(|error| crate::backend::ExecutionWakeError::new("EIO", error.to_string()))
     }
 }
 

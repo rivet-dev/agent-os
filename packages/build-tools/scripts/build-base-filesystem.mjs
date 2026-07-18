@@ -41,6 +41,7 @@ const EXTRA_DIRECTORIES = [
 
 const TRANSFORMS = [
 	"Normalize HOSTNAME to agentos",
+	"Allow traversal into the agentOS /root/node_modules compatibility projection",
 	"Preserve the captured user-level environment and filesystem layout as the agentos base layer",
 	"Add the non-Alpine /workspace directory (default agent working directory) owned by the base user",
 ];
@@ -247,6 +248,9 @@ function captureAlpineSnapshot() {
 function normalizeEntry(entry) {
 	if (entry.path === "/etc/hostname" && entry.type === "file") {
 		return { ...entry, content: `${BASE_HOSTNAME}\n` };
+	}
+	if (entry.path === "/root" && entry.type === "directory") {
+		return { ...entry, mode: "711" };
 	}
 	return entry;
 }

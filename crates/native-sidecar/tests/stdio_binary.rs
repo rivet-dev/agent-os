@@ -744,11 +744,9 @@ fn native_sidecar_binary_runs_the_framed_protocol_over_stdio() {
         wire_request(
             13,
             wire_vm(&connection_id, &session_id, &vm_id),
-            RequestPayload::SnapshotRootFilesystemRequest(
-                agentos_native_sidecar::wire::SnapshotRootFilesystemRequest {
-                    max_bytes: 64 * 1024 * 1024,
-                },
-            ),
+            RequestPayload::SnapshotRootFilesystemRequest(SnapshotRootFilesystemRequest {
+                max_bytes: 64 * 1024 * 1024,
+            }),
         ),
     );
     let snapshot = recv_response(&mut control, &codec, 13, &mut buffered_events);
@@ -990,8 +988,8 @@ fn native_sidecar_binary_supports_js_bridge_host_filesystem_access() {
                     js_bridge_result(call, Some(json!("/existing.txt")), None)
                 }
                 ("stat" | "lstat", "/existing.txt") => {
-                    let metadata =
-                        fs::metadata(host_root.join("existing.txt")).expect("stat host file");
+                    let metadata = fs::metadata(host_root.join("existing.txt"))
+                        .expect("stat existing host file");
                     js_bridge_result(
                         call,
                         Some(json!({

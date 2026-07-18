@@ -353,7 +353,6 @@ fn match_rule_unit_assertions() {
     assert!(!name_qualifies("EXECUTION_DRIVER_NAME"));
     assert!(!name_qualifies("DEFAULT_VIRTUAL_CPU_COUNT"));
     // Exclusions.
-    assert!(!name_qualifies("AGENTOS_WASM_MAX_FUEL_ENV"));
     assert!(!name_qualifies("ERR_SESSION_DEFERRED_COMMAND_ERROR_CODE"));
 
     // Declaration extraction.

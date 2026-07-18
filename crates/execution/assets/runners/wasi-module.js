@@ -31,6 +31,7 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
       ? globalThis.lookupFdHandle
       : undefined);
   const __agentOSWasiErrnoSuccess = 0;
+  const __agentOSWasiErrno2big = 1;
   const __agentOSWasiErrnoAcces = 2;
   const __agentOSWasiErrnoAgain = 6;
   const __agentOSWasiErrnoBadf = 8;
@@ -1269,6 +1270,16 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
 
     _statResolvedPath(resolved, follow) {
       if (
+        this._sidecarManagedProcess() &&
+        typeof resolved?.guestPath === "string"
+      ) {
+        return this._measureWasiPhase(follow ? "syncRpcStat" : "syncRpcLstat", () =>
+          __agentOSWasiSyncRpc().callSync(follow ? "fs.statSync" : "fs.lstatSync", [
+            resolved.guestPath,
+          ])
+        );
+      }
+      if (
         typeof globalThis?.__agentOSSyncRpc?.callSync === "function" &&
         typeof resolved?.guestPath === "string"
       ) {
@@ -2263,6 +2274,12 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
     }
 
     _pathOpen(fd, _dirflags, pathPtr, pathLen, oflags, rightsBase, rightsInheriting, _fdflags, openedFdPtr) {
+      // The managed runner replaces path_open with its dirfd-aware kernel RPC.
+      // Reaching this Node-fs implementation in production is an architecture
+      // violation, not a reason to open an ambient host descriptor.
+      if (this._sidecarManagedProcess()) {
+        return __agentOSWasiErrnoIo;
+      }
       try {
         const entry = this._measureWasiPhase("descriptorEntry", () => this._descriptorEntry(fd));
         if (
@@ -2801,9 +2818,17 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
     _randomGet(bufPtr, bufLen) {
       try {
         const length = Number(bufLen) >>> 0;
-        const bytes = Buffer.allocUnsafe(length);
-        __agentOSCrypto().randomFillSync(bytes);
-        return this._writeBytes(bufPtr, bytes);
+        const offset = Number(bufPtr) >>> 0;
+        const memory = this._memoryBytes();
+        if (length > __agentOSWasmSyncReadLimitBytes) return __agentOSWasiErrno2big;
+        if (offset > memory.byteLength - length) return __agentOSWasiErrnoFault;
+        const chunkBytes = 64 * 1024;
+        for (let written = 0; written < length; written += chunkBytes) {
+          __agentOSCrypto().randomFillSync(
+            memory.subarray(offset + written, offset + Math.min(length, written + chunkBytes)),
+          );
+        }
+        return __agentOSWasiErrnoSuccess;
       } catch {
         return __agentOSWasiErrnoFault;
       }

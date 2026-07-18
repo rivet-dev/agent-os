@@ -7,7 +7,6 @@ use crate::state::{BridgeError, VmState, BINDING_DRIVER_NAME};
 use crate::{NativeSidecar, NativeSidecarBridge, SidecarError};
 use agentos_kernel::command_registry::CommandDriver;
 use agentos_native_sidecar_core::bindings::{
-    ensure_binding_registry_capacity as core_ensure_binding_registry_capacity,
     ensure_collection_name_available as core_ensure_collection_name_available,
     ensure_command_aliases_available as core_ensure_command_aliases_available,
     registered_binding_command_names,
@@ -63,13 +62,9 @@ where
     validate_bindings_registration(&payload)?;
 
     let registered_name = payload.name.clone();
-    let (original_permissions, original_bindings, original_command_guest_paths) = {
+    let (original_permissions, original_bindings) = {
         let vm = sidecar.vms.get(&vm_id).expect("owned VM should exist");
-        (
-            vm.configuration.permissions.clone(),
-            vm.bindings.clone(),
-            vm.command_guest_paths.clone(),
-        )
+        (vm.configuration.permissions.clone(), vm.bindings.clone())
     };
     sidecar
         .bridge
@@ -78,7 +73,7 @@ where
         let vm = sidecar.vms.get_mut(&vm_id).expect("owned VM should exist");
         ensure_collection_name_available(&vm.bindings, &registered_name)?;
         ensure_command_aliases_available(&vm.bindings, &payload)?;
-        ensure_binding_registry_capacity(&vm.bindings, &payload)?;
+        ensure_binding_registry_capacity(vm, &payload)?;
         vm.bindings.insert(registered_name.clone(), payload);
         refresh_binding_registry(vm)?;
         Ok::<_, SidecarError>(binding_command_names(vm).len() as u32)
@@ -91,21 +86,43 @@ where
             result
         }
         Err(error) => {
-            let vm = sidecar.vms.get_mut(&vm_id).expect("owned VM should exist");
-            vm.bindings = original_bindings;
-            vm.command_guest_paths = original_command_guest_paths;
+            let registry_rollback = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("owned VM should exist");
+                vm.bindings = original_bindings;
+                refresh_binding_registry(vm)
+            };
             match sidecar.bridge.restore_vm_permissions_fail_closed(
                 &vm_id,
                 &original_permissions,
                 "binding collection registration rollback",
                 &error,
             ) {
-                Ok(()) => return Err(error),
+                Ok(()) => {}
                 Err(rollback_error) => {
-                    vm.configuration.permissions = deny_all_policy();
+                    sidecar
+                        .vms
+                        .get_mut(&vm_id)
+                        .expect("owned VM should exist")
+                        .configuration
+                        .permissions = deny_all_policy();
                     return Err(rollback_error);
                 }
             }
+            if let Err(rollback_error) = registry_rollback {
+                sidecar
+                    .vms
+                    .get_mut(&vm_id)
+                    .expect("owned VM should exist")
+                    .configuration
+                    .permissions = deny_all_policy();
+                sidecar
+                    .bridge
+                    .set_vm_permissions(&vm_id, &deny_all_policy())?;
+                return Err(SidecarError::InvalidState(format!(
+                    "binding registry rollback failed after {error}: {rollback_error}"
+                )));
+            }
+            return Err(error);
         }
     };
 
@@ -124,16 +141,11 @@ where
 fn refresh_binding_registry(vm: &mut VmState) -> Result<(), SidecarError> {
     let commands = binding_command_names(vm);
     vm.kernel
-        .register_driver(CommandDriver::new(
+        .replace_driver(CommandDriver::new(
             BINDING_DRIVER_NAME,
             commands.iter().cloned(),
         ))
         .map_err(kernel_error)?;
-
-    for command in commands {
-        vm.command_guest_paths
-            .insert(command.clone(), format!("/bin/{command}"));
-    }
     Ok(())
 }
 
@@ -600,10 +612,55 @@ fn ensure_command_aliases_available(
 }
 
 fn ensure_binding_registry_capacity(
-    bindings: &BTreeMap<String, RegisterHostCallbacksRequest>,
+    vm: &VmState,
     payload: &RegisterHostCallbacksRequest,
 ) -> Result<(), SidecarError> {
-    core_ensure_binding_registry_capacity(bindings, payload).map_err(binding_registration_error)
+    const COLLECTION_CONFIG_PATH: &str = "limits.bindings.maxRegisteredCollections";
+    const BINDING_CONFIG_PATH: &str = "limits.bindings.maxRegisteredBindingsPerVm";
+
+    let collection_limit = vm.limits.bindings.max_registered_collections;
+    if vm.bindings.len() >= collection_limit {
+        let observed = vm.bindings.len().saturating_add(1);
+        return Err(SidecarError::host_resource_limit(
+            COLLECTION_CONFIG_PATH,
+            collection_limit,
+            observed,
+            format!(
+                "VM would have {observed} registered binding collections, limit is {collection_limit}; raise {COLLECTION_CONFIG_PATH}"
+            ),
+        ));
+    }
+
+    let registered_bindings = vm
+        .bindings
+        .values()
+        .map(|collection| collection.callbacks.len())
+        .sum::<usize>();
+    let total_bindings = registered_bindings
+        .checked_add(payload.callbacks.len())
+        .ok_or_else(|| {
+            SidecarError::host_resource_limit(
+                BINDING_CONFIG_PATH,
+                vm.limits.bindings.max_registered_bindings_per_vm,
+                usize::MAX,
+                format!(
+                    "registered host callback count overflow; raise {BINDING_CONFIG_PATH} only after reducing the requested collection size"
+                ),
+            )
+        })?;
+    let binding_limit = vm.limits.bindings.max_registered_bindings_per_vm;
+    if total_bindings > binding_limit {
+        return Err(SidecarError::host_resource_limit(
+            BINDING_CONFIG_PATH,
+            binding_limit,
+            total_bindings,
+            format!(
+                "VM would have {total_bindings} registered host callbacks, limit is {binding_limit}; raise {BINDING_CONFIG_PATH}"
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 fn binding_command_names(vm: &VmState) -> Vec<String> {

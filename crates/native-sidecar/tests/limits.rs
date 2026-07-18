@@ -26,6 +26,15 @@ fn defaults_match_struct_default() {
         Some(128 * 1024 * 1024),
         "WASM memory must be bounded by default"
     );
+    assert_eq!(
+        parsed.wasm.active_cpu_time_limit_ms, 30_000,
+        "WASM active CPU must have a default runaway safeguard"
+    );
+    assert_eq!(
+        parsed.wasm.wall_clock_limit_ms, None,
+        "WASM wall-clock cutoff must remain opt-in"
+    );
+    assert_eq!(parsed.wasm.deterministic_fuel, None);
 }
 
 #[test]
@@ -37,7 +46,9 @@ fn overrides_only_present_keys() {
         }),
         wasm: Some(WasmLimitsConfig {
             max_module_file_bytes: Some(1_048_576),
-            runner_cpu_time_limit_ms: Some(90_000),
+            active_cpu_time_limit_ms: Some(90_000),
+            wall_clock_limit_ms: Some(120_000),
+            deterministic_fuel: Some(1_000_000),
             ..Default::default()
         }),
         js_runtime: Some(JsRuntimeLimitsConfig {
@@ -57,7 +68,9 @@ fn overrides_only_present_keys() {
 
     assert_eq!(parsed.bindings.max_binding_schema_bytes, 4096);
     assert_eq!(parsed.wasm.max_module_file_bytes, 1_048_576);
-    assert_eq!(parsed.wasm.runner_cpu_time_limit_ms, 90_000);
+    assert_eq!(parsed.wasm.active_cpu_time_limit_ms, 90_000);
+    assert_eq!(parsed.wasm.wall_clock_limit_ms, Some(120_000));
+    assert_eq!(parsed.wasm.deterministic_fuel, Some(1_000_000));
     assert_eq!(parsed.js_runtime.v8_heap_limit_mb, Some(256));
     assert_eq!(parsed.python.execution_timeout_ms, 1000);
     assert_eq!(parsed.http.max_fetch_response_bytes, 65536);

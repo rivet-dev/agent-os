@@ -91,6 +91,9 @@ mod tests {
             command: "node".to_owned(),
             status,
             exit_code,
+            pending_termination: None,
+            termination: None,
+            runtime_fault: None,
             identity: ProcessIdentity::default(),
         }
     }

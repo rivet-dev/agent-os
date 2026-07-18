@@ -29,6 +29,65 @@ fn production_v8_runtime_never_discovers_the_process_runtime() {
 }
 
 #[test]
+fn process_runtime_is_the_only_vm_executor_admission_owner() {
+    let manifest_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let session =
+        fs::read_to_string(manifest_root.join("src/session.rs")).expect("read V8 session source");
+    let session_compact: String = session
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    for local_admission in [
+        "SlotControl",
+        "SessionSlotPermit",
+        "activeV8executors",
+        "observe_executor(ExecutorMetricClass::Vm",
+    ] {
+        assert!(
+            !session_compact.contains(local_admission),
+            "V8 must not own process executor accounting primitive {local_admission}"
+        );
+    }
+    assert!(
+        session_compact.contains("slot_permit:SessionExecutorPermit")
+            && session_compact.contains(".vm_executor_admission().try_acquire()")
+            && session_compact.contains("self.manager_executor_admission.try_acquire()")
+            && session_compact.contains("self.manager_executor_admission.active()"),
+        "V8 assignment must combine process-global admission with an independent manager-local ceiling"
+    );
+
+    let runtime = fs::read_to_string(manifest_root.join("../runtime/src/lib.rs"))
+        .expect("read process runtime source");
+    let runtime_compact: String = runtime
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    assert!(
+        runtime_compact.contains("vm_executors:VmExecutorAdmission")
+            && runtime_compact.contains("vm_executors:self.vm_executors.clone()")
+            && runtime_compact.contains(
+                "VmExecutorAdmission::new(config.max_active_vm_executors,metrics.clone())"
+            ),
+        "one process-owned admission must be cloned unchanged into every RuntimeContext scope"
+    );
+
+    let admission = fs::read_to_string(manifest_root.join("../runtime/src/executor.rs"))
+        .expect("read runtime-neutral executor admission");
+    for engine_name in ["V8", "Wasmtime", "JavascriptExecution", "WasmExecution"] {
+        assert!(
+            !admission.contains(engine_name),
+            "runtime executor admission must not name engine {engine_name}"
+        );
+    }
+    assert!(
+        admission.contains("pub struct VmExecutorAdmission")
+            && admission.contains("pub struct VmExecutorPermit")
+            && admission.contains("WARN_AGENTOS_VM_EXECUTOR_NEAR_LIMIT"),
+        "runtime must expose engine-neutral RAII admission with near-limit warning"
+    );
+}
+
+#[test]
 fn node_server_close_waits_for_accepted_connections_to_drain() {
     let source = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -46,10 +105,13 @@ fn node_server_close_waits_for_accepted_connections_to_drain() {
         "accepted-socket teardown must re-check the Node server close drain gate"
     );
     assert!(
-		compact.contains("Promise.resolve(_netServerCloseRaw(serverId)).then(")
-			&& compact.contains("this._pendingTransportCloses-=1")
-			&& compact.contains("this._emitCloseIfDrained();"),
-		"listener teardown must complete asynchronously before entering the Node server close drain gate"
+		compact.contains("constfinishTransportClose=(error)=>{")
+			&& compact.contains("this._pendingTransportCloses-=1;")
+			&& compact.contains("this._emitCloseIfDrained();")
+			&& compact.contains(
+				"Promise.resolve(_netServerCloseRaw(serverId,unlinkNodePath)).then(()=>finishTransportClose(),finishTransportClose,);"
+			),
+		"listener teardown must complete through the asynchronous accounting helper before entering the Node server close drain gate"
     );
     assert!(
 		compact.contains("this._pendingTransportCloses!==0")

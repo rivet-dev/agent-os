@@ -1,6 +1,6 @@
 use crate::posix::{
-    MountedFileSystem, VfsError as PosixVfsError, VfsResult as PosixVfsResult, VirtualDirEntry,
-    VirtualStat,
+    FileExtent, MountedFileSystem, VfsError as PosixVfsError, VfsResult as PosixVfsResult,
+    VirtualDirEntry, VirtualStat,
 };
 use agentos_runtime::{BlockingJobError, RuntimeContext};
 use std::any::Any;
@@ -514,6 +514,22 @@ where
         })
     }
 
+    fn extent_at(&mut self, path: &str, index: usize) -> PosixVfsResult<Option<FileExtent>> {
+        let inner = Arc::clone(&self.inner);
+        let path = path.to_owned();
+        let reserved_bytes = path.len();
+        self.run(reserved_bytes, async move {
+            inner.extent_at(&path, index).await
+        })
+        .map(|extent| {
+            extent.map(|extent| FileExtent {
+                start: extent.start,
+                end: extent.end,
+                unwritten: extent.unwritten,
+            })
+        })
+    }
+
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> PosixVfsResult<Vec<u8>> {
         let inner = Arc::clone(&self.inner);
         let path = path.to_owned();
@@ -623,6 +639,22 @@ mod tests {
         assert_eq!(stat.mode & 0o777, 0o600);
         assert_eq!(stat.mode & S_IFREG, S_IFREG);
         assert_eq!(stat.size, 5);
+        assert_eq!(
+            mounted
+                .extent_at("/work/nested/file.txt", 0)
+                .expect("query first extent"),
+            Some(FileExtent {
+                start: 0,
+                end: 5,
+                unwritten: false,
+            })
+        );
+        assert_eq!(
+            mounted
+                .extent_at("/work/nested/file.txt", 1)
+                .expect("query past final extent"),
+            None
+        );
     }
 
     #[test]

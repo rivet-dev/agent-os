@@ -28,14 +28,17 @@ fn syncrpc_lat_enabled() -> bool {
 fn record_syncrpc_lat(ns: u64) {
     let m = SYNCRPC_LAT.get_or_init(|| std::sync::Mutex::new((0, 0, 0)));
     let Ok(mut a) = m.lock() else {
+        eprintln!(
+            "ERR_AGENTOS_SYNCRPC_LAT_METRICS_POISONED: sync bridge latency metrics lock poisoned"
+        );
         return;
     };
-    a.0 += 1;
-    a.1 = a.1.wrapping_add(ns / 1000);
+    a.0 = a.0.saturating_add(1);
+    a.1 = a.1.saturating_add(ns / 1000);
     a.2 = a.2.max(ns / 1000);
     if a.0 % 25 == 0 {
         if let Ok(path) = std::env::var("AGENTOS_SYNCRPC_LAT_FILE") {
-            let _ = std::fs::write(
+            if let Err(error) = std::fs::write(
                 &path,
                 format!(
                     "calls={} total_us={} avg_us={} max_us={}\n",
@@ -44,7 +47,12 @@ fn record_syncrpc_lat(ns: u64) {
                     a.1 / a.0,
                     a.2
                 ),
-            );
+            ) {
+                eprintln!(
+                    "WARN_AGENTOS_SYNCRPC_LAT_METRICS_WRITE: path={} error={error}",
+                    path
+                );
+            }
         }
     }
 }
@@ -72,13 +80,16 @@ pub(crate) fn record_sync_bridge_host_phase(method: &str, stage: &str, elapsed: 
     }
     let stats = SYNC_BRIDGE_HOST_PHASES.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
     let Ok(mut stats) = stats.lock() else {
+        eprintln!(
+            "ERR_AGENTOS_SYNC_BRIDGE_PHASE_METRICS_POISONED: sync bridge phase metrics lock poisoned"
+        );
         return;
     };
     let elapsed_us = elapsed.as_micros() as u64;
     let key = format!("{method}:{stage}");
     let entry = stats.entry(key).or_default();
-    entry.calls += 1;
-    entry.total_us = entry.total_us.wrapping_add(elapsed_us);
+    entry.calls = entry.calls.saturating_add(1);
+    entry.total_us = entry.total_us.saturating_add(elapsed_us);
     entry.max_us = entry.max_us.max(elapsed_us);
 
     if let Ok(path) = std::env::var("AGENTOS_SYNC_BRIDGE_HOST_PHASES_FILE") {
@@ -93,7 +104,12 @@ pub(crate) fn record_sync_bridge_host_phase(method: &str, stage: &str, elapsed: 
                 value.calls, value.total_us, avg_us, value.max_us
             ));
         }
-        let _ = std::fs::write(path, lines);
+        if let Err(error) = std::fs::write(&path, lines) {
+            eprintln!(
+                "WARN_AGENTOS_SYNC_BRIDGE_PHASE_METRICS_WRITE: path={} error={error}",
+                path
+            );
+        }
     }
 }
 
@@ -103,6 +119,9 @@ fn track_sync_bridge_call_method(call_id: u64, method: &str) {
     }
     let methods = SYNC_BRIDGE_CALL_METHODS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let Ok(mut methods) = methods.lock() else {
+        eprintln!(
+            "ERR_AGENTOS_SYNC_BRIDGE_METHOD_TRACKING_POISONED: sync bridge method tracking lock poisoned"
+        );
         return;
     };
     if methods.len() > 4096 {
@@ -113,8 +132,15 @@ fn track_sync_bridge_call_method(call_id: u64, method: &str) {
 
 fn cleanup_sync_bridge_call_tracking(call_id: u64) {
     if let Some(methods) = SYNC_BRIDGE_CALL_METHODS.get() {
-        if let Ok(mut methods) = methods.lock() {
-            methods.remove(&call_id);
+        match methods.lock() {
+            Ok(mut methods) => {
+                methods.remove(&call_id);
+            }
+            Err(_) => {
+                eprintln!(
+                    "ERR_AGENTOS_SYNC_BRIDGE_METHOD_TRACKING_POISONED: could not remove call_id={call_id} from diagnostic tracking"
+                );
+            }
         }
     }
 }
@@ -298,32 +324,91 @@ fn transfer_response_reservation(
     agentos_runtime::accounting::SharedReservation::new(reservation)
 }
 
-fn bounded_terminal_error_payload(error: &str, maximum_bytes: usize) -> Vec<u8> {
-    if error.len() <= maximum_bytes {
-        return error.as_bytes().to_vec();
+fn encode_terminal_error_payload(code: &str, message: &str, maximum_bytes: usize) -> Vec<u8> {
+    let encode = |message: &str| {
+        let value = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text(String::from("code")),
+                ciborium::Value::Text(code.to_owned()),
+            ),
+            (
+                ciborium::Value::Text(String::from("message")),
+                ciborium::Value::Text(message.to_owned()),
+            ),
+        ]);
+        let mut payload = Vec::new();
+        ciborium::into_writer(&value, &mut payload)
+            .expect("a bridge error map containing only strings must encode");
+        payload
+    };
+
+    let payload = encode(message);
+    if payload.len() <= maximum_bytes {
+        return payload;
     }
 
-    // Preserve the stable typed code whenever the declared response capacity
-    // can hold it. Production bridge declarations reserve at least 4 KiB; the
-    // shorter fallback only applies to synthetic or misconfigured callers.
-    let code = error.split_once(':').map_or(error, |(code, _)| code);
-    if code.len() <= maximum_bytes {
-        return code.as_bytes().to_vec();
+    // Production bridge declarations reserve at least 4 KiB. For smaller
+    // synthetic limits, shorten the diagnostic without ever deriving the
+    // stable code from that diagnostic.
+    let mut boundary = message.len().min(maximum_bytes);
+    while boundary > 0 && !message.is_char_boundary(boundary) {
+        boundary -= 1;
     }
-    code.as_bytes()[..maximum_bytes.min(code.len())].to_vec()
+    while boundary > 0 {
+        let payload = encode(&message[..boundary]);
+        if payload.len() <= maximum_bytes {
+            return payload;
+        }
+        boundary -= 1;
+        while boundary > 0 && !message.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+    }
+    let payload = encode("");
+    if payload.len() <= maximum_bytes {
+        payload
+    } else {
+        Vec::new()
+    }
 }
 
-fn bridge_call_timeout_error(call_id: u64, timeout: Duration) -> String {
+fn bridge_error_payload_message(payload: &[u8]) -> String {
+    let Ok(ciborium::Value::Map(entries)) = ciborium::from_reader::<ciborium::Value, _>(payload)
+    else {
+        return String::from_utf8_lossy(payload).to_string();
+    };
+    let mut code = None;
+    let mut message = None;
+    for (key, value) in entries {
+        let (ciborium::Value::Text(key), ciborium::Value::Text(value)) = (key, value) else {
+            continue;
+        };
+        match key.as_str() {
+            "code" => code = Some(value),
+            "message" => message = Some(value),
+            _ => {}
+        }
+    }
+    match (code, message) {
+        (Some(code), Some(message)) => format!("{code}: {message}"),
+        (_, Some(message)) => message,
+        _ => String::from_utf8_lossy(payload).to_string(),
+    }
+}
+
+fn bridge_call_timeout_message(call_id: u64, timeout: Duration) -> String {
     format!(
-        "ERR_AGENTOS_BRIDGE_CALL_TIMEOUT: bridge call_id {call_id} exceeded its {} ms deadline; raise limits.reactor.operationDeadlineMs",
+        "bridge call_id {call_id} exceeded its {} ms deadline; raise limits.reactor.operationDeadlineMs",
         timeout.as_millis()
     )
 }
 
 fn deliver_bridge_call_timeout(call_id: u64, target: BridgeCallTarget) -> Result<String, String> {
-    let error = bridge_call_timeout_error(call_id, target.timeout);
-    let payload = bounded_terminal_error_payload(
-        &error,
+    let message = bridge_call_timeout_message(call_id, target.timeout);
+    let error = format!("ERR_AGENTOS_BRIDGE_CALL_TIMEOUT: {message}");
+    let payload = encode_terminal_error_payload(
+        "ERR_AGENTOS_BRIDGE_CALL_TIMEOUT",
+        &message,
         target
             .max_response_bytes
             .min(target.response_reservation.amount()),
@@ -404,6 +489,57 @@ pub struct BridgeCallRegistry {
     retired: Mutex<RetiredBridgeCalls>,
     max_pending: usize,
 }
+
+/// A bridge-response settlement failure whose classification survives the
+/// in-process `io::Error` transport. Callers must branch on `kind`, never on
+/// the diagnostic text: the latter may contain guest-controlled values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeSettlementErrorKind {
+    StaleCompletion,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeSettlementError {
+    kind: BridgeSettlementErrorKind,
+    message: String,
+}
+
+impl BridgeSettlementError {
+    pub fn stale_completion(message: impl Into<String>) -> Self {
+        Self {
+            kind: BridgeSettlementErrorKind::StaleCompletion,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> BridgeSettlementErrorKind {
+        self.kind
+    }
+
+    /// Retained for diagnostic assertions; production classification uses
+    /// `kind()`.
+    pub fn contains(&self, needle: &str) -> bool {
+        self.message.contains(needle)
+    }
+}
+
+impl From<String> for BridgeSettlementError {
+    fn from(message: String) -> Self {
+        Self {
+            kind: BridgeSettlementErrorKind::Other,
+            message,
+        }
+    }
+}
+
+impl std::fmt::Display for BridgeSettlementError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for BridgeSettlementError {}
 
 impl BridgeCallRegistry {
     pub fn new(max_pending: usize) -> Self {
@@ -680,7 +816,7 @@ impl BridgeCallRegistry {
         supplied_session_id: &str,
         supplied_generation: Option<u64>,
         mut response: BridgeResponse,
-    ) -> Result<(), String> {
+    ) -> Result<(), BridgeSettlementError> {
         let call_id = response.call_id;
         let mut pending = self.pending.lock().map_err(|_| {
             String::from("ERR_AGENTOS_BRIDGE_REGISTRY_POISONED: bridge registry lock poisoned")
@@ -697,10 +833,10 @@ impl BridgeCallRegistry {
                     if retired.session_id == supplied_session_id
                         && retired.session_generation == supplied_generation
                     {
-                        return Err(format!(
+                        return Err(BridgeSettlementError::stale_completion(format!(
                             "ERR_AGENTOS_BRIDGE_STALE_COMPLETION: response for canceled host-visible bridge call_id {} in session {} generation {:?}",
                             response.call_id, supplied_session_id, supplied_generation
-                        ));
+                        )));
                     }
                     return Err(format!(
                         "ERR_AGENTOS_BRIDGE_STALE_GENERATION: response call_id {} named session {} generation {:?}, expected {} generation {:?}",
@@ -709,25 +845,29 @@ impl BridgeCallRegistry {
                         supplied_generation,
                         retired.session_id,
                         retired.session_generation
-                    ));
+                    )
+                    .into());
                 }
                 return Err(format!(
                     "ERR_AGENTOS_BRIDGE_UNKNOWN_CALL_ID: response for unknown bridge call_id {}",
                     response.call_id
-                ));
+                )
+                .into());
             }
         };
         if target.session_id != supplied_session_id {
             return Err(format!(
                 "ERR_AGENTOS_BRIDGE_STALE_GENERATION: response call_id {} named session {}, expected {}",
                 response.call_id, supplied_session_id, target.session_id
-            ));
+            )
+            .into());
         }
         if target.session_generation != supplied_generation {
             return Err(format!(
                 "ERR_AGENTOS_BRIDGE_STALE_GENERATION: response call_id {} generation {:?}, expected {:?}",
                 response.call_id, supplied_generation, target.session_generation
-            ));
+            )
+            .into());
         }
         // Identity validation must not consume a legitimate route when a stale
         // response arrives. Once identity is validated, however, settlement is
@@ -753,7 +893,7 @@ impl BridgeCallRegistry {
                     .insert(call_id, &target, self.max_pending);
             }
             let error = deliver_bridge_call_timeout(call_id, target)?;
-            return Err(error);
+            return Err(error.into());
         }
 
         if response.payload.len() > target.max_response_bytes {
@@ -763,8 +903,14 @@ impl BridgeCallRegistry {
                 response.payload.len(),
                 target.max_response_bytes
             );
-            let payload = bounded_terminal_error_payload(
-                &error,
+            let payload = encode_terminal_error_payload(
+                "ERR_AGENTOS_BRIDGE_RESPONSE_LIMIT",
+                &format!(
+                    "response call_id {} contains {} bytes, exceeding its declared maximum of {}; raise limits.reactor.maxBridgeResponseBytes",
+                    response.call_id,
+                    response.payload.len(),
+                    target.max_response_bytes
+                ),
                 target
                     .max_response_bytes
                     .min(target.response_reservation.amount()),
@@ -785,7 +931,7 @@ impl BridgeCallRegistry {
                         response.call_id
                     )
                 })?;
-            return Err(error);
+            return Err(error.into());
         }
 
         if let Some(reservation) = response.reservation.take() {
@@ -795,8 +941,12 @@ impl BridgeCallRegistry {
                 reservation.resource(),
                 reservation.amount()
             );
-            let payload = bounded_terminal_error_payload(
-                &error,
+            let payload = encode_terminal_error_payload(
+                "ERR_AGENTOS_BRIDGE_RESPONSE_ACCOUNTING",
+                &format!(
+                    "response call_id {} carries a producer-side reservation; bridge response ownership must come from the call's admission reservation",
+                    response.call_id
+                ),
                 target
                     .max_response_bytes
                     .min(target.response_reservation.amount()),
@@ -817,7 +967,7 @@ impl BridgeCallRegistry {
                         response.call_id
                     )
                 })?;
-            return Err(error);
+            return Err(error.into());
         }
 
         if let Err(limit_error) = grow_response_reservation(&mut target, response.payload.len()) {
@@ -827,8 +977,13 @@ impl BridgeCallRegistry {
                 response.payload.len(),
                 limit_error
             );
-            let payload = bounded_terminal_error_payload(
-                &error,
+            let payload = encode_terminal_error_payload(
+                "ERR_AGENTOS_BRIDGE_RESPONSE_LIMIT",
+                &format!(
+                    "response call_id {} could not reserve {} concrete bytes; raise limits.reactor.maxBridgeResponseBytes",
+                    response.call_id,
+                    response.payload.len()
+                ),
                 target
                     .max_response_bytes
                     .min(target.response_reservation.amount()),
@@ -849,7 +1004,7 @@ impl BridgeCallRegistry {
                         response.call_id
                     )
                 })?;
-            return Err(error);
+            return Err(error.into());
         }
 
         response.reservation = Some(transfer_response_reservation(
@@ -1241,14 +1396,43 @@ impl BridgeCallContext {
         args: Vec<u8>,
         max_response_bytes: usize,
     ) -> Result<Option<SyncBridgeCallResponse>, String> {
+        let response =
+            self.sync_call_frame_with_max_response_bytes(method, args, max_response_bytes)?;
+        match response {
+            Some(response) if response.status == 1 => {
+                Err(bridge_error_payload_message(&response.payload))
+            }
+            response => Ok(response),
+        }
+    }
+
+    /// Perform a sync bridge call while preserving the structured status=1
+    /// payload. The V8 adapter uses this to attach typed error fields without
+    /// reconstructing an errno from a diagnostic string.
+    pub fn sync_call_frame_with_max_response_bytes(
+        &self,
+        method: &str,
+        args: Vec<u8>,
+        max_response_bytes: usize,
+    ) -> Result<Option<SyncBridgeCallResponse>, String> {
         let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
         track_sync_bridge_call_method(call_id, method);
 
         // Optional diagnostic tracking. Correctness comes from the atomic
         // counter and recv_response(call_id) identity validation.
         if self.track_pending_calls {
-            let mut pending = self.pending_calls.lock().unwrap();
+            let mut pending = match self.pending_calls.lock() {
+                Ok(pending) => pending,
+                Err(_) => {
+                    cleanup_sync_bridge_call_tracking(call_id);
+                    return Err(String::from(
+                        "ERR_AGENTOS_BRIDGE_PENDING_CALLS_POISONED: pending bridge-call lock poisoned during admission",
+                    ));
+                }
+            };
             if !pending.insert(call_id) {
+                drop(pending);
+                cleanup_sync_bridge_call_tracking(call_id);
                 return Err(format!("duplicate call_id: {}", call_id));
             }
         }
@@ -1257,11 +1441,17 @@ impl BridgeCallContext {
             self.call_id_router
         {
             let phase_start = Instant::now();
-            let runtime = self.runtime.as_ref().ok_or_else(|| {
-                String::from(
+            let runtime = match self.runtime.as_ref() {
+                Some(runtime) => runtime,
+                None => {
+                    return Err(self.cleanup_pending_call_after_error(
+                        call_id,
+                        String::from(
                     "ERR_AGENTOS_RUNTIME_NOT_INJECTED: direct bridge calls require a session RuntimeContext",
-                )
-            })?;
+                        ),
+                    ));
+                }
+            };
             let receiver = match registry.register_sync_with_timeout(
                 runtime,
                 args.len(),
@@ -1273,8 +1463,7 @@ impl BridgeCallContext {
             ) {
                 Ok(receiver) => receiver,
                 Err(error) => {
-                    self.remove_pending_call(call_id);
-                    return Err(error);
+                    return Err(self.cleanup_pending_call_after_error(call_id, error));
                 }
             };
             record_sync_bridge_host_phase(method, "host_register_route", phase_start.elapsed());
@@ -1298,16 +1487,17 @@ impl BridgeCallContext {
         let phase_start = Instant::now();
         if let Some(route) = pending_route.as_ref() {
             if let Err(error) = route.mark_host_visible() {
-                self.remove_pending_call(call_id);
-                return Err(error);
+                return Err(self.cleanup_pending_call_after_error(call_id, error));
             }
         }
         if let Err(e) = self.sender.send_event(bridge_call) {
             if let Some(route) = pending_route.take() {
                 route.cancel_unpublished();
             }
-            self.remove_pending_call(call_id);
-            return Err(format!("failed to write BridgeCall: {}", e));
+            return Err(self.cleanup_pending_call_after_error(
+                call_id,
+                format!("failed to write BridgeCall: {}", e),
+            ));
         }
         record_sync_bridge_host_phase(method, "host_send_event", phase_start.elapsed());
 
@@ -1322,10 +1512,12 @@ impl BridgeCallContext {
                     recv(abort_rx) -> _ => Err(String::from("execution aborted")),
                     default(self.bridge_call_timeout) => {
                         let registry = self.call_id_router.as_ref().expect("direct response route");
-                        registry.timeout(call_id)?;
-                        receiver.recv().map_err(|_| {
-                            String::from("bridge response target closed during deadline settlement")
-                        })
+                        match registry.timeout(call_id) {
+                            Ok(_) => receiver.recv().map_err(|_| {
+                                String::from("bridge response target closed during deadline settlement")
+                            }),
+                            Err(error) => Err(error),
+                        }
                     },
                 }
             } else {
@@ -1336,10 +1528,14 @@ impl BridgeCallContext {
                     )),
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                         let registry = self.call_id_router.as_ref().expect("direct response route");
-                        registry.timeout(call_id)?;
-                        receiver.recv().map_err(|_| {
-                            String::from("bridge response target closed during deadline settlement")
-                        })
+                        match registry.timeout(call_id) {
+                            Ok(_) => receiver.recv().map_err(|_| {
+                                String::from(
+                                    "bridge response target closed during deadline settlement",
+                                )
+                            }),
+                            Err(error) => Err(error),
+                        }
                     }
                 }
             };
@@ -1356,8 +1552,7 @@ impl BridgeCallContext {
                     frame
                 }
                 Err(e) => {
-                    self.remove_pending_call(call_id);
-                    return Err(e);
+                    return Err(self.cleanup_pending_call_after_error(call_id, e));
                 }
             }
         } else {
@@ -1378,8 +1573,7 @@ impl BridgeCallContext {
                     frame
                 }
                 Err(e) => {
-                    self.remove_pending_call(call_id);
-                    return Err(e);
+                    return Err(self.cleanup_pending_call_after_error(call_id, e));
                 }
             }
         };
@@ -1388,16 +1582,12 @@ impl BridgeCallContext {
         }
 
         let phase_start = Instant::now();
-        self.remove_pending_call(call_id);
+        self.remove_pending_call(call_id)?;
         record_sync_bridge_host_phase(method, "host_cleanup", phase_start.elapsed());
 
         // Validate and extract BridgeResponse
         let phase_start = Instant::now();
-        if response.status == 1 {
-            let result = Err(String::from_utf8_lossy(&response.payload).to_string());
-            record_sync_bridge_host_phase(method, "host_extract_response", phase_start.elapsed());
-            result
-        } else if response.payload.is_empty() && response.status != 2 {
+        if response.payload.is_empty() && response.status == 0 {
             record_sync_bridge_host_phase(method, "host_extract_response", phase_start.elapsed());
             Ok(None)
         } else {
@@ -1539,27 +1729,56 @@ impl BridgeCallContext {
         self.dispatch_async_call(prepared)
     }
 
-    fn remove_pending_call(&self, call_id: u64) {
+    fn remove_pending_call(&self, call_id: u64) -> Result<(), String> {
         cleanup_sync_bridge_call_tracking(call_id);
         if self.track_pending_calls {
-            self.pending_calls.lock().unwrap().remove(&call_id);
+            self.pending_calls
+                .lock()
+                .map_err(|_| {
+                    String::from(
+                        "ERR_AGENTOS_BRIDGE_PENDING_CALLS_POISONED: pending bridge-call lock poisoned during cleanup",
+                    )
+                })?
+                .remove(&call_id);
+        }
+        Ok(())
+    }
+
+    fn cleanup_pending_call_after_error(&self, call_id: u64, error: String) -> String {
+        match self.remove_pending_call(call_id) {
+            Ok(()) => error,
+            Err(cleanup_error) => format!("{cleanup_error}; original_error={error}"),
         }
     }
 
     /// Check if a call_id is currently pending.
-    pub fn is_call_pending(&self, call_id: u64) -> bool {
+    pub fn is_call_pending(&self, call_id: u64) -> Result<bool, String> {
         if !self.track_pending_calls {
-            return false;
+            return Ok(false);
         }
-        self.pending_calls.lock().unwrap().contains(&call_id)
+        self.pending_calls
+            .lock()
+            .map(|pending| pending.contains(&call_id))
+            .map_err(|_| {
+                String::from(
+                    "ERR_AGENTOS_BRIDGE_PENDING_CALLS_POISONED: pending bridge-call lock poisoned during inspection",
+                )
+            })
     }
 
     /// Number of pending calls.
-    pub fn pending_count(&self) -> usize {
+    pub fn pending_count(&self) -> Result<usize, String> {
         if !self.track_pending_calls {
-            return 0;
+            return Ok(0);
         }
-        self.pending_calls.lock().unwrap().len()
+        self.pending_calls
+            .lock()
+            .map(|pending| pending.len())
+            .map_err(|_| {
+                String::from(
+                    "ERR_AGENTOS_BRIDGE_PENDING_CALLS_POISONED: pending bridge-call lock poisoned during inspection",
+                )
+            })
     }
 }
 
@@ -1582,9 +1801,7 @@ mod tests {
     use std::sync::Arc;
 
     fn test_runtime_context() -> RuntimeContext {
-        agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-            .expect("test process runtime")
-            .context()
+        crate::test_runtime_context()
     }
 
     fn limited_bridge_runtime(
@@ -1734,7 +1951,18 @@ mod tests {
 
     #[test]
     fn sync_call_error_response() {
-        let response_bytes = make_response_bytes(1, None, Some("ENOENT: no such file".into()));
+        let payload = encode_terminal_error_payload("ENOENT", "no such file", 4096);
+        let mut response_bytes = Vec::new();
+        ipc_binary::write_frame(
+            &mut response_bytes,
+            &BinaryFrame::BridgeResponse {
+                session_id: String::new(),
+                call_id: 1,
+                status: 1,
+                payload,
+            },
+        )
+        .expect("encode structured error response");
         let ctx = BridgeCallContext::new(
             Box::new(Vec::new()),
             Box::new(Cursor::new(response_bytes)),
@@ -1744,6 +1972,59 @@ mod tests {
         let result = ctx.sync_call("_fsReadFile", vec![0xc0]);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "ENOENT: no such file");
+    }
+
+    #[test]
+    fn terminal_error_payload_never_derives_code_from_message() {
+        let payload =
+            encode_terminal_error_payload("EIO", "EACCES: guest-controlled diagnostic", 4096);
+        let ciborium::Value::Map(entries) =
+            ciborium::from_reader::<ciborium::Value, _>(payload.as_slice())
+                .expect("decode structured bridge error")
+        else {
+            panic!("structured bridge error must be a CBOR map");
+        };
+        let text_field = |name: &str| {
+            entries.iter().find_map(|(key, value)| match (key, value) {
+                (ciborium::Value::Text(key), ciborium::Value::Text(value)) if key == name => {
+                    Some(value.as_str())
+                }
+                _ => None,
+            })
+        };
+        assert_eq!(text_field("code"), Some("EIO"));
+        assert_eq!(
+            text_field("message"),
+            Some("EACCES: guest-controlled diagnostic")
+        );
+    }
+
+    #[test]
+    fn sync_call_frame_preserves_structured_error_payload() {
+        let payload = encode_terminal_error_payload("EACCES", "permission denied", 4096);
+        let mut response_bytes = Vec::new();
+        ipc_binary::write_frame(
+            &mut response_bytes,
+            &BinaryFrame::BridgeResponse {
+                session_id: String::new(),
+                call_id: 1,
+                status: 1,
+                payload: payload.clone(),
+            },
+        )
+        .expect("encode structured error response");
+        let ctx = BridgeCallContext::new(
+            Box::new(Vec::new()),
+            Box::new(Cursor::new(response_bytes)),
+            "session-1".into(),
+        );
+
+        let response = ctx
+            .sync_call_frame_with_max_response_bytes("_fsReadFile", vec![0xc0], 4096)
+            .expect("receive structured response")
+            .expect("error response frame");
+        assert_eq!(response.status, 1);
+        assert_eq!(response.payload, payload);
     }
 
     #[test]
@@ -1773,9 +2054,46 @@ mod tests {
             "session-1".into(),
         );
 
-        assert_eq!(ctx.pending_count(), 0);
+        assert_eq!(ctx.pending_count().expect("inspect pending calls"), 0);
         let _ = ctx.sync_call("_fn", vec![]);
-        assert_eq!(ctx.pending_count(), 0);
+        assert_eq!(ctx.pending_count().expect("inspect pending calls"), 0);
+    }
+
+    #[test]
+    fn poisoned_pending_call_state_returns_a_typed_error() {
+        let mut ctx = BridgeCallContext::new(
+            Box::new(Vec::new()),
+            Box::new(Cursor::new(Vec::new())),
+            "session-1".into(),
+        );
+        ctx.track_pending_calls = true;
+
+        std::thread::scope(|scope| {
+            let pending_calls = &ctx.pending_calls;
+            assert!(
+                scope
+                    .spawn(|| {
+                        let _guard = pending_calls.lock().expect("acquire pending-call lock");
+                        panic!("poison pending-call lock");
+                    })
+                    .join()
+                    .is_err(),
+                "test poisoner must panic"
+            );
+        });
+
+        let error = ctx
+            .sync_call("_fn", vec![])
+            .expect_err("poisoned correctness state must reject admission");
+        assert!(error.starts_with("ERR_AGENTOS_BRIDGE_PENDING_CALLS_POISONED:"));
+        assert!(ctx
+            .is_call_pending(1)
+            .expect_err("poisoned inspection must be typed")
+            .starts_with("ERR_AGENTOS_BRIDGE_PENDING_CALLS_POISONED:"));
+        assert!(ctx
+            .pending_count()
+            .expect_err("poisoned inspection must be typed")
+            .starts_with("ERR_AGENTOS_BRIDGE_PENDING_CALLS_POISONED:"));
     }
 
     #[test]
@@ -2061,6 +2379,7 @@ mod tests {
                 },
             )
             .expect_err("canceled host-visible route must reject a stale completion");
+        assert_eq!(error.kind(), BridgeSettlementErrorKind::StaleCompletion);
         assert!(error.contains("ERR_AGENTOS_BRIDGE_STALE_COMPLETION"));
 
         let mismatched = registry
@@ -2075,6 +2394,7 @@ mod tests {
                 },
             )
             .expect_err("a different generation must not inherit stale-completion status");
+        assert_eq!(mismatched.kind(), BridgeSettlementErrorKind::Other);
         assert!(mismatched.contains("ERR_AGENTOS_BRIDGE_STALE_GENERATION"));
 
         let _unpublished_waiter = registry
@@ -2623,9 +2943,19 @@ mod tests {
 
         let terminal = waiter.recv().expect("receive bounded terminal error");
         assert_eq!(terminal.status, 1);
-        assert_eq!(terminal.payload.len(), 4);
-        assert_eq!(terminal.reservation.as_ref().unwrap().amount(), 4);
-        assert_eq!(resources.usage(ResourceClass::BridgeResponseBytes).used, 4);
+        assert!(terminal.payload.len() <= 4);
+        assert_eq!(
+            terminal.reservation.as_ref().unwrap().amount(),
+            terminal.payload.len()
+        );
+        assert_eq!(
+            resources.usage(ResourceClass::BridgeResponseBytes).used,
+            terminal.payload.len()
+        );
+        assert!(
+            terminal.payload.is_empty(),
+            "a budget too small for the typed envelope must not emit a truncated string sentinel"
+        );
         drop(terminal);
         assert!(resources.is_zero());
     }

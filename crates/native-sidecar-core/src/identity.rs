@@ -1,4 +1,5 @@
 use agentos_kernel::resource_accounting::ResourceLimits;
+use agentos_kernel::system::SystemIdentity;
 use agentos_kernel::user::UserManager;
 
 use crate::{virtual_os_cpu_count, virtual_os_freemem_bytes, virtual_os_totalmem_bytes};
@@ -31,6 +32,22 @@ pub fn shared_guest_runtime_identity(
     virtual_pid: Option<u64>,
     virtual_ppid: Option<u64>,
 ) -> SharedGuestRuntimeIdentity {
+    shared_guest_runtime_identity_with_system(
+        user,
+        resource_limits,
+        &SystemIdentity::default(),
+        virtual_pid,
+        virtual_ppid,
+    )
+}
+
+pub fn shared_guest_runtime_identity_with_system(
+    user: &UserManager,
+    resource_limits: &ResourceLimits,
+    system: &SystemIdentity,
+    virtual_pid: Option<u64>,
+    virtual_ppid: Option<u64>,
+) -> SharedGuestRuntimeIdentity {
     SharedGuestRuntimeIdentity {
         virtual_pid,
         virtual_ppid,
@@ -42,14 +59,14 @@ pub fn shared_guest_runtime_identity(
         os_totalmem: virtual_os_totalmem_bytes(resource_limits),
         os_freemem: virtual_os_freemem_bytes(resource_limits),
         os_homedir: user.homedir.clone(),
-        os_hostname: String::from("agentos"),
+        os_hostname: system.hostname.clone(),
         os_shell: user.shell.clone(),
         os_user: user.username.clone(),
         os_tmpdir: String::from("/tmp"),
-        os_type: String::from("Linux"),
-        os_release: String::from("6.8.0-agentos"),
-        os_version: String::from("#1 SMP PREEMPT_DYNAMIC agentos"),
-        os_machine: String::from("x86_64"),
+        os_type: system.os_type.clone(),
+        os_release: system.os_release.clone(),
+        os_version: system.os_version.clone(),
+        os_machine: system.machine.clone(),
     }
 }
 
@@ -94,5 +111,28 @@ mod tests {
         assert_eq!(identity.os_release, "6.8.0-agentos");
         assert_eq!(identity.os_version, "#1 SMP PREEMPT_DYNAMIC agentos");
         assert_eq!(identity.os_machine, "x86_64");
+    }
+
+    #[test]
+    fn injected_guest_identity_reuses_kernel_system_identity() {
+        let user = UserManager::default();
+        let limits = ResourceLimits::default();
+        let system = SystemIdentity {
+            hostname: String::from("vm-host"),
+            os_type: String::from("TestOS"),
+            os_release: String::from("1.2.3"),
+            os_version: String::from("build-7"),
+            machine: String::from("vm64"),
+            domain_name: String::from("vm-domain"),
+        };
+
+        let identity =
+            shared_guest_runtime_identity_with_system(&user, &limits, &system, None, None);
+
+        assert_eq!(identity.os_hostname, "vm-host");
+        assert_eq!(identity.os_type, "TestOS");
+        assert_eq!(identity.os_release, "1.2.3");
+        assert_eq!(identity.os_version, "build-7");
+        assert_eq!(identity.os_machine, "vm64");
     }
 }

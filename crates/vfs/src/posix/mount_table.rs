@@ -1,7 +1,8 @@
 use super::root_fs::RootFileSystem;
 use super::usage::{FileSystemStats, FileSystemUsage};
 use super::vfs::{
-    VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat, VirtualUtimeSpec,
+    FileExtent, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
+    VirtualUtimeSpec,
 };
 use std::any::Any;
 use std::collections::VecDeque;
@@ -278,6 +279,20 @@ pub trait MountedFileSystem: Any {
     fn unwritten_ranges(&mut self, _path: &str) -> VfsResult<Vec<(u64, u64)>> {
         Ok(Vec::new())
     }
+    fn extent_at(&mut self, path: &str, index: usize) -> VfsResult<Option<FileExtent>> {
+        let allocated = self.allocated_ranges(path)?;
+        let unwritten = self.unwritten_ranges(path)?;
+        Ok(crate::extent::classified_file_extent_at(
+            allocated.iter().copied(),
+            unwritten.iter().copied(),
+            index,
+        )
+        .map(|extent| FileExtent {
+            start: extent.start,
+            end: extent.end,
+            unwritten: extent.unwritten,
+        }))
+    }
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>>;
     fn pwrite(&mut self, path: &str, content: Vec<u8>, offset: u64) -> VfsResult<()> {
         let mut existing = self.read_file(path)?;
@@ -544,6 +559,10 @@ where
         VirtualFileSystem::unwritten_ranges(&mut self.inner, path)
     }
 
+    fn extent_at(&mut self, path: &str, index: usize) -> VfsResult<Option<FileExtent>> {
+        VirtualFileSystem::extent_at(&mut self.inner, path, index)
+    }
+
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {
         VirtualFileSystem::pread(&mut self.inner, path, offset, length)
     }
@@ -740,6 +759,10 @@ where
 
     fn unwritten_ranges(&mut self, path: &str) -> VfsResult<Vec<(u64, u64)>> {
         (**self).unwritten_ranges(path)
+    }
+
+    fn extent_at(&mut self, path: &str, index: usize) -> VfsResult<Option<FileExtent>> {
+        (**self).extent_at(path, index)
     }
 
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {
@@ -1014,6 +1037,10 @@ where
 
     fn unwritten_ranges(&mut self, path: &str) -> VfsResult<Vec<(u64, u64)>> {
         self.inner.unwritten_ranges(path)
+    }
+
+    fn extent_at(&mut self, path: &str, index: usize) -> VfsResult<Option<FileExtent>> {
+        self.inner.extent_at(path, index)
     }
 
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {
@@ -2478,6 +2505,13 @@ impl VirtualFileSystem for MountTable {
         self.mounts[index]
             .filesystem
             .unwritten_ranges(&relative_path)
+    }
+
+    fn extent_at(&mut self, path: &str, extent_index: usize) -> VfsResult<Option<FileExtent>> {
+        let (mount_index, relative_path) = self.resolve_content_index(path)?;
+        self.mounts[mount_index]
+            .filesystem
+            .extent_at(&relative_path, extent_index)
     }
 
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {

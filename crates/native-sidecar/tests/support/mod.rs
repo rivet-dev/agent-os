@@ -125,6 +125,50 @@ pub fn wire_vm(
     )
 }
 
+pub fn write_guest_file_wire(
+    sidecar: &mut NativeSidecar<RecordingBridge>,
+    request_id: agentos_native_sidecar::wire::RequestId,
+    connection_id: &str,
+    session_id: &str,
+    vm_id: &str,
+    path: &str,
+    contents: impl Into<String>,
+) {
+    let result = sidecar
+        .dispatch_wire_blocking(wire_request(
+            request_id,
+            wire_vm(connection_id, session_id, vm_id),
+            agentos_native_sidecar::wire::RequestPayload::GuestFilesystemCallRequest(
+                agentos_native_sidecar::wire::GuestFilesystemCallRequest {
+                    operation: agentos_native_sidecar::wire::GuestFilesystemOperation::WriteFile,
+                    path: path.to_owned(),
+                    destination_path: None,
+                    target: None,
+                    content: Some(contents.into()),
+                    encoding: Some(agentos_native_sidecar::wire::RootFilesystemEntryEncoding::Utf8),
+                    recursive: false,
+                    max_depth: None,
+                    mode: None,
+                    uid: None,
+                    gid: None,
+                    atime_ms: None,
+                    mtime_ms: None,
+                    len: None,
+                    offset: None,
+                },
+            ),
+        ))
+        .expect("write guest fixture through wire filesystem API");
+    assert!(
+        matches!(
+            &result.response.payload,
+            agentos_native_sidecar::wire::ResponsePayload::GuestFilesystemResultResponse(_)
+        ),
+        "unexpected guest fixture write response: {:?}",
+        result.response.payload
+    );
+}
+
 pub fn wire_permissions_allow_all() -> agentos_native_sidecar::wire::PermissionsPolicy {
     agentos_native_sidecar::wire::PermissionsPolicy {
         fs: Some(
@@ -731,6 +775,7 @@ pub fn wasm_signal_state_module() -> Vec<u8> {
   (import "host_process" "proc_sigaction" (func $proc_sigaction (type $proc_sigaction_t)))
   (memory (export "memory") 1)
   (data (i32.const 32) "signal:ready\n")
+  (func (export "__wasi_signal_trampoline") (param i32))
   (func $_start (export "_start")
     (drop
       (call $proc_sigaction

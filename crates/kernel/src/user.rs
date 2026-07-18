@@ -124,9 +124,7 @@ impl UserManager {
 
         let primary_group_name = config.group_name.unwrap_or_else(|| username.clone());
         let mut groups_by_gid = BTreeMap::new();
-        let mut group_gids_by_name = BTreeMap::new();
         for group in config.groups {
-            group_gids_by_name.insert(group.name.clone(), group.gid);
             groups_by_gid.insert(group.gid, group);
         }
         groups_by_gid.entry(gid).or_insert_with(|| GroupRecord {
@@ -134,7 +132,32 @@ impl UserManager {
             name: primary_group_name.clone(),
             members: vec![username.clone()],
         });
-        group_gids_by_name.insert(primary_group_name.clone(), gid);
+        let mut synthesized_members = BTreeMap::<u32, Vec<String>>::new();
+        for account in accounts_by_uid.values() {
+            for account_gid in &account.supplementary_gids {
+                if groups_by_gid.contains_key(account_gid) {
+                    continue;
+                }
+                let members = synthesized_members.entry(*account_gid).or_default();
+                if !members.contains(&account.username) {
+                    members.push(account.username.clone());
+                }
+            }
+        }
+        for (group_gid, members) in synthesized_members {
+            groups_by_gid.insert(
+                group_gid,
+                GroupRecord {
+                    gid: group_gid,
+                    name: format!("group{group_gid}"),
+                    members,
+                },
+            );
+        }
+        let group_gids_by_name = groups_by_gid
+            .values()
+            .map(|group| (group.name.clone(), group.gid))
+            .collect();
 
         Self {
             uid,
@@ -181,15 +204,7 @@ impl UserManager {
     }
 
     pub fn getgrgid(&self, gid: u32) -> Option<String> {
-        self.groups_by_gid.get(&gid).map(render_group).or_else(|| {
-            let members = self
-                .accounts_by_uid
-                .values()
-                .filter(|account| account.supplementary_gids.contains(&gid))
-                .map(|account| account.username.as_str())
-                .collect::<Vec<_>>();
-            (!members.is_empty()).then(|| format!("group{gid}:x:{gid}:{}", members.join(",")))
-        })
+        self.groups_by_gid.get(&gid).map(render_group)
     }
 
     pub fn getgrnam(&self, name: &str) -> Option<String> {
@@ -231,4 +246,138 @@ fn normalize_supplementary_gids(primary_gid: u32, supplementary_gids: Vec<u32>) 
         }
     }
     normalized
+}
+
+pub(crate) fn passwd_record_by_uid(database: &[u8], uid: u32) -> Option<String> {
+    passwd_records(database)
+        .find(|record| record.uid == uid)
+        .map(|record| record.text.to_owned())
+}
+
+pub(crate) fn passwd_record_by_name(database: &[u8], name: &str) -> Option<String> {
+    passwd_records(database)
+        .find(|record| record.name == name)
+        .map(|record| record.text.to_owned())
+}
+
+pub(crate) fn passwd_record_at(database: &[u8], index: usize) -> Option<String> {
+    passwd_records(database)
+        .nth(index)
+        .map(|record| record.text.to_owned())
+}
+
+pub(crate) fn group_record_by_gid(database: &[u8], gid: u32) -> Option<String> {
+    group_records(database)
+        .find(|record| record.gid == gid)
+        .map(|record| record.text.to_owned())
+}
+
+pub(crate) fn group_record_by_name(database: &[u8], name: &str) -> Option<String> {
+    group_records(database)
+        .find(|record| record.name == name)
+        .map(|record| record.text.to_owned())
+}
+
+pub(crate) fn group_record_at(database: &[u8], index: usize) -> Option<String> {
+    group_records(database)
+        .nth(index)
+        .map(|record| record.text.to_owned())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PasswdDatabaseRecord<'a> {
+    text: &'a str,
+    name: &'a str,
+    uid: u32,
+}
+
+fn passwd_records(database: &[u8]) -> impl Iterator<Item = PasswdDatabaseRecord<'_>> {
+    database.split(|byte| *byte == b'\n').filter_map(|line| {
+        if line.contains(&b'\0') {
+            return None;
+        }
+        let text = std::str::from_utf8(line).ok()?;
+        let mut fields = text.split(':');
+        let name = fields.next()?;
+        let _password = fields.next()?;
+        let uid = fields.next()?.parse().ok()?;
+        let _gid = fields.next()?.parse::<u32>().ok()?;
+        let _gecos = fields.next()?;
+        let _home = fields.next()?;
+        let _shell = fields.next()?;
+        fields
+            .next()
+            .is_none()
+            .then_some(PasswdDatabaseRecord { text, name, uid })
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GroupDatabaseRecord<'a> {
+    text: &'a str,
+    name: &'a str,
+    gid: u32,
+}
+
+fn group_records(database: &[u8]) -> impl Iterator<Item = GroupDatabaseRecord<'_>> {
+    database.split(|byte| *byte == b'\n').filter_map(|line| {
+        if line.contains(&b'\0') {
+            return None;
+        }
+        let text = std::str::from_utf8(line).ok()?;
+        let mut fields = text.split(':');
+        let name = fields.next()?;
+        let _password = fields.next()?;
+        let gid = fields.next()?.parse().ok()?;
+        let _members = fields.next()?;
+        fields
+            .next()
+            .is_none()
+            .then_some(GroupDatabaseRecord { text, name, gid })
+    })
+}
+
+#[cfg(test)]
+mod database_tests {
+    use super::*;
+
+    #[test]
+    fn account_database_parsers_skip_malformed_records_and_preserve_text() {
+        let passwd = b"\n# comment\nbad\nnul\0suffix:x:3:3::/:/bin/sh\ninvalid-utf8:x:\xff:2::/:/bin/sh\nextra:x:1:2::/:/bin/sh:field\nmissing:x:1:2::/bin/sh\noverflow:x:4294967296:2::/:/bin/sh\nroot:x:0:0:root:/root:/bin/sh\nroot:x:9:9:duplicate:/duplicate:/bin/false\nalias:x:0:0:duplicate:/duplicate:/bin/false\ncr:x:7:7::/:/bin/sh\r\n";
+        assert_eq!(
+            passwd_record_by_name(passwd, "root").as_deref(),
+            Some("root:x:0:0:root:/root:/bin/sh")
+        );
+        assert_eq!(passwd_record_by_uid(passwd, 0), passwd_record_at(passwd, 0));
+        assert_eq!(
+            passwd_record_at(passwd, 1).as_deref(),
+            Some("root:x:9:9:duplicate:/duplicate:/bin/false")
+        );
+        assert_eq!(
+            passwd_record_at(passwd, 2).as_deref(),
+            Some("alias:x:0:0:duplicate:/duplicate:/bin/false")
+        );
+        assert_eq!(
+            passwd_record_at(passwd, 3).as_deref(),
+            Some("cr:x:7:7::/:/bin/sh\r")
+        );
+        assert_eq!(passwd_record_at(passwd, 4), None);
+
+        let group = b"\n# comment\nbad\nnul\0suffix:x:3:user\ninvalid-utf8:x:\xff:user\nextra:x:1:user:field\nmissing:x:1\noverflow:x:4294967296:user\nroot:x:0:root\nroot:x:9:duplicate\nalias:x:0:duplicate\ncr:x:7:user\r\n";
+        assert_eq!(
+            group_record_by_name(group, "root").as_deref(),
+            Some("root:x:0:root")
+        );
+        assert_eq!(group_record_by_gid(group, 0), group_record_at(group, 0));
+        assert_eq!(
+            group_record_at(group, 1).as_deref(),
+            Some("root:x:9:duplicate")
+        );
+        assert_eq!(
+            group_record_at(group, 2).as_deref(),
+            Some("alias:x:0:duplicate")
+        );
+        assert_eq!(group_record_at(group, 3).as_deref(), Some("cr:x:7:user\r"));
+        assert_eq!(group_record_at(group, 4), None);
+    }
 }

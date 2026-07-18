@@ -224,6 +224,7 @@
 					"_processExec",
 					"_processExecFdImageCommit",
 					"_processSignalState",
+					"_processSignalEnd",
 					"_processTakeSignal",
 					"_processWasmSyncRpc"
 				]
@@ -1235,6 +1236,10 @@
 		},
 			"_processSignalState": {
 				"method": "process.signal_state",
+				"translateArgs": false
+			},
+			"_processSignalEnd": {
+				"method": "process.signal_end",
 				"translateArgs": false
 			},
 			"_processTakeSignal": {

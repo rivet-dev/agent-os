@@ -53,6 +53,8 @@ pub const POLLOUT: PollEvents = PollEvents(0x0004);
 pub const POLLERR: PollEvents = PollEvents(0x0008);
 pub const POLLHUP: PollEvents = PollEvents(0x0010);
 pub const POLLNVAL: PollEvents = PollEvents(0x0020);
+pub const POLLRDNORM: PollEvents = PollEvents(0x0040);
+pub const POLLWRNORM: PollEvents = PollEvents(0x0100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PollFd {

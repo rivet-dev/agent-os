@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io;
@@ -65,7 +64,9 @@ pub fn bundled_typescript_assets() -> &'static [(&'static str, &'static [u8])] {
     BUNDLED_TYPESCRIPT_ASSETS
 }
 
-static CLEANED_NODE_IMPORT_CACHE_ROOTS: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+static NODE_IMPORT_CACHE_ROOT_CLEANUPS: OnceLock<
+    Mutex<std::collections::BTreeMap<PathBuf, Arc<OnceLock<()>>>>,
+> = OnceLock::new();
 #[cfg(test)]
 static NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
@@ -2405,15 +2406,32 @@ fn default_node_import_cache_base_dir() -> PathBuf {
 }
 
 fn cleanup_stale_node_import_caches_once(base_dir: &Path) {
-    let cleaned_roots = CLEANED_NODE_IMPORT_CACHE_ROOTS.get_or_init(|| Mutex::new(BTreeSet::new()));
-    let should_cleanup = cleaned_roots
-        .lock()
-        .map(|mut roots| roots.insert(base_dir.to_path_buf()))
-        .unwrap_or(true);
+    run_node_import_cache_root_cleanup_once(base_dir, || {
+        cleanup_stale_node_import_caches(base_dir)
+    });
+}
 
-    if should_cleanup {
-        cleanup_stale_node_import_caches(base_dir);
-    }
+/// Synchronize the one-time stale-root cleanup itself, not just the decision
+/// to start it. A concurrent cache constructor for the same base must wait
+/// until deletion finishes; otherwise the first cleanup can remove the second
+/// constructor's newly materialized directory.
+fn run_node_import_cache_root_cleanup_once(base_dir: &Path, cleanup: impl FnOnce()) {
+    let cleanup_registry = NODE_IMPORT_CACHE_ROOT_CLEANUPS
+        .get_or_init(|| Mutex::new(std::collections::BTreeMap::new()));
+    let mut cleanup_registry = match cleanup_registry.lock() {
+        Ok(registry) => registry,
+        Err(poisoned) => {
+            eprintln!(
+                "ERR_AGENTOS_NODE_IMPORT_CACHE_CLEANUP_LOCK_POISONED: recovering the process-wide stale-cache cleanup registry after a panic"
+            );
+            poisoned.into_inner()
+        }
+    };
+    let cleanup_cell = cleanup_registry
+        .entry(base_dir.to_path_buf())
+        .or_insert_with(|| Arc::new(OnceLock::new()))
+        .clone();
+    cleanup_cell.get_or_init(|| cleanup());
 }
 
 fn cleanup_stale_node_import_caches(base_dir: &Path) {
@@ -2564,7 +2582,11 @@ impl NodeImportCache {
         let _materialization_guard = self
             .materialization_lock
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .map_err(|_| {
+                io::Error::other(
+                    "ERR_AGENTOS_NODE_IMPORT_CACHE_LOCK_POISONED: cache materialization lock was poisoned by a prior panic",
+                )
+            })?;
         if self.is_materialized() {
             return Ok(());
         }
@@ -3753,8 +3775,9 @@ fn write_file_if_changed(path: &Path, contents: &str) -> Result<(), io::Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        NodeImportCache, NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_LOCK,
-        NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_MS, NODE_WASM_RUNNER_SOURCE,
+        run_node_import_cache_root_cleanup_once, NodeImportCache,
+        NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_LOCK, NODE_IMPORT_CACHE_TEST_MATERIALIZE_DELAY_MS,
+        NODE_WASM_RUNNER_SOURCE,
     };
     use crate::host_node::node_binary;
     use serde_json::Value;
@@ -3763,9 +3786,63 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
     use std::process::{Command, Output, Stdio};
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::thread;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn concurrent_cache_constructor_waits_for_same_root_cleanup() {
+        let temp = tempdir().expect("create cleanup test root");
+        let base_dir = temp.path().join("shared-cache-base");
+        let (cleanup_started_tx, cleanup_started_rx) = mpsc::channel();
+        let (release_cleanup_tx, release_cleanup_rx) = mpsc::channel();
+        let first_base = base_dir.clone();
+        let first = thread::spawn(move || {
+            run_node_import_cache_root_cleanup_once(&first_base, || {
+                cleanup_started_tx.send(()).expect("publish cleanup start");
+                release_cleanup_rx.recv().expect("release root cleanup");
+            });
+        });
+        cleanup_started_rx.recv().expect("observe cleanup start");
+
+        let second_cleanup_ran = Arc::new(AtomicBool::new(false));
+        let second_cleanup_ran_in_thread = Arc::clone(&second_cleanup_ran);
+        let (second_started_tx, second_started_rx) = mpsc::channel();
+        let (second_finished_tx, second_finished_rx) = mpsc::channel();
+        let second = thread::spawn(move || {
+            second_started_tx
+                .send(())
+                .expect("publish second constructor start");
+            run_node_import_cache_root_cleanup_once(&base_dir, || {
+                second_cleanup_ran_in_thread.store(true, Ordering::Release);
+            });
+            second_finished_tx
+                .send(())
+                .expect("publish second constructor finish");
+        });
+        second_started_rx
+            .recv()
+            .expect("observe second constructor start");
+        assert!(
+            second_finished_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "same-root constructor must not pass while stale cleanup can still delete its cache"
+        );
+
+        release_cleanup_tx.send(()).expect("finish root cleanup");
+        first.join().expect("first cleanup thread");
+        second.join().expect("second constructor thread");
+        second_finished_rx
+            .try_recv()
+            .expect("second constructor finishes after cleanup");
+        assert!(
+            !second_cleanup_ran.load(Ordering::Acquire),
+            "same root must run stale cleanup exactly once"
+        );
+    }
 
     fn assert_node_available() {
         let output = Command::new(node_binary())
@@ -4281,6 +4358,14 @@ print(json.dumps({
 export async function loadPyodide(options) {
   return {
     setStdin(_stdin) {},
+    FS: {
+      mkdirTree(_path) {},
+    },
+    globals: {
+      set(_name, _value) {},
+      delete(_name) {},
+    },
+    runPython(_code) {},
     async loadPackage(packages) {
       options.stdout(`packages:${packages.join(',')}`);
       options.stderr(`base:${options.packageBaseUrl}`);
@@ -5018,13 +5103,17 @@ for (let index = 0; index < 520; index += 1) {
         assert!(NODE_WASM_RUNNER_SOURCE.contains("const cwdReadOnly = readOnlyForCwd(guestCwd);"));
         assert!(NODE_WASM_RUNNER_SOURCE
             .contains("preopens[cwdMount] = createPreopen(HOST_CWD, cwdReadOnly);"));
+        assert!(NODE_WASM_RUNNER_SOURCE.contains(
+            "guestPathIsReadOnly(guestPath) &&\n      (hasMutationOpenFlags(oflags) || hasWriteRights(rightsBase))"
+        ));
         assert!(NODE_WASM_RUNNER_SOURCE
-            .contains("if (mapping.readOnly) {\n        return WASI_ERRNO_ROFS;\n      }"));
+            .contains("if (guestReadOnlyDenied) {\n      return denyReadOnlyMutation();\n    }"));
         assert!(NODE_WASM_RUNNER_SOURCE.contains("readOnly: preopenSpec?.readOnly === true,"));
         assert!(NODE_WASM_RUNNER_SOURCE
             .contains("resolveModuleGuestPathToHostMapping(guestPath)?.readOnly === true"));
-        assert!(NODE_WASM_RUNNER_SOURCE
-            .contains("if (handle?.readOnly === true) {\n        return 1;\n      }"));
+        assert!(NODE_WASM_RUNNER_SOURCE.contains(
+            "if (handle?.readOnly === true || isWorkspaceReadOnly()) {\n      return WASI_ERRNO_ROFS;\n    }"
+        ));
     }
 
     #[test]

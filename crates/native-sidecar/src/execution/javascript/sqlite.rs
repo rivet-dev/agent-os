@@ -5,7 +5,7 @@ const SQLITE_JS_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
 pub(in crate::execution) fn service_javascript_sqlite_sync_rpc(
     kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     match request.method.as_str() {
         "sqlite.constants" => Ok(json!({})),
@@ -124,7 +124,7 @@ pub(in crate::execution) fn service_javascript_sqlite_sync_rpc(
 fn sqlite_open_database(
     kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     ensure_per_process_state_handle_capacity(process.sqlite_databases.len(), "sqlite database")?;
     let path = request.args.first().and_then(Value::as_str);
@@ -213,7 +213,9 @@ fn sqlite_open_database(
             .map_err(sqlite_error)?;
     }
     if host_path.is_some() && !read_only {
-        let _ = connection.pragma_update(None, "journal_mode", "WAL");
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .map_err(sqlite_error)?;
     }
 
     process.sqlite_databases.insert(
@@ -233,7 +235,7 @@ fn sqlite_open_database(
 fn sqlite_exec_database(
     _kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let database_id = javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.exec database id")?;
     let sql = javascript_sync_rpc_arg_str(&request.args, 1, "sqlite.exec sql")?;
@@ -253,7 +255,7 @@ fn sqlite_exec_database(
 fn sqlite_query_database(
     _kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let database_id = javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.query database id")?;
     let sql = javascript_sync_rpc_arg_str(&request.args, 1, "sqlite.query sql")?;
@@ -277,12 +279,12 @@ fn sqlite_query_database(
 
 fn sqlite_prepare_statement(
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     ensure_per_process_state_handle_capacity(process.sqlite_statements.len(), "sqlite statement")?;
     let database_id = javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.prepare database id")?;
     let sql = javascript_sync_rpc_arg_str(&request.args, 1, "sqlite.prepare sql")?;
-    let _ = sqlite_database(process, database_id)?;
+    sqlite_database(process, database_id)?;
     process.next_sqlite_statement_id += 1;
     let statement_id = process.next_sqlite_statement_id;
     process.sqlite_statements.insert(
@@ -302,7 +304,7 @@ fn sqlite_prepare_statement(
 fn sqlite_run_statement(
     _kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let statement_id =
         javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.statement.run statement id")?;
@@ -336,7 +338,7 @@ fn sqlite_run_statement(
 fn sqlite_get_statement(
     _kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let statement_id =
         javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.statement.get statement id")?;
@@ -362,7 +364,7 @@ fn sqlite_get_statement(
 fn sqlite_all_statement(
     _kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let statement_id =
         javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.statement.all statement id")?;
@@ -384,7 +386,7 @@ fn sqlite_all_statement(
 
 fn sqlite_statement_columns(
     process: &mut ActiveProcess,
-    request: &JavascriptSyncRpcRequest,
+    request: &HostRpcRequest,
 ) -> Result<Value, SidecarError> {
     let statement_id =
         javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.statement.columns statement id")?;
@@ -722,9 +724,20 @@ fn sqlite_sync_database(
         return Ok(());
     }
 
+    database
+        .connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .map_err(sqlite_error)?;
     let host_path = database.host_path.as_ref().expect("sqlite host path");
-    if !host_path.exists() {
-        return Ok(());
+    match fs::metadata(host_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(SidecarError::Io(format!(
+                "failed to inspect sqlite temp database {}: {error}",
+                host_path.display()
+            )))
+        }
     }
     // The main file alone is not a consistent snapshot when the guest selected
     // WAL mode. A checkpoint can remain busy while OpenCode keeps prepared read
@@ -789,17 +802,26 @@ fn cleanup_sqlite_host_artifacts(host_path: Option<&Path>) -> Result<(), Sidecar
     let parent = host_path.parent().map(PathBuf::from);
     for suffix in ["", "-wal", "-shm", ".snapshot"] {
         let path = PathBuf::from(format!("{}{}", host_path.display(), suffix));
-        if path.exists() {
-            fs::remove_file(&path).map_err(|error| {
-                SidecarError::Io(format!(
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(SidecarError::Io(format!(
                     "failed to remove sqlite temp artifact {}: {error}",
                     path.display()
-                ))
-            })?;
+                )));
+            }
         }
     }
     if let Some(parent) = parent {
-        let _ = fs::remove_dir_all(parent);
+        if let Err(error) = fs::remove_dir_all(&parent) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(SidecarError::Io(format!(
+                    "failed to remove sqlite temp directory {}: {error}",
+                    parent.display()
+                )));
+            }
+        }
     }
     Ok(())
 }

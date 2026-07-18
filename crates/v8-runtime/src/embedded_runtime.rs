@@ -197,25 +197,27 @@ impl EmbeddedV8Runtime {
             return Ok(false);
         }
 
-        let detached = {
+        let shutdown = {
             let mut mgr = self
                 .session_mgr
                 .lock()
                 .expect("session manager lock poisoned");
-            mgr.detach_session_if_output_generation(
+            mgr.begin_destroy_session_if_output_generation(
                 &registration.session_id,
                 registration.generation,
             )
             .map_err(other_io_error)?
         };
-        if detached {
+        let destroyed = shutdown.is_some();
+        if let Some(shutdown) = shutdown {
+            shutdown.finish();
             remove_session_output_if_current(
                 &self.session_outputs,
                 &registration.session_id,
                 registration.generation,
             );
         }
-        Ok(detached)
+        Ok(destroyed)
     }
 
     pub fn session_handle(self: &Arc<Self>, session_id: String) -> EmbeddedV8SessionHandle {
@@ -286,7 +288,7 @@ impl EmbeddedV8Runtime {
         let phase_start = Instant::now();
         let result = registry
             .settle(session_id, output_generation, response)
-            .map_err(other_io_error);
+            .map_err(io::Error::other);
         record_sync_bridge_host_phase(
             "sync_rpc_dispatch",
             "direct_response_settlement",
@@ -519,12 +521,12 @@ impl EmbeddedV8SessionHandle {
             .map_err(other_io_error)
     }
 
-    pub fn publish_signal(&self, signal: i32) -> io::Result<()> {
+    pub fn publish_signal(&self, signal: i32, delivery_token: u64) -> io::Result<()> {
         self.runtime
             .session_mgr
             .lock()
             .expect("session manager lock poisoned")
-            .publish_signal(&self.session_id, signal)
+            .publish_signal(&self.session_id, signal, delivery_token)
             .map_err(other_io_error)
     }
 
@@ -644,11 +646,25 @@ impl EmbeddedRuntimeHandle {
     }
 
     pub fn shutdown(&self) {
-        let _ = self.shutdown_stream.shutdown(Shutdown::Both);
-        if let Ok(mut guard) = self.join_handle.lock() {
-            if let Some(handle) = guard.take() {
-                let _ = handle.join();
+        let handle = match self.join_handle.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                if guard.is_some() {
+                    eprintln!(
+                        "FATAL_AGENTOS_EMBEDDED_RUNTIME_JOIN_STATE_POISONED: context=explicit; recovering join handle to fail closed"
+                    );
+                }
+                guard.take()
             }
+        };
+        if let Some(handle) = handle {
+            if let Err(error) = self.shutdown_stream.shutdown(Shutdown::Both) {
+                eprintln!(
+                    "ERR_AGENTOS_EMBEDDED_RUNTIME_SHUTDOWN_STREAM: context=explicit error={error}"
+                );
+            }
+            join_embedded_runtime_thread(handle, "explicit");
         }
         self.release_codec();
     }
@@ -662,11 +678,35 @@ impl EmbeddedRuntimeHandle {
 
 impl Drop for EmbeddedRuntimeHandle {
     fn drop(&mut self) {
-        let _ = self.shutdown_stream.shutdown(Shutdown::Both);
-        if let Some(handle) = self.join_handle.get_mut().ok().and_then(Option::take) {
-            let _ = handle.join();
+        let handle = match self.join_handle.get_mut() {
+            Ok(slot) => slot.take(),
+            Err(poisoned) => {
+                let slot = poisoned.into_inner();
+                if slot.is_some() {
+                    eprintln!(
+                        "FATAL_AGENTOS_EMBEDDED_RUNTIME_JOIN_STATE_POISONED: context=drop; recovering join handle to fail closed"
+                    );
+                }
+                slot.take()
+            }
+        };
+        if let Some(handle) = handle {
+            if let Err(error) = self.shutdown_stream.shutdown(Shutdown::Both) {
+                eprintln!(
+                    "ERR_AGENTOS_EMBEDDED_RUNTIME_SHUTDOWN_STREAM: context=drop error={error}"
+                );
+            }
+            join_embedded_runtime_thread(handle, "drop");
         }
         self.release_codec();
+    }
+}
+
+fn join_embedded_runtime_thread(handle: thread::JoinHandle<()>, context: &str) {
+    if handle.join().is_err() {
+        eprintln!(
+            "FATAL_AGENTOS_EMBEDDED_RUNTIME_THREAD_PANIC: context={context} embedded runtime thread panicked"
+        );
     }
 }
 
@@ -756,7 +796,11 @@ fn run_embedded_runtime(
     )));
 
     handle_connection(stream, connection_id, session_mgr, snapshot_cache);
-    let _ = writer_handle.join();
+    if writer_handle.join().is_err() {
+        eprintln!(
+            "FATAL_AGENTOS_EMBEDDED_RUNTIME_WRITER_PANIC: connection={connection_id} writer thread panicked"
+        );
+    }
 }
 
 fn ipc_writer_thread(
@@ -818,15 +862,23 @@ fn handle_connection(
         }
     }
 
-    {
+    let shutdowns = {
         let mut mgr = session_mgr.lock().expect("session manager lock poisoned");
-        for session_id in session_ids {
-            if let Err(error) = mgr.detach_session(&session_id) {
-                eprintln!(
-                    "ERR_AGENTOS_VM_EXECUTOR_QUARANTINE: failed to detach session {session_id}: {error}"
-                );
-            }
-        }
+        session_ids
+            .into_iter()
+            .filter_map(|session_id| match mgr.begin_destroy_session(&session_id) {
+                Ok(shutdown) => Some(shutdown),
+                Err(error) => {
+                    eprintln!(
+                        "ERR_AGENTOS_VM_EXECUTOR_SHUTDOWN: failed to destroy session {session_id}: {error}"
+                    );
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    for shutdown in shutdowns {
+        shutdown.finish();
     }
 }
 
@@ -855,17 +907,15 @@ fn dispatch_runtime_command(
             .map_err(other_io_error)
         }
         RuntimeCommand::DestroySession { session_id } => {
-            // Explicit destruction is a quiescence boundary. Remove the entry
-            // while holding the manager lock, then join after releasing it so
-            // the executor cannot leak into a successor session and the event
-            // dispatcher remains free to drain terminal output.
-            let shutdown = session_mgr
+            // Session executors are untrusted guest threads and cannot be
+            // joined on the runtime dispatch path. Detach them into the
+            // bounded quarantine; the manager retains the resource permit and
+            // reaps completed threads on subsequent runtime activity.
+            session_mgr
                 .lock()
                 .expect("session manager lock poisoned")
-                .begin_destroy_session(&session_id)
-                .map_err(other_io_error)?;
-            shutdown.finish();
-            Ok(())
+                .detach_session_for_destroy(&session_id)
+                .map_err(other_io_error)
         }
         RuntimeCommand::PauseSession { session_id } => {
             let mgr = session_mgr.lock().expect("session manager lock poisoned");
@@ -892,7 +942,7 @@ fn dispatch_runtime_command(
                     let result = registry
                         .settle(&session_id, output_generation, response)
                         .map(|_| ())
-                        .map_err(other_io_error);
+                        .map_err(io::Error::other);
                     record_sync_bridge_host_phase(
                         "sync_rpc_dispatch",
                         "direct_response_settlement",
@@ -936,10 +986,14 @@ fn dispatch_runtime_command(
             .expect("session manager lock poisoned")
             .remove_readiness(&session_id, capability_id, capability_generation)
             .map_err(other_io_error),
-        RuntimeCommand::PublishSignal { session_id, signal } => session_mgr
+        RuntimeCommand::PublishSignal {
+            session_id,
+            signal,
+            delivery_token,
+        } => session_mgr
             .lock()
             .expect("session manager lock poisoned")
-            .publish_signal(&session_id, signal)
+            .publish_signal(&session_id, signal, delivery_token)
             .map_err(other_io_error),
         RuntimeCommand::PublishTimer {
             session_id,
@@ -1091,9 +1145,7 @@ mod tests {
     }
 
     fn test_runtime_context() -> agentos_runtime::RuntimeContext {
-        agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-            .expect("test process runtime")
-            .context()
+        crate::test_runtime_context()
     }
 
     fn test_output_channel(
@@ -1217,6 +1269,37 @@ mod tests {
         assert!(
             !handle.is_alive(),
             "embedded runtime should report not alive after shutdown"
+        );
+    }
+
+    #[test]
+    fn embedded_runtime_shutdown_recovers_poisoned_join_state() {
+        let _codec_guard = EMBEDDED_RUNTIME_CODEC_TEST_LOCK
+            .lock()
+            .expect("embedded runtime codec test lock poisoned");
+        let (_stream, handle) = spawn_embedded_runtime_ipc(Some(1), test_runtime_context())
+            .expect("spawn embedded runtime");
+
+        std::thread::scope(|scope| {
+            assert!(
+                scope
+                    .spawn(|| {
+                        let _guard = handle
+                            .join_handle
+                            .lock()
+                            .expect("acquire embedded runtime join lock");
+                        panic!("poison embedded runtime join lock");
+                    })
+                    .join()
+                    .is_err(),
+                "test poisoner must panic"
+            );
+        });
+
+        handle.shutdown();
+        assert!(
+            !handle.is_alive(),
+            "shutdown must recover the handle and join the runtime thread"
         );
     }
 
@@ -1713,25 +1796,34 @@ mod tests {
             .session_handle(session_id.into())
             .destroy()
             .expect("destroy first session");
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let reconciled = {
-                let mut manager = runtime
-                    .session_mgr
-                    .lock()
-                    .expect("session manager lock poisoned");
-                manager.quarantined_session_count() == 0 && manager.active_slot_count() == 0
-            };
-            if reconciled {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "destroyed generation did not release its quarantined executor permit"
+        let shutdown_handles = {
+            let mut manager = runtime
+                .session_mgr
+                .lock()
+                .expect("session manager lock poisoned");
+            assert_eq!(
+                manager.session_count(),
+                0,
+                "nonblocking destroy must remove the session immediately"
             );
-            thread::yield_now();
+            // DestroySession cannot join an untrusted guest thread on the
+            // runtime dispatch path. Drain the bounded quarantine and join it
+            // outside the manager lock before reusing the single executor
+            // slot in this test.
+            manager.take_session_shutdown_handles()
+        };
+        for handle in shutdown_handles {
+            handle.join().expect("join detached session executor");
         }
+        assert_eq!(
+            runtime
+                .session_mgr
+                .lock()
+                .expect("session manager lock poisoned")
+                .active_slot_count(),
+            0,
+            "the detached executor permit must release after its thread joins"
+        );
 
         let (_second_receiver, _second_registration) = runtime
             .register_session_with_capacity(session_id, 1, Arc::clone(runtime.runtime.resources()))

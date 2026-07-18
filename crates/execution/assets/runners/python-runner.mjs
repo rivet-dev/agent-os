@@ -12,6 +12,7 @@ const PYODIDE_INDEX_URL_ENV = 'AGENTOS_PYODIDE_INDEX_URL';
 const PYODIDE_PACKAGE_BASE_URL_ENV = 'AGENTOS_PYODIDE_PACKAGE_BASE_URL';
 const PYODIDE_PACKAGE_CACHE_DIR_ENV = 'AGENTOS_PYODIDE_PACKAGE_CACHE_DIR';
 const PYODIDE_PACKAGE_CACHE_GUEST_ROOT = '/__agentos_pyodide_cache';
+const PYODIDE_PACKAGE_TEMP_GUEST_ROOT = '/__agentos_pyodide_package_tmp';
 const PYTHON_CODE_ENV = 'AGENTOS_PYTHON_CODE';
 const PYTHON_FILE_ENV = 'AGENTOS_PYTHON_FILE';
 const PYTHON_ARGV_ENV = 'AGENTOS_PYTHON_ARGV';
@@ -518,18 +519,16 @@ function rejectPendingRpcRequests(pending, error) {
 }
 
 function normalizePythonBridgeError(error) {
-  const normalized = error instanceof Error ? error : new Error(String(error));
-  const message = normalized.message || String(error);
-  const separatorIndex = message.indexOf(': ');
-  if (separatorIndex > 0) {
-    const code = message.slice(0, separatorIndex);
-    if (/^(?:ERR_[A-Z0-9_]+|E[A-Z0-9_]+)$/.test(code)) {
-      normalized.code = code;
-      normalized.message = message.slice(separatorIndex + 2);
-    }
-  }
-  if (typeof normalized.code !== 'string') {
-    normalized.code = 'ERR_AGENTOS_PYTHON_VFS_RPC';
+  const message = typeof error?.message === 'string' && error.message.length > 0
+    ? error.message
+    : String(error);
+  const normalized = error instanceof Error ? error : new Error(message);
+  const structuredCode = typeof error?.code === 'string' && error.code.length > 0
+    ? error.code
+    : 'EIO';
+  normalized.code = structuredCode;
+  if (error?.details !== undefined) {
+    normalized.details = error.details;
   }
   return normalized;
 }
@@ -973,12 +972,30 @@ from js import __agentOSPythonVfsRpc as _agentos_rpc
 def _agentos_raise_from_error(error):
     if not isinstance(error, dict):
         raise RuntimeError(str(error))
+    code = str(error.get("code", "") or "EIO")
     message = str(error.get("message", "agentos Python bridge request failed"))
-    if "EACCES:" in message:
-        raise PermissionError(message)
-    if "command not found" in message:
-        raise FileNotFoundError(message)
-    raise OSError(message)
+    details = error.get("details")
+    if code in ("EACCES", "EPERM"):
+        exception = PermissionError(message)
+    elif code == "ENOENT":
+        exception = FileNotFoundError(message)
+    else:
+        exception = OSError(message)
+    exception.code = code
+    if details is not None:
+        exception.details = details
+    raise exception
+
+def _agentos_bridge_error(error):
+    try:
+        code = str(getattr(error, "code", "") or "")
+    except Exception:
+        code = ""
+    try:
+        details = getattr(error, "details", None)
+    except Exception:
+        details = None
+    return {"code": code or "EIO", "message": str(error), "details": details}
 
 def _agentos_normalize_family(family):
     if family in (None, 0):
@@ -995,7 +1012,7 @@ def _agentos_dns_lookup(hostname, family=None):
             _agentos_rpc.dnsLookupSync(hostname, _agentos_normalize_family(family))
         )
     except Exception as error:
-        _agentos_raise_from_error({"message": str(error)})
+        _agentos_raise_from_error(_agentos_bridge_error(error))
     addresses = result.get("addresses") or []
     if not addresses:
         raise OSError(f"agentos DNS lookup returned no addresses for {hostname}")
@@ -1078,7 +1095,7 @@ def _agentos_http_request(url_or_request, data=None):
             _agentos_rpc.httpRequestSync(url, method, _agentos_json.dumps(headers), body_base64)
         )
     except Exception as error:
-        _agentos_raise_from_error({"message": str(error)})
+        _agentos_raise_from_error(_agentos_bridge_error(error))
     response = _AgentOsHttpResponse(payload)
     if response.status >= 400:
         raise _agentos_urllib_error.HTTPError(
@@ -1107,7 +1124,7 @@ async def _agentos_pyfetch(url, **kwargs):
             )
         )
     except Exception as error:
-        _agentos_raise_from_error({"message": str(error)})
+        _agentos_raise_from_error(_agentos_bridge_error(error))
     return _AgentOsPyfetchResponse(payload)
 
 def _agentos_urlopen(url, data=None, timeout=None, *args, **kwargs):
@@ -1162,13 +1179,22 @@ import errno as _agentos_errno
 _agentos_original_socket_class = _agentos_socket.socket
 
 def _agentos_socket_oserror(exc):
-    # Host errors arrive as "E<NAME>: message"; recover the errno so Python
-    # code can catch ConnectionRefusedError/TimeoutError/etc. (OSError picks the
-    # right subclass from the errno).
+    # The bridge carries the stable errno name separately from its diagnostic.
+    # OSError picks the right Python subclass from the numeric errno while the
+    # original message remains available to the caller.
     message = str(getattr(exc, "message", None) or exc)
-    head = message.split(":", 1)[0].strip()
-    code = getattr(_agentos_errno, head, 0) if head[:1] == "E" and head.isupper() else 0
-    return OSError(code or 0, message)
+    code_name = getattr(exc, "code", None)
+    errno_value = (
+        getattr(_agentos_errno, code_name, _agentos_errno.EIO)
+        if isinstance(code_name, str) and code_name.startswith("E")
+        else _agentos_errno.EIO
+    )
+    mapped = OSError(errno_value, message)
+    mapped.code = code_name if isinstance(code_name, str) and code_name.startswith("E") else "EIO"
+    details = getattr(exc, "details", None)
+    if details is not None:
+        mapped.details = details
+    return mapped
 
 def _agentos_socket_rpc(call):
     try:
@@ -1377,7 +1403,7 @@ class _AgentOsRequestsSession:
                 )
             )
         except Exception as error:
-            _agentos_raise_from_error({"message": str(error)})
+            _agentos_raise_from_error(_agentos_bridge_error(error))
         return _AgentOsRequestsResponse(payload)
 
     def get(self, url, **kwargs):
@@ -1456,7 +1482,7 @@ def _agentos_subprocess_run(args, *, capture_output=False, check=False, cwd=None
             )
         )
     except Exception as error:
-        _agentos_raise_from_error({"message": str(error)})
+        _agentos_raise_from_error(_agentos_bridge_error(error))
     stdout_bytes = payload.get("stdout", "").encode("utf-8")
     stderr_bytes = payload.get("stderr", "").encode("utf-8")
     if text or encoding is not None:
@@ -1750,24 +1776,19 @@ function installPythonWorkspaceFs(pyodide, bridge) {
       return error;
     }
 
-    const diagnostic = `${error?.code || ''} ${error?.message || ''} ${error?.stack || ''}`;
-    const message = diagnostic.toLowerCase();
-    let errno = ERRNO_CODES.EIO;
-    if (/permission denied|access denied|denied/.test(message)) {
-      errno = ERRNO_CODES.EACCES;
-    } else if (/read-only|erofs/.test(message)) {
-      errno = ERRNO_CODES.EROFS;
-    } else if (/not a directory|enotdir/.test(message)) {
-      errno = ERRNO_CODES.ENOTDIR;
-    } else if (/is a directory|eisdir/.test(message)) {
-      errno = ERRNO_CODES.EISDIR;
-    } else if (/exists|already exists|eexist/.test(message)) {
-      errno = ERRNO_CODES.EEXIST;
-    } else if (/not found|no such file|enoent/.test(message)) {
-      errno = ERRNO_CODES.ENOENT;
+    const code = typeof error?.code === 'string' ? error.code : '';
+    const errno = Number.isInteger(ERRNO_CODES[code])
+      ? ERRNO_CODES[code]
+      : ERRNO_CODES.EIO;
+    const mapped = new FS.ErrnoError(errno);
+    mapped.code = code || 'EIO';
+    mapped.message = typeof error?.message === 'string' && error.message.length > 0
+      ? error.message
+      : String(error ?? 'filesystem operation failed');
+    if (error?.details !== undefined) {
+      mapped.details = error.details;
     }
-
-    return new FS.ErrnoError(errno);
+    return mapped;
   }
 
   function withFsErrors(operation) {
@@ -2118,6 +2139,7 @@ function installPythonWorkspaceFs(pyodide, bridge) {
     'home',
     '__agentos_pyodide',
     '__agentos_pyodide_cache',
+    '__agentos_pyodide_package_tmp',
   ]);
   let rootEntries = [];
   try {
@@ -2154,6 +2176,19 @@ function installPythonWorkspaceFs(pyodide, bridge) {
     } catch {
       // A path Pyodide owns or cannot shadow — skip it rather than abort boot.
     }
+  }
+  // Pyodide keeps `/home` on MEMFS for its own interpreter state, but the
+  // configured Linux user's home must still be a live kernel-VFS projection.
+  // Mount that directory specifically so `/home/pyodide` can remain private
+  // while guest tools share one durable `$HOME` across executor processes.
+  const configuredHome = readRunnerEnv('HOME');
+  if (
+    rootEntries.includes('home') &&
+    typeof configuredHome === 'string' &&
+    configuredHome.startsWith('/home/') &&
+    bridge.fsStatSync(configuredHome)?.isDirectory
+  ) {
+    mountVfsAt(configuredHome);
   }
   // /workspace stays available for backward compatibility even if the VM root
   // does not advertise it.
@@ -2311,14 +2346,21 @@ function readProgramFromStdin() {
 // filesystem (via the kernel VFS), so `pip install` survives across separate
 // `python` invocations and is visible to other processes — just like a real
 // `site-packages`. It is prepended to `sys.path` on every boot.
-const PYTHON_VFS_SITE_PACKAGES = '/root/.agentos/site-packages';
+function pythonVfsSitePackages() {
+  const configuredHome = readRunnerEnv('HOME');
+  const pythonHome =
+    typeof configuredHome === 'string' && configuredHome.startsWith('/')
+      ? configuredHome.replace(/\/+$/, '') || '/'
+      : '/home/agentos';
+  return `${pythonHome === '/' ? '' : pythonHome}/.agentos/site-packages`;
+}
 
 function installPythonVfsSitePackages(pyodide) {
   if (typeof pyodide?.runPython !== 'function') {
     return;
   }
   try {
-    pyodide.globals.set('__agentos_vfs_site', PYTHON_VFS_SITE_PACKAGES);
+    pyodide.globals.set('__agentos_vfs_site', pythonVfsSitePackages());
     pyodide.runPython(
       'import os as _os, sys as _sys\n' +
         'try:\n' +
@@ -2330,7 +2372,7 @@ function installPythonVfsSitePackages(pyodide) {
         // shadow the stdlib.
         '        _sys.path.append(__agentos_vfs_site)\n' +
         // Best-effort: if the VFS site-packages can't be created (e.g. a
-        // read-only `/root`), persistence is simply unavailable — pip still
+        // read-only home directory), persistence is simply unavailable — pip still
         // works in-process. Degrade quietly rather than spam stderr.
         'except OSError:\n' +
         '    pass\n' +
@@ -2357,7 +2399,7 @@ function installPythonVfsSitePackages(pyodide) {
 // packages are copied into the persistent VFS site-packages so they survive the
 // per-process interpreter and can be imported by a later `python` invocation.
 async function runPythonPip(pyodide) {
-  pyodide.globals.set('__agentos_vfs_site', PYTHON_VFS_SITE_PACKAGES);
+  pyodide.globals.set('__agentos_vfs_site', pythonVfsSitePackages());
   try {
     await pyodide.runPythonAsync(`
 import os, shutil, site, sys
@@ -2529,15 +2571,31 @@ try {
     throw new Error('Pyodide loadPackage() is required to preload Python packages');
   }
   if (canLoadPackages) {
-    emitWarmupStage('before-load-micropip');
-    await pyodide.loadPackage(['micropip']);
-    emitWarmupStage('after-load-micropip');
-    if (preloadPackages.length > 0) {
-      emitWarmupStage('before-load-preload-packages');
-      const packageLoadStarted = realPerformance.now();
-      await pyodide.loadPackage(preloadPackages);
-      packageLoadMs = realPerformance.now() - packageLoadStarted;
-      emitWarmupStage('after-load-preload-packages');
+    pyodide.FS.mkdirTree(PYODIDE_PACKAGE_TEMP_GUEST_ROOT);
+    pyodide.globals.set('__agentos_pyodide_package_tmp', PYODIDE_PACKAGE_TEMP_GUEST_ROOT);
+    pyodide.runPython(
+      'import tempfile as _agentos_tempfile\n' +
+        '_agentos_tempfile.tempdir = __agentos_pyodide_package_tmp\n' +
+        'del _agentos_tempfile',
+    );
+    try {
+      emitWarmupStage('before-load-micropip');
+      await pyodide.loadPackage(['micropip']);
+      emitWarmupStage('after-load-micropip');
+      if (preloadPackages.length > 0) {
+        emitWarmupStage('before-load-preload-packages');
+        const packageLoadStarted = realPerformance.now();
+        await pyodide.loadPackage(preloadPackages);
+        packageLoadMs = realPerformance.now() - packageLoadStarted;
+        emitWarmupStage('after-load-preload-packages');
+      }
+    } finally {
+      pyodide.runPython(
+        'import tempfile as _agentos_tempfile\n' +
+          '_agentos_tempfile.tempdir = None\n' +
+          'del _agentos_tempfile',
+      );
+      pyodide.globals.delete('__agentos_pyodide_package_tmp');
     }
   }
   if (pyodide?._api?.config) {

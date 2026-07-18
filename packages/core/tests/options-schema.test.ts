@@ -49,6 +49,73 @@ describe("AgentOsOptions validation", () => {
 		).toThrow(/filesystem/);
 	});
 
+	test("accepts the distinct WASM CPU fields and rejects removed aliases", () => {
+		expect(
+			agentOsOptionsSchema.safeParse({
+				limits: {
+					wasm: {
+						activeCpuTimeLimitMs: 30_000,
+						wallClockLimitMs: 45_000,
+						deterministicFuel: 1_000_000,
+					},
+				},
+			}).success,
+		).toBe(true);
+		expect(() =>
+			agentOsOptionsSchema.parse({
+				limits: { resources: { maxWasmFuel: 1 } },
+			}),
+		).toThrow(/maxWasmFuel/);
+		expect(() =>
+			agentOsOptionsSchema.parse({
+				limits: { wasm: { runnerCpuTimeLimitMs: 1 } },
+			}),
+		).toThrow(/runnerCpuTimeLimitMs/);
+	});
+
+	test("bounds and materializes Linux account records", () => {
+		const exactPasswdRecord = {
+			uid: 0,
+			gid: 0,
+			username: "u",
+			homedir: "/",
+			shell: "/",
+			gecos: "x".repeat(4083),
+		};
+		expect(
+			agentOsOptionsSchema.safeParse({ user: exactPasswdRecord }).success,
+		).toBe(true);
+		expect(
+			agentOsOptionsSchema.safeParse({
+				user: { ...exactPasswdRecord, gecos: "😀".repeat(1021) },
+			}).success,
+		).toBe(false);
+		expect(
+			agentOsOptionsSchema.safeParse({
+				user: {
+					uid: 0,
+					gid: 0,
+					username: "root",
+					supplementaryGids: [44],
+					groups: [{ gid: 99, name: "group44", members: [] }],
+				},
+			}).success,
+		).toBe(false);
+		expect(
+			agentOsOptionsSchema.safeParse({
+				user: {
+					groups: [
+						{
+							gid: 7,
+							name: "g",
+							members: Array.from({ length: 257 }, (_, index) => `m${index}`),
+						},
+					],
+				},
+			}).success,
+		).toBe(false);
+	});
+
 	test("rejects create option factories on the one-shot core constructor", () => {
 		expect(() =>
 			agentOsOptionsSchema.parse({

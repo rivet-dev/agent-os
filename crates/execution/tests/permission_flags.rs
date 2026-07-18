@@ -279,7 +279,7 @@ export async function loadPyodide() {
         {
             Some(PythonExecutionEvent::Stdout(chunk)) => stdout.extend(chunk),
             Some(PythonExecutionEvent::Stderr(chunk)) => stderr.extend(chunk),
-            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+            Some(PythonExecutionEvent::HostRpcRequest(request)) => {
                 // Module-resolution sync RPCs surface during startup; service
                 // them host-directly, then expect the pyodide cache mkdir.
                 if execution
@@ -340,12 +340,13 @@ fn wasm_execution_applies_runtime_memory_and_fuel_limits_inside_v8_runtime() {
         .start_execution(StartWasmExecutionRequest {
             guest_runtime: Default::default(),
             limits: WasmExecutionLimits {
-                max_fuel: Some(250_000),
+                wall_clock_limit_ms: Some(250_000),
                 max_memory_bytes: Some(131_072),
                 ..Default::default()
             },
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: vec![String::from("./guest.wasm")],
             env: BTreeMap::new(),
             cwd: wasm_cwd,
@@ -398,6 +399,7 @@ fn wasm_permission_tiers_do_not_fall_back_to_host_node_binary() {
                 limits: Default::default(),
                 vm_id: String::from("vm-wasm"),
                 context_id: context.context_id,
+                managed_kernel_host: false,
                 argv: vec![String::from("./guest.wasm")],
                 env: BTreeMap::new(),
                 cwd: wasm_cwd,

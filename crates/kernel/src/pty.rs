@@ -3,6 +3,7 @@ use crate::fd_table::{
     FILETYPE_CHARACTER_DEVICE, O_RDWR,
 };
 use crate::poll::{PollEvents, PollNotifier, POLLHUP, POLLIN, POLLOUT};
+use crate::resource_accounting::BlockingReadDeadline;
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
@@ -12,6 +13,10 @@ use web_time::Instant;
 
 pub const MAX_PTY_BUFFER_BYTES: usize = 65_536;
 pub const MAX_CANON: usize = 4_096;
+pub const MAX_PTY_READ_BYTES: usize = MAX_PTY_BUFFER_BYTES;
+pub const MAX_PTY_WRITE_BYTES: usize = MAX_PTY_BUFFER_BYTES;
+pub const MAX_PTY_READ_WAITERS: usize = 1_024;
+pub const MAX_PTY_RETAINED_READ_BYTES: usize = 1024 * 1024;
 pub const SIGINT: i32 = 2;
 pub const SIGQUIT: i32 = 3;
 pub const SIGTSTP: i32 = 20;
@@ -32,9 +37,16 @@ impl PtyError {
         self.code
     }
 
-    fn bad_file_descriptor(message: impl Into<String>) -> Self {
+    fn not_a_tty(message: impl Into<String>) -> Self {
         Self {
-            code: "EBADF",
+            code: "ENOTTY",
+            message: message.into(),
+        }
+    }
+
+    fn dangling_pty(message: impl Into<String>) -> Self {
+        Self {
+            code: "EIO",
             message: message.into(),
         }
     }
@@ -49,6 +61,13 @@ impl PtyError {
     fn would_block(message: impl Into<String>) -> Self {
         Self {
             code: "EAGAIN",
+            message: message.into(),
+        }
+    }
+
+    fn too_big(message: impl Into<String>) -> Self {
+        Self {
+            code: "E2BIG",
             message: message.into(),
         }
     }
@@ -230,9 +249,10 @@ enum PtyEndKind {
     Slave,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone)]
 struct PendingRead {
     length: usize,
+    end: PtyEndKind,
     result: Option<Option<Vec<u8>>>,
 }
 
@@ -270,6 +290,8 @@ struct PtyManagerState {
     waiters: BTreeMap<u64, PendingRead>,
     next_pty_id: u64,
     next_waiter_id: u64,
+    warned_waiter_limit: bool,
+    warned_retained_read_limit: bool,
 }
 
 impl Default for PtyManagerState {
@@ -280,6 +302,8 @@ impl Default for PtyManagerState {
             waiters: BTreeMap::new(),
             next_pty_id: 0,
             next_waiter_id: 1,
+            warned_waiter_limit: false,
+            warned_retained_read_limit: false,
         }
     }
 }
@@ -422,11 +446,13 @@ impl PtyManager {
             .desc_to_pty
             .get(&description_id)
             .copied()
-            .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
+            .ok_or_else(|| PtyError::not_a_tty("not a PTY end"))?;
         let pty = state
             .ptys
             .get(&pty_ref.pty_id)
-            .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))?;
+            .ok_or_else(|| PtyError::dangling_pty("PTY not found"))?;
+        let retained_read_capacity_available =
+            retained_read_bytes(&state.waiters) < MAX_PTY_RETAINED_READ_BYTES;
 
         let mut events = PollEvents::empty();
         match pty_ref.end {
@@ -437,8 +463,11 @@ impl PtyManager {
                 if pty.closed_slave {
                     events |= POLLHUP;
                 } else if requested.intersects(POLLOUT)
-                    && (available_capacity(&pty.input_buffer) > 0
-                        || !pty.waiting_input_reads.is_empty())
+                    && if pty.waiting_input_reads.is_empty() {
+                        available_capacity(&pty.input_buffer) > 0
+                    } else {
+                        retained_read_capacity_available
+                    }
                 {
                     events |= POLLOUT;
                 }
@@ -452,8 +481,11 @@ impl PtyManager {
                 if pty.closed_master {
                     events |= POLLHUP;
                 } else if requested.intersects(POLLOUT)
-                    && (available_capacity(&pty.output_buffer) > 0
-                        || !pty.waiting_output_reads.is_empty())
+                    && if pty.waiting_output_reads.is_empty() {
+                        available_capacity(&pty.output_buffer) > 0
+                    } else {
+                        retained_read_capacity_available
+                    }
                 {
                     events |= POLLOUT;
                 }
@@ -465,6 +497,12 @@ impl PtyManager {
 
     pub fn write(&self, description_id: u64, data: impl AsRef<[u8]>) -> PtyResult<usize> {
         let payload = data.as_ref();
+        if payload.len() > MAX_PTY_WRITE_BYTES {
+            return Err(PtyError::too_big(format!(
+                "maxPtyWriteBytes is {MAX_PTY_WRITE_BYTES}, requested {} bytes; split the terminal write into bounded chunks",
+                payload.len()
+            )));
+        }
         let mut signals = Vec::new();
 
         {
@@ -473,11 +511,16 @@ impl PtyManager {
                 .desc_to_pty
                 .get(&description_id)
                 .copied()
-                .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
-            let PtyManagerState { ptys, waiters, .. } = &mut *state;
+                .ok_or_else(|| PtyError::not_a_tty("not a PTY end"))?;
+            let PtyManagerState {
+                ptys,
+                waiters,
+                warned_retained_read_limit,
+                ..
+            } = &mut *state;
             let pty = ptys
                 .get_mut(&pty_ref.pty_id)
-                .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))?;
+                .ok_or_else(|| PtyError::dangling_pty("PTY not found"))?;
 
             match pty_ref.end {
                 PtyEndKind::Master => {
@@ -487,7 +530,13 @@ impl PtyManager {
                     if pty.closed_slave {
                         return Err(PtyError::io("slave closed"));
                     }
-                    process_input(pty, waiters, payload, &mut signals)?;
+                    process_input(
+                        pty,
+                        waiters,
+                        payload,
+                        &mut signals,
+                        warned_retained_read_limit,
+                    )?;
                 }
                 PtyEndKind::Slave => {
                     if pty.closed_slave {
@@ -497,15 +546,15 @@ impl PtyManager {
                         return Err(PtyError::io("master closed"));
                     }
 
-                    let processed = process_output(&pty.termios, payload);
-                    deliver_output(pty, waiters, &processed, false)?;
+                    let processed = process_output(&pty.termios, payload)?;
+                    deliver_output(pty, waiters, &processed, false, warned_retained_read_limit)?;
                     // Terminal emulation: answer a Device Status Report cursor-position
                     // query (ESC[6n) with a cursor report (ESC[row;colR) on the slave's
                     // input. A real terminal emulator on the master side does this; the
                     // converged PTY may have no such emulator, so crossterm/reedline guests
                     // that probe the cursor at startup would otherwise stall and abort.
                     if contains_dsr_cursor_query(payload) {
-                        deliver_input(pty, waiters, b"\x1b[1;1R")?;
+                        deliver_input(pty, waiters, b"\x1b[1;1R", warned_retained_read_limit)?;
                     }
                 }
             }
@@ -533,12 +582,30 @@ impl PtyManager {
         length: usize,
         timeout: Option<Duration>,
     ) -> PtyResult<Option<Vec<u8>>> {
+        self.read_with_timeout_and_deadline(description_id, length, timeout, None)
+    }
+
+    pub(crate) fn read_with_timeout_and_deadline(
+        &self,
+        description_id: u64,
+        length: usize,
+        timeout: Option<Duration>,
+        mut blocking_deadline: Option<BlockingReadDeadline>,
+    ) -> PtyResult<Option<Vec<u8>>> {
+        if length > MAX_PTY_READ_BYTES {
+            return Err(PtyError::too_big(format!(
+                "maxPtyReadBytes is {MAX_PTY_READ_BYTES}, requested {length} bytes; lower the terminal read size"
+            )));
+        }
         let mut state = lock_or_recover(&self.inner.state);
         let pty_ref = state
             .desc_to_pty
             .get(&description_id)
             .copied()
-            .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
+            .ok_or_else(|| PtyError::not_a_tty("not a PTY end"))?;
+        if length == 0 {
+            return Ok(Some(Vec::new()));
+        }
         let mut waiter_id = None;
         let deadline = timeout.map(|duration| Instant::now() + duration);
 
@@ -547,6 +614,9 @@ impl PtyManager {
                 if let Some(waiter) = state.waiters.get_mut(&id) {
                     if let Some(result) = waiter.result.take() {
                         state.waiters.remove(&id);
+                        // Releasing a retained result can make a PTY writable
+                        // again even when its ordinary byte buffer is full.
+                        self.notify_waiters_and_pollers();
                         return Ok(result);
                     }
                 }
@@ -556,7 +626,7 @@ impl PtyManager {
                 let pty = state
                     .ptys
                     .get_mut(&pty_ref.pty_id)
-                    .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))?;
+                    .ok_or_else(|| PtyError::dangling_pty("PTY not found"))?;
 
                 match pty_ref.end {
                     PtyEndKind::Master => {
@@ -640,18 +710,34 @@ impl PtyManager {
             let id = if let Some(id) = waiter_id {
                 id
             } else {
+                if state.waiters.len() >= MAX_PTY_READ_WAITERS {
+                    return Err(PtyError::would_block(format!(
+                        "maxPtyReadWaiters limit is {MAX_PTY_READ_WAITERS}; retry after another terminal read completes"
+                    )));
+                }
+                let waiter_count = state.waiters.len().saturating_add(1);
+                warn_near_pty_limit(
+                    &mut state.warned_waiter_limit,
+                    "maxPtyReadWaiters",
+                    waiter_count,
+                    MAX_PTY_READ_WAITERS,
+                );
                 let next = state.next_waiter_id;
-                state.next_waiter_id += 1;
+                state.next_waiter_id = state
+                    .next_waiter_id
+                    .checked_add(1)
+                    .ok_or_else(|| PtyError::io("PTY read waiter identifier space exhausted"))?;
                 state.waiters.insert(
                     next,
                     PendingRead {
                         length,
+                        end: pty_ref.end,
                         result: None,
                     },
                 );
                 let Some(pty) = state.ptys.get_mut(&pty_ref.pty_id) else {
                     state.waiters.remove(&next);
-                    return Err(PtyError::bad_file_descriptor("PTY not found"));
+                    return Err(PtyError::dangling_pty("PTY not found"));
                 };
                 match pty_ref.end {
                     PtyEndKind::Master => pty.waiting_output_reads.push_back(next),
@@ -672,6 +758,9 @@ impl PtyManager {
 
             let now = Instant::now();
             if now >= deadline {
+                if let Some(blocking_deadline) = &mut blocking_deadline {
+                    blocking_deadline.expired();
+                }
                 if let Some(id) = waiter_id.take() {
                     state.waiters.remove(&id);
                     if let Some(pty) = state.ptys.get_mut(&pty_ref.pty_id) {
@@ -683,7 +772,10 @@ impl PtyManager {
                 return Err(PtyError::would_block("PTY read timed out"));
             }
 
-            let remaining = deadline.saturating_duration_since(now);
+            let remaining = blocking_deadline
+                .as_mut()
+                .and_then(BlockingReadDeadline::wait_slice)
+                .unwrap_or_else(|| deadline.saturating_duration_since(now));
             let (next_state, wait_result) =
                 wait_timeout_or_recover(&self.inner.waiters, state, remaining);
             state = next_state;
@@ -691,6 +783,12 @@ impl PtyManager {
                 waiter_id = None;
             }
             if wait_result.timed_out() {
+                if blocking_deadline
+                    .as_mut()
+                    .is_some_and(|deadline| !deadline.expired())
+                {
+                    continue;
+                }
                 if let Some(id) = waiter_id.take() {
                     state.waiters.remove(&id);
                     if let Some(pty) = state.ptys.get_mut(&pty_ref.pty_id) {
@@ -765,11 +863,11 @@ impl PtyManager {
             .desc_to_pty
             .get(&description_id)
             .copied()
-            .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
+            .ok_or_else(|| PtyError::not_a_tty("not a PTY end"))?;
         let pty = state
             .ptys
             .get_mut(&pty_ref.pty_id)
-            .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))?;
+            .ok_or_else(|| PtyError::dangling_pty("PTY not found"))?;
         pty.termios_generation = pty
             .termios_generation
             .checked_add(1)
@@ -812,11 +910,11 @@ impl PtyManager {
             .desc_to_pty
             .get(&description_id)
             .copied()
-            .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
+            .ok_or_else(|| PtyError::not_a_tty("not a PTY end"))?;
         let pty = state
             .ptys
             .get_mut(&pty_ref.pty_id)
-            .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))?;
+            .ok_or_else(|| PtyError::dangling_pty("PTY not found"))?;
 
         if !enabled {
             if let Some(owner_pid) = lease_owner_pid {
@@ -889,11 +987,11 @@ impl PtyManager {
             .desc_to_pty
             .get(&description_id)
             .copied()
-            .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
+            .ok_or_else(|| PtyError::not_a_tty("not a PTY end"))?;
         let pty = state
             .ptys
             .get_mut(&pty_ref.pty_id)
-            .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))?;
+            .ok_or_else(|| PtyError::dangling_pty("PTY not found"))?;
         release_raw_mode_lease(pty, owner_pid, Some(generation))
     }
 
@@ -903,13 +1001,13 @@ impl PtyManager {
             .desc_to_pty
             .get(&description_id)
             .copied()
-            .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
+            .ok_or_else(|| PtyError::not_a_tty("not a PTY end"))?;
         state
             .ptys
             .get(&pty_ref.pty_id)
             .cloned()
             .map(|pty| pty.termios)
-            .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))
+            .ok_or_else(|| PtyError::dangling_pty("PTY not found"))
     }
 
     pub fn set_termios(&self, description_id: u64, termios: PartialTermios) -> PtyResult<()> {
@@ -918,11 +1016,11 @@ impl PtyManager {
             .desc_to_pty
             .get(&description_id)
             .copied()
-            .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
+            .ok_or_else(|| PtyError::not_a_tty("not a PTY end"))?;
         let pty = state
             .ptys
             .get_mut(&pty_ref.pty_id)
-            .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))?;
+            .ok_or_else(|| PtyError::dangling_pty("PTY not found"))?;
         advance_termios_generation(pty)?;
         pty.termios.merge(termios);
         Ok(())
@@ -934,11 +1032,11 @@ impl PtyManager {
             .desc_to_pty
             .get(&description_id)
             .copied()
-            .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
+            .ok_or_else(|| PtyError::not_a_tty("not a PTY end"))?;
         let pty = state
             .ptys
             .get_mut(&pty_ref.pty_id)
-            .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))?;
+            .ok_or_else(|| PtyError::dangling_pty("PTY not found"))?;
         pty.foreground_pgid = pgid;
         Ok(())
     }
@@ -949,12 +1047,12 @@ impl PtyManager {
             .desc_to_pty
             .get(&description_id)
             .copied()
-            .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
+            .ok_or_else(|| PtyError::not_a_tty("not a PTY end"))?;
         state
             .ptys
             .get(&pty_ref.pty_id)
             .map(|pty| pty.foreground_pgid)
-            .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))
+            .ok_or_else(|| PtyError::dangling_pty("PTY not found"))
     }
 
     pub fn window_size(&self, description_id: u64) -> PtyResult<PtyWindowSize> {
@@ -963,12 +1061,12 @@ impl PtyManager {
             .desc_to_pty
             .get(&description_id)
             .copied()
-            .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
+            .ok_or_else(|| PtyError::not_a_tty("not a PTY end"))?;
         state
             .ptys
             .get(&pty_ref.pty_id)
             .map(|pty| pty.window_size)
-            .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))
+            .ok_or_else(|| PtyError::dangling_pty("PTY not found"))
     }
 
     pub fn resize(&self, description_id: u64, cols: u16, rows: u16) -> PtyResult<Option<u32>> {
@@ -977,11 +1075,11 @@ impl PtyManager {
             .desc_to_pty
             .get(&description_id)
             .copied()
-            .ok_or_else(|| PtyError::bad_file_descriptor("not a PTY end"))?;
+            .ok_or_else(|| PtyError::not_a_tty("not a PTY end"))?;
         let pty = state
             .ptys
             .get_mut(&pty_ref.pty_id)
-            .ok_or_else(|| PtyError::bad_file_descriptor("PTY not found"))?;
+            .ok_or_else(|| PtyError::dangling_pty("PTY not found"))?;
         let next_size = PtyWindowSize { cols, rows };
         if pty.window_size == next_size {
             return Ok(None);
@@ -995,19 +1093,29 @@ impl PtyManager {
     }
 
     pub fn buffered_input_bytes(&self) -> usize {
-        lock_or_recover(&self.inner.state)
+        let state = lock_or_recover(&self.inner.state);
+        let buffered: usize = state
             .ptys
             .values()
             .map(|pty| buffer_size(&pty.input_buffer))
-            .sum()
+            .sum();
+        buffered.saturating_add(retained_read_bytes_for_end(
+            &state.waiters,
+            PtyEndKind::Slave,
+        ))
     }
 
     pub fn buffered_output_bytes(&self) -> usize {
-        lock_or_recover(&self.inner.state)
+        let state = lock_or_recover(&self.inner.state);
+        let buffered: usize = state
             .ptys
             .values()
             .map(|pty| buffer_size(&pty.output_buffer))
-            .sum()
+            .sum();
+        buffered.saturating_add(retained_read_bytes_for_end(
+            &state.waiters,
+            PtyEndKind::Master,
+        ))
     }
 
     pub fn pending_read_waiter_count(&self) -> usize {
@@ -1043,9 +1151,9 @@ fn contains_dsr_cursor_query(data: &[u8]) -> bool {
     data.windows(QUERY.len()).any(|window| window == QUERY)
 }
 
-fn process_output(termios: &Termios, data: &[u8]) -> Vec<u8> {
+fn process_output(termios: &Termios, data: &[u8]) -> PtyResult<Vec<u8>> {
     if !termios.opost || !termios.onlcr || !data.contains(&b'\n') {
-        return data.to_vec();
+        return Ok(data.to_vec());
     }
 
     let extra_crs = data
@@ -1054,17 +1162,25 @@ fn process_output(termios: &Termios, data: &[u8]) -> Vec<u8> {
         .filter(|(index, byte)| **byte == b'\n' && (*index == 0 || data[*index - 1] != b'\r'))
         .count();
     if extra_crs == 0 {
-        return data.to_vec();
+        return Ok(data.to_vec());
     }
 
-    let mut result = Vec::with_capacity(data.len() + extra_crs);
+    let transformed_len = data.len().checked_add(extra_crs).ok_or_else(|| {
+        PtyError::too_big("maxPtyTransformedOutputBytes length calculation overflowed")
+    })?;
+    if transformed_len > MAX_PTY_BUFFER_BYTES {
+        return Err(PtyError::too_big(format!(
+            "maxPtyTransformedOutputBytes is {MAX_PTY_BUFFER_BYTES}, terminal output processing would produce {transformed_len} bytes; split the write into smaller chunks"
+        )));
+    }
+    let mut result = Vec::with_capacity(transformed_len);
     for (index, byte) in data.iter().enumerate() {
         if *byte == b'\n' && (index == 0 || data[index - 1] != b'\r') {
             result.push(b'\r');
         }
         result.push(*byte);
     }
-    result
+    Ok(result)
 }
 
 fn process_input(
@@ -1072,10 +1188,11 @@ fn process_input(
     waiters: &mut BTreeMap<u64, PendingRead>,
     data: &[u8],
     signals: &mut Vec<(u32, i32)>,
+    warned_retained_read_limit: &mut bool,
 ) -> PtyResult<()> {
     if !pty.termios.icanon && !pty.termios.echo && !pty.termios.isig {
         let translated = translate_input(&pty.termios, data);
-        deliver_input(pty, waiters, &translated)?;
+        deliver_input(pty, waiters, &translated, warned_retained_read_limit)?;
         return Ok(());
     }
 
@@ -1096,15 +1213,21 @@ fn process_input(
                 // signal is delivered to it and the char is not echoed, matching
                 // the integration suite's VINTR/VSUSP/VQUIT expectations.
                 if pty.termios.echo && !has_foreground_process_group {
-                    deliver_output(pty, waiters, &echo_control_byte(byte), true)?;
+                    deliver_output(
+                        pty,
+                        waiters,
+                        &echo_control_byte(byte),
+                        true,
+                        warned_retained_read_limit,
+                    )?;
                     if pty.termios.icanon {
-                        deliver_output(pty, waiters, b"\r\n", true)?;
+                        deliver_output(pty, waiters, b"\r\n", true, warned_retained_read_limit)?;
                     }
                 }
                 if has_foreground_process_group {
                     signals.push((pty.foreground_pgid, signal));
                 } else if pty.termios.icanon {
-                    deliver_input(pty, waiters, b"\n")?;
+                    deliver_input(pty, waiters, b"\n", warned_retained_read_limit)?;
                 }
                 continue;
             }
@@ -1116,7 +1239,7 @@ fn process_input(
                     deliver_input_eof(pty, waiters);
                 } else {
                     let line = pty.line_buffer.clone();
-                    deliver_input(pty, waiters, &line)?;
+                    deliver_input(pty, waiters, &line, warned_retained_read_limit)?;
                     pty.line_buffer.clear();
                 }
                 continue;
@@ -1125,7 +1248,13 @@ fn process_input(
             if byte == pty.termios.cc.verase || byte == 0x08 {
                 if let Some(&erased) = pty.line_buffer.last() {
                     if pty.termios.echo {
-                        deliver_output(pty, waiters, &erase_sequence(erased), true)?;
+                        deliver_output(
+                            pty,
+                            waiters,
+                            &erase_sequence(erased),
+                            true,
+                            warned_retained_read_limit,
+                        )?;
                     }
                     pty.line_buffer.pop();
                 }
@@ -1140,7 +1269,7 @@ fn process_input(
                             .iter()
                             .flat_map(|b| erase_sequence(*b))
                             .collect();
-                        deliver_output(pty, waiters, &erase, true)?;
+                        deliver_output(pty, waiters, &erase, true, warned_retained_read_limit)?;
                     }
                     pty.line_buffer.clear();
                 }
@@ -1164,7 +1293,7 @@ fn process_input(
                 if pty.termios.echo && !erased.is_empty() {
                     let sequence: Vec<u8> =
                         erased.iter().flat_map(|b| erase_sequence(*b)).collect();
-                    deliver_output(pty, waiters, &sequence, true)?;
+                    deliver_output(pty, waiters, &sequence, true, warned_retained_read_limit)?;
                 }
                 continue;
             }
@@ -1173,9 +1302,9 @@ fn process_input(
                 let mut line = pty.line_buffer.clone();
                 line.push(b'\n');
                 if pty.termios.echo {
-                    deliver_output(pty, waiters, b"\r\n", true)?;
+                    deliver_output(pty, waiters, b"\r\n", true, warned_retained_read_limit)?;
                 }
-                deliver_input(pty, waiters, &line)?;
+                deliver_input(pty, waiters, &line, warned_retained_read_limit)?;
                 pty.line_buffer.clear();
                 continue;
             }
@@ -1186,14 +1315,20 @@ fn process_input(
             if pty.termios.echo {
                 // ECHOCTL: echo control chars in caret form (e.g. 0x01 -> "^A")
                 // so they are visible; printable bytes echo verbatim.
-                deliver_output(pty, waiters, &echo_control_byte(byte), true)?;
+                deliver_output(
+                    pty,
+                    waiters,
+                    &echo_control_byte(byte),
+                    true,
+                    warned_retained_read_limit,
+                )?;
             }
             pty.line_buffer.push(byte);
         } else {
             if pty.termios.echo {
-                deliver_output(pty, waiters, &[byte], true)?;
+                deliver_output(pty, waiters, &[byte], true, warned_retained_read_limit)?;
             }
-            deliver_input(pty, waiters, &[byte])?;
+            deliver_input(pty, waiters, &[byte], warned_retained_read_limit)?;
         }
     }
 
@@ -1214,27 +1349,29 @@ fn deliver_input(
     pty: &mut PtyState,
     waiters: &mut BTreeMap<u64, PendingRead>,
     data: &[u8],
+    warned_retained_read_limit: &mut bool,
 ) -> PtyResult<()> {
-    if let Some(waiter_id) = pty.waiting_input_reads.pop_front() {
-        if let Some(waiter) = waiters.get_mut(&waiter_id) {
-            if data.len() <= waiter.length {
-                waiter.result = Some(Some(data.to_vec()));
-            } else {
-                // The waiter consumes `waiter.length` bytes directly; only the
-                // tail is buffered, so the buffer cap must be enforced on the
-                // tail. Otherwise a single large write past a pending reader
-                // bypasses MAX_PTY_BUFFER_BYTES entirely.
-                let tail_len = data.len() - waiter.length;
-                if tail_len > available_capacity(&pty.input_buffer) {
-                    pty.waiting_input_reads.push_front(waiter_id);
-                    return Err(PtyError::would_block("PTY input buffer full"));
-                }
-                let (head, tail) = data.split_at(waiter.length);
-                waiter.result = Some(Some(head.to_vec()));
+    if let Some(waiter_id) = pty.waiting_input_reads.front().copied() {
+        if let Some(waiter) = waiters.get(&waiter_id) {
+            let retained_len = data.len().min(waiter.length);
+            check_retained_read_capacity(waiters, retained_len, warned_retained_read_limit)?;
+            let tail_len = data.len().saturating_sub(waiter.length);
+            if tail_len > available_capacity(&pty.input_buffer) {
+                return Err(PtyError::would_block("PTY input buffer full"));
+            }
+            let split_at = retained_len;
+            let (head, tail) = data.split_at(split_at);
+            pty.waiting_input_reads.pop_front();
+            waiters
+                .get_mut(&waiter_id)
+                .expect("validated PTY input waiter must remain registered")
+                .result = Some(Some(head.to_vec()));
+            if !tail.is_empty() {
                 pty.input_buffer.push_front(tail.to_vec());
             }
             return Ok(());
         }
+        pty.waiting_input_reads.pop_front();
     }
 
     if buffer_size(&pty.input_buffer).saturating_add(data.len()) > MAX_PTY_BUFFER_BYTES {
@@ -1261,29 +1398,33 @@ fn deliver_output(
     waiters: &mut BTreeMap<u64, PendingRead>,
     data: &[u8],
     echo: bool,
+    warned_retained_read_limit: &mut bool,
 ) -> PtyResult<()> {
-    if let Some(waiter_id) = pty.waiting_output_reads.pop_front() {
-        if let Some(waiter) = waiters.get_mut(&waiter_id) {
-            if data.len() <= waiter.length {
-                waiter.result = Some(Some(data.to_vec()));
-            } else {
-                // Enforce the buffer cap on the tail (see deliver_input).
-                let tail_len = data.len() - waiter.length;
-                if tail_len > available_capacity(&pty.output_buffer) {
-                    pty.waiting_output_reads.push_front(waiter_id);
-                    let message = if echo {
-                        "PTY output buffer full (echo backpressure)"
-                    } else {
-                        "PTY output buffer full"
-                    };
-                    return Err(PtyError::would_block(message));
-                }
-                let (head, tail) = data.split_at(waiter.length);
-                waiter.result = Some(Some(head.to_vec()));
+    if let Some(waiter_id) = pty.waiting_output_reads.front().copied() {
+        if let Some(waiter) = waiters.get(&waiter_id) {
+            let retained_len = data.len().min(waiter.length);
+            check_retained_read_capacity(waiters, retained_len, warned_retained_read_limit)?;
+            let tail_len = data.len().saturating_sub(waiter.length);
+            if tail_len > available_capacity(&pty.output_buffer) {
+                let message = if echo {
+                    "PTY output buffer full (echo backpressure)"
+                } else {
+                    "PTY output buffer full"
+                };
+                return Err(PtyError::would_block(message));
+            }
+            let (head, tail) = data.split_at(retained_len);
+            pty.waiting_output_reads.pop_front();
+            waiters
+                .get_mut(&waiter_id)
+                .expect("validated PTY output waiter must remain registered")
+                .result = Some(Some(head.to_vec()));
+            if !tail.is_empty() {
                 pty.output_buffer.push_front(tail.to_vec());
             }
             return Ok(());
         }
+        pty.waiting_output_reads.pop_front();
     }
 
     if buffer_size(&pty.output_buffer).saturating_add(data.len()) > MAX_PTY_BUFFER_BYTES {
@@ -1297,6 +1438,56 @@ fn deliver_output(
 
     pty.output_buffer.push_back(data.to_vec());
     Ok(())
+}
+
+fn check_retained_read_capacity(
+    waiters: &BTreeMap<u64, PendingRead>,
+    additional: usize,
+    warned_near_limit: &mut bool,
+) -> PtyResult<()> {
+    let current = retained_read_bytes(waiters);
+    let observed = current
+        .checked_add(additional)
+        .ok_or_else(|| PtyError::would_block("maxPtyRetainedReadBytes accounting overflowed"))?;
+    if observed > MAX_PTY_RETAINED_READ_BYTES {
+        return Err(PtyError::would_block(format!(
+            "maxPtyRetainedReadBytes limit is {MAX_PTY_RETAINED_READ_BYTES}, retaining this result would use {observed} bytes; retry after another terminal reader consumes its result"
+        )));
+    }
+    warn_near_pty_limit(
+        warned_near_limit,
+        "maxPtyRetainedReadBytes",
+        observed,
+        MAX_PTY_RETAINED_READ_BYTES,
+    );
+    Ok(())
+}
+
+fn retained_read_bytes(waiters: &BTreeMap<u64, PendingRead>) -> usize {
+    waiters
+        .values()
+        .filter_map(|waiter| waiter.result.as_ref()?.as_ref())
+        .map(Vec::len)
+        .fold(0usize, usize::saturating_add)
+}
+
+fn retained_read_bytes_for_end(waiters: &BTreeMap<u64, PendingRead>, end: PtyEndKind) -> usize {
+    waiters
+        .values()
+        .filter(|waiter| waiter.end == end)
+        .filter_map(|waiter| waiter.result.as_ref()?.as_ref())
+        .map(Vec::len)
+        .fold(0usize, usize::saturating_add)
+}
+
+fn warn_near_pty_limit(warned: &mut bool, limit_name: &str, observed: usize, limit: usize) {
+    if *warned || observed < limit.saturating_sub(limit / 10) {
+        return;
+    }
+    *warned = true;
+    eprintln!(
+        "WARN_AGENTOS_RESOURCE_NEAR_LIMIT: resource={limit_name} used={observed} limit={limit}"
+    );
 }
 
 fn advance_termios_generation(pty: &mut PtyState) -> PtyResult<()> {
@@ -1455,6 +1646,164 @@ fn wait_timeout_or_recover<'a, T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_read_is_rejected_before_waiter_registration() {
+        let manager = PtyManager::new();
+        let pty = manager.create_pty();
+
+        let error = manager
+            .read_with_timeout(
+                pty.slave.description.id(),
+                MAX_PTY_READ_BYTES + 1,
+                Some(Duration::from_secs(1)),
+            )
+            .expect_err("oversized PTY read must fail before waiting");
+
+        assert_eq!(error.code(), "E2BIG");
+        assert!(error.to_string().contains("maxPtyReadBytes"));
+        assert_eq!(manager.pending_read_waiter_count(), 0);
+        assert_eq!(manager.queued_read_waiter_count(), 0);
+        assert_eq!(manager.buffered_input_bytes(), 0);
+        assert_eq!(manager.buffered_output_bytes(), 0);
+    }
+
+    #[test]
+    fn oversized_write_is_rejected_before_line_discipline_side_effects() {
+        let manager = PtyManager::new();
+        let pty = manager.create_pty();
+
+        let error = manager
+            .write(
+                pty.master.description.id(),
+                vec![b'x'; MAX_PTY_WRITE_BYTES + 1],
+            )
+            .expect_err("oversized PTY write must fail before processing input");
+
+        assert_eq!(error.code(), "E2BIG");
+        assert!(error.to_string().contains("maxPtyWriteBytes"));
+        let state = lock_or_recover(&manager.inner.state);
+        let pty_ref = state
+            .desc_to_pty
+            .get(&pty.master.description.id())
+            .expect("master must remain registered");
+        let pty_state = state.ptys.get(&pty_ref.pty_id).expect("PTY must exist");
+        assert!(pty_state.line_buffer.is_empty());
+        assert!(pty_state.input_buffer.is_empty());
+        assert!(pty_state.output_buffer.is_empty());
+        assert!(state.waiters.is_empty());
+    }
+
+    #[test]
+    fn output_transform_limit_rejects_before_buffering() {
+        let manager = PtyManager::new();
+        let pty = manager.create_pty();
+        let newlines = vec![b'\n'; MAX_PTY_BUFFER_BYTES / 2 + 1];
+
+        let error = manager
+            .write(pty.slave.description.id(), newlines)
+            .expect_err("ONLCR expansion beyond the PTY cap must fail");
+
+        assert_eq!(error.code(), "E2BIG");
+        assert!(error.to_string().contains("maxPtyTransformedOutputBytes"));
+        assert_eq!(manager.buffered_output_bytes(), 0);
+        let read_error = manager
+            .read_with_timeout(pty.master.description.id(), 1, Some(Duration::ZERO))
+            .expect_err("failed transformed write must publish no output");
+        assert_eq!(read_error.code(), "EAGAIN");
+    }
+
+    #[test]
+    fn read_waiter_limit_fails_with_named_typed_error() {
+        let manager = PtyManager::new();
+        let pty = manager.create_pty();
+        {
+            let mut state = lock_or_recover(&manager.inner.state);
+            for id in 1..=MAX_PTY_READ_WAITERS as u64 {
+                state.waiters.insert(
+                    id,
+                    PendingRead {
+                        length: 1,
+                        end: PtyEndKind::Slave,
+                        result: None,
+                    },
+                );
+            }
+            state.next_waiter_id = MAX_PTY_READ_WAITERS as u64 + 1;
+        }
+
+        let error = manager
+            .read_with_timeout(pty.slave.description.id(), 1, Some(Duration::from_secs(1)))
+            .expect_err("waiter saturation must fail without registering another waiter");
+
+        assert_eq!(error.code(), "EAGAIN");
+        assert!(error.to_string().contains("maxPtyReadWaiters"));
+        assert_eq!(manager.pending_read_waiter_count(), MAX_PTY_READ_WAITERS);
+        assert_eq!(manager.queued_read_waiter_count(), 0);
+    }
+
+    #[test]
+    fn retained_read_limit_is_accounted_and_fails_before_delivery() {
+        const RETAINED_CHUNK_BYTES: usize = 64 * 1024;
+        const RETAINED_CHUNKS: usize = MAX_PTY_RETAINED_READ_BYTES / RETAINED_CHUNK_BYTES;
+
+        let manager = PtyManager::new();
+        let pty = manager.create_pty();
+        let pending_id = RETAINED_CHUNKS as u64 + 1;
+        {
+            let mut state = lock_or_recover(&manager.inner.state);
+            let pty_id = state
+                .desc_to_pty
+                .get(&pty.master.description.id())
+                .expect("master must be registered")
+                .pty_id;
+            for id in 1..=RETAINED_CHUNKS as u64 {
+                state.waiters.insert(
+                    id,
+                    PendingRead {
+                        length: RETAINED_CHUNK_BYTES,
+                        end: PtyEndKind::Master,
+                        result: Some(Some(vec![0; RETAINED_CHUNK_BYTES])),
+                    },
+                );
+            }
+            state.waiters.insert(
+                pending_id,
+                PendingRead {
+                    length: 1,
+                    end: PtyEndKind::Master,
+                    result: None,
+                },
+            );
+            state
+                .ptys
+                .get_mut(&pty_id)
+                .expect("PTY must exist")
+                .waiting_output_reads
+                .push_back(pending_id);
+        }
+
+        assert_eq!(manager.buffered_output_bytes(), MAX_PTY_RETAINED_READ_BYTES);
+        let error = manager
+            .write(pty.slave.description.id(), b"x")
+            .expect_err("retained result saturation must block another delivery");
+
+        assert_eq!(error.code(), "EAGAIN");
+        assert!(error.to_string().contains("maxPtyRetainedReadBytes"));
+        let state = lock_or_recover(&manager.inner.state);
+        let pending = state
+            .waiters
+            .get(&pending_id)
+            .expect("blocked waiter must remain registered");
+        assert!(pending.result.is_none());
+        let pty_ref = state
+            .desc_to_pty
+            .get(&pty.master.description.id())
+            .expect("master must remain registered");
+        let pty_state = state.ptys.get(&pty_ref.pty_id).expect("PTY must exist");
+        assert_eq!(pty_state.waiting_output_reads.front(), Some(&pending_id));
+        assert!(pty_state.output_buffer.is_empty());
+    }
 
     #[test]
     fn zero_timeout_empty_read_does_not_publish_false_readiness() {

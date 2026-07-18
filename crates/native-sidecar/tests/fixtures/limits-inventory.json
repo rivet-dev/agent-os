@@ -267,7 +267,7 @@
 		"name": "MAX_FDS_PER_PROCESS",
 		"path": "crates/kernel/src/fd_table.rs",
 		"class": "invariant",
-		"rationale": "FD table layout fixed at 0-255; max_open_fds is the policy knob above it."
+		"rationale": "Bounded standalone/test fallback aligned with the default max_open_fds policy; production tables use the configured policy value."
 	},
 	{
 		"name": "DEFAULT_MAX_RECORD_LOCKS",
@@ -322,6 +322,30 @@
 		"path": "crates/kernel/src/pty.rs",
 		"class": "invariant",
 		"rationale": "Mirrors Linux PTY buffer semantics."
+	},
+	{
+		"name": "MAX_PTY_READ_BYTES",
+		"path": "crates/kernel/src/pty.rs",
+		"class": "invariant",
+		"rationale": "A single PTY read cannot usefully exceed the bounded PTY buffer it drains."
+	},
+	{
+		"name": "MAX_PTY_WRITE_BYTES",
+		"path": "crates/kernel/src/pty.rs",
+		"class": "invariant",
+		"rationale": "A single PTY write is capped at the bounded PTY buffer before line-discipline processing."
+	},
+	{
+		"name": "MAX_PTY_READ_WAITERS",
+		"path": "crates/kernel/src/pty.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounds parked PTY read state; make this VM-configurable if workloads demonstrate a legitimate need above the conservative default."
+	},
+	{
+		"name": "MAX_PTY_RETAINED_READ_BYTES",
+		"path": "crates/kernel/src/pty.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounds read results retained between PTY delivery and waiter wakeup; future VM policy may tune the global per-kernel budget."
 	},
 	{
 		"name": "DEFAULT_BLOCKING_READ_TIMEOUT_MS",
@@ -920,6 +944,13 @@
 		"wired": "VmLimits.js_runtime.wall_clock_limit_ms"
 	},
 	{
+		"name": "DEFAULT_WASM_ACTIVE_CPU_TIME_LIMIT_MS",
+		"path": "crates/native-sidecar-core/src/limits.rs",
+		"class": "policy",
+		"rationale": "Default active CPU runaway safeguard for standalone WASM execution.",
+		"wired": "VmLimits.wasm.active_cpu_time_limit_ms"
+	},
+	{
 		"name": "DEFAULT_WASM_CAPTURED_OUTPUT_LIMIT_BYTES",
 		"path": "crates/native-sidecar-core/src/limits.rs",
 		"class": "policy",
@@ -1177,12 +1208,6 @@
 		"rationale": "Crypto/state handle table cap tunable in principle; low demand, wire later."
 	},
 	{
-		"name": "PYTHON_SOCKET_MAX_RECV",
-		"path": "crates/native-sidecar/src/execution/python/sockets.rs",
-		"class": "policy-deferred",
-		"rationale": "Guest Python socket recv request clamp for one synchronous host read; bounded by default, fold into Python/socket VmLimits if operators need to tune it."
-	},
-	{
 		"name": "SQLITE_JS_SAFE_INTEGER_MAX",
 		"path": "crates/native-sidecar/src/execution/javascript/sqlite.rs",
 		"class": "invariant",
@@ -1193,18 +1218,6 @@
 		"path": "crates/native-sidecar/src/execution/network/udp.rs",
 		"class": "invariant",
 		"rationale": "UDP payload ceiling imposed by datagram protocol semantics; buffering remains separately policy-bounded."
-	},
-	{
-		"name": "MAX_CROSS_DEVICE_MOVE_DEPTH",
-		"path": "crates/native-sidecar/src/filesystem.rs",
-		"class": "policy-deferred",
-		"rationale": "Host filesystem safety bound; expose through typed filesystem policy if operators need to tune it."
-	},
-	{
-		"name": "MAX_MAPPED_TRUNCATE_BYTES",
-		"path": "crates/native-sidecar/src/filesystem.rs",
-		"class": "policy-deferred",
-		"rationale": "Host filesystem safety bound; expose through typed filesystem policy if operators need to tune it."
 	},
 	{
 		"name": "MAX_AGENTOS_PACKAGE_MOUNTS",
@@ -2043,5 +2056,405 @@
 		"path": "packages/core/src/bindings.ts",
 		"class": "policy-deferred",
 		"rationale": "Cross-boundary contract with native-sidecar-core bindings validation; both sides must change together."
+	},
+	{
+		"name": "APPEND_WIRE_BYTE_LIMIT",
+		"path": "crates/agentos-sidecar/src/session_store/performance_tests.rs",
+		"class": "invariant",
+		"rationale": "Performance-test assertion for bounded append response encoding; not production policy."
+	},
+	{
+		"name": "HISTORY_COMPLEXITY_LIMIT",
+		"path": "crates/agentos-sidecar/src/session_store/performance_tests.rs",
+		"class": "invariant",
+		"rationale": "Performance-test workload size; production history policy is configured separately."
+	},
+	{
+		"name": "SESSION_LIST_WIRE_BYTE_LIMIT",
+		"path": "crates/agentos-sidecar/src/session_store/performance_tests.rs",
+		"class": "invariant",
+		"rationale": "Performance-test assertion for bounded session-list response encoding; not production policy."
+	},
+	{
+		"name": "DEFAULT_BLOCK_CACHE_BYTES",
+		"path": "crates/vfs-store/src/local/file_block_store.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded local block-cache default; expose through storage configuration if operators need to tune it."
+	},
+	{
+		"name": "DEFAULT_PROCESS_MAX_PENDING_CHILD_SYNC_BYTES",
+		"path": "crates/native-sidecar-core/src/limits.rs",
+		"class": "policy",
+		"rationale": "Default retained-byte budget for pending child sync calls.",
+		"wired": "VmLimits.process.max_pending_child_sync_bytes"
+	},
+	{
+		"name": "DEFAULT_PROCESS_MAX_PENDING_CHILD_SYNC_COUNT",
+		"path": "crates/native-sidecar-core/src/limits.rs",
+		"class": "policy",
+		"rationale": "Default count budget for pending child sync calls.",
+		"wired": "VmLimits.process.max_pending_child_sync_count"
+	},
+	{
+		"name": "DEFAULT_WASM_PENDING_EVENT_BYTES",
+		"path": "crates/execution/src/wasm.rs",
+		"class": "policy",
+		"rationale": "Standalone WASM pending-event byte fallback; production launches receive the typed process limit.",
+		"wired": "WasmExecutionLimits.pending_event_bytes"
+	},
+	{
+		"name": "DEFAULT_WASM_SYNC_RPC_RESPONSE_LINE_BYTES",
+		"path": "crates/execution/src/wasm.rs",
+		"class": "policy",
+		"rationale": "Standalone WASM sync-response framing fallback; production launches receive the typed bridge limit.",
+		"wired": "WasmExecutionLimits.max_sync_rpc_response_line_bytes"
+	},
+	{
+		"name": "MAX_ACCOUNTS",
+		"path": "crates/vm-config/src/lib.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded configured guest account count; expose separately only if larger account databases are required."
+	},
+	{
+		"name": "MAX_ACCOUNT_RECORD_BYTES",
+		"path": "crates/vm-config/src/lib.rs",
+		"class": "invariant",
+		"rationale": "Owned account ABI record ceiling, leaving one byte for the terminating NUL."
+	},
+	{
+		"name": "MAX_GROUPS",
+		"path": "crates/vm-config/src/lib.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded configured guest group count; expose separately only if larger account databases are required."
+	},
+	{
+		"name": "MAX_GROUP_MEMBERS",
+		"path": "crates/vm-config/src/lib.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded member count per configured guest group; expose separately if operators need to tune it."
+	},
+	{
+		"name": "MAX_SUPPLEMENTARY_GIDS",
+		"path": "crates/vm-config/src/lib.rs",
+		"class": "invariant",
+		"rationale": "Owned Linux identity ABI supports a bounded 64-entry supplementary group set."
+	},
+	{
+		"name": "MAX_ACCOUNT_NAME_BYTES",
+		"path": "crates/native-sidecar/src/execution/host_dispatch/mod.rs",
+		"class": "invariant",
+		"rationale": "Owned account lookup ABI input ceiling."
+	},
+	{
+		"name": "MAX_ACCOUNT_RECORD_BYTES",
+		"path": "crates/native-sidecar/src/execution/host_dispatch/mod.rs",
+		"class": "invariant",
+		"rationale": "Owned account lookup ABI output ceiling."
+	},
+	{
+		"name": "MAX_CHILD_PROCESS_ID_BYTES",
+		"path": "crates/native-sidecar/src/execution/host_dispatch/mod.rs",
+		"class": "invariant",
+		"rationale": "Internal child-process correlation identifier framing ceiling."
+	},
+	{
+		"name": "MAX_DEFERRED_GUEST_WAIT_MS",
+		"path": "crates/native-sidecar/src/execution/host_dispatch/mod.rs",
+		"class": "invariant",
+		"rationale": "Largest wait representable by the owned u32-millisecond bridge ABI."
+	},
+	{
+		"name": "MAX_ENTROPY_CHUNK_BYTES",
+		"path": "crates/native-sidecar/src/execution/host_dispatch/mod.rs",
+		"class": "invariant",
+		"rationale": "Fixed per-import entropy work quantum; aggregate guest consumption remains separately accounted."
+	},
+	{
+		"name": "MAX_SIGNAL_SET_ENTRIES",
+		"path": "crates/native-sidecar/src/execution/host_dispatch/mod.rs",
+		"class": "invariant",
+		"rationale": "Owned signal ABI represents signals 1 through 64."
+	},
+	{
+		"name": "MAX_SIGNAL_STATE_MASK_JSON_BYTES",
+		"path": "crates/native-sidecar/src/execution/host_dispatch/mod.rs",
+		"class": "invariant",
+		"rationale": "Bounded encoding ceiling for the fixed 64-entry signal set."
+	},
+	{
+		"name": "MAX_SUPPLEMENTARY_GROUPS",
+		"path": "crates/native-sidecar/src/execution/host_dispatch/mod.rs",
+		"class": "invariant",
+		"rationale": "Owned Linux identity ABI supports a bounded 64-entry supplementary group set."
+	},
+	{
+		"name": "MAX_CLOSEFROM_TARGETS",
+		"path": "crates/native-sidecar/src/execution/host_dispatch/filesystem.rs",
+		"class": "invariant",
+		"rationale": "Defensive work bound above every supported open-fd limit for one closefrom operation."
+	},
+	{
+		"name": "MAX_PATH_BYTES",
+		"path": "crates/native-sidecar/src/execution/host_dispatch/filesystem.rs",
+		"class": "invariant",
+		"rationale": "Linux PATH_MAX-compatible owned ABI ceiling."
+	},
+	{
+		"name": "MAX_READDIR_ENTRIES",
+		"path": "crates/native-sidecar/src/execution/host_dispatch/filesystem.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded directory batch size; expose through filesystem limits if operators need to tune it."
+	},
+	{
+		"name": "MAX_XATTR_NAME_BYTES",
+		"path": "crates/native-sidecar/src/execution/host_dispatch/filesystem.rs",
+		"class": "invariant",
+		"rationale": "Linux XATTR_NAME_MAX-compatible owned ABI ceiling."
+	},
+	{
+		"name": "MAX_ADAPTIVE_CHUNK_SIZE",
+		"path": "crates/vfs/src/engine/engines/chunked.rs",
+		"class": "invariant",
+		"rationale": "Storage-format chunk-selection ceiling preventing unbounded adaptive chunks."
+	},
+	{
+		"name": "MAX_PENDING_WRITE_COMMITS",
+		"path": "crates/vfs-store/src/local/sqlite_metadata_store.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded SQLite write-coalescing queue; expose through storage configuration if tuning is needed."
+	},
+	{
+		"name": "MAX_DNS_RESULTS",
+		"path": "crates/execution/src/python.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded Python DNS result batch; expose through networking limits if operators need to tune it."
+	},
+	{
+		"name": "MAX_HOST_BYTES",
+		"path": "crates/execution/src/python.rs",
+		"class": "invariant",
+		"rationale": "DNS host-name wire-format ceiling."
+	},
+	{
+		"name": "MAX_HTTP_HEADERS",
+		"path": "crates/execution/src/python.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded Python HTTP header count; expose through HTTP limits if tuning is needed."
+	},
+	{
+		"name": "MAX_HTTP_HEADER_BYTES",
+		"path": "crates/execution/src/python.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded Python HTTP header bytes; expose through HTTP limits if tuning is needed."
+	},
+	{
+		"name": "MAX_HTTP_METHOD_BYTES",
+		"path": "crates/execution/src/python.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded Python HTTP method bytes; expose through HTTP limits if tuning is needed."
+	},
+	{
+		"name": "MAX_HTTP_URL_BYTES",
+		"path": "crates/execution/src/python.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded Python HTTP URL bytes; expose through HTTP limits if tuning is needed."
+	},
+	{
+		"name": "MAX_PATH_BYTES",
+		"path": "crates/execution/src/python.rs",
+		"class": "invariant",
+		"rationale": "Linux PATH_MAX-compatible Python bridge ceiling."
+	},
+	{
+		"name": "PYTHON_SOCKET_MAX_RECV",
+		"path": "crates/execution/src/python.rs",
+		"class": "policy-deferred",
+		"rationale": "Per-call Python socket receive clamp; expose through Python networking limits if operators need to tune it."
+	},
+	{
+		"name": "MAX_FD_WRITE_BYTES_LIMIT",
+		"path": "crates/kernel/src/resource_accounting.rs",
+		"class": "invariant",
+		"rationale": "Stable typed limit identifier, not the limit value."
+	},
+	{
+		"name": "MAX_PREAD_BYTES_LIMIT",
+		"path": "crates/kernel/src/resource_accounting.rs",
+		"class": "invariant",
+		"rationale": "Stable typed limit identifier, not the limit value."
+	},
+	{
+		"name": "MAX_PROCESS_ARGV_BYTES_LIMIT",
+		"path": "crates/kernel/src/resource_accounting.rs",
+		"class": "invariant",
+		"rationale": "Stable typed limit identifier, not the limit value."
+	},
+	{
+		"name": "MAX_PROCESS_ENV_BYTES_LIMIT",
+		"path": "crates/kernel/src/resource_accounting.rs",
+		"class": "invariant",
+		"rationale": "Stable typed limit identifier, not the limit value."
+	},
+	{
+		"name": "MAX_READDIR_ENTRIES_LIMIT",
+		"path": "crates/kernel/src/resource_accounting.rs",
+		"class": "invariant",
+		"rationale": "Stable typed limit identifier, not the limit value."
+	},
+	{
+		"name": "MAX_RUNTIME_FAULT_CODE_BYTES",
+		"path": "crates/kernel/src/process_runtime.rs",
+		"class": "invariant",
+		"rationale": "Bounded runtime-control error-code encoding ceiling."
+	},
+	{
+		"name": "MAX_RUNTIME_FAULT_DETAILS_BYTES",
+		"path": "crates/kernel/src/process_runtime.rs",
+		"class": "invariant",
+		"rationale": "Bounded runtime-control structured-details encoding ceiling."
+	},
+	{
+		"name": "MAX_RUNTIME_FAULT_MESSAGE_BYTES",
+		"path": "crates/kernel/src/process_runtime.rs",
+		"class": "invariant",
+		"rationale": "Bounded runtime-control error-message encoding ceiling."
+	},
+	{
+		"name": "MAX_SIGNAL_HANDLER_DEPTH",
+		"path": "crates/kernel/src/process_table.rs",
+		"class": "invariant",
+		"rationale": "Kernel recursion guard for nested caught-signal delivery."
+	},
+	{
+		"name": "MAX_SUPPLEMENTARY_GROUPS",
+		"path": "crates/kernel/src/kernel.rs",
+		"class": "invariant",
+		"rationale": "Owned Linux identity ABI supports a bounded 64-entry supplementary group set."
+	},
+	{
+		"name": "POSIX_ACL_ENTRY_LIMIT",
+		"path": "crates/kernel/src/kernel.rs",
+		"class": "invariant",
+		"rationale": "Owned POSIX ACL xattr representation ceiling."
+	},
+	{
+		"name": "XATTR_NAME_MAX",
+		"path": "crates/kernel/src/kernel.rs",
+		"class": "invariant",
+		"rationale": "Linux XATTR_NAME_MAX compatibility constant."
+	},
+	{
+		"name": "MAX_SCRIPT_PREVIEW_BYTES",
+		"path": "crates/native-sidecar/src/execution/launch.rs",
+		"class": "invariant",
+		"rationale": "Bounded diagnostic-only script preview; not guest execution policy."
+	},
+	{
+		"name": "NEAR_LIMIT_PERCENT",
+		"path": "crates/execution/src/backend/payload.rs",
+		"class": "invariant",
+		"rationale": "Shared 80-percent warning contract required by the runtime safety model."
+	},
+	{
+		"name": "TEST_PROCESS_VM_EXECUTOR_LIMIT",
+		"path": "crates/v8-runtime/src/lib.rs",
+		"class": "invariant",
+		"rationale": "Test-only process runtime admission bound."
+	},
+	{
+		"name": "VM_EXECUTOR_LIMIT_CONFIG_PATH",
+		"path": "crates/runtime/src/executor.rs",
+		"class": "invariant",
+		"rationale": "Stable configuration-path identifier, not a limit value."
+	},
+	{
+		"name": "XATTR_LIST_MAX",
+		"path": "crates/vfs/src/engine/types.rs",
+		"class": "invariant",
+		"rationale": "Linux xattr list-size compatibility ceiling."
+	},
+	{
+		"name": "XATTR_NAME_MAX",
+		"path": "crates/vfs/src/engine/types.rs",
+		"class": "invariant",
+		"rationale": "Linux XATTR_NAME_MAX compatibility constant."
+	},
+	{
+		"name": "XATTR_SIZE_MAX",
+		"path": "crates/vfs/src/engine/types.rs",
+		"class": "invariant",
+		"rationale": "Linux xattr value-size compatibility ceiling."
+	},
+	{
+		"name": "XATTR_LIST_MAX",
+		"path": "crates/vfs/src/posix/vfs.rs",
+		"class": "invariant",
+		"rationale": "Linux xattr list-size compatibility ceiling."
+	},
+	{
+		"name": "XATTR_NAME_MAX",
+		"path": "crates/vfs/src/posix/vfs.rs",
+		"class": "invariant",
+		"rationale": "Linux XATTR_NAME_MAX compatibility constant."
+	},
+	{
+		"name": "XATTR_SIZE_MAX",
+		"path": "crates/vfs/src/posix/vfs.rs",
+		"class": "invariant",
+		"rationale": "Linux xattr value-size compatibility ceiling."
+	},
+	{
+		"name": "MAX_ACP_ADDITIONAL_DIRECTORIES",
+		"path": "crates/agentos-sidecar-core/src/engine.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded trusted ACP request collection; expose through VM configuration if operators need to tune it."
+	},
+	{
+		"name": "MAX_ACP_GUEST_PATH_BYTES",
+		"path": "crates/agentos-sidecar-core/src/engine.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded trusted ACP guest-path payload; expose through VM configuration if operators need to tune it."
+	},
+	{
+		"name": "CHILD_PROCESS_EXIT_DRAIN_MAX_MS",
+		"path": "packages/build-tools/bridge-src/builtins/child-process.ts",
+		"class": "policy-deferred",
+		"rationale": "Bounded child stdio drain grace period; expose through process configuration if operators need to tune it."
+	},
+	{
+		"name": "CHILD_PROCESS_IPC_MAX_GRAPH_DEPTH",
+		"path": "packages/build-tools/bridge-src/builtins/child-process.ts",
+		"class": "invariant",
+		"rationale": "Parser recursion guard for the private child-process IPC serialization format."
+	},
+	{
+		"name": "CHILD_PROCESS_IPC_MAX_GRAPH_NODES",
+		"path": "packages/build-tools/bridge-src/builtins/child-process.ts",
+		"class": "policy-deferred",
+		"rationale": "Bounded retained graph for child-process IPC messages; expose through process configuration if operators need to tune it."
+	},
+	{
+		"name": "MAX_EARLY_CHILD_PROCESS_EVENTS",
+		"path": "packages/build-tools/bridge-src/builtins/child-process.ts",
+		"class": "policy-deferred",
+		"rationale": "Bounded events retained while child-process startup races handler registration; expose through process configuration if operators need to tune it."
+	},
+	{
+		"name": "MAX_EARLY_CHILD_PROCESS_IDS",
+		"path": "packages/build-tools/bridge-src/builtins/child-process.ts",
+		"class": "policy-deferred",
+		"rationale": "Bounded child identifiers retained while startup races handler registration; expose through process configuration if operators need to tune it."
+	},
+	{
+		"name": "MAX_NODE_CLI_SHIM_BYTES",
+		"path": "crates/native-sidecar/src/execution/launch.rs",
+		"class": "invariant",
+		"rationale": "Parser safety ceiling for the small trusted Node CLI redirect shim format."
+	},
+	{
+		"name": "MAX_TAR_REALPATH_CACHE_ENTRIES",
+		"path": "crates/vfs/src/posix/tar_fs.rs",
+		"class": "invariant",
+		"rationale": "Process-local memoization cap; clearing the cache changes performance only, not guest behavior."
 	}
 ]

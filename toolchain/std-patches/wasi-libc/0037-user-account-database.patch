@@ -1,15 +1,16 @@
 Implement the POSIX passwd and group database through host_user.
 
-The VM account database is kernel-owned and may contain multiple configured
-users and groups. Route name/id lookups, iteration, reentrant APIs, and
-getgrouplist through that database instead of consulting guest /etc files.
+The VM account database is kernel-owned and may contain multiple live or
+configured users and groups. Route name/id lookups, iteration, reentrant APIs,
+and getgrouplist through the kernel host service so `/etc/passwd` and
+`/etc/group` remain live process-visible sources without executor-local state.
 
 diff --git a/libc-bottom-half/sources/host_user_accounts.c b/libc-bottom-half/sources/host_user_accounts.c
 new file mode 100644
 index 0000000..a1f4e3d
 --- /dev/null
 +++ b/libc-bottom-half/sources/host_user_accounts.c
-@@ -0,0 +1,292 @@
+@@ -0,0 +1,310 @@
 +#define _GNU_SOURCE
 +#include <errno.h>
 +#include <grp.h>
@@ -22,7 +23,8 @@ index 0000000..a1f4e3d
 +#define WASM_IMPORT(mod, fn) \
 +    __attribute__((__import_module__(mod), __import_name__(fn)))
 +#define ACCOUNT_TEXT_MAX 4096
-+#define ACCOUNT_MEMBERS_MAX 256
++#define ACCOUNT_GROUP_MEMBERS_MAX 256
++#define ACCOUNT_GROUPS_MAX 256
 +
 +WASM_IMPORT("host_user", "getpwnam")
 +uint32_t __host_getpwnam(const uint8_t *, uint32_t, uint8_t *, uint32_t,
@@ -194,11 +196,16 @@ index 0000000..a1f4e3d
 +    temporary[length] = '\0';
 +    size_t member_count = group_member_count(temporary, length);
 +    if (member_count == SIZE_MAX) return EIO;
-+    uintptr_t strings_end = (uintptr_t)buffer + length + 1;
-+    uintptr_t aligned = (strings_end + sizeof(char *) - 1) & ~(sizeof(char *) - 1);
-+    if (aligned < (uintptr_t)buffer ||
-+        aligned + (member_count + 1) * sizeof(char *) > (uintptr_t)buffer + size)
++    if (member_count > ACCOUNT_GROUP_MEMBERS_MAX) return EOVERFLOW;
++    size_t strings_size = (size_t)length + 1;
++    size_t alignment_padding =
++        (sizeof(char *) - strings_size % sizeof(char *)) % sizeof(char *);
++    size_t members_size = (member_count + 1) * sizeof(char *);
++    if (strings_size > size || alignment_padding > size - strings_size ||
++        members_size > size - strings_size - alignment_padding)
 +        return ERANGE;
++    uintptr_t aligned =
++        (uintptr_t)(buffer + strings_size + alignment_padding);
 +    memcpy(buffer, temporary, length + 1);
 +    int parsed = parse_group(buffer, length, entry, (char **)aligned,
 +                             member_count);
@@ -228,7 +235,7 @@ index 0000000..a1f4e3d
 +
 +static struct group group_entry;
 +static char group_buffer[ACCOUNT_TEXT_MAX +
-+                         (ACCOUNT_MEMBERS_MAX + 1) * sizeof(char *)];
++                         (ACCOUNT_GROUP_MEMBERS_MAX + 1) * sizeof(char *)];
 +static uint32_t group_index;
 +
 +struct group *getgrgid(gid_t gid) {
@@ -282,19 +289,31 @@ index 0000000..a1f4e3d
 +
 +int getgrouplist(const char *user, gid_t primary, gid_t *groups, int *ngroups) {
 +    if (!user || !ngroups || *ngroups < 0) { errno = EINVAL; return -1; }
-+    gid_t found[ACCOUNT_MEMBERS_MAX];
++    gid_t found[ACCOUNT_GROUPS_MAX];
 +    size_t count = 0;
 +    found[count++] = primary;
-+    for (uint32_t index = 0; index < ACCOUNT_MEMBERS_MAX; index++) {
++    int database_ended = 0;
++    for (uint32_t index = 0; index < ACCOUNT_GROUPS_MAX; index++) {
 +        struct group *entry;
 +        int error = group_by_id(__host_getgrent, index, &group_entry,
 +                                group_buffer, sizeof group_buffer, &entry);
 +        if (error != 0) { errno = error; return -1; }
-+        if (!entry) break;
++        if (!entry) { database_ended = 1; break; }
 +        if (!group_has_member(entry, user)) continue;
 +        size_t existing = 0;
 +        while (existing < count && found[existing] != entry->gr_gid) existing++;
-+        if (existing == count) found[count++] = entry->gr_gid;
++        if (existing == count) {
++            if (count == ACCOUNT_GROUPS_MAX) { errno = EOVERFLOW; return -1; }
++            found[count++] = entry->gr_gid;
++        }
++    }
++    if (!database_ended) {
++        struct group *extra;
++        int error = group_by_id(__host_getgrent, ACCOUNT_GROUPS_MAX,
++                                &group_entry, group_buffer,
++                                sizeof group_buffer, &extra);
++        if (error != 0) { errno = error; return -1; }
++        if (extra) { errno = EOVERFLOW; return -1; }
 +    }
 +    int capacity = *ngroups;
 +    int copied = capacity < (int)count ? capacity : (int)count;

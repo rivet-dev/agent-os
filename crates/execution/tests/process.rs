@@ -61,8 +61,7 @@ fn embedded_runtime_process_keeps_host_pid_internal_for_javascript() {
         })
         .expect("start JavaScript execution");
 
-    assert!(execution.uses_shared_v8_runtime());
-    assert_eq!(execution.child_pid(), 0);
+    assert_eq!(execution.native_process_id(), None);
 
     let result = execution.wait().expect("wait for JavaScript execution");
     assert_eq!(result.exit_code, 0);
@@ -93,6 +92,7 @@ fn embedded_runtime_process_keeps_host_pid_internal_for_wasm() {
             limits: Default::default(),
             vm_id: String::from("vm-wasm"),
             context_id: context.context_id,
+            managed_kernel_host: false,
             argv: vec![module_path.to_string_lossy().into_owned()],
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
@@ -100,8 +100,7 @@ fn embedded_runtime_process_keeps_host_pid_internal_for_wasm() {
         })
         .expect("start wasm execution");
 
-    assert!(execution.uses_shared_v8_runtime());
-    assert_eq!(execution.child_pid(), 0);
+    assert_eq!(execution.native_process_id(), None);
 
     let result = execution.wait().expect("wait for wasm execution");
     assert_eq!(
@@ -153,8 +152,7 @@ export async function loadPyodide(options) {
         })
         .expect("start Python execution");
 
-    assert!(execution.uses_shared_v8_runtime());
-    assert_eq!(execution.child_pid(), 0);
+    assert_eq!(execution.native_process_id(), None);
 
     let ready_deadline = Instant::now() + Duration::from_secs(5);
     let mut saw_ready = false;
@@ -184,7 +182,7 @@ export async function loadPyodide(options) {
             Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
                 panic!("unexpected VFS RPC request during kill test: {request:?}");
             }
-            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+            Some(PythonExecutionEvent::HostRpcRequest(request)) => {
                 assert!(
                     execution
                         .try_service_standalone_module_sync_rpc(&request)
@@ -217,7 +215,7 @@ export async function loadPyodide(options) {
             Some(PythonExecutionEvent::VfsRpcRequest(request)) => {
                 panic!("unexpected VFS RPC request after kill: {request:?}");
             }
-            Some(PythonExecutionEvent::JavascriptSyncRpcRequest(request)) => {
+            Some(PythonExecutionEvent::HostRpcRequest(request)) => {
                 assert!(
                     execution
                         .try_service_standalone_module_sync_rpc(&request)

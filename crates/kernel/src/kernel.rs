@@ -1,18 +1,28 @@
 use crate::bridge::LifecycleState;
-use crate::command_registry::{CommandDriver, CommandRegistry};
+use crate::command_registry::{CommandDriver, CommandRegistry, COMMAND_STUB};
 use crate::device_layer::{create_device_layer, DeviceLayer};
 use crate::dns::{
-    format_dns_resource, resolve_dns, resolve_dns_records, DnsConfig, DnsLookupPolicy,
-    DnsRecordResolution, DnsResolution, DnsResolverErrorKind, HickoryDnsResolver,
-    SharedDnsResolver,
+    format_dns_resource, resolve_dns, resolve_dns_async, resolve_dns_records,
+    resolve_dns_records_async, DnsConfig, DnsLookupPolicy, DnsRecordResolution, DnsResolution,
+    DnsResolverErrorKind, SharedDnsResolver, UnavailableDnsResolver,
 };
+#[cfg(test)]
+use crate::fd_table::WASI_RIGHT_FD_FILESTAT_GET;
 use crate::fd_table::{
     AnonymousFile, AnonymousFileUsage, FdEntry, FdStat, FdTableError, FdTableManager,
     FileDescription, FileLockManager, FileLockTarget, FlockOperation, ProcessFdTable, RecordLock,
     RecordLockType, SharedAnonymousFile, TransferredFd, FD_CLOEXEC, FILETYPE_CHARACTER_DEVICE,
     FILETYPE_DIRECTORY, FILETYPE_PIPE, FILETYPE_REGULAR_FILE, FILETYPE_SOCKET_DGRAM,
-    FILETYPE_SOCKET_STREAM, FILETYPE_SYMBOLIC_LINK, F_DUPFD, O_APPEND, O_CREAT, O_DIRECT,
+    FILETYPE_SOCKET_STREAM, FILETYPE_SYMBOLIC_LINK, F_DUPFD, F_SETFD, O_APPEND, O_CREAT, O_DIRECT,
     O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY,
+    WASI_PREOPEN_READ_RIGHTS_BASE, WASI_PREOPEN_READ_RIGHTS_INHERITING,
+    WASI_PREOPEN_READ_WRITE_RIGHTS_BASE, WASI_PREOPEN_READ_WRITE_RIGHTS_INHERITING,
+    WASI_PREOPEN_WRITE_RIGHTS_BASE, WASI_PREOPEN_WRITE_RIGHTS_INHERITING, WASI_RIGHT_FD_ALLOCATE,
+    WASI_RIGHT_FD_DATASYNC, WASI_RIGHT_FD_FILESTAT_SET_SIZE, WASI_RIGHT_FD_FILESTAT_SET_TIMES,
+    WASI_RIGHT_FD_READ, WASI_RIGHT_FD_SYNC, WASI_RIGHT_FD_WRITE, WASI_RIGHT_PATH_LINK_SOURCE,
+    WASI_RIGHT_PATH_LINK_TARGET, WASI_RIGHT_PATH_OPEN, WASI_RIGHT_PATH_REMOVE_DIRECTORY,
+    WASI_RIGHT_PATH_RENAME_SOURCE, WASI_RIGHT_PATH_RENAME_TARGET, WASI_RIGHT_PATH_SYMLINK,
+    WASI_RIGHT_PATH_UNLINK_FILE,
 };
 use crate::mount_table::{MountEntry, MountOptions, MountTable, MountedFileSystem};
 use crate::network_policy::format_tcp_resource;
@@ -23,12 +33,16 @@ use crate::permissions::{
 use crate::pipe_manager::{PipeError, PipeManager};
 use crate::poll::{
     PollEvents, PollFd, PollNotifier, PollResult, PollTarget, PollTargetEntry, PollTargetResult,
-    POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT,
+    POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLRDNORM, POLLWRNORM,
+};
+use crate::process_runtime::{
+    ProcessControlWake, ProcessExit, ProcessExitReporter, ProcessRuntimeEndpoint,
+    ProcessRuntimeFault, ProcessRuntimeIdentity, RuntimeControlCell, RuntimeControlReceiver,
 };
 use crate::process_table::{
-    DriverProcess, ProcessContext, ProcessExitCallback, ProcessInfo, ProcessStatus, ProcessTable,
-    ProcessTableError, ProcessWaitResult, SigmaskHow, SignalSet, DEFAULT_PROCESS_UMASK, SIGCONT,
-    SIGPIPE, SIGSTOP, SIGTSTP, SIGWINCH,
+    ProcessContext, ProcessInfo, ProcessPermissionTier, ProcessStatus, ProcessTable,
+    ProcessTableError, ProcessWaitResult, SigmaskHow, SignalAction, SignalDelivery, SignalSet,
+    DEFAULT_PROCESS_UMASK, SIGPIPE, SIGWINCH,
 };
 use crate::pty::{
     LineDisciplineConfig, PartialTermios, PtyError, PtyManager, PtyWindowSize, Termios,
@@ -45,7 +59,11 @@ use crate::socket_table::{
     SocketMulticastMembership, SocketReadiness, SocketRecord, SocketShutdown, SocketSpec,
     SocketState, SocketTable, SocketTableError, SocketType, TransferredSocketRight,
 };
-use crate::user::{ProcessIdentity, UserConfig, UserManager};
+use crate::system::{realtime_now_ns, KernelClockId, SystemIdentity};
+use crate::user::{
+    group_record_at, group_record_by_gid, group_record_by_name, passwd_record_at,
+    passwd_record_by_name, passwd_record_by_uid, ProcessIdentity, UserConfig, UserManager,
+};
 use crate::vfs::{
     normalize_path, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat,
     VirtualTimeSpec, VirtualUtimeSpec, MAX_PATH_LENGTH, RENAME_EXCHANGE, S_IFDIR, S_IFLNK, S_IFREG,
@@ -56,13 +74,17 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 #[cfg(test)]
+use std::sync::Condvar;
+#[cfg(test)]
 use std::sync::OnceLock;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, WaitTimeoutResult};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub type KernelResult<T> = Result<T, KernelError>;
-pub use crate::process_table::{ProcessWaitEvent as WaitPidEvent, WaitPidFlags};
+pub use crate::process_table::{
+    ProcessResourceLimit, ProcessResourceLimitKind, ProcessWaitEvent as WaitPidEvent, WaitPidFlags,
+};
 
 pub const SEEK_SET: u8 = 0;
 pub const SEEK_CUR: u8 = 1;
@@ -81,9 +103,48 @@ pub struct KernelError {
     message: String,
 }
 
+/// A runtime image read by the trusted executor loader after its launch
+/// authority has been established. This bypasses guest `fs.read` policy only;
+/// guest process launches must use [`KernelVm::load_process_runtime_image`],
+/// which enforces pathname traversal and execute DAC first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLaunchImage {
+    pub canonical_path: String,
+    pub bytes: Vec<u8>,
+    pub mode: u32,
+}
+
+/// Bounded prefix used to classify a runtime image before the engine-specific
+/// full-image loader applies its own named size limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLaunchImagePrefix {
+    pub canonical_path: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Exact userspace argv/env image committed in the process table. The kernel
+/// validates aggregate payload limits before returning this owned snapshot;
+/// executor adapters may then apply their own bounded wire representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelProcessImage {
+    pub argv: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KernelFileExtent {
+    pub start: u64,
+    pub end: u64,
+    pub unwritten: bool,
+}
+
 impl KernelError {
     pub fn code(&self) -> &'static str {
         self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
     }
 
     fn new(code: &'static str, message: impl Into<String>) -> Self {
@@ -169,6 +230,7 @@ fn linux_shebang_interpreter(header: &[u8], path: &str) -> KernelResult<Option<S
 #[derive(Clone)]
 pub struct KernelVmConfig {
     pub vm_id: String,
+    pub vm_generation: u64,
     pub env: BTreeMap<String, String>,
     pub cwd: String,
     pub user: UserConfig,
@@ -178,21 +240,24 @@ pub struct KernelVmConfig {
     pub dns_resolver: SharedDnsResolver,
     pub resources: ResourceLimits,
     pub zombie_ttl: Duration,
+    pub system_identity: SystemIdentity,
 }
 
 impl KernelVmConfig {
     pub fn new(vm_id: impl Into<String>) -> Self {
         Self {
             vm_id: vm_id.into(),
+            vm_generation: 0,
             env: BTreeMap::new(),
             cwd: String::from("/workspace"),
             user: UserConfig::default(),
             permissions: Permissions::default(),
             loopback_exempt_ports: BTreeSet::new(),
             dns: DnsConfig::default(),
-            dns_resolver: Arc::new(HickoryDnsResolver::default()),
+            dns_resolver: Arc::new(UnavailableDnsResolver),
             resources: ResourceLimits::default(),
             zombie_ttl: Duration::from_secs(60),
+            system_identity: SystemIdentity::default(),
         }
     }
 }
@@ -203,6 +268,9 @@ pub struct SpawnOptions {
     pub parent_pid: Option<u32>,
     pub env: BTreeMap<String, String>,
     pub cwd: Option<String>,
+    /// Trusted process-creation ceiling. A child can only retain or reduce its
+    /// parent's kernel-owned authority; omitting this field inherits exactly.
+    pub permission_tier: Option<crate::process_table::ProcessPermissionTier>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -210,6 +278,8 @@ pub struct VirtualProcessOptions {
     pub parent_pid: Option<u32>,
     pub env: BTreeMap<String, String>,
     pub cwd: Option<String>,
+    /// Trusted virtual-process ceiling. Omission inherits the parent's tier.
+    pub permission_tier: Option<crate::process_table::ProcessPermissionTier>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -248,6 +318,14 @@ pub struct WaitPidEventResult {
     pub pid: u32,
     pub status: i32,
     pub event: WaitPidEvent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitPidDetailedResult {
+    pub pid: u32,
+    pub status: i32,
+    pub event: WaitPidEvent,
+    pub termination: Option<ProcessExit>,
 }
 
 #[derive(Debug)]
@@ -297,13 +375,60 @@ impl fmt::Debug for ReceivedFdRight {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessFdSnapshotEntry {
     pub fd: u32,
+    pub description_id: u64,
     pub fd_flags: u32,
     pub status_flags: u32,
     pub filetype: u8,
+    pub rights_base: u64,
+    pub rights_inheriting: u64,
     pub is_socket: bool,
     pub is_pipe: bool,
     pub is_pty: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessWasiPreopen {
+    pub fd: u32,
+    pub guest_path: String,
+    pub rights_base: u64,
+    pub rights_inheriting: u64,
+}
+
+fn wasi_preopen_rights(tier: ProcessPermissionTier, mount_writable: bool) -> Option<(u64, u64)> {
+    match tier {
+        ProcessPermissionTier::Isolated => None,
+        ProcessPermissionTier::ReadOnly => Some((
+            WASI_PREOPEN_READ_RIGHTS_BASE,
+            WASI_PREOPEN_READ_RIGHTS_INHERITING,
+        )),
+        ProcessPermissionTier::ReadWrite if mount_writable => Some((
+            WASI_PREOPEN_READ_WRITE_RIGHTS_BASE,
+            WASI_PREOPEN_READ_WRITE_RIGHTS_INHERITING,
+        )),
+        ProcessPermissionTier::Full if mount_writable => Some((
+            WASI_PREOPEN_WRITE_RIGHTS_BASE,
+            WASI_PREOPEN_WRITE_RIGHTS_INHERITING,
+        )),
+        ProcessPermissionTier::ReadWrite | ProcessPermissionTier::Full => Some((
+            WASI_PREOPEN_READ_RIGHTS_BASE,
+            WASI_PREOPEN_READ_RIGHTS_INHERITING,
+        )),
+    }
+}
+
+const WASI_WRITE_RIGHTS: u64 = WASI_RIGHT_FD_DATASYNC
+    | WASI_RIGHT_FD_SYNC
+    | WASI_RIGHT_FD_WRITE
+    | WASI_RIGHT_FD_ALLOCATE
+    | WASI_RIGHT_FD_FILESTAT_SET_SIZE
+    | WASI_RIGHT_FD_FILESTAT_SET_TIMES;
+const WASI_NAMESPACE_DESTRUCTIVE_RIGHTS: u64 = WASI_RIGHT_PATH_LINK_SOURCE
+    | WASI_RIGHT_PATH_LINK_TARGET
+    | WASI_RIGHT_PATH_RENAME_SOURCE
+    | WASI_RIGHT_PATH_RENAME_TARGET
+    | WASI_RIGHT_PATH_SYMLINK
+    | WASI_RIGHT_PATH_REMOVE_DIRECTORY
+    | WASI_RIGHT_PATH_UNLINK_FILE;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessFdDirEntry {
@@ -369,7 +494,9 @@ struct ShebangCommand {
 pub struct KernelProcessHandle {
     pid: u32,
     driver: String,
-    process: Arc<StubDriverProcess>,
+    processes: ProcessTable,
+    runtime_control: RuntimeControlCell,
+    exit_reporter: ProcessExitReporter,
 }
 
 impl fmt::Debug for KernelProcessHandle {
@@ -391,19 +518,105 @@ impl KernelProcessHandle {
     }
 
     pub fn finish(&self, exit_code: i32) {
-        self.process.finish(exit_code);
+        if let Err(error) = self
+            .exit_reporter
+            .report_exit(ProcessExit::Exited(exit_code))
+        {
+            eprintln!("failed to report exit for kernel pid {}: {error}", self.pid);
+        }
+    }
+
+    pub fn finish_signaled(&self, signal: i32, core_dumped: bool) {
+        if let Err(error) = self.exit_reporter.report_exit(ProcessExit::Signaled {
+            signal,
+            core_dumped,
+        }) {
+            eprintln!(
+                "failed to report signal exit for kernel pid {}: {error}",
+                self.pid
+            );
+        }
+    }
+
+    pub fn finish_runtime_fault(&self, fault: ProcessRuntimeFault) {
+        if let Err(error) = self.exit_reporter.report_runtime_fault(fault) {
+            eprintln!(
+                "failed to report runtime fault for kernel pid {}: {error}",
+                self.pid
+            );
+        }
+    }
+
+    pub fn exit_reporter(&self) -> ProcessExitReporter {
+        self.exit_reporter.clone()
     }
 
     pub fn kill(&self, signal: i32) {
-        self.process.kill(signal);
+        if let Err(error) = self.processes.kill(self.pid as i32, signal) {
+            eprintln!("failed to signal kernel pid {}: {error}", self.pid);
+        }
     }
 
     pub fn wait(&self, timeout: Duration) -> Option<i32> {
-        self.process.wait(timeout)
+        self.processes
+            .wait_for_exit(self.pid, timeout)
+            .ok()
+            .flatten()
+            .map(ProcessExit::shell_status)
     }
 
-    pub fn kill_signals(&self) -> Vec<i32> {
-        self.process.kill_signals()
+    pub fn attach_runtime_control(
+        &self,
+        wake: ProcessControlWake,
+    ) -> Result<RuntimeControlReceiver, crate::process_runtime::ProcessRuntimeEndpointError> {
+        self.runtime_control.attach(wake)
+    }
+
+    pub fn runtime_identity(&self) -> ProcessRuntimeIdentity {
+        self.runtime_control
+            .identity()
+            .expect("a kernel process handle is created after endpoint binding")
+    }
+
+    pub fn signal_action(
+        &self,
+        signal: i32,
+        action: Option<SignalAction>,
+    ) -> KernelResult<SignalAction> {
+        Ok(self.processes.signal_action(self.pid, signal, action)?)
+    }
+
+    pub fn begin_signal_delivery(&self) -> KernelResult<Option<SignalDelivery>> {
+        Ok(self.processes.begin_signal_delivery(self.pid)?)
+    }
+
+    pub fn end_signal_delivery(&self, token: u64) -> KernelResult<()> {
+        Ok(self.processes.end_signal_delivery(self.pid, token)?)
+    }
+
+    pub fn sigprocmask(&self, how: SigmaskHow, set: SignalSet) -> KernelResult<SignalSet> {
+        Ok(self.processes.sigprocmask(self.pid, how, set)?)
+    }
+
+    pub fn sigpending(&self) -> KernelResult<SignalSet> {
+        Ok(self.processes.sigpending(self.pid)?)
+    }
+
+    pub fn begin_temporary_signal_mask(&self, mask: SignalSet) -> KernelResult<u64> {
+        Ok(self.processes.begin_temporary_signal_mask(self.pid, mask)?)
+    }
+
+    pub fn end_temporary_signal_mask(&self, token: u64) -> KernelResult<()> {
+        Ok(self.processes.end_temporary_signal_mask(self.pid, token)?)
+    }
+
+    pub fn end_temporary_signal_mask_and_begin_signal_delivery(
+        &self,
+        token: u64,
+    ) -> KernelResult<Option<SignalDelivery>> {
+        Ok(self
+            .processes
+            .end_temporary_signal_mask_and_begin_signal_delivery(self.pid, token)?)
     }
 }
 
@@ -439,8 +652,10 @@ impl OpenShellHandle {
 
 pub struct KernelVm<F> {
     vm_id: String,
+    vm_generation: u64,
     boot_time_ms: u64,
     boot_instant: Instant,
+    system_identity: SystemIdentity,
     filesystem: PermissionedFileSystem<DeviceLayer<F>>,
     permissions: Permissions,
     loopback_exempt_ports: BTreeSet<u16>,
@@ -590,7 +805,7 @@ fn close_special_resource_if_needed(
     sockets: &SocketTable,
     fd_sockets: &FdSocketRegistry,
     description: &Arc<FileDescription>,
-    filetype: u8,
+    _filetype: u8,
 ) {
     if description.ref_count() != 0 {
         return;
@@ -598,7 +813,7 @@ fn close_special_resource_if_needed(
 
     file_locks.release_owner(description.id());
 
-    if filetype == FILETYPE_PIPE && pipes.is_pipe(description.id()) {
+    if pipes.is_pipe(description.id()) {
         pipes.close(description.id());
     }
 
@@ -664,8 +879,10 @@ enum ProcNode {
 impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     pub fn new(filesystem: F, config: KernelVmConfig) -> Self {
         let vm_id = config.vm_id;
+        let vm_generation = config.vm_generation;
         let boot_time_ms = now_ms();
         let boot_instant = Instant::now();
+        let system_identity = config.system_identity;
         let permissions = config.permissions.clone();
         let users = UserManager::from_config(config.user);
         let process_table = ProcessTable::with_zombie_ttl(config.zombie_ttl);
@@ -685,7 +902,14 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         let pipes = PipeManager::with_notifier(poll_notifier.clone());
         let ptys = PtyManager::with_signal_handler_and_notifier(
             Arc::new(move |pgid, signal| {
-                let _ = process_table_for_pty.kill(-(pgid as i32), signal);
+                if let Err(error) = process_table_for_pty.kill(-(pgid as i32), signal) {
+                    if !pty_signal_error_is_stale(&error) {
+                        eprintln!(
+                            "[agentos] PTY foreground process-group signal delivery failed: pgid={pgid} signal={signal} code={} error={error}",
+                            error.code()
+                        );
+                    }
+                }
             }),
             poll_notifier.clone(),
         );
@@ -725,8 +949,10 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
         Self {
             vm_id: vm_id.clone(),
+            vm_generation,
             boot_time_ms,
             boot_instant,
+            system_identity,
             filesystem,
             permissions,
             loopback_exempt_ports: config.loopback_exempt_ports,
@@ -802,8 +1028,70 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             .identity)
     }
 
+    pub fn process_image(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+    ) -> KernelResult<KernelProcessImage> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        let entry = self
+            .processes
+            .get(pid)
+            .ok_or_else(|| KernelError::no_such_process(pid))?;
+        self.resources
+            .check_process_argv_bytes(&entry.command, &entry.args)?;
+        self.resources
+            .check_process_env_bytes(&BTreeMap::new(), &entry.env)?;
+
+        let mut argv = Vec::with_capacity(entry.args.len().saturating_add(1));
+        argv.push(entry.command);
+        argv.extend(entry.args);
+        Ok(KernelProcessImage {
+            argv,
+            env: entry.env.into_iter().collect(),
+        })
+    }
+
     pub fn user_profile(&self) -> UserManager {
         self.users.clone()
+    }
+
+    pub fn system_identity(&self) -> &SystemIdentity {
+        &self.system_identity
+    }
+
+    pub fn clock_time_ns(
+        &self,
+        clock: KernelClockId,
+        deterministic_realtime_ns: Option<u64>,
+    ) -> KernelResult<u64> {
+        match clock {
+            KernelClockId::Realtime => deterministic_realtime_ns
+                .or_else(realtime_now_ns)
+                .ok_or_else(|| {
+                    KernelError::new("EOVERFLOW", "realtime clock exceeds u64 nanoseconds")
+                }),
+            KernelClockId::Monotonic => u64::try_from(self.boot_instant.elapsed().as_nanos())
+                .map_err(|_| {
+                    KernelError::new("EOVERFLOW", "monotonic clock exceeds u64 nanoseconds")
+                }),
+            KernelClockId::ProcessCpu | KernelClockId::ThreadCpu => Err(KernelError::new(
+                "ENOTSUP",
+                "virtual process CPU clocks are not implemented",
+            )),
+        }
+    }
+
+    pub fn clock_resolution_ns(&self, clock: KernelClockId) -> KernelResult<u64> {
+        match clock {
+            // Deterministic realtime is configured at millisecond precision.
+            KernelClockId::Realtime => Ok(1_000_000),
+            KernelClockId::Monotonic => Ok(1),
+            KernelClockId::ProcessCpu | KernelClockId::ThreadCpu => Err(KernelError::new(
+                "ENOTSUP",
+                "virtual process CPU clock resolution is not implemented",
+            )),
+        }
     }
 
     pub fn getuid(&self, requester_driver: &str, pid: u32) -> KernelResult<u32> {
@@ -1069,6 +1357,104 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             .ok_or_else(|| KernelError::new("ENOENT", "end of group database"))
     }
 
+    /// Resolve a passwd entry through the process-visible Linux account database.
+    ///
+    /// A live `/etc/passwd` file is authoritative when present. VM user
+    /// configuration remains the fallback for minimal filesystems that do not
+    /// project an account database at all.
+    pub fn getpwuid_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        uid: u32,
+    ) -> KernelResult<String> {
+        match self.read_account_database_for_process(requester_driver, pid, "/etc/passwd")? {
+            Some(database) => passwd_record_by_uid(&database, uid)
+                .ok_or_else(|| KernelError::new("ENOENT", format!("unknown uid {uid}"))),
+            None => self.getpwuid(uid),
+        }
+    }
+
+    pub fn getpwnam_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        username: &str,
+    ) -> KernelResult<String> {
+        match self.read_account_database_for_process(requester_driver, pid, "/etc/passwd")? {
+            Some(database) => passwd_record_by_name(&database, username)
+                .ok_or_else(|| KernelError::new("ENOENT", format!("unknown user {username}"))),
+            None => self.getpwnam(username),
+        }
+    }
+
+    pub fn getpwent_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        index: usize,
+    ) -> KernelResult<String> {
+        match self.read_account_database_for_process(requester_driver, pid, "/etc/passwd")? {
+            Some(database) => passwd_record_at(&database, index)
+                .ok_or_else(|| KernelError::new("ENOENT", "end of passwd database")),
+            None => self.getpwent(index),
+        }
+    }
+
+    pub fn getgrgid_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        gid: u32,
+    ) -> KernelResult<String> {
+        match self.read_account_database_for_process(requester_driver, pid, "/etc/group")? {
+            Some(database) => group_record_by_gid(&database, gid)
+                .ok_or_else(|| KernelError::new("ENOENT", format!("unknown gid {gid}"))),
+            None => self.getgrgid(gid),
+        }
+    }
+
+    pub fn getgrnam_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        name: &str,
+    ) -> KernelResult<String> {
+        match self.read_account_database_for_process(requester_driver, pid, "/etc/group")? {
+            Some(database) => group_record_by_name(&database, name)
+                .ok_or_else(|| KernelError::new("ENOENT", format!("unknown group {name}"))),
+            None => self.getgrnam(name),
+        }
+    }
+
+    pub fn getgrent_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        index: usize,
+    ) -> KernelResult<String> {
+        match self.read_account_database_for_process(requester_driver, pid, "/etc/group")? {
+            Some(database) => group_record_at(&database, index)
+                .ok_or_else(|| KernelError::new("ENOENT", "end of group database")),
+            None => self.getgrent(index),
+        }
+    }
+
+    fn read_account_database_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+    ) -> KernelResult<Option<Vec<u8>>> {
+        match self.lstat_for_process(requester_driver, pid, path) {
+            Ok(_) => self
+                .read_file_for_process(requester_driver, pid, path)
+                .map(Some),
+            Err(error) if error.code() == "ENOENT" => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn resource_snapshot(&self) -> ResourceSnapshot {
         let fd_tables = lock_or_recover(&self.fd_tables);
         self.resources.snapshot(
@@ -1116,6 +1502,37 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         resolve_dns(&self.dns, self.dns_resolver.as_ref(), hostname).map_err(map_dns_resolver_error)
     }
 
+    pub fn resolve_dns_async(
+        &self,
+        hostname: &str,
+        policy: DnsLookupPolicy,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = KernelResult<DnsResolution>> + Send>>
+    {
+        let prepared: KernelResult<(DnsConfig, SharedDnsResolver, String)> = (|| {
+            self.assert_not_terminated()?;
+            if matches!(policy, DnsLookupPolicy::CheckPermissions) {
+                let resource = format_dns_resource(hostname).map_err(map_dns_resolver_error)?;
+                check_network_access(
+                    &self.vm_id,
+                    &self.permissions,
+                    NetworkOperation::Dns,
+                    &resource,
+                )?;
+            }
+            Ok((
+                self.dns.clone(),
+                Arc::clone(&self.dns_resolver),
+                hostname.to_owned(),
+            ))
+        })();
+        Box::pin(async move {
+            let (dns, resolver, hostname) = prepared?;
+            resolve_dns_async(&dns, resolver.as_ref(), &hostname)
+                .await
+                .map_err(map_dns_resolver_error)
+        })
+    }
+
     pub fn resolve_dns_records(
         &self,
         hostname: &str,
@@ -1137,6 +1554,39 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             .map_err(map_dns_resolver_error)
     }
 
+    pub fn resolve_dns_records_async(
+        &self,
+        hostname: &str,
+        record_type: RecordType,
+        policy: DnsLookupPolicy,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = KernelResult<DnsRecordResolution>> + Send>,
+    > {
+        let prepared: KernelResult<(DnsConfig, SharedDnsResolver, String)> = (|| {
+            self.assert_not_terminated()?;
+            if matches!(policy, DnsLookupPolicy::CheckPermissions) {
+                let resource = format_dns_resource(hostname).map_err(map_dns_resolver_error)?;
+                check_network_access(
+                    &self.vm_id,
+                    &self.permissions,
+                    NetworkOperation::Dns,
+                    &resource,
+                )?;
+            }
+            Ok((
+                self.dns.clone(),
+                Arc::clone(&self.dns_resolver),
+                hostname.to_owned(),
+            ))
+        })();
+        Box::pin(async move {
+            let (dns, resolver, hostname) = prepared?;
+            resolve_dns_records_async(&dns, resolver.as_ref(), &hostname, record_type)
+                .await
+                .map_err(map_dns_resolver_error)
+        })
+    }
+
     pub fn register_driver(&mut self, driver: CommandDriver) -> KernelResult<()> {
         self.assert_not_terminated()?;
         let driver_name = driver.name().to_owned();
@@ -1145,6 +1595,31 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         lock_or_recover(&self.driver_pids)
             .entry(driver_name)
             .or_default();
+        self.commands
+            .populate_driver_bin(&mut self.filesystem, &populate_driver)?;
+        Ok(())
+    }
+
+    /// Atomically replace the command names owned by a runtime driver and
+    /// retire only obsolete `/bin` files that are still the exact generated
+    /// kernel stub. Guest/package files that replaced a stub are preserved.
+    pub fn replace_driver(&mut self, driver: CommandDriver) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        let driver_name = driver.name().to_owned();
+        let populate_driver = driver.clone();
+        let obsolete = self.commands.replace(driver)?;
+        lock_or_recover(&self.driver_pids)
+            .entry(driver_name)
+            .or_default();
+        for command in obsolete {
+            let path = format!("/bin/{command}");
+            if self.commands.resolve(&command).is_none() && self.filesystem.exists(&path)? {
+                let stat = self.filesystem.lstat(&path)?;
+                if !stat.is_symbolic_link && self.filesystem.read_file(&path)? == COMMAND_STUB {
+                    self.filesystem.remove_file(&path)?;
+                }
+            }
+        }
         self.commands
             .populate_driver_bin(&mut self.filesystem, &populate_driver)?;
         Ok(())
@@ -1163,6 +1638,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 parent_pid: options.parent_pid,
                 env: options.env,
                 cwd: options.cwd,
+                permission_tier: None,
             },
         )
     }
@@ -1178,6 +1654,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 parent_pid: None,
                 env: options.env,
                 cwd: options.cwd,
+                permission_tier: None,
             },
         )?;
         let owner = requester_driver.as_deref().unwrap_or(process.driver());
@@ -1239,7 +1716,85 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.assert_not_terminated()?;
         self.assert_driver_owns(requester_driver, pid)?;
         self.check_dac_access(pid, path, DAC_READ)?;
-        self.read_file_internal(Some(pid), path)
+        if is_proc_path(path) {
+            if let Some(
+                node @ (ProcNode::SelfLink { .. }
+                | ProcNode::PidCwdLink { .. }
+                | ProcNode::PidFdLink { .. }),
+            ) = self.resolve_proc_node(path, Some(pid))?
+            {
+                let target = self.proc_symlink_target(&node)?;
+                return self.read_file_for_process(requester_driver, pid, &target);
+            }
+            let bytes = self.read_file_internal(Some(pid), path)?;
+            self.resources.check_pread_length(bytes.len())?;
+            return Ok(bytes);
+        }
+        if is_virtual_device_storage_path(path) {
+            let bytes = self.read_file_internal(Some(pid), path)?;
+            self.resources.check_pread_length(bytes.len())?;
+            return Ok(bytes);
+        }
+
+        self.reject_unix_socket_data_path(path, "ENXIO")?;
+        let stat = self.stat_internal(Some(pid), path)?;
+        let length = usize::try_from(stat.size).map_err(|_| {
+            KernelError::new(
+                "EOVERFLOW",
+                format!("file '{path}' size does not fit host address space"),
+            )
+        })?;
+        self.resources.check_pread_length(length)?;
+        Ok(VirtualFileSystem::pread(
+            &mut self.filesystem,
+            path,
+            0,
+            length,
+        )?)
+    }
+
+    /// Validate a stable-size regular file read without allocating its body.
+    /// Queue-owning adapters use this before reserving by the admitted size,
+    /// then call `read_file_for_process` after admission and compare lengths to
+    /// detect a change between the two operations.
+    pub fn preflight_regular_file_read_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+    ) -> KernelResult<usize> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        self.check_dac_access(pid, path, DAC_READ)?;
+        self.reject_unix_socket_data_path(path, "ENXIO")?;
+        let canonical_path = self.raw_filesystem_mut().realpath(path)?;
+        if is_proc_path(&canonical_path) || is_virtual_device_storage_path(&canonical_path) {
+            return Err(KernelError::new(
+                "EINVAL",
+                format!("stable regular-file read does not support '{path}'"),
+            ));
+        }
+        let stat = self.stat_internal(Some(pid), &canonical_path)?;
+        if stat.is_directory || stat.mode & 0o170000 == S_IFDIR {
+            return Err(KernelError::new(
+                "EISDIR",
+                format!("cannot read directory '{path}' as a regular file"),
+            ));
+        }
+        if stat.mode & 0o170000 != S_IFREG {
+            return Err(KernelError::new(
+                "EINVAL",
+                format!("path '{path}' is not a regular file"),
+            ));
+        }
+        let length = usize::try_from(stat.size).map_err(|_| {
+            KernelError::new(
+                "EOVERFLOW",
+                format!("file '{path}' size does not fit host address space"),
+            )
+        })?;
+        self.resources.check_pread_length(length)?;
+        Ok(length)
     }
 
     pub fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> KernelResult<()> {
@@ -1645,6 +2200,67 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
     }
 
+    /// Return the kernel-owned runtime-neutral authority attached to a process.
+    pub fn process_permission_tier(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+    ) -> KernelResult<crate::process_table::ProcessPermissionTier> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        Ok(self.processes.permission_tier(pid)?)
+    }
+
+    /// Preview the immutable tier that an exec commit will install. Adapters
+    /// use this kernel calculation while preparing the replacement image, then
+    /// pass the same trusted requested tier to the commit operation.
+    pub fn effective_exec_permission_tier(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        requested: ProcessPermissionTier,
+    ) -> KernelResult<ProcessPermissionTier> {
+        Ok(self
+            .process_permission_tier(requester_driver, pid)?
+            .restrict(requested))
+    }
+
+    pub fn get_resource_limit(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        kind: ProcessResourceLimitKind,
+    ) -> KernelResult<ProcessResourceLimit> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        Ok(self.processes.get_resource_limit(pid, kind)?)
+    }
+
+    pub fn set_resource_limit(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        kind: ProcessResourceLimitKind,
+        value: ProcessResourceLimit,
+    ) -> KernelResult<()> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        if kind == ProcessResourceLimitKind::OpenFiles {
+            if let Some(soft) = value.soft {
+                usize::try_from(soft).map_err(|_| {
+                    KernelError::new("EINVAL", "RLIMIT_NOFILE does not fit the host fd index")
+                })?;
+            }
+        }
+        self.processes.set_resource_limit(pid, kind, value)?;
+        if kind == ProcessResourceLimitKind::OpenFiles {
+            let soft = value.soft.map_or(usize::MAX, |value| value as usize);
+            let mut tables = lock_or_recover(&self.fd_tables);
+            let table = tables
+                .get_mut(pid)
+                .ok_or_else(|| KernelError::no_such_process(pid))?;
+            table.set_max_fds(soft);
+        }
+        Ok(())
+    }
+
     pub fn exists(&self, path: &str) -> KernelResult<bool> {
         self.assert_not_terminated()?;
         self.exists_internal(None, path)
@@ -1950,11 +2566,11 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.assert_not_terminated()?;
         self.reject_read_only_entry_write_path(path)?;
         let removed = self.storage_lstat(path)?;
-        let detached = self.prepare_detached_directory_backing(path, removed.as_ref());
+        let detached = self.prepare_detached_directory_backing(path, removed.as_ref())?;
         self.filesystem.remove_dir(path)?;
-        if let Some((descriptions, stat)) = detached {
+        if let Some((descriptions, stat, xattrs)) = detached {
             for description in descriptions {
-                description.detach_directory(path, stat.clone());
+                description.detach_directory(path, stat.clone(), xattrs.clone());
             }
         }
         if removed.as_ref().is_some_and(|stat| stat.is_directory) {
@@ -1988,7 +2604,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         let detached_destination =
             self.prepare_anonymous_file_backing(new_path, replaced.as_ref())?;
         let detached_directory_destination =
-            self.prepare_detached_directory_backing(new_path, replaced.as_ref());
+            self.prepare_detached_directory_backing(new_path, replaced.as_ref())?;
         self.filesystem.rename_at2(old_path, new_path, flags)?;
         if flags == RENAME_EXCHANGE {
             let temporary = format!(
@@ -2021,9 +2637,9 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             }
             None => {}
         }
-        if let Some((descriptions, stat)) = detached_directory_destination {
+        if let Some((descriptions, stat, xattrs)) = detached_directory_destination {
             for description in descriptions {
-                description.detach_directory(new_path, stat.clone());
+                description.detach_directory(new_path, stat.clone(), xattrs.clone());
             }
         }
         self.rename_open_file_descriptions(old_path, new_path);
@@ -2216,23 +2832,11 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         uid: u32,
         gid: u32,
     ) -> KernelResult<()> {
-        let identity = self.process_identity(requester_driver, pid)?;
-        self.check_dac_traversal(pid, path)?;
-        let stat = self.filesystem.lstat(path)?;
-        if identity.euid != 0 {
-            let owns_file = identity.euid == stat.uid;
-            let keeps_owner = uid == stat.uid;
-            let allowed_group = gid == identity.egid || identity.supplementary_gids.contains(&gid);
-            if !owns_file || !keeps_owner || !allowed_group {
-                return Err(KernelError::new(
-                    "EPERM",
-                    format!("lchown is not permitted for {path}"),
-                ));
-            }
-        }
-        self.reject_read_only_entry_write_path(path)?;
-        self.filesystem.lchown(path, uid, gid)?;
-        Ok(())
+        // Keep one Linux ownership policy for chown/lchown/fchown. In
+        // particular, uid/gid UINT32_MAX are independent "unchanged"
+        // sentinels and must be resolved against the no-follow stat before
+        // permission checks or mutation.
+        self.chown_for_process(requester_driver, pid, path, uid, gid, false)
     }
 
     pub fn get_xattr(
@@ -2407,6 +3011,157 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             self.check_dac_mode_with_acl(&identity, &stat, DAC_WRITE, path)?;
         }
         self.remove_xattr(path, name, follow_symlinks)
+    }
+
+    pub fn fd_get_xattr_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        name: &str,
+    ) -> KernelResult<Vec<u8>> {
+        let description = self.description_for_fd(requester_driver, pid, fd)?;
+        if description.detached_xattrs().is_none() {
+            return self.get_xattr_for_process(
+                requester_driver,
+                pid,
+                &description.path(),
+                name,
+                true,
+            );
+        }
+        let identity = self.process_identity(requester_driver, pid)?;
+        let stat = self.dev_fd_stat(requester_driver, pid, fd)?;
+        let label = format!("fd {fd}");
+        check_xattr_namespace(&identity, name, false, &label)?;
+        self.check_detached_fd_dac(&identity, &stat, &description, DAC_READ, &label)?;
+        description
+            .detached_get_xattr(name)
+            .expect("detached xattr state was checked")
+            .map_err(KernelError::from)
+    }
+
+    pub fn fd_list_xattrs_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+    ) -> KernelResult<Vec<String>> {
+        let description = self.description_for_fd(requester_driver, pid, fd)?;
+        if description.detached_xattrs().is_none() {
+            return self.list_xattrs_for_process(requester_driver, pid, &description.path(), true);
+        }
+        let identity = self.process_identity(requester_driver, pid)?;
+        let stat = self.dev_fd_stat(requester_driver, pid, fd)?;
+        let label = format!("fd {fd}");
+        self.check_detached_fd_dac(&identity, &stat, &description, DAC_READ, &label)?;
+        let mut names = description
+            .detached_xattrs()
+            .expect("detached xattr state was checked")
+            .into_keys()
+            .collect::<Vec<_>>();
+        if identity.euid != 0 {
+            names.retain(|name| !name.starts_with("trusted.") && !name.starts_with("security."));
+        }
+        Ok(names)
+    }
+
+    pub fn fd_set_xattr_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        name: &str,
+        value: Vec<u8>,
+        flags: u32,
+    ) -> KernelResult<()> {
+        let description = self.description_for_fd(requester_driver, pid, fd)?;
+        if description.detached_xattrs().is_none() {
+            return self.set_xattr_for_process(
+                requester_driver,
+                pid,
+                &description.path(),
+                name,
+                value,
+                flags,
+                true,
+            );
+        }
+        let identity = self.process_identity(requester_driver, pid)?;
+        let stat = self.dev_fd_stat(requester_driver, pid, fd)?;
+        let label = format!("fd {fd}");
+        check_xattr_namespace(&identity, name, true, &label)?;
+        check_xattr_inode_write_policy(&stat, name, &label)?;
+        self.reject_read_only_resolved_write_path(&description.path())?;
+        if name.starts_with("system.posix_acl_") {
+            if identity.euid != 0 && identity.euid != stat.uid {
+                return Err(KernelError::new(
+                    "EPERM",
+                    format!("setting {name} requires ownership of {label}"),
+                ));
+            }
+        } else {
+            self.check_detached_fd_dac(&identity, &stat, &description, DAC_WRITE, &label)?;
+        }
+        let acl = if name == POSIX_ACL_ACCESS || name == POSIX_ACL_DEFAULT {
+            let acl = PosixAcl::parse(&value, &label)?;
+            if name == POSIX_ACL_DEFAULT && !stat.is_directory {
+                return Err(KernelError::new(
+                    "EACCES",
+                    format!("default ACL requires a directory: {label}"),
+                ));
+            }
+            Some(acl)
+        } else {
+            None
+        };
+        description
+            .detached_set_xattr(name, value, flags)
+            .expect("detached xattr state was checked")?;
+        if name == POSIX_ACL_ACCESS {
+            let mode = acl.expect("access ACL was parsed").mode(stat.mode);
+            description.detached_chmod(mode);
+        }
+        Ok(())
+    }
+
+    pub fn fd_remove_xattr_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        name: &str,
+    ) -> KernelResult<()> {
+        let description = self.description_for_fd(requester_driver, pid, fd)?;
+        if description.detached_xattrs().is_none() {
+            return self.remove_xattr_for_process(
+                requester_driver,
+                pid,
+                &description.path(),
+                name,
+                true,
+            );
+        }
+        let identity = self.process_identity(requester_driver, pid)?;
+        let stat = self.dev_fd_stat(requester_driver, pid, fd)?;
+        let label = format!("fd {fd}");
+        check_xattr_namespace(&identity, name, true, &label)?;
+        check_xattr_inode_write_policy(&stat, name, &label)?;
+        self.reject_read_only_resolved_write_path(&description.path())?;
+        if name.starts_with("system.posix_acl_") {
+            if identity.euid != 0 && identity.euid != stat.uid {
+                return Err(KernelError::new(
+                    "EPERM",
+                    format!("removing {name} requires ownership of {label}"),
+                ));
+            }
+        } else {
+            self.check_detached_fd_dac(&identity, &stat, &description, DAC_WRITE, &label)?;
+        }
+        description
+            .detached_remove_xattr(name)
+            .expect("detached xattr state was checked")?;
+        Ok(())
     }
 
     pub fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> KernelResult<()> {
@@ -2761,6 +3516,37 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(self.filesystem.unwritten_ranges(&path)?)
     }
 
+    /// Return one classified FIEMAP extent. The query remains indexed through
+    /// the VFS stack so implementations can scan authoritative extent metadata
+    /// without materializing adapter-local range lists.
+    pub fn fd_extent_at(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        index: u32,
+    ) -> KernelResult<Option<KernelFileExtent>> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        let path = {
+            let tables = lock_or_recover(&self.fd_tables);
+            tables
+                .get(pid)
+                .and_then(|table| table.get(fd))
+                .map(|entry| entry.description.path())
+                .ok_or_else(|| KernelError::bad_file_descriptor(fd))?
+        };
+        let wanted = usize::try_from(index)
+            .map_err(|_| KernelError::new("EOVERFLOW", "extent index exceeds usize"))?;
+        Ok(self
+            .filesystem
+            .extent_at(&path, wanted)?
+            .map(|extent| KernelFileExtent {
+                start: extent.start,
+                end: extent.end,
+                unwritten: extent.unwritten,
+            }))
+    }
+
     pub fn check_execute_for_process(
         &mut self,
         requester_driver: &str,
@@ -2768,14 +3554,390 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         path: &str,
     ) -> KernelResult<()> {
         self.assert_driver_owns(requester_driver, pid)?;
-        let stat = self.filesystem.stat(path)?;
+        let stat = self.raw_filesystem_mut().stat(path)?;
         if stat.is_directory {
             return Err(KernelError::new(
                 "EACCES",
                 format!("permission denied, execute '{path}'"),
             ));
         }
-        self.check_dac_access(pid, path, DAC_EXECUTE)
+        self.check_execute_dac_traversal(pid, path)?;
+        // Registered command projections are executable kernel objects. Their
+        // backing WASM blobs may be stored as 0644 because the trusted runtime
+        // driver, rather than the host filesystem, performs the image launch.
+        // Keep directory traversal checks above, but do not require a host-style
+        // execute bit on the projected blob itself.
+        if self.resolve_registered_command_path(path).is_some() {
+            return Ok(());
+        }
+        let identity = self
+            .processes
+            .get(pid)
+            .ok_or_else(|| KernelError::no_such_process(pid))?
+            .identity;
+        self.check_execute_dac_mode_with_acl(&identity, &stat, DAC_EXECUTE, path)
+    }
+
+    /// Load the initial runtime image selected by a trusted client Execute
+    /// request. Callers must bound and admit any external source before placing
+    /// it in the kernel VFS; this method never consults ambient host paths.
+    pub fn load_trusted_initial_runtime_image(
+        &mut self,
+        path: &str,
+        maximum_bytes: u64,
+    ) -> KernelResult<RuntimeLaunchImage> {
+        self.load_runtime_image_after_authorization(path, maximum_bytes)
+    }
+
+    pub fn load_trusted_initial_runtime_image_prefix(
+        &mut self,
+        path: &str,
+        prefix_bytes: usize,
+    ) -> KernelResult<RuntimeLaunchImagePrefix> {
+        self.load_runtime_image_prefix_after_authorization(path, prefix_bytes)
+    }
+
+    /// Admit the exact bounded source selected by a trusted initial Execute
+    /// request into the authoritative kernel VFS. This is deliberately the
+    /// only policy-bypassing write used by runtime launch staging: it rejects
+    /// traversal spellings and protected/read-only paths, accounts all new
+    /// bytes and inodes before mutation, and rolls back partial creation.
+    pub fn admit_trusted_initial_runtime_image(
+        &mut self,
+        path: &str,
+        bytes: Vec<u8>,
+        mode: u32,
+        maximum_bytes: u64,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        if path.is_empty() || !path.starts_with('/') {
+            return Err(KernelError::new(
+                "EINVAL",
+                "trusted runtime launch image path must be absolute",
+            ));
+        }
+        if path.as_bytes().contains(&0) {
+            return Err(KernelError::new(
+                "EINVAL",
+                "trusted runtime launch image path contains a NUL byte",
+            ));
+        }
+        if path.len() >= MAX_PATH_LENGTH {
+            return Err(KernelError::new(
+                "ENAMETOOLONG",
+                format!(
+                    "trusted runtime launch image path is {} bytes; maximum is {}",
+                    path.len(),
+                    MAX_PATH_LENGTH - 1
+                ),
+            ));
+        }
+        let normalized = normalize_path(path);
+        if normalized != path {
+            return Err(KernelError::new(
+                "EINVAL",
+                format!(
+                    "trusted runtime launch image path must be normalized without traversal: {path}"
+                ),
+            ));
+        }
+        if is_proc_path(path) || is_agentos_path(path) {
+            return Err(read_only_filesystem_error(path));
+        }
+        if bytes.len() as u64 > maximum_bytes {
+            return Err(KernelError::new(
+                "E2BIG",
+                format!(
+                    "trusted runtime launch image '{path}' is {} bytes, exceeding maximum {maximum_bytes}",
+                    bytes.len()
+                ),
+            ));
+        }
+        let admitted_size = bytes.len() as u64;
+        match self.raw_filesystem_mut().lstat(path) {
+            Ok(_) => {
+                return Err(KernelError::new(
+                    "EEXIST",
+                    format!("trusted runtime launch image already exists: {path}"),
+                ));
+            }
+            Err(error) if error.code() == "ENOENT" => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        let parent = parent_path(path);
+        let created_directories = self.missing_directory_paths(&parent, true)?;
+        let usage = self.filesystem_usage()?;
+        self.resources.check_filesystem_usage(
+            &usage,
+            usage.total_bytes.saturating_add(bytes.len() as u64),
+            usage
+                .inode_count
+                .saturating_add(created_directories.len())
+                .saturating_add(1),
+        )?;
+
+        if let Err(error) = self.raw_filesystem_mut().mkdir(&parent, true) {
+            let error = KernelError::from(error);
+            return match self.rollback_runtime_image_admission(path, &created_directories, false) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(KernelError::new(
+                    "EIO",
+                    format!("{error}; runtime image admission rollback failed: {rollback}"),
+                )),
+            };
+        }
+        if let Err(error) = self.raw_filesystem_mut().create_file_exclusive(path, bytes) {
+            let error = KernelError::from(error);
+            return match self.rollback_runtime_image_admission(path, &created_directories, false) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(KernelError::new(
+                    "EIO",
+                    format!("{error}; runtime image admission rollback failed: {rollback}"),
+                )),
+            };
+        }
+        if let Err(error) = self.raw_filesystem_mut().chmod(path, mode & 0o7777) {
+            let error = KernelError::from(error);
+            return match self.rollback_runtime_image_admission(path, &created_directories, true) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(KernelError::new(
+                    "EIO",
+                    format!("{error}; runtime image admission rollback failed: {rollback}"),
+                )),
+            };
+        }
+
+        self.update_filesystem_usage_cache_for_inode_creates(&parent, created_directories.len());
+        self.update_filesystem_usage_cache_for_inode_create(path, admitted_size);
+        Ok(())
+    }
+
+    fn rollback_runtime_image_admission(
+        &mut self,
+        path: &str,
+        created_directories: &[String],
+        file_created: bool,
+    ) -> Result<(), String> {
+        let mut failures = Vec::new();
+        if file_created {
+            if let Err(error) = self.raw_filesystem_mut().remove_file(path) {
+                if error.code() != "ENOENT" {
+                    failures.push(format!("remove {path}: {error}"));
+                }
+            }
+        }
+        for directory in created_directories.iter().rev() {
+            if let Err(error) = self.raw_filesystem_mut().remove_dir(directory) {
+                if error.code() != "ENOENT" {
+                    failures.push(format!("remove {directory}: {error}"));
+                }
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+
+    /// Load a guest-selected runtime image. Unlike an ordinary file read,
+    /// Linux exec requires search/execute permission but not read permission,
+    /// so authorization is checked before the trusted loader reads the bytes.
+    pub fn load_process_runtime_image(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+        maximum_bytes: u64,
+    ) -> KernelResult<RuntimeLaunchImage> {
+        self.check_execute_for_process(requester_driver, pid, path)?;
+        self.load_runtime_image_after_authorization(path, maximum_bytes)
+    }
+
+    /// Load an executable image through the exact open file description
+    /// selected by fexecve(2), without advancing its file offset.
+    pub fn load_process_runtime_image_from_fd(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        maximum_bytes: u64,
+    ) -> KernelResult<RuntimeLaunchImage> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let entry = {
+            let tables = lock_or_recover(&self.fd_tables);
+            tables
+                .get(pid)
+                .and_then(|table| table.get(fd))
+                .cloned()
+                .ok_or_else(|| KernelError::bad_file_descriptor(fd))?
+        };
+        let path = entry.description.path();
+        let anonymous = entry.description.anonymous_stat().is_some();
+        let stat = if let Some(stat) = entry.description.anonymous_stat() {
+            stat
+        } else {
+            self.raw_filesystem_mut().stat(&path)?
+        };
+        if stat.is_directory || stat.mode & 0o170000 != S_IFREG {
+            return Err(KernelError::new(
+                "EACCES",
+                format!("file descriptor {fd} is not a regular executable file"),
+            ));
+        }
+
+        let projected = !anonymous && self.resolve_registered_command_path(&path).is_some();
+        if !projected {
+            let identity = self
+                .processes
+                .get(pid)
+                .ok_or_else(|| KernelError::no_such_process(pid))?
+                .identity;
+            if anonymous {
+                self.check_detached_fd_dac(
+                    &identity,
+                    &stat,
+                    &entry.description,
+                    DAC_EXECUTE,
+                    &format!("fd {fd}"),
+                )?;
+            } else {
+                self.check_execute_dac_mode_with_acl(&identity, &stat, DAC_EXECUTE, &path)?;
+            }
+        }
+
+        if stat.size > maximum_bytes {
+            return Err(KernelError::new(
+                "E2BIG",
+                format!(
+                    "runtime launch image from fd {fd} is {} bytes, exceeding maximum {maximum_bytes}",
+                    stat.size
+                ),
+            ));
+        }
+        if stat.size >= maximum_bytes.saturating_mul(4) / 5 {
+            eprintln!(
+                "WARN_AGENTOS_RUNTIME_LAUNCH_IMAGE_NEAR_LIMIT: fd={fd} observed={} maximum={maximum_bytes}",
+                stat.size
+            );
+        }
+        let size = usize::try_from(stat.size).map_err(|_| {
+            KernelError::new(
+                "EOVERFLOW",
+                format!("runtime launch image from fd {fd} exceeds host address space"),
+            )
+        })?;
+        let bytes = if let Some(bytes) = entry.description.anonymous_pread(0, size) {
+            bytes
+        } else {
+            VirtualFileSystem::pread(&mut self.filesystem, &path, 0, size)?
+        };
+        if bytes.len() != size {
+            return Err(KernelError::new(
+                "EIO",
+                format!(
+                    "runtime launch image from fd {fd} changed while being snapshotted: expected {size} bytes, read {}",
+                    bytes.len()
+                ),
+            ));
+        }
+        let canonical_path = if anonymous {
+            entry.description.proc_display_path()
+        } else {
+            self.raw_filesystem_mut().realpath(&path)?
+        };
+        Ok(RuntimeLaunchImage {
+            canonical_path,
+            bytes,
+            mode: stat.mode,
+        })
+    }
+
+    pub fn load_process_runtime_image_prefix(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+        prefix_bytes: usize,
+    ) -> KernelResult<RuntimeLaunchImagePrefix> {
+        self.check_execute_for_process(requester_driver, pid, path)?;
+        self.load_runtime_image_prefix_after_authorization(path, prefix_bytes)
+    }
+
+    fn load_runtime_image_prefix_after_authorization(
+        &mut self,
+        path: &str,
+        prefix_bytes: usize,
+    ) -> KernelResult<RuntimeLaunchImagePrefix> {
+        self.assert_not_terminated()?;
+        self.resources.check_pread_length(prefix_bytes)?;
+        let canonical_path = self.raw_filesystem_mut().realpath(path)?;
+        let stat = self.raw_filesystem_mut().stat(&canonical_path)?;
+        if stat.is_directory || stat.mode & 0o170000 != S_IFREG {
+            return Err(KernelError::new(
+                "EACCES",
+                format!("permission denied, execute '{path}'"),
+            ));
+        }
+        let available = usize::try_from(stat.size.min(prefix_bytes as u64)).map_err(|_| {
+            KernelError::new(
+                "EOVERFLOW",
+                format!("runtime launch image '{path}' size does not fit host address space"),
+            )
+        })?;
+        let bytes = VirtualFileSystem::pread(&mut self.filesystem, &canonical_path, 0, available)?;
+        Ok(RuntimeLaunchImagePrefix {
+            canonical_path,
+            bytes,
+        })
+    }
+
+    fn load_runtime_image_after_authorization(
+        &mut self,
+        path: &str,
+        maximum_bytes: u64,
+    ) -> KernelResult<RuntimeLaunchImage> {
+        self.assert_not_terminated()?;
+        let canonical_path = self.raw_filesystem_mut().realpath(path)?;
+        let stat = self.raw_filesystem_mut().stat(&canonical_path)?;
+        if stat.is_directory || stat.mode & 0o170000 != S_IFREG {
+            return Err(KernelError::new(
+                "EACCES",
+                format!("permission denied, execute '{path}'"),
+            ));
+        }
+        if stat.size > maximum_bytes {
+            return Err(KernelError::new(
+                "E2BIG",
+                format!(
+                    "runtime launch image '{path}' is {} bytes, exceeding maximum {maximum_bytes}",
+                    stat.size
+                ),
+            ));
+        }
+        if stat.size >= maximum_bytes.saturating_mul(4) / 5 {
+            eprintln!(
+                "WARN_AGENTOS_RUNTIME_LAUNCH_IMAGE_NEAR_LIMIT: path={path} observed={} maximum={maximum_bytes}",
+                stat.size
+            );
+        }
+        let bytes = self.raw_filesystem_mut().read_file(&canonical_path)?;
+        if bytes.len() as u64 > maximum_bytes {
+            return Err(KernelError::new(
+                "E2BIG",
+                format!(
+                    "runtime launch image '{path}' grew to {} bytes, exceeding maximum {maximum_bytes}",
+                    bytes.len()
+                ),
+            ));
+        }
+        Ok(RuntimeLaunchImage {
+            canonical_path,
+            bytes,
+            mode: stat.mode,
+        })
     }
 
     pub fn list_processes(&self) -> BTreeMap<u32, ProcessInfo> {
@@ -2901,14 +4063,27 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             None => DEFAULT_PROCESS_UMASK,
         };
 
+        let root_open_files = self
+            .resource_limits()
+            .max_open_fds
+            .unwrap_or(DEFAULT_MAX_OPEN_FDS) as u64;
         let mut context = parent_context.unwrap_or_else(|| ProcessContext {
             identity: self.users.identity(),
+            resource_limits: crate::process_table::ProcessResourceLimits::with_open_files(
+                root_open_files,
+            ),
             ..ProcessContext::default()
         });
         context.ppid = options.parent_pid.unwrap_or(0);
         context.env = env;
         context.cwd = cwd;
         context.umask = process_umask;
+        if let Some(requested_tier) = options.permission_tier {
+            context.permission_tier = context.permission_tier.restrict(requested_tier);
+        }
+        if let Some(requested_tier) = options.permission_tier {
+            context.permission_tier = context.permission_tier.restrict(requested_tier);
+        }
 
         self.register_process(
             resolved.driver.name().to_owned(),
@@ -2943,6 +4118,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             cwd,
             &[],
             &[],
+            None,
             None,
         )
     }
@@ -2984,6 +4160,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         retained_internal_fds: &[u32],
         additional_cloexec_fds: &[u32],
         image_command: Option<&str>,
+        requested_permission_tier: Option<ProcessPermissionTier>,
     ) -> KernelResult<()> {
         self.assert_not_terminated()?;
         self.assert_driver_owns(requester_driver, pid)?;
@@ -3053,7 +4230,15 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 committed_args,
                 env,
                 cwd,
+                requested_permission_tier,
             )?;
+
+            let effective_tier = self.processes.permission_tier(pid)?;
+            let (rights_base, rights_inheriting) = wasi_preopen_rights(effective_tier, true)
+                .map_or((None, None), |(base, inheriting)| {
+                    (Some(base), Some(inheriting))
+                });
+            table.restrict_wasi_preopens(rights_base, rights_inheriting);
 
             let mut closed_entries = Vec::with_capacity(fds.len());
             for fd in fds {
@@ -3153,8 +4338,15 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             None => DEFAULT_PROCESS_UMASK,
         };
 
+        let root_open_files = self
+            .resource_limits()
+            .max_open_fds
+            .unwrap_or(DEFAULT_MAX_OPEN_FDS) as u64;
         let mut context = parent_context.unwrap_or_else(|| ProcessContext {
             identity: self.users.identity(),
+            resource_limits: crate::process_table::ProcessResourceLimits::with_open_files(
+                root_open_files,
+            ),
             ..ProcessContext::default()
         });
         context.ppid = options.parent_pid.unwrap_or(0);
@@ -3208,7 +4400,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         exit_code: i32,
     ) -> KernelResult<()> {
         self.assert_driver_owns(requester_driver, pid)?;
-        self.processes.mark_exited(pid, exit_code);
+        self.processes.mark_exited(pid, exit_code)?;
         Ok(())
     }
 
@@ -3246,14 +4438,20 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             }
         }
 
-        let process = Arc::new(StubDriverProcess::default());
+        let runtime_control = RuntimeControlCell::new_with_ack_sink(
+            self.vm_generation,
+            Arc::new(self.processes.clone()),
+        );
+        runtime_control
+            .bind_pid(pid)
+            .map_err(|error| KernelError::new(error.code(), error.message()))?;
         self.processes.register_with_process_group(
             pid,
             driver_name.clone(),
             command,
             args,
             ctx.clone(),
-            process.clone(),
+            Arc::new(runtime_control.clone()),
             requested_pgid,
         )?;
 
@@ -3269,6 +4467,14 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             } else {
                 tables.create(pid);
             }
+            let (rights_base, rights_inheriting) = wasi_preopen_rights(ctx.permission_tier, true)
+                .map_or((None, None), |(base, inheriting)| {
+                    (Some(base), Some(inheriting))
+                });
+            tables
+                .get_mut(pid)
+                .expect("registered process fd table exists")
+                .restrict_wasi_preopens(rights_base, rights_inheriting);
         }
 
         let mut owners = lock_or_recover(&self.driver_pids);
@@ -3283,7 +4489,15 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(KernelProcessHandle {
             pid,
             driver: driver_name,
-            process,
+            processes: self.processes.clone(),
+            runtime_control,
+            exit_reporter: ProcessExitReporter::new(
+                ProcessRuntimeIdentity {
+                    generation: self.vm_generation,
+                    pid,
+                },
+                Arc::new(self.processes.clone()),
+            ),
         })
     }
 
@@ -3303,6 +4517,31 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.assert_driver_owns(requester_driver, waiter_pid)?;
         let result = self.processes.waitpid_for(waiter_pid, pid, flags)?;
         Ok(result.map(|result| self.finish_waitpid_event(result)))
+    }
+
+    pub fn waitpid_detailed_with_options(
+        &mut self,
+        requester_driver: &str,
+        waiter_pid: u32,
+        pid: i32,
+        flags: WaitPidFlags,
+    ) -> KernelResult<Option<WaitPidDetailedResult>> {
+        self.assert_driver_owns(requester_driver, waiter_pid)?;
+        let transition = self
+            .processes
+            .waitpid_for_detailed(waiter_pid, pid, flags)?;
+        Ok(transition.map(|transition| {
+            let result = transition.result;
+            if result.event == WaitPidEvent::Exited {
+                self.cleanup_process_resources(result.pid);
+            }
+            WaitPidDetailedResult {
+                pid: result.pid,
+                status: result.status,
+                event: result.event,
+                termination: transition.termination,
+            }
+        }))
     }
 
     pub fn take_nonterminal_wait_event(
@@ -3377,6 +4616,123 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }))
     }
 
+    /// Install and return the process's WASI capability roots. The kernel owns
+    /// both descriptor allocation and rights; an executor may only project
+    /// this metadata into its engine-specific ABI.
+    pub fn initialize_wasi_preopens(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+    ) -> KernelResult<Vec<ProcessWasiPreopen>> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let permission_tier = self.processes.permission_tier(pid)?;
+        let should_initialize = {
+            let mut tables = lock_or_recover(&self.fd_tables);
+            tables
+                .get_mut(pid)
+                .ok_or_else(|| KernelError::no_such_process(pid))?
+                .begin_wasi_preopen_initialization()
+        };
+
+        if should_initialize && permission_tier != ProcessPermissionTier::Isolated {
+            let cwd = self.processes.inherited_context(pid)?.cwd;
+            let mut candidates = vec![normalize_path(&cwd), String::from("/")];
+            candidates.dedup();
+
+            for guest_path in candidates {
+                // Preopens are kernel-owned process capability roots, not a
+                // guest read of the directory. Install stable descriptors from
+                // trusted VFS metadata even when the guest's dynamic fs.read
+                // policy denies directory operations; each later operation on
+                // the descriptor still passes through policy, DAC, and rights.
+                let stat = self.raw_filesystem_mut().stat(&guest_path)?;
+                if !stat.is_directory {
+                    return Err(KernelError::new(
+                        "ENOTDIR",
+                        format!("WASI preopen path is not a directory: {guest_path}"),
+                    ));
+                }
+
+                let writable = self
+                    .filesystem
+                    .check_virtual_path(FsOperation::Write, &guest_path)
+                    .is_ok()
+                    && self
+                        .reject_read_only_resolved_write_path(&guest_path)
+                        .is_ok();
+                let (rights_base, rights_inheriting) =
+                    wasi_preopen_rights(permission_tier, writable)
+                        .expect("non-isolated tiers always expose preopens");
+                self.resources
+                    .check_fd_allocation(&self.resource_snapshot(), 1)?;
+                let mut tables = lock_or_recover(&self.fd_tables);
+                let table = tables
+                    .get_mut(pid)
+                    .ok_or_else(|| KernelError::no_such_process(pid))?;
+                let fd = table.open_with_details(
+                    &guest_path,
+                    O_DIRECTORY | O_RDONLY,
+                    FILETYPE_DIRECTORY,
+                    None,
+                )?;
+                table.mark_wasi_preopen(fd, guest_path, rights_base, rights_inheriting)?;
+            }
+        }
+
+        self.wasi_preopens(requester_driver, pid)
+    }
+
+    pub fn wasi_preopens(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+    ) -> KernelResult<Vec<ProcessWasiPreopen>> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        let tables = lock_or_recover(&self.fd_tables);
+        let table = tables
+            .get(pid)
+            .ok_or_else(|| KernelError::no_such_process(pid))?;
+        Ok(table
+            .values()
+            .filter_map(|entry| {
+                entry
+                    .wasi_preopen_path
+                    .as_ref()
+                    .map(|guest_path| ProcessWasiPreopen {
+                        fd: entry.fd,
+                        guest_path: guest_path.clone(),
+                        rights_base: entry.rights,
+                        rights_inheriting: entry.rights_inheriting,
+                    })
+            })
+            .collect())
+    }
+
+    pub fn wasi_preopen(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+    ) -> KernelResult<Option<ProcessWasiPreopen>> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        let tables = lock_or_recover(&self.fd_tables);
+        let entry = tables
+            .get(pid)
+            .ok_or_else(|| KernelError::no_such_process(pid))?
+            .get(fd)
+            .ok_or_else(|| KernelError::bad_file_descriptor(fd))?;
+        Ok(entry
+            .wasi_preopen_path
+            .as_ref()
+            .map(|guest_path| ProcessWasiPreopen {
+                fd,
+                guest_path: guest_path.clone(),
+                rights_base: entry.rights,
+                rights_inheriting: entry.rights_inheriting,
+            }))
+    }
+
     pub fn fd_snapshot(
         &self,
         requester_driver: &str,
@@ -3391,14 +4747,30 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             .values()
             .map(|entry| ProcessFdSnapshotEntry {
                 fd: entry.fd,
+                description_id: entry.description.id(),
                 fd_flags: entry.fd_flags,
-                status_flags: entry.status_flags | entry.description.flags(),
+                status_flags: entry.status_flags.get() | entry.description.flags(),
                 filetype: entry.filetype,
-                is_socket: self.fd_socket_id(&entry.description).is_some(),
+                rights_base: entry.rights,
+                rights_inheriting: entry.rights_inheriting,
+                is_socket: matches!(
+                    entry.filetype,
+                    FILETYPE_SOCKET_STREAM | FILETYPE_SOCKET_DGRAM
+                ),
                 is_pipe: self.pipes.is_pipe(entry.description.id()),
                 is_pty: self.ptys.is_pty(entry.description.id()),
             })
             .collect())
+    }
+
+    pub fn fd_is_pipe(&self, requester_driver: &str, pid: u32, fd: u32) -> KernelResult<bool> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        let entry = lock_or_recover(&self.fd_tables)
+            .get(pid)
+            .and_then(|table| table.get(fd))
+            .cloned()
+            .ok_or_else(|| KernelError::bad_file_descriptor(fd))?;
+        Ok(self.pipes.is_pipe(entry.description.id()))
     }
 
     /// Create a connected AF_UNIX socket pair whose endpoints live in the
@@ -3566,7 +4938,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 .ok_or_else(|| KernelError::no_such_process(pid))?;
             let fd = table.open_with_details(
                 &format!("socket:{socket_id}"),
-                status_flags,
+                status_flags | O_RDWR,
                 filetype,
                 None,
             )?;
@@ -3590,6 +4962,140 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             },
         );
         Ok(fd)
+    }
+
+    /// Allocate a canonical descriptor for a sidecar-owned socket transport.
+    ///
+    /// The transport itself remains in the sidecar reactor; this description
+    /// exists so dup/fork/exec/SCM_RIGHTS use the same kernel-owned Linux fd
+    /// semantics as every other resource. It deliberately does not create a
+    /// dummy `SocketId` or enter `fd_sockets`, which would double-account and
+    /// double-own the sidecar transport.
+    pub fn fd_open_external_socket(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        datagram: bool,
+        nonblocking: bool,
+        close_on_exec: bool,
+    ) -> KernelResult<(u32, u64)> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        self.resources
+            .check_fd_allocation(&self.resource_snapshot(), 1)?;
+        let filetype = if datagram {
+            FILETYPE_SOCKET_DGRAM
+        } else {
+            FILETYPE_SOCKET_STREAM
+        };
+        let status_flags = if nonblocking { O_NONBLOCK } else { 0 };
+        let mut tables = lock_or_recover(&self.fd_tables);
+        let table = tables
+            .get_mut(pid)
+            .ok_or_else(|| KernelError::no_such_process(pid))?;
+        let fd =
+            table.open_with_details("hostnet:external", status_flags | O_RDWR, filetype, None)?;
+        if close_on_exec {
+            table.fcntl(fd, F_SETFD, FD_CLOEXEC)?;
+        }
+        let description_id = table
+            .get(fd)
+            .expect("new external socket fd must exist")
+            .description
+            .id();
+        Ok((fd, description_id))
+    }
+
+    /// Return the open-file-description identity and number of aliases in this
+    /// process. Sidecar transports use this to key mutable reactor metadata by
+    /// description rather than treating a runner-local fd map as authoritative.
+    pub fn fd_description_identity(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+    ) -> KernelResult<(u64, usize)> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        let tables = lock_or_recover(&self.fd_tables);
+        let table = tables
+            .get(pid)
+            .ok_or_else(|| KernelError::no_such_process(pid))?;
+        let entry = table
+            .get(fd)
+            .ok_or_else(|| KernelError::bad_file_descriptor(fd))?;
+        let description_id = entry.description.id();
+        let aliases = table
+            .values()
+            .filter(|candidate| candidate.description.id() == description_id)
+            .count();
+        Ok((description_id, aliases))
+    }
+
+    /// Validate a live descriptor as a socket, optionally requiring the
+    /// kernel-owned socket to be in listening state. Managed external sockets
+    /// are recognizable by file type but their listener state remains in the
+    /// sidecar registry, which validates them before using this fallback.
+    pub fn fd_validate_socket(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        require_listening: bool,
+    ) -> KernelResult<()> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        let (description, filetype) = {
+            let tables = lock_or_recover(&self.fd_tables);
+            let entry = tables
+                .get(pid)
+                .and_then(|table| table.get(fd))
+                .ok_or_else(|| KernelError::bad_file_descriptor(fd))?;
+            (Arc::clone(&entry.description), entry.filetype)
+        };
+        if !matches!(filetype, FILETYPE_SOCKET_DGRAM | FILETYPE_SOCKET_STREAM) {
+            return Err(KernelError::new(
+                "ENOTSOCK",
+                format!("file descriptor {fd} is not a socket"),
+            ));
+        }
+        if !require_listening {
+            return Ok(());
+        }
+        let Some(socket_id) = self.fd_socket_id(&description) else {
+            return Err(KernelError::new(
+                "EINVAL",
+                format!("socket file descriptor {fd} is not listening"),
+            ));
+        };
+        let socket = self.sockets.get(socket_id).ok_or_else(|| {
+            KernelError::new(
+                "ENOTSOCK",
+                format!("socket file descriptor {fd} no longer has a live socket"),
+            )
+        })?;
+        if socket.state() != SocketState::Listening {
+            return Err(KernelError::new(
+                "EINVAL",
+                format!("socket file descriptor {fd} is not listening"),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn fd_description_alias_count(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        description_id: u64,
+    ) -> KernelResult<usize> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        let tables = lock_or_recover(&self.fd_tables);
+        let table = tables
+            .get(pid)
+            .ok_or_else(|| KernelError::no_such_process(pid))?;
+        Ok(table
+            .values()
+            .filter(|entry| entry.description.id() == description_id)
+            .count())
     }
 
     /// Attach an existing kernel socket directly to a transferable open file
@@ -3625,7 +5131,11 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             let table = tables
                 .get(pid)
                 .ok_or_else(|| KernelError::no_such_process(pid))?;
-            table.create_transfer(&format!("socket:{socket_id}"), status_flags, filetype)
+            table.create_transfer(
+                &format!("socket:{socket_id}"),
+                status_flags | O_RDWR,
+                filetype,
+            )
         };
         self.sockets.reassign_owner(socket_id, 0)?;
         lock_or_recover(&self.fd_sockets).insert(
@@ -3684,6 +5194,108 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             self.close_special_resource_if_needed(&description, filetype);
         }
         Ok(())
+    }
+
+    /// Install a descriptor captured by the kernel's trusted POSIX-spawn
+    /// staging path, retaining descriptor-local WASI preopen metadata. Guest
+    /// descriptor passing must continue to use [`Self::fd_install_transfer_at`],
+    /// which intentionally does not confer capability-root status.
+    pub fn fd_install_spawn_transfer_at(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        fd_flags: u32,
+        transfer: &TransferredFd,
+    ) -> KernelResult<()> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let replaced = {
+            let mut tables = lock_or_recover(&self.fd_tables);
+            let table = tables
+                .get_mut(pid)
+                .ok_or_else(|| KernelError::no_such_process(pid))?;
+            let replaced = table
+                .get(fd)
+                .map(|entry| (Arc::clone(&entry.description), entry.filetype));
+            table.install_spawn_transferred_at(transfer, fd, fd_flags)?;
+            replaced
+        };
+        if let Some((description, filetype)) = replaced {
+            self.close_special_resource_if_needed(&description, filetype);
+        }
+        Ok(())
+    }
+
+    /// Install one queued open-file description at the receiver's next free
+    /// descriptor. This is the sidecar-resource counterpart to the kernel's
+    /// ordinary SCM_RIGHTS installation path.
+    pub fn fd_install_transfer(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        transfer: &TransferredFd,
+        close_on_exec: bool,
+    ) -> KernelResult<u32> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        self.resources
+            .check_fd_allocation(&self.resource_snapshot(), 1)?;
+        let mut tables = lock_or_recover(&self.fd_tables);
+        let table = tables
+            .get_mut(pid)
+            .ok_or_else(|| KernelError::no_such_process(pid))?;
+        let mut installed =
+            table.install_transferred(std::slice::from_ref(transfer), close_on_exec)?;
+        Ok(installed
+            .pop()
+            .expect("one transferred description must install one fd"))
+    }
+
+    /// Atomically commit a runner-namespace `fd_renumber` without making the
+    /// runner authoritative for descriptor state. If the guest destination
+    /// already projects a kernel descriptor, replace that backing descriptor;
+    /// otherwise retain the source backing slot and only clear `FD_CLOEXEC`.
+    /// The caller updates guest-to-kernel identity projections after success.
+    pub fn fd_renumber_projection(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        source_fd: u32,
+        target_fd: Option<u32>,
+    ) -> KernelResult<u32> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        {
+            let tables = lock_or_recover(&self.fd_tables);
+            let table = tables
+                .get(pid)
+                .ok_or_else(|| KernelError::no_such_process(pid))?;
+            table
+                .get(source_fd)
+                .ok_or_else(|| KernelError::bad_file_descriptor(source_fd))?;
+            if let Some(target_fd) = target_fd {
+                table
+                    .get(target_fd)
+                    .ok_or_else(|| KernelError::bad_file_descriptor(target_fd))?;
+            }
+        }
+
+        let Some(target_fd) = target_fd else {
+            self.fd_fcntl(requester_driver, pid, source_fd, F_SETFD, 0)?;
+            return Ok(source_fd);
+        };
+        if source_fd == target_fd {
+            self.fd_fcntl(requester_driver, pid, source_fd, F_SETFD, 0)?;
+            return Ok(source_fd);
+        }
+
+        // fd_dup2 validates and replaces the destination before the source is
+        // consumed. Therefore every recoverable error leaves both original
+        // descriptors intact; the remaining close cannot fail without an
+        // internal concurrent mutation of this process's synchronous table.
+        self.fd_dup2(requester_driver, pid, source_fd, target_fd)?;
+        self.fd_close(requester_driver, pid, source_fd)?;
+        Ok(target_fd)
     }
 
     pub fn fd_socket_sendmsg(
@@ -3789,7 +5401,8 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             (
                 socket_id,
                 table.available_fd_capacity(),
-                (socket_entry.description.flags() | socket_entry.status_flags) & O_NONBLOCK != 0,
+                (socket_entry.description.flags() | socket_entry.status_flags.get()) & O_NONBLOCK
+                    != 0,
                 self.sockets
                     .get(socket_id)
                     .ok_or_else(|| KernelError::bad_file_descriptor(socket_fd))?
@@ -3798,6 +5411,9 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             )
         };
 
+        let mut blocking_deadline = (!nonblocking && !dontwait)
+            .then(|| self.resources.blocking_read_deadline())
+            .flatten();
         let deadline = (!nonblocking && !dontwait)
             .then(|| {
                 self.blocking_read_timeout()
@@ -3831,11 +5447,22 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 }
                 Ok(None) => break None,
                 Err(error) if error.code() == "EAGAIN" && !nonblocking && !dontwait => {
-                    let remaining =
-                        deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-                    if matches!(remaining, Some(duration) if duration.is_zero())
-                        || !self.poll_notifier.wait_for_change(generation, remaining)
-                    {
+                    let remaining = blocking_deadline
+                        .as_mut()
+                        .and_then(|deadline| deadline.wait_slice())
+                        .or_else(|| {
+                            deadline
+                                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                        });
+                    let changed = !matches!(remaining, Some(duration) if duration.is_zero())
+                        && self.poll_notifier.wait_for_change(generation, remaining);
+                    if !changed {
+                        if blocking_deadline
+                            .as_mut()
+                            .is_some_and(|deadline| !deadline.expired())
+                        {
+                            continue;
+                        }
                         return Err(KernelError::new(
                             "EAGAIN",
                             "blocking socket receive timed out; raise limits.resources.maxBlockingReadMs",
@@ -3957,7 +5584,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_socket_resource_ledger(
         &mut self,
-        resources: Arc<agentos_runtime::accounting::ResourceLedger>,
+        resources: Arc<crate::admission::ResourceLedger>,
     ) -> KernelResult<()> {
         self.sockets.set_resource_ledger(resources)?;
         Ok(())
@@ -4449,7 +6076,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             .sockets
             .get(socket_id)
             .ok_or_else(|| KernelError::new("ENOENT", format!("no such socket {socket_id}")))?;
-        if existing.owner_pid() != pid {
+        if existing.owner_pid() != pid && existing.owner_pid() != 0 {
             return Err(KernelError::permission_denied(format!(
                 "process {pid} does not own socket {socket_id}"
             )));
@@ -4682,6 +6309,20 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     ) -> KernelResult<u32> {
         self.assert_not_terminated()?;
         self.assert_driver_owns(requester_driver, pid)?;
+        match self.processes.permission_tier(pid)? {
+            ProcessPermissionTier::Isolated => {
+                return Err(KernelError::new(
+                    "EACCES",
+                    "isolated process tier has no filesystem path capability",
+                ));
+            }
+            ProcessPermissionTier::ReadOnly if open_requires_write_access(flags) => {
+                return Err(read_only_filesystem_error(path));
+            }
+            ProcessPermissionTier::ReadOnly
+            | ProcessPermissionTier::ReadWrite
+            | ProcessPermissionTier::Full => {}
+        }
         self.validate_fd_open_flags(pid, path, flags)?;
         if let Some(existing_fd) = parse_dev_fd_path(path)? {
             {
@@ -4705,7 +6346,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 .ok_or_else(|| KernelError::bad_file_descriptor(existing_fd))?;
             return Ok(table.dup_with_status_flags(
                 existing_fd,
-                Some(entry.status_flags | (flags & O_NONBLOCK)),
+                Some(entry.status_flags.get() | (flags & O_NONBLOCK)),
             )?);
         }
 
@@ -4777,7 +6418,13 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 self.resources
                     .check_fd_allocation(&self.resource_snapshot(), 1)?;
                 let timeout = self.blocking_read_timeout();
-                let pipe = self.pipes.open_named_pipe(key, path, flags, timeout)?;
+                let pipe = self.pipes.open_named_pipe_with_deadline(
+                    key,
+                    path,
+                    flags,
+                    timeout,
+                    self.resources.blocking_read_deadline(),
+                )?;
                 let mut tables = lock_or_recover(&self.fd_tables);
                 let table = tables
                     .get_mut(pid)
@@ -4812,6 +6459,156 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(table.open_with_details(&description_path, flags, filetype, lock_target)?)
     }
 
+    /// Open a descriptor under the kernel-owned Preview1 capability model.
+    /// Parent/tier/access validation is complete before `fd_open` can create
+    /// or truncate a path. `None` requests Linux-style synthesized rights.
+    pub fn fd_open_with_rights(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        parent_fd: Option<u32>,
+        path: &str,
+        flags: u32,
+        mode: Option<u32>,
+        requested_rights: Option<(u64, u64)>,
+    ) -> KernelResult<u32> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let tier = self.processes.permission_tier(pid)?;
+
+        if requested_rights.is_some() && parent_fd.is_none() {
+            return Err(KernelError::new(
+                "EACCES",
+                "explicit WASI open rights require a kernel directory capability",
+            ));
+        }
+
+        if let Some(parent_fd) = parent_fd {
+            let parent = self.fd_stat(requester_driver, pid, parent_fd)?;
+            if parent.filetype != FILETYPE_DIRECTORY {
+                return Err(KernelError::new(
+                    "ENOTDIR",
+                    format!("path_open parent fd {parent_fd} is not a directory"),
+                ));
+            }
+            if parent.rights & WASI_RIGHT_PATH_OPEN == 0 {
+                return Err(KernelError::new(
+                    "EACCES",
+                    format!("path_open parent fd {parent_fd} lacks PATH_OPEN"),
+                ));
+            }
+            if let Some((base, inheriting)) = requested_rights {
+                let unavailable = (base | inheriting) & !parent.rights_inheriting;
+                if unavailable != 0 {
+                    return Err(KernelError::new("EACCES", format!(
+                        "path_open requested rights {unavailable:#x} outside parent fd {parent_fd} inheriting rights"
+                    )));
+                }
+            }
+
+            let capability_root = self
+                .realpath_internal(Some(pid), &self.fd_path(requester_driver, pid, parent_fd)?)?;
+            let candidate = normalize_path(path);
+            if !path_is_within(&capability_root, &candidate) {
+                return Err(KernelError::new("EACCES", format!(
+                    "path_open target '{candidate}' escapes directory capability '{capability_root}'"
+                )));
+            }
+            let resolved_candidate = if self.exists_internal(Some(pid), &candidate)? {
+                self.realpath_internal(Some(pid), &candidate)?
+            } else {
+                let candidate_parent =
+                    self.realpath_internal(Some(pid), &parent_path(&candidate))?;
+                normalize_path(&format!(
+                    "{candidate_parent}/{}",
+                    candidate.rsplit('/').next().unwrap_or_default()
+                ))
+            };
+            if !path_is_within(&capability_root, &resolved_candidate) {
+                return Err(KernelError::new("EACCES", format!(
+                    "path_open resolved target '{resolved_candidate}' escapes directory capability '{capability_root}'"
+                )));
+            }
+        }
+
+        if let Some((base, inheriting)) = requested_rights {
+            let requested = base | inheriting;
+            let (tier_base, tier_inheriting) =
+                wasi_preopen_rights(tier, true).ok_or_else(|| {
+                    KernelError::new(
+                        "EACCES",
+                        "isolated process tier has no filesystem path capability",
+                    )
+                })?;
+            let unavailable = (base & !tier_base) | (inheriting & !tier_inheriting);
+            if unavailable != 0 {
+                return Err(KernelError::new(
+                    "EACCES",
+                    format!(
+                        "permission tier {tier:?} denies requested WASI rights {unavailable:#x}"
+                    ),
+                ));
+            }
+            if tier == ProcessPermissionTier::ReadOnly && requested & WASI_WRITE_RIGHTS != 0 {
+                return Err(read_only_filesystem_error(path));
+            }
+            if tier == ProcessPermissionTier::ReadWrite
+                && requested & WASI_NAMESPACE_DESTRUCTIVE_RIGHTS != 0
+            {
+                return Err(KernelError::new(
+                    "EACCES",
+                    format!(
+                        "read-write permission tier denies namespace rights {:#x}",
+                        requested & WASI_NAMESPACE_DESTRUCTIVE_RIGHTS
+                    ),
+                ));
+            }
+            if flags & (O_WRONLY | O_RDWR) == O_RDONLY && base & WASI_RIGHT_FD_WRITE != 0 {
+                return Err(KernelError::new(
+                    "EACCES",
+                    "read-only open flags cannot grant FD_WRITE",
+                ));
+            }
+            if flags & (O_WRONLY | O_RDWR) == O_WRONLY && base & WASI_RIGHT_FD_READ != 0 {
+                return Err(KernelError::new(
+                    "EACCES",
+                    "write-only open flags cannot grant FD_READ",
+                ));
+            }
+        }
+
+        let source_rights = if parse_dev_fd_path(path)?.is_some() {
+            let source_fd = parse_dev_fd_path(path)?.expect("checked above");
+            let source = self.fd_stat(requester_driver, pid, source_fd)?;
+            Some((source.rights, source.rights_inheriting))
+        } else {
+            None
+        };
+        let fd = self.fd_open(requester_driver, pid, path, flags, mode)?;
+        if let Some((requested_base, requested_inheriting)) = requested_rights {
+            let stat = self.fd_stat(requester_driver, pid, fd)?;
+            let (source_base, source_inheriting) = source_rights.unwrap_or((u64::MAX, u64::MAX));
+            let effective_base = requested_base & source_base;
+            let effective_inheriting = if stat.filetype == FILETYPE_DIRECTORY {
+                requested_inheriting & source_inheriting
+            } else {
+                0
+            };
+            let result = {
+                let mut tables = lock_or_recover(&self.fd_tables);
+                tables
+                    .get_mut(pid)
+                    .ok_or_else(|| KernelError::no_such_process(pid))?
+                    .set_rights(fd, effective_base, effective_inheriting)
+            };
+            if let Err(error) = result {
+                let _closed = self.fd_close(requester_driver, pid, fd);
+                return Err(error.into());
+            }
+        }
+        Ok(fd)
+    }
+
     pub fn fd_open_tmpfile(
         &mut self,
         requester_driver: &str,
@@ -4823,6 +6620,18 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     ) -> KernelResult<u32> {
         self.assert_not_terminated()?;
         self.assert_driver_owns(requester_driver, pid)?;
+        match self.processes.permission_tier(pid)? {
+            ProcessPermissionTier::Isolated => {
+                return Err(KernelError::new(
+                    "EACCES",
+                    "isolated process tier has no filesystem path capability",
+                ));
+            }
+            ProcessPermissionTier::ReadOnly => {
+                return Err(read_only_filesystem_error(directory));
+            }
+            ProcessPermissionTier::ReadWrite | ProcessPermissionTier::Full => {}
+        }
         if flags & 0b11 == crate::fd_table::O_RDONLY {
             return Err(KernelError::new(
                 "EINVAL",
@@ -4929,23 +6738,39 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
         if let Some(socket_id) = self.fd_socket_id(&entry.description) {
             self.resources.check_pread_length(length)?;
-            let nonblocking = (entry.description.flags() | entry.status_flags) & O_NONBLOCK != 0;
+            let nonblocking =
+                (entry.description.flags() | entry.status_flags.get()) & O_NONBLOCK != 0;
             let wait = if nonblocking {
                 Some(Duration::ZERO)
             } else {
                 timeout.or_else(|| self.blocking_read_timeout())
             };
+            let mut blocking_deadline = (!nonblocking && timeout.is_none())
+                .then(|| self.resources.blocking_read_deadline())
+                .flatten();
             let deadline = wait.map(|wait| Instant::now() + wait);
             let result = loop {
                 let generation = self.poll_notifier.snapshot();
                 match self.sockets.read(socket_id, length) {
                     Ok(result) => break result,
                     Err(error) if error.code() == "EAGAIN" && !nonblocking => {
-                        let remaining = deadline
-                            .map(|deadline| deadline.saturating_duration_since(Instant::now()));
-                        if matches!(remaining, Some(duration) if duration.is_zero())
-                            || !self.poll_notifier.wait_for_change(generation, remaining)
-                        {
+                        let remaining = blocking_deadline
+                            .as_mut()
+                            .and_then(|deadline| deadline.wait_slice())
+                            .or_else(|| {
+                                deadline.map(|deadline| {
+                                    deadline.saturating_duration_since(Instant::now())
+                                })
+                            });
+                        let changed = !matches!(remaining, Some(duration) if duration.is_zero())
+                            && self.poll_notifier.wait_for_change(generation, remaining);
+                        if !changed {
+                            if blocking_deadline
+                                .as_mut()
+                                .is_some_and(|deadline| !deadline.expired())
+                            {
+                                continue;
+                            }
                             return Err(KernelError::new(
                                 "EAGAIN",
                                 "blocking socket read timed out; raise limits.resources.maxBlockingReadMs",
@@ -4963,27 +6788,39 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         if self.pipes.is_pipe(entry.description.id()) {
-            let result = self.pipes.read_with_timeout(
+            let blocking_deadline =
+                ((entry.description.flags() | entry.status_flags.get()) & O_NONBLOCK == 0
+                    && timeout.is_none())
+                .then(|| self.resources.blocking_read_deadline())
+                .flatten();
+            let result = self.pipes.read_with_timeout_and_deadline(
                 entry.description.id(),
                 length,
-                if (entry.description.flags() | entry.status_flags) & O_NONBLOCK != 0 {
+                if (entry.description.flags() | entry.status_flags.get()) & O_NONBLOCK != 0 {
                     Some(Duration::ZERO)
                 } else {
                     timeout.or_else(|| self.blocking_read_timeout())
                 },
+                blocking_deadline,
             )?;
             return Ok(result);
         }
 
         if self.ptys.is_pty(entry.description.id()) {
-            return Ok(self.ptys.read_with_timeout(
+            let blocking_deadline =
+                ((entry.description.flags() | entry.status_flags.get()) & O_NONBLOCK == 0
+                    && timeout.is_none())
+                .then(|| self.resources.blocking_read_deadline())
+                .flatten();
+            return Ok(self.ptys.read_with_timeout_and_deadline(
                 entry.description.id(),
                 length,
-                if (entry.description.flags() | entry.status_flags) & O_NONBLOCK != 0 {
+                if (entry.description.flags() | entry.status_flags.get()) & O_NONBLOCK != 0 {
                     Some(Duration::ZERO)
                 } else {
                     timeout.or_else(|| self.blocking_read_timeout())
                 },
+                blocking_deadline,
             )?);
         }
 
@@ -5089,7 +6926,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 entry.description.id(),
                 data,
                 force_nonblocking
-                    || (entry.description.flags() | entry.status_flags) & O_NONBLOCK != 0,
+                    || (entry.description.flags() | entry.status_flags.get()) & O_NONBLOCK != 0,
             ) {
                 Ok(bytes) => Ok(bytes),
                 Err(error) => {
@@ -5234,6 +7071,10 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     /// `fd_read_with_timeout_result` re-check on the owning thread.
     pub fn poll_wait_handle(&self) -> crate::poll::PollWaitHandle {
         crate::poll::PollWaitHandle::new(self.poll_notifier.clone())
+    }
+
+    pub fn process_wait_handle(&self) -> crate::process_table::ProcessWaitHandle {
+        self.processes.wait_handle()
     }
 
     pub fn poll_targets(
@@ -5624,6 +7465,91 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(())
     }
 
+    /// Close every descriptor at or above `min_fd` under one descriptor-table
+    /// lock. Linux closefrom(2) ignores holes; special-resource retirement is
+    /// performed after the atomic table mutation so no concurrent observer can
+    /// see a partially closed descriptor range.
+    pub fn fd_close_from(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        min_fd: u32,
+    ) -> KernelResult<Vec<u32>> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        self.fd_close_matching(pid, |entry| entry.fd >= min_fd)
+    }
+
+    /// Close one exact set of canonical kernel descriptors as a single table
+    /// mutation. Missing descriptors are ignored, and private preopen roots
+    /// remain installed. Executor adapters use this when their display-fd
+    /// namespace is not identical to the kernel descriptor namespace.
+    pub fn fd_close_exact(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fds: impl IntoIterator<Item = u32>,
+    ) -> KernelResult<Vec<u32>> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        let fds = fds.into_iter().collect::<BTreeSet<_>>();
+        self.fd_close_matching(pid, |entry| fds.contains(&entry.fd))
+    }
+
+    fn fd_close_matching(
+        &mut self,
+        pid: u32,
+        mut should_close: impl FnMut(&FdEntry) -> bool,
+    ) -> KernelResult<Vec<u32>> {
+        let closed_entries = {
+            let mut tables = lock_or_recover(&self.fd_tables);
+            let table = tables
+                .get_mut(pid)
+                .ok_or_else(|| KernelError::no_such_process(pid))?;
+            let fds = table
+                .iter()
+                // WASI preopens are private capability roots used to service
+                // pathname operations, not guest-visible Linux descriptors.
+                // The executor retires only their untagged public aliases;
+                // closefrom must preserve the backing roots.
+                .filter_map(|entry| {
+                    (should_close(entry) && entry.wasi_preopen_path.is_none()).then_some(entry.fd)
+                })
+                .collect::<Vec<_>>();
+            let mut closed = Vec::with_capacity(fds.len());
+            for fd in fds {
+                let entry = table
+                    .get(fd)
+                    .cloned()
+                    .expect("closefrom snapshot must reference an open descriptor");
+                let removed = table.close(fd);
+                debug_assert!(removed);
+                closed.push((fd, entry.description, entry.filetype));
+            }
+            closed
+        };
+
+        let mut first_cleanup_error = None;
+        let mut closed_fds = Vec::with_capacity(closed_entries.len());
+        for (fd, description, filetype) in closed_entries {
+            closed_fds.push(fd);
+            if let Some(target) = description.lock_target() {
+                self.file_locks.release_process_target(pid, target);
+            }
+            self.close_special_resource_if_needed(&description, filetype);
+            if let Err(error) = self.cleanup_unnamed_file_if_closed(&description) {
+                eprintln!(
+                    "ERR_AGENTOS_CLOSE_MULTIPLE_CLEANUP: pid={pid} fd={fd} cleanup failed: {error}"
+                );
+                if first_cleanup_error.is_none() {
+                    first_cleanup_error = Some(error);
+                }
+            }
+        }
+        if let Some(error) = first_cleanup_error {
+            return Err(error);
+        }
+        Ok(closed_fds)
+    }
+
     /// Commit the descriptor half of exec by closing every descriptor still
     /// marked `FD_CLOEXEC` after POSIX spawn file actions have completed.
     pub fn close_process_cloexec_fds(
@@ -5710,7 +7636,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             .and_then(|table| table.get(fd))
             .cloned()
             .ok_or_else(|| KernelError::bad_file_descriptor(fd))?;
-        if entry.filetype != FILETYPE_PIPE {
+        if !self.pipes.is_pipe(entry.description.id()) {
             return Err(KernelError::new(
                 "EINVAL",
                 format!("fd {fd} is not a named pipe"),
@@ -5967,7 +7893,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 .cloned()
                 .ok_or_else(|| KernelError::bad_file_descriptor(fd))?
         };
-        Ok(self.ptys.is_slave(entry.description.id()))
+        Ok(self.ptys.is_pty(entry.description.id()))
     }
 
     pub fn pty_window_size(
@@ -6075,6 +8001,11 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     pub fn tcgetpgrp(&self, requester_driver: &str, pid: u32, fd: u32) -> KernelResult<u32> {
         let description = self.description_for_fd(requester_driver, pid, fd)?;
         Ok(self.ptys.get_foreground_pgid(description.id())?)
+    }
+
+    pub fn tcgetsid(&self, requester_driver: &str, pid: u32, fd: u32) -> KernelResult<u32> {
+        let _ = self.description_for_fd(requester_driver, pid, fd)?;
+        Ok(self.processes.getsid(pid)?)
     }
 
     pub fn pty_resize(
@@ -6189,6 +8120,45 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     pub fn sigpending(&self, requester_driver: &str, pid: u32) -> KernelResult<SignalSet> {
         self.assert_driver_owns(requester_driver, pid)?;
         Ok(self.processes.sigpending(pid)?)
+    }
+
+    pub fn signal_action(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        signal: i32,
+        action: Option<SignalAction>,
+    ) -> KernelResult<SignalAction> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        Ok(self.processes.signal_action(pid, signal, action)?)
+    }
+
+    pub fn begin_signal_delivery(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+    ) -> KernelResult<Option<SignalDelivery>> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        Ok(self.processes.begin_signal_delivery(pid)?)
+    }
+
+    pub fn end_signal_delivery(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        token: u64,
+    ) -> KernelResult<()> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        Ok(self.processes.end_signal_delivery(pid, token)?)
+    }
+
+    pub fn reset_signal_actions_for_exec(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+    ) -> KernelResult<()> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        Ok(self.processes.reset_signal_actions_for_exec(pid)?)
     }
 
     pub fn getppid(&self, requester_driver: &str, pid: u32) -> KernelResult<u32> {
@@ -6650,41 +8620,85 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         entry: &crate::fd_table::FdEntry,
         requested: PollEvents,
     ) -> KernelResult<PollEvents> {
+        // Linux exposes POLLRDNORM/POLLWRNORM as distinct public bits even
+        // though they use the same underlying readiness as POLLIN/POLLOUT.
+        // Normalize for every kernel object, then project readiness back onto
+        // exactly the aliases the caller requested (plus unconditional
+        // POLLERR/POLLHUP).
+        let normalized_requested = PollEvents::from_bits(
+            requested.bits()
+                | if requested.intersects(POLLRDNORM) {
+                    POLLIN.bits()
+                } else {
+                    0
+                }
+                | if requested.intersects(POLLWRNORM) {
+                    POLLOUT.bits()
+                } else {
+                    0
+                },
+        );
+        let project_aliases = |events: PollEvents| {
+            let mut bits = events.bits();
+            if events.intersects(POLLIN) {
+                if requested.intersects(POLLRDNORM) {
+                    bits |= POLLRDNORM.bits();
+                }
+                if !requested.intersects(POLLIN) {
+                    bits &= !POLLIN.bits();
+                }
+            }
+            if events.intersects(POLLOUT) {
+                if requested.intersects(POLLWRNORM) {
+                    bits |= POLLWRNORM.bits();
+                }
+                if !requested.intersects(POLLOUT) {
+                    bits &= !POLLOUT.bits();
+                }
+            }
+            PollEvents::from_bits(bits)
+        };
         if let Some(socket_id) = self.fd_socket_id(&entry.description) {
             let socket = self
                 .sockets
                 .get(socket_id)
                 .ok_or_else(|| KernelError::bad_file_descriptor(entry.fd))?;
-            let mut events = self.sockets.poll(socket_id, requested)?;
+            let mut events = self.sockets.poll(socket_id, normalized_requested)?;
             if events.intersects(POLLOUT) && !self.socket_pollout_has_resource_capacity(&socket) {
                 events = PollEvents::from_bits(events.bits() & !POLLOUT.bits());
             }
-            return Ok(events);
+            return Ok(project_aliases(events));
         }
 
         if self.pipes.is_pipe(entry.description.id()) {
-            return Ok(self.pipes.poll(entry.description.id(), requested)?);
+            return Ok(project_aliases(
+                self.pipes
+                    .poll(entry.description.id(), normalized_requested)?,
+            ));
         }
 
         if self.ptys.is_pty(entry.description.id()) {
-            return Ok(self.ptys.poll(entry.description.id(), requested)?);
+            return Ok(project_aliases(
+                self.ptys
+                    .poll(entry.description.id(), normalized_requested)?,
+            ));
         }
 
         let access_mode = entry.description.flags() & 0b11;
         let mut events = PollEvents::empty();
-        if requested.intersects(POLLIN) && access_mode != crate::fd_table::O_WRONLY {
+        if normalized_requested.intersects(POLLIN) && access_mode != crate::fd_table::O_WRONLY {
             events |= POLLIN;
         }
-        if requested.intersects(POLLOUT) && access_mode != crate::fd_table::O_RDONLY {
+        if normalized_requested.intersects(POLLOUT) && access_mode != crate::fd_table::O_RDONLY {
             events |= POLLOUT;
         }
-        if entry.filetype == FILETYPE_DIRECTORY && requested.intersects(POLLOUT) {
+        if entry.filetype == FILETYPE_DIRECTORY && normalized_requested.intersects(POLLOUT) {
             events |= POLLERR;
         }
         if self.terminated {
             events |= POLLHUP;
         }
-        Ok(events)
+        Ok(project_aliases(events))
     }
 
     fn description_for_fd(
@@ -6764,9 +8778,11 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
         stat.nlink = 0;
         let data = self.filesystem.read_file(path)?;
+        let xattrs = self.snapshot_xattrs(path)?;
         let backing: SharedAnonymousFile = Arc::new(Mutex::new(AnonymousFile::new(
             data,
             stat,
+            xattrs,
             Arc::clone(&self.anonymous_file_usage),
         )));
         Ok(Some(OpenFileRemovalBacking::Anonymous {
@@ -6787,9 +8803,18 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
         while let Some((directory, depth)) = queue.pop_front() {
             self.resources.check_recursive_fs_depth(depth)?;
-            let names = self
+            let names_result = self
                 .raw_filesystem_mut()
-                .read_dir_limited(&directory, per_directory_limit)?;
+                .read_dir_limited(&directory, per_directory_limit);
+            let names = match names_result {
+                Ok(names) => names,
+                Err(error) if error.code() == "ENOMEM" => {
+                    self.resources
+                        .check_readdir_entries(per_directory_limit.saturating_add(1))?;
+                    return Err(error.into());
+                }
+                Err(error) => return Err(error.into()),
+            };
             self.resources.check_readdir_entries(names.len())?;
             for name in names {
                 if matches!(name.as_str(), "." | "..") {
@@ -6815,11 +8840,19 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     }
 
     fn prepare_detached_directory_backing(
-        &self,
+        &mut self,
         path: &str,
         stat: Option<&VirtualStat>,
-    ) -> Option<(Vec<Arc<FileDescription>>, VirtualStat)> {
-        let mut stat = stat.filter(|stat| stat.is_directory)?.clone();
+    ) -> KernelResult<
+        Option<(
+            Vec<Arc<FileDescription>>,
+            VirtualStat,
+            BTreeMap<String, Vec<u8>>,
+        )>,
+    > {
+        let Some(mut stat) = stat.filter(|stat| stat.is_directory).cloned() else {
+            return Ok(None);
+        };
         stat.nlink = 0;
         let descriptions = self
             .open_file_descriptions()
@@ -6831,7 +8864,20 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                         .is_some_and(|target| target.ino() == stat.ino)
             })
             .collect::<Vec<_>>();
-        (!descriptions.is_empty()).then_some((descriptions, stat))
+        if descriptions.is_empty() {
+            return Ok(None);
+        }
+        let xattrs = self.snapshot_xattrs(path)?;
+        Ok(Some((descriptions, stat, xattrs)))
+    }
+
+    fn snapshot_xattrs(&mut self, path: &str) -> KernelResult<BTreeMap<String, Vec<u8>>> {
+        let mut snapshot = BTreeMap::new();
+        for name in self.filesystem.list_xattrs(path, true)? {
+            let value = self.filesystem.get_xattr(path, &name, true)?;
+            snapshot.insert(name, value);
+        }
+        Ok(snapshot)
     }
 
     fn rename_open_file_descriptions(&self, old_path: &str, new_path: &str) {
@@ -7300,7 +9346,15 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         if let Some(limit) = self.resources.max_readdir_entries() {
-            Ok(self.filesystem.read_dir_limited(path, limit)?)
+            match self.filesystem.read_dir_limited(path, limit) {
+                Ok(entries) => Ok(entries),
+                Err(error) if error.code() == "ENOMEM" => {
+                    self.resources
+                        .check_readdir_entries(limit.saturating_add(1))?;
+                    Err(error.into())
+                }
+                Err(error) => Err(error.into()),
+            }
         } else {
             Ok(self.filesystem.read_dir(path)?)
         }
@@ -7767,8 +9821,12 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
     fn proc_version_bytes(&self) -> Vec<u8> {
         format!(
-            "Linux version 6.8.0-agentos (agentos@localhost) #1 SMP boot={}\n",
-            self.boot_time_ms
+            "{} version {} (agentos@{}) {} boot={}\n",
+            self.system_identity.os_type,
+            self.system_identity.os_release,
+            self.system_identity.hostname,
+            self.system_identity.os_version,
+            self.boot_time_ms,
         )
         .into_bytes()
     }
@@ -8001,6 +10059,59 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(())
     }
 
+    fn check_execute_dac_traversal(&mut self, pid: u32, path: &str) -> KernelResult<()> {
+        if is_proc_path(path) {
+            return Ok(());
+        }
+        let identity = self
+            .processes
+            .get(pid)
+            .ok_or_else(|| KernelError::no_such_process(pid))?
+            .identity;
+        let normalized = normalize_path(path);
+        let components = normalized
+            .split('/')
+            .filter(|component| !component.is_empty())
+            .collect::<Vec<_>>();
+        let mut current = String::from("/");
+        for component in components.iter().take(components.len().saturating_sub(1)) {
+            current = join_child_path(&current, component);
+            let stat = self.raw_filesystem_mut().stat(&current)?;
+            if !stat.is_directory {
+                return Err(KernelError::new(
+                    "ENOTDIR",
+                    format!("path component is not a directory: {current}"),
+                ));
+            }
+            self.check_execute_dac_mode_with_acl(&identity, &stat, DAC_EXECUTE, &current)?;
+        }
+        Ok(())
+    }
+
+    fn check_execute_dac_mode_with_acl(
+        &mut self,
+        identity: &ProcessIdentity,
+        stat: &VirtualStat,
+        access: u32,
+        path: &str,
+    ) -> KernelResult<()> {
+        if identity.euid == 0 {
+            return check_dac_mode(identity, stat, access, path);
+        }
+        match self.read_posix_acl_raw(path, POSIX_ACL_ACCESS)? {
+            Some(acl) => acl.check_access(identity, stat, access, path),
+            None => check_dac_mode(identity, stat, access, path),
+        }
+    }
+
+    fn read_posix_acl_raw(&mut self, path: &str, name: &str) -> KernelResult<Option<PosixAcl>> {
+        match self.raw_filesystem_mut().get_xattr(path, name, true) {
+            Ok(value) => PosixAcl::parse(&value, path).map(Some),
+            Err(error) if matches!(error.code(), "ENODATA" | "EOPNOTSUPP") => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn check_dac_access(&mut self, pid: u32, path: &str, access: u32) -> KernelResult<()> {
         if is_proc_path(path) {
             return Ok(());
@@ -8059,6 +10170,28 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 self.no_posix_acl_cache.insert(cache_key);
                 check_dac_mode(identity, stat, access, path)
             }
+        }
+    }
+
+    fn check_detached_fd_dac(
+        &mut self,
+        identity: &ProcessIdentity,
+        stat: &VirtualStat,
+        description: &FileDescription,
+        access: u32,
+        label: &str,
+    ) -> KernelResult<()> {
+        if identity.euid == 0 {
+            return check_dac_mode(identity, stat, access, label);
+        }
+        let acl = description
+            .detached_xattrs()
+            .and_then(|xattrs| xattrs.get(POSIX_ACL_ACCESS).cloned())
+            .map(|value| PosixAcl::parse(&value, label))
+            .transpose()?;
+        match acl {
+            Some(acl) => acl.check_access(identity, stat, access, label),
+            None => check_dac_mode(identity, stat, access, label),
         }
     }
 
@@ -8442,6 +10575,10 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     }
 }
 
+fn pty_signal_error_is_stale(error: &ProcessTableError) -> bool {
+    error.code() == "ESRCH"
+}
+
 impl KernelVm<MountTable> {
     fn check_mount_permissions(&self, path: &str) -> KernelResult<()> {
         self.filesystem
@@ -8535,6 +10672,26 @@ impl KernelVm<MountTable> {
             .root_virtual_filesystem_mut::<RootFileSystem>()
     }
 
+    /// Complete trusted root bootstrap and activate the guest-visible
+    /// read-only mount policy in one kernel-owned transition.
+    pub fn finish_root_filesystem_bootstrap(&mut self) -> KernelResult<()> {
+        let read_only = match self.root_filesystem_mut() {
+            Some(root) => root.is_read_only_mode(),
+            None => return Ok(()),
+        };
+        if read_only {
+            self.filesystem
+                .inner_mut()
+                .inner_mut()
+                .remount("/", "remount,ro")
+                .map_err(KernelError::from)?;
+        }
+        self.root_filesystem_mut()
+            .expect("root filesystem remained available across remount")
+            .finish_bootstrap();
+        Ok(())
+    }
+
     pub fn snapshot_root_filesystem(&mut self) -> KernelResult<RootFilesystemSnapshot> {
         let usage = self.filesystem_usage()?;
         self.resources
@@ -8585,79 +10742,6 @@ impl KernelVm<MountTable> {
             ));
         }
         Ok(snapshot)
-    }
-}
-
-#[derive(Default)]
-struct StubDriverState {
-    exit_code: Option<i32>,
-    on_exit: Option<ProcessExitCallback>,
-    kill_signals: Vec<i32>,
-}
-
-#[derive(Default)]
-struct StubDriverProcess {
-    state: Mutex<StubDriverState>,
-    waiters: Condvar,
-}
-
-impl StubDriverProcess {
-    fn finish(&self, exit_code: i32) {
-        let callback = {
-            let mut state = lock_or_recover(&self.state);
-            if state.exit_code.is_some() {
-                return;
-            }
-            state.exit_code = Some(exit_code);
-            self.waiters.notify_all();
-            state.on_exit.clone()
-        };
-
-        if let Some(callback) = callback {
-            callback(exit_code);
-        }
-    }
-
-    fn kill_signals(&self) -> Vec<i32> {
-        lock_or_recover(&self.state).kill_signals.clone()
-    }
-}
-
-impl DriverProcess for StubDriverProcess {
-    fn kill(&self, signal: i32) {
-        {
-            let mut state = lock_or_recover(&self.state);
-            state.kill_signals.push(signal);
-        }
-        if matches!(
-            signal,
-            crate::process_table::SIGCHLD | SIGCONT | SIGSTOP | SIGTSTP | SIGWINCH
-        ) {
-            return;
-        }
-        self.finish(128 + signal);
-    }
-
-    fn wait(&self, timeout: Duration) -> Option<i32> {
-        let state = lock_or_recover(&self.state);
-        if let Some(code) = state.exit_code {
-            return Some(code);
-        }
-
-        let (state, _) = wait_timeout_or_recover(&self.waiters, state, timeout);
-        state.exit_code
-    }
-
-    fn set_on_exit(&self, callback: ProcessExitCallback) {
-        let maybe_exit = {
-            let mut state = lock_or_recover(&self.state);
-            state.on_exit = Some(callback.clone());
-            state.exit_code
-        };
-
-        if let Some(code) = maybe_exit {
-            callback(code);
-        }
     }
 }
 
@@ -8954,17 +11038,6 @@ fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
     }
 }
 
-fn wait_timeout_or_recover<'a, T>(
-    condvar: &Condvar,
-    guard: MutexGuard<'a, T>,
-    timeout: Duration,
-) -> (MutexGuard<'a, T>, WaitTimeoutResult) {
-    match condvar.wait_timeout(guard, timeout) {
-        Ok(result) => result,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
 fn is_sensitive_mount_path(path: &str) -> bool {
     let normalized = crate::vfs::normalize_path(path);
     normalized == "/"
@@ -9115,6 +11188,16 @@ fn parent_path(path: &str) -> String {
     } else {
         String::from(head)
     }
+}
+
+fn path_is_within(root: &str, candidate: &str) -> bool {
+    let root = normalize_path(root);
+    let candidate = normalize_path(candidate);
+    root == "/"
+        || candidate == root
+        || candidate
+            .strip_prefix(&root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn required_dirent_ino(path: &str, ino: u64) -> KernelResult<u64> {
@@ -9731,9 +11814,68 @@ mod tests {
     use super::*;
     use crate::fd_table::{FD_CLOEXEC, F_GETFD, F_SETFD, O_RDONLY};
     use crate::process_table::SIGTERM;
+    use crate::root_fs::{FilesystemEntry, RootFilesystemDescriptor, RootFilesystemMode};
     use crate::vfs::MemoryFileSystem;
+    use std::fs;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::thread;
+
+    #[test]
+    fn pty_signal_error_classification_only_suppresses_stale_process_groups() {
+        let process_table = ProcessTable::new();
+        let stale_group = process_table
+            .kill(-7, SIGTERM)
+            .expect_err("missing foreground process group must be stale");
+        assert_eq!(stale_group.code(), "ESRCH");
+        assert!(pty_signal_error_is_stale(&stale_group));
+
+        let invalid_signal = process_table
+            .kill(-7, i32::MAX)
+            .expect_err("invalid signal must remain diagnostic");
+        assert_eq!(invalid_signal.code(), "EINVAL");
+        assert!(!pty_signal_error_is_stale(&invalid_signal));
+    }
+
+    #[test]
+    fn finishing_read_only_root_bootstrap_seals_storage_and_mount_policy() {
+        let root = RootFileSystem::from_descriptor(RootFilesystemDescriptor {
+            mode: RootFilesystemMode::ReadOnly,
+            disable_default_base_layer: true,
+            lowers: Vec::new(),
+            bootstrap_entries: vec![FilesystemEntry::file("/bin/node", b"bootstrap".to_vec())],
+        })
+        .expect("build read-only root");
+        let mut config = KernelVmConfig::new("vm-read-only-bootstrap-transition");
+        config.permissions = Permissions::allow_all();
+        let mut kernel = KernelVm::new(MountTable::new(root), config);
+
+        kernel
+            .write_file("/bin/node", b"trusted-bootstrap".to_vec())
+            .expect("trusted bootstrap remains writable before finish");
+        kernel
+            .finish_root_filesystem_bootstrap()
+            .expect("finish root bootstrap");
+
+        assert!(
+            kernel
+                .mounted_filesystems()
+                .into_iter()
+                .find(|mount| mount.path == "/")
+                .expect("root mount")
+                .read_only
+        );
+        assert_eq!(
+            kernel.read_file("/bin/node").expect("read sealed root"),
+            b"trusted-bootstrap".to_vec()
+        );
+        assert_eq!(
+            kernel
+                .write_file("/bin/node", b"guest-write".to_vec())
+                .expect_err("sealed root rejects writes")
+                .code(),
+            "EROFS"
+        );
+    }
 
     fn kernel_with_process() -> (KernelVm<MemoryFileSystem>, KernelProcessHandle) {
         let mut config = KernelVmConfig::new("vm-fd-socket-test");
@@ -9753,6 +11895,1070 @@ mod tests {
             )
             .expect("spawn socket test process");
         (kernel, process)
+    }
+
+    #[test]
+    fn replace_driver_retires_only_obsolete_generated_command_stubs() {
+        let mut config = KernelVmConfig::new("vm-replace-driver");
+        config.permissions = Permissions::allow_all();
+        let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+        kernel
+            .register_driver(CommandDriver::new("runtime", ["old", "keep"]))
+            .expect("register initial runtime driver");
+        assert!(kernel.exists("/bin/old").expect("stat old stub"));
+        kernel
+            .write_file("/bin/keep", b"guest replacement".to_vec())
+            .expect("replace generated stub");
+
+        kernel
+            .replace_driver(CommandDriver::new("runtime", ["keep", "new"]))
+            .expect("replace runtime driver command set");
+        assert!(!kernel.exists("/bin/old").expect("stat retired stub"));
+        assert!(kernel.exists("/bin/new").expect("stat new stub"));
+        assert_eq!(
+            kernel.read_file("/bin/keep").expect("read preserved file"),
+            b"guest replacement".to_vec()
+        );
+        assert!(kernel.resolve_registered_command_path("/bin/old").is_none());
+        assert_eq!(
+            kernel
+                .commands
+                .resolve("new")
+                .expect("new command resolves")
+                .name(),
+            "runtime"
+        );
+
+        kernel
+            .replace_driver(CommandDriver::new("runtime", std::iter::empty::<&str>()))
+            .expect("remove runtime driver commands");
+        assert!(
+            kernel.exists("/bin/keep").expect("stat preserved file"),
+            "guest replacement is preserved"
+        );
+        assert!(!kernel.exists("/bin/new").expect("stat removed new stub"));
+    }
+
+    #[test]
+    fn closefrom_closes_one_atomic_sorted_descriptor_range() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        kernel
+            .write_file("/one", b"1".to_vec())
+            .expect("create first file");
+        kernel
+            .write_file("/two", b"2".to_vec())
+            .expect("create second file");
+        let first = kernel
+            .fd_open("wasm", pid, "/one", O_RDONLY, None)
+            .expect("open first fd");
+        let second = kernel
+            .fd_open("wasm", pid, "/two", O_RDONLY, None)
+            .expect("open second fd");
+        let high = kernel
+            .fd_fcntl("wasm", pid, first, F_DUPFD, 12)
+            .expect("duplicate high fd");
+
+        let closed = kernel
+            .fd_close_from("wasm", pid, second)
+            .expect("close descriptor range");
+        assert_eq!(closed, vec![second, high]);
+        assert!(kernel.fd_stat("wasm", pid, first).is_ok());
+        assert_eq!(
+            kernel.fd_stat("wasm", pid, second).unwrap_err().code(),
+            "EBADF"
+        );
+        assert_eq!(
+            kernel.fd_stat("wasm", pid, high).unwrap_err().code(),
+            "EBADF"
+        );
+    }
+
+    #[test]
+    fn closefrom_preserves_private_wasi_preopen_roots() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        kernel
+            .mkdir("/workspace", true)
+            .expect("create default workspace preopen");
+        let preopens = kernel
+            .initialize_wasi_preopens("wasm", pid)
+            .expect("initialize private preopen roots");
+        assert!(!preopens.is_empty());
+        kernel
+            .write_file("/ordinary", b"data".to_vec())
+            .expect("create ordinary file");
+        let ordinary = kernel
+            .fd_open("wasm", pid, "/ordinary", O_RDONLY, None)
+            .expect("open ordinary descriptor");
+
+        let closed = kernel
+            .fd_close_from("wasm", pid, 3)
+            .expect("close guest descriptor range");
+        assert_eq!(closed, vec![ordinary]);
+        for preopen in preopens {
+            kernel
+                .fd_stat("wasm", pid, preopen.fd)
+                .expect("private preopen backing remains live");
+        }
+    }
+
+    #[test]
+    fn exact_bulk_close_does_not_translate_a_display_fd_cutoff() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        kernel
+            .write_file("/canonical-three", b"3".to_vec())
+            .expect("create low canonical descriptor file");
+        kernel
+            .write_file("/unrelated-high", b"64".to_vec())
+            .expect("create high canonical descriptor file");
+        let canonical_three = kernel
+            .fd_open("wasm", pid, "/canonical-three", O_RDONLY, None)
+            .expect("open low canonical descriptor");
+        assert_eq!(canonical_three, 3);
+        let unrelated_high = kernel
+            .fd_fcntl("wasm", pid, canonical_three, F_DUPFD, 64)
+            .expect("create unrelated high descriptor");
+
+        let closed = kernel
+            .fd_close_exact("wasm", pid, [canonical_three])
+            .expect("close exact canonical target for display fd 64");
+        assert_eq!(closed, vec![canonical_three]);
+        assert_eq!(
+            kernel
+                .fd_stat("wasm", pid, canonical_three)
+                .unwrap_err()
+                .code(),
+            "EBADF"
+        );
+        kernel
+            .fd_stat("wasm", pid, unrelated_high)
+            .expect("numeric cutoff must not close unrelated canonical fd 64");
+    }
+
+    #[test]
+    fn descriptor_runtime_image_is_exact_and_does_not_advance_offset() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        let image = b"\0asm-executable".to_vec();
+        kernel
+            .write_file_for_process("wasm", pid, "/program", image.clone(), Some(0o755))
+            .expect("create executable image");
+        let fd = kernel
+            .fd_open("wasm", pid, "/program", O_RDONLY, None)
+            .expect("open executable image");
+        kernel
+            .fd_seek("wasm", pid, fd, 3, SEEK_SET)
+            .expect("move descriptor cursor");
+
+        let loaded = kernel
+            .load_process_runtime_image_from_fd("wasm", pid, fd, 1024)
+            .expect("load exact descriptor image");
+        assert_eq!(loaded.bytes, image);
+        assert_eq!(loaded.canonical_path, "/program");
+        assert_eq!(
+            kernel
+                .fd_seek("wasm", pid, fd, 0, SEEK_CUR)
+                .expect("observe unchanged cursor"),
+            3
+        );
+
+        kernel
+            .remove_file_for_process("wasm", pid, "/program")
+            .expect("unlink executable after open");
+        let unlinked = kernel
+            .load_process_runtime_image_from_fd("wasm", pid, fd, 1024)
+            .expect("open description survives unlink");
+        assert_eq!(unlinked.bytes, image);
+        assert!(unlinked.canonical_path.ends_with(" (deleted)"));
+    }
+
+    #[test]
+    fn socket_validation_distinguishes_fd_type_and_listener_state() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        kernel
+            .write_file("/regular", b"x".to_vec())
+            .expect("create regular file");
+        let regular = kernel
+            .fd_open("wasm", pid, "/regular", O_RDONLY, None)
+            .expect("open regular file");
+        assert_eq!(
+            kernel
+                .fd_validate_socket("wasm", pid, regular, false)
+                .unwrap_err()
+                .code(),
+            "ENOTSOCK"
+        );
+
+        let socket_id = kernel
+            .socket_create("wasm", pid, SocketSpec::unix_stream())
+            .expect("create socket");
+        let socket_fd = kernel
+            .fd_adopt_socket("wasm", pid, socket_id, 0)
+            .expect("adopt socket fd");
+        kernel
+            .fd_validate_socket("wasm", pid, socket_fd, false)
+            .expect("created socket validates");
+        assert_eq!(
+            kernel
+                .fd_validate_socket("wasm", pid, socket_fd, true)
+                .unwrap_err()
+                .code(),
+            "EINVAL"
+        );
+        kernel
+            .socket_bind_unix("wasm", pid, socket_id, "/listener")
+            .expect("bind listener");
+        kernel
+            .socket_listen("wasm", pid, socket_id, 8)
+            .expect("listen");
+        kernel
+            .fd_validate_socket("wasm", pid, socket_fd, true)
+            .expect("listening socket validates");
+    }
+
+    #[test]
+    fn explicit_wasi_open_requires_and_cannot_escape_a_kernel_directory_capability() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        kernel.mkdir("/cap", true).expect("create capability root");
+        kernel
+            .mkdir("/outside", true)
+            .expect("create outside directory");
+        kernel
+            .write_file("/cap/inside", b"inside".to_vec())
+            .expect("create inside file");
+        kernel
+            .write_file("/outside/secret", b"secret".to_vec())
+            .expect("create outside file");
+        let cap_fd = kernel
+            .fd_open("wasm", pid, "/cap", O_DIRECTORY | O_RDONLY, None)
+            .expect("open capability root");
+        {
+            let mut tables = lock_or_recover(&kernel.fd_tables);
+            tables
+                .get_mut(pid)
+                .expect("process fd table")
+                .set_rights(
+                    cap_fd,
+                    WASI_RIGHT_PATH_OPEN,
+                    WASI_RIGHT_FD_READ | WASI_RIGHT_FD_FILESTAT_GET,
+                )
+                .expect("grant capability rights");
+        }
+
+        let direct = kernel
+            .fd_open_with_rights(
+                "wasm",
+                pid,
+                None,
+                "/outside/secret",
+                O_RDONLY,
+                None,
+                Some((0, 0)),
+            )
+            .expect_err("explicit rights cannot use an ambient path");
+        assert_eq!(direct.code(), "EACCES");
+
+        let escape = kernel
+            .fd_open_with_rights(
+                "wasm",
+                pid,
+                Some(cap_fd),
+                "/outside/secret",
+                O_RDONLY,
+                None,
+                Some((WASI_RIGHT_FD_READ, 0)),
+            )
+            .expect_err("directory capability cannot escape");
+        assert_eq!(escape.code(), "EACCES");
+
+        let zero = kernel
+            .fd_open_with_rights(
+                "wasm",
+                pid,
+                Some(cap_fd),
+                "/cap/inside",
+                O_RDONLY,
+                None,
+                Some((0, 0)),
+            )
+            .expect("explicit zero rights are valid");
+        let zero_stat = kernel.fd_stat("wasm", pid, zero).expect("zero-right stat");
+        assert_eq!(zero_stat.rights, 0);
+        assert_eq!(zero_stat.rights_inheriting, 0);
+
+        let denied_create = kernel
+            .fd_open_with_rights(
+                "wasm",
+                pid,
+                Some(cap_fd),
+                "/cap/not-created",
+                O_CREAT | O_WRONLY,
+                Some(0o600),
+                Some((WASI_RIGHT_FD_WRITE, 0)),
+            )
+            .expect_err("parent inheriting rights reject write before create");
+        assert_eq!(denied_create.code(), "EACCES");
+        assert!(!kernel
+            .exists("/cap/not-created")
+            .expect("query rollback path"));
+    }
+
+    #[test]
+    fn wasi_preopen_rights_are_monotonic_and_propagate_path_authority() {
+        let read_only = wasi_preopen_rights(ProcessPermissionTier::ReadOnly, true)
+            .expect("read-only preopen rights");
+        assert_eq!(read_only.0, WASI_PREOPEN_READ_RIGHTS_BASE);
+        assert_eq!(read_only.1, WASI_PREOPEN_READ_RIGHTS_INHERITING);
+        assert_eq!(read_only.0, read_only.1);
+        assert_eq!(read_only.0 & WASI_WRITE_RIGHTS, 0);
+        assert_eq!(read_only.0 & WASI_NAMESPACE_DESTRUCTIVE_RIGHTS, 0);
+
+        let read_write = wasi_preopen_rights(ProcessPermissionTier::ReadWrite, true)
+            .expect("read-write preopen rights");
+        assert_eq!(read_write.0, WASI_PREOPEN_READ_WRITE_RIGHTS_BASE);
+        assert_eq!(read_write.1, WASI_PREOPEN_READ_WRITE_RIGHTS_INHERITING);
+        assert_eq!(read_write.0, read_write.1);
+        assert_ne!(read_write.0 & WASI_RIGHT_FD_WRITE, 0);
+        assert_eq!(read_write.0 & WASI_NAMESPACE_DESTRUCTIVE_RIGHTS, 0);
+
+        let full =
+            wasi_preopen_rights(ProcessPermissionTier::Full, true).expect("full preopen rights");
+        assert_eq!(full.0, WASI_PREOPEN_WRITE_RIGHTS_BASE);
+        assert_eq!(full.1, WASI_PREOPEN_WRITE_RIGHTS_INHERITING);
+        assert_eq!(full.0, full.1);
+        assert_eq!(
+            full.0 & WASI_NAMESPACE_DESTRUCTIVE_RIGHTS,
+            WASI_NAMESPACE_DESTRUCTIVE_RIGHTS
+        );
+        assert_eq!(
+            wasi_preopen_rights(ProcessPermissionTier::Isolated, true),
+            None
+        );
+    }
+
+    #[test]
+    fn preview1_opened_directory_retains_nested_posix_path_rights() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        kernel.mkdir("/cap", true).expect("create capability root");
+        let root_fd = kernel
+            .fd_open("wasm", pid, "/", O_DIRECTORY | O_RDONLY, None)
+            .expect("open root capability");
+        {
+            let mut tables = lock_or_recover(&kernel.fd_tables);
+            tables
+                .get_mut(pid)
+                .expect("process fd table")
+                .set_rights(
+                    root_fd,
+                    WASI_PREOPEN_READ_RIGHTS_BASE,
+                    WASI_PREOPEN_WRITE_RIGHTS_INHERITING,
+                )
+                .expect("grant full root inheriting rights");
+        }
+
+        let directory_fd = kernel
+            .fd_open_with_rights(
+                "wasm",
+                pid,
+                Some(root_fd),
+                "/cap",
+                O_DIRECTORY | O_RDONLY,
+                None,
+                Some((
+                    WASI_PREOPEN_READ_RIGHTS_BASE,
+                    WASI_PREOPEN_WRITE_RIGHTS_INHERITING,
+                )),
+            )
+            .expect("open nested directory capability");
+        let directory_stat = kernel
+            .fd_stat("wasm", pid, directory_fd)
+            .expect("stat nested directory capability");
+        assert_ne!(directory_stat.rights & WASI_RIGHT_PATH_OPEN, 0);
+        assert_eq!(
+            directory_stat.rights_inheriting,
+            WASI_PREOPEN_WRITE_RIGHTS_INHERITING
+        );
+
+        let child_fd = kernel
+            .fd_open_with_rights(
+                "wasm",
+                pid,
+                Some(directory_fd),
+                "/cap/child",
+                O_CREAT | O_RDWR,
+                Some(0o600),
+                Some((WASI_RIGHT_FD_READ | WASI_RIGHT_FD_WRITE, 0)),
+            )
+            .expect("openat through ordinary POSIX directory fd");
+        assert!(
+            kernel
+                .fd_stat("wasm", pid, child_fd)
+                .expect("stat nested child")
+                .rights
+                & WASI_RIGHT_FD_WRITE
+                != 0
+        );
+    }
+
+    #[test]
+    fn isolated_child_closes_inherited_preopens_from_enumeration_and_snapshot() {
+        let (mut kernel, parent) = kernel_with_process();
+        kernel
+            .mkdir("/workspace", true)
+            .expect("create default workspace preopen");
+        let parent_preopens = kernel
+            .initialize_wasi_preopens("wasm", parent.pid())
+            .expect("initialize parent preopens");
+        assert!(!parent_preopens.is_empty());
+        let parent_preopen_fds = parent_preopens
+            .iter()
+            .map(|entry| entry.fd)
+            .collect::<BTreeSet<_>>();
+
+        let child = kernel
+            .spawn_process(
+                "socket-test",
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from("wasm")),
+                    parent_pid: Some(parent.pid()),
+                    permission_tier: Some(ProcessPermissionTier::Isolated),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn isolated child");
+        assert!(kernel
+            .wasi_preopens("wasm", child.pid())
+            .expect("enumerate child preopens")
+            .is_empty());
+        let child_fds = kernel
+            .fd_snapshot("wasm", child.pid())
+            .expect("snapshot child fds")
+            .into_iter()
+            .map(|entry| entry.fd)
+            .collect::<BTreeSet<_>>();
+        assert!(parent_preopen_fds.is_disjoint(&child_fds));
+    }
+
+    #[test]
+    fn dev_fd_open_intersects_explicit_requested_rights() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        kernel
+            .write_file("/source", b"source".to_vec())
+            .expect("create source");
+        let root_fd = kernel
+            .fd_open("wasm", pid, "/", O_DIRECTORY | O_RDONLY, None)
+            .expect("open root capability");
+        let source_fd = kernel
+            .fd_open("wasm", pid, "/source", O_RDWR, None)
+            .expect("open source");
+        {
+            let mut tables = lock_or_recover(&kernel.fd_tables);
+            let table = tables.get_mut(pid).expect("process fd table");
+            table
+                .set_rights(
+                    root_fd,
+                    WASI_RIGHT_PATH_OPEN,
+                    WASI_RIGHT_FD_READ | WASI_RIGHT_FD_WRITE,
+                )
+                .expect("set root rights");
+            table
+                .set_rights(source_fd, WASI_RIGHT_FD_READ | WASI_RIGHT_FD_WRITE, 0)
+                .expect("set source rights");
+        }
+
+        let read_alias = kernel
+            .fd_open_with_rights(
+                "wasm",
+                pid,
+                Some(root_fd),
+                &format!("/dev/fd/{source_fd}"),
+                O_RDONLY,
+                None,
+                Some((WASI_RIGHT_FD_READ, 0)),
+            )
+            .expect("open read-only alias");
+        assert_eq!(
+            kernel
+                .fd_stat("wasm", pid, read_alias)
+                .expect("alias stat")
+                .rights,
+            WASI_RIGHT_FD_READ
+        );
+        let snapshot = kernel.fd_snapshot("wasm", pid).expect("fd snapshot");
+        let source_description = snapshot
+            .iter()
+            .find(|entry| entry.fd == source_fd)
+            .expect("source snapshot")
+            .description_id;
+        assert_eq!(
+            snapshot
+                .iter()
+                .find(|entry| entry.fd == read_alias)
+                .expect("alias snapshot")
+                .description_id,
+            source_description,
+            "/dev/fd alias must share the open description"
+        );
+        kernel
+            .fd_seek("wasm", pid, source_fd, 1, SEEK_SET)
+            .expect("seek source description");
+        assert_eq!(
+            kernel
+                .fd_read("wasm", pid, read_alias, 1)
+                .expect("read through alias"),
+            b"o"
+        );
+        assert_eq!(
+            kernel
+                .fd_seek("wasm", pid, source_fd, 0, SEEK_CUR)
+                .expect("observe shared offset"),
+            2
+        );
+
+        let zero_alias = kernel
+            .fd_open_with_rights(
+                "wasm",
+                pid,
+                Some(root_fd),
+                &format!("/dev/fd/{source_fd}"),
+                O_RDONLY,
+                None,
+                Some((0, 0)),
+            )
+            .expect("open zero-right alias");
+        assert_eq!(
+            kernel
+                .fd_stat("wasm", pid, zero_alias)
+                .expect("zero alias stat")
+                .rights,
+            0
+        );
+    }
+
+    #[test]
+    fn trusted_runtime_image_admission_is_bounded_policy_independent_and_accounted() {
+        let mut config = KernelVmConfig::new("vm-trusted-runtime-image");
+        config.permissions = Permissions {
+            filesystem: Some(Arc::new(|_| {
+                crate::permissions::PermissionDecision::deny("guest filesystem denied")
+            })),
+            ..Permissions::allow_all()
+        };
+        let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+        let before = kernel.filesystem_usage().expect("measure initial usage");
+        let image = b"\0asmfixture".to_vec();
+
+        kernel
+            .admit_trusted_initial_runtime_image(
+                "/tmp/runtime/guest.wasm",
+                image.clone(),
+                0o755,
+                image.len() as u64,
+            )
+            .expect("trusted admission bypasses guest fs policy");
+        let loaded = kernel
+            .load_trusted_initial_runtime_image("/tmp/runtime/guest.wasm", image.len() as u64)
+            .expect("trusted loader reads admitted image");
+        assert_eq!(loaded.bytes, image);
+        assert_eq!(loaded.mode & 0o777, 0o755);
+        let after = kernel.filesystem_usage().expect("measure admitted usage");
+        assert_eq!(
+            after.total_bytes - before.total_bytes,
+            loaded.bytes.len() as u64
+        );
+        assert_eq!(after.inode_count - before.inode_count, 3);
+        assert_eq!(
+            kernel
+                .read_file("/tmp/runtime/guest.wasm")
+                .expect_err("ordinary guest-attributable read remains denied")
+                .code(),
+            "EACCES"
+        );
+
+        let too_large = kernel
+            .admit_trusted_initial_runtime_image("/too-large.wasm", vec![0; 5], 0o755, 4)
+            .expect_err("oversized trusted image must fail before mutation");
+        assert_eq!(too_large.code(), "E2BIG");
+        assert_eq!(
+            kernel
+                .load_trusted_initial_runtime_image("/too-large.wasm", 4)
+                .expect_err("oversized rejection must leave no inode")
+                .code(),
+            "ENOENT"
+        );
+
+        let traversal = kernel
+            .admit_trusted_initial_runtime_image("/tmp/../escape.wasm", vec![0], 0o755, 1)
+            .expect_err("traversal spelling must be rejected");
+        assert_eq!(traversal.code(), "EINVAL");
+        let protected = kernel
+            .admit_trusted_initial_runtime_image("/etc/agentos/guest.wasm", vec![0], 0o755, 1)
+            .expect_err("protected package tree must remain read-only");
+        assert_eq!(protected.code(), "EROFS");
+
+        // Admission preflights the complete directory+file inode delta. A
+        // quota failure must therefore leave neither the file nor a partial
+        // parent hierarchy behind, and must not perturb cached accounting.
+        let mut baseline_config = KernelVmConfig::new("vm-trusted-runtime-quota-baseline");
+        baseline_config.permissions = Permissions::allow_all();
+        let mut baseline_kernel = KernelVm::new(MemoryFileSystem::new(), baseline_config);
+        let baseline = baseline_kernel
+            .filesystem_usage()
+            .expect("measure trusted admission quota baseline");
+
+        let mut limited_config = KernelVmConfig::new("vm-trusted-runtime-quota");
+        limited_config.permissions = Permissions::allow_all();
+        limited_config.resources = ResourceLimits {
+            max_inode_count: Some(baseline.inode_count + 1),
+            ..ResourceLimits::default()
+        };
+        let mut limited_kernel = KernelVm::new(MemoryFileSystem::new(), limited_config);
+        let before_rejection = limited_kernel
+            .filesystem_usage()
+            .expect("measure limited kernel before admission");
+        let quota = limited_kernel
+            .admit_trusted_initial_runtime_image("/quota/guest.wasm", b"image".to_vec(), 0o755, 5)
+            .expect_err("directory plus image must exceed the one-inode allowance");
+        assert_eq!(quota.code(), "ENOSPC");
+        assert!(!limited_kernel
+            .exists("/quota")
+            .expect("query partial parent"));
+        assert!(!limited_kernel
+            .exists("/quota/guest.wasm")
+            .expect("query rejected image"));
+        assert_eq!(
+            limited_kernel
+                .filesystem_usage()
+                .expect("measure limited kernel after rejection"),
+            before_rejection
+        );
+    }
+
+    #[test]
+    fn process_file_read_preflight_and_runtime_prefix_are_bounded_and_authorized() {
+        let mut config = KernelVmConfig::new("vm-bounded-read-preflight");
+        config.permissions = Permissions::allow_all();
+        config.resources = ResourceLimits {
+            max_pread_bytes: Some(4),
+            ..ResourceLimits::default()
+        };
+        let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+        kernel
+            .register_driver(CommandDriver::new("wasm", ["reader"]))
+            .expect("register reader");
+        let process = kernel
+            .spawn_process(
+                "reader",
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from("wasm")),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn reader");
+        let pid = process.pid();
+
+        kernel
+            .write_file("/exact", b"four".to_vec())
+            .expect("write exact fixture");
+        kernel
+            .write_file("/over", b"five!".to_vec())
+            .expect("write oversized fixture");
+        assert_eq!(
+            kernel
+                .preflight_regular_file_read_for_process("wasm", pid, "/exact")
+                .expect("exact preflight"),
+            4
+        );
+        let over = kernel
+            .preflight_regular_file_read_for_process("wasm", pid, "/over")
+            .expect_err("oversized preflight must fail before allocation");
+        assert_eq!(over.code(), "EINVAL");
+        assert!(over.message().contains("limits.resources.maxPreadBytes"));
+
+        kernel.chmod("/exact", 0).expect("deny exact fixture");
+        assert_eq!(
+            kernel
+                .preflight_regular_file_read_for_process("wasm", pid, "/exact")
+                .expect_err("read DAC must be enforced")
+                .code(),
+            "EACCES"
+        );
+        kernel.chmod("/exact", 0o644).expect("restore exact mode");
+
+        kernel
+            .symlink("/loop-b", "/loop-a")
+            .expect("first loop link");
+        kernel
+            .symlink("/loop-a", "/loop-b")
+            .expect("second loop link");
+        assert_eq!(
+            kernel
+                .preflight_regular_file_read_for_process("wasm", pid, "/loop-a")
+                .expect_err("symlink loop must stay typed")
+                .code(),
+            "ELOOP"
+        );
+
+        kernel
+            .write_file("/program", b"\0asmrest".to_vec())
+            .expect("write executable fixture");
+        kernel.chmod("/program", 0o755).expect("make executable");
+        let prefix = kernel
+            .load_process_runtime_image_prefix("wasm", pid, "/program", 4)
+            .expect("authorized prefix");
+        assert_eq!(prefix.canonical_path, "/program");
+        assert_eq!(prefix.bytes, b"\0asm");
+        kernel
+            .chmod("/program", 0o644)
+            .expect("remove execute mode");
+        assert_eq!(
+            kernel
+                .load_process_runtime_image_prefix("wasm", pid, "/program", 4)
+                .expect_err("process prefix must enforce execute DAC")
+                .code(),
+            "EACCES"
+        );
+        assert_eq!(
+            kernel
+                .load_trusted_initial_runtime_image_prefix("/program", 4)
+                .expect("trusted prefix bypasses process execute DAC")
+                .bytes,
+            b"\0asm"
+        );
+    }
+
+    #[test]
+    fn registered_projected_runtime_image_does_not_require_host_execute_bits() {
+        let (mut kernel, process) = kernel_with_process();
+        kernel
+            .set_resource_limit(
+                "wasm",
+                process.pid(),
+                ProcessResourceLimitKind::OpenFiles,
+                ProcessResourceLimit {
+                    soft: Some(3),
+                    hard: Some(3),
+                },
+            )
+            .expect("saturate the guest descriptor range with stdio");
+        assert_eq!(kernel.fd_snapshot("wasm", process.pid()).unwrap().len(), 3);
+        kernel
+            .register_driver(CommandDriver::new("wasm", ["projected-tool"]))
+            .expect("register projected command");
+        kernel
+            .mkdir("/__secure_exec/commands/0", true)
+            .expect("create projected command root");
+        kernel
+            .write_file(
+                "/__secure_exec/commands/0/projected-tool",
+                b"\0asmprojected".to_vec(),
+            )
+            .expect("write projected image");
+
+        let stat = kernel
+            .stat("/__secure_exec/commands/0/projected-tool")
+            .expect("stat projected image");
+        assert_eq!(stat.mode & EXECUTABLE_PERMISSION_BITS, 0);
+        let image = kernel
+            .load_process_runtime_image(
+                "wasm",
+                process.pid(),
+                "/__secure_exec/commands/0/projected-tool",
+                64,
+            )
+            .expect("registered projection should be executable");
+        assert_eq!(image.bytes, b"\0asmprojected");
+        assert_eq!(
+            kernel.fd_snapshot("wasm", process.pid()).unwrap().len(),
+            3,
+            "trusted runtime-image loading must not consume a guest descriptor"
+        );
+    }
+
+    #[test]
+    fn guest_runtime_image_loader_never_imports_ambient_host_paths() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after Unix epoch")
+            .as_nanos();
+        let host_directory = std::env::temp_dir().join(format!(
+            "agentos-kernel-ambient-runtime-image-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&host_directory).expect("create ambient host fixture directory");
+        let host_image = host_directory.join("guest.wasm");
+        fs::write(&host_image, b"\0asmhost-only").expect("write ambient host-only image");
+
+        let (mut kernel, process) = kernel_with_process();
+        let guest_path = host_image
+            .to_str()
+            .expect("temporary host fixture path should be UTF-8");
+        let error = kernel
+            .load_process_runtime_image("wasm", process.pid(), guest_path, 1024)
+            .expect_err("guest runtime image lookup must remain inside the kernel VFS");
+        assert_eq!(error.code(), "ENOENT");
+        assert!(host_image.is_file(), "ambient fixture itself must exist");
+
+        fs::remove_dir_all(host_directory).expect("remove ambient host fixture directory");
+    }
+
+    #[test]
+    fn kernel_owns_system_identity_and_clock_semantics() {
+        let mut config = KernelVmConfig::new("vm-system-services");
+        config.system_identity = SystemIdentity {
+            hostname: String::from("configured-host"),
+            os_type: String::from("Linux"),
+            os_release: String::from("test-release"),
+            os_version: String::from("test-version"),
+            machine: String::from("test-machine"),
+            domain_name: String::from("test-domain"),
+        };
+        let kernel = KernelVm::new(MemoryFileSystem::new(), config);
+
+        assert_eq!(kernel.system_identity().hostname, "configured-host");
+        assert_eq!(
+            kernel
+                .clock_time_ns(KernelClockId::Realtime, Some(123_456_789))
+                .expect("deterministic realtime"),
+            123_456_789
+        );
+        assert!(kernel.clock_time_ns(KernelClockId::Monotonic, None).is_ok());
+        assert_eq!(
+            kernel
+                .clock_resolution_ns(KernelClockId::Realtime)
+                .expect("realtime resolution"),
+            1_000_000
+        );
+        assert_eq!(
+            kernel
+                .clock_resolution_ns(KernelClockId::Monotonic)
+                .expect("monotonic resolution"),
+            1
+        );
+        let error = kernel
+            .clock_time_ns(KernelClockId::ProcessCpu, None)
+            .expect_err("unsupported CPU clock must be typed");
+        assert_eq!(error.code(), "ENOTSUP");
+    }
+
+    #[test]
+    fn external_socket_descriptions_are_canonical_without_dummy_kernel_sockets() {
+        let (mut kernel, parent) = kernel_with_process();
+        let pid = parent.pid();
+        let sockets_before = kernel.sockets.snapshot().sockets;
+        let (fd, description_id) = kernel
+            .fd_open_external_socket("wasm", pid, false, true, false)
+            .expect("open sidecar-owned socket description");
+        assert_eq!(kernel.sockets.snapshot().sockets, sockets_before);
+        assert_eq!(
+            kernel
+                .fd_description_identity("wasm", pid, fd)
+                .expect("external description identity"),
+            (description_id, 1)
+        );
+        assert!(kernel
+            .fd_snapshot("wasm", pid)
+            .expect("fd snapshot")
+            .iter()
+            .any(|entry| {
+                entry.fd == fd && entry.description_id == description_id && entry.is_socket
+            }));
+
+        let duplicate = kernel
+            .fd_dup("wasm", pid, fd)
+            .expect("duplicate external fd");
+        assert_eq!(
+            kernel
+                .fd_description_alias_count("wasm", pid, description_id)
+                .expect("count parent aliases"),
+            2
+        );
+        let transfer = kernel
+            .fd_transfer("wasm", pid, duplicate)
+            .expect("capture canonical transfer");
+        let received = kernel
+            .fd_install_transfer("wasm", pid, &transfer, true)
+            .expect("install canonical transfer");
+        assert_eq!(
+            kernel
+                .fd_description_identity("wasm", pid, received)
+                .expect("received identity")
+                .0,
+            description_id
+        );
+
+        let child = kernel
+            .spawn_process(
+                "socket-test",
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from("wasm")),
+                    parent_pid: Some(pid),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn child with external description");
+        assert_eq!(
+            kernel
+                .fd_description_identity("wasm", child.pid(), fd)
+                .expect("child inherited identity")
+                .0,
+            description_id
+        );
+        kernel
+            .fd_close("wasm", pid, fd)
+            .expect("close one parent alias");
+        assert_eq!(
+            kernel
+                .fd_description_alias_count("wasm", pid, description_id)
+                .expect("count remaining parent aliases"),
+            2
+        );
+    }
+
+    #[test]
+    fn rlimit_nofile_is_dynamic_and_shared_by_fd_allocation_paths() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        let (rights_sender, rights_receiver) = kernel
+            .fd_socketpair("wasm", pid, SocketType::Stream, false, false)
+            .expect("create SCM_RIGHTS channel");
+        kernel
+            .fd_socket_sendmsg("wasm", pid, rights_sender, b"x", &[0])
+            .expect("queue transferred fd");
+        kernel
+            .set_resource_limit(
+                "wasm",
+                pid,
+                ProcessResourceLimitKind::OpenFiles,
+                ProcessResourceLimit {
+                    soft: Some(5),
+                    hard: Some(8),
+                },
+            )
+            .expect("lower RLIMIT_NOFILE to current descriptor count");
+        let received = kernel
+            .fd_socket_recvmsg(
+                "wasm",
+                pid,
+                rights_receiver,
+                1,
+                1,
+                false,
+                false,
+                false,
+                false,
+            )
+            .expect("receive queued message")
+            .expect("message available");
+        assert!(received.rights.is_empty());
+        assert!(received.control_truncated);
+        kernel
+            .fd_close("wasm", pid, rights_sender)
+            .expect("close rights sender");
+        kernel
+            .fd_close("wasm", pid, rights_receiver)
+            .expect("close rights receiver");
+
+        let child = kernel
+            .spawn_process(
+                "socket-test",
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from("wasm")),
+                    parent_pid: Some(pid),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn child with inherited resource limits");
+        assert_eq!(
+            kernel
+                .get_resource_limit("wasm", child.pid(), ProcessResourceLimitKind::OpenFiles)
+                .expect("read child limit")
+                .soft,
+            Some(5)
+        );
+        kernel
+            .fd_dup("wasm", child.pid(), 0)
+            .expect("child fourth fd");
+        kernel
+            .fd_dup("wasm", child.pid(), 0)
+            .expect("child fifth fd");
+        assert_eq!(
+            kernel.fd_dup("wasm", child.pid(), 0).unwrap_err().code(),
+            "EMFILE",
+            "the inherited limit must also configure the child's fd table"
+        );
+
+        kernel
+            .set_resource_limit(
+                "wasm",
+                pid,
+                ProcessResourceLimitKind::OpenFiles,
+                ProcessResourceLimit {
+                    soft: Some(4),
+                    hard: Some(8),
+                },
+            )
+            .expect("lower RLIMIT_NOFILE");
+
+        let duplicate = kernel.fd_dup("wasm", pid, 0).expect("allocate fourth fd");
+        assert_eq!(kernel.fd_dup("wasm", pid, 0).unwrap_err().code(), "EMFILE");
+        assert_eq!(
+            kernel
+                .fd_socketpair("wasm", pid, SocketType::Stream, false, false)
+                .unwrap_err()
+                .code(),
+            "EMFILE"
+        );
+        assert_eq!(kernel.open_pty("wasm", pid).unwrap_err().code(), "EMFILE");
+
+        kernel
+            .fd_close("wasm", pid, duplicate)
+            .expect("free fourth fd");
+        let transfer = kernel.fd_transfer("wasm", pid, 0).expect("transfer stdio");
+        kernel
+            .set_resource_limit(
+                "wasm",
+                pid,
+                ProcessResourceLimitKind::OpenFiles,
+                ProcessResourceLimit {
+                    soft: Some(3),
+                    hard: Some(8),
+                },
+            )
+            .expect("lower limit to existing stdio count");
+        assert_eq!(
+            kernel
+                .fd_install_transfer_at("wasm", pid, 3, 0, &transfer)
+                .unwrap_err()
+                .code(),
+            "EBADF",
+            "an exact descriptor at RLIMIT_NOFILE is outside the descriptor range"
+        );
+        assert_eq!(
+            kernel
+                .set_resource_limit(
+                    "wasm",
+                    pid,
+                    ProcessResourceLimitKind::OpenFiles,
+                    ProcessResourceLimit {
+                        soft: Some(9),
+                        hard: Some(9),
+                    },
+                )
+                .unwrap_err()
+                .code(),
+            "EPERM"
+        );
     }
 
     #[test]
@@ -9917,6 +13123,54 @@ mod tests {
     }
 
     #[test]
+    fn fd_socketpair_applies_seqpacket_nonblocking_and_cloexec_options() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        let (left, right) = kernel
+            .fd_socketpair("wasm", pid, SocketType::SeqPacket, true, true)
+            .expect("create nonblocking close-on-exec seqpacket socketpair");
+
+        for fd in [left, right] {
+            let stat = kernel
+                .fd_stat("wasm", pid, fd)
+                .expect("stat seqpacket endpoint");
+            assert_eq!(stat.filetype, FILETYPE_SOCKET_STREAM);
+            assert_ne!(stat.flags & O_NONBLOCK, 0);
+            assert_eq!(
+                kernel
+                    .fd_fcntl("wasm", pid, fd, F_GETFD, 0)
+                    .expect("get seqpacket descriptor flags"),
+                FD_CLOEXEC
+            );
+        }
+
+        kernel
+            .fd_write("wasm", pid, left, b"abcd")
+            .expect("write first seqpacket message");
+        kernel
+            .fd_write("wasm", pid, left, b"ef")
+            .expect("write second seqpacket message");
+        let truncated = kernel
+            .fd_socket_recvmsg("wasm", pid, right, 2, 0, false, false, false, false)
+            .expect("receive first seqpacket message")
+            .expect("first seqpacket message is available");
+        assert_eq!(truncated.payload, b"ab");
+        assert!(truncated.payload_truncated);
+        assert_eq!(truncated.full_length, 4);
+        assert_eq!(
+            kernel
+                .fd_read("wasm", pid, right, 8)
+                .expect("read second seqpacket message"),
+            b"ef"
+        );
+
+        kernel.fd_close("wasm", pid, left).expect("close left fd");
+        kernel.fd_close("wasm", pid, right).expect("close right fd");
+        assert_eq!(kernel.sockets.snapshot().sockets, 0);
+        assert!(lock_or_recover(&kernel.fd_sockets).is_empty());
+    }
+
+    #[test]
     fn fd_socketpair_peek_duplicates_rights_without_consuming_message() {
         let (mut kernel, process) = kernel_with_process();
         let pid = process.pid();
@@ -10002,6 +13256,119 @@ mod tests {
     }
 
     #[test]
+    fn fd_renumber_projection_without_backing_target_preserves_description_state() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        kernel.write_file("/move-shared", b"abc").unwrap();
+        let original = kernel
+            .fd_open("wasm", pid, "/move-shared", O_RDONLY, None)
+            .unwrap();
+        let source = kernel.fd_dup("wasm", pid, original).unwrap();
+        let alias = kernel.fd_dup("wasm", pid, source).unwrap();
+        let description_id = kernel
+            .fd_description_identity("wasm", pid, source)
+            .unwrap()
+            .0;
+        kernel
+            .fd_fcntl("wasm", pid, source, F_SETFD, FD_CLOEXEC)
+            .unwrap();
+        kernel.fd_close("wasm", pid, original).unwrap();
+
+        let moved = kernel
+            .fd_renumber_projection("wasm", pid, source, None)
+            .unwrap();
+        assert_eq!(
+            moved, source,
+            "the runner can re-project the same backing fd"
+        );
+        assert_eq!(
+            kernel
+                .fd_description_identity("wasm", pid, moved)
+                .unwrap()
+                .0,
+            description_id
+        );
+        assert_eq!(kernel.fd_fcntl("wasm", pid, moved, F_GETFD, 0).unwrap(), 0);
+        assert_eq!(kernel.fd_read("wasm", pid, moved, 1).unwrap(), b"a");
+        assert_eq!(kernel.fd_read("wasm", pid, alias, 1).unwrap(), b"b");
+
+        kernel.fd_close("wasm", pid, moved).unwrap();
+        kernel.fd_close("wasm", pid, alias).unwrap();
+        process.finish(0);
+        kernel.waitpid(pid).unwrap();
+    }
+
+    #[test]
+    fn fd_renumber_projection_atomically_replaces_backing_target() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        kernel.write_file("/renumber-source", b"source").unwrap();
+        kernel.write_file("/renumber-target", b"target").unwrap();
+        let source = kernel
+            .fd_open("wasm", pid, "/renumber-source", O_RDONLY, None)
+            .unwrap();
+        let target = kernel
+            .fd_open("wasm", pid, "/renumber-target", O_RDONLY, None)
+            .unwrap();
+        let source_description = kernel
+            .fd_description_identity("wasm", pid, source)
+            .unwrap()
+            .0;
+        let target_description = kernel
+            .fd_description_identity("wasm", pid, target)
+            .unwrap()
+            .0;
+        kernel
+            .fd_fcntl("wasm", pid, source, F_SETFD, FD_CLOEXEC)
+            .unwrap();
+
+        let error = kernel
+            .fd_renumber_projection("wasm", pid, source, Some(999))
+            .expect_err("an invalid projected target must fail before mutation");
+        assert_eq!(error.code(), "EBADF");
+        assert_eq!(
+            kernel
+                .fd_description_identity("wasm", pid, source)
+                .unwrap()
+                .0,
+            source_description
+        );
+        assert_eq!(
+            kernel
+                .fd_description_identity("wasm", pid, target)
+                .unwrap()
+                .0,
+            target_description
+        );
+        assert_eq!(
+            kernel.fd_fcntl("wasm", pid, source, F_GETFD, 0).unwrap(),
+            FD_CLOEXEC
+        );
+
+        let moved = kernel
+            .fd_renumber_projection("wasm", pid, source, Some(target))
+            .unwrap();
+        assert_eq!(moved, target);
+        assert_eq!(
+            kernel.fd_stat("wasm", pid, source).unwrap_err().code(),
+            "EBADF"
+        );
+        assert_eq!(
+            kernel
+                .fd_description_identity("wasm", pid, target)
+                .unwrap()
+                .0,
+            source_description
+        );
+        assert_eq!(kernel.fd_fcntl("wasm", pid, target, F_GETFD, 0).unwrap(), 0);
+        assert_eq!(kernel.fd_read("wasm", pid, target, 6).unwrap(), b"source");
+
+        kernel.fd_close("wasm", pid, target).unwrap();
+        process.finish(0);
+        kernel.waitpid(pid).unwrap();
+    }
+
+    #[test]
     fn dev_fd_stat_reports_linux_pipe_and_socket_modes() {
         let (mut kernel, process) = kernel_with_process();
         let pid = process.pid();
@@ -10025,6 +13392,35 @@ mod tests {
             assert_eq!(stat.mode, 0o140777);
             assert_eq!(stat.nlink, 1);
             assert_eq!(stat.size, 0);
+        }
+    }
+
+    #[test]
+    fn pipe_fdstat_is_unknown_without_losing_kernel_pipe_identity() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        let (pipe_read, pipe_write) = kernel.open_pipe("wasm", pid).unwrap();
+
+        for fd in [pipe_read, pipe_write] {
+            assert_eq!(
+                kernel.fd_stat("wasm", pid, fd).unwrap().filetype,
+                crate::fd_table::FILETYPE_UNKNOWN,
+                "Preview1 must not expose a pipe as a socket"
+            );
+        }
+
+        let snapshot = kernel.fd_snapshot("wasm", pid).unwrap();
+        for fd in [pipe_read, pipe_write] {
+            let entry = snapshot
+                .iter()
+                .find(|entry| entry.fd == fd)
+                .expect("pipe fd in process snapshot");
+            assert!(
+                entry.is_pipe,
+                "PipeManager identity must remain authoritative"
+            );
+            assert!(!entry.is_socket, "pipe must not be classified as a socket");
+            assert!(kernel.fd_is_pipe("wasm", pid, fd).unwrap());
         }
     }
 
@@ -10062,6 +13458,53 @@ mod tests {
             kernel.sockets.get(socket_id).is_none(),
             "discarding the queued right must release and prune the adopted socket"
         );
+    }
+
+    #[test]
+    fn adopted_udp_socket_allows_charged_receive_for_transfer_owner() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        let socket_id = kernel
+            .socket_create("wasm", pid, SocketSpec::udp())
+            .expect("create transferable UDP socket");
+        kernel
+            .socket_bind_inet(
+                "wasm",
+                pid,
+                socket_id,
+                InetSocketAddress::new("127.0.0.1", 41000),
+            )
+            .expect("bind transferable UDP socket");
+        let _guard = kernel
+            .fd_adopt_socket_transfer("wasm", pid, socket_id, 0)
+            .expect("retain UDP socket description");
+        let sender_id = kernel
+            .socket_create("wasm", pid, SocketSpec::udp())
+            .expect("create UDP sender");
+        kernel
+            .socket_bind_inet(
+                "wasm",
+                pid,
+                sender_id,
+                InetSocketAddress::new("127.0.0.1", 41001),
+            )
+            .expect("bind UDP sender");
+        kernel
+            .socket_send_to_inet_loopback(
+                "wasm",
+                pid,
+                sender_id,
+                InetSocketAddress::new("127.0.0.1", 41000),
+                b"x",
+            )
+            .expect("send to description-owned UDP socket");
+
+        let received = kernel
+            .socket_recv_datagram_charged("wasm", pid, socket_id, 1)
+            .expect("description-owned UDP socket remains usable")
+            .expect("queued datagram remains receivable");
+        let (_, payload, _reservations) = received.into_parts();
+        assert_eq!(payload, b"x");
     }
 
     #[test]
@@ -10184,6 +13627,7 @@ mod tests {
                     parent_pid: Some(parent.pid()),
                     cwd: Some(String::from("/before-exec")),
                     env: BTreeMap::from([(String::from("STALE"), String::from("value"))]),
+                    ..SpawnOptions::default()
                 },
             )
             .expect("spawn child");
@@ -10233,9 +13677,17 @@ mod tests {
                 &[],
                 &[forwarded_cloexec_fd],
                 Some("/literal/not-executable"),
+                Some(ProcessPermissionTier::ReadOnly),
             )
             .expect_err("pathname validation must fail before exec commits");
         assert_eq!(error.code(), "EACCES");
+        assert_eq!(
+            kernel
+                .process_permission_tier("runtime", child.pid())
+                .expect("permission tier after rejected exec"),
+            ProcessPermissionTier::Full,
+            "a rejected exec must not commit its requested tier"
+        );
         assert_eq!(
             kernel.processes.get(child.pid()).expect("child entry"),
             before,
@@ -10264,10 +13716,18 @@ mod tests {
                 &[],
                 &[forwarded_cloexec_fd],
                 Some("/literal/new"),
+                Some(ProcessPermissionTier::ReadOnly),
             )
             .expect("replace process image");
 
         let after = kernel.processes.get(child.pid()).expect("exec child entry");
+        assert_eq!(
+            kernel
+                .process_permission_tier("runtime", child.pid())
+                .expect("permission tier after exec"),
+            ProcessPermissionTier::ReadOnly,
+            "exec must atomically drop to the trusted image tier"
+        );
         assert_eq!(after.pid, before.pid);
         assert_eq!(after.ppid, before.ppid);
         assert_eq!(after.pgid, before.pgid);
@@ -10277,6 +13737,16 @@ mod tests {
         assert_eq!(after.cwd, before.cwd, "execve must preserve cwd");
         assert_eq!(after.command, "");
         assert_eq!(after.args, vec![String::from("argument")]);
+        assert_eq!(
+            kernel
+                .process_image("runtime", child.pid())
+                .expect("read committed process image"),
+            KernelProcessImage {
+                argv: vec![String::new(), String::from("argument")],
+                env: vec![(String::from("ONLY"), String::from("new"))],
+            },
+            "the kernel image query must observe the replacement image exactly"
+        );
         assert_eq!(
             kernel
                 .read_file_for_process(
@@ -10625,8 +14095,7 @@ mod tests {
     }
 
     fn assert_kernel_drop_released_resources(retained: &RetainedKernelResources) {
-        assert_eq!(retained.process.wait(Duration::from_millis(50)), Some(143));
-        assert_eq!(retained.process.kill_signals(), vec![15]);
+        assert_eq!(retained.process.wait(Duration::from_millis(50)), Some(137));
         assert!(
             lock_or_recover(retained.fd_tables.as_ref()).is_empty(),
             "kernel drop should remove fd tables"
@@ -10672,8 +14141,14 @@ mod tests {
                 identity: ProcessIdentity::default(),
                 blocked_signals: SignalSet::empty(),
                 pending_signals: SignalSet::empty(),
+                resource_limits: Default::default(),
+                permission_tier: Default::default(),
             },
-            Arc::new(StubDriverProcess::default()),
+            {
+                let endpoint = RuntimeControlCell::new(0);
+                endpoint.bind_pid(leader_pid).expect("bind leader endpoint");
+                Arc::new(endpoint)
+            },
         );
 
         let peer_pid = kernel.processes.allocate_pid().expect("allocate pid");
@@ -10692,8 +14167,14 @@ mod tests {
                 identity: ProcessIdentity::default(),
                 blocked_signals: SignalSet::empty(),
                 pending_signals: SignalSet::empty(),
+                resource_limits: Default::default(),
+                permission_tier: Default::default(),
             },
-            Arc::new(StubDriverProcess::default()),
+            {
+                let endpoint = RuntimeControlCell::new(0);
+                endpoint.bind_pid(peer_pid).expect("bind peer endpoint");
+                Arc::new(endpoint)
+            },
         );
 
         lock_or_recover(&kernel.driver_pids)
@@ -10729,6 +14210,8 @@ mod tests {
                     identity: ProcessIdentity::default(),
                     blocked_signals: SignalSet::empty(),
                     pending_signals: SignalSet::empty(),
+                    resource_limits: Default::default(),
+                    permission_tier: Default::default(),
                 },
                 None,
                 None,

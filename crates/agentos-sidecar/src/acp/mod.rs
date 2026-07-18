@@ -1190,6 +1190,9 @@ fn error_response(error: SidecarError) -> AcpResponse {
 }
 
 fn error_code(error: &SidecarError) -> String {
+    if let SidecarError::Host(error) = error {
+        return error.code.clone();
+    }
     let code = match error {
         SidecarError::ResourceLimit(_) => "resource_limit",
         SidecarError::InvalidState(message) => message
@@ -1211,8 +1214,10 @@ fn error_code(error: &SidecarError) -> String {
         SidecarError::Kernel(_) => "kernel",
         SidecarError::Plugin(_) => "plugin",
         SidecarError::Execution(_) => "execution",
+        SidecarError::ExecutionEventChannelClosed { .. } => "execution_event_channel_closed",
         SidecarError::Bridge(_) => "bridge",
         SidecarError::Io(_) => "io",
+        SidecarError::Host(_) => unreachable!("handled above"),
     };
     String::from(code)
 }

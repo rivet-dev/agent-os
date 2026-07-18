@@ -6,7 +6,7 @@ impl<T> Http2AsyncIo for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-struct JavascriptHttp2ServerListenRequest {
+struct Http2ServerListenOptions {
     server_id: u64,
     secure: bool,
     port: Option<u16>,
@@ -14,41 +14,41 @@ struct JavascriptHttp2ServerListenRequest {
     backlog: Option<u32>,
     timeout: Option<u64>,
     settings: BTreeMap<String, Value>,
-    tls: Option<JavascriptTlsBridgeOptions>,
+    tls: Option<TlsBridgeOptions>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-struct JavascriptHttp2SessionConnectRequest {
+struct Http2SessionConnectOptions {
     authority: Option<String>,
     protocol: Option<String>,
     host: Option<String>,
     port: Option<u16>,
     settings: BTreeMap<String, Value>,
-    tls: Option<JavascriptTlsBridgeOptions>,
+    tls: Option<TlsBridgeOptions>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-struct JavascriptHttp2RequestOptions {
+struct Http2RequestOptions {
     end_stream: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-struct JavascriptHttp2FileResponseOptions {
+struct Http2FileResponseOptions {
     offset: Option<u64>,
     length: Option<i64>,
 }
 
-pub(in crate::execution) struct JavascriptHttp2SyncRpcServiceRequest<'a, B> {
+pub(in crate::execution) struct Http2ServiceRequest<'a, B> {
     pub(in crate::execution) bridge: &'a SharedBridge<B>,
     pub(in crate::execution) kernel: &'a mut SidecarKernel,
     pub(in crate::execution) vm_id: &'a str,
     pub(in crate::execution) dns: &'a VmDnsConfig,
-    pub(in crate::execution) socket_paths: &'a JavascriptSocketPathContext,
+    pub(in crate::execution) socket_paths: &'a SocketPathContext,
     pub(in crate::execution) process: &'a mut ActiveProcess,
-    pub(in crate::execution) sync_request: &'a JavascriptSyncRpcRequest,
+    pub(in crate::execution) sync_request: &'a HostRpcRequest,
     pub(in crate::execution) capabilities: CapabilityRegistry,
 }
 
@@ -128,9 +128,10 @@ fn reserve_http2_inbound_chunk(
         .as_ref()
         .cloned()
         .ok_or_else(|| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_RUNTIME_UNAVAILABLE: HTTP/2 read has no VM ResourceLedger",
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_RUNTIME_UNAVAILABLE",
+                String::from("HTTP/2 read has no VM ResourceLedger"),
+            )
         })?;
     reserve_http2_resources(
         &resources,
@@ -231,9 +232,10 @@ fn reserve_http2_event(
     event: &Http2BridgeEvent,
 ) -> Result<Vec<Reservation>, SidecarError> {
     let resources = state.resources.as_ref().ok_or_else(|| {
-        SidecarError::InvalidState(String::from(
-            "ERR_AGENTOS_RUNTIME_UNAVAILABLE: HTTP/2 state has no VM ResourceLedger",
-        ))
+        SidecarError::host(
+            "ERR_AGENTOS_RUNTIME_UNAVAILABLE",
+            String::from("HTTP/2 state has no VM ResourceLedger"),
+        )
     })?;
     let event_bytes = http2_event_bytes(event);
     reserve_http2_resources(
@@ -913,13 +915,13 @@ fn http2_runtime_snapshot() -> Http2RuntimeSnapshot {
 
 fn http2_snapshot_json(snapshot: &Http2SessionSnapshot) -> Result<String, SidecarError> {
     serde_json::to_string(snapshot)
-        .map_err(|error| SidecarError::Execution(format!("ERR_AGENTOS_NODE_SYNC_RPC: {error}")))
+        .map_err(|error| SidecarError::host("ERR_AGENTOS_NODE_SYNC_RPC", format!("{error}")))
 }
 
 fn http2_event_value(event: &Http2BridgeEvent) -> Result<Value, SidecarError> {
     serde_json::to_string(event)
         .map(Value::String)
-        .map_err(|error| SidecarError::Execution(format!("ERR_AGENTOS_NODE_SYNC_RPC: {error}")))
+        .map_err(|error| SidecarError::host("ERR_AGENTOS_NODE_SYNC_RPC", format!("{error}")))
 }
 
 fn push_http2_server_event(
@@ -1097,7 +1099,7 @@ fn push_http2_data_event(
 }
 
 fn push_http2_retain_wake(
-    session: Option<V8SessionHandle>,
+    session: Option<ExecutionWakeHandle>,
     identity: Option<(
         agentos_runtime::capability::CapabilityId,
         agentos_runtime::capability::CapabilityGeneration,
@@ -1246,6 +1248,7 @@ async fn await_http2_event(
             let mut state = shared.lock().map_err(|_| crate::state::DeferredRpcError {
                 code: String::from("ERR_AGENTOS_HTTP2_STATE_POISONED"),
                 message: String::from("HTTP/2 event state lock poisoned"),
+                details: None,
             })?;
             let notified = Arc::clone(&state.ready).notified_owned();
             let queue = if is_server {
@@ -1290,36 +1293,47 @@ fn defer_http2_poll(
     id: u64,
     is_server: bool,
     wait_ms: u64,
-) -> Result<JavascriptSyncRpcServiceResponse, SidecarError> {
+) -> Result<HostServiceResponse, SidecarError> {
     if let Some(event) = pop_http2_event_now(&process.http2.shared, id, is_server) {
         return http2_event_value(&event).map(Into::into);
     }
     if wait_ms == 0 {
         return Ok(Value::Null.into());
     }
-    let wait = Duration::from_millis(wait_ms).min(Duration::from_millis(
-        process.limits.reactor.operation_deadline_ms,
-    ));
+    let operation_deadline = Duration::from_millis(process.limits.reactor.operation_deadline_ms);
+    let requested_wait = Duration::from_millis(wait_ms);
+    let wait = requested_wait.min(operation_deadline);
+    let warn_operation_deadline = requested_wait >= operation_deadline;
     let shared = Arc::clone(&process.http2.shared);
     let (respond_to, receiver) = tokio::sync::oneshot::channel();
     process
         .runtime_context
         .spawn(agentos_runtime::TaskClass::Http2, async move {
-            let result =
-                match tokio::time::timeout(wait, await_http2_event(&shared, id, is_server)).await {
-                    Ok(Ok(Some(event))) => {
-                        http2_event_value(&event).map_err(|error| crate::state::DeferredRpcError {
-                            code: String::from("ERR_AGENTOS_HTTP2_EVENT_SERIALIZE"),
-                            message: error.to_string(),
-                        })
-                    }
-                    Ok(Ok(None)) | Err(_) => Ok(Value::Null),
-                    Ok(Err(error)) => Err(error),
-                };
+            let wait_result = if warn_operation_deadline {
+                crate::execution::operation_deadline_timeout(
+                    "HTTP/2 event poll",
+                    wait,
+                    await_http2_event(&shared, id, is_server),
+                )
+                .await
+            } else {
+                tokio::time::timeout(wait, await_http2_event(&shared, id, is_server)).await
+            };
+            let result = match wait_result {
+                Ok(Ok(Some(event))) => {
+                    http2_event_value(&event).map_err(|error| crate::state::DeferredRpcError {
+                        code: String::from("ERR_AGENTOS_HTTP2_EVENT_SERIALIZE"),
+                        message: error.to_string(),
+                        details: None,
+                    })
+                }
+                Ok(Ok(None)) | Err(_) => Ok(Value::Null),
+                Ok(Err(error)) => Err(error),
+            };
             respond_to.settle(result);
         })
         .map_err(SidecarError::from)?;
-    Ok(JavascriptSyncRpcServiceResponse::Deferred {
+    Ok(HostServiceResponse::Deferred {
         receiver,
         timeout: None,
         task_class: agentos_runtime::TaskClass::Http2,
@@ -1330,13 +1344,14 @@ fn defer_http2_wait(
     process: &ActiveProcess,
     id: u64,
     is_server: bool,
-) -> Result<JavascriptSyncRpcServiceResponse, SidecarError> {
+) -> Result<HostServiceResponse, SidecarError> {
     let shared = Arc::clone(&process.http2.shared);
     let event_session = shared
         .lock()
         .map_err(|_| SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned")))?
         .event_session
         .clone();
+    let max_adapter_event_bytes = process.limits.js_runtime.event_payload_limit_bytes;
     let (respond_to, receiver) = tokio::sync::oneshot::channel();
     process
         .runtime_context
@@ -1359,23 +1374,21 @@ fn defer_http2_wait(
                         break Err(crate::state::DeferredRpcError {
                             code: String::from("ERR_AGENTOS_HTTP2_EVENT_SERIALIZE"),
                             message: error.to_string(),
+                            details: None,
                         });
                     }
                 };
                 if let Some(session) = &event_session {
-                    let encoded = match v8_runtime::json_to_cbor_payload(&payload) {
-                        Ok(encoded) => encoded,
-                        Err(error) => {
-                            break Err(crate::state::DeferredRpcError {
-                                code: String::from("ERR_AGENTOS_HTTP2_EVENT_SERIALIZE"),
-                                message: error.to_string(),
-                            });
-                        }
-                    };
-                    if let Err(error) = session.send_stream_event("http2", encoded) {
+                    if let Err(error) = session.send_adapter_event(
+                        "http2",
+                        &payload,
+                        "limits.jsRuntime.eventPayloadLimitBytes",
+                        max_adapter_event_bytes,
+                    ) {
                         break Err(crate::state::DeferredRpcError {
-                            code: String::from("ERR_AGENTOS_HTTP2_EVENT_DELIVERY"),
-                            message: error.to_string(),
+                            code: error.code().to_owned(),
+                            message: error.message().to_owned(),
+                            details: error.details().cloned(),
                         });
                     }
                 }
@@ -1386,7 +1399,7 @@ fn defer_http2_wait(
             respond_to.settle(result);
         })
         .map_err(SidecarError::from)?;
-    Ok(JavascriptSyncRpcServiceResponse::Deferred {
+    Ok(HostServiceResponse::Deferred {
         receiver,
         timeout: None,
         task_class: agentos_runtime::TaskClass::Http2,
@@ -1537,7 +1550,7 @@ fn serialize_http2_headers_map(
         }
     }
     serde_json::to_string(&serialized)
-        .map_err(|error| SidecarError::Execution(format!("ERR_AGENTOS_NODE_SYNC_RPC: {error}")))
+        .map_err(|error| SidecarError::host("ERR_AGENTOS_NODE_SYNC_RPC", format!("{error}")))
 }
 
 fn serialize_http2_request_headers(
@@ -1605,8 +1618,9 @@ fn track_http2_capability(
             entry.insert(lease);
             Ok(())
         }
-        std::collections::btree_map::Entry::Occupied(_) => Err(SidecarError::InvalidState(
-            format!("ERR_AGENTOS_CAPABILITY_DUPLICATE: HTTP/2 state already owns {key:?}"),
+        std::collections::btree_map::Entry::Occupied(_) => Err(SidecarError::host(
+            "ERR_AGENTOS_CAPABILITY_DUPLICATE",
+            format!("HTTP/2 state already owns {key:?}"),
         )),
     }
 }
@@ -1687,9 +1701,10 @@ fn admit_http2_session(
         lease,
     )?;
     let resources = state.resources.as_ref().cloned().ok_or_else(|| {
-        SidecarError::InvalidState(String::from(
-            "ERR_AGENTOS_RUNTIME_UNAVAILABLE: HTTP/2 session has no VM ResourceLedger",
-        ))
+        SidecarError::host(
+            "ERR_AGENTOS_RUNTIME_UNAVAILABLE",
+            String::from("HTTP/2 session has no VM ResourceLedger"),
+        )
     })?;
     let stream_resources = Arc::new(ResourceLedger::root(
         format!("http2-session={session_id}"),
@@ -1735,9 +1750,10 @@ fn reserve_http2_connection(
         .as_ref()
         .cloned()
         .ok_or_else(|| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_RUNTIME_UNAVAILABLE: HTTP/2 connection has no VM ResourceLedger",
-            ))
+            SidecarError::host(
+                "ERR_AGENTOS_RUNTIME_UNAVAILABLE",
+                String::from("HTTP/2 connection has no VM ResourceLedger"),
+            )
         })?;
     reserve_http2_resources(&resources, &[(ResourceClass::Http2Connections, 1)])
 }
@@ -1860,7 +1876,7 @@ fn spawn_http2_client_session(
     shared: Arc<Mutex<crate::state::Http2SharedState>>,
     session_id: u64,
     remote_addr: SocketAddr,
-    tls: Option<JavascriptTlsBridgeOptions>,
+    tls: Option<TlsBridgeOptions>,
     default_ca_bundle: Vec<u8>,
     snapshot: Arc<Mutex<Http2SessionSnapshot>>,
     mut command_rx: TokioReceiver<QueuedHttp2Command>,
@@ -2121,8 +2137,15 @@ fn spawn_http2_client_session(
                                         continue;
                                     }
                                 };
-                                let options: JavascriptHttp2RequestOptions =
-                                    serde_json::from_str(&options_json).unwrap_or_default();
+                                let options: Http2RequestOptions = match serde_json::from_str(&options_json) {
+                                    Ok(options) => options,
+                                    Err(error) => {
+                                        respond_to.settle(Err(format!(
+                                            "ERR_INVALID_ARG_VALUE: invalid HTTP/2 request options: {error}"
+                                        )));
+                                        continue;
+                                    }
+                                };
                                 let stream_id = match admit_http2_stream(
                                     &shared,
                                     pending_capability,
@@ -2162,33 +2185,47 @@ fn spawn_http2_client_session(
                                 }
                             }
                             Http2SessionCommand::Settings { settings_json, respond_to } => {
-                                let settings = serde_json::from_str::<BTreeMap<String, Value>>(&settings_json)
-                                    .unwrap_or_default();
+                                let settings = match serde_json::from_str::<BTreeMap<String, Value>>(&settings_json) {
+                                    Ok(settings) => settings,
+                                    Err(error) => {
+                                        respond_to.settle(Err(format!(
+                                            "ERR_INVALID_ARG_VALUE: invalid HTTP/2 settings: {error}"
+                                        )));
+                                        continue;
+                                    }
+                                };
                                 {
                                     let mut snapshot = snapshot.lock().expect("http2 snapshot lock");
                                     snapshot.local_settings = http2_settings_from_value(&settings);
                                 }
-                                if let Ok(headers_json) = serde_json::to_string(&settings) {
-                                    push_http2_session_event(
-                                        &shared,
-                                        session_id,
-                                        Http2BridgeEvent {
-                                            kind: String::from("sessionLocalSettings"),
-                                            id: session_id,
-                                            data: Some(headers_json.clone()),
-                                            ..Http2BridgeEvent::default()
-                                        },
-                                    );
-                                    push_http2_session_event(
-                                        &shared,
-                                        session_id,
-                                        Http2BridgeEvent {
-                                            kind: String::from("sessionSettingsAck"),
-                                            id: session_id,
-                                            ..Http2BridgeEvent::default()
-                                        },
-                                    );
-                                }
+                                let headers_json = match serde_json::to_string(&settings) {
+                                    Ok(headers_json) => headers_json,
+                                    Err(error) => {
+                                        respond_to.settle(Err(format!(
+                                            "ERR_AGENTOS_SERIALIZATION: failed to encode HTTP/2 settings: {error}"
+                                        )));
+                                        continue;
+                                    }
+                                };
+                                push_http2_session_event(
+                                    &shared,
+                                    session_id,
+                                    Http2BridgeEvent {
+                                        kind: String::from("sessionLocalSettings"),
+                                        id: session_id,
+                                        data: Some(headers_json.clone()),
+                                        ..Http2BridgeEvent::default()
+                                    },
+                                );
+                                push_http2_session_event(
+                                    &shared,
+                                    session_id,
+                                    Http2BridgeEvent {
+                                        kind: String::from("sessionSettingsAck"),
+                                        id: session_id,
+                                        ..Http2BridgeEvent::default()
+                                    },
+                                );
                                 respond_to.settle(Ok(Value::Null));
                             }
                             Http2SessionCommand::SetLocalWindowSize { size, respond_to } => {
@@ -2291,7 +2328,7 @@ fn spawn_http2_server_session(
     server_id: u64,
     session_id: u64,
     stream: tokio::net::TcpStream,
-    tls: Option<JavascriptTlsBridgeOptions>,
+    tls: Option<TlsBridgeOptions>,
     snapshot: Arc<Mutex<Http2SessionSnapshot>>,
     mut command_rx: TokioReceiver<QueuedHttp2Command>,
     capabilities: CapabilityRegistry,
@@ -2366,7 +2403,10 @@ fn spawn_http2_server_session(
                             "serverConnection"
                         }),
                         id: server_id,
-                        data: Some(serde_json::to_string(&http2_socket_snapshot(local_addr, remote_addr)).unwrap_or_default()),
+                        data: Some(serde_json::to_string(&http2_socket_snapshot(local_addr, remote_addr)).unwrap_or_else(|error| {
+                            eprintln!("ERR_AGENTOS_HTTP2_SERIALIZATION: failed to encode server socket snapshot: {error}");
+                            String::from("{}")
+                        })),
                         ..Http2BridgeEvent::default()
                     },
                 );
@@ -2641,30 +2681,58 @@ fn spawn_http2_server_session(
                         } = queued_command;
                         match command {
                             Http2SessionCommand::Settings { settings_json, respond_to } => {
-                                let settings = serde_json::from_str::<BTreeMap<String, Value>>(&settings_json)
-                                    .unwrap_or_default();
+                                let settings = match serde_json::from_str::<BTreeMap<String, Value>>(&settings_json) {
+                                    Ok(settings) => settings,
+                                    Err(error) => {
+                                        respond_to.settle(Err(format!(
+                                            "ERR_INVALID_ARG_VALUE: invalid HTTP/2 settings: {error}"
+                                        )));
+                                        continue;
+                                    }
+                                };
                                 if let Some(initial_window_size) = settings
                                     .get("initialWindowSize")
                                     .and_then(Value::as_u64)
                                 {
-                                    let _ = connection.set_initial_window_size(initial_window_size as u32);
+                                    let initial_window_size = match u32::try_from(initial_window_size) {
+                                        Ok(initial_window_size) => initial_window_size,
+                                        Err(error) => {
+                                            respond_to.settle(Err(format!(
+                                                "ERR_OUT_OF_RANGE: HTTP/2 initialWindowSize does not fit u32: {error}"
+                                            )));
+                                            continue;
+                                        }
+                                    };
+                                    if let Err(error) = connection.set_initial_window_size(initial_window_size) {
+                                        respond_to.settle(Err(format!(
+                                            "ERR_HTTP2_INVALID_SETTING_VALUE: failed to apply initialWindowSize: {error}"
+                                        )));
+                                        continue;
+                                    }
                                 }
                                 {
                                     let mut snapshot = snapshot.lock().expect("http2 snapshot lock");
                                     snapshot.local_settings = http2_settings_from_value(&settings);
                                 }
-                                if let Ok(headers_json) = serde_json::to_string(&settings) {
-                                    push_http2_session_event(
-                                        &shared,
-                                        session_id,
-                                        Http2BridgeEvent {
-                                            kind: String::from("sessionLocalSettings"),
-                                            id: session_id,
-                                            data: Some(headers_json),
-                                            ..Http2BridgeEvent::default()
-                                        },
-                                    );
-                                }
+                                let headers_json = match serde_json::to_string(&settings) {
+                                    Ok(headers_json) => headers_json,
+                                    Err(error) => {
+                                        respond_to.settle(Err(format!(
+                                            "ERR_AGENTOS_SERIALIZATION: failed to encode HTTP/2 settings: {error}"
+                                        )));
+                                        continue;
+                                    }
+                                };
+                                push_http2_session_event(
+                                    &shared,
+                                    session_id,
+                                    Http2BridgeEvent {
+                                        kind: String::from("sessionLocalSettings"),
+                                        id: session_id,
+                                        data: Some(headers_json),
+                                        ..Http2BridgeEvent::default()
+                                    },
+                                );
                                 respond_to.settle(Ok(Value::Null));
                             }
                             Http2SessionCommand::SetLocalWindowSize { size, respond_to } => {
@@ -2848,8 +2916,15 @@ fn spawn_http2_server_session(
                                 respond_to.settle(Ok(Value::Null));
                             }
                             Http2SessionCommand::StreamRespondWithFile { stream_id, body, headers_json, options_json, respond_to } => {
-                                let options: JavascriptHttp2FileResponseOptions =
-                                    serde_json::from_str(&options_json).unwrap_or_default();
+                                let options: Http2FileResponseOptions = match serde_json::from_str(&options_json) {
+                                    Ok(options) => options,
+                                    Err(error) => {
+                                        respond_to.settle(Err(format!(
+                                            "ERR_INVALID_ARG_VALUE: invalid HTTP/2 file response options: {error}"
+                                        )));
+                                        continue;
+                                    }
+                                };
                                 let response = match build_http2_response(&headers_json) {
                                     Ok(response) => response,
                                     Err(error) => {
@@ -2857,12 +2932,26 @@ fn spawn_http2_server_session(
                                         continue;
                                     }
                                 };
-                                let offset = usize::try_from(options.offset.unwrap_or_default())
-                                    .unwrap_or(0)
-                                    .min(body.len());
+                                let offset = match usize::try_from(options.offset.unwrap_or_default()) {
+                                    Ok(offset) => offset.min(body.len()),
+                                    Err(error) => {
+                                        respond_to.settle(Err(format!(
+                                            "ERR_OUT_OF_RANGE: HTTP/2 file response offset does not fit usize: {error}"
+                                        )));
+                                        continue;
+                                    }
+                                };
                                 let available = body.len().saturating_sub(offset);
                                 let length = match options.length {
-                                    Some(length) if length >= 0 => available.min(length as usize),
+                                    Some(length) if length >= 0 => match usize::try_from(length) {
+                                        Ok(length) => available.min(length),
+                                        Err(error) => {
+                                            respond_to.settle(Err(format!(
+                                                "ERR_OUT_OF_RANGE: HTTP/2 file response length does not fit usize: {error}"
+                                            )));
+                                            continue;
+                                        }
+                                    },
                                     _ => available,
                                 };
                                 let body = Bytes::from(body).slice(offset..offset.saturating_add(length));
@@ -3148,7 +3237,7 @@ fn send_http2_command(
     header_bytes: usize,
     data_bytes: usize,
     command: impl FnOnce(Http2ResponseSender) -> Result<Http2SessionCommand, SidecarError>,
-) -> Result<JavascriptSyncRpcServiceResponse, SidecarError> {
+) -> Result<HostServiceResponse, SidecarError> {
     let (respond_to, response_rx) = tokio::sync::oneshot::channel();
     let respond_to = Http2ResponseSender::new(respond_to);
     let reservations = reserve_http2_resources(
@@ -3172,25 +3261,47 @@ fn send_http2_command(
             reservations,
         })
         .map_err(|error| match error {
-            tokio::sync::mpsc::error::TrySendError::Full(_) => SidecarError::InvalidState(
+            tokio::sync::mpsc::error::TrySendError::Full(_) => SidecarError::host(
+                "ERR_AGENTOS_HTTP2_COMMAND_LIMIT",
                 String::from(
-                    "ERR_AGENTOS_HTTP2_COMMAND_LIMIT: HTTP/2 session command queue is full; raise limits.http2.maxPendingCommands",
+                    "HTTP/2 session command queue is full; raise limits.http2.maxPendingCommands",
                 ),
             ),
-            tokio::sync::mpsc::error::TrySendError::Closed(_) => SidecarError::InvalidState(
-                String::from("HTTP/2 session command channel closed"),
-            ),
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                SidecarError::InvalidState(String::from("HTTP/2 session command channel closed"))
+            }
         })?;
-    Ok(JavascriptSyncRpcServiceResponse::Deferred {
+    Ok(HostServiceResponse::Deferred {
         receiver: response_rx,
         timeout: Some(session.command_timeout),
         task_class: agentos_runtime::TaskClass::Http2,
     })
 }
 
+fn read_http2_response_file_after_admission(
+    kernel: &mut SidecarKernel,
+    requester_pid: u32,
+    guest_path: &str,
+    admitted_bytes: usize,
+) -> Result<Vec<u8>, SidecarError> {
+    let body = kernel
+        .read_file_for_process(EXECUTION_DRIVER_NAME, requester_pid, guest_path)
+        .map_err(kernel_error)?;
+    if body.len() != admitted_bytes {
+        return Err(SidecarError::host(
+            "ERR_AGENTOS_HTTP2_FILE_CHANGED",
+            format!(
+                "response file size changed after admission: {guest_path} (admitted {admitted_bytes} bytes, read {} bytes)",
+                body.len()
+            ),
+        ));
+    }
+    Ok(body)
+}
+
 fn parse_http2_server_listen_payload(
-    request: &JavascriptSyncRpcRequest,
-) -> Result<JavascriptHttp2ServerListenRequest, SidecarError> {
+    request: &HostRpcRequest,
+) -> Result<Http2ServerListenOptions, SidecarError> {
     let payload_json =
         javascript_sync_rpc_arg_str(&request.args, 0, "net.http2_server_listen payload")?;
     serde_json::from_str(payload_json).map_err(|error| {
@@ -3201,8 +3312,8 @@ fn parse_http2_server_listen_payload(
 }
 
 fn parse_http2_connect_payload(
-    request: &JavascriptSyncRpcRequest,
-) -> Result<JavascriptHttp2SessionConnectRequest, SidecarError> {
+    request: &HostRpcRequest,
+) -> Result<Http2SessionConnectOptions, SidecarError> {
     let payload_json =
         javascript_sync_rpc_arg_str(&request.args, 0, "net.http2_session_connect payload")?;
     serde_json::from_str(payload_json).map_err(|error| {
@@ -3245,13 +3356,13 @@ fn http2_stream_for_id(
 }
 
 pub(in crate::execution) fn service_javascript_http2_sync_rpc<B>(
-    request: JavascriptHttp2SyncRpcServiceRequest<'_, B>,
-) -> Result<JavascriptSyncRpcServiceResponse, SidecarError>
+    request: Http2ServiceRequest<'_, B>,
+) -> Result<HostServiceResponse, SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    let JavascriptHttp2SyncRpcServiceRequest {
+    let Http2ServiceRequest {
         bridge,
         kernel,
         vm_id,
@@ -3321,7 +3432,9 @@ where
                     },
                 );
                 if state.event_session.is_none() {
-                    state.event_session = process.execution.javascript_v8_session_handle();
+                    state.event_session = process
+                        .execution
+                        .execution_wake_handle(process.kernel_handle.runtime_identity());
                 }
                 state.server_events.entry(payload.server_id).or_default();
             }
@@ -3337,7 +3450,7 @@ where
                 close_notify,
                 capabilities.clone(),
             );
-            javascript_net_json_string(
+            encode_net_json_string(
                 json!({
                     "address": socket_address_value(&guest_local_addr),
                     "capabilityId": identity.0,
@@ -3516,22 +3629,26 @@ where
                     SidecarError::InvalidState(String::from("HTTP/2 state lock poisoned"))
                 })?;
                 if state.event_session.is_none() {
-                    state.event_session = process.execution.javascript_v8_session_handle();
+                    state.event_session = process
+                        .execution
+                        .execution_wake_handle(process.kernel_handle.runtime_identity());
                 }
                 state.session_events.entry(session_id).or_default();
             }
             let tls = if secure {
-                Some(payload.tls.unwrap_or(JavascriptTlsBridgeOptions {
+                Some(payload.tls.unwrap_or(TlsBridgeOptions {
                     is_server: false,
                     servername: Some(host.to_string()),
                     alpn_protocols: Some(vec![String::from("h2")]),
-                    ..JavascriptTlsBridgeOptions::default()
+                    ..TlsBridgeOptions::default()
                 }))
             } else {
                 None
             };
             let default_ca_bundle = match tls.as_ref() {
-                Some(options) => vm_default_ca_bundle_for_tls_options(kernel, options)?,
+                Some(options) => {
+                    vm_default_ca_bundle_for_tls_options(kernel, process.kernel_pid, options)?
+                }
                 None => Vec::new(),
             };
             spawn_http2_client_session(
@@ -3546,7 +3663,7 @@ where
             );
             let snapshot_json =
                 http2_snapshot_json(&snapshot.lock().expect("http2 snapshot lock").clone())?;
-            javascript_net_json_string(
+            encode_net_json_string(
                 json!({
                     "sessionId": session_id,
                     "capabilityId": capability_id,
@@ -3880,15 +3997,23 @@ where
                 3,
                 "net.http2_stream_respond_with_file options",
             )?;
+            serde_json::from_str::<Http2FileResponseOptions>(options_json).map_err(|error| {
+                SidecarError::host(
+                    "ERR_INVALID_ARG_VALUE",
+                    format!("invalid HTTP/2 file response options: {error}"),
+                )
+            })?;
             let stream = http2_stream_for_id(process, stream_id)?;
             let session = http2_session_for_id(process, stream.session_id)?;
             let guest_path = resolve_http2_file_response_guest_path(process, path);
-            let file_bytes = usize::try_from(kernel.stat(&guest_path).map_err(kernel_error)?.size)
-                .map_err(|_| {
-                    SidecarError::Execution(format!(
-                        "EFBIG: HTTP/2 response file size does not fit usize: {guest_path}"
-                    ))
-                })?;
+            let requester_pid = process.kernel_pid;
+            let file_bytes = kernel
+                .preflight_regular_file_read_for_process(
+                    EXECUTION_DRIVER_NAME,
+                    requester_pid,
+                    &guest_path,
+                )
+                .map_err(kernel_error)?;
             let command_bytes = file_bytes
                 .saturating_add(headers_json.len())
                 .saturating_add(options_json.len())
@@ -3899,12 +4024,12 @@ where
                 headers_json.len(),
                 file_bytes,
                 |respond_to| {
-                    let body = kernel.read_file(&guest_path).map_err(kernel_error)?;
-                    if body.len() > file_bytes {
-                        return Err(SidecarError::Execution(format!(
-                        "ERR_AGENTOS_HTTP2_FILE_CHANGED: response file grew after admission: {guest_path}"
-                    )));
-                    }
+                    let body = read_http2_response_file_after_admission(
+                        kernel,
+                        requester_pid,
+                        &guest_path,
+                        file_bytes,
+                    )?;
                     Ok(Http2SessionCommand::StreamRespondWithFile {
                         stream_id,
                         body,
@@ -3925,6 +4050,12 @@ where
 #[cfg(test)]
 mod http2_reactor_tests {
     use super::*;
+    use agentos_kernel::command_registry::CommandDriver;
+    use agentos_kernel::kernel::KernelVmConfig;
+    use agentos_kernel::mount_table::MountTable;
+    use agentos_kernel::permissions::Permissions;
+    use agentos_kernel::resource_accounting::ResourceLimits;
+    use agentos_kernel::vfs::MemoryFileSystem;
 
     fn http2_ledger(event_limit: usize) -> Arc<ResourceLedger> {
         Arc::new(ResourceLedger::root(
@@ -3994,6 +4125,30 @@ mod http2_reactor_tests {
         ));
         let registry = CapabilityRegistry::new(41, Arc::clone(&resources));
         (resources, registry)
+    }
+
+    fn http2_file_test_kernel(max_pread_bytes: usize) -> (SidecarKernel, u32) {
+        let mut config = KernelVmConfig::new("vm-http2-file-response");
+        config.permissions = Permissions::allow_all();
+        config.resources = ResourceLimits {
+            max_pread_bytes: Some(max_pread_bytes),
+            ..ResourceLimits::default()
+        };
+        let mut kernel = SidecarKernel::new(MountTable::new(MemoryFileSystem::new()), config);
+        kernel
+            .register_driver(CommandDriver::new(EXECUTION_DRIVER_NAME, [WASM_COMMAND]))
+            .expect("register HTTP/2 file test driver");
+        let process = kernel
+            .spawn_process(
+                WASM_COMMAND,
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn HTTP/2 file test process");
+        (kernel, process.pid())
     }
 
     #[test]
@@ -4139,7 +4294,7 @@ mod http2_reactor_tests {
             })
         })
         .expect("command admission");
-        let JavascriptSyncRpcServiceResponse::Deferred { receiver, .. } = response else {
+        let HostServiceResponse::Deferred { receiver, .. } = response else {
             panic!("HTTP/2 command must return a deferred response");
         };
         let queued = command_rx.try_recv().expect("queued command");
@@ -4159,6 +4314,136 @@ mod http2_reactor_tests {
         assert_eq!(result, Value::Null);
         drop(reservations);
         assert!(resources.is_zero());
+    }
+
+    #[test]
+    fn http2_command_payload_failure_releases_every_reservation() {
+        let resources = http2_ledger(4);
+        let stream_resources = Arc::new(ResourceLedger::root(
+            "http2-session=payload-failure",
+            [(
+                ResourceClass::Http2Streams,
+                ResourceLimit::new(1, "limits.http2.maxStreamsPerConnection"),
+            )],
+        ));
+        let (command_tx, mut command_rx) = tokio_channel(1);
+        let runtime =
+            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+                .expect("runtime")
+                .context();
+        let session = ActiveHttp2Session {
+            command_tx,
+            capability_id: 1,
+            vm_generation: 1,
+            fairness: runtime.fairness().clone(),
+            command_timeout: Duration::from_secs(1),
+            close_requested: Arc::new(AtomicBool::new(false)),
+            close_abrupt: Arc::new(AtomicBool::new(false)),
+            close_notify: Arc::new(tokio::sync::Notify::new()),
+            _reservations: Vec::new(),
+            resources: Arc::clone(&resources),
+            stream_resources,
+        };
+
+        let error = send_http2_command(&session, 32, 4, 8, |_respond_to| {
+            Err(SidecarError::host(
+                "ERR_AGENTOS_HTTP2_FILE_CHANGED",
+                String::from("injected file race"),
+            ))
+        })
+        .err()
+        .expect("payload construction failure must propagate");
+        assert_eq!(error.code(), Some("ERR_AGENTOS_HTTP2_FILE_CHANGED"));
+        assert!(command_rx.try_recv().is_err());
+        assert!(
+            resources.is_zero(),
+            "payload failure must release command/header/data reservations"
+        );
+    }
+
+    #[test]
+    fn http2_full_command_queue_releases_rejected_reservations() {
+        let resources = http2_ledger(4);
+        let stream_resources = Arc::new(ResourceLedger::root(
+            "http2-session=queue-full",
+            [(
+                ResourceClass::Http2Streams,
+                ResourceLimit::new(1, "limits.http2.maxStreamsPerConnection"),
+            )],
+        ));
+        let (command_tx, mut command_rx) = tokio_channel(1);
+        let runtime =
+            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+                .expect("runtime")
+                .context();
+        let session = ActiveHttp2Session {
+            command_tx,
+            capability_id: 1,
+            vm_generation: 1,
+            fairness: runtime.fairness().clone(),
+            command_timeout: Duration::from_secs(1),
+            close_requested: Arc::new(AtomicBool::new(false)),
+            close_abrupt: Arc::new(AtomicBool::new(false)),
+            close_notify: Arc::new(tokio::sync::Notify::new()),
+            _reservations: Vec::new(),
+            resources: Arc::clone(&resources),
+            stream_resources,
+        };
+
+        let first_response = send_http2_command(&session, 32, 4, 8, |respond_to| {
+            Ok(Http2SessionCommand::Settings {
+                settings_json: String::from("{}"),
+                respond_to,
+            })
+        })
+        .expect("fill command queue");
+        let charged_classes = [
+            ResourceClass::Http2Commands,
+            ResourceClass::Http2CommandBytes,
+            ResourceClass::Http2HeaderBytes,
+            ResourceClass::Http2DataBytes,
+            ResourceClass::Http2BufferedBytes,
+            ResourceClass::BufferedBytes,
+        ];
+        let usage_before = charged_classes.map(|class| resources.usage(class).used);
+
+        let error = send_http2_command(&session, 32, 4, 8, |respond_to| {
+            Ok(Http2SessionCommand::Settings {
+                settings_json: String::from("{}"),
+                respond_to,
+            })
+        })
+        .err()
+        .expect("full queue must reject the second command");
+        assert_eq!(error.code(), Some("ERR_AGENTOS_HTTP2_COMMAND_LIMIT"));
+        assert_eq!(
+            charged_classes.map(|class| resources.usage(class).used),
+            usage_before,
+            "queue rejection must release only the rejected command reservations"
+        );
+
+        drop(command_rx.try_recv().expect("drain admitted command"));
+        drop(first_response);
+        assert!(resources.is_zero());
+    }
+
+    #[test]
+    fn http2_file_read_rejects_growth_after_admission() {
+        let (mut kernel, pid) = http2_file_test_kernel(16);
+        kernel
+            .write_file("/response", b"body".to_vec())
+            .expect("write initial response");
+        let admitted = kernel
+            .preflight_regular_file_read_for_process(EXECUTION_DRIVER_NAME, pid, "/response")
+            .expect("preflight response");
+        kernel
+            .write_file("/response", b"grown".to_vec())
+            .expect("grow response after admission");
+
+        let error =
+            read_http2_response_file_after_admission(&mut kernel, pid, "/response", admitted)
+                .expect_err("growth after admission must fail");
+        assert_eq!(error.code(), Some("ERR_AGENTOS_HTTP2_FILE_CHANGED"));
     }
 
     #[test]

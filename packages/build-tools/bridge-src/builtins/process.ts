@@ -21,9 +21,10 @@ import { loadWebSocketModule } from "../prelude.js";
 
 function readProcessConfig() {
   const env = typeof _processConfig !== "undefined" && _processConfig.env || {};
+  const internalEnv = globalThis.__agentOSProcessConfigEnv || env;
   let execArgv = [];
   try {
-    const parsed = JSON.parse(env.AGENTOS_NODE_EXEC_ARGV || "[]");
+    const parsed = JSON.parse(internalEnv.AGENTOS_NODE_EXEC_ARGV || "[]");
     if (Array.isArray(parsed)) execArgv = parsed.map(String);
   } catch {}
   return {
@@ -288,7 +289,14 @@ function signalDispatch(eventType, payload) {
   }
   const signal = payload.signal ?? payload.number;
   const action = typeof payload.action === "string" ? payload.action : "default";
-  _deliverProcessSignal(signal, action);
+  const deliveryToken = payload.deliveryToken;
+  try {
+    _deliverProcessSignal(signal, action);
+  } finally {
+    if (deliveryToken !== undefined) {
+      _processSignalEnd.applySyncPromise(void 0, [deliveryToken]);
+    }
+  }
 }
 
 function _addListener(event, listener, once = false) {
@@ -960,6 +968,10 @@ function applyProcessConfig(nextConfig) {
   for (const key of Object.keys(_stdinOnceListeners)) {
     _stdinOnceListeners[key] = [];
   }
+  // Snapshot restore clears the stdin listener tables above. Allow the
+  // post-restore IPC hook to attach its one framed-input listener again while
+  // retaining the already registered active-handle identity.
+  process2._agentOSIpcInstalled = false;
   setStdinDataValue(nextConfig.stdin ?? "");
   setStdinPosition(0);
   setStdinEnded(false);
@@ -979,7 +991,7 @@ function applyProcessConfig(nextConfig) {
   process2.argv = nextConfig.argv;
   process2.argv0 = nextConfig.argv0;
   process2.env = nextConfig.env;
-  process2.connected = nextConfig.env?.AGENTOS_NODE_IPC === "1";
+  process2.connected = globalThis.__agentOSProcessConfigEnv?.AGENTOS_NODE_IPC === "1";
   process2.mainModule = void 0;
   process2._cwd = nextConfig.cwd;
   process2.stdin.paused = true;

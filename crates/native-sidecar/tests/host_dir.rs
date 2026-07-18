@@ -213,6 +213,22 @@ mod host_dir {
             fs::remove_dir_all(outside_dir).expect("remove outside temp dir");
         }
 
+        #[test]
+        fn filesystem_utimes_supports_mount_root() {
+            let host_dir = temp_dir("host-dir-plugin-root-utimes");
+            let mut filesystem = HostDirFilesystem::new(&host_dir).expect("create host dir fs");
+
+            filesystem
+                .utimes("/", 1_700_000_123_000, 1_700_000_456_000)
+                .expect("utimes should update the mount root through its anchored fd");
+
+            let metadata = fs::metadata(&host_dir).expect("read mount root metadata");
+            assert_eq!(metadata.atime(), 1_700_000_123);
+            assert_eq!(metadata.mtime(), 1_700_000_456);
+
+            fs::remove_dir_all(host_dir).expect("remove temp dir");
+        }
+
         // Regression: metadata reads must not require READ permission on the
         // target under a non-root sidecar. POSIX `stat`/`exists` need only search
         // on the parent, but the pre-fix code opened the leaf `O_RDONLY`, which

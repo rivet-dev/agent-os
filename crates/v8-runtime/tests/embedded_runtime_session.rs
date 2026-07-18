@@ -17,6 +17,7 @@ fn run_timing_sensitive_tests() -> bool {
 static NEXT_TEST_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_TEST_VM_GENERATION: AtomicU64 = AtomicU64::new(1);
 const TEST_REACTOR_WORK_QUANTUM: usize = 64;
+const TEST_PROCESS_VM_EXECUTOR_LIMIT: usize = 64;
 
 fn next_session_id() -> String {
     format!(
@@ -26,7 +27,11 @@ fn next_session_id() -> String {
 }
 
 fn process_runtime_context() -> io::Result<agentos_runtime::RuntimeContext> {
-    agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+    let config = agentos_runtime::RuntimeConfig {
+        max_active_vm_executors: TEST_PROCESS_VM_EXECUTOR_LIMIT,
+        ..agentos_runtime::RuntimeConfig::default()
+    };
+    agentos_runtime::SidecarRuntime::process(&config)
         .map(agentos_runtime::SidecarRuntime::context)
         .map_err(|error| io::Error::other(error.to_string()))
 }
@@ -879,7 +884,7 @@ fn assert_sync_bridge_response_bypasses_full_ordinary_command_lane() -> io::Resu
         "unexpected ordinary-lane overload: {overload}"
     );
     for _ in 0..1_024 {
-        session.publish_signal(10)?;
+        session.publish_signal(10, 41)?;
     }
     session.send_bridge_response(call_id, 0, Vec::new())?;
     assert_execution_ok(&receiver, &session_id);
@@ -1014,8 +1019,7 @@ fn assert_destroy_joins_active_handle_executor() -> io::Result<()> {
 fn embedded_runtime_session_consolidated_behaviors() -> io::Result<()> {
     // This integration test is its own process entrypoint. Production
     // subsystems may retrieve, but never lazily construct, the process runtime.
-    agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-        .map_err(|error| io::Error::other(error.to_string()))?;
+    process_runtime_context()?;
     // Keep the embedded-runtime coverage in one test process. V8 teardown across
     // multiple integration tests still trips intermittent SIGSEGVs in this crate.
     assert_create_destroy_reuses_session_ids()?;

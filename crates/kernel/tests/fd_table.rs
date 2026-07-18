@@ -287,7 +287,7 @@ fn stat_returns_fd_metadata() {
 }
 
 #[test]
-fn nonblocking_status_flags_are_tracked_per_fd_entry() {
+fn nonblocking_status_override_creates_independent_reopen_state() {
     let mut manager = FdTableManager::new();
     manager.create(1);
 
@@ -323,6 +323,29 @@ fn nonblocking_status_flags_are_tracked_per_fd_entry() {
 }
 
 #[test]
+fn duplicated_descriptors_share_nonblocking_open_status() {
+    let mut manager = FdTableManager::new();
+    manager.create(1);
+
+    let table = manager.get_mut(1).expect("FD table should exist");
+    let fd = table
+        .open_with_filetype(
+            "/tmp/test.txt",
+            O_WRONLY | O_NONBLOCK,
+            FILETYPE_REGULAR_FILE,
+        )
+        .expect("open regular file");
+    let duplicate = table.dup(fd).expect("duplicate regular file");
+
+    table
+        .fcntl(duplicate, F_SETFL, 0)
+        .expect("clear shared nonblocking flag");
+
+    assert_eq!(table.fcntl(fd, F_GETFL, 0).unwrap(), O_WRONLY);
+    assert_eq!(table.fcntl(duplicate, F_GETFL, 0).unwrap(), O_WRONLY);
+}
+
+#[test]
 fn shared_description_open_preserves_nonblocking_status() {
     let mut manager = FdTableManager::new();
     manager.create(1);
@@ -340,7 +363,7 @@ fn shared_description_open_preserves_nonblocking_status() {
         .expect("open shared pipe description");
 
     assert_eq!(
-        table.get(fd).expect("opened entry").status_flags,
+        table.get(fd).expect("opened entry").status_flags.get(),
         O_NONBLOCK
     );
     assert_eq!(
@@ -431,6 +454,28 @@ fn fcntl_dupfd_uses_lowest_available_fd_at_or_above_minimum() {
             .fcntl(duplicated, F_GETFD, 0)
             .expect("new duplicate should clear FD flags"),
         0
+    );
+}
+
+#[test]
+fn fcntl_dupfd_supports_high_minimum_and_skips_alias_collisions() {
+    let mut manager = FdTableManager::with_max_fds(1024);
+    manager.create(1);
+
+    let table = manager.get_mut(1).expect("FD table should exist");
+    let fd = table
+        .open("/tmp/test.txt", O_RDONLY)
+        .expect("open source FD");
+    table.dup2(fd, 512).expect("occupy first high alias");
+    table.dup2(fd, 513).expect("occupy second high alias");
+
+    let duplicated = table
+        .fcntl(fd, F_DUPFD, 512)
+        .expect("duplicate above configured high minimum");
+    assert_eq!(duplicated, 514);
+    assert_eq!(
+        table.stat(duplicated).expect("duplicate stat").rights,
+        table.stat(fd).expect("source stat").rights
     );
 }
 

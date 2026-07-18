@@ -25,7 +25,7 @@ pub fn default_signal_exit_code(signal: i32) -> Option<i32> {
 }
 
 pub fn is_valid_posix_signal_number(signal: u32) -> bool {
-    signal <= 31
+    signal <= 64
 }
 
 pub fn parse_posix_signal(signal: &str) -> Option<i32> {
@@ -35,7 +35,7 @@ pub fn parse_posix_signal(signal: &str) -> Option<i32> {
     }
 
     if let Ok(value) = trimmed.parse::<i32>() {
-        return (0..=31).contains(&value).then_some(value);
+        return (0..=64).contains(&value).then_some(value);
     }
 
     let upper = trimmed.to_ascii_uppercase();
@@ -127,9 +127,10 @@ pub fn parse_process_signal_state_request(
     let mask_json = signal_state_str_arg(args, 2, "process.signal_state mask")?;
     let flags = signal_state_u32_arg(args, 3, "process.signal_state flags")?;
     let mask: Vec<u32> = serde_json::from_str(mask_json).map_err(|error| {
-        crate::SidecarCoreError::new(format!(
-            "process.signal_state mask must be valid JSON: {error}"
-        ))
+        crate::SidecarCoreError::typed(
+            "EINVAL",
+            format!("process.signal_state mask must be valid JSON: {error}"),
+        )
     })?;
     for signal in &mask {
         validate_process_signal_number(*signal, "process.signal_state mask entries")?;
@@ -139,9 +140,10 @@ pub fn parse_process_signal_state_request(
         "ignore" => SignalDispositionAction::Ignore,
         "user" => SignalDispositionAction::User,
         other => {
-            return Err(crate::SidecarCoreError::new(format!(
-                "unsupported process.signal_state action {other}"
-            )));
+            return Err(crate::SidecarCoreError::typed(
+                "EINVAL",
+                format!("unsupported process.signal_state action {other}"),
+            ));
         }
     };
 
@@ -188,9 +190,10 @@ fn validate_process_signal_number(signal: u32, label: &str) -> Result<(), crate:
     if is_valid_posix_signal_number(signal) {
         Ok(())
     } else {
-        Err(crate::SidecarCoreError::new(format!(
-            "{label} must be a valid POSIX signal"
-        )))
+        Err(crate::SidecarCoreError::typed(
+            "EINVAL",
+            format!("{label} must be a valid POSIX signal"),
+        ))
     }
 }
 
@@ -201,23 +204,36 @@ fn signal_state_u32_arg(
 ) -> Result<u32, crate::SidecarCoreError> {
     let value = args
         .get(index)
-        .ok_or_else(|| crate::SidecarCoreError::new(format!("{label} missing")))?;
+        .ok_or_else(|| crate::SidecarCoreError::typed("EINVAL", format!("{label} missing")))?;
     if let Some(value) = value.as_u64() {
-        return u32::try_from(value)
-            .map_err(|_| crate::SidecarCoreError::new(format!("{label} must fit in u32")));
+        return u32::try_from(value).map_err(|_| {
+            crate::SidecarCoreError::typed("EINVAL", format!("{label} must fit in u32"))
+        });
     }
     if let Some(value) = value.as_i64() {
-        return u32::try_from(value)
-            .map_err(|_| crate::SidecarCoreError::new(format!("{label} must fit in u32")));
+        return u32::try_from(value).map_err(|_| {
+            crate::SidecarCoreError::typed("EINVAL", format!("{label} must fit in u32"))
+        });
+    }
+    if let Some(value) = value.as_f64() {
+        if value.is_finite() && value.fract() == 0.0 && value >= 0.0 && value <= f64::from(u32::MAX)
+        {
+            return Ok(value as u32);
+        }
+        return Err(crate::SidecarCoreError::typed(
+            "EINVAL",
+            format!("{label} must fit in u32"),
+        ));
     }
     if let Some(value) = value.as_str() {
-        return value
-            .parse::<u32>()
-            .map_err(|error| crate::SidecarCoreError::new(format!("{label}: {error}")));
+        return value.parse::<u32>().map_err(|error| {
+            crate::SidecarCoreError::typed("EINVAL", format!("{label}: {error}"))
+        });
     }
-    Err(crate::SidecarCoreError::new(format!(
-        "{label} must be a u32"
-    )))
+    Err(crate::SidecarCoreError::typed(
+        "EINVAL",
+        format!("{label} must be a u32"),
+    ))
 }
 
 fn signal_state_str_arg<'a>(
@@ -225,9 +241,9 @@ fn signal_state_str_arg<'a>(
     index: usize,
     label: &str,
 ) -> Result<&'a str, crate::SidecarCoreError> {
-    args.get(index)
-        .and_then(Value::as_str)
-        .ok_or_else(|| crate::SidecarCoreError::new(format!("{label} must be a string")))
+    args.get(index).and_then(Value::as_str).ok_or_else(|| {
+        crate::SidecarCoreError::typed("EINVAL", format!("{label} must be a string"))
+    })
 }
 
 #[cfg(test)]
@@ -262,8 +278,8 @@ mod tests {
     #[test]
     fn validates_posix_signal_number_range() {
         assert!(is_valid_posix_signal_number(0));
-        assert!(is_valid_posix_signal_number(31));
-        assert!(!is_valid_posix_signal_number(32));
+        assert!(is_valid_posix_signal_number(64));
+        assert!(!is_valid_posix_signal_number(65));
     }
 
     #[test]
@@ -273,8 +289,9 @@ mod tests {
         assert_eq!(canonical_signal_name(16), Some("SIGSTKFLT"));
         assert_eq!(parse_posix_signal("9"), Some(9));
         assert_eq!(parse_posix_signal("0"), Some(0));
+        assert_eq!(parse_posix_signal("64"), Some(64));
         assert_eq!(parse_posix_signal("SIGBOGUS"), None);
-        assert_eq!(parse_posix_signal("32"), None);
+        assert_eq!(parse_posix_signal("65"), None);
     }
 
     #[test]
@@ -313,27 +330,57 @@ mod tests {
     #[test]
     fn rejects_unknown_process_signal_state_values() {
         let invalid_signal = parse_process_signal_state_request(&[
-            Value::from(32),
+            Value::from(65),
             Value::from("user"),
             Value::from("[]"),
             Value::from(0),
         ])
         .expect_err("unknown signal must fail");
+        assert_eq!(invalid_signal.code(), Some("EINVAL"));
         assert_eq!(
-            invalid_signal.to_string(),
+            invalid_signal.message(),
             "process.signal_state signal must be a valid POSIX signal"
         );
 
         let invalid_mask = parse_process_signal_state_request(&[
             Value::from(15),
             Value::from("user"),
-            Value::from("[32]"),
+            Value::from("[65]"),
             Value::from(0),
         ])
         .expect_err("unknown mask signal must fail");
+        assert_eq!(invalid_mask.code(), Some("EINVAL"));
         assert_eq!(
-            invalid_mask.to_string(),
+            invalid_mask.message(),
             "process.signal_state mask entries must be a valid POSIX signal"
         );
+    }
+
+    #[test]
+    fn accepts_only_bounded_integral_float_signal_state_flags() {
+        let parse_flags = |flags: f64| {
+            parse_process_signal_state_request(&[
+                Value::from(15),
+                Value::from("user"),
+                Value::from("[]"),
+                Value::Number(serde_json::Number::from_f64(flags).expect("finite test value")),
+            ])
+        };
+
+        assert_eq!(
+            parse_flags(f64::from(u32::MAX))
+                .expect("u32 maximum")
+                .1
+                .flags,
+            u32::MAX
+        );
+        for invalid in [-1.0, 1.5, f64::from(u32::MAX) + 1.0] {
+            let error = parse_flags(invalid).expect_err("invalid float flags must fail");
+            assert_eq!(error.code(), Some("EINVAL"));
+            assert_eq!(
+                error.message(),
+                "process.signal_state flags must fit in u32"
+            );
+        }
     }
 }

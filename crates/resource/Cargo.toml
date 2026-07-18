@@ -1,0 +1,10 @@
+[package]
+name = "agentos-resource"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runtime-neutral bounded resource accounting for AgentOS kernel services"
+
+[dependencies]
+event-listener = "5.4"

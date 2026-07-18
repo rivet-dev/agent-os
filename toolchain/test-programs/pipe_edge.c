@@ -4,10 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
-
-#ifndef __wasi__
 #include <signal.h>
-#endif
 
 #define LARGE_SIZE  (128 * 1024)  /* 128KB > 64KB pipe buffer */
 #define CHUNK_SIZE  32768         /* 32KB per chunk — fits in pipe buffer */
@@ -103,9 +100,7 @@ int main(void) {
 
     /* Test 2: broken pipe — close read end, write to write end -> EPIPE */
     {
-#ifndef __wasi__
         signal(SIGPIPE, SIG_IGN);
-#endif
         int p[2];
         if (pipe(p) != 0) {
             printf("broken_pipe: FAIL (pipe creation failed)\n");

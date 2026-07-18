@@ -28,7 +28,10 @@ describeIf(hasWasmBinaries, "wasmvm shell redirects", () => {
 		await (vfs as any).chmod("/", 0o1777);
 		await vfs.mkdir("/tmp", { recursive: true });
 		await (vfs as any).chmod("/tmp", 0o1777);
-		kernel = createKernel({ filesystem: vfs, syncFilesystemOnDispose: false });
+		kernel = createKernel({
+			filesystem: vfs,
+			syncFilesystemOnDispose: false,
+		});
 		await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
 
 		const result = await kernel.exec(
@@ -87,6 +90,27 @@ describeIf(hasWasmBinaries, "wasmvm shell redirects", () => {
 		expect(wasm.stdout).toBe(native.stdout);
 		expect(wasm.stderr).toBe(native.stderr);
 		expect(wasm.stdout).toBe("custom-zero|custom-one|from-exec\n");
+	}, 30_000);
+
+	it("executes an execute-only WASM image without requiring read permission", async () => {
+		const vfs = createInMemoryFileSystem();
+		await (vfs as any).chmod("/", 0o1777);
+		await vfs.mkdir("/tmp", { recursive: true });
+		await (vfs as any).chmod("/tmp", 0o1777);
+		kernel = createKernel({ filesystem: vfs, syncFilesystemOnDispose: false });
+		await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+
+		const executeOnlyPath = `/tmp/agentos-exec-only-${process.pid}`;
+		await kernel.writeFile(executeOnlyPath, readFileSync(`${COMMANDS_DIR}/sh`));
+		await (vfs as any).chmod(executeOnlyPath, 0o111);
+		const script =
+			`exec ${executeOnlyPath} -c ` +
+			`'printf "execute-only\\n"'`;
+		const wasm = await kernel.exec(`sh -c ${shellQuote(script)}`);
+
+		expect(wasm.exitCode, wasm.stderr).toBe(0);
+		expect(wasm.stdout).toBe("execute-only\n");
+		expect(wasm.stderr).toBe("");
 	}, 30_000);
 
 	it("matches native exec redirections and inherited descriptors", async () => {

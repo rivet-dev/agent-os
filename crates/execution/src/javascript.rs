@@ -1,3 +1,8 @@
+use crate::backend::{
+    DirectHostReplyTarget, ExecutionBackend, ExecutionBackendKind, ExecutionExit,
+    ExecutionWakeHandle, ExecutionWakeIdentity, HostCallReply, HostServiceError, ShutdownOutcome,
+    ShutdownReason, SignalCheckpointOutcome,
+};
 use crate::common::stable_hash64;
 use crate::node_import_cache::{
     NodeImportCache, NodeImportCacheCleanup, NODE_IMPORT_CACHE_ASSET_ROOT_ENV,
@@ -6,11 +11,12 @@ use crate::runtime_support::{
     NODE_COMPILE_CACHE_ENV, NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
     NODE_SANDBOX_ROOT_ENV,
 };
-use crate::signal::NodeSignalHandlerRegistration;
+use crate::signal::ExecutionSignalHandlerRegistration;
 use crate::v8_host::{V8RuntimeHost, V8SessionFrameReceiver, V8SessionHandle};
 use crate::v8_ipc::BinaryFrame;
 use crate::v8_runtime;
-use agentos_bridge::queue_tracker::{register_queue, TrackedLimit};
+use agentos_bridge::queue_tracker::{register_queue, QueueGauge, TrackedLimit};
+use agentos_runtime::accounting::ResourceClass;
 use agentos_runtime::RuntimeContext;
 use agentos_v8_runtime::runtime_protocol::{RuntimeCommand, WarmSessionHint};
 use flume::{Receiver as EventReceiver, Sender as EventSender};
@@ -121,6 +127,7 @@ fn record_js_phase_stats(
 ) {
     let phases = phases.get_or_init(|| Mutex::new(BTreeMap::new()));
     let Ok(mut phases) = phases.lock() else {
+        eprintln!("ERR_AGENTOS_DIAGNOSTIC_STATE: JavaScript phase statistics lock is poisoned");
         return;
     };
     let stats = phases.entry(stage.to_string()).or_default();
@@ -146,7 +153,12 @@ fn record_js_phase_stats(
             stats.calls
         ));
     }
-    let _ = fs::write(path, output);
+    if let Err(error) = fs::write(&path, output) {
+        eprintln!(
+            "ERR_AGENTOS_DIAGNOSTIC_WRITE: failed to write JavaScript phase statistics to {}: {error}",
+            path.to_string_lossy()
+        );
+    }
 }
 
 const DEFAULT_V8_CPU_TIME_LIMIT_MS: u32 = 30_000;
@@ -193,6 +205,9 @@ fn record_sync_bridge_phase(method: &str, stage: &str, elapsed: Duration) {
     }
     let stats = SYNC_BRIDGE_PHASES.get_or_init(|| Mutex::new(BTreeMap::new()));
     let Ok(mut stats) = stats.lock() else {
+        eprintln!(
+            "ERR_AGENTOS_DIAGNOSTIC_STATE: JavaScript sync-bridge statistics lock is poisoned"
+        );
         return;
     };
     let elapsed_us = elapsed.as_micros() as u64;
@@ -214,7 +229,11 @@ fn record_sync_bridge_phase(method: &str, stage: &str, elapsed: Duration) {
                 value.calls, value.total_us, avg_us, value.max_us
             ));
         }
-        let _ = fs::write(path, lines);
+        if let Err(error) = fs::write(&path, lines) {
+            eprintln!(
+                "ERR_AGENTOS_DIAGNOSTIC_WRITE: failed to write JavaScript sync-bridge statistics to {path}: {error}"
+            );
+        }
     }
 }
 
@@ -224,6 +243,7 @@ pub fn record_sync_bridge_request_enqueued(call_id: u64, method: &str) {
     }
     let requests = SYNC_BRIDGE_REQUEST_ENQUEUED.get_or_init(|| Mutex::new(HashMap::new()));
     let Ok(mut requests) = requests.lock() else {
+        eprintln!("ERR_AGENTOS_DIAGNOSTIC_STATE: sync-bridge request timing lock is poisoned");
         return;
     };
     if requests.len() > 4096 {
@@ -240,6 +260,7 @@ pub fn record_sync_bridge_request_observed(call_id: u64, fallback_method: &str) 
         return;
     };
     let Ok(mut requests) = requests.lock() else {
+        eprintln!("ERR_AGENTOS_DIAGNOSTIC_STATE: sync-bridge request timing lock is poisoned");
         return;
     };
     let Some((method, started)) = requests.remove(&call_id) else {
@@ -303,7 +324,7 @@ enum NodeControlMessage {
     },
     SignalState {
         signal: u32,
-        registration: NodeSignalHandlerRegistration,
+        registration: ExecutionSignalHandlerRegistration,
     },
 }
 
@@ -313,7 +334,7 @@ struct LinePrefixFilter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JavascriptSyncRpcRequest {
+pub struct HostRpcRequest {
     pub id: u64,
     pub method: String,
     pub args: Vec<Value>,
@@ -416,6 +437,40 @@ enum PendingSyncRpcResolution {
     Pending,
     TimedOut,
     Missing,
+}
+
+#[derive(Debug)]
+struct PendingSyncRpcRegistry {
+    states: BTreeMap<u64, PendingSyncRpcState>,
+    maximum: usize,
+    gauge: Arc<QueueGauge>,
+}
+
+impl PendingSyncRpcRegistry {
+    fn new(maximum: usize) -> Self {
+        let maximum = maximum.max(1);
+        Self {
+            states: BTreeMap::new(),
+            maximum,
+            gauge: register_queue(TrackedLimit::PendingSyncRpcCalls, maximum),
+        }
+    }
+
+    fn observe_depth(&self) {
+        self.gauge.observe_depth(self.states.len());
+    }
+}
+
+/// Direct response lane for JavaScript, Python's embedded JavaScript bridge,
+/// and compatibility-WASM host calls.
+///
+/// This deliberately retains only the pending-call token and the thread-safe
+/// V8 session lane. It does not retain or make `JavascriptExecution`/the V8
+/// isolate `Send`.
+#[derive(Debug, Clone)]
+pub struct JavascriptSyncRpcResponder {
+    pending_sync_rpc: Arc<Mutex<PendingSyncRpcRegistry>>,
+    v8_session: V8SessionHandle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -547,10 +602,10 @@ pub struct StartJavascriptExecutionRequest {
 pub enum JavascriptExecutionEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
-    SyncRpcRequest(JavascriptSyncRpcRequest),
+    SyncRpcRequest(HostRpcRequest),
     SignalState {
         signal: u32,
-        registration: NodeSignalHandlerRegistration,
+        registration: ExecutionSignalHandlerRegistration,
     },
     Exited(i32),
 }
@@ -559,7 +614,7 @@ pub enum JavascriptExecutionEvent {
 enum JavascriptProcessEvent {
     Stdout(Vec<u8>),
     RawStderr(Vec<u8>),
-    SyncRpcRequest(JavascriptSyncRpcRequest),
+    SyncRpcRequest(HostRpcRequest),
     Control(NodeControlMessage),
     Exited(i32),
 }
@@ -630,17 +685,20 @@ pub struct LocalModuleResolutionCache {
 pub trait ModuleFsReader {
     /// Realpath of `guest_path`, expressed as a guest path. `None` if the path
     /// does not resolve (does not exist / escapes the addressable tree).
-    fn canonical_guest_path(&mut self, guest_path: &str) -> Option<String>;
+    fn canonical_guest_path(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<Option<String>, HostServiceError>;
 
     /// Read the file at `guest_path` as a UTF-8 string, following symlinks.
-    fn read_to_string(&mut self, guest_path: &str) -> Option<String>;
+    fn read_to_string(&mut self, guest_path: &str) -> Result<Option<String>, HostServiceError>;
 
     /// `Some(true)` if `guest_path` is a directory, `Some(false)` if it exists
     /// but is not a directory, `None` if it does not exist. Follows symlinks.
-    fn path_is_dir(&mut self, guest_path: &str) -> Option<bool>;
+    fn path_is_dir(&mut self, guest_path: &str) -> Result<Option<bool>, HostServiceError>;
 
     /// Whether `guest_path` exists, following symlinks.
-    fn path_exists(&mut self, guest_path: &str) -> bool;
+    fn path_exists(&mut self, guest_path: &str) -> Result<bool, HostServiceError>;
 }
 
 /// Guest JavaScript module-resolution mode (the `moduleResolution` axis of
@@ -823,6 +881,7 @@ fn polyfill_registry() -> &'static PolyfillRegistry {
 #[derive(Debug, Clone, PartialEq)]
 enum LocalBridgeCallResult {
     Immediate(Value),
+    Error(HostServiceError),
     Deferred,
 }
 
@@ -848,14 +907,19 @@ fn timer_delay_ms(value: Option<&Value>) -> u64 {
     }
 }
 
-fn timer_dispatch_error(message: String) -> Value {
+fn timer_dispatch_error(error: HostServiceError) -> Value {
     json!({
         "__bd_error": {
             "name": "Error",
-            "code": message.split(':').next().unwrap_or("ERR_AGENTOS_JAVASCRIPT_TIMER"),
-            "message": message,
+            "code": error.code,
+            "message": error.message,
+            "details": error.details,
         }
     })
+}
+
+fn javascript_timer_error(code: &'static str, message: impl Into<String>) -> HostServiceError {
+    HostServiceError::new(code, message.into())
 }
 
 /// Decide whether a woken timer action should fire, and reclaim its tracking
@@ -870,22 +934,29 @@ fn timer_should_fire(
     timer_id: u64,
     generation: u64,
 ) -> bool {
-    timers
-        .lock()
-        .ok()
-        .and_then(|mut timers| {
-            let (current_generation, repeat) = timers
+    match timers.lock() {
+        Ok(mut timers) => {
+            let Some((current_generation, repeat)) = timers
                 .get(&timer_id)
-                .map(|entry| (entry.generation, entry.repeat))?;
+                .map(|entry| (entry.generation, entry.repeat))
+            else {
+                return false;
+            };
             if current_generation != generation {
-                return Some(false);
+                return false;
             }
             if !repeat {
                 timers.remove(&timer_id);
             }
-            Some(true)
-        })
-        .unwrap_or(false)
+            true
+        }
+        Err(error) => {
+            eprintln!(
+                "ERR_AGENTOS_TIMER_STATE: failed to inspect timer {timer_id} generation {generation}: {error}"
+            );
+            false
+        }
+    }
 }
 
 struct TimerWheel {
@@ -986,14 +1057,15 @@ impl TimerAction {
 }
 
 impl TimerWheel {
-    fn get(runtime: &RuntimeContext) -> Result<&'static Arc<Self>, String> {
+    fn get(runtime: &RuntimeContext) -> Result<&'static Arc<Self>, HostServiceError> {
         if let Some(wheel) = JAVASCRIPT_TIMER_WHEEL.get() {
             return Ok(wheel);
         }
 
         let _initializing = JAVASCRIPT_TIMER_WHEEL_INIT.lock().map_err(|_| {
-            String::from(
-                "ERR_AGENTOS_JAVASCRIPT_TIMER_WHEEL_INIT: timer wheel initialization lock poisoned",
+            javascript_timer_error(
+                "ERR_AGENTOS_JAVASCRIPT_TIMER_WHEEL_INIT",
+                "timer wheel initialization lock poisoned",
             )
         })?;
         if let Some(wheel) = JAVASCRIPT_TIMER_WHEEL.get() {
@@ -1001,13 +1073,21 @@ impl TimerWheel {
         }
 
         let wheel = Self::start(runtime.clone())?;
-        let _ = JAVASCRIPT_TIMER_WHEEL.set(wheel);
+        JAVASCRIPT_TIMER_WHEEL.set(wheel).map_err(|_| {
+            javascript_timer_error(
+                "ERR_AGENTOS_JAVASCRIPT_TIMER_WHEEL_INIT",
+                "timer wheel was concurrently installed despite the initialization lock",
+            )
+        })?;
         JAVASCRIPT_TIMER_WHEEL.get().ok_or_else(|| {
-            String::from("ERR_AGENTOS_JAVASCRIPT_TIMER_WHEEL_INIT: timer wheel was not installed")
+            javascript_timer_error(
+                "ERR_AGENTOS_JAVASCRIPT_TIMER_WHEEL_INIT",
+                "timer wheel was not installed",
+            )
         })
     }
 
-    fn start(runtime: RuntimeContext) -> Result<Arc<Self>, String> {
+    fn start(runtime: RuntimeContext) -> Result<Arc<Self>, HostServiceError> {
         let wheel = Arc::new(Self {
             state: Mutex::new(TimerWheelState::default()),
             ready: Notify::new(),
@@ -1018,12 +1098,15 @@ impl TimerWheel {
                 worker.run().await
             })
             .map_err(|error| {
-                format!("ERR_AGENTOS_TASK_LIMIT: failed to start JavaScript timer wheel: {error}")
+                javascript_timer_error(
+                    "ERR_AGENTOS_TASK_LIMIT",
+                    format!("failed to start JavaScript timer wheel: {error}"),
+                )
             })?;
         Ok(wheel)
     }
 
-    fn schedule(&self, delay_ms: u64, action: TimerAction) -> Result<(), String> {
+    fn schedule(&self, delay_ms: u64, action: TimerAction) -> Result<(), HostServiceError> {
         let now = Instant::now();
         let deadline = now
             .checked_add(Duration::from_millis(delay_ms))
@@ -1036,8 +1119,9 @@ impl TimerWheel {
         let old_earliest = state.heap.peek().map(|Reverse((deadline, _))| *deadline);
         let seq = state.next_seq;
         state.next_seq = state.next_seq.checked_add(1).ok_or_else(|| {
-            String::from(
-                "ERR_AGENTOS_JAVASCRIPT_TIMER_SEQUENCE_EXHAUSTED: process timer sequence exhausted",
+            javascript_timer_error(
+                "ERR_AGENTOS_JAVASCRIPT_TIMER_SEQUENCE_EXHAUSTED",
+                "process timer sequence exhausted",
             )
         })?;
         state.heap.push(Reverse((deadline, seq)));
@@ -1427,6 +1511,207 @@ impl GuestPathTranslator {
         let guest = self.host_to_guest_string(&canonical);
         (!guest.starts_with("/unknown/")).then_some(normalize_guest_path(&guest))
     }
+
+    /// Typed module-resolution variant of the legacy host translator. Missing
+    /// mappings remain a normal resolution miss; permission failures, symlink
+    /// loops, and other host filesystem errors cross the bridge as typed errors.
+    fn canonical_module_guest_path(
+        &self,
+        guest_path: &str,
+    ) -> Result<Option<String>, HostServiceError> {
+        let Some(host_path) = self.module_guest_to_host(guest_path)? else {
+            return Ok(None);
+        };
+        let Some(canonical) =
+            module_fs_canonicalize_optional(&host_path, "canonicalize", guest_path)?
+        else {
+            return Ok(None);
+        };
+
+        for mapping in &self.mappings {
+            if strip_guest_prefix(guest_path, &mapping.guest_path).is_none() {
+                continue;
+            }
+            if let Ok(stripped) = canonical.strip_prefix(&mapping.host_path) {
+                return Ok(Some(join_guest_path(
+                    &mapping.guest_path,
+                    &stripped.to_string_lossy().replace('\\', "/"),
+                )));
+            }
+            if let Some(real_mapping_path) = module_fs_canonicalize_optional(
+                &mapping.host_path,
+                "canonicalize mapping",
+                guest_path,
+            )? {
+                if let Ok(stripped) = canonical.strip_prefix(&real_mapping_path) {
+                    return Ok(Some(join_guest_path(
+                        &mapping.guest_path,
+                        &stripped.to_string_lossy().replace('\\', "/"),
+                    )));
+                }
+            }
+        }
+
+        if let Ok(stripped) = canonical.strip_prefix(&self.implicit_host_cwd) {
+            return Ok(Some(join_guest_path(
+                &self.implicit_guest_cwd,
+                &stripped.to_string_lossy().replace('\\', "/"),
+            )));
+        }
+        if let Some(sandbox_root) = &self.sandbox_root {
+            if let Ok(stripped) = canonical.strip_prefix(sandbox_root) {
+                return Ok(Some(join_guest_path(
+                    "/",
+                    &stripped.to_string_lossy().replace('\\', "/"),
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    fn module_guest_to_host(&self, guest_path: &str) -> Result<Option<PathBuf>, HostServiceError> {
+        let normalized = normalize_guest_path(guest_path);
+        let mut fallback_candidate = None;
+
+        for mapping in &self.mappings {
+            if let Some(suffix) = strip_guest_prefix(&normalized, &mapping.guest_path) {
+                let candidate = join_host_path(&mapping.host_path, suffix);
+                if module_fs_try_exists(&candidate, guest_path)? {
+                    return self.confine_module_host_path(candidate, guest_path);
+                }
+                if let Some(real_mapping_path) = module_fs_canonicalize_optional(
+                    &mapping.host_path,
+                    "canonicalize mapping",
+                    guest_path,
+                )? {
+                    let real_candidate = join_host_path(&real_mapping_path, suffix);
+                    if module_fs_try_exists(&real_candidate, guest_path)? {
+                        return self.confine_module_host_path(real_candidate, guest_path);
+                    }
+                    if let Some(sibling_candidate) = resolve_pnpm_sibling_host_path_typed(
+                        &real_mapping_path,
+                        suffix,
+                        guest_path,
+                    )? {
+                        return self.confine_module_host_path(sibling_candidate, guest_path);
+                    }
+                }
+                fallback_candidate.get_or_insert(candidate);
+            }
+        }
+
+        let candidate =
+            if let Some(suffix) = strip_guest_prefix(&normalized, &self.implicit_guest_cwd) {
+                Some(join_host_path(&self.implicit_host_cwd, suffix))
+            } else if let Some(candidate) = fallback_candidate {
+                Some(candidate)
+            } else {
+                self.sandbox_root.as_ref().map(|sandbox_root| {
+                    join_host_path(sandbox_root, normalized.trim_start_matches('/'))
+                })
+            };
+        match candidate {
+            Some(candidate) => self.confine_module_host_path(candidate, guest_path),
+            None => Ok(None),
+        }
+    }
+
+    fn confine_module_host_path(
+        &self,
+        host_path: PathBuf,
+        guest_path: &str,
+    ) -> Result<Option<PathBuf>, HostServiceError> {
+        let mut allowed_roots = Vec::new();
+        for root in self
+            .mappings
+            .iter()
+            .map(|mapping| mapping.host_path.as_path())
+            .chain(std::iter::once(self.implicit_host_cwd.as_path()))
+            .chain(self.sandbox_root.as_deref())
+        {
+            if let Some(canonical_root) =
+                module_fs_canonicalize_optional(root, "canonicalize root", guest_path)?
+            {
+                if !allowed_roots
+                    .iter()
+                    .any(|existing| existing == &canonical_root)
+                {
+                    allowed_roots.push(canonical_root);
+                }
+            }
+        }
+        if allowed_roots.is_empty() {
+            return Ok(None);
+        }
+
+        if let Some(canonical_path) =
+            module_fs_canonicalize_optional(&host_path, "canonicalize", guest_path)?
+        {
+            return Ok(
+                canonical_path_is_allowed(&canonical_path, &allowed_roots).then_some(host_path)
+            );
+        }
+
+        let mut ancestor = host_path.as_path();
+        loop {
+            match fs::symlink_metadata(ancestor) {
+                Ok(_) => {
+                    let canonical_ancestor = fs::canonicalize(ancestor).map_err(|error| {
+                        module_fs_io_error("canonicalize ancestor", guest_path, error)
+                    })?;
+                    return Ok(
+                        canonical_path_is_allowed(&canonical_ancestor, &allowed_roots)
+                            .then_some(host_path),
+                    );
+                }
+                Err(error) if module_fs_io_is_missing(&error) => {}
+                Err(error) => {
+                    return Err(module_fs_io_error("inspect ancestor", guest_path, error));
+                }
+            }
+            let Some(parent) = ancestor.parent() else {
+                return Ok(None);
+            };
+            ancestor = parent;
+        }
+    }
+}
+
+fn module_fs_try_exists(path: &Path, guest_path: &str) -> Result<bool, HostServiceError> {
+    path.try_exists()
+        .map_err(|error| module_fs_io_error("inspect", guest_path, error))
+}
+
+fn module_fs_canonicalize_optional(
+    path: &Path,
+    operation: &str,
+    guest_path: &str,
+) -> Result<Option<PathBuf>, HostServiceError> {
+    match fs::canonicalize(path) {
+        Ok(path) => Ok(Some(path)),
+        Err(error) if module_fs_io_is_missing(&error) => Ok(None),
+        Err(error) => Err(module_fs_io_error(operation, guest_path, error)),
+    }
+}
+
+fn resolve_pnpm_sibling_host_path_typed(
+    real_mapping_path: &Path,
+    suffix: &str,
+    guest_path: &str,
+) -> Result<Option<PathBuf>, HostServiceError> {
+    let Some(trimmed) = suffix.strip_prefix("node_modules/") else {
+        return Ok(None);
+    };
+    let mut current = Some(real_mapping_path);
+    while let Some(path) = current {
+        if path.file_name().and_then(|name| name.to_str()) == Some("node_modules") {
+            let candidate = join_host_path(path, trimmed);
+            return module_fs_try_exists(&candidate, guest_path)
+                .map(|exists| exists.then_some(candidate));
+        }
+        current = path.parent();
+    }
+    Ok(None)
 }
 
 fn sort_guest_path_mappings(mappings: &mut [GuestPathMapping]) {
@@ -1496,11 +1781,29 @@ impl ModuleResolutionTestHarness {
     }
 
     pub fn resolve_import(&mut self, specifier: &str, from_path: &str) -> Option<String> {
+        self.try_resolve_import(specifier, from_path)
+            .expect("host module filesystem resolution must succeed")
+    }
+
+    pub fn try_resolve_import(
+        &mut self,
+        specifier: &str,
+        from_path: &str,
+    ) -> Result<Option<String>, HostServiceError> {
         self.local_bridge
             .resolve_module(specifier, from_path, ModuleResolveMode::Import)
     }
 
     pub fn resolve_require(&mut self, specifier: &str, from_path: &str) -> Option<String> {
+        self.try_resolve_require(specifier, from_path)
+            .expect("host module filesystem resolution must succeed")
+    }
+
+    pub fn try_resolve_require(
+        &mut self,
+        specifier: &str,
+        from_path: &str,
+    ) -> Result<Option<String>, HostServiceError> {
         self.local_bridge
             .resolve_module(specifier, from_path, ModuleResolveMode::Require)
     }
@@ -1508,6 +1811,7 @@ impl ModuleResolutionTestHarness {
     pub fn module_format(&mut self, path: &str) -> Option<&'static str> {
         self.local_bridge
             .module_format(path)
+            .expect("host module filesystem format lookup must succeed")
             .map(LocalResolvedModuleFormat::as_str)
     }
 }
@@ -1519,7 +1823,7 @@ pub fn handle_internal_bridge_call_from_host_context(
     env: &BTreeMap<String, String>,
     method: &str,
     args: &[Value],
-) -> Option<Value> {
+) -> Result<Option<Value>, HostServiceError> {
     // default + in-place assign: LocalBridgeState is Drop, so `..default()` (E0509)
     // is not allowed.
     let mut local_bridge = LocalBridgeState::default();
@@ -1527,8 +1831,9 @@ pub fn handle_internal_bridge_call_from_host_context(
         GuestPathTranslator::from_host_context(env, host_cwd.to_path_buf(), guest_cwd.to_owned());
 
     match local_bridge.handle_internal_bridge_call(0, method, args) {
-        Some(LocalBridgeCallResult::Immediate(value)) => Some(value),
-        _ => None,
+        Some(LocalBridgeCallResult::Immediate(value)) => Ok(Some(value)),
+        Some(LocalBridgeCallResult::Error(error)) => Err(error),
+        _ => Ok(None),
     }
 }
 
@@ -1729,8 +2034,10 @@ pub enum JavascriptExecutionError {
     PrepareImportCache(std::io::Error),
     Spawn(std::io::Error),
     PendingSyncRpcRequest(u64),
+    PendingSyncRpcLimit { limit: usize, observed: usize },
     ExpiredSyncRpcRequest(u64),
     RpcResponse(String),
+    BridgeSettlement(agentos_v8_runtime::host_call::BridgeSettlementError),
     Terminate(std::io::Error),
     Control(std::io::Error),
     StdinClosed,
@@ -1766,6 +2073,10 @@ impl fmt::Display for JavascriptExecutionError {
                     "guest JavaScript execution requires servicing pending sync RPC request {id}"
                 )
             }
+            Self::PendingSyncRpcLimit { limit, observed } => write!(
+                f,
+                "ERR_AGENTOS_RESOURCE_LIMIT: pending JavaScript sync RPC calls observed {observed}, exceeding limits.reactor.maxBridgeCalls ({limit})"
+            ),
             Self::ExpiredSyncRpcRequest(id) => {
                 write!(f, "sync RPC request {id} is no longer pending")
             }
@@ -1774,6 +2085,9 @@ impl fmt::Display for JavascriptExecutionError {
                     f,
                     "failed to reply to guest JavaScript sync RPC request: {message}"
                 )
+            }
+            Self::BridgeSettlement(error) => {
+                write!(f, "failed to settle guest JavaScript bridge response: {error}")
             }
             Self::Terminate(err) => {
                 write!(f, "failed to terminate guest JavaScript runtime: {err}")
@@ -1796,6 +2110,15 @@ impl fmt::Display for JavascriptExecutionError {
 
 impl std::error::Error for JavascriptExecutionError {}
 
+fn javascript_bridge_response_error(error: std::io::Error) -> JavascriptExecutionError {
+    if let Some(settlement) = error.get_ref().and_then(|source| {
+        source.downcast_ref::<agentos_v8_runtime::host_call::BridgeSettlementError>()
+    }) {
+        return JavascriptExecutionError::BridgeSettlement(settlement.clone());
+    }
+    JavascriptExecutionError::RpcResponse(error.to_string())
+}
+
 #[derive(Debug)]
 pub struct JavascriptExecution {
     execution_id: String,
@@ -1805,11 +2128,12 @@ pub struct JavascriptExecution {
     // forced blocking compatibility paths through Handle::block_on, which
     // panicked whenever those paths were reached from the unified runtime.
     events: EventReceiver<JavascriptExecutionEvent>,
-    pending_sync_rpc: Arc<Mutex<Option<PendingSyncRpcState>>>,
+    pending_sync_rpc: Arc<Mutex<PendingSyncRpcRegistry>>,
     exited: Arc<AtomicBool>,
     kernel_stdin: Arc<LocalKernelStdinBridge>,
     _import_cache_guard: Arc<NodeImportCacheCleanup>,
     v8_session: V8SessionHandle,
+    session_destroyed: bool,
     /// Fully prepared V8 execute request. Cross-runtime execve prepares the
     /// replacement isolate and its bridge before committing kernel process
     /// state, but must not enqueue guest code until that commit is complete.
@@ -1840,16 +2164,19 @@ impl JavascriptExecution {
         &self.execution_id
     }
 
-    pub fn child_pid(&self) -> u32 {
-        self.child_pid
+    pub fn native_process_id(&self) -> Option<u32> {
+        (self.child_pid != 0).then_some(self.child_pid)
     }
 
     pub fn v8_session_handle(&self) -> V8SessionHandle {
         self.v8_session.clone()
     }
 
-    pub fn uses_shared_v8_runtime(&self) -> bool {
-        true
+    pub fn sync_rpc_responder(&self) -> JavascriptSyncRpcResponder {
+        JavascriptSyncRpcResponder {
+            pending_sync_rpc: Arc::clone(&self.pending_sync_rpc),
+            v8_session: self.v8_session.clone(),
+        }
     }
 
     pub fn has_exited(&self) -> bool {
@@ -1941,7 +2268,7 @@ impl JavascriptExecution {
 
     pub fn read_kernel_stdin_sync_rpc(
         &self,
-        request: &JavascriptSyncRpcRequest,
+        request: &HostRpcRequest,
     ) -> Result<Value, JavascriptExecutionError> {
         if request.method != "__kernel_stdin_read" {
             return Ok(Value::Null);
@@ -1952,7 +2279,7 @@ impl JavascriptExecution {
 
     pub(crate) fn handle_kernel_stdin_sync_rpc(
         &mut self,
-        request: &JavascriptSyncRpcRequest,
+        request: &HostRpcRequest,
     ) -> Result<bool, JavascriptExecutionError> {
         if request.method != "__kernel_stdin_read" {
             return Ok(false);
@@ -2004,31 +2331,14 @@ impl JavascriptExecution {
         id: u64,
         result: Value,
     ) -> Result<(), JavascriptExecutionError> {
-        let phase_start = Instant::now();
-        match self.clear_pending_sync_rpc(id)? {
-            PendingSyncRpcResolution::Pending => {}
-            PendingSyncRpcResolution::TimedOut => {
-                return Err(JavascriptExecutionError::ExpiredSyncRpcRequest(id));
-            }
-            PendingSyncRpcResolution::Missing => {}
-        }
-        record_sync_bridge_phase(
-            "sync_rpc_response",
-            "response_clear_pending",
-            phase_start.elapsed(),
-        );
-
-        self.respond_claimed_sync_rpc_success(id, result)
+        self.sync_rpc_responder().respond_success(id, result)
     }
 
     /// Atomically claim the exact pending sync RPC before a caller performs a
     /// destructive operation on its behalf. A timed-out or replaced request
     /// must not consume bytes that belong to the guest's next retry.
     pub fn claim_sync_rpc_response(&mut self, id: u64) -> Result<bool, JavascriptExecutionError> {
-        match self.clear_pending_sync_rpc(id)? {
-            PendingSyncRpcResolution::Pending => Ok(true),
-            PendingSyncRpcResolution::TimedOut | PendingSyncRpcResolution::Missing => Ok(false),
-        }
+        self.sync_rpc_responder().claim(id)
     }
 
     pub fn respond_claimed_sync_rpc_success(
@@ -2036,28 +2346,8 @@ impl JavascriptExecution {
         id: u64,
         result: Value,
     ) -> Result<(), JavascriptExecutionError> {
-        let phase_start = Instant::now();
-        let payload = translate_legacy_bridge_value_to_v8(&result);
-        record_sync_bridge_phase(
-            "sync_rpc_response",
-            "response_translate_value",
-            phase_start.elapsed(),
-        );
-        let phase_start = Instant::now();
-        let payload = v8_runtime::json_to_cbor_payload(&payload)
-            .map_err(|e| JavascriptExecutionError::RpcResponse(e.to_string()))?;
-        record_sync_bridge_phase(
-            "sync_rpc_response",
-            "response_encode_cbor",
-            phase_start.elapsed(),
-        );
-        let phase_start = Instant::now();
-        let result = self
-            .v8_session
-            .send_bridge_response(id, 0, payload)
-            .map_err(|e| JavascriptExecutionError::RpcResponse(e.to_string()));
-        record_sync_bridge_phase("sync_rpc_response", "response_send", phase_start.elapsed());
-        result
+        self.sync_rpc_responder()
+            .respond_claimed_success(id, result)
     }
 
     pub fn respond_sync_rpc_raw_success(
@@ -2065,31 +2355,7 @@ impl JavascriptExecution {
         id: u64,
         payload: Vec<u8>,
     ) -> Result<(), JavascriptExecutionError> {
-        let phase_start = Instant::now();
-        match self.clear_pending_sync_rpc(id)? {
-            PendingSyncRpcResolution::Pending => {}
-            PendingSyncRpcResolution::TimedOut => {
-                return Err(JavascriptExecutionError::ExpiredSyncRpcRequest(id));
-            }
-            PendingSyncRpcResolution::Missing => {}
-        }
-        record_sync_bridge_phase(
-            "sync_rpc_raw_response",
-            "response_clear_pending",
-            phase_start.elapsed(),
-        );
-
-        let phase_start = Instant::now();
-        let result = self
-            .v8_session
-            .send_bridge_response(id, 2, payload)
-            .map_err(|e| JavascriptExecutionError::RpcResponse(e.to_string()));
-        record_sync_bridge_phase(
-            "sync_rpc_raw_response",
-            "response_send",
-            phase_start.elapsed(),
-        );
-        result
+        self.sync_rpc_responder().respond_raw_success(id, payload)
     }
 
     pub fn respond_sync_rpc_error(
@@ -2098,15 +2364,7 @@ impl JavascriptExecution {
         code: impl Into<String>,
         message: impl Into<String>,
     ) -> Result<(), JavascriptExecutionError> {
-        match self.clear_pending_sync_rpc(id)? {
-            PendingSyncRpcResolution::Pending => {}
-            PendingSyncRpcResolution::TimedOut => {
-                return Err(JavascriptExecutionError::ExpiredSyncRpcRequest(id));
-            }
-            PendingSyncRpcResolution::Missing => {}
-        }
-
-        self.respond_claimed_sync_rpc_error(id, code, message)
+        self.sync_rpc_responder().respond_error(id, code, message)
     }
 
     pub fn respond_claimed_sync_rpc_error(
@@ -2115,10 +2373,8 @@ impl JavascriptExecution {
         code: impl Into<String>,
         message: impl Into<String>,
     ) -> Result<(), JavascriptExecutionError> {
-        let error_msg = format!("{}: {}", code.into(), message.into());
-        self.v8_session
-            .send_bridge_response(id, 1, error_msg.into_bytes())
-            .map_err(|e| JavascriptExecutionError::RpcResponse(e.to_string()))
+        self.sync_rpc_responder()
+            .respond_claimed_error(id, code, message)
     }
 
     pub async fn poll_event(
@@ -2232,6 +2488,7 @@ impl JavascriptExecution {
                     self.v8_session
                         .destroy()
                         .map_err(JavascriptExecutionError::Terminate)?;
+                    self.session_destroyed = true;
                     return Ok(JavascriptExecutionResult {
                         execution_id,
                         exit_code,
@@ -2255,9 +2512,24 @@ impl JavascriptExecution {
     /// sidecar service loop and never calls this.
     pub fn try_service_standalone_module_sync_rpc(
         &mut self,
-        request: &JavascriptSyncRpcRequest,
+        request: &HostRpcRequest,
     ) -> Result<bool, JavascriptExecutionError> {
-        let result = {
+        if !matches!(
+            request.method.as_str(),
+            "__resolve_module"
+                | "_resolveModule"
+                | "_resolveModuleSync"
+                | "__load_file"
+                | "_loadFile"
+                | "_loadFileSync"
+                | "__module_format"
+                | "_moduleFormat"
+                | "__batch_resolve_modules"
+                | "_batchResolveModules"
+        ) {
+            return Ok(false);
+        }
+        let result: Result<Value, HostServiceError> = {
             let mut guard = self.module_resolution.lock().map_err(|_| {
                 JavascriptExecutionError::RpcResponse(String::from(
                     "standalone module resolution state poisoned",
@@ -2265,7 +2537,7 @@ impl JavascriptExecution {
             })?;
             let (translator, cache) = &mut *guard;
             let mut resolver = ModuleResolver::new(translator, cache);
-            match request.method.as_str() {
+            (|| match request.method.as_str() {
                 "__resolve_module" | "_resolveModule" | "_resolveModuleSync" => {
                     let specifier = request.args.first().and_then(Value::as_str).unwrap_or("");
                     let parent = request.args.get(1).and_then(Value::as_str).unwrap_or("/");
@@ -2275,49 +2547,395 @@ impl JavascriptExecution {
                         _ if request.method == "_resolveModuleSync" => ModuleResolveMode::Require,
                         _ => ModuleResolveMode::Import,
                     };
-                    resolver
-                        .resolve_module(specifier, parent, mode)
+                    Ok(resolver
+                        .resolve_module(specifier, parent, mode)?
                         .map(Value::String)
-                        .unwrap_or(Value::Null)
+                        .unwrap_or(Value::Null))
                 }
-                "__load_file" | "_loadFile" | "_loadFileSync" => resolver
-                    .load_file(request.args.first().and_then(Value::as_str).unwrap_or(""))
+                "__load_file" | "_loadFile" | "_loadFileSync" => Ok(resolver
+                    .load_file(request.args.first().and_then(Value::as_str).unwrap_or(""))?
                     .map(Value::String)
-                    .unwrap_or(Value::Null),
-                "__module_format" | "_moduleFormat" => resolver
-                    .module_format(request.args.first().and_then(Value::as_str).unwrap_or(""))
+                    .unwrap_or(Value::Null)),
+                "__module_format" | "_moduleFormat" => Ok(resolver
+                    .module_format(request.args.first().and_then(Value::as_str).unwrap_or(""))?
                     .map(|format| Value::String(String::from(format.as_str())))
-                    .unwrap_or(Value::Null),
+                    .unwrap_or(Value::Null)),
                 "__batch_resolve_modules" | "_batchResolveModules" => {
                     resolver.batch_resolve_modules(&request.args)
                 }
-                _ => return Ok(false),
-            }
+                _ => unreachable!("module method was checked before locking resolver state"),
+            })()
         };
-        self.respond_sync_rpc_success(request.id, result)?;
+        match result {
+            Ok(result) => self.respond_sync_rpc_success(request.id, result)?,
+            Err(error) => self
+                .sync_rpc_responder()
+                .respond_host_error(request.id, error)?,
+        }
         Ok(true)
     }
+}
 
-    fn clear_pending_sync_rpc(
-        &self,
-        id: u64,
-    ) -> Result<PendingSyncRpcResolution, JavascriptExecutionError> {
-        let mut pending = self.pending_sync_rpc.lock().map_err(|_| {
-            JavascriptExecutionError::RpcResponse(String::from(
-                "sync RPC pending-request state lock poisoned",
-            ))
+impl ExecutionBackend for JavascriptExecution {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::Javascript
+    }
+
+    fn native_process_id(&self) -> Option<u32> {
+        JavascriptExecution::native_process_id(self)
+    }
+
+    fn wake_handle(&self, identity: ExecutionWakeIdentity) -> Option<ExecutionWakeHandle> {
+        Some(ExecutionWakeHandle::new(
+            identity,
+            Arc::new(self.v8_session.clone()),
+        ))
+    }
+
+    fn is_prepared_for_start(&self) -> bool {
+        JavascriptExecution::is_prepared_for_start(self)
+    }
+
+    fn start_prepared(&mut self) -> Result<(), HostServiceError> {
+        JavascriptExecution::start_prepared(self).map_err(|error| {
+            HostServiceError::new("ERR_AGENTOS_EXECUTION_START", error.to_string())
+        })
+    }
+
+    fn begin_shutdown(
+        &mut self,
+        reason: ShutdownReason,
+    ) -> Result<ShutdownOutcome, HostServiceError> {
+        if let ShutdownReason::Signal(signal) = reason {
+            if let Some(process_id) = self.native_process_id() {
+                return Ok(ShutdownOutcome::ForwardSignal { process_id, signal });
+            }
+            // A shared isolate has no host process whose wait status can
+            // preserve the terminating signal. V8 termination only reports a
+            // generic runtime exit, so publish the kernel-owned signal status
+            // immediately after requesting isolate shutdown.
+            self.terminate().map_err(|error| {
+                HostServiceError::new("ERR_AGENTOS_EXECUTION_SHUTDOWN", error.to_string())
+            })?;
+            return Ok(ShutdownOutcome::Exited(ExecutionExit::Signaled {
+                signal,
+                core_dumped: false,
+            }));
+        }
+        self.terminate().map_err(|error| {
+            HostServiceError::new("ERR_AGENTOS_EXECUTION_SHUTDOWN", error.to_string())
         })?;
-        match *pending {
-            Some(PendingSyncRpcState::Pending(current)) if current == id => {
-                *pending = None;
-                Ok(PendingSyncRpcResolution::Pending)
-            }
-            Some(PendingSyncRpcState::TimedOut(current)) if current == id => {
-                Ok(PendingSyncRpcResolution::TimedOut)
-            }
-            _ => Ok(PendingSyncRpcResolution::Missing),
+        Ok(ShutdownOutcome::AwaitExit)
+    }
+
+    fn set_paused(&self, paused: bool) -> Result<(), HostServiceError> {
+        let result = if paused {
+            JavascriptExecution::pause(self)
+        } else {
+            JavascriptExecution::resume(self)
+        };
+        result.map_err(|error| {
+            HostServiceError::new("ERR_AGENTOS_EXECUTION_CONTROL", error.to_string())
+        })
+    }
+
+    fn write_stdin(&mut self, bytes: &[u8]) -> Result<(), HostServiceError> {
+        JavascriptExecution::write_stdin(self, bytes).map_err(|error| {
+            HostServiceError::new("ERR_AGENTOS_EXECUTION_STDIN", error.to_string())
+        })
+    }
+
+    fn close_stdin(&mut self) -> Result<(), HostServiceError> {
+        JavascriptExecution::close_stdin(self).map_err(|error| {
+            HostServiceError::new("ERR_AGENTOS_EXECUTION_STDIN", error.to_string())
+        })
+    }
+
+    fn deliver_signal_checkpoint(
+        &self,
+        identity: ExecutionWakeIdentity,
+        signal: i32,
+        delivery_token: u64,
+        _flags: u32,
+    ) -> Result<SignalCheckpointOutcome, HostServiceError> {
+        let Some(wake) = self.wake_handle(identity) else {
+            return Ok(if let Some(process_id) = self.native_process_id() {
+                SignalCheckpointOutcome::ForwardToProcess { process_id }
+            } else {
+                SignalCheckpointOutcome::Unsupported
+            });
+        };
+        wake.publish_signal(signal, delivery_token)
+            .map_err(|error| HostServiceError::new(error.code(), error.to_string()))?;
+        Ok(SignalCheckpointOutcome::Published)
+    }
+}
+
+impl JavascriptSyncRpcResponder {
+    pub fn claim(&self, id: u64) -> Result<bool, JavascriptExecutionError> {
+        match clear_pending_sync_rpc(&self.pending_sync_rpc, id)? {
+            PendingSyncRpcResolution::Pending => Ok(true),
+            PendingSyncRpcResolution::TimedOut | PendingSyncRpcResolution::Missing => Ok(false),
         }
     }
+
+    pub fn respond_success(&self, id: u64, result: Value) -> Result<(), JavascriptExecutionError> {
+        let phase_start = Instant::now();
+        match clear_pending_sync_rpc(&self.pending_sync_rpc, id)? {
+            PendingSyncRpcResolution::Pending => {}
+            PendingSyncRpcResolution::TimedOut => {
+                return Err(JavascriptExecutionError::ExpiredSyncRpcRequest(id));
+            }
+            PendingSyncRpcResolution::Missing => {}
+        }
+        record_sync_bridge_phase(
+            "sync_rpc_response",
+            "response_clear_pending",
+            phase_start.elapsed(),
+        );
+        self.respond_claimed_success(id, result)
+    }
+
+    pub fn respond_claimed_success(
+        &self,
+        id: u64,
+        result: Value,
+    ) -> Result<(), JavascriptExecutionError> {
+        let phase_start = Instant::now();
+        let payload = translate_legacy_bridge_value_to_v8(&result);
+        record_sync_bridge_phase(
+            "sync_rpc_response",
+            "response_translate_value",
+            phase_start.elapsed(),
+        );
+        let phase_start = Instant::now();
+        let payload = v8_runtime::json_to_cbor_payload(&payload)
+            .map_err(|error| JavascriptExecutionError::RpcResponse(error.to_string()))?;
+        record_sync_bridge_phase(
+            "sync_rpc_response",
+            "response_encode_cbor",
+            phase_start.elapsed(),
+        );
+        let phase_start = Instant::now();
+        let result = self
+            .v8_session
+            .send_bridge_response(id, 0, payload)
+            .map_err(javascript_bridge_response_error);
+        record_sync_bridge_phase("sync_rpc_response", "response_send", phase_start.elapsed());
+        result
+    }
+
+    pub fn respond_raw_success(
+        &self,
+        id: u64,
+        payload: Vec<u8>,
+    ) -> Result<(), JavascriptExecutionError> {
+        let phase_start = Instant::now();
+        match clear_pending_sync_rpc(&self.pending_sync_rpc, id)? {
+            PendingSyncRpcResolution::Pending => {}
+            PendingSyncRpcResolution::TimedOut => {
+                return Err(JavascriptExecutionError::ExpiredSyncRpcRequest(id));
+            }
+            PendingSyncRpcResolution::Missing => {}
+        }
+        record_sync_bridge_phase(
+            "sync_rpc_raw_response",
+            "response_clear_pending",
+            phase_start.elapsed(),
+        );
+        self.respond_claimed_raw_success(id, payload)
+    }
+
+    pub fn respond_claimed_raw_success(
+        &self,
+        id: u64,
+        payload: Vec<u8>,
+    ) -> Result<(), JavascriptExecutionError> {
+        let phase_start = Instant::now();
+        let result = self
+            .v8_session
+            .send_bridge_response(id, 2, payload)
+            .map_err(javascript_bridge_response_error);
+        record_sync_bridge_phase(
+            "sync_rpc_raw_response",
+            "response_send",
+            phase_start.elapsed(),
+        );
+        result
+    }
+
+    pub fn respond_error(
+        &self,
+        id: u64,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Result<(), JavascriptExecutionError> {
+        self.respond_host_error(id, HostServiceError::new(code.into(), message.into()))
+    }
+
+    pub fn respond_host_error(
+        &self,
+        id: u64,
+        error: HostServiceError,
+    ) -> Result<(), JavascriptExecutionError> {
+        match clear_pending_sync_rpc(&self.pending_sync_rpc, id)? {
+            PendingSyncRpcResolution::Pending => {}
+            PendingSyncRpcResolution::TimedOut => {
+                return Err(JavascriptExecutionError::ExpiredSyncRpcRequest(id));
+            }
+            PendingSyncRpcResolution::Missing => {}
+        }
+        self.respond_claimed_host_error(id, error)
+    }
+
+    pub fn respond_claimed_error(
+        &self,
+        id: u64,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Result<(), JavascriptExecutionError> {
+        self.respond_claimed_host_error(id, HostServiceError::new(code.into(), message.into()))
+    }
+
+    pub(crate) fn respond_claimed_host_error(
+        &self,
+        id: u64,
+        error: HostServiceError,
+    ) -> Result<(), JavascriptExecutionError> {
+        let payload = encode_host_service_error_payload(&error)?;
+        self.v8_session
+            .send_bridge_response(id, 1, payload)
+            .map_err(javascript_bridge_response_error)
+    }
+}
+
+impl DirectHostReplyTarget for JavascriptSyncRpcResponder {
+    fn claim(&self, call_id: u64) -> Result<bool, HostServiceError> {
+        JavascriptSyncRpcResponder::claim(self, call_id).map_err(host_reply_adapter_error)
+    }
+
+    fn respond(
+        &self,
+        call_id: u64,
+        claimed: bool,
+        result: Result<HostCallReply, HostServiceError>,
+    ) -> Result<(), HostServiceError> {
+        let response = match result {
+            Ok(HostCallReply::Empty) if claimed => {
+                self.respond_claimed_success(call_id, Value::Null)
+            }
+            Ok(HostCallReply::Empty) => self.respond_success(call_id, Value::Null),
+            Ok(HostCallReply::Json(value)) if claimed => {
+                self.respond_claimed_success(call_id, value)
+            }
+            Ok(HostCallReply::Json(value)) => self.respond_success(call_id, value),
+            Ok(HostCallReply::Raw(bytes)) if claimed => {
+                self.respond_claimed_raw_success(call_id, bytes)
+            }
+            Ok(HostCallReply::Raw(bytes)) => self.respond_raw_success(call_id, bytes),
+            Err(error) => {
+                if claimed {
+                    self.respond_claimed_host_error(call_id, error)
+                } else {
+                    self.respond_host_error(call_id, error)
+                }
+            }
+        };
+        map_host_reply_adapter_response(response)
+    }
+
+    fn dismiss_claimed(&self, _call_id: u64) -> Result<(), HostServiceError> {
+        // `claim` already removed the exact pending request. A successful
+        // exec replaces or destroys the old image, so sending a bridge reply
+        // would incorrectly resume instructions following execve(2).
+        Ok(())
+    }
+}
+
+fn clear_pending_sync_rpc(
+    pending_sync_rpc: &Arc<Mutex<PendingSyncRpcRegistry>>,
+    id: u64,
+) -> Result<PendingSyncRpcResolution, JavascriptExecutionError> {
+    let mut pending = pending_sync_rpc.lock().map_err(|_| {
+        JavascriptExecutionError::RpcResponse(String::from(
+            "sync RPC pending-request state lock poisoned",
+        ))
+    })?;
+    let resolution = match pending.states.remove(&id) {
+        Some(PendingSyncRpcState::Pending(_)) => PendingSyncRpcResolution::Pending,
+        Some(PendingSyncRpcState::TimedOut(_)) => PendingSyncRpcResolution::TimedOut,
+        None => PendingSyncRpcResolution::Missing,
+    };
+    pending.observe_depth();
+    Ok(resolution)
+}
+
+pub(crate) fn host_reply_adapter_error(error: JavascriptExecutionError) -> HostServiceError {
+    match error {
+        JavascriptExecutionError::PendingSyncRpcRequest(id) => HostServiceError::new(
+            "EBUSY",
+            JavascriptExecutionError::PendingSyncRpcRequest(id).to_string(),
+        )
+        .with_details(json!({ "callId": id })),
+        JavascriptExecutionError::PendingSyncRpcLimit { limit, observed } => {
+            HostServiceError::limit(
+                "ERR_AGENTOS_RESOURCE_LIMIT",
+                "limits.reactor.maxBridgeCalls",
+                limit as u64,
+                observed as u64,
+            )
+        }
+        JavascriptExecutionError::ExpiredSyncRpcRequest(id) => HostServiceError::new(
+            "ESTALE",
+            JavascriptExecutionError::ExpiredSyncRpcRequest(id).to_string(),
+        )
+        .with_details(json!({ "callId": id })),
+        other => HostServiceError::new("ERR_AGENTOS_ADAPTER_REPLY", other.to_string()),
+    }
+}
+
+pub(crate) fn map_host_reply_adapter_response(
+    response: Result<(), JavascriptExecutionError>,
+) -> Result<(), HostServiceError> {
+    match response {
+        Err(JavascriptExecutionError::BridgeSettlement(error))
+            if error.kind()
+                == agentos_v8_runtime::host_call::BridgeSettlementErrorKind::StaleCompletion =>
+        {
+            // The V8 registry emits this marker only after proving that this
+            // exact session generation owned a host-visible route which was
+            // canceled before its claimed completion arrived. Unknown call IDs
+            // and mismatched generations remain fatal and take the branch below.
+            eprintln!("INFO_AGENTOS_STALE_BRIDGE_COMPLETION: {error}");
+            Ok(())
+        }
+        Err(error) => Err(host_reply_adapter_error(error)),
+        Ok(()) => Ok(()),
+    }
+}
+
+fn encode_host_service_error_payload(
+    error: &HostServiceError,
+) -> Result<Vec<u8>, JavascriptExecutionError> {
+    v8_runtime::json_to_cbor_payload(&serde_json::json!({
+        "code": error.code,
+        "message": error.message,
+        "details": error.details,
+    }))
+    .map_err(|encode_error| JavascriptExecutionError::RpcResponse(encode_error.to_string()))
+}
+
+fn decode_bridge_call_args(
+    method: &str,
+    call_id: u64,
+    payload: &[u8],
+) -> Result<Vec<Value>, HostServiceError> {
+    v8_runtime::cbor_payload_to_json_args(payload).map_err(|error| {
+        HostServiceError::new(
+            "ERR_AGENTOS_BRIDGE_REQUEST_DECODE",
+            format!("failed to decode bridge request {method} for call_id={call_id}: {error}"),
+        )
+    })
 }
 
 impl Drop for JavascriptExecution {
@@ -2326,7 +2944,14 @@ impl Drop for JavascriptExecution {
         // warning/result and then finish when its per-session lane closes.
         // Aborting the task first would drop the lane while the session thread
         // was still completing teardown.
-        let _ = self.v8_session.destroy();
+        if self.session_destroyed {
+            return;
+        }
+        if let Err(error) = self.v8_session.destroy() {
+            eprintln!(
+                "ERR_AGENTOS_JAVASCRIPT_SESSION_TEARDOWN: failed to destroy V8 session during execution drop: {error}"
+            );
+        }
     }
 }
 
@@ -2868,8 +3493,7 @@ impl JavascriptExecutionEngine {
         } else {
             build_v8_user_code(&guest_entrypoint, &request.env)
         };
-        let user_code = prepend_v8_runtime_shim(
-            user_code,
+        let post_restore_script = build_v8_runtime_init_script(
             &guest_entrypoint,
             &process_argv,
             request.argv0.as_deref(),
@@ -2887,7 +3511,13 @@ impl JavascriptExecutionEngine {
         // Start the event bridge before execution so early sync bridge calls
         // made during module instantiation/evaluation cannot deadlock waiting
         // for a response while no host thread is draining session frames yet.
-        let pending_sync_rpc = Arc::new(Mutex::new(None));
+        let max_pending_sync_rpcs = runtime
+            .resources()
+            .configured_limit(ResourceClass::BridgeCalls)
+            .map_or(JAVASCRIPT_EVENT_CHANNEL_CAPACITY, |limit| limit.maximum);
+        let pending_sync_rpc = Arc::new(Mutex::new(PendingSyncRpcRegistry::new(
+            max_pending_sync_rpcs,
+        )));
         let exited = Arc::new(AtomicBool::new(false));
         let kernel_stdin = Arc::new(LocalKernelStdinBridge::default());
         let standalone_translator = translator.clone();
@@ -2938,7 +3568,7 @@ impl JavascriptExecutionEngine {
             mode: u8::from(use_module_mode) | if retain_context { 2 } else { 0 },
             file_path: execution_file_path,
             bridge_code: V8RuntimeHost::bridge_code().to_owned(),
-            post_restore_script: String::new(),
+            post_restore_script,
             userland_code: snapshot_userland_code,
             high_resolution_time: request.guest_runtime.high_resolution_time,
             user_code,
@@ -2973,6 +3603,7 @@ impl JavascriptExecutionEngine {
             kernel_stdin,
             _import_cache_guard: import_cache_guard,
             v8_session,
+            session_destroyed: false,
             prepared_execute,
             _event_bridge_task: event_bridge_task,
             module_resolution: Mutex::new((
@@ -3014,7 +3645,7 @@ impl JavascriptExecutionEngine {
 }
 
 fn set_pending_sync_rpc_state(
-    pending_sync_rpc: &Arc<Mutex<Option<PendingSyncRpcState>>>,
+    pending_sync_rpc: &Arc<Mutex<PendingSyncRpcRegistry>>,
     id: u64,
 ) -> Result<(), JavascriptExecutionError> {
     let mut pending = pending_sync_rpc.lock().map_err(|_| {
@@ -3022,7 +3653,18 @@ fn set_pending_sync_rpc_state(
             "sync RPC pending-request state lock poisoned",
         ))
     })?;
-    *pending = Some(PendingSyncRpcState::Pending(id));
+    if pending.states.contains_key(&id) {
+        return Err(JavascriptExecutionError::PendingSyncRpcRequest(id));
+    }
+    let observed = pending.states.len().saturating_add(1);
+    if observed > pending.maximum {
+        return Err(JavascriptExecutionError::PendingSyncRpcLimit {
+            limit: pending.maximum,
+            observed,
+        });
+    }
+    pending.states.insert(id, PendingSyncRpcState::Pending(id));
+    pending.observe_depth();
     Ok(())
 }
 
@@ -3161,7 +3803,7 @@ fn javascript_wall_clock_limit_ms(request: &StartJavascriptExecutionRequest) -> 
 fn spawn_javascript_sync_rpc_timeout(
     id: u64,
     timeout: Duration,
-    pending_state: Arc<Mutex<Option<PendingSyncRpcState>>>,
+    pending_state: Arc<Mutex<PendingSyncRpcRegistry>>,
     responses: Option<JavascriptSyncRpcResponseWriter>,
 ) {
     let Some(responses) = responses else {
@@ -3180,20 +3822,22 @@ fn spawn_javascript_sync_rpc_timeout(
     if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Timer, async move {
         tokio::time::sleep(timeout).await;
 
-        let should_timeout = match pending_state.lock() {
-            Ok(mut guard) if *guard == Some(PendingSyncRpcState::Pending(id)) => {
-                *guard = Some(PendingSyncRpcState::TimedOut(id));
-                true
-            }
-            Ok(_) => false,
-            Err(_) => false,
-        };
+        let should_timeout = pending_state
+            .lock()
+            .map(|mut guard| match guard.states.get_mut(&id) {
+                Some(state @ PendingSyncRpcState::Pending(_)) => {
+                    *state = PendingSyncRpcState::TimedOut(id);
+                    true
+                }
+                _ => false,
+            })
+            .unwrap_or(false);
 
         if !should_timeout {
             return;
         }
 
-        let _ = write_javascript_sync_rpc_response(
+        if let Err(error) = write_javascript_sync_rpc_response(
             &responses,
             json!({
                 "id": id,
@@ -3206,17 +3850,21 @@ fn spawn_javascript_sync_rpc_timeout(
                     ),
                 },
             }),
-        );
+        ) {
+            eprintln!(
+                "ERR_AGENTOS_SYNC_RPC_TIMEOUT_REPLY: failed to publish timeout response for call_id={id}: {error}"
+            );
+        }
     }) {
         eprintln!("ERR_AGENTOS_TASK_LIMIT: could not arm JavaScript sync RPC timeout: {error}");
     }
 }
 
 #[cfg(test)]
-fn parse_javascript_sync_rpc_request(line: &str) -> Result<JavascriptSyncRpcRequest, String> {
+fn parse_javascript_sync_rpc_request(line: &str) -> Result<HostRpcRequest, String> {
     let wire: JavascriptSyncRpcRequestWire =
         serde_json::from_str(line).map_err(|error| error.to_string())?;
-    Ok(JavascriptSyncRpcRequest {
+    Ok(HostRpcRequest {
         id: wire.id,
         method: wire.method,
         args: wire.args,
@@ -3537,8 +4185,7 @@ fn resolve_v8_entrypoint(cwd: &Path, entrypoint: &str) -> String {
 // Keep each injected process/runtime value explicit at this one serialization
 // boundary; grouping them would duplicate the already-typed guest config.
 #[allow(clippy::too_many_arguments)]
-fn prepend_v8_runtime_shim(
-    user_code: String,
+fn build_v8_runtime_init_script(
     entrypoint: &str,
     argv: &[String],
     argv0: Option<&str>,
@@ -3606,6 +4253,15 @@ fn prepend_v8_runtime_shim(
   const nextCwd = {cwd_json};
   const nextEnv = {env_json};
   const nextHighResolutionTime = {high_resolution_time};
+  const visibleEnv = Object.fromEntries(
+    Object.entries(nextEnv).filter(([key]) => !key.startsWith("AGENTOS_"))
+  );
+  Object.defineProperty(globalThis, "__agentOSProcessConfigEnv", {{
+    configurable: true,
+    enumerable: false,
+    value: nextEnv,
+    writable: true,
+  }});
   try {{
     const previousProcessConfig =
       typeof globalThis._processConfig === "object" && globalThis._processConfig !== null
@@ -3617,7 +4273,7 @@ fn prepend_v8_runtime_shim(
       value: Object.freeze({{
         ...previousProcessConfig,
         cwd: nextCwd,
-        env: nextEnv,
+        env: visibleEnv,
         argv: nextArgv,
         argv0: nextArgv0,
         high_resolution_time: nextHighResolutionTime,
@@ -3625,19 +4281,6 @@ fn prepend_v8_runtime_shim(
       writable: false,
     }});
   }} catch (_e) {{}}
-  if (typeof globalThis.__runtimeRefreshProcessConfig === "function") {{
-    globalThis.__runtimeRefreshProcessConfig();
-  }}
-  Object.defineProperty(globalThis, "__agentOSProcessConfigEnv", {{
-    configurable: true,
-    enumerable: false,
-    value: nextEnv,
-    writable: true,
-  }});
-  const visibleEnv = Object.fromEntries(
-    Object.entries(nextEnv).filter(([key]) => !key.startsWith("AGENTOS_"))
-  );
-
   // Refresh the process module's closure-backed state before user modules run.
   // Updating only globalThis.process leaves named ESM imports such as
   // `import {{ cwd }} from "process"` reading the warm snapshot's stale cwd.
@@ -3648,10 +4291,7 @@ fn prepend_v8_runtime_shim(
   if (typeof process !== "undefined") {{
     process.argv = nextArgv;
     process.argv0 = nextArgv0;
-    process.env = {{
-      ...(process.env || {{}}),
-      ...visibleEnv,
-    }};
+    process.env = {{ ...visibleEnv }};
     const configuredHeapLimitMb = {heap_limit_mb};
     if (Number.isFinite(configuredHeapLimitMb) && configuredHeapLimitMb > 0) {{
       Object.defineProperty(globalThis, "__agentOSV8HeapLimitBytes", {{
@@ -3663,14 +4303,19 @@ fn prepend_v8_runtime_shim(
     }}
     if (nextEnv.AGENTOS_ALLOW_PROCESS_BINDINGS === "1" && typeof process.binding === "function") {{
       const originalProcessBinding = process.binding.bind(process);
+      let constantsBinding = null;
+      try {{
+        const bindingRequire = globalThis._moduleModule?.createRequire?.(
+          nextCwd === "/"
+            ? "/__agentos_runtime__.js"
+            : `${{nextCwd.replace(/\/+$/, "")}}/__agentos_runtime__.js`,
+        );
+        constantsBinding = bindingRequire?.("node:constants") ?? null;
+        constantsBinding = constantsBinding?.default ?? constantsBinding;
+      }} catch (_e) {{}}
       process.binding = (name) => {{
         const bindingName = String(name);
-        if (
-          bindingName === "constants" &&
-          typeof __agentOSConstantsBinding !== "undefined"
-        ) {{
-          const constantsBinding =
-            __agentOSConstantsBinding.default ?? __agentOSConstantsBinding;
+        if (bindingName === "constants" && constantsBinding !== null) {{
           return {{
             fs: constantsBinding,
             crypto: constantsBinding,
@@ -3721,6 +4366,9 @@ fn prepend_v8_runtime_shim(
     if (typeof __guestIdentity.execPath === "string" && __guestIdentity.execPath.length > 0) {{
       process.execPath = __guestIdentity.execPath;
     }}
+    globalThis.__runtimeStreamStdin = nextEnv.AGENTOS_KEEP_STDIN_OPEN === "1";
+    globalThis.__runtimeKernelStdin =
+      nextEnv.AGENTOS_FORWARD_KERNEL_STDIN_RPC === "1";
     if (nextEnv.AGENTOS_NODE_IPC === "1" && typeof __runtimeInstallProcessIpcBridge === "function") {{
       process.connected = true;
       __runtimeInstallProcessIpcBridge();
@@ -3865,8 +4513,7 @@ fn prepend_v8_runtime_shim(
       ].forEach(__dropGlobal);
     }}
   }}
-}})();
-{user_code}"#
+}})();"#
     )
 }
 
@@ -3879,7 +4526,7 @@ fn prepend_v8_runtime_shim(
 fn spawn_v8_event_bridge(
     runtime: &RuntimeContext,
     frame_receiver: V8SessionFrameReceiver,
-    pending_sync_rpc: Arc<Mutex<Option<PendingSyncRpcState>>>,
+    pending_sync_rpc: Arc<Mutex<PendingSyncRpcRegistry>>,
     exited: Arc<AtomicBool>,
     v8_session: V8SessionHandle,
     mut local_bridge: LocalBridgeState,
@@ -3916,8 +4563,30 @@ fn spawn_v8_event_bridge(
                     } => {
                         // Convert CBOR payload to JSON args
                         let phase_start = Instant::now();
-                        let args =
-                            v8_runtime::cbor_payload_to_json_args(&payload).unwrap_or_default();
+                        let args = match decode_bridge_call_args(&method, call_id, &payload) {
+                            Ok(args) => args,
+                            Err(host_error) => {
+                                let encoded = match encode_host_service_error_payload(&host_error) {
+                                    Ok(encoded) => encoded,
+                                    Err(error) => {
+                                        terminate_session_after_bridge_encoding_failure(
+                                            &v8_session,
+                                            call_id,
+                                            &error.to_string(),
+                                        );
+                                        break;
+                                    }
+                                };
+                                if let Err(reply_error) =
+                                    v8_session.send_bridge_response(call_id, 1, encoded)
+                                {
+                                    eprintln!(
+                                        "INFO_AGENTOS_STALE_BRIDGE_COMPLETION: failed to send typed decode error for call_id={call_id}: {reply_error}"
+                                    );
+                                }
+                                continue;
+                            }
+                        };
                         record_sync_bridge_phase(
                             &method,
                             "event_decode_args",
@@ -3952,16 +4621,43 @@ fn spawn_v8_event_bridge(
                             if let Some(response) =
                                 local_bridge.handle_internal_bridge_call(call_id, &method, &args)
                             {
-                                if let LocalBridgeCallResult::Immediate(response) = response {
-                                    let cbor_payload = v8_runtime::json_to_cbor_payload(&response)
-                                        .unwrap_or_default();
-                                    if let Err(error) =
-                                        v8_session.send_bridge_response(call_id, 0, cbor_payload)
-                                    {
-                                        eprintln!(
-                                            "INFO_AGENTOS_STALE_BRIDGE_COMPLETION: call_id={call_id} error={error}"
-                                        );
+                                let encoded = match response {
+                                    LocalBridgeCallResult::Immediate(response) => {
+                                        match v8_runtime::json_to_cbor_payload(&response) {
+                                            Ok(payload) => (0, payload),
+                                            Err(error) => {
+                                                terminate_session_after_bridge_encoding_failure(
+                                                    &v8_session,
+                                                    call_id,
+                                                    &error.to_string(),
+                                                );
+                                                break;
+                                            }
+                                        }
                                     }
+                                    LocalBridgeCallResult::Error(error) => {
+                                        match encode_host_service_error_payload(&error) {
+                                            Ok(payload) => (1, payload),
+                                            Err(error) => {
+                                                terminate_session_after_bridge_encoding_failure(
+                                                    &v8_session,
+                                                    call_id,
+                                                    &error.to_string(),
+                                                );
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    LocalBridgeCallResult::Deferred => continue,
+                                };
+                                if let Err(error) = v8_session.send_bridge_response(
+                                    call_id,
+                                    encoded.0,
+                                    encoded.1,
+                                ) {
+                                    eprintln!(
+                                        "INFO_AGENTOS_STALE_BRIDGE_COMPLETION: call_id={call_id} error={error}"
+                                    );
                                 }
                                 continue;
                             }
@@ -3971,10 +4667,21 @@ fn spawn_v8_event_bridge(
                         if method == "_log" || method == "_error" {
                             let output = decode_bridge_output_args(&args);
                             // Respond to the bridge call
+                            let null_payload = match v8_runtime::json_to_cbor_payload(&Value::Null) {
+                                Ok(payload) => payload,
+                                Err(error) => {
+                                    terminate_session_after_bridge_encoding_failure(
+                                        &v8_session,
+                                        call_id,
+                                        &error.to_string(),
+                                    );
+                                    break;
+                                }
+                            };
                             if let Err(error) = v8_session.send_bridge_response(
                                 call_id,
                                 0,
-                                v8_runtime::json_to_cbor_payload(&Value::Null).unwrap_or_default(),
+                                null_payload,
                             ) {
                                 eprintln!(
                                     "INFO_AGENTOS_STALE_BRIDGE_COMPLETION: call_id={call_id} error={error}"
@@ -4016,10 +4723,34 @@ fn spawn_v8_event_bridge(
                             phase_start.elapsed(),
                         );
 
-                        // Track pending sync RPC
+                        // Track exactly one pending sync RPC. A malformed or
+                        // timed-out guest that submits another call before the
+                        // old host operation settles receives a typed busy
+                        // reply; the original waiter is never overwritten.
                         let phase_start = Instant::now();
-                        if let Ok(mut pending) = pending_sync_rpc.lock() {
-                            *pending = Some(PendingSyncRpcState::Pending(call_id));
+                        if let Err(error) =
+                            set_pending_sync_rpc_state(&pending_sync_rpc, call_id)
+                        {
+                            let host_error = host_reply_adapter_error(error);
+                            let payload = match encode_host_service_error_payload(&host_error) {
+                                Ok(payload) => payload,
+                                Err(error) => {
+                                    terminate_session_after_bridge_encoding_failure(
+                                        &v8_session,
+                                        call_id,
+                                        &error.to_string(),
+                                    );
+                                    break;
+                                }
+                            };
+                            if let Err(reply_error) =
+                                v8_session.send_bridge_response(call_id, 1, payload)
+                            {
+                                eprintln!(
+                                    "INFO_AGENTOS_STALE_BRIDGE_COMPLETION: call_id={call_id} error={reply_error}"
+                                );
+                            }
+                            continue;
                         }
                         record_sync_bridge_phase(
                             &method,
@@ -4030,16 +4761,16 @@ fn spawn_v8_event_bridge(
                         let phase_start = Instant::now();
                         let request_args = translate_request_args_for_legacy(sidecar_method, &args);
                         let mut raw_bytes_args = HashMap::new();
-                        if sidecar_method == "net.write"
-                            || sidecar_method == "fs.writeSync"
-                            || sidecar_method == "fs.writevSync"
-                            || sidecar_method == "fs.writeFileSync"
-                            || sidecar_method == "crypto.hashUpdate"
-                        {
+                        // Preserve every CBOR byte-string argument losslessly.
+                        // Host-operation decoders, not the V8 bridge, own the
+                        // method schema; a per-method allowlist here silently
+                        // converted new binary syscall arguments into opaque
+                        // JSON placeholders (for example sendmsg payloads).
+                        for index in 0..args.len() {
                             if let Ok(Some(bytes)) =
-                                v8_runtime::cbor_payload_raw_byte_arg(&payload, 1)
+                                v8_runtime::cbor_payload_raw_byte_arg(&payload, index)
                             {
-                                raw_bytes_args.insert(1, bytes);
+                                raw_bytes_args.insert(index, bytes);
                             }
                         }
                         if method == "_fsReadRaw" || method == "_fsReadFileRangeRaw" {
@@ -4051,7 +4782,7 @@ fn spawn_v8_event_bridge(
                             phase_start.elapsed(),
                         );
                         Some(JavascriptExecutionEvent::SyncRpcRequest(
-                            JavascriptSyncRpcRequest {
+                            HostRpcRequest {
                                 id: call_id,
                                 method: sidecar_method.to_owned(),
                                 args: request_args,
@@ -4177,6 +4908,21 @@ fn spawn_v8_event_bridge(
         })?;
 
     Ok((receiver, task))
+}
+
+fn terminate_session_after_bridge_encoding_failure(
+    session: &V8SessionHandle,
+    call_id: u64,
+    error: &str,
+) {
+    eprintln!(
+        "ERR_AGENTOS_BRIDGE_RESPONSE_ENCODE: failed to encode bridge response for call_id={call_id}: {error}; terminating the JavaScript session"
+    );
+    if let Err(destroy_error) = session.destroy() {
+        eprintln!(
+            "ERR_AGENTOS_BRIDGE_RESPONSE_TEARDOWN: failed to terminate JavaScript session after bridge encoding failure for call_id={call_id}: {destroy_error}"
+        );
+    }
 }
 
 async fn send_javascript_event_async(
@@ -4338,6 +5084,10 @@ impl LocalBridgeState {
                 let resolved = self.with_module_resolver(|resolver| {
                     resolver.resolve_module(specifier, parent, mode)
                 });
+                let resolved = match resolved {
+                    Ok(resolved) => resolved,
+                    Err(error) => return Some(LocalBridgeCallResult::Error(error)),
+                };
                 if resolved.is_none() && self.has_module_reader() {
                     return None;
                 }
@@ -4346,7 +5096,11 @@ impl LocalBridgeState {
                 ))
             }
             "_moduleFormat" => {
-                let format = self.module_format(args.first().and_then(Value::as_str).unwrap_or(""));
+                let format =
+                    match self.module_format(args.first().and_then(Value::as_str).unwrap_or("")) {
+                        Ok(format) => format,
+                        Err(error) => return Some(LocalBridgeCallResult::Error(error)),
+                    };
                 if format.is_none() && self.has_module_reader() {
                     return None;
                 }
@@ -4357,7 +5111,11 @@ impl LocalBridgeState {
                 ))
             }
             "_loadFile" | "_loadFileSync" => {
-                let source = self.load_file(args.first().and_then(Value::as_str).unwrap_or(""));
+                let source =
+                    match self.load_file(args.first().and_then(Value::as_str).unwrap_or("")) {
+                        Ok(source) => source,
+                        Err(error) => return Some(LocalBridgeCallResult::Error(error)),
+                    };
                 if source.is_none() && self.has_module_reader() {
                     return None;
                 }
@@ -4366,7 +5124,10 @@ impl LocalBridgeState {
                 ))
             }
             "_batchResolveModules" => {
-                let resolved = self.batch_resolve_modules(args);
+                let resolved = match self.batch_resolve_modules(args) {
+                    Ok(resolved) => resolved,
+                    Err(error) => return Some(LocalBridgeCallResult::Error(error)),
+                };
                 if self.has_module_reader()
                     && resolved
                         .as_array()
@@ -4382,8 +5143,11 @@ impl LocalBridgeState {
             "_cryptoRandomFill" => {
                 let size = args.first().and_then(Value::as_u64).unwrap_or(16) as usize;
                 let mut bytes = vec![0u8; size];
-                if getrandom(&mut bytes).is_err() {
-                    return Some(LocalBridgeCallResult::Immediate(Value::Null));
+                if let Err(error) = getrandom(&mut bytes) {
+                    return Some(LocalBridgeCallResult::Error(HostServiceError::new(
+                        "ERR_AGENTOS_ENTROPY_UNAVAILABLE",
+                        format!("failed to fill the guest random buffer: {error}"),
+                    )));
                 }
                 Some(LocalBridgeCallResult::Immediate(Value::String(
                     v8_runtime::base64_encode_pub(&bytes),
@@ -4391,8 +5155,11 @@ impl LocalBridgeState {
             }
             "_cryptoRandomUUID" => {
                 let mut bytes = [0u8; 16];
-                if getrandom(&mut bytes).is_err() {
-                    return Some(LocalBridgeCallResult::Immediate(Value::Null));
+                if let Err(error) = getrandom(&mut bytes) {
+                    return Some(LocalBridgeCallResult::Error(HostServiceError::new(
+                        "ERR_AGENTOS_ENTROPY_UNAVAILABLE",
+                        format!("failed to generate a guest UUID: {error}"),
+                    )));
                 }
                 bytes[6] = (bytes[6] & 0x0f) | 0x40;
                 bytes[8] = (bytes[8] & 0x3f) | 0x80;
@@ -4441,12 +5208,39 @@ impl LocalBridgeState {
                 .map(Value::String)
                 .unwrap_or(Value::Null);
         }
-        let (dispatch_method, payload_json) = dispatch
+        let Some((dispatch_method, payload_json)) = dispatch
             .strip_prefix("__bd:")
             .and_then(|value| value.split_once(':'))
-            .unwrap_or(("", "[]"));
-        let payload = serde_json::from_str::<Value>(payload_json).unwrap_or_else(|_| json!([]));
-        let args = payload.as_array().cloned().unwrap_or_default();
+        else {
+            return Value::String(
+                timer_dispatch_error(javascript_timer_error(
+                    "ERR_AGENTOS_BRIDGE_DISPATCH_DECODE",
+                    "malformed bridge dispatch envelope",
+                ))
+                .to_string(),
+            );
+        };
+        let payload = match serde_json::from_str::<Value>(payload_json) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return Value::String(
+                    timer_dispatch_error(javascript_timer_error(
+                        "ERR_AGENTOS_BRIDGE_DISPATCH_DECODE",
+                        format!("invalid dispatch payload: {error}"),
+                    ))
+                    .to_string(),
+                );
+            }
+        };
+        let Some(args) = payload.as_array() else {
+            return Value::String(
+                timer_dispatch_error(javascript_timer_error(
+                    "ERR_AGENTOS_BRIDGE_DISPATCH_DECODE",
+                    "dispatch payload must be an array",
+                ))
+                .to_string(),
+            );
+        };
         let result = match dispatch_method {
             "kernelHandleRegister" => {
                 if let (Some(id), Some(description)) = (
@@ -4533,41 +5327,58 @@ impl LocalBridgeState {
         }
     }
 
-    fn create_kernel_timer(&mut self, delay_ms: u64, repeat: bool) -> Result<u64, String> {
+    fn create_kernel_timer(
+        &mut self,
+        delay_ms: u64,
+        repeat: bool,
+    ) -> Result<u64, HostServiceError> {
         self.register_timer(delay_ms, repeat)
     }
 
     /// Allocate a fresh timer id and register a one-shot (`repeat == false`)
     /// tracking entry at generation 0. Used by the bridge-timer path so the
     /// queued wheel action can be cancelled (its entry removed) on `clear`/teardown.
-    fn register_oneshot_timer(&mut self, delay_ms: u64) -> Result<u64, String> {
+    fn register_oneshot_timer(&mut self, delay_ms: u64) -> Result<u64, HostServiceError> {
         self.register_timer(delay_ms, false)
     }
 
-    fn register_timer(&mut self, delay_ms: u64, repeat: bool) -> Result<u64, String> {
+    fn register_timer(&mut self, delay_ms: u64, repeat: bool) -> Result<u64, HostServiceError> {
         let mut timers = self.timers.lock().map_err(|_| {
-            String::from(
-                "ERR_AGENTOS_JAVASCRIPT_TIMER_STATE: JavaScript timer registry lock poisoned",
+            javascript_timer_error(
+                "ERR_AGENTOS_JAVASCRIPT_TIMER_STATE",
+                "JavaScript timer registry lock poisoned",
             )
         })?;
         if timers.len() >= self.max_timers {
-            return Err(format!(
-                "ERR_AGENTOS_JAVASCRIPT_TIMER_LIMIT: execution exceeded {} active timers; raise limits.jsRuntime.maxTimers",
-                self.max_timers
+            return Err(HostServiceError::limit(
+                "ERR_AGENTOS_JAVASCRIPT_TIMER_LIMIT",
+                "limits.jsRuntime.maxTimers",
+                self.max_timers as u64,
+                timers.len().saturating_add(1) as u64,
             ));
         }
         let reservation = self
             .timer_resources
             .as_ref()
             .ok_or_else(|| {
-                String::from(
-                    "ERR_AGENTOS_RUNTIME_NOT_INJECTED: JavaScript timers require a resource ledger",
+                javascript_timer_error(
+                    "ERR_AGENTOS_RUNTIME_NOT_INJECTED",
+                    "JavaScript timers require a resource ledger",
                 )
             })?
             .reserve(agentos_runtime::accounting::ResourceClass::Timers, 1)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                javascript_timer_error("ERR_AGENTOS_RESOURCE_LIMIT", error.to_string())
+                    .with_details(json!({
+                        "limitName": "limits.jsRuntime.maxTimers",
+                        "requested": 1,
+                    }))
+            })?;
         let timer_id = self.next_timer_id.checked_add(1).ok_or_else(|| {
-            String::from("ERR_AGENTOS_JAVASCRIPT_TIMER_ID_EXHAUSTED: execution exhausted timer IDs")
+            javascript_timer_error(
+                "ERR_AGENTOS_JAVASCRIPT_TIMER_ID_EXHAUSTED",
+                "execution exhausted timer IDs",
+            )
         })?;
         self.next_timer_id = timer_id;
         timers.insert(
@@ -4582,33 +5393,40 @@ impl LocalBridgeState {
         Ok(timer_id)
     }
 
-    fn arm_kernel_timer(&self, timer_id: u64) -> Result<(), String> {
+    fn arm_kernel_timer(&self, timer_id: u64) -> Result<(), HostServiceError> {
         let Some(session) = self.v8_session.clone() else {
-            return Err(String::from(
-                "ERR_AGENTOS_JAVASCRIPT_TIMER_SESSION: timer has no live V8 session",
+            return Err(javascript_timer_error(
+                "ERR_AGENTOS_JAVASCRIPT_TIMER_SESSION",
+                "timer has no live V8 session",
             ));
         };
 
         let (delay_ms, generation, timers) = {
             let mut timers = self.timers.lock().map_err(|_| {
-                String::from(
-                    "ERR_AGENTOS_JAVASCRIPT_TIMER_STATE: JavaScript timer registry lock poisoned",
+                javascript_timer_error(
+                    "ERR_AGENTOS_JAVASCRIPT_TIMER_STATE",
+                    "JavaScript timer registry lock poisoned",
                 )
             })?;
             let entry = timers.get_mut(&timer_id).ok_or_else(|| {
-                format!("ERR_AGENTOS_JAVASCRIPT_TIMER_UNKNOWN: unknown timer {timer_id}")
+                javascript_timer_error(
+                    "ERR_AGENTOS_JAVASCRIPT_TIMER_UNKNOWN",
+                    format!("unknown timer {timer_id}"),
+                )
             })?;
             entry.generation = entry.generation.checked_add(1).ok_or_else(|| {
-                format!(
-                    "ERR_AGENTOS_JAVASCRIPT_TIMER_GENERATION_EXHAUSTED: timer {timer_id} exhausted generations"
+                javascript_timer_error(
+                    "ERR_AGENTOS_JAVASCRIPT_TIMER_GENERATION_EXHAUSTED",
+                    format!("timer {timer_id} exhausted generations"),
                 )
             })?;
             (entry.delay_ms, entry.generation, self.timers.clone())
         };
 
         let runtime = self.runtime.as_ref().ok_or_else(|| {
-            String::from(
-                "ERR_AGENTOS_RUNTIME_NOT_INJECTED: JavaScript timers require a process RuntimeContext",
+            javascript_timer_error(
+                "ERR_AGENTOS_RUNTIME_NOT_INJECTED",
+                "JavaScript timers require a process RuntimeContext",
             )
         })?;
         TimerWheel::get(runtime)?.schedule(
@@ -4645,7 +5463,7 @@ impl LocalBridgeState {
         let timer_id = match self.register_oneshot_timer(delay_ms) {
             Ok(timer_id) => timer_id,
             Err(error) => {
-                settle_timer_bridge_response(&session, call_id, 1, error.into_bytes());
+                settle_timer_bridge_response(&session, call_id, 1, error.to_string().into_bytes());
                 return;
             }
         };
@@ -4662,7 +5480,7 @@ impl LocalBridgeState {
             Ok(wheel) => wheel,
             Err(error) => {
                 self.clear_kernel_timer(timer_id);
-                settle_timer_bridge_response(&session, call_id, 1, error.into_bytes());
+                settle_timer_bridge_response(&session, call_id, 1, error.to_string().into_bytes());
                 return;
             }
         };
@@ -4677,7 +5495,7 @@ impl LocalBridgeState {
             },
         ) {
             self.clear_kernel_timer(timer_id);
-            settle_timer_bridge_response(&session, call_id, 1, error.into_bytes());
+            settle_timer_bridge_response(&session, call_id, 1, error.to_string().into_bytes());
         }
     }
 
@@ -4685,7 +5503,7 @@ impl LocalBridgeState {
         self.module_reader.is_some()
     }
 
-    fn batch_resolve_modules(&mut self, args: &[Value]) -> Value {
+    fn batch_resolve_modules(&mut self, args: &[Value]) -> Result<Value, HostServiceError> {
         self.with_module_resolver(|resolver| resolver.batch_resolve_modules(args))
     }
 
@@ -4694,16 +5512,18 @@ impl LocalBridgeState {
         specifier: &str,
         from_dir: &str,
         mode: ModuleResolveMode,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, HostServiceError> {
         if self.js_runtime_denies_specifier(specifier) {
             if std::env::var("AGENTOS_MODULE_READER_TRACE").is_ok() {
                 eprintln!("resolve DENIED: {specifier} from {from_dir}");
             }
-            return None;
+            return Ok(None);
         }
         let resolved = self
             .with_module_resolver(|resolver| resolver.resolve_module(specifier, from_dir, mode));
-        if resolved.is_none() && std::env::var("AGENTOS_MODULE_READER_TRACE").is_ok() {
+        if resolved.as_ref().is_ok_and(Option::is_none)
+            && std::env::var("AGENTOS_MODULE_READER_TRACE").is_ok()
+        {
             eprintln!("resolve MISS: {specifier} from {from_dir} mode={mode:?}");
         }
         resolved
@@ -4731,11 +5551,14 @@ impl LocalBridgeState {
         }
     }
 
-    fn module_format(&mut self, path: &str) -> Option<LocalResolvedModuleFormat> {
+    fn module_format(
+        &mut self,
+        path: &str,
+    ) -> Result<Option<LocalResolvedModuleFormat>, HostServiceError> {
         self.with_module_resolver(|resolver| resolver.module_format(path))
     }
 
-    fn load_file(&mut self, path: &str) -> Option<String> {
+    fn load_file(&mut self, path: &str) -> Result<Option<String>, HostServiceError> {
         self.with_module_resolver(|resolver| resolver.load_file(path))
     }
 
@@ -4764,44 +5587,81 @@ impl LocalBridgeState {
 }
 
 impl ModuleFsReader for &mut dyn ModuleFsReader {
-    fn canonical_guest_path(&mut self, guest_path: &str) -> Option<String> {
+    fn canonical_guest_path(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<Option<String>, HostServiceError> {
         (**self).canonical_guest_path(guest_path)
     }
 
-    fn read_to_string(&mut self, guest_path: &str) -> Option<String> {
+    fn read_to_string(&mut self, guest_path: &str) -> Result<Option<String>, HostServiceError> {
         (**self).read_to_string(guest_path)
     }
 
-    fn path_is_dir(&mut self, guest_path: &str) -> Option<bool> {
+    fn path_is_dir(&mut self, guest_path: &str) -> Result<Option<bool>, HostServiceError> {
         (**self).path_is_dir(guest_path)
     }
 
-    fn path_exists(&mut self, guest_path: &str) -> bool {
+    fn path_exists(&mut self, guest_path: &str) -> Result<bool, HostServiceError> {
         (**self).path_exists(guest_path)
     }
 }
 
 impl ModuleFsReader for &mut GuestPathTranslator {
-    fn canonical_guest_path(&mut self, guest_path: &str) -> Option<String> {
-        GuestPathTranslator::canonical_guest_path(self, guest_path)
+    fn canonical_guest_path(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<Option<String>, HostServiceError> {
+        self.canonical_module_guest_path(guest_path)
     }
 
-    fn read_to_string(&mut self, guest_path: &str) -> Option<String> {
-        let host_path = self.guest_to_host(guest_path)?;
-        fs::read_to_string(host_path).ok()
+    fn read_to_string(&mut self, guest_path: &str) -> Result<Option<String>, HostServiceError> {
+        let Some(host_path) = self.module_guest_to_host(guest_path)? else {
+            return Ok(None);
+        };
+        match fs::read_to_string(&host_path) {
+            Ok(contents) => Ok(Some(contents)),
+            Err(error) if module_fs_io_is_missing(&error) => Ok(None),
+            Err(error) => Err(module_fs_io_error("read", guest_path, error)),
+        }
     }
 
-    fn path_is_dir(&mut self, guest_path: &str) -> Option<bool> {
-        self.guest_to_host(guest_path)
-            .and_then(|host_path| fs::metadata(host_path).ok())
-            .map(|metadata| metadata.is_dir())
+    fn path_is_dir(&mut self, guest_path: &str) -> Result<Option<bool>, HostServiceError> {
+        let Some(host_path) = self.module_guest_to_host(guest_path)? else {
+            return Ok(None);
+        };
+        match fs::metadata(&host_path) {
+            Ok(metadata) => Ok(Some(metadata.is_dir())),
+            Err(error) if module_fs_io_is_missing(&error) => Ok(None),
+            Err(error) => Err(module_fs_io_error("stat", guest_path, error)),
+        }
     }
 
-    fn path_exists(&mut self, guest_path: &str) -> bool {
-        self.guest_to_host(guest_path)
-            .map(|host_path| host_path.exists())
-            .unwrap_or(false)
+    fn path_exists(&mut self, guest_path: &str) -> Result<bool, HostServiceError> {
+        Ok(self.path_is_dir(guest_path)?.is_some())
     }
+}
+
+fn module_fs_io_is_missing(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(2 | 20)) || error.kind() == std::io::ErrorKind::NotFound
+}
+
+fn module_fs_io_error(
+    operation: &str,
+    guest_path: &str,
+    error: std::io::Error,
+) -> HostServiceError {
+    let code = match error.raw_os_error() {
+        Some(2) => "ENOENT",
+        Some(13) => "EACCES",
+        Some(20) => "ENOTDIR",
+        Some(40) => "ELOOP",
+        _ => "EIO",
+    };
+    HostServiceError::new(
+        code,
+        format!("module filesystem {operation} failed for {guest_path}: {error}"),
+    )
 }
 
 /// Standard Node module resolution executed as pure path algebra over a
@@ -4821,32 +5681,52 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
         Self { reader, cache }
     }
 
-    pub fn batch_resolve_modules(&mut self, args: &[Value]) -> Value {
+    pub fn batch_resolve_modules(&mut self, args: &[Value]) -> Result<Value, HostServiceError> {
         let requests = args
             .first()
             .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        Value::Array(
-            requests
-                .into_iter()
-                .map(|request| {
-                    let pair = request.as_array().cloned().unwrap_or_default();
-                    let specifier = pair.first().and_then(Value::as_str).unwrap_or("");
-                    let referrer = pair.get(1).and_then(Value::as_str).unwrap_or("/");
-                    self.resolve_module(specifier, referrer, ModuleResolveMode::Import)
-                        .and_then(|resolved| {
-                            self.load_file(&resolved).map(|source| {
-                                json!({
-                                    "resolved": resolved,
-                                    "source": source,
-                                })
-                            })
-                        })
-                        .unwrap_or(Value::Null)
+            .ok_or_else(|| {
+                HostServiceError::new(
+                    "EINVAL",
+                    "batch module resolution requires an array of [specifier, referrer] pairs",
+                )
+            })?
+            .clone();
+        let mut results = Vec::with_capacity(requests.len());
+        for (index, request) in requests.into_iter().enumerate() {
+            let pair = request.as_array().ok_or_else(|| {
+                HostServiceError::new(
+                    "EINVAL",
+                    format!("batch module request {index} must be an array pair"),
+                )
+            })?;
+            let specifier = pair.first().and_then(Value::as_str).ok_or_else(|| {
+                HostServiceError::new(
+                    "EINVAL",
+                    format!("batch module request {index} requires a string specifier"),
+                )
+            })?;
+            let referrer = pair.get(1).and_then(Value::as_str).ok_or_else(|| {
+                HostServiceError::new(
+                    "EINVAL",
+                    format!("batch module request {index} requires a string referrer"),
+                )
+            })?;
+            let value = if let Some(resolved) =
+                self.resolve_module(specifier, referrer, ModuleResolveMode::Import)?
+            {
+                self.load_file(&resolved)?.map_or(Value::Null, |source| {
+                    json!({
+                        "resolved": resolved,
+                        "source": source,
+                    })
                 })
-                .collect(),
-        )
+            } else {
+                Value::Null
+            };
+            results.push(value);
+        }
+        Ok(Value::Array(results))
     }
 
     pub fn resolve_module(
@@ -4854,39 +5734,44 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
         specifier: &str,
         from_dir: &str,
         mode: ModuleResolveMode,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, HostServiceError> {
         let normalized_from_path = self
             .reader
-            .canonical_guest_path(from_dir)
+            .canonical_guest_path(from_dir)?
             .unwrap_or_else(|| normalize_guest_path(from_dir));
-        let normalized_from = if self.cached_stat(&normalized_from_path) == Some(false) {
+        let normalized_from = if self.cached_stat(&normalized_from_path)? == Some(false) {
             dirname_guest_path(&normalized_from_path)
         } else {
             normalize_module_resolve_context(&normalized_from_path)
         };
         let cache_key = (specifier.to_owned(), normalized_from.clone(), mode);
         if let Some(cached) = self.cache.resolve_results.get(&cache_key) {
-            return cached.clone();
+            return Ok(cached.clone());
         }
 
         let resolved = if let Some(builtin) = normalize_builtin_specifier(specifier) {
             Some(builtin)
         } else if specifier.starts_with("file:") {
-            guest_path_from_file_url(specifier)
-                .and_then(|file_path| self.resolve_path(&file_path, mode))
+            match guest_path_from_file_url(specifier) {
+                Some(file_path) => self.resolve_path(&file_path, mode)?,
+                None => None,
+            }
         } else if specifier.starts_with('/') {
-            self.resolve_path(specifier, mode)
+            self.resolve_path(specifier, mode)?
         } else if specifier.starts_with("./")
             || specifier.starts_with("../")
             || specifier == "."
             || specifier == ".."
         {
-            self.resolve_path(&join_guest_path(&normalized_from, specifier), mode)
+            self.resolve_path(&join_guest_path(&normalized_from, specifier), mode)?
         } else if specifier.starts_with('#') {
-            self.resolve_package_imports(specifier, &normalized_from, mode)
+            self.resolve_package_imports(specifier, &normalized_from, mode)?
         } else {
-            self.resolve_package_self_reference(specifier, &normalized_from, mode)
-                .or_else(|| self.resolve_node_modules(specifier, &normalized_from, mode))
+            let own = self.resolve_package_self_reference(specifier, &normalized_from, mode)?;
+            match own {
+                Some(resolved) => Some(resolved),
+                None => self.resolve_node_modules(specifier, &normalized_from, mode)?,
+            }
         };
 
         if resolved.is_some() || module_resolution_miss_is_stable(&normalized_from) {
@@ -4894,17 +5779,19 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
                 .resolve_results
                 .insert(cache_key, resolved.clone());
         }
-        resolved
+        Ok(resolved)
     }
 
-    pub fn load_file(&mut self, path: &str) -> Option<String> {
+    pub fn load_file(&mut self, path: &str) -> Result<Option<String>, HostServiceError> {
         let bare = path.trim_start_matches("node:");
         if is_builtin_specifier(path) {
-            return Some(build_builtin_module_wrapper(bare));
+            return Ok(Some(build_builtin_module_wrapper(bare)));
         }
 
-        let source = self.reader.read_to_string(path)?;
-        Some(
+        let Some(source) = self.reader.read_to_string(path)? else {
+            return Ok(None);
+        };
+        Ok(Some(
             if matches!(
                 Path::new(path).extension().and_then(|ext| ext.to_str()),
                 Some("js" | "mjs" | "cjs")
@@ -4913,55 +5800,66 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
             } else {
                 source
             },
-        )
+        ))
     }
 
-    pub fn module_format(&mut self, path: &str) -> Option<LocalResolvedModuleFormat> {
+    pub fn module_format(
+        &mut self,
+        path: &str,
+    ) -> Result<Option<LocalResolvedModuleFormat>, HostServiceError> {
         if let Some(cached) = self.cache.module_format_results.get(path) {
-            return *cached;
+            return Ok(*cached);
         }
 
-        let format = self.detect_module_format(path);
+        let format = self.detect_module_format(path)?;
         self.cache
             .module_format_results
             .insert(path.to_owned(), format);
-        format
+        Ok(format)
     }
 
-    fn detect_module_format(&mut self, path: &str) -> Option<LocalResolvedModuleFormat> {
+    fn detect_module_format(
+        &mut self,
+        path: &str,
+    ) -> Result<Option<LocalResolvedModuleFormat>, HostServiceError> {
         if is_builtin_specifier(path) {
-            return Some(LocalResolvedModuleFormat::Module);
+            return Ok(Some(LocalResolvedModuleFormat::Module));
         }
 
         let normalized = normalize_guest_path(path);
-        match Path::new(&normalized)
-            .extension()
-            .and_then(|ext| ext.to_str())
-        {
-            Some("mjs" | "mts") => Some(LocalResolvedModuleFormat::Module),
-            Some("cjs" | "cts") => Some(LocalResolvedModuleFormat::Commonjs),
-            Some("json") => Some(LocalResolvedModuleFormat::Json),
-            Some("js") => Some(
-                if self
-                    .nearest_package_json_type_for_guest_path(&normalized)
-                    .as_deref()
-                    == Some("module")
-                {
-                    LocalResolvedModuleFormat::Module
-                } else {
-                    LocalResolvedModuleFormat::Commonjs
-                },
-            ),
-            _ => None,
-        }
+        Ok(
+            match Path::new(&normalized)
+                .extension()
+                .and_then(|ext| ext.to_str())
+            {
+                Some("mjs" | "mts") => Some(LocalResolvedModuleFormat::Module),
+                Some("cjs" | "cts") => Some(LocalResolvedModuleFormat::Commonjs),
+                Some("json") => Some(LocalResolvedModuleFormat::Json),
+                Some("js") => Some(
+                    if self
+                        .nearest_package_json_type_for_guest_path(&normalized)?
+                        .as_deref()
+                        == Some("module")
+                    {
+                        LocalResolvedModuleFormat::Module
+                    } else {
+                        LocalResolvedModuleFormat::Commonjs
+                    },
+                ),
+                _ => None,
+            },
+        )
     }
 
-    fn nearest_package_json_type_for_guest_path(&mut self, guest_path: &str) -> Option<String> {
+    fn nearest_package_json_type_for_guest_path(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<Option<String>, HostServiceError> {
         let mut dir = dirname_guest_path(guest_path);
         loop {
             let package_json_path = join_guest_path(&dir, "package.json");
-            if let Some(package_json) = self.read_package_json(&package_json_path) {
-                return package_json.package_type;
+            if let Some(package_json) = self.read_package_json(&package_json_path)? {
+                return Ok(package_json.package_type);
             }
             // Node package scopes do not inherit `type` across a node_modules
             // boundary. This also matters for pnpm's nested symlink layout: if
@@ -4973,7 +5871,7 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
             }
             dir = dirname_guest_path(&dir);
         }
-        None
+        Ok(None)
     }
 
     fn resolve_package_imports(
@@ -4981,11 +5879,11 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
         request: &str,
         from_dir: &str,
         mode: ModuleResolveMode,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, HostServiceError> {
         let mut dir = normalize_guest_path(from_dir);
         loop {
             let pkg_json_path = join_guest_path(&dir, "package.json");
-            if let Some(pkg_json) = self.read_package_json(&pkg_json_path) {
+            if let Some(pkg_json) = self.read_package_json(&pkg_json_path)? {
                 if let Some(imports) = &pkg_json.imports {
                     if let Some(target) = resolve_imports_target(imports, request, mode) {
                         let target_path = if target.starts_with('/') {
@@ -4995,7 +5893,7 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
                         };
                         return self.resolve_path(&target_path, mode);
                     }
-                    return None;
+                    return Ok(None);
                 }
             }
             if dir == "/" {
@@ -5003,7 +5901,7 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
             }
             dir = dirname_guest_path(&dir);
         }
-        None
+        Ok(None)
     }
 
     fn resolve_package_self_reference(
@@ -5011,12 +5909,14 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
         request: &str,
         from_dir: &str,
         mode: ModuleResolveMode,
-    ) -> Option<String> {
-        let (package_name, subpath) = split_package_request(request)?;
+    ) -> Result<Option<String>, HostServiceError> {
+        let Some((package_name, subpath)) = split_package_request(request) else {
+            return Ok(None);
+        };
         let mut dir = normalize_guest_path(from_dir);
         loop {
             let pkg_json_path = join_guest_path(&dir, "package.json");
-            if let Some(pkg_json) = self.read_package_json(&pkg_json_path) {
+            if let Some(pkg_json) = self.read_package_json(&pkg_json_path)? {
                 if pkg_json.name.as_deref() == Some(package_name) {
                     return self.resolve_package_entry_from_dir(&dir, subpath, mode);
                 }
@@ -5026,7 +5926,7 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
             }
             dir = dirname_guest_path(&dir);
         }
-        None
+        Ok(None)
     }
 
     fn resolve_node_modules(
@@ -5034,8 +5934,10 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
         request: &str,
         from_dir: &str,
         mode: ModuleResolveMode,
-    ) -> Option<String> {
-        let (package_name, subpath) = split_package_request(request)?;
+    ) -> Result<Option<String>, HostServiceError> {
+        let Some((package_name, subpath)) = split_package_request(request) else {
+            return Ok(None);
+        };
 
         // Standard Node resolution over the faithful VFS: walk ancestor
         // `node_modules` directories (following symlinks via the importer's
@@ -5046,9 +5948,9 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
         loop {
             for package_dir in node_modules_direct_candidate_dirs(&dir, package_name) {
                 if let Some(entry) =
-                    self.resolve_package_entry_from_dir(&package_dir, subpath, mode)
+                    self.resolve_package_entry_from_dir(&package_dir, subpath, mode)?
                 {
-                    return Some(entry);
+                    return Ok(Some(entry));
                 }
             }
             if dir == "/" {
@@ -5057,15 +5959,16 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
             dir = dirname_guest_path(&dir);
         }
 
-        ["/root/node_modules", "/node_modules"]
-            .into_iter()
-            .find_map(|root| {
-                self.resolve_package_entry_from_dir(
-                    &join_guest_path(root, package_name),
-                    subpath,
-                    mode,
-                )
-            })
+        for root in ["/root/node_modules", "/node_modules"] {
+            if let Some(entry) = self.resolve_package_entry_from_dir(
+                &join_guest_path(root, package_name),
+                subpath,
+                mode,
+            )? {
+                return Ok(Some(entry));
+            }
+        }
+        Ok(None)
     }
 
     fn resolve_package_entry_from_dir(
@@ -5073,11 +5976,11 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
         package_dir: &str,
         subpath: &str,
         mode: ModuleResolveMode,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, HostServiceError> {
         let package_json_path = join_guest_path(package_dir, "package.json");
-        let pkg_json = self.read_package_json(&package_json_path);
-        if pkg_json.is_none() && !self.cached_exists(package_dir) {
-            return None;
+        let pkg_json = self.read_package_json(&package_json_path)?;
+        if pkg_json.is_none() && !self.cached_exists(package_dir)? {
+            return Ok(None);
         }
 
         if let Some(pkg_json) = pkg_json.as_ref() {
@@ -5087,9 +5990,13 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
                 } else {
                     format!("./{subpath}")
                 };
-                let exports_target = resolve_exports_target(exports, &exports_subpath, mode)?;
+                let Some(exports_target) = resolve_exports_target(exports, &exports_subpath, mode)
+                else {
+                    return Ok(None);
+                };
                 let target_path = join_guest_path(package_dir, &exports_target);
-                return self.resolve_path(&target_path, mode).or(Some(target_path));
+                let resolved = self.resolve_path(&target_path, mode)?;
+                return Ok(resolved.or(Some(target_path)));
             }
         }
 
@@ -5102,93 +6009,109 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
             .and_then(|pkg_json| pkg_json.main.as_deref())
             .unwrap_or("index.js");
         let entry_path = join_guest_path(package_dir, entry_field);
-        self.resolve_path(&entry_path, mode)
-            .or_else(|| self.resolve_path(&join_guest_path(package_dir, "index"), mode))
+        if let Some(resolved) = self.resolve_path(&entry_path, mode)? {
+            return Ok(Some(resolved));
+        }
+        self.resolve_path(&join_guest_path(package_dir, "index"), mode)
     }
 
-    fn resolve_path(&mut self, base_path: &str, mode: ModuleResolveMode) -> Option<String> {
-        if self.cached_stat(base_path) == Some(false) {
-            return Some(normalize_guest_path(base_path));
+    fn resolve_path(
+        &mut self,
+        base_path: &str,
+        mode: ModuleResolveMode,
+    ) -> Result<Option<String>, HostServiceError> {
+        if self.cached_stat(base_path)? == Some(false) {
+            return Ok(Some(normalize_guest_path(base_path)));
         }
 
         for extension in [".js", ".json", ".mjs", ".cjs"] {
             let candidate = format!("{}{}", normalize_guest_path(base_path), extension);
-            if self.cached_exists(&candidate) {
-                return Some(candidate);
+            if self.cached_exists(&candidate)? {
+                return Ok(Some(candidate));
             }
         }
 
-        if self.cached_stat(base_path) == Some(true) {
+        if self.cached_stat(base_path)? == Some(true) {
             let pkg_json_path = join_guest_path(base_path, "package.json");
-            if let Some(pkg_json) = self.read_package_json(&pkg_json_path) {
+            if let Some(pkg_json) = self.read_package_json(&pkg_json_path)? {
                 if let Some(main) = pkg_json.main.as_deref() {
                     let entry_path = join_guest_path(base_path, main);
                     if entry_path != normalize_guest_path(base_path) {
-                        if let Some(entry) = self.resolve_path(&entry_path, mode) {
-                            return Some(entry);
+                        if let Some(entry) = self.resolve_path(&entry_path, mode)? {
+                            return Ok(Some(entry));
                         }
                     }
                 }
                 if mode == ModuleResolveMode::Import
                     && pkg_json.package_type.as_deref() == Some("module")
-                    && self.cached_exists(&join_guest_path(base_path, "index.js"))
+                    && self.cached_exists(&join_guest_path(base_path, "index.js"))?
                 {
-                    return Some(join_guest_path(base_path, "index.js"));
+                    return Ok(Some(join_guest_path(base_path, "index.js")));
                 }
             }
 
             for extension in [".js", ".json", ".mjs", ".cjs"] {
                 let index_path = join_guest_path(base_path, &format!("index{extension}"));
-                if self.cached_exists(&index_path) {
-                    return Some(index_path);
+                if self.cached_exists(&index_path)? {
+                    return Ok(Some(index_path));
                 }
             }
         }
 
-        None
+        Ok(None)
     }
 
-    fn read_package_json(&mut self, guest_path: &str) -> Option<LocalPackageJson> {
+    fn read_package_json(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<Option<LocalPackageJson>, HostServiceError> {
         if let Some(cached) = self.cache.package_json_results.get(guest_path).cloned() {
-            return cached;
+            return Ok(cached);
         }
 
-        let parsed = self
-            .reader
-            .read_to_string(guest_path)
-            .and_then(|contents| serde_json::from_str::<LocalPackageJson>(&contents).ok());
+        let parsed = match self.reader.read_to_string(guest_path)? {
+            Some(contents) => Some(serde_json::from_str::<LocalPackageJson>(&contents).map_err(
+                |error| {
+                    HostServiceError::new(
+                        "ERR_INVALID_PACKAGE_CONFIG",
+                        format!("invalid package configuration {guest_path}: {error}"),
+                    )
+                },
+            )?),
+            None => None,
+        };
         if parsed.is_some() || module_path_miss_is_stable(guest_path) {
             self.cache
                 .package_json_results
                 .insert(guest_path.to_owned(), parsed.clone());
         }
-        parsed
+        Ok(parsed)
     }
 
-    fn cached_exists(&mut self, guest_path: &str) -> bool {
+    fn cached_exists(&mut self, guest_path: &str) -> Result<bool, HostServiceError> {
         if let Some(cached) = self.cache.exists_results.get(guest_path) {
-            return *cached;
+            return Ok(*cached);
         }
-        let exists = self.reader.path_exists(guest_path);
+        let exists = self.reader.path_exists(guest_path)?;
         if exists || module_path_miss_is_stable(guest_path) {
             self.cache
                 .exists_results
                 .insert(guest_path.to_owned(), exists);
         }
-        exists
+        Ok(exists)
     }
 
-    fn cached_stat(&mut self, guest_path: &str) -> Option<bool> {
+    fn cached_stat(&mut self, guest_path: &str) -> Result<Option<bool>, HostServiceError> {
         if let Some(cached) = self.cache.stat_results.get(guest_path) {
-            return *cached;
+            return Ok(*cached);
         }
-        let result = self.reader.path_is_dir(guest_path);
+        let result = self.reader.path_is_dir(guest_path)?;
         if result.is_some() || module_path_miss_is_stable(guest_path) {
             self.cache
                 .stat_results
                 .insert(guest_path.to_owned(), result);
         }
-        result
+        Ok(result)
     }
 }
 
@@ -7451,6 +8374,34 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn malformed_bridge_payload_is_a_typed_decode_error() {
+        let error = decode_bridge_call_args("_resolveModule", 17, &[0xff])
+            .expect_err("malformed CBOR must not become an empty argument list");
+        assert_eq!(error.code, "ERR_AGENTOS_BRIDGE_REQUEST_DECODE");
+        assert!(error.message.contains("call_id=17"));
+    }
+
+    #[test]
+    fn malformed_batch_module_request_is_a_typed_validation_error() {
+        let mut bridge = LocalBridgeState::default();
+        let error = bridge
+            .batch_resolve_modules(&[Value::Null])
+            .expect_err("malformed batch request must not become an empty result");
+        assert_eq!(error.code, "EINVAL");
+    }
+
+    #[test]
+    fn malformed_internal_dispatch_payload_returns_a_typed_error() {
+        let mut bridge = LocalBridgeState::default();
+        let response = bridge
+            .handle_polyfill_dispatch(&[Value::String(String::from("__bd:kernelTimerCreate:{"))]);
+        assert!(response
+            .as_str()
+            .expect("dispatch error response")
+            .contains("ERR_AGENTOS_BRIDGE_DISPATCH_DECODE"));
+    }
+
+    #[test]
     fn dispose_context_reclaims_one_shot_metadata_without_reusing_ids() {
         let mut engine = JavascriptExecutionEngine::default();
         let baseline = engine.context_count_for_test();
@@ -7676,7 +8627,8 @@ mod tests {
         let writer = File::from(writer_fd);
         let response_writer =
             JavascriptSyncRpcResponseWriter::new(writer, Duration::from_millis(50));
-        let pending = Arc::new(Mutex::new(Some(PendingSyncRpcState::Pending(7))));
+        let pending = Arc::new(Mutex::new(PendingSyncRpcRegistry::new(2)));
+        set_pending_sync_rpc_state(&pending, 7).expect("register timeout test call");
 
         spawn_javascript_sync_rpc_timeout(
             7,
@@ -7701,9 +8653,112 @@ mod tests {
             .expect("timeout message")
             .contains("timed out after 20ms"));
         assert_eq!(
-            *pending.lock().expect("pending state lock"),
-            Some(PendingSyncRpcState::TimedOut(7))
+            pending.lock().expect("pending state lock").states.get(&7),
+            Some(&PendingSyncRpcState::TimedOut(7))
         );
+    }
+
+    #[test]
+    fn pending_sync_rpc_registry_is_bounded_keyed_and_nonlossy() {
+        let pending = Arc::new(Mutex::new(PendingSyncRpcRegistry::new(2)));
+        set_pending_sync_rpc_state(&pending, 7).expect("first concurrent waiter");
+        set_pending_sync_rpc_state(&pending, 8).expect("second concurrent waiter");
+
+        let duplicate = set_pending_sync_rpc_state(&pending, 7)
+            .expect_err("duplicate call ID must not replace its waiter");
+        assert!(matches!(
+            duplicate,
+            JavascriptExecutionError::PendingSyncRpcRequest(7)
+        ));
+        assert_eq!(host_reply_adapter_error(duplicate).code, "EBUSY");
+
+        let over_limit = set_pending_sync_rpc_state(&pending, 9)
+            .expect_err("third distinct waiter exceeds configured admission");
+        assert!(matches!(
+            over_limit,
+            JavascriptExecutionError::PendingSyncRpcLimit {
+                limit: 2,
+                observed: 3,
+            }
+        ));
+        let host_error = host_reply_adapter_error(over_limit);
+        assert_eq!(host_error.code, "ERR_AGENTOS_RESOURCE_LIMIT");
+        assert_eq!(
+            host_error.details.as_ref().unwrap()["limitName"],
+            "limits.reactor.maxBridgeCalls"
+        );
+
+        let guard = pending.lock().expect("pending state lock");
+        assert_eq!(guard.states.len(), 2, "rejection preserves both waiters");
+        assert_eq!(guard.states.get(&7), Some(&PendingSyncRpcState::Pending(7)));
+        assert_eq!(guard.states.get(&8), Some(&PendingSyncRpcState::Pending(8)));
+        drop(guard);
+
+        assert_eq!(
+            clear_pending_sync_rpc(&pending, 8).expect("settle exact waiter"),
+            PendingSyncRpcResolution::Pending
+        );
+        let guard = pending.lock().expect("pending state lock");
+        assert_eq!(guard.states.len(), 1);
+        assert!(guard.states.contains_key(&7));
+    }
+
+    #[test]
+    fn direct_host_reply_ignores_only_proven_stale_bridge_completions() {
+        map_host_reply_adapter_response(Err(JavascriptExecutionError::BridgeSettlement(
+            agentos_v8_runtime::host_call::BridgeSettlementError::stale_completion(String::from(
+                "ERR_AGENTOS_BRIDGE_STALE_COMPLETION: response for canceled host-visible bridge call_id 7 in session v8-exec-1 generation Some(3)",
+            )),
+        )))
+        .expect("exact retired-route completion is benign");
+
+        for fatal in [
+            "ERR_AGENTOS_BRIDGE_UNKNOWN_CALL_ID: response for unknown bridge call_id 7",
+            "ERR_AGENTOS_BRIDGE_STALE_GENERATION: response call_id 7 named the wrong generation",
+            "prefix ERR_AGENTOS_BRIDGE_STALE_COMPLETION: guest-controlled text is not proof",
+        ] {
+            let error = map_host_reply_adapter_response(Err(
+                JavascriptExecutionError::RpcResponse(String::from(fatal)),
+            ))
+            .expect_err("unproven bridge response failure must stay fatal");
+            assert_eq!(error.code, "ERR_AGENTOS_ADAPTER_REPLY");
+        }
+    }
+
+    #[test]
+    fn javascript_host_error_payload_preserves_fields_without_parsing_message() {
+        let payload = encode_host_service_error_payload(
+            &HostServiceError::new("EIO", "EACCES: guest-controlled diagnostic").with_details(
+                serde_json::json!({
+                    "path": "/guest/file",
+                    "retryable": false,
+                }),
+            ),
+        )
+        .expect("encode structured host error");
+        let ciborium::Value::Map(entries) =
+            ciborium::from_reader::<ciborium::Value, _>(payload.as_slice())
+                .expect("decode structured host error")
+        else {
+            panic!("structured host error must be a CBOR map");
+        };
+        let field = |name: &str| {
+            entries.iter().find_map(|(key, value)| match key {
+                ciborium::Value::Text(key) if key == name => Some(value),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            field("code"),
+            Some(&ciborium::Value::Text(String::from("EIO")))
+        );
+        assert_eq!(
+            field("message"),
+            Some(&ciborium::Value::Text(String::from(
+                "EACCES: guest-controlled diagnostic"
+            )))
+        );
+        assert!(matches!(field("details"), Some(ciborium::Value::Map(_))));
     }
 
     #[test]
@@ -7904,9 +8959,9 @@ mod tests {
 
         assert_eq!(
             result,
-            Some(Value::String(String::from(
+            Ok(Some(Value::String(String::from(
                 "/node_modules/next/dist/cli/next-build.js"
-            )))
+            ))))
         );
 
         fs::remove_dir_all(&root).expect("remove temp module tree");
@@ -8177,7 +9232,10 @@ mod tests {
         let error = state
             .register_timer(10, false)
             .expect_err("second timer must hit the ledger bound");
-        assert!(error.contains("limits.jsRuntime.maxTimers"), "{error}");
+        assert!(
+            error.message.contains("limits.jsRuntime.maxTimers"),
+            "{error:?}"
+        );
         assert_eq!(state.timers.lock().unwrap().len(), 1);
 
         state.clear_kernel_timer(first);

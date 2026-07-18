@@ -1,7 +1,9 @@
 use agentos_kernel::command_registry::CommandDriver;
 use agentos_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions};
 use agentos_kernel::permissions::Permissions;
-use agentos_kernel::poll::{PollFd, PollTargetEntry, POLLERR, POLLHUP, POLLIN, POLLOUT};
+use agentos_kernel::poll::{
+    PollFd, PollTargetEntry, POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM,
+};
 use agentos_kernel::resource_accounting::ResourceLimits;
 use agentos_kernel::socket_table::{InetSocketAddress, SocketShutdown, SocketSpec};
 use agentos_kernel::vfs::MemoryFileSystem;
@@ -77,6 +79,31 @@ fn poll_reports_pipe_readiness_and_hangup() {
     assert_eq!(ready.ready_count, 1);
     assert!(ready.fds[0].revents.contains(POLLIN));
     assert!(ready.fds[0].revents.contains(POLLHUP));
+}
+
+#[test]
+fn poll_projects_linux_normal_read_and_write_aliases() {
+    let mut kernel = kernel_vm("vm-poll-normal-aliases");
+    let pid = spawn_shell(&mut kernel);
+    let (read_fd, write_fd) = kernel.open_pipe("shell", pid).expect("open pipe");
+    kernel
+        .fd_write("shell", pid, write_fd, b"x")
+        .expect("write pipe payload");
+
+    let ready = kernel
+        .poll_fds(
+            "shell",
+            pid,
+            vec![
+                PollFd::new(read_fd, POLLRDNORM),
+                PollFd::new(write_fd, POLLWRNORM),
+            ],
+            0,
+        )
+        .expect("poll Linux normal aliases");
+    assert_eq!(ready.ready_count, 2);
+    assert_eq!(ready.fds[0].revents, POLLRDNORM);
+    assert_eq!(ready.fds[1].revents, POLLWRNORM);
 }
 
 #[test]
