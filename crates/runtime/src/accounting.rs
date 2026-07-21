@@ -47,6 +47,9 @@ impl ResourceUsageObserver for RuntimeMetrics {
             ResourceClass::Tasks => self.observe_resource(ResourceMetricClass::Tasks, used),
             ResourceClass::ExecutorSlots => {}
             ResourceClass::ExecutorBytes => self.observe_buffer(BufferMetricClass::Executor, used),
+            ResourceClass::WasmMemoryBytes => {
+                self.observe_buffer(BufferMetricClass::Executor, used)
+            }
             ResourceClass::Http2BufferedBytes => {
                 self.observe_buffer(BufferMetricClass::Http2, used)
             }

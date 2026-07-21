@@ -267,6 +267,8 @@ export interface ExecOptions {
 	filePath?: string;
 	cpuTimeLimitMs?: number;
 	timingMitigation?: TimingMitigation;
+	/** Selects standalone WASM commands only; JavaScript remains on V8. */
+	wasmBackend?: "v8" | "wasmtime";
 }
 
 export interface ExecResult {

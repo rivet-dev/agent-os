@@ -17,6 +17,7 @@ pub use crate::generated_protocol::v1::*;
 impl Copy for crate::generated_protocol::v1::GuestFilesystemOperation {}
 impl Copy for crate::generated_protocol::v1::RootFilesystemMode {}
 impl Copy for crate::generated_protocol::v1::WasmPermissionTier {}
+impl Copy for crate::generated_protocol::v1::StandaloneWasmBackend {}
 
 // `derive(Default)` cannot be added: these are foreign generated types, so the
 // `Default` impl must be written by hand here (orphan rule).

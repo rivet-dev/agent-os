@@ -855,6 +855,7 @@ impl ProcessTable {
     /// signals, and the runtime endpoint used to report the eventual exit.
     /// Caught dispositions reset to default while ignored dispositions survive,
     /// matching execve(2).
+    #[allow(clippy::too_many_arguments)]
     pub fn exec(
         &self,
         pid: u32,

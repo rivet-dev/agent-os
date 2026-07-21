@@ -218,18 +218,16 @@ model as every other child.
 
 ## 6. Code organization
 
-The expected initial organization is:
+The implemented initial organization is:
 
 ```text
-crates/execution/src/wasm/
-  mod.rs                    public facade and backend selection
-  types.rs                  runtime-neutral requests, events, limits, errors
-  backend.rs                internal dual-backend selection contract
+crates/execution/src/wasm.rs
+                            retained V8-WASM implementation and dual-backend
+                            facade; keeping this working compatibility backend
+                            intact avoids coupling Wasmtime to a wholesale move
 
-  v8_compat/
-    mod.rs                  current implementation moved mostly intact
-    prewarm.rs
-    memory_limits.rs
+crates/execution/src/wasm/
+  profile.rs                shared wasmparser proposal profile
 
   wasmtime/
     mod.rs                  execution and engine facade
@@ -240,25 +238,28 @@ crates/execution/src/wasm/
     limits.rs               memory, stack, CPU, and cancellation
     lifecycle.rs            start, exit, traps, signals, teardown
     memory.rs               checked guest-memory ABI primitives
+    error.rs                stable AgentOS outcome normalization
 
     linker/
-      mod.rs
+      mod.rs                generated-registry trampoline and signal checkpoints
       preview1.rs
       filesystem.rs
       network.rs
       process.rs
       terminal.rs
-      identity.rs
+      user.rs
 
-    threads/                later milestone, absent from initial parity
+    threads/                Phase 4 only; absent from initial parity
       mod.rs
       group.rs
       admission.rs
 ```
 
-The current `crates/execution/src/wasm.rs` should initially move mostly intact
-under `v8_compat/`. The Wasmtime migration must not be coupled to a wholesale
-cleanup of the working compatibility implementation.
+Rust permits `wasm.rs` and the `wasm/` submodule directory to coexist. Retaining
+the established V8-WASM implementation in `wasm.rs` is deliberate: it keeps the
+compatibility backend independently reviewable while new Wasmtime code is
+split by responsibility. A later mechanical move under `v8_compat/` would not
+change ownership or behavior and is not a prerequisite for this project.
 
 Runtime-neutral host operations do not belong exclusively under `wasm/`.
 Existing kernel and sidecar operations should be exposed through small
@@ -660,7 +661,7 @@ revision has been sealed:
 
 - [x] Phase 0: specification, inventory, baseline, and locked decisions.
 - [x] Phase 1: complete runtime-neutral kernel/executor prerequisite.
-- [ ] Phase 2: production Wasmtime executor at current V8-WASM parity.
+- [x] Phase 2: production Wasmtime executor at current V8-WASM parity.
 - [ ] Phase 3: performance decision, preferred-backend rollout, and initial
       project completion.
 - [ ] Phase 4: separately gated threaded-WASM roadmap completion.
@@ -770,71 +771,88 @@ revision has been sealed:
 
 ### Phase 2 revision: Add Wasmtime at full current feature parity
 
-- [ ] Pin one reviewed Wasmtime version and revalidate the referenced API
+- [x] Pin one reviewed Wasmtime version and revalidate the referenced API
       defaults, safety contracts, supported platforms, and Cargo feature set.
-- [ ] Add the multi-file `crates/execution/src/wasm/wasmtime/` Engine, Store,
+- [x] Add the multi-file `crates/execution/src/wasm/wasmtime/` Engine, Store,
       Module cache, Linker, ABI, memory, error, interruption, and execution
       modules without creating a new crate or giant source file.
-- [ ] Configure a bounded process-wide Engine registry keyed by the exact
+- [x] Configure a bounded process-wide Engine registry keyed by the exact
       AgentOS feature profile and stack cap; enforce the eight-profile default
       limit and 80% warning.
-- [ ] Prevalidate every module with the shared `wasmparser` profile so V8-WASM
+- [x] Prevalidate every module with the shared `wasmparser` profile so V8-WASM
       and Wasmtime accept and reject the same features independently of engine
       defaults.
-- [ ] Add the bounded per-Engine 32-entry/256 MiB charged in-memory Module LRU,
+- [x] Add the bounded per-Engine 32-entry/256 MiB charged in-memory Module LRU,
       exact cache keys, metrics, and eviction behavior; never deserialize
       native artifacts.
-- [ ] Build Store context from trusted VM generation, kernel PID, permission
+- [x] Build Store context from trusted VM generation, kernel PID, permission
       profile, limit ledger, cancellation state, and shared host-service
       handles only.
-- [ ] Enforce linear-memory, table, instance, stack, aggregate memory, active
+- [x] Enforce linear-memory, table, instance, stack, aggregate memory, active
       CPU, optional wall-clock, deterministic-fuel, and interruption limits
       with typed errors.
-- [ ] Implement epoch-based termination and active-CPU accounting that pauses
+- [x] Implement epoch-based termination and active-CPU accounting that pauses
       while an import is asynchronously waiting.
-- [ ] Implement cooperative caught-signal delivery at import/safe-point
+- [x] Implement cooperative caught-signal delivery at import/safe-point
       boundaries with exact trampoline validation, inherited-mask setup,
       one-at-a-time LIFO token settlement, nested delivery, and shared
       completion/partial-result versus `SA_RESTART` arbitration; use epochs
       only for STOP scheduling and terminal interruption.
-- [ ] Generate and link the owned Preview1 ABI, `wasi_unstable` alias, and every
+- [x] Generate and link the owned Preview1 ABI, `wasi_unstable` alias, and every
       `host_fs`, `host_net`, `host_process`, `host_tty`, and `host_user`
       function/version over the Phase 1 shared operations using the generated
       registry and one dynamic `func_new_async` trampoline; no handwritten
       import-name switchboard is permitted.
-- [ ] Do not create a `wasmtime-wasi` context or install ambient filesystem,
+- [x] Do not create a `wasmtime-wasi` context or install ambient filesystem,
       network, process, environment, clock, random, or stdio capabilities.
-- [ ] Apply the three-phase async guest-memory contract to every waiting import:
+- [x] Apply the three-phase async guest-memory contract to every waiting import:
       validate/copy bounded input, await with no guest borrow, then reacquire
       and revalidate output before commit.
-- [ ] Prevalidate all output ranges before side effects and make fd/resource
+- [x] Prevalidate all output ranges before side effects and make fd/resource
       allocation transactional when result encoding can fail.
-- [ ] Run guest code only on the bounded non-Tokio VM executor while async host
+- [x] Run guest code only on the bounded non-Tokio VM executor while async host
       work continues to use the one sidecar Tokio runtime and its direct waiters.
-- [ ] Normalize validation failures, traps, stack exhaustion, cancellation,
+- [x] Normalize validation failures, traps, stack exhaustion, cancellation,
       timeout, fuel exhaustion, exit, terminating signal, errno, and internal
       faults into stable AgentOS typed outcomes.
-- [ ] Add the optional sealed `wasmtime`/`v8` protocol and client selector;
+- [x] Add the optional sealed `wasmtime`/`v8` protocol and client selector;
       omission remains the sidecar-owned V8 default during Phase 2.
-- [ ] Keep V8 permanently for JavaScript and keep V8-WASM as an independent,
+- [x] Keep V8 permanently for JavaScript and keep V8-WASM as an independent,
       maintained compatibility backend; add no V8-to-Wasmtime bridge.
-- [ ] Keep shared memory, threads, memory64, multi-memory, relaxed SIMD, tail
+- [x] Keep shared memory, threads, memory64, multi-memory, relaxed SIMD, tail
       calls, GC/function references, exceptions, components, custom page sizes,
       AOT, pooling, Wizer, and live snapshots disabled for initial parity.
-- [ ] Pass the complete differential ABI and working-software corpus—including
+- [x] Pass the complete differential ABI and working-software corpus—including
       `ls`, `vim`, `grep`, `curl`, shell pipelines, sqlite, git, tar/gzip, and
       metadata tools—against both standalone-WASM backends.
-- [ ] Pass permission-tier, errno, malformed-module, hostile-import,
+- [x] Pass permission-tier, errno, malformed-module, hostile-import,
       cancellation, signal, fd/process/TTY/network, and every limit-at/over-bound
       test against Wasmtime with no ambient-host escape.
-- [ ] Pass full Linux x86-64 conformance plus Linux arm64 and macOS x86-64/arm64
+- [x] Pass full Linux x86-64 conformance plus Linux arm64 and macOS x86-64/arm64
       build and smoke/conformance release gates; keep browser builds out of
       scope.
-- [ ] Verify teardown releases Store, waiter, fd, socket, process, memory,
+- [x] Verify teardown releases Store, waiter, fd, socket, process, memory,
       compiled-code, and kernel reservations without cross-VM state retention.
-- [ ] Seal the complete executor and parity/safety proof as one independently
+- [x] Seal the complete executor and parity/safety proof as one independently
       reviewable Phase 2 JJ revision on top of Phase 1; do not land a partial
       linker or spike.
+
+Phase 2 evidence (Rust 1.94.0, Linux x86-64 canonical workspace):
+
+- `just tools-rebuild` rebuilt and audited all 166 default commands; the
+  required focused Vim build raised the corpus to 167 commands/136 modules,
+  with all 145 live imports declared in the 169-function/29-signature ABI.
+- Native workspace check, all-target strict clippy, formatting, protocol tests,
+  client tests, fixed-version checks, protocol-inventory checks, TypeScript
+  request mapping, and workflow YAML parsing passed. Root `pnpm check-types`
+  passed all 146 tasks.
+- Wasmtime units passed 15/15; architecture guards 61/61; safety/limits/ambient
+  denial 7/7; raw differential ABI 9/9; and the serial real-software corpus
+  5/5 in 220.82 seconds (`ls`, real HTTP `curl`, `grep`, sqlite, git, tar/gzip,
+  metadata, shell/child affinity, and focused Vim).
+- Release gates pin the reviewed Wasmtime MSRV and require Linux x86-64/arm64
+  builds plus native macOS x86-64/arm64 smoke tests before assets can publish;
+  browser entrypoints remain excluded.
 
 ### Phase 3 revision: Measure and enable the preferred backend
 

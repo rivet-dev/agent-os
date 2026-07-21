@@ -1,12 +1,13 @@
 use crate::backend::{
-    DescendantOutputOwnership, DescendantWaitOwnership, ExecutionBackend, ExecutionBackendKind,
-    ExecutionExit, ExecutionWakeHandle, ExecutionWakeIdentity, HostServiceError,
-    PublishedSignalCheckpoint, ShutdownOutcome, ShutdownReason, SignalCheckpointOutcome,
-    SynchronousFdWritePolicy,
+    DescendantOutputOwnership, DescendantWaitOwnership, DirectHostReplyHandle, ExecutionBackend,
+    ExecutionBackendKind, ExecutionExit, ExecutionWakeHandle, ExecutionWakeIdentity,
+    HostServiceError, PublishedSignalCheckpoint, ShutdownOutcome, ShutdownReason,
+    SignalCheckpointOutcome, SynchronousFdWritePolicy,
 };
 use crate::common::{
     encode_json_string, encode_json_string_array, encode_json_string_map, frozen_time_ms,
 };
+use crate::host::ProcessHostCapabilitySet;
 use crate::javascript::{
     CreateJavascriptContextRequest, GuestRuntimeConfig, HostRpcRequest, JavascriptExecution,
     JavascriptExecutionEngine, JavascriptExecutionError, JavascriptExecutionEvent,
@@ -33,6 +34,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
+
+#[path = "wasm/profile.rs"]
+mod profile;
+#[path = "wasm/wasmtime/mod.rs"]
+pub mod wasmtime;
 
 const WASM_MODULE_PATH_ENV: &str = "AGENTOS_WASM_MODULE_PATH";
 const WASM_GUEST_ARGV_ENV: &str = "AGENTOS_GUEST_ARGV";
@@ -174,6 +180,15 @@ pub enum WasmPermissionTier {
     Isolated,
 }
 
+/// Sealed standalone-WASM engine choice. JavaScript WebAssembly APIs are not
+/// affected by this selector and always remain inside V8.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StandaloneWasmBackend {
+    #[default]
+    V8,
+    Wasmtime,
+}
+
 impl WasmPermissionTier {
     fn as_env_value(self) -> &'static str {
         match self {
@@ -271,17 +286,58 @@ pub struct StartWasmExecutionRequest {
     pub guest_runtime: GuestRuntimeConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum WasmExecutionEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
     SyncRpcRequest(HostRpcRequest),
+    /// Native executor request carrying its own generation-bound direct waiter.
+    /// This is decoded into the same runtime-neutral HostOperation path as the
+    /// compatibility runner, but has no V8 responder or line protocol.
+    HostCall {
+        request: HostRpcRequest,
+        reply: DirectHostReplyHandle,
+    },
     SignalState {
         signal: u32,
         registration: ExecutionSignalHandlerRegistration,
     },
     Exited(i32),
 }
+
+impl PartialEq for WasmExecutionEvent {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Stdout(left), Self::Stdout(right))
+            | (Self::Stderr(left), Self::Stderr(right)) => left == right,
+            (Self::SyncRpcRequest(left), Self::SyncRpcRequest(right)) => left == right,
+            (
+                Self::HostCall {
+                    request: left_request,
+                    reply: left_reply,
+                },
+                Self::HostCall {
+                    request: right_request,
+                    reply: right_reply,
+                },
+            ) => left_request == right_request && left_reply.identity() == right_reply.identity(),
+            (
+                Self::SignalState {
+                    signal: left_signal,
+                    registration: left_registration,
+                },
+                Self::SignalState {
+                    signal: right_signal,
+                    registration: right_registration,
+                },
+            ) => left_signal == right_signal && left_registration == right_registration,
+            (Self::Exited(left), Self::Exited(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for WasmExecutionEvent {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmExecutionResult {
@@ -358,6 +414,7 @@ pub enum WasmExecutionError {
         limit: usize,
         observed: usize,
     },
+    Host(HostServiceError),
     Internal {
         code: &'static str,
         message: &'static str,
@@ -476,6 +533,7 @@ impl fmt::Display for WasmExecutionError {
                 f,
                 "ERR_AGENTOS_RESOURCE_LIMIT: {limit_name} limit is {limit}, observed {observed}; raise {limit_name} if needed"
             ),
+            Self::Host(error) => write!(f, "{}: {}", error.code, error.message),
             Self::Internal { code, message } => write!(f, "{code}: {message}"),
             Self::EventChannelClosed => {
                 f.write_str("guest WebAssembly event channel closed unexpectedly")
@@ -488,6 +546,17 @@ impl std::error::Error for WasmExecutionError {}
 
 #[derive(Debug)]
 pub struct WasmExecution {
+    backend: WasmExecutionBackend,
+}
+
+#[derive(Debug)]
+enum WasmExecutionBackend {
+    V8(Box<V8WasmExecution>),
+    Wasmtime(wasmtime::WasmtimeExecution),
+}
+
+#[derive(Debug)]
+struct V8WasmExecution {
     execution_id: String,
     child_pid: u32,
     inner: JavascriptExecution,
@@ -775,7 +844,8 @@ fn wasm_event_retained_bytes(event: &WasmExecutionEvent) -> usize {
         WasmExecutionEvent::Stdout(bytes) | WasmExecutionEvent::Stderr(bytes) => {
             envelope.saturating_add(bytes.len())
         }
-        WasmExecutionEvent::SyncRpcRequest(request) => envelope
+        WasmExecutionEvent::SyncRpcRequest(request)
+        | WasmExecutionEvent::HostCall { request, .. } => envelope
             .saturating_add(request.method.len())
             .saturating_add(request.raw_bytes_args.values().map(Vec::len).sum::<usize>())
             // JSON args arrive through an independently frame-bounded bridge;
@@ -799,7 +869,7 @@ struct WasmGuestPathMapping {
     read_only: bool,
 }
 
-impl WasmExecution {
+impl V8WasmExecution {
     pub fn sync_rpc_responder(&self) -> JavascriptSyncRpcResponder {
         self.inner.sync_rpc_responder()
     }
@@ -1044,6 +1114,7 @@ impl WasmExecution {
                         request.method
                     )));
                 }
+                WasmExecutionEvent::HostCall { .. } => return Err(no_native_host_consumer()),
                 WasmExecutionEvent::SignalState { .. } => {}
                 WasmExecutionEvent::Exited(exit_code) => {
                     return Ok(WasmExecutionResult {
@@ -1386,7 +1457,7 @@ impl WasmExecution {
     }
 }
 
-impl ExecutionBackend for WasmExecution {
+impl ExecutionBackend for V8WasmExecution {
     fn kind(&self) -> ExecutionBackendKind {
         ExecutionBackendKind::WebAssembly
     }
@@ -1404,7 +1475,7 @@ impl ExecutionBackend for WasmExecution {
     }
 
     fn native_process_id(&self) -> Option<u32> {
-        WasmExecution::native_process_id(self)
+        V8WasmExecution::native_process_id(self)
     }
 
     fn wake_handle(&self, identity: ExecutionWakeIdentity) -> Option<ExecutionWakeHandle> {
@@ -1412,11 +1483,11 @@ impl ExecutionBackend for WasmExecution {
     }
 
     fn is_prepared_for_start(&self) -> bool {
-        WasmExecution::is_prepared_for_start(self)
+        V8WasmExecution::is_prepared_for_start(self)
     }
 
     fn start_prepared(&mut self) -> Result<(), HostServiceError> {
-        WasmExecution::start_prepared(self).map_err(|error| {
+        V8WasmExecution::start_prepared(self).map_err(|error| {
             HostServiceError::new("ERR_AGENTOS_EXECUTION_START", error.to_string())
         })
     }
@@ -1449,9 +1520,9 @@ impl ExecutionBackend for WasmExecution {
 
     fn set_paused(&self, paused: bool) -> Result<(), HostServiceError> {
         let result = if paused {
-            WasmExecution::pause(self)
+            V8WasmExecution::pause(self)
         } else {
-            WasmExecution::resume(self)
+            V8WasmExecution::resume(self)
         };
         result.map_err(|error| {
             HostServiceError::new("ERR_AGENTOS_EXECUTION_CONTROL", error.to_string())
@@ -1464,7 +1535,7 @@ impl ExecutionBackend for WasmExecution {
     }
 
     fn close_stdin(&mut self) -> Result<(), HostServiceError> {
-        WasmExecution::close_stdin(self).map_err(|error| {
+        V8WasmExecution::close_stdin(self).map_err(|error| {
             HostServiceError::new("ERR_AGENTOS_EXECUTION_STDIN", error.to_string())
         })
     }
@@ -1513,6 +1584,406 @@ impl ExecutionBackend for WasmExecution {
     }
 }
 
+impl WasmExecution {
+    pub fn standalone_backend(&self) -> StandaloneWasmBackend {
+        match &self.backend {
+            WasmExecutionBackend::V8(_) => StandaloneWasmBackend::V8,
+            WasmExecutionBackend::Wasmtime(_) => StandaloneWasmBackend::Wasmtime,
+        }
+    }
+
+    pub fn sync_rpc_responder(&self) -> Option<JavascriptSyncRpcResponder> {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => Some(execution.sync_rpc_responder()),
+            WasmExecutionBackend::Wasmtime(_) => None,
+        }
+    }
+
+    pub fn execution_id(&self) -> &str {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => execution.execution_id(),
+            WasmExecutionBackend::Wasmtime(execution) => execution.execution_id(),
+        }
+    }
+
+    pub fn native_process_id(&self) -> Option<u32> {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => execution.native_process_id(),
+            WasmExecutionBackend::Wasmtime(_) => None,
+        }
+    }
+
+    pub fn v8_session_handle(&self) -> Option<V8SessionHandle> {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => Some(execution.v8_session_handle()),
+            WasmExecutionBackend::Wasmtime(_) => None,
+        }
+    }
+
+    pub fn start_prepared(&mut self) -> Result<(), WasmExecutionError> {
+        match &mut self.backend {
+            WasmExecutionBackend::V8(execution) => execution.start_prepared(),
+            WasmExecutionBackend::Wasmtime(execution) => execution.start_prepared(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn is_prepared_for_start(&self) -> bool {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => execution.is_prepared_for_start(),
+            WasmExecutionBackend::Wasmtime(execution) => execution.is_prepared_for_start(),
+        }
+    }
+
+    pub fn write_stdin(&mut self, chunk: &[u8]) -> Result<(), WasmExecutionError> {
+        match &mut self.backend {
+            WasmExecutionBackend::V8(execution) => execution.write_stdin(chunk),
+            WasmExecutionBackend::Wasmtime(_) => Ok(()),
+        }
+    }
+
+    pub fn write_stdin_kernel_only(&mut self, chunk: &[u8]) -> Result<(), WasmExecutionError> {
+        match &mut self.backend {
+            WasmExecutionBackend::V8(execution) => execution.write_stdin_kernel_only(chunk),
+            WasmExecutionBackend::Wasmtime(_) => Ok(()),
+        }
+    }
+
+    pub fn close_stdin(&mut self) -> Result<(), WasmExecutionError> {
+        match &mut self.backend {
+            WasmExecutionBackend::V8(execution) => execution.close_stdin(),
+            WasmExecutionBackend::Wasmtime(_) => Ok(()),
+        }
+    }
+
+    pub fn send_stream_event(
+        &self,
+        event_type: &str,
+        payload: Value,
+    ) -> Result<(), WasmExecutionError> {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => execution.send_stream_event(event_type, payload),
+            WasmExecutionBackend::Wasmtime(_) => Err(wasmtime_adapter_only_error(
+                "ENOTSUP",
+                "native Wasmtime executions do not accept V8 stream events",
+            )),
+        }
+    }
+
+    pub fn terminate(&self) -> Result<(), WasmExecutionError> {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => execution.terminate(),
+            WasmExecutionBackend::Wasmtime(execution) => {
+                execution.terminate();
+                Ok(())
+            }
+        }
+    }
+
+    pub fn pause(&self) -> Result<(), WasmExecutionError> {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => execution.pause(),
+            WasmExecutionBackend::Wasmtime(execution) => {
+                execution.set_paused(true);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn resume(&self) -> Result<(), WasmExecutionError> {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => execution.resume(),
+            WasmExecutionBackend::Wasmtime(execution) => {
+                execution.set_paused(false);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn respond_sync_rpc_success(
+        &mut self,
+        id: u64,
+        result: Value,
+    ) -> Result<(), WasmExecutionError> {
+        match &mut self.backend {
+            WasmExecutionBackend::V8(execution) => execution.respond_sync_rpc_success(id, result),
+            WasmExecutionBackend::Wasmtime(_) => Err(no_native_sync_rpc()),
+        }
+    }
+
+    pub fn claim_sync_rpc_response(&mut self, id: u64) -> Result<bool, WasmExecutionError> {
+        match &mut self.backend {
+            WasmExecutionBackend::V8(execution) => execution.claim_sync_rpc_response(id),
+            WasmExecutionBackend::Wasmtime(_) => Err(no_native_sync_rpc()),
+        }
+    }
+
+    pub fn respond_claimed_sync_rpc_success(
+        &mut self,
+        id: u64,
+        result: Value,
+    ) -> Result<(), WasmExecutionError> {
+        match &mut self.backend {
+            WasmExecutionBackend::V8(execution) => {
+                execution.respond_claimed_sync_rpc_success(id, result)
+            }
+            WasmExecutionBackend::Wasmtime(_) => Err(no_native_sync_rpc()),
+        }
+    }
+
+    pub fn respond_sync_rpc_raw_success(
+        &mut self,
+        id: u64,
+        payload: Vec<u8>,
+    ) -> Result<(), WasmExecutionError> {
+        match &mut self.backend {
+            WasmExecutionBackend::V8(execution) => {
+                execution.respond_sync_rpc_raw_success(id, payload)
+            }
+            WasmExecutionBackend::Wasmtime(_) => Err(no_native_sync_rpc()),
+        }
+    }
+
+    pub fn respond_sync_rpc_error(
+        &mut self,
+        id: u64,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Result<(), WasmExecutionError> {
+        match &mut self.backend {
+            WasmExecutionBackend::V8(execution) => {
+                execution.respond_sync_rpc_error(id, code, message)
+            }
+            WasmExecutionBackend::Wasmtime(_) => Err(no_native_sync_rpc()),
+        }
+    }
+
+    pub fn respond_claimed_sync_rpc_error(
+        &mut self,
+        id: u64,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Result<(), WasmExecutionError> {
+        match &mut self.backend {
+            WasmExecutionBackend::V8(execution) => {
+                execution.respond_claimed_sync_rpc_error(id, code, message)
+            }
+            WasmExecutionBackend::Wasmtime(_) => Err(no_native_sync_rpc()),
+        }
+    }
+
+    pub async fn poll_event(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<WasmExecutionEvent>, WasmExecutionError> {
+        match &mut self.backend {
+            WasmExecutionBackend::V8(execution) => execution.poll_event(timeout).await,
+            WasmExecutionBackend::Wasmtime(execution) => execution.poll_event(timeout).await,
+        }
+    }
+
+    pub fn try_poll_event(&mut self) -> Result<Option<WasmExecutionEvent>, WasmExecutionError> {
+        match &mut self.backend {
+            WasmExecutionBackend::V8(execution) => execution.try_poll_event(),
+            WasmExecutionBackend::Wasmtime(execution) => execution.try_poll_event(),
+        }
+    }
+
+    pub fn poll_event_blocking(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<WasmExecutionEvent>, WasmExecutionError> {
+        match &mut self.backend {
+            WasmExecutionBackend::V8(execution) => execution.poll_event_blocking(timeout),
+            WasmExecutionBackend::Wasmtime(execution) => execution.poll_event_blocking(timeout),
+        }
+    }
+
+    pub fn wait(self) -> Result<WasmExecutionResult, WasmExecutionError> {
+        match self.backend {
+            WasmExecutionBackend::V8(execution) => execution.wait(),
+            WasmExecutionBackend::Wasmtime(execution) => {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                loop {
+                    match execution.next_event_blocking()? {
+                        WasmExecutionEvent::Stdout(chunk) => stdout.extend_from_slice(&chunk),
+                        WasmExecutionEvent::Stderr(chunk) => stderr.extend_from_slice(&chunk),
+                        WasmExecutionEvent::Exited(exit_code) => {
+                            return Ok(WasmExecutionResult {
+                                execution_id: execution.execution_id().to_owned(),
+                                exit_code,
+                                stdout,
+                                stderr,
+                            });
+                        }
+                        WasmExecutionEvent::SyncRpcRequest(_) => {
+                            return Err(no_native_sync_rpc());
+                        }
+                        WasmExecutionEvent::HostCall { .. } => {
+                            return Err(no_native_host_consumer());
+                        }
+                        WasmExecutionEvent::SignalState { .. } => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn no_native_sync_rpc() -> WasmExecutionError {
+    wasmtime_adapter_only_error(
+        "ENOTSUP",
+        "native Wasmtime imports use direct typed host waiters, not V8 sync RPC",
+    )
+}
+
+fn no_native_host_consumer() -> WasmExecutionError {
+    wasmtime_adapter_only_error(
+        "ENOTCONN",
+        "native Wasmtime host calls require the sidecar host-event consumer",
+    )
+}
+
+fn wasmtime_adapter_only_error(code: &'static str, message: &'static str) -> WasmExecutionError {
+    WasmExecutionError::Host(HostServiceError::new(code, message))
+}
+
+impl ExecutionBackend for WasmExecution {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::WebAssembly
+    }
+
+    fn synchronous_fd_write_policy(&self) -> SynchronousFdWritePolicy {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => execution.synchronous_fd_write_policy(),
+            WasmExecutionBackend::Wasmtime(_) => SynchronousFdWritePolicy::Blocking,
+        }
+    }
+
+    fn descendant_wait_ownership(&self) -> DescendantWaitOwnership {
+        DescendantWaitOwnership::Guest
+    }
+
+    fn descendant_output_ownership(&self) -> DescendantOutputOwnership {
+        DescendantOutputOwnership::GuestDescriptors
+    }
+
+    fn native_process_id(&self) -> Option<u32> {
+        WasmExecution::native_process_id(self)
+    }
+
+    fn wake_handle(&self, identity: ExecutionWakeIdentity) -> Option<ExecutionWakeHandle> {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => execution.wake_handle(identity),
+            WasmExecutionBackend::Wasmtime(_) => None,
+        }
+    }
+
+    fn configure_host_services(&mut self, host: ProcessHostCapabilitySet) {
+        if let WasmExecutionBackend::Wasmtime(execution) = &self.backend {
+            execution.configure_host_services(host);
+        }
+    }
+
+    fn is_prepared_for_start(&self) -> bool {
+        WasmExecution::is_prepared_for_start(self)
+    }
+
+    fn start_prepared(&mut self) -> Result<(), HostServiceError> {
+        WasmExecution::start_prepared(self).map_err(wasm_execution_host_error)
+    }
+
+    fn begin_shutdown(
+        &mut self,
+        reason: ShutdownReason,
+    ) -> Result<ShutdownOutcome, HostServiceError> {
+        match &mut self.backend {
+            WasmExecutionBackend::V8(execution) => execution.begin_shutdown(reason),
+            WasmExecutionBackend::Wasmtime(execution) => {
+                execution.terminate();
+                Ok(match reason {
+                    ShutdownReason::Signal(signal) => {
+                        ShutdownOutcome::Exited(ExecutionExit::Signaled {
+                            signal,
+                            core_dumped: false,
+                        })
+                    }
+                    ShutdownReason::RuntimeFault => {
+                        ShutdownOutcome::Exited(ExecutionExit::Exited(1))
+                    }
+                    _ => ShutdownOutcome::AwaitExit,
+                })
+            }
+        }
+    }
+
+    fn set_paused(&self, paused: bool) -> Result<(), HostServiceError> {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => execution.set_paused(paused),
+            WasmExecutionBackend::Wasmtime(execution) => {
+                execution.set_paused(paused);
+                Ok(())
+            }
+        }
+    }
+
+    fn write_stdin(&mut self, _bytes: &[u8]) -> Result<(), HostServiceError> {
+        Ok(())
+    }
+
+    fn close_stdin(&mut self) -> Result<(), HostServiceError> {
+        WasmExecution::close_stdin(self).map_err(wasm_execution_host_error)
+    }
+
+    fn deliver_signal_checkpoint(
+        &self,
+        identity: ExecutionWakeIdentity,
+        signal: i32,
+        delivery_token: u64,
+        flags: u32,
+    ) -> Result<SignalCheckpointOutcome, HostServiceError> {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => {
+                execution.deliver_signal_checkpoint(identity, signal, delivery_token, flags)
+            }
+            WasmExecutionBackend::Wasmtime(execution) => {
+                execution.deliver_signal_checkpoint(identity, signal, delivery_token, flags)?;
+                Ok(SignalCheckpointOutcome::Published)
+            }
+        }
+    }
+
+    fn take_signal_checkpoint(
+        &self,
+        identity: ExecutionWakeIdentity,
+    ) -> Result<Option<PublishedSignalCheckpoint>, HostServiceError> {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => execution.take_signal_checkpoint(identity),
+            WasmExecutionBackend::Wasmtime(execution) => execution.take_signal_checkpoint(identity),
+        }
+    }
+
+    fn discard_signal_checkpoints(
+        &self,
+        identity: ExecutionWakeIdentity,
+    ) -> Result<(), HostServiceError> {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) => execution.discard_signal_checkpoints(identity),
+            WasmExecutionBackend::Wasmtime(execution) => {
+                execution.discard_signal_checkpoints(identity)
+            }
+        }
+    }
+}
+
+fn wasm_execution_host_error(error: WasmExecutionError) -> HostServiceError {
+    match error {
+        WasmExecutionError::Host(error) => error,
+        error => HostServiceError::new("ERR_AGENTOS_WASM_EXECUTION", error.to_string()),
+    }
+}
+
 #[derive(Clone, Copy)]
 enum StreamChannel {
     Stdout,
@@ -1528,6 +1999,7 @@ pub struct WasmExecutionEngine {
     import_caches: BTreeMap<String, NodeImportCache>,
     javascript_context_ids: BTreeMap<String, String>,
     javascript_engine: JavascriptExecutionEngine,
+    event_notify: Option<Arc<Notify>>,
 }
 
 impl Default for WasmExecutionEngine {
@@ -1546,6 +2018,7 @@ impl Default for WasmExecutionEngine {
             import_caches: BTreeMap::new(),
             javascript_context_ids: BTreeMap::new(),
             javascript_engine,
+            event_notify: None,
         }
     }
 }
@@ -1563,6 +2036,11 @@ fn default_wasm_test_runtime_context() -> Option<RuntimeContext> {
 }
 
 impl WasmExecutionEngine {
+    /// Process-wide Wasmtime cache/profile/RSS metrics for operator telemetry.
+    pub fn wasmtime_metrics(&self) -> Result<wasmtime::WasmtimeMetricsSnapshot, HostServiceError> {
+        wasmtime::WasmtimeExecutionEngine::metrics()
+    }
+
     pub fn new(runtime: RuntimeContext) -> Self {
         Self {
             runtime: Some(runtime.clone()),
@@ -1572,6 +2050,7 @@ impl WasmExecutionEngine {
             import_caches: BTreeMap::new(),
             javascript_context_ids: BTreeMap::new(),
             javascript_engine: JavascriptExecutionEngine::new(runtime),
+            event_notify: None,
         }
     }
 
@@ -1589,7 +2068,8 @@ impl WasmExecutionEngine {
     }
 
     pub fn set_event_notify(&mut self, notify: Option<Arc<Notify>>) {
-        self.javascript_engine.set_event_notify(notify);
+        self.javascript_engine.set_event_notify(notify.clone());
+        self.event_notify = notify;
     }
 
     pub fn create_context(&mut self, request: CreateWasmContextRequest) -> WasmContext {
@@ -1645,6 +2125,15 @@ impl WasmExecutionEngine {
         self.create_execution_with_runtime(request, runtime, false)
     }
 
+    pub fn start_execution_for_backend(
+        &mut self,
+        request: StartWasmExecutionRequest,
+        backend: StandaloneWasmBackend,
+    ) -> Result<WasmExecution, WasmExecutionError> {
+        let runtime = self.runtime_context()?.clone();
+        self.create_execution_for_backend(request, runtime, false, backend)
+    }
+
     pub fn prepare_execution(
         &mut self,
         request: StartWasmExecutionRequest,
@@ -1653,12 +2142,91 @@ impl WasmExecutionEngine {
         self.create_execution_with_runtime(request, runtime, true)
     }
 
+    pub fn prepare_execution_for_backend(
+        &mut self,
+        request: StartWasmExecutionRequest,
+        backend: StandaloneWasmBackend,
+    ) -> Result<WasmExecution, WasmExecutionError> {
+        let runtime = self.runtime_context()?.clone();
+        self.create_execution_for_backend(request, runtime, true, backend)
+    }
+
+    pub fn prepare_execution_with_runtime_for_backend(
+        &mut self,
+        request: StartWasmExecutionRequest,
+        runtime: RuntimeContext,
+        backend: StandaloneWasmBackend,
+    ) -> Result<WasmExecution, WasmExecutionError> {
+        self.create_execution_for_backend(request, runtime, true, backend)
+    }
+
     pub fn start_execution_with_runtime(
         &mut self,
         request: StartWasmExecutionRequest,
         runtime: RuntimeContext,
     ) -> Result<WasmExecution, WasmExecutionError> {
         self.create_execution_with_runtime(request, runtime, false)
+    }
+
+    pub fn start_execution_with_runtime_for_backend(
+        &mut self,
+        request: StartWasmExecutionRequest,
+        runtime: RuntimeContext,
+        backend: StandaloneWasmBackend,
+    ) -> Result<WasmExecution, WasmExecutionError> {
+        self.create_execution_for_backend(request, runtime, false, backend)
+    }
+
+    fn create_execution_for_backend(
+        &mut self,
+        request: StartWasmExecutionRequest,
+        runtime: RuntimeContext,
+        defer_execute: bool,
+        backend: StandaloneWasmBackend,
+    ) -> Result<WasmExecution, WasmExecutionError> {
+        match backend {
+            StandaloneWasmBackend::V8 => {
+                self.create_execution_with_runtime(request, runtime, defer_execute)
+            }
+            StandaloneWasmBackend::Wasmtime => {
+                self.create_wasmtime_execution(request, runtime, defer_execute)
+            }
+        }
+    }
+
+    fn create_wasmtime_execution(
+        &mut self,
+        request: StartWasmExecutionRequest,
+        runtime: RuntimeContext,
+        defer_execute: bool,
+    ) -> Result<WasmExecution, WasmExecutionError> {
+        let context = self
+            .contexts
+            .get(&request.context_id)
+            .cloned()
+            .ok_or_else(|| WasmExecutionError::MissingContext(request.context_id.clone()))?;
+        if context.vm_id != request.vm_id {
+            return Err(WasmExecutionError::VmMismatch {
+                expected: context.vm_id,
+                found: request.vm_id,
+            });
+        }
+        let module_path = context
+            .module_path
+            .ok_or(WasmExecutionError::MissingModulePath)?;
+        self.next_execution_id += 1;
+        let execution_id = format!("exec-{}", self.next_execution_id);
+        let execution = wasmtime::WasmtimeExecution::spawn(
+            execution_id,
+            module_path,
+            request,
+            runtime,
+            self.event_notify.clone(),
+            defer_execute,
+        )?;
+        Ok(WasmExecution {
+            backend: WasmExecutionBackend::Wasmtime(execution),
+        })
     }
 
     fn create_execution_with_runtime(
@@ -1684,6 +2252,7 @@ impl WasmExecutionEngine {
 
         let resolved_module = resolve_wasm_module(&context, &request)?;
         verify_wasm_module_header(&resolved_module)?;
+        validate_module_profile(&resolved_module)?;
         let prewarm_timeout = resolve_wasm_prewarm_timeout(&request)?;
         let javascript_context_id = self
             .javascript_context_ids
@@ -1762,6 +2331,7 @@ impl WasmExecutionEngine {
 
         let resolved_module = resolve_wasm_module(&context, &request)?;
         verify_wasm_module_header(&resolved_module)?;
+        validate_module_profile(&resolved_module)?;
         let prewarm_timeout = resolve_wasm_prewarm_timeout(&request)?;
         let javascript_context_id = self
             .javascript_context_ids
@@ -1815,6 +2385,23 @@ impl WasmExecutionEngine {
         )
     }
 
+    pub async fn start_execution_with_runtime_async_for_backend(
+        &mut self,
+        request: StartWasmExecutionRequest,
+        runtime: RuntimeContext,
+        backend: StandaloneWasmBackend,
+    ) -> Result<WasmExecution, WasmExecutionError> {
+        match backend {
+            StandaloneWasmBackend::V8 => {
+                self.start_execution_with_runtime_async(request, runtime)
+                    .await
+            }
+            StandaloneWasmBackend::Wasmtime => {
+                self.create_wasmtime_execution(request, runtime, false)
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn finish_start_execution(
         &mut self,
@@ -1854,41 +2441,45 @@ impl WasmExecutionEngine {
         let pending_event_budget = wasm_pending_event_budget(&request.limits)?;
 
         Ok(WasmExecution {
-            execution_id,
-            child_pid,
-            inner: javascript_execution,
-            execution_timeout,
-            execution_started_at: Instant::now(),
-            timeout_reported: false,
-            // Approach-warn (~80%) before the optional WASM elapsed deadline;
-            // only registered when a wall-clock limit is configured.
-            wall_clock_gauge: execution_timeout.map(|limit| {
-                register_limit(
-                    TrackedLimit::WasmWallClockMs,
-                    duration_millis_saturating_usize(limit),
-                )
-            }),
-            pending_events: WasmEventQueue::new(Arc::clone(&pending_event_budget)),
-            signal_checkpoints: WasmSignalCheckpointInbox::new(Arc::clone(&pending_event_budget)),
-            stdout_stream_buffer: Vec::new(),
-            stderr_stream_buffer: Vec::new(),
-            max_stack_bytes: request.limits.max_stack_bytes,
-            pending_v8_stack_overflow: None,
-            internal_sync_rpc: WasmInternalSyncRpc {
-                module_guest_paths: wasm_guest_module_paths(
-                    &resolved_module.specifier,
-                    &request.env,
-                ),
-                module_host_path: resolved_module.resolved_path.clone(),
-                guest_cwd: wasm_guest_cwd(&request.env),
-                host_cwd: request.cwd.clone(),
-                sandbox_root: sandbox_root.clone(),
-                guest_path_mappings,
-                route_fs_through_sidecar: sandbox_root.is_some(),
-                next_fd: 64,
-                open_files: BTreeMap::new(),
-                pending_events: WasmEventQueue::new(pending_event_budget),
-            },
+            backend: WasmExecutionBackend::V8(Box::new(V8WasmExecution {
+                execution_id,
+                child_pid,
+                inner: javascript_execution,
+                execution_timeout,
+                execution_started_at: Instant::now(),
+                timeout_reported: false,
+                // Approach-warn (~80%) before the optional WASM elapsed deadline;
+                // only registered when a wall-clock limit is configured.
+                wall_clock_gauge: execution_timeout.map(|limit| {
+                    register_limit(
+                        TrackedLimit::WasmWallClockMs,
+                        duration_millis_saturating_usize(limit),
+                    )
+                }),
+                pending_events: WasmEventQueue::new(Arc::clone(&pending_event_budget)),
+                signal_checkpoints: WasmSignalCheckpointInbox::new(Arc::clone(
+                    &pending_event_budget,
+                )),
+                stdout_stream_buffer: Vec::new(),
+                stderr_stream_buffer: Vec::new(),
+                max_stack_bytes: request.limits.max_stack_bytes,
+                pending_v8_stack_overflow: None,
+                internal_sync_rpc: WasmInternalSyncRpc {
+                    module_guest_paths: wasm_guest_module_paths(
+                        &resolved_module.specifier,
+                        &request.env,
+                    ),
+                    module_host_path: resolved_module.resolved_path.clone(),
+                    guest_cwd: wasm_guest_cwd(&request.env),
+                    host_cwd: request.cwd.clone(),
+                    sandbox_root: sandbox_root.clone(),
+                    guest_path_mappings,
+                    route_fs_through_sidecar: sandbox_root.is_some(),
+                    next_fd: 64,
+                    open_files: BTreeMap::new(),
+                    pending_events: WasmEventQueue::new(pending_event_budget),
+                },
+            })),
         })
     }
 
@@ -4583,7 +5174,7 @@ fn module_path(
     }
 }
 
-fn guest_visible_wasm_env(env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+pub(super) fn guest_visible_wasm_env(env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     let mut guest_env = env
         .iter()
         .filter(|(key, _)| !is_internal_wasm_guest_env_key(key))
@@ -4872,6 +5463,11 @@ fn verify_wasm_module_header(
         header: header.to_vec(),
         shell_shim,
     })
+}
+
+fn validate_module_profile(resolved_module: &ResolvedWasmModule) -> Result<(), WasmExecutionError> {
+    let bytes = cached_wasm_module_bytes(&resolved_module.resolved_path)?;
+    profile::validate_locked_profile(bytes.as_slice()).map_err(WasmExecutionError::Host)
 }
 
 fn detect_native_binary_format(header: &[u8]) -> Option<NativeBinaryFormat> {

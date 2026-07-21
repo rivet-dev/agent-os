@@ -1532,6 +1532,7 @@ process.stdin.once("data", (canonical) => {
                 env: HashMap::from([(String::from("AGENTOS_EXEC_TTY"), String::from("1"))]),
                 cwd: None,
                 wasm_permission_tier: None,
+                wasm_backend: None,
             }),
         ))
         .expect("start TTY stdin discipline probe");

@@ -289,6 +289,7 @@ impl AgentOs {
             env: options.env.clone().into_iter().collect(),
             cwd: options.cwd.clone(),
             wasm_permission_tier: None,
+            wasm_backend: None,
         };
 
         // Background: subscribe to events first (so no output is missed), issue the spawn, fan
@@ -442,6 +443,7 @@ impl AgentOs {
             env: options.env.clone().into_iter().collect(),
             cwd: options.cwd.clone(),
             wasm_permission_tier: None,
+            wasm_backend: None,
         };
 
         let agent = self.clone();
@@ -600,6 +602,7 @@ impl AgentOs {
             env: base.env.clone().into_iter().collect(),
             cwd: base.cwd.clone(),
             wasm_permission_tier: None,
+            wasm_backend: None,
         };
 
         // Subscribe before issuing the spawn so no output is missed.

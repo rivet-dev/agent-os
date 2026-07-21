@@ -307,6 +307,7 @@ interface TrackedProcessEntry {
 	driver: string;
 	cwd: string;
 	env: Record<string, string>;
+	wasmBackend: "v8" | "wasmtime" | undefined;
 	startTime: number;
 	exitTime: number | null;
 	hostPid: number | null;
@@ -652,6 +653,7 @@ export class NativeSidecarKernelProxy {
 				...(options?.env ?? {}),
 				...(options?.streamStdin ? { AGENTOS_KEEP_STDIN_OPEN: "1" } : {}),
 			},
+			wasmBackend: options?.wasmBackend,
 			startTime: Date.now(),
 			exitTime: null,
 			hostPid: null,
@@ -1528,6 +1530,7 @@ export class NativeSidecarKernelProxy {
 			args: entry.args,
 			env: entry.env,
 			cwd: entry.cwd,
+			wasmBackend: entry.wasmBackend,
 		});
 		entry.hostPid = started.pid;
 		entry.started = true;

@@ -640,6 +640,7 @@ mod kernel_authority {
         dispose_vm_and_close_session(&mut sidecar, &connection_id, &session_id, &vm_id);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_command(
         sidecar: &mut agentos_native_sidecar::NativeSidecar<RecordingBridge>,
         connection_id: &str,
@@ -663,6 +664,7 @@ mod kernel_authority {
                     env: HashMap::new(),
                     cwd: Some(String::from("/workspace")),
                     wasm_permission_tier: None,
+                    wasm_backend: None,
                 }),
             ))
             .expect("dispatch execute");
@@ -699,6 +701,7 @@ mod kernel_authority {
                     env: HashMap::new(),
                     cwd: Some(String::from("/workspace")),
                     wasm_permission_tier: None,
+                    wasm_backend: None,
                 }),
             ))
             .expect("dispatch execute");

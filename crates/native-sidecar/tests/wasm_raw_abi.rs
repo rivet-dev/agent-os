@@ -1,7 +1,8 @@
 mod support;
 
 use agentos_native_sidecar::wire::{
-    ExecuteRequest, GuestRuntimeKind, RequestPayload, ResponsePayload, WasmPermissionTier,
+    ExecuteRequest, GuestRuntimeKind, RequestPayload, ResponsePayload, StandaloneWasmBackend,
+    WasmPermissionTier,
 };
 use agentos_wasm_abi_generator::{
     imports_module, raw_call_assertion_module, single_import_module, AbiImport, AbiManifest,
@@ -377,6 +378,34 @@ fn run_raw_module_with_metadata(
     tier: WasmPermissionTier,
     metadata: HashMap<String, String>,
 ) -> (String, String, i32) {
+    let v8 = run_raw_module_for_backend(
+        &format!("{name}-v8"),
+        module,
+        tier,
+        metadata.clone(),
+        StandaloneWasmBackend::V8,
+    );
+    let wasmtime = run_raw_module_for_backend(
+        &format!("{name}-wasmtime"),
+        module,
+        tier,
+        metadata,
+        StandaloneWasmBackend::Wasmtime,
+    );
+    assert_eq!(
+        wasmtime, v8,
+        "Wasmtime and V8-WASM raw ABI outcomes diverged for {name}"
+    );
+    wasmtime
+}
+
+fn run_raw_module_for_backend(
+    name: &str,
+    module: &[u8],
+    tier: WasmPermissionTier,
+    metadata: HashMap<String, String>,
+    backend: StandaloneWasmBackend,
+) -> (String, String, i32) {
     let mut sidecar = new_sidecar(name);
     let cwd = temp_dir(&format!("{name}-cwd"));
     let entrypoint = cwd.join("raw-abi.wasm");
@@ -406,6 +435,7 @@ fn run_raw_module_with_metadata(
                 env: HashMap::new(),
                 cwd: None,
                 wasm_permission_tier: Some(tier),
+                wasm_backend: Some(backend),
             }),
         ))
         .expect("start generated raw-ABI fixture through sidecar");

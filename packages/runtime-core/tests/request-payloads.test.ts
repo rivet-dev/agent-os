@@ -205,6 +205,7 @@ describe("request payload conversion", () => {
 				env: new Map([["A", "1"]]),
 				cwd: null,
 				wasmPermissionTier: protocol.WasmPermissionTier.Isolated,
+				wasmBackend: null,
 			},
 		});
 	});

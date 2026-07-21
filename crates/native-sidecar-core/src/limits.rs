@@ -1969,7 +1969,8 @@ mod tests {
 
     #[test]
     fn process_queue_limits_reject_zero_before_runtime_construction() {
-        let cases: [(&str, fn(&mut ProcessLimitsConfig)); 3] = [
+        type ProcessLimitMutation = fn(&mut ProcessLimitsConfig);
+        let cases: [(&str, ProcessLimitMutation); 3] = [
             ("limits.process.pending_stdin_bytes", |process| {
                 process.pending_stdin_bytes = Some(0)
             }),

@@ -56,6 +56,7 @@ pub enum ExecutionExit {
 /// extension and are never consumed by shared host-service implementations.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+#[allow(clippy::large_enum_variant)]
 pub enum ExecutionEvent {
     Output {
         stream: OutputStream,

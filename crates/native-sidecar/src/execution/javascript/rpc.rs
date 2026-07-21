@@ -532,6 +532,7 @@ pub(in crate::execution) fn descriptor_rights_compat_request(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::execution) async fn service_descriptor_rights_compat_operation<B>(
     bridge: &SharedBridge<B>,
     vm_id: &str,
@@ -3076,7 +3077,7 @@ where
                 .signal_process(EXECUTION_DRIVER_NAME, target_pid, parsed_signal)
                 .map_err(kernel_error)?;
             process.apply_runtime_controls()?;
-            Ok(Value::Null.into())
+            Ok(Value::Null)
         }
         "process.umask" => {
             let new_mask = javascript_sync_rpc_arg_u32_optional(&request.args, 0, "process umask")?;

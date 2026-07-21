@@ -23,7 +23,7 @@ use agentos_execution::{
         BoundedUsize, BoundedVec, KernelPollInterest, SocketAddress,
         SocketDomain as HostSocketDomain, SocketKind as HostSocketKind, WaitTarget,
     },
-    HostRpcRequest, JavascriptExecution, PythonExecution, WasmExecution,
+    HostRpcRequest, JavascriptExecution, PythonExecution, StandaloneWasmBackend, WasmExecution,
 };
 use agentos_kernel::fd_table::TransferredFd;
 use agentos_kernel::kernel::{KernelProcessHandle, KernelVm};
@@ -1539,6 +1539,10 @@ pub(crate) struct ActiveProcess {
     /// host (instead of the raw guest stdout/stderr execution events).
     pub(crate) tty_master_fd: Option<u32>,
     pub(crate) runtime: GuestRuntimeKind,
+    /// Standalone-WASM engine affinity inherited across spawn and exec. This
+    /// is independent of the current image so a Wasmtime process that execs
+    /// JavaScript and later spawns WASM retains its selected backend.
+    pub(crate) standalone_wasm_backend: StandaloneWasmBackend,
     /// Executor-selected transport facts consumed by common POSIX paths.
     /// This is intentionally independent of `runtime`: compatibility WASM and
     /// Wasmtime share a guest kind but may use different host-call transports.
@@ -2052,7 +2056,7 @@ pub(crate) fn tcp_socket_event_retained_bytes(event: &TcpSocketEvent) -> usize {
 
 #[derive(Clone, Debug)]
 pub(crate) struct SocketEventPusher {
-    pub(crate) session: ExecutionWakeHandle,
+    pub(crate) session: Option<ExecutionWakeHandle>,
     pub(crate) capability_id: agentos_runtime::capability::CapabilityId,
     pub(crate) capability_generation: agentos_runtime::capability::CapabilityGeneration,
     live: Arc<AtomicBool>,
@@ -2074,8 +2078,9 @@ impl SocketEventPusher {
             return Ok(false);
         }
         self.owner_notify.notify_one();
-        self.session
-            .publish_readiness(self.capability_id, self.capability_generation, flags)?;
+        if let Some(session) = &self.session {
+            session.publish_readiness(self.capability_id, self.capability_generation, flags)?;
+        }
         Ok(true)
     }
 }
@@ -2191,14 +2196,15 @@ impl SocketReadinessSubscribers {
         if !target.is_live() {
             return Ok(false);
         }
-        target
-            .session
-            .set_application_read_interest(
-                target.capability_id,
-                target.capability_generation,
-                enabled,
-            )
-            .map_err(|error| SidecarError::Execution(error.to_string()))?;
+        if let Some(session) = &target.session {
+            session
+                .set_application_read_interest(
+                    target.capability_id,
+                    target.capability_generation,
+                    enabled,
+                )
+                .map_err(|error| SidecarError::Execution(error.to_string()))?;
+        }
         self.set_application_read_interest_state(identity, enabled)
     }
 
@@ -2277,8 +2283,7 @@ impl SocketReadinessRegistration {
         owner_notify: Arc<Notify>,
         replay_flags: agentos_runtime::readiness::ReadyFlags,
     ) {
-        let (Some(session), Some((capability_id, capability_generation))) = (session, identity)
-        else {
+        let Some((capability_id, capability_generation)) = identity else {
             return;
         };
         let live = Arc::new(AtomicBool::new(true));
@@ -3149,6 +3154,7 @@ impl BindingExecution {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ActiveExecutionEvent {
     Common(ExecutionEvent),
     Stdout(Vec<u8>),
@@ -3789,6 +3795,44 @@ mod socket_readiness_registry_tests {
             .expect("retired readiness publish must be ignored"));
         assert_eq!(wake_target.readiness_publishes.load(Ordering::Acquire), 1);
         assert!(subscribers.targets().is_empty());
+    }
+
+    #[test]
+    fn socket_subscription_without_executor_wake_notifies_posix_poll_owner() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build notify test runtime");
+        let take_notify_permit = |notify: &Notify| {
+            runtime.block_on(async {
+                tokio::time::timeout(Duration::from_millis(10), notify.notified())
+                    .await
+                    .is_ok()
+            })
+        };
+        let resources = ResourceLedger::root(
+            "runtime-neutral-socket-wake-test",
+            [(
+                ResourceClass::Capabilities,
+                ResourceLimit::new(1, "limits.reactor.maxCapabilities"),
+            )],
+        );
+        let subscribers = SocketReadinessSubscribers::new(&resources);
+        let registration = SocketReadinessRegistration::new(Arc::clone(&subscribers), None, None);
+        let owner_notify = Arc::new(Notify::new());
+        registration.register(
+            None,
+            Some((1, 1)),
+            Arc::clone(&owner_notify),
+            agentos_runtime::readiness::ReadyFlags::READABLE,
+        );
+
+        assert!(take_notify_permit(&owner_notify));
+        let target = subscribers.targets().pop().expect("registered target");
+        assert!(target
+            .publish_readiness(agentos_runtime::readiness::ReadyFlags::READABLE)
+            .expect("runtime-neutral readiness publish"));
+        assert!(take_notify_permit(&owner_notify));
     }
 
     #[test]

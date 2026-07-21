@@ -308,6 +308,7 @@ fn fail_deferred_posix_poll(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub(in crate::execution) fn service_deferred_posix_poll(
     generation: u64,
     runtime: &agentos_runtime::RuntimeContext,
@@ -496,7 +497,7 @@ pub(in crate::execution) fn service_deferred_posix_poll(
                 return std::task::Poll::Pending;
             }
             for waiter in &native_listener_waiters {
-                if let std::task::Poll::Ready(_) = waiter.poll_read_ready(cx) {
+                if waiter.poll_read_ready(cx).is_ready() {
                     return std::task::Poll::Ready(());
                 }
             }
@@ -718,9 +719,9 @@ where
     }
     .map_err(kernel_error);
     let prune_result = prune_managed_descriptions_after_fd_mutation(
-        &bridge,
+        bridge,
         vm_id,
-        &socket_paths,
+        socket_paths,
         vm,
         kernel_pid,
         candidate_descriptions,
@@ -1505,6 +1506,7 @@ fn decode_unix_address(
 #[allow(dead_code)]
 pub(super) struct NetworkCapability;
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_context_stream_read<B>(
     sidecar: &mut NativeSidecar<B>,
     vm_id: &str,
@@ -1545,6 +1547,7 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::execution) fn dispatch_descendant_context_stream_read<B>(
     sidecar: &mut NativeSidecar<B>,
     vm_id: &str,
@@ -2643,7 +2646,7 @@ where
                             "UDP socket requires INET address",
                         ));
                     };
-                    let response = service_managed_udp_operation(
+                    service_managed_udp_operation(
                         ManagedUdpServiceRequest {
                             bridge: context.bridge,
                             kernel: &mut *context.kernel,
@@ -2659,8 +2662,7 @@ where
                             host: Some(host.clone()),
                             port: *port,
                         },
-                    )?;
-                    response
+                    )?
                 }
                 _ => return Err(SidecarError::host("EOPNOTSUPP", "unsupported socket bind")),
             };

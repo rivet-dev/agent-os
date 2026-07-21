@@ -62,6 +62,24 @@ impl DirectHostReplyTarget for DirectHostReplyWaiterTarget {
             .send(result)
             .map_err(|_| HostServiceError::new("EPIPE", "direct host-reply receiver was canceled"))
     }
+
+    fn dismiss_claimed(&self, call_id: u64) -> Result<(), HostServiceError> {
+        self.validate_call_id(call_id)?;
+        let sender = self
+            .sender
+            .lock()
+            .map_err(|_| HostServiceError::new("EIO", "direct host-reply waiter lock is poisoned"))?
+            .take()
+            .ok_or_else(|| {
+                HostServiceError::new("EALREADY", "direct host-reply waiter is already settled")
+            })?;
+        sender
+            .send(Err(HostServiceError::new(
+                "ERR_AGENTOS_EXEC_REPLACED",
+                "the kernel committed a replacement process image",
+            )))
+            .map_err(|_| HostServiceError::new("EPIPE", "direct host-reply receiver was canceled"))
+    }
 }
 
 impl DirectHostReplyWaiterTarget {
@@ -503,9 +521,11 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::sync::Mutex;
 
+    type RecordedReply = (u64, bool, Result<HostCallReply, HostServiceError>);
+
     #[derive(Default)]
     struct RecordingTarget {
-        replies: Mutex<Vec<(u64, bool, Result<HostCallReply, HostServiceError>)>>,
+        replies: Mutex<Vec<RecordedReply>>,
         dismissed: Mutex<Vec<u64>>,
         fail_delivery: bool,
     }
@@ -735,6 +755,20 @@ mod tests {
             .expect("settle error");
         let error = poll_direct_receiver(receiver).expect_err("typed error");
         assert_eq!(error.code, "EACCES");
+    }
+
+    #[test]
+    fn dismissed_native_exec_waiter_receives_replacement_outcome() {
+        let identity = HostCallIdentity {
+            generation: 9,
+            pid: 17,
+            call_id: 26,
+        };
+        let (reply, receiver) = direct_host_reply_channel(identity, 1024).expect("direct channel");
+        assert!(reply.claim().expect("claim exec"));
+        reply.dismiss_claimed().expect("dismiss exec");
+        let error = poll_direct_receiver(receiver).expect_err("exec replacement");
+        assert_eq!(error.code, "ERR_AGENTOS_EXEC_REPLACED");
     }
 
     #[test]

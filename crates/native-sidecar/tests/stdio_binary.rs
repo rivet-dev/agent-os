@@ -775,6 +775,7 @@ fn native_sidecar_binary_runs_the_framed_protocol_over_stdio() {
                 env: HashMap::new(),
                 cwd: None,
                 wasm_permission_tier: None,
+                wasm_backend: None,
             }),
         ),
     );

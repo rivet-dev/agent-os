@@ -1373,7 +1373,7 @@ mod tests {
 
     #[test]
     fn configured_acp_limit_errors_preserve_stable_wire_codes() {
-        let mut limits = AcpLimits {
+        let limits = AcpLimits {
             max_prompt_bytes: 3,
             ..AcpLimits::default()
         };
@@ -1381,8 +1381,11 @@ mod tests {
             .expect_err("prompt bytes must be bounded");
         assert_eq!(error_code(&bytes_error), "acp_prompt_bytes_limit");
 
-        limits.max_prompt_bytes = 1024;
-        limits.max_prompt_blocks = 1;
+        let limits = AcpLimits {
+            max_prompt_bytes: 1024,
+            max_prompt_blocks: 1,
+            ..AcpLimits::default()
+        };
         let blocks_error = parse_content_blocks("[{},{}]", "main", &limits)
             .expect_err("prompt blocks must be bounded");
         assert_eq!(error_code(&blocks_error), "acp_prompt_blocks_limit");

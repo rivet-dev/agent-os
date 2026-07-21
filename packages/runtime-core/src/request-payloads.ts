@@ -31,6 +31,7 @@ import {
 	type LiveGuestRuntimeKind,
 	type LiveRootFilesystemMode,
 	type LiveWasmPermissionTier,
+	type LiveStandaloneWasmBackend,
 	toGeneratedDisposeReason,
 	toGeneratedFilesystemOperation,
 	toGeneratedGuestFilesystemOperation,
@@ -38,6 +39,7 @@ import {
 	toGeneratedRootFilesystemEntryEncoding,
 	toGeneratedRootFilesystemMode,
 	toGeneratedWasmPermissionTier,
+	toGeneratedStandaloneWasmBackend,
 } from "./protocol-maps.js";
 
 export interface LiveRegisteredHostCallbackExample {
@@ -170,6 +172,7 @@ export type LiveRequestPayload =
 			env?: Record<string, string>;
 			cwd?: string;
 			wasm_permission_tier?: LiveWasmPermissionTier;
+			wasm_backend?: LiveStandaloneWasmBackend;
 	  }
 	| {
 			type: "write_stdin";
@@ -515,6 +518,10 @@ export function toGeneratedRequestPayload(
 						payload.wasm_permission_tier === undefined
 							? null
 							: toGeneratedWasmPermissionTier(payload.wasm_permission_tier),
+					wasmBackend:
+						payload.wasm_backend === undefined
+							? null
+							: toGeneratedStandaloneWasmBackend(payload.wasm_backend),
 				},
 			};
 		case "write_stdin":

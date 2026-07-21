@@ -46,6 +46,7 @@ impl AcpExtension {
                 env: env.into_iter().collect(),
                 cwd: Some(request.cwd.clone()),
                 wasm_permission_tier: None,
+                wasm_backend: None,
             })
             .await
         {

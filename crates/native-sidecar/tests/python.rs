@@ -414,6 +414,7 @@ fn execute_python_entrypoint_with_env(
                 env,
                 cwd: None,
                 wasm_permission_tier: None,
+                wasm_backend: None,
             }),
         ))
         .expect("start python execution through wire");
@@ -451,6 +452,7 @@ fn execute_javascript_with_env(
                 env,
                 cwd: None,
                 wasm_permission_tier: None,
+                wasm_backend: None,
             }),
         ))
         .expect("start JavaScript execution through wire");
@@ -3282,6 +3284,7 @@ fn execute_python_cli(
                 env: HashMap::new(),
                 cwd: None,
                 wasm_permission_tier: None,
+                wasm_backend: None,
             }),
         ))
         .expect("start python CLI execution through wire");
@@ -3319,6 +3322,7 @@ fn execute_python_cli_with_env(
                 env,
                 cwd: None,
                 wasm_permission_tier: None,
+                wasm_backend: None,
             }),
         ))
         .expect("start python CLI execution through wire");

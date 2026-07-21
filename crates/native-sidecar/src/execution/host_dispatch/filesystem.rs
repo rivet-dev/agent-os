@@ -451,10 +451,29 @@ pub(super) fn decode(
             },
             linkable: javascript_sync_rpc_option_bool(&request.args, 3, "linkable").unwrap_or(true),
         },
+        "process.open_tmpfile_at" => FilesystemOperation::OpenTmpfileAt {
+            dir_fd: javascript_sync_rpc_arg_u32(&request.args, 0, "unnamed-file dir fd")?,
+            path: path(1, "unnamed-file directory")?,
+            options: GuestOpenSpec {
+                flags: javascript_sync_rpc_arg_u32(&request.args, 2, "unnamed-file flags")?,
+                mode: Some(javascript_sync_rpc_arg_u32(
+                    &request.args,
+                    3,
+                    "unnamed-file mode",
+                )?),
+                rights: GuestOpenRights::Synthesized,
+            },
+            linkable: javascript_sync_rpc_option_bool(&request.args, 4, "linkable").unwrap_or(true),
+        },
         "fs.linkFdSync" => FilesystemOperation::LinkDescriptorAt {
             fd: javascript_sync_rpc_arg_u32(&request.args, 0, "unnamed-file fd")?,
             dir_fd: NODE_CWD_FD,
             path: path(1, "unnamed-file link destination")?,
+        },
+        "process.fd_link_at" => FilesystemOperation::LinkDescriptorAt {
+            fd: javascript_sync_rpc_arg_u32(&request.args, 0, "unnamed-file fd")?,
+            dir_fd: javascript_sync_rpc_arg_u32(&request.args, 1, "unnamed-file link dir fd")?,
+            path: path(2, "unnamed-file link destination")?,
         },
         "fs.punchHoleSync" => FilesystemOperation::Range {
             fd: javascript_sync_rpc_arg_u32(&request.args, 0, "punch-hole fd")?,
@@ -491,6 +510,10 @@ pub(super) fn decode(
             dir_fd: NODE_CWD_FD,
             path: path(0, "filesystem statfs path")?,
         },
+        "process.path_statfs_at" => FilesystemOperation::FilesystemStatsAt {
+            dir_fd: javascript_sync_rpc_arg_u32(&request.args, 0, "statfs dir fd")?,
+            path: path(1, "filesystem statfs path")?,
+        },
         "fs.statSync" => FilesystemOperation::NodeStatAt {
             dir_fd: NODE_CWD_FD,
             path: path(0, "filesystem stat path")?,
@@ -500,6 +523,12 @@ pub(super) fn decode(
             path: path(0, "filesystem mknod path")?,
             mode: javascript_sync_rpc_arg_u32(&request.args, 1, "filesystem mknod mode")?,
             device: javascript_sync_rpc_arg_u64(&request.args, 2, "filesystem mknod device")?,
+        },
+        "process.path_mknod_at" => FilesystemOperation::MakeNodeAt {
+            dir_fd: javascript_sync_rpc_arg_u32(&request.args, 0, "mknod dir fd")?,
+            path: path(1, "filesystem mknod path")?,
+            mode: javascript_sync_rpc_arg_u32(&request.args, 2, "filesystem mknod mode")?,
+            device: javascript_sync_rpc_arg_u64(&request.args, 3, "filesystem mknod device")?,
         },
         "fs.remountSync" => FilesystemOperation::Remount {
             path: path(0, "filesystem remount path")?,
@@ -516,6 +545,19 @@ pub(super) fn decode(
             new_dir_fd: NODE_CWD_FD,
             new_path: path(1, "filesystem renameat2 destination")?,
             flags: javascript_sync_rpc_arg_u32(&request.args, 2, "filesystem renameat2 flags")?,
+        },
+        "process.path_rename_at2" => FilesystemOperation::RenameAt {
+            old_dir_fd: javascript_sync_rpc_arg_u32(&request.args, 0, "renameat2 old dir fd")?,
+            old_path: path(1, "filesystem renameat2 source")?,
+            new_dir_fd: javascript_sync_rpc_arg_u32(&request.args, 2, "renameat2 new dir fd")?,
+            new_path: path(3, "filesystem renameat2 destination")?,
+            flags: javascript_sync_rpc_arg_u32(&request.args, 4, "filesystem renameat2 flags")?,
+        },
+        "process.path_access_at" => FilesystemOperation::AccessAt {
+            dir_fd: javascript_sync_rpc_arg_u32(&request.args, 0, "access dir fd")?,
+            path: path(1, "filesystem access path")?,
+            mode: javascript_sync_rpc_arg_u32(&request.args, 2, "filesystem access mode")?,
+            effective_ids: javascript_sync_rpc_arg_bool(&request.args, 3, "effective IDs")?,
         },
         "fs.getxattrSync" | "fs.listxattrSync" | "fs.setxattrSync" | "fs.removexattrSync" => {
             let (operation, name_value, value, follow_index) = match request.method.as_str() {
@@ -554,6 +596,47 @@ pub(super) fn decode(
                     .map_err(SidecarError::Host)?,
             }
         }
+        "process.path_getxattr_at"
+        | "process.path_listxattr_at"
+        | "process.path_setxattr_at"
+        | "process.path_removexattr_at" => {
+            let (operation, name_value, value, follow_index) = match request.method.as_str() {
+                "process.path_getxattr_at" => {
+                    (XattrOperation::Get, Some(name(2, "xattr name")?), None, 3)
+                }
+                "process.path_listxattr_at" => (XattrOperation::List, None, None, 2),
+                "process.path_setxattr_at" => (
+                    XattrOperation::Set {
+                        flags: javascript_sync_rpc_arg_u32(&request.args, 4, "xattr flags")?,
+                    },
+                    Some(name(2, "xattr name")?),
+                    Some(bytes(3, "xattr value")?),
+                    5,
+                ),
+                _ => (
+                    XattrOperation::Remove,
+                    Some(name(2, "xattr name")?),
+                    None,
+                    3,
+                ),
+            };
+            FilesystemOperation::Xattr {
+                target: MetadataTarget::Path {
+                    dir_fd: javascript_sync_rpc_arg_u32(&request.args, 0, "xattr dir fd")?,
+                    follow_symlinks: javascript_sync_rpc_arg_bool(
+                        &request.args,
+                        follow_index,
+                        "follow symlinks",
+                    )?,
+                },
+                path: Some(path(1, "xattr path")?),
+                name: name_value,
+                value,
+                operation,
+                max_result_bytes: BoundedUsize::try_new(max_reply_bytes, &response_limit)
+                    .map_err(SidecarError::Host)?,
+            }
+        }
         "fs.fgetxattrSync" | "fs.flistxattrSync" | "fs.fsetxattrSync" | "fs.fremovexattrSync" => {
             let (operation, name_value, value) = match request.method.as_str() {
                 "fs.fgetxattrSync" => (XattrOperation::Get, Some(name(1, "xattr name")?), None),
@@ -582,6 +665,7 @@ pub(super) fn decode(
             }
         }
         "process.fd_pipe" => FilesystemOperation::Pipe,
+        "process.fd_snapshot" => FilesystemOperation::Snapshot,
         "process.fd_open" => FilesystemOperation::OpenAt {
             dir_fd: NODE_CWD_FD,
             path: path(0, "fd_open path")?,
@@ -1003,6 +1087,8 @@ impl SidecarHostCapability<FilesystemOperation> for FilesystemCapability {
                 | FilesystemOperation::OpenAt { .. }
                 | FilesystemOperation::OpenTmpfileAt { .. }
                 | FilesystemOperation::Pipe
+                | FilesystemOperation::Snapshot
+                | FilesystemOperation::CanonicalPreopens
                 | FilesystemOperation::Preopen { .. }
                 | FilesystemOperation::Preopens
                 | FilesystemOperation::Close { .. }
@@ -1155,6 +1241,33 @@ impl SidecarHostCapability<FilesystemOperation> for FilesystemCapability {
                     .map_err(kernel_host_error)?;
                 json!({ "readFd": read_fd, "writeFd": write_fd })
             }
+            FilesystemOperation::Snapshot => Value::Array(
+                kernel
+                    .fd_snapshot(EXECUTION_DRIVER_NAME, pid)
+                    .map_err(kernel_host_error)?
+                    .into_iter()
+                    .map(|entry| {
+                        json!({
+                            "fd": entry.fd,
+                            "descriptionId": entry.description_id.to_string(),
+                            "fdFlags": entry.fd_flags,
+                            "statusFlags": entry.status_flags,
+                            "filetype": entry.filetype,
+                            "rightsBase": entry.rights_base.to_string(),
+                            "rightsInheriting": entry.rights_inheriting.to_string(),
+                            "kind": if entry.is_socket {
+                                "socket"
+                            } else if entry.is_pipe {
+                                "pipe"
+                            } else if entry.is_pty {
+                                "pty"
+                            } else {
+                                "file"
+                            },
+                        })
+                    })
+                    .collect(),
+            ),
             FilesystemOperation::Preopen { fd } => kernel
                 .wasi_preopen(EXECUTION_DRIVER_NAME, pid, fd)
                 .map_err(kernel_host_error)?
@@ -1163,6 +1276,12 @@ impl SidecarHostCapability<FilesystemOperation> for FilesystemCapability {
             FilesystemOperation::Preopens => {
                 let preopens = kernel
                     .initialize_wasi_preopens(EXECUTION_DRIVER_NAME, pid)
+                    .map_err(kernel_host_error)?;
+                Value::Array(preopens.into_iter().map(preopen_value).collect())
+            }
+            FilesystemOperation::CanonicalPreopens => {
+                let preopens = kernel
+                    .initialize_canonical_wasi_preopens(EXECUTION_DRIVER_NAME, pid)
                     .map_err(kernel_host_error)?;
                 Value::Array(preopens.into_iter().map(preopen_value).collect())
             }
@@ -2968,7 +3087,7 @@ mod tests {
                 &mut process,
                 Some((
                     stdin_reader_fd,
-                    maximum.clone(),
+                    maximum,
                     DeferredKernelReadResponse::KernelStdin,
                     Instant::now(),
                     direct_reply(Arc::clone(&target), identity.generation, pid, call_id),
@@ -3080,7 +3199,7 @@ mod tests {
             &mut parent,
             Some((
                 read_fd,
-                maximum.clone(),
+                maximum,
                 Instant::now() + Duration::from_secs(1),
                 direct_reply(Arc::clone(&target), identity.generation, parent_pid, 1),
             )),
@@ -3120,7 +3239,7 @@ mod tests {
             panic!("read reply must be JSON")
         };
         assert_eq!(
-            javascript_sync_rpc_bytes_arg(&[payload.clone()], 0, "read reply")
+            javascript_sync_rpc_bytes_arg(std::slice::from_ref(payload), 0, "read reply")
                 .expect("decode read reply"),
             b"child-payload"
         );
@@ -3148,7 +3267,7 @@ mod tests {
             panic!("EOF reply must be JSON")
         };
         assert!(
-            javascript_sync_rpc_bytes_arg(&[payload.clone()], 0, "EOF reply")
+            javascript_sync_rpc_bytes_arg(std::slice::from_ref(payload), 0, "EOF reply")
                 .expect("decode EOF reply")
                 .is_empty()
         );

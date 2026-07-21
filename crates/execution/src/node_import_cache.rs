@@ -2431,7 +2431,7 @@ fn run_node_import_cache_root_cleanup_once(base_dir: &Path, cleanup: impl FnOnce
         .entry(base_dir.to_path_buf())
         .or_insert_with(|| Arc::new(OnceLock::new()))
         .clone();
-    cleanup_cell.get_or_init(|| cleanup());
+    cleanup_cell.get_or_init(cleanup);
 }
 
 fn cleanup_stale_node_import_caches(base_dir: &Path) {

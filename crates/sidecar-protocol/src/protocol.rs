@@ -1757,6 +1757,7 @@ pub type SoftwareDescriptor = crate::wire::SoftwareDescriptor;
 pub type ProjectedModuleDescriptor = crate::wire::ProjectedModuleDescriptor;
 
 pub type WasmPermissionTier = crate::wire::WasmPermissionTier;
+pub type StandaloneWasmBackend = crate::wire::StandaloneWasmBackend;
 
 pub type ExecuteRequest = crate::wire::ExecuteRequest;
 

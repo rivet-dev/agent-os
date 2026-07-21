@@ -4683,6 +4683,26 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.wasi_preopens(requester_driver, pid)
     }
 
+    /// Install WASI capability roots and commit the direct executor's initial
+    /// guest-visible descriptor layout into the authoritative kernel table.
+    /// This must run before guest code starts and replaces executor-local fd
+    /// projections for runtimes that can call the kernel ABI directly.
+    pub fn initialize_canonical_wasi_preopens(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+    ) -> KernelResult<Vec<ProcessWasiPreopen>> {
+        self.initialize_wasi_preopens(requester_driver, pid)?;
+        {
+            let mut tables = lock_or_recover(&self.fd_tables);
+            tables
+                .get_mut(pid)
+                .ok_or_else(|| KernelError::no_such_process(pid))?
+                .canonicalize_initial_wasi_layout()?;
+        }
+        self.wasi_preopens(requester_driver, pid)
+    }
+
     pub fn wasi_preopens(
         &self,
         requester_driver: &str,
@@ -6462,6 +6482,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     /// Open a descriptor under the kernel-owned Preview1 capability model.
     /// Parent/tier/access validation is complete before `fd_open` can create
     /// or truncate a path. `None` requests Linux-style synthesized rights.
+    #[allow(clippy::too_many_arguments)]
     pub fn fd_open_with_rights(
         &mut self,
         requester_driver: &str,
@@ -8839,6 +8860,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(None)
     }
 
+    #[allow(clippy::type_complexity)]
     fn prepare_detached_directory_backing(
         &mut self,
         path: &str,

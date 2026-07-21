@@ -284,15 +284,58 @@ fn sidecar_publishes_only_one_signal_delivery_scope_at_a_time() {
 }
 
 #[test]
-fn phase_one_contains_no_wasmtime_implementation_or_dependency() {
+fn phase_two_keeps_wasmtime_scoped_to_the_standalone_wasm_adapter() {
     let root = repo_root();
+    let workspace = std::fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo.toml");
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
     assert!(
-        !lock.contains("name = \"wasmtime") && !lock.contains("name = \"wasmtime-"),
-        "Wasmtime dependencies belong to the later executor revision, not the prerequisite refactor"
+        workspace.contains("wasmtime = { version = \"=46.0.0\", default-features = false")
+            && workspace.contains("wasmparser = \"=0.251.0\"")
+            && lock.contains("name = \"wasmtime\"\nversion = \"46.0.0\"")
+            && !lock.contains("name = \"wasmtime-wasi\""),
+        "Phase 2 must pin reviewed Wasmtime without installing ambient wasmtime-wasi"
     );
 
-    let mut manifests = vec![root.join("Cargo.toml")];
+    let wasm_adapter = std::fs::read_to_string(root.join("crates/execution/src/wasm.rs"))
+        .expect("read standalone WASM adapter");
+    let wasmtime_module =
+        std::fs::read_to_string(root.join("crates/execution/src/wasm/wasmtime/module.rs"))
+            .expect("read Wasmtime module compiler");
+    assert!(
+        wasm_adapter
+            .matches("validate_module_profile(&resolved_module)?;")
+            .count()
+            >= 2
+            && wasmtime_module.contains("profile::validate_locked_profile"),
+        "both V8-WASM start paths and Wasmtime compilation must use the shared wasmparser profile"
+    );
+
+    let publish = std::fs::read_to_string(root.join(".github/workflows/publish.yaml"))
+        .expect("read publish workflow");
+    let linux = std::fs::read_to_string(root.join("docker/build/linux-gnu.Dockerfile"))
+        .expect("read Linux release build");
+    let darwin = std::fs::read_to_string(root.join("docker/build/darwin.Dockerfile"))
+        .expect("read Darwin release build");
+    for (name, source) in [
+        ("publish workflow", publish.as_str()),
+        ("Linux release build", linux.as_str()),
+        ("Darwin release build", darwin.as_str()),
+    ] {
+        assert!(
+            source.contains("1.94.0"),
+            "{name} must use Wasmtime 46's reviewed Rust MSRV"
+        );
+    }
+    assert!(
+        linux.contains("cargo test -p agentos-execution wasmtime --lib --target \"$TARGET\"")
+            && publish.contains("runner: macos-15-intel")
+            && publish.contains("runner: macos-15")
+            && publish.contains("cargo test -p agentos-execution wasmtime --lib")
+            && publish.contains("needs.wasmtime-darwin-smoke.result == 'success'"),
+        "all four release platforms must compile and natively smoke the reviewed Wasmtime embedding"
+    );
+
+    let mut manifests = Vec::new();
     for entry in std::fs::read_dir(root.join("crates")).expect("read workspace crates") {
         let path = entry
             .expect("read workspace crate entry")
@@ -305,18 +348,17 @@ fn phase_one_contains_no_wasmtime_implementation_or_dependency() {
     for manifest in manifests {
         let source = std::fs::read_to_string(&manifest)
             .unwrap_or_else(|error| panic!("read {}: {error}", manifest.display()));
-        for line in source.lines().map(strip_line_comment) {
+        if source.lines().map(strip_line_comment).any(|line| {
             let compact = line
                 .chars()
                 .filter(|ch| !ch.is_whitespace())
                 .collect::<String>();
-            assert!(
-                !compact.starts_with("wasmtime=")
-                    && !compact.starts_with("wasmtime-")
-                    && !compact.contains("package=\"wasmtime"),
-                "Wasmtime dependency appeared in {}: {}",
-                manifest.display(),
-                line.trim()
+            compact.starts_with("wasmtime=") || compact.starts_with("wasmtime-")
+        }) {
+            assert_eq!(
+                manifest,
+                root.join("crates/execution/Cargo.toml"),
+                "only the execution crate may depend on Wasmtime"
             );
         }
     }
@@ -325,11 +367,13 @@ fn phase_one_contains_no_wasmtime_implementation_or_dependency() {
         let source = std::fs::read_to_string(root.join(&relative))
             .unwrap_or_else(|error| panic!("read {}: {error}", relative.display()));
         let production = production_source_text(&source);
-        assert!(
-            !production.contains("wasmtime::") && !production.contains("extern crate wasmtime"),
-            "Wasmtime implementation code appeared before Phase 1 closed in {}",
-            relative.display()
-        );
+        if production.contains("use wasmtime::") || production.contains("extern crate wasmtime") {
+            assert!(
+                relative.starts_with("crates/execution/src/wasm/wasmtime"),
+                "external Wasmtime API use escaped the standalone adapter: {}",
+                relative.display()
+            );
+        }
     }
 }
 
@@ -506,14 +550,15 @@ fn production_backends_route_typed_host_calls_through_family_capabilities() {
     )
     .expect("read shared host dispatcher");
 
-    // JavaScript, Python's embedded-JavaScript bridge, and compatibility WASM
-    // all use the same decoder before a sidecar semantic operation is chosen.
+    // JavaScript, Python's embedded-JavaScript bridge, compatibility WASM, and
+    // native Wasmtime host calls all enter the same typed capability router
+    // before a sidecar semantic operation is chosen.
     assert_eq!(
         process
             .matches("return route_compatibility_host_call(")
             .count(),
-        3,
-        "every production V8-backed adapter must use the bound common host-call submission path"
+        4,
+        "every production executor host-call lane must use the bound common submission path"
     );
     assert!(
         process.contains("ExecutionBackend::configure_host_services")
@@ -1198,6 +1243,9 @@ const FS_ALLOW: &[&str] = &[
     "crates/execution/src/javascript.rs",
     "crates/execution/src/node_import_cache.rs",
     "crates/execution/src/runtime_support.rs",
+    // Process RSS is sampled only for operator-visible Wasmtime diagnostics;
+    // it is not guest filesystem access or an ambient WASI capability.
+    "crates/execution/src/wasm/wasmtime/engine.rs",
     // Host-side V8 diagnostics: module-trace and sync-RPC latency profilers
     // write to an operator-provided file path, and snapshot bootstrap reads the
     // userland bundle from PI_SNAPSHOT_BUNDLE_PATH. Host-only, not guest-reachable.
@@ -1506,19 +1554,38 @@ fn production_execution_lifecycle_is_runtime_neutral_and_delegated() {
     );
 
     let wasm = std::fs::read_to_string(root.join("crates/execution/src/wasm.rs"))
-        .expect("read compatibility WASM adapter");
+        .expect("read standalone WASM adapters");
+    let v8_backend_start = wasm
+        .find("impl ExecutionBackend for V8WasmExecution")
+        .expect("find V8-WASM backend adapter");
+    let v8_backend_end = wasm[v8_backend_start..]
+        .find("impl WasmExecution")
+        .map(|offset| v8_backend_start + offset)
+        .expect("find end of V8-WASM backend adapter");
+    let v8_backend: String = wasm[v8_backend_start..v8_backend_end]
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    assert!(
+        v8_backend.contains("fndeliver_signal_checkpoint(")
+            && v8_backend.contains("self.wake_handle(identity)")
+            && v8_backend.contains("wake.publish_signal(signal,delivery_token)"),
+        "compatibility WASM checkpoints must publish through the runtime-neutral kernel wake capability"
+    );
     let wasm_backend_start = wasm
         .find("impl ExecutionBackend for WasmExecution")
-        .expect("find compatibility WASM backend adapter");
+        .expect("find standalone WASM backend adapter");
     let wasm_backend: String = wasm[wasm_backend_start..]
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect();
     assert!(
-        wasm_backend.contains("fndeliver_signal_checkpoint(")
-            && wasm_backend.contains("self.wake_handle(identity)")
-            && wasm_backend.contains("wake.publish_signal(signal,delivery_token)"),
-        "compatibility WASM checkpoints must publish through the runtime-neutral kernel wake capability"
+        wasm_backend
+            .matches("execution.deliver_signal_checkpoint(identity,signal,delivery_token,flags)")
+            .count()
+            >= 2
+            && wasm_backend.contains("WasmExecutionBackend::Wasmtime(execution)"),
+        "both standalone WASM engines must consume the common signal-checkpoint contract"
     );
 }
 
@@ -2772,6 +2839,9 @@ fn nested_child_start_never_blocks_the_shared_runtime_worker() {
         source
             .matches(".start_execution_with_runtime_async(")
             .count()
+            + source
+                .matches(".start_execution_with_runtime_async_for_backend(")
+                .count()
             >= 6,
         "top-level plus root/descendant Python and WASM startup must use async runtime adapters"
     );
@@ -3017,6 +3087,14 @@ fn production_threads_match_the_reviewed_topology_manifest() {
         (
             "serialized-v8-maintenance",
             "crates/execution/src/v8_host.rs",
+        ),
+        (
+            "process-wasmtime-epoch-ticker",
+            "crates/execution/src/wasm/wasmtime/engine.rs",
+        ),
+        (
+            "admitted-wasmtime-guest-executor",
+            "crates/execution/src/wasm/wasmtime/lifecycle.rs",
         ),
         (
             "constant-stdio-writer",

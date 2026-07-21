@@ -704,13 +704,9 @@ impl ActiveUnixSocket {
         )>,
         owner_notify: Arc<tokio::sync::Notify>,
     ) {
-        let (Some(session), Some((capability_id, capability_generation))) = (session, identity)
-        else {
-            return;
-        };
         self.readiness_registration.register(
-            Some(session),
-            Some((capability_id, capability_generation)),
+            session,
+            identity,
             owner_notify,
             agentos_runtime::readiness::ReadyFlags::READABLE,
         );
@@ -1575,13 +1571,9 @@ impl ActiveUnixListener {
         )>,
         owner_notify: Arc<tokio::sync::Notify>,
     ) {
-        let (Some(session), Some((capability_id, capability_generation))) = (session, identity)
-        else {
-            return;
-        };
         self.readiness_registration.register(
-            Some(session),
-            Some((capability_id, capability_generation)),
+            session,
+            identity,
             owner_notify,
             agentos_runtime::readiness::ReadyFlags::ACCEPT,
         );

@@ -78,8 +78,8 @@ pub use config::{
 
 pub use process::{
     ExecOptions, ExecResult, ProcessExit, ProcessInfo, ProcessOutput, ProcessStatus, ProcessStream,
-    ProcessTreeNode, SpawnHandle, SpawnOptions, SpawnStdio, SpawnedProcessInfo, StdinInput,
-    TimingMitigation,
+    ProcessTreeNode, SpawnHandle, SpawnOptions, SpawnStdio, SpawnedProcessInfo,
+    StandaloneWasmBackend, StdinInput, TimingMitigation,
 };
 
 pub use net::{HttpRequest, HttpResponse};

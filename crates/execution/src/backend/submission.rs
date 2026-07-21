@@ -167,9 +167,7 @@ impl ExecutionEventSubmitHandle {
         let result = self.submit_admitted_identity(event, admission);
         if let Err(error) = &result {
             if let Some(reply) = reply {
-                if let Err(delivery_error) = reply.fail(error.clone()) {
-                    return Err(delivery_error);
-                }
+                reply.fail(error.clone())?;
             }
         }
         result
@@ -239,9 +237,7 @@ impl ExecutionEventSubmitHandle {
         };
         let queued_retention = match &event {
             ExecutionEvent::HostCall { reply, .. } => {
-                if let Err(error) = reply.retain_request(retention) {
-                    return Err(error);
-                }
+                reply.retain_request(retention)?;
                 None
             }
             _ => Some(retention),

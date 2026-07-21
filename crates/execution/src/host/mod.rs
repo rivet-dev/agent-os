@@ -40,6 +40,7 @@ pub struct HostProcessContext {
 /// Runtime-neutral operation accepted by the shared sidecar host dispatcher.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
+#[allow(clippy::large_enum_variant)]
 pub enum HostOperation {
     Filesystem(FilesystemOperation),
     Network(NetworkOperation),

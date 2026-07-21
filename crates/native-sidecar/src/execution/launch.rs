@@ -3846,15 +3846,13 @@ mod bounded_host_launch_source_tests {
             .write_all(b"d")
             .expect("grow launch source after metadata admission");
         let stale = read_open_host_launch_source(opened, 3)
-            .err()
-            .expect("growth after admission metadata must be rejected");
+            .expect_err("growth after admission metadata must be rejected");
         assert_eq!(stale.code(), Some("ESTALE"));
 
         let oversize_path = directory.join("oversize.wasm");
         fs::write(&oversize_path, b"abcde").expect("write oversized launch source");
         let oversize = open_host_launch_source(oversize_path, 4)
-            .err()
-            .expect("oversized source must fail from handle metadata before reading");
+            .expect_err("oversized source must fail from handle metadata before reading");
         assert_eq!(oversize.code(), Some("E2BIG"));
 
         fs::remove_dir_all(directory).expect("remove launch source test directory");
@@ -5060,14 +5058,21 @@ where
                         .map_err(kernel_error),
                     "top-level compatibility-WASM permission lookup"
                 );
+                let module_path = match payload.wasm_backend {
+                    Some(StandaloneWasmBackend::Wasmtime) => env
+                        .get("AGENTOS_GUEST_ENTRYPOINT")
+                        .map(|path| format!("{TRUSTED_INITIAL_MODULE_PREFIX}{path}"))
+                        .unwrap_or_else(|| resolved.entrypoint.clone()),
+                    Some(StandaloneWasmBackend::V8) | None => resolved.entrypoint.clone(),
+                };
                 let context = self.wasm_engine.create_context(CreateWasmContextRequest {
                     vm_id: vm_id.clone(),
-                    module_path: Some(resolved.entrypoint.clone()),
+                    module_path: Some(module_path),
                 });
                 let context_id = context.context_id;
                 let execution = match self
                     .wasm_engine
-                    .start_execution_with_runtime_async(
+                    .start_execution_with_runtime_async_for_backend(
                         StartWasmExecutionRequest {
                             vm_id: vm_id.clone(),
                             context_id: context_id.clone(),
@@ -5080,6 +5085,14 @@ where
                             guest_runtime: wasm_guest_runtime,
                         },
                         vm.runtime_context.clone(),
+                        match payload.wasm_backend {
+                            Some(StandaloneWasmBackend::Wasmtime) => {
+                                ExecutionStandaloneWasmBackend::Wasmtime
+                            }
+                            Some(StandaloneWasmBackend::V8) | None => {
+                                ExecutionStandaloneWasmBackend::V8
+                            }
+                        },
                     )
                     .await
                     .map_err(wasm_error)

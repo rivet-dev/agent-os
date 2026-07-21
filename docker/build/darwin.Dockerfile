@@ -11,7 +11,7 @@ ARG TARGET=aarch64-apple-darwin
 ARG CLANG=aarch64-apple-darwin20.4
 ARG BUILD_PROFILE=debug
 ARG CACHE_PLATFORM=darwin-arm64
-ARG RUST_TOOLCHAIN=1.91.1
+ARG RUST_TOOLCHAIN=1.94.0
 
 ENV SDK=/root/osxcross/target/SDK/MacOSX11.3.sdk \
     RUSTC_WRAPPER=sccache \

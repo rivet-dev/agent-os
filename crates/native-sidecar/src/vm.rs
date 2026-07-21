@@ -1838,6 +1838,9 @@ fn vm_resource_ledger(
                         ResourceClass::Tasks => "runtime.resources.maxTasks",
                         ResourceClass::ExecutorSlots => "runtime.blocking.maxJobs",
                         ResourceClass::ExecutorBytes => "runtime.blocking.maxQueuedBytes",
+                        ResourceClass::WasmMemoryBytes => {
+                            "runtime.resources.maxWasmMemoryBytes"
+                        }
                         ResourceClass::Http2Connections => "limits.http2.maxConnections",
                         ResourceClass::Http2Streams => "limits.http2.maxStreams",
                         ResourceClass::Http2BufferedBytes => "limits.http2.maxBufferedBytes",
@@ -2669,13 +2672,12 @@ fn initialize_vm_runtime_scratch_root(root: PathBuf) -> Result<PathBuf, SidecarE
     // symlink to `/private/var`, and macOS fd→path recovery (`fcntl(F_GETPATH)`)
     // reports the resolved `/private/var/…` form. Canonicalize the private
     // runtime root so executor confinement compares the same host path form.
-    let initialized = (|| {
-        #[cfg(target_os = "macos")]
-        let root = fs::canonicalize(&root).map_err(|error| {
-            SidecarError::Io(format!("failed to canonicalize VM runtime root: {error}"))
-        })?;
-        Ok(root)
-    })();
+    #[cfg(target_os = "macos")]
+    let initialized = fs::canonicalize(&root).map_err(|error| {
+        SidecarError::Io(format!("failed to canonicalize VM runtime root: {error}"))
+    });
+    #[cfg(not(target_os = "macos"))]
+    let initialized: Result<PathBuf, SidecarError> = Ok(root);
 
     match initialized {
         Ok(root) => Ok(root),

@@ -92,8 +92,8 @@ use crate::protocol::{
     ProcessSnapshotEntry, ProcessSnapshotStatus, PtyResizedResponse, QueueSnapshotEntry,
     RequestFrame, ResizePtyRequest, ResourceSnapshotResponse, ResponseFrame, ResponsePayload,
     RetainedExecutionLanguage, SidecarRequestPayload, SignalDispositionAction,
-    SignalHandlerRegistration, SocketStateEntry, StreamChannel, VmFetchRequest, VmFetchResponse,
-    WasmPermissionTier, WriteStdinRequest,
+    SignalHandlerRegistration, SocketStateEntry, StandaloneWasmBackend, StreamChannel,
+    VmFetchRequest, VmFetchResponse, WasmPermissionTier, WriteStdinRequest,
 };
 use crate::service::{
     audit_fields, dirname, emit_security_audit_event, emit_structured_event_or_stderr,
@@ -186,8 +186,10 @@ use agentos_execution::{
     ExecutionSignalDispositionAction, ExecutionSignalHandlerRegistration, GuestRuntimeConfig,
     HostRpcRequest, JavascriptExecutionEvent, JavascriptExecutionLimits,
     JavascriptSyncRpcResponder, PythonExecutionEvent, PythonExecutionLimits, PythonVfsRpcResponder,
-    StartJavascriptExecutionRequest, StartPythonExecutionRequest, StartWasmExecutionRequest,
-    WasmExecutionEvent, WasmExecutionLimits, WasmPermissionTier as ExecutionWasmPermissionTier,
+    StandaloneWasmBackend as ExecutionStandaloneWasmBackend, StartJavascriptExecutionRequest,
+    StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecutionEvent,
+    WasmExecutionLimits, WasmPermissionTier as ExecutionWasmPermissionTier,
+    TRUSTED_INITIAL_MODULE_PREFIX,
 };
 use agentos_kernel::dns::{
     DnsLookupPolicy, DnsRecordResolution, DnsResolutionSource as KernelDnsResolutionSource,
@@ -538,7 +540,7 @@ mod configured_socket_capacity_tests {
         .await
         .expect_err("operation must still expire at the hard deadline");
 
-        let warnings = captured.lock().expect("deadline warnings");
+        let warnings = captured.lock().expect("deadline warnings").clone();
         assert_eq!(warnings.len(), 2);
         for warning in warnings.iter() {
             assert_eq!(warning.limit_name, "limits.reactor.operationDeadlineMs");
@@ -548,7 +550,6 @@ mod configured_socket_capacity_tests {
                 "warning must precede the hard deadline: {warning:?}"
             );
         }
-        drop(warnings);
 
         // The synchronous TCP/Unix write path uses the same warning state
         // machine even though its readiness wait is `poll(2)`, not a Future.
@@ -575,7 +576,10 @@ mod configured_socket_capacity_tests {
         tokio::time::sleep(reparked.remaining_until_deadline()).await;
         assert!(reparked.expired());
 
-        let warnings = captured.lock().expect("deadline warnings after sync paths");
+        let warnings = captured
+            .lock()
+            .expect("deadline warnings after sync paths")
+            .clone();
         assert_eq!(warnings.len(), 4);
         assert_eq!(
             warnings

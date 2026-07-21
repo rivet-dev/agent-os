@@ -194,8 +194,8 @@ pub fn build_root_filesystem_with_loaded_snapshot(
     for lower in &mut descriptor.lowers {
         lower.entries.retain(|entry| {
             let path = normalize_path(&entry.path);
-            !(bootstrap_replaces_bundle && path == crate::ca::CA_CERTIFICATES_GUEST_PATH)
-                && !(bootstrap_replaces_cert_pem && path == crate::ca::CA_CERTIFICATES_SYMLINK_PATH)
+            !(bootstrap_replaces_bundle && path == crate::ca::CA_CERTIFICATES_GUEST_PATH
+                || bootstrap_replaces_cert_pem && path == crate::ca::CA_CERTIFICATES_SYMLINK_PATH)
         });
     }
     descriptor.lowers.push(default_services_snapshot());

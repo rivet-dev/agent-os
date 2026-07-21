@@ -213,6 +213,10 @@ impl BoundedProcessLaunchRequest {
 /// diverge through separate fd projections.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutableImageSource {
+    /// Client-selected initial image admitted by the trusted sidecar before
+    /// guest execution starts. This authority is never exposed as a guest
+    /// import and does not apply to spawn/exec images.
+    TrustedInitialPath(BoundedString),
     Path(BoundedString),
     Descriptor(u32),
 }

@@ -200,9 +200,8 @@ where
                 ));
             }
         };
-        let response = core_guest_filesystem_call(&mut vm.kernel, payload)
-            .map_err(native_guest_filesystem_core_error)?;
-        response
+        core_guest_filesystem_call(&mut vm.kernel, payload)
+            .map_err(native_guest_filesystem_core_error)?
     };
 
     Ok(DispatchResult {

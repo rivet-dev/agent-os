@@ -40,9 +40,10 @@ pub use python::{
     PythonVfsRpcStat, StartPythonExecutionRequest,
 };
 pub use signal::{ExecutionSignalDispositionAction, ExecutionSignalHandlerRegistration};
+pub use wasm::wasmtime::TRUSTED_INITIAL_MODULE_PREFIX;
 pub use wasm::{
-    CreateWasmContextRequest, NativeBinaryFormat, StartWasmExecutionRequest, WasmContext,
-    WasmExecution, WasmExecutionEngine, WasmExecutionError, WasmExecutionEvent,
+    CreateWasmContextRequest, NativeBinaryFormat, StandaloneWasmBackend, StartWasmExecutionRequest,
+    WasmContext, WasmExecution, WasmExecutionEngine, WasmExecutionError, WasmExecutionEvent,
     WasmExecutionLimits, WasmExecutionResult, WasmPermissionTier,
 };
 

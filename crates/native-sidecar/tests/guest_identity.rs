@@ -427,7 +427,7 @@ fn wasm_guest_identity_commands_use_kernel_owned_defaults() {
         &vm_id,
         "proc-wasm-identity",
         GuestRuntimeKind::WebAssembly,
-        &wasm_path,
+        wasm_path,
         Vec::new(),
     );
 
@@ -641,7 +641,7 @@ fn wasm_guest_created_pty_uses_live_bounded_kernel_state() {
         &vm_id,
         "proc-wasm-guest-pty",
         GuestRuntimeKind::WebAssembly,
-        &wasm_path,
+        wasm_path,
         Vec::new(),
     );
     let (stdout, stderr, exit_code) = collect_guest_identity_process_output(
@@ -783,7 +783,7 @@ fn wasm_guest_env_filters_internal_control_vars_and_uses_kernel_defaults() {
         &vm_id,
         "proc-wasm-env",
         GuestRuntimeKind::WebAssembly,
-        &wasm_path,
+        wasm_path,
         Vec::new(),
     );
 
@@ -941,7 +941,7 @@ fn wasm_preopens_and_rights_are_kernel_authoritative() {
         &vm_id,
         "proc-wasm-preopen",
         GuestRuntimeKind::WebAssembly,
-        &wasm_path,
+        wasm_path,
         Vec::new(),
     );
     let (stdout, stderr, exit_code) = collect_guest_identity_process_output(
@@ -990,18 +990,30 @@ fn guest_identity_cases() {
     let current_exe = std::env::current_exe().expect("current test binary path");
 
     for case_name in GUEST_IDENTITY_CASES {
-        let status = Command::new(&current_exe)
-            .arg("--exact")
-            .arg("__guest_identity_case_runner")
-            .arg("--nocapture")
-            .env("AGENTOS_GUEST_IDENTITY_CASE", case_name)
-            .status()
-            .unwrap_or_else(|error| panic!("spawn guest_identity runner for {case_name}: {error}"));
+        let backends: &[Option<&str>] = if case_name.starts_with("wasm_") {
+            &[Some("v8"), Some("wasmtime")]
+        } else {
+            &[None]
+        };
+        for backend in backends {
+            let mut command = Command::new(&current_exe);
+            command
+                .arg("--exact")
+                .arg("__guest_identity_case_runner")
+                .arg("--nocapture")
+                .env("AGENTOS_GUEST_IDENTITY_CASE", case_name);
+            if let Some(backend) = backend {
+                command.env("AGENTOS_TEST_WASM_BACKEND", backend);
+            }
+            let status = command.status().unwrap_or_else(|error| {
+                panic!("spawn guest_identity runner for {case_name}/{backend:?}: {error}")
+            });
 
-        assert!(
-            status.success(),
-            "guest_identity case {case_name} failed with status {status}"
-        );
+            assert!(
+                status.success(),
+                "guest_identity case {case_name}/{backend:?} failed with status {status}"
+            );
+        }
     }
 }
 

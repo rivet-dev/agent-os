@@ -241,6 +241,7 @@ impl ActiveProcess {
         ExecutionBackend::configure_host_services(&mut execution, host_capabilities.clone());
         let control_notify = Arc::clone(&process_event_notify);
         runtime_control.set_wake(Arc::new(move || control_notify.notify_one()));
+        let standalone_wasm_backend = execution.standalone_wasm_backend();
         Self {
             kernel_pid,
             kernel_handle,
@@ -261,6 +262,7 @@ impl ActiveProcess {
             ),
             tty_master_fd: None,
             runtime,
+            standalone_wasm_backend,
             adapter_policy: ExecutionAdapterPolicy::BINDING,
             detached: false,
             execution,
@@ -941,8 +943,7 @@ impl ActiveProcess {
                 timeout,
                 &host_capabilities,
             )
-            .await
-            .map_err(|error| SidecarError::Execution(error.to_string()))?;
+            .await?;
         if let Some(event) = event {
             return Ok(Some(PolledExecutionEvent::unreserved(event)));
         }
@@ -955,6 +956,7 @@ impl ActiveProcess {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) async fn poll_execution_event_for_test(
         &mut self,
         timeout: Duration,
@@ -984,14 +986,11 @@ impl ActiveProcess {
             )));
         }
         let host_capabilities = self.host_capabilities.clone();
-        let event = self
-            .execution
-            .try_poll_event_with_host(
-                self.kernel_handle.runtime_identity(),
-                self.limits.reactor.max_bridge_response_bytes,
-                &host_capabilities,
-            )
-            .map_err(|error| SidecarError::Execution(error.to_string()))?;
+        let event = self.execution.try_poll_event_with_host(
+            self.kernel_handle.runtime_identity(),
+            self.limits.reactor.max_bridge_response_bytes,
+            &host_capabilities,
+        )?;
         if let Some(event) = event {
             return Ok(Some(PolledExecutionEvent::unreserved(event)));
         }
@@ -1092,6 +1091,14 @@ impl ActiveProcess {
 
     pub(crate) fn with_adapter_policy(mut self, adapter_policy: ExecutionAdapterPolicy) -> Self {
         self.adapter_policy = adapter_policy;
+        self
+    }
+
+    pub(crate) fn with_standalone_wasm_backend(
+        mut self,
+        backend: ExecutionStandaloneWasmBackend,
+    ) -> Self {
+        self.standalone_wasm_backend = backend;
         self
     }
 
@@ -2746,6 +2753,19 @@ impl ExecutionBackend for BindingExecution {
 }
 
 impl ActiveExecution {
+    /// Engine affinity is adapter construction metadata used only when this
+    /// process later replaces or spawns its standalone-WASM image. Keep the
+    /// storage-enum match behind the adapter boundary so common process
+    /// lifecycle code never switches on an executor variant.
+    fn standalone_wasm_backend(&self) -> ExecutionStandaloneWasmBackend {
+        match self {
+            Self::Wasm(execution) => execution.standalone_backend(),
+            Self::Javascript(_) | Self::Python(_) | Self::Binding(_) => {
+                ExecutionStandaloneWasmBackend::V8
+            }
+        }
+    }
+
     fn backend(&self) -> &dyn ExecutionBackend {
         match self {
             Self::Javascript(execution) => execution,
@@ -3473,7 +3493,7 @@ fn map_python_execution_event_with_host(
 
 fn map_wasm_execution_event_with_host(
     event: WasmExecutionEvent,
-    responder: JavascriptSyncRpcResponder,
+    responder: Option<JavascriptSyncRpcResponder>,
     identity: ProcessRuntimeIdentity,
     max_reply_bytes: usize,
     host: Option<&ProcessHostCapabilitySet>,
@@ -3482,8 +3502,22 @@ fn map_wasm_execution_event_with_host(
         WasmExecutionEvent::Stdout(chunk) => ActiveExecutionEvent::Stdout(chunk),
         WasmExecutionEvent::Stderr(chunk) => ActiveExecutionEvent::Stderr(chunk),
         WasmExecutionEvent::SyncRpcRequest(request) => {
+            let responder = responder.ok_or_else(|| {
+                SidecarError::host(
+                    "ERR_AGENTOS_WASMTIME_SYNC_RPC",
+                    "native Wasmtime emitted an impossible V8 sync RPC event",
+                )
+            })?;
             return route_compatibility_host_call(
                 execution_host_call(request, responder, identity, max_reply_bytes)?,
+                true,
+                max_reply_bytes,
+                host,
+            );
+        }
+        WasmExecutionEvent::HostCall { request, reply } => {
+            return route_compatibility_host_call(
+                ExecutionHostCall { request, reply },
                 true,
                 max_reply_bytes,
                 host,
@@ -3513,7 +3547,8 @@ fn route_compatibility_host_call(
         args: &'a [Value],
     }
 
-    let admission = host
+    let reply = call.reply.clone();
+    let admission = match host
         .map(|host| {
             let raw_bytes = call
                 .request
@@ -3535,8 +3570,22 @@ fn route_compatibility_host_call(
             )
         })
         .transpose()
-        .map_err(SidecarError::from)?;
-    let event = decode_compatibility_host_call(call, full_filesystem, max_reply_bytes)?;
+    {
+        Ok(admission) => admission,
+        Err(error) => {
+            reply.fail(error).map_err(SidecarError::from)?;
+            return Ok(None);
+        }
+    };
+    let event = match decode_compatibility_host_call(call, full_filesystem, max_reply_bytes) {
+        Ok(event) => event,
+        Err(error) => {
+            reply
+                .fail(host_service_error(&error))
+                .map_err(SidecarError::from)?;
+            return Ok(None);
+        }
+    };
     let Some(host) = host else {
         return Ok(Some(event));
     };

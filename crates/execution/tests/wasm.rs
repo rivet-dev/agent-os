@@ -1640,6 +1640,9 @@ fn wasm_execution_streams_exit_event_after_signal_mask_commit() {
                     .expect("commit the initial standalone signal mask");
                 saw_initial_signal_mask = true;
             }
+            Some(WasmExecutionEvent::HostCall { .. }) => {
+                panic!("V8 compatibility test received a native Wasmtime host call")
+            }
             Some(WasmExecutionEvent::SignalState { .. }) => {}
             None => panic!("timed out waiting for wasm execution event"),
         }
@@ -1889,6 +1892,9 @@ fn wasm_execution_waits_for_kernel_signal_state_commit_before_continuing() {
             Some(WasmExecutionEvent::SignalState { .. }) => {
                 panic!("managed signal state must use the reply-bearing host-call path")
             }
+            Some(WasmExecutionEvent::HostCall { .. }) => {
+                panic!("V8 compatibility test received a native Wasmtime host call")
+            }
             None => panic!("timed out waiting for wasm execution event"),
         }
     }
@@ -1959,6 +1965,9 @@ fn wasm_execution_preserves_stdout_when_signal_state_marker_shares_stdout_chunk(
             Some(WasmExecutionEvent::SyncRpcRequest(request)) => {
                 panic!("unexpected sync RPC request: {request:?}")
             }
+            Some(WasmExecutionEvent::HostCall { .. }) => {
+                panic!("V8 compatibility test received a native Wasmtime host call")
+            }
             None => panic!("timed out waiting for wasm execution event"),
         }
     }
@@ -2025,6 +2034,9 @@ fn wasm_execution_reassembles_split_signal_state_marker_across_stdout_chunks() {
             }
             Some(WasmExecutionEvent::SyncRpcRequest(request)) => {
                 panic!("unexpected sync RPC request: {request:?}")
+            }
+            Some(WasmExecutionEvent::HostCall { .. }) => {
+                panic!("V8 compatibility test received a native Wasmtime host call")
             }
             None => panic!("timed out waiting for wasm execution event"),
         }
@@ -2461,6 +2473,9 @@ fn wasm_execution_poll_path_times_out_at_wall_clock_limit() {
             }
             Some(WasmExecutionEvent::SyncRpcRequest(request)) => {
                 panic!("unexpected sync RPC request: {request:?}")
+            }
+            Some(WasmExecutionEvent::HostCall { .. }) => {
+                panic!("V8 compatibility test received a native Wasmtime host call")
             }
             Some(WasmExecutionEvent::Stdout(_))
             | Some(WasmExecutionEvent::SignalState { .. })

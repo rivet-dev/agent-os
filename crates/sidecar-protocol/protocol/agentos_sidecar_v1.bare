@@ -216,6 +216,11 @@ type WasmPermissionTier enum {
   ISOLATED
 }
 
+type StandaloneWasmBackend enum {
+  V8
+  WASMTIME
+}
+
 # agentOS package descriptor. `path` is the trusted host path of the package:
 # normally the packed `.aospkg` file (header + vbare manifest + mount index +
 # mount tar; see crates/vfs/package-format/v1.bare). The sidecar reads the
@@ -382,6 +387,7 @@ type ExecuteRequest struct {
   env: map<str><str>
   cwd: optional<str>
   wasmPermissionTier: optional<WasmPermissionTier>
+  wasmBackend: optional<StandaloneWasmBackend>
 }
 
 # First-class execution lifecycle. The legacy process request above remains an

@@ -14221,24 +14221,40 @@ if (__agentOSWasiSyscallPhasesEnabled) {
 }
 
 function instantiateWasmModule(targetModule) {
-  return __agentOSWasmMeasurePhase('WebAssembly.Instance', () => new WebAssembly.Instance(targetModule, {
-    wasi_snapshot_preview1: wasiImport,
-    wasi_unstable: wasiImport,
-    host_system: hostSystemImport,
-    host_tty: hostTtyImport,
-    // Read-write commands like DuckDB need fd_dup_min from the patched
-    // wasi-libc surface, but broader host_process capabilities stay
-    // reserved for the full tier.
-    host_process:
-      permissionTier === 'full'
-        ? hostProcessImport
-        : permissionTier === 'isolated'
-          ? undefined
-          : limitedHostProcessImport,
-    host_net: permissionTier === 'full' ? hostNetImport : undefined,
-    host_user: hostUserImport,
-    host_fs: hostFsImport,
-  }));
+  try {
+    return __agentOSWasmMeasurePhase('WebAssembly.Instance', () => new WebAssembly.Instance(targetModule, {
+      wasi_snapshot_preview1: wasiImport,
+      wasi_unstable: wasiImport,
+      host_system: hostSystemImport,
+      host_tty: hostTtyImport,
+      // Read-write commands like DuckDB need fd_dup_min from the patched
+      // wasi-libc surface, but broader host_process capabilities stay
+      // reserved for the full tier.
+      host_process:
+        permissionTier === 'full'
+          ? hostProcessImport
+          : permissionTier === 'isolated'
+            ? undefined
+            : limitedHostProcessImport,
+      host_net: permissionTier === 'full' ? hostNetImport : undefined,
+      host_user: hostUserImport,
+      host_fs: hostFsImport,
+    }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const unsupported = /Import #\d+ "([^"]+)" "([^"]+)"/.exec(message);
+    if (unsupported) {
+      process.stderr.write(
+        `ERR_AGENTOS_WASM_UNSUPPORTED_IMPORT: unsupported WebAssembly host import ${unsupported[1]}.${unsupported[2]}\n`,
+      );
+    } else {
+      process.stderr.write(
+        'ERR_AGENTOS_WASM_INSTANTIATION: WebAssembly host imports do not match module requirements\n',
+      );
+    }
+    process.exit(1);
+    throw error;
+  }
 }
 
 let instance = instantiateWasmModule(module);

@@ -43,6 +43,11 @@ impl SidecarHostCapability<ProcessOperation> for ProcessCapability {
                     ));
                 }
                 let image = match source {
+                    ExecutableImageSource::TrustedInitialPath(path) => kernel
+                        .load_trusted_initial_runtime_image(
+                            path.as_str(),
+                            process.limits.wasm.max_module_file_bytes,
+                        ),
                     ExecutableImageSource::Path(path) => {
                         let path = if path.as_str().starts_with('/') {
                             normalize_path(path.as_str())

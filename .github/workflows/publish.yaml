@@ -21,7 +21,9 @@ env:
   R2_BUCKET: rivet-releases
   R2_ENDPOINT: https://2a94c6a0ced8d35ea63cddc86c2681e7.r2.cloudflarestorage.com
   SIDECAR_PLATFORMS: "linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64"
-  RUST_TOOLCHAIN: "1.91.1"
+  # Wasmtime 46's reviewed MSRV. Keep the Docker defaults in sync so release
+  # artifacts cannot accidentally build with an older unsupported compiler.
+  RUST_TOOLCHAIN: "1.94.0"
   LINUX_GNU_LLVM_VERSION: "22"
   LINUX_GNU_SYSROOT_TAG: "sysroot-20250207"
 
@@ -100,6 +102,33 @@ jobs:
           name: codex-wasm
           path: software/codex/wasm
           if-no-files-found: error
+
+  wasmtime-darwin-smoke:
+    needs: [context]
+    name: "Wasmtime smoke (${{ matrix.platform }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-x64
+            runner: macos-15-intel
+            architecture: x86_64
+          - platform: darwin-arm64
+            runner: macos-15
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasmtime-${{ matrix.platform }}
+      - name: Verify native runner architecture
+        run: test "$(uname -m)" = "${{ matrix.architecture }}"
+      - name: Compile and execute Wasmtime embedding smoke tests
+        run: cargo test -p agentos-execution wasmtime --lib
 
   build-sidecar:
     needs: [context]
@@ -244,9 +273,9 @@ jobs:
           if-no-files-found: error
 
   publish-npm:
-    needs: [context, wasm-commands, codex-wasm, build-sidecar, build-sidecar-darwin]
+    needs: [context, wasm-commands, codex-wasm, wasmtime-darwin-smoke, build-sidecar, build-sidecar-darwin]
     name: Publish npm
-    if: ${{ !cancelled() && needs.wasm-commands.result == 'success' && needs.codex-wasm.result == 'success' && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' }}
+    if: ${{ !cancelled() && needs.wasm-commands.result == 'success' && needs.codex-wasm.result == 'success' && needs.wasmtime-darwin-smoke.result == 'success' && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -328,9 +357,9 @@ jobs:
             ${{ needs.context.outputs.trigger == 'release' && '--release-mode' || '' }}
 
   release-assets:
-    needs: [context, build-sidecar, build-sidecar-darwin]
+    needs: [context, wasmtime-darwin-smoke, build-sidecar, build-sidecar-darwin]
     name: Release assets
-    if: ${{ !cancelled() && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' }}
+    if: ${{ !cancelled() && needs.wasmtime-darwin-smoke.result == 'success' && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

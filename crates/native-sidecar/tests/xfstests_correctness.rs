@@ -658,6 +658,7 @@ fn try_execute_command_with_env(
                 env,
                 cwd: Some(String::from("/")),
                 wasm_permission_tier: None,
+                wasm_backend: None,
             }),
         ))
         .expect("execute verification command");

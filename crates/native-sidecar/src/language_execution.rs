@@ -1288,6 +1288,7 @@ where
             env: operation.env.into_iter().collect(),
             cwd: operation.cwd,
             wasm_permission_tier: None,
+            wasm_backend: None,
         };
         let launch_result = if reused_resident {
             let language = operation

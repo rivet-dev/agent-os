@@ -284,6 +284,7 @@ export interface ExecOptions {
 	filePath?: string;
 	cpuTimeLimitMs?: number;
 	timingMitigation?: TimingMitigation;
+	wasmBackend?: "v8" | "wasmtime";
 }
 
 export interface ExecResult {

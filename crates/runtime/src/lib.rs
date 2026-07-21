@@ -62,6 +62,7 @@ const DEFAULT_MAX_PROCESS_ASYNC_COMPLETION_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_MAX_PROCESS_UDP_DATAGRAMS: usize = 65_536;
 const DEFAULT_MAX_PROCESS_UDP_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_MAX_PROCESS_TLS_BYTES: usize = 256 * 1024 * 1024;
+const DEFAULT_MAX_PROCESS_WASM_MEMORY_BYTES: usize = 8 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_PROCESS_HTTP2_CONNECTIONS: usize = 4_096;
 const DEFAULT_MAX_PROCESS_HTTP2_STREAMS: usize = 65_536;
 const DEFAULT_MAX_PROCESS_HTTP2_BYTES: usize = 512 * 1024 * 1024;
@@ -217,6 +218,9 @@ pub struct RuntimeResourceConfig {
     pub max_udp_datagrams: usize,
     pub max_udp_bytes: usize,
     pub max_tls_bytes: usize,
+    /// Aggregate admitted linear-memory envelopes for active standalone WASM
+    /// Stores. This must not share the blocking-work byte ledger.
+    pub max_wasm_memory_bytes: usize,
     pub max_http2_connections: usize,
     pub max_http2_streams: usize,
     pub max_http2_buffered_bytes: usize,
@@ -249,6 +253,7 @@ impl Default for RuntimeResourceConfig {
             max_udp_datagrams: DEFAULT_MAX_PROCESS_UDP_DATAGRAMS,
             max_udp_bytes: DEFAULT_MAX_PROCESS_UDP_BYTES,
             max_tls_bytes: DEFAULT_MAX_PROCESS_TLS_BYTES,
+            max_wasm_memory_bytes: DEFAULT_MAX_PROCESS_WASM_MEMORY_BYTES,
             max_http2_connections: DEFAULT_MAX_PROCESS_HTTP2_CONNECTIONS,
             max_http2_streams: DEFAULT_MAX_PROCESS_HTTP2_STREAMS,
             max_http2_buffered_bytes: DEFAULT_MAX_PROCESS_HTTP2_BYTES,
@@ -357,6 +362,13 @@ impl RuntimeResourceConfig {
             (
                 ResourceClass::TlsBytes,
                 ResourceLimit::new(self.max_tls_bytes, "runtime.resources.maxTlsBytes"),
+            ),
+            (
+                ResourceClass::WasmMemoryBytes,
+                ResourceLimit::new(
+                    self.max_wasm_memory_bytes,
+                    "runtime.resources.maxWasmMemoryBytes",
+                ),
             ),
             (
                 ResourceClass::Http2Connections,
@@ -590,6 +602,10 @@ impl RuntimeConfig {
             (
                 "runtime.resources.maxTlsBytes",
                 self.resources.max_tls_bytes,
+            ),
+            (
+                "runtime.resources.maxWasmMemoryBytes",
+                self.resources.max_wasm_memory_bytes,
             ),
             (
                 "runtime.resources.maxHttp2Connections",

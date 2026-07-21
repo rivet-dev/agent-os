@@ -8,6 +8,12 @@ use crate::vfs::VirtualStat;
 
 pub const MAX_FDS_PER_PROCESS: usize = 1024;
 
+// The owned libc uses this private descriptor namespace for immutable WASI
+// capability roots. A Linux program may close or replace the visible preopen
+// fd while absolute-path libc operations must retain their kernel-owned root.
+pub const WASI_HIDDEN_PREOPEN_FD_TAG: u32 = 0x4000_0000;
+pub const WASI_HIDDEN_PREOPEN_FD_MASK: u32 = 0x3fff_ffff;
+
 pub const O_RDONLY: u32 = 0;
 pub const O_WRONLY: u32 = 1;
 pub const O_RDWR: u32 = 2;
@@ -1044,20 +1050,24 @@ impl FlockOperation {
 #[derive(Debug, Clone)]
 pub struct ProcessFdTable {
     entries: BTreeMap<u32, FdEntry>,
+    hidden_wasi_preopens: BTreeMap<u32, FdEntry>,
     next_fd: u32,
     alloc_desc: DescriptionFactory,
     max_fds: usize,
     wasi_preopens_initialized: bool,
+    canonical_wasi_layout_initialized: bool,
 }
 
 impl ProcessFdTable {
     fn new(alloc_desc: DescriptionFactory, max_fds: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
+            hidden_wasi_preopens: BTreeMap::new(),
             next_fd: 3,
             alloc_desc,
             max_fds,
             wasi_preopens_initialized: false,
+            canonical_wasi_layout_initialized: false,
         }
     }
 
@@ -1297,8 +1307,7 @@ impl ProcessFdTable {
 
     pub fn transfer(&self, fd: u32) -> FdResult<TransferredFd> {
         let entry = self
-            .entries
-            .get(&fd)
+            .get(fd)
             .ok_or_else(|| FdTableError::bad_file_descriptor(fd))?;
         entry.description.increment_ref_count();
         Ok(TransferredFd {
@@ -1424,11 +1433,94 @@ impl ProcessFdTable {
     }
 
     pub fn get(&self, fd: u32) -> Option<&FdEntry> {
+        if fd & WASI_HIDDEN_PREOPEN_FD_TAG != 0 {
+            return self.hidden_wasi_preopens.get(&fd);
+        }
         self.entries.get(&fd)
     }
 
     pub fn values(&self) -> Values<'_, u32, FdEntry> {
         self.entries.values()
+    }
+
+    /// Canonicalize the initial direct-executor descriptor namespace.
+    ///
+    /// WASI capability roots occupy the stable range beginning at fd 3. All
+    /// other inherited descriptors retain their sorted order immediately
+    /// after that range. This is the same layout the V8 compatibility adapter
+    /// projects, but it is committed once in the kernel so a direct executor
+    /// never needs a shadow fd table. This operation is only valid before
+    /// guest code starts.
+    pub fn canonicalize_initial_wasi_layout(&mut self) -> FdResult<()> {
+        if self.canonical_wasi_layout_initialized {
+            return Ok(());
+        }
+        let preopen_fds = self
+            .entries
+            .values()
+            .filter(|entry| entry.wasi_preopen_path.is_some())
+            .map(|entry| entry.fd)
+            .collect::<Vec<_>>();
+        if preopen_fds.is_empty() {
+            self.canonical_wasi_layout_initialized = true;
+            return Ok(());
+        }
+        let inherited_fds = self
+            .entries
+            .values()
+            .filter(|entry| entry.fd > 2 && entry.wasi_preopen_path.is_none())
+            .map(|entry| entry.fd)
+            .collect::<Vec<_>>();
+        let required = 3usize
+            .checked_add(preopen_fds.len())
+            .and_then(|value| value.checked_add(inherited_fds.len()))
+            .ok_or_else(FdTableError::too_many_open_files)?;
+        if required > self.max_fds {
+            return Err(FdTableError::too_many_open_files());
+        }
+
+        let mut targets = BTreeMap::new();
+        for fd in self.entries.keys().copied().filter(|fd| *fd <= 2) {
+            targets.insert(fd, fd);
+        }
+        for (index, fd) in preopen_fds.into_iter().enumerate() {
+            targets.insert(fd, 3 + index as u32);
+        }
+        let inherited_base = 3 + targets.values().filter(|fd| **fd > 2).count() as u32;
+        for (index, fd) in inherited_fds.into_iter().enumerate() {
+            targets.insert(fd, inherited_base + index as u32);
+        }
+
+        let entries = std::mem::take(&mut self.entries);
+        for (source, mut entry) in entries {
+            let target = targets.get(&source).copied().ok_or_else(|| {
+                FdTableError::invalid_argument(format!(
+                    "initial WASI layout omitted descriptor {source}"
+                ))
+            })?;
+            entry.fd = target;
+            if self.entries.insert(target, entry).is_some() {
+                return Err(FdTableError::invalid_argument(format!(
+                    "initial WASI layout assigned descriptor {target} twice"
+                )));
+            }
+        }
+        self.next_fd = (3..self.max_fds as u32)
+            .find(|fd| !self.entries.contains_key(fd))
+            .unwrap_or_default();
+        for entry in self
+            .entries
+            .values()
+            .filter(|entry| entry.wasi_preopen_path.is_some())
+        {
+            let hidden_fd = WASI_HIDDEN_PREOPEN_FD_TAG | entry.fd;
+            entry.description.increment_ref_count();
+            let mut hidden = entry.clone();
+            hidden.fd = hidden_fd;
+            self.hidden_wasi_preopens.insert(hidden_fd, hidden);
+        }
+        self.canonical_wasi_layout_initialized = true;
+        Ok(())
     }
 
     /// Mark the one-time installation of WASI capability roots for this
@@ -1498,6 +1590,9 @@ impl ProcessFdTable {
                 let closed = self.close(fd);
                 debug_assert!(closed);
             }
+            for (_, entry) in std::mem::take(&mut self.hidden_wasi_preopens) {
+                entry.description.decrement_ref_count();
+            }
             return;
         }
         let base = rights_base.expect("checked above");
@@ -1506,6 +1601,10 @@ impl ProcessFdTable {
             if entry.wasi_preopen_path.is_none() {
                 continue;
             }
+            entry.rights &= base;
+            entry.rights_inheriting &= inheriting;
+        }
+        for entry in self.hidden_wasi_preopens.values_mut() {
             entry.rights &= base;
             entry.rights_inheriting &= inheriting;
         }
@@ -1578,8 +1677,7 @@ impl ProcessFdTable {
 
     pub fn stat(&self, fd: u32) -> FdResult<FdStat> {
         let entry = self
-            .entries
-            .get(&fd)
+            .get(fd)
             .ok_or_else(|| FdTableError::bad_file_descriptor(fd))?;
         Ok(FdStat {
             filetype: entry.filetype,
@@ -1659,6 +1757,7 @@ impl ProcessFdTable {
         let mut child = Self::new(self.alloc_desc.clone(), self.max_fds);
         child.next_fd = self.next_fd;
         child.wasi_preopens_initialized = self.wasi_preopens_initialized;
+        child.canonical_wasi_layout_initialized = self.canonical_wasi_layout_initialized;
 
         for (fd, entry) in &self.entries {
             // Kernel process creation is spawn (fork + exec combined), so
@@ -1685,6 +1784,10 @@ impl ProcessFdTable {
                 },
             );
         }
+        for (fd, entry) in &self.hidden_wasi_preopens {
+            entry.description.increment_ref_count();
+            child.hidden_wasi_preopens.insert(*fd, entry.clone());
+        }
 
         child
     }
@@ -1700,6 +1803,9 @@ impl ProcessFdTable {
         let fds: Vec<u32> = self.entries.keys().copied().collect();
         for fd in fds {
             self.close(fd);
+        }
+        for (_, entry) in std::mem::take(&mut self.hidden_wasi_preopens) {
+            entry.description.decrement_ref_count();
         }
     }
 
@@ -2465,6 +2571,78 @@ mod wasi_preopen_tests {
         );
         assert!(table.close(fd));
         assert!(table.stat(fd).is_err());
+    }
+
+    #[test]
+    fn canonical_layout_resolves_collisions_and_protects_hidden_preopen_aliases() {
+        let mut manager = FdTableManager::new();
+        let table = manager.create(8);
+        let inherited_three = table.open("pipe:three", O_RDWR).expect("open fd 3");
+        let inherited_four = table.open("pipe:four", O_RDWR).expect("open fd 4");
+        assert_eq!((inherited_three, inherited_four), (3, 4));
+        let inherited_ids = (
+            table.get(3).expect("fd 3").description.id(),
+            table.get(4).expect("fd 4").description.id(),
+        );
+        let preopen = table
+            .open_with_details("/", O_DIRECTORY, FILETYPE_DIRECTORY, None)
+            .expect("open preopen directory");
+        table
+            .mark_wasi_preopen(
+                preopen,
+                String::from("/"),
+                WASI_PREOPEN_WRITE_RIGHTS_BASE,
+                WASI_PREOPEN_WRITE_RIGHTS_INHERITING,
+            )
+            .expect("mark preopen");
+        let preopen_id = table.get(preopen).expect("preopen").description.id();
+
+        table
+            .canonicalize_initial_wasi_layout()
+            .expect("canonicalize initial descriptors");
+        assert_eq!(
+            table.get(3).expect("visible preopen").description.id(),
+            preopen_id
+        );
+        assert_eq!(
+            table.get(4).expect("first inherited").description.id(),
+            inherited_ids.0
+        );
+        assert_eq!(
+            table.get(5).expect("second inherited").description.id(),
+            inherited_ids.1
+        );
+
+        let hidden = WASI_HIDDEN_PREOPEN_FD_TAG | 3;
+        assert_eq!(
+            table.get(hidden).expect("hidden preopen").description.id(),
+            preopen_id
+        );
+        assert!(table.close(3));
+        assert!(table.stat(3).is_err());
+        assert_eq!(
+            table
+                .stat(hidden)
+                .expect("hidden preopen survives visible close")
+                .wasi_preopen_path
+                .as_deref(),
+            Some("/")
+        );
+
+        // Executor initialization is idempotent and must not recreate a guest
+        // fd that the process deliberately closed.
+        table
+            .canonicalize_initial_wasi_layout()
+            .expect("repeat canonicalization");
+        assert!(table.stat(3).is_err());
+
+        let mut child = table.fork();
+        assert_eq!(
+            child.stat(hidden).expect("forked hidden preopen").rights,
+            WASI_PREOPEN_WRITE_RIGHTS_BASE
+        );
+        child.restrict_wasi_preopens(None, None);
+        assert!(child.stat(hidden).is_err());
     }
 
     #[test]

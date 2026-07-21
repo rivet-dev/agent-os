@@ -346,6 +346,15 @@ pub fn execute_wire(
     entrypoint: &Path,
     args: Vec<String>,
 ) {
+    let wasm_backend = if runtime == agentos_native_sidecar::wire::GuestRuntimeKind::WebAssembly {
+        match std::env::var("AGENTOS_TEST_WASM_BACKEND").as_deref() {
+            Ok("wasmtime") => Some(agentos_native_sidecar::wire::StandaloneWasmBackend::Wasmtime),
+            Ok("v8") | Err(_) => Some(agentos_native_sidecar::wire::StandaloneWasmBackend::V8),
+            Ok(value) => panic!("unknown AGENTOS_TEST_WASM_BACKEND value {value:?}"),
+        }
+    } else {
+        None
+    };
     let result = sidecar
         .dispatch_wire_blocking(wire_request(
             request_id,
@@ -360,6 +369,7 @@ pub fn execute_wire(
                     env: HashMap::new(),
                     cwd: None,
                     wasm_permission_tier: None,
+                    wasm_backend,
                 },
             ),
         ))

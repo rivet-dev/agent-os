@@ -128,6 +128,12 @@ pub enum FilesystemOperation {
         linkable: bool,
     },
     Pipe,
+    /// Snapshot the process's live kernel fd table. This is read at the point
+    /// of a spawn/exec decision; executor adapters must not cache it.
+    Snapshot,
+    /// Install kernel-owned WASI roots and canonicalize the initial direct
+    /// guest fd namespace before any guest code executes.
+    CanonicalPreopens,
     Preopen {
         fd: u32,
     },

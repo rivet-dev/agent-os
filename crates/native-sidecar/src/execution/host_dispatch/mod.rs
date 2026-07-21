@@ -658,7 +658,11 @@ pub(super) fn authorize_host_operation(
         ) => Ok(()),
         HostOperation::Network(operation) => Err(tier_denied("EACCES", tier, "network", operation)),
         HostOperation::Process(
-            ProcessOperation::GetImage { .. } | ProcessOperation::SystemIdentity,
+            ProcessOperation::GetImage { .. }
+            | ProcessOperation::SystemIdentity
+            | ProcessOperation::OpenExecutableImage { .. }
+            | ProcessOperation::ReadExecutableImage { .. }
+            | ProcessOperation::CloseExecutableImage { .. },
         ) => Ok(()),
         HostOperation::Process(ProcessOperation::GetResourceLimit { .. }) => Ok(()),
         HostOperation::Process(

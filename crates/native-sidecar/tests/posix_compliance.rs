@@ -123,6 +123,7 @@ fn wait_for_process_output(
 #[derive(Default)]
 struct MockProcessState {
     kills: Vec<i32>,
+    #[allow(dead_code)]
     exit_code: Option<i32>,
     binding: Option<(ProcessTable, u32)>,
 }
@@ -152,6 +153,7 @@ impl MockDriverProcess {
             .binding = Some((table.clone(), pid));
     }
 
+    #[allow(dead_code)]
     fn exit(&self, exit_code: i32) {
         let binding = {
             let mut state = self.state.lock().expect("mock process lock poisoned");

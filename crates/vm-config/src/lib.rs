@@ -413,7 +413,7 @@ fn validate_account_record_size(
     syntax_bytes: usize,
 ) -> Result<(), VmConfigError> {
     let record_bytes = field_bytes.try_fold(syntax_bytes, usize::checked_add);
-    if !record_bytes.is_some_and(|bytes| bytes <= MAX_ACCOUNT_RECORD_BYTES) {
+    if record_bytes.is_none_or(|bytes| bytes > MAX_ACCOUNT_RECORD_BYTES) {
         return Err(VmConfigError::new(format!(
             "{label} rendered account record exceeds {MAX_ACCOUNT_RECORD_BYTES} bytes (the 4096-byte ABI buffer includes its terminating NUL)"
         )));

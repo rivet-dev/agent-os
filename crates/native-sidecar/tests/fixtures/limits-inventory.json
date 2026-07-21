@@ -2456,5 +2456,166 @@
 		"path": "crates/vfs/src/posix/tar_fs.rs",
 		"class": "invariant",
 		"rationale": "Process-local memoization cap; clearing the cache changes performance only, not guest behavior."
+	},
+	{
+		"name": "DEFAULT_MODULE_CACHE_CHARGED_BYTES",
+		"path": "crates/execution/src/wasm/wasmtime/cache.rs",
+		"class": "policy-deferred",
+		"rationale": "Process-wide compiled-module cache byte budget; expose through runtime configuration when cache tuning is supported."
+	},
+	{
+		"name": "DEFAULT_MODULE_CACHE_ENTRIES",
+		"path": "crates/execution/src/wasm/wasmtime/cache.rs",
+		"class": "policy-deferred",
+		"rationale": "Process-wide compiled-module cache entry budget; expose through runtime configuration when cache tuning is supported."
+	},
+	{
+		"name": "DEFAULT_MAX_ENGINE_PROFILES",
+		"path": "crates/execution/src/wasm/wasmtime/engine.rs",
+		"class": "policy-deferred",
+		"rationale": "Process-wide Wasmtime Engine profile registry bound; expose through runtime configuration when profile tuning is supported."
+	},
+	{
+		"name": "DEFAULT_WASM_STACK_BYTES",
+		"path": "crates/execution/src/wasm/wasmtime/engine.rs",
+		"class": "policy",
+		"rationale": "Fallback for the typed per-execution Wasmtime guest stack limit.",
+		"wired": "WasmExecutionLimits.max_stack_bytes"
+	},
+	{
+		"name": "ENGINE_PROFILE_LIMIT_CONFIG_PATH",
+		"path": "crates/execution/src/wasm/wasmtime/engine.rs",
+		"class": "invariant",
+		"rationale": "Stable typed limit identifier, not the limit value."
+	},
+	{
+		"name": "DEFAULT_MAX_INSTANCES",
+		"path": "crates/execution/src/wasm/wasmtime/limits.rs",
+		"class": "invariant",
+		"rationale": "The standalone executor instantiates exactly one guest module per Store."
+	},
+	{
+		"name": "DEFAULT_MAX_MEMORIES",
+		"path": "crates/execution/src/wasm/wasmtime/limits.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded memories per standalone Store; expose with the Wasm feature-policy surface if multi-memory workloads require it."
+	},
+	{
+		"name": "DEFAULT_MAX_TABLES",
+		"path": "crates/execution/src/wasm/wasmtime/limits.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded tables per standalone Store; expose with the Wasm feature-policy surface if multi-table workloads require it."
+	},
+	{
+		"name": "DEFAULT_MAX_TABLE_ELEMENTS",
+		"path": "crates/execution/src/wasm/wasmtime/limits.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded guest table elements per Store; expose through Wasm resource configuration if operators need to tune it."
+	},
+	{
+		"name": "DEFAULT_MAX_WASM_MEMORY_BYTES",
+		"path": "crates/execution/src/wasm/wasmtime/limits.rs",
+		"class": "policy",
+		"rationale": "Fallback for the typed per-execution Wasmtime linear-memory limit.",
+		"wired": "WasmExecutionLimits.max_memory_bytes"
+	},
+	{
+		"name": "DEFAULT_TABLE_ACCOUNTING_BYTES",
+		"path": "crates/execution/src/wasm/wasmtime/limits.rs",
+		"class": "invariant",
+		"rationale": "Conservative aggregate-ledger charge derived from the fixed table-element representation ceiling."
+	},
+	{
+		"name": "DEFAULT_MAX_MODULE_FILE_BYTES",
+		"path": "crates/execution/src/wasm/wasmtime/lifecycle.rs",
+		"class": "policy",
+		"rationale": "Fallback for the typed standalone-WASM executable image byte limit.",
+		"wired": "WasmExecutionLimits.max_module_file_bytes"
+	},
+	{
+		"name": "MAX_ACCOUNT_NAME_BYTES",
+		"path": "crates/execution/src/wasm/wasmtime/linker/user.rs",
+		"class": "invariant",
+		"rationale": "Owned account lookup ABI input ceiling shared with the sidecar host dispatch."
+	},
+	{
+		"name": "MAX_GROUPS",
+		"path": "crates/execution/src/wasm/wasmtime/linker/user.rs",
+		"class": "invariant",
+		"rationale": "Owned Linux supplementary-group ABI ceiling."
+	},
+	{
+		"name": "MAX_DNS_PAYLOAD",
+		"path": "crates/execution/src/wasm/wasmtime/linker/network.rs",
+		"class": "invariant",
+		"rationale": "Owned DNS raw-record ABI payload ceiling kept identical to the V8-WASM adapter."
+	},
+	{
+		"name": "MAX_DNS_RECORDS",
+		"path": "crates/execution/src/wasm/wasmtime/linker/network.rs",
+		"class": "invariant",
+		"rationale": "Owned DNS raw-record ABI count ceiling kept identical to the V8-WASM adapter."
+	},
+	{
+		"name": "MAX_POLL_FDS",
+		"path": "crates/execution/src/wasm/wasmtime/linker/network.rs",
+		"class": "invariant",
+		"rationale": "Linux IOV_MAX-compatible poll batch ceiling kept identical to the V8-WASM adapter."
+	},
+	{
+		"name": "MAX_FDS",
+		"path": "crates/execution/src/wasm/wasmtime/linker/process.rs",
+		"class": "invariant",
+		"rationale": "Absolute Linux descriptor-number ceiling for validating exec close lists; the configured RLIMIT_NOFILE is tighter."
+	},
+	{
+		"name": "MAX_RIGHTS",
+		"path": "crates/execution/src/wasm/wasmtime/linker/process.rs",
+		"class": "invariant",
+		"rationale": "Generated host-permission registry width, not a tunable runtime bound."
+	},
+	{
+		"name": "MAX_IOVECS",
+		"path": "crates/execution/src/wasm/wasmtime/linker/preview1.rs",
+		"class": "invariant",
+		"rationale": "Linux IOV_MAX-compatible vectored-I/O ceiling kept identical to the V8-WASM adapter."
+	},
+	{
+		"name": "MAX_POLL_SUBSCRIPTIONS",
+		"path": "crates/execution/src/wasm/wasmtime/linker/preview1.rs",
+		"class": "invariant",
+		"rationale": "Owned Preview1 poll batch ceiling kept identical to the V8-WASM adapter."
+	},
+	{
+		"name": "MAX_SIGNALS_PER_SAFE_POINT",
+		"path": "crates/execution/src/wasm/wasmtime/linker/mod.rs",
+		"class": "invariant",
+		"rationale": "Bounded signal-delivery work quantum per guest safe point to preserve scheduler fairness."
+	},
+	{
+		"name": "XATTR_NAME_MAX",
+		"path": "crates/execution/src/wasm/wasmtime/linker/filesystem.rs",
+		"class": "invariant",
+		"rationale": "Linux XATTR_NAME_MAX compatibility constant."
+	},
+	{
+		"name": "XATTR_SIZE_MAX",
+		"path": "crates/execution/src/wasm/wasmtime/linker/filesystem.rs",
+		"class": "invariant",
+		"rationale": "Linux xattr value-size compatibility ceiling."
+	},
+	{
+		"name": "DEFAULT_MAX_HOST_REPLY_BYTES",
+		"path": "crates/execution/src/wasm/wasmtime/store.rs",
+		"class": "policy",
+		"rationale": "Fallback for the typed Wasmtime host-reply transport byte limit.",
+		"wired": "WasmExecutionLimits.max_sync_rpc_response_line_bytes"
+	},
+	{
+		"name": "DEFAULT_MAX_PROCESS_WASM_MEMORY_BYTES",
+		"path": "crates/runtime/src/lib.rs",
+		"class": "policy",
+		"rationale": "Default aggregate linear-memory envelope for active standalone-WASM Stores.",
+		"wired": "RuntimeConfig.resources.max_wasm_memory_bytes"
 	}
 ]

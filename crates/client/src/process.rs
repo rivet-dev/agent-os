@@ -55,6 +55,24 @@ pub enum TimingMitigation {
     Freeze,
 }
 
+/// Engine override for standalone WebAssembly commands. JavaScript and its
+/// `WebAssembly.*` APIs always remain on V8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StandaloneWasmBackend {
+    V8,
+    Wasmtime,
+}
+
+impl From<StandaloneWasmBackend> for wire::StandaloneWasmBackend {
+    fn from(value: StandaloneWasmBackend) -> Self {
+        match value {
+            StandaloneWasmBackend::V8 => Self::V8,
+            StandaloneWasmBackend::Wasmtime => Self::Wasmtime,
+        }
+    }
+}
+
 /// `stdin` value: a string or raw bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StdinInput {
@@ -82,6 +100,7 @@ pub struct ExecOptions {
     pub file_path: Option<String>,
     pub cpu_time_limit_ms: Option<f64>,
     pub timing_mitigation: Option<TimingMitigation>,
+    pub wasm_backend: Option<StandaloneWasmBackend>,
 }
 
 impl Default for ExecOptions {
@@ -97,6 +116,7 @@ impl Default for ExecOptions {
             file_path: None,
             cpu_time_limit_ms: None,
             timing_mitigation: None,
+            wasm_backend: None,
         }
     }
 }
@@ -128,6 +148,7 @@ pub struct SpawnOptions {
     pub stdout_fd: Option<i32>,
     pub stderr_fd: Option<i32>,
     pub stream_stdin: Option<bool>,
+    pub wasm_backend: Option<StandaloneWasmBackend>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,6 +272,7 @@ impl AgentOs {
                 resolved_args,
                 options.env.clone(),
                 options.cwd.clone(),
+                options.wasm_backend,
             )
             .await
             .context("exec: Execute request failed")?;
@@ -903,6 +925,7 @@ impl AgentOs {
         args: Vec<String>,
         env: BTreeMap<String, String>,
         cwd: Option<String>,
+        wasm_backend: Option<StandaloneWasmBackend>,
     ) -> std::result::Result<wire::ProcessStartedResponse, ClientError> {
         let ownership = self.vm_scope();
         let response = self
@@ -918,6 +941,7 @@ impl AgentOs {
                     env: env.into_iter().collect(),
                     cwd,
                     wasm_permission_tier: None,
+                    wasm_backend: wasm_backend.map(Into::into),
                 }),
             )
             .await?;
@@ -1052,6 +1076,7 @@ impl AgentOs {
                 args,
                 options.env.clone(),
                 options.cwd.clone(),
+                options.wasm_backend,
             )
             .await
         {

@@ -3872,6 +3872,7 @@ where
         Ok(parent.child_processes.keys().cloned().collect())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn rollback_registered_child_process_sync(
         &mut self,
         vm_id: &str,
@@ -4361,6 +4362,16 @@ where
                     _ => None,
                 }
             } else {
+                if parent.runtime == GuestRuntimeKind::WebAssembly
+                    && parent.standalone_wasm_backend == ExecutionStandaloneWasmBackend::Wasmtime
+                {
+                    // Native Wasmtime children publish output through their
+                    // inherited kernel descriptors and settle wait(2) through
+                    // the guest-owned kernel process table. The proactive
+                    // sidecar pump may still retire the child here, but there
+                    // is no V8 stream session to notify.
+                    return Ok(true);
+                }
                 let payload = match event_type {
                     "stdout" => json!({
                         "sessionId": child_process_id,
@@ -5574,7 +5585,13 @@ where
         let total_start = Instant::now();
         let process_event_capacity = self.config.runtime.protocol.max_process_events;
         let phase_start = Instant::now();
-        let (parent_env, parent_guest_cwd, parent_host_cwd, parent_kernel_pid) = {
+        let (
+            parent_env,
+            parent_guest_cwd,
+            parent_host_cwd,
+            parent_kernel_pid,
+            standalone_wasm_backend,
+        ) = {
             let vm = self
                 .vms
                 .get_mut(vm_id)
@@ -5588,6 +5605,7 @@ where
                 parent.guest_cwd.clone(),
                 parent.host_cwd.clone(),
                 parent.kernel_pid,
+                parent.standalone_wasm_backend,
             )
         };
         let mut resolved =
@@ -6031,9 +6049,16 @@ where
                         Some(u64::from(kernel_pid)),
                         Some(u64::from(parent_kernel_pid)),
                     );
+                    let module_path = match standalone_wasm_backend {
+                        ExecutionStandaloneWasmBackend::Wasmtime => execution_env
+                            .get("AGENTOS_GUEST_ENTRYPOINT")
+                            .cloned()
+                            .unwrap_or_else(|| resolved.entrypoint.clone()),
+                        ExecutionStandaloneWasmBackend::V8 => resolved.entrypoint.clone(),
+                    };
                     let context = self.wasm_engine.create_context(CreateWasmContextRequest {
                         vm_id: vm_id.to_owned(),
-                        module_path: Some(resolved.entrypoint.clone()),
+                        module_path: Some(module_path),
                     });
                     let context_id = context.context_id;
                     let runtime_control = attach_child_runtime_control!(
@@ -6041,7 +6066,7 @@ where
                     );
                     let execution_result = self
                         .wasm_engine
-                        .start_execution_with_runtime_async(
+                        .start_execution_with_runtime_async_for_backend(
                             StartWasmExecutionRequest {
                                 vm_id: vm_id.to_owned(),
                                 context_id: context_id.clone(),
@@ -6058,6 +6083,7 @@ where
                                 guest_runtime: wasm_guest_runtime,
                             },
                             vm.runtime_context.clone(),
+                            standalone_wasm_backend,
                         )
                         .await;
                     self.wasm_engine.dispose_context(&context_id);
@@ -6290,6 +6316,7 @@ where
             Arc::clone(&self.process_event_notify),
         )
         .with_adapter_policy(resolved.adapter_policy)
+        .with_standalone_wasm_backend(standalone_wasm_backend)
         .with_process_event_limits(&process_event_limits)
         .with_vm_pending_byte_budgets(
             Arc::clone(&vm_pending_stdin_bytes_budget),
@@ -6560,7 +6587,14 @@ where
             ));
         }
 
-        let (guest_cwd, host_cwd, kernel_pid, parent_kernel_pid, current_adapter_policy) = {
+        let (
+            guest_cwd,
+            host_cwd,
+            kernel_pid,
+            parent_kernel_pid,
+            current_adapter_policy,
+            standalone_wasm_backend,
+        ) = {
             let vm = self.vms.get(vm_id).ok_or_else(|| missing_vm_error(vm_id))?;
             let root = vm
                 .active_processes
@@ -6584,6 +6618,7 @@ where
                 process.kernel_pid,
                 parent_kernel_pid,
                 process.adapter_policy,
+                process.standalone_wasm_backend,
             )
         };
 
@@ -6848,14 +6883,21 @@ where
                 ));
                 execution_env.insert(String::from(WASM_STDIO_SYNC_RPC_ENV), String::from("1"));
                 execution_env.insert(String::from(WASM_EXEC_COMMIT_RPC_ENV), String::from("1"));
+                let module_path = match standalone_wasm_backend {
+                    ExecutionStandaloneWasmBackend::Wasmtime => execution_env
+                        .get("AGENTOS_GUEST_ENTRYPOINT")
+                        .cloned()
+                        .unwrap_or_else(|| resolved.entrypoint.clone()),
+                    ExecutionStandaloneWasmBackend::V8 => resolved.entrypoint.clone(),
+                };
                 let context = self.wasm_engine.create_context(CreateWasmContextRequest {
                     vm_id: vm_id.to_owned(),
-                    module_path: Some(resolved.entrypoint.clone()),
+                    module_path: Some(module_path),
                 });
                 let context_id = context.context_id;
                 let replacement_result =
-                    self.wasm_engine
-                        .prepare_execution(StartWasmExecutionRequest {
+                    self.wasm_engine.prepare_execution_with_runtime_for_backend(
+                        StartWasmExecutionRequest {
                             vm_id: vm_id.to_owned(),
                             context_id: context_id.clone(),
                             managed_kernel_host: true,
@@ -6877,7 +6919,10 @@ where
                                 Some(u64::from(kernel_pid)),
                                 Some(u64::from(parent_kernel_pid)),
                             ),
-                        });
+                        },
+                        vm.runtime_context.clone(),
+                        standalone_wasm_backend,
+                    );
                 self.wasm_engine.dispose_context(&context_id);
                 ActiveExecution::Wasm(Box::new(replacement_result.map_err(wasm_error)?))
             }
@@ -7301,7 +7346,13 @@ where
         let total_start = Instant::now();
         let process_event_capacity = self.config.runtime.protocol.max_process_events;
         let phase_start = Instant::now();
-        let (parent_env, parent_guest_cwd, parent_host_cwd, parent_kernel_pid) = {
+        let (
+            parent_env,
+            parent_guest_cwd,
+            parent_host_cwd,
+            parent_kernel_pid,
+            standalone_wasm_backend,
+        ) = {
             let vm = self.vms.get(vm_id).ok_or_else(|| missing_vm_error(vm_id))?;
             let root = vm
                 .active_processes
@@ -7318,6 +7369,7 @@ where
                 parent.guest_cwd.clone(),
                 parent.host_cwd.clone(),
                 parent.kernel_pid,
+                parent.standalone_wasm_backend,
             )
         };
         let mut resolved =
@@ -7732,9 +7784,16 @@ where
                             Some(u64::from(kernel_pid)),
                             Some(u64::from(parent_kernel_pid)),
                         );
+                        let module_path = match standalone_wasm_backend {
+                            ExecutionStandaloneWasmBackend::Wasmtime => execution_env
+                                .get("AGENTOS_GUEST_ENTRYPOINT")
+                                .cloned()
+                                .unwrap_or_else(|| resolved.entrypoint.clone()),
+                            ExecutionStandaloneWasmBackend::V8 => resolved.entrypoint.clone(),
+                        };
                         let context = self.wasm_engine.create_context(CreateWasmContextRequest {
                             vm_id: vm_id.to_owned(),
-                            module_path: Some(resolved.entrypoint.clone()),
+                            module_path: Some(module_path),
                         });
                         let context_id = context.context_id;
                         let runtime_control = ActiveProcess::attach_runtime_control_before_start(
@@ -7743,7 +7802,7 @@ where
                         )?;
                         let execution_result = self
                             .wasm_engine
-                            .start_execution_with_runtime_async(
+                            .start_execution_with_runtime_async_for_backend(
                                 StartWasmExecutionRequest {
                                     vm_id: vm_id.to_owned(),
                                     context_id: context_id.clone(),
@@ -7763,6 +7822,7 @@ where
                                     guest_runtime: wasm_guest_runtime,
                                 },
                                 vm.runtime_context.clone(),
+                                standalone_wasm_backend,
                             )
                             .await;
                         self.wasm_engine.dispose_context(&context_id);
@@ -8024,6 +8084,7 @@ where
             Arc::clone(&self.process_event_notify),
         )
         .with_adapter_policy(resolved.adapter_policy)
+        .with_standalone_wasm_backend(standalone_wasm_backend)
         .with_process_event_limits(&process_event_limits)
         .with_vm_pending_byte_budgets(
             Arc::clone(&vm_pending_stdin_bytes_budget),
@@ -8320,6 +8381,7 @@ where
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn settle_descendant_managed_network_response(
         &self,
         vm_id: &str,
@@ -10047,13 +10109,13 @@ where
                                 offset: None,
                                 deadline_ms: Some(timeout_ms),
                             },
-                        ) => Some((Some(*fd), max_bytes.clone(), *timeout_ms)),
+                        ) => Some((Some(*fd), *max_bytes, *timeout_ms)),
                         HostOperation::Filesystem(
                             agentos_execution::host::FilesystemOperation::StdinRead {
                                 max_bytes,
                                 timeout_ms,
                             },
-                        ) => Some((None, max_bytes.clone(), *timeout_ms)),
+                        ) => Some((None, *max_bytes, *timeout_ms)),
                         _ => None,
                     };
                     if let Some((fd, max_bytes, timeout_ms)) = deferred_kernel_read {
@@ -11325,7 +11387,7 @@ where
                     format!("unknown process pid {target_pid}"),
                 ));
             };
-            let action = if signal == 0 {
+            if signal == 0 {
                 SignalDispositionAction::Default
             } else {
                 protocol_signal_registration(
@@ -11335,8 +11397,7 @@ where
                         .map_err(kernel_error)?,
                 )
                 .action
-            };
-            action
+            }
         };
 
         let Some(root) = vm.active_processes.get_mut(process_id) else {
