@@ -4,11 +4,11 @@ name = "cmd-expr"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "expr standalone binary for secure-exec VM"
+description = "expr standalone binary for agentos VM"
 
 [[bin]]
 name = "expr"
 path = "src/main.rs"
 
 [dependencies]
-secureexec-expr = { path = "../expr" }
+agentos-expr = { path = "../expr" }

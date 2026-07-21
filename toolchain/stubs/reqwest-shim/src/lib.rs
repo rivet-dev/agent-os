@@ -1,4 +1,4 @@
-//! `reqwest` 0.12 API shim for wasm32-wasip1, backed by secure-exec `wasi-http`
+//! `reqwest` 0.12 API shim for wasm32-wasip1, backed by agentos `wasi-http`
 //! (host_net TCP/TLS). Drop-in target for `[patch.crates-io] reqwest`.
 //!
 //! STATUS: scaffold. The buffered request/response path is implemented against

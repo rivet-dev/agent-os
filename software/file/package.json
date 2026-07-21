@@ -3,7 +3,7 @@
 	"version": "0.3.3",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "file type detection for secure-exec VMs",
+	"description": "file type detection for agentos VMs",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [

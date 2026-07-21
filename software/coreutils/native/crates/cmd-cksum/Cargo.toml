@@ -4,7 +4,7 @@ name = "cmd-cksum"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "cksum standalone binary for secure-exec VM"
+description = "cksum standalone binary for agentos VM"
 
 [[bin]]
 name = "cksum"

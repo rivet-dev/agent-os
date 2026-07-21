@@ -97,7 +97,7 @@ fn package_format_rejects_unknown_schema_version_and_corrupt_headers() {
 
 #[test]
 fn tar_filesystem_rejects_unsorted_index() {
-    let path = unique_path("secure-exec-unsorted-aospkg");
+    let path = unique_path("agentos-unsorted-aospkg");
     let manifest = encode_package_manifest(v1::PackageManifest {
         name: String::from("unsorted"),
         version: String::from("1.0.0"),

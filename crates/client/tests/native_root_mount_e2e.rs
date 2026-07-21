@@ -556,7 +556,7 @@ async fn native_root_mount_files_visible_to_wasm_commands() {
     // The regression: guest WASM commands must observe the mount-backed root
     // content, not an empty/broken view.
     let cat = os
-        .exec("cat /workspace/data.txt", ExecOptions::default())
+        .exec_process("cat /workspace/data.txt", ExecOptions::default())
         .await
         .expect("exec cat");
     assert_eq!(
@@ -572,7 +572,7 @@ async fn native_root_mount_files_visible_to_wasm_commands() {
     );
 
     let wc = os
-        .exec("wc -c /workspace/data.txt", ExecOptions::default())
+        .exec_process("wc -c /workspace/data.txt", ExecOptions::default())
         .await
         .expect("exec wc");
     assert_eq!(
@@ -589,7 +589,7 @@ async fn native_root_mount_files_visible_to_wasm_commands() {
 
     // A command spawned by the guest shell must retain the same mounted root.
     let sh_absolute = os
-        .exec("sh -c 'cat /workspace/data.txt'", ExecOptions::default())
+        .exec_process("sh -c 'cat /workspace/data.txt'", ExecOptions::default())
         .await
         .expect("exec sh absolute cat");
     assert_eq!(
@@ -601,7 +601,7 @@ async fn native_root_mount_files_visible_to_wasm_commands() {
 
     // Shell traversal into the mounted root must work too.
     let sh = os
-        .exec(
+        .exec_process(
             "sh -c 'cd /workspace && cat data.txt'",
             ExecOptions::default(),
         )
@@ -615,7 +615,7 @@ async fn native_root_mount_files_visible_to_wasm_commands() {
     assert_eq!(sh.stdout.trim_end(), "hello-bridge-root");
 
     let relative_write = os
-        .exec(
+        .exec_process(
             "sh -c 'cd /workspace && echo relative-write > relative.txt'",
             ExecOptions::default(),
         )
@@ -635,7 +635,7 @@ async fn native_root_mount_files_visible_to_wasm_commands() {
 
     // Guest writes must round-trip back to the host view as well.
     let write = os
-        .exec(
+        .exec_process(
             "sh -c 'echo guest-write > /workspace/out.txt'",
             ExecOptions::default(),
         )

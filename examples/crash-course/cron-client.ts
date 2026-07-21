@@ -5,13 +5,13 @@ const client = createClient<typeof registry>({ endpoint: "http://localhost:6420"
 const agent = client.vm.getOrCreate("my-agent");
 
 // Schedule a command every hour
-await agent.scheduleCron({
+await agent.cron.schedule({
   schedule: "0 * * * *",
   action: { type: "exec", command: "rm", args: ["-rf", "/tmp/cache/*"] },
 });
 
 // Schedule an agent session daily at 9 AM
-await agent.scheduleCron({
+await agent.cron.schedule({
   schedule: "0 9 * * *",
   action: {
     type: "session",

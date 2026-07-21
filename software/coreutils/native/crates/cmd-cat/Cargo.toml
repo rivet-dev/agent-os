@@ -4,7 +4,7 @@ name = "cmd-cat"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "cat standalone binary for secure-exec VM"
+description = "cat standalone binary for agentos VM"
 
 [[bin]]
 name = "cat"

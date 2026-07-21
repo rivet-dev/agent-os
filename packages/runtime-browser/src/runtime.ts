@@ -2902,7 +2902,7 @@ export const POLYFILL_CODE_MAP: Record<string, string> = {
 	"node:crypto": "module.exports = require('crypto');",
 	wasi: BROWSER_WASI_POLYFILL_CODE,
 	"node:wasi": "module.exports = require('wasi');",
-	"secure-exec:wasi-command-host": `
+	"agentos:wasi-command-host": `
 		const callSync = (ref, ...args) => {
 			if (typeof ref === "function") return ref(...args);
 			if (ref && typeof ref.applySync === "function") return ref.applySync(undefined, args);
@@ -4670,7 +4670,7 @@ export const POLYFILL_CODE_MAP: Record<string, string> = {
 		const uid = nonNegativeInteger(virtualOs.uid, 1000);
 		const gid = nonNegativeInteger(virtualOs.gid, 1000);
 		const cpuInfo = () => ({
-			model: stringValue(virtualOs.cpuModel, "secure-exec virtual CPU"),
+			model: stringValue(virtualOs.cpuModel, "agentos virtual CPU"),
 			speed: 0,
 			times: { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 },
 		});
@@ -4682,18 +4682,18 @@ export const POLYFILL_CODE_MAP: Record<string, string> = {
 			freemem: () => freemem,
 			getPriority: () => 0,
 			homedir: () => homedir,
-			hostname: () => stringValue(virtualOs.hostname, "secure-exec"),
+			hostname: () => stringValue(virtualOs.hostname, "agentos"),
 			loadavg: () => [0, 0, 0],
 			machine: () => stringValue(virtualOs.machine, "x86_64"),
 			networkInterfaces: () => ({}),
 			platform: () => platform,
-			release: () => stringValue(virtualOs.release, "6.8.0-secure-exec"),
+			release: () => stringValue(virtualOs.release, "6.8.0-agentos"),
 			tmpdir: () => tmpdir,
 			totalmem: () => totalmem,
 			type: () => stringValue(virtualOs.type, platform === "win32" ? "Windows_NT" : "Linux"),
 			uptime: () => 0,
 			userInfo: () => ({ username, uid, gid, shell, homedir }),
-			version: () => stringValue(virtualOs.version, "#1 SMP PREEMPT_DYNAMIC secure-exec"),
+			version: () => stringValue(virtualOs.version, "#1 SMP PREEMPT_DYNAMIC agentos"),
 		};
 	`,
 	"node:os": "module.exports = require('os');",
@@ -4717,7 +4717,7 @@ export function getRuntimePolyfillCode(
 ): string | null {
 	const name = moduleName.replace(/^node:/, "");
 	const source = POLYFILL_CODE_MAP[name];
-	if (!source || name !== "secure-exec:wasi-command-host") {
+	if (!source || name !== "agentos:wasi-command-host") {
 		return source ?? null;
 	}
 	const maxSpawnFileActions = positiveIntegerOrDefault(

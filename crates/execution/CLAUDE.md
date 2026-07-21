@@ -14,7 +14,7 @@ If tests fail because they were written for the old `Command::new("node")` path,
 
 ## Node.js Isolation Model
 
-**Desired state:** Guest JS/TS runs inside isolated V8 contexts managed by the execution engine. All Node.js builtins (`fs`, `net`, `child_process`, `dns`, `http`, `os`, etc.) are kernel-backed polyfills that route through the kernel VFS, socket table, and process table. Module loading is fully intercepted — guest code never touches real host APIs. The execution engine previously had this working via `@secure-exec/core` + `@secure-exec/nodejs` with full kernel-backed polyfills for all builtins.
+**Desired state:** Guest JS/TS runs inside isolated V8 contexts managed by the execution engine. All Node.js builtins (`fs`, `net`, `child_process`, `dns`, `http`, `os`, etc.) are kernel-backed polyfills that route through the kernel VFS, socket table, and process table. Module loading is fully intercepted — guest code never touches real host APIs. The previous JavaScript kernel packages had full kernel-backed polyfills for all builtins.
 
 **Current state (⚠️ STILL INCOMPLETE -- see `~/.agents/todo/node-isolation-gaps.md`):**
 
@@ -23,7 +23,7 @@ Guest JavaScript entrypoints in `javascript.rs` now run only through the shared 
 - Keep any real-host Node helpers isolated to clearly host-only modules used by benchmarks or import-cache tests. Guest JS/WASM/Python runtime code should depend only on neutral shared helpers (for example signal metadata or path resolution), not on files that also own host launch behavior.
 - Guest-side WebAssembly inside the V8 isolate must stay enabled on both fresh isolates and snapshot restores. Real npm packages rely on `WebAssembly.Module`, `WebAssembly.Instance`, and `WebAssembly.instantiate*`, and allowing those APIs does not violate the kernel-isolation boundary because compilation stays inside the isolate. Do not reintroduce an embedder callback that blocks WASM; rely on V8's own implementation limits instead.
 
-**Recovery reference:** The complete working polyfill + V8 isolate code from the original `@secure-exec/core` + `@secure-exec/nodejs` + `@secure-exec/v8` packages has been recovered to `~/.agents/recovery/secure-exec/`. Key files to port:
+**Recovery reference:** The complete working polyfill + V8 isolate code from the original JavaScript runtime packages has been recovered to `~/.agents/recovery/agentos/`. Key files to port:
 - `nodejs/src/bridge/fs.ts` (3,974 lines) -- full kernel-backed `fs`/`fs/promises` polyfill
 - `nodejs/src/bridge/network.ts` (11,149 lines) -- full `net`/`dgram`/`dns` polyfill via kernel socket table
 - `nodejs/src/bridge/child-process.ts` (1,058 lines) -- `child_process` polyfill via kernel process table
@@ -34,11 +34,11 @@ Guest JavaScript entrypoints in `javascript.rs` now run only through the shared 
 - `kernel/` -- the JS kernel (VFS, process table, socket table, PTY, pipes)
 - `v8/` -- V8 runtime process manager, IPC binary protocol
 
-The original source repo is at `/home/nathan/secure-exec-1/` (tagged `v0.2.1`).
+The original source repo is at `/home/nathan/agentos-1/` (tagged `v0.2.1`).
 
 **Prior art -- the original JS kernel had full polyfills:**
 
-Before the Rust sidecar (commit `5a43882`), the JS kernel (`@secure-exec/core` + `@secure-exec/nodejs` + `packages/posix/`) had complete kernel-backed polyfills for all builtins. The pattern was:
+Before the Rust sidecar (commit `5a43882`), the JavaScript kernel and `packages/posix/` had complete kernel-backed polyfills for all builtins. The pattern was:
 - **Kernel socket table** -- `kernel.socketTable.create/connect/send/recv` managed all TCP/UDP. Loopback stayed in-kernel; external connections went through a `HostNetworkAdapter`.
 - **Kernel VFS** -- All `fs` operations routed through the kernel VFS via syscall RPC.
 - **Kernel process table** -- `child_process.spawn` routed through `kernel.spawn()`.
@@ -114,7 +114,7 @@ The host-support ESM loader hook (`loader.mjs`) is generated from a Rust string 
 ## Runner Script Assets
 
 - Execution-host runner scripts materialized by `NodeImportCache` should live as checked-in assets under `crates/execution/assets/runners/` and be loaded via `include_str!`.
-- The stdlib-backed V8 bridge bundle is generated from `packages/build-tools/bridge-src/` into Cargo `OUT_DIR`; `pnpm --dir packages/secure-exec-core build:v8-bridge` is only for manual debugging. Keep the heavier assert/util/zlib payload in `v8-bridge-zlib.js` so the main `v8-bridge.js` stays below the 500KB cap.
+- The stdlib-backed V8 bridge bundle is generated from `packages/build-tools/bridge-src/` into Cargo `OUT_DIR`; `pnpm --dir packages/agentos-core build:v8-bridge` is only for manual debugging. Keep the heavier assert/util/zlib payload in `v8-bridge-zlib.js` so the main `v8-bridge.js` stays below the 500KB cap.
 - Guest `os` virtualization has two env surfaces: public `process.env` is intentionally scrubbed of `AGENTOS_*`, while the real per-execution values live in the hidden runtime env (`globalThis.__agentOSProcessConfigEnv` in `javascript.rs`, mirrored from the sidecar's `prepare_guest_runtime_env(...)`). If `bridge-src` needs VM-scoped CPU/memory/home metadata, read that hidden env path or `_processConfig.env` rather than the sanitized public env, and keep it aligned with `node_import_cache.rs`.
 - When `build:v8-bridge` pulls deeper undici API modules (for example `undici/lib/api/*`), keep `packages/build-tools/scripts/build-v8-bridge.mjs` aliasing any extra Node builtins they require to standalone shim files under `crates/execution/assets/undici-shims/`; those imports execute while the bundle is still bootstrapping, so they cannot depend on later `exposeCustomGlobal(...)` wiring like `_asyncHooksModule`.
 - Keep `http` and `https` default agents scoped to their own module instances inside `packages/build-tools/bridge-src/`; sharing a single global default agent makes `http.request()` inherit HTTPS TLS behavior. Guest-local loopback TLS upgrades must also short-circuit inside the bridge instead of calling `net.socket_upgrade_tls`, because loopback fast-path sockets never have a kernel socket id.

@@ -11,7 +11,7 @@
     "arch": "x64"
   },
   "sidecar": {
-    "path": "/home/nathan/.herdr/workspaces/agent-os/secure-exec-perf-rules/packages/benchmarks/../../target/release/agentos-native-sidecar",
+    "path": "/home/nathan/.herdr/workspaces/agent-os/agentos-perf-rules/packages/benchmarks/../../target/release/agentos-native-sidecar",
     "profile": "release",
     "mtimeMs": 1783005507539.7039,
     "mtimeIso": "2026-07-02T08:18:27.540-07:00",

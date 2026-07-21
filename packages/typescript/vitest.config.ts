@@ -9,7 +9,7 @@ export default defineConfig({
 				replacement: resolve(__dirname, "../core/dist/runtime-compat.js"),
 			},
 			{
-				find: "@rivet-dev/agentos-typescript",
+				find: "@rivet-dev/agentos-internal-typescript",
 				replacement: resolve(__dirname, "./src/index.ts"),
 			},
 		],

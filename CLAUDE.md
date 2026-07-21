@@ -4,8 +4,8 @@ Always spell the product name `agentOS`, never `AgentOS`; do not alter type
 identifiers such as `AgentOSActorConfig`.
 
 agentOS owns the runtime, kernel, VFS, language execution, registry packages,
-ACP/session layer, agentOS client APIs, docs, and publish machinery. The
-`secure-exec` repository is now a generated compatibility mirror only.
+ACP/session layer, agentOS client APIs, docs, and publish machinery. agentOS
+Exec is the JavaScript, TypeScript, and Python execution surface of agentOS.
 
 ## Boundaries
 
@@ -19,9 +19,8 @@ ACP/session layer, agentOS client APIs, docs, and publish machinery. The
   or public API that already uses the word.
 - The protocol has no backward compatibility guarantee. Client, sidecar, and
   protocol crates ship in same-version lockstep; update both sides together.
-- Generic runtime work belongs here, not in `../secure-exec`. Regenerate that
-  mirror with `node scripts/generate-secure-exec-mirror.mjs` after changing a
-  shimmed public surface.
+- Generic runtime and language-execution work belongs here. Do not add a
+  compatibility mirror or a second package namespace for AgentOS language execution.
 - Keep root `package.json` scripts limited to Turbo orchestration; repo-specific
   commands belong in `justfile` recipes or scoped package scripts.
 - agentOS targets native Linux/container execution. Browser support is not
@@ -221,9 +220,9 @@ custom host-syscall imports. Treat that target as **native POSIX**;
 
 - `scripts/publish` is the source of truth for npm/crates discovery, version
   rewriting, npm publish, crates publish, release assets, and R2 upload.
-- Publishable npm packages and Rust crates are agentOS-owned. Compatibility
-  `@secure-exec/*`, `secure-exec`, and `secure-exec-*` artifacts are emitted
-  from the generated mirror.
+- Publishable npm packages and Rust crates are agentOS-owned. agentOS language
+  execution is exposed through `@rivet-dev/agentos`; do not publish separate
+  language packages, compatibility artifacts, or language subpaths.
 - The release workflow must build and stage the native sidecar binaries,
   runtime-sidecar binaries, registry WASM commands, and pyodide assets before
   publish.
@@ -231,13 +230,19 @@ custom host-syscall imports. Treat that target as **native POSIX**;
 
 ## Docs
 
-- The agentOS website lives in `website/` and deploys to `agentos-sdk.dev`.
+- The agentOS website lives in `website/`. Its canonical public domain is
+  `agentos-sdk.dev`. This is the only accepted AgentOS domain for URLs, schema
+  IDs, email addresses, package metadata, and documentation.
 - Keep docs current in the same change as user-facing behavior: public APIs,
   runtime options, env knobs, limits, architecture, and package names.
 - Runnable docs code must come from real checked example files via the docs
   theme `<CodeSnippet>` mechanism. Inline code is fine only for shell commands,
   config fragments, or non-runnable examples.
 - Validate docs changes with `pnpm --dir website build` when the site changes.
+- Run `just docs-check-links` when changing documentation paths, routes,
+  redirects, headings used as link anchors, or shared navigation links. It
+  builds and crawls the rendered Astro site. Pass `true` to include external
+  URLs (`just docs-check-links true`).
 
 ## Tests
 

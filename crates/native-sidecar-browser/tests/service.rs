@@ -178,12 +178,12 @@ fn test_os_config() -> BrowserWorkerOsConfig {
         platform: String::from("linux"),
         arch: String::from("x64"),
         r#type: String::from("Linux"),
-        release: String::from("6.8.0-secure-exec"),
-        version: String::from("#1 SMP PREEMPT_DYNAMIC secure-exec"),
+        release: String::from("6.8.0-agentos"),
+        version: String::from("#1 SMP PREEMPT_DYNAMIC agentos"),
         cpu_count: 1,
         totalmem: 1024 * 1024 * 1024,
         freemem: 512 * 1024 * 1024,
-        hostname: String::from("secure-exec"),
+        hostname: String::from("agentos"),
         homedir: String::from("/home/user"),
         tmpdir: String::from("/tmp"),
         machine: String::from("x86_64"),
@@ -355,16 +355,16 @@ fn browser_worker_spawn_receives_virtual_identity_config() {
     );
     assert_eq!(
         spawn.get("os_hostname").map(String::as_str),
-        Some("secure-exec")
+        Some("agentos")
     );
     assert_eq!(spawn.get("os_type").map(String::as_str), Some("Linux"));
     assert_eq!(
         spawn.get("os_release").map(String::as_str),
-        Some("6.8.0-secure-exec")
+        Some("6.8.0-agentos")
     );
     assert_eq!(
         spawn.get("os_version").map(String::as_str),
-        Some("#1 SMP PREEMPT_DYNAMIC secure-exec")
+        Some("#1 SMP PREEMPT_DYNAMIC agentos")
     );
     assert_eq!(spawn.get("os_tmpdir").map(String::as_str), Some("/tmp"));
     assert_eq!(spawn.get("os_machine").map(String::as_str), Some("x86_64"));

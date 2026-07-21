@@ -1,5 +1,5 @@
 # Agent OS ACP extension protocol schema, version 1.
-# This schema is intentionally standalone. It imports no secure-exec schema.
+# This schema is intentionally standalone. It imports no agentos schema.
 
 type JsonUtf8 str
 
@@ -181,12 +181,14 @@ type AcpCloseSessionRequest struct {
 # Resume a session that exists in durable storage but is not live in the current
 # VM (e.g. after a Rivet actor slept and woke with a fresh VM). The sidecar runs
 # the stateless resume state machine (native session/load when the agent supports
-# it, else a fresh session/new + transcript continuation preamble). `cwd`/`env`
-# describe the fresh adapter launch used by the fallback tier. `transcriptPath`,
-# when present, is a guest-readable path the fallback preamble points the agent at.
+# it, else a fresh session/new + transcript continuation preamble). `runtime`,
+# `cwd`, and `env` describe the fresh adapter launch used by the fallback tier.
+# `transcriptPath`, when present, is a guest-readable path the fallback preamble
+# points the agent at.
 type AcpResumeSessionRequest struct {
   sessionId: str
   agentType: str
+  runtime: AcpRuntimeKind
   transcriptPath: optional<str>
   cwd: str
   additionalDirectories: list<str>

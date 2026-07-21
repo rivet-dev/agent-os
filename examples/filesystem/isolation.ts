@@ -6,13 +6,13 @@ const agent = client.vm.getOrCreate("my-agent");
 
 // Seed a file into the VFS at boot. Bytes are copied into the kernel's
 // in-memory filesystem; the host filesystem is never exposed to the guest.
-await agent.writeFile("/home/agentos/seed.json", JSON.stringify({ ok: true }));
+await agent.filesystem.writeFile("/home/agentos/seed.json", JSON.stringify({ ok: true }));
 
 // Write another file from the host after boot.
-await agent.writeFile("/home/agentos/note.txt", "written from the host\n");
+await agent.filesystem.writeFile("/home/agentos/note.txt", "written from the host\n");
 
 // The guest reads both files through the normal node:fs API.
-const result = await agent.exec(`node -e '
+const result = await agent.process.exec(`node -e '
   const { readFileSync } = require("node:fs");
   const seed = JSON.parse(readFileSync("/home/agentos/seed.json", "utf8"));
   const note = readFileSync("/home/agentos/note.txt", "utf8").trim();
@@ -22,7 +22,7 @@ const result = await agent.exec(`node -e '
 console.log("guest stdout:", result.stdout.trim());
 
 // Read a guest-written file back on the host.
-const bytes = await agent.readFile("/home/agentos/seed.json");
+const bytes = await agent.filesystem.readFile("/home/agentos/seed.json");
 console.log("host readFile:", new TextDecoder().decode(bytes));
 
 // The same path on the real host disk does not exist. The VFS is isolated.

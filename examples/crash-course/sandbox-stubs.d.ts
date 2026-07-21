@@ -27,7 +27,7 @@ declare module "@rivet-dev/agentos-sandbox" {
 	import type {
 		NativeMountPluginDescriptor,
 		Bindings,
-	} from "@rivet-dev/agentos-core";
+	} from "@rivet-dev/agentos";
 	import type { SandboxAgent } from "sandbox-agent";
 
 	export interface SandboxFsOptions {

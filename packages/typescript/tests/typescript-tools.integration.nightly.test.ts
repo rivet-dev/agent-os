@@ -1,6 +1,6 @@
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createTypeScriptTools } from "@rivet-dev/agentos-typescript";
+import { createTypeScriptTools } from "@rivet-dev/agentos-internal-typescript";
 import {
 	allowAllFs,
 	createKernel,
@@ -32,7 +32,7 @@ function createTools() {
 	};
 }
 
-describe("@rivet-dev/agentos-typescript", () => {
+describe("AgentOS internal TypeScript compiler", () => {
 	it("typechecks a project with node types from node_modules", async () => {
 		const { filesystem, tools } = createTools();
 		await filesystem.mkdir("/root");

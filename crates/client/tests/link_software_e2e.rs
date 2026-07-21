@@ -76,7 +76,7 @@ async fn link_software_makes_command_resolve_live() {
     let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
     let err_cap = Arc::new(Mutex::new(Vec::<u8>::new()));
     let handle = os
-        .spawn("linked-cmd", Vec::new(), SpawnOptions::default())
+        .spawn_process("linked-cmd", Vec::new(), SpawnOptions::default())
         .expect("spawn linked-cmd");
     let cb = captured.clone();
     let ecb = err_cap.clone();

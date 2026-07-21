@@ -18,26 +18,7 @@ export const setup: typeof rivetkitSetup = ((
 		experimentalActorUds: true,
 	} as Parameters<typeof rivetkitSetup>[0])) as typeof rivetkitSetup;
 
-export type {
-	AgentOsOptions,
-	DirEntry,
-	DynamicMountDescriptor,
-	ExportRootFilesystemOptions,
-	HttpRequest,
-	HttpResponse,
-	MountInfo,
-	NodeModulesMountConfig,
-	PackageDescriptor,
-	ProcessExit,
-	ProcessOutput,
-	PromptResult,
-	ReaddirEntry,
-	RootSnapshotExport,
-	SessionInfo,
-	ShellData,
-	ShellExit,
-} from "@rivet-dev/agentos-core";
-export { defineSoftware, nodeModulesMount } from "@rivet-dev/agentos-core";
+export * from "@rivet-dev/agentos-core";
 export type {
 	AgentOsActorConfigInput as AgentOSActorConfigInput,
 	AgentOsActorConfigInput as AgentOSConfigInput,
@@ -56,6 +37,9 @@ export {
 	type VmFetchStreamHead,
 } from "./actor.js";
 export type {
+	ActorData,
+	ActorLanguageSpawnOptions,
+	ActorSpawnOptions,
 	AgentOsEvents,
 	ProcessExitPayload,
 	ProcessOutputPayload,

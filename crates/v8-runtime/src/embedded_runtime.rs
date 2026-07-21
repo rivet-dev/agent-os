@@ -594,7 +594,7 @@ impl EmbeddedV8SessionHandle {
 }
 
 fn validate_execute_mode(mode: u8) -> io::Result<()> {
-    if mode > 1 {
+    if mode > 3 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unknown Execute mode: {mode}"),

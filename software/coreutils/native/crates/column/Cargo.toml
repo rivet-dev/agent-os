@@ -1,9 +1,9 @@
 [package]
 workspace = "../../../../../toolchain"
-name = "secureexec-column"
+name = "agentos-column"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "column implementation for secure-exec standalone binaries"
+description = "column implementation for agentos standalone binaries"
 
 [dependencies]

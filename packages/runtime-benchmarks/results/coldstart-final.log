@@ -8,9 +8,9 @@ MemAvailable: 26424332 kB | SwapFree: 0 kB | SwapCached: 114032 kB
 Iterations: 5 (+ 1 warmup)
 Batch sizes: 1, 10, 50, 100, 200
 Scenarios: owned-sidecar, shared-sidecar, resident-runner, isolate-only
-Sidecar: /home/nathan/secure-exec-perf-restore/target/release/secure-exec-sidecar
+Sidecar: /home/nathan/agentos-perf-restore/target/release/agentos-sidecar
 
-WASM commands: /home/nathan/secure-exec/packages/core/commands
+WASM commands: /home/nathan/agentos/packages/core/commands
 
 
 --- scenario=owned-sidecar, batch=1, mode=sequential ---

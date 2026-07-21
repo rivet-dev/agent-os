@@ -1,6 +1,7 @@
 // @rivet-dev/agentos
 
 export { AgentOs, AgentOsSidecar } from "./agent-os.js";
+export type * from "./language-execution.js";
 export {
 	CronManager,
 	InvalidScheduleError,
@@ -14,6 +15,7 @@ export {
 	bindings,
 	validateBindings,
 } from "./bindings.js";
+export type { Binding, BindingExample, Bindings } from "./bindings.js";
 export {
 	agentOsLimitsSchema,
 	agentOsOptionFieldSchemas,
@@ -28,9 +30,7 @@ export {
 	sidecarConfigSchema,
 	bindingsSchema,
 } from "./options-schema.js";
-export {
-	createSnapshotExport,
-} from "./layers.js";
+export { createSnapshotExport } from "./layers.js";
 export { defineSoftware } from "./packages.js";
 export {
 	isPackageDescriptor,

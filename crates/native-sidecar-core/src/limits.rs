@@ -6,6 +6,8 @@
 //! unchanged unless an operator overrides a config field.
 
 use agentos_kernel::resource_accounting::ResourceLimits;
+#[cfg(test)]
+use agentos_vm_config::ExecutionLimitsConfig;
 use agentos_vm_config::{
     Http2LimitsConfig, ReactorLimitsConfig, ResourceLimitsConfig, TlsLimitsConfig, UdpLimitsConfig,
     VmLimitsConfig,
@@ -76,6 +78,9 @@ pub const DEFAULT_PROCESS_MAX_SPAWN_FILE_ACTIONS: usize = 4096;
 pub const DEFAULT_PROCESS_MAX_SPAWN_FILE_ACTION_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_PROCESS_PENDING_EVENT_COUNT: usize = 10_000;
 pub const DEFAULT_PROCESS_PENDING_EVENT_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_EXECUTION_COMPLETED_TTL_MS: u64 = 5 * 60 * 1000;
+pub const DEFAULT_EXECUTION_MAX_COMPLETED_EXECUTIONS: usize = 1_024;
+pub const DEFAULT_EXECUTION_LIVE_WARNING_THRESHOLD: usize = 64;
 
 pub const DEFAULT_REACTOR_MAX_CAPABILITIES: usize = 4096;
 pub const DEFAULT_REACTOR_MAX_READY_HANDLES: usize = 4096;
@@ -132,7 +137,25 @@ pub struct VmLimits {
     pub js_runtime: JsRuntimeLimits,
     pub python: PythonLimits,
     pub wasm: WasmLimits,
+    pub execution: ExecutionLimits,
     pub process: ProcessLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionLimits {
+    pub completed_ttl_ms: u64,
+    pub max_completed_executions: usize,
+    pub live_execution_warning_threshold: usize,
+}
+
+impl Default for ExecutionLimits {
+    fn default() -> Self {
+        Self {
+            completed_ttl_ms: DEFAULT_EXECUTION_COMPLETED_TTL_MS,
+            max_completed_executions: DEFAULT_EXECUTION_MAX_COMPLETED_EXECUTIONS,
+            live_execution_warning_threshold: DEFAULT_EXECUTION_LIVE_WARNING_THRESHOLD,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -801,6 +824,23 @@ pub fn vm_limits_from_config(
                 .map_err(|_| integer_too_large("limits.wasm.runnerCpuTimeLimitMs", value))?;
         }
     }
+    if let Some(execution) = config.execution.as_ref() {
+        set_u64(
+            &mut limits.execution.completed_ttl_ms,
+            execution.completed_ttl_ms,
+            "limits.execution.completedTtlMs",
+        )?;
+        set_usize(
+            &mut limits.execution.max_completed_executions,
+            execution.max_completed_executions,
+            "limits.execution.maxCompletedExecutions",
+        )?;
+        set_usize(
+            &mut limits.execution.live_execution_warning_threshold,
+            execution.live_execution_warning_threshold,
+            "limits.execution.liveExecutionWarningThreshold",
+        )?;
+    }
     if let Some(process) = config.process.as_ref() {
         set_usize(
             &mut limits.process.max_spawn_file_actions,
@@ -1204,6 +1244,26 @@ pub fn validate_vm_limits(
     limits: &VmLimits,
     sidecar_max_frame_bytes: usize,
 ) -> Result<(), SidecarCoreError> {
+    for (path, value) in [
+        (
+            "limits.execution.completedTtlMs",
+            limits.execution.completed_ttl_ms,
+        ),
+        (
+            "limits.execution.maxCompletedExecutions",
+            limits.execution.max_completed_executions as u64,
+        ),
+        (
+            "limits.execution.liveExecutionWarningThreshold",
+            limits.execution.live_execution_warning_threshold as u64,
+        ),
+    ] {
+        if value == 0 {
+            return Err(SidecarCoreError::new(format!(
+                "{path} must be greater than zero"
+            )));
+        }
+    }
     for (path, value) in [
         (
             "limits.reactor.maxCapabilities",
@@ -1824,6 +1884,68 @@ mod tests {
             };
             let error = vm_limits_from_config(Some(&config), 64 * 1024 * 1024)
                 .expect_err("zero process spawn limit must be rejected");
+            assert!(error.to_string().contains(field), "{error}");
+        }
+    }
+
+    #[test]
+    fn execution_retention_limits_have_bounded_defaults_and_accept_overrides() {
+        let defaults = vm_limits_from_config(None, 64 * 1024 * 1024).expect("default limits");
+        assert_eq!(
+            defaults.execution.completed_ttl_ms,
+            DEFAULT_EXECUTION_COMPLETED_TTL_MS
+        );
+        assert_eq!(
+            defaults.execution.max_completed_executions,
+            DEFAULT_EXECUTION_MAX_COMPLETED_EXECUTIONS
+        );
+        assert_eq!(
+            defaults.execution.live_execution_warning_threshold,
+            DEFAULT_EXECUTION_LIVE_WARNING_THRESHOLD
+        );
+
+        let config = VmLimitsConfig {
+            execution: Some(ExecutionLimitsConfig {
+                completed_ttl_ms: Some(25),
+                max_completed_executions: Some(3),
+                live_execution_warning_threshold: Some(2),
+            }),
+            ..VmLimitsConfig::default()
+        };
+        let limits = vm_limits_from_config(Some(&config), 64 * 1024 * 1024).expect("overrides");
+        assert_eq!(limits.execution.completed_ttl_ms, 25);
+        assert_eq!(limits.execution.max_completed_executions, 3);
+        assert_eq!(limits.execution.live_execution_warning_threshold, 2);
+
+        for (field, config) in [
+            (
+                "limits.execution.completedTtlMs",
+                ExecutionLimitsConfig {
+                    completed_ttl_ms: Some(0),
+                    ..ExecutionLimitsConfig::default()
+                },
+            ),
+            (
+                "limits.execution.maxCompletedExecutions",
+                ExecutionLimitsConfig {
+                    max_completed_executions: Some(0),
+                    ..ExecutionLimitsConfig::default()
+                },
+            ),
+            (
+                "limits.execution.liveExecutionWarningThreshold",
+                ExecutionLimitsConfig {
+                    live_execution_warning_threshold: Some(0),
+                    ..ExecutionLimitsConfig::default()
+                },
+            ),
+        ] {
+            let config = VmLimitsConfig {
+                execution: Some(config),
+                ..VmLimitsConfig::default()
+            };
+            let error = vm_limits_from_config(Some(&config), 64 * 1024 * 1024)
+                .expect_err("zero execution limit must be rejected");
             assert!(error.to_string().contains(field), "{error}");
         }
     }

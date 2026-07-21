@@ -18,4 +18,4 @@ conn.on("vmShutdown", (payload) => {
 
 // The VM starts lazily on the first AgentOS action after wake, after the
 // lifecycle subscriptions above are active.
-await conn.exists("/");
+await conn.filesystem.exists("/");

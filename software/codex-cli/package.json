@@ -3,7 +3,7 @@
 	"version": "0.3.3",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "OpenAI Codex command package for secure-exec VMs",
+	"description": "OpenAI Codex command package for agentos VMs",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [

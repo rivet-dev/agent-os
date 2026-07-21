@@ -7,7 +7,7 @@ import { tryReadAgentosPackageManifest } from "./agentos-package.js";
 
 /**
  * Input type for the `software` option. Software is a self-contained package
- * directory that the secure-exec sidecar materializes into the `/opt/agentos`
+ * directory that the agentos sidecar materializes into the `/opt/agentos`
  * projection. Accepts a package-dir ref or an array of refs for meta-packages.
  */
 export type SoftwareEntry = SoftwarePackageRef;

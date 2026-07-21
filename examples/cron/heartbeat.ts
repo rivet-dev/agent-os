@@ -5,7 +5,7 @@ const client = createClient<typeof registry>({ endpoint: "http://localhost:6420"
 const handle = client.vm.getOrCreate("my-agent");
 
 // docs:start heartbeat
-await handle.scheduleCron({
+await handle.cron.schedule({
   schedule: "*/30 * * * *",
   overlap: "skip",
   action: {

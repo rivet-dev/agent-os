@@ -1,10 +1,10 @@
 // Networking: start a server inside the VM and fetch from it.
 //
-// vm.httpRequest() routes HTTP requests to services running inside the VM.
+// vm.network.httpRequest() routes HTTP requests to services running inside the VM.
 // Note: Preview URLs (agent.createPreviewUrl) are only available in the
-// RivetKit actor wrapper, not in the core API. See examples/agent-os/ for that.
+// RivetKit actor wrapper, not in the direct VM API. See the actor examples for that.
 
-import { AgentOs } from "@rivet-dev/agentos-core";
+import { AgentOs } from "@rivet-dev/agentos";
 
 function settleWithin(promise: Promise<unknown>, ms: number): Promise<void> {
 	return Promise.race([
@@ -22,7 +22,7 @@ const vm = await AgentOs.create({
 });
 
 // Write a server script to run inside the VM
-await vm.writeFile(
+await vm.filesystem.writeFile(
 	"/tmp/server.js",
 	`
 const http = require("http");
@@ -43,7 +43,7 @@ const portPromise = new Promise<number>((resolve) => {
 	resolvePort = resolve;
 });
 
-const proc = vm.spawn("node", ["/tmp/server.js"]);
+const proc = await vm.process.spawn("node", ["/tmp/server.js"]);
 vm.onProcessOutput(proc.pid, (event) => {
 	if (event.stream === "stdout") {
 		const text = new TextDecoder().decode(event.data);
@@ -55,13 +55,13 @@ vm.onProcessOutput(proc.pid, (event) => {
 const port = await portPromise;
 console.log("Server listening on port", port);
 
-// vm.httpRequest() sends a buffered request to the VM server via localhost
-const response = await vm.httpRequest({ port, path: "/api/test" });
+// vm.network.httpRequest() sends a buffered request to the VM server via localhost
+const response = await vm.network.httpRequest({ port, path: "/api/test" });
 const json = JSON.parse(new TextDecoder().decode(response.body));
 console.log("Response:", json);
 
 await settleWithin(
-	vm.waitProcess(proc.pid).catch(() => {}),
+	vm.process.wait(proc.pid).catch(() => {}),
 	500,
 );
 await settleWithin(

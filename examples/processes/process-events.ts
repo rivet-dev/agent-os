@@ -3,7 +3,7 @@ import type { registry } from "./server";
 
 const client = createClient<typeof registry>({ endpoint: "http://localhost:6420" });
 const conn = client.vm.getOrCreate("my-agent").connect();
-const { pid } = await conn.spawn("node", ["/home/agentos/server.js"]);
+const { pid } = await conn.process.spawn("node", ["/home/agentos/server.js"]);
 
 conn.on("processOutput", (data) => {
 	if (data.pid !== pid) return;

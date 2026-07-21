@@ -6970,7 +6970,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         interpreter_depth: usize,
     ) -> KernelResult<()> {
         let resolved = self.validate_executable_path(path, cwd)?;
-        // `/bin/<name>` and `/__secure_exec/commands/.../<name>` may be
+        // `/bin/<name>` and `/__agentos/commands/.../<name>` may be
         // kernel-owned command stubs whose backing bytes are a self-referential
         // launcher rather than the projected WASM blob the runner loads. Once
         // the exact path has resolved to a registered command, its trusted
@@ -7014,7 +7014,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         if let Some(name) = normalized
-            .strip_prefix("/__secure_exec/commands/")
+            .strip_prefix("/__agentos/commands/")
             .and_then(|suffix| suffix.rsplit('/').next())
         {
             if !name.is_empty() && !name.contains('/') && self.commands.resolve(name).is_some() {
@@ -7727,7 +7727,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         let mut body = String::new();
         for processor in 0..self.proc_cpu_count() {
             body.push_str(&format!(
-                "processor\t: {processor}\nmodel name\t: secure-exec Virtual CPU\ncpu MHz\t\t: 1000.000\nsiblings\t: 1\ncpu cores\t: 1\n\n"
+                "processor\t: {processor}\nmodel name\t: agentos Virtual CPU\ncpu MHz\t\t: 1000.000\nsiblings\t: 1\ncpu cores\t: 1\n\n"
             ));
         }
         body.into_bytes()

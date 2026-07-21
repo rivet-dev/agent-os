@@ -55,12 +55,13 @@ Set up an agentOS actor, create a session, and run your first coding agent.
 
    By default, agentOS runs locally with `npx rivetkit dev` — no infrastructure needed. To run in production, deploy to any of these targets:
 
-   See [Deployment](/docs/deployment) for managed, self-hosted, and agentOS Core options.
+   See [Deployment](/docs/deployment) for managed, self-hosted, and direct VM options.
 
 agentOS is in preview and the API is subject to change. If you run into issues, please [report them on GitHub](https://github.com/rivet-dev/rivet/issues) or [join our Discord](https://rivet.dev/discord).
 
-## agentOS Core
+## Direct VM API
 
-The quickstart above uses `@rivet-dev/agentos`, which includes statefulness, multiplayer, and orchestration out of the box. If you only need direct VM control without those features, you can use the core package (`@rivet-dev/agentos-core`) standalone.
+The same `@rivet-dev/agentos` package also exports `AgentOs.create()` for direct
+VM control without the actor lifecycle, multiplayer, or orchestration layer.
 
-See [agentOS core documentation](/docs/core) for reference.
+See the [direct VM API documentation](/docs/core) for reference.

@@ -4,6 +4,7 @@
 //! types, and other shared data structures extracted from service.rs.
 
 use crate::protocol::{
+    ExecutionCompletedResponse, ExecutionDescriptor, ExecutionOutputCapture, ExecutionOutputEvent,
     GuestRuntimeKind, MountDescriptor, ProjectedModuleDescriptor, RegisterHostCallbacksRequest,
     SidecarRequestFrame, SidecarRequestPayload, SidecarResponseFrame, SidecarResponsePayload,
     SignalHandlerRegistration, SoftwareDescriptor, WasmPermissionTier,
@@ -528,7 +529,7 @@ pub(crate) const VM_LISTEN_PORT_MAX_METADATA_KEY: &str = "network.listen.port_ma
 pub(crate) const VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY: &str = "network.listen.allow_privileged";
 pub(crate) const DEFAULT_JAVASCRIPT_NET_BACKLOG: u32 = 511;
 pub(crate) const LOOPBACK_EXEMPT_PORTS_ENV: &str = "AGENTOS_LOOPBACK_EXEMPT_PORTS";
-pub(crate) const BINDING_DRIVER_NAME: &str = "secure-exec-host-callbacks";
+pub(crate) const BINDING_DRIVER_NAME: &str = "agentos-host-callbacks";
 pub(crate) const MAPPED_HOST_FD_START: u32 = 1_000_000_000;
 
 // ---------------------------------------------------------------------------
@@ -875,6 +876,17 @@ pub(crate) struct VmState {
     /// only when the trusted client asks for another bounded chunk.
     pub(crate) vm_fetch_streams: BTreeMap<String, VmFetchStreamState>,
     pub(crate) next_vm_fetch_stream_id: u64,
+    /// Public language/process executions keyed by their sole lifecycle ID.
+    /// Process IDs remain internal routing details in `execution_processes`.
+    pub(crate) executions: BTreeMap<String, ManagedLanguageExecution>,
+    pub(crate) execution_processes: BTreeMap<String, String>,
+    pub(crate) next_public_execution_id: u64,
+    pub(crate) execution_retention_wake_deadline_ms: Option<u64>,
+    pub(crate) execution_retention_wake_task: Option<tokio::task::JoinHandle<()>>,
+    /// The VM filesystem is shared across executions, so package-manager
+    /// mutations must never run concurrently.
+    pub(crate) package_mutation_execution_id: Option<String>,
+    pub(crate) typescript_compiler_staged: bool,
     pub(crate) exited_process_snapshots: VecDeque<ExitedProcessSnapshot>,
     pub(crate) detached_child_processes: BTreeSet<String>,
     /// Rotating start positions for bounded child-process event turns. Durable
@@ -2581,6 +2593,50 @@ pub(crate) struct ActiveUdpSocket {
 // ---------------------------------------------------------------------------
 // Execution types
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutionValueKind {
+    None,
+    JavaScript,
+    Python,
+    TypeScriptCheck,
+}
+
+#[derive(Debug)]
+pub(crate) struct ManagedLanguageExecution {
+    /// False for an attached ephemeral operation. Its map key is an internal
+    /// correlation token and is never exposed through lifecycle enumeration.
+    pub(crate) public: bool,
+    /// True only for caller-created reusable contexts. Background processes are
+    /// retained internally but must not appear in the context collection.
+    pub(crate) context: bool,
+    pub(crate) descriptor: ExecutionDescriptor,
+    pub(crate) result: Option<ExecutionCompletedResponse>,
+    pub(crate) events: VecDeque<ExecutionOutputEvent>,
+    pub(crate) retained_event_bytes: usize,
+    pub(crate) output_truncated: bool,
+    pub(crate) next_sequence: u64,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    pub(crate) stdout_truncated: bool,
+    pub(crate) stderr_truncated: bool,
+    pub(crate) output_limit_bytes: usize,
+    pub(crate) output_limit_setting: &'static str,
+    pub(crate) capture: ExecutionOutputCapture,
+    pub(crate) retain_events: bool,
+    pub(crate) event_limit: usize,
+    pub(crate) event_bytes_limit: usize,
+    pub(crate) uses_pty: bool,
+    pub(crate) value_kind: ExecutionValueKind,
+    pub(crate) semantic_result_path: Option<String>,
+    pub(crate) pending_outcome: Option<crate::protocol::ExecutionOutcome>,
+    pub(crate) deadline_ms: Option<u64>,
+    pub(crate) expires_at_ms: Option<u64>,
+    pub(crate) deadline_task: Option<tokio::task::JoinHandle<()>>,
+    /// Internal process whose V8/Pyodide context is parked while the public
+    /// execution is idle. It is never exposed as a second lifecycle identity.
+    pub(crate) resident_process_id: Option<String>,
+}
 
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)] // execution state is process-registry owned and preserves backend drop affinity

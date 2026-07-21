@@ -398,7 +398,7 @@ mod shadow_root {
         let command_root = registry_command_root()
             .expect("registry WASM commands are required before mounting command root");
         let mut mounts = vec![MountDescriptor {
-            guest_path: String::from("/__secure_exec/commands/0"),
+            guest_path: String::from("/__agentos/commands/0"),
             guest_source: String::from("host_dir"),
             guest_fstype: String::from("host_dir"),
             read_only: true,

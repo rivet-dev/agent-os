@@ -1132,13 +1132,6 @@ const ExecutionSection = () => (
 								<ArrowRight className='h-3.5 w-3.5' />
 							</a>
 						</div>
-						{/* agentOS Exec callout intentionally hidden until the standalone execution product is ready. */}
-						{/*
-						<aside className='mt-7 max-w-sm border-t border-ink/10 pt-5'>
-							<p className='text-xs font-medium text-ink'>Just need secure code execution?</p>
-							<p className='mt-1.5 text-xs leading-relaxed text-ink-soft'><span className='font-medium text-ink'>agentOS Exec</span> is the lightweight subset for running isolated Node.js or Python code.</p>
-						</aside>
-						*/}
 					</div>
 					<div className='min-w-0'>
 						<AgentSessionDemo />
@@ -1940,7 +1933,7 @@ function RuntimeBenchInfo({
 							<strong className='font-medium text-cream'>{detail.label}</strong> {detail.text}
 						</span>
 					))}
-					<a href='/docs/benchmarks#reproducing' className='mt-3 inline-flex font-medium text-cream underline decoration-cream/30 underline-offset-4 transition-colors hover:text-white hover:decoration-cream/70'>
+					<a href='/docs/performance#reproducing' className='mt-3 inline-flex font-medium text-cream underline decoration-cream/30 underline-offset-4 transition-colors hover:text-white hover:decoration-cream/70'>
 						Methodology &amp; reproduction →
 					</a>
 				</span>
@@ -2188,7 +2181,7 @@ const secondaryFeatures = [
 		icon: Package,
 		title: 'Sandbox mounting',
 		description: 'Mount a full Linux sandbox only when native binaries or heavy compilation need one.',
-		docsHref: '/docs/sandbox',
+		docsHref: '/docs/sandboxes',
 	},
 	{
 		icon: AppWindow,
@@ -2363,7 +2356,7 @@ const BenchmarksSection = () => {
 								What staying in-process saves.
 							</h2>
 							<a
-								href='/docs/benchmarks'
+								href='/docs/performance'
 								className='inline-flex shrink-0 items-center gap-1 text-sm text-accent-deep underline underline-offset-2 transition-colors hover:text-accent'
 							>
 								Benchmark document

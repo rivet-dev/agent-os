@@ -8,7 +8,7 @@ agentOS is a Linux environment with a POSIX-compliant virtual kernel. It handles
 
 ## Sandbox mounting
 
-When a workload needs a full Linux OS, agents can escalate to a full sandbox on demand without changing code. The [sandbox mounting](/docs/sandbox) extension mounts the sandbox as a filesystem and lets you execute commands on it, like mounting a hard drive on your own machine. Files written in the VM are available in the sandbox and vice versa.
+When a workload needs a full Linux OS, agents can escalate to a full sandbox on demand without changing code. The [external sandbox](/docs/sandboxes) extension mounts the sandbox as a filesystem and lets you execute commands on it, like mounting a hard drive on your own machine. Files written in the VM are available in the sandbox and vice versa.
 
 See [agentOS vs Sandbox](/docs/versus-sandbox) for a detailed comparison.
 
@@ -16,7 +16,7 @@ See [agentOS vs Sandbox](/docs/versus-sandbox) for a detailed comparison.
 
 ### Software registry
 
-agentOS uses its own [software registry](/registry) of popular tools cross-compiled for the runtime. You cannot download and install arbitrary binaries (for example via `curl` or `apt`), and standard Linux package managers (`apt`, `yum`) are not available since agentOS runs a streamlined Linux environment rather than a full distribution. Native binaries that are not yet available in the registry (such as Go, Rust, or C++ toolchains) require a full [sandbox](/docs/sandbox).
+agentOS uses its own [software registry](/registry) of popular tools cross-compiled for the runtime. You cannot download and install arbitrary binaries (for example via `curl` or `apt`), and standard Linux package managers (`apt`, `yum`) are not available since agentOS runs a streamlined Linux environment rather than a full distribution. Native binaries that are not yet available in the registry (such as Go, Rust, or C++ toolchains) require a full [external sandbox](/docs/sandboxes).
 
 See [Software](/docs/software) for how to install and configure available packages.
 
@@ -31,4 +31,3 @@ agentOS provides a POSIX-compliant virtual Linux kernel with full filesystem ope
 ### No hardware access
 
 The VM has no access to GPUs, USB devices, or other hardware.
-

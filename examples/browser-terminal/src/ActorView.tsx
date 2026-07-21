@@ -16,6 +16,17 @@ interface ShellExitPayload {
 	shellId: string;
 }
 
+interface TerminalActions {
+	open(options?: { cols?: number; rows?: number }): Promise<{ shellId: string }>;
+	write(shellId: string, data: string): Promise<void>;
+	resize(shellId: string, cols: number, rows: number): Promise<void>;
+	close(shellId: string): Promise<void>;
+}
+
+function terminalActions(connection: unknown): TerminalActions {
+	return (connection as { terminal: TerminalActions }).terminal;
+}
+
 function toBytes(data: unknown): Uint8Array {
 	if (data instanceof Uint8Array) return data;
 	if (data instanceof ArrayBuffer) return new Uint8Array(data);
@@ -112,7 +123,7 @@ export function ActorView({ actorId }: { actorId: string }) {
 		Promise.all(
 			ids.map(async (shellId) => {
 				try {
-					await conn.resizeShell(shellId, 80, 24);
+					await terminalActions(conn).resize(shellId, 80, 24);
 					return shellId;
 				} catch {
 					return null;
@@ -138,12 +149,15 @@ export function ActorView({ actorId }: { actorId: string }) {
 		setError(null);
 	}, [actorId]);
 
-	const openShell = useCallback(async () => {
+	const openTerminal = useCallback(async () => {
 		if (!conn) return;
 		setBusy(true);
 		setError(null);
 		try {
-			const { shellId } = await conn.openShell({ cols: 80, rows: 24 });
+			const { shellId } = await terminalActions(conn).open({
+				cols: 80,
+				rows: 24,
+			});
 			setTabs((prev) => {
 				const next = [
 					...prev,
@@ -167,8 +181,10 @@ export function ActorView({ actorId }: { actorId: string }) {
 		async (shellId: string) => {
 			dropTab(shellId);
 			try {
-				await conn?.closeShell(shellId);
-			} catch {}
+				if (conn) await terminalActions(conn).close(shellId);
+			} catch (closeError) {
+				console.warn("Failed to close terminal", closeError);
+			}
 		},
 		[conn, dropTab],
 	);
@@ -200,7 +216,7 @@ export function ActorView({ actorId }: { actorId: string }) {
 					type="button"
 					className="tab-new"
 					disabled={!conn || busy}
-					onClick={() => void openShell()}
+					onClick={() => void openTerminal()}
 					title="New terminal"
 				>
 					+
@@ -225,8 +241,14 @@ export function ActorView({ actorId }: { actorId: string }) {
 						key={t.shellId}
 						shellId={t.shellId}
 						active={t.shellId === active}
-						onInput={(text) => conn?.writeShell(t.shellId, text)}
-						onResize={(cols, rows) => conn?.resizeShell(t.shellId, cols, rows)}
+						onInput={(text) =>
+							conn ? terminalActions(conn).write(t.shellId, text) : undefined
+						}
+						onResize={(cols, rows) =>
+							conn
+								? terminalActions(conn).resize(t.shellId, cols, rows)
+								: undefined
+						}
 						subscribe={subscribe(t.shellId)}
 					/>
 				))}

@@ -4,7 +4,7 @@ name = "cmd-split"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "split standalone binary for secure-exec VM"
+description = "split standalone binary for agentos VM"
 
 [[bin]]
 name = "split"

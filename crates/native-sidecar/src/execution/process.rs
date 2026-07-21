@@ -1545,6 +1545,26 @@ impl ActiveExecution {
         matches!(self, Self::Javascript(execution) if execution.has_exited())
     }
 
+    pub(crate) fn execute_retained_language(
+        &mut self,
+        language: RetainedExecutionLanguage,
+        source: String,
+        file_path: String,
+        module: bool,
+    ) -> Result<(), SidecarError> {
+        match (self, language) {
+            (Self::Javascript(execution), RetainedExecutionLanguage::JavaScript) => execution
+                .execute_retained(source, file_path, module)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            (Self::Python(execution), RetainedExecutionLanguage::Python) => execution
+                .execute_retained(source)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            _ => Err(SidecarError::InvalidState(String::from(
+                "retained language does not match the resident executor",
+            ))),
+        }
+    }
+
     pub(crate) fn child_pid(&self) -> u32 {
         match self {
             Self::Javascript(execution) => execution.child_pid(),

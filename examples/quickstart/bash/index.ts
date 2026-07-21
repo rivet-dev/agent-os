@@ -1,30 +1,28 @@
-// Run shell commands inside the VM.
+import { AgentOs } from "@rivet-dev/agentos";
 
-import { AgentOs } from "@rivet-dev/agentos-core";
+const runtime = await AgentOs.create();
 
-const vm = await AgentOs.create();
+try {
+	// No capture: you get the outcome and exit code only.
+	await runtime.process.exec("mkdir -p /workspace/demo");
 
-// Simple commands
-const echo = await vm.exec("echo 'Hello from the shell!'");
-console.log(echo.stdout);
+	// Capture "stderr" for diagnostics, "all" for both streams.
+	const listing = await runtime.process.exec("ls -la /workspace", {
+		output: { capture: "all" },
+	});
+	console.log(listing.outcome === "succeeded" ? listing.stdout : listing.error);
 
-// Pipes
-const piped = await vm.exec("echo 'hello world' | tr a-z A-Z");
-console.log("Piped:", piped.stdout.trim());
+	// Pipes, redirects, and globs work — it's a real shell.
+	const piped = await runtime.process.exec("echo 'hello world' | tr a-z A-Z", {
+		output: { capture: "all" },
+	});
+	console.log(piped.stdout?.trim()); // "HELLO WORLD"
 
-// File manipulation
-await vm.exec("echo 'line 1' > /tmp/test.txt");
-await vm.exec("echo 'line 2' >> /tmp/test.txt");
-await vm.exec("echo 'line 3' >> /tmp/test.txt");
-
-const cat = await vm.exec("cat /tmp/test.txt");
-console.log("File contents:");
-console.log(cat.stdout);
-
-// grep
-const grep = await vm.exec("grep '2' /tmp/test.txt");
-console.log("Grep result:", grep.stdout.trim());
-
-console.log("Exit code:", grep.exitCode);
-
-await vm.dispose();
+	// execFile sends each arg verbatim — no shell parses it, so no injection.
+	const raw = await runtime.process.execFile("echo", ["$(whoami)"], {
+		output: { capture: "all" },
+	});
+	console.log(raw.stdout?.trim()); // "$(whoami)" — printed literally, never run
+} finally {
+	await runtime.dispose();
+}

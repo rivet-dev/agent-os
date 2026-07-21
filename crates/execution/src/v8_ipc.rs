@@ -1,4 +1,4 @@
-//! Binary IPC framing for communication with the secure-exec-v8 runtime process.
+//! Binary IPC framing for communication with the agentos-v8 runtime process.
 //!
 //! Wire format per frame:
 //!   [4B total_len (u32 BE, excludes self)]

@@ -1,4 +1,4 @@
-import { AgentOs } from "@rivet-dev/agentos-core";
+import { AgentOs } from "@rivet-dev/agentos";
 
 // Configure filesystem backends at boot. Native mount plugins (host
 // directories, S3, etc.) are passed via `plugin`, each identified by an `id`

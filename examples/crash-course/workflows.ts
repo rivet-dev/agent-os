@@ -22,18 +22,18 @@ const bugFixer = actor({
 			step
 				.client<typeof registry>()
 				.vm.getOrCreate("bug-fixer")
-				.exec(`git clone ${step.state.repo} /home/agentos/repo`),
+				.process.exec(`git clone ${step.state.repo} /home/agentos/repo`),
 		);
 
 		await ctx.step("fix-bug", async (step) => {
 			const agent = step
 				.client<typeof registry>()
 				.vm.getOrCreate("bug-fixer");
-			await agent.openSession({
+			await agent.sessions.open({
 				agent: "pi",
 				env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 			});
-			await agent.prompt({
+			await agent.sessions.prompt({
 				content: [
 					{ type: "text", text: `Fix the bug in issue: ${step.state.issue}` },
 				],
@@ -44,7 +44,7 @@ const bugFixer = actor({
 			step
 				.client<typeof registry>()
 				.vm.getOrCreate("bug-fixer")
-				.exec("cd /home/agentos/repo && npm test"),
+				.process.exec("cd /home/agentos/repo && npm test"),
 		);
 		await ctx.step("complete", async (step) => {
 			step.state.status = "complete";

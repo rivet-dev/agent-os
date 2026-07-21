@@ -14,15 +14,15 @@ export function Agent() {
   });
 
   async function run() {
-    // In production, inject credentials on the server (see /docs/llm-credentials)
+    // In production, inject credentials on the server (see /docs/models-and-credentials)
     const connection = agent.connection;
     if (!connection) return;
 
-    await connection.openSession({
+    await connection.sessions.open({
       agent: "pi",
       env: { ANTHROPIC_API_KEY: process.env.VITE_ANTHROPIC_API_KEY! },
     });
-    await connection.prompt({
+    await connection.sessions.prompt({
       content: [
         {
           type: "text",

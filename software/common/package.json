@@ -3,7 +3,7 @@
 	"version": "0.3.0-rc.2",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "Common WASM command set for secure-exec VMs (coreutils + sed + grep + gawk + findutils + diffutils + tar + gzip)",
+	"description": "Common WASM command set for agentos VMs (coreutils + sed + grep + gawk + findutils + diffutils + tar + gzip)",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [

@@ -1,6 +1,6 @@
-# Secure Exec Benchmarks
+# AgentOS language execution Benchmarks
 
-These benchmarks measure the public `secure-exec` SDK paths used by consumers.
+These benchmarks measure the public `agentos` SDK paths used by consumers.
 
 ## Cold Start Matrix
 
@@ -156,7 +156,7 @@ Focused lanes live under `src/focused/` and preserve the legacy CLI flags, env v
 - **`readdir-scaling`**: pure readdir scaling with setup outside the timed loop. Knobs: `BENCH_READDIR_ITERATIONS`, `BENCH_READDIR_WARMUP`, `BENCH_READDIR_ENTRY_COUNTS`, `BENCH_READDIR_MODES`, `BENCH_READDIR_FIXTURES`, `BENCH_READDIR_WORKLOADS`.
 - **`readdir-probe`**: guarded/probe readdir shapes.
 - **`mount-readdir`**: host mount-table readdir scaling. Knobs: `BENCH_MOUNT_READDIR_ITERATIONS`, `BENCH_MOUNT_READDIR_WARMUP`, `BENCH_MOUNT_READDIR_COUNTS`, `BENCH_MOUNT_READDIR_ENTRY_COUNT`.
-- **`overlay-readdir`**: explicitly skipped in secure-exec because Agent OS TypeScript overlay layer-store APIs are not exposed here.
+- **`overlay-readdir`**: explicitly skipped in agentos because Agent OS TypeScript overlay layer-store APIs are not exposed here.
 - **`process-spawn`**: native baseline, host Node, and guest VM process-spawn floor. Knobs: `BENCH_ITERATIONS`, `BENCH_WARMUP`, `BENCH_PROCESS_LIFECYCLE_TRACE`.
 - **`wasm-command-floor`**: direct WASM command startup/capture floor. Knobs: `BENCH_WASM_COMMAND_FLOOR_ITERATIONS`, `BENCH_WASM_COMMAND_FLOOR_WARMUP`, `BENCH_WASM_COMMAND_FLOOR_SERIAL_RUNS`, `BENCH_WASM_COMMAND_FLOOR_STDOUT_SIZES`, `BENCH_WASM_COMMAND_FLOOR_WARMUP_DEBUG`.
 - **`wasm-command-floor-debug`**: command floor with WASM warmup diagnostics.

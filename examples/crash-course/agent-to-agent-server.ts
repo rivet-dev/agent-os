@@ -24,14 +24,14 @@ const coder = agentOS({
 						});
 						const content = await client.coder
 							.getOrCreate("feature-auth")
-							.readFile(path);
+							.filesystem.readFile(path);
 						const reviewerHandle = client.reviewer.getOrCreate("feature-auth");
-						await reviewerHandle.writeFile(path, content);
-						await reviewerHandle.openSession({
+						await reviewerHandle.filesystem.writeFile(path, content);
+						await reviewerHandle.sessions.open({
 							agent: "pi",
 							env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 						});
-						const result = await reviewerHandle.prompt({
+						const result = await reviewerHandle.sessions.prompt({
 							content: [
 								{ type: "text", text: `Review ${path} for security issues` },
 							],

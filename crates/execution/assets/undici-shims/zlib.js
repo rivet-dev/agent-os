@@ -1,7 +1,7 @@
 "use strict";
 
 function getZlibModule() {
-	const mod = globalThis.__secureExecBuiltinZlibModule;
+	const mod = globalThis.__agentOsBuiltinZlibModule;
 	if (!mod) {
 		throw new Error("node:zlib bridge module is not available");
 	}

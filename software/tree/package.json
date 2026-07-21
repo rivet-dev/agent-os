@@ -3,7 +3,7 @@
 	"version": "0.3.3",
 	"type": "module",
 	"license": "GPL-2.0-or-later",
-	"description": "tree directory listing for secure-exec VMs",
+	"description": "tree directory listing for agentos VMs",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [

@@ -2,7 +2,7 @@
 #
 # The Rust kernel is the substance of this repo; the rest is the TypeScript
 # client/protocol/registry plus a large test suite (the kernel itself lives in
-# the secure-exec repo). We count Rust in full, plus the core client surface
+# the agentos repo). We count Rust in full, plus the core client surface
 # (the AgentOS client entrypoint + its sidecar wire layer) and the core JS
 # binary-resolver shim, and exclude everything else (tests, demos, tooling,
 # generated bundles, the website, and the remaining client/registry code).

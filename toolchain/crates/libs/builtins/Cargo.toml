@@ -1,9 +1,9 @@
 [package]
-name = "secureexec-builtins"
+name = "agentos-builtins"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Built-in command implementations (sleep, test/[, whoami) for secure-exec VM"
+description = "Built-in command implementations (sleep, test/[, whoami) for agentos VM"
 
 [dependencies]
 libc = "0.2"

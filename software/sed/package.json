@@ -3,7 +3,7 @@
 	"version": "0.3.4",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "GNU sed stream editor for secure-exec VMs",
+	"description": "GNU sed stream editor for agentos VMs",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [

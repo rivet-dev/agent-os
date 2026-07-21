@@ -4,11 +4,11 @@ name = "cmd-timeout"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "timeout standalone binary for secure-exec VM"
+description = "timeout standalone binary for agentos VM"
 
 [[bin]]
 name = "timeout"
 path = "src/main.rs"
 
 [dependencies]
-shims = { package = "secureexec-shims", path = "../../../../../toolchain/crates/libs/shims" }
+shims = { package = "agentos-shims", path = "../../../../../toolchain/crates/libs/shims" }

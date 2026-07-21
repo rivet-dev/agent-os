@@ -1540,6 +1540,12 @@ where
                 self.snapshot_root_filesystem(&request, payload).await
             }
             RequestRoute::ListMounts(payload) => self.list_mounts(&request, payload).await,
+            RequestRoute::ExecutionOperation(payload) => {
+                self.execute_language_operation(&request, payload).await
+            }
+            RequestRoute::ExecutionLifecycle(payload) => {
+                self.handle_execution_lifecycle(&request, payload).await
+            }
             RequestRoute::Execute(payload) => self.execute(&request, payload).await,
             RequestRoute::WriteStdin(payload) => self.write_stdin(&request, payload).await,
             RequestRoute::ResizePty(payload) => self.resize_pty(&request, payload).await,
@@ -3169,7 +3175,12 @@ where
         shared_respond(request, payload)
     }
 
-    fn reject(&self, request: &RequestFrame, code: &str, message: &str) -> ResponseFrame {
+    pub(crate) fn reject(
+        &self,
+        request: &RequestFrame,
+        code: &str,
+        message: &str,
+    ) -> ResponseFrame {
         shared_reject(request, code, message)
     }
 
@@ -4014,7 +4025,7 @@ pub(crate) fn vfs_error(error: VfsError) -> SidecarError {
 /// required. The empirically-supported package managers are captured in
 /// `crates/sidecar/tests/module_layout_e2e.rs`.
 #[allow(dead_code)]
-const HOISTED_NODE_MODULES_GUIDANCE: &str = "secure-exec can't load mounted node_modules: the directory uses a non-flat layout (pnpm / bun / yarn workspaces store, or yarn Plug'n'Play) whose package store isn't visible inside the VM. A flat (hoisted) node_modules is required.\n  - pnpm        -> add `node-linker=hoisted` to .npmrc, then reinstall\n  - yarn berry  -> set `nodeLinker: node-modules` in .yarnrc.yml (not pnp/pnpm)\n  - bun         -> install dependencies outside a workspace (workspaces use a .bun store)\n  - npm / yarn classic -> already flat, no change needed";
+const HOISTED_NODE_MODULES_GUIDANCE: &str = "agentos can't load mounted node_modules: the directory uses a non-flat layout (pnpm / bun / yarn workspaces store, or yarn Plug'n'Play) whose package store isn't visible inside the VM. A flat (hoisted) node_modules is required.\n  - pnpm        -> add `node-linker=hoisted` to .npmrc, then reinstall\n  - yarn berry  -> set `nodeLinker: node-modules` in .yarnrc.yml (not pnp/pnpm)\n  - bun         -> install dependencies outside a workspace (workspaces use a .bun store)\n  - npm / yarn classic -> already flat, no change needed";
 
 /// Detect, from an adapter's captured stderr, a non-flat-`node_modules` failure
 /// signature. Returns the actionable guidance to fold into the surfaced error,
@@ -4185,7 +4196,7 @@ mod symlinked_node_modules_hint_tests {
         // dist/package.json inside the unreachable .pnpm store.
         let stderr = "Error: ENOENT: no such file or directory, open '/root/node_modules/.pnpm/@mariozechner+pi-coding-agent@0.60.0_x/node_modules/@mariozechner/pi-coding-agent/dist/package.json'";
         let hint = symlinked_node_modules_hint(stderr).expect("expected hoisted guidance");
-        assert!(hint.contains("secure-exec can't load mounted node_modules"));
+        assert!(hint.contains("agentos can't load mounted node_modules"));
         assert!(!hint.contains("agentos"));
     }
 

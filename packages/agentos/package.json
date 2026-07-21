@@ -1,7 +1,7 @@
 {
 	"name": "@rivet-dev/agentos",
 	"version": "0.0.1",
-	"description": "A native TypeScript RivetKit actor backed by the AgentOS core SDK and sidecar.",
+	"description": "The AgentOS actor and orchestration SDK.",
 	"license": "Apache-2.0",
 	"keywords": [
 		"rivetkit",

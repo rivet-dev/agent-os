@@ -2319,7 +2319,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_error_code_accepts_trusted_secure_exec_prefixes() {
+    fn bridge_error_code_accepts_trusted_agentos_prefixes() {
         assert_eq!(
             bridge_error_code("ERR_AGENTOS_NODE_SYNC_RPC: EACCES: permission denied on /foo"),
             Some("EACCES")

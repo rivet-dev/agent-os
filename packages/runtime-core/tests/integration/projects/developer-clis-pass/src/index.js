@@ -103,8 +103,8 @@ module.exports = {
   await mkdir(path.join(monorepo, "packages", "a"), { recursive: true });
   await mkdir(path.join(monorepo, "packages", "b"), { recursive: true });
   await writeFile(path.join(monorepo, "package.json"), `${JSON.stringify({ name: "agentos-cli-monorepo", version: "1.0.0", private: true, packageManager: "pnpm@11.15.0", workspaces: ["packages/*"] }, null, 2)}\n`);
-  await writeFile(path.join(monorepo, "packages", "a", "package.json"), "{\"name\":\"@agentos/a\",\"version\":\"1.0.0\"}\n");
-  await writeFile(path.join(monorepo, "packages", "b", "package.json"), "{\"name\":\"@agentos/b\",\"version\":\"1.0.0\"}\n");
+  await writeFile(path.join(monorepo, "packages", "a", "package.json"), "{\"name\":\"@fixture/a\",\"version\":\"1.0.0\"}\n");
+  await writeFile(path.join(monorepo, "packages", "b", "package.json"), "{\"name\":\"@fixture/b\",\"version\":\"1.0.0\"}\n");
   await execFileAsync(process.execPath, [require.resolve("@manypkg/cli"), "check"], {
     cwd: monorepo,
     env: { ...process.env, CI: "1", NO_COLOR: "1", FORCE_COLOR: "0" },

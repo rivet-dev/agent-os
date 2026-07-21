@@ -14,7 +14,7 @@ declare function lookupTenantApiKey(tenantId: string): Promise<string>;
 async function startTenantSession(tenantId: string) {
 	const anthropicApiKey = await lookupTenantApiKey(tenantId);
 
-	await client.vm.getOrCreate(tenantId).openSession({
+	await client.vm.getOrCreate(tenantId).sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: anthropicApiKey },
 	});

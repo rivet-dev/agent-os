@@ -1,7 +1,8 @@
 {
-	"name": "@rivet-dev/agentos-typescript",
+	"name": "@rivet-dev/agentos-internal-typescript",
+	"private": true,
 	"version": "0.0.1",
-	"description": "AgentOS TypeScript companion tools backed by AgentOS runtime primitives.",
+	"description": "Internal TypeScript compiler implementation for AgentOS JavaScript execution.",
 	"type": "module",
 	"license": "Apache-2.0",
 	"main": "./dist/index.js",

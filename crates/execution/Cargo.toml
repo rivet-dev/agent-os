@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Native execution plane scaffold for secure-exec"
+description = "Native execution plane scaffold for agentos"
 build = "build.rs"
 # Large Pyodide runtime assets are staged at build time (copied from the
 # in-tree assets directory during workspace builds, or downloaded from the

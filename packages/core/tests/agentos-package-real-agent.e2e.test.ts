@@ -20,10 +20,10 @@ import { AgentOs } from "../src/index.js";
  */
 const ENABLED = process.env.AGENTOS_TEST_REAL_PI === "1";
 const here = dirname(fileURLToPath(import.meta.url));
-// Toolchain now lives in the sibling secure-exec repo (see its package README).
+// Toolchain now lives in the sibling agentos repo (see its package README).
 const TOOLCHAIN_CLI = resolve(
 	here,
-	"../../../../secure-exec/packages/agentos-toolchain/dist/cli.js",
+	"../../../../agentos/packages/agentos-toolchain/dist/cli.js",
 );
 
 /** Real published agent adapters, packed flat with native addons pruned. */

@@ -793,6 +793,9 @@ pub struct VmLimitsConfig {
     pub wasm: Option<WasmLimitsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub execution: Option<ExecutionLimitsConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub process: Option<ProcessLimitsConfig>,
 }
 
@@ -1054,6 +1057,41 @@ impl VmLimitsConfig {
         if let Some(js_runtime) = &self.js_runtime {
             validate_nonzero_options([("limits.jsRuntime.maxTimers", js_runtime.max_timers)])?;
         }
+        if let Some(execution) = &self.execution {
+            validate_nonzero_options([
+                (
+                    "limits.execution.completedTtlMs",
+                    execution.completed_ttl_ms,
+                ),
+                (
+                    "limits.execution.maxCompletedExecutions",
+                    execution.max_completed_executions,
+                ),
+                (
+                    "limits.execution.liveExecutionWarningThreshold",
+                    execution.live_execution_warning_threshold,
+                ),
+            ])?;
+            const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+            for (path, value) in [
+                (
+                    "limits.execution.completedTtlMs",
+                    execution.completed_ttl_ms,
+                ),
+                (
+                    "limits.execution.maxCompletedExecutions",
+                    execution.max_completed_executions,
+                ),
+                (
+                    "limits.execution.liveExecutionWarningThreshold",
+                    execution.live_execution_warning_threshold,
+                ),
+            ] {
+                if value.is_some_and(|value| value > MAX_SAFE_INTEGER) {
+                    return Err(VmConfigError::new(format!("{path} must be a safe integer")));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -1242,6 +1280,12 @@ limits_struct!(WasmLimitsConfig {
     prewarm_timeout_ms,
     runner_heap_limit_mb,
     runner_cpu_time_limit_ms,
+});
+
+limits_struct!(ExecutionLimitsConfig {
+    completed_ttl_ms,
+    max_completed_executions,
+    live_execution_warning_threshold,
 });
 
 limits_struct!(ProcessLimitsConfig {

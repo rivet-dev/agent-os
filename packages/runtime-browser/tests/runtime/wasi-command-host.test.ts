@@ -100,7 +100,7 @@ function loadCommandHostFactory(
 		exports: {} as { createWasiCommandHost?: CommandHostFactory },
 	};
 	const source = getRuntimePolyfillCode(
-		"secure-exec:wasi-command-host",
+		"agentos:wasi-command-host",
 		processLimits,
 	);
 	if (!source) throw new Error("command host polyfill was not found");

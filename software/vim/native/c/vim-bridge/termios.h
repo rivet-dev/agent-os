@@ -1,4 +1,4 @@
-/* termios.h — POSIX termios for the secure-exec full-OS libc (musl layout).
+/* termios.h — POSIX termios for the agentos full-OS libc (musl layout).
  *
  * wasi-libc ships no termios; this header pairs with termios_bridge.c, which
  * implements the functions on top of the `host_tty` kernel imports (raw-mode

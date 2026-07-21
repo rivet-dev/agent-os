@@ -23,7 +23,7 @@ import { dirname, join, resolve, sep } from "node:path";
  *
  * Why this exists: pnpm's default (`node-linker=symlinked`) install fills
  * `<pkg>/node_modules/<dep>` with symlinks into the workspace-root `.pnpm`
- * store. The secure-exec `host_dir` mount resolves strictly beneath the mount
+ * store. The agentos `host_dir` mount resolves strictly beneath the mount
  * root (`openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)`), so those
  * store-escaping symlinks are refused ("escapes mapped host root") and
  * transitive deps (e.g. `undici`) are not even present in the slim tree.
@@ -94,7 +94,7 @@ function stripEscapingSymlinks(root: string): string[] {
 					// A hoisted deploy has no `.pnpm` store-escape symlinks, so an
 					// escaping link here is a workspace `link:` dep pnpm didn't copy
 					// — e.g. an agent package that now lives in the sibling
-					// secure-exec repo (software/*). Materialize a dereferenced
+					// agentos repo (software/*). Materialize a dereferenced
 					// copy so it's still present in the flat tree the VM mounts; a
 					// published install would have it as a real dir. Dangling or
 					// non-package escapes are dropped as before.

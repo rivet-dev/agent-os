@@ -7,10 +7,10 @@ package or a local script into a valid, self-contained agentOS package.
 npx @rivet-dev/agentos-toolchain pack <npm-pkg | ./local-dir> [options]
 ```
 
-## Why this lives in secure-exec
+## Why this lives in agentos
 
-**Packaging is part of secure-exec's core behavior, so the tool that produces
-packages lives here, next to the things it packages.** secure-exec owns the VM
+**Packaging is part of agentos's core behavior, so the tool that produces
+packages lives here, next to the things it packages.** agentos owns the VM
 runtime that *runs* packages — the kernel, the VFS, the `/opt/agentos` mount, the
 `$PATH` command resolver, and the header/`binfmt` dispatch — and it owns the
 package **definitions** themselves: the generic registry software (`software/*`)

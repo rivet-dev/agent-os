@@ -12,63 +12,92 @@ export {
 } from "./agent-os-conformance-fixture.js";
 
 export const AGENT_OS_CONFORMANCE_ACTIONS = [
-	"readFile",
-	"writeFile",
-	"readFiles",
-	"writeFiles",
-	"stat",
-	"mkdir",
-	"readdir",
-	"readdirEntries",
-	"readdirRecursive",
-	"exists",
-	"move",
-	"remove",
-	"exec",
-	"execArgv",
-	"spawn",
-	"waitProcess",
-	"killProcess",
-	"stopProcess",
-	"listProcesses",
-	"allProcesses",
-	"processTree",
-	"getProcess",
-	"writeProcessStdin",
-	"closeProcessStdin",
-	"openShell",
-	"writeShell",
-	"resizeShell",
-	"closeShell",
-	"waitShell",
-	"httpRequest",
+	"process.exec",
+	"process.execFile",
+	"process.spawn",
+	"process.get",
+	"process.list",
+	"process.tree",
+	"process.wait",
+	"process.signal",
+	"process.kill",
+	"process.writeStdin",
+	"process.closeStdin",
+	"process.resizePty",
+	"process.readOutput",
+	"createContext",
+	"contexts.get",
+	"contexts.list",
+	"contexts.reset",
+	"contexts.delete",
+	"javascript.execute",
+	"javascript.evaluate",
+	"javascript.executeFile",
+	"javascript.spawn",
+	"javascript.spawnFile",
+	"javascript.npm.install",
+	"javascript.npm.runScript",
+	"javascript.npm.runPackage",
+	"typescript.execute",
+	"typescript.evaluate",
+	"typescript.executeFile",
+	"typescript.spawn",
+	"typescript.spawnFile",
+	"typescript.check",
+	"typescript.checkProject",
+	"python.execute",
+	"python.evaluate",
+	"python.executeFile",
+	"python.executeModule",
+	"python.spawn",
+	"python.spawnFile",
+	"python.spawnModule",
+	"python.install",
+	"terminal.open",
+	"terminal.write",
+	"terminal.resize",
+	"terminal.wait",
+	"terminal.close",
+	"filesystem.readFile",
+	"filesystem.writeFile",
+	"filesystem.readFiles",
+	"filesystem.writeFiles",
+	"filesystem.stat",
+	"filesystem.mkdir",
+	"filesystem.readdir",
+	"filesystem.readdirEntries",
+	"filesystem.readdirRecursive",
+	"filesystem.exists",
+	"filesystem.move",
+	"filesystem.remove",
+	"filesystem.export",
+	"filesystem.mount",
+	"filesystem.unmount",
+	"filesystem.listMounts",
+	"network.httpRequest",
 	"vmFetch",
 	"vmFetchStreamStart",
 	"vmFetchStreamRead",
 	"vmFetchStreamCancel",
-	"scheduleCron",
-	"listCronJobs",
-	"cancelCronJob",
-	"listAgents",
-	"listMounts",
-	"listSoftware",
-	"exportRootFilesystem",
-	"mountFs",
-	"unmountFs",
-	"linkSoftware",
-	"openSession",
-	"getSession",
-	"prompt",
-	"cancelPrompt",
-	"unloadSession",
-	"deleteSession",
-	"respondPermission",
-	"listSessions",
-	"readHistory",
-	"getSessionConfig",
-	"setSessionConfigOption",
-	"getSessionCapabilities",
-	"getSessionAgentInfo",
+	"software.list",
+	"software.link",
+	"agents.list",
+	"sessions.open",
+	"sessions.get",
+	"sessions.list",
+	"sessions.delete",
+	"sessions.unload",
+	"sessions.prompt",
+	"sessions.cancelPrompt",
+	"sessions.respondPermission",
+	"sessions.readHistory",
+	"sessions.getConfig",
+	"sessions.setConfigOption",
+	"sessions.getCapabilities",
+	"sessions.getAgentInfo",
+	"cron.schedule",
+	"cron.list",
+	"cron.cancel",
 ] as const;
 
 export type AgentOsConformanceAction =
@@ -164,44 +193,52 @@ export function defineAgentOsConformanceSuite(
 		}, 120_000);
 
 		test("filesystem actions preserve bytes, metadata, batches, and directory semantics", async () => {
-			await backend.call("mkdir", "/conformance/fs/nested", {
+			await backend.call("filesystem.mkdir", "/conformance/fs/nested", {
 				recursive: true,
 			});
-			await backend.call("writeFile", "/conformance/fs/a.txt", "alpha");
+			await backend.call("filesystem.writeFile", "/conformance/fs/a.txt", "alpha");
 			await backend.call(
-				"writeFile",
+				"filesystem.writeFile",
 				"/conformance/fs/nested/b.bin",
 				new Uint8Array([0, 1, 2, 255]),
 			);
 			expect(
-				text(await backend.call("readFile", "/conformance/fs/a.txt")),
+				text(await backend.call("filesystem.readFile", "/conformance/fs/a.txt")),
 			).toBe("alpha");
 			expect([
 				...asBytes(
-					await backend.call("readFile", "/conformance/fs/nested/b.bin"),
+					await backend.call(
+						"filesystem.readFile",
+						"/conformance/fs/nested/b.bin",
+					),
 				),
 			]).toEqual([0, 1, 2, 255]);
 
-			const writes = await backend.call<any[]>("writeFiles", [
+			const writes = await backend.call<any[]>("filesystem.writeFiles", [
 				{ path: "/conformance/fs/batch/c.txt", content: "charlie" },
 				{ path: "/proc/conformance-denied", content: "no" },
 			]);
 			expect(writes.map((entry) => entry.success)).toEqual([true, false]);
-			const reads = await backend.call<any[]>("readFiles", [
+			const reads = await backend.call<any[]>("filesystem.readFiles", [
 				"/conformance/fs/a.txt",
 				"/conformance/fs/missing",
 			]);
 			expect(text(reads[0].content)).toBe("alpha");
 			expect(reads[1].content).toBeNull();
 
-			expect(await backend.call("exists", "/conformance/fs/a.txt")).toBe(true);
-			const stat = await backend.call<any>("stat", "/conformance/fs/nested");
+			expect(
+				await backend.call("filesystem.exists", "/conformance/fs/a.txt"),
+			).toBe(true);
+			const stat = await backend.call<any>(
+				"filesystem.stat",
+				"/conformance/fs/nested",
+			);
 			expect(stat.isDirectory).toBe(true);
 			expect(
-				await backend.call<string[]>("readdir", "/conformance/fs"),
+				await backend.call<string[]>("filesystem.readdir", "/conformance/fs"),
 			).toEqual(expect.arrayContaining(["a.txt", "nested", "batch"]));
 			const entries = await backend.call<any[]>(
-				"readdirEntries",
+				"filesystem.readdirEntries",
 				"/conformance/fs",
 			);
 			expect(entries).toEqual(
@@ -210,7 +247,7 @@ export function defineAgentOsConformanceSuite(
 				]),
 			);
 			const recursive = await backend.call<any[]>(
-				"readdirRecursive",
+				"filesystem.readdirRecursive",
 				"/conformance/fs",
 			);
 			expect(recursive.map((entry) => entry.path)).toContain(
@@ -218,21 +255,26 @@ export function defineAgentOsConformanceSuite(
 			);
 
 			await backend.call(
-				"move",
+				"filesystem.move",
 				"/conformance/fs/a.txt",
 				"/conformance/fs/moved.txt",
 			);
-			expect(await backend.call("exists", "/conformance/fs/a.txt")).toBe(false);
-			await backend.call("remove", "/conformance/fs/moved.txt");
-			expect(await backend.call("exists", "/conformance/fs/moved.txt")).toBe(
-				false,
-			);
+			expect(
+				await backend.call("filesystem.exists", "/conformance/fs/a.txt"),
+			).toBe(false);
+			await backend.call("filesystem.remove", "/conformance/fs/moved.txt");
+			expect(
+				await backend.call("filesystem.exists", "/conformance/fs/moved.txt"),
+			).toBe(false);
 		}, 60_000);
 
-		test("process actions and events cover execution, inspection, stdin, stop, and kill", async () => {
-			const execResult = await backend.call<any>("exec", "printf exec-ok");
+		test("process actions and events cover execution, inspection, stdin, signal, and kill", async () => {
+			const execResult = await backend.call<any>(
+				"process.exec",
+				"printf exec-ok",
+			);
 			expect(execResult).toMatchObject({ exitCode: 0, stdout: "exec-ok" });
-			const argvResult = await backend.call<any>("execArgv", "printf", [
+			const argvResult = await backend.call<any>("process.execFile", "printf", [
 				"argv-ok",
 			]);
 			expect(argvResult).toMatchObject({ exitCode: 0, stdout: "argv-ok" });
@@ -244,35 +286,33 @@ export function defineAgentOsConformanceSuite(
 			);
 			const offExit = backend.on("processExit", (event) => exits.push(event));
 			const spawned = await backend.call<any>(
-				"spawn",
+				"process.spawn",
 				"node",
 				[
 					"-e",
 					"process.stdin.on('data', d => { process.stdout.write('stdin:' + d); process.stderr.write('side'); });",
 				],
-				{ streamStdin: true },
-			);
-			expect((await backend.call<any>("getProcess", spawned.pid)).running).toBe(
-				true,
 			);
 			expect(
-				(await backend.call<any[]>("listProcesses")).some(
+				(await backend.call<any>("process.get", spawned.pid)).state,
+			).toBe("running");
+			expect(
+				(await backend.call<any[]>("process.list")).some(
 					(process) => process.pid === spawned.pid,
 				),
 			).toBe(true);
 			expect(
-				(await backend.call<any[]>("allProcesses")).some(
+				(await backend.call<any[]>("process.tree")).some(
 					(process) => process.pid === spawned.pid,
 				),
 			).toBe(true);
-			expect(
-				(await backend.call<any[]>("processTree")).some(
-					(process) => process.pid === spawned.pid,
-				),
-			).toBe(true);
-			await backend.call("writeProcessStdin", spawned.pid, "hello");
-			await backend.call("closeProcessStdin", spawned.pid);
-			expect(await backend.call("waitProcess", spawned.pid)).toBe(0);
+			await backend.call("process.writeStdin", spawned.pid, "hello");
+			await backend.call("process.closeStdin", spawned.pid);
+			expect(await backend.call("process.wait", spawned.pid)).toMatchObject({
+				pid: spawned.pid,
+				outcome: "exited",
+				exitCode: 0,
+			});
 			await eventually(
 				() => output,
 				(events) =>
@@ -287,18 +327,18 @@ export function defineAgentOsConformanceSuite(
 					),
 			);
 
-			const stopped = await backend.call<any>("spawn", "node", [
+			const stopped = await backend.call<any>("process.spawn", "node", [
 				"-e",
 				"setInterval(() => {}, 1000)",
 			]);
-			await backend.call("stopProcess", stopped.pid);
-			await backend.call("waitProcess", stopped.pid);
-			const killed = await backend.call<any>("spawn", "node", [
+			await backend.call("process.signal", stopped.pid, "SIGTERM");
+			await backend.call("process.wait", stopped.pid);
+			const killed = await backend.call<any>("process.spawn", "node", [
 				"-e",
 				"setInterval(() => {}, 1000)",
 			]);
-			await backend.call("killProcess", killed.pid);
-			await backend.call("waitProcess", killed.pid);
+			await backend.call("process.kill", killed.pid);
+			await backend.call("process.wait", killed.pid);
 			offOutput();
 			offExit();
 		}, 60_000);
@@ -312,7 +352,7 @@ export function defineAgentOsConformanceSuite(
 				stderr.push(event),
 			);
 			const offExit = backend.on("shellExit", (event) => exits.push(event));
-			const shell = await backend.call<any>("openShell", {
+			const shell = await backend.call<any>("terminal.open", {
 				command: "node",
 				args: [
 					"-e",
@@ -321,9 +361,9 @@ export function defineAgentOsConformanceSuite(
 				cols: 80,
 				rows: 24,
 			});
-			await backend.call("resizeShell", shell.shellId, 100, 30);
-			await backend.call("writeShell", shell.shellId, "hello-shell\n");
-			expect(await backend.call("waitShell", shell.shellId)).toBe(0);
+			await backend.call("terminal.resize", shell.shellId, 100, 30);
+			await backend.call("terminal.write", shell.shellId, "hello-shell\n");
+			expect(await backend.call("terminal.wait", shell.shellId)).toBe(0);
 			await eventually(
 				() => data,
 				(events) =>
@@ -347,11 +387,11 @@ export function defineAgentOsConformanceSuite(
 				(events) => events.some((event) => event.shellId === shell.shellId),
 			);
 
-			const closable = await backend.call<any>("openShell", {
+			const closable = await backend.call<any>("terminal.open", {
 				command: "node",
 				args: ["-e", "setInterval(() => {}, 1000)"],
 			});
-			await backend.call("closeShell", closable.shellId);
+			await backend.call("terminal.close", closable.shellId);
 			offData();
 			offStderr();
 			offExit();
@@ -362,7 +402,7 @@ export function defineAgentOsConformanceSuite(
 			const offOutput = backend.on("processOutput", (event) =>
 				output.push(event),
 			);
-			const server = await backend.call<any>("spawn", "node", [
+			const server = await backend.call<any>("process.spawn", "node", [
 				"-e",
 				`
 				const http = require('http');
@@ -382,7 +422,7 @@ export function defineAgentOsConformanceSuite(
 					),
 			);
 			const response = await backend.call<any>(
-				"httpRequest",
+				"network.httpRequest",
 				{
 					port: 31337,
 					path: "/path?q=1",
@@ -394,27 +434,27 @@ export function defineAgentOsConformanceSuite(
 			expect(response.status).toBe(200);
 			expect(response.headers["x-conformance"]).toBe("yes");
 			expect(text(response.body)).toBe("POST:/path?q=1:payload");
-			await backend.call("killProcess", server.pid);
-			await backend.call("waitProcess", server.pid);
+			await backend.call("process.kill", server.pid);
+			await backend.call("process.wait", server.pid);
 			offOutput();
 
-			const job = await backend.call<any>("scheduleCron", {
+			const job = await backend.call<any>("cron.schedule", {
 				id: "conformance-cron",
 				schedule: "0 0 1 1 *",
 				action: { type: "exec", command: "node", args: ["-e", "void 0"] },
 				overlap: "skip",
 			});
 			expect(job.id).toBe("conformance-cron");
-			expect(await backend.call<any[]>("listCronJobs")).toEqual([
+			expect(await backend.call<any[]>("cron.list")).toEqual([
 				expect.objectContaining({ id: "conformance-cron", overlap: "skip" }),
 			]);
-			await backend.call("cancelCronJob", job.id);
-			expect(await backend.call<any[]>("listCronJobs")).toEqual([]);
+			await backend.call("cron.cancel", job.id);
+			expect(await backend.call<any[]>("cron.list")).toEqual([]);
 			const cronEvents: any[] = [];
 			const offCron = backend.on("cronEvent", (event) =>
 				cronEvents.push(event),
 			);
-			const oneShot = await backend.call<any>("scheduleCron", {
+			const oneShot = await backend.call<any>("cron.schedule", {
 				id: "conformance-cron-event",
 				schedule: new Date(Date.now() + 750).toISOString(),
 				action: { type: "exec", command: "node", args: ["-e", "void 0"] },
@@ -428,10 +468,10 @@ export function defineAgentOsConformanceSuite(
 					),
 				10_000,
 			);
-			await backend.call("cancelCronJob", oneShot.id);
+			await backend.call("cron.cancel", oneShot.id);
 			offCron();
 
-			const agents = await backend.call<any[]>("listAgents");
+			const agents = await backend.call<any[]>("agents.list");
 			expect(agents).toEqual(
 				expect.arrayContaining([
 					expect.objectContaining({
@@ -440,7 +480,7 @@ export function defineAgentOsConformanceSuite(
 					}),
 				]),
 			);
-			expect(await backend.call<any[]>("listMounts")).toContainEqual(
+			expect(await backend.call<any[]>("filesystem.listMounts")).toContainEqual(
 				expect.objectContaining({
 					path: "/conformance-mount",
 					kind: "host_dir",
@@ -450,19 +490,19 @@ export function defineAgentOsConformanceSuite(
 			expect(
 				text(
 					await backend.call(
-						"readFile",
+						"filesystem.readFile",
 						"/conformance-mount/package.json",
 					),
 				),
 			).toContain(CONFORMANCE_AGENT_NAME);
 			await expect(
 				backend.call(
-					"writeFile",
+					"filesystem.writeFile",
 					"/conformance-mount/should-fail.txt",
 					"read-only",
 				),
 			).rejects.toThrow();
-			const software = await backend.call<any[]>("listSoftware");
+			const software = await backend.call<any[]>("software.list");
 			expect(
 				software.some((entry) =>
 					entry.commands.includes("conformance-agent-acp"),
@@ -473,7 +513,7 @@ export function defineAgentOsConformanceSuite(
 		test("sessions cover durable history, live events, permission replies, config, restoration, unload, and deletion", async () => {
 			const sessionId = "conformance-session";
 			expect(
-				await backend.call("openSession", {
+				await backend.call("sessions.open", {
 					sessionId,
 					agent: CONFORMANCE_AGENT_NAME,
 					permissionPolicy: "ask",
@@ -483,20 +523,20 @@ export function defineAgentOsConformanceSuite(
 					additionalInstructions: "shared-suite",
 				}),
 			).toBeUndefined();
-			expect((await backend.call<any>("listSessions")).sessions).toContainEqual(
+			expect((await backend.call<any>("sessions.list")).sessions).toContainEqual(
 				expect.objectContaining({
 					sessionId,
 					agent: CONFORMANCE_AGENT_NAME,
 				}),
 			);
 			expect(
-				(await backend.call<any>("getSessionConfig", { sessionId })).options,
+				(await backend.call<any>("sessions.getConfig", { sessionId })).options,
 			).toHaveLength(2);
 			expect(
-				await backend.call<any>("getSessionCapabilities", { sessionId }),
+				await backend.call<any>("sessions.getCapabilities", { sessionId }),
 			).toMatchObject({ loadSession: true });
 			expect(
-				await backend.call<any>("getSessionAgentInfo", { sessionId }),
+				await backend.call<any>("sessions.getAgentInfo", { sessionId }),
 			).toMatchObject({ name: CONFORMANCE_AGENT_NAME });
 
 			const sessionEvents: any[] = [];
@@ -512,7 +552,7 @@ export function defineAgentOsConformanceSuite(
 					permissionReady.resolve(event);
 				}
 			});
-			const prompt = backend.call<any>("prompt", {
+			const prompt = backend.call<any>("sessions.prompt", {
 				sessionId,
 				content: [{ type: "text", text: "permission please" }],
 			});
@@ -535,7 +575,7 @@ export function defineAgentOsConformanceSuite(
 				),
 			]);
 			expect(permission.toolCall.toolCallId).toBe("binding-call-1");
-			await backend.call("respondPermission", {
+			await backend.call("sessions.respondPermission", {
 				sessionId,
 				requestId: permission.requestId,
 				optionId: "allow_once",
@@ -543,17 +583,19 @@ export function defineAgentOsConformanceSuite(
 			expect(JSON.stringify((await prompt).message)).toContain("permission");
 			expect(permissions).toHaveLength(1);
 
-			await backend.call("setSessionConfigOption", {
+			await backend.call("sessions.setConfigOption", {
 				sessionId,
 				configId: "model",
 				value: "next-model",
 			});
-			await backend.call("setSessionConfigOption", {
+			await backend.call("sessions.setConfigOption", {
 				sessionId,
 				configId: "thought_level",
 				value: "high",
 			});
-			const config = (await backend.call<any>("getSessionConfig", { sessionId }))
+			const config = (
+				await backend.call<any>("sessions.getConfig", { sessionId })
+			)
 				.options;
 			expect(
 				config.find((entry: any) => entry.category === "model")?.currentValue,
@@ -562,8 +604,10 @@ export function defineAgentOsConformanceSuite(
 				config.find((entry: any) => entry.category === "thought_level")
 					?.currentValue,
 			).toBe("high");
-			await backend.call("cancelPrompt", { sessionId });
-			const history = await backend.call<any>("readHistory", { sessionId });
+			await backend.call("sessions.cancelPrompt", { sessionId });
+			const history = await backend.call<any>("sessions.readHistory", {
+				sessionId,
+			});
 			expect(history.events.length).toBeGreaterThan(0);
 			const permissionHistory = history.events.filter(
 				(entry: any) =>
@@ -593,14 +637,16 @@ export function defineAgentOsConformanceSuite(
 			}
 			expect(recoveredBySequence.size).toBe(history.events.length);
 
-			await backend.call("unloadSession", { sessionId });
-			const restored = await backend.call<any>("prompt", {
+			await backend.call("sessions.unload", { sessionId });
+			const restored = await backend.call<any>("sessions.prompt", {
 				sessionId,
 				content: [{ type: "text", text: "restored" }],
 			});
 			expect(JSON.stringify(restored.message)).toContain("restored");
-			await backend.call("deleteSession", { sessionId });
-			expect((await backend.call<any>("listSessions")).sessions).not.toContainEqual(
+			await backend.call("sessions.delete", { sessionId });
+			expect(
+				(await backend.call<any>("sessions.list")).sessions,
+			).not.toContainEqual(
 				expect.objectContaining({ sessionId }),
 			);
 			offSession();
@@ -660,18 +706,18 @@ export function defineAgentOsConformanceSuite(
 				if (event.type === "tool_call") liveTools.push(event);
 			});
 			try {
-				await backend.call("openSession", {
+				await backend.call("sessions.open", {
 					sessionId,
 					agent: CONFORMANCE_AGENT_NAME,
 					skipOsInstructions: true,
 				});
 				expect(
-					await backend.call<any>("getSessionCapabilities", { sessionId }),
+					await backend.call<any>("sessions.getCapabilities", { sessionId }),
 				).toMatchObject({
 					prompt: { image: true, audio: true, embeddedContext: true },
 				});
 
-				const response = await backend.call<any>("prompt", {
+				const response = await backend.call<any>("sessions.prompt", {
 					sessionId,
 					content,
 				});
@@ -690,7 +736,9 @@ export function defineAgentOsConformanceSuite(
 					}),
 				);
 
-				const history = await backend.call<any>("readHistory", { sessionId });
+				const history = await backend.call<any>("sessions.readHistory", {
+					sessionId,
+				});
 				const userContent = history.events
 					.filter((event: any) => event.type === "user_message_chunk")
 					.map((event: any) => event.content);
@@ -705,8 +753,8 @@ export function defineAgentOsConformanceSuite(
 					})),
 				);
 
-				await backend.call("unloadSession", { sessionId });
-				const restoredHistory = await backend.call<any>("readHistory", {
+				await backend.call("sessions.unload", { sessionId });
+				const restoredHistory = await backend.call<any>("sessions.readHistory", {
 					sessionId,
 				});
 				expect(
@@ -716,7 +764,7 @@ export function defineAgentOsConformanceSuite(
 				).toEqual(content);
 			} finally {
 				offSession();
-				await backend.call("deleteSession", { sessionId });
+				await backend.call("sessions.delete", { sessionId });
 			}
 		}, 90_000);
 
@@ -730,19 +778,21 @@ export function defineAgentOsConformanceSuite(
 				// permissionPolicy is deliberately omitted: the sidecar-owned default
 				// must be allow_all for both Core and actor clients.
 				expect(
-					await backend.call("openSession", {
+					await backend.call("sessions.open", {
 						sessionId,
 						agent: CONFORMANCE_AGENT_NAME,
 						skipOsInstructions: true,
 					}),
 				).toBeUndefined();
-				const result = await backend.call<any>("prompt", {
+				const result = await backend.call<any>("sessions.prompt", {
 					sessionId,
 					content: [{ type: "text", text: "permission automatically" }],
 				});
 				expect(JSON.stringify(result.message)).toContain("allow_once");
 
-				const history = await backend.call<any>("readHistory", { sessionId });
+				const history = await backend.call<any>("sessions.readHistory", {
+					sessionId,
+				});
 				expect(
 					history.events.filter(
 						(entry: any) =>
@@ -759,7 +809,7 @@ export function defineAgentOsConformanceSuite(
 				).toBe(false);
 			} finally {
 				offSession();
-				await backend.call("deleteSession", { sessionId });
+				await backend.call("sessions.delete", { sessionId });
 			}
 		}, 90_000);
 
@@ -769,13 +819,13 @@ export function defineAgentOsConformanceSuite(
 				crashes.push(event),
 			);
 			const sessionId = "crash-session";
-			await backend.call("openSession", {
+			await backend.call("sessions.open", {
 				sessionId,
 				agent: CONFORMANCE_AGENT_NAME,
 				skipOsInstructions: true,
 			});
 			await backend
-				.call("prompt", {
+				.call("sessions.prompt", {
 					sessionId,
 					content: [{ type: "text", text: "crash-adapter" }],
 				})
@@ -785,7 +835,7 @@ export function defineAgentOsConformanceSuite(
 				(events) => events.some((event) => event.sessionId === sessionId),
 				15_000,
 			);
-			await backend.call("deleteSession", { sessionId });
+			await backend.call("sessions.delete", { sessionId });
 			offCrash();
 		}, 30_000);
 

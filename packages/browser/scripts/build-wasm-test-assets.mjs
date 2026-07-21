@@ -61,10 +61,10 @@ run(esbuildBin, [
 // kernel (createAgentOsConvergedSidecar).
 const browserTestsDir = path.join(packageRoot, "tests", "browser-wasm");
 const workerEntry = require.resolve("@rivet-dev/agentos-runtime-browser/internal/worker");
-const secureExecBrowserRoot = path.resolve(path.dirname(workerEntry), "..");
-const secureExecRepoRoot = path.resolve(secureExecBrowserRoot, "..", "..");
-const secureExecCommandsDir = path.join(
-	secureExecRepoRoot,
+const agentOsBrowserRoot = path.resolve(path.dirname(workerEntry), "..");
+const agentOsRepoRoot = path.resolve(agentOsBrowserRoot, "..", "..");
+const agentOsCommandsDir = path.join(
+	agentOsRepoRoot,
 	"registry",
 	"native",
 	"target",
@@ -95,15 +95,15 @@ function copyCommandsFrom(commandsDir) {
 
 if (existsSync(repoNativeCommandsDir)) {
 	copyCommandsFrom(repoNativeCommandsDir);
-} else if (existsSync(secureExecCommandsDir)) {
-	copyCommandsFrom(secureExecCommandsDir);
+} else if (existsSync(agentOsCommandsDir)) {
+	copyCommandsFrom(agentOsCommandsDir);
 } else if (existsSync(runtimeCoreCommandsDir)) {
 	copyCommandsFrom(runtimeCoreCommandsDir);
 } else if (existsSync(coreutilsCommandsDir)) {
 	copyCommandsFrom(coreutilsCommandsDir);
 } else {
 	console.log(
-		`skipping real wasm command copy; missing ${repoNativeCommandsDir}, ${secureExecCommandsDir}, ${runtimeCoreCommandsDir}, and ${coreutilsCommandsDir}`,
+		`skipping real wasm command copy; missing ${repoNativeCommandsDir}, ${agentOsCommandsDir}, ${runtimeCoreCommandsDir}, and ${coreutilsCommandsDir}`,
 	);
 }
 run(esbuildBin, [

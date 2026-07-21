@@ -3,7 +3,7 @@
 	"version": "0.3.3",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "SQLite3 CLI for secure-exec VMs",
+	"description": "SQLite3 CLI for agentos VMs",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [

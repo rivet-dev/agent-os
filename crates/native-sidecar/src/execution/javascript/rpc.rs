@@ -5079,7 +5079,7 @@ mod error_code_tests {
     }
 
     #[test]
-    fn guest_errno_code_accepts_trusted_secure_exec_prefixes() {
+    fn guest_errno_code_accepts_trusted_agentos_prefixes() {
         assert_eq!(
             guest_errno_code("ERR_AGENTOS_NODE_SYNC_RPC: EACCES: permission denied on /foo"),
             Some("EACCES")

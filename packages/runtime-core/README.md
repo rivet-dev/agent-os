@@ -1,6 +1,6 @@
 # @rivet-dev/agentos-runtime-core
 
-Raw Secure Exec protocol types and codecs.
+Raw AgentOS language execution protocol types and codecs.
 
 - `@rivet-dev/agentos-runtime-core/protocol` exports the generated sidecar protocol.
 - `@rivet-dev/agentos-runtime-core/binary` resolves the published `agentos-native-sidecar` binary. `AGENTOS_NATIVE_SIDECAR_BIN` overrides only this native runtime; the legacy `AGENTOS_SIDECAR_BIN` override remains the fallback.

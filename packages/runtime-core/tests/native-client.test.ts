@@ -12,7 +12,7 @@ const ownership = {
 
 describe("stdio sidecar protocol client", () => {
 	test("drives a stdio protocol process", async () => {
-		const fixtureRoot = mkdtempSync(join(tmpdir(), "secure-exec-client-"));
+		const fixtureRoot = mkdtempSync(join(tmpdir(), "agentos-client-"));
 		const driverPath = join(fixtureRoot, "fake-sidecar.mjs");
 		writeFileSync(
 			driverPath,
@@ -90,7 +90,7 @@ describe("stdio sidecar protocol client", () => {
 	});
 
 	test("registers native spawn for the shared SidecarProcess wrapper", async () => {
-		const fixtureRoot = mkdtempSync(join(tmpdir(), "secure-exec-process-"));
+		const fixtureRoot = mkdtempSync(join(tmpdir(), "agentos-process-"));
 		const driverPath = join(fixtureRoot, "fake-sidecar.mjs");
 		writeFileSync(
 			driverPath,

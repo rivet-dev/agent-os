@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 
 use agentos_protocol::generated::v1::{
     AcpCloseSessionRequest, AcpCreateSessionRequest, AcpDeliverAgentOutputRequest,
-    AcpGetSessionStateRequest, AcpPendingResponse, AcpRequest, AcpResponse,
-    AcpResumeSessionRequest, AcpRuntimeKind, AcpSessionClosedResponse, AcpSessionRequest,
+    AcpGetSessionStateRequest, AcpPendingResponse, AcpRequest, AcpResponse, AcpRuntimeKind,
+    AcpResumeSessionRequest, AcpSessionClosedResponse, AcpSessionRequest,
     AcpSessionResumedResponse, AcpSessionRpcResponse,
 };
 use serde_json::{json, Map, Value};
@@ -63,13 +63,14 @@ struct AgentPackageManifest {
 struct AgentPackageAgentBlock {
     #[serde(rename = "acpEntrypoint", default)]
     acp_entrypoint: String,
+    #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(rename = "launchArgs", default)]
     launch_args: Vec<String>,
 }
 
 /// Resolve an agent name to its launch parameters by reading the projected
-/// manifest at `/opt/agentos/<name>/current/agentos-package.json` over the host
+/// manifest at `/opt/agentos/pkgs/<name>/current/agentos-package.json` over the host
 /// filesystem seam. A missing file, a missing `agent` block, or an empty
 /// `agent.acpEntrypoint` all map to a single typed "unknown agent" error. Mirrors
 /// the native sidecar `resolve_agent`.
@@ -1782,7 +1783,7 @@ mod tests {
 
     #[test]
     fn resume_falls_back_to_session_new_when_no_native_capability() {
-        use agentos_protocol::generated::v1::AcpResumeSessionRequest;
+        use agentos_protocol::generated::v1::{AcpResumeSessionRequest, AcpRuntimeKind};
         use serde_json::Value;
         use std::collections::{HashMap, VecDeque};
 
@@ -1852,6 +1853,7 @@ mod tests {
         let request = AcpResumeSessionRequest {
             session_id: "old-session".into(),
             agent_type: "echo".into(),
+            runtime: AcpRuntimeKind::JavaScript,
             transcript_path: Some("/transcripts/old.jsonl".into()),
             cwd: "/workspace".into(),
             additional_directories: Vec::new(),

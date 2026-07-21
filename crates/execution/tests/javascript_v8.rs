@@ -917,7 +917,7 @@ fn javascript_execution_uses_v8_runtime_without_spawning_guest_node_binary() {
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
             wasm_module_bytes: None,
-            inline_code: Some(String::from("globalThis.__secureExecRanInV8 = true;")),
+            inline_code: Some(String::from("globalThis.__agentOsRanInV8 = true;")),
         })
         .expect("start JavaScript execution");
 
@@ -963,7 +963,7 @@ fn javascript_execution_virtual_os_identity_comes_from_guest_runtime_not_env() {
                 os_tmpdir: Some(String::from("/vm-tmp")),
                 os_type: Some(String::from("VMType")),
                 os_release: Some(String::from("1.2.3-vm")),
-                os_version: Some(String::from("VM secure-exec build 42")),
+                os_version: Some(String::from("VM agentos build 42")),
                 os_machine: Some(String::from("vm64")),
                 ..Default::default()
             },
@@ -992,7 +992,7 @@ if (os.hostname() !== "vm-hostname") throw new Error(`hostname=${os.hostname()}`
 if (os.tmpdir() !== "/vm-tmp") throw new Error(`tmpdir=${os.tmpdir()}`);
 if (os.type() !== "VMType") throw new Error(`type=${os.type()}`);
 if (os.release() !== "1.2.3-vm") throw new Error(`release=${os.release()}`);
-if (os.version() !== "VM secure-exec build 42") throw new Error(`version=${os.version()}`);
+if (os.version() !== "VM agentos build 42") throw new Error(`version=${os.version()}`);
 if (os.machine() !== "vm64") throw new Error(`machine=${os.machine()}`);
 "#,
             )),
@@ -1893,14 +1893,14 @@ fn javascript_execution_high_resolution_time_opt_in_enables_sub_ms_hrtime() {
             wasm_module_bytes: None,
             inline_code: Some(String::from(
                 r#"
-if (typeof __secureExecHrNowUs !== "function") {
+if (typeof __agentOsHrNowUs !== "function") {
   throw new Error("high-resolution host clock was not installed");
 }
 let sawSubMs = false;
 for (let attempt = 0; attempt < 80 && !sawSubMs; attempt++) {
   const start = process.hrtime.bigint();
-  const until = __secureExecHrNowUs() + 200;
-  while (__secureExecHrNowUs() < until) {}
+  const until = __agentOsHrNowUs() + 200;
+  while (__agentOsHrNowUs() < until) {}
   const delta = process.hrtime.bigint() - start;
   if (delta > 0n && delta < 1000000n) {
     sawSubMs = true;
@@ -1942,7 +1942,7 @@ fn javascript_execution_high_resolution_time_default_off_keeps_coarse_clock() {
             wasm_module_bytes: None,
             inline_code: Some(String::from(
                 r#"
-if (typeof __secureExecHrNowUs !== "undefined") {
+if (typeof __agentOsHrNowUs !== "undefined") {
   throw new Error("high-resolution host clock exists without opt-in");
 }
 for (let attempt = 0; attempt < 20; attempt++) {

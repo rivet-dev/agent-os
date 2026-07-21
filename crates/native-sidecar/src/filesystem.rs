@@ -1042,7 +1042,6 @@ where
         log_stale_process_event(&sidecar.bridge, vm_id, process_id, "python VFS RPC");
         return Ok(());
     };
-
     match response {
         Ok(payload) => process
             .execution
@@ -5891,7 +5890,7 @@ mod tests {
             (
                 Some(writable_mapping(
                     "/mapped/file.txt",
-                    "/tmp/secure-exec-mapped-source",
+                    "/tmp/agentos-mapped-source",
                 )),
                 None,
             ),
@@ -5899,7 +5898,7 @@ mod tests {
                 None,
                 Some(writable_mapping(
                     "/mapped-dst/file.txt",
-                    "/tmp/secure-exec-mapped-destination",
+                    "/tmp/agentos-mapped-destination",
                 )),
             ),
         ] {

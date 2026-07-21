@@ -6,7 +6,7 @@ Run the Claude Code agent inside a VM with skills, MCP servers, and custom confi
 
 Read [Sessions](/docs/sessions) first for session options, streaming events, prompts, and lifecycle management.
 
-## LLM Credentials
+## Model & credentials
 
 Set the relevant variable(s) on the session's `env`, sourced from your server's environment:
 
@@ -17,7 +17,7 @@ Set the relevant variable(s) on the session's `env`, sourced from your server's 
 - `CLAUDE_CODE_USE_BEDROCK=1` — use Amazon Bedrock (auth via the AWS credential chain: `AWS_REGION`, `AWS_PROFILE`, …).
 - `CLAUDE_CODE_USE_VERTEX=1` — use Google Vertex AI (auth via Google Cloud credentials).
 
-See [LLM Credentials](/docs/llm-credentials), and Claude Code's [environment variables](https://code.claude.com/docs/en/env-vars) for the full list.
+See [Models & Credentials](/docs/models-and-credentials), and Claude Code's [environment variables](https://code.claude.com/docs/en/env-vars) for the full list.
 
 ## Skills
 
@@ -27,7 +27,7 @@ Claude Code discovers [agent skills](https://docs.claude.com/en/docs/claude-code
 
 Expose extra tools to the agent by passing `mcpServers` to `openSession`. Both local child-process servers and remote URLs are supported.
 
-**Pre-install `npx`-launched servers.** A local server started with `npx -y …` writes install progress to **stdout** on its first run, which corrupts the MCP stdio handshake (you'll see `Connection closed`). Pre-install it in the VM so `npx` is silent — `await agent.exec("npm install -g @modelcontextprotocol/server-filesystem")` before the session — or pin the package and point `command` at the installed binary.
+**Pre-install `npx`-launched servers.** A local server started with `npx -y …` writes install progress to **stdout** on its first run, which corrupts the MCP stdio handshake (you'll see `Connection closed`). Pre-install it in the VM so `npx` is silent — `await agent.process.exec("npm install -g @modelcontextprotocol/server-filesystem")` before the session — or pin the package and point `command` at the installed binary.
 
 ## Customizing the agent
 

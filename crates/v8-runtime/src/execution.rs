@@ -116,7 +116,7 @@ pub fn install_high_resolution_time_global(scope: &mut v8::HandleScope, origin: 
     let Some(func) = template.get_function(scope) else {
         return;
     };
-    let key = v8::String::new(scope, "__secureExecHrNowUs").unwrap();
+    let key = v8::String::new(scope, "__agentOsHrNowUs").unwrap();
     let attr = v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_DELETE;
     global.define_own_property(scope, key.into(), func.into(), attr);
 }
@@ -128,7 +128,7 @@ pub fn install_require_esm_sync_global(scope: &mut v8::HandleScope) {
     let Some(function) = template.get_function(scope) else {
         return;
     };
-    let key = v8::String::new(scope, "__secureExecRequireEsmSync").unwrap();
+    let key = v8::String::new(scope, "__agentOsRequireEsmSync").unwrap();
     let attributes = v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_DELETE;
     global.define_own_property(scope, key.into(), function.into(), attributes);
 }

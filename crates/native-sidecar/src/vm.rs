@@ -548,6 +548,13 @@ where
                 active_processes: BTreeMap::new(),
                 vm_fetch_streams: BTreeMap::new(),
                 next_vm_fetch_stream_id: 0,
+                executions: BTreeMap::new(),
+                execution_processes: BTreeMap::new(),
+                next_public_execution_id: 0,
+                execution_retention_wake_deadline_ms: None,
+                execution_retention_wake_task: None,
+                package_mutation_execution_id: None,
+                typescript_compiler_staged: false,
                 exited_process_snapshots: VecDeque::new(),
                 detached_child_processes: BTreeSet::new(),
                 attached_child_event_cursor: 0,
@@ -682,7 +689,7 @@ where
             vm.command_guest_paths = discover_command_guest_paths(&mut vm.kernel);
             // The `{ packageDir }` projection lands each package's `bin/<cmd>` at
             // `/opt/agentos/bin/<cmd>` (on `$PATH`) but does NOT populate
-            // `/__secure_exec/commands`, so `discover_command_guest_paths` alone misses
+            // `/__agentos/commands`, so `discover_command_guest_paths` alone misses
             // projected commands and every projected wasm/js command resolves to
             // ENOEXEC (absolute path) / ENOENT (bare name). Register each projected
             // command by name -> its `/opt/agentos/bin/<cmd>` entrypoint so both the
@@ -1122,6 +1129,17 @@ where
         // down: a process that refuses to die must not strand the VM's tracking
         // entries for the process lifetime.
         let terminate_result = self.terminate_vm_processes(vm_id, &mut events).await;
+        if let Some(vm) = self.vms.get_mut(vm_id) {
+            if let Some(task) = vm.execution_retention_wake_task.take() {
+                task.abort();
+            }
+            vm.execution_retention_wake_deadline_ms = None;
+            for execution in vm.executions.values_mut() {
+                if let Some(task) = execution.deadline_task.take() {
+                    task.abort();
+                }
+            }
+        }
 
         // Process teardown can require the VM blocking executor to flush
         // host-materialized state into a persistent filesystem plugin (for
@@ -3672,9 +3690,8 @@ mod tests {
             .expect("clock should be monotonic")
             .as_nanos();
         let database_path =
-            std::env::temp_dir().join(format!("secure-exec-native-root-{unique}.sqlite"));
-        let block_root =
-            std::env::temp_dir().join(format!("secure-exec-native-root-blocks-{unique}"));
+            std::env::temp_dir().join(format!("agentos-native-root-{unique}.sqlite"));
+        let block_root = std::env::temp_dir().join(format!("agentos-native-root-blocks-{unique}"));
         let native_root =
             native_root_plugin_from_config(Some(&agentos_vm_config::NativeRootFilesystemConfig {
                 plugin: agentos_vm_config::MountPluginDescriptor {

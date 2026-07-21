@@ -20,32 +20,28 @@
       "title": "Authentication",
       "description": "Authenticate connections to agentOS actors using Rivet Actor connection params and hooks."
     },
-    "/docs/docs/benchmarks": {
-      "title": "Benchmarks",
-      "description": "Performance benchmarks comparing agentOS to traditional sandbox providers."
+    "/docs/docs/bash": {
+      "title": "Bash",
+      "description": "Run shell commands and arbitrary argv operations through the agentOS execution lifecycle."
     },
     "/docs/docs/bindings": {
-      "title": "Bindings",
+      "title": "Custom Bindings",
       "description": "Expose custom host functions to agents as CLI commands inside the VM."
     },
     "/docs/docs/browser": {
-      "title": "Browser",
+      "title": "Browser Automation",
       "description": "Let agents read and search the web from an agentOS VM using Browserbase's cloud browser through the browse CLI — no local browser or sandbox required."
     },
     "/docs/docs/core": {
-      "title": "Core Package",
-      "description": "Use @rivet-dev/agentos-core standalone for direct VM control without the Rivet Actor runtime."
-    },
-    "/docs/docs/cost-evaluation": {
-      "title": "Cost Evaluation",
-      "description": "How agentOS compares on cost to per-second sandbox providers when you run coding-agent VMs on your own hardware."
+      "title": "Direct VM API",
+      "description": "Use the direct AgentOS VM API or layer it into an AgentOS actor."
     },
     "/docs/docs/crash-course": {
       "title": "Crash Course",
       "description": "Run coding agents inside isolated VMs with full filesystem, process, and network control."
     },
     "/docs/docs/cron": {
-      "title": "Cron Jobs",
+      "title": "Crons & Loops",
       "description": "Schedule recurring commands and agent sessions in agentOS VMs."
     },
     "/docs/docs/debugging": {
@@ -64,21 +60,21 @@
       "title": "Introduction",
       "description": "Run coding agents inside isolated VMs with full filesystem, process, and network control."
     },
-    "/docs/docs/js-runtime": {
-      "title": "JavaScript Runtime",
-      "description": "How agentOS runs guest JavaScript: native V8 acceleration, low memory overhead, and Node.js compatibility."
+    "/docs/docs/javascript-compatibility": {
+      "title": "Node.js Compatibility",
+      "description": "Node.js builtins available to JavaScript running inside AgentOS."
+    },
+    "/docs/docs/javascript": {
+      "title": "Node.js",
+      "description": "Execute JavaScript and TypeScript, install npm dependencies, and manage execution lifecycles in agentOS."
     },
     "/docs/docs/limitations": {
       "title": "Limitations",
       "description": "What the agentOS VM does not support, and how to work around it."
     },
-    "/docs/docs/llm-credentials": {
-      "title": "LLM Credentials",
-      "description": "Pass LLM API keys to agent sessions securely."
-    },
-    "/docs/docs/llm-gateway": {
-      "title": "Embedded LLM Gateway",
-      "description": "Route, meter, and manage LLM API calls from agents."
+    "/docs/docs/models-and-credentials": {
+      "title": "Models & Credentials",
+      "description": "Choose agent models and pass provider credentials to sessions securely."
     },
     "/docs/docs/multiplayer": {
       "title": "Multiplayer",
@@ -88,9 +84,9 @@
       "title": "Networking & Previews",
       "description": "Proxy HTTP requests into agentOS VMs and create shareable preview URLs."
     },
-    "/docs/docs/nodejs-runtime": {
-      "title": "Node.js Runtime",
-      "description": "Run Node.js in agentOS: native V8 acceleration, the node CLI, installing packages, and Node.js compatibility."
+    "/docs/docs/performance": {
+      "title": "Performance",
+      "description": "AgentOS latency, memory, cost, and benchmark methodology."
     },
     "/docs/docs/permissions": {
       "title": "Permissions",
@@ -104,9 +100,9 @@
       "title": "Processes & Shell",
       "description": "Execute commands, spawn long-running processes, and open interactive shells in agentOS VMs."
     },
-    "/docs/docs/python-runtime": {
-      "title": "Python Runtime",
-      "description": "Run Python in agentOS: the python CLI, installing packages ahead of time or at runtime, and what's supported."
+    "/docs/docs/python": {
+      "title": "Python",
+      "description": "Execute Python source, files, modules, and package workflows in agentOS."
     },
     "/docs/docs/quickstart": {
       "title": "Quickstart",
@@ -118,6 +114,10 @@
     },
     "/docs/docs/sandbox": {
       "title": "Sandbox Mounting",
+      "description": "Extend agentOS with full sandboxes for heavy workloads like browsers, desktop automation, and compilation."
+    },
+    "/docs/docs/sandboxes": {
+      "title": "External Sandboxes",
       "description": "Extend agentOS with full sandboxes for heavy workloads like browsers, desktop automation, and compilation."
     },
     "/docs/docs/security-model": {
@@ -140,12 +140,8 @@
       "title": "agentOS vs Sandbox",
       "description": "When to use the lightweight agentOS VM, a full sandbox, or both together."
     },
-    "/docs/docs/webhooks": {
-      "title": "Webhooks",
-      "description": "Trigger agent sessions directly from external webhooks using Hono."
-    },
     "/docs/docs/workflows": {
-      "title": "Workflow Automation",
+      "title": "Workflows & Graphs",
       "description": "Orchestrate multi-step agent tasks with durable workflows."
     },
     "/docs/docs/agents/claude": {

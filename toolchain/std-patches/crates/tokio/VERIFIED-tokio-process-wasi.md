@@ -4,7 +4,7 @@ Proven in isolation (/tmp/tokio-dev + [patch], --cfg tokio_unstable, -Z build-st
 `Command::new("echo").arg("hi").output().await` COMPILES for wasm32-wasip1.
 This de-risks codex's entire exec path under the pipeline-only approach.
 
-## The exact changes (to capture as secure-exec patches):
+## The exact changes (to capture as agentos patches):
 
 ### A. tokio crate patch (std-patches/crates/tokio/):
 1. src/macros/cfg.rs — in `macro_rules! cfg_process`, remove `#[cfg(not(target_os = "wasi"))]`.

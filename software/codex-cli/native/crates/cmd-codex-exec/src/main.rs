@@ -1,4 +1,4 @@
-/// Codex headless command for secure-exec VM.
+/// Codex headless command for agentos VM.
 ///
 /// The prompt mode remains a placeholder command. The ACP session-turn path is
 /// disabled until it can delegate to the real Codex agent package instead of a

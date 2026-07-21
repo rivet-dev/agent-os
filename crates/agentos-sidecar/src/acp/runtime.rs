@@ -1229,6 +1229,8 @@ pub(super) async fn send_json_rpc_request(
             }
             EventPayload::ProcessOutputEvent(_)
             | EventPayload::ProcessExitedEvent(_)
+            | EventPayload::ExecutionOutputEvent(_)
+            | EventPayload::ExecutionCompletedEvent(_)
             | EventPayload::VmLifecycleEvent(_)
             | EventPayload::StructuredEvent(_)
             | EventPayload::ExtEnvelope(_) => {}
@@ -1576,7 +1578,7 @@ pub(super) async fn resolve_agent(
 }
 
 /// Extract the owning connection id from an ownership scope. Every scope carries
-/// a connection id, which is the tenant boundary secure-exec enforces; ACP
+/// a connection id, which is the tenant boundary AgentOS enforces; ACP
 /// session ownership is keyed off this same connection id.
 /// Remove every session in `sessions` owned by `connection_id`, returning the
 /// adapter process ids of the dropped records. Split out from
@@ -1624,7 +1626,7 @@ pub(super) fn is_adapter_exited_error(error: &SidecarError) -> bool {
 }
 
 /// True when `error` means the adapter process is gone: either the in-pump exit
-/// observation (`is_adapter_exited_error`) or a secure-exec process-table
+/// observation (`is_adapter_exited_error`) or an AgentOS process-table
 /// lookup failure from operating on an adapter that already exited — the lazy
 /// observation of an idle-time crash (`ADAPTER_NO_ACTIVE_PROCESS_MARKER`).
 pub(super) fn is_adapter_gone_error(error: &SidecarError) -> bool {

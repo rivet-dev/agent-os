@@ -3,7 +3,7 @@
 	"version": "0.3.4",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "GNU coreutils for secure-exec VMs (sh, cat, ls, cp, sort, and 80+ commands)",
+	"description": "GNU coreutils for agentos VMs (sh, cat, ls, cp, sort, and 80+ commands)",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [

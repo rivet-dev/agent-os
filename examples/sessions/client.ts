@@ -9,7 +9,7 @@ const agent = client.vm.getOrCreate("my-agent");
 // ── Open a session ──────────────────────────────────────────────
 async function openSession() {
 	// The caller owns the durable session ID; openSession resolves with no value.
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
@@ -17,7 +17,7 @@ async function openSession() {
 
 // ── openSession options: env ────────────────────────────────────
 async function withEnv() {
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
@@ -25,7 +25,7 @@ async function withEnv() {
 
 // ── openSession options: cwd ────────────────────────────────────
 async function withCwd() {
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 		cwd: "/home/agentos/project",
@@ -34,7 +34,7 @@ async function withCwd() {
 
 // ── openSession options: additionalInstructions ─────────────────
 async function withInstructions() {
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 		additionalInstructions: "Always write tests before implementation.",
@@ -43,7 +43,7 @@ async function withInstructions() {
 
 // ── openSession options: skipOsInstructions ─────────────────────
 async function withSkipOsInstructions() {
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 		skipOsInstructions: true,
@@ -53,7 +53,7 @@ async function withSkipOsInstructions() {
 // ── openSession options: system prompt customization ────────────
 async function withSystemPrompt() {
 	// docs:start system-prompt
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 		// Extra instructions appended to the agent system prompt
@@ -66,11 +66,11 @@ async function withSystemPrompt() {
 
 // ── Prompt a session ─────────────────────────────────────────────────
 async function promptSession() {
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
-	const response = await agent.prompt({
+	const response = await agent.sessions.prompt({
 		content: [
 			{
 				type: "text",
@@ -90,11 +90,11 @@ async function streamResponses() {
 		console.log(`[${event.sessionId}]`, event.durability, event);
 	});
 
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
-	await agent.prompt({
+	await agent.sessions.prompt({
 		content: [{ type: "text", text: "Explain how async/await works" }],
 	});
 }
@@ -126,24 +126,24 @@ async function subscribeFirst() {
 	});
 
 	// Then trigger actions
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
-	await agent.prompt({
+	await agent.sessions.prompt({
 		content: [{ type: "text", text: "Run the test suite" }],
 	});
 }
 
 // ── Cancel a prompt ───────────────────────────────────────────────
 async function cancelPrompt() {
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
 
 	// Start a long-running prompt
-	const promptPromise = agent.prompt({
+	const promptPromise = agent.sessions.prompt({
 		content: [
 			{
 				type: "text",
@@ -154,7 +154,7 @@ async function cancelPrompt() {
 
 	// Cancel the in-flight prompt while keeping the session available.
 	setTimeout(async () => {
-		await agent.cancelPrompt();
+		await agent.sessions.cancelPrompt();
 	}, 10_000);
 
 	const response = await promptPromise;
@@ -163,22 +163,22 @@ async function cancelPrompt() {
 
 // ── Unload a session runtime ───────────────────────────────────────────────
 async function unloadSession() {
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
 
 	// Release the adapter without deleting the durable session or its history.
-	await agent.unloadSession();
+	await agent.sessions.unload();
 }
 
 // ── List durable sessions ─────────────────────────────────────────────────
 async function listDurableSessions() {
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
-	const page = await agent.listSessions();
+	const page = await agent.sessions.list();
 	for (const session of page.sessions) {
 		console.log(session.sessionId, session.agent);
 	}
@@ -188,20 +188,20 @@ async function listDurableSessions() {
 async function multipleSessions() {
 	// Create two sessions in the same VM
 	const coderSessionId = "coder";
-	await agent.openSession({
+	await agent.sessions.open({
 		sessionId: coderSessionId,
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
 	const reviewerSessionId = "reviewer";
-	await agent.openSession({
+	await agent.sessions.open({
 		sessionId: reviewerSessionId,
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
 
 	// Coder writes code
-	await agent.prompt({
+	await agent.sessions.prompt({
 		sessionId: coderSessionId,
 		content: [
 			{ type: "text", text: "Write a REST API at /home/agentos/api.ts" },
@@ -209,14 +209,14 @@ async function multipleSessions() {
 	});
 
 	// Reviewer reads and reviews the same file
-	await agent.prompt({
+	await agent.sessions.prompt({
 		sessionId: reviewerSessionId,
 		content: [{ type: "text", text: "Review /home/agentos/api.ts for issues" }],
 	});
 
 	// Unload each adapter independently while preserving both histories.
-	await agent.unloadSession({ sessionId: coderSessionId });
-	await agent.unloadSession({ sessionId: reviewerSessionId });
+	await agent.sessions.unload({ sessionId: coderSessionId });
+	await agent.sessions.unload({ sessionId: reviewerSessionId });
 }
 
 export {

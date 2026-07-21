@@ -2,7 +2,7 @@
 
 // AGENTOS_BROWSER_SUPPORT_DISABLED: retained for reference, but AgentOS is native-only.
 /*
-//! Browser-side sidecar scaffold for the secure-exec runtime migration.
+//! Browser-side sidecar scaffold for the agentos runtime migration.
 
 mod service;
 #[cfg(target_arch = "wasm32")]

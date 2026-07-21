@@ -4,7 +4,7 @@ name = "cmd-yes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "yes standalone binary for secure-exec VM"
+description = "yes standalone binary for agentos VM"
 
 [[bin]]
 name = "yes"

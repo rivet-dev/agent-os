@@ -15,21 +15,21 @@ import type { AgentOs } from "../src/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "../../..");
-const SECURE_EXEC_C_ROOT = resolve(
+const AGENTOS_C_ROOT = resolve(
 	REPO_ROOT,
 	"toolchain/c",
 );
-const WASM_PROBE_BINARY = resolve(SECURE_EXEC_C_ROOT, "build/fs_probe");
+const WASM_PROBE_BINARY = resolve(AGENTOS_C_ROOT, "build/fs_probe");
 const NATIVE_PROBE_BINARY = resolve(
-	SECURE_EXEC_C_ROOT,
+	AGENTOS_C_ROOT,
 	"build/native/fs_probe",
 );
 const PATCHED_LIBC = resolve(
-	SECURE_EXEC_C_ROOT,
+	AGENTOS_C_ROOT,
 	"sysroot/lib/wasm32-wasi/libc.a",
 );
 const PATCHED_ERRNO = resolve(
-	SECURE_EXEC_C_ROOT,
+	AGENTOS_C_ROOT,
 	"sysroot/include/wasm32-wasi/errno.h",
 );
 const SIDECAR_BINARY = resolve(
@@ -57,7 +57,7 @@ function hasCommand(command: string): boolean {
 // on PATH), so it is not probed here. Skip cleanly otherwise instead of
 // hard-failing the run, matching vim-native-parity.test.ts.
 const CAN_RUN =
-	existsSync(join(SECURE_EXEC_C_ROOT, "Makefile")) &&
+	existsSync(join(AGENTOS_C_ROOT, "Makefile")) &&
 	hasCommand("make") &&
 	hasCommand("cargo") &&
 	(HAS_PATCHED_SYSROOT || hasCommand("cmake"));
@@ -92,7 +92,7 @@ function runChecked(
 function ensureFsProbeBuilt(): void {
 	if (!HAS_PATCHED_SYSROOT) {
 		runChecked("make", ["sysroot"], {
-			cwd: SECURE_EXEC_C_ROOT,
+			cwd: AGENTOS_C_ROOT,
 			label: "failed to build patched wasi-libc sysroot",
 		});
 	}
@@ -104,7 +104,7 @@ function ensureFsProbeBuilt(): void {
 			"WASM_CFLAGS=--target=wasm32-wasi --sysroot=sysroot -O2 -flto -I include/",
 		],
 		{
-			cwd: SECURE_EXEC_C_ROOT,
+			cwd: AGENTOS_C_ROOT,
 			label: "failed to build fs_probe parity fixtures",
 		},
 	);

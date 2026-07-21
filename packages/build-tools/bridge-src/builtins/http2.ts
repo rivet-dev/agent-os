@@ -1,7 +1,6 @@
-import { _fdGetPath, _fs, decodeBridgeJson } from "./fs.js";
-import { setImmediate } from "./timers.js";
 import { exposeCustomGlobal } from "../global-exposure.js";
 import { Response } from "./fetch.js";
+import { _fdGetPath, _fs, decodeBridgeJson } from "./fs.js";
 import {
 	createErrorWithCode,
 	createTypeErrorWithCode,
@@ -18,8 +17,9 @@ import {
 	registerCapabilityReadiness,
 	unregisterCapabilityReadiness,
 } from "./readiness.js";
+import { setImmediate } from "./timers.js";
 
-var HTTP2_K_SOCKET = /* @__PURE__ */ Symbol.for("secure-exec.http2.kSocket");
+var HTTP2_K_SOCKET = /* @__PURE__ */ Symbol.for("agentos.http2.kSocket");
 
 var HTTP2_OPTIONS = /* @__PURE__ */ Symbol("options");
 
@@ -853,7 +853,7 @@ var ClientHttp2Stream = class extends Http2EventEmitter {
 	}
 	_emitPush(headers, flags) {
 		if (process.env.AGENTOS_DEBUG_HTTP2_BRIDGE === "1") {
-			console.error("[secure-exec http2 isolate] push", this._streamId);
+			console.error("[agentos http2 isolate] push", this._streamId);
 		}
 		this.emit("push", headers, flags ?? 0);
 	}
@@ -867,7 +867,7 @@ var ClientHttp2Stream = class extends Http2EventEmitter {
 		this._receivedResponse = true;
 		if (process.env.AGENTOS_DEBUG_HTTP2_BRIDGE === "1") {
 			console.error(
-				"[secure-exec http2 isolate] response headers",
+				"[agentos http2 isolate] response headers",
 				this._streamId,
 				this._isPushStream,
 			);
@@ -1410,7 +1410,7 @@ var Http2ServerResponse = class extends Http2EventEmitter {
 		return this._headers[name];
 	}
 	hasHeader(name) {
-		return Object.prototype.hasOwnProperty.call(this._headers, name);
+		return Object.hasOwn(this._headers, name);
 	}
 	removeHeader(name) {
 		delete this._headers[name];
@@ -2407,7 +2407,7 @@ function onHttp2Dispatch(_eventType, payload) {
 		return;
 	}
 	if (process.env.AGENTOS_DEBUG_HTTP2_BRIDGE === "1") {
-		console.error("[secure-exec http2 isolate dispatch]", event.kind, event.id);
+		console.error("[agentos http2 isolate dispatch]", event.kind, event.id);
 	}
 	const kind = event.kind;
 	const id = event.id;
@@ -2477,29 +2477,8 @@ var http2 = {
 };
 
 export {
-	ClientHttp2Stream,
-	DEFAULT_HTTP2_SESSION_STATE,
-	DEFAULT_HTTP2_SETTINGS,
-	HTTP2_INTERNAL_BINDING_CONSTANTS,
-	HTTP2_K_SOCKET,
-	HTTP2_NGHTTP2_ERROR_MESSAGES,
-	HTTP2_OPTIONS,
-	Http2EventEmitter,
-	Http2Server,
-	Http2ServerRequest,
-	Http2ServerResponse,
-	Http2Session,
-	Http2SocketProxy,
-	Http2Stream,
-	NghttpError,
-	S_IFDIR,
-	S_IFIFO,
-	S_IFLNK,
-	S_IFMT,
-	S_IFREG,
-	S_IFSOCK,
-	ServerHttp2Stream,
 	applyHttp2SessionState,
+	ClientHttp2Stream,
 	cloneHttp2SessionRuntimeState,
 	cloneHttp2Settings,
 	connectHttp2,
@@ -2511,15 +2490,29 @@ export {
 	createHttp2Server,
 	createHttp2SettingRangeError,
 	createHttp2SettingTypeError,
+	DEFAULT_HTTP2_SESSION_STATE,
+	DEFAULT_HTTP2_SETTINGS,
 	flushPendingHttp2ClientStreamEvents,
 	formatHttp2InvalidValue,
 	getCompleteUtf8PrefixLength,
 	getOrCreateHttp2Session,
+	HTTP2_INTERNAL_BINDING_CONSTANTS,
+	HTTP2_K_SOCKET,
+	HTTP2_NGHTTP2_ERROR_MESSAGES,
+	HTTP2_OPTIONS,
+	Http2EventEmitter,
+	Http2Server,
+	Http2ServerRequest,
+	Http2ServerResponse,
+	Http2Session,
+	Http2SocketProxy,
+	Http2Stream,
 	http2,
 	http2Dispatch,
 	http2Servers,
 	http2Sessions,
 	http2Streams,
+	NghttpError,
 	nextHttp2ServerId,
 	nghttp2ErrorString,
 	normalizeHttp2Authority,
@@ -2534,13 +2527,20 @@ export {
 	parseHttp2SocketState,
 	pendingHttp2ClientStreamEvents,
 	pendingHttp2CompatRequests,
-	queuePendingHttp2ClientStreamEvent,
 	queuedHttp2DispatchEvents,
+	queuePendingHttp2ClientStreamEvent,
 	resolveHttp2SocketId,
-	schedulePendingHttp2ClientStreamEventsFlush,
-	scheduleQueuedHttp2DispatchDrain,
+	S_IFDIR,
+	S_IFIFO,
+	S_IFLNK,
+	S_IFMT,
+	S_IFREG,
+	S_IFSOCK,
+	ServerHttp2Stream,
 	scheduledHttp2ClientStreamFlushes,
 	scheduledHttp2DispatchDrain,
+	schedulePendingHttp2ClientStreamEventsFlush,
+	scheduleQueuedHttp2DispatchDrain,
 	serializeHttp2Headers,
 	sliceHttp2FileBody,
 	validateHttp2ConnectOptions,

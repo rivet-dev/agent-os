@@ -423,7 +423,7 @@ async fn run_action(vm: &AgentOs, action: &CronAction) -> Result<(), ClientError
             // and re-parsing it through the `exec` command-line parser would re-split argv elements
             // on whitespace and shell-evaluate any `$()`/backtick content; `exec_argv` preserves the
             // structured (command, args) contract element-for-element.
-            vm.exec_argv(command, args, crate::process::ExecOptions::default())
+            vm.exec_argv_process(command, args, crate::process::ExecOptions::default())
                 .await
                 .map_err(|err| ClientError::Sidecar(err.to_string()))?;
             Ok(())

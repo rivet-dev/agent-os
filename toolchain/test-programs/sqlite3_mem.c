@@ -103,7 +103,7 @@ static sqlite3_vfs memVfs __attribute__((used)) = {
     sizeof(MemFile),
     512,
     0,
-    "secure-exec-mem",
+    "agentos-mem",
     0,
     memOpen,
     memDelete,

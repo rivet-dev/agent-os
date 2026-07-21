@@ -4,7 +4,7 @@
 // SharedArrayBuffer sync-bridge, and the fs/net/dns/module servicers are all
 // reused verbatim. Agent OS plugs in its OWN wasm sidecar — the one that registers
 // `BrowserAcpExtension` — via `createBrowserRuntimeDriverFactory({ convergedSidecar })`.
-// This is the Agent OS analogue of secure-exec's `createDefaultConvergedSidecar`:
+// This is the Agent OS analogue of agentos's `createDefaultConvergedSidecar`:
 // same `ConvergedSidecarFactoryOptions` contract, different (ACP-bearing) wasm.
 //
 // The kernel (wasm) remains the sole enforcement point; no guest-side permission

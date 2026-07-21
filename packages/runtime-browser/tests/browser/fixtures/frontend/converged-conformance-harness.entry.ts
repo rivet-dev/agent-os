@@ -1,6 +1,6 @@
 // Bundled converged conformance harness.
 //
-// Exposes the same window.__secureExecBrowserHarness API the conformance specs
+// Exposes the same window.__agentOsBrowserHarness API the conformance specs
 // drive (via harness.ts), but every runtime is created with the converged
 // sidecar so guest syscalls run against the wasm kernel instead of the legacy
 // in-process TS kernel. This is the vehicle for running the conformance suite
@@ -80,7 +80,7 @@ function debugRuntime(driver: ConvergedDriver) {
 
 declare global {
 	interface Window {
-		__secureExecBrowserHarness?: unknown;
+		__agentOsBrowserHarness?: unknown;
 	}
 }
 
@@ -216,7 +216,7 @@ async function createRuntime(options: Record<string, unknown> = {}) {
 
 	const decisions = { deniedFsReads: 0 };
 	const factory = createBrowserRuntimeDriverFactory({
-		workerUrl: new URL("/secure-exec-worker.js", window.location.href),
+		workerUrl: new URL("/agentos-worker.js", window.location.href),
 		convergedSidecar: {
 			loadSidecar,
 			config,
@@ -244,7 +244,7 @@ async function createRuntime(options: Record<string, unknown> = {}) {
 	return {
 		crossOriginIsolated: window.crossOriginIsolated,
 		runtimeId,
-		workerUrl: "/secure-exec-worker.js",
+		workerUrl: "/agentos-worker.js",
 	};
 }
 
@@ -385,13 +385,13 @@ async function smoke() {
 	await disposeRuntime(runtimeId);
 	return {
 		crossOriginIsolated: window.crossOriginIsolated,
-		workerUrl: "/secure-exec-worker.js",
+		workerUrl: "/agentos-worker.js",
 		result: result.result,
 		stdio: result.stdio,
 	};
 }
 
-window.__secureExecBrowserHarness = {
+window.__agentOsBrowserHarness = {
 	createRuntime,
 	exec,
 	disposeRuntime,

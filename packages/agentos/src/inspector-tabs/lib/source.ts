@@ -3,8 +3,9 @@
 // the gateway (actor-client) and transforms the result into the display type the
 // ported component expects. Action names/shapes are the actual ones, not the
 // mockup's aspirational `agentOs*` names.
-import { queryOptions } from "@tanstack/react-query";
+
 import type { SessionStreamEntry } from "@rivet-dev/agentos-core";
+import { queryOptions } from "@tanstack/react-query";
 import { callAction } from "./actor-client";
 import type {
 	FileContent,

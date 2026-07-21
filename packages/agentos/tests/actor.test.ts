@@ -84,6 +84,14 @@ describe("agentOS actor", () => {
 		expect(definition.config.actions).toHaveProperty("increment");
 		expect(definition.config.actions).toHaveProperty("readFile");
 		expect(definition.config.actions).toHaveProperty("openSession");
+		expect(definition.config.actions).toHaveProperty("filesystem.readFile");
+		expect(definition.config.actions).toHaveProperty("process.spawn");
+		expect(definition.config.actions).toHaveProperty("terminal.open");
+		expect(definition.config.actions).toHaveProperty("typescript.execute");
+		expect(definition.config.actions).toHaveProperty("sessions.open");
+		for (const action of AGENT_OS_CONFORMANCE_ACTIONS) {
+			expect(definition.config.actions).toHaveProperty(action);
+		}
 		expect(definition.config.actions).toHaveProperty("cancelPrompt");
 		expect(definition.config.actions).toHaveProperty("deleteSession");
 		expect(definition.config.actions).toHaveProperty("setSessionConfigOption");
@@ -111,15 +119,51 @@ describe("agentOS actor", () => {
 		).toThrow(/cannot share sandbox: \{ client \}/);
 	});
 
-	test("keeps the shared conformance inventory in lockstep with actor built-ins", () => {
+	test("exposes nested execution actions without new flat aliases", () => {
 		const actions = createAgentOsActions();
-		expect(Object.keys(actions).sort()).toEqual(
-			[
-				...AGENT_OS_CONFORMANCE_ACTIONS,
-				"createPreviewUrl",
-				"expirePreviewUrl",
-			].sort(),
-		);
+		expect(actions.process.exec).not.toBe(actions.exec);
+		expect(actions.process.execFile).not.toBe(actions.execArgv);
+		expect(actions.process.spawn).toBe(actions.spawn);
+		expect(actions.terminal.open).toBe(actions.openShell);
+		expect(actions.filesystem.readFile).toBe(actions.readFile);
+		expect(actions.sessions.open).toBe(actions.openSession);
+		expect(actions.javascript.execute).toBeTypeOf("function");
+		expect(actions.typescript.checkProject).toBeTypeOf("function");
+		expect(actions.javascript.npm.install).toBeTypeOf("function");
+		expect(actions.python.execute).toBeTypeOf("function");
+		expect(actions.contexts.list).toBeTypeOf("function");
+		expect(actions.process.readOutput).toBeTypeOf("function");
+		for (const removedFlatAction of [
+			"executeJavaScript",
+			"evaluateJavaScript",
+			"executeJavaScriptFile",
+			"executeTypeScript",
+			"evaluateTypeScript",
+			"executeTypeScriptFile",
+			"checkTypeScript",
+			"checkTypeScriptProject",
+			"installNpmPackages",
+			"executeNpmScript",
+			"executeNpmPackage",
+			"executePython",
+			"evaluatePython",
+			"executePythonFile",
+			"executePythonModule",
+			"installPythonPackages",
+			"getExecution",
+			"listExecutions",
+			"waitExecution",
+			"cancelExecution",
+			"signalExecution",
+			"resetExecution",
+			"deleteExecution",
+			"writeExecutionStdin",
+			"closeExecutionStdin",
+			"resizeExecutionPty",
+			"readExecutionOutput",
+		]) {
+			expect(actions).not.toHaveProperty(removedFlatAction);
+		}
 		const definition = agentOS();
 		expect(Object.keys(definition.config.events ?? {}).sort()).toEqual(
 			[...AGENT_OS_CONFORMANCE_EVENTS, "vmBooted", "vmShutdown"].sort(),
@@ -439,6 +483,116 @@ describe("agentOS actor", () => {
 		expect(onBeforeConnect).toHaveBeenCalledOnce();
 	});
 
+	test("preserves legacy exec results separately from lifecycle execution", async () => {
+		const legacyResult = {
+			exitCode: 0,
+			stdout: new Uint8Array(Buffer.from("legacy")),
+			stderr: new Uint8Array(),
+		};
+		const executionResult = {
+			outcome: "succeeded",
+			exitCode: 0,
+			stdout: "nested",
+			stderr: "",
+		};
+		const exec = vi.fn(async () => legacyResult);
+		const processExec = vi.fn(async () => executionResult);
+		vi.spyOn(AgentOs, "create").mockResolvedValue({
+			exec,
+			process: { exec: processExec },
+			onCronEvent: vi.fn(),
+			onExecutionOutput: vi.fn(() => vi.fn()),
+			onExecutionCompleted: vi.fn(() => vi.fn()),
+		} as never);
+		const actions = createAgentOsActions({});
+		const context = {
+			actorId: "exec-compatibility-test",
+			actorRuntimeSocket: vi.fn(async () => ({
+				path: "/tmp/actor.sock",
+			})),
+			broadcast: vi.fn(),
+			db: { execute: vi.fn(async () => []) },
+			keepAwake: <T>(promise: Promise<T>) => promise,
+			log: { info: vi.fn(), error: vi.fn() },
+		} as never;
+
+		await expect(actions.exec(context, "printf legacy")).resolves.toBe(
+			legacyResult,
+		);
+		await expect(actions.process.exec(context, "printf nested")).resolves.toBe(
+			executionResult,
+		);
+		expect(exec).toHaveBeenCalledWith("printf legacy");
+		expect(processExec).toHaveBeenCalledWith("printf nested", undefined);
+	});
+
+	test("keeps nested and legacy spawn as managed PID processes", async () => {
+		let emitOutput: ((event: unknown) => void) | undefined;
+		let emitExit: ((event: unknown) => void) | undefined;
+		const waitProcess = Promise.resolve({
+			pid: 42,
+			outcome: "exited",
+			exitCode: 0,
+		});
+		const spawn = vi.fn(async () => ({
+			pid: 42,
+			state: "running",
+			command: "node",
+			startedAtMs: 1,
+		}));
+		const wait = vi.fn(() => waitProcess);
+		const vm = {
+			process: { spawn, wait },
+			onProcessOutput: vi.fn((_pid, callback) => {
+				emitOutput = callback;
+				return vi.fn();
+			}),
+			onProcessExit: vi.fn((_pid, callback) => {
+				emitExit = callback;
+				return vi.fn();
+			}),
+			onCronEvent: vi.fn(),
+			onExecutionOutput: vi.fn(() => vi.fn()),
+			onExecutionCompleted: vi.fn(() => vi.fn()),
+		};
+		vi.spyOn(AgentOs, "create").mockResolvedValue(vm as never);
+		const actions = createAgentOsActions({});
+		const keepAwake = vi.fn(<T>(promise: Promise<T>) => promise);
+		const broadcast = vi.fn();
+		const context = {
+			actorId: "nested-spawn-test",
+			actorRuntimeSocket: vi.fn(async () => ({
+				path: "/tmp/actor.sock",
+			})),
+			broadcast,
+			db: { execute: vi.fn(async () => []) },
+			keepAwake,
+			log: { info: vi.fn(), error: vi.fn() },
+		} as never;
+
+		await expect(
+			actions.process.spawn(context, "node", ["server.js"]),
+		).resolves.toMatchObject({ pid: 42, state: "running" });
+		expect(spawn).toHaveBeenCalledWith("node", ["server.js"]);
+		expect(wait).toHaveBeenCalledWith(42);
+		expect(keepAwake).toHaveBeenCalledWith(waitProcess);
+
+		emitOutput?.({ pid: 42, stream: "stdout", data: "ready" });
+		emitExit?.({ pid: 42, exitCode: 0 });
+		expect(broadcast).toHaveBeenCalledWith(
+			"processOutput",
+			expect.objectContaining({ pid: 42 }),
+		);
+		expect(broadcast).toHaveBeenCalledWith(
+			"processExit",
+			expect.objectContaining({ pid: 42 }),
+		);
+
+		await expect(
+			actions.spawn(context, "node", ["legacy.js"]),
+		).resolves.toMatchObject({ pid: 42, state: "running" });
+	});
+
 	test("keeps generic native session-event hooks awake with actor context", async () => {
 		let emitSessionEvent: ((event: unknown) => void) | undefined;
 		let resolveHook!: () => void;
@@ -447,7 +601,9 @@ describe("agentOS actor", () => {
 		});
 		const vm = {
 			onCronEvent: vi.fn(),
-			openSession: vi.fn(async () => undefined),
+			onExecutionOutput: vi.fn(() => vi.fn()),
+			onExecutionCompleted: vi.fn(() => vi.fn()),
+			sessions: { open: vi.fn(async () => undefined) },
 			onSessionEvent: vi.fn((_sessionId, callback) => {
 				emitSessionEvent = callback;
 			}),
@@ -538,8 +694,10 @@ describe("agentOS actor", () => {
 			resolvePrompt = resolve;
 		});
 		vi.spyOn(AgentOs, "create").mockResolvedValue({
-			prompt: vi.fn(() => prompt),
+			sessions: { prompt: vi.fn(() => prompt) },
 			onCronEvent: vi.fn(),
+			onExecutionOutput: vi.fn(() => vi.fn()),
+			onExecutionCompleted: vi.fn(() => vi.fn()),
 			onSessionEvent: vi.fn(),
 		} as never);
 		const actions = createAgentOsActions({});
@@ -570,10 +728,14 @@ describe("agentOS actor", () => {
 			code: "acp_api_error",
 		});
 		vi.spyOn(AgentOs, "create").mockResolvedValue({
-			prompt: vi.fn(async () => {
-				throw adapterError;
-			}),
+			sessions: {
+				prompt: vi.fn(async () => {
+					throw adapterError;
+				}),
+			},
 			onCronEvent: vi.fn(),
+			onExecutionOutput: vi.fn(() => vi.fn()),
+			onExecutionCompleted: vi.fn(() => vi.fn()),
 			onSessionEvent: vi.fn(),
 		} as never);
 		const actions = createAgentOsActions({});
@@ -625,7 +787,9 @@ describe("agentOS actor", () => {
 			| undefined;
 		const vm = {
 			onCronEvent: vi.fn(),
-			openSession: vi.fn(async () => undefined),
+			onExecutionOutput: vi.fn(() => vi.fn()),
+			onExecutionCompleted: vi.fn(() => vi.fn()),
+			sessions: { open: vi.fn(async () => undefined) },
 			onSessionEvent: vi.fn(),
 		};
 		vi.spyOn(AgentOs, "create").mockImplementation(async (options) => {
@@ -687,7 +851,9 @@ describe("agentOS actor", () => {
 		const order: string[] = [];
 		const vm = {
 			onCronEvent: vi.fn(),
-			readFile: vi.fn(async () => new Uint8Array([1])),
+			filesystem: {
+				readFile: vi.fn(async () => new Uint8Array([1])),
+			},
 			dispose: vi.fn(async () => {
 				order.push("dispose");
 			}),

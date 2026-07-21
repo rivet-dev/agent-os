@@ -3132,7 +3132,7 @@ const __agentOSRequireBuiltin = (specifier) => {{
   if (typeof process?.getBuiltinModule === "function") {{
     return process.getBuiltinModule(specifier);
   }}
-  throw new Error(`secure-exec WASM bootstrap cannot load ${{specifier}}`);
+  throw new Error(`agentos WASM bootstrap cannot load ${{specifier}}`);
 }};
 {wasi_module_source}
 {env_merge_source}
@@ -3176,42 +3176,42 @@ if (typeof globalThis !== "undefined") {{
           return __agentOSRequireBuiltin("node:fs").chmodSync(...args);
         case "__kernel_stdio_write":
           if (typeof _kernelStdioWriteRaw === "undefined") {{
-            throw new Error("secure-exec WASM kernel stdio bridge is unavailable");
+            throw new Error("agentos WASM kernel stdio bridge is unavailable");
           }}
           return _kernelStdioWriteRaw.applySync(void 0, args);
         case "__kernel_stdin_read":
           if (typeof _kernelStdinReadRaw === "undefined") {{
-            throw new Error("secure-exec WASM kernel stdin bridge is unavailable");
+            throw new Error("agentos WASM kernel stdin bridge is unavailable");
           }}
           return _kernelStdinReadRaw.applySync(void 0, args);
         case "__kernel_poll":
           if (typeof _kernelPollRaw === "undefined") {{
-            throw new Error("secure-exec WASM kernel poll bridge is unavailable");
+            throw new Error("agentos WASM kernel poll bridge is unavailable");
           }}
           return _kernelPollRaw.applySync(void 0, args);
         case "__kernel_isatty":
           if (typeof _kernelIsattyRaw === "undefined") {{
-            throw new Error("secure-exec WASM kernel isatty bridge is unavailable");
+            throw new Error("agentos WASM kernel isatty bridge is unavailable");
           }}
           return _kernelIsattyRaw.applySync(void 0, args);
         case "__kernel_flock_path":
           if (typeof _kernelFlockRaw === "undefined") {{
-            throw new Error("secure-exec WASM kernel file-lock bridge is unavailable");
+            throw new Error("agentos WASM kernel file-lock bridge is unavailable");
           }}
           return _kernelFlockRaw.applySync(void 0, args);
         case "__kernel_tty_size":
           if (typeof _kernelTtySizeRaw === "undefined") {{
-            throw new Error("secure-exec WASM kernel tty size bridge is unavailable");
+            throw new Error("agentos WASM kernel tty size bridge is unavailable");
           }}
           return _kernelTtySizeRaw.applySync(void 0, args);
         case "__pty_set_raw_mode":
           if (typeof _ptySetRawMode === "undefined") {{
-            throw new Error("secure-exec WASM PTY raw-mode bridge is unavailable");
+            throw new Error("agentos WASM PTY raw-mode bridge is unavailable");
           }}
           return _ptySetRawMode.applySync(void 0, args);
         case "child_process.spawn": {{
           if (typeof _childProcessSpawnStart === "undefined") {{
-            throw new Error("secure-exec WASM child_process bridge is unavailable");
+            throw new Error("agentos WASM child_process bridge is unavailable");
           }}
           const [request] = args;
           return _childProcessSpawnStart.applySync(void 0, [
@@ -3222,32 +3222,32 @@ if (typeof globalThis !== "undefined") {{
         }}
         case "child_process.poll":
           if (typeof _childProcessPoll === "undefined") {{
-            throw new Error("secure-exec WASM child_process poll bridge is unavailable");
+            throw new Error("agentos WASM child_process poll bridge is unavailable");
           }}
           return _childProcessPoll.applySync(void 0, args);
         case "child_process.kill":
           if (typeof _childProcessKill === "undefined") {{
-            throw new Error("secure-exec WASM child_process kill bridge is unavailable");
+            throw new Error("agentos WASM child_process kill bridge is unavailable");
           }}
           return _childProcessKill.applySync(void 0, args);
         case "process.kill":
           if (typeof _processKill === "undefined") {{
-            throw new Error("secure-exec WASM process kill bridge is unavailable");
+            throw new Error("agentos WASM process kill bridge is unavailable");
           }}
           return _processKill.applySync(void 0, args);
         case "process.exec":
           if (typeof _processExec === "undefined") {{
-            throw new Error("secure-exec WASM process exec bridge is unavailable");
+            throw new Error("agentos WASM process exec bridge is unavailable");
           }}
           return _processExec.applySync(void 0, args);
         case "process.exec_fd_image_commit":
           if (typeof _processExecFdImageCommit === "undefined") {{
-            throw new Error("secure-exec WASM process fd image commit bridge is unavailable");
+            throw new Error("agentos WASM process fd image commit bridge is unavailable");
           }}
           return _processExecFdImageCommit.applySync(void 0, args);
         case "child_process.write_stdin": {{
           if (typeof _childProcessStdinWrite === "undefined") {{
-            throw new Error("secure-exec WASM child_process stdin bridge is unavailable");
+            throw new Error("agentos WASM child_process stdin bridge is unavailable");
           }}
           const [childId, chunk] = args;
           return _childProcessStdinWrite.applySync(void 0, [
@@ -3257,67 +3257,67 @@ if (typeof globalThis !== "undefined") {{
         }}
         case "child_process.close_stdin":
           if (typeof _childProcessStdinClose === "undefined") {{
-            throw new Error("secure-exec WASM child_process stdin-close bridge is unavailable");
+            throw new Error("agentos WASM child_process stdin-close bridge is unavailable");
           }}
           return _childProcessStdinClose.applySync(void 0, args);
         case "net.connect":
           if (typeof _netSocketConnectRaw === "undefined") {{
-            throw new Error("secure-exec WASM net.connect bridge is unavailable");
+            throw new Error("agentos WASM net.connect bridge is unavailable");
           }}
           return _netSocketConnectRaw.applySync(void 0, args);
         case "net.bind_unix":
           if (typeof _netBindUnixRaw === "undefined") {{
-            throw new Error("secure-exec WASM net.bind_unix bridge is unavailable");
+            throw new Error("agentos WASM net.bind_unix bridge is unavailable");
           }}
           return _netBindUnixRaw.applySync(void 0, args);
         case "net.bind_connected_unix":
           if (typeof _netBindConnectedUnixRaw === "undefined") {{
-            throw new Error("secure-exec WASM net.bind_connected_unix bridge is unavailable");
+            throw new Error("agentos WASM net.bind_connected_unix bridge is unavailable");
           }}
           return _netBindConnectedUnixRaw.applySync(void 0, args);
         case "net.reserve_tcp_port":
           if (typeof _netReserveTcpPortRaw === "undefined") {{
-            throw new Error("secure-exec WASM net.reserve_tcp_port bridge is unavailable");
+            throw new Error("agentos WASM net.reserve_tcp_port bridge is unavailable");
           }}
           return _netReserveTcpPortRaw.applySync(void 0, args);
         case "net.release_tcp_port":
           if (typeof _netReleaseTcpPortRaw === "undefined") {{
-            throw new Error("secure-exec WASM net.release_tcp_port bridge is unavailable");
+            throw new Error("agentos WASM net.release_tcp_port bridge is unavailable");
           }}
           return _netReleaseTcpPortRaw.applySync(void 0, args);
         case "net.listen":
           if (typeof _netServerListenRaw === "undefined") {{
-            throw new Error("secure-exec WASM net.listen bridge is unavailable");
+            throw new Error("agentos WASM net.listen bridge is unavailable");
           }}
           return _netServerListenRaw.applySync(void 0, args);
         case "net.server_accept":
           if (typeof _netServerAcceptRaw === "undefined") {{
-            throw new Error("secure-exec WASM net.server_accept bridge is unavailable");
+            throw new Error("agentos WASM net.server_accept bridge is unavailable");
           }}
           return _netServerAcceptRaw.applySync(void 0, args);
         case "net.server_close":
           if (typeof _netServerCloseSyncRaw === "undefined") {{
-            throw new Error("secure-exec WASM net.server_close bridge is unavailable");
+            throw new Error("agentos WASM net.server_close bridge is unavailable");
           }}
           return _netServerCloseSyncRaw.applySync(void 0, args);
         case "net.poll":
           if (typeof _netSocketPollRaw === "undefined") {{
-            throw new Error("secure-exec WASM net.poll bridge is unavailable");
+            throw new Error("agentos WASM net.poll bridge is unavailable");
           }}
           return _netSocketPollRaw.applySync(void 0, args);
         case "net.socket_read":
           if (typeof _netSocketReadRaw === "undefined") {{
-            throw new Error("secure-exec WASM net.socket_read bridge is unavailable");
+            throw new Error("agentos WASM net.socket_read bridge is unavailable");
           }}
           return _netSocketReadRaw.applySync(void 0, args);
         case "net.socket_wait_connect":
           if (typeof _netSocketWaitConnectSyncRaw === "undefined") {{
-            throw new Error("secure-exec WASM net.socket_wait_connect bridge is unavailable");
+            throw new Error("agentos WASM net.socket_wait_connect bridge is unavailable");
           }}
           return _netSocketWaitConnectSyncRaw.applySync(void 0, args);
         case "net.write":
           if (typeof _netSocketWriteSyncRaw === "undefined") {{
-            throw new Error("secure-exec WASM net.write bridge is unavailable");
+            throw new Error("agentos WASM net.write bridge is unavailable");
           }}
           return _netSocketWriteSyncRaw.applySync(void 0, [
             args[0],
@@ -3326,27 +3326,27 @@ if (typeof globalThis !== "undefined") {{
           ]);
         case "net.destroy":
           if (typeof _netSocketDestroyRaw === "undefined") {{
-            throw new Error("secure-exec WASM net.destroy bridge is unavailable");
+            throw new Error("agentos WASM net.destroy bridge is unavailable");
           }}
           return _netSocketDestroyRaw.applySync(void 0, args);
         case "net.socket_upgrade_tls":
           if (typeof _netSocketUpgradeTlsRaw === "undefined") {{
-            throw new Error("secure-exec WASM TLS-upgrade bridge is unavailable");
+            throw new Error("agentos WASM TLS-upgrade bridge is unavailable");
           }}
           return _netSocketUpgradeTlsRaw.applySync(void 0, args);
         case "dgram.createSocket":
           if (typeof _dgramSocketCreateRaw === "undefined") {{
-            throw new Error("secure-exec WASM dgram.createSocket bridge is unavailable");
+            throw new Error("agentos WASM dgram.createSocket bridge is unavailable");
           }}
           return _dgramSocketCreateRaw.applySync(void 0, args);
         case "dgram.bind":
           if (typeof _dgramSocketBindRaw === "undefined") {{
-            throw new Error("secure-exec WASM dgram.bind bridge is unavailable");
+            throw new Error("agentos WASM dgram.bind bridge is unavailable");
           }}
           return _dgramSocketBindRaw.applySync(void 0, args);
         case "dgram.send": {{
           if (typeof _dgramSocketSendRaw === "undefined") {{
-            throw new Error("secure-exec WASM dgram.send bridge is unavailable");
+            throw new Error("agentos WASM dgram.send bridge is unavailable");
           }}
           const [socketId, chunk, options = {{}}] = args;
           return _dgramSocketSendRaw.applySync(void 0, [
@@ -3357,7 +3357,7 @@ if (typeof globalThis !== "undefined") {{
         }}
         case "dgram.poll":
           if (typeof _dgramSocketRecvRaw === "undefined") {{
-            throw new Error("secure-exec WASM dgram.poll bridge is unavailable");
+            throw new Error("agentos WASM dgram.poll bridge is unavailable");
           }}
           const event = _dgramSocketRecvRaw.applySync(void 0, args);
           if (event && event.type === "message") {{
@@ -3384,32 +3384,32 @@ if (typeof globalThis !== "undefined") {{
           return event;
         case "dgram.close":
           if (typeof _dgramSocketCloseRaw === "undefined") {{
-            throw new Error("secure-exec WASM dgram.close bridge is unavailable");
+            throw new Error("agentos WASM dgram.close bridge is unavailable");
           }}
           return _dgramSocketCloseRaw.applySync(void 0, args);
         case "dgram.address":
           if (typeof _dgramSocketAddressRaw === "undefined") {{
-            throw new Error("secure-exec WASM dgram.address bridge is unavailable");
+            throw new Error("agentos WASM dgram.address bridge is unavailable");
           }}
           return _dgramSocketAddressRaw.applySync(void 0, args);
         case "dgram.setBufferSize":
           if (typeof _dgramSocketSetBufferSizeRaw === "undefined") {{
-            throw new Error("secure-exec WASM dgram.setBufferSize bridge is unavailable");
+            throw new Error("agentos WASM dgram.setBufferSize bridge is unavailable");
           }}
           return _dgramSocketSetBufferSizeRaw.applySync(void 0, args);
         case "dgram.getBufferSize":
           if (typeof _dgramSocketGetBufferSizeRaw === "undefined") {{
-            throw new Error("secure-exec WASM dgram.getBufferSize bridge is unavailable");
+            throw new Error("agentos WASM dgram.getBufferSize bridge is unavailable");
           }}
           return _dgramSocketGetBufferSizeRaw.applySync(void 0, args);
         case "dns.lookup":
           if (typeof _networkDnsLookupSyncRaw === "undefined") {{
-            throw new Error("secure-exec WASM dns.lookup bridge is unavailable");
+            throw new Error("agentos WASM dns.lookup bridge is unavailable");
           }}
           return _networkDnsLookupSyncRaw.applySync(void 0, args);
         case "process.signal_state": {{
           if (typeof _processSignalState === "undefined") {{
-            throw new Error("secure-exec WASM signal-state bridge is unavailable");
+            throw new Error("agentos WASM signal-state bridge is unavailable");
           }}
           const [signal, action = "default", maskJson = "[]", flags = 0] = args;
           return _processSignalState.applySyncPromise(void 0, [
@@ -3421,7 +3421,7 @@ if (typeof globalThis !== "undefined") {{
         }}
         case "process.take_signal":
           if (typeof _processTakeSignal === "undefined") {{
-            throw new Error("secure-exec WASM signal-drain bridge is unavailable");
+            throw new Error("agentos WASM signal-drain bridge is unavailable");
           }}
           return _processTakeSignal.applySync(void 0, args);
         case "process.getpgid":
@@ -3517,11 +3517,11 @@ if (typeof globalThis !== "undefined") {{
         case "process.fd_recvmsg_rights":
         case "process.fd_socket_shutdown":
           if (typeof _processWasmSyncRpc === "undefined") {{
-            throw new Error("secure-exec WASM process-syscall bridge is unavailable");
+            throw new Error("agentos WASM process-syscall bridge is unavailable");
           }}
           return _processWasmSyncRpc.applySync(void 0, [method, ...args]);
         default:
-          throw new Error(`secure-exec WASM sync RPC method not implemented in V8 runtime: ${{method}}`);
+          throw new Error(`agentos WASM sync RPC method not implemented in V8 runtime: ${{method}}`);
       }}
     }},
     async call(method, args = []) {{
@@ -5250,14 +5250,14 @@ mod tests {
             &BTreeMap::from([(
                 String::from("AGENTOS_GUEST_PATH_MAPPINGS"),
                 format!(
-                    "[{{\"guestPath\":\"/__secure_exec/commands/0\",\"hostPath\":\"{}\"}}]",
+                    "[{{\"guestPath\":\"/__agentos/commands/0\",\"hostPath\":\"{}\"}}]",
                     command_root.display()
                 ),
             )]),
         );
 
         assert!(candidates.contains(&module.to_string_lossy().into_owned()));
-        assert!(candidates.contains(&String::from("/__secure_exec/commands/0/hello")));
+        assert!(candidates.contains(&String::from("/__agentos/commands/0/hello")));
     }
 
     #[test]
@@ -5382,7 +5382,7 @@ mod tests {
                     read_only: false,
                 },
                 super::WasmGuestPathMapping {
-                    guest_path: String::from("/__secure_exec/commands/0"),
+                    guest_path: String::from("/__agentos/commands/0"),
                     host_path: mapped_root.clone(),
                     read_only: false,
                 },
@@ -5609,9 +5609,9 @@ mod tests {
     fn wasm_sandbox_root_reads_absolute_env_only() {
         let sandbox_root = wasm_sandbox_root(&BTreeMap::from([(
             String::from(WASM_SANDBOX_ROOT_ENV),
-            String::from("/tmp/secure-exec-shadow"),
+            String::from("/tmp/agentos-shadow"),
         )]));
-        assert_eq!(sandbox_root, Some(PathBuf::from("/tmp/secure-exec-shadow")));
+        assert_eq!(sandbox_root, Some(PathBuf::from("/tmp/agentos-shadow")));
 
         let relative = wasm_sandbox_root(&BTreeMap::from([(
             String::from(WASM_SANDBOX_ROOT_ENV),
@@ -5639,7 +5639,7 @@ mod tests {
             module_host_path: PathBuf::from("/tmp/module.wasm"),
             guest_cwd: String::from("/"),
             host_cwd: PathBuf::from("/tmp"),
-            sandbox_root: Some(PathBuf::from("/tmp/secure-exec-shadow")),
+            sandbox_root: Some(PathBuf::from("/tmp/agentos-shadow")),
             guest_path_mappings: Vec::new(),
             route_fs_through_sidecar: true,
             next_fd: 64,

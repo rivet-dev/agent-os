@@ -21,16 +21,16 @@ import {
 	faMessages,
 	faCheck,
 	faKey,
-	faCloud,
 	faDownload,
 	faFloppyDisk,
 	faTerminal,
 	faGlobe,
+	faCloud,
 	faClock,
 	faHardDrive,
 	faNodeJs,
+	faPython,
 	faGauge,
-	faLink,
 	faTowerBroadcast,
 	faArrowsLeftRight,
 	faDiagramNext,
@@ -46,17 +46,15 @@ export const siteConfig = {
 	repo: "rivet-dev/agentos",
 	editPath: "website/",
 
-	// Keep in sync with the marketing nav (src/components/Navigation.tsx):
-	// same links in the same order across docs + marketing.
+	// Cookbooks lives in the docs tab strip below, so do not duplicate it here.
 	topNav: [
 		{ label: "Documentation", href: "/docs", match: "/docs" },
-		{ label: "Cookbooks", href: "/cookbooks", match: "/cookbooks" },
 		{ label: "Use Cases", href: "/use-cases" },
 		{ label: "Registry", href: "/registry" },
 		{ label: "Deploy", href: "/docs/deployment", match: "/docs/deployment" },
 	],
 	tabs: [
-		{ label: "Documentation", href: "/docs", match: "/docs" },
+		{ label: "General", href: "/docs", match: "/docs" },
 		{ label: "Cookbooks", href: "/cookbooks", match: "/cookbooks" },
 	],
 	social: { discord: "https://rivet.dev/discord" },
@@ -77,7 +75,6 @@ export const siteConfig = {
 			title: "Documentation",
 			href: "/docs",
 			sidebar: [
-				{ title: "Introduction", href: "/docs", icon: faCircleInfo },
 				{
 					title: "General",
 					pages: [
@@ -127,8 +124,25 @@ export const siteConfig = {
 						},
 						{ title: "Sessions & Transcripts", href: "/docs/sessions", icon: faMessages },
 						{ title: "Approvals", href: "/docs/approvals", icon: faCheck },
-						{ title: "LLM Credentials", href: "/docs/llm-credentials", icon: faKey },
-						{ title: "LLM Gateway", href: "/docs/llm-gateway", badge: "Coming Soon", icon: faCloud },
+						{ title: "Models & Credentials", href: "/docs/models-and-credentials", icon: faKey },
+					],
+				},
+				{
+					title: "Execution",
+					pages: [
+						{ title: "Bash", href: "/docs/bash", icon: faTerminal },
+						{ title: "Node.js", href: "/docs/javascript", icon: faNodeJs },
+						{ title: "Python", href: "/docs/python", icon: faPython },
+					],
+				},
+				{
+					title: "Orchestration",
+					pages: [
+						{ title: "AI-Generated Apps", href: "/docs/apps", badge: "Preview", icon: faCloud },
+						{ title: "Multiplayer", href: "/docs/multiplayer", icon: faTowerBroadcast },
+						{ title: "Workflows & Graphs", href: "/docs/workflows", icon: faDiagramNext },
+						{ title: "Crons & Loops", href: "/docs/cron", icon: faClock },
+						{ title: "Agent-to-Agent", href: "/docs/agent-to-agent", icon: faArrowsLeftRight },
 					],
 				},
 				{
@@ -136,26 +150,18 @@ export const siteConfig = {
 					pages: [
 						{ title: "Software", href: "/docs/software", icon: faDownload },
 						{ title: "Filesystem", href: "/docs/filesystem", icon: faFloppyDisk },
-						{ title: "Bindings", href: "/docs/bindings", icon: faWrench },
-						{ title: "Processes & Shell", href: "/docs/processes", icon: faTerminal },
+						{ title: "Processes & Shells", href: "/docs/processes", icon: faTerminal },
 						{ title: "Networking & Previews", href: "/docs/networking", icon: faGlobe },
-						{ title: "Cron Jobs", href: "/docs/cron", icon: faClock },
-						{ title: "Browser", href: "/docs/browser", badge: "Beta", icon: faWindowMaximize },
-						{ title: "Sandbox Mounting", href: "/docs/sandbox", badge: "Beta", icon: faHardDrive },
-						{ title: "JavaScript Runtime", href: "/docs/js-runtime", icon: faNodeJs },
 						{ title: "Permissions", href: "/docs/permissions", icon: faKey },
 						{ title: "Resource Limits", href: "/docs/resource-limits", icon: faGauge },
 					],
 				},
 				{
-					title: "Orchestration",
+					title: "Extensions",
 					pages: [
-						{ title: "AI-Generated Apps", href: "/docs/apps", badge: "Preview", icon: faCloud },
-						{ title: "Authentication", href: "/docs/authentication", icon: faKey },
-						{ title: "Webhooks", href: "/docs/webhooks", icon: faLink },
-						{ title: "Multiplayer & Realtime", href: "/docs/multiplayer", icon: faTowerBroadcast },
-						{ title: "Agent-to-Agent", href: "/docs/agent-to-agent", icon: faArrowsLeftRight },
-						{ title: "Workflows", href: "/docs/workflows", icon: faDiagramNext },
+						{ title: "Custom Bindings", href: "/docs/bindings", icon: faWrench },
+						{ title: "Browser Automation", href: "/docs/browser", badge: "Beta", icon: faWindowMaximize },
+						{ title: "External Sandboxes", href: "/docs/sandboxes", badge: "Beta", icon: faHardDrive },
 					],
 				},
 				{
@@ -163,6 +169,7 @@ export const siteConfig = {
 					pages: [
 						{ title: "API Reference", href: "/api", external: true, target: "_blank" },
 						{ title: "Deploy", href: "/docs/deployment" },
+						{ title: "Authentication", href: "/docs/authentication" },
 						{
 							title: "Custom Software",
 							collapsible: true,
@@ -205,10 +212,9 @@ export const siteConfig = {
 							title: "More",
 							collapsible: true,
 							pages: [
-								{ title: "Core SDK", href: "/docs/core" },
+								{ title: "Direct VM SDK", href: "/docs/core" },
 								{ title: "Debugging", href: "/docs/debugging" },
-								{ title: "Benchmarks", href: "/docs/benchmarks" },
-								{ title: "Cost Evaluation", href: "/docs/cost-evaluation" },
+								{ title: "Performance", href: "/docs/performance" },
 							],
 						},
 					],
@@ -235,6 +241,15 @@ export const siteConfig = {
 						{ title: "Codex Agent", href: "/cookbooks/codex" },
 						{ title: "OpenCode Agent", href: "/cookbooks/opencode" },
 						{ title: "Agent to Agent", href: "/cookbooks/agent-to-agent" },
+					],
+				},
+				{
+					title: "Code Execution",
+					pages: [
+						{ title: "AI Agent Code Exec", href: "/cookbooks/js-ai-agent-code-exec" },
+						{ title: "Code Mode", href: "/cookbooks/js-code-mode" },
+						{ title: "Dev Servers", href: "/cookbooks/js-dev-servers" },
+						{ title: "Plugin Systems", href: "/cookbooks/js-plugin-systems" },
 					],
 				},
 				{
@@ -269,7 +284,6 @@ export const siteConfig = {
 					pages: [
 						{ title: "Cron", href: "/cookbooks/cron" },
 						{ title: "Workflows", href: "/cookbooks/workflows" },
-						{ title: "Webhooks", href: "/cookbooks/webhooks" },
 					],
 				},
 				{

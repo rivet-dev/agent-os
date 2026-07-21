@@ -1,6 +1,6 @@
 --- a/scripts/build-wasi-codex-exec.sh
 +++ b/scripts/build-wasi-codex-exec.sh
-@@ -33,6 +33,7 @@ INSTALL="${INSTALL:-${SECURE_EXEC_DIR:+1}}"
+@@ -34,5 +34,6 @@
  SYSROOT="$(rustc "+$TOOLCHAIN" --print sysroot)"
  LIBDIR="$SYSROOT/lib/rustlib/wasm32-wasip1/lib"
  STASH="$LIBDIR/.prebuilt-stash"

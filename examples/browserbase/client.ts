@@ -16,7 +16,7 @@ const env = {
 	BROWSERBASE_PROJECT_ID: process.env.BROWSERBASE_PROJECT_ID!,
 };
 
-const { stdout } = await agent.exec("browse cloud fetch https://example.com", {
+const { stdout } = await agent.process.exec("browse cloud fetch https://example.com", {
 	env,
 });
 
@@ -29,7 +29,7 @@ console.log(page.content);
 // discovers Browserbase's `browse` CLI skill and reaches for it on its own. The
 // Browserbase credentials go into the session environment, so every command the
 // agent runs — including `browse` — inherits them.
-await agent.openSession({
+await agent.sessions.open({
 	agent: "claude",
 	env: {
 		BROWSERBASE_API_KEY: process.env.BROWSERBASE_API_KEY!,
@@ -39,7 +39,7 @@ await agent.openSession({
 });
 
 // Note: no mention of `browse` — the mounted skill tells the agent to use it.
-const response = await agent.prompt({
+const response = await agent.sessions.prompt({
 	content: [
 		{
 			type: "text",
@@ -49,4 +49,4 @@ const response = await agent.prompt({
 });
 console.log(response.message?.content ?? []);
 
-await agent.deleteSession();
+await agent.sessions.delete();

@@ -3,7 +3,7 @@
 	"version": "0.3.4",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "GNU findutils for secure-exec VMs (find, xargs)",
+	"description": "GNU findutils for agentos VMs (find, xargs)",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [

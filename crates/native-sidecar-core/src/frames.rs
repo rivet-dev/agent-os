@@ -495,14 +495,13 @@ mod tests {
 
     #[test]
     fn authenticated_response_sets_connection_ownership() {
-        let response =
-            authenticated_response(7, "secure-exec-test", String::from("conn-test"), 1024);
+        let response = authenticated_response(7, "agentos-test", String::from("conn-test"), 1024);
 
         assert_eq!(response.request_id, 7);
         assert_eq!(response.ownership, OwnershipScope::connection("conn-test"));
         match response.payload {
             ResponsePayload::Authenticated(authenticated) => {
-                assert_eq!(authenticated.sidecar_id, "secure-exec-test");
+                assert_eq!(authenticated.sidecar_id, "agentos-test");
                 assert_eq!(authenticated.connection_id, "conn-test");
                 assert_eq!(authenticated.max_frame_bytes, 1024);
             }

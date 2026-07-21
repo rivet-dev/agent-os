@@ -55,66 +55,66 @@ importers:
         specifier: ^0.60.0
         version: 0.60.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@agentos-software/claude-code':
-        specifier: link:../../../secure-exec/software/claude
-        version: link:../../../secure-exec/software/claude
-      '@secure-exec/codex':
+        specifier: link:../../../agentos/software/claude
+        version: link:../../../agentos/software/claude
+      '@agentos-software/codex':
         specifier: link:../../software/codex
         version: link:../../software/codex
       '@agentos-software/codex':
-        specifier: link:../../../secure-exec/software/codex
-        version: link:../../../secure-exec/software/codex
+        specifier: link:../../../agentos/software/codex
+        version: link:../../../agentos/software/codex
       '@rivet-dev/agentos-runtime-coreutils':
         specifier: link:../../software/coreutils
         version: link:../../software/coreutils
-      '@secure-exec/curl':
+      '@agentos-software/curl':
         specifier: link:../../software/curl
         version: link:../../software/curl
-      '@secure-exec/diffutils':
+      '@agentos-software/diffutils':
         specifier: link:../../software/diffutils
         version: link:../../software/diffutils
-      '@secure-exec/fd':
+      '@agentos-software/fd':
         specifier: link:../../software/fd
         version: link:../../software/fd
-      '@secure-exec/file':
+      '@agentos-software/file':
         specifier: link:../../software/file
         version: link:../../software/file
-      '@secure-exec/findutils':
+      '@agentos-software/findutils':
         specifier: link:../../software/findutils
         version: link:../../software/findutils
-      '@secure-exec/gawk':
+      '@agentos-software/gawk':
         specifier: link:../../software/gawk
         version: link:../../software/gawk
-      '@secure-exec/grep':
+      '@agentos-software/grep':
         specifier: link:../../software/grep
         version: link:../../software/grep
-      '@secure-exec/gzip':
+      '@agentos-software/gzip':
         specifier: link:../../software/gzip
         version: link:../../software/gzip
-      '@secure-exec/jq':
+      '@agentos-software/jq':
         specifier: link:../../software/jq
         version: link:../../software/jq
       '@agentos-software/opencode':
-        specifier: link:../../../secure-exec/software/opencode
-        version: link:../../../secure-exec/software/opencode
+        specifier: link:../../../agentos/software/opencode
+        version: link:../../../agentos/software/opencode
       '@agentos-software/pi':
-        specifier: link:../../../secure-exec/software/pi
-        version: link:../../../secure-exec/software/pi
+        specifier: link:../../../agentos/software/pi
+        version: link:../../../agentos/software/pi
       '@agentos-software/pi-cli':
-        specifier: link:../../../secure-exec/software/pi-cli
-        version: link:../../../secure-exec/software/pi-cli
-      '@secure-exec/ripgrep':
+        specifier: link:../../../agentos/software/pi-cli
+        version: link:../../../agentos/software/pi-cli
+      '@agentos-software/ripgrep':
         specifier: link:../../software/ripgrep
         version: link:../../software/ripgrep
-      '@secure-exec/sed':
+      '@agentos-software/sed':
         specifier: link:../../software/sed
         version: link:../../software/sed
-      '@secure-exec/tar':
+      '@agentos-software/tar':
         specifier: link:../../software/tar
         version: link:../../software/tar
-      '@secure-exec/tree':
+      '@agentos-software/tree':
         specifier: link:../../software/tree
         version: link:../../software/tree
-      '@secure-exec/yq':
+      '@agentos-software/yq':
         specifier: link:../../software/yq
         version: link:../../software/yq
       '@types/node':

@@ -1,5 +1,5 @@
 import { agentOS, setup } from "@rivet-dev/agentos";
-import type { Permissions } from "@rivet-dev/agentos-core";
+import type { Permissions } from "@rivet-dev/agentos";
 
 // docs:start grant-network
 // Grant the network, leave everything else at the secure default.

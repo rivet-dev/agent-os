@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Shared per-VM kernel plane for the secure-exec runtime migration.
+//! Shared per-VM kernel plane for the agentos runtime migration.
 
 pub use agentos_bridge as bridge;
 pub mod command_registry;

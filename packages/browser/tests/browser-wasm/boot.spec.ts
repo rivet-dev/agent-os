@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 // Proves the converged Agent OS wasm sidecar (agentos-sidecar-browser, which links
-// the secure-exec converged kernel + the ACP extension) loads and runs in REAL
+// the agentos converged kernel + the ACP extension) loads and runs in REAL
 // Chromium, and processes wire frames.
 
 test("agentos wasm sidecar boots in Chromium and reports its identity", async ({

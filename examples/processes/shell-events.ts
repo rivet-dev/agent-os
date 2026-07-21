@@ -3,7 +3,7 @@ import type { registry } from "./server";
 
 const client = createClient<typeof registry>({ endpoint: "http://localhost:6420" });
 const conn = client.vm.getOrCreate("my-agent").connect();
-const { shellId } = await conn.openShell();
+const { shellId } = await conn.terminal.open();
 
 conn.on("shellData", (data) => {
 	if (data.shellId !== shellId) return;

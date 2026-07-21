@@ -677,7 +677,7 @@ dependencies = [
 name = "cmd-awk"
 version = "0.1.0"
 dependencies = [
- "secureexec-awk",
+ "agentos-awk",
 ]
 
 [[package]]
@@ -770,8 +770,8 @@ dependencies = [
  "codex-network-proxy",
  "codex-otel",
  "ratatui",
- "secureexec-wasi-http",
- "secureexec-wasi-spawn",
+ "agentos-wasi-http",
+ "agentos-wasi-spawn",
 ]
 
 [[package]]
@@ -780,14 +780,14 @@ version = "0.1.0"
 dependencies = [
  "codex-network-proxy",
  "codex-otel",
- "secureexec-wasi-http",
+ "agentos-wasi-http",
 ]
 
 [[package]]
 name = "cmd-column"
 version = "0.1.0"
 dependencies = [
- "secureexec-column",
+ "agentos-column",
 ]
 
 [[package]]
@@ -808,7 +808,7 @@ dependencies = [
 name = "cmd-curl"
 version = "0.1.0"
 dependencies = [
- "secureexec-wasi-http",
+ "agentos-wasi-http",
 ]
 
 [[package]]
@@ -840,7 +840,7 @@ version = "0.1.0"
 name = "cmd-diff"
 version = "0.1.0"
 dependencies = [
- "secureexec-diff",
+ "agentos-diff",
 ]
 
 [[package]]
@@ -861,7 +861,7 @@ dependencies = [
 name = "cmd-du"
 version = "0.1.0"
 dependencies = [
- "secureexec-du",
+ "agentos-du",
 ]
 
 [[package]]
@@ -875,14 +875,14 @@ dependencies = [
 name = "cmd-egrep"
 version = "0.1.0"
 dependencies = [
- "secureexec-shims",
+ "agentos-shims",
 ]
 
 [[package]]
 name = "cmd-env"
 version = "0.1.0"
 dependencies = [
- "secureexec-shims",
+ "agentos-shims",
 ]
 
 [[package]]
@@ -896,7 +896,7 @@ dependencies = [
 name = "cmd-expr"
 version = "0.1.0"
 dependencies = [
- "secureexec-expr",
+ "agentos-expr",
 ]
 
 [[package]]
@@ -924,14 +924,14 @@ dependencies = [
 name = "cmd-fgrep"
 version = "0.1.0"
 dependencies = [
- "secureexec-shims",
+ "agentos-shims",
 ]
 
 [[package]]
 name = "cmd-file"
 version = "0.1.0"
 dependencies = [
- "secureexec-file-cmd",
+ "agentos-file-cmd",
 ]
 
 [[package]]
@@ -971,7 +971,7 @@ dependencies = [
 name = "cmd-gzip"
 version = "0.1.0"
 dependencies = [
- "secureexec-gzip",
+ "agentos-gzip",
 ]
 
 [[package]]
@@ -989,7 +989,7 @@ version = "0.1.0"
 name = "cmd-http-test"
 version = "0.1.0"
 dependencies = [
- "secureexec-wasi-http",
+ "agentos-wasi-http",
 ]
 
 [[package]]
@@ -1010,7 +1010,7 @@ dependencies = [
 name = "cmd-jq"
 version = "0.1.0"
 dependencies = [
- "secureexec-jq",
+ "agentos-jq",
 ]
 
 [[package]]
@@ -1087,7 +1087,7 @@ dependencies = [
 name = "cmd-nice"
 version = "0.1.0"
 dependencies = [
- "secureexec-shims",
+ "agentos-shims",
 ]
 
 [[package]]
@@ -1101,7 +1101,7 @@ dependencies = [
 name = "cmd-nohup"
 version = "0.1.0"
 dependencies = [
- "secureexec-shims",
+ "agentos-shims",
 ]
 
 [[package]]
@@ -1185,7 +1185,7 @@ dependencies = [
 name = "cmd-rev"
 version = "0.1.0"
 dependencies = [
- "secureexec-rev",
+ "agentos-rev",
 ]
 
 [[package]]
@@ -1290,7 +1290,7 @@ dependencies = [
 name = "cmd-sleep"
 version = "0.1.0"
 dependencies = [
- "secureexec-builtins",
+ "agentos-builtins",
 ]
 
 [[package]]
@@ -1304,7 +1304,7 @@ dependencies = [
 name = "cmd-spawn-test-host"
 version = "0.1.0"
 dependencies = [
- "secureexec-wasi-spawn",
+ "agentos-wasi-spawn",
  "tokio",
 ]
 
@@ -1326,21 +1326,21 @@ dependencies = [
 name = "cmd-stdbuf"
 version = "0.1.0"
 dependencies = [
- "secureexec-shims",
+ "agentos-shims",
 ]
 
 [[package]]
 name = "cmd-strings"
 version = "0.1.0"
 dependencies = [
- "secureexec-strings-cmd",
+ "agentos-strings-cmd",
 ]
 
 [[package]]
 name = "cmd-stubs"
 version = "0.1.0"
 dependencies = [
- "secureexec-stubs",
+ "agentos-stubs",
 ]
 
 [[package]]
@@ -1375,7 +1375,7 @@ dependencies = [
 name = "cmd-tar"
 version = "0.1.0"
 dependencies = [
- "secureexec-tar",
+ "agentos-tar",
 ]
 
 [[package]]
@@ -1389,14 +1389,14 @@ dependencies = [
 name = "cmd-test"
 version = "0.1.0"
 dependencies = [
- "secureexec-builtins",
+ "agentos-builtins",
 ]
 
 [[package]]
 name = "cmd-timeout"
 version = "0.1.0"
 dependencies = [
- "secureexec-shims",
+ "agentos-shims",
 ]
 
 [[package]]
@@ -1470,14 +1470,14 @@ dependencies = [
 name = "cmd-which"
 version = "0.1.0"
 dependencies = [
- "secureexec-shims",
+ "agentos-shims",
 ]
 
 [[package]]
 name = "cmd-whoami"
 version = "0.1.0"
 dependencies = [
- "secureexec-builtins",
+ "agentos-builtins",
 ]
 
 [[package]]
@@ -1502,7 +1502,7 @@ dependencies = [
 name = "cmd-yq"
 version = "0.1.0"
 dependencies = [
- "secureexec-yq",
+ "agentos-yq",
 ]
 
 [[package]]
@@ -4110,14 +4110,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
-name = "secureexec-awk"
+name = "agentos-awk"
 version = "0.1.0"
 dependencies = [
  "awk-rs",
 ]
 
 [[package]]
-name = "secureexec-builtins"
+name = "agentos-builtins"
 version = "0.1.0"
 dependencies = [
  "libc",
@@ -4125,43 +4125,43 @@ dependencies = [
 ]
 
 [[package]]
-name = "secureexec-column"
+name = "agentos-column"
 version = "0.1.0"
 
 [[package]]
-name = "secureexec-diff"
+name = "agentos-diff"
 version = "0.1.0"
 dependencies = [
  "similar",
 ]
 
 [[package]]
-name = "secureexec-du"
+name = "agentos-du"
 version = "0.1.0"
 
 [[package]]
-name = "secureexec-expr"
+name = "agentos-expr"
 version = "0.1.0"
 dependencies = [
  "regex",
 ]
 
 [[package]]
-name = "secureexec-file-cmd"
+name = "agentos-file-cmd"
 version = "0.1.0"
 dependencies = [
  "infer",
 ]
 
 [[package]]
-name = "secureexec-gzip"
+name = "agentos-gzip"
 version = "0.1.0"
 dependencies = [
  "flate2",
 ]
 
 [[package]]
-name = "secureexec-jq"
+name = "agentos-jq"
 version = "0.1.0"
 dependencies = [
  "jaq-core",
@@ -4171,26 +4171,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "secureexec-rev"
+name = "agentos-rev"
 version = "0.1.0"
 
 [[package]]
-name = "secureexec-shims"
+name = "agentos-shims"
 version = "0.1.0"
 dependencies = [
  "wasi-ext",
 ]
 
 [[package]]
-name = "secureexec-strings-cmd"
+name = "agentos-strings-cmd"
 version = "0.1.0"
 
 [[package]]
-name = "secureexec-stubs"
+name = "agentos-stubs"
 version = "0.1.0"
 
 [[package]]
-name = "secureexec-tar"
+name = "agentos-tar"
 version = "0.1.0"
 dependencies = [
  "flate2",
@@ -4198,22 +4198,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "secureexec-wasi-http"
+name = "agentos-wasi-http"
 version = "0.1.0"
 dependencies = [
  "wasi-ext",
 ]
 
 [[package]]
-name = "secureexec-wasi-pty"
+name = "agentos-wasi-pty"
 version = "0.1.0"
 dependencies = [
- "secureexec-wasi-spawn",
+ "agentos-wasi-spawn",
  "wasi-ext",
 ]
 
 [[package]]
-name = "secureexec-wasi-spawn"
+name = "agentos-wasi-spawn"
 version = "0.1.0"
 dependencies = [
  "wasi",
@@ -4221,7 +4221,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "secureexec-yq"
+name = "agentos-yq"
 version = "0.1.0"
 dependencies = [
  "jaq-core",

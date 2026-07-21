@@ -1,4 +1,4 @@
-import { AgentOs, nodeModulesMount } from "@rivet-dev/agentos-core";
+import { AgentOs, nodeModulesMount } from "@rivet-dev/agentos";
 import pi from "@agentos-software/pi";
 
 // The full AgentOs.create() configuration surface. The agentOS() actor accepts

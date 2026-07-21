@@ -100,9 +100,9 @@ use crate::protocol::{
     JavascriptPosixSpawnFileAction, JavascriptSpawnHostNetFd, KillProcessRequest, OwnershipScope,
     ProcessExitedEvent, ProcessOutputEvent, ProcessSnapshotEntry, ProcessSnapshotStatus,
     PtyResizedResponse, QueueSnapshotEntry, RequestFrame, ResizePtyRequest,
-    ResourceSnapshotResponse, ResponseFrame, ResponsePayload, SidecarRequestPayload,
-    SignalDispositionAction, SignalHandlerRegistration, SocketStateEntry, StreamChannel,
-    VmFetchRequest, VmFetchResponse, WasmPermissionTier, WriteStdinRequest,
+    ResourceSnapshotResponse, ResponseFrame, ResponsePayload, RetainedExecutionLanguage,
+    SidecarRequestPayload, SignalDispositionAction, SignalHandlerRegistration, SocketStateEntry,
+    StreamChannel, VmFetchRequest, VmFetchResponse, WasmPermissionTier, WriteStdinRequest,
 };
 use crate::service::{
     audit_fields, dirname, emit_security_audit_event, emit_structured_event_or_stderr,

@@ -126,7 +126,7 @@ This is the baseline filesystem layer that everything else builds on.
 Relevant files:
 - `crates/kernel/src/vfs.rs`
 - `crates/kernel/src/root_fs.rs`
-- `packages/secure-exec-core/fixtures/base-filesystem.json`
+- `packages/agentos-core/fixtures/base-filesystem.json`
 - `crates/kernel/src/device_layer.rs`
 - `crates/kernel/src/overlay_fs.rs`
 - `crates/kernel/src/mount_table.rs`

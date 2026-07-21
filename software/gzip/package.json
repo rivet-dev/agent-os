@@ -3,7 +3,7 @@
 	"version": "0.3.4",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "GNU gzip compression for secure-exec VMs (gzip, gunzip, zcat)",
+	"description": "GNU gzip compression for agentos VMs (gzip, gunzip, zcat)",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [

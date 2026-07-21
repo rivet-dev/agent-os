@@ -74,7 +74,6 @@ jobs:
       - run: node scripts/verify-fixed-versions.mjs
       - run: node --test scripts/check-layout.test.mjs
       - run: pnpm check-layout
-      - run: node --test scripts/generate-secure-exec-mirror.test.mjs
       - run: node --test scripts/check-rustfmt.test.mjs
       - run: node scripts/check-rustfmt.mjs
       - run: pnpm check-types
@@ -84,7 +83,6 @@ jobs:
             --filter '@rivet-dev/agentos-build-tools' \
             --filter '@rivet-dev/agentos-toolchain' \
             --filter '@rivet-dev/agentos-runtime-sidecar' \
-            --filter 'secure-exec' \
             test
       - run: pnpm lint
         continue-on-error: true

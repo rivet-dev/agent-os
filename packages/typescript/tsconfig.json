@@ -9,7 +9,7 @@
 		"outDir": "./dist",
 		"rootDir": "./src",
 		"paths": {
-			"@rivet-dev/agentos-typescript": ["./src/index.ts"],
+			"@rivet-dev/agentos-internal-typescript": ["./src/index.ts"],
 			"@rivet-dev/agentos-core/internal/runtime-compat": [
 				"../core/dist/runtime-compat.d.ts"
 			]

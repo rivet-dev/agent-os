@@ -1878,7 +1878,7 @@ mod tests {
     use crate::{ExtensionContext, ExtensionFuture, ExtensionInterruptResponse, ExtensionResponse};
     use std::io::Cursor;
 
-    const TEST_EXTENSION_NAMESPACE: &str = "dev.rivet.secure-exec.test.blocking";
+    const TEST_EXTENSION_NAMESPACE: &str = "dev.rivet.agentos.test.blocking";
 
     fn test_protocol_budget(
         max_frames: usize,

@@ -8,10 +8,10 @@ const agent = client.vm.getOrCreate("my-agent");
 
 // The agent invokes the binding itself as a shell command:
 //   agentos-weather forecast --city Paris --days 3
-await agent.openSession({
+await agent.sessions.open({
 	agent: "claude",
 	env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
-await agent.prompt({
+await agent.sessions.prompt({
 	content: [{ type: "text", text: "What's the weather in Paris?" }],
 });

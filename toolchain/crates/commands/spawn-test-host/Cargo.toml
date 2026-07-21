@@ -10,5 +10,5 @@ name = "spawn-test-host"
 path = "src/main.rs"
 
 [dependencies]
-wasi-spawn = { package = "secureexec-wasi-spawn", path = "../../libs/wasi-spawn" }
+wasi-spawn = { package = "agentos-wasi-spawn", path = "../../libs/wasi-spawn" }
 tokio = { version = "1.50.0", features = ["process", "rt"] }

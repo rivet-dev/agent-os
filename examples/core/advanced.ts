@@ -1,4 +1,4 @@
-import { AgentOs } from "@rivet-dev/agentos-core";
+import { AgentOs } from "@rivet-dev/agentos";
 
 // One dedicated sidecar process hosting multiple VMs.
 const sidecar = await AgentOs.createSidecar();

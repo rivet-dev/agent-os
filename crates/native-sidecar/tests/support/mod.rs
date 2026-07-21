@@ -387,6 +387,8 @@ pub fn try_collect_process_output_wire_with_timeout(
                 agentos_native_sidecar::wire::EventPayload::ProcessExitedEvent(_)
                 | agentos_native_sidecar::wire::EventPayload::VmLifecycleEvent(_)
                 | agentos_native_sidecar::wire::EventPayload::StructuredEvent(_)
+                | agentos_native_sidecar::wire::EventPayload::ExecutionOutputEvent(_)
+                | agentos_native_sidecar::wire::EventPayload::ExecutionCompletedEvent(_)
                 | agentos_native_sidecar::wire::EventPayload::ExtEnvelope(_) => {}
             }
         }

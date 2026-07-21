@@ -1,7 +1,7 @@
 // pty_probe.c — argv-dispatched PTY/line-discipline probe for the agent-os
 // terminal test matrix (packages/core/tests/pty-line-discipline.nightly.test.ts).
 //
-// Unlike secure-exec's single-sequence pty_probe.c, this probe runs exactly ONE
+// Unlike agentos's single-sequence pty_probe.c, this probe runs exactly ONE
 // case, selected by argv[1] (the caseId). The host harness drives the SAME case
 // set through this WASM probe and a guest-Node twin (pty_probe.mjs) and asserts
 // the SAME observable marker protocol against both runtimes.
@@ -72,7 +72,7 @@ static unsigned int host_tty_set_raw_mode(unsigned int enabled) {
 }
 #endif
 
-// ---- shared encoders (byte-identical to secure-exec's pty_probe.c) ----------
+// ---- shared encoders (byte-identical to agentos's pty_probe.c) ----------
 
 static void print_hex(const unsigned char *bytes, int len) {
     for (int i = 0; i < len; i++) {

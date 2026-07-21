@@ -71,7 +71,7 @@ describeIf(hasWasmBinaries, "ripgrep command", { timeout: 10_000 }, () => {
 
 		const result = await kernel.exec("rg --version", {});
 		expect(result.stdout).toContain("ripgrep 15.1.0");
-		expect(result.stdout).not.toContain("secure-exec");
+		expect(result.stdout).not.toContain("agentos");
 	});
 
 	it("searches recursively and respects .gitignore by default", async () => {

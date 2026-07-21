@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "rivetkit": "2.3.4"
+    "rivetkit": "0.0.0-sqlite-uds.4e59a38"
   }
 }

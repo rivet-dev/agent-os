@@ -24,6 +24,9 @@ mod filesystem;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/json_rpc.rs"]
 mod json_rpc;
+#[allow(dead_code)]
+#[path = "../src/language_execution.rs"]
+mod language_execution;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/limits.rs"]
 mod limits;
@@ -2209,7 +2212,7 @@ ykAheWCsAteSEWVc0w==\n\
                     OwnershipScope::vm(connection_id, session_id, vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
                         mounts: vec![MountDescriptor {
-                            guest_path: String::from("/__secure_exec/commands/0"),
+                            guest_path: String::from("/__agentos/commands/0"),
                             guest_source: String::from("agentos"),
                             guest_fstype: String::from("agentos"),
                             read_only: true,
@@ -3338,7 +3341,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     ),
                     fixture_dns_record(
                         "bundle.example.test.",
-                        RData::TXT(TXT::new(vec![String::from("secure-exec")])),
+                        RData::TXT(TXT::new(vec![String::from("agentos")])),
                     ),
                 ],
                 ("bundle.example.test.", RecordType::ANY) => vec![
@@ -9556,7 +9559,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                 .expect("clock should be monotonic")
                 .as_nanos();
             let metadata_path =
-                std::env::temp_dir().join(format!("secure-exec-service-s3-{unique}.sqlite"));
+                std::env::temp_dir().join(format!("agentos-service-s3-{unique}.sqlite"));
 
             let mut sidecar = create_test_sidecar();
             let (connection_id, session_id) =
@@ -11304,7 +11307,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
                         mounts: vec![MountDescriptor {
-                            guest_path: String::from("/__secure_exec/commands/0"),
+                            guest_path: String::from("/__agentos/commands/0"),
                             guest_source: String::from("agentos"),
                             guest_fstype: String::from("agentos"),
                             read_only: true,
@@ -11406,7 +11409,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
                         mounts: vec![MountDescriptor {
-                            guest_path: String::from("/__secure_exec/commands/0"),
+                            guest_path: String::from("/__agentos/commands/0"),
                             guest_source: String::from("agentos"),
                             guest_fstype: String::from("agentos"),
                             read_only: true,
@@ -11804,7 +11807,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
                         mounts: vec![MountDescriptor {
-                            guest_path: String::from("/__secure_exec/commands/0"),
+                            guest_path: String::from("/__agentos/commands/0"),
                             guest_source: String::from("agentos"),
                             guest_fstype: String::from("agentos"),
                             read_only: true,
@@ -11841,11 +11844,11 @@ console.log(JSON.stringify({ status: "ok", summary }));
             assert!(
                 path_entries
                     .first()
-                    .is_some_and(|entry| *entry == "/__secure_exec/commands/0"),
+                    .is_some_and(|entry| *entry == "/__agentos/commands/0"),
                 "PATH should prioritize mounted command root: {path}"
             );
             assert!(
-                path_entries.contains(&"/__secure_exec/commands/0"),
+                path_entries.contains(&"/__agentos/commands/0"),
                 "PATH should include mounted command root: {path}"
             );
 
@@ -13615,7 +13618,7 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                 &vm_id,
                 "proc-js-binding-rpc",
                 crate::protocol::JavascriptChildProcessSpawnRequest {
-                    command: String::from("/__secure_exec/commands/0/agentos-math"),
+                    command: String::from("/__agentos/commands/0/agentos-math"),
                     args: vec![
                         String::from("add"),
                         String::from("--a"),
@@ -13669,7 +13672,7 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                     &vm.guest_cwd,
                     &vm.host_cwd,
                     &crate::protocol::JavascriptChildProcessSpawnRequest {
-                        command: String::from("/__secure_exec/commands/0/agentos-math"),
+                        command: String::from("/__agentos/commands/0/agentos-math"),
                         args: vec![
                             String::from("add"),
                             String::from("--a"),
@@ -17616,7 +17619,7 @@ await new Promise(() => {});
                         json!("aes-256-gcm"),
                         json!(base64::engine::general_purpose::STANDARD.encode([7_u8; 32])),
                         json!(base64::engine::general_purpose::STANDARD.encode([3_u8; 12])),
-                        json!(base64::engine::general_purpose::STANDARD.encode(b"secure-exec")),
+                        json!(base64::engine::general_purpose::STANDARD.encode(b"agentos")),
                         json!(r#"{"aad":"YWR2YW5jZWQ=","authTagLength":16}"#),
                     ],
                 },
@@ -17646,7 +17649,7 @@ await new Promise(() => {});
             .expect("decipheriv response");
             assert_eq!(
                 decode_base64(decipher_response.as_str().expect("decipher response")),
-                b"secure-exec"
+                b"agentos"
             );
 
             let mut streaming_process = create_crypto_test_process();
@@ -19097,7 +19100,7 @@ console.log(JSON.stringify({ membershipAddress, sourceAddress, reboundAddress, d
                 r#"
 import net from "node:net";
 
-const path = "/tmp/secure-exec-unix-echo.sock";
+const path = "/tmp/agentos-unix-echo.sock";
 const summary = await new Promise((resolve, reject) => {
   const server = net.createServer((socket) => {
     socket.setEncoding("utf8");
@@ -24020,7 +24023,7 @@ console.log(`BODY:${{body}}`);
                 sidecar.vms.get(&vm_id).expect("javascript vm"),
             )
             .expect("build Unix socket path context");
-            let socket_path = "/tmp/secure-exec.sock";
+            let socket_path = "/tmp/agentos.sock";
 
             let listen = {
                 let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
@@ -24422,7 +24425,7 @@ console.log(`BODY:${{body}}`);
                     19_u64,
                     "net.connect",
                     vec![json!({ "path": socket_path })],
-                    "unix:/tmp/secure-exec.sock",
+                    "unix:/tmp/agentos.sock",
                 ),
                 (
                     20_u64,
@@ -25233,7 +25236,7 @@ try {
                     ),
                     (
                         String::from("AGENTOS_VIRTUAL_OS_HOSTNAME"),
-                        String::from("secure-exec-test"),
+                        String::from("agentos-test"),
                     ),
                     (
                         String::from("AGENTOS_PARENT_NODE_ALLOW_CHILD_PROCESS"),
@@ -25263,7 +25266,7 @@ try {
             );
             assert_eq!(
                 filtered.get("AGENTOS_VIRTUAL_OS_HOSTNAME"),
-                Some(&String::from("secure-exec-test"))
+                Some(&String::from("agentos-test"))
             );
             assert!(!filtered.contains_key("AGENTOS_PARENT_NODE_ALLOW_CHILD_PROCESS"));
             assert!(!filtered.contains_key("VISIBLE_MARKER"));

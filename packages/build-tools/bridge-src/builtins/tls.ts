@@ -3,7 +3,7 @@ import { NetServer, NetSocket, buildSerializedTlsOptions, isTlsSecureContextWrap
 
 function createSecureContextWrapper(options) {
   return {
-    __secureExecTlsContext: buildSerializedTlsOptions(options),
+    __agentOsTlsContext: buildSerializedTlsOptions(options),
     context: {}
   };
 }
@@ -305,7 +305,7 @@ var TLSServer = class {
     }
     const resolvedOptions = {
       ...this._tlsOptions,
-      ...selectedContext?.__secureExecTlsContext ?? {},
+      ...selectedContext?.__agentOsTlsContext ?? {},
       isServer: true
     };
     if (this._alpnCallback) {

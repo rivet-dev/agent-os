@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared kernel plane for secure-exec native and browser sidecars"
+description = "Shared kernel plane for agentos native and browser sidecars"
 
 [dependencies]
 agentos-bridge = { workspace = true }

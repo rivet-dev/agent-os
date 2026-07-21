@@ -3,7 +3,7 @@
 	"version": "0.3.3",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "vim for secure-exec VMs (wasm build + bundled runtime via provides)",
+	"description": "vim for agentos VMs (wasm build + bundled runtime via provides)",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [

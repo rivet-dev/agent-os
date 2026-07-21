@@ -1,4 +1,4 @@
-import { getSecureExecUndiciDispatcher, undiciFetch } from "./undici.js";
+import { getAgentOsUndiciDispatcher, undiciFetch } from "./undici.js";
 import { exposeCustomGlobal, exposeInstallCompatibleHardenedGlobal } from "../global-exposure.js";
 import { undiciFormDataModule, undiciHeadersModule, undiciRequestModule, undiciResponseModule } from "../prelude.js";
 import { isFlatHeaderList, onUpgradeSocketEnd } from "./http.js";
@@ -118,7 +118,7 @@ function normalizeFetchRequestInit(options = {}) {
   const normalized = { ...options };
   // Some bundled Node SDKs pass node-fetch style `agent` options into fetch().
   // Undici doesn't accept that field, and the default global dispatcher already
-  // routes through the secure-exec virtual network stack.
+  // routes through the agentos virtual network stack.
   if (Object.prototype.hasOwnProperty.call(normalized, "agent")) {
     delete normalized.agent;
   }
@@ -216,7 +216,7 @@ async function fetch(input, options = {}) {
   // calls. Per-call dispatchers (the 4f470c61 workaround for pooled clients
   // going stale against released sockets) are no longer needed now that
   // host->guest socket event push keeps pooled connections live.
-  const fetchDispatcher = normalizedOptions.dispatcher == null && typeof getSecureExecUndiciDispatcher === "function" ? getSecureExecUndiciDispatcher() : null;
+  const fetchDispatcher = normalizedOptions.dispatcher == null && typeof getAgentOsUndiciDispatcher === "function" ? getAgentOsUndiciDispatcher() : null;
   try {
     return await undiciFetch(
       resolvedInput,

@@ -57,8 +57,8 @@ var config2 = readProcessConfig();
 var processClockFallbackNow = typeof performance !== "undefined" && performance && typeof performance.now === "function" ? performance.now.bind(performance) : Date.now;
 
 var processClockNow = () => {
-  if (typeof __secureExecHrNowUs === "function") {
-    return __secureExecHrNowUs() / 1000;
+  if (typeof __agentOsHrNowUs === "function") {
+    return __agentOsHrNowUs() / 1000;
   }
   return processClockFallbackNow();
 };
@@ -1154,7 +1154,7 @@ function setupGlobals() {
   if (typeof globalBuffer.constants !== "object" || globalBuffer.constants === null) {
     globalBuffer.constants = BUFFER_CONSTANTS;
   }
-  const builtinUtilModule = globalThis.__secureExecBuiltinUtilModule;
+  const builtinUtilModule = globalThis.__agentOsBuiltinUtilModule;
   if (builtinUtilModule?.types) {
     builtinUtilModule.types.isProxy = () => false;
   }

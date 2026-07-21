@@ -8,7 +8,7 @@ const agent = client.vm.getOrCreate("my-agent");
 
 // The Browserbase credentials go into the session environment, so every
 // command the agent runs — including `browse` — inherits them.
-await agent.openSession({
+await agent.sessions.open({
 	agent: "pi",
 	env: {
 		BROWSERBASE_API_KEY: process.env.BROWSERBASE_API_KEY!,
@@ -17,7 +17,7 @@ await agent.openSession({
 	},
 });
 
-const response = await agent.prompt({
+const response = await agent.sessions.prompt({
 	content: [
 		{
 			type: "text",
@@ -27,4 +27,4 @@ const response = await agent.prompt({
 });
 console.log(response.message?.content ?? []);
 
-await agent.deleteSession();
+await agent.sessions.delete();

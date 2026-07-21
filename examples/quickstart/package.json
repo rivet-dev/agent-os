@@ -22,7 +22,7 @@
 		"pi-extensions": "node --import tsx src/pi-extensions.ts"
 	},
 	"dependencies": {
-		"@rivet-dev/agentos-core": "workspace:*",
+		"@rivet-dev/agentos": "workspace:*",
 		"@rivet-dev/agentos-sandbox": "workspace:*",
 		"sandbox-agent": "^0.4.2",
 		"dockerode": "^4.0.9",

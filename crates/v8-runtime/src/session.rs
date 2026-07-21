@@ -3,7 +3,7 @@
 #[cfg(not(test))]
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -517,6 +517,7 @@ struct SessionAssignment {
     snapshot_cache: Arc<SnapshotCache>,
     isolate_handle: SharedIsolateHandle,
     execution_abort: SharedExecutionAbort,
+    execution_active: Arc<AtomicBool>,
     pause_control: Arc<SessionPauseControl>,
     session_id: String,
     output_generation: Option<u64>,
@@ -832,7 +833,7 @@ fn spawn_warm_worker(
     let worker_userland_code = userland_code.clone();
     // AGENTOS_THREAD_SITE: bounded-v8-warm-worker
     let join_handle = match thread::Builder::new()
-        .name(String::from("secure-exec-v8-warm-worker"))
+        .name(String::from("agentos-v8-warm-worker"))
         .spawn(move || {
             let precreated = precreate_warm_isolate(
                 snapshot_cache,
@@ -934,7 +935,7 @@ fn precreate_warm_isolate(
 
 /// Normalize an opt-in CPU-time budget: `Some(0)` means "disabled" and folds to
 /// `None` so the CPU-budget watchdog is NOT armed. The runtime layer does not
-/// invent a default here: secure-exec sidecar VM executions pass the typed
+/// invent a default here: agentos sidecar VM executions pass the typed
 /// `limits.jsRuntime.cpuTimeLimitMs` default, while lower-level callers can pass
 /// `None`/`0` deliberately.
 fn normalize_cpu_time_limit_ms(cpu_time_limit_ms: Option<u32>) -> Option<u32> {
@@ -1004,6 +1005,9 @@ struct SessionEntry {
     isolate_handle: SharedIsolateHandle,
     /// Current execution abort handle used to wake sync bridge waits.
     execution_abort: SharedExecutionAbort,
+    /// Set from Execute admission until that operation leaves the session
+    /// thread, including the startup window before an isolate handle exists.
+    execution_active: Arc<AtomicBool>,
     pause_control: Arc<SessionPauseControl>,
     /// Durable socket readiness and its dedicated capacity-one wake lane.
     ready_broker: Arc<SessionReadiness>,
@@ -1165,6 +1169,14 @@ impl ActiveExecutionAbort {
 impl Drop for ActiveExecutionAbort {
     fn drop(&mut self) {
         *self.shared.0.lock().unwrap() = None;
+    }
+}
+
+struct ExecutionActivityGuard(Arc<AtomicBool>);
+
+impl Drop for ExecutionActivityGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -1406,6 +1418,7 @@ impl SessionManager {
             SessionReadiness::new(ready_generation, &session_runtime, ready_batch_handle_limit)?;
         let isolate_handle = Arc::new(Mutex::new(None));
         let execution_abort = new_execution_abort();
+        let execution_active = Arc::new(AtomicBool::new(false));
         let pause_control = Arc::new(SessionPauseControl::default());
         #[cfg(test)]
         let session_resources = Arc::clone(session_runtime.resources());
@@ -1424,6 +1437,7 @@ impl SessionManager {
             snapshot_cache: Arc::clone(&self.snapshot_cache),
             isolate_handle: Arc::clone(&isolate_handle),
             execution_abort: execution_abort.clone(),
+            execution_active: Arc::clone(&execution_active),
             pause_control: Arc::clone(&pause_control),
             session_id: session_id.clone(),
             output_generation,
@@ -1474,6 +1488,7 @@ impl SessionManager {
                 join_handle: Some(join_handle),
                 isolate_handle,
                 execution_abort,
+                execution_active,
                 pause_control,
                 ready_broker,
                 #[cfg(test)]
@@ -1751,7 +1766,7 @@ impl SessionManager {
         &self,
         session_id: &str,
         msg: &SessionMessage,
-    ) -> Result<(Sender<SessionCommand>, usize), String> {
+    ) -> Result<(Sender<SessionCommand>, usize, Arc<AtomicBool>), String> {
         let entry = self
             .sessions
             .get(session_id)
@@ -1769,10 +1784,21 @@ impl SessionManager {
             }
         }
         if matches!(msg, SessionMessage::TerminateExecution) {
-            signal_execution_abort(&entry.execution_abort, ExecutionAbortReason::Terminated);
+            if entry.execution_active.load(Ordering::Acquire) {
+                signal_execution_abort_durable(
+                    &entry.execution_abort,
+                    ExecutionAbortReason::Terminated,
+                );
+            } else {
+                signal_execution_abort(&entry.execution_abort, ExecutionAbortReason::Terminated);
+            }
         }
 
-        Ok((entry.tx.clone(), entry.command_capacity))
+        Ok((
+            entry.tx.clone(),
+            entry.command_capacity,
+            Arc::clone(&entry.execution_active),
+        ))
     }
 
     /// Admit an ordinary message without ever blocking the thread that also
@@ -1780,6 +1806,7 @@ impl SessionManager {
     /// `publish_readiness`; ordinary events are never reclassified by name.
     pub fn try_send_to_session(&self, session_id: &str, msg: SessionMessage) -> Result<(), String> {
         let terminate_requested = matches!(&msg, SessionMessage::TerminateExecution);
+        let execute_requested = matches!(&msg, SessionMessage::Execute { .. });
         let incoming_kind = match &msg {
             SessionMessage::InjectGlobals { .. } => String::from("inject_globals"),
             SessionMessage::Execute { .. } => String::from("execute"),
@@ -1787,7 +1814,11 @@ impl SessionManager {
             SessionMessage::StreamEvent(event) => format!("stream_event:{}", event.event_type),
             SessionMessage::TerminateExecution => String::from("terminate_execution"),
         };
-        let (sender, command_capacity) = self.session_command_sender(session_id, &msg)?;
+        let (sender, command_capacity, execution_active) =
+            self.session_command_sender(session_id, &msg)?;
+        if execute_requested {
+            execution_active.store(true, Ordering::Release);
+        }
         let command = SessionCommand::Message(msg);
 
         match sender.try_send(command) {
@@ -1798,12 +1829,18 @@ impl SessionManager {
                 Ok(())
             }
             Err(crossbeam_channel::TrySendError::Full(_)) => {
+                if execute_requested {
+                    execution_active.store(false, Ordering::Release);
+                }
                 Err(format!(
                     "ERR_AGENTOS_SESSION_COMMAND_LIMIT: session {session_id} command queue exceeded limit of {command_capacity} while admitting {incoming_kind} (queued={}); raise limits.reactor.maxHandleCommands",
                     sender.len()
                 ))
             }
             Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                if execute_requested {
+                    execution_active.store(false, Ordering::Release);
+                }
                 Err(format!(
                     "session thread disconnected for session {session_id}"
                 ))
@@ -2205,6 +2242,7 @@ fn session_thread(
         snapshot_cache,
         isolate_handle,
         execution_abort,
+        execution_active,
         pause_control,
         session_id,
         output_generation,
@@ -2341,6 +2379,7 @@ fn session_thread(
                     user_code,
                     wasm_module_bytes,
                 } => {
+                    let _execution_activity = ExecutionActivityGuard(Arc::clone(&execution_active));
                     // `userland_code` is consumed only by the non-test snapshot
                     // path below; keep it bound (without a warning) under `test`.
                     #[cfg(test)]
@@ -2490,11 +2529,19 @@ fn session_thread(
                         let iso = v8_isolate.as_mut().unwrap();
                         iso.cancel_terminate_execution();
 
-                        // Create execution context: Context::new on a snapshot-restored
-                        // isolate gives a fresh clone of the snapshot's default context
-                        // (bridge IIFE already executed, all infrastructure set up).
-                        // On a non-snapshot isolate, this gives a blank context.
-                        let exec_context = isolate::create_context(iso);
+                        // Language executions set bit 1 to reuse the session's
+                        // process-lifetime context. Normal process executions keep
+                        // receiving a fresh context for every Execute message.
+                        let retain_context = mode & 2 != 0;
+                        let module_mode = mode & 1 != 0;
+                        let exec_context = if retain_context {
+                            _v8_context
+                                .as_ref()
+                                .expect("session context exists after isolate creation")
+                                .clone()
+                        } else {
+                            isolate::create_context(iso)
+                        };
 
                         if high_resolution_time {
                             let scope = &mut v8::HandleScope::new(iso);
@@ -2538,6 +2585,28 @@ fn session_thread(
                         // terminate requests can unblock sync bridge waits.
                         let (_active_execution_abort, abort_rx) =
                             ActiveExecutionAbort::arm(&execution_abort);
+                        if execution_abort_requested(&abort_rx) {
+                            // Termination may arrive after Execute admission but
+                            // before isolate startup completes. Finish without
+                            // entering guest code; there is no running isolate
+                            // frame for terminate_execution() to interrupt yet.
+                            send_event_with_generation(
+                                &event_tx,
+                                output_generation,
+                                RuntimeEvent::ExecutionResult {
+                                    session_id,
+                                    exit_code: 1,
+                                    exports: None,
+                                    error: Some(ExecutionErrorBin {
+                                        error_type: String::from("Error"),
+                                        message: String::from("Execution terminated"),
+                                        stack: String::new(),
+                                        code: String::new(),
+                                    }),
+                                },
+                            );
+                            continue;
+                        }
 
                         // Async completions have a dedicated bounded lane.
                         // Synchronous calls register their own capacity-one
@@ -2776,7 +2845,7 @@ fn session_thread(
                             Some(file_path.as_str())
                         };
                         let phase_start = Instant::now();
-                        let (mut code, mut exports, mut error) = if mode == 0 {
+                        let (mut code, mut exports, mut error) = if !module_mode {
                             let scope = &mut v8::HandleScope::new(iso);
                             let ctx = v8::Local::new(scope, &exec_context);
                             let scope = &mut v8::ContextScope::new(scope, ctx);
@@ -2806,7 +2875,7 @@ fn session_thread(
                         // Re-check async ESM completion once immediately so
                         // pure-microtask top-level await settles without
                         // needing a bridge event-loop round-trip.
-                        if mode != 0 && error.is_none() {
+                        if module_mode && error.is_none() {
                             let scope = &mut v8::HandleScope::new(iso);
                             let ctx = v8::Local::new(scope, &exec_context);
                             let scope = &mut v8::ContextScope::new(scope, ctx);
@@ -2858,7 +2927,7 @@ fn session_thread(
 
                         // Finalize any entry-module top-level await that was
                         // waiting on bridge-driven async work (timers/network).
-                        if !terminated && mode != 0 && error.is_none() {
+                        if !terminated && module_mode && error.is_none() {
                             let scope = &mut v8::HandleScope::new(iso);
                             let ctx = v8::Local::new(scope, &exec_context);
                             let scope = &mut v8::ContextScope::new(scope, ctx);
@@ -2947,7 +3016,7 @@ fn session_thread(
                             }
                         }
 
-                        if !terminated && mode == 0 && error.is_none() {
+                        if !terminated && !module_mode && error.is_none() {
                             let scope = &mut v8::HandleScope::new(iso);
                             let ctx = v8::Local::new(scope, &exec_context);
                             let scope = &mut v8::ContextScope::new(scope, ctx);
@@ -4232,6 +4301,7 @@ mod tests {
                 join_handle: Some(join_handle),
                 isolate_handle: Arc::new(Mutex::new(None)),
                 execution_abort: new_execution_abort(),
+                execution_active: Arc::new(AtomicBool::new(false)),
                 pause_control: Arc::new(SessionPauseControl::default()),
                 ready_broker,
                 session_resources,

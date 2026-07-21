@@ -74,7 +74,7 @@ export function serializeMountConfigForSidecar(
 
 const SYNTHETIC_PID_BASE = 1_000_000;
 const MISSING_EXIT_EVENT_GRACE_MS = 500;
-const PROTECTED_READ_ONLY_GUEST_ROOTS = ["/etc/secure-exec"] as const;
+const PROTECTED_READ_ONLY_GUEST_ROOTS = ["/etc/agentos"] as const;
 const TRAILING_OUTPUT_DRAIN_INTERVAL_MS = 10;
 const TRAILING_OUTPUT_DRAIN_MAX_MS = 250;
 const TRAILING_OUTPUT_DRAIN_QUIET_TURNS = 2;

@@ -15,7 +15,7 @@ const env = {
 	BROWSERBASE_PROJECT_ID: process.env.BROWSERBASE_PROJECT_ID!,
 };
 
-const { stdout } = await agent.exec("browse cloud fetch https://example.com", {
+const { stdout } = await agent.process.exec("browse cloud fetch https://example.com", {
 	env,
 });
 

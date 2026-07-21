@@ -244,6 +244,55 @@ docs:
 docs-build:
 	pnpm --filter @rivet-dev/agentos-website build
 
+# Build and crawl the generated site for broken routes, anchors, and assets.
+# Pass `true` to also check external URLs. Crawling the rendered output checks
+# Astro's actual routing behavior instead of guessing routes from MDX paths.
+docs-check-links external='false': docs-build
+	#!/usr/bin/env bash
+	set -euo pipefail
+	command -v docker >/dev/null || {
+		echo "error: docker is required to run the docs link checker" >&2
+		exit 1
+	}
+	repo_root='{{justfile_directory()}}'
+	external='{{ external }}'
+	case "$external" in
+		false) network_args=(--offline) ;;
+		true) network_args=() ;;
+		*)
+			echo "error: external must be 'true' or 'false'" >&2
+			exit 1
+			;;
+	esac
+	docker_env=()
+	if [[ "$external" == true && -n "${GITHUB_TOKEN:-}" ]]; then
+		docker_env=(-e GITHUB_TOKEN)
+	elif [[ "$external" == true && -n "${GH_TOKEN:-}" ]]; then
+		export GITHUB_TOKEN="$GH_TOKEN"
+		docker_env=(-e GITHUB_TOKEN)
+	elif [[ "$external" == true ]] \
+		&& command -v gh >/dev/null \
+		&& GITHUB_TOKEN="$(gh auth token 2>/dev/null)"; then
+		export GITHUB_TOKEN
+		docker_env=(-e GITHUB_TOKEN)
+	fi
+	docker run --rm \
+		"${docker_env[@]}" \
+		-v "$repo_root/website/dist:/site:ro" \
+		lycheeverse/lychee:0.24.2 \
+		--root-dir /site \
+		--index-files index.html \
+		--include-fragments=anchor-only \
+		--exclude-all-private \
+		--max-concurrency 32 \
+		--host-concurrency 2 \
+		--host-request-interval 200ms \
+		--max-retries 1 \
+		--timeout 20 \
+		--no-progress \
+		"${network_args[@]}" \
+		/site
+
 test-bounded cmd='pnpm test':
 	#!/usr/bin/env bash
 	set -euo pipefail

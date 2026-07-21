@@ -19,6 +19,11 @@
 			"import": "./dist/runtime-compat.js",
 			"default": "./dist/runtime-compat.js"
 		},
+		"./internal/code-execution": {
+			"types": "./dist/code-execution.d.ts",
+			"import": "./dist/code-execution.js",
+			"default": "./dist/code-execution.js"
+		},
 		"./test/file-system": {
 			"types": "./dist/test/file-system.d.ts",
 			"import": "./dist/test/file-system.js",

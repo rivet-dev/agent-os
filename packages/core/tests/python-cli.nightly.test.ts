@@ -4,7 +4,7 @@ import { AgentOs } from "../src/index.js";
 import { REGISTRY_SOFTWARE } from "./helpers/registry-commands.js";
 
 // End-to-end coverage for the Pyodide-powered `python` / `python3` CLI exposed
-// by secure-exec, driven through the public AgentOs API. `python` resolves as a
+// by agentos, driven through the public AgentOs API. `python` resolves as a
 // runtime command (like `node`): `vm.exec()` / `vm.execArgv()` / `spawn()` route
 // it directly to the embedded Pyodide runtime, and a `/bin/python` stub also
 // makes it resolvable on the guest shell `PATH`. The Python runtime bridges the

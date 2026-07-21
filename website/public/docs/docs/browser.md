@@ -1,4 +1,4 @@
-# Browser
+# Browser Automation
 
 Let agents read and search the web from an agentOS VM using Browserbase's cloud browser through the browse CLI — no local browser or sandbox required.
 
@@ -36,4 +36,4 @@ browse cloud sessions list               # list cloud browser sessions
 browse cloud projects list               # list Browserbase projects
 ```
 
-The [interactive driver mode](https://docs.browserbase.com/integrations/skills/browse-cli) (`browse open`, `browse click`, …) is not supported inside the VM yet ([#1631](https://github.com/rivet-dev/agentos/issues/1631)). For interactive automation, run `browse` inside a sandbox via [Sandbox Mounting](/docs/sandbox).
+The [interactive driver mode](https://docs.browserbase.com/integrations/skills/browse-cli) (`browse open`, `browse click`, …) is not supported inside the VM yet ([#1631](https://github.com/rivet-dev/agentos/issues/1631)). For interactive automation, run `browse` inside an external sandbox via [External Sandboxes](/docs/sandboxes).

@@ -1,4 +1,4 @@
-# Workflow Automation
+# Workflows & Graphs
 
 Orchestrate multi-step agent tasks with durable workflows.
 

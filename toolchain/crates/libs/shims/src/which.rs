@@ -1,4 +1,4 @@
-//! Minimal `which` implementation for the secure-exec VM.
+//! Minimal `which` implementation for the agentos VM.
 //!
 //! Searches the current PATH for one or more command names and prints the first
 //! matching executable path for each command. This is primarily needed for

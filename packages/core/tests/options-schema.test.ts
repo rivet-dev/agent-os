@@ -79,6 +79,39 @@ describe("AgentOsOptions validation", () => {
 		).toBe(true);
 	});
 
+	test("uses the sidecar wire name for the per-VM binding limit", () => {
+		expect(
+			agentOsOptionsSchema.safeParse({
+				limits: { bindings: { maxRegisteredBindingsPerVm: 256 } },
+			}).success,
+		).toBe(true);
+		expect(
+			agentOsOptionsSchema.safeParse({
+				limits: { bindings: { maxRegisteredCollectionsPerVm: 256 } },
+			}).success,
+		).toBe(false);
+	});
+
+	test("validates execution retention limits as positive safe integers", () => {
+		expect(
+			agentOsOptionsSchema.safeParse({
+				limits: {
+					execution: {
+						completedTtlMs: 300_000,
+						maxCompletedExecutions: 1_024,
+						liveExecutionWarningThreshold: 64,
+					},
+				},
+			}).success,
+		).toBe(true);
+		for (const value of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+			expect(
+				agentOsOptionsSchema.safeParse({
+					limits: { execution: { completedTtlMs: value } },
+				}).success,
+			).toBe(false);
+		}
+	});
 	test("provider sandbox starts a client and owns disposal", async () => {
 		let disposed = false;
 		const client = {

@@ -713,7 +713,7 @@ describeIf(
 
 		it("execFileSync on node_modules/.bin shell shims unwraps to the node entrypoint", async () => {
 			const projectRoot = mkdtempSync(
-				join(tmpdir(), "secure-exec-node-bin-shim-"),
+				join(tmpdir(), "agentos-node-bin-shim-"),
 			);
 			cleanupPaths.push(projectRoot);
 
@@ -785,7 +785,7 @@ describeIf(
 
 		it("execFileSync dereferences node_modules/.bin main-module symlinks", async () => {
 			const projectRoot = mkdtempSync(
-				join(tmpdir(), "secure-exec-node-bin-symlink-"),
+				join(tmpdir(), "agentos-node-bin-symlink-"),
 			);
 			cleanupPaths.push(projectRoot);
 
@@ -853,7 +853,7 @@ describeIf(
 
 		it("execFileSync unwraps shell shims whose node entrypoint has no shebang or extension", async () => {
 			const projectRoot = mkdtempSync(
-				join(tmpdir(), "secure-exec-node-bin-shim-no-shebang-"),
+				join(tmpdir(), "agentos-node-bin-shim-no-shebang-"),
 			);
 			cleanupPaths.push(projectRoot);
 

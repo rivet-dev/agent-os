@@ -10,7 +10,7 @@ transport.
 
 For socket ownership, loopback, DNS, and network policy, see
 [Networking](/docs/architecture/networking). For the client-facing JavaScript
-environment, see [JavaScript Runtime](/docs/js-runtime).
+environment, see [JavaScript](/docs/javascript).
 
 Tokio never invokes guest JavaScript from a runtime worker. A Tokio task stores
 bounded work and publishes durable readiness. The separate V8 executor thread

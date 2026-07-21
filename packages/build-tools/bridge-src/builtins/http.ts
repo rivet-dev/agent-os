@@ -1013,9 +1013,9 @@ var ClientRequest = class {
       return;
     }
     const signalWithOnAbort = signal;
-    signalWithOnAbort.__secureExecPrevOnAbort__ = signalWithOnAbort.onabort ?? null;
+    signalWithOnAbort.__agentOsPrevOnAbort__ = signalWithOnAbort.onabort ?? null;
     signalWithOnAbort.onabort = ((event) => {
-      signalWithOnAbort.__secureExecPrevOnAbort__?.call(signal, event);
+      signalWithOnAbort.__agentOsPrevOnAbort__?.call(signal, event);
       this._signalAbortHandler?.();
     });
   }
@@ -1031,11 +1031,11 @@ var ClientRequest = class {
     }
     const signalWithOnAbort = signal;
     if (signalWithOnAbort.onabort === this._signalAbortHandler) {
-      signalWithOnAbort.onabort = signalWithOnAbort.__secureExecPrevOnAbort__ ?? null;
-    } else if (signalWithOnAbort.__secureExecPrevOnAbort__ !== void 0) {
-      signalWithOnAbort.onabort = signalWithOnAbort.__secureExecPrevOnAbort__ ?? null;
+      signalWithOnAbort.onabort = signalWithOnAbort.__agentOsPrevOnAbort__ ?? null;
+    } else if (signalWithOnAbort.__agentOsPrevOnAbort__ !== void 0) {
+      signalWithOnAbort.onabort = signalWithOnAbort.__agentOsPrevOnAbort__ ?? null;
     }
-    delete signalWithOnAbort.__secureExecPrevOnAbort__;
+    delete signalWithOnAbort.__agentOsPrevOnAbort__;
     this._signalAbortHandler = void 0;
   }
   _clearTimeout() {
@@ -1051,7 +1051,7 @@ var ClientRequest = class {
 
 function createUnsupportedHttpSocketWriteError(surface) {
   return createErrorWithCode(
-    `${surface}.write() is not implemented by the secure-exec http compatibility layer`,
+    `${surface}.write() is not implemented by the agentos http compatibility layer`,
     "ERR_NOT_IMPLEMENTED"
   );
 }
@@ -1645,7 +1645,7 @@ var Agent = class _Agent {
 
 function debugBridgeNetwork(...args) {
   if (process.env.AGENTOS_DEBUG_HTTP_BRIDGE === "1") {
-    console.error("[secure-exec bridge network]", ...args);
+    console.error("[agentos bridge network]", ...args);
   }
 }
 

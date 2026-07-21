@@ -63,7 +63,7 @@ if (typeof Uint8Array.prototype.utf8Slice !== "function") {
 
 var bufferCtorMutable = import_buffer2.Buffer;
 
-if (typeof bufferCtorMutable.allocUnsafe === "function" && !bufferCtorMutable.allocUnsafe._secureExecPatched) {
+if (typeof bufferCtorMutable.allocUnsafe === "function" && !bufferCtorMutable.allocUnsafe._agentOsPatched) {
   const originalAllocUnsafe = bufferCtorMutable.allocUnsafe;
   bufferCtorMutable.allocUnsafe = function patchedAllocUnsafe(size) {
     try {
@@ -75,7 +75,7 @@ if (typeof bufferCtorMutable.allocUnsafe === "function" && !bufferCtorMutable.al
       throw error;
     }
   };
-  bufferCtorMutable.allocUnsafe._secureExecPatched = true;
+  bufferCtorMutable.allocUnsafe._agentOsPatched = true;
 }
 
 var Buffer3 = import_buffer2.Buffer;

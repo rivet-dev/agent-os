@@ -27,12 +27,12 @@ app.post("/slack/events", async (c) => {
 	// Prompt calls for one session are serialized automatically by AgentOS.
 	if (body.event?.type === "message" && !body.event?.bot_id) {
 		const agent = client.vm.getOrCreate("slack-agent");
-		await agent.openSession({
+		await agent.sessions.open({
 			agent: "pi",
 			env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 			additionalInstructions: "You answer Slack messages concisely.",
 		});
-		const result = await agent.prompt({
+		const result = await agent.sessions.prompt({
 			content: [
 				{
 					type: "text",

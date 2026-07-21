@@ -20,7 +20,7 @@
 //!     (`sidecar::execution`), the embedded V8 runtime IPC pair, and
 //!     host-backed storage plugins.
 //!   * process -- `std::process::Command` / `tokio::process` / OS `fork`.
-//!     Sanctioned only where secure-exec spawns its own helper process (the
+//!     Sanctioned only where agentos spawns its own helper process (the
 //!     client transport that launches the sidecar). Guest "process" spawns are
 //!     dispatched through the kernel `CommandDriver` registry and never touch
 //!     `Command::new`.
@@ -394,12 +394,12 @@ const NET_ALLOW: &[&str] = &[
 
 /// process: OS subprocess creation.
 ///
-/// Sanctioned surface: only the client transport, which spawns secure-exec's
+/// Sanctioned surface: only the client transport, which spawns agentos's
 /// own sidecar helper binary. Guest "process" spawns go through the kernel
 /// `CommandDriver` registry and never reach `Command::new`.
 const PROCESS_ALLOW: &[&str] = &[
     "crates/sidecar-client/src/transport.rs",
-    // V8 snapshot builder re-execs secure-exec's OWN binary as a helper
+    // V8 snapshot builder re-execs agentos's OWN binary as a helper
     // (SNAPSHOT_HELPER_ENV) so snapshot creation runs in a clean process.
     // Host-side bootstrap only; no guest-controlled input picks the program.
     "crates/v8-runtime/src/snapshot.rs",
@@ -1449,7 +1449,7 @@ fn browser_sources_are_retained_but_disabled_from_native_build_and_publish_gates
     }
 
     let mirror_generator =
-        std::fs::read_to_string(root.join("scripts/generate-secure-exec-mirror.mjs"))
+        std::fs::read_to_string(root.join("scripts/generate-agentos-mirror.mjs"))
             .expect("read compatibility mirror generator");
     assert!(
         mirror_generator.contains("browserShim ? { private: true } : {}")
@@ -1460,7 +1460,7 @@ fn browser_sources_are_retained_but_disabled_from_native_build_and_publish_gates
         let source = std::fs::read_to_string(root.join(relative_path))
             .unwrap_or_else(|error| panic!("read {relative_path}: {error}"));
         assert!(
-            source.contains("node --test scripts/generate-secure-exec-mirror.test.mjs"),
+            source.contains("node --test scripts/generate-agentos-mirror.test.mjs"),
             "{relative_path} must enforce compatibility-mirror reproducibility"
         );
     }

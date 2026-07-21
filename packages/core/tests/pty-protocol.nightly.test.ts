@@ -15,14 +15,14 @@ import type { AgentOs } from "../src/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "../../..");
-const SECURE_EXEC_C_ROOT = resolve(
+const AGENTOS_C_ROOT = resolve(
 	REPO_ROOT,
 	"toolchain/c",
 );
 const SIDECAR_BINARY = process.env.AGENTOS_SIDECAR_BIN
 	? resolve(process.env.AGENTOS_SIDECAR_BIN)
 	: resolve(REPO_ROOT, "target/debug/agentos-sidecar");
-const PTY_PROBE_COMMAND_DIR = resolve(SECURE_EXEC_C_ROOT, "build");
+const PTY_PROBE_COMMAND_DIR = resolve(AGENTOS_C_ROOT, "build");
 const PTY_PROBE_BINARY = resolve(PTY_PROBE_COMMAND_DIR, "pty_probe");
 
 const SETTLE_MS = 80;
@@ -35,14 +35,14 @@ function ensurePtyProbeBuilt(): void {
 	}
 
 	const result = spawnSync("make", ["build/pty_probe"], {
-		cwd: SECURE_EXEC_C_ROOT,
+		cwd: AGENTOS_C_ROOT,
 		encoding: "utf8",
 	});
 	if (result.status !== 0) {
 		throw new Error(
 			[
 				"failed to build pty_probe C WASM fixture",
-				`cwd=${SECURE_EXEC_C_ROOT}`,
+				`cwd=${AGENTOS_C_ROOT}`,
 				`status=${result.status}`,
 				result.stdout,
 				result.stderr,

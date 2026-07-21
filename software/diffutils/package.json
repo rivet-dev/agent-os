@@ -3,7 +3,7 @@
 	"version": "0.3.4",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "GNU diffutils for secure-exec VMs (diff)",
+	"description": "GNU diffutils for agentos VMs (diff)",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [

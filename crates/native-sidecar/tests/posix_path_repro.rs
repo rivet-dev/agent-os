@@ -73,7 +73,7 @@ fn configure_mounts(
         mounts.insert(
             0,
             MountDescriptor {
-                guest_path: String::from("/__secure_exec/commands/0"),
+                guest_path: String::from("/__agentos/commands/0"),
                 guest_source: String::from("host_dir"),
                 guest_fstype: String::from("host_dir"),
                 read_only: true,

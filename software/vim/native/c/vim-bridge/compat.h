@@ -1,7 +1,7 @@
 /* compat.h — forced-include shim filling full-OS libc gaps for porting
- * Linux C programs (vim) to the secure-exec wasm runtime. */
-#ifndef _SECUREEXEC_WASM_COMPAT_H
-#define _SECUREEXEC_WASM_COMPAT_H
+ * Linux C programs (vim) to the agentos wasm runtime. */
+#ifndef _AGENTOS_WASM_COMPAT_H
+#define _AGENTOS_WASM_COMPAT_H
 #include <sys/types.h>
 #include <poll.h>
 #include <sys/time.h>

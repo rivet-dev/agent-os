@@ -264,6 +264,27 @@ export type LiveResponsePayload =
 			retryable: boolean | null;
 			errno: string | null;
 	  }
+	| { type: "execution_accepted"; response: protocol.ExecutionAcceptedResponse }
+	| {
+			type: "execution_completed";
+			response: protocol.ExecutionCompletedResponse;
+	  }
+	| {
+			type: "execution_evaluation";
+			response: protocol.ExecutionEvaluationResponse;
+	  }
+	| { type: "typescript_check"; response: protocol.TypeScriptCheckResponse }
+	| {
+			type: "execution_descriptor";
+			response: protocol.ExecutionDescriptorResponse;
+	  }
+	| { type: "execution_list"; response: protocol.ExecutionListResponse }
+	| { type: "execution_deleted"; response: protocol.ExecutionDeletedResponse }
+	| { type: "execution_io"; response: protocol.ExecutionIoResponse }
+	| {
+			type: "execution_output_page";
+			response: protocol.ExecutionOutputPageResponse;
+	  }
 	| {
 			type: "ext_result";
 			envelope: LiveExtEnvelope;
@@ -625,6 +646,24 @@ export function fromGeneratedResponsePayload(
 				type: "ext_result",
 				envelope: fromGeneratedExtEnvelope(payload.val),
 			};
+		case "ExecutionAcceptedResponse":
+			return { type: "execution_accepted", response: payload.val };
+		case "ExecutionCompletedResponse":
+			return { type: "execution_completed", response: payload.val };
+		case "ExecutionEvaluationResponse":
+			return { type: "execution_evaluation", response: payload.val };
+		case "TypeScriptCheckResponse":
+			return { type: "typescript_check", response: payload.val };
+		case "ExecutionDescriptorResponse":
+			return { type: "execution_descriptor", response: payload.val };
+		case "ExecutionListResponse":
+			return { type: "execution_list", response: payload.val };
+		case "ExecutionDeletedResponse":
+			return { type: "execution_deleted", response: payload.val };
+		case "ExecutionIoResponse":
+			return { type: "execution_io", response: payload.val };
+		case "ExecutionOutputPageResponse":
+			return { type: "execution_output_page", response: payload.val };
 	}
 }
 

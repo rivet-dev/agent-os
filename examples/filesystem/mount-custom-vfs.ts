@@ -1,8 +1,8 @@
-import { AgentOs } from "@rivet-dev/agentos-core";
+import { AgentOs } from "@rivet-dev/agentos";
 
 const vm = await AgentOs.create({ defaultSoftware: false });
-await vm.mountFs({
+await vm.filesystem.mount({
 	path: "/home/agentos/scratch",
 	plugin: { id: "memory", config: {} },
 });
-await vm.writeFile("/home/agentos/scratch/hello.txt", "hello");
+await vm.filesystem.writeFile("/home/agentos/scratch/hello.txt", "hello");

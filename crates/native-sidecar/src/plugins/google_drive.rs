@@ -19,7 +19,7 @@ use url::Url;
 
 const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const DEFAULT_INLINE_THRESHOLD: usize = 64 * 1024;
-const MANIFEST_FORMAT: &str = "secure_exec_google_drive_filesystem_manifest_v1";
+const MANIFEST_FORMAT: &str = "agentos_google_drive_filesystem_manifest_v1";
 const LEGACY_AGENTOS_MANIFEST_FORMAT: &str = "agentos_google_drive_filesystem_manifest_v1";
 const DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
 const DEFAULT_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";

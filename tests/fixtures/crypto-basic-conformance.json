@@ -1,5 +1,5 @@
 {
-  "message": "secure-exec",
+  "message": "agentos",
   "hmacKey": "shared-secret",
   "password": "password",
   "salt": "salt",
@@ -12,20 +12,20 @@
   },
   "aesCbc": {
     "algorithm": "aes-256-cbc",
-    "plaintext": "secure-exec-crypto-surface",
+    "plaintext": "agentos-crypto-surface",
     "keyHex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
     "ivHex": "0102030405060708090a0b0c0d0e0f10"
   },
   "aesGcm": {
     "algorithm": "aes-256-gcm",
-    "plaintext": "secure-exec-gcm-authenticated",
-    "aad": "secure-exec-aad",
+    "plaintext": "agentos-gcm-authenticated",
+    "aad": "agentos-aad",
     "keyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     "ivHex": "101112131415161718191a1b",
     "authTagLength": 16
   },
   "rsa": {
-    "message": "secure-exec advanced crypto",
+    "message": "agentos advanced crypto",
     "privatePem": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC5r8vgRgQj8qd5\nBzip2/NdY6qTnrF5D5V7F+cSoARQbWTxqoAq92II5swnKTGafmf4m1mdFT9Jqwh8\n+oD2q9cokZsPONBEQTbhgLziUC5h8BU8xZf/5yHi8oQ9CX96D5XNyGZA4fpG4l+0\nxMUXCvPL4loKElgBvSrGKYqA+/3gAqQESELKFzdwiwy6BsJuIYgeHp48aHSm/Mei\nhi7nGncWIWRSccbUbQ2rskqwNJJEi7w1cGzPfyyxlmK7RvxFM979lHtbS266j3K/\nD8azaL14oJkWesjwjAwXaCG+YTBZsznpNIkbzNcboqb7azxPc8ihLYEhZgw7Mypw\nW34i3IWpAgMBAAECggEABiGud0m7y3ew6dezTZsBDPvq2MFCqTWhB4JxQG9Lq5MF\n/gIinyIx7Asgm0hw2WIQ/kFO/73N+OZIO1953VHGViu2Ty94MFDNxm63jgRjMhu5\nIwHmJ4g5cu+NyCAyQ+5HN/2rY4gZLIVyiJsYyptNFDxb7pcCR47SEauy5aVGK4/y\nuv3WmZQPU8EkCol7Cxhgq5MFkfLuXN44+Lt81ADaI8bcKgzosyczswkijAVzmmjt\ncc4T/SDy8dZBQZistej5pBWVaDJHIEJyoxxRrVy5mJCDEfSfDDAm2iNrGGQAMQ6x\nlpVAjT5MtBA+tbwXe4ODMZaGYKiiFC6DxJX8yThrawKBgQDo3Fnf0+3qkmfXbuG2\nO3GjJQ0S5tthS7Av6e90c68zLMn795lh30BCCuMnwfIAw3gP7A3mxXBepFNaG3/h\nUJ5BhT3pegg/9qetNHgLuUpOZE7F22h/TGNBeV2TJr5oYyCQU289yvRgl9tYSE5J\no5/YnGCX9nnTj2LdOvN1BDqHGwKBgQDMI2d8MROUsbLCKR7sHpkpk8lC6wb23x2s\nLe3tb8cjnSLwfIDKruV1O85AVPmQ9vD7lkwDUtn6WsSjK01GBCdS19uOlPbwhsAe\nsVDEa0pchTHerHIFyWX67gX2lWB9wyb5WnoaOW3Z07E2l//5x6/MQihF+KJ7+ooB\nZNj5ZcAeiwKBgQDEfpyAWY9b76sciX6Bjeu4ZV2A47mfgoTsCZV8SNpAbr0Kl8ag\nZgkNMa65L9mMd2Vq2iBo6ZaG5ldHpAjnEmZYl5zE1ar8fqDDcZETI4nmWJJ4N0sY\nkFb5OvaRY5Is9+jUoPMvy4EnuTzoZCtbzGzoFh0UXnIy6b3dPQ+PYMAanQKBgAHo\nzt39g4ZfhyGDyvNAcgROipJiqmUCvz9OCqyu3/j4TkxbjcTXj/PhxFMbuF3fwW9I\n/5sEWl+aG76+9/EQtuFyfW4+/HRRfliLJgtASajF4iqICGT/dkG7mjitOwLSIXox\nm3TFVr6z2TN+hnlqob1SXRgSdEqelE3hCJqEliBzAoGAY8tfltBpUviP6QvUWLuR\nUAVVJAbO5+4nqoAuw99YUk8ROynPJ0DRcl4gWdpmsn3en4l8tDa2B2+4f4aqIHk9\n2pHtDYOvwcOHUmVM3wUd+A8g51aTGc4cDrYNFCU0MNKeZIGUNvmUUIzOe3Ip2baV\nhQMaC2t1SHE0udGv4T0LBLE=\n-----END PRIVATE KEY-----",
     "publicPem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAua/L4EYEI/KneQc4qdvz\nXWOqk56xeQ+VexfnEqAEUG1k8aqAKvdiCObMJykxmn5n+JtZnRU/SasIfPqA9qvX\nKJGbDzjQREE24YC84lAuYfAVPMWX/+ch4vKEPQl/eg+VzchmQOH6RuJftMTFFwrz\ny+JaChJYAb0qximKgPv94AKkBEhCyhc3cIsMugbCbiGIHh6ePGh0pvzHooYu5xp3\nFiFkUnHG1G0Nq7JKsDSSRIu8NXBsz38ssZZiu0b8RTPe/ZR7W0tuuo9yvw/Gs2i9\neKCZFnrI8IwMF2ghvmEwWbM56TSJG8zXG6Km+2s8T3PIoS2BIWYMOzMqcFt+ItyF\nqQIDAQAB\n-----END PUBLIC KEY-----",
     "sha256SignatureHex": "3b63c4ed2e760a6c49b11889b9b2d3b854f2ef849ddedcdba6da75838122640a79f01959cc314732fe005e7af3a1c5437a735cdbf17796dd5e2ef23ed8e29e7963ab28b22f0cc0992b7519d397ac2fd29259e3557f59c71cf6b2d334715302534ecdf6dae04aea9fca5c3e658b9be66f2b5b51c960f7d41dc2381049ecfc471e7c3119be82f8156f3655451eebb8412eeb989481f28864d6fed41a2bd1b1e8591fbd6afc2b8b46ab2ae19ab1028f380b7ebeb5d1cfe851af08764f40f295ef6ea9b9a64fde565e85dde122cd21ae8cb7100065cecb74e2168ec3404f4ff5f99ed80f0f081000c337a387d29425a33cf15cd8c41f5ebe64a0a99cc9164fde8777"

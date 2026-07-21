@@ -4,7 +4,7 @@ name = "cmd-touch"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "touch standalone binary for secure-exec VM"
+description = "touch standalone binary for agentos VM"
 
 [[bin]]
 name = "touch"

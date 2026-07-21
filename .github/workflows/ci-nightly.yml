@@ -40,7 +40,6 @@ jobs:
             sudo apt-get install --yes cmake
           fi
       - run: pnpm install --frozen-lockfile
-      - run: node --test scripts/generate-secure-exec-mirror.test.mjs
       - run: make -C toolchain commands
       - run: make -C toolchain cmd/duckdb
       - run: make -C toolchain codex

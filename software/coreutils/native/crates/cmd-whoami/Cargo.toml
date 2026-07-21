@@ -4,11 +4,11 @@ name = "cmd-whoami"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "whoami standalone binary for secure-exec VM"
+description = "whoami standalone binary for agentos VM"
 
 [[bin]]
 name = "whoami"
 path = "src/main.rs"
 
 [dependencies]
-secureexec-builtins = { path = "../../../../../toolchain/crates/libs/builtins" }
+agentos-builtins = { path = "../../../../../toolchain/crates/libs/builtins" }

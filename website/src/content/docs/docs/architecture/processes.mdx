@@ -8,7 +8,7 @@ skill: true
 
 This page is an internals deep-dive on the kernel's **process model**: the data
 structures and syscall paths behind every guest process. For the client-facing
-API (`exec`, `spawn`, `openShell`, lifecycle, the process tree), see
+API (`process.exec`, `process.spawn`, `terminal.open`, lifecycle, the process tree), see
 [Processes & Shell](/docs/processes). For the surrounding component and trust
 model, see [Architecture](/docs/architecture).
 
@@ -82,10 +82,10 @@ An interactive shell needs a terminal, not just piped stdio: line editing, job
 control signals, and window size all depend on a PTY. The kernel provides
 virtual PTY devices for this.
 
-- **A shell is a process plus a PTY.** `openShell` allocates a kernel PTY and starts a shell process attached to it, returning a `shellId`. The PTY is a virtualized terminal device, never a host `/dev/pts` entry.
-- **Bidirectional terminal I/O.** `writeShell` feeds keystrokes into the PTY master side; everything the shell and its children emit comes back as `shellData` events. This carries terminal control sequences, so full-screen TUIs behave correctly.
-- **Resize is a terminal operation.** `resizeShell` updates the PTY's window size (columns and rows), which the kernel propagates to the foreground process the way a real terminal resize would, so programs relying on `TIOCGWINSZ`-style sizing redraw correctly.
-- **Teardown.** `closeShell` tears down the PTY and the attached shell process. An open shell keeps the VM active, the same way an open PTY keeps a session alive on a real system.
+- **A shell is a process plus a PTY.** `terminal.open` allocates a kernel PTY and starts a shell process attached to it, returning a `shellId`. The PTY is a virtualized terminal device, never a host `/dev/pts` entry.
+- **Bidirectional terminal I/O.** `terminal.write` feeds keystrokes into the PTY master side; everything the shell and its children emit comes back as `shellData` events. This carries terminal control sequences, so full-screen TUIs behave correctly.
+- **Resize is a terminal operation.** `terminal.resize` updates the PTY's window size (columns and rows), which the kernel propagates to the foreground process the way a real terminal resize would, so programs relying on `TIOCGWINSZ`-style sizing redraw correctly.
+- **Teardown.** `terminal.close` tears down the PTY and the attached shell process. An open shell keeps the VM active, the same way an open PTY keeps a session alive on a real system.
 
 ## WASM sh and coreutils on the process model
 

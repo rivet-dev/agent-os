@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::ExecutionStreamChannel;
 
 pub(super) struct BindingProcessEventRequest {
     pub(super) runtime_context: agentos_runtime::RuntimeContext,
@@ -406,6 +407,7 @@ where
         ownership: &OwnershipScope,
     ) -> Result<bool, SidecarError> {
         let mut emitted_any = false;
+        self.expire_public_execution_deadlines()?;
 
         let mut queued_envelopes = Vec::new();
         {
@@ -846,12 +848,29 @@ where
         }
         let (connection_id, session_id) = { (vm.connection_id.clone(), vm.session_id.clone()) };
         let ownership = OwnershipScope::vm(&connection_id, &session_id, vm_id);
+        let public_execution = self.is_public_execution_process(vm_id, process_id);
 
         if self.capture_extension_process_output_event(vm_id, process_id, &event) {
             return Ok(None);
         }
 
         match event {
+            ActiveExecutionEvent::Stdout(chunk) if public_execution => Ok(self
+                .record_public_execution_output(
+                    vm_id,
+                    process_id,
+                    ExecutionStreamChannel::Stdout,
+                    chunk,
+                )
+                .map(|payload| EventFrame::new(ownership, payload))),
+            ActiveExecutionEvent::Stderr(chunk) if public_execution => Ok(self
+                .record_public_execution_output(
+                    vm_id,
+                    process_id,
+                    ExecutionStreamChannel::Stderr,
+                    chunk,
+                )
+                .map(|payload| EventFrame::new(ownership, payload))),
             ActiveExecutionEvent::Stdout(chunk) => Ok(Some(EventFrame::new(
                 ownership,
                 EventPayload::ProcessOutput(ProcessOutputEvent {
@@ -909,25 +928,37 @@ where
                     process_id,
                 );
                 record_execute_response_to_exit(vm_id, process_id);
+                let park_resident = public_execution
+                    && self.should_park_public_execution_process(vm_id, process_id);
                 let phase_start = Instant::now();
-                let became_idle = self
-                    .finish_active_process_exit(vm_id, process_id, exit_code)?
-                    .unwrap_or(false);
+                let became_idle = if park_resident {
+                    false
+                } else {
+                    self.finish_active_process_exit(vm_id, process_id, exit_code)?
+                        .unwrap_or(false)
+                };
                 record_execute_phase("process_exit_cleanup", phase_start.elapsed());
 
                 let phase_start = Instant::now();
-                if became_idle {
+                if became_idle || (park_resident && !self.has_running_nonresident_processes(vm_id))
+                {
                     self.bridge.emit_lifecycle(vm_id, LifecycleState::Ready)?;
                 }
                 record_execute_phase("process_exit_lifecycle_emit", phase_start.elapsed());
 
-                Ok(Some(EventFrame::new(
-                    ownership,
-                    EventPayload::ProcessExited(ProcessExitedEvent {
-                        process_id: process_id.to_owned(),
-                        exit_code,
-                    }),
-                )))
+                if public_execution {
+                    Ok(self
+                        .complete_public_execution(vm_id, process_id, exit_code)
+                        .map(|payload| EventFrame::new(ownership, payload)))
+                } else {
+                    Ok(Some(EventFrame::new(
+                        ownership,
+                        EventPayload::ProcessExited(ProcessExitedEvent {
+                            process_id: process_id.to_owned(),
+                            exit_code,
+                        }),
+                    )))
+                }
             }
         }
     }

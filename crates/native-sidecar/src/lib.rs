@@ -12,6 +12,7 @@ pub mod extension;
 pub(crate) mod filesystem;
 #[allow(dead_code)]
 pub(crate) mod json_rpc;
+pub(crate) mod language_execution;
 pub mod limits;
 pub(crate) mod metadata;
 pub mod package_projection;

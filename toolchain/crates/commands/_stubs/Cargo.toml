@@ -3,11 +3,11 @@ name = "cmd-stubs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "_stubs mini-multicall binary for unsupported commands in secure-exec VM"
+description = "_stubs mini-multicall binary for unsupported commands in agentos VM"
 
 [[bin]]
 name = "_stubs"
 path = "src/main.rs"
 
 [dependencies]
-secureexec-stubs = { path = "../../libs/stubs" }
+agentos-stubs = { path = "../../libs/stubs" }

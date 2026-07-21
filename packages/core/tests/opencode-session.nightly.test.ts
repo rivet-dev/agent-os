@@ -56,7 +56,7 @@ const REGISTRY_COMMAND_DIR_CANDIDATES = [
 	),
 	resolve(
 		import.meta.dirname,
-		"../../../../secure-exec/toolchain/target/wasm32-wasip1/release/commands",
+		"../../../../agentos/toolchain/target/wasm32-wasip1/release/commands",
 	),
 ];
 

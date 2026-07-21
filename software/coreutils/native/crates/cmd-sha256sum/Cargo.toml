@@ -4,7 +4,7 @@ name = "cmd-sha256sum"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "sha256sum standalone binary for secure-exec VM"
+description = "sha256sum standalone binary for agentos VM"
 
 [[bin]]
 name = "sha256sum"

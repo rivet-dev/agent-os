@@ -138,7 +138,7 @@ fn parse_dns_record_type(rrtype: &str) -> Result<RecordType, SidecarError> {
         "CAA" => Ok(RecordType::CAA),
         "ANY" => Ok(RecordType::ANY),
         other => Err(SidecarError::Execution(format!(
-            "ERR_NOT_IMPLEMENTED: dns rrtype {other} is not supported by the secure-exec dns bridge"
+            "ERR_NOT_IMPLEMENTED: dns rrtype {other} is not supported by the agentos dns bridge"
         ))),
     }
 }
@@ -324,7 +324,7 @@ fn dns_resolution_to_node_value(
                 .collect(),
         )),
         other => Err(SidecarError::Execution(format!(
-            "ERR_NOT_IMPLEMENTED: dns rrtype {other} is not supported by the secure-exec dns bridge"
+            "ERR_NOT_IMPLEMENTED: dns rrtype {other} is not supported by the agentos dns bridge"
         ))),
     }
 }

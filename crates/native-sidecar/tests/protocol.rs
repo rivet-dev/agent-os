@@ -130,7 +130,7 @@ fn ext_envelope_event_encoding_microbench() {
         let ext_frame = ProtocolFrame::Event(EventFrame::new(
             ownership.clone(),
             EventPayload::Ext(ExtEnvelope {
-                namespace: String::from("dev.rivet.secure-exec.acp"),
+                namespace: String::from("dev.rivet.agentos.acp"),
                 payload: inner,
             }),
         ));

@@ -4,8 +4,8 @@ import type { registry } from "./server";
 const client = createClient<typeof registry>({ endpoint: "http://localhost:6420" });
 const handle = client.vm.getOrCreate("shared-agent");
 const conn = handle.connect();
-const { pid } = await handle.spawn("node", ["/home/agentos/server.js"]);
-const { shellId } = await handle.openShell();
+const { pid } = await handle.process.spawn("node", ["/home/agentos/server.js"]);
+const { shellId } = await handle.terminal.open();
 
 // All connected clients see process output
 conn.on("processOutput", (data) => {

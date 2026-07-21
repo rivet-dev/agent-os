@@ -1,11 +1,11 @@
 {
 	"name": "@rivet-dev/agentos-runtime-sidecar-linux-arm64-gnu",
 	"version": "0.0.1",
-	"description": "Secure Exec native sidecar binary for Linux arm64 (glibc)",
+	"description": "AgentOS language execution native sidecar binary for Linux arm64 (glibc)",
 	"license": "Apache-2.0",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/rivet-dev/secure-exec.git",
+		"url": "https://github.com/rivet-dev/agentos.git",
 		"directory": "packages/sidecar/npm/linux-arm64-gnu"
 	},
 	"os": [

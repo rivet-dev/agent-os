@@ -1,0 +1,17 @@
+{
+	"name": "@rivet-dev/agentos-example-js-typescript",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"start": "tsx src/index.ts",
+		"check-types": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@rivet-dev/agentos": "workspace:*",
+		"typescript": "^5.7.2"
+	},
+	"devDependencies": {
+		"@types/node": "^22.10.2",
+		"tsx": "^4.19.2"
+	}
+}

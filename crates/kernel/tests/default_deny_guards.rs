@@ -1,6 +1,6 @@
 //! Default-deny / fail-closed guards (CI hardening, item #5).
 //!
-//! These tests pin down the secure-exec security posture so a refactor cannot
+//! These tests pin down the agentos security posture so a refactor cannot
 //! silently weaken it:
 //!
 //!   1. Default-deny: with no policy configured (`Permissions::default()`),

@@ -660,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn binary_path_uses_secure_exec_env_fallback() {
+    fn binary_path_uses_agentos_env_fallback() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let previous = std::env::var(SIDECAR_BIN_ENV).ok();
         std::env::set_var(SIDECAR_BIN_ENV, "/tmp/agentos-native-sidecar");

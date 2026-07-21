@@ -798,7 +798,7 @@ function isProjectedCommandGuestPath(subject) {
     ? path.posix.normalize(raw)
     : path.posix.resolve(HOST_FS_GUEST_CWD, raw);
   return (
-    /^\/__secure_exec\/commands\/\d+(?:\/|$)/u.test(guestPath) ||
+    /^\/__agentos\/commands\/\d+(?:\/|$)/u.test(guestPath) ||
     /^\/opt\/agentos\/bin\/[^/]+$/u.test(guestPath)
   );
 }
@@ -860,7 +860,7 @@ function projectedCommandImageBytes(command) {
   if (!name || name === '.' || name === '/') return null;
   for (const mapping of GUEST_PATH_MAPPINGS) {
     if (
-      !/^\/__secure_exec\/commands\/\d+$/u.test(mapping?.guestPath ?? '') &&
+      !/^\/__agentos\/commands\/\d+$/u.test(mapping?.guestPath ?? '') &&
       mapping?.guestPath !== '/opt/agentos/bin'
     ) continue;
     const guestCandidate = path.posix.join(mapping.guestPath, name);
@@ -4501,7 +4501,7 @@ function readSyncRpcLine() {
     const chunk = Buffer.alloc(4096);
     const bytesRead = readSync(NODE_SYNC_RPC_RESPONSE_FD, chunk, 0, chunk.length, null);
     if (bytesRead === 0) {
-      throw new Error('secure-exec WASM sync RPC response channel closed unexpectedly');
+      throw new Error('agentos WASM sync RPC response channel closed unexpectedly');
     }
     syncRpcResponseBuffer += chunk.subarray(0, bytesRead).toString('utf8');
   }
@@ -4529,7 +4529,7 @@ function callSyncRpc(method, args = []) {
   }
 
   if (!NODE_SYNC_RPC_ENABLE || NODE_SYNC_RPC_REQUEST_FD == null || NODE_SYNC_RPC_RESPONSE_FD == null) {
-    const error = new Error(`secure-exec WASM sync RPC is unavailable for ${method}`);
+    const error = new Error(`agentos WASM sync RPC is unavailable for ${method}`);
     error.code = 'ERR_AGENTOS_WASM_SYNC_RPC_UNAVAILABLE';
     throw error;
   }
@@ -4549,7 +4549,7 @@ function callSyncRpc(method, args = []) {
     }
 
     const error = new Error(
-      response?.error?.message || `secure-exec WASM sync RPC ${method} failed`,
+      response?.error?.message || `agentos WASM sync RPC ${method} failed`,
     );
     if (typeof response?.error?.code === 'string') {
       error.code = response.error.code;
@@ -12568,7 +12568,7 @@ function resetCaughtWasmSignalDispositionsForExec(sidecarCommitted) {
   }
 }
 
-Object.defineProperty(globalThis, '__secureExecWasmSignalDispatch', {
+Object.defineProperty(globalThis, '__agentOsWasmSignalDispatch', {
   configurable: true,
   writable: true,
   value: (_eventType, payload) => {

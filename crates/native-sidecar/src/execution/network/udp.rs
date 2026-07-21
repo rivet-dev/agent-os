@@ -1207,7 +1207,7 @@ impl ActiveUdpSocket {
     ) -> Result<SocketAddr, SidecarError> {
         if self.native_commands.is_some() || self.guest_local_addr.is_some() {
             return Err(SidecarError::Execution(String::from(
-                "EINVAL: secure-exec dgram socket is already bound",
+                "EINVAL: agentos dgram socket is already bound",
             )));
         }
 

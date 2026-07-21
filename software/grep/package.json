@@ -3,7 +3,7 @@
 	"version": "0.3.4",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "GNU grep pattern matching for secure-exec VMs (grep, egrep, fgrep)",
+	"description": "GNU grep pattern matching for agentos VMs (grep, egrep, fgrep)",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [

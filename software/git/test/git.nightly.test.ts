@@ -712,7 +712,7 @@ describeIf(hasGit, 'git command', () => {
       runHostGit(['-C', worktree, 'add', 'README.md']);
       runHostGit([
         '-C', worktree,
-        '-c', 'user.name=secure-exec', '-c', 'user.email=agent@example.com',
+        '-c', 'user.name=agentos', '-c', 'user.email=agent@example.com',
         'commit', '-m', 'seed',
       ]);
       runHostGit(['-C', worktree, 'checkout', '-b', 'feature/deep']);
@@ -720,7 +720,7 @@ describeIf(hasGit, 'git command', () => {
       runHostGit(['-C', worktree, 'add', 'feature.txt']);
       runHostGit([
         '-C', worktree,
-        '-c', 'user.name=secure-exec', '-c', 'user.email=agent@example.com',
+        '-c', 'user.name=agentos', '-c', 'user.email=agent@example.com',
         'commit', '-m', 'feature branch',
       ]);
       runHostGit(['-C', worktree, 'checkout', 'main']);

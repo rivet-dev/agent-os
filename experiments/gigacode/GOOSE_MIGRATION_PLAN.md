@@ -180,8 +180,8 @@ Delete OpenCode product functionality and references, including:
 - Gigacode compatibility routes, state projections, imports, launcher logic,
   installer repair, environment variables, and documentation.
 
-Regenerate derived website/registry output and the secure-exec compatibility
-mirror when affected public surfaces require it. Do not remove unrelated words
+Regenerate derived website and registry output when affected public surfaces
+require it. Do not remove unrelated words
 that merely contain the character sequence `opencode` unless they refer to the
 OpenCode product.
 
@@ -465,7 +465,7 @@ Repository-wide removal criteria:
 - No runtime, client, website, example, installer, publish, or documentation
   surface references the OpenCode product. The migration specification is the
   only allowed historical reference.
-- Generated website/registry artifacts and the secure-exec mirror are current.
+- Generated website and registry artifacts are current.
 
 Goose/Gigacode criteria:
 

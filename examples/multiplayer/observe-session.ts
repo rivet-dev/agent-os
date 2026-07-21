@@ -12,11 +12,11 @@ connA.on("sessionEvent", (event) => {
 	console.log("[A]", event);
 });
 
-await agentA.openSession({
+await agentA.sessions.open({
 	agent: "pi",
 	env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
-await agentA.prompt({
+await agentA.sessions.prompt({
 	content: [{ type: "text", text: "Build a REST API" }],
 });
 

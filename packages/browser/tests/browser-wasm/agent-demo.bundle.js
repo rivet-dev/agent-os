@@ -1803,7 +1803,7 @@ var require_buffer = __commonJS({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/bytes.js
+// ../../../agent-os/packages/core/dist/bytes.js
 function toExactArrayBuffer(value) {
   return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
 }
@@ -1811,19 +1811,19 @@ function toExactUint8Array(value) {
   return Uint8Array.from(value);
 }
 var init_bytes = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/bytes.js"() {
+  "../../../agent-os/packages/core/dist/bytes.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/frame-payload-codec.js
+// ../../../agent-os/packages/core/dist/frame-payload-codec.js
 var init_frame_payload_codec = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/frame-payload-codec.js"() {
+  "../../../agent-os/packages/core/dist/frame-payload-codec.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/ext.js
+// ../../../agent-os/packages/core/dist/ext.js
 function toGeneratedExtEnvelope(envelope) {
   return {
     namespace: envelope.namespace,
@@ -1837,13 +1837,13 @@ function fromGeneratedExtEnvelope(envelope) {
   };
 }
 var init_ext = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/ext.js"() {
+  "../../../agent-os/packages/core/dist/ext.js"() {
     "use strict";
     init_bytes();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/json.js
+// ../../../agent-os/packages/core/dist/json.js
 function stringifyJsonUtf8(value, context) {
   try {
     const encoded = JSON.stringify(value);
@@ -1863,12 +1863,12 @@ function parseJsonUtf8(value, context) {
   }
 }
 var init_json = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/json.js"() {
+  "../../../agent-os/packages/core/dist/json.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/numbers.js
+// ../../../agent-os/packages/core/dist/numbers.js
 function bigIntToSafeNumber(value, context) {
   const max = BigInt(Number.MAX_SAFE_INTEGER);
   const min = BigInt(Number.MIN_SAFE_INTEGER);
@@ -1878,12 +1878,12 @@ function bigIntToSafeNumber(value, context) {
   return Number(value);
 }
 var init_numbers = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/numbers.js"() {
+  "../../../agent-os/packages/core/dist/numbers.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/callbacks.js
+// ../../../agent-os/packages/core/dist/callbacks.js
 function fromGeneratedSidecarRequestPayload(payload) {
   switch (payload.tag) {
     case "HostCallbackRequest":
@@ -1937,7 +1937,7 @@ function toGeneratedSidecarResponsePayload(payload) {
   }
 }
 var init_callbacks = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/callbacks.js"() {
+  "../../../agent-os/packages/core/dist/callbacks.js"() {
     "use strict";
     init_ext();
     init_json();
@@ -1945,7 +1945,7 @@ var init_callbacks = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/ownership.js
+// ../../../agent-os/packages/core/dist/ownership.js
 function toGeneratedOwnershipScope(ownership) {
   switch (ownership.scope) {
     case "connection":
@@ -1995,20 +1995,20 @@ function fromGeneratedOwnershipScope(ownership) {
   }
 }
 var init_ownership = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/ownership.js"() {
+  "../../../agent-os/packages/core/dist/ownership.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/imports/dev.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/imports/dev.js
 var DEV;
 var init_dev = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/imports/dev.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/imports/dev.js"() {
     DEV = false;
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/util/assert.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/util/assert.js
 function assert(test, message = "") {
   if (!test) {
     const e = new AssertionError(message);
@@ -2018,7 +2018,7 @@ function assert(test, message = "") {
 }
 var V8Error, AssertionError;
 var init_assert = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/util/assert.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/util/assert.js"() {
     init_dev();
     V8Error = Error;
     AssertionError = class extends Error {
@@ -2030,7 +2030,7 @@ var init_assert = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/util/validator.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/util/validator.js
 function isI32(val) {
   return val === (val | 0);
 }
@@ -2053,14 +2053,14 @@ function isU64Safe(val) {
   return Number.isSafeInteger(val) && val >= 0;
 }
 var init_validator = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/util/validator.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/util/validator.js"() {
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/util/constants.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/util/constants.js
 var TEXT_DECODER_THRESHOLD, TEXT_ENCODER_THRESHOLD, INT_SAFE_MAX_BYTE_COUNT, UINT_SAFE32_MAX_BYTE_COUNT, INVALID_UTF8_STRING, NON_CANONICAL_REPRESENTATION, TOO_LARGE_BUFFER, TOO_LARGE_NUMBER, IS_LITTLE_ENDIAN_PLATFORM;
 var init_constants = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/util/constants.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/util/constants.js"() {
     TEXT_DECODER_THRESHOLD = 256;
     TEXT_ENCODER_THRESHOLD = 256;
     INT_SAFE_MAX_BYTE_COUNT = 8;
@@ -2073,10 +2073,10 @@ var init_constants = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/core/bare-error.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/core/bare-error.js
 var BareError;
 var init_bare_error = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/core/bare-error.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/core/bare-error.js"() {
     BareError = class extends Error {
       constructor(offset, issue, opts) {
         super(`(byte:${offset}) ${issue}`);
@@ -2089,7 +2089,7 @@ var init_bare_error = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/core/byte-cursor.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/core/byte-cursor.js
 function check(bc, min) {
   if (DEV) {
     assert(isU32(min));
@@ -2137,7 +2137,7 @@ function isEs2024ArrayBufferLike(buffer) {
 }
 var ByteCursor;
 var init_byte_cursor = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/core/byte-cursor.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/core/byte-cursor.js"() {
     init_assert();
     init_constants();
     init_validator();
@@ -2159,7 +2159,7 @@ var init_byte_cursor = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/fixed-primitive.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/fixed-primitive.js
 function readBool(bc) {
   const val = readU8(bc);
   if (val > 1) {
@@ -2253,7 +2253,7 @@ function writeU64(bc, x) {
   bc.offset += 8;
 }
 var init_fixed_primitive = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/fixed-primitive.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/fixed-primitive.js"() {
     init_bare_error();
     init_byte_cursor();
     init_assert();
@@ -2262,7 +2262,7 @@ var init_fixed_primitive = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/uint.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/uint.js
 function readUintSafe32(bc) {
   let result = readU8(bc);
   if (result >= 128) {
@@ -2344,7 +2344,7 @@ function writeUintSafe(bc, x) {
   writeU8(bc, zigZag);
 }
 var init_uint = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/uint.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/uint.js"() {
     init_bare_error();
     init_assert();
     init_constants();
@@ -2353,7 +2353,7 @@ var init_uint = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u8-array.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u8-array.js
 function readU8Array(bc) {
   return readU8FixedArray(bc, readUintSafe32(bc));
 }
@@ -2382,7 +2382,7 @@ function readUnsafeU8FixedArray(bc, len) {
   return bc.bytes.subarray(offset, offset + len);
 }
 var init_u8_array = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u8-array.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u8-array.js"() {
     init_byte_cursor();
     init_assert();
     init_validator();
@@ -2390,7 +2390,7 @@ var init_u8_array = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/data.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/data.js
 function readData(bc) {
   return readU8Array(bc).buffer;
 }
@@ -2404,56 +2404,56 @@ function readFixedData(bc, len) {
   return readU8FixedArray(bc, len).buffer;
 }
 var init_data = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/data.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/data.js"() {
     init_assert();
     init_validator();
     init_u8_array();
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/f32-array.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/f32-array.js
 var init_f32_array = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/f32-array.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/f32-array.js"() {
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/f64-array.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/f64-array.js
 var init_f64_array = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/f64-array.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/f64-array.js"() {
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i8-array.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i8-array.js
 var init_i8_array = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i8-array.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i8-array.js"() {
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i16-array.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i16-array.js
 var init_i16_array = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i16-array.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i16-array.js"() {
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i32-array.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i32-array.js
 var init_i32_array = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i32-array.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i32-array.js"() {
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i64-array.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i64-array.js
 var init_i64_array = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i64-array.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/i64-array.js"() {
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/int.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/int.js
 var init_int = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/int.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/int.js"() {
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/string.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/string.js
 function readString(bc) {
   return readFixedString(bc, readUintSafe32(bc));
 }
@@ -2573,7 +2573,7 @@ function utf8ByteLength(s) {
 }
 var UTF8_DECODER, UTF8_ENCODER;
 var init_string = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/string.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/string.js"() {
     init_bare_error();
     init_byte_cursor();
     init_assert();
@@ -2586,13 +2586,13 @@ var init_string = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u8-clamped-array.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u8-clamped-array.js
 var init_u8_clamped_array = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u8-clamped-array.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u8-clamped-array.js"() {
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u16-array.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u16-array.js
 function readU16Array(bc) {
   return readU16FixedArray(bc, readUintSafe32(bc));
 }
@@ -2631,7 +2631,7 @@ function writeU16FixedArrayBe(bc, x) {
 }
 var readU16FixedArray, writeU16FixedArray;
 var init_u16_array = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u16-array.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u16-array.js"() {
     init_byte_cursor();
     init_assert();
     init_constants();
@@ -2645,7 +2645,7 @@ var init_u16_array = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u32-array.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u32-array.js
 function readU32Array(bc) {
   return readU32FixedArray(bc, readUintSafe32(bc));
 }
@@ -2684,7 +2684,7 @@ function writeU32FixedArrayBe(bc, x) {
 }
 var readU32FixedArray, writeU32FixedArray;
 var init_u32_array = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u32-array.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u32-array.js"() {
     init_byte_cursor();
     init_assert();
     init_constants();
@@ -2698,13 +2698,13 @@ var init_u32_array = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u64-array.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u64-array.js
 var init_u64_array = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u64-array.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/codec/u64-array.js"() {
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/core/config.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/core/config.js
 function Config({ initialBufferLength = 1024, maxBufferLength = 1024 * 1024 * 32 }) {
   if (DEV) {
     assert(isU32(initialBufferLength), TOO_LARGE_NUMBER);
@@ -2717,16 +2717,16 @@ function Config({ initialBufferLength = 1024, maxBufferLength = 1024 * 1024 * 32
   };
 }
 var init_config = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/core/config.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/core/config.js"() {
     init_assert();
     init_constants();
     init_validator();
   }
 });
 
-// ../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/index.js
+// ../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/index.js
 var init_dist = __esm({
-  "../../../secure-exec-convwasi/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/index.js"() {
+  "../../../agent-os/node_modules/.pnpm/@rivetkit+bare-ts@0.6.2/node_modules/@rivetkit/bare-ts/dist/index.js"() {
     init_data();
     init_f32_array();
     init_f64_array();
@@ -2751,7 +2751,7 @@ var init_dist = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/generated-protocol.js
+// ../../../agent-os/packages/core/dist/generated-protocol.js
 function readJsonUtf8(bc) {
   return readString(bc);
 }
@@ -5566,7 +5566,7 @@ function decodeProtocolFrame(bytes) {
 }
 var DEFAULT_CONFIG, GuestRuntimeKind, RootFilesystemMode, RootFilesystemEntryKind, RootFilesystemEntryEncoding, PermissionMode, DisposeReason, WasmPermissionTier, GuestFilesystemOperation, FilesystemOperation, ProcessSnapshotStatus, SignalDispositionAction, VmLifecycleState, StreamChannel;
 var init_generated_protocol = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/generated-protocol.js"() {
+  "../../../agent-os/packages/core/dist/generated-protocol.js"() {
     "use strict";
     init_dist();
     DEFAULT_CONFIG = /* @__PURE__ */ Config({});
@@ -5660,7 +5660,7 @@ var init_generated_protocol = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/protocol-maps.js
+// ../../../agent-os/packages/core/dist/protocol-maps.js
 function toGeneratedPermissionMode(mode) {
   switch (mode) {
     case "allow":
@@ -5918,13 +5918,13 @@ function fromGeneratedGuestFilesystemOperation(operation) {
   }
 }
 var init_protocol_maps = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/protocol-maps.js"() {
+  "../../../agent-os/packages/core/dist/protocol-maps.js"() {
     "use strict";
     init_generated_protocol();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/event-buffer.js
+// ../../../agent-os/packages/core/dist/event-buffer.js
 function fromGeneratedEventPayload(payload) {
   switch (payload.tag) {
     case "VmLifecycleEvent":
@@ -5959,7 +5959,7 @@ function fromGeneratedEventPayload(payload) {
   }
 }
 var init_event_buffer = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/event-buffer.js"() {
+  "../../../agent-os/packages/core/dist/event-buffer.js"() {
     "use strict";
     init_ext();
     init_ownership();
@@ -5967,7 +5967,7 @@ var init_event_buffer = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/protocol-schema.js
+// ../../../agent-os/packages/core/dist/protocol-schema.js
 function validateSidecarProtocolSchema(schema) {
   if (schema.name !== SIDECAR_PROTOCOL_SCHEMA.name || schema.version !== SIDECAR_PROTOCOL_SCHEMA.version) {
     throw new Error(`unsupported sidecar protocol schema ${schema.name}@${schema.version}`);
@@ -5976,7 +5976,7 @@ function validateSidecarProtocolSchema(schema) {
 }
 var SIDECAR_PROTOCOL_SCHEMA;
 var init_protocol_schema = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/protocol-schema.js"() {
+  "../../../agent-os/packages/core/dist/protocol-schema.js"() {
     "use strict";
     SIDECAR_PROTOCOL_SCHEMA = {
       name: "agentos-native-sidecar",
@@ -5985,7 +5985,7 @@ var init_protocol_schema = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/descriptors.js
+// ../../../agent-os/packages/core/dist/descriptors.js
 function toGeneratedSidecarPlacement(placement) {
   switch (placement.kind) {
     case "shared":
@@ -6023,13 +6023,13 @@ function toGeneratedProjectedModuleDescriptor(descriptor) {
   };
 }
 var init_descriptors = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/descriptors.js"() {
+  "../../../agent-os/packages/core/dist/descriptors.js"() {
     "use strict";
     init_json();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/filesystem.js
+// ../../../agent-os/packages/core/dist/filesystem.js
 function toGeneratedRootFilesystemEntry(entry) {
   return {
     path: entry.path,
@@ -6057,13 +6057,13 @@ function fromGeneratedRootFilesystemEntry(entry) {
   };
 }
 var init_filesystem = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/filesystem.js"() {
+  "../../../agent-os/packages/core/dist/filesystem.js"() {
     "use strict";
     init_protocol_maps();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/permissions.js
+// ../../../agent-os/packages/core/dist/permissions.js
 function toGeneratedPermissionsPolicy(policy) {
   if (policy === void 0) {
     return null;
@@ -6116,13 +6116,13 @@ function toGeneratedPatternPermissionScope(scope) {
   };
 }
 var init_permissions = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/permissions.js"() {
+  "../../../agent-os/packages/core/dist/permissions.js"() {
     "use strict";
     init_protocol_maps();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/request-payloads.js
+// ../../../agent-os/packages/core/dist/request-payloads.js
 function toGeneratedRequestPayload(payload) {
   switch (payload.type) {
     case "authenticate":
@@ -6359,7 +6359,7 @@ function toGeneratedOptionalU64(value) {
   return value === void 0 ? null : BigInt(value);
 }
 var init_request_payloads = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/request-payloads.js"() {
+  "../../../agent-os/packages/core/dist/request-payloads.js"() {
     "use strict";
     init_bytes();
     init_descriptors();
@@ -6371,7 +6371,7 @@ var init_request_payloads = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/state.js
+// ../../../agent-os/packages/core/dist/state.js
 function fromGeneratedGuestFilesystemStat(stat) {
   return {
     mode: stat.mode,
@@ -6415,14 +6415,14 @@ function fromGeneratedProcessSnapshotEntry(entry) {
   };
 }
 var init_state = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/state.js"() {
+  "../../../agent-os/packages/core/dist/state.js"() {
     "use strict";
     init_numbers();
     init_protocol_maps();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/response-payloads.js
+// ../../../agent-os/packages/core/dist/response-payloads.js
 function fromGeneratedResponsePayload(payload) {
   switch (payload.tag) {
     case "AuthenticatedResponse":
@@ -6600,7 +6600,7 @@ function fromGeneratedResponsePayload(payload) {
   }
 }
 var init_response_payloads = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/response-payloads.js"() {
+  "../../../agent-os/packages/core/dist/response-payloads.js"() {
     "use strict";
     init_filesystem();
     init_ext();
@@ -6610,7 +6610,7 @@ var init_response_payloads = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/protocol-frames.js
+// ../../../agent-os/packages/core/dist/protocol-frames.js
 function toGeneratedProtocolFrame(frame) {
   switch (frame.frame_type) {
     case "request":
@@ -6679,7 +6679,7 @@ function toLiveProtocolSchema(schema) {
   return validateSidecarProtocolSchema(schema);
 }
 var init_protocol_frames = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/protocol-frames.js"() {
+  "../../../agent-os/packages/core/dist/protocol-frames.js"() {
     "use strict";
     init_bytes();
     init_frame_payload_codec();
@@ -6694,24 +6694,24 @@ var init_protocol_frames = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/encoding.js
+// ../../../agent-os/packages/browser/dist/encoding.js
 var init_encoding = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/encoding.js"() {
+  "../../../agent-os/packages/browser/dist/encoding.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/os-filesystem.js
+// ../../../agent-os/packages/browser/dist/os-filesystem.js
 var init_os_filesystem = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/os-filesystem.js"() {
+  "../../../agent-os/packages/browser/dist/os-filesystem.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/wasi-polyfill.js
+// ../../../agent-os/packages/browser/dist/wasi-polyfill.js
 var BROWSER_WASI_POLYFILL_CODE;
 var init_wasi_polyfill = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/wasi-polyfill.js"() {
+  "../../../agent-os/packages/browser/dist/wasi-polyfill.js"() {
     "use strict";
     BROWSER_WASI_POLYFILL_CODE = `
 		globalThis.__agentOSWasiHost = {
@@ -9088,10 +9088,10 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/signals.js
+// ../../../agent-os/packages/browser/dist/signals.js
 var PROCESS_SIGNAL_NUMBERS, VALID_PROCESS_SIGNALS;
 var init_signals = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/signals.js"() {
+  "../../../agent-os/packages/browser/dist/signals.js"() {
     "use strict";
     PROCESS_SIGNAL_NUMBERS = {
       SIGHUP: 1,
@@ -9132,10 +9132,10 @@ var init_signals = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/generated/buffer-polyfill.js
+// ../../../agent-os/packages/browser/dist/generated/buffer-polyfill.js
 var BROWSER_BUFFER_POLYFILL_CODE;
 var init_buffer_polyfill = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/generated/buffer-polyfill.js"() {
+  "../../../agent-os/packages/browser/dist/generated/buffer-polyfill.js"() {
     "use strict";
     BROWSER_BUFFER_POLYFILL_CODE = `var process = globalThis.process || {
   env: {},
@@ -10723,10 +10723,10 @@ if (module.exports && module.exports.default == null) module.exports.default = m
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/generated/path-polyfill.js
+// ../../../agent-os/packages/browser/dist/generated/path-polyfill.js
 var BROWSER_PATH_POLYFILL_CODE;
 var init_path_polyfill = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/generated/path-polyfill.js"() {
+  "../../../agent-os/packages/browser/dist/generated/path-polyfill.js"() {
     "use strict";
     BROWSER_PATH_POLYFILL_CODE = `var process = globalThis.process || {
   env: {},
@@ -11156,10 +11156,10 @@ if (module.exports && module.exports.default == null) module.exports.default = m
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/generated/util-polyfill.js
+// ../../../agent-os/packages/browser/dist/generated/util-polyfill.js
 var BROWSER_UTIL_POLYFILL_CODE;
 var init_util_polyfill = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/generated/util-polyfill.js"() {
+  "../../../agent-os/packages/browser/dist/generated/util-polyfill.js"() {
     "use strict";
     BROWSER_UTIL_POLYFILL_CODE = `var process = globalThis.process || {
   env: {},
@@ -13574,10 +13574,10 @@ if (module.exports && module.exports.default == null) module.exports.default = m
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/runtime.js
+// ../../../agent-os/packages/browser/dist/runtime.js
 var POLYFILL_CODE_MAP;
 var init_runtime = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/runtime.js"() {
+  "../../../agent-os/packages/browser/dist/runtime.js"() {
     "use strict";
     init_os_filesystem();
     init_encoding();
@@ -15875,10 +15875,10 @@ var init_runtime = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/sync-bridge.js
+// ../../../agent-os/packages/browser/dist/sync-bridge.js
 var SYNC_BRIDGE_SIGNAL_BYTES, SYNC_BRIDGE_DEFAULT_DATA_BYTES, SYNC_BRIDGE_MIN_DATA_BYTES, BROWSER_SYNC_BRIDGE_OPERATIONS, BROWSER_SYNC_BRIDGE_OPERATION_SET;
 var init_sync_bridge = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/sync-bridge.js"() {
+  "../../../agent-os/packages/browser/dist/sync-bridge.js"() {
     "use strict";
     SYNC_BRIDGE_SIGNAL_BYTES = 4 * Int32Array.BYTES_PER_ELEMENT;
     SYNC_BRIDGE_DEFAULT_DATA_BYTES = 16 * 1024 * 1024;
@@ -15938,26 +15938,26 @@ var init_sync_bridge = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/converged-base64.js
+// ../../../agent-os/packages/browser/dist/converged-base64.js
 var init_converged_base64 = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/converged-base64.js"() {
+  "../../../agent-os/packages/browser/dist/converged-base64.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/converged-fs-bridge.js
+// ../../../agent-os/packages/browser/dist/converged-fs-bridge.js
 var init_converged_fs_bridge = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/converged-fs-bridge.js"() {
+  "../../../agent-os/packages/browser/dist/converged-fs-bridge.js"() {
     "use strict";
     init_converged_base64();
     init_sync_bridge();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/converged-net-bridge.js
+// ../../../agent-os/packages/browser/dist/converged-net-bridge.js
 var CONVERGED_NET_BRIDGE_OPERATIONS, CONVERGED_NET_BRIDGE_OPERATION_SET;
 var init_converged_net_bridge = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/converged-net-bridge.js"() {
+  "../../../agent-os/packages/browser/dist/converged-net-bridge.js"() {
     "use strict";
     init_converged_base64();
     init_sync_bridge();
@@ -15979,19 +15979,19 @@ var init_converged_net_bridge = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/converged-dgram-bridge.js
+// ../../../agent-os/packages/browser/dist/converged-dgram-bridge.js
 var init_converged_dgram_bridge = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/converged-dgram-bridge.js"() {
+  "../../../agent-os/packages/browser/dist/converged-dgram-bridge.js"() {
     "use strict";
     init_converged_base64();
     init_sync_bridge();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/converged-pty-bridge.js
+// ../../../agent-os/packages/browser/dist/converged-pty-bridge.js
 var CONVERGED_PTY_BRIDGE_OPERATIONS, CONVERGED_PTY_BRIDGE_OPERATION_SET;
 var init_converged_pty_bridge = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/converged-pty-bridge.js"() {
+  "../../../agent-os/packages/browser/dist/converged-pty-bridge.js"() {
     "use strict";
     init_converged_base64();
     init_sync_bridge();
@@ -16009,9 +16009,9 @@ var init_converged_pty_bridge = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/converged-sync-bridge-handler.js
+// ../../../agent-os/packages/browser/dist/converged-sync-bridge-handler.js
 var init_converged_sync_bridge_handler = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/converged-sync-bridge-handler.js"() {
+  "../../../agent-os/packages/browser/dist/converged-sync-bridge-handler.js"() {
     "use strict";
     init_protocol_frames();
     init_converged_fs_bridge();
@@ -16029,30 +16029,30 @@ var import_buffer = __toESM(require_buffer(), 1);
 init_protocol_frames();
 init_protocol_schema();
 
-// ../../../secure-exec-convwasi/packages/browser/dist/driver.js
+// ../../../agent-os/packages/browser/dist/driver.js
 init_encoding();
 init_runtime();
 var BROWSER_SYSTEM_DRIVER_OPTIONS = Symbol.for("secure-exec.browserSystemDriverOptions");
 var NATIVE_FETCH = typeof globalThis !== "undefined" && typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : void 0;
 
-// ../../../secure-exec-convwasi/packages/browser/dist/index.js
+// ../../../agent-os/packages/browser/dist/index.js
 init_os_filesystem();
 init_runtime();
 
-// ../../../secure-exec-convwasi/packages/browser/dist/child-process-bridge.js
+// ../../../agent-os/packages/browser/dist/child-process-bridge.js
 init_encoding();
 
-// ../../../secure-exec-convwasi/packages/browser/dist/runtime-driver.js
+// ../../../agent-os/packages/browser/dist/runtime-driver.js
 init_encoding();
 init_runtime();
 init_signals();
 init_sync_bridge();
 
-// ../../../secure-exec-convwasi/packages/browser/dist/default-sidecar.js
+// ../../../agent-os/packages/browser/dist/default-sidecar.js
 var WASM_MODULE_URL = new URL("./sidecar-wasm-web/agentos_native_sidecar_browser.js", import.meta.url);
 var WASM_BINARY_URL = new URL("./sidecar-wasm-web/agentos_native_sidecar_browser_bg.wasm", import.meta.url);
 
-// ../../../secure-exec-convwasi/packages/browser/dist/sab-ring.js
+// ../../../agent-os/packages/browser/dist/sab-ring.js
 var HEAD_INDEX = 0;
 var TAIL_INDEX = 1;
 var HEADER_I32 = 4;
@@ -16145,7 +16145,7 @@ var SabRingProtocolError = class extends Error {
   }
 };
 
-// ../../../secure-exec-convwasi/packages/browser/dist/sab-reactor.js
+// ../../../agent-os/packages/browser/dist/sab-reactor.js
 var REACTOR_CONTROL_BYTES = 1 * Int32Array.BYTES_PER_ELEMENT;
 var DEFERRED = Symbol("syscall-deferred");
 function encodeSyscallCompletion(executionId, result) {
@@ -16157,7 +16157,7 @@ function encodeSyscallCompletion(executionId, result) {
   return out;
 }
 
-// ../../../secure-exec-convwasi/packages/browser/dist/index.js
+// ../../../agent-os/packages/browser/dist/index.js
 init_converged_sync_bridge_handler();
 
 // src/chrome-llm-adapter.ts

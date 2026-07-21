@@ -78,7 +78,7 @@ fixtures and benchmarks that exercise host VFS callbacks. Disabled browser
 sources remain dormant reference code, not a supported production VFS.
 
 - [x] Remove the core in-memory VFS and overlay/layer-store implementations.
-- [x] Remove their root and secure-exec compatibility exports.
+- [x] Remove their root and agentos compatibility exports.
 - [x] Require a caller-owned filesystem in the low-level compatibility runtime.
 - [x] Move remaining repository fixtures to the explicit test-only surface.
 - [x] Remove obsolete duplicate semantic tests.

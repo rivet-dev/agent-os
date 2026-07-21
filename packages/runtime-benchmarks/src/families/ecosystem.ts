@@ -80,7 +80,7 @@ function ls100Op(): CommandBenchmarkOp {
 		fileLine: "packages/benchmarks/src/families/ecosystem.ts:46",
 		reproducer: "ls -1 over a pre-created 100-file directory",
 		runHostCmd: (iters, warmup) => {
-			const dir = createHostDirWithFiles("secure-exec-ecosystem-ls-", 100);
+			const dir = createHostDirWithFiles("agentos-ecosystem-ls-", 100);
 			try {
 				return sampleSyncCommand(iters, warmup, () => {
 					const stdout = execFileSync("ls", ["-1", dir], { encoding: "utf8" });
@@ -111,7 +111,7 @@ function shPipelineOp(): CommandBenchmarkOp {
 		reproducer: 'sh -c "ls -1 | grep -c ." over a 100-file directory',
 		runHostCmd: (iters, warmup) => {
 			const dir = createHostDirWithFiles(
-				"secure-exec-ecosystem-pipeline-",
+				"agentos-ecosystem-pipeline-",
 				100,
 			);
 			try {
@@ -171,21 +171,21 @@ function echoHelloOp(): CommandBenchmarkOp {
 		name: "echo_hello",
 		...ECOSYSTEM_SAMPLE_CAP,
 		fileLine: "packages/benchmarks/src/families/ecosystem.ts:140",
-		reproducer: "echo secure-exec-ecosystem",
+		reproducer: "echo agentos-ecosystem",
 		runHostCmd: (iters, warmup) =>
 			sampleSyncCommand(iters, warmup, () => {
-				const stdout = execFileSync("echo", ["secure-exec-ecosystem"], {
+				const stdout = execFileSync("echo", ["agentos-ecosystem"], {
 					encoding: "utf8",
 				});
-				assertExact(stdout, "secure-exec-ecosystem\n", "host echo_hello");
+				assertExact(stdout, "agentos-ecosystem\n", "host echo_hello");
 			}),
 		runVmCmd: async (vm, iters, warmup) =>
 			sampleAsyncCommand(iters, warmup, async () => {
 				const result = await vm.execWasmCommand("echo", [
-					"secure-exec-ecosystem",
+					"agentos-ecosystem",
 				]);
 				assertExit(result, "vm echo_hello");
-				assertExact(result.stdout, "secure-exec-ecosystem\n", "vm echo_hello");
+				assertExact(result.stdout, "agentos-ecosystem\n", "vm echo_hello");
 			}),
 	};
 }
@@ -199,7 +199,7 @@ function catOp(name: string, sizeBytes: number): CommandBenchmarkOp {
 		fileLine: "packages/benchmarks/src/families/ecosystem.ts:165",
 		reproducer: `cat a pre-created ${sizeBytes} byte text fixture and verify exact stdout`,
 		runHostCmd: (iters, warmup) => {
-			const dir = mkdtempSync(join(tmpdir(), `secure-exec-ecosystem-${name}-`));
+			const dir = mkdtempSync(join(tmpdir(), `agentos-ecosystem-${name}-`));
 			const file = join(dir, "fixture.txt");
 			writeFileSync(file, expected);
 			try {
@@ -238,7 +238,7 @@ function grepTreeOp(name: string, fileCount: number): CommandBenchmarkOp {
 		reproducer: `grep -l needle over ${fileCount} files and verify match count`,
 		runHostCmd: (iters, warmup) => {
 			const dir = createHostDirWithFiles(
-				`secure-exec-ecosystem-${name}-`,
+				`agentos-ecosystem-${name}-`,
 				fileCount,
 				(i) => grepFileContent(i),
 			);
@@ -282,7 +282,7 @@ function sedSubstitutionOp(): CommandBenchmarkOp {
 		fileLine: "packages/benchmarks/src/families/ecosystem.ts:248",
 		reproducer: "sed replaces every alpha token in a known fixture",
 		runHostCmd: (iters, warmup) => {
-			const dir = mkdtempSync(join(tmpdir(), "secure-exec-ecosystem-sed-"));
+			const dir = mkdtempSync(join(tmpdir(), "agentos-ecosystem-sed-"));
 			const file = join(dir, "fixture.txt");
 			writeFileSync(file, input);
 			try {
@@ -321,7 +321,7 @@ function findTreeOp(): CommandBenchmarkOp {
 		reproducer: "find a 1000-file tree and verify the file count",
 		runHostCmd: (iters, warmup) => {
 			const dir = createHostDirWithFiles(
-				"secure-exec-ecosystem-find-",
+				"agentos-ecosystem-find-",
 				BIG_TREE_FILES,
 			);
 			try {
@@ -369,12 +369,12 @@ function tarTreeOp(name: string, fileCount: number): CommandBenchmarkOp {
 		reproducer: `tar create/extract/list a ${fileCount}-file tree and diff a sentinel file`,
 		runHostCmd: (iters, warmup) => {
 			const src = createHostDirWithFiles(
-				`secure-exec-ecosystem-${name}-`,
+				`agentos-ecosystem-${name}-`,
 				fileCount,
 			);
 			writeFileSync(join(src, "sentinel.txt"), sentinelContent(fileCount));
 			const work = mkdtempSync(
-				join(tmpdir(), `secure-exec-ecosystem-${name}-work-`),
+				join(tmpdir(), `agentos-ecosystem-${name}-work-`),
 			);
 			try {
 				return sampleSyncCommand(iters, warmup, (i) => {
@@ -422,7 +422,7 @@ function gzipRoundTripOp(name: string, sizeBytes: number): CommandBenchmarkOp {
 		fileLine: "packages/benchmarks/src/families/ecosystem.ts:381",
 		reproducer: `gzip then gunzip a ${sizeBytes} byte fixture and diff the result`,
 		runHostCmd: (iters, warmup) => {
-			const dir = mkdtempSync(join(tmpdir(), `secure-exec-ecosystem-${name}-`));
+			const dir = mkdtempSync(join(tmpdir(), `agentos-ecosystem-${name}-`));
 			const src = join(dir, "fixture.txt");
 			writeFileSync(src, content);
 			try {
@@ -469,7 +469,7 @@ function jqExtractOp(): CommandBenchmarkOp {
 		fileLine: "packages/benchmarks/src/families/ecosystem.ts:428",
 		reproducer: "jq extracts a known field from a JSON fixture",
 		runHostCmd: (iters, warmup) => {
-			const dir = mkdtempSync(join(tmpdir(), "secure-exec-ecosystem-jq-"));
+			const dir = mkdtempSync(join(tmpdir(), "agentos-ecosystem-jq-"));
 			const file = join(dir, "fixture.json");
 			writeFileSync(file, input);
 			try {
@@ -508,7 +508,7 @@ function gitInitCommitOp(): CommandBenchmarkOp {
 		reproducer: "git init, add ten files, commit, and rev-parse HEAD",
 		runHostCmd: (iters, warmup) =>
 			sampleSyncCommand(iters, warmup, () => {
-				const dir = createHostDirWithFiles("secure-exec-ecosystem-git-", 10);
+				const dir = createHostDirWithFiles("agentos-ecosystem-git-", 10);
 				try {
 					const stdout = execFileSync("sh", ["-c", gitScript()], {
 						cwd: dir,
@@ -624,7 +624,7 @@ async function ensureVmRoot(vm: Pick<BenchVm, "exec">): Promise<void> {
 }
 
 function textPayload(sizeBytes: number): string {
-	const chunk = "secure-exec ecosystem payload line 0123456789abcdef\n";
+	const chunk = "agentos ecosystem payload line 0123456789abcdef\n";
 	let output = "";
 	while (output.length < sizeBytes) output += chunk;
 	return output.slice(0, sizeBytes);
@@ -641,7 +641,7 @@ function grepFileContent(index: number): string {
 }
 
 function sentinelContent(fileCount: number): string {
-	return `secure-exec tar sentinel ${fileCount}\n`;
+	return `agentos tar sentinel ${fileCount}\n`;
 }
 
 function tarRoundTripScript(src: string, archive: string, out: string): string {

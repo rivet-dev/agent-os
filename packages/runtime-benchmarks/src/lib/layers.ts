@@ -213,7 +213,7 @@ export function runNodeProgram(
 	iters: number,
 	warmup: number,
 ): number[] {
-	const dir = mkdtempSync(join(tmpdir(), "secure-exec-fuzz-perf-node-"));
+	const dir = mkdtempSync(join(tmpdir(), "agentos-fuzz-perf-node-"));
 	const file = join(dir, "bench.mjs");
 	try {
 		writeFileSync(file, source);
@@ -237,7 +237,7 @@ export async function runNodeProgramMeasured(
 	iters: number,
 	warmup: number,
 ): Promise<LayerSampleSet> {
-	const dir = mkdtempSync(join(tmpdir(), "secure-exec-fuzz-perf-node-"));
+	const dir = mkdtempSync(join(tmpdir(), "agentos-fuzz-perf-node-"));
 	const file = join(dir, "bench.mjs");
 	try {
 		writeFileSync(file, source);
@@ -339,7 +339,7 @@ function resolveNativeBaselineWasm(): string | undefined {
 
 function ensureWasmCommandDir(wasmPath: string): string {
 	if (wasmCommandDir) return wasmCommandDir;
-	const dir = mkdtempSync(join(tmpdir(), "secure-exec-native-baseline-wasm-cmd-"));
+	const dir = mkdtempSync(join(tmpdir(), "agentos-native-baseline-wasm-cmd-"));
 	mkdirSync(dir, { recursive: true });
 	copyFileSync(wasmPath, join(dir, WASM_COMMAND_NAME));
 	wasmCommandDir = dir;

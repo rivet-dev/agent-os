@@ -13,13 +13,13 @@ Agent OS keeps only product-surface benchmarks here:
 
 The differential matrix, focused runtime lanes, fuzz/perf harness, leak and
 footprint probes, native comparisons, and ecosystem command benches now live in
-secure-exec:
+agentos:
 
-`/home/nathan/.herdr/workspaces/agent-os/secure-exec-perf-rules/packages/benchmarks`
+`/home/nathan/.herdr/workspaces/agent-os/agentos-perf-rules/packages/benchmarks`
 
 Use that package for runtime-focused investigations; also follow its
 `CLAUDE.md` Benchmarks section. `overlay-readdir` is deleted here too; its
-secure-exec port is pending the API it needs.
+agentos port is pending the API it needs.
 
 ## Standard Suite
 

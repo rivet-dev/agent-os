@@ -4,7 +4,7 @@ name = "cmd-seq"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "seq standalone binary for secure-exec VM"
+description = "seq standalone binary for agentos VM"
 
 [[bin]]
 name = "seq"

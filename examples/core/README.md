@@ -5,7 +5,7 @@ category: "Reference"
 order: 1
 ---
 
-The core `@rivet-dev/agentos-core` API surface in one place: boot a VM with
+The core `@rivet-dev/agentos` API surface in one place: boot a VM with
 `AgentOs.create()` and drive it directly for exec, filesystem, processes, agent
 sessions, networking, and cron — no actor runtime and no client/server split.
 Reach for this when you want a reference of what an `AgentOs` instance can do and

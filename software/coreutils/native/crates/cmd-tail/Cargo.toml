@@ -4,7 +4,7 @@ name = "cmd-tail"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "tail standalone binary for secure-exec VM"
+description = "tail standalone binary for agentos VM"
 
 [[bin]]
 name = "tail"

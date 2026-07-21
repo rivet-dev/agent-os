@@ -3317,7 +3317,7 @@ function createBrowserProcess(): Record<string, unknown> {
 		emit(event: string, value?: unknown) {
 			return emitProcessListeners(String(event), value);
 		},
-		__secureExecRefreshProcess(nextConfig?: Record<string, unknown>) {
+		__agentOsRefreshProcess(nextConfig?: Record<string, unknown>) {
 			stopPtyPump();
 			clearStdinListeners();
 			for (const key of Object.keys(processListeners)) {
@@ -3371,11 +3371,11 @@ function createBrowserProcess(): Record<string, unknown> {
 				processBridge.gid = nextConfig.gid;
 			}
 		},
-		__secureExecStopPtyStdio() {
+		__agentOsStopPtyStdio() {
 			stopPtyPump();
 			stdioPty = null;
 		},
-		__secureExecResizePty(columns: number, rows: number) {
+		__agentOsResizePty(columns: number, rows: number) {
 			if (!stdioPty) return;
 			stdioPty.columns = Math.max(1, Math.trunc(columns));
 			stdioPty.rows = Math.max(1, Math.trunc(rows));
@@ -3398,7 +3398,7 @@ function getRuntimeProcess(): Record<string, unknown> | undefined {
 
 function refreshRuntimeProcess(): void {
 	const proc = getRuntimeProcess();
-	const refresh = proc?.__secureExecRefreshProcess as
+	const refresh = proc?.__agentOsRefreshProcess as
 		| ((nextConfig?: Record<string, unknown> | null) => void)
 		| undefined;
 	if (typeof refresh === "function") {
@@ -3415,7 +3415,7 @@ function resizeRuntimePty(
 		return;
 	}
 	const proc = getRuntimeProcess();
-	const resize = proc?.__secureExecResizePty as
+	const resize = proc?.__agentOsResizePty as
 		| ((columns: number, rows: number) => void)
 		| undefined;
 	if (typeof resize === "function") {
@@ -3624,9 +3624,9 @@ async function execScript(
 		};
 	} finally {
 		const proc = getRuntimeProcess() as
-			| { __secureExecStopPtyStdio?: () => void }
+			| { __agentOsStopPtyStdio?: () => void }
 			| undefined;
-		proc?.__secureExecStopPtyStdio?.();
+		proc?.__agentOsStopPtyStdio?.();
 		pendingExecutionSignals.delete(executionId);
 		activeProcessRequestId = previousProcessRequestId;
 		activeExecutionId = previousExecutionId;
@@ -3742,7 +3742,7 @@ self.onmessage = async (event: MessageEvent<BrowserWorkerRequestMessage>) => {
 			const error = new Error(
 				`Browser worker extension dispatch is not implemented for namespace ${message.payload.namespace}`,
 			) as Error & { code?: string };
-			error.code = "ERR_SECURE_EXEC_BROWSER_EXTENSION_UNSUPPORTED";
+			error.code = "ERR_AGENTOS_BROWSER_EXTENSION_UNSUPPORTED";
 			throw error;
 		}
 		if (message.type === "dispose") {

@@ -18,39 +18,20 @@ Requests reach your Hono server, where `appsRouter` routes them to a prewarmed
 agentOS VM serving the generated application. Rivet handles request routing and
 orchestrates the pool of prewarmed VMs.
 
-<svg viewBox="0 0 620 190" role="img" aria-label="An HTTP request reaches your Hono server, where appsRouter uses Rivet to route it to a prewarmed agentOS VM serving the AI-generated app." style="width:100%;height:auto;max-width:620px;display:block;margin:2.5rem auto 1rem;">
-  <defs>
-    <marker id="apps-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="#1b1916" />
-    </marker>
-    <symbol id="apps-os" viewBox="0 0 100 100">
-      <rect x="8" y="8" width="84" height="84" rx="26" fill="none" stroke="#1b1916" stroke-width="8" />
       <text x="50" y="50" text-anchor="middle" dominant-baseline="central" font-family="var(--sl-font)" font-weight="700" font-size="38" fill="#1b1916">OS</text>
-    </symbol>
-  </defs>
 
-  <rect x="12" y="66" width="126" height="58" rx="12" fill="#ffffff" stroke="#1b1916" stroke-width="1.5" />
   <text x="75" y="91" text-anchor="middle" font-family="var(--sl-font)" font-size="14" font-weight="600" fill="#1b1916">Request</text>
   <text x="75" y="110" text-anchor="middle" font-family="var(--sl-font)" font-size="10.5" fill="#56524a">Agent · Browser · API</text>
 
-  <line x1="140" y1="95" x2="184" y2="95" stroke="#1b1916" stroke-width="1.5" marker-end="url(#apps-arrow)" />
-
-  <rect x="190" y="42" width="174" height="106" rx="14" fill="#faf8f3" stroke="#1b1916" stroke-width="1.5" />
   <text x="206" y="65" font-family="var(--sl-font)" font-size="13" font-weight="600" fill="#1b1916">Your Hono server</text>
-  <rect x="206" y="78" width="142" height="50" rx="8" fill="#ffffff" stroke="#1b1916" stroke-width="1.2" />
   <text x="277" y="99" text-anchor="middle" font-family="var(--sl-font)" font-size="12" font-weight="600" fill="#1b1916">appsRouter</text>
   <text x="277" y="116" text-anchor="middle" font-family="var(--sl-font)" font-size="10" fill="#56524a">route the request</text>
 
-  <line x1="366" y1="95" x2="410" y2="95" stroke="#1b1916" stroke-width="1.5" marker-end="url(#apps-arrow)" />
   <text x="388" y="82" text-anchor="middle" font-family="var(--sl-font)" font-size="10" fill="#56524a">Rivet</text>
 
-  <rect x="416" y="42" width="192" height="106" rx="14" fill="#faf8f3" stroke="#1b1916" stroke-width="1.5" />
   <text x="432" y="65" font-family="var(--sl-font)" font-size="13" font-weight="600" fill="#1b1916">Prewarmed VM</text>
-  <rect x="432" y="78" width="160" height="50" rx="8" fill="#ffffff" stroke="#1b1916" stroke-width="1.2" />
-  <use href="#apps-os" x="444" y="88" width="30" height="30" />
   <text x="485" y="99" font-family="var(--sl-font)" font-size="11.5" font-weight="600" fill="#1b1916">AI-generated app</text>
   <text x="485" y="116" font-family="var(--sl-font)" font-size="10" fill="#56524a">serves the response</text>
-</svg>
 
 ## Quickstart
 

@@ -3,7 +3,7 @@
 	"version": "0.3.5",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "GNU tar archiver for secure-exec VMs",
+	"description": "GNU tar archiver for agentos VMs",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [

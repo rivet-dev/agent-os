@@ -191,7 +191,7 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
       return;
     }
     try {
-      process.stderr.write(\`[secure-exec-wasi] \${message}\\n\`);
+      process.stderr.write(\`[agentos-wasi] \${message}\\n\`);
     } catch {
       // Ignore debug logging failures.
     }

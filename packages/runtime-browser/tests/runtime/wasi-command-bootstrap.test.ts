@@ -21,7 +21,7 @@ describe("wasi command bootstrap", () => {
 		});
 
 		expect(source).toContain('require("node:wasi")');
-		expect(source).toContain('require("secure-exec:wasi-command-host")');
+		expect(source).toContain('require("agentos:wasi-command-host")');
 		expect(source).toContain('const commandSource = "/commands/sh";');
 		expect(source).toContain("/commands/sh");
 		expect(source).toContain("/commands/echo");

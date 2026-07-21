@@ -4,7 +4,7 @@ name = "cmd-tee"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "tee standalone binary for secure-exec VM"
+description = "tee standalone binary for agentos VM"
 
 [[bin]]
 name = "tee"

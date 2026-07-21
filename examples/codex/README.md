@@ -11,7 +11,7 @@ Run OpenAI's Codex agent inside a VM session and prompt it with natural language
 
 ## How it works
 
-Register the `codex` software with `agentOS({ software: [codex] })` so the VM knows how to launch the agent. The client calls `agent.openSession({ agent: "codex", ... })`, which infers the default `main` session, passes `OPENAI_API_KEY` through `env`, then drives the agent with `agent.prompt({ content })`. Two optional extensions build on the same flow: drop a `SKILL.md` into `/home/agentos/.codex/skills/` before opening the session and the agent auto-discovers it, or configure MCP servers in Codex's native config file.
+Register the `codex` software with `agentOS({ software: [codex] })` so the VM knows how to launch the agent. The client calls `agent.sessions.open({ agent: "codex", ... })`, which infers the default `main` session, passes `OPENAI_API_KEY` through `env`, then drives the agent with `agent.sessions.prompt({ content })`. Two optional extensions build on the same flow: drop a `SKILL.md` into `/home/agentos/.codex/skills/` before opening the session and the agent auto-discovers it, or configure MCP servers in Codex's native config file.
 
 ## Run it
 

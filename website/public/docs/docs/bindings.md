@@ -1,4 +1,4 @@
-# Bindings
+# Custom Bindings
 
 Expose custom host functions to agents as CLI commands inside the VM.
 
@@ -62,9 +62,9 @@ On failure (validation or execution error), the binding exits non-zero and write
 Missing required flag: --city
 ```
 
-## Bindings vs MCP servers
+## Bindings and MCP servers
 
-agentOS supports two ways to give agents access to external functionality: **bindings** and **MCP servers**. Both work, but they have different tradeoffs.
+AgentOS supports two ways to give agents access to external functionality: **bindings** and session-scoped **MCP servers**. Both work, but they have different tradeoffs.
 
 |  | Bindings | MCP Servers |
 |---|---|---|

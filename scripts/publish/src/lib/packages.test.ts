@@ -75,8 +75,10 @@ test("builds platform map for the agent-os sidecar meta package", () => {
 
 test("sanity check passes for the agent-os workspace", () => {
 	const packages = discoverPackages(repoRoot);
+	const names = new Set(packages.map((pkg) => pkg.name));
 
 	assert.doesNotThrow(() => assertDiscoverySanity(packages));
+	assert(names.has("@rivet-dev/agentos"));
 });
 
 test("publishes only new AgentOS Apps software packages in lockstep", () => {

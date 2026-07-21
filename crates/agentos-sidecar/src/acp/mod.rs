@@ -61,7 +61,7 @@ const ACP_INACTIVITY_WARNING_INTERVAL: Duration = Duration::from_secs(30);
 const PROMPT_RESPONSE_DRAIN_QUIET: Duration = Duration::from_millis(50);
 // While an ACP request is in flight the stdio loop is inside the extension
 // dispatch, so this wait loop becomes the cooperative VM I/O pump. Keep it at
-// the same cadence as secure-exec's outer event pump so adapter fetches and
+// the same cadence as agentos's outer event pump so adapter fetches and
 // process output keep moving mid-turn.
 const ACP_CANCEL_METHOD: &str = "session/cancel";
 const ACP_TRACE_PATH_ENV: &str = "AGENT_OS_ACP_TRACE_PATH";
@@ -85,7 +85,7 @@ const AGENTOS_SYSTEM_PROMPT: &str = include_str!("../AGENTOS_SYSTEM_PROMPT.md");
 /// evict the now-dead session record instead of leaking it until an explicit
 /// internal runtime cleanup that may never run.
 const ADAPTER_EXITED_ERROR_MARKER: &str = "exited with code";
-/// Substring of the secure-exec process-table error returned when an operation
+/// Substring of the agentos process-table error returned when an operation
 /// targets a process that already exited ("VM <vm> has no active process <id>").
 /// Writing a request to an adapter that crashed while *idle* surfaces this way
 /// (the exit is observed lazily, on the next stdin write), so it is classified
@@ -1424,7 +1424,7 @@ mod tests {
         assert_eq!(adapter_exit_code_from_error(&exited), Some(7));
 
         // Lazy observation: a request write to an already-reaped adapter fails
-        // with secure-exec's process-table error (the exact production shape:
+        // with agentos's process-table error (the exact production shape:
         // "VM vm-5 has no active process agent-6"). No exit code is observed.
         let gone =
             SidecarError::InvalidState(String::from("VM vm-5 has no active process agent-6"));

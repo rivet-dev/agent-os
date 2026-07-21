@@ -1,6 +1,6 @@
 //! wasm32-wasip1 backend stub for portable-pty.
 //!
-//! The secure-exec VM brokers process execution via wasi-spawn/wasi-pty; a full
+//! The agentos VM brokers process execution via wasi-spawn/wasi-pty; a full
 //! PTY bridge is future work. This backend lets portable-pty (and thus
 //! codex-utils-pty / codex-core) COMPILE for wasip1. PTY operations return an
 //! Unsupported error at runtime (codex's exec falls back to non-PTY execution).

@@ -1,4 +1,4 @@
-# Secure Exec sidecar protocol schema, version 1.
+# AgentOS language execution sidecar protocol schema, version 1.
 # This schema is generator-ready: numeric ordinals are intentionally omitted
 # and type blocks are ordered before first use.
 
@@ -384,6 +384,267 @@ type ExecuteRequest struct {
   wasmPermissionTier: optional<WasmPermissionTier>
 }
 
+# First-class execution lifecycle. The legacy process request above remains an
+# internal kernel transport while clients migrate in lockstep to these semantic
+# operations; language/package command construction belongs to the sidecar.
+type ExecutionState enum {
+  CREATING
+  IDLE
+  RUNNING
+  RESETTING
+  DELETING
+  FAILED
+}
+
+type ExecutionOutcome enum {
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  TIMED_OUT
+}
+
+type RetainedExecutionLanguage enum {
+  JAVA_SCRIPT
+  PYTHON
+}
+
+type ExecutionStreamChannel enum {
+  STDOUT
+  STDERR
+  PTY
+}
+
+type JavaScriptModuleFormat enum {
+  MODULE
+  COMMON_JS
+}
+
+type ExecutionIdentityOptions struct {
+  contextId: optional<str>
+}
+
+type ExecutionPtyOptions struct {
+  cols: optional<u16>
+  rows: optional<u16>
+}
+
+type ExecutionOutputCapture enum {
+  NONE
+  STDERR
+  ALL
+}
+
+type ExecutionOutputOptions struct {
+  capture: optional<ExecutionOutputCapture>
+  retainEvents: optional<bool>
+}
+
+type ProcessExecutionOptions struct {
+  identity: ExecutionIdentityOptions
+  output: ExecutionOutputOptions
+  operationId: optional<str>
+  background: optional<bool>
+  cwd: optional<str>
+  env: optional<map<str><str>>
+  args: list<str>
+  stdin: optional<data>
+  timeoutMs: optional<u64>
+  pty: optional<ExecutionPtyOptions>
+}
+
+type ShellExecutionRequest struct {
+  process: ProcessExecutionOptions
+  command: str
+}
+
+type ArgvExecutionRequest struct {
+  process: ProcessExecutionOptions
+  command: str
+}
+
+type JavaScriptExecutionRequest struct {
+  process: ProcessExecutionOptions
+  source: str
+  format: optional<JavaScriptModuleFormat>
+  filePath: optional<str>
+  inputs: optional<JsonUtf8>
+}
+
+type JavaScriptEvaluationRequest struct {
+  process: ProcessExecutionOptions
+  expression: str
+  format: optional<JavaScriptModuleFormat>
+  filePath: optional<str>
+  inputs: optional<JsonUtf8>
+}
+
+type JavaScriptFileExecutionRequest struct {
+  process: ProcessExecutionOptions
+  path: str
+}
+
+type TypeScriptExecutionRequest struct {
+  process: ProcessExecutionOptions
+  source: str
+  filePath: optional<str>
+  tsconfigPath: optional<str>
+  compilerOptions: optional<JsonUtf8>
+  inputs: optional<JsonUtf8>
+}
+
+type TypeScriptEvaluationRequest struct {
+  process: ProcessExecutionOptions
+  expression: str
+  filePath: optional<str>
+  tsconfigPath: optional<str>
+  compilerOptions: optional<JsonUtf8>
+  inputs: optional<JsonUtf8>
+}
+
+type TypeScriptFileExecutionRequest struct {
+  process: ProcessExecutionOptions
+  path: str
+  tsconfigPath: optional<str>
+  compilerOptions: optional<JsonUtf8>
+}
+
+type TypeScriptCheckRequest struct {
+  identity: ExecutionIdentityOptions
+  output: ExecutionOutputOptions
+  source: str
+  cwd: optional<str>
+  filePath: optional<str>
+  tsconfigPath: optional<str>
+  compilerOptions: optional<JsonUtf8>
+  timeoutMs: optional<u64>
+}
+
+type TypeScriptProjectCheckRequest struct {
+  identity: ExecutionIdentityOptions
+  output: ExecutionOutputOptions
+  cwd: optional<str>
+  tsconfigPath: optional<str>
+  timeoutMs: optional<u64>
+}
+
+type NpmProjectInstallRequest struct {
+  identity: ExecutionIdentityOptions
+  output: ExecutionOutputOptions
+  cwd: optional<str>
+  env: optional<map<str><str>>
+  timeoutMs: optional<u64>
+  frozen: optional<bool>
+}
+
+type NpmPackageInstallRequest struct {
+  identity: ExecutionIdentityOptions
+  output: ExecutionOutputOptions
+  cwd: optional<str>
+  env: optional<map<str><str>>
+  timeoutMs: optional<u64>
+  packages: list<str>
+  dev: optional<bool>
+  global: optional<bool>
+}
+
+type NpmScriptExecutionRequest struct {
+  process: ProcessExecutionOptions
+  script: str
+}
+
+type NpmPackageExecutionRequest struct {
+  process: ProcessExecutionOptions
+  packageSpec: str
+  binary: optional<str>
+}
+
+type PythonExecutionRequest struct {
+  process: ProcessExecutionOptions
+  source: str
+  inputs: optional<JsonUtf8>
+}
+
+type PythonEvaluationRequest struct {
+  process: ProcessExecutionOptions
+  expression: str
+  inputs: optional<JsonUtf8>
+}
+
+type PythonFileExecutionRequest struct {
+  process: ProcessExecutionOptions
+  path: str
+}
+
+type PythonModuleExecutionRequest struct {
+  process: ProcessExecutionOptions
+  module: str
+}
+
+type PythonInstallRequest struct {
+  identity: ExecutionIdentityOptions
+  output: ExecutionOutputOptions
+  cwd: optional<str>
+  env: optional<map<str><str>>
+  timeoutMs: optional<u64>
+  packages: list<str>
+  upgrade: optional<bool>
+  requirementsFile: optional<str>
+  indexUrl: optional<str>
+  extraIndexUrls: list<str>
+}
+
+type CreateContextRequest struct {
+  contextId: str
+}
+
+type GetExecutionRequest struct {
+  executionId: str
+}
+
+type ListExecutionsRequest void
+
+type WaitExecutionRequest struct {
+  executionId: str
+}
+
+type CancelExecutionRequest struct {
+  executionId: str
+}
+
+type SignalExecutionRequest struct {
+  executionId: str
+  signal: str
+}
+
+type ResetExecutionRequest struct {
+  executionId: str
+}
+
+type DeleteExecutionRequest struct {
+  executionId: str
+}
+
+type WriteExecutionStdinRequest struct {
+  executionId: str
+  chunk: data
+}
+
+type CloseExecutionStdinRequest struct {
+  executionId: str
+}
+
+type ResizeExecutionPtyRequest struct {
+  executionId: str
+  cols: u16
+  rows: u16
+}
+
+type ReadExecutionOutputRequest struct {
+  executionId: str
+  cursor: optional<str>
+  limit: optional<u32>
+}
+
 type WriteStdinRequest struct {
   processId: str
   chunk: data
@@ -496,7 +757,38 @@ type RequestPayload union {
   GetResourceSnapshotRequest |
   LinkPackageRequest |
   ProvidedCommandsRequest |
-  ListMountsRequest
+  ListMountsRequest |
+  ShellExecutionRequest |
+  ArgvExecutionRequest |
+  JavaScriptExecutionRequest |
+  JavaScriptEvaluationRequest |
+  JavaScriptFileExecutionRequest |
+  TypeScriptExecutionRequest |
+  TypeScriptEvaluationRequest |
+  TypeScriptFileExecutionRequest |
+  TypeScriptCheckRequest |
+  TypeScriptProjectCheckRequest |
+  NpmProjectInstallRequest |
+  NpmPackageInstallRequest |
+  NpmScriptExecutionRequest |
+  NpmPackageExecutionRequest |
+  PythonExecutionRequest |
+  PythonEvaluationRequest |
+  PythonFileExecutionRequest |
+  PythonModuleExecutionRequest |
+  PythonInstallRequest |
+  CreateContextRequest |
+  GetExecutionRequest |
+  ListExecutionsRequest |
+  WaitExecutionRequest |
+  CancelExecutionRequest |
+  SignalExecutionRequest |
+  ResetExecutionRequest |
+  DeleteExecutionRequest |
+  WriteExecutionStdinRequest |
+  CloseExecutionStdinRequest |
+  ResizeExecutionPtyRequest |
+  ReadExecutionOutputRequest
 }
 
 type RequestFrame struct {
@@ -766,6 +1058,102 @@ type VmFetchResponse struct {
   responseJson: str
 }
 
+type ExecutionDescriptor struct {
+  executionId: str
+  generation: u64
+  state: ExecutionState
+  retainedLanguage: optional<RetainedExecutionLanguage>
+  processId: optional<str>
+  pid: optional<u32>
+  createdAtMs: u64
+  lastStartedAtMs: optional<u64>
+  lastCompletedAtMs: optional<u64>
+  lastOutcome: optional<ExecutionOutcome>
+  lastExitCode: optional<i32>
+}
+
+type ExecutionErrorData struct {
+  code: str
+  name: str
+  message: str
+  stack: optional<str>
+  details: optional<JsonUtf8>
+}
+
+type ExecutionAcceptedResponse struct {
+  operationId: str
+  execution: optional<ExecutionDescriptor>
+}
+
+type ExecutionCompletedResponse struct {
+  execution: optional<ExecutionDescriptor>
+  outcome: ExecutionOutcome
+  exitCode: optional<i32>
+  error: optional<ExecutionErrorData>
+  stdout: optional<data>
+  stderr: optional<data>
+  stdoutTruncated: optional<bool>
+  stderrTruncated: optional<bool>
+  evaluationValue: optional<JsonUtf8>
+  typeScriptCheckResult: optional<JsonUtf8>
+}
+
+type ExecutionEvaluationResponse struct {
+  result: ExecutionCompletedResponse
+  value: optional<JsonUtf8>
+}
+
+type TypeScriptDiagnostic struct {
+  code: u32
+  category: str
+  message: str
+  filePath: optional<str>
+  line: optional<u32>
+  column: optional<u32>
+}
+
+type TypeScriptCheckResponse struct {
+  result: ExecutionCompletedResponse
+  hasErrors: optional<bool>
+  diagnostics: list<TypeScriptDiagnostic>
+}
+
+type ExecutionDescriptorResponse struct {
+  execution: ExecutionDescriptor
+}
+
+type ExecutionListResponse struct {
+  executions: list<ExecutionDescriptor>
+}
+
+type ExecutionDeletedResponse struct {
+  executionId: str
+}
+
+type ExecutionIoResponse struct {
+  executionId: str
+  acceptedBytes: optional<u64>
+}
+
+type ExecutionOutputEvent struct {
+  executionId: str
+  generation: u64
+  processId: optional<str>
+  sequence: u64
+  channel: ExecutionStreamChannel
+  chunk: data
+  timestampMs: u64
+}
+
+type ExecutionOutputPageResponse struct {
+  executionId: str
+  generation: u64
+  events: list<ExecutionOutputEvent>
+  nextCursor: str
+  hasMore: bool
+  truncated: bool
+}
+
 type ResponsePayload union {
   AuthenticatedResponse |
   SessionOpenedResponse |
@@ -802,7 +1190,16 @@ type ResponsePayload union {
   ResourceSnapshotResponse |
   PackageLinkedResponse |
   ProvidedCommandsResponse |
-  ListMountsResponse
+  ListMountsResponse |
+  ExecutionAcceptedResponse |
+  ExecutionCompletedResponse |
+  ExecutionEvaluationResponse |
+  TypeScriptCheckResponse |
+  ExecutionDescriptorResponse |
+  ExecutionListResponse |
+  ExecutionDeletedResponse |
+  ExecutionIoResponse |
+  ExecutionOutputPageResponse
 }
 
 type ResponseFrame struct {
@@ -840,6 +1237,14 @@ type ProcessExitedEvent struct {
   exitCode: i32
 }
 
+type ExecutionCompletedEvent struct {
+  executionId: str
+  generation: u64
+  outcome: ExecutionOutcome
+  exitCode: optional<i32>
+  error: optional<ExecutionErrorData>
+}
+
 type StructuredEvent struct {
   name: str
   detail: map<str><str>
@@ -850,7 +1255,9 @@ type EventPayload union {
   ProcessOutputEvent |
   ProcessExitedEvent |
   StructuredEvent |
-  ExtEnvelope
+  ExtEnvelope |
+  ExecutionOutputEvent |
+  ExecutionCompletedEvent
 }
 
 type EventFrame struct {

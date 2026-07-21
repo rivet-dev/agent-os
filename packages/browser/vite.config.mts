@@ -39,7 +39,7 @@ const wasmDir = path.join(here, ".cache", "agentos-sidecar-wasm-web");
 const commandsDir = path.join(browserWasmDir, "commands");
 const repoRoot = path.resolve(here, "..", "..");
 // @rivet-dev/agentos-runtime-browser is symlinked to a sibling checkout; allow Vite to read it.
-const secureExecCheckout = path.resolve(repoRoot, "..", "secure-exec-convwasi");
+const agentOsCheckout = path.resolve(repoRoot, "..", "agentos-convwasi");
 // The entry imports `buffer` for the Buffer polyfill; Vite would otherwise
 // externalize the Node builtin. Point it at the npm `buffer` package (same as the
 // esbuild gate build's `--alias:buffer=...`).
@@ -193,7 +193,7 @@ export default defineConfig({
 			"Cross-Origin-Embedder-Policy": "require-corp",
 		},
 		fs: {
-			allow: [browserWasmDir, here, wasmDir, repoRoot, secureExecCheckout],
+			allow: [browserWasmDir, here, wasmDir, repoRoot, agentOsCheckout],
 		},
 	},
 	resolve: {

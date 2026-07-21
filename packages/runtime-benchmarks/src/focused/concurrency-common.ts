@@ -265,7 +265,7 @@ import net from "node:net";
 
 const durationMs = Number(process.env.BENCH_DURATION_MS || ${DEFAULT_DURATION_MS});
 const warmup = Number(process.env.BENCH_WARMUP || ${DEFAULT_TCP_WARMUP});
-const payload = Buffer.from("secure-exec-tcp-echo");
+const payload = Buffer.from("agentos-tcp-echo");
 const samplesMs = [];
 const now = () => Number(process.hrtime.bigint()) / 1e6;
 

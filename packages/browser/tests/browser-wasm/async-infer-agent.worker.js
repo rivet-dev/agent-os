@@ -3,24 +3,24 @@ var __esm = (fn, res) => function __init() {
   return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
 };
 
-// ../../../secure-exec-convwasi/packages/browser/dist/encoding.js
+// ../../../agent-os/packages/browser/dist/encoding.js
 var init_encoding = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/encoding.js"() {
+  "../../../agent-os/packages/browser/dist/encoding.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/os-filesystem.js
+// ../../../agent-os/packages/browser/dist/os-filesystem.js
 var init_os_filesystem = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/os-filesystem.js"() {
+  "../../../agent-os/packages/browser/dist/os-filesystem.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/wasi-polyfill.js
+// ../../../agent-os/packages/browser/dist/wasi-polyfill.js
 var BROWSER_WASI_POLYFILL_CODE;
 var init_wasi_polyfill = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/wasi-polyfill.js"() {
+  "../../../agent-os/packages/browser/dist/wasi-polyfill.js"() {
     "use strict";
     BROWSER_WASI_POLYFILL_CODE = `
 		globalThis.__agentOSWasiHost = {
@@ -2397,10 +2397,10 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/signals.js
+// ../../../agent-os/packages/browser/dist/signals.js
 var PROCESS_SIGNAL_NUMBERS, VALID_PROCESS_SIGNALS;
 var init_signals = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/signals.js"() {
+  "../../../agent-os/packages/browser/dist/signals.js"() {
     "use strict";
     PROCESS_SIGNAL_NUMBERS = {
       SIGHUP: 1,
@@ -2441,10 +2441,10 @@ var init_signals = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/generated/buffer-polyfill.js
+// ../../../agent-os/packages/browser/dist/generated/buffer-polyfill.js
 var BROWSER_BUFFER_POLYFILL_CODE;
 var init_buffer_polyfill = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/generated/buffer-polyfill.js"() {
+  "../../../agent-os/packages/browser/dist/generated/buffer-polyfill.js"() {
     "use strict";
     BROWSER_BUFFER_POLYFILL_CODE = `var process = globalThis.process || {
   env: {},
@@ -4032,10 +4032,10 @@ if (module.exports && module.exports.default == null) module.exports.default = m
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/generated/path-polyfill.js
+// ../../../agent-os/packages/browser/dist/generated/path-polyfill.js
 var BROWSER_PATH_POLYFILL_CODE;
 var init_path_polyfill = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/generated/path-polyfill.js"() {
+  "../../../agent-os/packages/browser/dist/generated/path-polyfill.js"() {
     "use strict";
     BROWSER_PATH_POLYFILL_CODE = `var process = globalThis.process || {
   env: {},
@@ -4465,10 +4465,10 @@ if (module.exports && module.exports.default == null) module.exports.default = m
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/generated/util-polyfill.js
+// ../../../agent-os/packages/browser/dist/generated/util-polyfill.js
 var BROWSER_UTIL_POLYFILL_CODE;
 var init_util_polyfill = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/generated/util-polyfill.js"() {
+  "../../../agent-os/packages/browser/dist/generated/util-polyfill.js"() {
     "use strict";
     BROWSER_UTIL_POLYFILL_CODE = `var process = globalThis.process || {
   env: {},
@@ -6883,10 +6883,10 @@ if (module.exports && module.exports.default == null) module.exports.default = m
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/runtime.js
+// ../../../agent-os/packages/browser/dist/runtime.js
 var POLYFILL_CODE_MAP;
 var init_runtime = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/runtime.js"() {
+  "../../../agent-os/packages/browser/dist/runtime.js"() {
     "use strict";
     init_os_filesystem();
     init_encoding();
@@ -9184,10 +9184,10 @@ var init_runtime = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/sync-bridge.js
+// ../../../agent-os/packages/browser/dist/sync-bridge.js
 var SYNC_BRIDGE_SIGNAL_BYTES, SYNC_BRIDGE_DEFAULT_DATA_BYTES, SYNC_BRIDGE_MIN_DATA_BYTES, BROWSER_SYNC_BRIDGE_OPERATIONS, BROWSER_SYNC_BRIDGE_OPERATION_SET;
 var init_sync_bridge = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/sync-bridge.js"() {
+  "../../../agent-os/packages/browser/dist/sync-bridge.js"() {
     "use strict";
     SYNC_BRIDGE_SIGNAL_BYTES = 4 * Int32Array.BYTES_PER_ELEMENT;
     SYNC_BRIDGE_DEFAULT_DATA_BYTES = 16 * 1024 * 1024;
@@ -9247,45 +9247,45 @@ var init_sync_bridge = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/bytes.js
+// ../../../agent-os/packages/core/dist/bytes.js
 var init_bytes = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/bytes.js"() {
+  "../../../agent-os/packages/core/dist/bytes.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/frame-payload-codec.js
+// ../../../agent-os/packages/core/dist/frame-payload-codec.js
 var init_frame_payload_codec = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/frame-payload-codec.js"() {
+  "../../../agent-os/packages/core/dist/frame-payload-codec.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/ext.js
+// ../../../agent-os/packages/core/dist/ext.js
 var init_ext = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/ext.js"() {
+  "../../../agent-os/packages/core/dist/ext.js"() {
     "use strict";
     init_bytes();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/json.js
+// ../../../agent-os/packages/core/dist/json.js
 var init_json = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/json.js"() {
+  "../../../agent-os/packages/core/dist/json.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/numbers.js
+// ../../../agent-os/packages/core/dist/numbers.js
 var init_numbers = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/numbers.js"() {
+  "../../../agent-os/packages/core/dist/numbers.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/callbacks.js
+// ../../../agent-os/packages/core/dist/callbacks.js
 var init_callbacks = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/callbacks.js"() {
+  "../../../agent-os/packages/core/dist/callbacks.js"() {
     "use strict";
     init_ext();
     init_json();
@@ -9293,17 +9293,17 @@ var init_callbacks = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/ownership.js
+// ../../../agent-os/packages/core/dist/ownership.js
 var init_ownership = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/ownership.js"() {
+  "../../../agent-os/packages/core/dist/ownership.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/generated-protocol.js
+// ../../../agent-os/packages/core/dist/generated-protocol.js
 var GuestRuntimeKind, RootFilesystemMode, RootFilesystemEntryKind, RootFilesystemEntryEncoding, PermissionMode, DisposeReason, WasmPermissionTier, GuestFilesystemOperation, FilesystemOperation, ProcessSnapshotStatus, SignalDispositionAction, VmLifecycleState, StreamChannel;
 var init_generated_protocol = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/generated-protocol.js"() {
+  "../../../agent-os/packages/core/dist/generated-protocol.js"() {
     "use strict";
     (function(GuestRuntimeKind2) {
       GuestRuntimeKind2["JavaScript"] = "JavaScript";
@@ -9395,17 +9395,17 @@ var init_generated_protocol = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/protocol-maps.js
+// ../../../agent-os/packages/core/dist/protocol-maps.js
 var init_protocol_maps = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/protocol-maps.js"() {
+  "../../../agent-os/packages/core/dist/protocol-maps.js"() {
     "use strict";
     init_generated_protocol();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/event-buffer.js
+// ../../../agent-os/packages/core/dist/event-buffer.js
 var init_event_buffer = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/event-buffer.js"() {
+  "../../../agent-os/packages/core/dist/event-buffer.js"() {
     "use strict";
     init_ext();
     init_ownership();
@@ -9413,40 +9413,40 @@ var init_event_buffer = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/protocol-schema.js
+// ../../../agent-os/packages/core/dist/protocol-schema.js
 var init_protocol_schema = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/protocol-schema.js"() {
+  "../../../agent-os/packages/core/dist/protocol-schema.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/descriptors.js
+// ../../../agent-os/packages/core/dist/descriptors.js
 var init_descriptors = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/descriptors.js"() {
+  "../../../agent-os/packages/core/dist/descriptors.js"() {
     "use strict";
     init_json();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/filesystem.js
+// ../../../agent-os/packages/core/dist/filesystem.js
 var init_filesystem = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/filesystem.js"() {
+  "../../../agent-os/packages/core/dist/filesystem.js"() {
     "use strict";
     init_protocol_maps();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/permissions.js
+// ../../../agent-os/packages/core/dist/permissions.js
 var init_permissions = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/permissions.js"() {
+  "../../../agent-os/packages/core/dist/permissions.js"() {
     "use strict";
     init_protocol_maps();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/request-payloads.js
+// ../../../agent-os/packages/core/dist/request-payloads.js
 var init_request_payloads = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/request-payloads.js"() {
+  "../../../agent-os/packages/core/dist/request-payloads.js"() {
     "use strict";
     init_bytes();
     init_descriptors();
@@ -9458,18 +9458,18 @@ var init_request_payloads = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/state.js
+// ../../../agent-os/packages/core/dist/state.js
 var init_state = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/state.js"() {
+  "../../../agent-os/packages/core/dist/state.js"() {
     "use strict";
     init_numbers();
     init_protocol_maps();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/response-payloads.js
+// ../../../agent-os/packages/core/dist/response-payloads.js
 var init_response_payloads = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/response-payloads.js"() {
+  "../../../agent-os/packages/core/dist/response-payloads.js"() {
     "use strict";
     init_filesystem();
     init_ext();
@@ -9479,9 +9479,9 @@ var init_response_payloads = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/core/dist/protocol-frames.js
+// ../../../agent-os/packages/core/dist/protocol-frames.js
 var init_protocol_frames = __esm({
-  "../../../secure-exec-convwasi/packages/core/dist/protocol-frames.js"() {
+  "../../../agent-os/packages/core/dist/protocol-frames.js"() {
     "use strict";
     init_bytes();
     init_frame_payload_codec();
@@ -9496,26 +9496,26 @@ var init_protocol_frames = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/converged-base64.js
+// ../../../agent-os/packages/browser/dist/converged-base64.js
 var init_converged_base64 = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/converged-base64.js"() {
+  "../../../agent-os/packages/browser/dist/converged-base64.js"() {
     "use strict";
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/converged-fs-bridge.js
+// ../../../agent-os/packages/browser/dist/converged-fs-bridge.js
 var init_converged_fs_bridge = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/converged-fs-bridge.js"() {
+  "../../../agent-os/packages/browser/dist/converged-fs-bridge.js"() {
     "use strict";
     init_converged_base64();
     init_sync_bridge();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/converged-net-bridge.js
+// ../../../agent-os/packages/browser/dist/converged-net-bridge.js
 var CONVERGED_NET_BRIDGE_OPERATIONS, CONVERGED_NET_BRIDGE_OPERATION_SET;
 var init_converged_net_bridge = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/converged-net-bridge.js"() {
+  "../../../agent-os/packages/browser/dist/converged-net-bridge.js"() {
     "use strict";
     init_converged_base64();
     init_sync_bridge();
@@ -9537,19 +9537,19 @@ var init_converged_net_bridge = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/converged-dgram-bridge.js
+// ../../../agent-os/packages/browser/dist/converged-dgram-bridge.js
 var init_converged_dgram_bridge = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/converged-dgram-bridge.js"() {
+  "../../../agent-os/packages/browser/dist/converged-dgram-bridge.js"() {
     "use strict";
     init_converged_base64();
     init_sync_bridge();
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/converged-pty-bridge.js
+// ../../../agent-os/packages/browser/dist/converged-pty-bridge.js
 var CONVERGED_PTY_BRIDGE_OPERATIONS, CONVERGED_PTY_BRIDGE_OPERATION_SET;
 var init_converged_pty_bridge = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/converged-pty-bridge.js"() {
+  "../../../agent-os/packages/browser/dist/converged-pty-bridge.js"() {
     "use strict";
     init_converged_base64();
     init_sync_bridge();
@@ -9567,9 +9567,9 @@ var init_converged_pty_bridge = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/converged-sync-bridge-handler.js
+// ../../../agent-os/packages/browser/dist/converged-sync-bridge-handler.js
 var init_converged_sync_bridge_handler = __esm({
-  "../../../secure-exec-convwasi/packages/browser/dist/converged-sync-bridge-handler.js"() {
+  "../../../agent-os/packages/browser/dist/converged-sync-bridge-handler.js"() {
     "use strict";
     init_protocol_frames();
     init_converged_fs_bridge();
@@ -9580,30 +9580,30 @@ var init_converged_sync_bridge_handler = __esm({
   }
 });
 
-// ../../../secure-exec-convwasi/packages/browser/dist/driver.js
+// ../../../agent-os/packages/browser/dist/driver.js
 init_encoding();
 init_runtime();
 var BROWSER_SYSTEM_DRIVER_OPTIONS = Symbol.for("secure-exec.browserSystemDriverOptions");
 var NATIVE_FETCH = typeof globalThis !== "undefined" && typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : void 0;
 
-// ../../../secure-exec-convwasi/packages/browser/dist/index.js
+// ../../../agent-os/packages/browser/dist/index.js
 init_os_filesystem();
 init_runtime();
 
-// ../../../secure-exec-convwasi/packages/browser/dist/child-process-bridge.js
+// ../../../agent-os/packages/browser/dist/child-process-bridge.js
 init_encoding();
 
-// ../../../secure-exec-convwasi/packages/browser/dist/runtime-driver.js
+// ../../../agent-os/packages/browser/dist/runtime-driver.js
 init_encoding();
 init_runtime();
 init_signals();
 init_sync_bridge();
 
-// ../../../secure-exec-convwasi/packages/browser/dist/default-sidecar.js
+// ../../../agent-os/packages/browser/dist/default-sidecar.js
 var WASM_MODULE_URL = new URL("./sidecar-wasm-web/agentos_native_sidecar_browser.js", import.meta.url);
 var WASM_BINARY_URL = new URL("./sidecar-wasm-web/agentos_native_sidecar_browser_bg.wasm", import.meta.url);
 
-// ../../../secure-exec-convwasi/packages/browser/dist/sab-ring.js
+// ../../../agent-os/packages/browser/dist/sab-ring.js
 var HEAD_INDEX = 0;
 var TAIL_INDEX = 1;
 var HEADER_I32 = 4;
@@ -9696,11 +9696,11 @@ var SabRingProtocolError = class extends Error {
   }
 };
 
-// ../../../secure-exec-convwasi/packages/browser/dist/sab-reactor.js
+// ../../../agent-os/packages/browser/dist/sab-reactor.js
 var REACTOR_CONTROL_BYTES = 1 * Int32Array.BYTES_PER_ELEMENT;
 var DEFERRED = Symbol("syscall-deferred");
 
-// ../../../secure-exec-convwasi/packages/browser/dist/sab-execution-endpoint.js
+// ../../../agent-os/packages/browser/dist/sab-execution-endpoint.js
 var FRAME_SYSCALL = 1;
 var FRAME_STDOUT = 2;
 var FRAME_STDERR = 3;
@@ -9774,7 +9774,7 @@ var SabExecutionEndpoint = class {
   }
 };
 
-// ../../../secure-exec-convwasi/packages/browser/dist/index.js
+// ../../../agent-os/packages/browser/dist/index.js
 init_converged_sync_bridge_handler();
 
 // tests/browser-wasm/async-infer-agent.worker.ts

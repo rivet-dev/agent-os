@@ -4,7 +4,7 @@ name = "cmd-factor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "factor standalone binary for secure-exec VM"
+description = "factor standalone binary for agentos VM"
 
 [[bin]]
 name = "factor"

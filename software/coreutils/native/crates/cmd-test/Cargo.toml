@@ -4,11 +4,11 @@ name = "cmd-test"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "test/[ standalone binary for secure-exec VM"
+description = "test/[ standalone binary for agentos VM"
 
 [[bin]]
 name = "test"
 path = "src/main.rs"
 
 [dependencies]
-secureexec-builtins = { path = "../../../../../toolchain/crates/libs/builtins" }
+agentos-builtins = { path = "../../../../../toolchain/crates/libs/builtins" }

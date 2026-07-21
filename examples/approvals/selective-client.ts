@@ -16,7 +16,7 @@ conn.on("sessionEvent", (event) => {
 		(candidate) => candidate.kind === desiredKind,
 	);
 	if (!option) return;
-	agent
+	agent.sessions
 		.respondPermission({
 			sessionId: event.sessionId,
 			requestId: event.requestId,
@@ -25,12 +25,12 @@ conn.on("sessionEvent", (event) => {
 		.catch((error) => console.error("Permission response failed:", error));
 });
 
-await agent.openSession({
+await agent.sessions.open({
 	agent: "claude",
 	// Required for permission_request events; the default is allow_all.
 	permissionPolicy: "ask",
 	env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
-await agent.prompt({
+await agent.sessions.prompt({
 	content: [{ type: "text", text: "Read config.json and update it" }],
 });

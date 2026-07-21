@@ -1,4 +1,4 @@
-# reqwest-shim: a wasm32-wasip1 drop-in for `reqwest` 0.12, backed by secure-exec
+# reqwest-shim: a wasm32-wasip1 drop-in for `reqwest` 0.12, backed by agentos
 # `wasi-http` (host_net TCP/TLS). Wired in via `[patch.crates-io] reqwest = { path }`
 # ONLY once it compiles against codex-exec's whole subtree — patching it in early
 # would break every command's `make wasm` build.
@@ -19,7 +19,7 @@ name = "reqwest"
 path = "src/lib.rs"
 
 [dependencies]
-wasi-http = { package = "secureexec-wasi-http", path = "../../crates/libs/wasi-http" }
+wasi-http = { package = "agentos-wasi-http", path = "../../crates/libs/wasi-http" }
 http = "1"
 bytes = "1"
 serde = "1"

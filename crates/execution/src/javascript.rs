@@ -46,6 +46,10 @@ const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENTOS_NODE_IMPORT_CACHE_PATH";
 const NODE_KEEP_STDIN_OPEN_ENV: &str = "AGENTOS_KEEP_STDIN_OPEN";
 const NODE_GUEST_ENTRYPOINT_ENV: &str = "AGENTOS_GUEST_ENTRYPOINT";
 const NODE_GUEST_ENTRYPOINT_MODULE_MODE_ENV: &str = "AGENTOS_GUEST_ENTRYPOINT_MODULE_MODE";
+const NODE_RETAIN_CONTEXT_ENV: &str = "AGENTOS_RETAIN_LANGUAGE_CONTEXT";
+const NODE_INLINE_FILE_PATH_ENV: &str = "AGENTOS_INLINE_FILE_PATH";
+const NODE_USE_BUNDLED_TYPESCRIPT_ENV: &str = "AGENTOS_USE_BUNDLED_TYPESCRIPT";
+const NODE_TYPESCRIPT_COMPILER_PATH_ENV: &str = "AGENTOS_TYPESCRIPT_COMPILER_PATH";
 const NODE_GUEST_PATH_MAPPINGS_ENV: &str = "AGENTOS_GUEST_PATH_MAPPINGS";
 const NODE_VIRTUAL_PROCESS_EXEC_PATH_ENV: &str = "AGENTOS_VIRTUAL_PROCESS_EXEC_PATH";
 const NODE_VIRTUAL_PROCESS_PID_ENV: &str = "AGENTOS_VIRTUAL_PROCESS_PID";
@@ -161,10 +165,10 @@ const JAVASCRIPT_CAPTURED_OUTPUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 const KERNEL_STDIN_BUFFER_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 const NODE_WARMUP_MARKER_VERSION: &str = "1";
 const NODE_WARMUP_SPECIFIERS: &[&str] = &[
-    "secure-exec:builtin/path",
-    "secure-exec:builtin/url",
-    "secure-exec:builtin/fs-promises",
-    "secure-exec:polyfill/path",
+    "agentos:builtin/path",
+    "agentos:builtin/url",
+    "agentos:builtin/fs-promises",
+    "agentos:polyfill/path",
 ];
 
 #[derive(Debug, Default, Clone)]
@@ -261,6 +265,7 @@ const RESERVED_NODE_ENV_KEYS: &[&str] = &[
     NODE_FROZEN_TIME_ENV,
     NODE_GUEST_ENTRYPOINT_ENV,
     NODE_GUEST_ENTRYPOINT_MODULE_MODE_ENV,
+    NODE_INLINE_FILE_PATH_ENV,
     NODE_GUEST_ARGV_ENV,
     NODE_GUEST_PATH_MAPPINGS_ENV,
     NODE_VIRTUAL_PROCESS_EXEC_PATH_ENV,
@@ -274,6 +279,9 @@ const RESERVED_NODE_ENV_KEYS: &[&str] = &[
     NODE_IMPORT_CACHE_LOADER_PATH_ENV,
     NODE_IMPORT_CACHE_PATH_ENV,
     NODE_KEEP_STDIN_OPEN_ENV,
+    NODE_RETAIN_CONTEXT_ENV,
+    NODE_USE_BUNDLED_TYPESCRIPT_ENV,
+    NODE_TYPESCRIPT_COMPILER_PATH_ENV,
     NODE_ALLOWED_BUILTINS_ENV,
     NODE_LOOPBACK_EXEMPT_PORTS_ENV,
     NODE_SYNC_RPC_ENABLE_ENV,
@@ -1848,6 +1856,31 @@ impl JavascriptExecution {
         self.exited.load(Ordering::Acquire)
     }
 
+    /// Run another sidecar-managed operation in this execution's retained V8
+    /// context. Public clients submit semantic language requests; only the
+    /// sidecar calls this executor primitive.
+    pub fn execute_retained(
+        &mut self,
+        user_code: String,
+        file_path: String,
+        module: bool,
+    ) -> Result<(), JavascriptExecutionError> {
+        self.exited.store(false, Ordering::Release);
+        self.kernel_stdin.reset();
+        self.v8_session
+            .execute(
+                2 | u8::from(module),
+                file_path,
+                String::new(),
+                String::new(),
+                String::new(),
+                false,
+                user_code,
+                None,
+            )
+            .map_err(JavascriptExecutionError::Spawn)
+    }
+
     /// Enqueue a replacement image that was fully prepared without running
     /// guest code. This is the final step of an atomic cross-runtime execve and
     /// must only be called after the kernel and sidecar process state commit.
@@ -2777,12 +2810,18 @@ impl JavascriptExecutionEngine {
         // synthetic resource name so its dynamic-import callback has the same
         // resolution base instead of trying to resolve from the literal `-e`.
         let execution_file_path = if matches!(guest_entrypoint.as_str(), "-e" | "--eval") {
-            let cwd = translator.guest_cwd().trim_end_matches('/');
-            if cwd.is_empty() {
-                String::from("/[eval]")
-            } else {
-                format!("{cwd}/[eval]")
-            }
+            request
+                .env
+                .get(NODE_INLINE_FILE_PATH_ENV)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let cwd = translator.guest_cwd().trim_end_matches('/');
+                    if cwd.is_empty() {
+                        String::from("/[eval]")
+                    } else {
+                        format!("{cwd}/[eval]")
+                    }
+                })
         } else {
             guest_entrypoint.clone()
         };
@@ -2891,8 +2930,12 @@ impl JavascriptExecutionEngine {
         record_js_start_phase("js_start_install_module_reader", phase_start.elapsed());
 
         let phase_start = Instant::now();
+        let retain_context = request
+            .env
+            .get(NODE_RETAIN_CONTEXT_ENV)
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
         let prepared_execute = PreparedJavascriptExecute {
-            mode: if use_module_mode { 1 } else { 0 },
+            mode: u8::from(use_module_mode) | if retain_context { 2 } else { 0 },
             file_path: execution_file_path,
             bridge_code: V8RuntimeHost::bridge_code().to_owned(),
             post_restore_script: String::new(),
@@ -5223,6 +5266,12 @@ fn hex_digit(byte: u8) -> Option<u8> {
 }
 
 impl LocalKernelStdinBridge {
+    fn reset(&self) {
+        let mut state = self.state.lock().expect("kernel stdin state poisoned");
+        state.bytes.clear();
+        state.closed = false;
+    }
+
     fn write(&self, chunk: &[u8]) -> Result<(), JavascriptExecutionError> {
         let mut state = self.state.lock().expect("kernel stdin state poisoned");
         if state.closed {
@@ -5470,10 +5519,10 @@ fn polyfill_expression(request: &str) -> Option<String> {
             format!(
                 "(() => {{ const error = new Error({message}); error.code = {code}; throw error; }})()",
                 message = serde_json::to_string(&format!(
-                    "node:{normalized} is not available in the secure-exec guest runtime"
+                    "node:{normalized} is not available in the agentos guest runtime"
                 ))
                 .unwrap_or_else(|_| format!(
-                    "\"node:{normalized} is not available in the secure-exec guest runtime\""
+                    "\"node:{normalized} is not available in the agentos guest runtime\""
                 )),
                 code = serde_json::to_string(error_code)
                     .unwrap_or_else(|_| "\"ERR_ACCESS_DENIED\"".to_owned())
@@ -6285,11 +6334,11 @@ export default {
 
     if module_name == "vm" {
         return String::from(
-            r#"const VM_CONTEXT_TAG = typeof Symbol === "function" ? Symbol.for("secure-exec.vm.context") : "__secure_exec_vm_context__";
-const VM_CONTEXT_ID = typeof Symbol === "function" ? Symbol.for("secure-exec.vm.context.id") : "__secure_exec_vm_context_id__";
+            r#"const VM_CONTEXT_TAG = typeof Symbol === "function" ? Symbol.for("agentos.vm.context") : "__agentos_vm_context__";
+const VM_CONTEXT_ID = typeof Symbol === "function" ? Symbol.for("agentos.vm.context.id") : "__agentos_vm_context_id__";
 
 function createVmNotImplementedError(feature) {
-  const error = new Error(`node:vm ${feature} is not implemented in the secure-exec guest runtime`);
+  const error = new Error(`node:vm ${feature} is not implemented in the agentos guest runtime`);
   error.code = "ERR_NOT_IMPLEMENTED";
   return error;
 }
@@ -6427,7 +6476,7 @@ export default { Script, compileFunction, createContext, isContext, measureMemor
     if module_name == "worker_threads" {
         return String::from(
             r#"function createNotImplementedError(feature) {
-  const error = new Error(`node:worker_threads ${feature} is not available in the secure-exec guest runtime`);
+  const error = new Error(`node:worker_threads ${feature} is not available in the agentos guest runtime`);
   error.code = "ERR_NOT_IMPLEMENTED";
   return error;
 }
@@ -6481,7 +6530,7 @@ function setEnvironmentData() {}
 
 export const BroadcastChannel = globalThis.BroadcastChannel;
 export { MessageChannel, MessagePort, Worker, getEnvironmentData, markAsUncloneable, markAsUntransferable, moveMessagePortToContext, postMessageToThread, receiveMessageOnPort, setEnvironmentData };
-export const SHARE_ENV = Symbol.for("secure-exec.worker_threads.SHARE_ENV");
+export const SHARE_ENV = Symbol.for("agentos.worker_threads.SHARE_ENV");
 export const isMainThread = true;
 export const parentPort = null;
 export const resourceLimits = {};
@@ -7824,7 +7873,7 @@ mod tests {
             .expect("system time")
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "secure-exec-module-bridge-{}-{unique}",
+            "agentos-module-bridge-{}-{unique}",
             std::process::id()
         ));
         let bin_dir = root.join("node_modules/next/dist/bin");

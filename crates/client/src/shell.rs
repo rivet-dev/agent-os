@@ -376,6 +376,8 @@ impl AgentOs {
                         }
                     }
                     EventPayload::VmLifecycleEvent(_)
+                    | EventPayload::ExecutionOutputEvent(_)
+                    | EventPayload::ExecutionCompletedEvent(_)
                     | EventPayload::StructuredEvent(_)
                     | EventPayload::ExtEnvelope(_) => {}
                 }
@@ -512,6 +514,8 @@ impl AgentOs {
                         }
                     }
                     EventPayload::VmLifecycleEvent(_)
+                    | EventPayload::ExecutionOutputEvent(_)
+                    | EventPayload::ExecutionCompletedEvent(_)
                     | EventPayload::StructuredEvent(_)
                     | EventPayload::ExtEnvelope(_) => {}
                 }
@@ -644,6 +648,8 @@ impl AgentOs {
                         }
                     }
                     EventPayload::VmLifecycleEvent(_)
+                    | EventPayload::ExecutionOutputEvent(_)
+                    | EventPayload::ExecutionCompletedEvent(_)
                     | EventPayload::StructuredEvent(_)
                     | EventPayload::ExtEnvelope(_) => {}
                 }

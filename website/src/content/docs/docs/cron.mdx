@@ -1,10 +1,14 @@
 ---
-title: "Cron Jobs"
+title: "Crons & Loops"
 description: "Schedule recurring commands and agent sessions in agentOS VMs."
 skill: true
 ---
 
-Schedule recurring work with cron expressions, running either a shell command (`exec`) or an agent session (`session`), with overlap modes (`allow`, `skip`, `queue`) and native `cronEvent` streaming to monitor execution. Cron jobs keep the actor alive while a job runs; the actor can sleep between executions.
+Schedule recurring work and long-running agent loops with cron expressions,
+running either a shell command (`exec`) or an agent session (`session`), with
+overlap modes (`allow`, `skip`, `queue`) and native `cronEvent` streaming to
+monitor execution. Cron jobs keep the actor alive while a job runs; the actor
+can sleep between executions.
 
 ## Schedule a command
 

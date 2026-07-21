@@ -27,7 +27,7 @@ const REPO_ROOT = resolve(__dirname, "../../..");
 // one-off fixture builds.
 const VIM_PACKAGE_DIR = resolve(
 	REPO_ROOT,
-	"../secure-exec/software/vim/dist/package",
+	"../agentos/software/vim/dist/package",
 );
 const VIM_COMMAND_DIR =
 	process.env.AGENTOS_VIM_FIXTURE_DIR ?? resolve(VIM_PACKAGE_DIR, "bin");

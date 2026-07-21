@@ -1837,7 +1837,7 @@ pub(super) fn resolve_host_node_cli_entrypoint(
             continue;
         };
         let package_root = entrypoint.parent()?.parent()?.to_path_buf();
-        let guest_root = format!("/__secure_exec/node-runtime/{command_name}");
+        let guest_root = format!("/__agentos/node-runtime/{command_name}");
         let relative_entrypoint = entrypoint.strip_prefix(&package_root).ok()?;
         let guest_entrypoint = normalize_path(&format!(
             "{guest_root}/{}",
@@ -1946,7 +1946,7 @@ pub(super) fn build_host_node_cli_eval(cli: &ResolvedHostNodeCliEntrypoint) -> S
     let guest_display_module = normalize_path(&format!("{}/lib/utils/display.js", cli.guest_root));
     let guest_log_file_module =
         normalize_path(&format!("{}/lib/utils/log-file.js", cli.guest_root));
-    let debug_preamble = "const __agentOSDebugNpmCli = !!process.env.CODEX_DEBUG_NPM_CLI; const __agentOSDebugLog = (...args) => { if (__agentOSDebugNpmCli) { console.error('[secure-exec npm debug]', ...args); } }; const __agentOSIsProcessExitError = (error) => !!(error && typeof error === 'object' && (error._isProcessExit === true || error.name === 'ProcessExitError')); const __agentOSResolveExitCode = (code) => Number.isFinite(code) ? code : (Number.isFinite(process.exitCode) ? process.exitCode : 0); const __agentOSFinish = (code) => { process.exitCode = __agentOSResolveExitCode(code); }; if (__agentOSDebugNpmCli) { const __agentOSWrapAsyncFsMethod = (__agentOSTarget, __agentOSMethod) => { const __agentOSOriginal = __agentOSTarget[__agentOSMethod]; if (typeof __agentOSOriginal !== 'function' || __agentOSOriginal.__agentOSDebugWrapped) { return; } const __agentOSWrapped = async (...args) => { const target = args.length > 0 ? args[0] : '<none>'; __agentOSDebugLog(`fs.${__agentOSMethod}:start`, String(target)); try { const result = await __agentOSOriginal.apply(__agentOSTarget, args); __agentOSDebugLog(`fs.${__agentOSMethod}:done`, String(target)); return result; } catch (error) { __agentOSDebugLog(`fs.${__agentOSMethod}:error`, String(target), error && error.stack ? error.stack : String(error)); throw error; } }; __agentOSWrapped.__agentOSDebugWrapped = true; __agentOSTarget[__agentOSMethod] = __agentOSWrapped; }; const __agentOSWrapSyncFsMethod = (__agentOSTarget, __agentOSMethod) => { const __agentOSOriginal = __agentOSTarget[__agentOSMethod]; if (typeof __agentOSOriginal !== 'function' || __agentOSOriginal.__agentOSDebugWrapped) { return; } const __agentOSWrapped = (...args) => { const target = args.length > 0 ? args[0] : '<none>'; __agentOSDebugLog(`fs.${__agentOSMethod}:start`, String(target)); try { const result = __agentOSOriginal.apply(__agentOSTarget, args); __agentOSDebugLog(`fs.${__agentOSMethod}:done`, String(target)); return result; } catch (error) { __agentOSDebugLog(`fs.${__agentOSMethod}:error`, String(target), error && error.stack ? error.stack : String(error)); throw error; } }; __agentOSWrapped.__agentOSDebugWrapped = true; __agentOSTarget[__agentOSMethod] = __agentOSWrapped; }; const __agentOSFsPromiseModules = [require('fs/promises'), require('node:fs/promises')]; for (const __agentOSFsPromises of __agentOSFsPromiseModules) { for (const __agentOSMethod of ['access', 'lstat', 'mkdir', 'open', 'readFile', 'readdir', 'readlink', 'realpath', 'rename', 'rm', 'rmdir', 'stat', 'symlink', 'unlink', 'writeFile']) { __agentOSWrapAsyncFsMethod(__agentOSFsPromises, __agentOSMethod); } } const __agentOSFsModules = [require('fs'), require('node:fs')]; for (const __agentOSFs of __agentOSFsModules) { for (const __agentOSMethod of ['accessSync', 'existsSync', 'lstatSync', 'mkdirSync', 'openSync', 'readFileSync', 'readdirSync', 'readlinkSync', 'realpathSync', 'renameSync', 'rmSync', 'rmdirSync', 'statSync', 'symlinkSync', 'unlinkSync', 'writeFileSync']) { __agentOSWrapSyncFsMethod(__agentOSFs, __agentOSMethod); } } }";
+    let debug_preamble = "const __agentOSDebugNpmCli = !!process.env.CODEX_DEBUG_NPM_CLI; const __agentOSDebugLog = (...args) => { if (__agentOSDebugNpmCli) { console.error('[agentos npm debug]', ...args); } }; const __agentOSIsProcessExitError = (error) => !!(error && typeof error === 'object' && (error._isProcessExit === true || error.name === 'ProcessExitError')); const __agentOSResolveExitCode = (code) => Number.isFinite(code) ? code : (Number.isFinite(process.exitCode) ? process.exitCode : 0); const __agentOSFinish = (code) => { process.exitCode = __agentOSResolveExitCode(code); }; if (__agentOSDebugNpmCli) { const __agentOSWrapAsyncFsMethod = (__agentOSTarget, __agentOSMethod) => { const __agentOSOriginal = __agentOSTarget[__agentOSMethod]; if (typeof __agentOSOriginal !== 'function' || __agentOSOriginal.__agentOSDebugWrapped) { return; } const __agentOSWrapped = async (...args) => { const target = args.length > 0 ? args[0] : '<none>'; __agentOSDebugLog(`fs.${__agentOSMethod}:start`, String(target)); try { const result = await __agentOSOriginal.apply(__agentOSTarget, args); __agentOSDebugLog(`fs.${__agentOSMethod}:done`, String(target)); return result; } catch (error) { __agentOSDebugLog(`fs.${__agentOSMethod}:error`, String(target), error && error.stack ? error.stack : String(error)); throw error; } }; __agentOSWrapped.__agentOSDebugWrapped = true; __agentOSTarget[__agentOSMethod] = __agentOSWrapped; }; const __agentOSWrapSyncFsMethod = (__agentOSTarget, __agentOSMethod) => { const __agentOSOriginal = __agentOSTarget[__agentOSMethod]; if (typeof __agentOSOriginal !== 'function' || __agentOSOriginal.__agentOSDebugWrapped) { return; } const __agentOSWrapped = (...args) => { const target = args.length > 0 ? args[0] : '<none>'; __agentOSDebugLog(`fs.${__agentOSMethod}:start`, String(target)); try { const result = __agentOSOriginal.apply(__agentOSTarget, args); __agentOSDebugLog(`fs.${__agentOSMethod}:done`, String(target)); return result; } catch (error) { __agentOSDebugLog(`fs.${__agentOSMethod}:error`, String(target), error && error.stack ? error.stack : String(error)); throw error; } }; __agentOSWrapped.__agentOSDebugWrapped = true; __agentOSTarget[__agentOSMethod] = __agentOSWrapped; }; const __agentOSFsPromiseModules = [require('fs/promises'), require('node:fs/promises')]; for (const __agentOSFsPromises of __agentOSFsPromiseModules) { for (const __agentOSMethod of ['access', 'lstat', 'mkdir', 'open', 'readFile', 'readdir', 'readlink', 'realpath', 'rename', 'rm', 'rmdir', 'stat', 'symlink', 'unlink', 'writeFile']) { __agentOSWrapAsyncFsMethod(__agentOSFsPromises, __agentOSMethod); } } const __agentOSFsModules = [require('fs'), require('node:fs')]; for (const __agentOSFs of __agentOSFsModules) { for (const __agentOSMethod of ['accessSync', 'existsSync', 'lstatSync', 'mkdirSync', 'openSync', 'readFileSync', 'readdirSync', 'readlinkSync', 'realpathSync', 'renameSync', 'rmSync', 'rmdirSync', 'statSync', 'symlinkSync', 'unlinkSync', 'writeFileSync']) { __agentOSWrapSyncFsMethod(__agentOSFs, __agentOSMethod); } } }";
     let display_stub = format!(
         "const __agentOSDisplayModulePath = require.resolve({display_module}); const __agentOSLogFileModulePath = require.resolve({log_file_module}); const __agentOSColorPassthrough = new Proxy((value) => value, {{ get: () => __agentOSColorPassthrough, apply: (_target, _thisArg, args) => args[0] }}); class __AgentOSNpmDisplayStub {{ constructor() {{ this.chalk = {{ noColor: __agentOSColorPassthrough, stdout: __agentOSColorPassthrough, stderr: __agentOSColorPassthrough }}; this._logPaused = true; this._logBuffer = []; this._outputBuffer = []; const levels = {{ silent: 0, error: 1, warn: 2, notice: 3, http: 4, info: 5, verbose: 6, silly: 7 }}; const loglevelIndex = process.argv.findIndex((arg) => arg === '--loglevel' || arg.startsWith('--loglevel=')); const loglevelArg = loglevelIndex < 0 ? undefined : process.argv[loglevelIndex]; const configuredLevel = loglevelArg && loglevelArg.includes('=') ? loglevelArg.slice(loglevelArg.indexOf('=') + 1) : process.argv[loglevelIndex + 1]; this._logThreshold = levels[String(configuredLevel || process.env.npm_config_loglevel || 'notice').toLowerCase()] ?? levels.notice; this._shouldLog = (level) => levels[level] === undefined || levels[level] <= this._logThreshold; this._write = (stream, values) => {{ if (!Array.isArray(values) || values.length === 0) {{ return; }} const text = values.map((value) => typeof value === 'string' ? value : String(value)).join(' '); if (text.length === 0) {{ return; }} const normalized = text.replace(/\\r\\n/g, '\\n'); if (/^\\n?> npx\\n> /u.test(normalized)) {{ return; }} stream.write(text.endsWith('\\n') ? text : `${{text}}\\n`); }}; this._inputHandler = (level, ...args) => {{ if (level !== 'read') {{ return; }} const [resolve, reject, callback] = args; Promise.resolve().then(() => callback()).then(resolve, reject); }}; this._logHandler = (level, ...args) => {{ if (level === 'resume') {{ this._logPaused = false; for (const [bufferLevel, bufferArgs] of this._logBuffer.splice(0)) {{ if (this._shouldLog(bufferLevel)) {{ this._write(process.stderr, bufferArgs); }} }} return; }} if (level === 'pause') {{ this._logPaused = true; return; }} if (!this._shouldLog(level)) {{ return; }} if (this._logPaused) {{ this._logBuffer.push([level, args]); return; }} this._write(process.stderr, args); }}; this._outputHandler = (level, ...args) => {{ if (level === 'buffer') {{ this._outputBuffer.push(['standard', args]); return; }} if (level === 'flush') {{ for (const [bufferLevel, bufferArgs] of this._outputBuffer.splice(0)) {{ this._write(bufferLevel === 'error' ? process.stderr : process.stdout, bufferArgs); }} return; }} this._write(level === 'error' ? process.stderr : process.stdout, args); }}; process.on('input', this._inputHandler); process.on('log', this._logHandler); process.on('output', this._outputHandler); }} async load() {{ process.emit('log', 'resume'); process.emit('output', 'flush'); }} off() {{ if (this._inputHandler) {{ process.off('input', this._inputHandler); }} if (this._logHandler) {{ process.off('log', this._logHandler); }} if (this._outputHandler) {{ process.off('output', this._outputHandler); }} this._logBuffer.length = 0; this._outputBuffer.length = 0; }} }} class __AgentOSNpmLogFileStub {{ constructor() {{ this.files = []; }} async load() {{ return []; }} off() {{}} }} globalThis._moduleCache[__agentOSDisplayModulePath] = {{ exports: __AgentOSNpmDisplayStub }}; globalThis._moduleCache[__agentOSLogFileModulePath] = {{ exports: __AgentOSNpmLogFileStub }};",
         display_module = serde_json::to_string(&guest_display_module)
@@ -2333,7 +2333,7 @@ pub(super) fn registered_command_name_for_path(vm: &VmState, path: &str) -> Opti
         .find_map(|prefix| normalized.strip_prefix(prefix))
         .or_else(|| {
             normalized
-                .strip_prefix("/__secure_exec/commands/")
+                .strip_prefix("/__agentos/commands/")
                 .and_then(|suffix| suffix.rsplit('/').next())
         })?;
     (!name.is_empty() && !name.contains('/') && vm.kernel.commands().contains_key(name))
@@ -2679,7 +2679,7 @@ fn resolve_guest_command_path_candidate(vm: &VmState, candidate: &str) -> Option
         || candidate.starts_with("/usr/bin/")
         || candidate.starts_with("/usr/local/bin/")
         || candidate.starts_with(&format!("{}/", crate::package_projection::OPT_AGENTOS_BIN))
-        || candidate.starts_with("/__secure_exec/commands/")
+        || candidate.starts_with("/__agentos/commands/")
     {
         if let Some(file_name) = Path::new(candidate)
             .file_name()
@@ -2955,9 +2955,20 @@ pub(super) fn guest_virtual_home(vm: &VmState) -> String {
 
 /// Build the typed per-execution Python limits from the per-VM `VmLimits`.
 pub(super) fn python_execution_limits(vm: &VmState) -> PythonExecutionLimits {
+    python_execution_limits_with_env(vm, &BTreeMap::new())
+}
+
+/// Build Python limits while honoring a sidecar-owned per-execution timeout.
+pub(super) fn python_execution_limits_with_env(
+    vm: &VmState,
+    env: &BTreeMap<String, String>,
+) -> PythonExecutionLimits {
     PythonExecutionLimits {
         output_buffer_max_bytes: Some(vm.limits.python.output_buffer_max_bytes),
-        execution_timeout_ms: Some(vm.limits.python.execution_timeout_ms),
+        execution_timeout_ms: env
+            .get("AGENTOS_PYTHON_EXECUTION_TIMEOUT_MS")
+            .and_then(|value| value.parse().ok())
+            .or(Some(vm.limits.python.execution_timeout_ms)),
         max_old_space_mb: Some(vm.limits.python.max_old_space_mb),
         vfs_rpc_timeout_ms: Some(vm.limits.python.vfs_rpc_timeout_ms),
         reactor_work_quantum: vm_reactor_work_quantum(&vm.limits),
@@ -5009,7 +5020,7 @@ where
                             file_path: python_file_path,
                             env: env.clone(),
                             cwd: resolved.host_cwd.clone(),
-                            limits: python_execution_limits(vm),
+                            limits: python_execution_limits_with_env(vm, &env),
                             guest_runtime: guest_runtime_identity(vm, None, None),
                         },
                         vm.runtime_context.clone(),

@@ -1,10 +1,10 @@
 [package]
 workspace = "../../../../../toolchain"
-name = "secureexec-yq"
+name = "agentos-yq"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "yq (YAML/XML/TOML/JSON processor) implementation for secure-exec standalone binaries"
+description = "yq (YAML/XML/TOML/JSON processor) implementation for agentos standalone binaries"
 
 [dependencies]
 jaq-core = "2.2"

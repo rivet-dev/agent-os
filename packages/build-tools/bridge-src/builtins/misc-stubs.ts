@@ -2,7 +2,7 @@ import { EventEmitter, once } from "./events.js";
 import { process2 } from "./process.js";
 
 function createWorkerThreadsNotImplementedError(feature) {
-  const error = new Error(`node:worker_threads ${feature} is not available in the secure-exec guest runtime`);
+  const error = new Error(`node:worker_threads ${feature} is not available in the agentos guest runtime`);
   error.code = "ERR_NOT_IMPLEMENTED";
   return error;
 }
@@ -41,7 +41,7 @@ var builtinWorkerThreadsModule = {
   BroadcastChannel: globalThis.BroadcastChannel,
   MessageChannel: globalThis.MessageChannel ?? WorkerThreadMessageChannel,
   MessagePort: globalThis.MessagePort ?? WorkerThreadPort,
-  SHARE_ENV: Symbol.for("secure-exec.worker_threads.SHARE_ENV"),
+  SHARE_ENV: Symbol.for("agentos.worker_threads.SHARE_ENV"),
   Worker: WorkerThreadWorker,
   getEnvironmentData() {
     return void 0;
@@ -363,7 +363,7 @@ var builtinStreamPromisesModule = {
 
 function createAccessDeniedBuiltinError(request) {
   const normalized = String(request).replace(/^node:/, "");
-  const error = new Error(`node:${normalized} is not available in the secure-exec guest runtime`);
+  const error = new Error(`node:${normalized} is not available in the agentos guest runtime`);
   error.code = "ERR_ACCESS_DENIED";
   return error;
 }

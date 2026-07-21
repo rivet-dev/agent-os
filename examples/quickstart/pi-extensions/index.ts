@@ -14,7 +14,7 @@
 
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
-import { AgentOs, nodeModulesMount } from "@rivet-dev/agentos-core";
+import { AgentOs, nodeModulesMount } from "@rivet-dev/agentos";
 import pi from "@agentos-software/pi";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -26,7 +26,7 @@ if (!ANTHROPIC_API_KEY) {
 
 const require = createRequire(import.meta.url);
 const MODULE_ACCESS_CWD = resolve(
-	dirname(require.resolve("@rivet-dev/agentos-core")),
+	dirname(require.resolve("@rivet-dev/agentos")),
 	"..",
 );
 const HOME_DIR = "/home/agentos";
@@ -66,12 +66,12 @@ const vm = await AgentOs.create({
 // Write the extension into Pi's global extensions directory.
 // In the VM, HOME is /home/agentos, so ~/.pi/agent/extensions/ resolves there.
 const extensionsDir = "/home/agentos/.pi/agent/extensions";
-await vm.mkdir(extensionsDir, { recursive: true });
-await vm.mkdir(WORKSPACE_DIR, { recursive: true });
-await vm.writeFile(`${extensionsDir}/custom-greeting.js`, extensionSource);
+await vm.filesystem.mkdir(extensionsDir, { recursive: true });
+await vm.filesystem.mkdir(WORKSPACE_DIR, { recursive: true });
+await vm.filesystem.writeFile(`${extensionsDir}/custom-greeting.js`, extensionSource);
 
 if (ANTHROPIC_BASE_URL) {
-	await vm.writeFile(
+	await vm.filesystem.writeFile(
 		`${HOME_DIR}/.pi/agent/models.json`,
 		JSON.stringify(
 			{
@@ -92,7 +92,7 @@ console.log("Extension written. Creating Pi session...\n");
 
 // ── Create session and prompt ──────────────────────────────────────
 
-await vm.openSession({
+await vm.sessions.open({
 	agent: "pi",
 	cwd: WORKSPACE_DIR,
 	env: {
@@ -104,7 +104,7 @@ await vm.openSession({
 
 // Ask a simple question — if the extension loaded, the agent will
 // prefix its response with "EXTENSION_OK: "
-const result = await vm.prompt({
+const result = await vm.sessions.prompt({
 	content: [
 		{ type: "text", text: "What is 2 + 2? Reply with just the number." },
 	],
@@ -124,5 +124,5 @@ if (responseText.includes("EXTENSION_OK:")) {
 	throw new Error("FAIL — Response did not include the expected prefix.");
 }
 
-await vm.deleteSession();
+await vm.sessions.delete();
 await vm.dispose();

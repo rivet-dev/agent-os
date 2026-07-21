@@ -19,7 +19,7 @@ const constants = {
 };
 
 function notImplemented(name) {
-  const error = new Error(`node:http2 ${name} is not available in the secure-exec bridge bootstrap`);
+  const error = new Error(`node:http2 ${name} is not available in the agentos bridge bootstrap`);
   error.code = "ERR_NOT_IMPLEMENTED";
   throw error;
 }

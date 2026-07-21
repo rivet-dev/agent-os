@@ -1,5 +1,5 @@
 [package]
-name = "secureexec-wasi-http"
+name = "agentos-wasi-http"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

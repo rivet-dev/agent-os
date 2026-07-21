@@ -641,13 +641,15 @@ export function writeAcpCloseSessionRequest(bc: bare.ByteCursor, x: AcpCloseSess
  * Resume a session that exists in durable storage but is not live in the current
  * VM (e.g. after a Rivet actor slept and woke with a fresh VM). The sidecar runs
  * the stateless resume state machine (native session/load when the agent supports
- * it, else a fresh session/new + transcript continuation preamble). `cwd`/`env`
- * describe the fresh adapter launch used by the fallback tier. `transcriptPath`,
- * when present, is a guest-readable path the fallback preamble points the agent at.
+ * it, else a fresh session/new + transcript continuation preamble). `runtime`,
+ * `cwd`, and `env` describe the fresh adapter launch used by the fallback tier.
+ * `transcriptPath`, when present, is a guest-readable path the fallback preamble
+ * points the agent at.
  */
 export type AcpResumeSessionRequest = {
     readonly sessionId: string
     readonly agentType: string
+    readonly runtime: AcpRuntimeKind
     readonly transcriptPath: string | null
     readonly cwd: string
     readonly additionalDirectories: readonly string[]
@@ -659,6 +661,7 @@ export function readAcpResumeSessionRequest(bc: bare.ByteCursor): AcpResumeSessi
     return {
         sessionId: bare.readString(bc),
         agentType: bare.readString(bc),
+        runtime: readAcpRuntimeKind(bc),
         transcriptPath: read2(bc),
         cwd: bare.readString(bc),
         additionalDirectories: read0(bc),
@@ -670,6 +673,7 @@ export function readAcpResumeSessionRequest(bc: bare.ByteCursor): AcpResumeSessi
 export function writeAcpResumeSessionRequest(bc: bare.ByteCursor, x: AcpResumeSessionRequest): void {
     bare.writeString(bc, x.sessionId)
     bare.writeString(bc, x.agentType)
+    writeAcpRuntimeKind(bc, x.runtime)
     write2(bc, x.transcriptPath)
     bare.writeString(bc, x.cwd)
     write0(bc, x.additionalDirectories)

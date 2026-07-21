@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Shared bridge contracts between the secure-exec kernel and execution planes.
+//! Shared bridge contracts between the agentos kernel and execution planes.
 
 pub mod queue_tracker;
 

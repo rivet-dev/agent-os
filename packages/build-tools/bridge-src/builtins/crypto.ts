@@ -11,11 +11,11 @@ function throwUnsupportedCryptoApi(api) {
   throw createUnsupportedCryptoApiError(`crypto.${api}`);
 }
 
-var kCryptoKeyToken = /* @__PURE__ */ Symbol("secureExecCryptoKey");
+var kCryptoKeyToken = /* @__PURE__ */ Symbol("agentOsCryptoKey");
 
-var kCryptoToken = /* @__PURE__ */ Symbol("secureExecCrypto");
+var kCryptoToken = /* @__PURE__ */ Symbol("agentOsCrypto");
 
-var kSubtleToken = /* @__PURE__ */ Symbol("secureExecSubtle");
+var kSubtleToken = /* @__PURE__ */ Symbol("agentOsSubtle");
 
 var ERR_INVALID_THIS2 = "ERR_INVALID_THIS";
 
@@ -552,7 +552,7 @@ function createBuiltinHmac(algorithm, key) {
   };
 }
 
-var kBuiltinCryptoKeyObjectToken = /* @__PURE__ */ Symbol("secureExecBuiltinKeyObject");
+var kBuiltinCryptoKeyObjectToken = /* @__PURE__ */ Symbol("agentOsBuiltinKeyObject");
 
 function isBufferLikeValue(value) {
   return import_buffer2.Buffer.isBuffer(value) || value instanceof ArrayBuffer || ArrayBuffer.isView(value);

@@ -26,7 +26,7 @@ The actor's durable root is handled separately: the sidecar connects directly to
 
 ## File operations
 
-These operations are primarily what the agent uses inside the VM, and are also available from the client to seed inputs and read results. For large or read-only inputs (a repo, a dataset), a read-only [host mount](#mounts) is faster than copying files in. Programs that need stdin or live output use exec instead (see [Core](/docs/core)).
+These operations are primarily what the agent uses inside the VM, and are also available from the client to seed inputs and read results. For large or read-only inputs (a repo, a dataset), a read-only [host mount](#mounts) is faster than copying files in. Programs that need stdin or live output use exec instead (see the [Direct VM API](/docs/core)).
 
 ### Read and write
 
@@ -57,7 +57,7 @@ See [Permissions](/docs/permissions) for the full configuration.
 
 ## Sandboxes
 
-For heavier or untrusted workloads, run a full Linux [sandbox](/docs/sandbox) alongside the VM and mount its filesystem into agentOS. The agent then reads and writes the sandbox's files through the same `fs` APIs while the sandbox handles execution. See [Sandbox Mounting](/docs/sandbox) for setup.
+For heavier workloads, run a full Linux [external sandbox](/docs/sandboxes) alongside the VM and mount its filesystem into agentOS. The agent then reads and writes the sandbox's files through the same `fs` APIs while the sandbox handles execution.
 
 ## Default layout
 

@@ -9,12 +9,12 @@ const agent = client.vm.getOrCreate("my-agent");
 // ── Quick start ───────────────────────────────────────────────────
 // docs:start quick-start
 async function quickStart() {
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
 
-	const result = await agent.prompt({
+	const result = await agent.sessions.prompt({
 		content: [
 			{ type: "text", text: "What files are in the current directory?" },
 		],
@@ -37,13 +37,13 @@ description: How to write commit messages in this project.
 Write commit messages in the imperative mood and keep the subject under 50 characters.
 `;
 
-	await agent.mkdir("/home/agentos/.pi/agent/skills/commit-style");
-	await agent.writeFile(
+	await agent.filesystem.mkdir("/home/agentos/.pi/agent/skills/commit-style");
+	await agent.filesystem.writeFile(
 		"/home/agentos/.pi/agent/skills/commit-style/SKILL.md",
 		skill,
 	);
 
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
@@ -58,7 +58,7 @@ Write commit messages in the imperative mood and keep the subject under 50 chara
 async function withMcp() {
 	// Pre-install the MCP server so `npx` is silent — first-run install output
 	// would otherwise corrupt the MCP stdio handshake ("Connection closed").
-	await agent.exec("npm install -g @modelcontextprotocol/server-filesystem");
+	await agent.process.exec("npm install -g @modelcontextprotocol/server-filesystem");
 
 	// docs:start mcp
 	const mcpConfig = JSON.stringify({
@@ -78,10 +78,10 @@ async function withMcp() {
 		},
 	});
 
-	await agent.mkdir("/home/agentos/.pi/agent");
-	await agent.writeFile("/home/agentos/.pi/agent/.mcp.json", mcpConfig);
+	await agent.filesystem.mkdir("/home/agentos/.pi/agent");
+	await agent.filesystem.writeFile("/home/agentos/.pi/agent/.mcp.json", mcpConfig);
 
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
@@ -98,15 +98,15 @@ description: How to write commit messages in this project.
 Write commit messages in the imperative mood and keep the subject under 50 characters.
 `;
 
-	await agent.mkdir("/home/agentos/.pi/agent/skills/commit-style");
-	await agent.writeFile(
+	await agent.filesystem.mkdir("/home/agentos/.pi/agent/skills/commit-style");
+	await agent.filesystem.writeFile(
 		"/home/agentos/.pi/agent/skills/commit-style/SKILL.md",
 		skill,
 	);
 
 	// Pre-install the MCP server so `npx` is silent — first-run install output
 	// would otherwise corrupt the MCP stdio handshake ("Connection closed").
-	await agent.exec("npm install -g @modelcontextprotocol/server-filesystem");
+	await agent.process.exec("npm install -g @modelcontextprotocol/server-filesystem");
 
 	const mcpConfig = JSON.stringify({
 		mcpServers: {
@@ -120,15 +120,15 @@ Write commit messages in the imperative mood and keep the subject under 50 chara
 			},
 		},
 	});
-	await agent.mkdir("/home/agentos/.pi/agent");
-	await agent.writeFile("/home/agentos/.pi/agent/.mcp.json", mcpConfig);
+	await agent.filesystem.mkdir("/home/agentos/.pi/agent");
+	await agent.filesystem.writeFile("/home/agentos/.pi/agent/.mcp.json", mcpConfig);
 
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
 
-	const result = await agent.prompt({
+	const result = await agent.sessions.prompt({
 		content: [
 			{
 				type: "text",
@@ -158,14 +158,14 @@ export default function(pi) {
 `;
 
 	// Write the extension before creating the session
-	await agent.mkdir("/home/agentos/.pi/agent/extensions");
-	await agent.writeFile(
+	await agent.filesystem.mkdir("/home/agentos/.pi/agent/extensions");
+	await agent.filesystem.writeFile(
 		"/home/agentos/.pi/agent/extensions/formal.js",
 		extensionCode,
 	);
 
 	// Pi discovers the extension automatically
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});

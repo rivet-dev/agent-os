@@ -6,9 +6,9 @@
  *
  *   native floor   real host node via Rust std::process   (native-baseline binary)
  *   node reference  real host node via Node child_process  (in-process, host)
- *   guest           node inside a secure-exec VM (a fresh V8 isolate per spawn)
+ *   guest           node inside a agentos VM (a fresh V8 isolate per spawn)
  *
- *   emulation_tax = guest.p50 / node.p50   <- what secure-exec's emulation adds
+ *   emulation_tax = guest.p50 / node.p50   <- what agentos's emulation adds
  *   total_tax     = guest.p50 / native.p50 <- total cost over the raw host floor
  *
  * The guest layer hits the V8-isolate-per-spawn path that the surface map flagged as

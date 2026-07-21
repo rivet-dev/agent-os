@@ -1,4 +1,4 @@
-//! Generated Secure Exec sidecar wire protocol surface.
+//! Generated AgentOS language execution sidecar wire protocol surface.
 //!
 //! This module is the public generated protocol entrypoint. The hand-written
 //! `protocol` module remains an internal compatibility layer while callers move
@@ -564,6 +564,14 @@ fn legacy_limits_config(
         runner_heap_limit_mb: legacy_u64(metadata, "limits.wasm.runner_heap_limit_mb"),
         runner_cpu_time_limit_ms: legacy_u64(metadata, "limits.wasm.runner_cpu_time_limit_ms"),
     };
+    let execution = agentos_vm_config::ExecutionLimitsConfig {
+        completed_ttl_ms: legacy_u64(metadata, "limits.execution.completed_ttl_ms"),
+        max_completed_executions: legacy_u64(metadata, "limits.execution.max_completed_executions"),
+        live_execution_warning_threshold: legacy_u64(
+            metadata,
+            "limits.execution.live_execution_warning_threshold",
+        ),
+    };
     let process = agentos_vm_config::ProcessLimitsConfig {
         max_spawn_file_actions: legacy_u64(metadata, "limits.process.max_spawn_file_actions")
             .or_else(|| legacy_u64(metadata, "limits.wasm.max_spawn_file_actions")),
@@ -591,6 +599,10 @@ fn legacy_limits_config(
         js_runtime: legacy_has_js_runtime_limits(&js_runtime).then_some(js_runtime),
         python: legacy_has_python_limits(&python).then_some(python),
         wasm: legacy_has_wasm_limits(&wasm).then_some(wasm),
+        execution: (execution.completed_ttl_ms.is_some()
+            || execution.max_completed_executions.is_some()
+            || execution.live_execution_warning_threshold.is_some())
+        .then_some(execution),
         process: legacy_has_process_limits(&process).then_some(process),
     };
 
@@ -603,6 +615,7 @@ fn legacy_limits_config(
         && config.js_runtime.is_none()
         && config.python.is_none()
         && config.wasm.is_none()
+        && config.execution.is_none()
         && config.process.is_none()
     {
         None

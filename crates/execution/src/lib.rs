@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Native execution plane scaffold for the secure-exec runtime migration.
+//! Native execution plane scaffold for the agentos runtime migration.
 
 mod common;
 mod host_node;
@@ -28,6 +28,8 @@ pub use javascript::{
     LocalModuleResolutionCache, LocalResolvedModuleFormat, ModuleFsReader, ModuleResolveMode,
     ModuleResolver, StartJavascriptExecutionRequest,
 };
+#[doc(hidden)]
+pub use node_import_cache::bundled_typescript_assets;
 pub use python::{
     CreatePythonContextRequest, PythonContext, PythonExecution, PythonExecutionEngine,
     PythonExecutionError, PythonExecutionEvent, PythonExecutionLimits, PythonExecutionResult,

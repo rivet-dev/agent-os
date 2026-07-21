@@ -1,6 +1,6 @@
-# Secure Exec Browser
+# AgentOS language execution Browser
 
-Browser driver primitives for secure-exec.
+Browser driver primitives for agentos.
 
 - Package: `@rivet-dev/agentos-runtime-browser`
 - Exports: `createBrowserDriver`, `createBrowserRuntimeDriverFactory`, `createOpfsFileSystem`, `BrowserWorkerAdapter`

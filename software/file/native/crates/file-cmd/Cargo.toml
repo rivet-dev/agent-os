@@ -1,10 +1,10 @@
 [package]
 workspace = "../../../../../toolchain"
-name = "secureexec-file-cmd"
+name = "agentos-file-cmd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "file command implementation for secure-exec standalone binaries"
+description = "file command implementation for agentos standalone binaries"
 
 [dependencies]
 infer = "0.16"

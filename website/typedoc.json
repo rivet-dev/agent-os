@@ -1,7 +1,9 @@
 {
 	"$schema": "https://typedoc.org/schema.json",
-	"entryPoints": ["../packages/agentos/src/index.ts"],
-	"tsconfig": "../packages/agentos/tsconfig.json",
+	"entryPoints": [
+		"../packages/agentos/src/index.ts"
+	],
+	"tsconfig": "./tsconfig.typedoc.json",
 	"out": "public/api",
 	"name": "agentOS API Reference",
 	"includeVersion": true,

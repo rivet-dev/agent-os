@@ -40,7 +40,6 @@ export const EXCLUDED = new Set<string>([
 	// unified sidecar reactor/security contract and must not be published.
 	"@rivet-dev/agentos-browser",
 	"@rivet-dev/agentos-runtime-browser",
-	"secure-exec",
 	"publish",
 ]);
 
@@ -227,6 +226,7 @@ export function assertDiscoverySanity(packages: Package[]): void {
 	const required: string[] = [];
 	if (hasAgentOsPackages) {
 		required.push(
+			"@rivet-dev/agentos",
 			"@rivet-dev/agentos-core",
 			"@rivet-dev/agentos-sidecar",
 			"@rivet-dev/agentos-runtime-sidecar",

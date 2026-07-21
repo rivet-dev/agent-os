@@ -71,11 +71,14 @@ defineAgentOsConformanceSuite({
 				action: AgentOsConformanceAction,
 				...args: unknown[]
 			): Promise<T> {
-				const method = handle[action];
+				const path = action.split(".");
+				let owner = handle;
+				for (const segment of path.slice(0, -1)) owner = owner[segment];
+				const method = owner[path.at(-1)!];
 				if (typeof method !== "function") {
 					throw new Error(`Actor backend does not implement ${action}`);
 				}
-				return (await method(...args)) as T;
+				return (await method.apply(owner, args)) as T;
 			},
 			on(
 				event: AgentOsConformanceEvent,

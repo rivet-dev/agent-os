@@ -1,8 +1,8 @@
 /**
- * Memory overhead benchmark for the Secure Exec runtime.
+ * Memory overhead benchmark for the AgentOS language execution runtime.
  *
  * Measures incremental host-process RSS per live runtime by booting N runtimes
- * via the public `secure-exec` SDK, sampling memory, then tearing them down.
+ * via the public `agentos` SDK, sampling memory, then tearing them down.
  *
  * Each `NodeRuntime.create()` boots an out-of-process sidecar VM, so the bulk
  * of a runtime's memory lives in the sidecar child process, not this Node

@@ -10,8 +10,8 @@ var UndiciRequest = undiciRequestModule?.Request ?? undiciRequestModule?.default
 var UndiciResponse = undiciResponseModule?.Response ?? undiciResponseModule?.default ?? undiciResponseModule;
 var setUndiciGlobalDispatcher = undiciGlobalModule?.setGlobalDispatcher;
 var getUndiciGlobalDispatcher = undiciGlobalModule?.getGlobalDispatcher;
-var secureExecUndiciDispatcher = null;
-function createSecureExecUndiciDispatcher() {
+var agentOsUndiciDispatcher = null;
+function createAgentOsUndiciDispatcher() {
   const dispatcher = new UndiciAgent({
     // Bound the per-origin connection pool. With an unbounded pool, requests that
     // overlap while the pool's clients are still connecting each find every client
@@ -78,16 +78,16 @@ function createSecureExecUndiciDispatcher() {
   });
   return dispatcher;
 }
-function getSecureExecUndiciDispatcher() {
-  if (!secureExecUndiciDispatcher) {
-    secureExecUndiciDispatcher = createSecureExecUndiciDispatcher();
+function getAgentOsUndiciDispatcher() {
+  if (!agentOsUndiciDispatcher) {
+    agentOsUndiciDispatcher = createAgentOsUndiciDispatcher();
   }
-  return secureExecUndiciDispatcher;
+  return agentOsUndiciDispatcher;
 }
 if (typeof setUndiciGlobalDispatcher === "function" && typeof UndiciAgent === "function") {
   const currentDispatcher = typeof getUndiciGlobalDispatcher === "function" ? getUndiciGlobalDispatcher() : null;
   if (currentDispatcher == null) {
-    setUndiciGlobalDispatcher(getSecureExecUndiciDispatcher());
+    setUndiciGlobalDispatcher(getAgentOsUndiciDispatcher());
   }
 }
-export { UndiciAgent, UndiciClient, undiciRequest, undiciFetch, UndiciHeaders, UndiciRequest, UndiciResponse, setUndiciGlobalDispatcher, getUndiciGlobalDispatcher, secureExecUndiciDispatcher, createSecureExecUndiciDispatcher, getSecureExecUndiciDispatcher };
+export { UndiciAgent, UndiciClient, undiciRequest, undiciFetch, UndiciHeaders, UndiciRequest, UndiciResponse, setUndiciGlobalDispatcher, getUndiciGlobalDispatcher, agentOsUndiciDispatcher, createAgentOsUndiciDispatcher, getAgentOsUndiciDispatcher };

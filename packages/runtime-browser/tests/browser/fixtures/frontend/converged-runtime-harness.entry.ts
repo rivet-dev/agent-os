@@ -131,7 +131,7 @@ async function execConvergedGuest(
 	} as never;
 
 	const factory = createBrowserRuntimeDriverFactory({
-		workerUrl: new URL("/secure-exec-worker.js", window.location.href),
+		workerUrl: new URL("/agentos-worker.js", window.location.href),
 		convergedSidecar: { loadSidecar, config },
 	});
 

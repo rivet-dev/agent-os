@@ -1,6 +1,6 @@
 //! Centralized bounded-queue usage tracker.
 //!
-//! secure-exec streams guest output through a *chain* of bounded queues: the
+//! agentos streams guest output through a *chain* of bounded queues: the
 //! V8 -> host event channel, the sidecar stdout/stdin frame queues, and so on.
 //! Each queue applies backpressure when full (it parks the producer until the
 //! consumer drains) rather than crashing, but backpressure is invisible: a slow
@@ -403,7 +403,7 @@ pub struct QueueRegistry {
 }
 
 impl QueueRegistry {
-    /// The shared registry. All `secure-exec` bounded queues register here so
+    /// The shared registry. All `agentos` bounded queues register here so
     /// their usage can be inspected from one place.
     pub fn global() -> &'static QueueRegistry {
         static REGISTRY: OnceLock<QueueRegistry> = OnceLock::new();

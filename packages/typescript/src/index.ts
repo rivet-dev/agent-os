@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import type { AgentOs } from "@rivet-dev/agentos-core";
 import {
 	createKernel,
 	type createNodeDriver,
@@ -54,6 +55,15 @@ export interface TypeScriptToolsOptions {
 	memoryLimit?: number;
 	cpuTimeLimitMs?: number;
 	compilerSpecifier?: string;
+}
+
+export interface AgentOsTypeScriptToolsOptions {
+	/** Guest path or package specifier for the TypeScript compiler. */
+	compilerSpecifier: string;
+	/** Per-compiler-invocation wall-clock limit. */
+	timeoutMs?: number;
+	/** Per-compiler-invocation CPU limit. */
+	cpuTimeLimitMs?: number;
 }
 
 export interface TypeScriptTools {
@@ -137,6 +147,104 @@ export function createTypeScriptTools(
 				options: requestOptions,
 			}),
 	};
+}
+
+let nextAgentOsCompilerRequestId = 0;
+
+/**
+ * Bind the TypeScript compiler to an existing AgentOS VM.
+ *
+ * Unlike the legacy driver-oriented constructor, this runs every compiler
+ * invocation in the caller's VM, so source files, tsconfig projects,
+ * permissions, and resource limits all share one sidecar-owned environment.
+ */
+export function createAgentOsTypeScriptTools(
+	vm: AgentOs,
+	options: AgentOsTypeScriptToolsOptions,
+): TypeScriptTools {
+	const run = async <TResult extends CompilerResponse>(
+		request: Omit<CompilerRequest, "compilerSpecifier">,
+	): Promise<TResult> => {
+		const completeRequest = {
+			...request,
+			compilerSpecifier: options.compilerSpecifier,
+		} as CompilerRequest;
+		try {
+			return (await runCompilerRequestInAgentOs(
+				vm,
+				completeRequest,
+				options,
+			)) as TResult;
+		} catch (error) {
+			return createFailureResult<TResult>(
+				completeRequest.kind,
+				error instanceof Error ? error.message : String(error),
+			);
+		}
+	};
+
+	return {
+		typecheckProject: (requestOptions = {}) =>
+			run<TypeCheckResult>({
+				kind: "typecheckProject",
+				options: requestOptions,
+			}),
+		compileProject: (requestOptions = {}) =>
+			run<ProjectCompileResult>({
+				kind: "compileProject",
+				options: requestOptions,
+			}),
+		typecheckSource: (requestOptions) =>
+			run<TypeCheckResult>({
+				kind: "typecheckSource",
+				options: requestOptions,
+			}),
+		compileSource: (requestOptions) =>
+			run<SourceCompileResult>({
+				kind: "compileSource",
+				options: requestOptions,
+			}),
+	};
+}
+
+async function runCompilerRequestInAgentOs(
+	vm: AgentOs,
+	request: CompilerRequest,
+	options: AgentOsTypeScriptToolsOptions,
+): Promise<CompilerResponse> {
+	const requestId = nextAgentOsCompilerRequestId++;
+	const requestPath = `/tmp/agentos-typescript-request-${requestId}.json`;
+	const runnerPath = `/tmp/agentos-typescript-runner-${requestId}.cjs`;
+	await vm.writeFile(requestPath, JSON.stringify(request));
+	await vm.writeFile(runnerPath, buildCompilerRuntimeScript(requestPath));
+
+	try {
+		const result = await vm.execArgv("node", [runnerPath], {
+			cwd: request.options.cwd ?? "/workspace",
+			timeout: options.timeoutMs,
+			cpuTimeLimitMs: options.cpuTimeLimitMs,
+		});
+		if (result.stdout.trim()) {
+			return parseRuntimeResponse(result.stdout);
+		}
+		if (result.exitCode !== 0) {
+			throw new Error(
+				result.stderr.trim() || `TypeScript runtime exited ${result.exitCode}`,
+			);
+		}
+		throw new Error("TypeScript runtime produced no response");
+	} finally {
+		for (const targetPath of [requestPath, runnerPath]) {
+			try {
+				if (await vm.exists(targetPath)) await vm.remove(targetPath);
+			} catch (error) {
+				console.error(
+					`[agentos] failed to remove TypeScript compiler temporary file ${targetPath}:`,
+					error,
+				);
+			}
+		}
+	}
 }
 
 async function runCompilerRequest<TResult extends CompilerResponse>(
@@ -388,10 +496,10 @@ function createFailureResult<TResult extends CompilerResponse>(
 function normalizeCompilerFailureMessage(errorMessage?: string): string {
 	const message = (errorMessage ?? "TypeScript compiler failed").trim();
 	if (/memory limit/i.test(message)) {
-		return "TypeScript compiler exceeded sandbox memory limit";
+		return "TypeScript compiler exceeded VM memory limit";
 	}
 	if (/cpu time limit exceeded|timed out/i.test(message)) {
-		return "TypeScript compiler exceeded sandbox CPU time limit";
+		return "TypeScript compiler exceeded VM CPU time limit";
 	}
 	return message;
 }
@@ -417,6 +525,7 @@ function buildCompilerRuntimeScript(requestPath: string): string {
 	return `
 const fs = require("node:fs");
 const path = require("node:path");
+const __require = require;
 
 function loadTypeScriptCompiler(compilerSpecifier) {
 	const specifier =
@@ -450,6 +559,7 @@ try {
 function buildCompilerRuntimeEval(request: CompilerRequest): string {
 	return `
 const path = require("node:path");
+const __require = require;
 
 function loadTypeScriptCompiler(compilerSpecifier) {
 	const specifier =
@@ -619,7 +729,7 @@ function compilerRuntimeMain(
 		const cwd = path.resolve(options.cwd ?? "/root");
 		const filePath = path.resolve(
 			cwd,
-			options.filePath ?? "__secure_exec_typescript_input__.ts",
+			options.filePath ?? "__agentos_typescript_input__.ts",
 		);
 		const projectCompilerOptions = options.configFilePath
 			? resolveProjectConfig(

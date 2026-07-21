@@ -1,5 +1,5 @@
 [package]
-name = "secureexec-stubs"
+name = "agentos-stubs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

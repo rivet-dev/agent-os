@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/index.js";
 
-describe("flat spawn API", () => {
+describe("process API", () => {
 	let vm: AgentOs;
 
 	beforeEach(async () => {
@@ -13,22 +13,24 @@ describe("flat spawn API", () => {
 	});
 
 	test("onProcessStderr captures stderr, onProcessExit fires with exit code", async () => {
-		await vm.writeFile(
+		await vm.filesystem.writeFile(
 			"/tmp/stderr-exit.mjs",
 			'process.stderr.write("err-data\\n"); process.exit(42);',
 		);
 
-		const { pid } = vm.spawn("node", ["/tmp/stderr-exit.mjs"], {
+		const { pid } = await vm.process.spawn("node", ["/tmp/stderr-exit.mjs"], {
 			env: { HOME: "/home/agentos" },
 		});
 
 		const stderrChunks: string[] = [];
-		vm.onProcessStderr(pid, (data) => {
-			stderrChunks.push(new TextDecoder().decode(data));
+		vm.onProcessOutput(pid, (event) => {
+			if (event.stream === "stderr") {
+				stderrChunks.push(new TextDecoder().decode(event.data));
+			}
 		});
 
 		const exitCodePromise = new Promise<number>((resolve) => {
-			vm.onProcessExit(pid, resolve);
+			vm.onProcessExit(pid, (event) => resolve(event.exitCode));
 		});
 
 		const exitCode = await exitCodePromise;
@@ -36,26 +38,26 @@ describe("flat spawn API", () => {
 		expect(stderrChunks.join("")).toContain("err-data");
 	}, 30_000);
 
-	test("spawn returns { pid }, writeProcessStdin sends data, onProcessStdout receives it", async () => {
-		await vm.writeFile(
+	test("nested spawn returns { pid } and manages the tracked process", async () => {
+		await vm.filesystem.writeFile(
 			"/tmp/echo-stdin.mjs",
 			`process.stdin.on("data", (chunk) => process.stdout.write(chunk));`,
 		);
 
-		const { pid } = vm.spawn("node", ["/tmp/echo-stdin.mjs"], {
-			streamStdin: true,
+		const { pid } = await vm.process.spawn("node", ["/tmp/echo-stdin.mjs"], {
 			env: { HOME: "/home/agentos" },
 		});
 
 		const chunks: string[] = [];
-		const expectedOutput = "hello from flat api";
+		const expectedOutput = "hello from nested api";
 		const stdoutReceived = new Promise<void>((resolve, reject) => {
 			const timeout = setTimeout(() => {
 				reject(new Error("Timed out waiting for spawned stdout"));
 			}, 5_000);
 
-			vm.onProcessStdout(pid, (data) => {
-				chunks.push(new TextDecoder().decode(data));
+			vm.onProcessOutput(pid, (event) => {
+				if (event.stream !== "stdout") return;
+				chunks.push(new TextDecoder().decode(event.data));
 				if (chunks.join("").includes(expectedOutput)) {
 					clearTimeout(timeout);
 					resolve();
@@ -63,13 +65,13 @@ describe("flat spawn API", () => {
 			});
 		});
 
-		vm.writeProcessStdin(pid, "hello from flat api\n");
+		await vm.process.writeStdin(pid, "hello from nested api\n");
 
 		await stdoutReceived;
 
-		vm.killProcess(pid);
-		await vm.waitProcess(pid);
+		await vm.process.kill(pid);
+		await vm.process.wait(pid);
 
-		expect(chunks.join("")).toContain(expectedOutput);
+		expect(chunks.join("")).toContain("hello from nested api");
 	}, 30_000);
 });

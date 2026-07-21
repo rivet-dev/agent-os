@@ -201,7 +201,7 @@ describe.skipIf(!hasCodexExecArtifact)(
 		}, 70000);
 
 		test("shell tool runs a REAL subprocess with an observable filesystem side effect", async () => {
-			// Proves codex's exec tool spawns a real subprocess via the secure-exec
+			// Proves codex's exec tool spawns a real subprocess via the agentos
 			// host_process bridge (not a mocked/gated stub): the model asks to run a
 			// shell command that WRITES A FILE, we approve it, and after the turn we
 			// read that file back from the VM and assert its contents. Inlined (not

@@ -13,6 +13,7 @@
 		"check-types": "pnpm --dir ../runtime-core build && tsc --noEmit"
 	},
 	"dependencies": {
+		"@rivet-dev/agentos": "workspace:*",
 		"@rivet-dev/agentos-runtime-core": "workspace:*"
 	},
 	"devDependencies": {

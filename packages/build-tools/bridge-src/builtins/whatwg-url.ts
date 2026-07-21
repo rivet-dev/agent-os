@@ -1,5 +1,5 @@
-const kBlobUrlStore = /* @__PURE__ */ Symbol.for("secureExec.blobUrlStore");
-const kBlobUrlCounter = /* @__PURE__ */ Symbol.for("secureExec.blobUrlCounter");
+const kBlobUrlStore = /* @__PURE__ */ Symbol.for("agentOs.blobUrlStore");
+const kBlobUrlCounter = /* @__PURE__ */ Symbol.for("agentOs.blobUrlCounter");
 
 function createNodeTypeError(message, code) {
 	const error = new TypeError(message);

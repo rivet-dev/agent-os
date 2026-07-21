@@ -28,7 +28,7 @@ The sidecar—not the actor or SDK—owns defaults and orchestration. TypeScript
 
 One prompt may run per session. Cancellation races are first-writer-wins. AgentOS does not automatically replay interrupted prompts because tool side effects may already have occurred.
 
-The ACP runtime and core SDK transports impose no wall-clock deadline on prompts or human permission waits. After 30 seconds without ACP activity, AgentOS logs an inactivity warning with the total elapsed time and last observed activity, repeating every 30 seconds until activity resumes. Streaming output resets that interval. Bootstrap, teardown, filesystem, terminal, and other machine-to-machine operations retain bounded failure deadlines. Actor-hosted calls currently inherit RivetKit's maximum timer-safe action bound of about 24.8 days because RivetKit does not yet support an unbounded action.
+The ACP runtime and AgentOS client transports impose no wall-clock deadline on prompts or human permission waits. After 30 seconds without ACP activity, AgentOS logs an inactivity warning with the total elapsed time and last observed activity, repeating every 30 seconds until activity resumes. Streaming output resets that interval. Bootstrap, teardown, filesystem, terminal, and other machine-to-machine operations retain bounded failure deadlines. Actor-hosted calls currently inherit RivetKit's maximum timer-safe action bound of about 24.8 days because RivetKit does not yet support an unbounded action.
 
 ## Reads versus adapter operations
 

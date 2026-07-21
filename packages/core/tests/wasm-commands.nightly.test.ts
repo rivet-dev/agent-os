@@ -273,13 +273,13 @@ EOF`);
 			const bash = await vm.exec("which bash");
 			expect(bash.exitCode).toBe(0);
 			expect(bash.stdout.trim()).toMatch(
-				/^\/(?:bin|__secure_exec\/commands\/\d+)\/bash$/,
+				/^\/(?:bin|__agentos\/commands\/\d+)\/bash$/,
 			);
 
 			const rg = await vm.exec("which rg");
 			expect(rg.exitCode).toBe(0);
 			expect(rg.stdout.trim()).toMatch(
-				/^\/(?:bin|__secure_exec\/commands\/\d+)\/rg$/,
+				/^\/(?:bin|__agentos\/commands\/\d+)\/rg$/,
 			);
 
 			const missing = await vm.exec("which definitely-not-a-command");

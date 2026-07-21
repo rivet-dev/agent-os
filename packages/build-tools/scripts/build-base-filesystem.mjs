@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-// Build the secure-exec base filesystem in ONE step: snapshot a stock Alpine
-// container, apply the secure-exec transforms, and write the single
+// Build the agentos base filesystem in ONE step: snapshot a stock Alpine
+// container, apply the agentos transforms, and write the single
 // `base-filesystem.json`. Requires Docker. Run this BY HAND when the base needs
 // updating — nothing runs it during a build.
 //
@@ -23,15 +23,15 @@ const OUTPUT_PATHS = [
 	fileURLToPath(new URL("../../../crates/vfs/assets/base-filesystem.json", import.meta.url)),
 ];
 
-// --- secure-exec base identity (the transform target) -----------------------
+// --- agentos base identity (the transform target) -----------------------
 
-const BASE_HOSTNAME = "secure-exec";
+const BASE_HOSTNAME = "agentos";
 const BASE_USER = "agentos";
 const BASE_HOME = `/home/${BASE_USER}`;
 const BASE_UID = 1000;
 const BASE_GID = 1000;
 
-// Non-Alpine directories the secure-exec base layer always provides on top of the
+// Non-Alpine directories the agentos base layer always provides on top of the
 // captured snapshot. `/workspace` is the default agent working directory (cwd) and
 // the conventional mount root; it is kept separate from `$HOME` (/home/agentos),
 // which is never a mount.
@@ -40,8 +40,8 @@ const EXTRA_DIRECTORIES = [
 ];
 
 const TRANSFORMS = [
-	"Normalize HOSTNAME to secure-exec",
-	"Preserve the captured user-level environment and filesystem layout as the secure-exec base layer",
+	"Normalize HOSTNAME to agentos",
+	"Preserve the captured user-level environment and filesystem layout as the agentos base layer",
 	"Add the non-Alpine /workspace directory (default agent working directory) owned by the base user",
 ];
 
@@ -242,7 +242,7 @@ function captureAlpineSnapshot() {
 	}
 }
 
-// --- transform: raw Alpine snapshot -> secure-exec base filesystem ----------
+// --- transform: raw Alpine snapshot -> agentos base filesystem ----------
 
 function normalizeEntry(entry) {
 	if (entry.path === "/etc/hostname" && entry.type === "file") {

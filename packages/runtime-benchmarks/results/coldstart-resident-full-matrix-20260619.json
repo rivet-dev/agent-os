@@ -1,5 +1,5 @@
 
-> @rivet-dev/agentos-runtime-benchmarks@ bench:coldstart /home/nathan/secure-exec-perf-restore/packages/benchmarks
+> @rivet-dev/agentos-runtime-benchmarks@ bench:coldstart /home/nathan/agentos-perf-restore/packages/benchmarks
 > tsx coldstart.bench.ts
 
 {

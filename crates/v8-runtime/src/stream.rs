@@ -10,7 +10,7 @@
 /// - "http2" → _http2Dispatch
 /// - "stdin", "stdin_end" → _stdinDispatch
 /// - "net_socket" → _netSocketDispatch
-/// - "signal" → __secureExecWasmSignalDispatch or _signalDispatch
+/// - "signal" → __agentOsWasmSignalDispatch or _signalDispatch
 /// - "timer" → _timerDispatch
 pub fn dispatch_stream_event(scope: &mut v8::HandleScope, event_type: &str, payload: &[u8]) {
     // Look up the dispatch function on the global object
@@ -23,7 +23,7 @@ pub fn dispatch_stream_event(scope: &mut v8::HandleScope, event_type: &str, payl
         "http2" => &["_http2Dispatch"],
         "stdin" | "stdin_end" => &["_stdinDispatch"],
         "net_socket" => &["_netSocketDispatch"],
-        "signal" => &["__secureExecWasmSignalDispatch", "_signalDispatch"],
+        "signal" => &["__agentOsWasmSignalDispatch", "_signalDispatch"],
         "timer" => &["_timerDispatch"],
         _ => return, // Unknown event type — ignore
     };
@@ -94,7 +94,7 @@ fn dispatch_stream_value(
     let context = scope.get_current_context();
     let global = context.global(scope);
     let dispatch_names: &[&str] = match event_type {
-        "signal" => &["__secureExecWasmSignalDispatch", "_signalDispatch"],
+        "signal" => &["__agentOsWasmSignalDispatch", "_signalDispatch"],
         "timer" => &["_timerDispatch"],
         _ => return,
     };

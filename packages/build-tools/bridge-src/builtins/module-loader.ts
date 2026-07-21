@@ -80,7 +80,7 @@ function createRequireEsmError(filename) {
 }
 function createModuleFormatBridgeMissingError(filename) {
   const error = new Error(
-    `secure-exec module format bridge is not registered; cannot require ${filename}.`
+    `agentos module format bridge is not registered; cannot require ${filename}.`
   );
   error.code = "ERR_AGENTOS_MODULE_FORMAT_BRIDGE_MISSING";
   return error;
@@ -98,10 +98,10 @@ function assertCommonjsLoadable(filename) {
   if (moduleFormat(filename) === "module") throw createRequireEsmError(filename);
 }
 function requireEsmSync(filename, parentPath) {
-  if (typeof globalThis.__secureExecRequireEsmSync !== "function") {
+  if (typeof globalThis.__agentOsRequireEsmSync !== "function") {
     throw createRequireEsmError(filename);
   }
-  const namespace = globalThis.__secureExecRequireEsmSync(filename, parentPath);
+  const namespace = globalThis.__agentOsRequireEsmSync(filename, parentPath);
   if (
     namespace != null &&
     (typeof namespace === "object" || typeof namespace === "function") &&
@@ -148,7 +148,7 @@ function createRequire(filename) {
 // module wrapper, and resolution still flows through _requireFrom with the same
 // permission checks — and the namespaced name avoids changing `typeof require` for
 // guest code that branches on CJS-vs-ESM.
-defineGlobal("__secureExecGuestCreateRequire", createRequire);
+defineGlobal("__agentOsGuestCreateRequire", createRequire);
 var Module = class _Module {
   id;
   path;

@@ -11,7 +11,7 @@
     "arch": "x64"
   },
   "sidecar": {
-    "path": "/home/runner/work/secure-exec/secure-exec/target/release/agentos-native-sidecar",
+    "path": "/home/runner/work/agentos/agentos/target/release/agentos-native-sidecar",
     "profile": "release",
     "mtimeMs": 1783042624895.653,
     "mtimeIso": "2026-07-02T18:37:04.896-07:00",

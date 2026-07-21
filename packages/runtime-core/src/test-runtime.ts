@@ -1942,7 +1942,7 @@ class WasmVmRuntimeDescriptor implements KernelRuntimeDriver {
 			}
 			guestPaths.set(
 				name,
-				`/__secure_exec/commands/${startIndex + dirOffset}/${name}`,
+				`/__agentos/commands/${startIndex + dirOffset}/${name}`,
 			);
 		}
 		return guestPaths;
@@ -2364,7 +2364,7 @@ function collectGuestCommandPaths(
 		if (!guestPaths.has(entry.name)) {
 			guestPaths.set(
 				entry.name,
-				`/__secure_exec/commands/${startIndex + entry.dirOffset}/${entry.name}`,
+				`/__agentos/commands/${startIndex + entry.dirOffset}/${entry.name}`,
 			);
 		}
 	}
@@ -2894,7 +2894,7 @@ class NativeKernel implements Kernel {
 		const allCommandDirs = [...this.mountedCommandDirs, ...commandDirs];
 		const sidecarMounts = allCommandDirs.map((commandDir, index) =>
 			serializeMountConfigForSidecar({
-				path: `/__secure_exec/commands/${index}`,
+				path: `/__agentos/commands/${index}`,
 				readOnly: true,
 				plugin: {
 					id: "host_dir",

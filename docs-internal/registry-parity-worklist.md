@@ -85,7 +85,7 @@ fuel checkpoints that distinguish user CPU from user-plus-system CPU.
 
 **This is the highest-leverage item and reshapes several below.** Audit revealed
 that **most commands are NOT the real Linux tool** — they are custom Rust rewrites
-(`secureexec-*` crates) or `uutils`, plus at least one hand-rolled C CLI (curl).
+(`agentos-*` crates) or `uutils`, plus at least one hand-rolled C CLI (curl).
 Per the load-bearing rule, each must become the **real upstream tool** compiled to
 WASI and patched as needed.
 
@@ -117,11 +117,11 @@ actual backing:
 | **wget** | DONE | our 174-line `wget.c` (dropped) | real GNU Wget vs our sysroot — stub `getrlimit`/`getgroups`, then build |
 | **http-get** | DONE | our 95-line `http_get.c` | dropped; real curl covers HTTP fetches |
 | **git** | DONE | our hand-rolled git from `sha1`+`flate2` | **real git** (upstream C), patched for WASI — **NOT gitoxide** |
-| **fd** | DONE | our `secureexec-fd` on raw `regex` (not sharkdp/fd) | real **fd** (sharkdp) |
+| **fd** | DONE | our `agentos-fd` on raw `regex` (not sharkdp/fd) | real **fd** (sharkdp) |
 | **findutils** (`find`,`xargs`) | DONE | our hand-rolled on `regex`/shims | replaced with `uutils/findutils` |
 | **tree** | DONE | our hand-rolled, zero deps | real `tree`, or an established one |
-| **grep** | DONE | our `secureexec-grep` on raw `regex` (**not** an established grep pkg) | real **GNU grep** |
-| **ripgrep** (`rg`) | DONE | our `secureexec-grep` recursive search shim, not real ripgrep | real upstream **ripgrep** |
+| **grep** | DONE | our `agentos-grep` on raw `regex` (**not** an established grep pkg) | real **GNU grep** |
+| **ripgrep** (`rg`) | DONE | our `agentos-grep` recursive search shim, not real ripgrep | real upstream **ripgrep** |
 | **zip** | DONE | our 203-line `zip.c` over zlib/minizip (not Info-ZIP) | real Info-ZIP, or an established lib's CLI |
 | **unzip** | DONE | our 669-line `unzip.c` over zlib/minizip | real Info-ZIP unzip |
 | **sqlite3 CLI** | DONE | our 558-line `sqlite3_cli.c` (engine is real SQLite; the shell is ours) | real SQLite `shell.c` (its official CLI) |
@@ -244,7 +244,7 @@ works (`wasi-spawn` broker), so `xargs` is not a blocker.
   `2026-07-08T05-43-24-0700-http-get-clear-stale-generated-and-install.log`;
   cross-runtime network tests pass 11/11 with the WASM curl rows in
   `2026-07-08T05-47-43-0700-http-get-runtime-cross-network-test-pass.log`.
-- **tree — DONE.** Replaced the custom Rust `secureexec-tree`/`cmd-tree` crates
+- **tree — DONE.** Replaced the custom Rust `agentos-tree`/`cmd-tree` crates
   with upstream Steve Baker `tree` 2.3.2 from `OldManProgrammer/unix-tree`.
   It builds as a C toolchain command from pinned source, stages into
   `@agentos-software/tree`, and refreshes the tracked runtime-core fallback
@@ -266,7 +266,7 @@ works (`wasi-spawn` broker), so `xargs` is not a blocker.
   longer includes the deleted Rust tree crates in
   `2026-07-08T05-33-17-0700-tree-cargo-metadata-after-removing-empty-dirs.log`.
   Rev: `kpmrwxln` — `fix(tree): build upstream tree`.
-- **fd — DONE.** Replaced the custom Rust `secureexec-fd` regex walker with
+- **fd — DONE.** Replaced the custom Rust `agentos-fd` regex walker with
   upstream sharkdp `fd-find` 10.4.2. Because `fd-find` is a bin-only crate,
   `cmd-fd` now acts as the workspace build trigger while the toolchain builds
   the upstream `fd` binary directly. WASI compatibility stays in dependency
@@ -286,7 +286,7 @@ works (`wasi-spawn` broker), so `xargs` is not a blocker.
   `2026-07-08T06-25-00-0700-fd-vitest-upstream-after-dir-format.log`.
   Rev: `mrskpomv` — `fix(fd): build upstream fd-find`.
 - **grep — DONE.** Replaced the `@agentos-software/grep` package's custom
-  `secureexec-grep` command wrapper with upstream GNU grep 3.12 from the official
+  `agentos-grep` command wrapper with upstream GNU grep 3.12 from the official
   GNU release tarball. The real GNU `grep` binary builds through the C toolchain;
   `egrep` and `fgrep` are separate tiny WASM launchers that preserve GNU's
   upstream obsolescent scripts by spawning `grep -E` / `grep -F` through the
@@ -308,10 +308,10 @@ works (`wasi-spawn` broker), so `xargs` is not a blocker.
   pass 8/8 in `2026-07-08T06-43-59-0700-grep-vitest-after-wrapper-cache-repair.log`.
   Rev: `uyukolvr` — `fix(grep): build upstream GNU grep`.
 - **ripgrep — DONE.** Replaced the `@agentos-software/ripgrep` package's custom
-  `secureexec-grep` recursive search shim with upstream ripgrep 15.1.0 from the
+  `agentos-grep` recursive search shim with upstream ripgrep 15.1.0 from the
   canonical `BurntSushi/ripgrep` crate/release. The local `cmd-rg` crate is now
   only a build trigger, and `toolchain/Makefile` builds ripgrep's own `rg` bin
-  directly. The old `secureexec-grep` library is gone. Proof: latest upstream
+  directly. The old `agentos-grep` library is gone. Proof: latest upstream
   release captured in `2026-07-08T06-50-40-0700-ripgrep-github-latest-release.json`;
   crate metadata captured in `2026-07-08T06-52-00-0700-ripgrep-cargo-info.log`;
   upstream WASM build passes in

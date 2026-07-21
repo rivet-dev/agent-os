@@ -9,7 +9,7 @@ test("playground harness boots a real browser runtime in Chromium", async ({
 	const result = await smokeHarness(page);
 
 	expect(result.crossOriginIsolated).toBe(true);
-	expect(result.workerUrl).toContain("/secure-exec-worker.js");
+	expect(result.workerUrl).toContain("/agentos-worker.js");
 	expect(result.result.code).toBe(0);
 	expect(result.stdio).toEqual([
 		{

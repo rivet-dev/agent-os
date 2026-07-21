@@ -27,7 +27,7 @@ if (typeof CanonicalDuplex !== "function") {
 	);
 }
 
-var NET_SOCKET_REGISTRY_PREFIX = "__secureExecNetSocket:";
+var NET_SOCKET_REGISTRY_PREFIX = "__agentOsNetSocket:";
 
 var NET_SERVER_HANDLE_PREFIX = "net-server:";
 
@@ -1067,13 +1067,13 @@ function serializeTlsValue(value) {
 
 function isTlsSecureContextWrapper(value) {
 	return (
-		!!value && typeof value === "object" && "__secureExecTlsContext" in value
+		!!value && typeof value === "object" && "__agentOsTlsContext" in value
 	);
 }
 
 function buildSerializedTlsOptions(options, extra) {
 	const contextOptions = isTlsSecureContextWrapper(options?.secureContext)
-		? options.secureContext.__secureExecTlsContext
+		? options.secureContext.__agentOsTlsContext
 		: void 0;
 	const serialized = {
 		...(contextOptions ?? {}),
@@ -1515,8 +1515,8 @@ function isNetBridgeMetricsEnabled() {
 }
 
 function netBridgeNowUs() {
-	if (typeof __secureExecHrNowUs === "function") {
-		return Math.round(__secureExecHrNowUs());
+	if (typeof __agentOsHrNowUs === "function") {
+		return Math.round(__agentOsHrNowUs());
 	}
 	if (
 		typeof performance !== "undefined" &&

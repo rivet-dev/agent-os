@@ -16,12 +16,12 @@ import type { AgentOs } from "../src/index.js";
 const { Terminal } = xterm;
 
 // The vim binary comes from the @agentos-software/vim registry package (built
-// from source in secure-exec). Gate the suite on it being present so it skips
+// from source in agentos). Gate the suite on it being present so it skips
 // on a checkout that has not built the registry.
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const VIM_PACKAGE_BIN = resolve(
 	REPO_ROOT,
-	"../secure-exec/software/vim/dist/package/bin/vim",
+	"../agentos/software/vim/dist/package/bin/vim",
 );
 const VIM_BINARY = process.env.AGENTOS_VIM_FIXTURE_BIN ?? VIM_PACKAGE_BIN;
 

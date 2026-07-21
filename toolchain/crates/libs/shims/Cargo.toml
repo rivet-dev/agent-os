@@ -1,5 +1,5 @@
 [package]
-name = "secureexec-shims"
+name = "agentos-shims"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

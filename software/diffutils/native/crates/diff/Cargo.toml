@@ -1,10 +1,10 @@
 [package]
 workspace = "../../../../../toolchain"
-name = "secureexec-diff"
+name = "agentos-diff"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "diff implementation for secure-exec standalone binaries"
+description = "diff implementation for agentos standalone binaries"
 
 [dependencies]
 similar = "2"

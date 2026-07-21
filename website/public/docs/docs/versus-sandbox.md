@@ -4,7 +4,7 @@ When to use the lightweight agentOS VM, a full sandbox, or both together.
 
 - **agentOS** is a lightweight VM that runs inside your process. Near-zero cold start, low memory, direct backend integration via [bindings](/docs/bindings).
 - **Sandboxes** are full Linux environments with root access, system packages, and native binary support.
-- **You can use both.** agentOS works with sandboxes through [sandbox mounting](/docs/sandbox). Agents run in the lightweight VM by default and spin up a full sandbox on demand.
+- **You can use both.** agentOS works with sandboxes through the [external sandbox extension](/docs/sandboxes). Agents run in the lightweight VM by default and spin up a full sandbox on demand.
 
 ## Comparison
 
@@ -41,7 +41,7 @@ Spin up a sandbox when the workload needs a real Linux kernel:
 
 ### Both together
 
-Use agentOS with [sandbox mounting](/docs/sandbox) for workflows that need both:
+Use agentOS with [external sandboxes](/docs/sandboxes) for workflows that need both:
 
 - Agent runs in the agentOS VM with full access to bindings and permissions
 - Sandbox spins up on demand for heavy tasks

@@ -1,6 +1,6 @@
 "use strict";
 
-import streamDefault, * as streamNs from "secure-exec-stream-stdlib";
+import streamDefault, * as streamNs from "agentos-stream-stdlib";
 import { Buffer } from "node:buffer";
 
 const baseStreamModule = streamNs.default ?? streamDefault ?? {};
@@ -130,7 +130,7 @@ export const isDisturbed = (stream) => {
 	);
 };
 
-export * from "secure-exec-stream-stdlib";
+export * from "agentos-stream-stdlib";
 
 export default {
 	...baseStreamModule,

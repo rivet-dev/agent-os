@@ -1,7 +1,7 @@
 mod support;
 
 use agentos_native_sidecar::wire::{
-    CreateVmRequest, GuestRuntimeKind, RequestId, RequestPayload, ResponsePayload,
+    CreateVmRequest, ExecuteRequest, GuestRuntimeKind, RequestId, RequestPayload, ResponsePayload,
     RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryEncoding,
     RootFilesystemEntryKind, RootFilesystemMode,
 };
@@ -197,6 +197,7 @@ print(json.dumps({
     "env_pwd": os.environ.get("PWD"),
     "env_shell": os.environ.get("SHELL"),
     "env_path": os.environ.get("PATH"),
+    "custom_env": os.environ.get("EXEC_REVIEW"),
     "internal_keys": sorted([
         key for key in os.environ
         if key.startswith("AGENTOS_") or key.startswith("NODE_SYNC_RPC_")
@@ -213,17 +214,26 @@ print(json.dumps({
         },
     );
 
-    execute_wire(
-        &mut sidecar,
-        4,
-        &connection_id,
-        &session_id,
-        &vm_id,
-        "proc-python-identity",
-        GuestRuntimeKind::Python,
-        std::path::Path::new("/workspace/identity.py"),
-        Vec::new(),
-    );
+    let result = sidecar
+        .dispatch_wire_blocking(wire_request(
+            4,
+            support::wire_vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::ExecuteRequest(ExecuteRequest {
+                process_id: String::from("proc-python-identity"),
+                command: None,
+                runtime: Some(GuestRuntimeKind::Python),
+                entrypoint: Some(String::from("/workspace/identity.py")),
+                args: Vec::new(),
+                env: HashMap::from([(String::from("EXEC_REVIEW"), String::from("visible"))]),
+                cwd: None,
+                wasm_permission_tier: None,
+            }),
+        ))
+        .expect("start Python identity execution");
+    assert!(matches!(
+        result.response.payload,
+        ResponsePayload::ProcessStartedResponse(_)
+    ));
 
     let (stdout, stderr, exit_code) = collect_guest_identity_process_output(
         &mut sidecar,
@@ -245,6 +255,7 @@ print(json.dumps({
     assert_eq!(parsed["env_pwd"], "/");
     assert_eq!(parsed["env_shell"], "/bin/sh");
     assert_eq!(parsed["env_path"], DEFAULT_GUEST_PATH_ENV);
+    assert_eq!(parsed["custom_env"], "visible");
     assert_eq!(parsed["internal_keys"], Value::Array(Vec::new()));
     assert_eq!(parsed["path_home"], "/home/agentos");
 }

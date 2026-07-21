@@ -518,7 +518,7 @@ impl AgentOs {
         let result = self
             .guest_fs_call(Self::fs_request(GuestFilesystemOperation::ReadDir, path))
             .await?;
-        // secure-exec's READ_DIR now returns rich entries (`entries:
+        // agentos's READ_DIR now returns rich entries (`entries:
         // list<GuestDirEntry>` with name + is_directory + is_symbolic_link);
         // this name-only accessor projects the basenames. The richer fields back
         // the typed [`Self::read_dir_with_types`] path.
@@ -703,7 +703,7 @@ impl AgentOs {
         Ok(entries)
     }
 
-    /// Typed directory listing: each child reported with its resolved type. secure-exec's native
+    /// Typed directory listing: each child reported with its resolved type. agentos's native
     /// `READ_DIR` returns basenames only (`entries: list<str>`), so the type of each entry is derived
     /// with a per-child `lstat` (a symlink is reported as such, lstat-style, not followed). Goes
     /// through the kernel, so mounts are listed correctly. `.`/`..` are filtered.

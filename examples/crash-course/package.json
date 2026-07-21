@@ -6,7 +6,7 @@
   "scripts": { "check-types": "tsc --noEmit" },
   "dependencies": {
     "@rivet-dev/agentos": "workspace:*",
-    "@rivet-dev/agentos-core": "workspace:*",
+    "@rivet-dev/agentos": "workspace:*",
     "@rivet-dev/agentos-sandbox": "workspace:*",
     "rivetkit": "catalog:rivetkit",
     "sandbox-agent": "^0.4.2",

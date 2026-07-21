@@ -4,7 +4,7 @@ import type { BenchmarkOp } from "../lib/layers.js";
  * Perf-finding regression ops.
  *
  * Each op exercises one hot-path anti-pattern surfaced by the 2026-06-30
- * perf-slop scan (see ~/progress/secure-exec/2026-06-30-fuzz-perf-optimization-report/
+ * perf-slop scan (see ~/progress/agentos/2026-06-30-fuzz-perf-optimization-report/
  * perf-slop-scan.md). The `program` runs identically under host Node and inside
  * the guest VM, so `tax.emulation = guest.p50 / node.p50` is the guest overhead
  * the corresponding fix is expected to shrink. Capture these numbers BEFORE the
@@ -22,7 +22,7 @@ import type { BenchmarkOp } from "../lib/layers.js";
  *     4096 sidecar event buffer and hangs instead of timing. Needs a
  *     sidecar-internal per-event counter.
  *   - execution.rs:962 (byte-by-byte loopback-TLS read): a guest HTTPS loopback
- *     request currently ERRORS (`ERR_SECURE_EXEC_NODE_SYNC_RPC: loopback TLS transport
+ *     request currently ERRORS (`ERR_AGENTOS_NODE_SYNC_RPC: loopback TLS transport
  *     read`), so there is no successful transfer to time. The error on that exact
  *     path is itself worth a follow-up.
  *   - execution.rs:19315/19895 (HTTP/2 accept + backpressure polls): node:http2

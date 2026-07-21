@@ -2162,7 +2162,7 @@ class NativeKernel implements Kernel {
 		}
 		const sidecarMounts = commandDirs.map((commandDir, index) =>
 			serializeMountConfigForSidecar({
-				path: `/__secure_exec/commands/${index}`,
+				path: `/__agentos/commands/${index}`,
 				readOnly: true,
 				plugin: {
 					id: "host_dir",

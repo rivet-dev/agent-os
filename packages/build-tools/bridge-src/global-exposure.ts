@@ -1,4 +1,4 @@
-// .agent/recovery/secure-exec/shared/global-exposure.ts
+// .agent/recovery/agentos/shared/global-exposure.ts
 var NODE_CUSTOM_GLOBAL_INVENTORY = [
 	{
 		name: "_processConfig",
@@ -7,13 +7,13 @@ var NODE_CUSTOM_GLOBAL_INVENTORY = [
 			"Bridge bootstrap configuration must not be replaced by sandbox code.",
 	},
 	{
-		name: "__secureExecHrNowUs",
+		name: "__agentOsHrNowUs",
 		classification: "hardened",
 		rationale:
 			"High-resolution monotonic clock, only installed when high_resolution_time opt-in is set.",
 	},
 	{
-		name: "__secureExecRequireEsmSync",
+		name: "__agentOsRequireEsmSync",
 		classification: "hardened",
 		rationale: "V8-owned synchronous ESM loader used by Node-compatible require().",
 	},

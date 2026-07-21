@@ -19,13 +19,13 @@ const PYTHON_MODULE_ENV = 'AGENTOS_PYTHON_MODULE';
 const PYTHON_STDIN_PROGRAM_ENV = 'AGENTOS_PYTHON_STDIN_PROGRAM';
 const PYTHON_INTERACTIVE_ENV = 'AGENTOS_PYTHON_INTERACTIVE';
 const PYTHON_PREWARM_ONLY_ENV = 'AGENTOS_PYTHON_PREWARM_ONLY';
+const RETAIN_LANGUAGE_CONTEXT_ENV = 'AGENTOS_RETAIN_LANGUAGE_CONTEXT';
 const PYTHON_WARMUP_DEBUG_ENV = 'AGENTOS_PYTHON_WARMUP_DEBUG';
 const PYTHON_WARMUP_METRICS_PREFIX = '__AGENTOS_PYTHON_WARMUP_METRICS__:';
 const PYTHON_PRELOAD_PACKAGES_ENV = 'AGENTOS_PYTHON_PRELOAD_PACKAGES';
 const PYTHON_VFS_RPC_REQUEST_FD_ENV = 'AGENTOS_PYTHON_VFS_RPC_REQUEST_FD';
 const PYTHON_VFS_RPC_RESPONSE_FD_ENV = 'AGENTOS_PYTHON_VFS_RPC_RESPONSE_FD';
 const FORWARD_KERNEL_STDIN_RPC_ENV = 'AGENTOS_FORWARD_KERNEL_STDIN_RPC';
-const PYTHON_RUNTIME_ENV_NAMES = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'PWD', 'TMPDIR', 'PATH'];
 const INTERNAL_ENV = globalThis.__agentOSPythonInternalEnv ?? Object.create(null);
 const ALLOW_PROCESS_BINDINGS = readRunnerEnv('AGENTOS_ALLOW_PROCESS_BINDINGS') === '1';
 const STDIN_FD = 0;
@@ -408,7 +408,7 @@ async function normalizeFetchBody(body) {
     return Buffer.from(await body.arrayBuffer()).toString('base64');
   }
 
-  throw new Error('unsupported fetch body type for secure-exec Python package loading');
+  throw new Error('unsupported fetch body type for agentos Python package loading');
 }
 
 function emitPythonStartupMetrics({
@@ -714,7 +714,7 @@ function createPythonFdRpcBridge() {
       const chunk = Buffer.alloc(4096);
       const bytesRead = readSync(responseFd, chunk, 0, chunk.length, null);
       if (bytesRead === 0) {
-        throw new Error('secure-exec Python VFS RPC response channel closed unexpectedly');
+        throw new Error('agentos Python VFS RPC response channel closed unexpectedly');
       }
       responseBuffer += chunk.subarray(0, bytesRead).toString('utf8');
     }
@@ -724,7 +724,7 @@ function createPythonFdRpcBridge() {
     try {
       return JSON.parse(line);
     } catch (error) {
-      throw new Error(`invalid secure-exec Python VFS RPC response: ${formatError(error)}`);
+      throw new Error(`invalid agentos Python VFS RPC response: ${formatError(error)}`);
     }
   }
 
@@ -765,7 +765,7 @@ function createPythonFdRpcBridge() {
       return message.result ?? {};
     }
 
-    const error = new Error(message?.error?.message || `secure-exec Python VFS RPC request ${id} failed`);
+    const error = new Error(message?.error?.message || `agentos Python VFS RPC request ${id} failed`);
     error.code = message?.error?.code || 'ERR_AGENTOS_PYTHON_VFS_RPC';
     throw error;
   }
@@ -897,7 +897,7 @@ function createPythonFdRpcBridge() {
 }
 
 function accessDenied(subject) {
-  const error = new Error(`${subject} is not available in the secure-exec guest Python runtime`);
+  const error = new Error(`${subject} is not available in the agentos guest Python runtime`);
   error.code = ACCESS_DENIED_CODE;
   return error;
 }
@@ -917,9 +917,9 @@ except Exception:
     _agentos_safe_pyodide_js_api = None
 
 def _agentos_raise_access_denied(module_name):
-    raise RuntimeError(f"{module_name} is not available in the secure-exec guest Python runtime")
+    raise RuntimeError(f"{module_name} is not available in the agentos guest Python runtime")
 
-class _SecureExecBlockedModule(_agentos_types.ModuleType):
+class _AgentOsBlockedModule(_agentos_types.ModuleType):
     def __init__(self, name):
         super().__init__(name)
         self.__dict__['__all__'] = ()
@@ -931,7 +931,7 @@ class _SecureExecBlockedModule(_agentos_types.ModuleType):
         return []
 
 _agentos_blocked_modules = {
-    _agentos_module_name: _SecureExecBlockedModule(_agentos_module_name)
+    _agentos_module_name: _AgentOsBlockedModule(_agentos_module_name)
     for _agentos_module_name in ('js', 'pyodide_js')
 }
 
@@ -967,13 +967,13 @@ import sys as _agentos_sys
 import types as _agentos_types
 import urllib.error as _agentos_urllib_error
 import urllib.request as _agentos_urllib_request
-from email.message import Message as _SecureExecMessage
+from email.message import Message as _AgentOsMessage
 from js import __agentOSPythonVfsRpc as _agentos_rpc
 
 def _agentos_raise_from_error(error):
     if not isinstance(error, dict):
         raise RuntimeError(str(error))
-    message = str(error.get("message", "secure-exec Python bridge request failed"))
+    message = str(error.get("message", "agentos Python bridge request failed"))
     if "EACCES:" in message:
         raise PermissionError(message)
     if "command not found" in message:
@@ -998,17 +998,17 @@ def _agentos_dns_lookup(hostname, family=None):
         _agentos_raise_from_error({"message": str(error)})
     addresses = result.get("addresses") or []
     if not addresses:
-        raise OSError(f"secure-exec DNS lookup returned no addresses for {hostname}")
+        raise OSError(f"agentos DNS lookup returned no addresses for {hostname}")
     return addresses
 
-class _SecureExecHttpResponse:
+class _AgentOsHttpResponse:
     def __init__(self, payload):
         self.status = int(payload.get("status", 0))
         self.reason = str(payload.get("reason", ""))
         self.url = str(payload.get("url", ""))
         self._body = _agentos_base64.b64decode(payload.get("bodyBase64", "") or "")
         headers = payload.get("headers") or {}
-        self.headers = _SecureExecMessage()
+        self.headers = _AgentOsMessage()
         for name, values in headers.items():
           for value in values:
             self.headers.add_header(str(name), str(value))
@@ -1034,7 +1034,7 @@ class _SecureExecHttpResponse:
         self.close()
         return False
 
-class _SecureExecPyfetchResponse:
+class _AgentOsPyfetchResponse:
     def __init__(self, payload):
         self.status = int(payload.get("status", 0))
         self.status_text = str(payload.get("reason", ""))
@@ -1079,7 +1079,7 @@ def _agentos_http_request(url_or_request, data=None):
         )
     except Exception as error:
         _agentos_raise_from_error({"message": str(error)})
-    response = _SecureExecHttpResponse(payload)
+    response = _AgentOsHttpResponse(payload)
     if response.status >= 400:
         raise _agentos_urllib_error.HTTPError(
             url,
@@ -1108,7 +1108,7 @@ async def _agentos_pyfetch(url, **kwargs):
         )
     except Exception as error:
         _agentos_raise_from_error({"message": str(error)})
-    return _SecureExecPyfetchResponse(payload)
+    return _AgentOsPyfetchResponse(payload)
 
 def _agentos_urlopen(url, data=None, timeout=None, *args, **kwargs):
     del timeout, args, kwargs
@@ -1143,7 +1143,7 @@ def _agentos_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
             sockaddr = (address, port)
         results.append((entry_family, socktype, protocol, "", sockaddr))
     if not results:
-        raise OSError(f"secure-exec DNS lookup returned no matching addresses for {host}")
+        raise OSError(f"agentos DNS lookup returned no matching addresses for {host}")
     return results
 
 def _agentos_gethostbyname(host):
@@ -1178,7 +1178,7 @@ def _agentos_socket_rpc(call):
     except Exception as exc:
         raise _agentos_socket_oserror(exc) from None
 
-class _SecureExecSocket:
+class _AgentOsSocket:
     def __init__(self, family=None, type=None, proto=0, fileno=None):
         self.family = family if family is not None else _agentos_socket.AF_INET
         self.type = type if type is not None else _agentos_socket.SOCK_STREAM
@@ -1334,12 +1334,12 @@ def _agentos_socket_factory(family=-1, type=-1, proto=0, fileno=None):
         and fam in (_agentos_socket.AF_INET, _agentos_socket.AF_INET6)
         and typ in (_agentos_socket.SOCK_STREAM, _agentos_socket.SOCK_DGRAM)
     ):
-        return _SecureExecSocket(fam, typ, proto)
+        return _AgentOsSocket(fam, typ, proto)
     return _agentos_original_socket_class(family, type, proto, fileno)
 
 _agentos_socket.socket = _agentos_socket_factory
 
-class _SecureExecRequestsResponse:
+class _AgentOsRequestsResponse:
     def __init__(self, payload):
         self.status_code = int(payload.get("status", 0))
         self.reason = str(payload.get("reason", ""))
@@ -1360,7 +1360,7 @@ class _SecureExecRequestsResponse:
         if self.status_code >= 400:
             raise RuntimeError(f"{self.status_code} {self.reason}")
 
-class _SecureExecRequestsSession:
+class _AgentOsRequestsSession:
     def request(self, method, url, **kwargs):
         headers = dict(kwargs.get("headers") or {})
         data = kwargs.get("data")
@@ -1378,16 +1378,16 @@ class _SecureExecRequestsSession:
             )
         except Exception as error:
             _agentos_raise_from_error({"message": str(error)})
-        return _SecureExecRequestsResponse(payload)
+        return _AgentOsRequestsResponse(payload)
 
     def get(self, url, **kwargs):
         return self.request("GET", url, **kwargs)
 
 def _agentos_install_requests_module():
     module = _agentos_types.ModuleType("requests")
-    session = _SecureExecRequestsSession
+    session = _AgentOsRequestsSession
     module.Session = session
-    module.Response = _SecureExecRequestsResponse
+    module.Response = _AgentOsRequestsResponse
     module.request = lambda method, url, **kwargs: session().request(method, url, **kwargs)
     module.get = lambda url, **kwargs: session().get(url, **kwargs)
     module.exceptions = _agentos_types.SimpleNamespace(RequestException=RuntimeError)
@@ -1398,12 +1398,12 @@ try:
 except ModuleNotFoundError:
     _agentos_install_requests_module()
 else:
-    _agentos_requests.Session = _SecureExecRequestsSession
-    _agentos_requests.Response = _SecureExecRequestsResponse
-    _agentos_requests.request = lambda method, url, **kwargs: _SecureExecRequestsSession().request(method, url, **kwargs)
-    _agentos_requests.get = lambda url, **kwargs: _SecureExecRequestsSession().get(url, **kwargs)
+    _agentos_requests.Session = _AgentOsRequestsSession
+    _agentos_requests.Response = _AgentOsRequestsResponse
+    _agentos_requests.request = lambda method, url, **kwargs: _AgentOsRequestsSession().request(method, url, **kwargs)
+    _agentos_requests.get = lambda url, **kwargs: _AgentOsRequestsSession().get(url, **kwargs)
 
-class _SecureExecCompletedProcess:
+class _AgentOsCompletedProcess:
     def __init__(self, args, returncode, stdout, stderr):
         self.args = args
         self.returncode = returncode
@@ -1443,7 +1443,7 @@ def _agentos_subprocess_run(args, *, capture_output=False, check=False, cwd=None
     merged_env = dict(env or {})
     resolved_cwd = cwd if cwd is not None else _agentos_os.environ.get("PWD")
     if input is not None:
-        raise NotImplementedError("subprocess.run input is not supported in the secure-exec Python runtime")
+        raise NotImplementedError("subprocess.run input is not supported in the agentos Python runtime")
     try:
         payload = _agentos_json.loads(
             _agentos_rpc.subprocessRunSync(
@@ -1465,7 +1465,7 @@ def _agentos_subprocess_run(args, *, capture_output=False, check=False, cwd=None
     else:
         stdout_value = stdout_bytes
         stderr_value = stderr_bytes
-    result = _SecureExecCompletedProcess(
+    result = _AgentOsCompletedProcess(
         args,
         int(payload.get("exitCode", 1)),
         stdout_value if capture_output else None,
@@ -1521,9 +1521,13 @@ function installPythonGuestImportBlocklist(pyodide) {
 
 function buildPythonRuntimeEnv() {
   const runtimeEnv = {};
-  for (const name of PYTHON_RUNTIME_ENV_NAMES) {
-    if (typeof process.env[name] === 'string') {
-      runtimeEnv[name] = process.env[name];
+  for (const [name, value] of Object.entries(process.env)) {
+    if (
+      typeof value === 'string' &&
+      !name.startsWith('AGENTOS_') &&
+      !name.startsWith('NODE_SYNC_RPC_')
+    ) {
+      runtimeEnv[name] = value;
     }
   }
   return runtimeEnv;
@@ -2429,6 +2433,7 @@ function resolvePythonSource(pyodide) {
 }
 
 let pythonVfsRpcBridge = null;
+let retainLanguageContext = false;
 
 try {
   const startupStarted = realPerformance.now();
@@ -2442,6 +2447,7 @@ try {
   const packageCacheDir = resolvePyodidePackageCacheDir();
   emitWarmupStage(`package-cache-dir:${packageCacheDir}`);
   const prewarmOnly = readRunnerEnv(PYTHON_PREWARM_ONLY_ENV) === '1';
+  retainLanguageContext = readRunnerEnv(RETAIN_LANGUAGE_CONTEXT_ENV) === '1';
   const preloadPackages = parsePreloadPackages(readRunnerEnv(PYTHON_PRELOAD_PACKAGES_ENV));
   const lockFileContents = await readLockFileContents(indexPath, indexUrl).catch((error) => {
     throw wrapPythonStartupError('lock file read', { indexPath, indexUrl }, error);
@@ -2502,6 +2508,9 @@ try {
       error,
     );
   });
+  if (retainLanguageContext) {
+    globalThis.__agentOSRetainedPyodide = pyodide;
+  }
   restorePyodideShellCompat();
   emitWarmupStage('after-load-pyodide');
   const loadPyodideMs = realPerformance.now() - loadPyodideStarted;
@@ -2584,7 +2593,11 @@ try {
   writeStream(process.stderr, formatError(error));
   process.exitCode = 1;
 } finally {
-  pythonVfsRpcBridge?.dispose();
+  if (!retainLanguageContext) {
+    pythonVfsRpcBridge?.dispose();
+  }
   emitControlMessage({ type: 'python_exit', exitCode: process.exitCode ?? 0 });
 }
-process.exit(process.exitCode ?? 0);
+if (!retainLanguageContext) {
+  process.exit(process.exitCode ?? 0);
+}
