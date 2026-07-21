@@ -11,6 +11,9 @@
 		"bench:memory": "node --expose-gc --import tsx/esm memory.bench.ts",
 		"bench:matrix": "tsx src/run-all.ts",
 		"bench:wasm-backends": "tsx src/focused/wasm-backend-comparison.bench.ts",
+		"bench:wasm-threads": "tsx src/focused/wasmtime-threads.bench.ts",
+		"test:wasm-mixed-smoke": "AGENTOS_WASM_MIXED_SOAK_WARMUP=2 AGENTOS_WASM_MIXED_SOAK_CYCLES=6 tsx src/focused/wasm-mixed-soak.ts",
+		"test:wasm-mixed-soak": "AGENTOS_WASM_MIXED_SOAK_WARMUP=10 AGENTOS_WASM_MIXED_SOAK_CYCLES=200 tsx src/focused/wasm-mixed-soak.ts",
 		"check-types": "pnpm --dir ../runtime-core build && tsc --noEmit"
 	},
 	"dependencies": {

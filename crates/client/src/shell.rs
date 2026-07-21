@@ -50,6 +50,8 @@ pub struct OpenShellOptions {
     pub cwd: Option<String>,
     pub cols: Option<u16>,
     pub rows: Option<u16>,
+    /// Engine affinity inherited by standalone WASM commands launched by the shell.
+    pub wasm_backend: Option<crate::process::StandaloneWasmBackend>,
 }
 
 /// Options for `connect_terminal` (extends [`OpenShellOptions`]).
@@ -289,7 +291,7 @@ impl AgentOs {
             env: options.env.clone().into_iter().collect(),
             cwd: options.cwd.clone(),
             wasm_permission_tier: None,
-            wasm_backend: None,
+            wasm_backend: options.wasm_backend.map(Into::into),
         };
 
         // Background: subscribe to events first (so no output is missed), issue the spawn, fan
@@ -443,7 +445,7 @@ impl AgentOs {
             env: options.env.clone().into_iter().collect(),
             cwd: options.cwd.clone(),
             wasm_permission_tier: None,
-            wasm_backend: None,
+            wasm_backend: options.wasm_backend.map(Into::into),
         };
 
         let agent = self.clone();
@@ -602,7 +604,7 @@ impl AgentOs {
             env: base.env.clone().into_iter().collect(),
             cwd: base.cwd.clone(),
             wasm_permission_tier: None,
-            wasm_backend: None,
+            wasm_backend: base.wasm_backend.map(Into::into),
         };
 
         // Subscribe before issuing the spawn so no output is missed.

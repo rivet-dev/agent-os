@@ -23,6 +23,8 @@ export interface BenchVmOptions {
 	loopbackExemptPorts?: number[];
 	mounts?: HostDirectoryMount[];
 	permissions?: NodeRuntimeCreateOptions["permissions"];
+	limits?: NodeRuntimeCreateOptions["limits"];
+	wasmBackend?: NodeRuntimeCreateOptions["wasmBackend"];
 	wasmCommandDirs?: string[];
 	sidecar?: SidecarProcess;
 }
@@ -34,7 +36,7 @@ export interface BenchVmProcess {
 }
 
 export interface BenchVmExecOptions {
-	wasmBackend?: "v8" | "wasmtime";
+	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 	env?: Record<string, string>;
 	cwd?: string;
 	stdin?: string | Uint8Array;
@@ -107,6 +109,8 @@ export async function createBenchVm(
 			env: "allow",
 			...options.permissions,
 		},
+		limits: options.limits,
+		wasmBackend: options.wasmBackend,
 		mounts: options.mounts,
 		commandsDir: options.commandsDir,
 		loopbackExemptPorts: options.loopbackExemptPorts,

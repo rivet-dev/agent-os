@@ -610,7 +610,27 @@ where
                 )
                 .await?
             } else {
-                cancel_kernel_http_fetch_stream(&self.bridge, &vm_id, vm, stream_id).await?
+                let response_json =
+                    cancel_kernel_http_fetch_stream(&self.bridge, &vm_id, vm, stream_id).await?;
+                // Cancellation closes the client socket immediately, but the
+                // server process retires its accepted peer only after the
+                // shared readiness/event pump delivers EOF. Give that
+                // sidecar-owned path a small fixed cleanup budget so a
+                // successful cancel does not return with a leaked socket.
+                let ownership = OwnershipScope::vm(&connection_id, &session_id, &vm_id);
+                let process_event_notify = Arc::clone(&self.process_event_notify);
+                for _ in 0..32 {
+                    let notified = process_event_notify.notified();
+                    if self.pump_process_events(&ownership).await? {
+                        continue;
+                    }
+                    tokio::select! {
+                        _ = notified => {}
+                        _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+                    }
+                }
+                self.process_event_notify.notify_one();
+                response_json
             };
             let response = self.respond(
                 request,
@@ -634,9 +654,7 @@ where
             .vms
             .get_mut(&vm_id)
             .ok_or_else(|| SidecarError::InvalidState(String::from("unknown sidecar VM")))?;
-        // HTTP origin-form has exactly one leading slash. Normalizing at the
-        // sidecar boundary keeps VM fetch behavior stable even when an
-        // upstream router hands us a network-path-style `//foo` URL.
+        // HTTP origin-form has exactly one leading slash.
         let target_path = format!("/{}", payload.path.trim_start_matches('/'));
         let request_url = Url::parse(&format!("http://127.0.0.1:{}{target_path}", payload.port))
             .map_err(|error| {
@@ -678,8 +696,8 @@ where
         let target_process_id = find_kernel_http_listener_process(vm, payload.port);
         if let Some(target_process_id) = target_process_id {
             let max_fetch_response_bytes = vm.limits.http.max_fetch_response_bytes;
-            let fetch_result = if stream_operation.as_deref() == Some("start") {
-                start_kernel_http_fetch_stream(
+            if stream_operation.as_deref() == Some("start") {
+                let response_json = start_kernel_http_fetch_stream(
                     &self.bridge,
                     &vm_id,
                     vm,
@@ -691,32 +709,153 @@ where
                     body_bytes.as_deref(),
                     max_fetch_response_bytes,
                 )
-                .await
+                .await?;
+                let response = self.respond(
+                    request,
+                    ResponsePayload::VmFetchResult(VmFetchResponse { response_json }),
+                );
+                ensure_vm_fetch_response_frame_within_limit(
+                    &response,
+                    self.config.max_frame_bytes,
+                )?;
+                return Ok(DispatchResult {
+                    response,
+                    events: Vec::new(),
+                });
+            }
+            let mut fetch = begin_kernel_http_fetch(
+                vm,
+                &target_process_id,
+                payload.port,
+                &target_path,
+                &options,
+                &headers,
+                body_bytes.as_deref(),
+                max_fetch_response_bytes,
+            )?;
+            let ownership = OwnershipScope::vm(&connection_id, &session_id, &vm_id);
+            let process_event_notify = Arc::clone(&self.process_event_notify);
+            let _ = vm;
+            let mut target_exit_events = Vec::new();
+            let mut target_exited = false;
+            let fetch_result: Result<String, SidecarError> = async {
+                loop {
+                    // Register before probing durable socket state and event
+                    // queues so a racing completion cannot lose its wake.
+                    let notified = process_event_notify.notified();
+                    let response = {
+                        let vm = self.vms.get_mut(&vm_id).ok_or_else(|| {
+                            SidecarError::InvalidState(format!(
+                                "VM {vm_id} is no longer active during vm.fetch"
+                            ))
+                        })?;
+                        poll_kernel_http_fetch(vm, &mut fetch)?
+                    };
+                    if let Some(response) = response {
+                        break Ok(response);
+                    }
+
+                    if self.pump_process_events(&ownership).await? {
+                        let queued_exit_code = self.pending_process_events.iter().find_map(
+                            |envelope| {
+                                if envelope.vm_id == vm_id
+                                    && envelope.process_id == target_process_id
+                                {
+                                    match &envelope.event {
+                                        ActiveExecutionEvent::Exited(exit_code) => Some(*exit_code),
+                                        _ => None,
+                                    }
+                                } else {
+                                    None
+                                }
+                            },
+                        );
+                        if let Some(exit_code) = queued_exit_code {
+                            // Public process events normally finalize an exit when the caller
+                            // polls them. vm.fetch is itself waiting on a socket owned by this
+                            // target process, so deferring exit cleanup until a later poll would
+                            // create a circular wait: the socket closes only after cleanup, while
+                            // the request prevents the caller from polling. Drain this process's
+                            // queued output and exit in order, retain the resulting public frames
+                            // on the rejected response, and let exit finalization close every
+                            // kernel socket and resource before returning.
+                            while self
+                                .vms
+                                .get(&vm_id)
+                                .is_some_and(|vm| {
+                                    vm.active_processes.contains_key(&target_process_id)
+                                })
+                            {
+                                let envelope = self
+                                    .take_matching_process_event_envelope(
+                                        &vm_id,
+                                        &target_process_id,
+                                    )?
+                                    .ok_or_else(|| {
+                                        SidecarError::InvalidState(format!(
+                                            "vm.fetch lost the queued exit event for target process {target_process_id}"
+                                        ))
+                                    })?;
+                                if let Some(frame) =
+                                    self.handle_process_event_envelope(envelope).await?
+                                {
+                                    target_exit_events.push(frame);
+                                }
+                            }
+                            let error = SidecarError::Execution(format!(
+                                "vm.fetch target exited before responding (exit code {exit_code})"
+                            ));
+                            target_exited = true;
+                            break Err(error);
+                        }
+                        continue;
+                    }
+
+                    tokio::select! {
+                        _ = notified => {}
+                        _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+                    }
+                }
+            }
+            .await;
+            let close_result = if target_exited {
+                // Exit finalization already closed and reaped every socket owned by
+                // the target kernel process, including this fetch socket.
+                Ok(())
             } else {
-                dispatch_kernel_http_fetch(
-                    &self.bridge,
-                    &vm_id,
-                    vm,
-                    &target_process_id,
-                    payload.port,
-                    &target_path,
-                    &options,
-                    &headers,
-                    body_bytes.as_deref(),
-                    max_fetch_response_bytes,
-                )
-                .await
+                self.vms
+                    .get_mut(&vm_id)
+                    .ok_or_else(|| {
+                        SidecarError::InvalidState(format!(
+                            "VM {vm_id} disappeared while closing vm.fetch socket"
+                        ))
+                    })
+                    .and_then(|vm| close_kernel_http_fetch(vm, &fetch))
             };
             let response_json = match fetch_result {
-                Ok(response_json) => response_json,
+                Ok(response_json) => {
+                    close_result?;
+                    response_json
+                }
                 Err(error) => {
-                    if let Some(exit_code) = kernel_http_fetch_target_exit_code(&error) {
-                        let _ = vm;
-                        self.finish_active_process_exit(&vm_id, &target_process_id, exit_code)?;
+                    if let Err(close_error) = close_result {
+                        eprintln!(
+                            "ERR_AGENTOS_HTTP_FETCH_CLEANUP: failed to close kernel socket after fetch error: {close_error}"
+                        );
+                    }
+                    if target_exited {
+                        return Ok(DispatchResult {
+                            response: self.reject_error(request, &error),
+                            events: target_exit_events,
+                        });
                     }
                     return Err(error);
                 }
             };
+            // The inline pump may have moved public output/exit events into
+            // the durable queue while consuming the runtime wake that would
+            // normally prompt the stdio transport to drain it.
+            self.process_event_notify.notify_one();
             let response = self.respond(
                 request,
                 ResponsePayload::VmFetchResult(VmFetchResponse { response_json }),
@@ -838,6 +977,7 @@ where
             request,
             ResponsePayload::VmFetchResult(VmFetchResponse { response_json }),
         );
+        self.process_event_notify.notify_one();
         ensure_vm_fetch_response_frame_within_limit(&response, self.config.max_frame_bytes)?;
 
         Ok(DispatchResult {

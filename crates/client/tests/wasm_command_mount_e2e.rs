@@ -11,7 +11,8 @@
 
 mod common;
 
-use agentos_client::ExecOptions;
+use agentos_client::config::{AgentOsConfig, PackageRef};
+use agentos_client::{AgentOs, ExecOptions, StandaloneWasmBackend};
 
 #[tokio::test]
 async fn wasm_command_software_mounts_into_vm() {
@@ -41,4 +42,44 @@ async fn wasm_command_software_mounts_into_vm() {
     assert_eq!(result.stdout.trim_end(), "hello", "echo stdout");
 
     os.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn every_public_wasm_backend_selector_executes_projected_commands() {
+    if !common::require_sidecar("every_public_wasm_backend_selector_executes_projected_commands") {
+        return;
+    }
+    let Some(package_dir) = common::coreutils_package_dir() else {
+        eprintln!(
+            "skipping every_public_wasm_backend_selector_executes_projected_commands: coreutils package artifacts absent"
+        );
+        return;
+    };
+
+    for backend in [
+        StandaloneWasmBackend::V8,
+        StandaloneWasmBackend::Wasmtime,
+        StandaloneWasmBackend::WasmtimeThreads,
+    ] {
+        let os = AgentOs::create(AgentOsConfig {
+            packages: vec![PackageRef {
+                path: package_dir.to_string_lossy().into_owned(),
+            }],
+            wasm_backend: Some(backend),
+            ..Default::default()
+        })
+        .await
+        .expect("create VM for explicit WASM backend");
+        let result = os
+            .exec("printf selector | tr a-z A-Z", ExecOptions::default())
+            .await
+            .expect("execute projected command through selected backend");
+        assert_eq!(
+            result.exit_code, 0,
+            "backend {backend:?} failed: stderr={:?}",
+            result.stderr
+        );
+        assert_eq!(result.stdout, "SELECTOR");
+        os.shutdown().await.expect("shutdown selector VM");
+    }
 }

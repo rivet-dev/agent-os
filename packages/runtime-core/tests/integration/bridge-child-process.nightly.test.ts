@@ -17,6 +17,7 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +29,7 @@ import {
 	createNodeRuntime,
 	createWasmVmRuntime,
 	describeIf,
+	itIf,
 	NodeFileSystem,
 } from "@rivet-dev/agentos-vm-test-harness";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -54,6 +56,9 @@ const skipReason =
 	BRIDGE_COMMAND_DIRS.length === 0
 		? `WASM shell command not found at ${COMMANDS_DIR} or ${PACKAGED_COREUTILS_COMMANDS_DIR}`
 		: false;
+const runReleaseWasmtimeReuseGate =
+	process.env.AGENTOS_TEST_WASM_BACKEND === "wasmtime" &&
+	/[/\\]release[/\\]/.test(process.env.AGENTOS_SIDECAR_BIN ?? "");
 
 function createBridgeIntegrationKernel(): Promise<IntegrationKernelResult> {
 	return createIntegrationKernel({
@@ -194,6 +199,105 @@ describeIf(
 			const output = chunks.map((c) => new TextDecoder().decode(c)).join("");
 			expect(output).toContain("async-ok");
 		});
+
+		itIf(
+			runReleaseWasmtimeReuseGate,
+			"reuses Wasmtime after V8 children wait for piped WASM commands [release Wasmtime matrix]",
+			async () => {
+				const server = createServer((_request, response) => {
+					response.writeHead(200, {
+						"content-type": "text/plain",
+						connection: "close",
+					});
+					response.end("bridge-reuse-ok");
+				});
+				await new Promise<void>((resolveListen, rejectListen) => {
+					server.once("error", rejectListen);
+					server.listen(0, "127.0.0.1", resolveListen);
+				});
+				const address = server.address();
+				if (!address || typeof address === "string") {
+					throw new Error("test server did not expose a TCP port");
+				}
+
+				try {
+					ctx = await createIntegrationKernel({
+						runtimes: ["wasmvm", "node"],
+						commandDirs: BRIDGE_COMMAND_DIRS,
+						loopbackExemptPorts: [address.port],
+						wasmBackend: "wasmtime",
+					});
+
+					for (let cycle = 0; cycle < 10; cycle += 1) {
+						await ctx.vfs.writeFile(
+							"/tmp/bridge-reuse-input.txt",
+							`direct-${cycle}\n`,
+						);
+						const nodeOutput: Uint8Array[] = [];
+						const nodeProcess = ctx.kernel.spawn(
+							"node",
+							[
+								"-e",
+								`
+          const { spawn } = require('child_process');
+          const child = spawn('sh', ['-lc', "printf 'from-node-${cycle}\\n' | tr '[:lower:]' '[:upper:]'"], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+          let stdout = '';
+          child.stdout.on('data', (chunk) => { stdout += chunk; });
+          child.on('close', (code) => {
+            if (code !== 0 || stdout !== 'FROM-NODE-${cycle}\\n') process.exit(1);
+            console.log(stdout.trim());
+          });
+        `,
+							],
+							{
+								onStdout: (data) => nodeOutput.push(data),
+							},
+						);
+						expect(await nodeProcess.wait()).toBe(0);
+						expect(
+							nodeOutput
+								.map((chunk) => new TextDecoder().decode(chunk))
+								.join(""),
+						).toContain(`FROM-NODE-${cycle}`);
+
+						const stdout: Uint8Array[] = [];
+						const stderr: Uint8Array[] = [];
+						const wasmProcess = ctx.kernel.spawn(
+							"sh",
+							[
+								"-lc",
+								`cat /tmp/bridge-reuse-input.txt | tr '[:lower:]' '[:upper:]'; curl --max-time 5 -fsS http://127.0.0.1:${address.port}/`,
+							],
+							{
+								onStdout: (data) => stdout.push(data),
+								onStderr: (data) => stderr.push(data),
+							},
+						);
+						const timeout = setTimeout(() => wasmProcess.kill(9), 60_000);
+						const exitCode = await wasmProcess
+							.wait()
+							.finally(() => clearTimeout(timeout));
+						const output = stdout
+							.map((chunk) => new TextDecoder().decode(chunk))
+							.join("");
+						const errorOutput = stderr
+							.map((chunk) => new TextDecoder().decode(chunk))
+							.join("");
+						expect(exitCode, `cycle ${cycle}: ${errorOutput}`).toBe(0);
+						expect(output).toContain(`DIRECT-${cycle}\n`);
+						expect(output).toContain("bridge-reuse-ok");
+					}
+				} finally {
+					await new Promise<void>((resolveClose, rejectClose) => {
+						server.close((error) =>
+							error ? rejectClose(error) : resolveClose(),
+						);
+					});
+				}
+			},
+		);
 
 		it("child_process.spawn with shell:true preserves shell builtin exit codes", async () => {
 			ctx = await createBridgeIntegrationKernel();

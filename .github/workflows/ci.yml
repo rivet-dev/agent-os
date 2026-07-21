@@ -121,13 +121,35 @@ jobs:
           workspaces: toolchain -> target
           key: wasm-commands-${{ hashFiles('toolchain/Cargo.lock') }}
       - run: pnpm install --frozen-lockfile --filter '@rivet-dev/agentos-runtime-core...'
-      - run: make -C toolchain pr-commands
-      - run: node packages/runtime-core/scripts/copy-wasm-commands.mjs --require-coreutils
+      - run: make -C toolchain commands
+      # DuckDB and Vim are intentionally outside the default command set because
+      # they are heavy builds, but the runtime/parity suites require their real
+      # command artifacts.
+      - name: Build required heavy integration commands
+        run: make -C toolchain cmd/duckdb cmd/vim
+      - name: Build mandatory threaded-WASM conformance fixtures
+        run: make -C toolchain/c pthread-conformance-wasm pthread-benchmark-wasm
+      - name: Stage native/WASM C parity fixtures
+        run: make -C toolchain/c conformance-artifacts
+      - run: node packages/runtime-core/scripts/copy-wasm-commands.mjs --require
       - uses: actions/upload-artifact@v4
         with:
           name: wasm-commands
           path: packages/runtime-core/commands
           retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-thread-fixtures
+          path: |
+            toolchain/c/build/pthread_conformance.wasm
+            toolchain/c/build/pthread_benchmark.wasm
+            toolchain/c/build/exec_variants
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-c-parity-fixtures
+          path: toolchain/c/build/conformance
           if-no-files-found: error
 
   rust:
@@ -331,3 +353,79 @@ jobs:
               exit 1
             fi
           done
+
+  wasm-backend-matrix:
+    name: "WASM backend (${{ matrix.backend }})"
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'aggregate-ci')
+    needs: [wasm-commands]
+    runs-on: [self-hosted, agentos-builder]
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [v8, wasmtime]
+    env:
+      AGENTOS_TEST_WASM_BACKEND: ${{ matrix.backend }}
+      AGENTOS_E2E_NETWORK: '1'
+      AGENT_OS_CLIENT_ALLOW_E2E_SKIPS: '0'
+      AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/release/agentos-native-sidecar
+      AGENTOS_WASMTIME_WORKER_PATH: ${{ github.workspace }}/target/release/agentos-native-sidecar
+      AGENTOS_WASM_COMMANDS_DIR: ${{ github.workspace }}/packages/runtime-core/commands
+      AGENTOS_C_WASM_COMMANDS_DIR: ${{ github.workspace }}/toolchain/c/build/conformance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm-backend-${{ matrix.backend }}
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-commands
+          path: packages/runtime-core/commands
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-thread-fixtures
+          path: toolchain/c/build
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-c-parity-fixtures
+          path: toolchain/c/build/conformance
+      - name: Restore and package the validated command corpus
+        run: |
+          mkdir -p toolchain/target/wasm32-wasip1/release/commands
+          cp -a packages/runtime-core/commands/. toolchain/target/wasm32-wasip1/release/commands/
+          node packages/runtime-core/scripts/copy-wasm-commands.mjs --require
+          pnpm --filter @agentos-software/coreutils build:runtime
+          pnpm --filter '@agentos-software/common...' build
+      - name: Build the release sidecar and public test clients
+        run: |
+          cargo build --release -p agentos-native-sidecar
+          pnpm --filter '@rivet-dev/agentos-runtime-core...' build
+          pnpm --filter @rivet-dev/agentos-vm-test-harness build
+          pnpm --filter @rivet-dev/agentos-core build
+          pnpm --filter @rivet-dev/agentos build
+      - name: Run all native sidecar tests through the selected VM backend
+        run: cargo test --release -p agentos-native-sidecar --tests -- --test-threads=1
+      - name: Run owned pthread libc conformance
+        if: matrix.backend == 'wasmtime'
+        run: cargo test --release -p agentos-native-sidecar --test wasmtime_safety owned_pthread_libc_mutex_cond_tls_join_detach_and_cancel_conform -- --ignored --exact --nocapture --test-threads=1
+      - name: Run native-vs-WASM C conformance through the selected VM backend
+        run: pnpm --dir packages/core exec vitest run --root ../.. toolchain/conformance/c-parity.test.ts --reporter=verbose --maxWorkers=1 --minWorkers=1
+      - name: Run runtime-core WASM and cross-runtime integration serially
+        run: pnpm --dir packages/runtime-core exec vitest run --reporter=verbose --maxWorkers=1 --minWorkers=1
+      - name: Run the public TypeScript client suite serially
+        run: pnpm --dir packages/core exec vitest run --reporter=verbose --maxWorkers=1 --minWorkers=1
+      - name: Run the public Rust client without artifact skips
+        run: cargo test -p agentos-client -- --test-threads=1
+      - name: Run every registry software suite through the selected WASM backend
+        run: pnpm exec turbo test --concurrency=1 --filter='@agentos-software/*'
+      - name: Run deterministic actor, ACP, and agent-tool conformance
+        run: pnpm --filter @rivet-dev/agentos test:e2e:run
+      - name: Run mixed V8-JavaScript and Wasmtime resource-plateau smoke
+        if: matrix.backend == 'wasmtime'
+        run: pnpm --dir packages/runtime-benchmarks test:wasm-mixed-smoke

@@ -3,6 +3,20 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// VM-wide default engine for standalone WebAssembly process images.
+///
+/// This does not affect JavaScript's `WebAssembly.*` APIs, which always run in
+/// the owning V8 isolate. Individual process launches may override this value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+pub enum StandaloneWasmBackend {
+    #[default]
+    V8,
+    Wasmtime,
+    WasmtimeThreads,
+}
+
 /// Canonical Rust-side VM config. Unknown fields must stay rejected here and in
 /// the TS preflight schema at
 /// `packages/core/src/node-runtime-options-schema.ts`; update both when a
@@ -18,6 +32,13 @@ pub struct CreateVmConfig {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     #[ts(type = "Record<string, string>")]
     pub env: BTreeMap<String, String>,
+    #[serde(
+        default,
+        rename = "wasmBackend",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(optional)]
+    pub wasm_backend: Option<StandaloneWasmBackend>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub database: Option<VmSqliteDescriptor>,
@@ -1453,6 +1474,8 @@ limits_struct!(WasmLimitsConfig {
     active_cpu_time_limit_ms,
     wall_clock_limit_ms,
     deterministic_fuel,
+    max_threads,
+    max_concurrent_threads,
 });
 
 limits_struct!(ExecutionLimitsConfig {
@@ -1604,6 +1627,31 @@ mod tests {
         let json = serde_json::to_string(&config).expect("serialize config");
         let decoded: CreateVmConfig = serde_json::from_str(&json).expect("decode config");
         assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn standalone_wasm_backend_round_trips_and_defaults_to_v8() {
+        let omitted: CreateVmConfig =
+            serde_json::from_str(r#"{"env":{},"rootFilesystem":{},"loopbackExemptPorts":[]}"#)
+                .expect("decode omitted backend");
+        assert_eq!(
+            omitted.wasm_backend.unwrap_or_default(),
+            StandaloneWasmBackend::V8
+        );
+
+        for backend in [
+            StandaloneWasmBackend::V8,
+            StandaloneWasmBackend::Wasmtime,
+            StandaloneWasmBackend::WasmtimeThreads,
+        ] {
+            let config = CreateVmConfig {
+                wasm_backend: Some(backend),
+                ..CreateVmConfig::default()
+            };
+            let json = serde_json::to_string(&config).expect("serialize backend");
+            let decoded: CreateVmConfig = serde_json::from_str(&json).expect("decode backend");
+            assert_eq!(decoded.wasm_backend, Some(backend));
+        }
     }
 
     #[test]

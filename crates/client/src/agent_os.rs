@@ -1072,6 +1072,15 @@ fn serialize_create_vm_config_for_sidecar(
         database: config.database.clone(),
         cwd: None,
         env: BTreeMap::new(),
+        wasm_backend: config.wasm_backend.map(|backend| match backend {
+            crate::process::StandaloneWasmBackend::V8 => vm_config::StandaloneWasmBackend::V8,
+            crate::process::StandaloneWasmBackend::Wasmtime => {
+                vm_config::StandaloneWasmBackend::Wasmtime
+            }
+            crate::process::StandaloneWasmBackend::WasmtimeThreads => {
+                vm_config::StandaloneWasmBackend::WasmtimeThreads
+            }
+        }),
         user: config.user.clone(),
         root_filesystem,
         permissions: Some(permissions_policy_config(config)),
@@ -3789,6 +3798,7 @@ mod tests {
         DirEntryType, FilesystemEntry, FilesystemEntryEncoding, FilesystemSnapshotEntries,
         FilesystemSnapshotExport, RootSnapshotExport, SnapshotExportKind,
     };
+    use crate::process::StandaloneWasmBackend;
     use agentos_sidecar_client::wire::{
         FsPermissionScope, PatternPermissionScope, PermissionMode as WirePermissionMode,
     };
@@ -4047,6 +4057,31 @@ mod tests {
             serde_json::json!({ "databasePath": "/tmp/agentos-root.sqlite" })
         );
         assert!(native_root.read_only);
+    }
+
+    #[test]
+    fn create_vm_config_preserves_standalone_wasm_backend() {
+        for (client_backend, config_backend) in [
+            (
+                StandaloneWasmBackend::V8,
+                agentos_vm_config::StandaloneWasmBackend::V8,
+            ),
+            (
+                StandaloneWasmBackend::Wasmtime,
+                agentos_vm_config::StandaloneWasmBackend::Wasmtime,
+            ),
+            (
+                StandaloneWasmBackend::WasmtimeThreads,
+                agentos_vm_config::StandaloneWasmBackend::WasmtimeThreads,
+            ),
+        ] {
+            let config = serialize_create_vm_config_for_sidecar(&AgentOsConfig {
+                wasm_backend: Some(client_backend),
+                ..Default::default()
+            })
+            .expect("serialize create VM config");
+            assert_eq!(config.wasm_backend, Some(config_backend));
+        }
     }
 
     #[test]

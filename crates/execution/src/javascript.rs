@@ -525,7 +525,7 @@ pub struct JavascriptExecutionLimits {
 /// guest's virtual identity no longer rides the ambient env channel. `None`
 /// keeps the guest-runtime default. See the env-vs-wire rule in
 /// `crates/sidecar/CLAUDE.md`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuestRuntimeConfig {
     /// Virtual `process.pid`.
     pub virtual_pid: Option<u64>,
@@ -2657,6 +2657,7 @@ impl ExecutionBackend for JavascriptExecution {
         signal: i32,
         delivery_token: u64,
         _flags: u32,
+        _thread_id: u32,
     ) -> Result<SignalCheckpointOutcome, HostServiceError> {
         let Some(wake) = self.wake_handle(identity) else {
             return Ok(if let Some(process_id) = self.native_process_id() {

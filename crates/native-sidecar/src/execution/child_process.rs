@@ -442,6 +442,26 @@ mod descendant_rpc_route_tests {
             "descendant deferred completions must share root connect finalization"
         );
     }
+
+    #[test]
+    fn descendant_stream_routing_uses_execution_capability_not_wasm_engine() {
+        let source = include_str!("child_process.rs");
+        let start = source
+            .rfind("fn route_child_process_bridge_event(")
+            .expect("descendant bridge event router");
+        let end = source[start..]
+            .find("pub(super) async fn pump_detached_child_process_events(")
+            .map(|offset| start + offset)
+            .expect("descendant bridge event router end");
+        let router = &source[start..end];
+
+        assert!(router.contains("descendant_output_ownership()"));
+        assert!(router.contains("DescendantOutputOwnership::GuestDescriptors"));
+        assert!(
+            !router.contains("standalone_wasm_backend"),
+            "POSIX stream ownership must not depend on the selected WASM engine"
+        );
+    }
 }
 
 impl TransferredHostNetSocket {
@@ -1751,6 +1771,74 @@ fn materialize_direct_runtime_stdio_mappings(
             }
         }
     }
+    Ok(())
+}
+
+/// Materialize every guest descriptor at its canonical kernel number before a
+/// WASM image starts. File actions may allocate temporary kernel descriptors;
+/// retaining those aliases both requires an executor-local translation table
+/// and keeps pipe/socket descriptions alive after the guest closes its fd.
+fn materialize_wasm_fd_mappings(
+    kernel: &mut SidecarKernel,
+    pid: u32,
+    applied: &mut AppliedPosixSpawnFileActions,
+) -> Result<(), SidecarError> {
+    let snapshot = kernel
+        .fd_snapshot(EXECUTION_DRIVER_NAME, pid)
+        .map_err(kernel_error)?;
+    let fd_flags = snapshot
+        .iter()
+        .map(|entry| (entry.fd, entry.fd_flags))
+        .collect::<BTreeMap<_, _>>();
+    let hidden_preopens = kernel
+        .wasi_preopens(EXECUTION_DRIVER_NAME, pid)
+        .map_err(kernel_error)?
+        .into_iter()
+        .map(|entry| entry.fd)
+        .collect::<BTreeSet<_>>();
+    let target_fds = applied
+        .fd_mappings
+        .iter()
+        .map(|mapping| mapping[0])
+        .collect::<BTreeSet<_>>();
+    let mut transfers = Vec::with_capacity(applied.fd_mappings.len());
+    for [guest_fd, source_fd] in &applied.fd_mappings {
+        let flags = fd_flags.get(source_fd).copied().ok_or_else(|| {
+            SidecarError::host(
+                "EBADF",
+                format!("WASM guest fd {guest_fd} maps to closed kernel fd {source_fd}"),
+            )
+        })?;
+        transfers.push((
+            *guest_fd,
+            *source_fd,
+            flags,
+            kernel
+                .fd_transfer(EXECUTION_DRIVER_NAME, pid, *source_fd)
+                .map_err(kernel_error)?,
+        ));
+    }
+    for (guest_fd, source_fd, flags, transfer) in &transfers {
+        if guest_fd != source_fd {
+            kernel
+                .fd_install_spawn_transfer_at(
+                    EXECUTION_DRIVER_NAME,
+                    pid,
+                    *guest_fd,
+                    *flags,
+                    transfer,
+                )
+                .map_err(kernel_error)?;
+        }
+    }
+    for (_, source_fd, _, _) in &transfers {
+        if !target_fds.contains(source_fd) && !hidden_preopens.contains(source_fd) {
+            kernel
+                .fd_close(EXECUTION_DRIVER_NAME, pid, *source_fd)
+                .map_err(kernel_error)?;
+        }
+    }
+    applied.fd_mappings = target_fds.into_iter().map(|fd| [fd, fd]).collect();
     Ok(())
 }
 
@@ -4398,14 +4486,17 @@ where
                     _ => None,
                 }
             } else {
-                if parent.runtime == GuestRuntimeKind::WebAssembly
-                    && parent.standalone_wasm_backend == ExecutionStandaloneWasmBackend::Wasmtime
+                if parent.execution.descendant_output_ownership()
+                    == DescendantOutputOwnership::GuestDescriptors
                 {
-                    // Native Wasmtime children publish output through their
-                    // inherited kernel descriptors and settle wait(2) through
-                    // the guest-owned kernel process table. The proactive
-                    // sidecar pump may still retire the child here, but there
-                    // is no V8 stream session to notify.
+                    // POSIX guests publish descendant output through inherited
+                    // kernel descriptors and settle wait(2) through the
+                    // guest-owned kernel process table. The proactive sidecar
+                    // pump may still retire the child here, but forwarding the
+                    // same event through an executor stream lane duplicates
+                    // state. For V8-WASM those unconsumed duplicates also fill
+                    // the bounded session command queue while the guest is in
+                    // a synchronous host call.
                     return Ok(true);
                 }
                 let payload = match event_type {
@@ -5874,7 +5965,7 @@ where
                 )
                 .map_err(kernel_error)?;
             let kernel_pid = kernel_handle.pid();
-            let applied_spawn_actions = if let Some(prepared) = prepared_spawn_actions {
+            let mut applied_spawn_actions = if let Some(prepared) = prepared_spawn_actions {
                 install_preapplied_posix_spawn_file_actions(
                     &mut vm.kernel,
                     &kernel_handle,
@@ -5889,6 +5980,13 @@ where
                     &prepared_host_net_fds.kernel_actions,
                 )?
             };
+            if resolved.adapter_policy.encodes_inherited_fd_bootstrap {
+                materialize_wasm_fd_mappings(
+                    &mut vm.kernel,
+                    kernel_pid,
+                    &mut applied_spawn_actions,
+                )?;
+            }
             let posix_spawn_controls_stdin = !request.options.spawn_file_actions.is_empty()
                 && (applied_spawn_actions
                     .fd_mappings
@@ -6086,7 +6184,8 @@ where
                         Some(u64::from(parent_kernel_pid)),
                     );
                     let module_path = match standalone_wasm_backend {
-                        ExecutionStandaloneWasmBackend::Wasmtime => execution_env
+                        ExecutionStandaloneWasmBackend::Wasmtime
+                        | ExecutionStandaloneWasmBackend::WasmtimeThreads => execution_env
                             .get("AGENTOS_GUEST_ENTRYPOINT")
                             .cloned()
                             .unwrap_or_else(|| resolved.entrypoint.clone()),
@@ -6920,7 +7019,8 @@ where
                 execution_env.insert(String::from(WASM_STDIO_SYNC_RPC_ENV), String::from("1"));
                 execution_env.insert(String::from(WASM_EXEC_COMMIT_RPC_ENV), String::from("1"));
                 let module_path = match standalone_wasm_backend {
-                    ExecutionStandaloneWasmBackend::Wasmtime => execution_env
+                    ExecutionStandaloneWasmBackend::Wasmtime
+                    | ExecutionStandaloneWasmBackend::WasmtimeThreads => execution_env
                         .get("AGENTOS_GUEST_ENTRYPOINT")
                         .cloned()
                         .unwrap_or_else(|| resolved.entrypoint.clone()),
@@ -7626,7 +7726,7 @@ where
                     )
                     .map_err(kernel_error)?;
                 let kernel_pid = kernel_handle.pid();
-                let applied_spawn_actions = if let Some(prepared) = prepared_spawn_actions {
+                let mut applied_spawn_actions = if let Some(prepared) = prepared_spawn_actions {
                     install_preapplied_posix_spawn_file_actions(
                         &mut vm.kernel,
                         &kernel_handle,
@@ -7641,6 +7741,13 @@ where
                         &prepared_host_net_fds.kernel_actions,
                     )?
                 };
+                if resolved.adapter_policy.encodes_inherited_fd_bootstrap {
+                    materialize_wasm_fd_mappings(
+                        &mut vm.kernel,
+                        kernel_pid,
+                        &mut applied_spawn_actions,
+                    )?;
+                }
                 let posix_spawn_controls_stdin = !request.options.spawn_file_actions.is_empty()
                     && (applied_spawn_actions
                         .fd_mappings
@@ -7821,7 +7928,8 @@ where
                             Some(u64::from(parent_kernel_pid)),
                         );
                         let module_path = match standalone_wasm_backend {
-                            ExecutionStandaloneWasmBackend::Wasmtime => execution_env
+                            ExecutionStandaloneWasmBackend::Wasmtime
+                            | ExecutionStandaloneWasmBackend::WasmtimeThreads => execution_env
                                 .get("AGENTOS_GUEST_ENTRYPOINT")
                                 .cloned()
                                 .unwrap_or_else(|| resolved.entrypoint.clone()),
@@ -8649,6 +8757,60 @@ where
             )),
         };
         match result {
+            Ok(response) => reply.succeed(response),
+            Err(error) => reply.fail(host_service_error(&error)),
+        }
+        .map_err(SidecarError::from)
+    }
+
+    fn dispatch_descendant_context_fd_snapshot(
+        &self,
+        vm_id: &str,
+        root_process_id: &str,
+        caller_process_path: &[&str],
+        reply: DirectHostReplyHandle,
+    ) -> Result<(), SidecarError> {
+        let Some(vm) = self.vms.get(vm_id) else {
+            reply
+                .fail(HostServiceError::new(
+                    "ESTALE",
+                    "host call VM no longer exists",
+                ))
+                .map_err(SidecarError::from)?;
+            return Ok(());
+        };
+        let Some(root) = vm.active_processes.get(root_process_id) else {
+            reply
+                .fail(HostServiceError::new(
+                    "ESTALE",
+                    "host call root process no longer exists",
+                ))
+                .map_err(SidecarError::from)?;
+            return Ok(());
+        };
+        let Some(caller) = Self::active_process_by_path(root, caller_process_path) else {
+            reply
+                .fail(HostServiceError::new(
+                    "ESTALE",
+                    "host call descendant process no longer exists",
+                ))
+                .map_err(SidecarError::from)?;
+            return Ok(());
+        };
+        let identity = reply.identity();
+        if identity.generation != vm.generation || identity.pid != caller.kernel_pid {
+            reply
+                .fail(HostServiceError::new(
+                    "ESTALE",
+                    "fd snapshot identity does not match the descendant process",
+                ))
+                .map_err(SidecarError::from)?;
+            return Ok(());
+        }
+        if !reply.claim().map_err(SidecarError::from)? {
+            return Ok(());
+        }
+        match fd_snapshot_with_managed_routes(vm, caller.kernel_pid) {
             Ok(response) => reply.succeed(response),
             Err(error) => reply.fail(host_service_error(&error)),
         }
@@ -9803,6 +9965,7 @@ where
             agentos_execution::host::BoundedVec<agentos_execution::host::KernelPollInterest>,
             Option<Instant>,
             Option<agentos_execution::host::SignalSetValue>,
+            Option<u32>,
             DirectHostReplyHandle,
         ),
     ) -> Result<(), SidecarError> {
@@ -10151,15 +10314,40 @@ where
             match event {
                 ActiveExecutionEvent::Common(ExecutionEvent::HostCall { operation, reply }) => {
                     drop(reservation);
+                    if matches!(
+                        operation,
+                        HostOperation::Filesystem(
+                            agentos_execution::host::FilesystemOperation::Snapshot
+                        )
+                    ) {
+                        self.dispatch_descendant_context_fd_snapshot(
+                            vm_id,
+                            process_id,
+                            &child_path,
+                            reply,
+                        )?;
+                        continue;
+                    }
+                    let default_blocking_read_ms = self
+                        .vms
+                        .get(vm_id)
+                        .and_then(|vm| vm.limits.resources.max_blocking_read_ms)
+                        .unwrap_or(
+                            agentos_kernel::resource_accounting::DEFAULT_BLOCKING_READ_TIMEOUT_MS,
+                        );
                     let deferred_kernel_read = match &operation {
                         HostOperation::Filesystem(
                             agentos_execution::host::FilesystemOperation::Read {
                                 fd,
                                 max_bytes,
                                 offset: None,
-                                deadline_ms: Some(timeout_ms),
+                                deadline_ms,
                             },
-                        ) => Some((Some(*fd), *max_bytes, *timeout_ms)),
+                        ) => Some((
+                            Some(*fd),
+                            *max_bytes,
+                            deadline_ms.unwrap_or(default_blocking_read_ms),
+                        )),
                         HostOperation::Filesystem(
                             agentos_execution::host::FilesystemOperation::StdinRead {
                                 max_bytes,
@@ -10222,11 +10410,19 @@ where
                                 interests,
                                 timeout_ms,
                                 signal_mask,
+                                signal_thread_id,
                             },
-                        ) => Some((interests.clone(), *timeout_ms, *signal_mask)),
+                        ) => Some((
+                            interests.clone(),
+                            *timeout_ms,
+                            *signal_mask,
+                            *signal_thread_id,
+                        )),
                         _ => None,
                     };
-                    if let Some((interests, timeout_ms, signal_mask)) = deferred_posix_poll {
+                    if let Some((interests, timeout_ms, signal_mask, signal_thread_id)) =
+                        deferred_posix_poll
+                    {
                         let deadline = match timeout_ms
                             .map(host_dispatch::checked_deferred_guest_wait_deadline)
                             .transpose()
@@ -10241,7 +10437,7 @@ where
                             vm_id,
                             process_id,
                             &child_path,
-                            (interests, deadline, signal_mask, reply),
+                            (interests, deadline, signal_mask, signal_thread_id, reply),
                         )?;
                         continue;
                     }

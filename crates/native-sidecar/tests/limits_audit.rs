@@ -4,7 +4,7 @@
 //! with instructions, so operator-tunable bounds cannot silently accumulate as hardcoded values.
 //!
 //! This is a pure filesystem test: no VM, no V8, no new dependencies (`serde_json` is already a
-//! sidecar dependency). The match rule is hand-rolled string checks, asserted by its own unit
+//! native-sidecar dependency). The match rule is hand-rolled string checks, asserted by its own unit
 //! cases below.
 
 use std::collections::BTreeSet;
@@ -19,13 +19,13 @@ struct ScannedConst {
     path: String,
 }
 
-/// Resolve the workspace root from `CARGO_MANIFEST_DIR` (which points at `crates/sidecar`).
+/// Resolve the workspace root from `CARGO_MANIFEST_DIR` (which points at `crates/native-sidecar`).
 fn workspace_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
         .and_then(Path::parent)
-        .expect("crates/sidecar has a workspace root two levels up")
+        .expect("crates/native-sidecar has a workspace root two levels up")
         .to_path_buf()
 }
 
@@ -289,7 +289,7 @@ fn limit_constants_are_classified() {
             failures.push(format!(
                 "unclassified limit constant {} in {}: wire it through a typed configuration field and mark it \
                  \"policy\", or add an \"invariant\"/\"policy-deferred\" entry to \
-                 crates/sidecar/tests/fixtures/limits-inventory.json with a one-line rationale",
+                 crates/native-sidecar/tests/fixtures/limits-inventory.json with a one-line rationale",
                 c.name, c.path
             ));
         }

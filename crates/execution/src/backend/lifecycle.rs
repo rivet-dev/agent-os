@@ -81,6 +81,7 @@ pub struct PublishedSignalCheckpoint {
     pub signal: i32,
     pub delivery_token: u64,
     pub flags: u32,
+    pub thread_id: u32,
 }
 
 /// Sidecar-facing lifecycle shared by thread-affine and Send backends.
@@ -142,6 +143,7 @@ pub trait ExecutionBackend {
         signal: i32,
         delivery_token: u64,
         flags: u32,
+        thread_id: u32,
     ) -> Result<SignalCheckpointOutcome, HostServiceError>;
 
     /// Takes one delivery already claimed by the kernel control plane and
@@ -151,6 +153,18 @@ pub trait ExecutionBackend {
         _identity: ExecutionWakeIdentity,
     ) -> Result<Option<PublishedSignalCheckpoint>, HostServiceError> {
         Ok(None)
+    }
+
+    fn take_signal_checkpoint_for_thread(
+        &self,
+        identity: ExecutionWakeIdentity,
+        thread_id: u32,
+    ) -> Result<Option<PublishedSignalCheckpoint>, HostServiceError> {
+        if thread_id == 0 {
+            self.take_signal_checkpoint(identity)
+        } else {
+            Ok(None)
+        }
     }
 
     /// Drops checkpoints claimed by the replaced image after a successful

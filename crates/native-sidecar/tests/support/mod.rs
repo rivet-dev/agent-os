@@ -305,23 +305,23 @@ pub fn create_vm_wire_with_metadata(
         .entry(String::from("cwd"))
         .or_insert_with(|| cwd.to_string_lossy().into_owned());
 
+    let request = create_vm_request_with_selected_wasm_backend(
+        runtime.clone(),
+        metadata,
+        agentos_native_sidecar::wire::RootFilesystemDescriptor {
+            mode: agentos_native_sidecar::wire::RootFilesystemMode::Ephemeral,
+            disable_default_base_layer: false,
+            lowers: Vec::new(),
+            bootstrap_entries: Vec::new(),
+        },
+        Some(wire_permissions_allow_all()),
+    );
+
     let result = sidecar
         .dispatch_wire_blocking(wire_request(
             request_id,
             wire_session(connection_id, session_id),
-            agentos_native_sidecar::wire::RequestPayload::CreateVmRequest(
-                agentos_native_sidecar::wire::CreateVmRequest::legacy_test_config(
-                    runtime,
-                    metadata,
-                    agentos_native_sidecar::wire::RootFilesystemDescriptor {
-                        mode: agentos_native_sidecar::wire::RootFilesystemMode::Ephemeral,
-                        disable_default_base_layer: false,
-                        lowers: Vec::new(),
-                        bootstrap_entries: Vec::new(),
-                    },
-                    Some(wire_permissions_allow_all()),
-                ),
-            ),
+            agentos_native_sidecar::wire::RequestPayload::CreateVmRequest(request),
         ))
         .expect("create sidecar VM through wire");
 
@@ -332,6 +332,29 @@ pub fn create_vm_wire_with_metadata(
         other => panic!("unexpected wire vm create response: {other:?}"),
     };
     (vm_id, result)
+}
+
+pub fn create_vm_request_with_selected_wasm_backend(
+    runtime: agentos_native_sidecar::wire::GuestRuntimeKind,
+    metadata: HashMap<String, String>,
+    root_filesystem: agentos_native_sidecar::wire::RootFilesystemDescriptor,
+    permissions: Option<agentos_native_sidecar::wire::PermissionsPolicy>,
+) -> agentos_native_sidecar::wire::CreateVmRequest {
+    let legacy_request = agentos_native_sidecar::wire::CreateVmRequest::legacy_test_config(
+        runtime.clone(),
+        metadata,
+        root_filesystem,
+        permissions,
+    );
+    let mut config: agentos_vm_config::CreateVmConfig =
+        serde_json::from_str(&legacy_request.config).expect("decode test VM config");
+    config.wasm_backend = match std::env::var("AGENTOS_TEST_WASM_BACKEND").as_deref() {
+        Ok("v8") => Some(agentos_vm_config::StandaloneWasmBackend::V8),
+        Ok("wasmtime") => Some(agentos_vm_config::StandaloneWasmBackend::Wasmtime),
+        Ok(value) => panic!("unknown AGENTOS_TEST_WASM_BACKEND value {value:?}"),
+        Err(_) => None,
+    };
+    agentos_native_sidecar::wire::CreateVmRequest::json_config(runtime, config)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -346,15 +369,6 @@ pub fn execute_wire(
     entrypoint: &Path,
     args: Vec<String>,
 ) {
-    let wasm_backend = if runtime == agentos_native_sidecar::wire::GuestRuntimeKind::WebAssembly {
-        match std::env::var("AGENTOS_TEST_WASM_BACKEND").as_deref() {
-            Ok("wasmtime") => Some(agentos_native_sidecar::wire::StandaloneWasmBackend::Wasmtime),
-            Ok("v8") | Err(_) => Some(agentos_native_sidecar::wire::StandaloneWasmBackend::V8),
-            Ok(value) => panic!("unknown AGENTOS_TEST_WASM_BACKEND value {value:?}"),
-        }
-    } else {
-        None
-    };
     let result = sidecar
         .dispatch_wire_blocking(wire_request(
             request_id,
@@ -369,7 +383,7 @@ pub fn execute_wire(
                     env: HashMap::new(),
                     cwd: None,
                     wasm_permission_tier: None,
-                    wasm_backend,
+                    wasm_backend: None,
                 },
             ),
         ))

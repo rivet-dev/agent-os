@@ -25,7 +25,7 @@ just software-build            # stage + assemble every software package
 just software-build ripgrep    # ... or just one
 ```
 
-The native build compiles each command for `wasm32-wasip1` with the pinned **nightly** toolchain from `rust-toolchain.toml` (the build vendors and patches `std` for WASI), optimizes with `wasm-opt`, and drops the binaries in `toolchain/target/wasm32-wasip1/release/commands/`. C-based commands (e.g. `sqlite3`, `unzip`, `wget`, `zip`) compile with a **wasi-sdk** clang toolchain via `make -C toolchain/c`.
+The native build compiles each command for `wasm32-wasip1` with the pinned **nightly** toolchain from `rust-toolchain.toml` (the build vendors and patches `std` for WASI), optimizes with the checksum-verified Binaryen 128 `wasm-opt`, and drops the binaries in `toolchain/target/wasm32-wasip1/release/commands/`. C-based commands (e.g. `sqlite3`, `unzip`, `wget`, `zip`) compile with a **wasi-sdk** clang toolchain via `make -C toolchain/c`.
 
 Each package's build then runs the **agentos-toolchain** lifecycle: `agentos-toolchain stage` copies the binaries listed in the package's `agentos-package.json` into its `bin/`, and `agentos-toolchain build` assembles the clean `dist/package/` dir with a `bin` map in its `package.json` and packs it into `dist/package.aospkg` (the `{ packagePath }` target).
 

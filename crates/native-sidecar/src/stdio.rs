@@ -1194,17 +1194,20 @@ async fn run_async(
             }
             _ = process_event_notify.notified() => {
                 for session in active_sessions.iter().cloned().collect::<Vec<_>>() {
-                    if sidecar.pump_process_events(&session.compat_ownership_scope()).await? {
-                        match event_ready_tx.try_send(()) {
-                            Ok(())
-                            | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {}
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
-                                return Err(io::Error::new(
-                                    io::ErrorKind::BrokenPipe,
-                                    "event-ready wake receiver closed",
-                                )
-                                .into());
-                            }
+                    sidecar.pump_process_events(&session.compat_ownership_scope()).await?;
+                    // A request-scoped inline pump can already have moved
+                    // public events into the durable queue before issuing
+                    // this wake, so probe that queue even when this pump turn
+                    // finds no new executor event.
+                    match event_ready_tx.try_send(()) {
+                        Ok(())
+                        | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::BrokenPipe,
+                                "event-ready wake receiver closed",
+                            )
+                            .into());
                         }
                     }
                 }

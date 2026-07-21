@@ -27,9 +27,11 @@ reduced counts plus focused semantic coverage; the reduced test still executes
 and any non-pass outcome fails. Wildcards,
 auto-blessing, unused records, duplicate records, and stale records are errors.
 
-Reports are written to `report/results.md`, `report/agentos-gaps.md`, and
-`report/surface-audit.md`, with driver-specific summaries under
-`report/backends/<backend>/results.md`. `XFSTESTS_BACKENDS` defaults to the
+Each WASM engine writes reports under `report/<wasm-backend>/`: the main files
+are `results.md`, `agentos-gaps.md`, and `surface-audit.md`, with
+driver-specific summaries under `backends/<storage-backend>/results.md`.
+`XFSTESTS_WASM_BACKENDS` defaults to the required `v8 wasmtime` executor
+matrix. `XFSTESTS_BACKENDS` defaults to the
 `chunked_local,memory,chunked_s3` supported writable-engine matrix and rejects
 unknown or duplicate entries. The dormant `object_s3` harness paths are retained
 for focused return-to-service validation, but the plugin is intentionally not
@@ -44,6 +46,10 @@ external cancellation. `XFSTESTS_CONCURRENCY` bounds simultaneous VMs;
 per-test watchdog is 3,600 seconds, calibrated from the pinned helper workloads
 with byte-for-byte verification enabled;
 a timeout remains a strict harness failure.
+Nightly CI also runs the ignored 1,000-file `dirstress` process matrix once per
+WASM engine on `chunked_local`; it covers the one-process, five-process shared,
+and five-process/five-directory layouts without multiplying the same workload
+across every storage-plugin leg.
 
 ## Correctness constraints
 

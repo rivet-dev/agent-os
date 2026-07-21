@@ -20,6 +20,9 @@
 	"files": [
 		"agentos-native-sidecar"
 	],
+	"bin": {
+		"agentos-native-sidecar": "./agentos-native-sidecar"
+	},
 	"scripts": {
 		"check-types": "node -e \"process.exit(0)\""
 	},

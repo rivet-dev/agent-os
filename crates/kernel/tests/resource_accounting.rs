@@ -1982,3 +1982,119 @@ fn resource_limits_reject_oversized_readdir_batches() {
         .to_string()
         .contains("limits.resources.maxReaddirEntries"));
 }
+
+#[test]
+fn fd_readdir_does_not_charge_synthetic_dot_entries_to_the_child_limit() {
+    let mut config = KernelVmConfig::new("vm-fd-readdir-limit");
+    config.permissions = Permissions::allow_all();
+    config.resources = ResourceLimits {
+        max_readdir_entries: Some(2),
+        ..ResourceLimits::default()
+    };
+
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel.create_dir("/exact").expect("create exact directory");
+    kernel
+        .write_file("/exact/a.txt", b"a".to_vec())
+        .expect("write exact first entry");
+    kernel
+        .write_file("/exact/b.txt", b"b".to_vec())
+        .expect("write exact second entry");
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+    let process = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn shell");
+    let directory_fd = kernel
+        .fd_open("shell", process.pid(), "/exact", 0, None)
+        .expect("open exact directory");
+
+    let first_page = kernel
+        .fd_read_dir_page_with_types("shell", process.pid(), directory_fd, 0, 2)
+        .expect("exact-limit descriptor readdir must admit synthetic dot entries");
+    assert_eq!(first_page.len(), 2);
+    assert_eq!(first_page[0].name, ".");
+    assert_eq!(first_page[1].name, "..");
+    let second_page = kernel
+        .fd_read_dir_page_with_types("shell", process.pid(), directory_fd, 2, 2)
+        .expect("exact-limit descriptor readdir must return the child page");
+    assert_eq!(
+        second_page
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a.txt", "b.txt"]
+    );
+
+    process.finish(0);
+    kernel.wait_and_reap(process.pid()).expect("reap shell");
+}
+
+#[test]
+fn fd_readdir_cookie_remains_stable_when_an_earlier_page_is_deleted() {
+    let mut config = KernelVmConfig::new("vm-fd-readdir-cookie");
+    config.permissions = Permissions::allow_all();
+
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel.create_dir("/entries").expect("create directory");
+    for name in ["a", "b", "c", "d"] {
+        kernel
+            .write_file(&format!("/entries/{name}"), name.as_bytes().to_vec())
+            .expect("write directory child");
+    }
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+    let process = kernel
+        .spawn_process(
+            "sh",
+            Vec::new(),
+            SpawnOptions {
+                requester_driver: Some(String::from("shell")),
+                ..SpawnOptions::default()
+            },
+        )
+        .expect("spawn shell");
+    let directory_fd = kernel
+        .fd_open("shell", process.pid(), "/entries", 0, None)
+        .expect("open directory");
+
+    let first_page = kernel
+        .fd_read_dir_page_with_types("shell", process.pid(), directory_fd, 0, 4)
+        .expect("read first page");
+    assert_eq!(
+        first_page
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![".", "..", "a", "b"]
+    );
+    kernel
+        .remove_file("/entries/a")
+        .expect("unlink first child");
+    kernel
+        .remove_file("/entries/b")
+        .expect("unlink second child");
+
+    let second_page = kernel
+        .fd_read_dir_page_with_types("shell", process.pid(), directory_fd, 4, 4)
+        .expect("read stable second page");
+    assert_eq!(
+        second_page
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["c", "d"]
+    );
+
+    process.finish(0);
+    kernel.wait_and_reap(process.pid()).expect("reap shell");
+}

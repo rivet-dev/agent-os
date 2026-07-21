@@ -1,8 +1,6 @@
 export type { AcpLimitsConfig } from "./generated/AcpLimitsConfig.js";
+export type { BindingLimitsConfig } from "./generated/BindingLimitsConfig.js";
 export type { CreateVmConfig } from "./generated/CreateVmConfig.js";
-export type { VmUserConfig } from "./generated/VmUserConfig.js";
-export type { VmUserAccountConfig } from "./generated/VmUserAccountConfig.js";
-export type { VmGroupConfig } from "./generated/VmGroupConfig.js";
 export type { FsPermissionRule } from "./generated/FsPermissionRule.js";
 export type { FsPermissionRuleSet } from "./generated/FsPermissionRuleSet.js";
 export type { FsPermissionScope } from "./generated/FsPermissionScope.js";
@@ -28,8 +26,11 @@ export type { RootFilesystemEntryEncoding } from "./generated/RootFilesystemEntr
 export type { RootFilesystemEntryKind } from "./generated/RootFilesystemEntryKind.js";
 export type { RootFilesystemLowerDescriptor } from "./generated/RootFilesystemLowerDescriptor.js";
 export type { RootFilesystemMode } from "./generated/RootFilesystemMode.js";
-export type { BindingLimitsConfig } from "./generated/BindingLimitsConfig.js";
+export type { StandaloneWasmBackend } from "./generated/StandaloneWasmBackend.js";
 export type { VmDnsConfig } from "./generated/VmDnsConfig.js";
+export type { VmGroupConfig } from "./generated/VmGroupConfig.js";
 export type { VmLimitsConfig } from "./generated/VmLimitsConfig.js";
 export type { VmListenPolicyConfig } from "./generated/VmListenPolicyConfig.js";
+export type { VmUserAccountConfig } from "./generated/VmUserAccountConfig.js";
+export type { VmUserConfig } from "./generated/VmUserConfig.js";
 export type { WasmLimitsConfig } from "./generated/WasmLimitsConfig.js";

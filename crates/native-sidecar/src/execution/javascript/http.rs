@@ -232,19 +232,6 @@ fn serialize_kernel_http_fetch_request(
     request
 }
 
-pub(in crate::execution) fn kernel_http_fetch_target_exit_code(
-    error: &SidecarError,
-) -> Option<i32> {
-    let SidecarError::Execution(message) = error else {
-        return None;
-    };
-    message
-        .strip_prefix("vm.fetch target exited before responding (exit code ")?
-        .strip_suffix(')')?
-        .parse()
-        .ok()
-}
-
 fn find_http_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
@@ -482,16 +469,10 @@ where
 {
     let identity = process.kernel_handle.runtime_identity();
     let max_reply_bytes = process.limits.reactor.max_bridge_response_bytes;
-    let event = if wait.is_zero() {
-        process
-            .execution
-            .try_poll_event(identity, max_reply_bytes)?
-    } else {
-        process
-            .execution
-            .poll_event(identity, max_reply_bytes, wait)
-            .await?
-    };
+    let event = process
+        .execution
+        .poll_event(identity, max_reply_bytes, wait)
+        .await?;
     let Some(event) = event else { return Ok(false) };
 
     match event {
@@ -570,10 +551,19 @@ where
     Ok(())
 }
 
+pub(in crate::execution) struct KernelHttpFetch {
+    kernel_pid: u32,
+    socket_id: SocketId,
+    response_buffer: Vec<u8>,
+    peer_closed: bool,
+    url: String,
+    deadline: Instant,
+    max_fetch_response_bytes: usize,
+    _capability: agentos_runtime::capability::CapabilityLease,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(in crate::execution) async fn dispatch_kernel_http_fetch<B>(
-    bridge: &SharedBridge<B>,
-    vm_id: &str,
+pub(in crate::execution) fn begin_kernel_http_fetch(
     vm: &mut VmState,
     target_process_id: &str,
     port: u16,
@@ -582,12 +572,7 @@ pub(in crate::execution) async fn dispatch_kernel_http_fetch<B>(
     headers: &HttpHeaderCollection,
     body_bytes: Option<&[u8]>,
     max_fetch_response_bytes: usize,
-) -> Result<String, SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
-    let socket_paths = build_socket_path_context(vm)?;
+) -> Result<KernelHttpFetch, SidecarError> {
     // Client source ports belong to the kernel socket table. The listen-port
     // allocator does not reserve active client sockets and can hand the same
     // source port to concurrent requests.
@@ -607,56 +592,129 @@ where
         .kernel
         .socket_create(EXECUTION_DRIVER_NAME, kernel_pid, SocketSpec::tcp())
         .map_err(kernel_error)?;
-    let _fetch_capability = pending_capability
+    let capability = pending_capability
         .commit(CapabilityBackend::Kernel { socket_id })
         .map_err(|error| SidecarError::Execution(error.to_string()))?;
+    vm.kernel
+        .socket_bind_inet(
+            EXECUTION_DRIVER_NAME,
+            kernel_pid,
+            socket_id,
+            InetSocketAddress::new("127.0.0.1", local_port),
+        )
+        .map_err(kernel_error)?;
+    vm.kernel
+        .socket_connect_inet_loopback(
+            EXECUTION_DRIVER_NAME,
+            kernel_pid,
+            socket_id,
+            InetSocketAddress::new("127.0.0.1", port),
+        )
+        .map_err(kernel_error)?;
+    let request_bytes =
+        serialize_kernel_http_fetch_request(port, path, options, headers, body_bytes);
+    vm.kernel
+        .socket_write(EXECUTION_DRIVER_NAME, kernel_pid, socket_id, &request_bytes)
+        .map_err(kernel_error)?;
 
-    let result = dispatch_kernel_http_fetch_with_socket(
-        bridge,
-        vm_id,
-        vm,
-        target_process_id,
+    Ok(KernelHttpFetch {
         kernel_pid,
         socket_id,
-        local_port,
-        port,
-        path,
-        options,
-        headers,
-        body_bytes,
-        &socket_paths,
+        response_buffer: Vec::new(),
+        peer_closed: false,
+        url: format!("http://127.0.0.1:{port}{path}"),
+        deadline: Instant::now() + http_loopback_request_timeout(),
         max_fetch_response_bytes,
-    )
-    .await;
-    let close_result = vm
+        _capability: capability,
+    })
+}
+
+pub(in crate::execution) fn poll_kernel_http_fetch(
+    vm: &mut VmState,
+    fetch: &mut KernelHttpFetch,
+) -> Result<Option<String>, SidecarError> {
+    if let Some(response) =
+        parse_kernel_http_fetch_response(&fetch.response_buffer, fetch.peer_closed, &fetch.url)
+            .map_err(sidecar_core_execution_error)?
+    {
+        ensure_vm_fetch_response_within_limit(
+            &response,
+            "vm.fetch",
+            fetch.max_fetch_response_bytes,
+        )
+        .map_err(sidecar_core_execution_error)?;
+        return Ok(Some(response));
+    }
+    if Instant::now() >= fetch.deadline {
+        let preview = String::from_utf8_lossy(&fetch.response_buffer);
+        return Err(SidecarError::Execution(format!(
+            "vm.fetch timed out waiting for kernel TCP HTTP response ({} buffered bytes: {:?})",
+            fetch.response_buffer.len(),
+            preview.chars().take(200).collect::<String>()
+        )));
+    }
+
+    let poll = vm
         .kernel
-        .socket_close(EXECUTION_DRIVER_NAME, kernel_pid, socket_id)
-        .map_err(kernel_error);
-    let cleanup_result = if result.is_err() {
-        drain_host_fetch_target_events(bridge, vm_id, vm, target_process_id, &socket_paths).await
-    } else {
-        Ok(())
-    };
-    match result {
-        Ok(response) => {
-            close_result?;
-            cleanup_result?;
-            Ok(response)
-        }
-        Err(error) => {
-            if let Err(close_error) = close_result {
-                eprintln!(
-                    "ERR_AGENTOS_HTTP_FETCH_CLEANUP: failed to close kernel socket {socket_id} after fetch error: {close_error}"
-                );
+        .poll_targets(
+            EXECUTION_DRIVER_NAME,
+            fetch.kernel_pid,
+            vec![PollTargetEntry::socket(
+                fetch.socket_id,
+                POLLIN | POLLHUP | POLLERR,
+            )],
+            0,
+        )
+        .map_err(kernel_error)?;
+    let revents = poll
+        .targets
+        .first()
+        .map(|entry| entry.revents)
+        .unwrap_or_else(PollEvents::empty);
+    if revents.intersects(POLLERR) {
+        return Err(SidecarError::Execution(String::from(
+            "vm.fetch kernel TCP socket reported POLLERR",
+        )));
+    }
+    if revents.intersects(POLLIN) {
+        loop {
+            match vm.kernel.socket_read(
+                EXECUTION_DRIVER_NAME,
+                fetch.kernel_pid,
+                fetch.socket_id,
+                64 * 1024,
+            ) {
+                Ok(Some(bytes)) if !bytes.is_empty() => {
+                    fetch.response_buffer.extend(bytes);
+                    ensure_vm_fetch_raw_response_buffer_within_limit(
+                        fetch.response_buffer.len(),
+                        "vm.fetch",
+                    )
+                    .map_err(sidecar_core_execution_error)?;
+                }
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    fetch.peer_closed = true;
+                    break;
+                }
+                Err(error) if error.code() == "EAGAIN" => break,
+                Err(error) => return Err(kernel_error(error)),
             }
-            if let Err(cleanup_error) = cleanup_result {
-                eprintln!(
-                    "ERR_AGENTOS_HTTP_FETCH_CLEANUP: failed to drain target events after fetch error: {cleanup_error}"
-                );
-            }
-            Err(error)
         }
     }
+    if revents.intersects(POLLHUP) {
+        fetch.peer_closed = true;
+    }
+    Ok(None)
+}
+
+pub(in crate::execution) fn close_kernel_http_fetch(
+    vm: &mut VmState,
+    fetch: &KernelHttpFetch,
+) -> Result<(), SidecarError> {
+    vm.kernel
+        .socket_close(EXECUTION_DRIVER_NAME, fetch.kernel_pid, fetch.socket_id)
+        .map_err(kernel_error)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1071,150 +1129,6 @@ where
     })?;
     close_fetch_stream_socket(bridge, vm_id, vm, state).await?;
     Ok(String::from("{\"cancelled\":true}"))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn dispatch_kernel_http_fetch_with_socket<B>(
-    bridge: &SharedBridge<B>,
-    vm_id: &str,
-    vm: &mut VmState,
-    target_process_id: &str,
-    kernel_pid: u32,
-    socket_id: SocketId,
-    local_port: u16,
-    port: u16,
-    path: &str,
-    options: &JavascriptHttpRequestOptions,
-    headers: &HttpHeaderCollection,
-    body_bytes: Option<&[u8]>,
-    socket_paths: &SocketPathContext,
-    max_fetch_response_bytes: usize,
-) -> Result<String, SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
-    vm.kernel
-        .socket_bind_inet(
-            EXECUTION_DRIVER_NAME,
-            kernel_pid,
-            socket_id,
-            InetSocketAddress::new("127.0.0.1", local_port),
-        )
-        .map_err(kernel_error)?;
-    vm.kernel
-        .socket_connect_inet_loopback(
-            EXECUTION_DRIVER_NAME,
-            kernel_pid,
-            socket_id,
-            InetSocketAddress::new("127.0.0.1", port),
-        )
-        .map_err(kernel_error)?;
-
-    let request_bytes =
-        serialize_kernel_http_fetch_request(port, path, options, headers, body_bytes);
-    vm.kernel
-        .socket_write(EXECUTION_DRIVER_NAME, kernel_pid, socket_id, &request_bytes)
-        .map_err(kernel_error)?;
-
-    let mut response_buffer = Vec::new();
-    let mut peer_closed = false;
-    let url = format!("http://127.0.0.1:{port}{path}");
-    let deadline = Instant::now() + http_loopback_request_timeout();
-    loop {
-        if let Some(response) =
-            parse_kernel_http_fetch_response(&response_buffer, peer_closed, &url)
-                .map_err(sidecar_core_execution_error)?
-        {
-            ensure_vm_fetch_response_within_limit(&response, "vm.fetch", max_fetch_response_bytes)
-                .map_err(sidecar_core_execution_error)?;
-            return Ok(response);
-        }
-        if Instant::now() >= deadline {
-            let preview = String::from_utf8_lossy(&response_buffer);
-            return Err(SidecarError::Execution(format!(
-                "vm.fetch timed out waiting for kernel TCP HTTP response ({} buffered bytes: {:?})",
-                response_buffer.len(),
-                preview.chars().take(200).collect::<String>()
-            )));
-        }
-
-        {
-            let dns = vm.dns.clone();
-            let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-            let capabilities = vm.capabilities.clone();
-            let process = vm
-                .active_processes
-                .get_mut(target_process_id)
-                .ok_or_else(|| {
-                    SidecarError::InvalidState(format!(
-                        "vm.fetch target process disappeared: {target_process_id}"
-                    ))
-                })?;
-            service_host_fetch_target_event(
-                bridge,
-                vm_id,
-                &dns,
-                socket_paths,
-                &mut vm.kernel,
-                &kernel_readiness,
-                process,
-                Duration::from_millis(5),
-                &capabilities,
-            )
-            .await?;
-        }
-
-        let poll = vm
-            .kernel
-            .poll_targets(
-                EXECUTION_DRIVER_NAME,
-                kernel_pid,
-                vec![PollTargetEntry::socket(
-                    socket_id,
-                    POLLIN | POLLHUP | POLLERR,
-                )],
-                5,
-            )
-            .map_err(kernel_error)?;
-        let revents = poll
-            .targets
-            .first()
-            .map(|entry| entry.revents)
-            .unwrap_or_else(PollEvents::empty);
-        if revents.intersects(POLLERR) {
-            return Err(SidecarError::Execution(String::from(
-                "vm.fetch kernel TCP socket reported POLLERR",
-            )));
-        }
-        if revents.intersects(POLLIN) {
-            loop {
-                match vm
-                    .kernel
-                    .socket_read(EXECUTION_DRIVER_NAME, kernel_pid, socket_id, 64 * 1024)
-                {
-                    Ok(Some(bytes)) if !bytes.is_empty() => {
-                        response_buffer.extend(bytes);
-                        ensure_vm_fetch_raw_response_buffer_within_limit(
-                            response_buffer.len(),
-                            "vm.fetch",
-                        )
-                        .map_err(sidecar_core_execution_error)?;
-                    }
-                    Ok(Some(_)) => break,
-                    Ok(None) => {
-                        peer_closed = true;
-                        break;
-                    }
-                    Err(error) if error.code() == "EAGAIN" => break,
-                    Err(error) => return Err(kernel_error(error)),
-                }
-            }
-        }
-        if revents.intersects(POLLHUP) {
-            peer_closed = true;
-        }
-    }
 }
 
 pub(in crate::execution) fn begin_loopback_http_request(

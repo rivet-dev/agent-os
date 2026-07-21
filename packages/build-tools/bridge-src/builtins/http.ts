@@ -4129,7 +4129,12 @@ async function dispatchLoopbackServerRequest(serverOrId, requestInput) {
   }
 }
 
-async function dispatchSocketBackedServerRequest(server, requestInput, streamSocket) {
+async function dispatchSocketBackedServerRequest(
+  server,
+  requestInput,
+  streamSocket,
+  connectionClosed,
+) {
   const request = typeof requestInput === "string" ? JSON.parse(requestInput) : requestInput;
   const incoming = new ServerIncomingMessage(request);
   const outgoing = new ServerResponseBridge();
@@ -4163,7 +4168,14 @@ async function dispatchSocketBackedServerRequest(server, requestInput, streamSoc
     // Ending here as soon as the listener returns races that continuation and
     // produces a synthetic empty 200 response. Leave the request open until
     // ServerResponse.end()/destroy() closes it, matching native Node.
-    await outgoing.waitForClose();
+    const connectionClosedFirst = await Promise.race([
+      outgoing.waitForClose().then(() => false),
+      connectionClosed.then(() => true),
+    ]);
+    if (connectionClosedFirst && !outgoing.writableFinished) {
+      incoming._abort();
+      outgoing.destroy();
+    }
     let aborted = false;
     const abortRequest = () => {
       if (aborted) {
@@ -4195,6 +4207,14 @@ function attachHttpServerSocket(server, socket) {
   let dispatchPending = false;
   let ended = false;
   let detached = false;
+  let resolveConnectionClosed;
+  const connectionClosed = new Promise((resolve) => {
+    resolveConnectionClosed = resolve;
+  });
+  const markConnectionClosed = () => {
+    resolveConnectionClosed?.();
+    resolveConnectionClosed = null;
+  };
   const cleanup = () => {
     if (detached) {
       return;
@@ -4238,16 +4258,19 @@ function attachHttpServerSocket(server, socket) {
   };
   const onEnd = () => {
     ended = true;
+    markConnectionClosed();
     if (buffer.length === 0) {
-      cleanup();
+      finishSocket();
       return;
     }
     scheduleDispatch();
   };
   const onClose = () => {
+    markConnectionClosed();
     cleanup();
   };
   const onError = () => {
+    markConnectionClosed();
     cleanup();
   };
   async function processRequests() {
@@ -4289,6 +4312,7 @@ function attachHttpServerSocket(server, socket) {
         server,
         parsed.request,
         socket,
+        connectionClosed,
       );
       if (detached || socket.destroyed) {
         return;

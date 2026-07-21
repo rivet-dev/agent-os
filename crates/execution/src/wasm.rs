@@ -187,6 +187,9 @@ pub enum StandaloneWasmBackend {
     #[default]
     V8,
     Wasmtime,
+    /// Explicit Wasmtime pthread/shared-memory profile. Ordinary Wasmtime
+    /// executions retain the single-thread feature surface.
+    WasmtimeThreads,
 }
 
 impl WasmPermissionTier {
@@ -218,7 +221,7 @@ pub struct WasmContext {
 /// kernel `ResourceLimits` (originating from `CreateVmConfig` on the BARE wire);
 /// `None` selects "unlimited / engine default". See the env-vs-wire rule in
 /// `crates/sidecar/CLAUDE.md`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WasmExecutionLimits {
     /// Active CPU-time budget in milliseconds. The V8 compatibility backend
     /// maps this to the trusted runner isolate's CPU watchdog.
@@ -265,9 +268,12 @@ pub struct WasmExecutionLimits {
     /// Maximum aggregate bytes retained by compatibility-adapter event queues.
     /// Sidecar VMs supply limits.process.pendingEventBytes.
     pub pending_event_bytes: Option<usize>,
+    /// Maximum native guest threads in an explicitly threaded Wasmtime group,
+    /// including the initial thread.
+    pub max_threads: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StartWasmExecutionRequest {
     pub vm_id: String,
     pub context_id: String,
@@ -1546,6 +1552,7 @@ impl ExecutionBackend for V8WasmExecution {
         signal: i32,
         delivery_token: u64,
         flags: u32,
+        thread_id: u32,
     ) -> Result<SignalCheckpointOutcome, HostServiceError> {
         let Some(wake) = self.wake_handle(identity) else {
             return Ok(if let Some(process_id) = self.native_process_id() {
@@ -1560,6 +1567,7 @@ impl ExecutionBackend for V8WasmExecution {
                 signal,
                 delivery_token,
                 flags,
+                thread_id,
             },
         )?;
         if let Err(error) = wake.publish_signal(signal, delivery_token) {
@@ -1588,6 +1596,9 @@ impl WasmExecution {
     pub fn standalone_backend(&self) -> StandaloneWasmBackend {
         match &self.backend {
             WasmExecutionBackend::V8(_) => StandaloneWasmBackend::V8,
+            WasmExecutionBackend::Wasmtime(execution) if execution.is_threaded() => {
+                StandaloneWasmBackend::WasmtimeThreads
+            }
             WasmExecutionBackend::Wasmtime(_) => StandaloneWasmBackend::Wasmtime,
         }
     }
@@ -1942,13 +1953,24 @@ impl ExecutionBackend for WasmExecution {
         signal: i32,
         delivery_token: u64,
         flags: u32,
+        thread_id: u32,
     ) -> Result<SignalCheckpointOutcome, HostServiceError> {
         match &self.backend {
-            WasmExecutionBackend::V8(execution) => {
-                execution.deliver_signal_checkpoint(identity, signal, delivery_token, flags)
-            }
+            WasmExecutionBackend::V8(execution) => execution.deliver_signal_checkpoint(
+                identity,
+                signal,
+                delivery_token,
+                flags,
+                thread_id,
+            ),
             WasmExecutionBackend::Wasmtime(execution) => {
-                execution.deliver_signal_checkpoint(identity, signal, delivery_token, flags)?;
+                execution.deliver_signal_checkpoint(
+                    identity,
+                    signal,
+                    delivery_token,
+                    flags,
+                    thread_id,
+                )?;
                 Ok(SignalCheckpointOutcome::Published)
             }
         }
@@ -1961,6 +1983,22 @@ impl ExecutionBackend for WasmExecution {
         match &self.backend {
             WasmExecutionBackend::V8(execution) => execution.take_signal_checkpoint(identity),
             WasmExecutionBackend::Wasmtime(execution) => execution.take_signal_checkpoint(identity),
+        }
+    }
+
+    fn take_signal_checkpoint_for_thread(
+        &self,
+        identity: ExecutionWakeIdentity,
+        thread_id: u32,
+    ) -> Result<Option<PublishedSignalCheckpoint>, HostServiceError> {
+        match &self.backend {
+            WasmExecutionBackend::V8(execution) if thread_id == 0 => {
+                execution.take_signal_checkpoint(identity)
+            }
+            WasmExecutionBackend::V8(_) => Ok(None),
+            WasmExecutionBackend::Wasmtime(execution) => {
+                execution.take_signal_checkpoint_for_thread(identity, thread_id)
+            }
         }
     }
 
@@ -2189,7 +2227,10 @@ impl WasmExecutionEngine {
                 self.create_execution_with_runtime(request, runtime, defer_execute)
             }
             StandaloneWasmBackend::Wasmtime => {
-                self.create_wasmtime_execution(request, runtime, defer_execute)
+                self.create_wasmtime_execution(request, runtime, defer_execute, false)
+            }
+            StandaloneWasmBackend::WasmtimeThreads => {
+                self.create_wasmtime_execution(request, runtime, defer_execute, true)
             }
         }
     }
@@ -2199,6 +2240,7 @@ impl WasmExecutionEngine {
         request: StartWasmExecutionRequest,
         runtime: RuntimeContext,
         defer_execute: bool,
+        threaded: bool,
     ) -> Result<WasmExecution, WasmExecutionError> {
         let context = self
             .contexts
@@ -2223,6 +2265,7 @@ impl WasmExecutionEngine {
             runtime,
             self.event_notify.clone(),
             defer_execute,
+            threaded,
         )?;
         Ok(WasmExecution {
             backend: WasmExecutionBackend::Wasmtime(execution),
@@ -2252,6 +2295,11 @@ impl WasmExecutionEngine {
 
         let resolved_module = resolve_wasm_module(&context, &request)?;
         verify_wasm_module_header(&resolved_module)?;
+        // Enforce bounded structural parsing before the complete feature
+        // validator. Oversized section counts and pathological varuints must
+        // fail at AgentOS's explicit parser limits rather than being obscured
+        // by a later engine/validator EOF diagnostic.
+        validate_module_limits(&resolved_module, &request)?;
         validate_module_profile(&resolved_module)?;
         let prewarm_timeout = resolve_wasm_prewarm_timeout(&request)?;
         let javascript_context_id = self
@@ -2266,7 +2314,6 @@ impl WasmExecutionEngine {
                 .map_err(WasmExecutionError::PrepareWarmPath)?;
         }
         let frozen_time_ms = frozen_time_ms();
-        validate_module_limits(&resolved_module, &request)?;
         // Fail closed when a stack byte budget is configured. The V8 runner does
         // not yet expose a per-module stack lever, so accepting the value would
         // claim to enforce a policy that the runtime actually ignores.
@@ -2331,6 +2378,7 @@ impl WasmExecutionEngine {
 
         let resolved_module = resolve_wasm_module(&context, &request)?;
         verify_wasm_module_header(&resolved_module)?;
+        validate_module_limits(&resolved_module, &request)?;
         validate_module_profile(&resolved_module)?;
         let prewarm_timeout = resolve_wasm_prewarm_timeout(&request)?;
         let javascript_context_id = self
@@ -2346,7 +2394,6 @@ impl WasmExecutionEngine {
                 .map_err(WasmExecutionError::PrepareWarmPath)?;
         }
         let frozen_time_ms = frozen_time_ms();
-        validate_module_limits(&resolved_module, &request)?;
         wasm_stack_limit_bytes(&request)?;
         let execution_timeout = resolve_wasm_wall_clock_limit(&request)?;
         let import_cache = self
@@ -2397,7 +2444,10 @@ impl WasmExecutionEngine {
                     .await
             }
             StandaloneWasmBackend::Wasmtime => {
-                self.create_wasmtime_execution(request, runtime, false)
+                self.create_wasmtime_execution(request, runtime, false, false)
+            }
+            StandaloneWasmBackend::WasmtimeThreads => {
+                self.create_wasmtime_execution(request, runtime, false, true)
             }
         }
     }
@@ -6183,6 +6233,7 @@ mod tests {
             signal: 15,
             delivery_token: 99,
             flags: 0x8000_0000,
+            thread_id: 0,
         };
 
         inbox
@@ -6883,6 +6934,7 @@ process.stdout.write(JSON.stringify({{ overflow, exactLine: exact.line, exactRet
             max_sync_rpc_response_line_bytes: None,
             pending_event_count: None,
             pending_event_bytes: None,
+            max_threads: None,
         };
         StartWasmExecutionRequest {
             limits,
@@ -6992,6 +7044,7 @@ process.stdout.write(JSON.stringify({{ overflow, exactLine: exact.line, exactRet
             max_sync_rpc_response_line_bytes: None,
             pending_event_count: None,
             pending_event_bytes: None,
+            max_threads: None,
         });
 
         assert_eq!(
@@ -7074,6 +7127,7 @@ process.stdout.write(JSON.stringify({{ overflow, exactLine: exact.line, exactRet
             max_sync_rpc_response_line_bytes: None,
             pending_event_count: None,
             pending_event_bytes: None,
+            max_threads: None,
         });
         let resolved_module = ResolvedWasmModule {
             specifier: String::from("./guest.wasm"),
@@ -7129,6 +7183,7 @@ process.stdout.write(JSON.stringify({{ overflow, exactLine: exact.line, exactRet
             max_sync_rpc_response_line_bytes: None,
             pending_event_count: None,
             pending_event_bytes: None,
+            max_threads: None,
         });
         request
             .env
@@ -7169,6 +7224,7 @@ process.stdout.write(JSON.stringify({{ overflow, exactLine: exact.line, exactRet
             max_sync_rpc_response_line_bytes: None,
             pending_event_count: None,
             pending_event_bytes: None,
+            max_threads: None,
         });
         request
             .env
@@ -8060,7 +8116,7 @@ process.stdout.write(JSON.stringify({{ overflow, exactLine: exact.line, exactRet
     }
 
     #[test]
-    fn managed_wait_uses_one_kernel_authoritative_direct_reply() {
+    fn managed_wait_uses_bounded_kernel_authoritative_direct_replies() {
         let runner = include_str!("../assets/runners/wasm-runner.mjs");
         let start = runner
             .find("function takeManagedWaitTransition(")
@@ -8071,6 +8127,8 @@ process.stdout.write(JSON.stringify({{ overflow, exactLine: exact.line, exactRet
             .expect("managed wait helper end");
         let helper = &runner[start..end];
         assert_eq!(helper.matches("callSyncRpc('process.waitpid'").count(), 1);
+        assert!(helper.contains("KERNEL_WAIT_SLICE_MS"));
+        assert!(helper.contains("transition == null && blocking"));
         assert!(!helper.contains("process.waitpid_transition"));
         assert!(!helper.contains("pumpSpawnedChildren"));
         assert!(!helper.contains("Atomics.wait"));

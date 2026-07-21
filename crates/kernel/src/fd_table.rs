@@ -419,8 +419,20 @@ pub struct FileDescription {
     backing: Mutex<FileBacking>,
     lock_target: Option<FileLockTarget>,
     cursor: AtomicU64,
+    directory_snapshot: Mutex<Option<Vec<DirectorySnapshotEntry>>>,
     flags: AtomicU32,
     ref_count: AtomicUsize,
+}
+
+/// One stable record in an open directory description's current getdents
+/// stream. This is cursor state, not a second filesystem namespace: rewinding
+/// to cookie zero replaces it from the authoritative VFS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectorySnapshotEntry {
+    pub name: String,
+    pub ino: u64,
+    pub is_directory: bool,
+    pub is_symbolic_link: bool,
 }
 
 impl FileDescription {
@@ -453,6 +465,7 @@ impl FileDescription {
             backing: Mutex::new(FileBacking::Path(path.into())),
             lock_target,
             cursor: AtomicU64::new(0),
+            directory_snapshot: Mutex::new(None),
             flags: AtomicU32::new(flags),
             ref_count: AtomicUsize::new(ref_count),
         }
@@ -756,6 +769,32 @@ impl FileDescription {
 
     pub fn set_cursor(&self, cursor: u64) {
         self.cursor.store(cursor, Ordering::SeqCst);
+    }
+
+    /// Replace the entries backing this open directory description's current
+    /// getdents stream. Linux directory offsets remain usable when entries
+    /// returned by an earlier page are removed, so a mutable vector index into
+    /// the live directory is not a valid cookie implementation.
+    pub fn reset_directory_snapshot(&self, entries: Vec<DirectorySnapshotEntry>) {
+        *lock_or_recover(&self.directory_snapshot) = Some(entries);
+    }
+
+    /// Return the requested child-entry slice from the current directory
+    /// stream, together with the total number of snapshotted children.
+    pub fn directory_snapshot_page(
+        &self,
+        first_child: usize,
+        max_children: usize,
+    ) -> Option<(usize, Vec<DirectorySnapshotEntry>)> {
+        let snapshot = lock_or_recover(&self.directory_snapshot);
+        let entries = snapshot.as_ref()?;
+        let page = entries
+            .iter()
+            .skip(first_child)
+            .take(max_children)
+            .cloned()
+            .collect();
+        Some((entries.len(), page))
     }
 
     pub fn flags(&self) -> u32 {

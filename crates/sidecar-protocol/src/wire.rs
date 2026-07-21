@@ -565,6 +565,8 @@ fn legacy_limits_config(
         active_cpu_time_limit_ms: legacy_u64(metadata, "limits.wasm.active_cpu_time_limit_ms"),
         wall_clock_limit_ms: legacy_u64(metadata, "limits.wasm.wall_clock_limit_ms"),
         deterministic_fuel: legacy_u64(metadata, "limits.wasm.deterministic_fuel"),
+        max_threads: legacy_u64(metadata, "limits.wasm.max_threads"),
+        max_concurrent_threads: legacy_u64(metadata, "limits.wasm.max_concurrent_threads"),
     };
     let execution = agentos_vm_config::ExecutionLimitsConfig {
         completed_ttl_ms: legacy_u64(metadata, "limits.execution.completed_ttl_ms"),
@@ -730,6 +732,8 @@ fn legacy_has_wasm_limits(config: &agentos_vm_config::WasmLimitsConfig) -> bool 
         || config.active_cpu_time_limit_ms.is_some()
         || config.wall_clock_limit_ms.is_some()
         || config.deterministic_fuel.is_some()
+        || config.max_threads.is_some()
+        || config.max_concurrent_threads.is_some()
 }
 
 fn legacy_has_process_limits(config: &agentos_vm_config::ProcessLimitsConfig) -> bool {

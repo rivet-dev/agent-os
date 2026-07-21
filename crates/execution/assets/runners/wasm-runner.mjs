@@ -47,6 +47,7 @@ const WASI_ERRNO_NAMETOOLONG = 37;
 const WASI_ERRNO_NOBUFS = 42;
 const WASI_ERRNO_NOENT = 44;
 const WASI_ERRNO_NOEXEC = 45;
+const WASI_ERRNO_NOMEM = 48;
 const WASI_ERRNO_NOSPC = 51;
 const WASI_ERRNO_NOSYS = 52;
 const WASI_ERRNO_HOSTUNREACH = 23;
@@ -980,6 +981,21 @@ function parseLinuxShebang(bytes) {
   };
 }
 
+function compileResolvedExecImage(bytes, subject, argv) {
+  try {
+    const binary = enforceMemoryLimit(bytes, maxMemoryPages);
+    return { module: new WebAssembly.Module(binary), argv };
+  } catch (error) {
+    if (
+      error instanceof WebAssembly.CompileError ||
+      error?.message === 'module is not a valid WebAssembly binary'
+    ) {
+      throw execError('ENOEXEC', `${subject} is not a supported WebAssembly executable image`);
+    }
+    throw error;
+  }
+}
+
 function compileExecImage(bytes, subject, argv, interpreterDepth = 0) {
   const shebang = parseLinuxShebang(bytes);
   if (shebang) {
@@ -999,21 +1015,57 @@ function compileExecImage(bytes, subject, argv, interpreterDepth = 0) {
     );
   }
 
-  try {
-    const binary = enforceMemoryLimit(bytes, maxMemoryPages);
-    return { module: new WebAssembly.Module(binary), argv };
-  } catch (error) {
-    if (
-      error instanceof WebAssembly.CompileError ||
-      error?.message === 'module is not a valid WebAssembly binary'
-    ) {
-      throw execError('ENOEXEC', `${subject} is not a supported WebAssembly executable image`);
-    }
-    throw error;
-  }
+  return compileResolvedExecImage(bytes, subject, argv);
 }
 
 function loadExecImageFromPath(command, argv, interpreterDepth = 0) {
+  if (SIDECAR_MANAGED_PROCESS) {
+    const subject = String(command);
+    const image = callSyncRpc('process.exec_image_open', [subject, argv]);
+    const handle = String(image?.handle ?? '');
+    let bytes;
+    try {
+      const size = Number(image?.size);
+      if (!Number.isSafeInteger(size) || size < 0) {
+        throw execError('EFBIG', `${subject} has an invalid executable image size`);
+      }
+      if (size > maxModuleFileBytes) {
+        throw execError(
+          'EFBIG',
+          `${subject} is ${size} bytes, exceeding limits.wasm.maxModuleFileBytes (${maxModuleFileBytes}); raise limits.wasm.maxModuleFileBytes if needed`,
+        );
+      }
+      bytes = Buffer.alloc(size);
+      let offset = 0;
+      while (offset < size) {
+        const requested = boundedWasmSyncRpcReadLength(size - offset);
+        const chunk = Buffer.from(callSyncRpc('process.exec_image_read', [
+          handle,
+          String(offset),
+          requested,
+        ]) ?? []);
+        if (chunk.byteLength === 0 || chunk.byteLength > requested) {
+          throw execError('EIO', `${subject} changed while its executable image was read`);
+        }
+        chunk.copy(bytes, offset);
+        offset += chunk.byteLength;
+      }
+    } finally {
+      if (handle.length > 0) {
+        callSyncRpc('process.exec_image_close', [handle]);
+      }
+    }
+    if (!Array.isArray(image?.argv) || image.argv.some((value) => typeof value !== 'string')) {
+      throw execError('EIO', `${subject} resolution did not return a valid argv`);
+    }
+    traceHostProcess('exec-image-bytes', {
+      command,
+      byteLength: bytes.byteLength,
+      magic: Array.from(bytes.subarray(0, Math.min(16, bytes.byteLength))),
+    });
+    return compileResolvedExecImage(bytes, subject, image.argv);
+  }
+
   let bytes = readExecutablePathBytes(command);
   traceHostProcess('exec-image-bytes', {
     command,
@@ -1053,14 +1105,12 @@ function loadExecImageFromFd(fd, argv, closeFds) {
   if (SIDECAR_MANAGED_PROCESS) {
     const image = callSyncRpc('process.exec_image_open_fd', [
       canonicalKernelFdForSpawnAction(descriptor),
+      argv,
+      kernelCloexecFdsForCommit(closeFds),
     ]);
     const imageHandle = String(image?.handle ?? '');
     let bytes;
     try {
-      const projectedExecutable = isProjectedCommandGuestPath(image?.canonicalPath ?? '');
-      if (!projectedExecutable && (Number(image?.mode) & 0o111) === 0) {
-        throw execError('EACCES', `${scriptRef} does not have an executable mode bit`);
-      }
       const size = Number(image?.size);
       if (!Number.isSafeInteger(size) || size < 0) {
         throw execError('EFBIG', `${scriptRef} has an invalid executable image size`);
@@ -1091,11 +1141,11 @@ function loadExecImageFromFd(fd, argv, closeFds) {
         callSyncRpc('process.exec_image_close', [imageHandle]);
       }
     }
-    if (parseLinuxShebang(bytes) && closeFds.includes(descriptor)) {
-      throw execError('ENOENT', `${scriptRef} will be closed before its interpreter opens it`);
+    if (!Array.isArray(image?.argv) || image.argv.some((value) => typeof value !== 'string')) {
+      throw execError('EIO', `${scriptRef} resolution did not return a valid argv`);
     }
     return {
-      ...compileExecImage(bytes, scriptRef, argv),
+      ...compileExecImage(bytes, scriptRef, image.argv),
       scriptRef,
     };
   }
@@ -2902,6 +2952,8 @@ function mapSyntheticFsError(error) {
       return WASI_ERRNO_NOTEMPTY;
     case 'ENOEXEC':
       return WASI_ERRNO_NOEXEC;
+    case 'ENOMEM':
+      return WASI_ERRNO_NOMEM;
     case 'ENOSPC':
       return WASI_ERRNO_NOSPC;
     case 'ENOSYS':
@@ -2985,6 +3037,8 @@ function mapHostProcessError(error) {
       return WASI_ERRNO_NOENT;
     case 'ENOEXEC':
       return WASI_ERRNO_NOEXEC;
+    case 'ENOMEM':
+      return WASI_ERRNO_NOMEM;
     case 'ENOTDIR':
       return WASI_ERRNO_NOTDIR;
     case 'ENOTEMPTY':
@@ -4411,13 +4465,21 @@ function finalizeChildExit(record, exitCode, signal, coreDumped = false) {
   return status;
 }
 
-function takeManagedWaitTransition(selector, options, _blocking) {
+function takeManagedWaitTransition(selector, options, blocking) {
   const numericSelector = Number(selector) | 0;
   const normalizedOptions = Number(options) >>> 0;
   for (;;) {
     try {
-      const transition = callSyncRpc('process.waitpid', [numericSelector, normalizedOptions]);
+      // A POSIX blocking wait can legitimately outlive the bridge operation
+      // deadline. Ask the kernel for one bounded event-driven slice at a time
+      // and re-probe without polling or holding a sidecar worker.
+      const transition = callSyncRpc('process.waitpid', [
+        numericSelector,
+        normalizedOptions,
+        KERNEL_WAIT_SLICE_MS,
+      ]);
       dispatchPendingWasmSignals();
+      if (transition == null && blocking) continue;
       return transition;
     } catch (error) {
       const mustInterrupt = dispatchPendingWasmSignals(true);
@@ -7901,14 +7963,15 @@ const hostNetImport = {
     try {
       const servername = readGuestString(hostnamePtr, hostnameLen);
       if (socket.managed === true) {
-        if ((Number(flags) & 1) === 1 || guestEnv.NODE_TLS_REJECT_UNAUTHORIZED === '0') {
-          return WASI_ERRNO_NOTSUP;
-        }
+        const rejectUnauthorized = !(
+          (Number(flags) & 1) === 1 || guestEnv.NODE_TLS_REJECT_UNAUTHORIZED === '0'
+        );
         callSyncRpc('process.hostnet_tls_connect', [
           managedHostNetTargetFd(socket),
           servername,
           [],
           unixConnectTimeoutMs,
+          rejectUnauthorized,
         ]);
         return WASI_ERRNO_SUCCESS;
       }
@@ -11405,8 +11468,15 @@ const hostFsImport = {
         Number(followSymlinks) !== 0,
       ]);
       return Number(stat?.mode) >>> 0;
-    } catch {
-      traceHostProcess('host-fs-path-mode-fault', {});
+    } catch (error) {
+      traceHostProcess('host-fs-path-mode-fault', {
+        fd: Number(fd) >>> 0,
+        path: (() => {
+          try { return readGuestString(pathPtr, pathLen); } catch { return null; }
+        })(),
+        code: error?.code,
+        message: error?.message,
+      });
       return 0;
     }
   },
@@ -11776,13 +11846,23 @@ if (delegatePathOpen) {
         }
         const openedFd = registerKernelDelegateFd(kernelFd);
         const writeResult = writeGuestUint32(openedFdPtr, openedFd);
+        traceHostProcess('path-open-managed', {
+          inputFd: Number(fd) >>> 0,
+          kernelDirFd: Number(passthroughDirHandle.targetFd) >>> 0,
+          path: managedOpenPath,
+          kernelFd,
+          openedFd,
+          writeResult,
+        });
         if (writeResult !== WASI_ERRNO_SUCCESS) {
           wasiImport.fd_close(openedFd);
         }
         return writeResult;
       } catch (error) {
-        traceHostProcess('path-open-error', {
+        traceHostProcess('path-open-managed-error', {
+          inputFd: Number(fd) >>> 0,
           guestPath,
+          path: managedOpenPath,
           oflags: Number(oflags) >>> 0,
           rightsBase: String(rightsBase),
           fdflags: Number(fdflags) >>> 0,
@@ -11905,6 +11985,16 @@ function delegatePathDirFd(fd) {
 }
 
 function kernelPathOperand(fd, pathPtr, pathLen) {
+  const numericFd = Number(fd) >>> 0;
+  if (numericFd === NODE_CWD_FD) {
+    return {
+      // AgentOS extension imports use this sentinel for an ordinary pathname
+      // resolved from the process cwd. WASI's private tagged preopens still go
+      // through lookupFdHandle so they retain their capability-root identity.
+      dirFd: numericFd,
+      path: readGuestString(pathPtr, pathLen),
+    };
+  }
   const handle = lookupFdHandle(fd);
   if (handle?.kind === 'kernel-fd') {
     return {
@@ -12285,6 +12375,12 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
       const written = writeBytesToGuestIovs(iovs, iovsLen, bytes, iovRequest);
       return writeGuestUint32(nreadPtr, written);
     } catch (error) {
+      traceHostProcess('fd-read-managed-error', {
+        guestFd: numericFd,
+        kernelFd: Number(handle.targetFd) >>> 0,
+        code: error?.code,
+        message: error?.message,
+      });
       return mapHostProcessError(error);
     }
   }
@@ -12450,9 +12546,11 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
   }
 
   if (rejectClosedPassthroughFd(numericFd)) {
+    traceHostProcess('fd-read-closed', { guestFd: numericFd, handleKind: handle?.kind ?? null });
     return WASI_ERRNO_BADF;
   }
 
+  traceHostProcess('fd-read-delegate', { guestFd: numericFd, handleKind: handle?.kind ?? null });
   return delegateManagedFdRead
     ? __agentOSWasiMeasurePhase('fd_read', 'delegate_call', () =>
         delegateManagedFdRead(numericFd, iovs, iovsLen, nreadPtr)

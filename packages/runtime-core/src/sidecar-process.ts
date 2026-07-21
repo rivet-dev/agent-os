@@ -72,7 +72,7 @@ type GuestRuntimeKind = Extract<
 	"java_script" | "python" | "web_assembly"
 >;
 type WasmPermissionTier = LiveWasmPermissionTier;
-type StandaloneWasmBackend = "v8" | "wasmtime";
+type StandaloneWasmBackend = "v8" | "wasmtime" | "wasmtime-threads";
 type RootFilesystemEntryEncoding = LiveRootFilesystemEntryEncoding;
 
 type RootFilesystemDescriptor = {

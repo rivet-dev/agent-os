@@ -17,6 +17,15 @@ fn main() {
         .with_writer(std::io::stderr)
         .with_max_level(level)
         .init();
+    if std::env::args().nth(1).as_deref()
+        == Some(agentos_execution::WASMTIME_THREAD_WORKER_ARGUMENT)
+    {
+        if let Err(error) = agentos_execution::run_wasmtime_thread_worker() {
+            tracing::error!(code = %error.code, message = %error.message, "Wasmtime thread worker failed");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Err(error) = fcntl(CONTROL_FD, FcntlArg::F_GETFD) {
         tracing::error!(
             ?error,

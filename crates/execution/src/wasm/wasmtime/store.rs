@@ -5,6 +5,8 @@ use super::diagnostics::ExecutionDiagnostics;
 use super::engine::{WasmtimeEngineHandle, WasmtimeEngineProfile};
 use super::lifecycle::QueuedWasmtimeEvent;
 use super::limits;
+use super::threads::ThreadGroup;
+use super::worker::WorkerIpcClient;
 use crate::backend::{
     direct_host_reply_channel, HostCallIdentity, HostCallReply, HostServiceError,
 };
@@ -31,7 +33,9 @@ pub struct PendingExecReplacement {
 /// every import issued by a Store. It owns no sidecar or kernel state.
 #[derive(Clone)]
 pub struct WasmtimeHostClient {
-    host: ProcessHostCapabilitySet,
+    process: HostProcessContext,
+    host: Option<ProcessHostCapabilitySet>,
+    worker: Option<WorkerIpcClient>,
     next_call_id: Arc<AtomicU64>,
     max_host_reply_bytes: usize,
     cancelled: Arc<AtomicBool>,
@@ -56,7 +60,9 @@ impl WasmtimeHostClient {
         event_notify: Option<Arc<Notify>>,
     ) -> Self {
         Self {
-            host,
+            process: host.process(),
+            host: Some(host),
+            worker: None,
             next_call_id: Arc::new(AtomicU64::new(1)),
             max_host_reply_bytes,
             cancelled,
@@ -69,13 +75,38 @@ impl WasmtimeHostClient {
         }
     }
 
+    pub(super) fn new_worker(
+        worker: WorkerIpcClient,
+        max_host_reply_bytes: usize,
+        cancelled: Arc<AtomicBool>,
+        cancel_notify: Arc<Notify>,
+        signal_pending: Arc<AtomicBool>,
+        resources: Arc<ResourceLedger>,
+        events: Sender<QueuedWasmtimeEvent>,
+    ) -> Self {
+        Self {
+            process: worker.process(),
+            host: None,
+            worker: Some(worker),
+            next_call_id: Arc::new(AtomicU64::new(1)),
+            max_host_reply_bytes,
+            cancelled,
+            cancel_notify,
+            signal_pending,
+            resources,
+            events,
+            event_notify: None,
+            diagnostics: None,
+        }
+    }
+
     pub fn with_diagnostics(mut self, diagnostics: Arc<ExecutionDiagnostics>) -> Self {
         self.diagnostics = Some(diagnostics);
         self
     }
 
     pub fn process(&self) -> HostProcessContext {
-        self.host.process()
+        self.process
     }
 
     pub fn canceled(&self) -> bool {
@@ -83,7 +114,10 @@ impl WasmtimeHostClient {
     }
 
     pub fn signal_pending(&self) -> bool {
-        self.signal_pending.load(Ordering::Acquire)
+        self.worker
+            .as_ref()
+            .map(WorkerIpcClient::signal_pending)
+            .unwrap_or_else(|| self.signal_pending.load(Ordering::Acquire))
     }
 
     pub async fn submit(
@@ -100,6 +134,9 @@ impl WasmtimeHostClient {
                 "Wasmtime execution was canceled before host-call admission",
             ));
         }
+        if let Some(worker) = self.worker.as_ref() {
+            return worker.submit(operation).await;
+        }
         let call_id = self
             .next_call_id
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -111,15 +148,18 @@ impl WasmtimeHostClient {
                     "Wasmtime host-call identity space is exhausted",
                 )
             })?;
-        let process = self.host.process();
+        let process = self.process;
         let identity = HostCallIdentity {
             generation: process.generation,
             pid: process.pid,
             call_id,
         };
-        let admission = self.host.admit_request(retained_request_bytes)?;
+        let host = self.host.as_ref().ok_or_else(|| {
+            HostServiceError::new("EIO", "direct Wasmtime host capability is unavailable")
+        })?;
+        let admission = host.admit_request(retained_request_bytes)?;
         let (reply, receiver) = direct_host_reply_channel(identity, self.max_host_reply_bytes)?;
-        self.host.submit(operation, reply, admission)?;
+        host.submit(operation, reply, admission)?;
         tokio::select! {
             reply = receiver => reply,
             () = self.cancel_notify.notified() => Err(HostServiceError::new(
@@ -157,6 +197,11 @@ impl WasmtimeHostClient {
                 "Wasmtime execution was canceled before adapter-call admission",
             ));
         }
+        if let Some(worker) = self.worker.as_ref() {
+            return worker
+                .submit_adapter_call(method, args, raw_bytes_args)
+                .await;
+        }
         let call_id = self
             .next_call_id
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -168,7 +213,7 @@ impl WasmtimeHostClient {
                     "Wasmtime host-call identity space is exhausted",
                 )
             })?;
-        let process = self.host.process();
+        let process = self.process;
         let identity = HostCallIdentity {
             generation: process.generation,
             pid: process.pid,
@@ -234,6 +279,9 @@ impl WasmtimeHostClient {
     }
 
     pub async fn publish_stderr(&self, bytes: Vec<u8>) -> Result<(), HostServiceError> {
+        if let Some(worker) = self.worker.as_ref() {
+            return worker.publish_stderr(bytes).await;
+        }
         let retained_bytes = bytes.len();
         let event = QueuedWasmtimeEvent::new(
             &self.resources,
@@ -257,6 +305,17 @@ impl WasmtimeHostClient {
         }
         Ok(())
     }
+
+    pub(super) fn report_thread_group_failure(&self, error: HostServiceError) {
+        if let Some(worker) = self.worker.as_ref() {
+            if let Err(report_error) = worker.report_group_failure(error) {
+                eprintln!(
+                    "{}: failed to report pthread group failure to parent: {}",
+                    report_error.code, report_error.message
+                );
+            }
+        }
+    }
 }
 
 pub struct WasmtimeStoreState {
@@ -266,6 +325,8 @@ pub struct WasmtimeStoreState {
     pub env: Vec<Vec<u8>>,
     pub virtual_pid: u32,
     pub virtual_ppid: u32,
+    pub thread_id: i32,
+    pub thread_group: Option<Arc<ThreadGroup>>,
     pub limits: StoreLimits,
     pub exit_code: Option<i32>,
     pub exec_replaced: bool,
@@ -281,8 +342,8 @@ pub struct WasmtimeStoreState {
     active_cpu_started_ns: u64,
     paused: Arc<AtomicBool>,
     pause_notify: Arc<Notify>,
-    _async_stack_reservation: Reservation,
-    _guest_memory_reservation: Reservation,
+    _async_stack_reservation: Option<Reservation>,
+    _guest_memory_reservation: Option<Reservation>,
 }
 
 impl std::fmt::Debug for WasmtimeStoreState {
@@ -308,36 +369,55 @@ impl WasmtimeStoreState {
         active_cpu_started_ns: u64,
         paused: Arc<AtomicBool>,
         pause_notify: Arc<Notify>,
+        group_memory_pre_reserved: bool,
+        thread_group: Option<Arc<ThreadGroup>>,
+        thread_id: i32,
     ) -> Result<Self, HostServiceError> {
         let async_stack_bytes = profile.async_stack_bytes()?;
-        let async_stack_reservation = runtime
-            .resources()
-            .reserve(ResourceClass::WasmMemoryBytes, async_stack_bytes)
-            .map_err(|error| {
-                HostServiceError::new("ERR_AGENTOS_WASMTIME_ASYNC_STACK_LIMIT", error.to_string())
-                    .with_details(serde_json::json!({
-                        "limitName": "limits.resources.maxWasmStackBytes",
-                        "observed": async_stack_bytes,
-                    }))
-            })?;
+        let async_stack_reservation = if group_memory_pre_reserved {
+            None
+        } else {
+            Some(
+                runtime
+                    .resources()
+                    .reserve(ResourceClass::WasmMemoryBytes, async_stack_bytes)
+                    .map_err(|error| {
+                        HostServiceError::new(
+                            "ERR_AGENTOS_WASMTIME_ASYNC_STACK_LIMIT",
+                            error.to_string(),
+                        )
+                        .with_details(serde_json::json!({
+                            "limitName": "limits.resources.maxWasmStackBytes",
+                            "observed": async_stack_bytes,
+                        }))
+                    })?,
+            )
+        };
         let linear_memory_bytes = limits::max_memory_bytes(&request.limits)?;
         let aggregate_memory_bytes = limits::aggregate_store_memory_bytes(&request.limits)?;
-        let guest_memory_reservation = runtime
-            .resources()
-            .reserve(ResourceClass::WasmMemoryBytes, aggregate_memory_bytes)
-            .map_err(|error| {
-                HostServiceError::new(
-                    "ERR_AGENTOS_WASMTIME_AGGREGATE_MEMORY_LIMIT",
-                    error.to_string(),
-                )
-                .with_details(serde_json::json!({
-                    "limitName": "limits.resources.maxWasmMemoryBytes",
-                    "observed": aggregate_memory_bytes,
-                    "linearMemoryBytes": linear_memory_bytes,
-                    "tableAccountingBytes": limits::DEFAULT_TABLE_ACCOUNTING_BYTES,
-                    "resource": "wasmtimeGuestMemory",
-                }))
-            })?;
+        let guest_memory_reservation = if group_memory_pre_reserved {
+            None
+        } else {
+            Some(
+                runtime
+                    .resources()
+                    .reserve(ResourceClass::WasmMemoryBytes, aggregate_memory_bytes)
+                    .map_err(|error| {
+                        HostServiceError::new(
+                            "ERR_AGENTOS_WASMTIME_AGGREGATE_MEMORY_LIMIT",
+                            error.to_string(),
+                        )
+                        .with_details(serde_json::json!({
+                            "limitName": "limits.resources.maxWasmMemoryBytes",
+                            "observed": aggregate_memory_bytes,
+                            "linearMemoryBytes": linear_memory_bytes,
+                            "exceptionGcHeapBytes": linear_memory_bytes,
+                            "tableAccountingBytes": limits::DEFAULT_TABLE_ACCOUNTING_BYTES,
+                            "resource": "wasmtimeGuestMemory",
+                        }))
+                    })?,
+            )
+        };
         let argv = nul_terminated_strings(request.argv.iter().map(String::as_str), "argv")?;
         let guest_env = guest_visible_wasm_env(&request.env);
         let env = nul_terminated_strings(
@@ -363,6 +443,8 @@ impl WasmtimeStoreState {
             env,
             virtual_pid,
             virtual_ppid,
+            thread_id,
+            thread_group,
             limits: limits::store_limits(&request.limits)?,
             exit_code: None,
             exec_replaced: false,
@@ -460,6 +542,9 @@ pub fn create_store(
     active_cpu_started_ns: u64,
     paused: Arc<AtomicBool>,
     pause_notify: Arc<Notify>,
+    group_memory_pre_reserved: bool,
+    thread_group: Option<Arc<ThreadGroup>>,
+    thread_id: i32,
 ) -> Result<Store<WasmtimeStoreState>, HostServiceError> {
     let deterministic_fuel = request.limits.deterministic_fuel;
     let mut store = Store::new(
@@ -473,6 +558,9 @@ pub fn create_store(
             active_cpu_started_ns,
             paused,
             pause_notify,
+            group_memory_pre_reserved,
+            thread_group,
+            thread_id,
         )?,
     );
     store.limiter(|state| &mut state.limits);
@@ -645,6 +733,9 @@ mod tests {
             thread_cpu_time_ns(),
             Arc::new(AtomicBool::new(false)),
             Arc::new(Notify::new()),
+            false,
+            None,
+            0,
         )
         .expect("store state");
         assert_eq!(

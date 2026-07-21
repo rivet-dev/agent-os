@@ -40,6 +40,8 @@ pub struct AgentOsConfig {
     pub loopback_exempt_ports: Vec<u16>,
     /// Allowed Node.js builtins. Default: the hardened native-bridge set.
     pub allowed_node_builtins: Option<Vec<String>>,
+    /// VM-wide default for standalone WASM commands. JavaScript remains on V8.
+    pub wasm_backend: Option<crate::process::StandaloneWasmBackend>,
     /// Root filesystem configuration. Default: overlay + bundled base snapshot.
     pub root_filesystem: RootFilesystemConfig,
     /// Additional mounts.
@@ -98,6 +100,11 @@ impl AgentOsConfigBuilder {
 
     pub fn allowed_node_builtins(mut self, builtins: Vec<String>) -> Self {
         self.config.allowed_node_builtins = Some(builtins);
+        self
+    }
+
+    pub fn wasm_backend(mut self, backend: crate::process::StandaloneWasmBackend) -> Self {
+        self.config.wasm_backend = Some(backend);
         self
     }
 
@@ -726,6 +733,18 @@ pub struct WasmLimits {
         skip_serializing_if = "Option::is_none"
     )]
     pub deterministic_fuel: Option<u64>,
+    #[serde(
+        default,
+        rename = "maxThreads",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_threads: Option<u64>,
+    #[serde(
+        default,
+        rename = "maxConcurrentThreads",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_concurrent_threads: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

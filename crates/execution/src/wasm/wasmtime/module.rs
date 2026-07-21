@@ -1,6 +1,6 @@
 //! Shared-profile module compilation.
 
-use super::super::profile::validate_locked_profile;
+use super::super::profile::{validate_locked_profile, validate_locked_threaded_profile};
 use super::engine::WasmtimeEngineHandle;
 use crate::backend::HostServiceError;
 use std::sync::Arc;
@@ -19,7 +19,14 @@ pub fn compile_module(
     bytes: &[u8],
 ) -> Result<CompiledModule, HostServiceError> {
     let validation_started = Instant::now();
-    validate_locked_profile(bytes)?;
+    match engine.profile().feature_profile {
+        super::engine::WasmtimeFeatureProfile::AgentOsOwnedWasiV1 => {
+            validate_locked_profile(bytes)?;
+        }
+        super::engine::WasmtimeFeatureProfile::AgentOsOwnedWasiV1Threads => {
+            validate_locked_threaded_profile(bytes)?;
+        }
+    }
     let profile_validation = validation_started.elapsed();
     let mut modules = engine.modules().lock().map_err(|_| {
         HostServiceError::new(

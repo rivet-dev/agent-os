@@ -341,8 +341,9 @@ fn phase_two_keeps_wasmtime_scoped_to_the_standalone_wasm_adapter() {
             .matches("validate_module_profile(&resolved_module)?;")
             .count()
             >= 2
-            && wasmtime_module.contains("profile::validate_locked_profile"),
-        "both V8-WASM start paths and Wasmtime compilation must use the shared wasmparser profile"
+            && wasmtime_module.contains("validate_locked_profile(bytes)?;")
+            && wasmtime_module.contains("validate_locked_threaded_profile(bytes)?;"),
+        "both V8-WASM start paths and both Wasmtime profiles must use the shared wasmparser validators"
     );
 
     let publish = std::fs::read_to_string(root.join(".github/workflows/publish.yaml"))
@@ -366,8 +367,10 @@ fn phase_two_keeps_wasmtime_scoped_to_the_standalone_wasm_adapter() {
             && publish.contains("runner: macos-15-intel")
             && publish.contains("runner: macos-15")
             && publish.contains("cargo test -p agentos-execution wasmtime --lib")
-            && publish.contains("needs.wasmtime-darwin-smoke.result == 'success'"),
-        "all four release platforms must compile and natively smoke the reviewed Wasmtime embedding"
+            && publish.contains("smoke-sidecar-artifacts:")
+            && publish.contains("scripts/ci/smoke-packed-wasm-backends.mjs")
+            && publish.contains("needs.smoke-sidecar-artifacts.result == 'success'"),
+        "all four release platforms must compile Wasmtime and natively smoke the actual packaged artifact"
     );
 
     let mut manifests = Vec::new();
@@ -413,21 +416,150 @@ fn phase_two_keeps_wasmtime_scoped_to_the_standalone_wasm_adapter() {
 }
 
 #[test]
+fn owned_toolchain_pins_binaryen_for_finalized_wasm_exceptions() {
+    let root = repo_root();
+    let toolchain =
+        std::fs::read_to_string(root.join("toolchain/Makefile")).expect("read toolchain Makefile");
+    let c_toolchain = std::fs::read_to_string(root.join("toolchain/c/Makefile"))
+        .expect("read C toolchain Makefile");
+    let installer = std::fs::read_to_string(root.join("toolchain/scripts/ensure-wasm-opt.sh"))
+        .expect("read pinned Binaryen installer");
+    let duckdb = std::fs::read_to_string(root.join("toolchain/c/scripts/build-duckdb.sh"))
+        .expect("read DuckDB build script");
+
+    assert!(
+        toolchain.contains("BINARYEN_VERSION := 128")
+            && toolchain.contains("./scripts/ensure-wasm-opt.sh \"$(WASM_OPT)\"")
+            && !toolchain.contains("\tcargo install wasm-opt")
+            && c_toolchain.contains("BINARYEN_VERSION := 128")
+            && c_toolchain.contains("../scripts/ensure-wasm-opt.sh \"$(WASM_OPT)\"")
+            && c_toolchain.contains("include/sys/ioctl.h wasm-opt-check"),
+        "all canonical command builds must use the pinned Binaryen tool"
+    );
+    for required in [
+        "BINARYEN_VERSION=128",
+        "--translate-to-exnref",
+        "binaryen-version_${BINARYEN_VERSION}-${PLATFORM}.tar.gz",
+        "4ce79586d1c4762502eebe9a1db071fa5e446ef8897f2f766eb1cce5ec6dee9e",
+        "bafe0468976d923f09052f8ec6a6a0a9d942ee7f02ac113c85a80afea7ba3679",
+        "0b4bbd58c46b73a3de1fd485579a56cd413dd395414306d9f33df407fde58b9b",
+        "0ef730ecedf2dac894812185fc78f5940ab980cdde79427e49fa87331d24422f",
+    ] {
+        assert!(
+            installer.contains(required),
+            "pinned Binaryen installer omitted {required}"
+        );
+    }
+    assert!(
+        duckdb.contains("Binaryen 128 is required") && duckdb.contains("--translate-to-exnref"),
+        "DuckDB must reject a toolchain that cannot finalize exception references"
+    );
+}
+
+#[test]
+fn maintained_wasm_surfaces_are_mechanically_gated_on_both_backends() {
+    let root = repo_root();
+    let ci =
+        std::fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read CI workflow");
+    for required in [
+        "backend: [v8, wasmtime]",
+        "AGENTOS_TEST_WASM_BACKEND: ${{ matrix.backend }}",
+        "cargo test --release -p agentos-native-sidecar --tests -- --test-threads=1",
+        "toolchain/conformance/c-parity.test.ts",
+        "wasm-c-parity-fixtures",
+        "packages/runtime-core exec vitest run",
+        "packages/core exec vitest run",
+        "cargo test -p agentos-client -- --test-threads=1",
+        "turbo test --concurrency=1 --filter='@agentos-software/*'",
+        "@rivet-dev/agentos test:e2e:run",
+        "pthread-conformance-wasm pthread-benchmark-wasm",
+        "owned_pthread_libc_mutex_cond_tls_join_detach_and_cancel_conform",
+        "test:wasm-mixed-smoke",
+        "AGENT_OS_CLIENT_ALLOW_E2E_SKIPS: '0'",
+    ] {
+        assert!(
+            ci.contains(required),
+            "CI must mechanically require the dual-backend gate: {required}"
+        );
+    }
+
+    let turbo = std::fs::read_to_string(root.join("turbo.json")).expect("read Turbo configuration");
+    assert!(
+        turbo.contains("\"AGENTOS_TEST_WASM_BACKEND\""),
+        "Turbo must pass and hash the backend selector for registry software tests"
+    );
+
+    let publish = std::fs::read_to_string(root.join(".github/workflows/publish.yaml"))
+        .expect("read publish workflow");
+    let justfile = std::fs::read_to_string(root.join("justfile")).expect("read justfile");
+    assert!(
+        publish.contains("make -C toolchain cmd/duckdb cmd/vim")
+            && publish.contains("smoke-packed-wasm-backends.mjs")
+            && justfile.contains("make -C toolchain cmd/duckdb cmd/vim"),
+        "publish must build the complete parity-tested command corpus before packaged backend smokes"
+    );
+
+    let xfstests = std::fs::read_to_string(root.join("tests/xfstests/Makefile"))
+        .expect("read xfstests Makefile");
+    assert!(
+        xfstests.contains("XFSTESTS_WASM_BACKENDS ?= v8 wasmtime")
+            && xfstests.contains("AGENTOS_TEST_WASM_BACKEND=\"$$wasm_backend\""),
+        "xfstests must execute its WASM helper corpus through V8 and Wasmtime"
+    );
+
+    let nightly = std::fs::read_to_string(root.join(".github/workflows/ci-nightly.yml"))
+        .expect("read nightly CI workflow");
+    for required in [
+        "xfstests_wasi_dirstress_process_matrix",
+        "if: matrix.storage_backend == 'chunked_local'",
+        "AGENTOS_TEST_WASM_BACKEND: ${{ matrix.wasm_backend }}",
+    ] {
+        assert!(
+            nightly.contains(required),
+            "nightly CI must retain the dual-engine directory stress gate: {required}"
+        );
+    }
+
+    let packaged = std::fs::read_to_string(root.join("scripts/ci/smoke-packed-wasm-backends.mjs"))
+        .expect("read packaged WASM backend smoke");
+    for required in [
+        "[\"v8\", \"wasmtime\", \"wasmtime-threads\"]",
+        "pthread-conformance.wasm",
+        "pack(runtimeSidecarDir)",
+        "--platform-package",
+    ] {
+        assert!(
+            packaged.contains(required),
+            "packaged artifacts must exercise the public backend surface: {required}"
+        );
+    }
+}
+
+#[test]
 fn kernel_process_table_is_the_only_durable_signal_state_owner() {
     let root = repo_root();
     let process_table = std::fs::read_to_string(root.join("crates/kernel/src/process_table.rs"))
         .expect("read kernel process table");
     let record = rust_braced_item(&process_table, "struct ProcessRecord {");
     for field in [
-        "blocked_signals: SignalSet",
         "pending_signals: SignalSet",
         "signal_actions: [SignalAction",
-        "signal_deliveries: Vec<InProgressSignalDelivery>",
-        "temporary_signal_masks: Vec<TemporarySignalMask>",
+        "signal_threads: BTreeMap<u32, ProcessThreadSignalState>",
     ] {
         assert!(
             record.contains(field),
             "kernel ProcessRecord is missing {field}"
+        );
+    }
+    let thread_record = rust_braced_item(&process_table, "struct ProcessThreadSignalState {");
+    for field in [
+        "blocked_signals: SignalSet",
+        "signal_deliveries: Vec<InProgressSignalDelivery>",
+        "temporary_signal_masks: Vec<TemporarySignalMask>",
+    ] {
+        assert!(
+            thread_record.contains(field),
+            "kernel thread signal record is missing {field}"
         );
     }
     let schedule = rust_braced_item(&process_table, "fn queue_or_schedule_signal(");
@@ -1347,6 +1479,10 @@ const PROCESS_ALLOW: &[&str] = &[
     // (SNAPSHOT_HELPER_ENV) so snapshot creation runs in a clean process.
     // Host-side bootstrap only; no guest-controlled input picks the program.
     "crates/v8-runtime/src/snapshot.rs",
+    // Explicitly threaded WASM is isolated in a re-exec of the reviewed
+    // native-sidecar binary. The parent keeps every kernel capability and the
+    // child receives only bounded typed host-operation IPC.
+    "crates/execution/src/wasm/wasmtime/worker.rs",
 ];
 
 /// env: process-environment reads.
@@ -1368,6 +1504,9 @@ const ENV_ALLOW: &[&str] = &[
     // Host-side perf phase diagnostics toggles, read from operator env and not
     // guest-reachable.
     "crates/execution/src/javascript.rs",
+    // Operator/test override for the reviewed native-sidecar worker binary;
+    // guest input cannot select or mutate this path.
+    "crates/execution/src/wasm/wasmtime/worker.rs",
     "crates/native-sidecar/src/filesystem.rs",
     "crates/v8-runtime/src/bridge.rs",
     "crates/native-sidecar/src/execution/",
@@ -1545,7 +1684,7 @@ fn production_execution_lifecycle_is_runtime_neutral_and_delegated() {
             && compact.contains("self.backend_mut().write_stdin(bytes)")
             && compact.contains("self.backend_mut().close_stdin()")
             && compact.contains(
-                "self.backend().deliver_signal_checkpoint(identity,signal,delivery_token,flags)"
+                "self.backend().deliver_signal_checkpoint(identity,signal,delivery_token,flags,thread_id)"
             ),
         "ActiveExecution must delegate every common lifecycle method through ExecutionBackend"
     );
@@ -1616,7 +1755,9 @@ fn production_execution_lifecycle_is_runtime_neutral_and_delegated() {
         .collect();
     assert!(
         wasm_backend
-            .matches("execution.deliver_signal_checkpoint(identity,signal,delivery_token,flags)")
+            .matches(
+                "execution.deliver_signal_checkpoint(identity,signal,delivery_token,flags,thread_id,)"
+            )
             .count()
             >= 2
             && wasm_backend.contains("WasmExecutionBackend::Wasmtime(execution)"),
@@ -3099,6 +3240,31 @@ fn v8_platform_worker_pool_has_a_reviewed_fixed_bound() {
 }
 
 #[test]
+fn canonical_wasm_exceptions_use_one_finalized_artifact_on_both_engines() {
+    let root = repo_root();
+    let v8 = std::fs::read_to_string(root.join("crates/v8-runtime/src/isolate.rs"))
+        .expect("read V8 platform source");
+    assert!(
+        v8.contains("v8::V8::set_flags_from_string(\"--experimental-wasm-exnref\")"),
+        "V8 130 must enable the finalized exception encoding used by canonical C++ commands"
+    );
+
+    let profile = std::fs::read_to_string(root.join("crates/execution/src/wasm/profile.rs"))
+        .expect("read shared WASM profile");
+    assert!(profile.contains("features.set(WasmFeatures::EXCEPTIONS, true)"));
+    assert!(profile.contains("features.set(WasmFeatures::LEGACY_EXCEPTIONS, false)"));
+
+    let duckdb = std::fs::read_to_string(root.join("toolchain/c/scripts/build-duckdb.sh"))
+        .expect("read DuckDB toolchain script");
+    assert!(
+        duckdb.contains("--translate-to-exnref")
+            && duckdb
+                .contains("Binaryen 128 is required to finalize DuckDB exception instructions"),
+        "the owned toolchain must translate LLVM 19's legacy exceptions before staging DuckDB"
+    );
+}
+
+#[test]
 fn production_threads_match_the_reviewed_topology_manifest() {
     const MANIFEST: &[(&str, &str)] = &[
         ("blocking-executor-worker", "crates/runtime/src/lib.rs"),
@@ -3130,6 +3296,18 @@ fn production_threads_match_the_reviewed_topology_manifest() {
         (
             "admitted-wasmtime-guest-executor",
             "crates/execution/src/wasm/wasmtime/lifecycle.rs",
+        ),
+        (
+            "admitted-threaded-wasmtime-guest",
+            "crates/execution/src/wasm/wasmtime/threads.rs",
+        ),
+        (
+            "threaded-wasmtime-ipc-writer",
+            "crates/execution/src/wasm/wasmtime/worker.rs",
+        ),
+        (
+            "threaded-wasmtime-ipc-reader",
+            "crates/execution/src/wasm/wasmtime/worker.rs",
         ),
         (
             "constant-stdio-writer",

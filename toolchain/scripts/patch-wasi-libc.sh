@@ -6,11 +6,12 @@
 # host_user WASM imports, and builds the patched sysroot.
 #
 # Usage:
-#   ./scripts/patch-wasi-libc.sh [--check] [--reverse]
+#   ./scripts/patch-wasi-libc.sh [--check] [--reverse] [--threads]
 #
 # Options:
 #   --check    Dry-run: verify patches apply cleanly without building
 #   --reverse  Reverse (unapply) previously applied patches
+#   --threads  Build the real POSIX pthread sysroot in c/sysroot-threads
 
 set -euo pipefail
 
@@ -30,6 +31,9 @@ WASI_LIBC_DIR="$VENDOR_DIR/wasi-libc"
 LLVM_PROJECT_DIR="$VENDOR_DIR/llvm-project"
 WASI_SDK_DIR="$VENDOR_DIR/wasi-sdk"
 SYSROOT_DIR="$WASMCORE_DIR/c/sysroot"
+THREAD_MODEL="single"
+TARGET_TRIPLE="wasm32-wasi"
+WASIP1_TRIPLE="wasm32-wasip1"
 WASI_LIBC_SRC_DIR="$WASI_LIBC_DIR"
 WORKTREE_DIR=""
 
@@ -43,9 +47,15 @@ for arg in "$@"; do
         --reverse)
             MODE="reverse"
             ;;
+        --threads)
+            THREAD_MODEL="posix"
+            TARGET_TRIPLE="wasm32-wasi-threads"
+            WASIP1_TRIPLE="wasm32-wasip1-threads"
+            SYSROOT_DIR="$WASMCORE_DIR/c/sysroot-threads"
+            ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: $0 [--check] [--reverse]"
+            echo "Usage: $0 [--check] [--reverse] [--threads]"
             exit 1
             ;;
     esac
@@ -244,13 +254,14 @@ make -C "$WASI_LIBC_SRC_DIR" \
     AR="$WASI_AR" \
     NM="$WASI_NM" \
     SYSROOT="$SYSROOT_DIR" \
+    THREAD_MODEL="$THREAD_MODEL" \
     libc \
     -j"$(nproc 2>/dev/null || echo 4)"
 
 # Install CRT startup files (crt1.o etc.) from the vanilla wasi-sdk sysroot.
 # CRT objects are standard startup routines that don't need our patches.
-SYSROOT_LIB="$SYSROOT_DIR/lib/wasm32-wasi"
-VANILLA_LIB="$WASI_SDK_DIR/share/wasi-sysroot/lib/wasm32-wasi"
+SYSROOT_LIB="$SYSROOT_DIR/lib/$TARGET_TRIPLE"
+VANILLA_LIB="$WASI_SDK_DIR/share/wasi-sysroot/lib/$TARGET_TRIPLE"
 for crt in "$VANILLA_LIB"/crt*.o; do
     [ -f "$crt" ] && cp "$crt" "$SYSROOT_LIB/"
 done
@@ -260,9 +271,9 @@ done
 # thread-capable headers/libs from wasm32-wasi-threads because libc++'s mutex
 # support expects those definitions even when we satisfy pthread calls through
 # wasi-emulated-pthread.
-VANILLA_INCLUDE="$WASI_SDK_DIR/share/wasi-sysroot/include/wasm32-wasi"
+VANILLA_INCLUDE="$WASI_SDK_DIR/share/wasi-sysroot/include/$TARGET_TRIPLE"
 THREADS_INCLUDE="$WASI_SDK_DIR/share/wasi-sysroot/include/wasm32-wasi-threads"
-SYSROOT_INCLUDE="$SYSROOT_DIR/include/wasm32-wasi"
+SYSROOT_INCLUDE="$SYSROOT_DIR/include/$TARGET_TRIPLE"
 mkdir -p "$SYSROOT_INCLUDE/c++/v1"
 if [ -d "$VANILLA_INCLUDE/c++/v1" ]; then
     cp -R "$VANILLA_INCLUDE/c++/v1/." "$SYSROOT_INCLUDE/c++/v1/"
@@ -286,13 +297,15 @@ done
 LLVM_RUNTIME_BUILD_SCRIPT="$WASMCORE_DIR/c/scripts/build-llvm-runtimes.sh"
 LLVM_RUNTIME_BUILD_DIR="$WASMCORE_DIR/c/build/llvm-runtimes"
 LLVM_RUNTIME_INSTALL_DIR="$WASMCORE_DIR/c/build/llvm-runtimes-install"
-echo "Rebuilding libc++/libc++abi/libunwind with -fwasm-exceptions..."
-LLVM_PROJECT_SRC_DIR="$LLVM_PROJECT_DIR" \
-LLVM_RUNTIME_BUILD_DIR="$LLVM_RUNTIME_BUILD_DIR" \
-LLVM_RUNTIME_INSTALL_DIR="$LLVM_RUNTIME_INSTALL_DIR" \
-WASI_SDK_DIR="$WASI_SDK_DIR" \
-SYSROOT_DIR="$SYSROOT_DIR" \
-bash "$LLVM_RUNTIME_BUILD_SCRIPT"
+if [ "$THREAD_MODEL" = "single" ]; then
+    echo "Rebuilding libc++/libc++abi/libunwind with -fwasm-exceptions..."
+    LLVM_PROJECT_SRC_DIR="$LLVM_PROJECT_DIR" \
+    LLVM_RUNTIME_BUILD_DIR="$LLVM_RUNTIME_BUILD_DIR" \
+    LLVM_RUNTIME_INSTALL_DIR="$LLVM_RUNTIME_INSTALL_DIR" \
+    WASI_SDK_DIR="$WASI_SDK_DIR" \
+    SYSROOT_DIR="$SYSROOT_DIR" \
+    bash "$LLVM_RUNTIME_BUILD_SCRIPT"
+fi
 
 # Create empty dummy libraries (libm, librt, libpthread, etc.)
 for lib in m rt pthread crypt util xnet resolv; do
@@ -303,8 +316,8 @@ echo ""
 echo "=== Sysroot build complete ==="
 
 # Verify the build output
-if [ -f "$SYSROOT_DIR/lib/wasm32-wasi/libc.a" ]; then
-    echo "OK: $SYSROOT_DIR/lib/wasm32-wasi/libc.a exists"
+if [ -f "$SYSROOT_LIB/libc.a" ]; then
+    echo "OK: $SYSROOT_LIB/libc.a exists"
 else
     echo "ERROR: libc.a not found in sysroot — build may have failed"
     exit 1
@@ -323,9 +336,9 @@ echo "Removed conflicting sigaction.o/signal.o from libc.a"
 # wasi-libc builds under wasm32-wasi, but clang --target=wasm32-wasip1 expects
 # wasm32-wasip1 subdirectories. Create symlinks so both targets work.
 for subdir in include lib; do
-    if [ -d "$SYSROOT_DIR/$subdir/wasm32-wasi" ] && [ ! -e "$SYSROOT_DIR/$subdir/wasm32-wasip1" ]; then
-        ln -s wasm32-wasi "$SYSROOT_DIR/$subdir/wasm32-wasip1"
-        echo "Symlink: $subdir/wasm32-wasip1 -> wasm32-wasi"
+    if [ -d "$SYSROOT_DIR/$subdir/$TARGET_TRIPLE" ] && [ ! -e "$SYSROOT_DIR/$subdir/$WASIP1_TRIPLE" ]; then
+        ln -s "$TARGET_TRIPLE" "$SYSROOT_DIR/$subdir/$WASIP1_TRIPLE"
+        echo "Symlink: $subdir/$WASIP1_TRIPLE -> $TARGET_TRIPLE"
     fi
 done
 
@@ -340,7 +353,15 @@ done
 # Overrides are compiled and added to libc.a so ALL WASM programs get the fixes.
 OVERRIDES_DIR="$WASMCORE_DIR/std-patches/wasi-libc-overrides"
 OVERRIDE_INCLUDE_DIR="$WASMCORE_DIR/c/include"
-OVERRIDE_CFLAGS="--target=wasm32-wasip1 --sysroot=$SYSROOT_DIR -O2 -D_GNU_SOURCE -I$OVERRIDE_INCLUDE_DIR"
+OVERRIDE_CFLAGS="--target=$WASIP1_TRIPLE --sysroot=$SYSROOT_DIR -O2 -D_GNU_SOURCE -I$OVERRIDE_INCLUDE_DIR"
+if [ "$THREAD_MODEL" = "posix" ]; then
+    # Clang's wasm32-wasip1-threads triple selects shared memory at link time,
+    # but it does not enable the atomics/bulk-memory code-generation features
+    # for standalone override objects. Mixing such an object into threaded
+    # libc produces an archive with a `-shared-mem` member and fails as soon as
+    # a threaded program pulls that override (for example through fcntl/stdio).
+    OVERRIDE_CFLAGS="$OVERRIDE_CFLAGS -pthread -matomics -mbulk-memory"
+fi
 
 # Extra flags for overrides that need musl internal headers (struct __pthread, etc.)
 MUSL_INTERNAL_DIR="$WASI_LIBC_SRC_DIR/libc-top-half/musl/src/internal"
@@ -364,7 +385,11 @@ if [ -d "$OVERRIDES_DIR" ] && ls "$OVERRIDES_DIR"/*.c >/dev/null 2>&1; then
     # are in a single mutex.o — remove it so our override replaces them all.
     # pthread_key: create, delete, and tsd_run_dtors are in a single .o — remove
     # via __pthread_key_create to replace the whole TSD compilation unit.
-    for sym in fcntl close strfmon open_wmemstream swprintf inet_ntop __pthread_mutex_lock pthread_attr_setguardsize pthread_mutexattr_setrobust __pthread_key_create fmtmsg; do
+    REPLACED_SYMBOLS="fcntl close strfmon open_wmemstream swprintf inet_ntop fmtmsg"
+    if [ "$THREAD_MODEL" = "single" ]; then
+        REPLACED_SYMBOLS="$REPLACED_SYMBOLS __pthread_mutex_lock pthread_attr_setguardsize pthread_mutexattr_setrobust __pthread_key_create"
+    fi
+    for sym in $REPLACED_SYMBOLS; do
         OBJ_LINE=$("$WASI_NM" --print-file-name "$SYSROOT_LIB/libc.a" 2>/dev/null | { grep " [TW] ${sym}\$" || true; } | head -1)
         if [ -n "$OBJ_LINE" ]; then
             OBJ=$(echo "$OBJ_LINE" | extract_obj)
@@ -378,6 +403,10 @@ if [ -d "$OVERRIDES_DIR" ] && ls "$OVERRIDES_DIR"/*.c >/dev/null 2>&1; then
     # Compile each override and add to libc.a
     for src in "$OVERRIDES_DIR"/*.c; do
         name="$(basename "${src%.c}")"
+        if [ "$THREAD_MODEL" = "posix" ] && [[ "$name" == pthread_* ]]; then
+            echo "  Keeping threaded libc implementation: $name"
+            continue
+        fi
         EXTRA_FLAGS=""
         # pthread_key needs musl internal headers for struct __pthread
         case "$name" in

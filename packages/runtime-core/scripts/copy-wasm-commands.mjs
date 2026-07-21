@@ -29,11 +29,10 @@ const SOURCE_DIR = path.join(
 const DEST_DIR = path.join(PACKAGE_ROOT, "commands");
 const SOFTWARE_ROOT = path.join(REPO_ROOT, "software");
 
-// These packages are intentionally outside `make -C toolchain commands`:
-// codex is built from its separately pinned upstream checkout, while duckdb
-// and vim are explicit heavy builds. If any are present they are still copied;
-// they are simply not prerequisites for `--require`.
-const OPTIONAL_COMMAND_PACKAGES = new Set(["codex-cli", "duckdb", "vim"]);
+// Codex is built from its separately pinned upstream checkout and remains an
+// explicit opt-in artifact. DuckDB and Vim are heavy explicit builds too, but
+// CI and publish build them and `--require` must reject their absence.
+const OPTIONAL_COMMAND_PACKAGES = new Set(["codex-cli"]);
 
 function commandNames(manifest, manifestPath) {
 	const names = [

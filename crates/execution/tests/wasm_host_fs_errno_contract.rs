@@ -27,6 +27,25 @@ fn existing_path_errors_reach_libc_as_eexist() {
 }
 
 #[test]
+fn resource_limit_errors_reach_libc_as_enomem() {
+    let source = runner_source();
+    let start = source
+        .find("function mapHostProcessError(")
+        .expect("host error mapper");
+    let end = source[start..]
+        .find("\n}\n\nfunction seekGuestFileHandle")
+        .map(|offset| start + offset)
+        .expect("end of host error mapper");
+    let error_map = &source[start..end];
+
+    assert!(
+        source.contains("const WASI_ERRNO_NOMEM = 48;")
+            && error_map.contains("case 'ENOMEM':\n      return WASI_ERRNO_NOMEM;"),
+        "host ENOMEM must retain the preview1/WASI errno value instead of becoming EFAULT"
+    );
+}
+
+#[test]
 fn path_open_preserves_directory_and_nofollow_before_kernel_mutation() {
     let source = runner_source();
 

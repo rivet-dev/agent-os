@@ -2378,65 +2378,95 @@ impl SocketTable {
     }
 
     pub fn shutdown(&self, socket_id: SocketId, how: SocketShutdown) -> SocketResult<SocketRecord> {
-        let mut table = lock_or_recover(&self.inner.state);
-        let record = table
-            .sockets
-            .remove(&socket_id)
-            .ok_or_else(|| SocketTableError::not_found(socket_id))?;
+        let (record, readiness) = {
+            let mut table = lock_or_recover(&self.inner.state);
+            let record = table
+                .sockets
+                .remove(&socket_id)
+                .ok_or_else(|| SocketTableError::not_found(socket_id))?;
 
-        if record.state != SocketState::Connected {
-            table.sockets.insert(socket_id, record);
-            return Err(SocketTableError::not_connected(format!(
-                "socket {socket_id} is not connected"
-            )));
-        }
+            if record.state != SocketState::Connected {
+                table.sockets.insert(socket_id, record);
+                return Err(SocketTableError::not_connected(format!(
+                    "socket {socket_id} is not connected"
+                )));
+            }
 
-        let Some(mut connection) = record.connection_state.clone() else {
-            table.sockets.insert(socket_id, record);
-            return Err(SocketTableError::not_connected(format!(
-                "socket {socket_id} is not connected"
-            )));
-        };
+            let Some(mut connection) = record.connection_state.clone() else {
+                table.sockets.insert(socket_id, record);
+                return Err(SocketTableError::not_connected(format!(
+                    "socket {socket_id} is not connected"
+                )));
+            };
 
-        if matches!(how, SocketShutdown::Read | SocketShutdown::Both) {
-            connection.clear_recv();
-            #[cfg(not(target_arch = "wasm32"))]
-            release_all_retained_bytes(&mut table, socket_id);
-            connection.read_shutdown = true;
-        }
-        if matches!(how, SocketShutdown::Write | SocketShutdown::Both) {
-            connection.write_shutdown = true;
-            if let Some(peer_socket_id) = connection.peer_socket_id {
-                if let Some(peer) = table.sockets.get_mut(&peer_socket_id) {
-                    if let Some(peer_connection) = peer.connection_state.as_mut() {
-                        peer_connection.peer_write_shutdown = true;
+            if matches!(how, SocketShutdown::Read | SocketShutdown::Both) {
+                connection.clear_recv();
+                #[cfg(not(target_arch = "wasm32"))]
+                release_all_retained_bytes(&mut table, socket_id);
+                connection.read_shutdown = true;
+            }
+            let mut readiness = None;
+            if matches!(how, SocketShutdown::Write | SocketShutdown::Both) {
+                connection.write_shutdown = true;
+                if let Some(peer_socket_id) = connection.peer_socket_id {
+                    if let Some(peer) = table.sockets.get_mut(&peer_socket_id) {
+                        if let Some(peer_connection) = peer.connection_state.as_mut() {
+                            let became_eof_ready = !peer_connection.peer_write_shutdown;
+                            peer_connection.peer_write_shutdown = true;
+                            readiness = became_eof_ready.then_some(SocketReadiness {
+                                socket_id: peer_socket_id,
+                                kind: SocketReadinessKind::Data,
+                            });
+                        }
                     }
                 }
             }
-        }
 
-        let mut record = record;
-        record.connection_state = Some(connection);
-        let cloned = record.clone();
-        table.sockets.insert(socket_id, record);
-        Ok(cloned)
+            let mut record = record;
+            record.connection_state = Some(connection);
+            let cloned = record.clone();
+            table.sockets.insert(socket_id, record);
+            (cloned, readiness)
+        };
+        self.emit_readiness(readiness);
+        Ok(record)
     }
 
     pub fn remove(&self, socket_id: SocketId) -> SocketResult<SocketRecord> {
-        let mut table = lock_or_recover(&self.inner.state);
-        remove_socket(&mut table, socket_id).ok_or_else(|| SocketTableError::not_found(socket_id))
+        let (record, readiness) = {
+            let mut table = lock_or_recover(&self.inner.state);
+            let readiness = peer_eof_readiness(&table, socket_id);
+            let record = remove_socket(&mut table, socket_id)
+                .ok_or_else(|| SocketTableError::not_found(socket_id))?;
+            (record, readiness)
+        };
+        self.emit_readiness(readiness);
+        Ok(record)
     }
 
     pub fn remove_all_for_pid(&self, owner_pid: u32) -> Vec<SocketRecord> {
-        let mut table = lock_or_recover(&self.inner.state);
-        let Some(socket_ids) = table.by_owner.remove(&owner_pid) else {
-            return Vec::new();
+        let (records, readiness) = {
+            let mut table = lock_or_recover(&self.inner.state);
+            let Some(socket_ids) = table.by_owner.remove(&owner_pid) else {
+                return Vec::new();
+            };
+            let mut readiness = Vec::new();
+            let records = socket_ids
+                .into_iter()
+                .filter_map(|socket_id| {
+                    if let Some(event) = peer_eof_readiness(&table, socket_id) {
+                        readiness.push(event);
+                    }
+                    remove_socket(&mut table, socket_id)
+                })
+                .collect();
+            readiness.retain(|event| table.sockets.contains_key(&event.socket_id));
+            (records, readiness)
         };
-
-        socket_ids
-            .into_iter()
-            .filter_map(|socket_id| remove_socket(&mut table, socket_id))
-            .collect()
+        for event in readiness {
+            self.emit_readiness(Some(event));
+        }
+        records
     }
 
     pub fn snapshot(&self) -> SocketTableSnapshot {
@@ -2998,6 +3028,24 @@ fn has_incompatible_inet_bind_conflict(
 fn inet_datagram_bind_shares_port(requested: &SocketRecord, existing: &SocketRecord) -> bool {
     (requested.reuse_port() && existing.reuse_port())
         || (requested.reuse_address() && existing.reuse_address())
+}
+
+fn peer_eof_readiness(table: &SocketTableState, socket_id: SocketId) -> Option<SocketReadiness> {
+    let peer_socket_id = table
+        .sockets
+        .get(&socket_id)?
+        .connection_state
+        .as_ref()?
+        .peer_socket_id?;
+    let peer_connection = table
+        .sockets
+        .get(&peer_socket_id)?
+        .connection_state
+        .as_ref()?;
+    (!peer_connection.peer_write_shutdown).then_some(SocketReadiness {
+        socket_id: peer_socket_id,
+        kind: SocketReadinessKind::Data,
+    })
 }
 
 fn remove_socket(table: &mut SocketTableState, socket_id: SocketId) -> Option<SocketRecord> {

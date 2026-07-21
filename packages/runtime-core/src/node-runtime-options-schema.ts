@@ -319,6 +319,13 @@ export const nodeRuntimeCreateOptionsSchema = z
 		env: z.record(z.string(), z.string()).optional(),
 		cwd: z.string().optional(),
 		user: vmUserConfigSchema.optional(),
+		wasmBackend: z.enum(["v8", "wasmtime", "wasmtime-threads"]).optional(),
+		limits: z
+			.custom<NodeRuntimeCreateOptions["limits"]>(
+				(value: unknown) => typeof value === "object" && value !== null,
+				{ message: "Expected VM limits object" },
+			)
+			.optional(),
 		permissions: nodeRuntimePermissionsSchema.optional(),
 		commandsDir: z.string().optional(),
 		wasmCommandDirs: stringArray.optional(),

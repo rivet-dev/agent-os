@@ -35,39 +35,76 @@ impl SidecarHostCapability<ProcessOperation> for ProcessCapability {
         operation: ProcessOperation,
     ) -> Result<HostCallReply, HostServiceError> {
         let value = match operation {
-            ProcessOperation::OpenExecutableImage { source } => {
+            ProcessOperation::OpenExecutableImage { source, resolution } => {
                 if process.executable_image.is_some() {
                     return Err(HostServiceError::new(
                         "EBUSY",
                         "this process already owns an executable-image snapshot",
                     ));
                 }
-                let image = match source {
-                    ExecutableImageSource::TrustedInitialPath(path) => kernel
+                let (image, resolved_argv) = match (source, resolution) {
+                    (ExecutableImageSource::TrustedInitialPath(path), None) => kernel
                         .load_trusted_initial_runtime_image(
                             path.as_str(),
                             process.limits.wasm.max_module_file_bytes,
-                        ),
-                    ExecutableImageSource::Path(path) => {
+                        )
+                        .map(|image| (image, None)),
+                    (ExecutableImageSource::Path(path), None) => {
                         let path = if path.as_str().starts_with('/') {
                             normalize_path(path.as_str())
                         } else {
                             normalize_path(&format!("{}/{}", process.guest_cwd, path.as_str()))
                         };
-                        kernel.load_process_runtime_image(
-                            EXECUTION_DRIVER_NAME,
-                            process.kernel_pid,
-                            &path,
-                            process.limits.wasm.max_module_file_bytes,
-                        )
+                        kernel
+                            .load_process_runtime_image(
+                                EXECUTION_DRIVER_NAME,
+                                process.kernel_pid,
+                                &path,
+                                process.limits.wasm.max_module_file_bytes,
+                            )
+                            .map(|image| (image, None))
                     }
-                    ExecutableImageSource::Descriptor(fd) => kernel
+                    (ExecutableImageSource::Descriptor(fd), None) => kernel
                         .load_process_runtime_image_from_fd(
                             EXECUTION_DRIVER_NAME,
                             process.kernel_pid,
                             fd,
                             process.limits.wasm.max_module_file_bytes,
-                        ),
+                        )
+                        .map(|image| (image, None)),
+                    (ExecutableImageSource::Descriptor(fd), Some(resolution)) => {
+                        let request = resolution.as_request();
+                        kernel
+                            .load_resolved_process_runtime_image_from_fd(
+                                EXECUTION_DRIVER_NAME,
+                                process.kernel_pid,
+                                fd,
+                                &process.guest_cwd,
+                                &request.argv,
+                                &request.close_on_exec_fds,
+                                process.limits.wasm.max_module_file_bytes,
+                            )
+                            .map(|resolved| (resolved.image, Some(resolved.argv)))
+                    }
+                    (ExecutableImageSource::Path(path), Some(resolution)) => {
+                        let request = resolution.as_request();
+                        kernel
+                            .load_resolved_process_runtime_image(
+                                EXECUTION_DRIVER_NAME,
+                                process.kernel_pid,
+                                path.as_str(),
+                                &process.guest_cwd,
+                                &request.argv,
+                                process.limits.wasm.max_module_file_bytes,
+                            )
+                            .map(|resolved| (resolved.image, Some(resolved.argv)))
+                    }
+                    (ExecutableImageSource::TrustedInitialPath(_), Some(_)) => {
+                        return Err(HostServiceError::new(
+                            "EINVAL",
+                            "trusted initial images cannot request guest exec resolution",
+                        ));
+                    }
                 }
                 .map_err(kernel_host_error)?;
                 let size = image.bytes.len();
@@ -84,6 +121,7 @@ impl SidecarHostCapability<ProcessOperation> for ProcessCapability {
                     "canonicalPath": canonical_path,
                     "size": size,
                     "mode": mode,
+                    "argv": resolved_argv,
                 })
             }
             ProcessOperation::ReadExecutableImage {

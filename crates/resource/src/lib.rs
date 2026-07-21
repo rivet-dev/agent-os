@@ -36,6 +36,7 @@ pub enum ResourceClass {
     ExecutorSlots,
     ExecutorBytes,
     WasmMemoryBytes,
+    WasmThreads,
     Http2Connections,
     Http2Streams,
     Http2BufferedBytes,
@@ -48,7 +49,7 @@ pub enum ResourceClass {
 }
 
 impl ResourceClass {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::Capabilities,
         Self::ReadyHandles,
         Self::Sockets,
@@ -70,6 +71,7 @@ impl ResourceClass {
         Self::ExecutorSlots,
         Self::ExecutorBytes,
         Self::WasmMemoryBytes,
+        Self::WasmThreads,
         Self::Http2Connections,
         Self::Http2Streams,
         Self::Http2BufferedBytes,
@@ -104,6 +106,7 @@ impl ResourceClass {
             Self::ExecutorSlots => "executorSlots",
             Self::ExecutorBytes => "executorBytes",
             Self::WasmMemoryBytes => "wasmMemoryBytes",
+            Self::WasmThreads => "wasmThreads",
             Self::Http2Connections => "http2Connections",
             Self::Http2Streams => "http2Streams",
             Self::Http2BufferedBytes => "http2BufferedBytes",

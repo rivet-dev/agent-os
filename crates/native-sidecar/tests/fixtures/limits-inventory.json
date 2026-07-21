@@ -2617,5 +2617,56 @@
 		"class": "policy",
 		"rationale": "Default aggregate linear-memory envelope for active standalone-WASM Stores.",
 		"wired": "RuntimeConfig.resources.max_wasm_memory_bytes"
+	},
+	{
+		"name": "DEFAULT_MAX_WORKER_FRAME_BYTES",
+		"path": "crates/execution/src/wasm/wasmtime/worker.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded default for the private threaded-WASM worker transport; expose through process runtime configuration if larger configured host replies require it."
+	},
+	{
+		"name": "MAX_STARTUP_HEADER_BYTES",
+		"path": "crates/execution/src/wasm/wasmtime/worker.rs",
+		"class": "invariant",
+		"rationale": "Private worker startup protocol ceiling above the separately bounded argv, environment, and typed request fields."
+	},
+	{
+		"name": "MAX_WORKER_FRAME_BYTES",
+		"path": "crates/execution/src/wasm/wasmtime/worker.rs",
+		"class": "policy-deferred",
+		"rationale": "Hard safety ceiling for one private threaded-WASM worker frame; expose through process runtime configuration if host-operation budgets grow beyond it."
+	},
+	{
+		"name": "MAX_WASI_THREAD_ID",
+		"path": "crates/execution/src/wasm/wasmtime/threads.rs",
+		"class": "invariant",
+		"rationale": "Positive signed thread-id range reserved by the owned WASI-threads ABI."
+	},
+	{
+		"name": "MAX_SIGNAL_THREADS_PER_PROCESS",
+		"path": "crates/kernel/src/process_table.rs",
+		"class": "policy-deferred",
+		"rationale": "Defense-in-depth bound on per-process kernel signal-thread records above current VM thread admission; expose through kernel/process limits if supported thread counts grow."
+	},
+	{
+		"name": "DEFAULT_WASM_MAX_CONCURRENT_THREADS",
+		"path": "crates/native-sidecar-core/src/limits.rs",
+		"class": "policy",
+		"rationale": "Default aggregate per-VM threaded-WASM admission bound.",
+		"wired": "VmLimits.wasm.max_concurrent_threads"
+	},
+	{
+		"name": "DEFAULT_WASM_MAX_THREADS",
+		"path": "crates/native-sidecar-core/src/limits.rs",
+		"class": "policy",
+		"rationale": "Default maximum thread count for one explicitly threaded standalone-WASM group.",
+		"wired": "VmLimits.wasm.max_threads"
+	},
+	{
+		"name": "DEFAULT_MAX_PROCESS_WASM_THREADS",
+		"path": "crates/runtime/src/lib.rs",
+		"class": "policy",
+		"rationale": "Default aggregate sidecar-process threaded-WASM admission bound.",
+		"wired": "RuntimeConfig.resources.max_wasm_threads"
 	}
 ]

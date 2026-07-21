@@ -29,6 +29,7 @@ const MAX_SIGNALS_PER_SAFE_POINT: usize = 64;
 pub fn build_linker(
     engine: &Engine,
     tier: WasmPermissionTier,
+    threaded: bool,
 ) -> wasmtime::Result<Linker<WasmtimeStoreState>> {
     let mut linker = Linker::new(engine);
     for abi in ABI_BINDINGS {
@@ -42,6 +43,19 @@ pub fn build_linker(
             link_binding(&mut linker, engine, abi, alias.alias_module)?;
         }
     }
+    if threaded {
+        linker.func_wrap(
+            "wasi",
+            "thread-spawn",
+            |caller: Caller<'_, WasmtimeStoreState>, start_arg: i32| -> i32 {
+                caller
+                    .data()
+                    .thread_group
+                    .as_ref()
+                    .map_or(-1, |group| group.spawn(start_arg))
+            },
+        )?;
+    }
     Ok(linker)
 }
 
@@ -52,9 +66,12 @@ pub fn build_linker(
 pub fn validate_module_imports(
     module: &Module,
     tier: WasmPermissionTier,
+    threaded: bool,
 ) -> Result<(), HostServiceError> {
     for import in module.imports() {
-        if import_permitted(import.module(), import.name(), tier) {
+        if import_permitted(import.module(), import.name(), tier)
+            || (threaded && is_thread_runtime_import(import.module(), import.name()))
+        {
             continue;
         }
         return Err(HostServiceError::new(
@@ -71,6 +88,10 @@ pub fn validate_module_imports(
         })));
     }
     Ok(())
+}
+
+fn is_thread_runtime_import(module: &str, name: &str) -> bool {
+    matches!((module, name), ("env", "memory") | ("wasi", "thread-spawn"))
 }
 
 fn import_permitted(module: &str, name: &str, tier: WasmPermissionTier) -> bool {
@@ -135,11 +156,15 @@ async fn dispatch(
             "ERR_AGENTOS_WASMTIME_CANCELED: execution canceled"
         ));
     }
-    drain_signal_checkpoints(caller).await?;
+    drain_signal_checkpoints(caller, false).await?;
     loop {
         dispatch_once(caller, abi, params, results).await?;
-        let signals = drain_signal_checkpoints(caller).await?;
         let interrupted = matches!(results, [Val::I32(value)] if *value == WASI_ERRNO_INTR);
+        // EINTR is itself an authoritative signal wake. In the threaded worker
+        // topology its reply can become runnable just before the coalesced
+        // SignalWake frame updates the local fast-path counter, so probe the
+        // parent-owned checkpoint once unconditionally.
+        let signals = drain_signal_checkpoints(caller, interrupted).await?;
         if interrupted
             && abi.restartability == Restartability::SignalRestartable
             && signals.delivered
@@ -266,6 +291,7 @@ struct SignalDispatch {
 
 async fn drain_signal_checkpoints(
     caller: &mut Caller<'_, WasmtimeStoreState>,
+    mut force_probe: bool,
 ) -> wasmtime::Result<SignalDispatch> {
     let mut outcome = SignalDispatch {
         delivered: false,
@@ -273,14 +299,20 @@ async fn drain_signal_checkpoints(
     };
     for _ in 0..MAX_SIGNALS_PER_SAFE_POINT {
         let host = caller.data().host.clone();
-        if !host.signal_pending() {
+        if !force_probe && !host.signal_pending() {
             return Ok(outcome);
         }
+        force_probe = false;
+        let thread_id = u32::try_from(caller.data().thread_id).map_err(|_| {
+            wasmtime::format_err!("ERR_AGENTOS_WASMTIME_SIGNAL_THREAD_ID: invalid thread id")
+        })?;
+        let take = if caller.data().thread_group.is_some() {
+            SignalOperation::TakePublishedDeliveryForThread { thread_id }
+        } else {
+            SignalOperation::TakePublishedDelivery
+        };
         let reply = host
-            .submit(
-                HostOperation::Signal(SignalOperation::TakePublishedDelivery),
-                0,
-            )
+            .submit(HostOperation::Signal(take), std::mem::size_of::<u32>())
             .await
             .map_err(wasmtime_host_error)?;
         let value = host_json(reply, "process.take_signal")?;
@@ -319,13 +351,18 @@ async fn drain_signal_checkpoints(
                 )
             })?;
         let handler_result = trampoline.call_async(&mut *caller, signal).await;
+        let end = if caller.data().thread_group.is_some() {
+            SignalOperation::EndDeliveryForThread { thread_id, token }
+        } else {
+            SignalOperation::EndDelivery { token }
+        };
         let end_result = caller
             .data()
             .host
             .clone()
             .submit(
-                HostOperation::Signal(SignalOperation::EndDelivery { token }),
-                std::mem::size_of::<u64>(),
+                HostOperation::Signal(end),
+                std::mem::size_of::<u64>() + std::mem::size_of::<u32>(),
             )
             .await;
         if let Err(error) = handler_result {
@@ -347,15 +384,30 @@ pub async fn initialize_inherited_signal_mask(
     store: &mut wasmtime::Store<WasmtimeStoreState>,
     instance: &wasmtime::Instance,
 ) -> Result<(), HostServiceError> {
+    let thread_id = u32::try_from(store.data().thread_id).map_err(|_| {
+        HostServiceError::new(
+            "ERR_AGENTOS_WASMTIME_SIGNAL_THREAD_ID",
+            "invalid Wasmtime signal thread id",
+        )
+    })?;
+    let update = if store.data().thread_group.is_some() {
+        SignalOperation::UpdateMaskForThread {
+            thread_id,
+            how: SignalMaskHow::Block,
+            set: SignalSetValue::default(),
+        }
+    } else {
+        SignalOperation::UpdateMask {
+            how: SignalMaskHow::Block,
+            set: SignalSetValue::default(),
+        }
+    };
     let reply = store
         .data()
         .host
         .clone()
         .submit(
-            HostOperation::Signal(SignalOperation::UpdateMask {
-                how: SignalMaskHow::Block,
-                set: SignalSetValue::default(),
-            }),
+            HostOperation::Signal(update),
             std::mem::size_of::<SignalSetValue>(),
         )
         .await?;
@@ -552,7 +604,7 @@ mod tests {
             .expect("allowed import module"),
         )
         .expect("compile allowed import module");
-        validate_module_imports(&module, WasmPermissionTier::Isolated)
+        validate_module_imports(&module, WasmPermissionTier::Isolated, false)
             .expect("generated registry permits import");
 
         let hostile = Module::new(
@@ -561,7 +613,7 @@ mod tests {
                 .expect("hostile import module"),
         )
         .expect("compile hostile import module");
-        let error = validate_module_imports(&hostile, WasmPermissionTier::Full)
+        let error = validate_module_imports(&hostile, WasmPermissionTier::Full, false)
             .expect_err("unknown import must fail before linker diagnostics");
         assert_eq!(error.code, "ERR_AGENTOS_WASM_UNSUPPORTED_IMPORT");
         assert_eq!(

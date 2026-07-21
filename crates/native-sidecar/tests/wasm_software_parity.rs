@@ -24,8 +24,13 @@ fn command_artifact(name: &str) -> PathBuf {
     if staged.is_file() {
         return staged;
     }
-    root.join("toolchain/target/wasm32-wasip1/release/commands")
-        .join(name)
+    let toolchain = root
+        .join("toolchain/target/wasm32-wasip1/release/commands")
+        .join(name);
+    if toolchain.is_file() {
+        return toolchain;
+    }
+    root.join("toolchain/c/build").join(name)
 }
 
 fn run_command(
@@ -105,13 +110,18 @@ fn run_command_with_files_and_metadata(
         "fixture\n",
     );
     for (index, extra) in extra_commands.iter().enumerate() {
+        let guest_path = if *extra == "sh" {
+            String::from("/bin/sh")
+        } else {
+            format!("/workspace/{extra}")
+        };
         write_guest_binary(
             &mut sidecar,
             10 + index as i64,
             &connection_id,
             &session_id,
             &vm_id,
-            &format!("/workspace/{extra}"),
+            &guest_path,
             &std::fs::read(command_artifact(extra)).expect("read generated child command"),
         );
     }
@@ -386,6 +396,36 @@ fn shell_pipeline_and_child_backend_affinity_match_v8_wasm() {
         assert_command_parity_with_files("sh", &["-c", script], &["grep"]);
     assert_eq!(exit_code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "beta\n");
+}
+
+#[test]
+#[ignore = "requires the generated toolchain/c/build/exec_variants fixture"]
+fn exec_variants_match_linux_behavior_on_both_wasm_backends() {
+    for (mode, marker) in [
+        ("execle", "execle: ok"),
+        ("execvpe", "execvpe: ok"),
+        ("execve-shebang", "execve_shebang: ok"),
+        ("shell-fallback", "shell_fallback: ok"),
+        ("fexecve", "fexecve_unlinked_cloexec: ok"),
+        ("fexecve-script", "fexecve_script_unlinked: ok"),
+        (
+            "fexecve-script-cloexec",
+            "fexecve_script_cloexec_enoent: ok",
+        ),
+    ] {
+        // Launch the fixture through the projected guest path. The trusted
+        // initial entrypoint is a host-only image source and intentionally is
+        // not mirrored into the kernel VFS, whereas a process that self-execs
+        // must name the live kernel-owned executable.
+        let script = format!("/workspace/exec_variants {mode}");
+        let (stdout, stderr, exit_code) =
+            assert_command_parity_with_files("sh", &["-c", &script], &["exec_variants", "sh"]);
+        assert_eq!(exit_code, 0, "{mode} stderr: {stderr}");
+        assert!(
+            stdout.contains(marker),
+            "{mode} output omitted {marker:?}: {stdout:?}"
+        );
+    }
 }
 
 #[test]

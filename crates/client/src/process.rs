@@ -58,10 +58,13 @@ pub enum TimingMitigation {
 /// Engine override for standalone WebAssembly commands. JavaScript and its
 /// `WebAssembly.*` APIs always remain on V8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum StandaloneWasmBackend {
+    #[serde(rename = "v8")]
     V8,
+    #[serde(rename = "wasmtime")]
     Wasmtime,
+    #[serde(rename = "wasmtime-threads")]
+    WasmtimeThreads,
 }
 
 impl From<StandaloneWasmBackend> for wire::StandaloneWasmBackend {
@@ -69,6 +72,7 @@ impl From<StandaloneWasmBackend> for wire::StandaloneWasmBackend {
         match value {
             StandaloneWasmBackend::V8 => Self::V8,
             StandaloneWasmBackend::Wasmtime => Self::Wasmtime,
+            StandaloneWasmBackend::WasmtimeThreads => Self::WasmtimeThreads,
         }
     }
 }

@@ -1878,36 +1878,54 @@ where
                 })
                 .map_err(kernel_error)
         }
-        "process.fd_snapshot" => kernel
-            .fd_snapshot(EXECUTION_DRIVER_NAME, process.kernel_pid)
-            .map(|entries| {
-                Value::Array(
-                    entries
-                        .into_iter()
-                        .map(|entry| {
-                            json!({
-                                "fd": entry.fd,
-                                "descriptionId": entry.description_id.to_string(),
-                                "fdFlags": entry.fd_flags,
-                                "statusFlags": entry.status_flags,
-                                "filetype": entry.filetype,
-                                "rightsBase": entry.rights_base,
-                                "rightsInheriting": entry.rights_inheriting,
-                                "kind": if entry.is_socket {
-                                    "socket"
-                                } else if entry.is_pipe {
-                                    "pipe"
-                                } else if entry.is_pty {
-                                    "pty"
-                                } else {
-                                    "file"
-                                },
-                            })
+        "process.fd_snapshot" => {
+            let entries = kernel
+                .fd_snapshot(EXECUTION_DRIVER_NAME, process.kernel_pid)
+                .map_err(kernel_error)?;
+            let managed_ids = if let Some(registry) = managed_descriptions.as_ref() {
+                registry
+                    .lock()
+                    .map_err(|_| {
+                        SidecarError::host("EIO", "managed description registry lock poisoned")
+                    })?
+                    .iter()
+                    .filter_map(|(description_id, description)| {
+                        description
+                            .route_for(process.kernel_pid)
+                            .is_some()
+                            .then_some(*description_id)
+                    })
+                    .collect::<BTreeSet<_>>()
+            } else {
+                BTreeSet::new()
+            };
+            Ok(Value::Array(
+                entries
+                    .into_iter()
+                    .map(|entry| {
+                        json!({
+                            "fd": entry.fd,
+                            "descriptionId": entry.description_id.to_string(),
+                            "managedHostNet": managed_ids.contains(&entry.description_id),
+                            "fdFlags": entry.fd_flags,
+                            "statusFlags": entry.status_flags,
+                            "filetype": entry.filetype,
+                            "rightsBase": entry.rights_base,
+                            "rightsInheriting": entry.rights_inheriting,
+                            "kind": if entry.is_socket {
+                                "socket"
+                            } else if entry.is_pipe {
+                                "pipe"
+                            } else if entry.is_pty {
+                                "pty"
+                            } else {
+                                "file"
+                            },
                         })
-                        .collect(),
-                )
-            })
-            .map_err(kernel_error),
+                    })
+                    .collect(),
+            ))
+        }
         "process.hostnet_fd_open" => {
             let datagram = javascript_sync_rpc_arg_bool(
                 &request.args,

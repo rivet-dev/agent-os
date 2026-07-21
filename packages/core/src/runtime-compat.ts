@@ -248,6 +248,8 @@ export interface OpenShellOptions {
 	cwd?: string;
 	cols?: number;
 	rows?: number;
+	/** Engine affinity inherited by standalone WASM commands launched by the shell. */
+	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 	/** Optional stderr-only diagnostic tap; do not render it alongside `onData`. */
 	onStderr?: (data: Uint8Array) => void;
 }
@@ -268,7 +270,7 @@ export interface ExecOptions {
 	cpuTimeLimitMs?: number;
 	timingMitigation?: TimingMitigation;
 	/** Selects standalone WASM commands only; JavaScript remains on V8. */
-	wasmBackend?: "v8" | "wasmtime";
+	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 }
 
 export interface ExecResult {
@@ -2104,6 +2106,7 @@ class NativeKernel implements Kernel {
 			permissions?: Permissions;
 			env?: Record<string, string>;
 			cwd?: string;
+			wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 			hostNetworkAdapter?: unknown;
 			loopbackExemptPorts?: number[];
 			mounts?: Array<{
@@ -2514,6 +2517,7 @@ class NativeKernel implements Kernel {
 		const session = await client.authenticateAndOpenSession();
 		const createVmConfig: CreateVmConfig = {
 			env: createVmEnv,
+			wasmBackend: this.options.wasmBackend,
 			rootFilesystem,
 			permissions: bootstrapPermissions
 				? serializePermissionsForSidecar(bootstrapPermissions)
@@ -2605,6 +2609,7 @@ export function createKernel(options: {
 	permissions?: Permissions;
 	env?: Record<string, string>;
 	cwd?: string;
+	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 	maxProcesses?: number;
 	hostNetworkAdapter?: unknown;
 	loopbackExemptPorts?: number[];

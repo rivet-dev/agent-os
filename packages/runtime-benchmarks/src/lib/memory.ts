@@ -55,6 +55,12 @@ export interface ProcessMemorySnapshot {
 	majorFaults: number;
 }
 
+export interface ProcessTreeMemorySnapshot extends ProcessMemorySnapshot {
+	processCount: number;
+	threadCount: number;
+	pids: number[];
+}
+
 /** Read orthogonal Linux process-memory counters without conflating VIRT/RSS/PSS. */
 export function readProcessMemorySnapshot(pid: number): ProcessMemorySnapshot {
 	const status = readFileSync(`/proc/${pid}/status`, "utf8");
@@ -82,6 +88,69 @@ export function readProcessMemorySnapshot(pid: number): ProcessMemorySnapshot {
 		// `fields[0]` is field 3 (`state`); minflt/majflt are fields 10/12.
 		minorFaults: Number(fields[7] ?? 0),
 		majorFaults: Number(fields[9] ?? 0),
+	};
+}
+
+/**
+ * Sum resident counters across a process and every live descendant. Linux
+ * records children against the creating thread, so enumerate every task's
+ * `children` file instead of looking only at the thread-group leader.
+ */
+export function readProcessTreeMemorySnapshot(
+	rootPid: number,
+): ProcessTreeMemorySnapshot {
+	const pending = [rootPid];
+	const visited = new Set<number>();
+	const snapshots: Array<[number, ProcessMemorySnapshot, number]> = [];
+	while (pending.length > 0) {
+		const pid = pending.pop();
+		if (pid === undefined || visited.has(pid)) continue;
+		visited.add(pid);
+		try {
+			const tasks = readdirSync(`/proc/${pid}/task`).filter((entry) =>
+				/^\d+$/.test(entry),
+			);
+			const children = new Set<number>();
+			for (const task of tasks) {
+				try {
+					for (const child of readFileSync(
+						`/proc/${pid}/task/${task}/children`,
+						"utf8",
+					)
+						.trim()
+						.split(/\s+/)
+						.filter(Boolean)) {
+						const parsed = Number(child);
+						if (Number.isInteger(parsed) && parsed > 0) children.add(parsed);
+					}
+				} catch {
+					// A task may exit while its process remains live.
+				}
+			}
+			snapshots.push([pid, readProcessMemorySnapshot(pid), tasks.length]);
+			pending.push(...children);
+		} catch {
+			// A descendant may exit between discovery and sampling.
+		}
+	}
+	if (snapshots.length === 0) {
+		throw new Error(`process tree rooted at ${rootPid} is unavailable`);
+	}
+	const sum = (select: (snapshot: ProcessMemorySnapshot) => number) =>
+		snapshots.reduce((total, [, snapshot]) => total + select(snapshot), 0);
+	return {
+		rssBytes: sum((snapshot) => snapshot.rssBytes),
+		peakRssBytes: sum((snapshot) => snapshot.peakRssBytes),
+		pssBytes: sum((snapshot) => snapshot.pssBytes),
+		virtualBytes: sum((snapshot) => snapshot.virtualBytes),
+		minorFaults: sum((snapshot) => snapshot.minorFaults),
+		majorFaults: sum((snapshot) => snapshot.majorFaults),
+		processCount: snapshots.length,
+		threadCount: snapshots.reduce(
+			(total, [, , threadCount]) => total + threadCount,
+			0,
+		),
+		pids: snapshots.map(([pid]) => pid).sort((left, right) => left - right),
 	};
 }
 

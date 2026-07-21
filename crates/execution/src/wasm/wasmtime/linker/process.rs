@@ -11,21 +11,25 @@ use super::preview1::{
 use super::{i32_arg, set_i32_result};
 use crate::abi::{AbiBinding, ImportId};
 use crate::backend::HostCallReply;
-use crate::host::ExecutableImageSource;
+use crate::host::{HostOperation, SignalMaskHow, SignalOperation, SignalSetValue};
 use crate::wasm::wasmtime::{
     lifecycle, memory, module,
     store::{PendingExecReplacement, WasmtimeStoreState},
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 use wasmtime::{Caller, Extern, Val, ValType};
 
+const ERRNO_AGAIN: i32 = 6;
 const ERRNO_BADF: i32 = 8;
+const ERRNO_INTR: i32 = 27;
 const ERRNO_NOENT: i32 = 44;
 const ERRNO_NOEXEC: i32 = 45;
 const ERRNO_NOTSUP: i32 = 58;
 const ERRNO_PERM: i32 = 63;
 const ERRNO_SRCH: i32 = 71;
+const ERRNO_TIMEDOUT: i32 = 73;
 const MAX_FDS: usize = 1 << 20;
 const MAX_RIGHTS: usize = 253;
 const SUPPORTED_SPAWN_FLAGS: u32 = 0xff;
@@ -548,7 +552,11 @@ fn spawn_fd_state(snapshot: &[Value]) -> (Vec<Value>, Vec<Value>) {
             continue;
         };
         mappings.push(json!([fd, fd]));
-        if entry.get("kind").and_then(Value::as_str) == Some("socket") {
+        // Kernel-owned AF_UNIX socketpairs and managed host-network sockets
+        // deliberately share the Linux descriptor kind. The sidecar registry
+        // annotates the one-shot snapshot with its authoritative ownership;
+        // do not invent a host-network description for an ordinary socket.
+        if entry.get("managedHostNet").and_then(Value::as_bool) == Some(true) {
             host_net.push(json!({
                 "guestFd": fd,
                 "descriptionId": entry.get("descriptionId").cloned().unwrap_or(Value::Null),
@@ -593,12 +601,13 @@ async fn exec(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val], by_fd
     else {
         return ERRNO_FAULT;
     };
-    let Ok(argv) = memory::read_bytes(caller, argv_pointer, argv_length as usize)
+    let Ok(mut argv) = memory::read_bytes(caller, argv_pointer, argv_length as usize)
         .map_err(|_| ERRNO_FAULT)
         .and_then(nul_strings)
     else {
         return ERRNO_FAULT;
     };
+    let original_argv = argv.clone();
     let Ok(env) = memory::read_bytes(caller, env_pointer, env_length as usize)
         .map_err(|_| ERRNO_FAULT)
         .and_then(serialized_env)
@@ -624,32 +633,66 @@ async fn exec(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val], by_fd
     } else {
         None
     };
-    let prepared_replacement = if let Some(fd) = executable_fd {
-        let host = caller.data().host.clone();
-        let engine = caller.data().engine.clone();
-        let maximum = caller.data().max_module_file_bytes;
-        let bytes = match lifecycle::load_executable_image(
-            &host,
-            ExecutableImageSource::Descriptor(fd),
-            maximum,
+    let command = command.unwrap_or_else(|| format!("/proc/self/fd/{}", executable_fd.unwrap()));
+    let host = caller.data().host.clone();
+    let engine = caller.data().engine.clone();
+    let maximum = caller.data().max_module_file_bytes;
+    let (open_method, open_args) = if let Some(fd) = executable_fd {
+        (
+            "process.exec_image_open_fd",
+            vec![json!(fd), json!(argv), json!(close_fds)],
         )
-        .await
-        {
-            Ok(bytes) => bytes,
-            Err(error) => return errno(&error),
+    } else {
+        ("process.exec_image_open", vec![json!(command), json!(argv)])
+    };
+    let open = match call(caller, open_method, open_args, HashMap::new()).await {
+        Ok(reply) => reply,
+        Err(error) => return errno(&error),
+    };
+    let prepared_replacement = {
+        let (bytes, resolved_argv) =
+            match lifecycle::read_open_executable_image(&host, open, maximum).await {
+                Ok(image) => image,
+                Err(error) => return errno(&error),
+            };
+        let Some(resolved_argv) = resolved_argv else {
+            return ERRNO_IO;
         };
+        argv = resolved_argv;
         let compiled = match module::compile_module(&engine, &bytes) {
             Ok(compiled) => compiled.module,
+            Err(error) if error.code == "ERR_AGENTOS_WASM_INVALID_MODULE" && !by_fd => {
+                let request = json!({
+                    "command": command,
+                    "args": original_argv.iter().skip(1).cloned().collect::<Vec<_>>(),
+                    "options": {
+                        "argv0": original_argv.first().cloned().unwrap_or_else(|| command.clone()),
+                        "env": env,
+                        "shell": false,
+                        "cloexecFds": close_fds,
+                        "localReplacement": false,
+                        "internalBootstrapEnv": {},
+                    }
+                });
+                return match call(caller, "process.exec", vec![request], HashMap::new()).await {
+                    Ok(_) => {
+                        caller.data_mut().exec_replaced = true;
+                        ERRNO_IO
+                    }
+                    Err(error) if error.code == "ERR_AGENTOS_EXEC_REPLACED" => {
+                        caller.data_mut().exec_replaced = true;
+                        ERRNO_IO
+                    }
+                    Err(error) => errno(&error),
+                };
+            }
             Err(error) if error.code == "ERR_AGENTOS_WASM_INVALID_MODULE" => {
                 return ERRNO_NOEXEC;
             }
             Err(error) => return errno(&error),
         };
         Some(compiled)
-    } else {
-        None
     };
-    let command = command.unwrap_or_else(|| format!("/proc/self/fd/{}", executable_fd.unwrap()));
     let request = json!({
         "command": command,
         "args": argv.iter().skip(1).cloned().collect::<Vec<_>>(),
@@ -658,7 +701,7 @@ async fn exec(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val], by_fd
             "env": env,
             "shell": false,
             "cloexecFds": close_fds,
-            "localReplacement": by_fd,
+            "localReplacement": true,
             "executableFd": executable_fd,
             "internalBootstrapEnv": {},
         }
@@ -669,21 +712,26 @@ async fn exec(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val], by_fd
         "process.exec"
     };
     match call(caller, method, vec![request], HashMap::new()).await {
-        Ok(_) if by_fd => {
+        Ok(_) => {
             caller.data_mut().pending_exec_replacement = Some(PendingExecReplacement {
-                module: prepared_replacement.expect("fexec replacement was precompiled"),
+                module: prepared_replacement.expect("exec replacement was precompiled"),
                 argv,
                 env,
             });
             caller.data_mut().exec_replaced = true;
             ERRNO_IO
         }
-        Ok(_) => ERRNO_IO,
         Err(error) if error.code == "ERR_AGENTOS_EXEC_REPLACED" => {
             caller.data_mut().exec_replaced = true;
             ERRNO_IO
         }
-        Err(error) => errno(&error),
+        Err(error) => {
+            eprintln!(
+                "ERR_AGENTOS_WASMTIME_EXEC_COMMIT: method={method} command={command:?} code={} message={}",
+                error.code, error.message
+            );
+            errno(&error)
+        }
     }
 }
 
@@ -1240,20 +1288,75 @@ async fn record_lock(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val]
             }
         }
     }
-    match call(
-        caller,
-        "process.fd_record_lock",
-        vec![
-            json!(fd),
-            json!(command),
-            json!(kind),
-            json!(start.to_string()),
-            json!(length.to_string()),
-        ],
-        HashMap::new(),
-    )
-    .await
-    {
+    let arguments = vec![
+        json!(fd),
+        json!(command),
+        json!(kind),
+        json!(start.to_string()),
+        json!(length.to_string()),
+    ];
+    let started = Instant::now();
+    let limit_ms = caller.data().max_blocking_read_ms;
+    let warning_ms = limit_ms.saturating_mul(4) / 5;
+    let mut warned_near_limit = false;
+    let reply = loop {
+        let reply = call(
+            caller,
+            "process.fd_record_lock",
+            arguments.clone(),
+            HashMap::new(),
+        )
+        .await;
+        let Err(error) = &reply else {
+            break reply;
+        };
+        if command != 14 || errno(error) != ERRNO_AGAIN {
+            break reply;
+        }
+
+        // F_SETLKW registration and conflict/deadlock ownership remain in the
+        // kernel. Yield here so another process can release the lock, then ask
+        // the kernel to atomically retry the registered request.
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if !warned_near_limit && elapsed_ms >= warning_ms {
+            let warning = format!(
+                "[agentos] F_SETLKW is nearing limits.resources.maxBlockingReadMs ({limit_ms} ms)\n"
+            );
+            if caller
+                .data()
+                .host
+                .publish_stderr(warning.into_bytes())
+                .await
+                .is_err()
+            {
+                cancel_record_lock_wait(caller).await;
+                return ERRNO_IO;
+            }
+            warned_near_limit = true;
+        }
+        if elapsed_ms >= limit_ms {
+            cancel_record_lock_wait(caller).await;
+            let warning = format!(
+                "[agentos] F_SETLKW exceeded limits.resources.maxBlockingReadMs ({limit_ms} ms); raise limits.resources.maxBlockingReadMs if needed\n"
+            );
+            if caller
+                .data()
+                .host
+                .publish_stderr(warning.into_bytes())
+                .await
+                .is_err()
+            {
+                return ERRNO_IO;
+            }
+            return ERRNO_TIMEDOUT;
+        }
+        let wait_status = simple_call(caller, "process.sleep", vec![json!(1)]).await;
+        if wait_status != SUCCESS {
+            cancel_record_lock_wait(caller).await;
+            return wait_status;
+        }
+    };
+    match reply {
         Ok(_reply) if command != 12 => SUCCESS,
         Ok(reply) => {
             let Ok(value) = json_reply(reply) else {
@@ -1282,6 +1385,15 @@ async fn record_lock(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val]
             SUCCESS
         }
         Err(error) => errno(&error),
+    }
+}
+
+async fn cancel_record_lock_wait(caller: &mut Caller<'_, WasmtimeStoreState>) {
+    let status = simple_call(caller, "process.fd_record_lock_cancel", Vec::new()).await;
+    if status != SUCCESS && status != ERRNO_INTR {
+        eprintln!(
+            "ERR_AGENTOS_WASMTIME_RECORD_LOCK_CANCEL: failed to cancel a blocking record-lock wait: errno={status}"
+        );
     }
 }
 
@@ -1331,10 +1443,35 @@ async fn send_rights(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val]
     if memory::validate_range(caller, output, 4).is_err() {
         return ERRNO_FAULT;
     }
-    let rights = rights_bytes
+    let right_fds = rights_bytes
         .chunks_exact(4)
-        .map(|bytes| json!(u32::from_le_bytes(bytes.try_into().unwrap())))
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
         .collect::<Vec<_>>();
+    let snapshot = match fd_snapshot(caller).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => return error,
+    };
+    let mut rights = Vec::with_capacity(right_fds.len());
+    for fd in right_fds {
+        let Some(entry) = snapshot
+            .iter()
+            .find(|entry| entry.get("fd").and_then(value_u64) == Some(u64::from(fd)))
+        else {
+            return ERRNO_BADF;
+        };
+        if entry.get("managedHostNet").and_then(Value::as_bool) == Some(true) {
+            let Some(description_id) = entry.get("descriptionId").and_then(Value::as_str) else {
+                return ERRNO_IO;
+            };
+            rights.push(json!({
+                "kind": "hostNet",
+                "fd": fd,
+                "descriptionId": description_id,
+            }));
+        } else {
+            rights.push(json!(fd));
+        }
+    }
     let mut raw = HashMap::new();
     raw.insert(1, bytes);
     match call(
@@ -1385,22 +1522,50 @@ async fn receive_rights(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[V
         return ERRNO_FAULT;
     }
     let close_on_exec = *flags & 0x4000_0000 != 0;
-    match call(
-        caller,
-        "process.fd_recvmsg_rights",
-        vec![
-            json!(fd),
-            json!(data_capacity),
-            json!(rights_capacity),
-            json!(close_on_exec),
-            json!(*flags & 0x2 != 0),
-            json!(*flags & 0x40 != 0),
-            json!(*flags & 0x100 != 0),
-        ],
-        HashMap::new(),
-    )
-    .await
-    {
+    let nonblocking = match super::network::fd_is_nonblocking(caller, *fd).await {
+        Ok(nonblocking) => nonblocking || *flags & 0x40 != 0,
+        Err(error) => return error,
+    };
+    let started = Instant::now();
+    let mut warned_near_limit = false;
+    let reply = loop {
+        let reply = call(
+            caller,
+            "process.fd_recvmsg_rights",
+            vec![
+                json!(fd),
+                json!(data_capacity),
+                json!(rights_capacity),
+                json!(close_on_exec),
+                json!(*flags & 0x2 != 0),
+                // Never block the sidecar actor inside the kernel recvmsg.
+                // A child sharing this socket may need that same actor to run
+                // its sendmsg host call. The readiness wait below is deferred
+                // by the shared reactor and therefore preserves progress.
+                json!(true),
+                json!(*flags & 0x100 != 0),
+            ],
+            HashMap::new(),
+        )
+        .await;
+        match reply {
+            Err(error) if errno(&error) == ERRNO_AGAIN && !nonblocking => {
+                let wait = super::network::wait_for_socket_readable(
+                    caller,
+                    *fd,
+                    "blocking socket receive",
+                    started,
+                    &mut warned_near_limit,
+                )
+                .await;
+                if wait != SUCCESS {
+                    return wait;
+                }
+            }
+            reply => break reply,
+        }
+    };
+    match reply {
         Ok(reply) => {
             let Ok(value) = json_reply(reply) else {
                 return ERRNO_IO;
@@ -1567,17 +1732,39 @@ async fn signal_mask(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val]
     {
         return ERRNO_FAULT;
     }
-    let requested = signal_set(low, high)
-        .into_iter()
-        .filter(|signal| !matches!(signal, 9 | 19))
-        .collect::<Vec<_>>();
-    match call(
-        caller,
-        "process.signal_mask",
-        vec![json!(how), json!(requested)],
-        HashMap::new(),
-    )
-    .await
+    let mut set = (low as u64) | ((high as u64) << 32);
+    set &= !(1u64 << (9 - 1));
+    set &= !(1u64 << (19 - 1));
+    let how = match how {
+        0 => SignalMaskHow::Block,
+        1 => SignalMaskHow::Unblock,
+        2 => SignalMaskHow::Set,
+        3 if set == 0 => SignalMaskHow::Block,
+        _ => return ERRNO_INVAL,
+    };
+    let thread_id = match u32::try_from(caller.data().thread_id) {
+        Ok(thread_id) => thread_id,
+        Err(_) => return ERRNO_INVAL,
+    };
+    let operation = if caller.data().thread_group.is_some() {
+        SignalOperation::UpdateMaskForThread {
+            thread_id,
+            how,
+            set: SignalSetValue(set),
+        }
+    } else {
+        SignalOperation::UpdateMask {
+            how,
+            set: SignalSetValue(set),
+        }
+    };
+    let host = caller.data().host.clone();
+    match host
+        .submit(
+            HostOperation::Signal(operation),
+            std::mem::size_of::<SignalSetValue>(),
+        )
+        .await
     {
         Ok(reply) => {
             let Ok(value) = json_reply(reply) else {
@@ -1672,10 +1859,18 @@ async fn ppoll(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val]) -> i
     } else {
         Value::Null
     };
+    let signal_thread_id = if caller.data().thread_group.is_some() {
+        match u32::try_from(caller.data().thread_id) {
+            Ok(thread_id) => json!(thread_id),
+            Err(_) => return ERRNO_INVAL,
+        }
+    } else {
+        Value::Null
+    };
     match call(
         caller,
         "process.posix_poll",
-        vec![Value::Array(entries), timeout, mask],
+        vec![Value::Array(entries), timeout, mask, signal_thread_id],
         HashMap::new(),
     )
     .await

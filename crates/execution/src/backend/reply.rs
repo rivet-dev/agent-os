@@ -20,11 +20,11 @@ pub struct HostCallIdentity {
     pub call_id: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum HostCallReply {
     Empty,
     Json(Value),
-    Raw(Vec<u8>),
+    Raw(#[serde(with = "serde_bytes")] Vec<u8>),
 }
 
 type DirectHostReplyResult = Result<HostCallReply, HostServiceError>;
@@ -58,9 +58,17 @@ impl DirectHostReplyTarget for DirectHostReplyWaiterTarget {
             .ok_or_else(|| {
                 HostServiceError::new("EALREADY", "direct host-reply waiter is already settled")
             })?;
-        sender
-            .send(result)
-            .map_err(|_| HostServiceError::new("EPIPE", "direct host-reply receiver was canceled"))
+        if sender.send(result).is_err() {
+            // Cancellation can race a claimed destructive call. The response
+            // is terminal and must not be replayed; report the lost consumer
+            // without escalating an expected guest teardown into a sidecar
+            // process failure.
+            eprintln!(
+                "WARN_AGENTOS_DIRECT_HOST_REPLY_RECEIVER_CANCELED: generation={} pid={} callId={}",
+                self.identity.generation, self.identity.pid, self.identity.call_id
+            );
+        }
+        Ok(())
     }
 
     fn dismiss_claimed(&self, call_id: u64) -> Result<(), HostServiceError> {
@@ -73,12 +81,19 @@ impl DirectHostReplyTarget for DirectHostReplyWaiterTarget {
             .ok_or_else(|| {
                 HostServiceError::new("EALREADY", "direct host-reply waiter is already settled")
             })?;
-        sender
+        if sender
             .send(Err(HostServiceError::new(
                 "ERR_AGENTOS_EXEC_REPLACED",
                 "the kernel committed a replacement process image",
             )))
-            .map_err(|_| HostServiceError::new("EPIPE", "direct host-reply receiver was canceled"))
+            .is_err()
+        {
+            eprintln!(
+                "WARN_AGENTOS_DIRECT_HOST_REPLY_RECEIVER_CANCELED: generation={} pid={} callId={} execReplacement=true",
+                self.identity.generation, self.identity.pid, self.identity.call_id
+            );
+        }
+        Ok(())
     }
 }
 
@@ -785,6 +800,38 @@ mod tests {
             reply.succeed(HostCallReply::Empty).unwrap_err().code,
             "EALREADY"
         );
+    }
+
+    #[test]
+    fn cancellation_after_claim_does_not_escalate_terminal_reply_delivery() {
+        let identity = HostCallIdentity {
+            generation: 9,
+            pid: 17,
+            call_id: 27,
+        };
+        let (reply, receiver) = direct_host_reply_channel(identity, 1024).expect("direct channel");
+        assert!(reply.claim().expect("claim before cancellation"));
+        drop(receiver);
+        reply
+            .succeed(HostCallReply::Empty)
+            .expect("claimed side effect remains terminal after waiter cancellation");
+        assert!(!reply.delivery_failed());
+    }
+
+    #[test]
+    fn cancellation_after_exec_claim_does_not_escalate_dismissal() {
+        let identity = HostCallIdentity {
+            generation: 9,
+            pid: 17,
+            call_id: 28,
+        };
+        let (reply, receiver) = direct_host_reply_channel(identity, 1024).expect("direct channel");
+        assert!(reply.claim().expect("claim exec before cancellation"));
+        drop(receiver);
+        reply
+            .dismiss_claimed()
+            .expect("exec dismissal remains terminal after waiter cancellation");
+        assert!(!reply.delivery_failed());
     }
 
     #[test]

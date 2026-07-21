@@ -69,6 +69,7 @@ export {
 	SOCK_DGRAM,
 	SOCK_STREAM,
 } from "../../runtime-core/src/test-runtime.js";
+
 import {
 	allowAll,
 	createInMemoryFileSystem,
@@ -76,6 +77,7 @@ import {
 	createNodeRuntime,
 	createWasmVmRuntime,
 } from "../../runtime-core/src/test-runtime.js";
+
 export type {
 	DriverProcess,
 	Kernel,
@@ -86,18 +88,28 @@ export type {
 	VirtualFileSystem,
 } from "../../runtime-core/src/test-runtime.js";
 export {
-	createWasmVmRuntime,
-	DEFAULT_FIRST_PARTY_TIERS,
-	WASMVM_COMMANDS,
-	type PermissionTier,
-	type WasmVmRuntimeOptions,
-} from "../../runtime-core/src/test-runtime.js";
-export {
 	createNodeHostNetworkAdapter,
 	createNodeRuntime,
+	createWasmVmRuntime,
+	DEFAULT_FIRST_PARTY_TIERS,
 	NodeFileSystem,
+	type PermissionTier,
+	WASMVM_COMMANDS,
+	type WasmVmRuntimeOptions,
 } from "../../runtime-core/src/test-runtime.js";
 export { TerminalHarness } from "./terminal-harness.js";
+
+type TestWasmBackend = "v8" | "wasmtime";
+
+function configuredTestWasmBackend(): TestWasmBackend | undefined {
+	const backend = process.env.AGENTOS_TEST_WASM_BACKEND;
+	if (backend === undefined || backend === "v8" || backend === "wasmtime") {
+		return backend;
+	}
+	throw new Error(
+		`AGENTOS_TEST_WASM_BACKEND must be "v8" or "wasmtime", got ${JSON.stringify(backend)}`,
+	);
+}
 
 /**
  * Registry integration tests assume they can bootstrap runtimes and /bin stubs
@@ -109,6 +121,7 @@ export function createKernel(
 	return createKernelBase({
 		...options,
 		permissions: options.permissions ?? allowAll,
+		wasmBackend: options.wasmBackend ?? configuredTestWasmBackend(),
 	});
 }
 
@@ -123,6 +136,8 @@ export interface IntegrationKernelOptions {
 	loopbackExemptPorts?: number[];
 	commandDirs?: string[];
 	permissions?: Parameters<typeof createKernelBase>[0]["permissions"];
+	/** VM-wide engine used by standalone WASM commands in this test kernel. */
+	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 }
 
 /**
@@ -141,11 +156,14 @@ export async function createIntegrationKernel(
 		filesystem: vfs,
 		loopbackExemptPorts: options?.loopbackExemptPorts,
 		permissions: options?.permissions,
+		wasmBackend: options?.wasmBackend,
 	});
 
 	if (runtimes.includes("wasmvm")) {
 		await kernel.mount(
-			createWasmVmRuntime({ commandDirs: options?.commandDirs ?? [COMMANDS_DIR] }),
+			createWasmVmRuntime({
+				commandDirs: options?.commandDirs ?? [COMMANDS_DIR],
+			}),
 		);
 	}
 	if (runtimes.includes("node")) {

@@ -9,13 +9,13 @@ use crate::dns::{
 #[cfg(test)]
 use crate::fd_table::WASI_RIGHT_FD_FILESTAT_GET;
 use crate::fd_table::{
-    AnonymousFile, AnonymousFileUsage, FdEntry, FdStat, FdTableError, FdTableManager,
-    FileDescription, FileLockManager, FileLockTarget, FlockOperation, ProcessFdTable, RecordLock,
-    RecordLockType, SharedAnonymousFile, TransferredFd, FD_CLOEXEC, FILETYPE_CHARACTER_DEVICE,
-    FILETYPE_DIRECTORY, FILETYPE_PIPE, FILETYPE_REGULAR_FILE, FILETYPE_SOCKET_DGRAM,
-    FILETYPE_SOCKET_STREAM, FILETYPE_SYMBOLIC_LINK, F_DUPFD, F_SETFD, O_APPEND, O_CREAT, O_DIRECT,
-    O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY,
-    WASI_PREOPEN_READ_RIGHTS_BASE, WASI_PREOPEN_READ_RIGHTS_INHERITING,
+    AnonymousFile, AnonymousFileUsage, DirectorySnapshotEntry, FdEntry, FdStat, FdTableError,
+    FdTableManager, FileDescription, FileLockManager, FileLockTarget, FlockOperation,
+    ProcessFdTable, RecordLock, RecordLockType, SharedAnonymousFile, TransferredFd, FD_CLOEXEC,
+    FILETYPE_CHARACTER_DEVICE, FILETYPE_DIRECTORY, FILETYPE_PIPE, FILETYPE_REGULAR_FILE,
+    FILETYPE_SOCKET_DGRAM, FILETYPE_SOCKET_STREAM, FILETYPE_SYMBOLIC_LINK, F_DUPFD, F_SETFD,
+    O_APPEND, O_CREAT, O_DIRECT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_RDWR,
+    O_TRUNC, O_WRONLY, WASI_PREOPEN_READ_RIGHTS_BASE, WASI_PREOPEN_READ_RIGHTS_INHERITING,
     WASI_PREOPEN_READ_WRITE_RIGHTS_BASE, WASI_PREOPEN_READ_WRITE_RIGHTS_INHERITING,
     WASI_PREOPEN_WRITE_RIGHTS_BASE, WASI_PREOPEN_WRITE_RIGHTS_INHERITING, WASI_RIGHT_FD_ALLOCATE,
     WASI_RIGHT_FD_DATASYNC, WASI_RIGHT_FD_FILESTAT_SET_SIZE, WASI_RIGHT_FD_FILESTAT_SET_TIMES,
@@ -114,6 +114,15 @@ pub struct RuntimeLaunchImage {
     pub mode: u32,
 }
 
+/// Kernel-resolved executable image and Linux argv after following a bounded
+/// shebang chain. Executors compile only `image`; process semantics remain in
+/// the kernel so V8 and Wasmtime cannot disagree about interpreter handling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRuntimeLaunchImage {
+    pub image: RuntimeLaunchImage,
+    pub argv: Vec<String>,
+}
+
 /// Bounded prefix used to classify a runtime image before the engine-specific
 /// full-image loader applies its own named size limit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,7 +192,13 @@ impl fmt::Display for KernelError {
 
 impl Error for KernelError {}
 
-fn linux_shebang_interpreter(header: &[u8], path: &str) -> KernelResult<Option<String>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinuxShebang {
+    interpreter: String,
+    optional_argument: Option<String>,
+}
+
+fn parse_linux_shebang(header: &[u8], path: &str) -> KernelResult<Option<LinuxShebang>> {
     if !header.starts_with(b"#!") {
         return Ok(None);
     }
@@ -224,7 +239,32 @@ fn linux_shebang_interpreter(header: &[u8], path: &str) -> KernelResult<Option<S
             format!("invalid shebang line: {path}"),
         ));
     }
-    Ok(Some(interpreter.to_owned()))
+    let optional_argument = separator
+        .map(|index| &interpreter_tail[index..])
+        .map(|value| {
+            let start = value
+                .iter()
+                .position(|byte| !matches!(*byte, b' ' | b'\t'))
+                .unwrap_or(value.len());
+            let end = value
+                .iter()
+                .rposition(|byte| !matches!(*byte, b' ' | b'\t'))
+                .map(|index| index + 1)
+                .unwrap_or(start);
+            &value[start..end]
+        })
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            std::str::from_utf8(value)
+                .map(str::to_owned)
+                .map_err(|_| KernelError::new("ENOEXEC", format!("invalid shebang line: {path}")))
+        })
+        .transpose()?;
+
+    Ok(Some(LinuxShebang {
+        interpreter: interpreter.to_owned(),
+        optional_argument,
+    }))
 }
 
 #[derive(Clone)]
@@ -590,12 +630,50 @@ impl KernelProcessHandle {
         Ok(self.processes.begin_signal_delivery(self.pid)?)
     }
 
+    pub fn register_signal_thread(&self, thread_id: u32, inherit_from: u32) -> KernelResult<()> {
+        Ok(self
+            .processes
+            .register_signal_thread(self.pid, thread_id, inherit_from)?)
+    }
+
+    pub fn unregister_signal_thread(&self, thread_id: u32) -> KernelResult<()> {
+        Ok(self
+            .processes
+            .unregister_signal_thread(self.pid, thread_id)?)
+    }
+
+    pub fn begin_signal_delivery_for_thread(
+        &self,
+        thread_id: u32,
+    ) -> KernelResult<Option<SignalDelivery>> {
+        Ok(self
+            .processes
+            .begin_signal_delivery_for_thread(self.pid, thread_id)?)
+    }
+
     pub fn end_signal_delivery(&self, token: u64) -> KernelResult<()> {
         Ok(self.processes.end_signal_delivery(self.pid, token)?)
     }
 
+    pub fn end_signal_delivery_for_thread(&self, thread_id: u32, token: u64) -> KernelResult<()> {
+        Ok(self
+            .processes
+            .end_signal_delivery_for_thread(self.pid, thread_id, token)?)
+    }
+
     pub fn sigprocmask(&self, how: SigmaskHow, set: SignalSet) -> KernelResult<SignalSet> {
         Ok(self.processes.sigprocmask(self.pid, how, set)?)
+    }
+
+    pub fn sigprocmask_for_thread(
+        &self,
+        thread_id: u32,
+        how: SigmaskHow,
+        set: SignalSet,
+    ) -> KernelResult<SignalSet> {
+        Ok(self
+            .processes
+            .sigprocmask_for_thread(self.pid, thread_id, how, set)?)
     }
 
     pub fn sigpending(&self) -> KernelResult<SignalSet> {
@@ -606,8 +684,28 @@ impl KernelProcessHandle {
         Ok(self.processes.begin_temporary_signal_mask(self.pid, mask)?)
     }
 
+    pub fn begin_temporary_signal_mask_for_thread(
+        &self,
+        thread_id: u32,
+        mask: SignalSet,
+    ) -> KernelResult<u64> {
+        Ok(self
+            .processes
+            .begin_temporary_signal_mask_for_thread(self.pid, thread_id, mask)?)
+    }
+
     pub fn end_temporary_signal_mask(&self, token: u64) -> KernelResult<()> {
         Ok(self.processes.end_temporary_signal_mask(self.pid, token)?)
+    }
+
+    pub fn end_temporary_signal_mask_for_thread(
+        &self,
+        thread_id: u32,
+        token: u64,
+    ) -> KernelResult<()> {
+        Ok(self
+            .processes
+            .end_temporary_signal_mask_for_thread(self.pid, thread_id, token)?)
     }
 
     pub fn end_temporary_signal_mask_and_begin_signal_delivery(
@@ -617,6 +715,18 @@ impl KernelProcessHandle {
         Ok(self
             .processes
             .end_temporary_signal_mask_and_begin_signal_delivery(self.pid, token)?)
+    }
+
+    pub fn end_temporary_signal_mask_and_begin_signal_delivery_for_thread(
+        &self,
+        thread_id: u32,
+        token: u64,
+    ) -> KernelResult<Option<SignalDelivery>> {
+        Ok(self
+            .processes
+            .end_temporary_signal_mask_and_begin_signal_delivery_for_thread(
+                self.pid, thread_id, token,
+            )?)
     }
 }
 
@@ -3855,6 +3965,147 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         })
     }
 
+    /// Load the exact `fexecve(2)` source and resolve Linux shebang semantics
+    /// before handing an engine the final WebAssembly image. The descriptor
+    /// snapshot remains the source of truth for the first image; interpreters
+    /// are resolved live through the kernel VFS and registered command
+    /// projections. No executor-local filesystem mirror participates.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_resolved_process_runtime_image_from_fd(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        cwd: &str,
+        argv: &[String],
+        close_on_exec_fds: &[u32],
+        maximum_bytes: u64,
+    ) -> KernelResult<ResolvedRuntimeLaunchImage> {
+        let image =
+            self.load_process_runtime_image_from_fd(requester_driver, pid, fd, maximum_bytes)?;
+        self.resolve_process_runtime_image(
+            pid,
+            image,
+            format!("/proc/self/fd/{fd}"),
+            Some(fd),
+            cwd,
+            argv,
+            close_on_exec_fds,
+            maximum_bytes,
+        )
+    }
+
+    /// Resolve a pathname `execve(2)` image through the same kernel-owned
+    /// shebang path used by descriptor exec. `subject` remains the caller's
+    /// pathname spelling because Linux exposes it to the interpreter argv.
+    pub fn load_resolved_process_runtime_image(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+        cwd: &str,
+        argv: &[String],
+        maximum_bytes: u64,
+    ) -> KernelResult<ResolvedRuntimeLaunchImage> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let image = self.load_process_runtime_exec_path(pid, path, cwd, maximum_bytes)?;
+        self.resolve_process_runtime_image(
+            pid,
+            image,
+            path.to_owned(),
+            None,
+            cwd,
+            argv,
+            &[],
+            maximum_bytes,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_process_runtime_image(
+        &mut self,
+        pid: u32,
+        mut image: RuntimeLaunchImage,
+        mut subject: String,
+        descriptor_script_fd: Option<u32>,
+        cwd: &str,
+        argv: &[String],
+        close_on_exec_fds: &[u32],
+        maximum_bytes: u64,
+    ) -> KernelResult<ResolvedRuntimeLaunchImage> {
+        let mut resolved_argv = argv.to_vec();
+        let mut interpreter_depth = 0;
+        let mut descriptor_script_fd = descriptor_script_fd;
+
+        loop {
+            if image.bytes.starts_with(b"\0asm") {
+                return Ok(ResolvedRuntimeLaunchImage {
+                    image,
+                    argv: resolved_argv,
+                });
+            }
+            let header = &image.bytes[..image.bytes.len().min(SHEBANG_LINE_MAX_BYTES)];
+            let Some(shebang) = parse_linux_shebang(header, &subject)? else {
+                return Err(KernelError::new(
+                    "ENOEXEC",
+                    format!("exec format error: {subject}"),
+                ));
+            };
+            if descriptor_script_fd.is_some_and(|fd| close_on_exec_fds.contains(&fd)) {
+                return Err(KernelError::new(
+                    "ENOENT",
+                    format!("{subject} will be closed before its interpreter opens it"),
+                ));
+            }
+            descriptor_script_fd = None;
+            if interpreter_depth >= MAX_EXEC_INTERPRETER_DEPTH {
+                return Err(KernelError::new(
+                    "ELOOP",
+                    format!("interpreter recursion for {subject} exceeds the Linux limit"),
+                ));
+            }
+            interpreter_depth += 1;
+
+            let mut interpreter_argv = Vec::with_capacity(resolved_argv.len() + 2);
+            interpreter_argv.push(shebang.interpreter.clone());
+            if let Some(argument) = shebang.optional_argument {
+                interpreter_argv.push(argument);
+            }
+            interpreter_argv.push(subject);
+            interpreter_argv.extend(resolved_argv.into_iter().skip(1));
+            resolved_argv = interpreter_argv;
+            subject = shebang.interpreter.clone();
+
+            image =
+                self.load_process_runtime_exec_path(pid, &shebang.interpreter, cwd, maximum_bytes)?;
+        }
+    }
+
+    fn load_process_runtime_exec_path(
+        &mut self,
+        pid: u32,
+        path: &str,
+        cwd: &str,
+        maximum_bytes: u64,
+    ) -> KernelResult<RuntimeLaunchImage> {
+        let requested_path = if path.starts_with('/') {
+            normalize_path(path)
+        } else {
+            normalize_path(&format!("{cwd}/{path}"))
+        };
+        let registered_command = self.resolve_registered_command_path(&requested_path);
+        let authorized_path = self
+            .resolve_executable_path(path, cwd, Some(pid))?
+            .ok_or_else(|| KernelError::command_not_found(path))?;
+        let runtime_path = if let Some(command) = registered_command {
+            self.resolve_registered_command_runtime_path(&command)?
+        } else {
+            authorized_path
+        };
+        self.load_runtime_image_after_authorization(&runtime_path, maximum_bytes)
+    }
+
     pub fn load_process_runtime_image_prefix(
         &mut self,
         requester_driver: &str,
@@ -6378,6 +6629,26 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 return Err(read_only_filesystem_error(path));
             }
 
+            if let ProcNode::PidFdLink {
+                pid: target_pid,
+                fd,
+            } = &proc_node
+            {
+                if *target_pid == pid {
+                    // `/proc/self/fd/N` is an open-file-description alias, not
+                    // a pathname reopen. Following its display target would
+                    // break Linux's unlinked-fd semantics (notably fexecve of
+                    // scripts), because that target ends in ` (deleted)`.
+                    return self.fd_open(
+                        requester_driver,
+                        pid,
+                        &format!("/dev/fd/{fd}"),
+                        flags,
+                        mode,
+                    );
+                }
+            }
+
             if matches!(
                 proc_node,
                 ProcNode::SelfLink { .. }
@@ -6497,6 +6768,30 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.assert_driver_owns(requester_driver, pid)?;
         let tier = self.processes.permission_tier(pid)?;
 
+        // Resolve the current process's proc-fd spelling to the existing
+        // `/dev/fd` capability path before pathname canonicalization. Both are
+        // Linux symlink aliases for the same open description, but following
+        // procfs's display target would fail for an unlinked file.
+        if parse_dev_fd_path(path)?.is_none() {
+            if let Some(ProcNode::PidFdLink {
+                pid: target_pid,
+                fd,
+            }) = self.resolve_proc_node(path, Some(pid))?
+            {
+                if target_pid == pid {
+                    return self.fd_open_with_rights(
+                        requester_driver,
+                        pid,
+                        parent_fd,
+                        &format!("/dev/fd/{fd}"),
+                        flags,
+                        mode,
+                        requested_rights,
+                    );
+                }
+            }
+        }
+
         if requested_rights.is_some() && parent_fd.is_none() {
             return Err(KernelError::new(
                 "EACCES",
@@ -6598,8 +6893,18 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             }
         }
 
-        let source_rights = if parse_dev_fd_path(path)?.is_some() {
-            let source_fd = parse_dev_fd_path(path)?.expect("checked above");
+        let source_fd = if let Some(source_fd) = parse_dev_fd_path(path)? {
+            Some(source_fd)
+        } else {
+            match self.resolve_proc_node(path, Some(pid))? {
+                Some(ProcNode::PidFdLink {
+                    pid: target_pid,
+                    fd,
+                }) if target_pid == pid => Some(fd),
+                _ => None,
+            }
+        };
+        let source_rights = if let Some(source_fd) = source_fd {
             let source = self.fd_stat(requester_driver, pid, source_fd)?;
             Some((source.rights, source.rights_inheriting))
         } else {
@@ -7864,12 +8169,14 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
         let path = self.fd_path(requester_driver, pid, fd)?;
         let children = self.read_dir_with_types_for_process(requester_driver, pid, &path)?;
-        self.resources
-            .check_readdir_entries(children.len().saturating_add(2))?;
 
         // fd_readdir is the Linux-like descriptor traversal surface. Unlike
         // path-based Node readdir, it exposes the synthetic current/parent
         // entries and inode identities used by libc readdir/telldir/seekdir.
+        // The configured limit bounds real directory children; these two
+        // kernel-synthesized framing entries must not make an exactly-at-limit
+        // directory unreadable. `children` was already checked above, so this
+        // allocation remains bounded by maxReaddirEntries + 2.
         let current_stat = self.stat_internal(Some(pid), &path)?;
         let parent = parent_path(&path);
         let parent_stat = self.stat_internal(Some(pid), &parent)?;
@@ -7892,6 +8199,93 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             entries.push(ProcessFdDirEntry {
                 name: child.name,
                 ino: required_dirent_ino(&child_path, child_stat.ino)?,
+                is_directory: child.is_directory,
+                is_symbolic_link: child.is_symbolic_link,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// Reads one descriptor-directory page without inode-statting entries that
+    /// cannot fit in the requested page. `cookie` and returned ordering use the
+    /// same logical stream as [`Self::fd_read_dir_with_types`], including `.`
+    /// and `..` at positions zero and one. A read beginning at cookie zero
+    /// snapshots the bounded child-name set on the shared open-file
+    /// description. Later pages use that snapshot so removing an earlier page
+    /// cannot shift live vector indices and skip undeleted entries.
+    pub fn fd_read_dir_page_with_types(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        cookie: usize,
+        max_entries: usize,
+    ) -> KernelResult<Vec<ProcessFdDirEntry>> {
+        let stat = self.fd_stat(requester_driver, pid, fd)?;
+        if stat.filetype != FILETYPE_DIRECTORY {
+            return Err(KernelError::new(
+                "ENOTDIR",
+                format!("file descriptor {fd} is not a directory"),
+            ));
+        }
+        let description = self.description_for_fd(requester_driver, pid, fd)?;
+        if description.detached_directory_stat().is_some() || max_entries == 0 {
+            return Ok(Vec::new());
+        }
+        let path = self.fd_path(requester_driver, pid, fd)?;
+        if cookie == 0 || description.directory_snapshot_page(0, 0).is_none() {
+            let children = self.read_dir_with_types_for_process(requester_driver, pid, &path)?;
+            let mut snapshot = Vec::with_capacity(children.len());
+            for child in children {
+                let child_path = join_child_path(&path, &child.name);
+                let child_stat = self.lstat_internal(Some(pid), &child_path)?;
+                snapshot.push(DirectorySnapshotEntry {
+                    name: child.name,
+                    ino: required_dirent_ino(&child_path, child_stat.ino)?,
+                    is_directory: child.is_directory,
+                    is_symbolic_link: child.is_symbolic_link,
+                });
+            }
+            description.reset_directory_snapshot(snapshot);
+        }
+        let first_child = cookie.saturating_sub(2);
+        let requested_children = cookie
+            .saturating_add(max_entries)
+            .saturating_sub(cookie.max(2));
+        let (child_count, child_names) = description
+            .directory_snapshot_page(first_child, requested_children)
+            .expect("directory snapshot was initialized above");
+        let total_entries = child_count.saturating_add(2);
+        if cookie >= total_entries {
+            return Ok(Vec::new());
+        }
+
+        let mut entries = Vec::with_capacity(max_entries.min(total_entries - cookie));
+        let page_end = cookie.saturating_add(max_entries).min(total_entries);
+        if cookie == 0 && page_end > 0 {
+            let current_stat = self.stat_internal(Some(pid), &path)?;
+            entries.push(ProcessFdDirEntry {
+                name: String::from("."),
+                ino: required_dirent_ino(&path, current_stat.ino)?,
+                is_directory: true,
+                is_symbolic_link: false,
+            });
+        }
+        if cookie <= 1 && page_end > 1 {
+            let parent = parent_path(&path);
+            let parent_stat = self.stat_internal(Some(pid), &parent)?;
+            entries.push(ProcessFdDirEntry {
+                name: String::from(".."),
+                ino: required_dirent_ino(&parent, parent_stat.ino)?,
+                is_directory: true,
+                is_symbolic_link: false,
+            });
+        }
+
+        for child in child_names {
+            entries.push(ProcessFdDirEntry {
+                name: child.name,
+                ino: child.ino,
                 is_directory: child.is_directory,
                 is_symbolic_link: child.is_symbolic_link,
             });
@@ -9054,7 +9448,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             return Ok(());
         }
 
-        let Some(interpreter) = linux_shebang_interpreter(&header, &resolved)? else {
+        let Some(shebang) = parse_linux_shebang(&header, &resolved)? else {
             return Err(KernelError::new(
                 "ENOEXEC",
                 format!("exec format error: {resolved}"),
@@ -9067,12 +9461,12 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             ));
         }
 
-        self.validate_wasm_exec_image_inner(&interpreter, cwd, interpreter_depth + 1)
+        self.validate_wasm_exec_image_inner(&shebang.interpreter, cwd, interpreter_depth + 1)
     }
 
     fn resolve_registered_command_path(&self, path: &str) -> Option<String> {
         let normalized = normalize_path(path);
-        for prefix in ["/bin/", "/usr/bin/", "/usr/local/bin/"] {
+        for prefix in ["/bin/", "/usr/bin/", "/usr/local/bin/", "/opt/agentos/bin/"] {
             let Some(name) = normalized.strip_prefix(prefix) else {
                 continue;
             };
@@ -9091,6 +9485,44 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         None
+    }
+
+    fn resolve_registered_command_runtime_path(&mut self, command: &str) -> KernelResult<String> {
+        let mut roots = match self.read_dir("/__secure_exec/commands") {
+            Ok(roots) => roots,
+            Err(error) if error.code() == "ENOENT" => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        roots.retain(|entry| {
+            !entry.is_empty() && entry.chars().all(|character| character.is_ascii_digit())
+        });
+        roots.sort();
+        for root in roots {
+            let candidate = normalize_path(&format!("/__secure_exec/commands/{root}/{command}"));
+            if let Some(path) = self.resolve_live_runtime_file(&candidate)? {
+                return Ok(path);
+            }
+        }
+
+        let projected = normalize_path(&format!("/opt/agentos/bin/{command}"));
+        if let Some(path) = self.resolve_live_runtime_file(&projected)? {
+            return Ok(path);
+        }
+
+        Err(KernelError::new(
+            "ENOENT",
+            format!("registered command image is unavailable: {command}"),
+        ))
+    }
+
+    fn resolve_live_runtime_file(&mut self, candidate: &str) -> KernelResult<Option<String>> {
+        let canonical = match self.raw_filesystem_mut().realpath(candidate) {
+            Ok(path) => normalize_path(&path),
+            Err(error) if matches!(error.code(), "ENOENT" | "ENOTDIR") => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let stat = self.raw_filesystem_mut().lstat(&canonical)?;
+        Ok((!stat.is_directory && !stat.is_symbolic_link).then_some(canonical))
     }
 
     fn parse_shebang_command(&mut self, path: &str) -> KernelResult<Option<ShebangCommand>> {
@@ -12094,6 +12526,99 @@ mod tests {
             .expect("open description survives unlink");
         assert_eq!(unlinked.bytes, image);
         assert!(unlinked.canonical_path.ends_with(" (deleted)"));
+        let alias = kernel
+            .fd_open("wasm", pid, &format!("/proc/self/fd/{fd}"), O_RDONLY, None)
+            .expect("proc fd alias duplicates an unlinked open description");
+        assert_eq!(
+            kernel
+                .fd_pread("wasm", pid, alias, image.len(), 0)
+                .expect("read duplicated unlinked proc fd alias"),
+            image
+        );
+    }
+
+    #[test]
+    fn descriptor_runtime_image_resolves_shebang_in_kernel() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        kernel
+            .register_driver(CommandDriver::new("wasm", ["sh"]))
+            .expect("register shell projection");
+        kernel
+            .mkdir("/__secure_exec/commands/0", true)
+            .expect("create command projection root");
+        let shell_image = b"\0asm\x01\0\0\0".to_vec();
+        kernel
+            .write_file("/__secure_exec/commands/0/sh", shell_image.clone())
+            .expect("write projected shell image");
+        kernel
+            .write_file_for_process(
+                "wasm",
+                pid,
+                "/script",
+                b"#!/bin/sh -e\necho ok\n".to_vec(),
+                Some(0o755),
+            )
+            .expect("write executable script");
+        let fd = kernel
+            .fd_open("wasm", pid, "/script", O_RDONLY, None)
+            .expect("open script");
+
+        let resolved = kernel
+            .load_resolved_process_runtime_image_from_fd(
+                "wasm",
+                pid,
+                fd,
+                "/",
+                &[String::from("script-name"), String::from("argument")],
+                &[],
+                1024,
+            )
+            .expect("resolve descriptor shebang");
+        assert_eq!(resolved.image.bytes, shell_image);
+        assert_eq!(
+            resolved.argv,
+            vec![
+                String::from("/bin/sh"),
+                String::from("-e"),
+                format!("/proc/self/fd/{fd}"),
+                String::from("argument"),
+            ]
+        );
+
+        let resolved_path = kernel
+            .load_resolved_process_runtime_image(
+                "wasm",
+                pid,
+                "/script",
+                "/",
+                &[String::from("script-name"), String::from("argument")],
+                1024,
+            )
+            .expect("resolve pathname shebang");
+        assert_eq!(resolved_path.image.bytes, shell_image);
+        assert_eq!(
+            resolved_path.argv,
+            vec![
+                String::from("/bin/sh"),
+                String::from("-e"),
+                String::from("/script"),
+                String::from("argument"),
+            ]
+        );
+
+        let error = kernel
+            .load_resolved_process_runtime_image_from_fd(
+                "wasm",
+                pid,
+                fd,
+                "/",
+                &[String::from("script-name")],
+                &[fd],
+                1024,
+            )
+            .expect_err("close-on-exec script descriptor must fail like Linux");
+        assert_eq!(error.code(), "ENOENT");
     }
 
     #[test]

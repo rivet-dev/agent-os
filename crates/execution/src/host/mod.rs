@@ -31,7 +31,7 @@ use std::sync::Arc;
 /// Authority identifying the already-registered process issuing a host call.
 /// Permission tier and resource rights are looked up from kernel state; they
 /// are intentionally not caller-selectable fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct HostProcessContext {
     pub generation: u64,
     pub pid: u32,

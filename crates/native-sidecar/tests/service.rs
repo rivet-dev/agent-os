@@ -111,7 +111,7 @@ mod service {
             RequestFrame, RequestPayload, ResponsePayload, RootFilesystemEntry,
             RootFilesystemEntryEncoding, RootFilesystemEntryKind, SessionOpenedResponse,
             SidecarPlacement, SidecarPlacementShared, SidecarRequestFrame, SidecarRequestPayload,
-            SidecarResponsePayload, WriteStdinRequest,
+            SidecarResponsePayload, StandaloneWasmBackend, WriteStdinRequest,
         };
         use crate::state::VmDnsConfig;
         use crate::state::{
@@ -388,7 +388,7 @@ mod service {
             ServerConnection, SignatureScheme,
         };
         use serde_json::{json, Value};
-        use std::collections::BTreeMap;
+        use std::collections::{BTreeMap, HashMap};
         use std::fs;
         use std::io::{BufReader, Read, Write};
         use std::net::{SocketAddr, TcpListener, UdpSocket};
@@ -1649,6 +1649,66 @@ ykAheWCsAteSEWVc0w==\n\
             ));
         }
 
+        fn runtime_fault_pump_publishes_exit_and_cleans_up_process() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate sidecar");
+            let vm_id = create_vm_with_metadata(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+                BTreeMap::new(),
+            )
+            .expect("create vm");
+            let process_id = String::from("proc-runtime-fault");
+            let process = spawn_vm_wasm_binding_process(&mut sidecar, &vm_id);
+            sidecar
+                .vms
+                .get_mut(&vm_id)
+                .expect("test vm")
+                .active_processes
+                .insert(process_id.clone(), process);
+
+            let fault = agentos_execution::backend::ExecutionEvent::runtime_fault(
+                HostServiceError::new("ERR_AGENTOS_TEST_RUNTIME_FAULT", "test runtime fault"),
+                &agentos_execution::backend::PayloadLimit::new("test.maxRuntimeFaultBytes", 4096)
+                    .expect("runtime fault limit"),
+            )
+            .expect("bounded runtime fault");
+            sidecar
+                .vms
+                .get_mut(&vm_id)
+                .expect("test vm")
+                .active_processes
+                .get_mut(&process_id)
+                .expect("test process")
+                .queue_pending_execution_event(ActiveExecutionEvent::Common(fault))
+                .expect("queue runtime fault");
+
+            let ownership = OwnershipScope::vm(&connection_id, &session_id, &vm_id);
+            let frame = block_on_sidecar!(
+                sidecar,
+                sidecar.poll_event(&ownership, Duration::from_secs(1))
+            )
+            .expect("poll runtime fault exit")
+            .expect("runtime fault must publish an exit frame");
+            let EventPayload::ProcessExited(exit) = frame.payload else {
+                panic!("runtime fault must publish ProcessExited");
+            };
+            assert_eq!(exit.process_id, process_id);
+            assert_eq!(exit.exit_code, 1);
+            assert!(
+                !sidecar
+                    .vms
+                    .get(&vm_id)
+                    .expect("test vm")
+                    .active_processes
+                    .contains_key(&process_id),
+                "runtime fault cleanup must remove the active process"
+            );
+        }
+
         fn assert_handle_limit_error(error: SidecarError) {
             assert!(
                 error.to_string().contains("handle limit exceeded"),
@@ -2406,15 +2466,27 @@ ykAheWCsAteSEWVc0w==\n\
             permissions: PermissionsPolicy,
             metadata: BTreeMap<String, String>,
         ) -> Result<String, SidecarError> {
+            let legacy_request = CreateVmRequest::legacy_test_config(
+                GuestRuntimeKind::JavaScript,
+                metadata.into_iter().collect(),
+                Default::default(),
+                Some(permissions),
+            );
+            let mut config: agentos_vm_config::CreateVmConfig =
+                serde_json::from_str(&legacy_request.config).expect("decode test VM config");
+            config.wasm_backend = match std::env::var("AGENTOS_TEST_WASM_BACKEND").as_deref() {
+                Ok("v8") => Some(agentos_vm_config::StandaloneWasmBackend::V8),
+                Ok("wasmtime") => Some(agentos_vm_config::StandaloneWasmBackend::Wasmtime),
+                Ok(value) => panic!("unknown AGENTOS_TEST_WASM_BACKEND value {value:?}"),
+                Err(_) => None,
+            };
             let response = sidecar
                 .dispatch_blocking(request(
                     3,
                     OwnershipScope::session(connection_id, session_id),
-                    RequestPayload::CreateVm(CreateVmRequest::legacy_test_config(
+                    RequestPayload::CreateVm(CreateVmRequest::json_config(
                         GuestRuntimeKind::JavaScript,
-                        metadata.into_iter().collect(),
-                        Default::default(),
-                        Some(permissions),
+                        config,
                     )),
                 ))
                 .expect("create vm");
@@ -2977,7 +3049,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
             outputs
         }
 
-        fn ledger_usage_snapshot(resources: &ResourceLedger) -> [usize; 30] {
+        fn ledger_usage_snapshot(resources: &ResourceLedger) -> [usize; ResourceClass::ALL.len()] {
             ResourceClass::ALL.map(|class| resources.usage(class).used)
         }
 
@@ -3779,9 +3851,26 @@ console.log(JSON.stringify({ status: "ok", summary }));
             let mut stderr = Vec::new();
             let mut exit_code = None;
             let deadline = Instant::now() + Duration::from_secs(30);
-            let mut events_drained = 0;
-            while events_drained < 10_000 && Instant::now() < deadline {
-                events_drained += 1;
+            let mut events_drained: usize = 0;
+            let mut matched_envelopes = 0;
+            let mut empty_polls = 0;
+            let mut common_events = 0;
+            let mut common_host_calls = 0;
+            let mut common_outputs = 0;
+            let mut common_warnings = 0;
+            let mut common_faults = 0;
+            let mut common_exits = 0;
+            let mut rpc_events = 0;
+            let mut completion_events = 0;
+            let mut read_rechecks = 0;
+            let mut udp_rechecks = 0;
+            let mut signal_events = 0;
+            // Wasmtime exposes each owned ABI call as an individual common
+            // event, so a syscall-heavy command can legitimately exceed the
+            // old 10,000-iteration V8-oriented guard. The wall-clock deadline
+            // is the authoritative bound for this synchronous test helper.
+            while Instant::now() < deadline {
+                events_drained = events_drained.saturating_add(1);
                 pump_sibling_internal_process_events(sidecar, vm_id, process_id);
                 block_on_sidecar!(sidecar, sidecar.pump_child_process_events(vm_id))
                     .expect("pump attached child process events");
@@ -3789,6 +3878,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     .take_matching_process_event_envelope(vm_id, process_id)
                     .expect("drain queued sidecar process event")
                 {
+                    matched_envelopes += 1;
                     block_on_sidecar!(sidecar, sidecar.handle_process_event_envelope(envelope))
                         .expect("handle queued sidecar process event");
                     continue;
@@ -3808,6 +3898,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     if exit_code.is_some() {
                         break;
                     }
+                    empty_polls += 1;
                     continue;
                 };
 
@@ -3821,12 +3912,32 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     ActiveExecutionEvent::Exited(code) => {
                         exit_code = Some(*code);
                     }
-                    ActiveExecutionEvent::Common(_)
-                    | ActiveExecutionEvent::HostRpcRequest(_)
-                    | ActiveExecutionEvent::HostCallCompletion(_)
-                    | ActiveExecutionEvent::ManagedStreamReadRecheck(_)
-                    | ActiveExecutionEvent::ManagedUdpPollRecheck(_)
-                    | ActiveExecutionEvent::SignalState { .. } => {}
+                    ActiveExecutionEvent::Common(event) => {
+                        common_events += 1;
+                        match event {
+                            agentos_execution::backend::ExecutionEvent::HostCall { .. } => {
+                                common_host_calls += 1;
+                            }
+                            agentos_execution::backend::ExecutionEvent::Output { .. } => {
+                                common_outputs += 1;
+                            }
+                            agentos_execution::backend::ExecutionEvent::Warning(_) => {
+                                common_warnings += 1;
+                            }
+                            agentos_execution::backend::ExecutionEvent::RuntimeFault(_) => {
+                                common_faults += 1;
+                            }
+                            agentos_execution::backend::ExecutionEvent::Exited(_) => {
+                                common_exits += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    ActiveExecutionEvent::HostRpcRequest(_) => rpc_events += 1,
+                    ActiveExecutionEvent::HostCallCompletion(_) => completion_events += 1,
+                    ActiveExecutionEvent::ManagedStreamReadRecheck(_) => read_rechecks += 1,
+                    ActiveExecutionEvent::ManagedUdpPollRecheck(_) => udp_rechecks += 1,
+                    ActiveExecutionEvent::SignalState { .. } => signal_events += 1,
                 }
 
                 block_on_sidecar!(
@@ -3837,6 +3948,17 @@ console.log(JSON.stringify({ status: "ok", summary }));
                 pump_sibling_internal_process_events(sidecar, vm_id, process_id);
                 block_on_sidecar!(sidecar, sidecar.pump_child_process_events(vm_id))
                     .expect("pump attached child process events");
+            }
+
+            if exit_code.is_none() {
+                let active_processes = sidecar
+                    .vms
+                    .get(vm_id)
+                    .map(|vm| vm.active_processes.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                eprintln!(
+                    "TEST_PROCESS_DRAIN_TIMEOUT: process={process_id} loops={events_drained} matched_envelopes={matched_envelopes} empty_polls={empty_polls} common_events={common_events} common_host_calls={common_host_calls} common_outputs={common_outputs} common_warnings={common_warnings} common_faults={common_faults} common_exits={common_exits} rpc_events={rpc_events} completion_events={completion_events} read_rechecks={read_rechecks} udp_rechecks={udp_rechecks} signal_events={signal_events} active_processes={active_processes:?}"
+                );
             }
 
             (
@@ -10485,6 +10607,118 @@ console.log(JSON.stringify({ status: "ok", summary }));
                 .read_file("/blocked.txt")
                 .expect_err("read should be denied");
             assert_eq!(read_error.code(), "EACCES");
+        }
+        fn create_vm_stores_standalone_wasm_backend_policy() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let response = sidecar
+                .dispatch_blocking(request(
+                    3,
+                    OwnershipScope::session(&connection_id, &session_id),
+                    RequestPayload::CreateVm(CreateVmRequest::json_config(
+                        GuestRuntimeKind::JavaScript,
+                        agentos_vm_config::CreateVmConfig {
+                            wasm_backend: Some(
+                                agentos_vm_config::StandaloneWasmBackend::WasmtimeThreads,
+                            ),
+                            ..Default::default()
+                        },
+                    )),
+                ))
+                .expect("create VM with standalone-WASM policy");
+            let vm_id = created_vm_id(response).expect("VM created");
+            assert_eq!(
+                sidecar
+                    .vms
+                    .get(&vm_id)
+                    .expect("created VM")
+                    .standalone_wasm_backend,
+                agentos_execution::StandaloneWasmBackend::WasmtimeThreads
+            );
+        }
+        fn vm_default_and_process_override_select_standalone_wasm_backend() {
+            let cwd = temp_dir("agentos-native-sidecar-vm-wasm-backend-policy");
+            let module_path = cwd.join("guest.wasm");
+            write_fixture(
+                &module_path,
+                wat::parse_str("(module (func (export \"_start\")))")
+                    .expect("compile backend policy fixture"),
+            );
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let legacy = CreateVmRequest::legacy_test_config(
+                GuestRuntimeKind::WebAssembly,
+                HashMap::from([(String::from("cwd"), cwd.to_string_lossy().into_owned())]),
+                Default::default(),
+                Some(PermissionsPolicy::allow_all()),
+            );
+            let mut config: agentos_vm_config::CreateVmConfig =
+                serde_json::from_str(&legacy.config).expect("decode VM config");
+            config.wasm_backend = Some(agentos_vm_config::StandaloneWasmBackend::Wasmtime);
+            let created = sidecar
+                .dispatch_blocking(request(
+                    3,
+                    OwnershipScope::session(&connection_id, &session_id),
+                    RequestPayload::CreateVm(CreateVmRequest::json_config(
+                        GuestRuntimeKind::WebAssembly,
+                        config,
+                    )),
+                ))
+                .expect("create Wasmtime-default VM");
+            let vm_id = created_vm_id(created).expect("VM created");
+
+            for (request_id, process_id, override_backend, expected_backend) in [
+                (
+                    4,
+                    "vm-default",
+                    None,
+                    agentos_execution::StandaloneWasmBackend::Wasmtime,
+                ),
+                (
+                    5,
+                    "process-override",
+                    Some(StandaloneWasmBackend::V8),
+                    agentos_execution::StandaloneWasmBackend::V8,
+                ),
+            ] {
+                let started = sidecar
+                    .dispatch_blocking(request(
+                        request_id,
+                        OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                        RequestPayload::Execute(crate::protocol::ExecuteRequest {
+                            process_id: process_id.to_owned(),
+                            command: None,
+                            runtime: Some(GuestRuntimeKind::WebAssembly),
+                            entrypoint: Some(module_path.to_string_lossy().into_owned()),
+                            args: Vec::new(),
+                            env: HashMap::new(),
+                            cwd: None,
+                            wasm_permission_tier: None,
+                            wasm_backend: override_backend,
+                        }),
+                    ))
+                    .expect("start backend policy fixture");
+                assert!(matches!(
+                    started.response.payload,
+                    ResponsePayload::ProcessStarted(_)
+                ));
+                assert_eq!(
+                    sidecar
+                        .vms
+                        .get(&vm_id)
+                        .expect("VM")
+                        .active_processes
+                        .get(process_id)
+                        .expect("active process")
+                        .standalone_wasm_backend,
+                    expected_backend
+                );
+                let (_, stderr, exit_code) = drain_process_output(&mut sidecar, &vm_id, process_id);
+                assert_eq!(exit_code, Some(0), "stderr: {stderr}");
+            }
         }
         fn create_vm_without_permissions_defaults_to_static_deny_all() {
             let mut sidecar = create_test_sidecar();
@@ -25725,6 +25959,7 @@ try {
             service_case!(bridge_permissions_map_symlink_operations_to_symlink_access);
             service_case!(vm_limits_config_reads_filesystem_limits);
             service_case!(create_vm_applies_filesystem_permission_descriptors_to_kernel_access);
+            service_case!(create_vm_stores_standalone_wasm_backend_policy);
             service_case!(create_vm_without_permissions_defaults_to_static_deny_all);
             service_case!(configure_vm_rollback_restore_failure_falls_back_to_static_deny_all);
             service_case!(binding_registration_rollback_restore_failure_keeps_registry_consistent);
@@ -25855,6 +26090,7 @@ try {
                 descendant_transfer_byte_overflow_restores_current_and_deferred_envelopes
             );
             service_case!(exit_trailing_requeue_preserves_exit_when_queue_is_full);
+            service_case!(runtime_fault_pump_publishes_exit_and_cleans_up_process);
             service_case!(
                 javascript_child_process_poll_reports_echild_when_child_disappears_after_drain
             );
@@ -25899,6 +26135,7 @@ try {
             descendant_transfer_overflow_preserves_global_queue();
             descendant_transfer_byte_overflow_restores_current_and_deferred_envelopes();
             exit_trailing_requeue_preserves_exit_when_queue_is_full();
+            runtime_fault_pump_publishes_exit_and_cleans_up_process();
         }
 
         #[test]
@@ -25962,6 +26199,16 @@ try {
         fn service_javascript_sqlite_persists_multiple_handles_and_wal() {
             javascript_sqlite_sync_rpcs_round_trip_and_persist_vm_files();
             javascript_sqlite_builtin_round_trips_through_sidecar_sync_rpc();
+        }
+
+        #[test]
+        fn create_vm_standalone_wasm_backend_policy_regression() {
+            create_vm_stores_standalone_wasm_backend_policy();
+        }
+
+        #[test]
+        fn vm_default_and_process_override_wasm_backend_regression() {
+            vm_default_and_process_override_select_standalone_wasm_backend();
         }
 
         #[test]

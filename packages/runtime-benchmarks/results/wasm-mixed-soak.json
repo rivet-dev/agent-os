@@ -1,0 +1,6938 @@
+{
+  "benchmark": "wasm-mixed-soak",
+  "status": "complete",
+  "metadata": {
+    "startedAt": "2026-07-21T14:19:44.334Z",
+    "hostname": "nathan-dev",
+    "platform": "linux",
+    "arch": "x64",
+    "cpuModel": "12th Gen Intel(R) Core(TM) i7-12700KF",
+    "logicalCpus": 20,
+    "totalMemoryBytes": 67170398208,
+    "node": "v24.17.0",
+    "sidecar": {
+      "path": "/home/nathan/.herdr/workspaces/agent-os/wasmtime-executor/target/release/agentos-native-sidecar",
+      "profile": "release",
+      "mtimeMs": 1784643409180.2722,
+      "mtimeIso": "2026-07-21T07:16:49.180-07:00",
+      "sizeBytes": 147835856
+    },
+    "wasmBackend": "wasmtime",
+    "javascriptBackend": "v8",
+    "vmCount": 1,
+    "warmupCycles": 10,
+    "measuredCycles": 200,
+    "settleMs": 100,
+    "operationTimeoutMs": 30000,
+    "maxRssGrowthBytes": 50331648,
+    "maxPssGrowthBytes": 50331648
+  },
+  "baseline": {
+    "cycle": -1,
+    "elapsedMs": 13151.242542,
+    "memory": {
+      "rssBytes": 401362944,
+      "peakRssBytes": 414846976,
+      "pssBytes": 405713920,
+      "virtualBytes": 2601406464,
+      "minorFaults": 94996,
+      "majorFaults": 0,
+      "processCount": 1,
+      "threadCount": 21,
+      "pids": [
+        3882452
+      ]
+    },
+    "resources": {
+      "runningProcesses": 0,
+      "stoppedProcesses": 0,
+      "exitedProcesses": 0,
+      "fdTables": 0,
+      "openFds": 0,
+      "pipes": 0,
+      "ptys": 0,
+      "sockets": 0,
+      "socketListeners": 0,
+      "socketConnections": 0,
+      "wasmReservedMemoryBytes": 0,
+      "wasmtimeEngineProfiles": 1,
+      "wasmtimeModuleEntries": 8,
+      "wasmtimeChargedModuleBytes": 69673704,
+      "queueDepth": 0
+    }
+  },
+  "samples": [
+    {
+      "cycle": 0,
+      "elapsedMs": 13604.361766,
+      "memory": {
+        "rssBytes": 401145856,
+        "peakRssBytes": 414846976,
+        "pssBytes": 405718016,
+        "virtualBytes": 2601406464,
+        "minorFaults": 98113,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 1,
+      "elapsedMs": 14032.591631000001,
+      "memory": {
+        "rssBytes": 401215488,
+        "peakRssBytes": 414846976,
+        "pssBytes": 405746688,
+        "virtualBytes": 2601406464,
+        "minorFaults": 101256,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 2,
+      "elapsedMs": 14470.193888,
+      "memory": {
+        "rssBytes": 401350656,
+        "peakRssBytes": 414916608,
+        "pssBytes": 405787648,
+        "virtualBytes": 2601406464,
+        "minorFaults": 104384,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 3,
+      "elapsedMs": 14903.076777,
+      "memory": {
+        "rssBytes": 401408000,
+        "peakRssBytes": 414916608,
+        "pssBytes": 405795840,
+        "virtualBytes": 2601406464,
+        "minorFaults": 107521,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 4,
+      "elapsedMs": 15353.275351,
+      "memory": {
+        "rssBytes": 401522688,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405808128,
+        "virtualBytes": 2601406464,
+        "minorFaults": 110641,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 5,
+      "elapsedMs": 15794.73596,
+      "memory": {
+        "rssBytes": 401559552,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405812224,
+        "virtualBytes": 2601406464,
+        "minorFaults": 113777,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 6,
+      "elapsedMs": 16243.891102,
+      "memory": {
+        "rssBytes": 401620992,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405812224,
+        "virtualBytes": 2601406464,
+        "minorFaults": 116894,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 7,
+      "elapsedMs": 16683.671051999998,
+      "memory": {
+        "rssBytes": 401661952,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405812224,
+        "virtualBytes": 2601406464,
+        "minorFaults": 120029,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 8,
+      "elapsedMs": 17109.183377999998,
+      "memory": {
+        "rssBytes": 401494016,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405811200,
+        "virtualBytes": 2601406464,
+        "minorFaults": 123146,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 9,
+      "elapsedMs": 17540.422369,
+      "memory": {
+        "rssBytes": 401543168,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405835776,
+        "virtualBytes": 2601406464,
+        "minorFaults": 126287,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 10,
+      "elapsedMs": 17967.462414999998,
+      "memory": {
+        "rssBytes": 401604608,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405843968,
+        "virtualBytes": 2601406464,
+        "minorFaults": 129406,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 11,
+      "elapsedMs": 18395.370516,
+      "memory": {
+        "rssBytes": 401629184,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405848064,
+        "virtualBytes": 2601406464,
+        "minorFaults": 132542,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 12,
+      "elapsedMs": 18825.626665,
+      "memory": {
+        "rssBytes": 401489920,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405848064,
+        "virtualBytes": 2601406464,
+        "minorFaults": 135660,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 13,
+      "elapsedMs": 19252.647699999998,
+      "memory": {
+        "rssBytes": 401526784,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405848064,
+        "virtualBytes": 2601406464,
+        "minorFaults": 138796,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 14,
+      "elapsedMs": 19698.627409,
+      "memory": {
+        "rssBytes": 401383424,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405848064,
+        "virtualBytes": 2601406464,
+        "minorFaults": 141915,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 15,
+      "elapsedMs": 20125.925122,
+      "memory": {
+        "rssBytes": 401416192,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405848064,
+        "virtualBytes": 2601406464,
+        "minorFaults": 145050,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 16,
+      "elapsedMs": 20566.047456,
+      "memory": {
+        "rssBytes": 401494016,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405848064,
+        "virtualBytes": 2601406464,
+        "minorFaults": 148167,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 17,
+      "elapsedMs": 20995.595405,
+      "memory": {
+        "rssBytes": 401571840,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405848064,
+        "virtualBytes": 2601406464,
+        "minorFaults": 151302,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 18,
+      "elapsedMs": 21427.234924,
+      "memory": {
+        "rssBytes": 401440768,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405848064,
+        "virtualBytes": 2601406464,
+        "minorFaults": 154419,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 19,
+      "elapsedMs": 21855.879237999998,
+      "memory": {
+        "rssBytes": 401477632,
+        "peakRssBytes": 415105024,
+        "pssBytes": 405848064,
+        "virtualBytes": 2601406464,
+        "minorFaults": 157554,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 20,
+      "elapsedMs": 22293.793271,
+      "memory": {
+        "rssBytes": 401563648,
+        "peakRssBytes": 415178752,
+        "pssBytes": 405848064,
+        "virtualBytes": 2601406464,
+        "minorFaults": 160673,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 21,
+      "elapsedMs": 22734.705475,
+      "memory": {
+        "rssBytes": 401346560,
+        "peakRssBytes": 415178752,
+        "pssBytes": 405848064,
+        "virtualBytes": 2601406464,
+        "minorFaults": 163808,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 22,
+      "elapsedMs": 23175.677357,
+      "memory": {
+        "rssBytes": 401420288,
+        "peakRssBytes": 415178752,
+        "pssBytes": 405848064,
+        "virtualBytes": 2601406464,
+        "minorFaults": 166925,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 23,
+      "elapsedMs": 23614.936416999997,
+      "memory": {
+        "rssBytes": 401494016,
+        "peakRssBytes": 415178752,
+        "pssBytes": 405848064,
+        "virtualBytes": 2601406464,
+        "minorFaults": 170060,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 24,
+      "elapsedMs": 24051.745472,
+      "memory": {
+        "rssBytes": 401571840,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405852160,
+        "virtualBytes": 2601406464,
+        "minorFaults": 173179,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 25,
+      "elapsedMs": 24482.630944,
+      "memory": {
+        "rssBytes": 401350656,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405852160,
+        "virtualBytes": 2601406464,
+        "minorFaults": 176314,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 26,
+      "elapsedMs": 24912.787139,
+      "memory": {
+        "rssBytes": 401420288,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405852160,
+        "virtualBytes": 2601406464,
+        "minorFaults": 179433,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 27,
+      "elapsedMs": 25341.173718,
+      "memory": {
+        "rssBytes": 401494016,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405852160,
+        "virtualBytes": 2601406464,
+        "minorFaults": 182570,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 28,
+      "elapsedMs": 25775.318811999998,
+      "memory": {
+        "rssBytes": 401313792,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405852160,
+        "virtualBytes": 2601406464,
+        "minorFaults": 185688,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 29,
+      "elapsedMs": 26220.219687999997,
+      "memory": {
+        "rssBytes": 401379328,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405852160,
+        "virtualBytes": 2601406464,
+        "minorFaults": 188821,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 30,
+      "elapsedMs": 26650.365394999997,
+      "memory": {
+        "rssBytes": 401510400,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405852160,
+        "virtualBytes": 2601406464,
+        "minorFaults": 191939,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 31,
+      "elapsedMs": 27076.664945,
+      "memory": {
+        "rssBytes": 401330176,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405853184,
+        "virtualBytes": 2601406464,
+        "minorFaults": 195075,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 32,
+      "elapsedMs": 27517.903631999998,
+      "memory": {
+        "rssBytes": 401461248,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405857280,
+        "virtualBytes": 2601406464,
+        "minorFaults": 198194,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 33,
+      "elapsedMs": 27957.712456999998,
+      "memory": {
+        "rssBytes": 401485824,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405857280,
+        "virtualBytes": 2601406464,
+        "minorFaults": 201329,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 34,
+      "elapsedMs": 28389.511513999998,
+      "memory": {
+        "rssBytes": 401293312,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405857280,
+        "virtualBytes": 2601406464,
+        "minorFaults": 204447,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 35,
+      "elapsedMs": 28820.97212,
+      "memory": {
+        "rssBytes": 401330176,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405861376,
+        "virtualBytes": 2601406464,
+        "minorFaults": 207583,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 36,
+      "elapsedMs": 29257.549608999998,
+      "memory": {
+        "rssBytes": 401481728,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405861376,
+        "virtualBytes": 2601406464,
+        "minorFaults": 210701,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 37,
+      "elapsedMs": 29694.979685,
+      "memory": {
+        "rssBytes": 401289216,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405861376,
+        "virtualBytes": 2601406464,
+        "minorFaults": 213835,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 38,
+      "elapsedMs": 30210.330712,
+      "memory": {
+        "rssBytes": 401367040,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405861376,
+        "virtualBytes": 2601406464,
+        "minorFaults": 216953,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 39,
+      "elapsedMs": 30730.754235999997,
+      "memory": {
+        "rssBytes": 401387520,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405860352,
+        "virtualBytes": 2601406464,
+        "minorFaults": 220088,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 40,
+      "elapsedMs": 31162.143925,
+      "memory": {
+        "rssBytes": 401219584,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405860352,
+        "virtualBytes": 2601406464,
+        "minorFaults": 223205,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 41,
+      "elapsedMs": 31596.196077,
+      "memory": {
+        "rssBytes": 401301504,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405861376,
+        "virtualBytes": 2601406464,
+        "minorFaults": 226339,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 42,
+      "elapsedMs": 32038.574119999997,
+      "memory": {
+        "rssBytes": 401362944,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405861376,
+        "virtualBytes": 2601406464,
+        "minorFaults": 229457,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 43,
+      "elapsedMs": 32491.422982,
+      "memory": {
+        "rssBytes": 401432576,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405861376,
+        "virtualBytes": 2601406464,
+        "minorFaults": 232594,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 44,
+      "elapsedMs": 32918.783744,
+      "memory": {
+        "rssBytes": 401223680,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405861376,
+        "virtualBytes": 2601406464,
+        "minorFaults": 235711,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 45,
+      "elapsedMs": 33355.79667,
+      "memory": {
+        "rssBytes": 401289216,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405861376,
+        "virtualBytes": 2601406464,
+        "minorFaults": 238844,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 46,
+      "elapsedMs": 33788.814731000006,
+      "memory": {
+        "rssBytes": 401395712,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405861376,
+        "virtualBytes": 2601406464,
+        "minorFaults": 241962,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 47,
+      "elapsedMs": 34228.691949,
+      "memory": {
+        "rssBytes": 401412096,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405861376,
+        "virtualBytes": 2601406464,
+        "minorFaults": 245097,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 48,
+      "elapsedMs": 34667.334862,
+      "memory": {
+        "rssBytes": 401272832,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405861376,
+        "virtualBytes": 2601406464,
+        "minorFaults": 248215,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 49,
+      "elapsedMs": 35107.232836,
+      "memory": {
+        "rssBytes": 401379328,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405890048,
+        "virtualBytes": 2601406464,
+        "minorFaults": 251357,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 50,
+      "elapsedMs": 35542.733352,
+      "memory": {
+        "rssBytes": 401240064,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405894144,
+        "virtualBytes": 2601406464,
+        "minorFaults": 254476,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 51,
+      "elapsedMs": 35990.848521,
+      "memory": {
+        "rssBytes": 401338368,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405894144,
+        "virtualBytes": 2601406464,
+        "minorFaults": 257608,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 52,
+      "elapsedMs": 36443.851813,
+      "memory": {
+        "rssBytes": 401416192,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405893120,
+        "virtualBytes": 2601406464,
+        "minorFaults": 260726,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 53,
+      "elapsedMs": 36870.665521,
+      "memory": {
+        "rssBytes": 401227776,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405897216,
+        "virtualBytes": 2601406464,
+        "minorFaults": 263862,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 54,
+      "elapsedMs": 37304.530920000005,
+      "memory": {
+        "rssBytes": 401317888,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405897216,
+        "virtualBytes": 2601406464,
+        "minorFaults": 266980,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 55,
+      "elapsedMs": 37824.873098000004,
+      "memory": {
+        "rssBytes": 401367040,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405898240,
+        "virtualBytes": 2601406464,
+        "minorFaults": 270114,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 56,
+      "elapsedMs": 38260.129960000006,
+      "memory": {
+        "rssBytes": 401186816,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405897216,
+        "virtualBytes": 2601406464,
+        "minorFaults": 273232,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 57,
+      "elapsedMs": 38684.214578,
+      "memory": {
+        "rssBytes": 401227776,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405897216,
+        "virtualBytes": 2601406464,
+        "minorFaults": 276367,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 58,
+      "elapsedMs": 39111.454388000006,
+      "memory": {
+        "rssBytes": 401350656,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405897216,
+        "virtualBytes": 2601406464,
+        "minorFaults": 279486,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 59,
+      "elapsedMs": 39537.942981,
+      "memory": {
+        "rssBytes": 401178624,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405897216,
+        "virtualBytes": 2601406464,
+        "minorFaults": 282619,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 60,
+      "elapsedMs": 39969.567265000005,
+      "memory": {
+        "rssBytes": 401330176,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405897216,
+        "virtualBytes": 2601406464,
+        "minorFaults": 285735,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 61,
+      "elapsedMs": 40407.672695,
+      "memory": {
+        "rssBytes": 401100800,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405897216,
+        "virtualBytes": 2601406464,
+        "minorFaults": 288872,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 62,
+      "elapsedMs": 40842.024853,
+      "memory": {
+        "rssBytes": 401190912,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405897216,
+        "virtualBytes": 2601406464,
+        "minorFaults": 291990,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 63,
+      "elapsedMs": 41271.898030000004,
+      "memory": {
+        "rssBytes": 401211392,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405898240,
+        "virtualBytes": 2601406464,
+        "minorFaults": 295125,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 64,
+      "elapsedMs": 41706.868014,
+      "memory": {
+        "rssBytes": 401342464,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405898240,
+        "virtualBytes": 2601406464,
+        "minorFaults": 298243,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 65,
+      "elapsedMs": 42132.708554000004,
+      "memory": {
+        "rssBytes": 401129472,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405902336,
+        "virtualBytes": 2601406464,
+        "minorFaults": 301378,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 66,
+      "elapsedMs": 42562.904,
+      "memory": {
+        "rssBytes": 401199104,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405902336,
+        "virtualBytes": 2601406464,
+        "minorFaults": 304496,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 67,
+      "elapsedMs": 42995.140767000004,
+      "memory": {
+        "rssBytes": 401207296,
+        "peakRssBytes": 415195136,
+        "pssBytes": 405902336,
+        "virtualBytes": 2601406464,
+        "minorFaults": 307630,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 68,
+      "elapsedMs": 43425.901365000005,
+      "memory": {
+        "rssBytes": 401330176,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406082560,
+        "virtualBytes": 2601406464,
+        "minorFaults": 310792,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 69,
+      "elapsedMs": 43862.245601,
+      "memory": {
+        "rssBytes": 401379328,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406082560,
+        "virtualBytes": 2601406464,
+        "minorFaults": 313926,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 70,
+      "elapsedMs": 44299.878721,
+      "memory": {
+        "rssBytes": 401453056,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406082560,
+        "virtualBytes": 2601406464,
+        "minorFaults": 317044,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 71,
+      "elapsedMs": 44727.185944000004,
+      "memory": {
+        "rssBytes": 401518592,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406082560,
+        "virtualBytes": 2601406464,
+        "minorFaults": 320177,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 72,
+      "elapsedMs": 45154.038270000005,
+      "memory": {
+        "rssBytes": 401321984,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406082560,
+        "virtualBytes": 2601406464,
+        "minorFaults": 323295,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 73,
+      "elapsedMs": 45588.402228,
+      "memory": {
+        "rssBytes": 401317888,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406082560,
+        "virtualBytes": 2601406464,
+        "minorFaults": 326429,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 74,
+      "elapsedMs": 46014.111302000005,
+      "memory": {
+        "rssBytes": 401424384,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406082560,
+        "virtualBytes": 2601406464,
+        "minorFaults": 329547,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 75,
+      "elapsedMs": 46444.513351,
+      "memory": {
+        "rssBytes": 401498112,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406082560,
+        "virtualBytes": 2601406464,
+        "minorFaults": 332682,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 76,
+      "elapsedMs": 46869.940278,
+      "memory": {
+        "rssBytes": 401317888,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406082560,
+        "virtualBytes": 2601406464,
+        "minorFaults": 335800,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 77,
+      "elapsedMs": 47306.405262,
+      "memory": {
+        "rssBytes": 401387520,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406082560,
+        "virtualBytes": 2601406464,
+        "minorFaults": 338937,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 78,
+      "elapsedMs": 47731.859350000006,
+      "memory": {
+        "rssBytes": 401510400,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406082560,
+        "virtualBytes": 2601406464,
+        "minorFaults": 342055,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 79,
+      "elapsedMs": 48165.318702000004,
+      "memory": {
+        "rssBytes": 401260544,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406082560,
+        "virtualBytes": 2601406464,
+        "minorFaults": 345190,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 80,
+      "elapsedMs": 48599.557347,
+      "memory": {
+        "rssBytes": 401371136,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406086656,
+        "virtualBytes": 2601406464,
+        "minorFaults": 348308,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 81,
+      "elapsedMs": 49029.072073,
+      "memory": {
+        "rssBytes": 401371136,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406086656,
+        "virtualBytes": 2601406464,
+        "minorFaults": 351443,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 82,
+      "elapsedMs": 49463.320157,
+      "memory": {
+        "rssBytes": 401461248,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406086656,
+        "virtualBytes": 2601406464,
+        "minorFaults": 354561,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 83,
+      "elapsedMs": 49892.607244,
+      "memory": {
+        "rssBytes": 401469440,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406086656,
+        "virtualBytes": 2601406464,
+        "minorFaults": 357695,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 84,
+      "elapsedMs": 50325.658747,
+      "memory": {
+        "rssBytes": 401260544,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406086656,
+        "virtualBytes": 2601406464,
+        "minorFaults": 360812,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 85,
+      "elapsedMs": 50759.872627000004,
+      "memory": {
+        "rssBytes": 401281024,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406086656,
+        "virtualBytes": 2601406464,
+        "minorFaults": 363947,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 86,
+      "elapsedMs": 51197.667895000006,
+      "memory": {
+        "rssBytes": 401371136,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406086656,
+        "virtualBytes": 2601406464,
+        "minorFaults": 367065,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 87,
+      "elapsedMs": 51625.013031,
+      "memory": {
+        "rssBytes": 401440768,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406086656,
+        "virtualBytes": 2601406464,
+        "minorFaults": 370201,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 88,
+      "elapsedMs": 52051.980237,
+      "memory": {
+        "rssBytes": 401260544,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406086656,
+        "virtualBytes": 2601406464,
+        "minorFaults": 373318,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 89,
+      "elapsedMs": 52480.115938,
+      "memory": {
+        "rssBytes": 401297408,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406085632,
+        "virtualBytes": 2601406464,
+        "minorFaults": 376453,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 90,
+      "elapsedMs": 52911.638731,
+      "memory": {
+        "rssBytes": 401371136,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406085632,
+        "virtualBytes": 2601406464,
+        "minorFaults": 379571,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 91,
+      "elapsedMs": 53355.334621,
+      "memory": {
+        "rssBytes": 401199104,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406086656,
+        "virtualBytes": 2601406464,
+        "minorFaults": 382704,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 92,
+      "elapsedMs": 53785.75706,
+      "memory": {
+        "rssBytes": 401272832,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406085632,
+        "virtualBytes": 2601406464,
+        "minorFaults": 385822,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 93,
+      "elapsedMs": 54221.567456000004,
+      "memory": {
+        "rssBytes": 401354752,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406085632,
+        "virtualBytes": 2601406464,
+        "minorFaults": 388957,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 94,
+      "elapsedMs": 54653.335941000005,
+      "memory": {
+        "rssBytes": 401215488,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406086656,
+        "virtualBytes": 2601406464,
+        "minorFaults": 392075,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 95,
+      "elapsedMs": 55081.518474000004,
+      "memory": {
+        "rssBytes": 401543168,
+        "peakRssBytes": 415195136,
+        "pssBytes": 406086656,
+        "virtualBytes": 2601406464,
+        "minorFaults": 395209,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 96,
+      "elapsedMs": 55511.778845,
+      "memory": {
+        "rssBytes": 401629184,
+        "peakRssBytes": 415244288,
+        "pssBytes": 406086656,
+        "virtualBytes": 2601406464,
+        "minorFaults": 398327,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 97,
+      "elapsedMs": 55945.23823,
+      "memory": {
+        "rssBytes": 402075648,
+        "peakRssBytes": 415244288,
+        "pssBytes": 406086656,
+        "virtualBytes": 2601406464,
+        "minorFaults": 401461,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 98,
+      "elapsedMs": 56385.102723,
+      "memory": {
+        "rssBytes": 402997248,
+        "peakRssBytes": 416587776,
+        "pssBytes": 407155712,
+        "virtualBytes": 2601406464,
+        "minorFaults": 404839,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 99,
+      "elapsedMs": 56816.528932,
+      "memory": {
+        "rssBytes": 403066880,
+        "peakRssBytes": 416587776,
+        "pssBytes": 407286784,
+        "virtualBytes": 2601406464,
+        "minorFaults": 408005,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 100,
+      "elapsedMs": 57256.81874,
+      "memory": {
+        "rssBytes": 403136512,
+        "peakRssBytes": 416587776,
+        "pssBytes": 407299072,
+        "virtualBytes": 2601406464,
+        "minorFaults": 411127,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 101,
+      "elapsedMs": 57681.534827,
+      "memory": {
+        "rssBytes": 403152896,
+        "peakRssBytes": 416587776,
+        "pssBytes": 407299072,
+        "virtualBytes": 2601406464,
+        "minorFaults": 414262,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 102,
+      "elapsedMs": 58113.434273,
+      "memory": {
+        "rssBytes": 402984960,
+        "peakRssBytes": 416587776,
+        "pssBytes": 407299072,
+        "virtualBytes": 2601406464,
+        "minorFaults": 417379,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 103,
+      "elapsedMs": 58538.648165000006,
+      "memory": {
+        "rssBytes": 403054592,
+        "peakRssBytes": 416587776,
+        "pssBytes": 407299072,
+        "virtualBytes": 2601406464,
+        "minorFaults": 420515,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 104,
+      "elapsedMs": 58966.481882,
+      "memory": {
+        "rssBytes": 403177472,
+        "peakRssBytes": 416755712,
+        "pssBytes": 407299072,
+        "virtualBytes": 2601406464,
+        "minorFaults": 423634,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 105,
+      "elapsedMs": 59535.419362,
+      "memory": {
+        "rssBytes": 403730432,
+        "peakRssBytes": 416755712,
+        "pssBytes": 407299072,
+        "virtualBytes": 2601406464,
+        "minorFaults": 426772,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 106,
+      "elapsedMs": 59974.468246000004,
+      "memory": {
+        "rssBytes": 403578880,
+        "peakRssBytes": 417161216,
+        "pssBytes": 407299072,
+        "virtualBytes": 2601406464,
+        "minorFaults": 429889,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 107,
+      "elapsedMs": 60419.237452,
+      "memory": {
+        "rssBytes": 403677184,
+        "peakRssBytes": 417161216,
+        "pssBytes": 407299072,
+        "virtualBytes": 2601406464,
+        "minorFaults": 433021,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 108,
+      "elapsedMs": 60855.242149000005,
+      "memory": {
+        "rssBytes": 403730432,
+        "peakRssBytes": 417161216,
+        "pssBytes": 407299072,
+        "virtualBytes": 2601406464,
+        "minorFaults": 436139,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 109,
+      "elapsedMs": 61285.897962,
+      "memory": {
+        "rssBytes": 403496960,
+        "peakRssBytes": 417161216,
+        "pssBytes": 407299072,
+        "virtualBytes": 2601406464,
+        "minorFaults": 439274,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 110,
+      "elapsedMs": 61710.886912,
+      "memory": {
+        "rssBytes": 403615744,
+        "peakRssBytes": 417198080,
+        "pssBytes": 407302144,
+        "virtualBytes": 2601406464,
+        "minorFaults": 442392,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 111,
+      "elapsedMs": 62140.291824,
+      "memory": {
+        "rssBytes": 403664896,
+        "peakRssBytes": 417198080,
+        "pssBytes": 407302144,
+        "virtualBytes": 2601406464,
+        "minorFaults": 445526,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 112,
+      "elapsedMs": 62686.546694000004,
+      "memory": {
+        "rssBytes": 403525632,
+        "peakRssBytes": 417198080,
+        "pssBytes": 407303168,
+        "virtualBytes": 2601406464,
+        "minorFaults": 448643,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 113,
+      "elapsedMs": 63115.653267,
+      "memory": {
+        "rssBytes": 403574784,
+        "peakRssBytes": 417198080,
+        "pssBytes": 407303168,
+        "virtualBytes": 2601406464,
+        "minorFaults": 451777,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 114,
+      "elapsedMs": 63550.110256,
+      "memory": {
+        "rssBytes": 403701760,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407302144,
+        "virtualBytes": 2601406464,
+        "minorFaults": 454895,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 115,
+      "elapsedMs": 63974.868721,
+      "memory": {
+        "rssBytes": 403468288,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407302144,
+        "virtualBytes": 2601406464,
+        "minorFaults": 458030,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 116,
+      "elapsedMs": 64406.056238000005,
+      "memory": {
+        "rssBytes": 403529728,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407302144,
+        "virtualBytes": 2601406464,
+        "minorFaults": 461147,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 117,
+      "elapsedMs": 64834.505742,
+      "memory": {
+        "rssBytes": 403562496,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407302144,
+        "virtualBytes": 2601406464,
+        "minorFaults": 464284,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 118,
+      "elapsedMs": 65265.389200000005,
+      "memory": {
+        "rssBytes": 403636224,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407303168,
+        "virtualBytes": 2601406464,
+        "minorFaults": 467402,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 119,
+      "elapsedMs": 65699.522076,
+      "memory": {
+        "rssBytes": 403435520,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407303168,
+        "virtualBytes": 2601406464,
+        "minorFaults": 470538,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 120,
+      "elapsedMs": 66131.706112,
+      "memory": {
+        "rssBytes": 403300352,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407344128,
+        "virtualBytes": 2601406464,
+        "minorFaults": 473666,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 121,
+      "elapsedMs": 66569.116509,
+      "memory": {
+        "rssBytes": 403398656,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407360512,
+        "virtualBytes": 2601406464,
+        "minorFaults": 476804,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 122,
+      "elapsedMs": 67003.394005,
+      "memory": {
+        "rssBytes": 403501056,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407360512,
+        "virtualBytes": 2601406464,
+        "minorFaults": 479922,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 123,
+      "elapsedMs": 67439.674132,
+      "memory": {
+        "rssBytes": 403279872,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407360512,
+        "virtualBytes": 2601406464,
+        "minorFaults": 483056,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 124,
+      "elapsedMs": 67878.851257,
+      "memory": {
+        "rssBytes": 403353600,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407360512,
+        "virtualBytes": 2601406464,
+        "minorFaults": 486174,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 125,
+      "elapsedMs": 68313.81547799999,
+      "memory": {
+        "rssBytes": 403390464,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407364608,
+        "virtualBytes": 2601406464,
+        "minorFaults": 489310,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 126,
+      "elapsedMs": 68754.862996,
+      "memory": {
+        "rssBytes": 403251200,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407364608,
+        "virtualBytes": 2601406464,
+        "minorFaults": 492427,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 127,
+      "elapsedMs": 69188.76113299999,
+      "memory": {
+        "rssBytes": 403329024,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407389184,
+        "virtualBytes": 2601406464,
+        "minorFaults": 495567,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 128,
+      "elapsedMs": 69625.852025,
+      "memory": {
+        "rssBytes": 403386368,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407389184,
+        "virtualBytes": 2601406464,
+        "minorFaults": 498686,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 129,
+      "elapsedMs": 70057.704189,
+      "memory": {
+        "rssBytes": 403664896,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407389184,
+        "virtualBytes": 2601406464,
+        "minorFaults": 501820,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 130,
+      "elapsedMs": 70493.38569899999,
+      "memory": {
+        "rssBytes": 403513344,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407389184,
+        "virtualBytes": 2601406464,
+        "minorFaults": 504937,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 131,
+      "elapsedMs": 70925.71278999999,
+      "memory": {
+        "rssBytes": 403550208,
+        "peakRssBytes": 417275904,
+        "pssBytes": 407388160,
+        "virtualBytes": 2601406464,
+        "minorFaults": 508072,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 132,
+      "elapsedMs": 71354.013135,
+      "memory": {
+        "rssBytes": 404451328,
+        "peakRssBytes": 418062336,
+        "pssBytes": 408469504,
+        "virtualBytes": 2601406464,
+        "minorFaults": 511454,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 133,
+      "elapsedMs": 71784.21586499999,
+      "memory": {
+        "rssBytes": 404467712,
+        "peakRssBytes": 418062336,
+        "pssBytes": 408469504,
+        "virtualBytes": 2601406464,
+        "minorFaults": 514589,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 134,
+      "elapsedMs": 72216.682435,
+      "memory": {
+        "rssBytes": 404332544,
+        "peakRssBytes": 418062336,
+        "pssBytes": 408469504,
+        "virtualBytes": 2601406464,
+        "minorFaults": 517707,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 135,
+      "elapsedMs": 72643.861184,
+      "memory": {
+        "rssBytes": 404414464,
+        "peakRssBytes": 418062336,
+        "pssBytes": 408469504,
+        "virtualBytes": 2601406464,
+        "minorFaults": 520842,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 136,
+      "elapsedMs": 73073.840451,
+      "memory": {
+        "rssBytes": 404516864,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408470528,
+        "virtualBytes": 2601406464,
+        "minorFaults": 523959,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 137,
+      "elapsedMs": 73504.101575,
+      "memory": {
+        "rssBytes": 404344832,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408470528,
+        "virtualBytes": 2601406464,
+        "minorFaults": 527092,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 138,
+      "elapsedMs": 73935.20135999999,
+      "memory": {
+        "rssBytes": 404422656,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408470528,
+        "virtualBytes": 2601406464,
+        "minorFaults": 530210,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 139,
+      "elapsedMs": 74363.550061,
+      "memory": {
+        "rssBytes": 404451328,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408470528,
+        "virtualBytes": 2601406464,
+        "minorFaults": 533348,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 140,
+      "elapsedMs": 74796.70958899999,
+      "memory": {
+        "rssBytes": 404525056,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408470528,
+        "virtualBytes": 2601406464,
+        "minorFaults": 536466,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 141,
+      "elapsedMs": 75224.23258299999,
+      "memory": {
+        "rssBytes": 404262912,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408470528,
+        "virtualBytes": 2601406464,
+        "minorFaults": 539600,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 142,
+      "elapsedMs": 75652.711184,
+      "memory": {
+        "rssBytes": 404324352,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408470528,
+        "virtualBytes": 2601406464,
+        "minorFaults": 542717,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 143,
+      "elapsedMs": 76081.24595899999,
+      "memory": {
+        "rssBytes": 404361216,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408469504,
+        "virtualBytes": 2601406464,
+        "minorFaults": 545852,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 144,
+      "elapsedMs": 76510.85444299999,
+      "memory": {
+        "rssBytes": 404500480,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408469504,
+        "virtualBytes": 2601406464,
+        "minorFaults": 548970,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 145,
+      "elapsedMs": 76940.76076199999,
+      "memory": {
+        "rssBytes": 404312064,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408469504,
+        "virtualBytes": 2601406464,
+        "minorFaults": 552103,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 146,
+      "elapsedMs": 77380.913236,
+      "memory": {
+        "rssBytes": 404451328,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408469504,
+        "virtualBytes": 2601406464,
+        "minorFaults": 555221,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 147,
+      "elapsedMs": 77814.470299,
+      "memory": {
+        "rssBytes": 404451328,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408469504,
+        "virtualBytes": 2601406464,
+        "minorFaults": 558356,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 148,
+      "elapsedMs": 78243.83518699999,
+      "memory": {
+        "rssBytes": 404316160,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408469504,
+        "virtualBytes": 2601406464,
+        "minorFaults": 561474,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 149,
+      "elapsedMs": 78671.653439,
+      "memory": {
+        "rssBytes": 404414464,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408469504,
+        "virtualBytes": 2601406464,
+        "minorFaults": 564608,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 150,
+      "elapsedMs": 79098.794088,
+      "memory": {
+        "rssBytes": 404275200,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408469504,
+        "virtualBytes": 2601406464,
+        "minorFaults": 567726,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 151,
+      "elapsedMs": 79528.60048,
+      "memory": {
+        "rssBytes": 404623360,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408469504,
+        "virtualBytes": 2601406464,
+        "minorFaults": 570861,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 152,
+      "elapsedMs": 79959.574199,
+      "memory": {
+        "rssBytes": 404455424,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408470528,
+        "virtualBytes": 2601406464,
+        "minorFaults": 573978,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 153,
+      "elapsedMs": 80387.854265,
+      "memory": {
+        "rssBytes": 404504576,
+        "peakRssBytes": 418115584,
+        "pssBytes": 408470528,
+        "virtualBytes": 2601406464,
+        "minorFaults": 577112,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 154,
+      "elapsedMs": 80825.31032599999,
+      "memory": {
+        "rssBytes": 404594688,
+        "peakRssBytes": 418205696,
+        "pssBytes": 408470528,
+        "virtualBytes": 2601406464,
+        "minorFaults": 580231,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 155,
+      "elapsedMs": 81264.47484699999,
+      "memory": {
+        "rssBytes": 404643840,
+        "peakRssBytes": 418205696,
+        "pssBytes": 408470528,
+        "virtualBytes": 2601406464,
+        "minorFaults": 583366,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 156,
+      "elapsedMs": 81696.30911999999,
+      "memory": {
+        "rssBytes": 404443136,
+        "peakRssBytes": 418205696,
+        "pssBytes": 408470528,
+        "virtualBytes": 2601406464,
+        "minorFaults": 586485,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 157,
+      "elapsedMs": 82136.454386,
+      "memory": {
+        "rssBytes": 404451328,
+        "peakRssBytes": 418205696,
+        "pssBytes": 408470528,
+        "virtualBytes": 2601406464,
+        "minorFaults": 589619,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 158,
+      "elapsedMs": 82574.549159,
+      "memory": {
+        "rssBytes": 404512768,
+        "peakRssBytes": 418205696,
+        "pssBytes": 408474624,
+        "virtualBytes": 2601406464,
+        "minorFaults": 592737,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 159,
+      "elapsedMs": 83009.56287,
+      "memory": {
+        "rssBytes": 404533248,
+        "peakRssBytes": 418205696,
+        "pssBytes": 408474624,
+        "virtualBytes": 2601406464,
+        "minorFaults": 595872,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 160,
+      "elapsedMs": 83440.164936,
+      "memory": {
+        "rssBytes": 404635648,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408474624,
+        "virtualBytes": 2601406464,
+        "minorFaults": 598989,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 161,
+      "elapsedMs": 83874.36669499999,
+      "memory": {
+        "rssBytes": 404467712,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408474624,
+        "virtualBytes": 2601406464,
+        "minorFaults": 602124,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 162,
+      "elapsedMs": 84302.67554899999,
+      "memory": {
+        "rssBytes": 404434944,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408474624,
+        "virtualBytes": 2601406464,
+        "minorFaults": 605243,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 163,
+      "elapsedMs": 84725.445778,
+      "memory": {
+        "rssBytes": 404512768,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408609792,
+        "virtualBytes": 2601406464,
+        "minorFaults": 608409,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 164,
+      "elapsedMs": 85157.287751,
+      "memory": {
+        "rssBytes": 404574208,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408609792,
+        "virtualBytes": 2601406464,
+        "minorFaults": 611527,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 165,
+      "elapsedMs": 85581.57696199999,
+      "memory": {
+        "rssBytes": 404369408,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408609792,
+        "virtualBytes": 2601406464,
+        "minorFaults": 614661,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 166,
+      "elapsedMs": 86016.726274,
+      "memory": {
+        "rssBytes": 404504576,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408609792,
+        "virtualBytes": 2601406464,
+        "minorFaults": 617779,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 167,
+      "elapsedMs": 86446.864695,
+      "memory": {
+        "rssBytes": 404598784,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408626176,
+        "virtualBytes": 2601406464,
+        "minorFaults": 620917,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 168,
+      "elapsedMs": 86888.033998,
+      "memory": {
+        "rssBytes": 404455424,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 624037,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 169,
+      "elapsedMs": 87325.174701,
+      "memory": {
+        "rssBytes": 404525056,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 627172,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 170,
+      "elapsedMs": 87755.88849099999,
+      "memory": {
+        "rssBytes": 404381696,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 630290,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 171,
+      "elapsedMs": 88186.10448299999,
+      "memory": {
+        "rssBytes": 404398080,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 633426,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 172,
+      "elapsedMs": 88618.858643,
+      "memory": {
+        "rssBytes": 404512768,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 636542,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 173,
+      "elapsedMs": 89050.862732,
+      "memory": {
+        "rssBytes": 404549632,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 639677,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 174,
+      "elapsedMs": 89488.01374299999,
+      "memory": {
+        "rssBytes": 404357120,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 642795,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 175,
+      "elapsedMs": 89927.22968599999,
+      "memory": {
+        "rssBytes": 404434944,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 645930,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 176,
+      "elapsedMs": 90363.637779,
+      "memory": {
+        "rssBytes": 404283392,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 649047,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 177,
+      "elapsedMs": 90796.05602399999,
+      "memory": {
+        "rssBytes": 404340736,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 652183,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 178,
+      "elapsedMs": 91222.921492,
+      "memory": {
+        "rssBytes": 404471808,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 655301,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 179,
+      "elapsedMs": 91652.216502,
+      "memory": {
+        "rssBytes": 404283392,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408629248,
+        "virtualBytes": 2601406464,
+        "minorFaults": 658436,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 180,
+      "elapsedMs": 92080.00573399999,
+      "memory": {
+        "rssBytes": 404357120,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408629248,
+        "virtualBytes": 2601406464,
+        "minorFaults": 661554,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 181,
+      "elapsedMs": 92510.07999,
+      "memory": {
+        "rssBytes": 404373504,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408629248,
+        "virtualBytes": 2601406464,
+        "minorFaults": 664690,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 182,
+      "elapsedMs": 92943.899654,
+      "memory": {
+        "rssBytes": 404439040,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408629248,
+        "virtualBytes": 2601406464,
+        "minorFaults": 667807,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 183,
+      "elapsedMs": 93375.92663399999,
+      "memory": {
+        "rssBytes": 404504576,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 670941,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 184,
+      "elapsedMs": 93810.499694,
+      "memory": {
+        "rssBytes": 404365312,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 674059,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 185,
+      "elapsedMs": 94237.613709,
+      "memory": {
+        "rssBytes": 404430848,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 677193,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 186,
+      "elapsedMs": 94677.475987,
+      "memory": {
+        "rssBytes": 404508672,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 680311,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 187,
+      "elapsedMs": 95114.532872,
+      "memory": {
+        "rssBytes": 404340736,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 683446,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 188,
+      "elapsedMs": 95545.842165,
+      "memory": {
+        "rssBytes": 404471808,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 686563,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 189,
+      "elapsedMs": 95983.95303399999,
+      "memory": {
+        "rssBytes": 404537344,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 689697,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 190,
+      "elapsedMs": 96426.746888,
+      "memory": {
+        "rssBytes": 404369408,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 692814,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 191,
+      "elapsedMs": 96861.085278,
+      "memory": {
+        "rssBytes": 404434944,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 695948,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 192,
+      "elapsedMs": 97300.515023,
+      "memory": {
+        "rssBytes": 404504576,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 699065,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 193,
+      "elapsedMs": 97759.566077,
+      "memory": {
+        "rssBytes": 404271104,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 702200,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 194,
+      "elapsedMs": 98197.253761,
+      "memory": {
+        "rssBytes": 404361216,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 705318,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 195,
+      "elapsedMs": 98633.56032799999,
+      "memory": {
+        "rssBytes": 404426752,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 708452,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 196,
+      "elapsedMs": 99069.61441899999,
+      "memory": {
+        "rssBytes": 404246528,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 711570,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 197,
+      "elapsedMs": 99501.418163,
+      "memory": {
+        "rssBytes": 404299776,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408630272,
+        "virtualBytes": 2601406464,
+        "minorFaults": 714705,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 198,
+      "elapsedMs": 99932.148213,
+      "memory": {
+        "rssBytes": 404377600,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408629248,
+        "virtualBytes": 2601406464,
+        "minorFaults": 717823,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    },
+    {
+      "cycle": 199,
+      "elapsedMs": 100357.99377999999,
+      "memory": {
+        "rssBytes": 404426752,
+        "peakRssBytes": 418234368,
+        "pssBytes": 408629248,
+        "virtualBytes": 2601406464,
+        "minorFaults": 720957,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21,
+        "pids": [
+          3882452
+        ]
+      },
+      "resources": {
+        "runningProcesses": 0,
+        "stoppedProcesses": 0,
+        "exitedProcesses": 0,
+        "fdTables": 0,
+        "openFds": 0,
+        "pipes": 0,
+        "ptys": 0,
+        "sockets": 0,
+        "socketListeners": 0,
+        "socketConnections": 0,
+        "wasmReservedMemoryBytes": 0,
+        "wasmtimeEngineProfiles": 1,
+        "wasmtimeModuleEntries": 8,
+        "wasmtimeChargedModuleBytes": 69673704,
+        "queueDepth": 0
+      }
+    }
+  ],
+  "completedAt": "2026-07-21T14:21:25.019Z",
+  "signalProbe": [
+    {
+      "wasmExitCode": 143,
+      "javascriptExitCode": 143
+    }
+  ],
+  "postSignal": {
+    "cycle": 200,
+    "elapsedMs": 100450.699964,
+    "memory": {
+      "rssBytes": 405786624,
+      "peakRssBytes": 418234368,
+      "pssBytes": 410059776,
+      "virtualBytes": 2601713664,
+      "minorFaults": 723661,
+      "majorFaults": 0,
+      "processCount": 1,
+      "threadCount": 21,
+      "pids": [
+        3882452
+      ]
+    },
+    "resources": {
+      "runningProcesses": 0,
+      "stoppedProcesses": 0,
+      "exitedProcesses": 0,
+      "fdTables": 0,
+      "openFds": 0,
+      "pipes": 0,
+      "ptys": 0,
+      "sockets": 0,
+      "socketListeners": 0,
+      "socketConnections": 0,
+      "wasmReservedMemoryBytes": 0,
+      "wasmtimeEngineProfiles": 1,
+      "wasmtimeModuleEntries": 9,
+      "wasmtimeChargedModuleBytes": 70722280,
+      "queueDepth": 0
+    }
+  },
+  "summary": {
+    "measuredCycles": 200,
+    "windowSize": 50,
+    "rssGrowthBytes": 3022848,
+    "maxRssGrowthBytes": 50331648,
+    "pssSupported": true,
+    "pssGrowthBytes": 2778112,
+    "maxPssGrowthBytes": 50331648,
+    "processGrowth": 0,
+    "threadGrowth": 0,
+    "resourceGrowth": {
+      "runningProcesses": 0,
+      "stoppedProcesses": 0,
+      "exitedProcesses": 0,
+      "fdTables": 0,
+      "openFds": 0,
+      "pipes": 0,
+      "ptys": 0,
+      "sockets": 0,
+      "socketListeners": 0,
+      "socketConnections": 0,
+      "wasmReservedMemoryBytes": 0,
+      "wasmtimeEngineProfiles": 0,
+      "wasmtimeModuleEntries": 0,
+      "wasmtimeChargedModuleBytes": 0,
+      "queueDepth": 0
+    },
+    "resourcesPassed": true,
+    "passed": true,
+    "signalsPassed": true
+  }
+}

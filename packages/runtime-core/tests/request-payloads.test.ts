@@ -46,6 +46,7 @@ describe("request payload conversion", () => {
 			runtime: "java_script",
 			config: {
 				env: {},
+				wasmBackend: "wasmtime",
 				rootFilesystem: {
 					mode: "read-only",
 					disableDefaultBaseLayer: true,
@@ -63,6 +64,7 @@ describe("request payload conversion", () => {
 			},
 		});
 		expect(JSON.parse(createVmPayload.val.config)).toMatchObject({
+			wasmBackend: "wasmtime",
 			rootFilesystem: {
 				mode: "read-only",
 				disableDefaultBaseLayer: true,
@@ -208,6 +210,27 @@ describe("request payload conversion", () => {
 				wasmBackend: null,
 			},
 		});
+	});
+
+	it("maps every standalone WASM backend selector", () => {
+		for (const [wasm_backend, wasmBackend] of [
+			["v8", protocol.StandaloneWasmBackend.V8],
+			["wasmtime", protocol.StandaloneWasmBackend.Wasmtime],
+			["wasmtime-threads", protocol.StandaloneWasmBackend.WasmtimeThreads],
+		] as const) {
+			expect(
+				toGeneratedRequestPayload({
+					type: "execute",
+					process_id: `proc-${wasm_backend}`,
+					args: [],
+					env: {},
+					wasm_backend,
+				}),
+			).toMatchObject({
+				tag: "ExecuteRequest",
+				val: { wasmBackend },
+			});
+		}
 	});
 
 	it("maps guest kernel call requests", () => {

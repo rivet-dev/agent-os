@@ -6,24 +6,24 @@ import * as path from "node:path";
 import * as posixPath from "node:path/posix";
 import { fileURLToPath } from "node:url";
 import "./native-client.js";
+import {
+	type AuthenticatedSession,
+	type CreatedVm,
+	type LocalCompatMount,
+	NativeSidecarKernelProxy,
+	SidecarProcess,
+	type RootFilesystemEntry,
+	type SidecarRegisteredHostCallbackDefinition,
+	type SidecarRequestFrame,
+	type SidecarResponsePayload,
+	serializeMountConfigForSidecar,
+} from "./kernel-proxy.js";
 import { resolvePublishedSidecarBinary } from "./binary.js";
 import { findCargoBinary, resolveCargoBinary } from "./cargo.js";
 import type { JsRuntimeConfig } from "./generated/JsRuntimeConfig.js";
 import type { PermissionsPolicy } from "./generated/PermissionsPolicy.js";
 import type { VmLimitsConfig } from "./generated/VmLimitsConfig.js";
 import type { VmUserConfig } from "./generated/VmUserConfig.js";
-import {
-	type AuthenticatedSession,
-	type CreatedVm,
-	type LocalCompatMount,
-	NativeSidecarKernelProxy,
-	type RootFilesystemEntry,
-	SidecarProcess,
-	type SidecarRegisteredHostCallbackDefinition,
-	type SidecarRequestFrame,
-	type SidecarResponsePayload,
-	serializeMountConfigForSidecar,
-} from "./kernel-proxy.js";
 
 export const AF_INET = 2;
 export const AF_UNIX = 1;
@@ -265,6 +265,8 @@ export interface OpenShellOptions {
 	cwd?: string;
 	cols?: number;
 	rows?: number;
+	/** Engine affinity inherited by standalone WASM commands launched by the shell. */
+	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 	/** Optional stderr-only diagnostic tap; do not render it alongside `onData`. */
 	onStderr?: (data: Uint8Array) => void;
 }
@@ -284,7 +286,7 @@ export interface ExecOptions {
 	filePath?: string;
 	cpuTimeLimitMs?: number;
 	timingMitigation?: TimingMitigation;
-	wasmBackend?: "v8" | "wasmtime";
+	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 }
 
 export interface ExecResult {
@@ -2801,12 +2803,13 @@ class NativeKernel implements Kernel {
 			env?: Record<string, string>;
 			cwd?: string;
 			user?: VmUserConfig;
+			wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
+			limits?: VmLimitsConfig;
 			sidecar?: SidecarProcess;
 			onBootTiming?: (timing: KernelBootTiming) => void;
 			hostNetworkAdapter?: unknown;
 			loopbackExemptPorts?: number[];
 			jsRuntime?: Partial<JsRuntimeConfig>;
-			limits?: VmLimitsConfig;
 			mounts?: Array<{
 				path: string;
 				fs: VirtualFileSystem;
@@ -3340,6 +3343,8 @@ class NativeKernel implements Kernel {
 				runtime: "java_script",
 				config: {
 					env: createVmEnv,
+					wasmBackend: this.options.wasmBackend,
+					limits: this.options.limits,
 					...(this.options.user ? { user: this.options.user } : {}),
 					rootFilesystem,
 					...(bootstrapPermissions
@@ -3467,13 +3472,14 @@ export function createKernel(options: {
 	env?: Record<string, string>;
 	cwd?: string;
 	user?: VmUserConfig;
+	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
+	limits?: VmLimitsConfig;
 	sidecar?: SidecarProcess;
 	onBootTiming?: (timing: KernelBootTiming) => void;
 	maxProcesses?: number;
 	hostNetworkAdapter?: unknown;
 	loopbackExemptPorts?: number[];
 	jsRuntime?: Partial<JsRuntimeConfig>;
-	limits?: VmLimitsConfig;
 	logger?: unknown;
 	mounts?: Array<{ path: string; fs: VirtualFileSystem; readOnly?: boolean }>;
 	syncFilesystemOnDispose?: boolean;

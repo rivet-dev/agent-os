@@ -219,6 +219,7 @@ type WasmPermissionTier enum {
 type StandaloneWasmBackend enum {
   V8
   WASMTIME
+  WASMTIME_THREADS
 }
 
 # agentOS package descriptor. `path` is the trusted host path of the package:

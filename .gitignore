@@ -43,11 +43,14 @@ secrets/**/*
 # Generated WASM toolchain and software artifacts. These are rebuilt for tests
 # and releases and must never be committed.
 packages/runtime-core/commands/
+packages/runtime-sidecar/npm/*/agentos-native-sidecar
+packages/sidecar-binary/npm/*/agentos-sidecar
 toolchain/vendor/
 toolchain/c/build/
 toolchain/c/vendor/
 toolchain/c/libs/
 toolchain/c/sysroot/
+toolchain/c/sysroot-threads/
 toolchain/c/.cache/
 toolchain/std-patches/wasi-libc-overrides/*.o
 software/*/bin/
@@ -86,6 +89,7 @@ scripts/ralph/.codex-last-msg-*
 
 # Local caches and stray outputs
 .agentos/
+.cache/
 crates/execution/assets/v8-bridge.js
 crates/execution/assets/v8-bridge-zlib.js
 crates/execution/.agentos-pyodide-cache/

@@ -307,7 +307,7 @@ interface TrackedProcessEntry {
 	driver: string;
 	cwd: string;
 	env: Record<string, string>;
-	wasmBackend: "v8" | "wasmtime" | undefined;
+	wasmBackend: "v8" | "wasmtime" | "wasmtime-threads" | undefined;
 	startTime: number;
 	exitTime: number | null;
 	hostPid: number | null;
@@ -1153,6 +1153,7 @@ export class NativeSidecarKernelProxy {
 										{
 											env: shellEnv,
 											cwd: shellCwd,
+											wasmBackend: options?.wasmBackend,
 											streamStdin: true,
 											onStdout: (chunk) =>
 												emitSyntheticTerminal(textDecoder.decode(chunk)),
@@ -1174,6 +1175,7 @@ export class NativeSidecarKernelProxy {
 								const result = await execCommand(nextCommand, {
 									env: shellEnv,
 									cwd: shellCwd,
+									wasmBackend: options?.wasmBackend,
 								});
 								const sanitizedStdout = sanitizeSyntheticShellText(
 									result.stdout,
@@ -1226,6 +1228,7 @@ export class NativeSidecarKernelProxy {
 				AGENTOS_EXEC_TTY: "1",
 			},
 			cwd: options?.cwd,
+			wasmBackend: options?.wasmBackend,
 			streamStdin: true,
 			onStdout: (chunk) => {
 				const sanitized = sanitizeNativeShellOutput(chunk);
@@ -1324,7 +1327,10 @@ export class NativeSidecarKernelProxy {
 			stdin.isTTY && typeof stdin.setRawMode === "function";
 		const onStdinData = (data: Uint8Array | string) => {
 			void shell.write(data).catch((error) => {
-				console.error("[agentos] failed to forward terminal stdin:", error);
+				console.error(
+					"ERR_AGENTOS_TERMINAL_STDIN: failed to forward terminal input",
+					error,
+				);
 			});
 		};
 		const onResize = () => {
@@ -1663,7 +1669,7 @@ export class NativeSidecarKernelProxy {
 	}
 
 	private async waitForMountReconfigure(): Promise<void> {
-		if (this.mountReconfigurePromise) {
+		if (this.mountReconfigurePromise !== null) {
 			await this.mountReconfigurePromise;
 		}
 	}
@@ -1761,7 +1767,7 @@ export class NativeSidecarKernelProxy {
 	}
 
 	private async refreshProcessSnapshot(): Promise<void> {
-		if (this.processSnapshotRefresh) {
+		if (this.processSnapshotRefresh !== null) {
 			await this.processSnapshotRefresh;
 			return;
 		}

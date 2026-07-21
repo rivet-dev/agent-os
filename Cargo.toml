@@ -86,7 +86,10 @@ vbare-compiler = { package = "rivet-vbare-compiler", version = "0.0.5" }
 wasmtime = { version = "=46.0.0", default-features = false, features = [
     "async",
     "cranelift",
+    "gc",
+    "gc-drc",
     "runtime",
     "std",
+    "threads",
 ] }
 wasmparser = "=0.251.0"

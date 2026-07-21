@@ -22,6 +22,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { JsRuntimeConfig } from "./generated/JsRuntimeConfig.js";
+import type { VmLimitsConfig } from "./generated/VmLimitsConfig.js";
 import type { VmUserConfig } from "./generated/VmUserConfig.js";
 import { parseNodeRuntimeCreateOptions } from "./node-runtime-options-schema.js";
 import type { SidecarProcess } from "./sidecar-process.js";
@@ -150,6 +151,10 @@ export interface NodeRuntimeCreateOptions {
 	cwd?: string;
 	/** Initial virtual Linux credentials and account record. Defaults to `1000:1000` (`agentos`). */
 	user?: VmUserConfig;
+	/** VM-wide default for standalone WASM commands. JavaScript remains on V8. */
+	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
+	/** Sidecar-enforced VM resource and runtime limits. */
+	limits?: VmLimitsConfig;
 	/**
 	 * Permission policy for the VM. Merged over a secure default that **denies
 	 * network access** (guest code cannot reach the network until you opt in);
@@ -352,7 +357,7 @@ export interface NodeRuntimeExecOptions {
 	 * Select the engine for a standalone WebAssembly command. JavaScript and
 	 * Python commands ignore this option. Omission preserves the runtime default.
 	 */
-	wasmBackend?: "v8" | "wasmtime";
+	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 	/** Extra environment variables for this run, merged over the VM env. */
 	env?: Record<string, string>;
 	/** Working directory for this run. */
@@ -669,6 +674,8 @@ export class NodeRuntime {
 			env: options.env,
 			cwd: options.cwd,
 			user: options.user,
+			wasmBackend: options.wasmBackend,
+			limits: options.limits,
 			sidecar: options.sidecar,
 			onBootTiming: (timing) => options.onBootTiming?.(timing),
 			loopbackExemptPorts: options.loopbackExemptPorts,

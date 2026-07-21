@@ -548,6 +548,17 @@ where
                 listen_policy,
                 create_loopback_exempt_ports,
                 guest_env,
+                standalone_wasm_backend: match create_config.wasm_backend.unwrap_or_default() {
+                    vm_config::StandaloneWasmBackend::V8 => {
+                        agentos_execution::StandaloneWasmBackend::V8
+                    }
+                    vm_config::StandaloneWasmBackend::Wasmtime => {
+                        agentos_execution::StandaloneWasmBackend::Wasmtime
+                    }
+                    vm_config::StandaloneWasmBackend::WasmtimeThreads => {
+                        agentos_execution::StandaloneWasmBackend::WasmtimeThreads
+                    }
+                },
                 requested_runtime: payload.runtime,
                 root_filesystem_mode: protocol_root_filesystem_mode(root_filesystem.mode),
                 guest_cwd,
@@ -1624,6 +1635,32 @@ fn vm_resource_ledger(
                 "limits.resources.maxSocketDatagramQueueLen must be bounded for sidecar VMs",
             ))
         })?;
+    let wasm_linear_memory_limit = limits.resources.max_wasm_memory_bytes.ok_or_else(|| {
+        SidecarError::InvalidState(String::from(
+            "limits.resources.maxWasmMemoryBytes must be bounded for sidecar VMs",
+        ))
+    })?;
+    let _wasm_linear_memory_limit = usize::try_from(wasm_linear_memory_limit).map_err(|_| {
+        SidecarError::InvalidState(String::from(
+            "limits.resources.maxWasmMemoryBytes exceeds the host address space",
+        ))
+    })?;
+    // `limits.resources.maxWasmMemoryBytes` is the accessible linear-memory
+    // cap for each guest memory. Wasmtime's admission reservation also includes
+    // bounded table and async-stack envelopes, so reusing the linear cap as the
+    // child ledger's aggregate maximum makes one otherwise-valid Store
+    // impossible to admit. Keep aggregate Store admission under the distinct,
+    // process-wide runtime envelope; the child ledger still gives each VM a
+    // bounded scope while the Store limiter independently enforces the exact
+    // per-memory linear cap.
+    let wasm_aggregate_memory_limit = process
+        .usage(ResourceClass::WasmMemoryBytes)
+        .limit
+        .ok_or_else(|| {
+            SidecarError::InvalidState(String::from(
+                "runtime.resources.maxWasmMemoryBytes must be bounded for sidecar VMs",
+            ))
+        })?;
     let child_limits = [
         (
             ResourceClass::Capabilities,
@@ -1745,6 +1782,20 @@ fn vm_resource_ledger(
             ),
         ),
         (
+            ResourceClass::WasmMemoryBytes,
+            ResourceLimit::new(
+                wasm_aggregate_memory_limit,
+                "runtime.resources.maxWasmMemoryBytes",
+            ),
+        ),
+        (
+            ResourceClass::WasmThreads,
+            ResourceLimit::new(
+                limits.wasm.max_concurrent_threads,
+                "limits.wasm.maxConcurrentThreads",
+            ),
+        ),
+        (
             ResourceClass::Http2Connections,
             ResourceLimit::new(limits.http2.max_connections, "limits.http2.maxConnections"),
         ),
@@ -1841,6 +1892,7 @@ fn vm_resource_ledger(
                         ResourceClass::WasmMemoryBytes => {
                             "runtime.resources.maxWasmMemoryBytes"
                         }
+                        ResourceClass::WasmThreads => "runtime.resources.maxWasmThreads",
                         ResourceClass::Http2Connections => "limits.http2.maxConnections",
                         ResourceClass::Http2Streams => "limits.http2.maxStreams",
                         ResourceClass::Http2BufferedBytes => "limits.http2.maxBufferedBytes",
@@ -2994,6 +3046,22 @@ mod tests {
                 resource.name()
             );
         }
+        assert_eq!(
+            ledger.usage(ResourceClass::WasmMemoryBytes).limit,
+            process
+                .resources()
+                .usage(ResourceClass::WasmMemoryBytes)
+                .limit,
+            "the VM aggregate Store envelope must inherit the bounded process ceiling"
+        );
+        assert_ne!(
+            ledger.usage(ResourceClass::WasmMemoryBytes).limit,
+            crate::limits::VmLimits::default()
+                .resources
+                .max_wasm_memory_bytes
+                .and_then(|value| usize::try_from(value).ok()),
+            "the per-memory linear cap must not be reused as Store-overhead admission"
+        );
     }
 
     fn block_on<F: std::future::Future>(future: F) -> F::Output {
@@ -3105,7 +3173,16 @@ mod tests {
         ] {
             let process = Arc::new(ResourceLedger::root(
                 format!("executor-ceiling-test-{resource:?}"),
-                [(resource, ResourceLimit::new(maximum, process_path))],
+                [
+                    (resource, ResourceLimit::new(maximum, process_path)),
+                    (
+                        ResourceClass::WasmMemoryBytes,
+                        ResourceLimit::new(
+                            1024 * 1024 * 1024,
+                            "runtime.resources.maxWasmMemoryBytes",
+                        ),
+                    ),
+                ],
             ));
             let error = vm_resource_ledger("vm-test", 70_005, &limits, process)
                 .expect_err("VM executor limit must not exceed its process ceiling");

@@ -12,7 +12,7 @@ use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 #[derive(Debug, Clone)]
 struct MockDnsResolver {
@@ -102,15 +102,8 @@ fn new_kernel(config: KernelVmConfig) -> KernelVm<MemoryFileSystem> {
     KernelVm::new(MemoryFileSystem::new(), config)
 }
 
-struct NoopWake;
-
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn poll_ready<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let mut context = Context::from_waker(Waker::noop());
     let mut future = std::pin::pin!(future);
     match future.as_mut().poll(&mut context) {
         Poll::Ready(output) => output,

@@ -96,6 +96,7 @@ pub(crate) struct DeferredKernelPoll {
     /// Kernel-owned temporary mask scope for a combined ppoll. The sidecar
     /// restores this before publishing a caught signal or settling the reply.
     pub(crate) temporary_signal_mask_token: Option<u64>,
+    pub(crate) temporary_signal_thread_id: Option<u32>,
     /// Distinguishes the combined kernel/managed-fd path from the legacy
     /// kernel-only compatibility operation.
     pub(crate) combined: bool,
@@ -423,6 +424,12 @@ impl ActiveRealIntervalTimer {
         let mut timer = self.state.lock().unwrap_or_else(|error| error.into_inner());
         refresh_real_interval_timer(&mut timer, Instant::now());
         std::mem::take(&mut timer.pending_expiry)
+    }
+
+    pub(crate) fn next_deadline(&self) -> Option<Instant> {
+        let mut timer = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        refresh_real_interval_timer(&mut timer, Instant::now());
+        timer.deadline
     }
 }
 
@@ -1191,6 +1198,9 @@ pub(crate) struct VmState {
     pub(crate) listen_policy: VmListenPolicy,
     pub(crate) create_loopback_exempt_ports: BTreeSet<u16>,
     pub(crate) guest_env: BTreeMap<String, String>,
+    /// VM-wide standalone-WASM engine policy. JavaScript itself remains on V8;
+    /// this affinity is copied to every top-level process for spawn/exec.
+    pub(crate) standalone_wasm_backend: StandaloneWasmBackend,
     pub(crate) requested_runtime: GuestRuntimeKind,
     pub(crate) root_filesystem_mode: RootFilesystemMode,
     pub(crate) guest_cwd: String,

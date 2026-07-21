@@ -4,6 +4,17 @@ import { constants as osConstants } from "node:os";
 import { posix as posixPath } from "node:path";
 import type { NativeMountPluginDescriptor } from "./descriptors.js";
 import type {
+	AuthenticatedSession,
+	CreatedVm,
+	GuestFilesystemStat,
+	SidecarMountDescriptor,
+	SidecarProcess,
+	SidecarProcessSnapshotEntry,
+	SidecarResourceSnapshot,
+	SidecarSignalHandlerRegistration,
+	SidecarSocketStateEntry,
+} from "./sidecar-process.js";
+import type {
 	ConnectTerminalOptions,
 	Kernel,
 	KernelExecOptions,
@@ -16,17 +27,6 @@ import type {
 	VirtualFileSystem,
 	VirtualStat,
 } from "./test-runtime.js";
-import type {
-	AuthenticatedSession,
-	CreatedVm,
-	GuestFilesystemStat,
-	SidecarProcess,
-	SidecarMountDescriptor,
-	SidecarProcessSnapshotEntry,
-	SidecarResourceSnapshot,
-	SidecarSignalHandlerRegistration,
-	SidecarSocketStateEntry,
-} from "./sidecar-process.js";
 
 export interface PlainMountConfig {
 	path: string;
@@ -79,9 +79,7 @@ const TRAILING_OUTPUT_DRAIN_INTERVAL_MS = 10;
 const TRAILING_OUTPUT_DRAIN_MAX_MS = 250;
 const TRAILING_OUTPUT_DRAIN_QUIET_TURNS = 2;
 
-async function drainTrailingProcessOutputTurn(
-	delayMs = 0,
-): Promise<void> {
+async function drainTrailingProcessOutputTurn(delayMs = 0): Promise<void> {
 	// Native-sidecar `process_output` events can lag one macrotask behind the
 	// terminal `process_exited` notification for very short-lived processes, and
 	// under suite load the sidecar event pump can need a little extra time to
@@ -242,7 +240,7 @@ function shellSingleQuote(value: string): string {
 	if (value.length === 0) {
 		return "''";
 	}
-	return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+	return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 function buildSignalNameByNumber(): Map<number, string> {
@@ -307,7 +305,7 @@ interface TrackedProcessEntry {
 	driver: string;
 	cwd: string;
 	env: Record<string, string>;
-	wasmBackend: "v8" | "wasmtime" | undefined;
+	wasmBackend: "v8" | "wasmtime" | "wasmtime-threads" | undefined;
 	startTime: number;
 	exitTime: number | null;
 	hostPid: number | null;
@@ -620,8 +618,9 @@ export class NativeSidecarKernelProxy {
 	): ManagedProcess {
 		let spawnCommand = command;
 		let spawnArgs = [...args];
-		const shellOption = (options as ({ shell?: unknown } & KernelSpawnOptions) | undefined)
-			?.shell;
+		const shellOption = (
+			options as ({ shell?: unknown } & KernelSpawnOptions) | undefined
+		)?.shell;
 		if (shellOption === true || typeof shellOption === "string") {
 			// Node's shell mode hands the raw command line to the shell. Shell
 			// grammar belongs to the guest shell, so the bridge never parses it.
@@ -712,10 +711,7 @@ export class NativeSidecarKernelProxy {
 					.catch((error) => {
 						this.handleBackgroundProcessError(entry, error);
 					});
-				if (
-					(signal === 9 || signal === 15) &&
-					entry.exitCode === null
-				) {
+				if ((signal === 9 || signal === 15) && entry.exitCode === null) {
 					this.finishProcess(entry, 128 + signal);
 				}
 			},
@@ -751,8 +747,7 @@ export class NativeSidecarKernelProxy {
 			(command === "sh" || command === "/bin/sh" ? ["-i"] : []);
 		const synthesizePrompt = !options?.command && !options?.args;
 		const autoCloseExplicitCommandStdin =
-			Boolean(options?.command) &&
-			!["sh", "/bin/sh", "bash"].includes(command);
+			Boolean(options?.command) && !["sh", "/bin/sh", "bash"].includes(command);
 		const promptText = "sh-0.4$ ";
 		const textEncoder = new TextEncoder();
 		const textDecoder = new TextDecoder();
@@ -963,7 +958,9 @@ export class NativeSidecarKernelProxy {
 						if (newlineIndex < 0) {
 							break;
 						}
-						const line = bufferedInput.slice(0, newlineIndex).replace(/\r$/, "");
+						const line = bufferedInput
+							.slice(0, newlineIndex)
+							.replace(/\r$/, "");
 						bufferedInput = bufferedInput.slice(newlineIndex + 1);
 						emitSyntheticStdout(`${line}\n`);
 						const nextCommand = bufferedCommand
@@ -983,7 +980,9 @@ export class NativeSidecarKernelProxy {
 								}
 								const exitMatch = trimmed.match(/^exit(?:\s+(-?\d+))?$/);
 								if (exitMatch) {
-									finishSyntheticShell(Number.parseInt(exitMatch[1] ?? "0", 10));
+									finishSyntheticShell(
+										Number.parseInt(exitMatch[1] ?? "0", 10),
+									);
 									return;
 								}
 								const exportMatch = trimmed.match(
@@ -1014,6 +1013,7 @@ export class NativeSidecarKernelProxy {
 										{
 											env: shellEnv,
 											cwd: shellCwd,
+											wasmBackend: options?.wasmBackend,
 											streamStdin: true,
 											onStdout: (chunk) =>
 												emitSyntheticTerminal(textDecoder.decode(chunk)),
@@ -1035,6 +1035,7 @@ export class NativeSidecarKernelProxy {
 								const result = await execCommand(nextCommand, {
 									env: shellEnv,
 									cwd: shellCwd,
+									wasmBackend: options?.wasmBackend,
 								});
 								const sanitizedStdout = sanitizeSyntheticShellText(
 									result.stdout,
@@ -1082,6 +1083,7 @@ export class NativeSidecarKernelProxy {
 		const proc = this.spawn(command, args, {
 			env: options?.env,
 			cwd: options?.cwd,
+			wasmBackend: options?.wasmBackend,
 			streamStdin: true,
 			onStdout: (chunk) => {
 				for (const handler of terminalHandlers) {
@@ -1459,7 +1461,7 @@ export class NativeSidecarKernelProxy {
 	}
 
 	private async refreshProcessSnapshot(): Promise<void> {
-		if (this.processSnapshotRefresh) {
+		if (this.processSnapshotRefresh !== null) {
 			await this.processSnapshotRefresh;
 			return;
 		}
@@ -1510,9 +1512,7 @@ export class NativeSidecarKernelProxy {
 				return;
 			}
 
-			await drainTrailingProcessOutputTurn(
-				Math.min(delayMs, remainingMs),
-			);
+			await drainTrailingProcessOutputTurn(Math.min(delayMs, remainingMs));
 			if (entry.outputGeneration === observedGeneration) {
 				quietTurns += 1;
 			} else {
@@ -1558,13 +1558,9 @@ export class NativeSidecarKernelProxy {
 	private async runEventPump(): Promise<void> {
 		while (!this.disposed) {
 			try {
-				const event = await this.client.waitForEvent(
-					{ any: true },
-					undefined,
-					{
-						signal: this.eventPumpAbortController.signal,
-					},
-				);
+				const event = await this.client.waitForEvent({ any: true }, undefined, {
+					signal: this.eventPumpAbortController.signal,
+				});
 				if (event.payload.type === "process_output") {
 					const entry = this.trackedProcessesById.get(event.payload.process_id);
 					if (!entry) {
@@ -1679,13 +1675,10 @@ export class NativeSidecarKernelProxy {
 							entry.hostExitObservedAt = now;
 							continue;
 						}
-						if (
-							now - entry.hostExitObservedAt >= MISSING_EXIT_EVENT_GRACE_MS
-						) {
+						if (now - entry.hostExitObservedAt >= MISSING_EXIT_EVENT_GRACE_MS) {
 							this.finishProcess(entry, 0);
 							break;
 						}
-						continue;
 					}
 				} catch {
 					// Fall back to the next wait interval if the sidecar snapshot query fails.
@@ -1749,39 +1742,39 @@ export class NativeSidecarKernelProxy {
 		}
 
 		entry.stdinFlushPromise = entry.startPromise
-				.then(async () => {
-					if (entry.exitCode !== null) {
-						return;
-					}
-					while (entry.pendingStdin.length > 0) {
+			.then(async () => {
+				if (entry.exitCode !== null) {
+					return;
+				}
+				while (entry.pendingStdin.length > 0) {
 					const chunk = entry.pendingStdin.shift();
 					if (chunk === undefined) {
 						break;
 					}
-						await this.client.writeStdin(
-							this.session,
-							this.vm,
-							entry.processId,
-							chunk,
-						);
-					}
-				})
-				.catch((error) => {
-					if (isNoSuchProcessError(error) || isUnknownVmError(error)) {
-						return;
-					}
-					throw error;
-				})
-				.finally(() => {
+					await this.client.writeStdin(
+						this.session,
+						this.vm,
+						entry.processId,
+						chunk,
+					);
+				}
+			})
+			.catch((error) => {
+				if (isNoSuchProcessError(error) || isUnknownVmError(error)) {
+					return;
+				}
+				throw error;
+			})
+			.finally(() => {
 				entry.stdinFlushPromise = null;
-					if (entry.pendingStdin.length > 0 && entry.exitCode === null) {
-						void this.flushPendingStdin(entry).catch((error) => {
-							this.handleBackgroundProcessError(entry, error);
-						});
-					}
-				});
-			return entry.stdinFlushPromise;
-		}
+				if (entry.pendingStdin.length > 0 && entry.exitCode === null) {
+					void this.flushPendingStdin(entry).catch((error) => {
+						this.handleBackgroundProcessError(entry, error);
+					});
+				}
+			});
+		return entry.stdinFlushPromise;
+	}
 
 	private async closeTrackedStdin(entry: TrackedProcessEntry): Promise<void> {
 		await entry.startPromise;
@@ -1789,14 +1782,14 @@ export class NativeSidecarKernelProxy {
 		if (entry.exitCode !== null || !entry.pendingCloseStdin) {
 			return;
 		}
-			entry.pendingCloseStdin = false;
-			try {
-				await this.client.closeStdin(this.session, this.vm, entry.processId);
-			} catch (error) {
-				if (isNoSuchProcessError(error) || isUnknownVmError(error)) {
-					return;
-				}
-				throw error;
+		entry.pendingCloseStdin = false;
+		try {
+			await this.client.closeStdin(this.session, this.vm, entry.processId);
+		} catch (error) {
+			if (isNoSuchProcessError(error) || isUnknownVmError(error)) {
+				return;
+			}
+			throw error;
 		}
 	}
 
@@ -1804,7 +1797,11 @@ export class NativeSidecarKernelProxy {
 		entry: TrackedProcessEntry,
 		error: unknown,
 	): void {
-		if (this.disposed || isNoSuchProcessError(error) || isUnknownVmError(error)) {
+		if (
+			this.disposed ||
+			isNoSuchProcessError(error) ||
+			isUnknownVmError(error)
+		) {
 			return;
 		}
 		if (entry.exitCode !== null) {
@@ -1819,7 +1816,11 @@ export class NativeSidecarKernelProxy {
 		entry: TrackedProcessEntry,
 		error: unknown,
 	): number {
-		if (this.disposed || isNoSuchProcessError(error) || isUnknownVmError(error)) {
+		if (
+			this.disposed ||
+			isNoSuchProcessError(error) ||
+			isUnknownVmError(error)
+		) {
 			return entry.exitCode ?? 1;
 		}
 		this.emitBackgroundProcessError(entry, error);
@@ -2199,10 +2200,7 @@ export class NativeSidecarKernelProxy {
 	private assertGuestPathWritable(path: string): void {
 		const normalizedPath = posixPath.normalize(path);
 		for (const root of PROTECTED_READ_ONLY_GUEST_ROOTS) {
-			if (
-				normalizedPath === root ||
-				normalizedPath.startsWith(`${root}/`)
-			) {
+			if (normalizedPath === root || normalizedPath.startsWith(`${root}/`)) {
 				throw errnoError("EROFS", "read-only file system");
 			}
 		}
@@ -2381,7 +2379,6 @@ export type {
 	AuthenticatedSession,
 	CreatedVm,
 	GuestFilesystemStat,
-	SidecarSpawnOptions,
 	RootFilesystemEntry,
 	SidecarEventSelector,
 	SidecarPermissionsPolicy,
@@ -2392,10 +2389,11 @@ export type {
 	SidecarSessionState,
 	SidecarSignalHandlerRegistration,
 	SidecarSocketStateEntry,
+	SidecarSpawnOptions,
 } from "./sidecar-process.js";
 export {
-	SidecarProcess,
 	SidecarEventBufferOverflow,
+	SidecarProcess,
 	SidecarProcessError,
 	SidecarProcessExited,
 } from "./sidecar-process.js";

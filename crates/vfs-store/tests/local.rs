@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use vfs::adapter::MountedEngineFileSystem;
 use vfs::engine::engines::{ChunkedFs, ChunkedFsOptions};
 use vfs::engine::mem::MemoryBlockStore;
-use vfs::engine::{BlockKey, BlockStore, VirtualFileSystem};
+use vfs::engine::{BlockKey, BlockStore, VirtualFileSystem, S_IFBLK, S_IFCHR, S_IFIFO};
 use vfs::posix::MountedFileSystem;
 use vfs::posix::{MemoryFileSystem, MountOptions, MountTable};
 
@@ -42,7 +42,7 @@ async fn sqlite_store_installs_canonical_schema() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
 
     let mut statement = connection
         .prepare(
@@ -140,7 +140,7 @@ fn sqlite_store_rejects_future_schema_versions() {
                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                schema_version INTEGER NOT NULL CHECK (schema_version >= 0)
              ) STRICT;
-             INSERT INTO agentos_fs_schema_version (singleton, schema_version) VALUES (1, 3);",
+             INSERT INTO agentos_fs_schema_version (singleton, schema_version) VALUES (1, 4);",
         )
         .unwrap();
     drop(connection);
@@ -150,7 +150,54 @@ fn sqlite_store_rejects_future_schema_versions() {
         .expect("future schema must be rejected");
     assert!(error
         .message()
-        .contains("version 3; latest supported version is 2"));
+        .contains("version 4; latest supported version is 3"));
+}
+
+#[test]
+fn sqlite_store_migrates_v2_dentries_to_all_supported_inode_kinds() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("v2.sqlite");
+    drop(SqliteMetadataStore::open(&db).unwrap());
+
+    let connection = Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "DROP INDEX agentos_fs_dentries_parent;
+             ALTER TABLE agentos_fs_dentries RENAME TO agentos_fs_dentries_v3;
+             CREATE TABLE agentos_fs_dentries (
+               parent_ino INTEGER NOT NULL CHECK (parent_ino > 0),
+               name TEXT NOT NULL CHECK (length(name) > 0),
+               child_ino INTEGER NOT NULL CHECK (child_ino > 0),
+               kind INTEGER NOT NULL CHECK (kind IN (0, 1, 2)),
+               PRIMARY KEY (parent_ino, name)
+             ) STRICT;
+             INSERT INTO agentos_fs_dentries (parent_ino, name, child_ino, kind)
+               SELECT parent_ino, name, child_ino, kind FROM agentos_fs_dentries_v3;
+             DROP TABLE agentos_fs_dentries_v3;
+             CREATE INDEX agentos_fs_dentries_parent ON agentos_fs_dentries(parent_ino);
+             UPDATE agentos_fs_schema_version SET schema_version = 2 WHERE singleton = 1;",
+        )
+        .unwrap();
+    drop(connection);
+
+    drop(SqliteMetadataStore::open(&db).unwrap());
+    let connection = Connection::open(&db).unwrap();
+    let version: i64 = connection
+        .query_row(
+            "SELECT schema_version FROM agentos_fs_schema_version WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let dentry_sql: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name = 'agentos_fs_dentries'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 3);
+    assert!(dentry_sql.contains("kind IN (0, 1, 2, 3, 4, 5)"));
 }
 
 #[tokio::test]
@@ -194,6 +241,44 @@ async fn sqlite_store_reopens_persisted_metadata() {
             .await
             .unwrap(),
         b"xattr"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_store_reopens_all_special_inode_kinds() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("special-inodes.sqlite");
+
+    {
+        let fs = ChunkedFs::new(
+            SqliteMetadataStore::open(&db).unwrap(),
+            MemoryBlockStore::new(),
+        );
+        fs.mkdir("/devices", false).await.unwrap();
+        fs.mknod("/devices/char", S_IFCHR | 0o600, (1 << 8) | 3)
+            .await
+            .unwrap();
+        fs.mknod("/devices/block", S_IFBLK | 0o640, (8 << 8) | 1)
+            .await
+            .unwrap();
+        fs.mknod("/devices/fifo", S_IFIFO | 0o600, 0).await.unwrap();
+    }
+
+    let fs = ChunkedFs::new(
+        SqliteMetadataStore::open(&db).unwrap(),
+        MemoryBlockStore::new(),
+    );
+    assert_eq!(
+        fs.stat("/devices/char").await.unwrap().mode & 0o170000,
+        S_IFCHR
+    );
+    assert_eq!(
+        fs.stat("/devices/block").await.unwrap().mode & 0o170000,
+        S_IFBLK
+    );
+    assert_eq!(
+        fs.stat("/devices/fifo").await.unwrap().mode & 0o170000,
+        S_IFIFO
     );
 }
 

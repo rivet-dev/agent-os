@@ -28,6 +28,8 @@ pub const SIGPIPE: i32 = 13;
 pub const SIGWINCH: i32 = 28;
 const MAX_SIGNAL: i32 = 64;
 const MAX_SIGNAL_HANDLER_DEPTH: usize = 64;
+const MAX_SIGNAL_THREADS_PER_PROCESS: usize = 1024;
+pub const MAIN_SIGNAL_THREAD_ID: u32 = 0;
 const SIGTTIN: i32 = 21;
 const SIGTTOU: i32 = 22;
 const SIGURG: i32 = 23;
@@ -324,6 +326,8 @@ pub struct SignalDelivery {
     pub token: u64,
     pub signal: i32,
     pub action: SignalAction,
+    /// Kernel signal-thread record selected for this process-directed signal.
+    pub thread_id: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -538,15 +542,30 @@ struct ProcessRecord {
     entry: ProcessEntry,
     runtime_endpoint: Arc<dyn ProcessRuntimeEndpoint>,
     pending_wait_events: VecDeque<PendingWaitEvent>,
-    blocked_signals: SignalSet,
     pending_signals: SignalSet,
     signal_actions: [SignalAction; MAX_SIGNAL as usize],
-    signal_deliveries: Vec<InProgressSignalDelivery>,
-    temporary_signal_masks: Vec<TemporarySignalMask>,
+    signal_threads: BTreeMap<u32, ProcessThreadSignalState>,
     next_signal_delivery_token: u64,
     next_signal_mask_token: u64,
     resource_limits: ProcessResourceLimits,
     permission_tier: ProcessPermissionTier,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessThreadSignalState {
+    blocked_signals: SignalSet,
+    signal_deliveries: Vec<InProgressSignalDelivery>,
+    temporary_signal_masks: Vec<TemporarySignalMask>,
+}
+
+impl ProcessThreadSignalState {
+    fn new(blocked_signals: SignalSet) -> Self {
+        Self {
+            blocked_signals,
+            signal_deliveries: Vec::new(),
+            temporary_signal_masks: Vec::new(),
+        }
+    }
 }
 
 struct ScheduledSignalDelivery {
@@ -742,11 +761,12 @@ impl ProcessTable {
                 entry: entry.clone(),
                 runtime_endpoint,
                 pending_wait_events: VecDeque::new(),
-                blocked_signals: ctx.blocked_signals,
                 pending_signals: ctx.pending_signals,
                 signal_actions: inherited_signal_actions,
-                signal_deliveries: Vec::new(),
-                temporary_signal_masks: Vec::new(),
+                signal_threads: BTreeMap::from([(
+                    MAIN_SIGNAL_THREAD_ID,
+                    ProcessThreadSignalState::new(ctx.blocked_signals),
+                )]),
                 next_signal_delivery_token: 1,
                 next_signal_mask_token: 1,
                 resource_limits: ctx.resource_limits,
@@ -789,7 +809,11 @@ impl ProcessTable {
             umask: parent.entry.umask,
             fds: ProcessFileDescriptors::default(),
             identity: parent.entry.identity.clone(),
-            blocked_signals: parent.blocked_signals,
+            blocked_signals: parent
+                .signal_threads
+                .get(&MAIN_SIGNAL_THREAD_ID)
+                .map(|thread| thread.blocked_signals)
+                .unwrap_or_else(SignalSet::empty),
             pending_signals: SignalSet::empty(),
             resource_limits: parent.resource_limits.clone(),
             permission_tier: parent.permission_tier,
@@ -896,8 +920,7 @@ impl ProcessTable {
                 *action = SignalAction::DEFAULT;
             }
         }
-        record.signal_deliveries.clear();
-        record.temporary_signal_masks.clear();
+        reset_signal_threads_for_exec(record);
         self.inner.notify_waiters();
         Ok(())
     }
@@ -1422,13 +1445,83 @@ impl ProcessTable {
                 *action = SignalAction::DEFAULT;
             }
         }
-        record.signal_deliveries.clear();
-        record.temporary_signal_masks.clear();
+        reset_signal_threads_for_exec(record);
         Ok(())
     }
 
-    /// Atomically installs the temporary process mask used by `ppoll`.
-    pub fn begin_temporary_signal_mask(&self, pid: u32, mut mask: SignalSet) -> ProcessResult<u64> {
+    pub fn register_signal_thread(
+        &self,
+        pid: u32,
+        thread_id: u32,
+        inherit_from: u32,
+    ) -> ProcessResult<()> {
+        let deliveries = {
+            let mut state = self.inner.lock_state();
+            let record = state
+                .entries
+                .get_mut(&pid)
+                .ok_or_else(|| ProcessTableError::no_such_process(pid))?;
+            if record.signal_threads.contains_key(&thread_id) {
+                return Err(ProcessTableError::invalid_argument(format!(
+                    "signal thread {thread_id} already exists for process {pid}"
+                )));
+            }
+            if record.signal_threads.len() >= MAX_SIGNAL_THREADS_PER_PROCESS {
+                return Err(ProcessTableError {
+                    code: "EAGAIN",
+                    message: format!(
+                        "process {pid} exceeded kernel.signal.maxThreadsPerProcess={MAX_SIGNAL_THREADS_PER_PROCESS}"
+                    ),
+                });
+            }
+            let inherited = record
+                .signal_threads
+                .get(&inherit_from)
+                .ok_or_else(|| {
+                    ProcessTableError::invalid_argument(format!(
+                        "signal thread {inherit_from} does not exist for process {pid}"
+                    ))
+                })?
+                .blocked_signals;
+            record
+                .signal_threads
+                .insert(thread_id, ProcessThreadSignalState::new(inherited));
+            collect_pending_signal_deliveries(record)?
+        };
+        deliver_signals(&self.inner, deliveries);
+        Ok(())
+    }
+
+    pub fn unregister_signal_thread(&self, pid: u32, thread_id: u32) -> ProcessResult<()> {
+        if thread_id == MAIN_SIGNAL_THREAD_ID {
+            return Err(ProcessTableError::invalid_argument(
+                "the main process signal thread cannot be unregistered",
+            ));
+        }
+        let mut state = self.inner.lock_state();
+        let record = state
+            .entries
+            .get_mut(&pid)
+            .ok_or_else(|| ProcessTableError::no_such_process(pid))?;
+        record.signal_threads.remove(&thread_id).ok_or_else(|| {
+            ProcessTableError::invalid_argument(format!(
+                "signal thread {thread_id} does not exist for process {pid}"
+            ))
+        })?;
+        Ok(())
+    }
+
+    /// Atomically installs the temporary mask used by `ppoll` for one thread.
+    pub fn begin_temporary_signal_mask(&self, pid: u32, mask: SignalSet) -> ProcessResult<u64> {
+        self.begin_temporary_signal_mask_for_thread(pid, MAIN_SIGNAL_THREAD_ID, mask)
+    }
+
+    pub fn begin_temporary_signal_mask_for_thread(
+        &self,
+        pid: u32,
+        thread_id: u32,
+        mut mask: SignalSet,
+    ) -> ProcessResult<u64> {
         mask.remove(SIGKILL)?;
         mask.remove(SIGSTOP)?;
         let (token, deliveries) = {
@@ -1437,57 +1530,71 @@ impl ProcessTable {
                 .entries
                 .get_mut(&pid)
                 .ok_or_else(|| ProcessTableError::no_such_process(pid))?;
-            if record.temporary_signal_masks.len() >= MAX_SIGNAL_HANDLER_DEPTH {
-                return Err(ProcessTableError::signal_delivery_depth_exceeded(pid));
-            }
             let token = record.next_signal_mask_token;
             record.next_signal_mask_token =
                 record.next_signal_mask_token.checked_add(1).unwrap_or(1);
-            record.temporary_signal_masks.push(TemporarySignalMask {
+            let thread = signal_thread_mut(record, pid, thread_id)?;
+            if thread.temporary_signal_masks.len() >= MAX_SIGNAL_HANDLER_DEPTH {
+                return Err(ProcessTableError::signal_delivery_depth_exceeded(pid));
+            }
+            thread.temporary_signal_masks.push(TemporarySignalMask {
                 token,
-                previous_mask: record.blocked_signals,
+                previous_mask: thread.blocked_signals,
             });
-            record.blocked_signals = mask;
+            thread.blocked_signals = mask;
             (token, collect_pending_signal_deliveries(record)?)
         };
         deliver_signals(&self.inner, deliveries);
         Ok(token)
     }
 
-    /// Restores the previous mask for a `ppoll` scope and schedules any signal
-    /// that became deliverable as part of restoration.
     pub fn end_temporary_signal_mask(&self, pid: u32, token: u64) -> ProcessResult<()> {
+        self.end_temporary_signal_mask_for_thread(pid, MAIN_SIGNAL_THREAD_ID, token)
+    }
+
+    pub fn end_temporary_signal_mask_for_thread(
+        &self,
+        pid: u32,
+        thread_id: u32,
+        token: u64,
+    ) -> ProcessResult<()> {
         let deliveries = {
             let mut state = self.inner.lock_state();
             let record = state
                 .entries
                 .get_mut(&pid)
                 .ok_or_else(|| ProcessTableError::no_such_process(pid))?;
-            let Some(scope) = record.temporary_signal_masks.last().copied() else {
+            let thread = signal_thread_mut(record, pid, thread_id)?;
+            let Some(scope) = thread.temporary_signal_masks.last().copied() else {
                 return Err(ProcessTableError::invalid_signal_delivery_token(pid, token));
             };
             if scope.token != token {
                 return Err(ProcessTableError::invalid_signal_delivery_token(pid, token));
             }
-            record.temporary_signal_masks.pop();
-            record.blocked_signals = scope.previous_mask;
+            thread.temporary_signal_masks.pop();
+            thread.blocked_signals = scope.previous_mask;
             collect_pending_signal_deliveries(record)?
         };
         deliver_signals(&self.inner, deliveries);
         Ok(())
     }
 
-    /// Atomically selects one caught signal that became deliverable under a
-    /// `ppoll` mask, restores the caller's mask, and starts its handler using
-    /// that restored mask as the handler frame's previous state.
-    ///
-    /// Selection must happen before restoration or a signal unblocked only by
-    /// `ppoll` would disappear from the deliverable set. Handler setup must
-    /// happen after restoration so nested handlers and `sigprocmask` observe
-    /// the real caller mask, matching Linux's atomic ppoll return semantics.
     pub fn end_temporary_signal_mask_and_begin_signal_delivery(
         &self,
         pid: u32,
+        token: u64,
+    ) -> ProcessResult<Option<SignalDelivery>> {
+        self.end_temporary_signal_mask_and_begin_signal_delivery_for_thread(
+            pid,
+            MAIN_SIGNAL_THREAD_ID,
+            token,
+        )
+    }
+
+    pub fn end_temporary_signal_mask_and_begin_signal_delivery_for_thread(
+        &self,
+        pid: u32,
+        thread_id: u32,
         token: u64,
     ) -> ProcessResult<Option<SignalDelivery>> {
         let mut state = self.inner.lock_state();
@@ -1495,122 +1602,98 @@ impl ProcessTable {
             .entries
             .get_mut(&pid)
             .ok_or_else(|| ProcessTableError::no_such_process(pid))?;
-        let Some(scope) = record.temporary_signal_masks.last().copied() else {
-            return Err(ProcessTableError::invalid_signal_delivery_token(pid, token));
+        let selected = {
+            let pending_signals = record.pending_signals;
+            let signal_actions = record.signal_actions;
+            let thread = signal_thread_mut(record, pid, thread_id)?;
+            let Some(scope) = thread.temporary_signal_masks.last().copied() else {
+                return Err(ProcessTableError::invalid_signal_delivery_token(pid, token));
+            };
+            if scope.token != token {
+                return Err(ProcessTableError::invalid_signal_delivery_token(pid, token));
+            }
+            if thread.signal_deliveries.len() >= MAX_SIGNAL_HANDLER_DEPTH {
+                return Err(ProcessTableError::signal_delivery_depth_exceeded(pid));
+            }
+            let selected = pending_signals
+                .difference(thread.blocked_signals)
+                .signals()
+                .into_iter()
+                .find(|signal| {
+                    signal_actions[(*signal - 1) as usize].disposition == SignalDisposition::User
+                });
+            thread.temporary_signal_masks.pop();
+            thread.blocked_signals = scope.previous_mask;
+            selected
         };
-        if scope.token != token {
-            return Err(ProcessTableError::invalid_signal_delivery_token(pid, token));
-        }
-        if record.signal_deliveries.len() >= MAX_SIGNAL_HANDLER_DEPTH {
-            return Err(ProcessTableError::signal_delivery_depth_exceeded(pid));
-        }
-
-        let selected = record
-            .pending_signals
-            .difference(record.blocked_signals)
-            .signals()
-            .into_iter()
-            .find(|signal| {
-                record.signal_actions[(*signal - 1) as usize].disposition == SignalDisposition::User
-            });
-        record.temporary_signal_masks.pop();
-        record.blocked_signals = scope.previous_mask;
-
-        let Some(signal) = selected else {
-            return Ok(None);
-        };
-        record.pending_signals.remove(signal)?;
-        let action = record.signal_actions[(signal - 1) as usize];
-        let previous_mask = record.blocked_signals;
-        record.blocked_signals = record.blocked_signals.union(action.mask);
-        if action.flags & SA_NODEFER == 0 {
-            record.blocked_signals.insert(signal)?;
-        }
-        record.blocked_signals.remove(SIGKILL)?;
-        record.blocked_signals.remove(SIGSTOP)?;
-        let delivery_token = record.next_signal_delivery_token;
-        record.next_signal_delivery_token = record
-            .next_signal_delivery_token
-            .checked_add(1)
-            .unwrap_or(1);
-        record.signal_deliveries.push(InProgressSignalDelivery {
-            token: delivery_token,
-            previous_mask,
-        });
-        if action.flags & SA_RESETHAND != 0 {
-            record.signal_actions[(signal - 1) as usize] = SignalAction::DEFAULT;
-        }
-        Ok(Some(SignalDelivery {
-            token: delivery_token,
-            signal,
-            action,
-        }))
+        selected
+            .map(|signal| claim_signal_for_thread(record, pid, thread_id, signal))
+            .transpose()
     }
 
-    /// Claims one caught, unblocked signal and applies its handler mask.
+    /// Claims one process-directed signal and deterministically selects the
+    /// lowest registered thread that does not block it.
     pub fn begin_signal_delivery(&self, pid: u32) -> ProcessResult<Option<SignalDelivery>> {
         let mut state = self.inner.lock_state();
         let record = state
             .entries
             .get_mut(&pid)
             .ok_or_else(|| ProcessTableError::no_such_process(pid))?;
-        if record.signal_deliveries.len() >= MAX_SIGNAL_HANDLER_DEPTH {
-            return Err(ProcessTableError::signal_delivery_depth_exceeded(pid));
-        }
-        let Some(signal) = record
+        let Some((signal, thread_id)) = select_signal_target(record) else {
+            return Ok(None);
+        };
+        claim_signal_for_thread(record, pid, thread_id, signal).map(Some)
+    }
+
+    pub fn begin_signal_delivery_for_thread(
+        &self,
+        pid: u32,
+        thread_id: u32,
+    ) -> ProcessResult<Option<SignalDelivery>> {
+        let mut state = self.inner.lock_state();
+        let record = state
+            .entries
+            .get_mut(&pid)
+            .ok_or_else(|| ProcessTableError::no_such_process(pid))?;
+        let thread = signal_thread(record, pid, thread_id)?;
+        let selected = record
             .pending_signals
-            .difference(record.blocked_signals)
+            .difference(thread.blocked_signals)
             .signals()
             .into_iter()
             .find(|signal| {
                 record.signal_actions[(*signal - 1) as usize].disposition == SignalDisposition::User
-            })
-        else {
-            return Ok(None);
-        };
-        record.pending_signals.remove(signal)?;
-        let action = record.signal_actions[(signal - 1) as usize];
-        let previous_mask = record.blocked_signals;
-        record.blocked_signals = record.blocked_signals.union(action.mask);
-        if action.flags & SA_NODEFER == 0 {
-            record.blocked_signals.insert(signal)?;
-        }
-        record.blocked_signals.remove(SIGKILL)?;
-        record.blocked_signals.remove(SIGSTOP)?;
-        let token = record.next_signal_delivery_token;
-        record.next_signal_delivery_token = record
-            .next_signal_delivery_token
-            .checked_add(1)
-            .unwrap_or(1);
-        record.signal_deliveries.push(InProgressSignalDelivery {
-            token,
-            previous_mask,
-        });
-        if action.flags & SA_RESETHAND != 0 {
-            record.signal_actions[(signal - 1) as usize] = SignalAction::DEFAULT;
-        }
-        Ok(Some(SignalDelivery {
-            token,
-            signal,
-            action,
-        }))
+            });
+        selected
+            .map(|signal| claim_signal_for_thread(record, pid, thread_id, signal))
+            .transpose()
     }
 
     pub fn end_signal_delivery(&self, pid: u32, token: u64) -> ProcessResult<()> {
+        self.end_signal_delivery_for_thread(pid, MAIN_SIGNAL_THREAD_ID, token)
+    }
+
+    pub fn end_signal_delivery_for_thread(
+        &self,
+        pid: u32,
+        thread_id: u32,
+        token: u64,
+    ) -> ProcessResult<()> {
         let deliveries = {
             let mut state = self.inner.lock_state();
             let record = state
                 .entries
                 .get_mut(&pid)
                 .ok_or_else(|| ProcessTableError::no_such_process(pid))?;
-            let Some(delivery) = record.signal_deliveries.last().copied() else {
+            let thread = signal_thread_mut(record, pid, thread_id)?;
+            let Some(delivery) = thread.signal_deliveries.last().copied() else {
                 return Err(ProcessTableError::invalid_signal_delivery_token(pid, token));
             };
             if delivery.token != token {
                 return Err(ProcessTableError::invalid_signal_delivery_token(pid, token));
             }
-            record.signal_deliveries.pop();
-            record.blocked_signals = delivery.previous_mask;
+            thread.signal_deliveries.pop();
+            thread.blocked_signals = delivery.previous_mask;
             collect_pending_signal_deliveries(record)?
         };
         deliver_signals(&self.inner, deliveries);
@@ -1623,13 +1706,24 @@ impl ProcessTable {
         how: SigmaskHow,
         set: SignalSet,
     ) -> ProcessResult<SignalSet> {
+        self.sigprocmask_for_thread(pid, MAIN_SIGNAL_THREAD_ID, how, set)
+    }
+
+    pub fn sigprocmask_for_thread(
+        &self,
+        pid: u32,
+        thread_id: u32,
+        how: SigmaskHow,
+        set: SignalSet,
+    ) -> ProcessResult<SignalSet> {
         let (previous, deliveries) = {
             let mut state = self.inner.lock_state();
             let record = state
                 .entries
                 .get_mut(&pid)
                 .ok_or_else(|| ProcessTableError::no_such_process(pid))?;
-            let previous = record.blocked_signals;
+            let thread = signal_thread_mut(record, pid, thread_id)?;
+            let previous = thread.blocked_signals;
             let mut next = match how {
                 SigmaskHow::Block => previous.union(set),
                 SigmaskHow::Unblock => previous.difference(set),
@@ -1637,12 +1731,10 @@ impl ProcessTable {
             };
             next.remove(SIGKILL)?;
             next.remove(SIGSTOP)?;
-            record.blocked_signals = next;
-
+            thread.blocked_signals = next;
             let deliveries = collect_pending_signal_deliveries(record)?;
             (previous, deliveries)
         };
-
         deliver_signals(&self.inner, deliveries);
         Ok(previous)
     }
@@ -1983,6 +2075,100 @@ fn signal_can_be_blocked(signal: i32) -> bool {
     !matches!(signal, SIGKILL | SIGSTOP)
 }
 
+fn signal_thread(
+    record: &ProcessRecord,
+    pid: u32,
+    thread_id: u32,
+) -> ProcessResult<&ProcessThreadSignalState> {
+    record.signal_threads.get(&thread_id).ok_or_else(|| {
+        ProcessTableError::invalid_argument(format!(
+            "signal thread {thread_id} does not exist for process {pid}"
+        ))
+    })
+}
+
+fn signal_thread_mut(
+    record: &mut ProcessRecord,
+    pid: u32,
+    thread_id: u32,
+) -> ProcessResult<&mut ProcessThreadSignalState> {
+    record.signal_threads.get_mut(&thread_id).ok_or_else(|| {
+        ProcessTableError::invalid_argument(format!(
+            "signal thread {thread_id} does not exist for process {pid}"
+        ))
+    })
+}
+
+fn select_signal_target(record: &ProcessRecord) -> Option<(i32, u32)> {
+    record
+        .pending_signals
+        .signals()
+        .into_iter()
+        .find_map(|signal| {
+            if record.signal_actions[(signal - 1) as usize].disposition != SignalDisposition::User {
+                return None;
+            }
+            record
+                .signal_threads
+                .iter()
+                .find(|(_, thread)| !thread.blocked_signals.contains(signal))
+                .map(|(thread_id, _)| (signal, *thread_id))
+        })
+}
+
+fn claim_signal_for_thread(
+    record: &mut ProcessRecord,
+    pid: u32,
+    thread_id: u32,
+    signal: i32,
+) -> ProcessResult<SignalDelivery> {
+    let action = record.signal_actions[(signal - 1) as usize];
+    let token = record.next_signal_delivery_token;
+    record.next_signal_delivery_token = record
+        .next_signal_delivery_token
+        .checked_add(1)
+        .unwrap_or(1);
+    let thread = signal_thread(record, pid, thread_id)?;
+    if thread.signal_deliveries.len() >= MAX_SIGNAL_HANDLER_DEPTH {
+        return Err(ProcessTableError::signal_delivery_depth_exceeded(pid));
+    }
+    record.pending_signals.remove(signal)?;
+    let thread = signal_thread_mut(record, pid, thread_id)?;
+    let previous_mask = thread.blocked_signals;
+    thread.blocked_signals = thread.blocked_signals.union(action.mask);
+    if action.flags & SA_NODEFER == 0 {
+        thread.blocked_signals.insert(signal)?;
+    }
+    thread.blocked_signals.remove(SIGKILL)?;
+    thread.blocked_signals.remove(SIGSTOP)?;
+    thread.signal_deliveries.push(InProgressSignalDelivery {
+        token,
+        previous_mask,
+    });
+    if action.flags & SA_RESETHAND != 0 {
+        record.signal_actions[(signal - 1) as usize] = SignalAction::DEFAULT;
+    }
+    Ok(SignalDelivery {
+        token,
+        signal,
+        action,
+        thread_id,
+    })
+}
+
+fn reset_signal_threads_for_exec(record: &mut ProcessRecord) {
+    let blocked = record
+        .signal_threads
+        .get(&MAIN_SIGNAL_THREAD_ID)
+        .map(|thread| thread.blocked_signals)
+        .unwrap_or_else(SignalSet::empty);
+    record.signal_threads.clear();
+    record.signal_threads.insert(
+        MAIN_SIGNAL_THREAD_ID,
+        ProcessThreadSignalState::new(blocked),
+    );
+}
+
 fn queue_or_schedule_signal(
     record: &mut ProcessRecord,
     signal: i32,
@@ -2006,7 +2192,12 @@ fn queue_or_schedule_signal(
         return scheduled_signal_delivery(record, signal, controls);
     }
 
-    if signal_can_be_blocked(signal) && record.blocked_signals.contains(signal) {
+    if signal_can_be_blocked(signal)
+        && record
+            .signal_threads
+            .values()
+            .all(|thread| thread.blocked_signals.contains(signal))
+    {
         record.pending_signals.insert(signal)?;
         return scheduled_signal_delivery(record, signal, controls);
     }
@@ -2090,8 +2281,18 @@ fn collect_pending_signal_deliveries(
     record: &mut ProcessRecord,
 ) -> ProcessResult<Vec<ScheduledSignalDelivery>> {
     let mut deliveries = Vec::new();
-    let signals = record.pending_signals.difference(record.blocked_signals);
-    for signal in signals.signals() {
+    let signals = record
+        .pending_signals
+        .signals()
+        .into_iter()
+        .filter(|signal| {
+            record
+                .signal_threads
+                .values()
+                .any(|thread| !thread.blocked_signals.contains(*signal))
+        })
+        .collect::<Vec<_>>();
+    for signal in signals {
         record.pending_signals.remove(signal)?;
         if let Some(delivery) = queue_or_schedule_signal(record, signal)? {
             deliveries.push(delivery);
@@ -2876,6 +3077,66 @@ mod tests {
             endpoint.take_controls(),
             vec![ProcessControlRequest::Checkpoint]
         );
+    }
+
+    #[test]
+    fn process_signal_selects_an_unblocked_thread_and_keeps_masks_per_thread() {
+        let table = ProcessTable::with_zombie_ttl(Duration::from_secs(3600));
+        let endpoint = endpoint();
+        table.register(
+            10,
+            "test",
+            "pthread-signals",
+            Vec::new(),
+            context(0),
+            endpoint.clone(),
+        );
+        table
+            .register_signal_thread(10, 1, MAIN_SIGNAL_THREAD_ID)
+            .expect("register pthread signal record");
+        table
+            .signal_action(
+                10,
+                SIGTERM,
+                Some(SignalAction {
+                    disposition: SignalDisposition::User,
+                    ..SignalAction::DEFAULT
+                }),
+            )
+            .expect("install caught action");
+        let mask = SignalSet::from_signal(SIGTERM).expect("mask");
+        table
+            .sigprocmask_for_thread(10, MAIN_SIGNAL_THREAD_ID, SigmaskHow::Block, mask)
+            .expect("block signal only on main thread");
+        table.kill(10, SIGTERM).expect("queue process signal");
+        assert_eq!(
+            endpoint.take_controls(),
+            vec![ProcessControlRequest::Checkpoint]
+        );
+        let delivery = table
+            .begin_signal_delivery(10)
+            .expect("select signal thread")
+            .expect("caught delivery");
+        assert_eq!(delivery.thread_id, 1);
+        table
+            .end_signal_delivery_for_thread(10, 1, delivery.token)
+            .expect("settle on selected thread");
+        let main_mask = table
+            .sigprocmask_for_thread(
+                10,
+                MAIN_SIGNAL_THREAD_ID,
+                SigmaskHow::Block,
+                SignalSet::empty(),
+            )
+            .expect("query main mask");
+        let worker_mask = table
+            .sigprocmask_for_thread(10, 1, SigmaskHow::Block, SignalSet::empty())
+            .expect("query worker mask");
+        assert!(main_mask.contains(SIGTERM));
+        assert!(!worker_mask.contains(SIGTERM));
+        table
+            .unregister_signal_thread(10, 1)
+            .expect("remove pthread signal record");
     }
 
     #[test]

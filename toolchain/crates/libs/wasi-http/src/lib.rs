@@ -15,7 +15,9 @@
 use std::fmt;
 use std::io;
 
-// AgentOS's owned wasi-libc p1 ABI values for AF_INET and SOCK_STREAM.
+// AgentOS private host_net ABI values. These are wasi-libc Preview 1 values,
+// not Linux's AF_INET=2 / SOCK_STREAM=1 values; libc performs that translation
+// for POSIX callers, while this crate calls host_net directly through wasi-ext.
 const AF_INET: u32 = 1;
 const SOCK_STREAM: u32 = 6;
 const MAX_URL_BYTES: usize = 8 * 1024;

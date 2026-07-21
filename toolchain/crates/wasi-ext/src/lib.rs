@@ -868,8 +868,8 @@ pub fn sigaction_set(
 extern "C" {
     /// Create a socket.
     ///
-    /// `domain` is the address family (e.g. AF_INET=2).
-    /// `sock_type` is the socket type (e.g. SOCK_STREAM=1).
+    /// `domain` is the private Preview 1 address family (e.g. AF_INET=1).
+    /// `sock_type` is the private Preview 1 socket type (e.g. SOCK_STREAM=6).
     /// `protocol` is the protocol (0 for default).
     /// On success, the socket FD is written to `ret_fd`.
     /// Returns errno.

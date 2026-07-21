@@ -17,6 +17,17 @@ use agentos_client::AgentOs;
 
 static INIT: Once = Once::new();
 
+fn test_wasm_backend() -> Option<agentos_client::StandaloneWasmBackend> {
+    match std::env::var("AGENTOS_TEST_WASM_BACKEND").as_deref() {
+        Ok("v8") => Some(agentos_client::StandaloneWasmBackend::V8),
+        Ok("wasmtime") => Some(agentos_client::StandaloneWasmBackend::Wasmtime),
+        Ok(value) => {
+            panic!("AGENTOS_TEST_WASM_BACKEND must be \"v8\" or \"wasmtime\", got {value:?}")
+        }
+        Err(_) => None,
+    }
+}
+
 fn test_node_modules_dir() -> PathBuf {
     std::env::var_os("AGENTOS_TEST_NODE_MODULES_DIR")
         .map(PathBuf::from)
@@ -93,6 +104,7 @@ pub async fn new_vm_with_sidecar_pool(pool: impl Into<String>) -> AgentOs {
         sidecar: Some(AgentOsSidecarConfig::Shared {
             pool: Some(pool.into()),
         }),
+        wasm_backend: test_wasm_backend(),
         ..Default::default()
     })
     .await
@@ -131,6 +143,7 @@ async fn new_vm_with_config(
         loopback_exempt_ports,
         mounts: all_mounts,
         permissions,
+        wasm_backend: test_wasm_backend(),
         ..Default::default()
     })
     .await
@@ -230,6 +243,7 @@ pub async fn new_vm_with_commands() -> Option<AgentOs> {
         packages: vec![PackageRef {
             path: package_dir.to_string_lossy().into_owned(),
         }],
+        wasm_backend: test_wasm_backend(),
         ..Default::default()
     };
     Some(

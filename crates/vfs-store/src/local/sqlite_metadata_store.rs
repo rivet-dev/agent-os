@@ -132,6 +132,26 @@ const LOCAL_FS_MIGRATIONS: &[LocalFsMigration] = &[
             DROP TABLE agentos_fs_inodes_v1;
         "#,
     },
+    LocalFsMigration {
+        version: 3,
+        statements: r#"
+            DROP INDEX agentos_fs_dentries_parent;
+            ALTER TABLE agentos_fs_dentries RENAME TO agentos_fs_dentries_v2;
+            CREATE TABLE agentos_fs_dentries (
+              parent_ino INTEGER NOT NULL CHECK (parent_ino > 0),
+              name TEXT NOT NULL CHECK (length(name) > 0),
+              child_ino INTEGER NOT NULL CHECK (child_ino > 0),
+              kind INTEGER NOT NULL CHECK (kind IN (0, 1, 2, 3, 4, 5)),
+              PRIMARY KEY (parent_ino, name)
+            ) STRICT;
+            INSERT INTO agentos_fs_dentries (parent_ino, name, child_ino, kind)
+              SELECT parent_ino, name, child_ino, kind
+                FROM agentos_fs_dentries_v2;
+            DROP TABLE agentos_fs_dentries_v2;
+            CREATE INDEX agentos_fs_dentries_parent
+              ON agentos_fs_dentries(parent_ino);
+        "#,
+    },
 ];
 
 pub struct SqliteMetadataStore {

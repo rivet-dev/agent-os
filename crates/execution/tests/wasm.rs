@@ -255,6 +255,7 @@ fn wasm_limits_from_env(env: &BTreeMap<String, String>) -> WasmExecutionLimits {
         max_sync_rpc_response_line_bytes: None,
         pending_event_count: None,
         pending_event_bytes: None,
+        max_threads: None,
     }
 }
 
@@ -3071,7 +3072,7 @@ fn wasm_configured_stack_byte_limit_fails_closed_for_v8() {
 // the binary's wall WORSE (33-92s vs this ~20s collapsed run) and is unsafe, so
 // the coverage stays collapsed here.
 #[test]
-fn wasm_suite() {
+fn v8_wasm_compatibility_runner_suite() {
     wasm_contexts_preserve_vm_and_module_configuration();
     wasm_execution_stays_inside_v8_runtime_without_host_node_launches();
     wasm_execution_runs_guest_module_through_v8();

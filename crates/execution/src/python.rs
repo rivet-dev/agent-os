@@ -1252,6 +1252,7 @@ impl ExecutionBackend for PythonExecution {
         signal: i32,
         delivery_token: u64,
         _flags: u32,
+        _thread_id: u32,
     ) -> Result<SignalCheckpointOutcome, HostServiceError> {
         let Some(wake) = self.wake_handle(identity) else {
             return Ok(if let Some(process_id) = self.native_process_id() {

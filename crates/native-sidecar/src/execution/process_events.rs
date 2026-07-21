@@ -847,7 +847,7 @@ where
                     let Some(event) = event else {
                         continue;
                     };
-                    if matches!(event.event(), ActiveExecutionEvent::Exited(_)) {
+                    if Self::terminal_execution_event(event.event()) {
                         record_execute_response_to_exit_milestone(
                             "execute_response_to_exit_event_polled",
                             &vm_id,
@@ -1090,10 +1090,19 @@ where
             event,
             ActiveExecutionEvent::Common(ExecutionEvent::HostCall { .. })
                 | ActiveExecutionEvent::Common(ExecutionEvent::Warning(_))
-                | ActiveExecutionEvent::Common(ExecutionEvent::RuntimeFault(_))
                 | ActiveExecutionEvent::HostRpcRequest(_)
                 | ActiveExecutionEvent::ManagedUdpPollRecheck(_)
                 | ActiveExecutionEvent::SignalState { .. }
+        )
+    }
+
+    pub(crate) fn terminal_execution_event(event: &ActiveExecutionEvent) -> bool {
+        matches!(
+            event,
+            ActiveExecutionEvent::Exited(_)
+                | ActiveExecutionEvent::Common(
+                    ExecutionEvent::Exited(_) | ExecutionEvent::RuntimeFault(_)
+                )
         )
     }
 

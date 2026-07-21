@@ -2417,6 +2417,7 @@ pub(super) fn wasm_execution_limits(vm: &VmState) -> WasmExecutionLimits {
         max_sync_rpc_response_line_bytes: Some(vm.limits.reactor.max_bridge_response_bytes as u64),
         pending_event_count: Some(vm.limits.process.pending_event_count),
         pending_event_bytes: Some(vm.limits.process.pending_event_bytes),
+        max_threads: Some(vm.limits.wasm.max_threads),
     }
 }
 
@@ -4556,6 +4557,14 @@ where
         }
         let vm_pending_stdin_bytes_budget = Arc::clone(&vm.pending_stdin_bytes_budget);
         let vm_pending_event_bytes_budget = Arc::clone(&vm.pending_event_bytes_budget);
+        let standalone_wasm_backend = match payload.wasm_backend {
+            Some(StandaloneWasmBackend::V8) => ExecutionStandaloneWasmBackend::V8,
+            Some(StandaloneWasmBackend::Wasmtime) => ExecutionStandaloneWasmBackend::Wasmtime,
+            Some(StandaloneWasmBackend::WasmtimeThreads) => {
+                ExecutionStandaloneWasmBackend::WasmtimeThreads
+            }
+            None => vm.standalone_wasm_backend,
+        };
 
         if let Some(command) = payload.command.as_deref() {
             if let Some(binding_resolution) =
@@ -4627,6 +4636,7 @@ where
                     Arc::clone(&self.process_event_notify),
                 )
                 .with_adapter_policy(ExecutionAdapterPolicy::BINDING)
+                .with_standalone_wasm_backend(standalone_wasm_backend)
                 .with_vm_pending_byte_budgets(
                     Arc::clone(&vm_pending_stdin_bytes_budget),
                     Arc::clone(&vm_pending_event_bytes_budget),
@@ -4812,6 +4822,14 @@ where
             ),
             "top-level runtime-control attachment"
         );
+        if resolved.runtime == GuestRuntimeKind::WebAssembly {
+            top_level_start_step!(
+                vm.kernel
+                    .initialize_canonical_wasi_preopens(EXECUTION_DRIVER_NAME, kernel_pid)
+                    .map_err(kernel_error),
+                "top-level WASI capability-root initialization"
+            );
+        }
         let tty_master_fd = if requested_tty {
             let (master_fd, slave_fd, _) = top_level_start_step!(
                 vm.kernel
@@ -5059,11 +5077,17 @@ where
                     "top-level compatibility-WASM permission lookup"
                 );
                 let module_path = match payload.wasm_backend {
-                    Some(StandaloneWasmBackend::Wasmtime) => env
-                        .get("AGENTOS_GUEST_ENTRYPOINT")
-                        .map(|path| format!("{TRUSTED_INITIAL_MODULE_PREFIX}{path}"))
-                        .unwrap_or_else(|| resolved.entrypoint.clone()),
-                    Some(StandaloneWasmBackend::V8) | None => resolved.entrypoint.clone(),
+                    _ if matches!(
+                        standalone_wasm_backend,
+                        ExecutionStandaloneWasmBackend::Wasmtime
+                            | ExecutionStandaloneWasmBackend::WasmtimeThreads
+                    ) =>
+                    {
+                        env.get("AGENTOS_GUEST_ENTRYPOINT")
+                            .map(|path| format!("{TRUSTED_INITIAL_MODULE_PREFIX}{path}"))
+                            .unwrap_or_else(|| resolved.entrypoint.clone())
+                    }
+                    _ => resolved.entrypoint.clone(),
                 };
                 let context = self.wasm_engine.create_context(CreateWasmContextRequest {
                     vm_id: vm_id.clone(),
@@ -5085,14 +5109,7 @@ where
                             guest_runtime: wasm_guest_runtime,
                         },
                         vm.runtime_context.clone(),
-                        match payload.wasm_backend {
-                            Some(StandaloneWasmBackend::Wasmtime) => {
-                                ExecutionStandaloneWasmBackend::Wasmtime
-                            }
-                            Some(StandaloneWasmBackend::V8) | None => {
-                                ExecutionStandaloneWasmBackend::V8
-                            }
-                        },
+                        standalone_wasm_backend,
                     )
                     .await
                     .map_err(wasm_error)
@@ -5130,6 +5147,7 @@ where
             Arc::clone(&self.process_event_notify),
         )
         .with_adapter_policy(resolved.adapter_policy)
+        .with_standalone_wasm_backend(standalone_wasm_backend)
         .with_vm_pending_byte_budgets(vm_pending_stdin_bytes_budget, vm_pending_event_bytes_budget)
         .with_kernel_stdin_writer_fd(kernel_stdin_writer_fd)
         .with_tty_master_fd(tty_master_fd)

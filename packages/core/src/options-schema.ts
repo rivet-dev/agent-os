@@ -376,6 +376,8 @@ export const agentOsLimitsSchema = z
 				activeCpuTimeLimitMs: nonNegativeInteger.optional(),
 				wallClockLimitMs: nonNegativeInteger.optional(),
 				deterministicFuel: nonNegativeInteger.optional(),
+				maxThreads: positiveInteger.optional(),
+				maxConcurrentThreads: positiveInteger.optional(),
 			})
 			.strict()
 			.optional(),
@@ -541,6 +543,7 @@ export const agentOsOptionFieldSchemas = {
 	defaultSoftware: z.boolean().optional(),
 	loopbackExemptPorts: z.array(z.number().int().min(0).max(65535)).optional(),
 	allowedNodeBuiltins: stringArray.optional(),
+	wasmBackend: z.enum(["v8", "wasmtime", "wasmtime-threads"]).optional(),
 	highResolutionTime: z.boolean().optional(),
 	database: z
 		.discriminatedUnion("type", [

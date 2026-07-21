@@ -334,12 +334,16 @@ pub enum NetworkOperation {
         /// `None` is poll(2)'s indefinite wait; `Some(0)` is a probe.
         timeout_ms: Option<u64>,
         signal_mask: Option<SignalSetValue>,
+        /// Kernel signal-thread record that owns the temporary ppoll mask.
+        /// `None` preserves the single-thread/main-thread compatibility path.
+        signal_thread_id: Option<u32>,
     },
     TlsConnect {
         fd: u32,
         server_name: BoundedString,
         alpn: BoundedVec<BoundedBytes>,
         deadline_ms: Option<u64>,
+        reject_unauthorized: bool,
     },
     TlsRead {
         session_id: u64,

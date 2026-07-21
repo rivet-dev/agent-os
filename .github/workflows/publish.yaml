@@ -73,11 +73,24 @@ jobs:
           key: wasm-commands-${{ hashFiles('toolchain/Cargo.lock') }}
       - run: pnpm install --frozen-lockfile --filter '@rivet-dev/agentos-runtime-core...'
       - run: make -C toolchain commands
+      # These real upstream commands are intentionally outside the fast default
+      # toolchain target, but are part of the published and parity-tested corpus.
+      - name: Build required heavy release commands
+        run: make -C toolchain cmd/duckdb cmd/vim
+      - run: make -C toolchain/c pthread-conformance-wasm
+      - run: make -C toolchain/c build/exec_variants
       - run: node packages/runtime-core/scripts/copy-wasm-commands.mjs --require
       - uses: actions/upload-artifact@v4
         with:
           name: wasm-commands
           path: packages/runtime-core/commands
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-thread-fixtures
+          path: |
+            toolchain/c/build/pthread_conformance.wasm
+            toolchain/c/build/exec_variants
           if-no-files-found: error
 
   codex-wasm:
@@ -272,10 +285,63 @@ jobs:
           path: target/sidecar-artifacts/${{ matrix.platform }}
           if-no-files-found: error
 
+  smoke-sidecar-artifacts:
+    needs: [wasm-commands, build-sidecar, build-sidecar-darwin]
+    name: "Packaged WASM backends (${{ matrix.platform }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64-gnu
+            runner: [self-hosted, agentos-builder]
+          - platform: linux-arm64-gnu
+            runner: [self-hosted, agentos-builder-arm64]
+          - platform: darwin-x64
+            runner: macos-15-intel
+          - platform: darwin-arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - run: pnpm install --frozen-lockfile --filter '@rivet-dev/agentos-runtime-core...'
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-commands
+          path: packages/runtime-core/commands
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-thread-fixtures
+          path: target/wasm-thread-fixtures
+      - uses: actions/download-artifact@v4
+        with:
+          name: sidecar-${{ matrix.platform }}
+          path: target/smoke-sidecar
+      - name: Stage the actual release binary in its npm platform package
+        run: |
+          set -euo pipefail
+          package_dir="packages/runtime-sidecar/npm/${{ matrix.platform }}"
+          cp target/smoke-sidecar/agentos-native-sidecar "$package_dir/agentos-native-sidecar"
+          chmod +x "$package_dir/agentos-native-sidecar"
+      - run: pnpm --filter @rivet-dev/agentos-runtime-core build
+      - name: Install tarballs and exercise every shipped WASM selector
+        run: |
+          node scripts/ci/smoke-packed-wasm-backends.mjs \
+            --platform-package "packages/runtime-sidecar/npm/${{ matrix.platform }}" \
+            --thread-fixture target/wasm-thread-fixtures/pthread_conformance.wasm
+
   publish-npm:
-    needs: [context, wasm-commands, codex-wasm, wasmtime-darwin-smoke, build-sidecar, build-sidecar-darwin]
+    needs: [context, wasm-commands, codex-wasm, wasmtime-darwin-smoke, build-sidecar, build-sidecar-darwin, smoke-sidecar-artifacts]
     name: Publish npm
-    if: ${{ !cancelled() && needs.wasm-commands.result == 'success' && needs.codex-wasm.result == 'success' && needs.wasmtime-darwin-smoke.result == 'success' && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' }}
+    if: ${{ !cancelled() && needs.wasm-commands.result == 'success' && needs.codex-wasm.result == 'success' && needs.wasmtime-darwin-smoke.result == 'success' && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' && needs.smoke-sidecar-artifacts.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -357,9 +423,9 @@ jobs:
             ${{ needs.context.outputs.trigger == 'release' && '--release-mode' || '' }}
 
   release-assets:
-    needs: [context, wasmtime-darwin-smoke, build-sidecar, build-sidecar-darwin]
+    needs: [context, wasmtime-darwin-smoke, build-sidecar, build-sidecar-darwin, smoke-sidecar-artifacts]
     name: Release assets
-    if: ${{ !cancelled() && needs.wasmtime-darwin-smoke.result == 'success' && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' }}
+    if: ${{ !cancelled() && needs.wasmtime-darwin-smoke.result == 'success' && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' && needs.smoke-sidecar-artifacts.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

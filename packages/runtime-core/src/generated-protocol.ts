@@ -1160,6 +1160,7 @@ export function writeWasmPermissionTier(bc: bare.ByteCursor, x: WasmPermissionTi
 export enum StandaloneWasmBackend {
     V8 = "V8",
     Wasmtime = "Wasmtime",
+    WasmtimeThreads = "WasmtimeThreads",
 }
 
 export function readStandaloneWasmBackend(bc: bare.ByteCursor): StandaloneWasmBackend {
@@ -1170,6 +1171,8 @@ export function readStandaloneWasmBackend(bc: bare.ByteCursor): StandaloneWasmBa
             return StandaloneWasmBackend.V8
         case 1:
             return StandaloneWasmBackend.Wasmtime
+        case 2:
+            return StandaloneWasmBackend.WasmtimeThreads
         default: {
             bc.offset = offset
             throw new bare.BareError(offset, "invalid tag")
@@ -1185,6 +1188,10 @@ export function writeStandaloneWasmBackend(bc: bare.ByteCursor, x: StandaloneWas
         }
         case StandaloneWasmBackend.Wasmtime: {
             bare.writeU8(bc, 1)
+            break
+        }
+        case StandaloneWasmBackend.WasmtimeThreads: {
+            bare.writeU8(bc, 2)
             break
         }
     }

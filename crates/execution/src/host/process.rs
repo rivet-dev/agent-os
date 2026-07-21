@@ -221,6 +221,34 @@ pub enum ExecutableImageSource {
     Descriptor(u32),
 }
 
+/// Linux process-image context required when an executable snapshot may be a
+/// shebang script. This is admitted before it can enter the host-operation
+/// queue; the kernel owns interpreter resolution and argv rewriting.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutableImageResolutionRequest {
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub close_on_exec_fds: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedExecutableImageResolutionRequest(ExecutableImageResolutionRequest);
+
+impl BoundedExecutableImageResolutionRequest {
+    pub fn try_new(
+        request: ExecutableImageResolutionRequest,
+        limit: &PayloadLimit,
+    ) -> Result<Self, HostServiceError> {
+        limit.admit_json(&request)?;
+        Ok(Self(request))
+    }
+
+    pub fn as_request(&self) -> &ExecutableImageResolutionRequest {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ProcessOperation {
@@ -241,6 +269,9 @@ pub enum ProcessOperation {
     /// VM's WASM module-file limit and returns an opaque generation handle.
     OpenExecutableImage {
         source: ExecutableImageSource,
+        /// Present for exec/fexec snapshots, absent for an already-resolved
+        /// trusted initial module.
+        resolution: Option<BoundedExecutableImageResolutionRequest>,
     },
     ReadExecutableImage {
         handle: u64,

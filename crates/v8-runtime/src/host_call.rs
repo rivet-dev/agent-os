@@ -446,6 +446,21 @@ struct RetiredBridgeCalls {
 
 impl RetiredBridgeCalls {
     fn insert(&mut self, call_id: u64, target: &BridgeCallTarget, limit: usize) {
+        self.insert_identity(
+            call_id,
+            &target.session_id,
+            target.session_generation,
+            limit,
+        );
+    }
+
+    fn insert_identity(
+        &mut self,
+        call_id: u64,
+        session_id: &str,
+        session_generation: Option<u64>,
+        limit: usize,
+    ) {
         while self.order.len() >= limit {
             let Some((oldest_call_id, oldest_epoch)) = self.order.pop_front() else {
                 break;
@@ -464,8 +479,8 @@ impl RetiredBridgeCalls {
         self.by_call_id.insert(
             call_id,
             RetiredBridgeCall {
-                session_id: target.session_id.clone(),
-                session_generation: target.session_generation,
+                session_id: session_id.to_owned(),
+                session_generation,
                 retirement_epoch,
             },
         );
@@ -1012,13 +1027,33 @@ impl BridgeCallRegistry {
             response.payload.len(),
         ));
 
-        target.sender.try_send(response).map_err(|error| {
-            format!(
+        match target.sender.try_send(response) {
+            Ok(()) => Ok(()),
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) if target.host_visible => {
+                self.retired
+                    .lock()
+                    .map_err(|_| {
+                        String::from(
+                            "ERR_AGENTOS_BRIDGE_REGISTRY_POISONED: retired bridge registry lock poisoned",
+                        )
+                    })?
+                    .insert_identity(
+                        call_id,
+                        &target.session_id,
+                        target.session_generation,
+                        self.max_pending,
+                    );
+                Err(BridgeSettlementError::stale_completion(format!(
+                    "ERR_AGENTOS_BRIDGE_STALE_COMPLETION: published {:?} response target disconnected before settlement for call_id {} in session {} generation {:?}",
+                    target.kind, call_id, target.session_id, target.session_generation
+                )))
+            }
+            Err(error) => Err(format!(
                 "ERR_AGENTOS_BRIDGE_RESPONSE_DELIVERY: {:?} response target for session {} generation {:?} rejected settlement: {error}",
                 target.kind, target.session_id, target.session_generation
             )
-        })?;
-        Ok(())
+            .into()),
+        }
     }
 
     fn cancel_with_visibility(&self, call_id: u64, force_unpublished: bool) {
@@ -2414,6 +2449,58 @@ mod tests {
             )
             .expect_err("unpublished route must not authorize a stale response");
         assert!(unknown.contains("ERR_AGENTOS_BRIDGE_UNKNOWN_CALL_ID"));
+        assert_eq!(registry.retired_len(), 1);
+    }
+
+    #[test]
+    fn bridge_registry_classifies_only_published_disconnected_waiters_as_stale() {
+        let registry = BridgeCallRegistry::new(2);
+        let runtime = test_runtime_context();
+
+        let visible_waiter = registry
+            .register_sync(&runtime, 0, 1, 23, "session-a", Some(4))
+            .expect("register host-visible route");
+        registry
+            .mark_host_visible(23)
+            .expect("mark route host-visible");
+        drop(visible_waiter);
+
+        let stale = registry
+            .settle(
+                "session-a",
+                Some(4),
+                BridgeResponse {
+                    call_id: 23,
+                    status: 0,
+                    payload: Vec::new(),
+                    reservation: None,
+                },
+            )
+            .expect_err("a published route may disconnect during guest teardown");
+        assert_eq!(stale.kind(), BridgeSettlementErrorKind::StaleCompletion);
+        assert!(stale.contains("ERR_AGENTOS_BRIDGE_STALE_COMPLETION"));
+        assert_eq!(registry.pending_len(), 0);
+        assert_eq!(registry.retired_len(), 1);
+
+        let unpublished_waiter = registry
+            .register_sync(&runtime, 0, 1, 24, "session-a", Some(4))
+            .expect("register unpublished route");
+        drop(unpublished_waiter);
+
+        let delivery_error = registry
+            .settle(
+                "session-a",
+                Some(4),
+                BridgeResponse {
+                    call_id: 24,
+                    status: 0,
+                    payload: Vec::new(),
+                    reservation: None,
+                },
+            )
+            .expect_err("an unpublished disconnected route remains a hard error");
+        assert_eq!(delivery_error.kind(), BridgeSettlementErrorKind::Other);
+        assert!(delivery_error.contains("ERR_AGENTOS_BRIDGE_RESPONSE_DELIVERY"));
         assert_eq!(registry.retired_len(), 1);
     }
 

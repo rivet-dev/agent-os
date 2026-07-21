@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "vitest";
 import {
-	AgentOs,
 	__disposeAllSharedSidecarsForTesting,
+	AgentOs,
 } from "../../src/agent-os.js";
 import { ALLOW_ALL_VM_PERMISSIONS } from "./permissions.js";
 
@@ -13,6 +13,15 @@ const globalState = globalThis as typeof globalThis & {
 	__agentOsDefaultPermissionsPatched?: boolean;
 };
 const databaseDirectories: string[] = [];
+
+function configuredTestWasmBackend(): "v8" | "wasmtime" | undefined {
+	const backend = process.env.AGENTOS_TEST_WASM_BACKEND;
+	if (backend === undefined || backend === "") return undefined;
+	if (backend === "v8" || backend === "wasmtime") return backend;
+	throw new Error(
+		`AGENTOS_TEST_WASM_BACKEND must be "v8" or "wasmtime", got ${JSON.stringify(backend)}`,
+	);
+}
 
 function testDatabase() {
 	const directory = mkdtempSync(join(tmpdir(), "agentos-test-sqlite-"));
@@ -34,6 +43,7 @@ if (!globalState.__agentOsDefaultPermissionsPatched) {
 			...(options ?? {}),
 			database: options?.database ?? testDatabase(),
 			permissions: options?.permissions ?? ALLOW_ALL_VM_PERMISSIONS,
+			wasmBackend: options?.wasmBackend ?? configuredTestWasmBackend(),
 		});
 	}) as typeof AgentOs.create;
 }

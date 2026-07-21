@@ -15,6 +15,7 @@ use crate::wasm::wasmtime::{memory, store::WasmtimeStoreState};
 use base64::Engine as _;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::time::Instant;
 use wasmtime::{Caller, Val};
 
 const ERRNO_AGAIN: i32 = 6;
@@ -31,7 +32,10 @@ const SOCK_STREAM: u32 = 6;
 const SOCK_CLOEXEC: u32 = 0x2000;
 const SOCK_NONBLOCK: u32 = 0x4000;
 const KERNEL_O_NONBLOCK: u32 = 0x800;
+const MSG_DONTWAIT: u32 = 0x40;
 const MSG_TRUNC: u32 = 0x20;
+const POLLIN: u32 = 0x001;
+const POLLRDNORM: u32 = 0x040;
 
 pub async fn dispatch(
     caller: &mut Caller<'_, WasmtimeStoreState>,
@@ -458,49 +462,161 @@ async fn accept(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val]) -> 
     {
         return ERRNO_FAULT;
     }
-    match call(
-        caller,
-        "process.hostnet_accept",
-        vec![json!(fd), json!(false), json!(false), Value::Null],
-        HashMap::new(),
-    )
-    .await
-    {
-        Ok(reply) => {
-            let Ok(value) = json_reply(reply) else {
-                return ERRNO_IO;
-            };
-            if value.is_null() || value.get("kind").and_then(Value::as_str) == Some("wouldBlock") {
-                return ERRNO_AGAIN;
+    let nonblocking = match fd_is_nonblocking(caller, fd).await {
+        Ok(nonblocking) => nonblocking,
+        Err(error) => return error,
+    };
+    let started = Instant::now();
+    let mut warned_near_limit = false;
+    loop {
+        match call(
+            caller,
+            "process.hostnet_accept",
+            vec![json!(fd), json!(false), json!(false), Value::Null],
+            HashMap::new(),
+        )
+        .await
+        {
+            Ok(reply) => {
+                let Ok(value) = json_reply(reply) else {
+                    return ERRNO_IO;
+                };
+                if value.is_null()
+                    || value.get("kind").and_then(Value::as_str) == Some("wouldBlock")
+                {
+                    if nonblocking {
+                        return ERRNO_AGAIN;
+                    }
+                    let wait = wait_for_socket_readable(
+                        caller,
+                        fd,
+                        "blocking socket accept",
+                        started,
+                        &mut warned_near_limit,
+                    )
+                    .await;
+                    if wait != SUCCESS {
+                        return wait;
+                    }
+                    continue;
+                }
+                let Some(accepted_fd) = value
+                    .get("fd")
+                    .and_then(value_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                else {
+                    return ERRNO_IO;
+                };
+                let address = encode_address(value.get("info").unwrap_or(&value), true);
+                let copied = if commit(caller, fd_output, &accepted_fd.to_le_bytes()) == SUCCESS {
+                    publish_bytes(
+                        caller,
+                        address_output,
+                        capacity,
+                        length_output,
+                        address.as_bytes(),
+                        false,
+                    )
+                } else {
+                    ERRNO_FAULT
+                };
+                if copied == SUCCESS {
+                    return SUCCESS;
+                } else {
+                    log_fd_rollback(caller, accepted_fd, "accept output commit").await;
+                    return copied;
+                }
             }
-            let Some(accepted_fd) = value
-                .get("fd")
-                .and_then(value_u64)
-                .and_then(|value| u32::try_from(value).ok())
-            else {
-                return ERRNO_IO;
-            };
-            let address = encode_address(value.get("info").unwrap_or(&value), true);
-            let copied = if commit(caller, fd_output, &accepted_fd.to_le_bytes()) == SUCCESS {
-                publish_bytes(
-                    caller,
-                    address_output,
-                    capacity,
-                    length_output,
-                    address.as_bytes(),
-                    false,
-                )
-            } else {
-                ERRNO_FAULT
-            };
-            if copied == SUCCESS {
-                SUCCESS
-            } else {
-                log_fd_rollback(caller, accepted_fd, "accept output commit").await;
-                copied
-            }
+            Err(error) => return errno(&error),
         }
-        Err(error) => errno(&error),
+    }
+}
+
+pub(super) async fn fd_is_nonblocking(
+    caller: &mut Caller<'_, WasmtimeStoreState>,
+    fd: u32,
+) -> Result<bool, i32> {
+    match call(caller, "process.fd_stat", vec![json!(fd)], HashMap::new()).await {
+        Ok(reply) => json_reply(reply)
+            .ok()
+            .and_then(|value| value.get("flags").and_then(value_u64))
+            .map(|flags| flags & u64::from(KERNEL_O_NONBLOCK) != 0)
+            .ok_or(ERRNO_IO),
+        Err(error) => Err(errno(&error)),
+    }
+}
+
+pub(super) async fn wait_for_socket_readable(
+    caller: &mut Caller<'_, WasmtimeStoreState>,
+    fd: u32,
+    operation: &str,
+    started: Instant,
+    warned_near_limit: &mut bool,
+) -> i32 {
+    let limit_ms = caller.data().max_blocking_read_ms;
+    loop {
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let warning_ms = limit_ms.saturating_mul(4) / 5;
+        if !*warned_near_limit && elapsed_ms >= warning_ms {
+            let warning = format!(
+                "[agentos] {operation} is nearing limits.resources.maxBlockingReadMs ({limit_ms} ms)\n"
+            );
+            if caller
+                .data()
+                .host
+                .publish_stderr(warning.into_bytes())
+                .await
+                .is_err()
+            {
+                return ERRNO_IO;
+            }
+            *warned_near_limit = true;
+        }
+        if elapsed_ms >= limit_ms {
+            let warning = format!(
+                "[agentos] {operation} exceeded limits.resources.maxBlockingReadMs ({limit_ms} ms); raise limits.resources.maxBlockingReadMs if needed\n"
+            );
+            if caller
+                .data()
+                .host
+                .publish_stderr(warning.into_bytes())
+                .await
+                .is_err()
+            {
+                return ERRNO_IO;
+            }
+            return ERRNO_TIMEDOUT;
+        }
+        let checkpoint_ms = if *warned_near_limit {
+            limit_ms
+        } else {
+            warning_ms.max(1)
+        };
+        let wait_ms = checkpoint_ms.saturating_sub(elapsed_ms).max(1);
+        let reply = call(
+            caller,
+            "process.posix_poll",
+            vec![
+                json!([{"fd": fd, "events": POLLIN | POLLRDNORM}]),
+                json!(wait_ms),
+                Value::Null,
+            ],
+            HashMap::new(),
+        )
+        .await;
+        match reply {
+            Ok(reply) => {
+                let ready = json_reply(reply)
+                    .ok()
+                    .and_then(|value| value.get("readyCount").and_then(value_u64))
+                    .unwrap_or_default()
+                    > 0;
+                if ready {
+                    return SUCCESS;
+                }
+            }
+            Err(error) => return errno(&error),
+        }
     }
 }
 
@@ -618,15 +734,38 @@ async fn send(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val], to: b
         Value::Null
     };
     let mut raw = HashMap::new();
-    raw.insert(1, bytes);
-    match call(
+    raw.insert(1, bytes.clone());
+    let host_reply = call(
         caller,
         "process.hostnet_send",
         vec![json!(fd), Value::Null, json!(flags), address, Value::Null],
         raw,
     )
-    .await
-    {
+    .await;
+    let reply = match host_reply {
+        reply @ Ok(_) => reply,
+        // The kernel owns AF_UNIX socketpair data and message boundaries.
+        // V8 routes non-host-network descriptors through this same operation;
+        // keep the native linker as a codec rather than a second socket stack.
+        Err(error) if !to && error.code == "ENOTSOCK" => {
+            let mut raw = HashMap::new();
+            raw.insert(1, bytes);
+            call(
+                caller,
+                "process.fd_sendmsg_rights",
+                vec![
+                    json!(fd),
+                    Value::Null,
+                    Value::Array(Vec::new()),
+                    json!(flags),
+                ],
+                raw,
+            )
+            .await
+        }
+        reply => reply,
+    };
+    match reply {
         Ok(reply) => {
             let written = match reply {
                 HostCallReply::Json(value) => {
@@ -675,76 +814,140 @@ async fn receive(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val], fr
     {
         return ERRNO_FAULT;
     }
-    match call(
-        caller,
-        "process.hostnet_recv",
-        vec![json!(fd), json!(capacity), json!(flags), Value::Null],
-        HashMap::new(),
-    )
-    .await
-    {
-        Ok(reply) => {
-            if matches!(&reply, HostCallReply::Json(Value::Null)) {
-                return commit(caller, length_output, &0u32.to_le_bytes());
-            }
-            let (bytes, address) = match reply {
-                HostCallReply::Json(value)
-                    if value.get("kind").and_then(Value::as_str) == Some("wouldBlock") =>
-                {
-                    return ERRNO_AGAIN;
-                }
-                HostCallReply::Json(value)
-                    if value.get("type").and_then(Value::as_str) == Some("message") =>
-                {
-                    let bytes = value
-                        .get("data")
-                        .cloned()
-                        .map(HostCallReply::Json)
-                        .and_then(|value| reply_bytes(value).ok())
-                        .ok_or(ERRNO_IO);
-                    let address = encode_address(&value, true);
-                    match bytes {
-                        Ok(bytes) => (bytes, Some(address)),
-                        Err(error) => return error,
-                    }
-                }
-                reply => match reply_bytes(reply) {
-                    Ok(bytes) => (bytes, None),
-                    Err(error) => return error,
-                },
-            };
-            let written = bytes.len().min(capacity as usize);
-            if commit(caller, output, &bytes[..written]) != SUCCESS {
-                return ERRNO_FAULT;
-            }
-            let reported = if flags & MSG_TRUNC != 0 {
-                bytes.len()
-            } else {
-                written
-            };
-            let Ok(reported) = u32::try_from(reported) else {
-                return ERRNO_2BIG;
-            };
-            if commit(caller, length_output, &reported.to_le_bytes()) != SUCCESS {
-                return ERRNO_FAULT;
-            }
-            if let Some((address_output, address_capacity, address_length_output)) = address_outputs
-            {
-                let Some(address) = address else {
-                    return ERRNO_IO;
-                };
-                return publish_bytes(
+    let nonblocking = match fd_is_nonblocking(caller, fd).await {
+        Ok(nonblocking) => nonblocking || flags & MSG_DONTWAIT != 0,
+        Err(error) => return error,
+    };
+    let started = Instant::now();
+    let mut warned_near_limit = false;
+    loop {
+        let host_reply = call(
+            caller,
+            "process.hostnet_recv",
+            vec![json!(fd), json!(capacity), json!(flags), Value::Null],
+            HashMap::new(),
+        )
+        .await;
+        let reply = match host_reply {
+            reply @ Ok(_) => reply,
+            Err(error) if !from && error.code == "ENOTSOCK" => {
+                call(
                     caller,
-                    address_output,
-                    address_capacity,
-                    address_length_output,
-                    address.as_bytes(),
-                    false,
-                );
+                    "process.fd_recvmsg_rights",
+                    vec![
+                        json!(fd),
+                        json!(capacity),
+                        json!(0),
+                        json!(false),
+                        json!(flags & 0x2 != 0),
+                        json!(flags & MSG_DONTWAIT != 0),
+                        json!(flags & 0x100 != 0),
+                    ],
+                    HashMap::new(),
+                )
+                .await
             }
-            SUCCESS
+            reply => reply,
+        };
+        match reply {
+            Ok(reply) => {
+                if matches!(&reply, HostCallReply::Json(Value::Null)) {
+                    return commit(caller, length_output, &0u32.to_le_bytes());
+                }
+                let full_length = match &reply {
+                    HostCallReply::Json(value) => value
+                        .get("fullLength")
+                        .and_then(value_u64)
+                        .and_then(|value| usize::try_from(value).ok()),
+                    _ => None,
+                };
+                let (bytes, address) = match reply {
+                    HostCallReply::Json(value)
+                        if value.get("kind").and_then(Value::as_str) == Some("wouldBlock") =>
+                    {
+                        if nonblocking {
+                            return ERRNO_AGAIN;
+                        }
+                        let wait = wait_for_socket_readable(
+                            caller,
+                            fd,
+                            "blocking socket receive",
+                            started,
+                            &mut warned_near_limit,
+                        )
+                        .await;
+                        if wait != SUCCESS {
+                            return wait;
+                        }
+                        continue;
+                    }
+                    HostCallReply::Json(value)
+                        if value.get("type").and_then(Value::as_str) == Some("message") =>
+                    {
+                        let bytes = value
+                            .get("data")
+                            .cloned()
+                            .map(HostCallReply::Json)
+                            .and_then(|value| reply_bytes(value).ok())
+                            .ok_or(ERRNO_IO);
+                        let address = encode_address(&value, true);
+                        match bytes {
+                            Ok(bytes) => (bytes, Some(address)),
+                            Err(error) => return error,
+                        }
+                    }
+                    HostCallReply::Json(value) if value.get("data").is_some() => {
+                        let bytes = value
+                            .get("data")
+                            .cloned()
+                            .map(HostCallReply::Json)
+                            .and_then(|value| reply_bytes(value).ok())
+                            .ok_or(ERRNO_IO);
+                        match bytes {
+                            Ok(bytes) => (bytes, None),
+                            Err(error) => return error,
+                        }
+                    }
+                    reply => match reply_bytes(reply) {
+                        Ok(bytes) => (bytes, None),
+                        Err(error) => return error,
+                    },
+                };
+                let written = bytes.len().min(capacity as usize);
+                if commit(caller, output, &bytes[..written]) != SUCCESS {
+                    return ERRNO_FAULT;
+                }
+                let full_length = full_length.unwrap_or(bytes.len());
+                let reported = if flags & MSG_TRUNC != 0 {
+                    full_length
+                } else {
+                    written
+                };
+                let Ok(reported) = u32::try_from(reported) else {
+                    return ERRNO_2BIG;
+                };
+                if commit(caller, length_output, &reported.to_le_bytes()) != SUCCESS {
+                    return ERRNO_FAULT;
+                }
+                if let Some((address_output, address_capacity, address_length_output)) =
+                    address_outputs
+                {
+                    let Some(address) = address else {
+                        return ERRNO_IO;
+                    };
+                    return publish_bytes(
+                        caller,
+                        address_output,
+                        address_capacity,
+                        address_length_output,
+                        address.as_bytes(),
+                        false,
+                    );
+                }
+                return SUCCESS;
+            }
+            Err(error) => return errno(&error),
         }
-        Err(error) => errno(&error),
     }
 }
 
@@ -874,10 +1077,19 @@ async fn tls_connect(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val]
     let Ok(hostname) = memory::read_string(caller, pointer, length as usize) else {
         return ERRNO_FAULT;
     };
+    let reject_unauthorized = !caller.data().env.iter().any(|entry| {
+        entry.strip_suffix(&[0]).unwrap_or(entry.as_slice()) == b"NODE_TLS_REJECT_UNAUTHORIZED=0"
+    });
     simple_call(
         caller,
         "process.hostnet_tls_connect",
-        vec![json!(fd), json!(hostname), json!([]), Value::Null],
+        vec![
+            json!(fd),
+            json!(hostname),
+            json!([]),
+            Value::Null,
+            json!(reject_unauthorized),
+        ],
     )
     .await
 }

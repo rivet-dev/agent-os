@@ -3,6 +3,7 @@ import type { JsRuntimeConfig } from "./JsRuntimeConfig.js";
 import type { NativeRootFilesystemConfig } from "./NativeRootFilesystemConfig.js";
 import type { PermissionsPolicy } from "./PermissionsPolicy.js";
 import type { RootFilesystemConfig } from "./RootFilesystemConfig.js";
+import type { StandaloneWasmBackend } from "./StandaloneWasmBackend.js";
 import type { VmDnsConfig } from "./VmDnsConfig.js";
 import type { VmLimitsConfig } from "./VmLimitsConfig.js";
 import type { VmListenPolicyConfig } from "./VmListenPolicyConfig.js";
@@ -15,4 +16,4 @@ import type { VmUserConfig } from "./VmUserConfig.js";
  * `packages/core/src/node-runtime-options-schema.ts`; update both when a
  * public `NodeRuntime.create(...)` option changes the generated VM config.
  */
-export type CreateVmConfig = { cwd?: string, env: Record<string, string>, database?: VmSqliteDescriptor, user?: VmUserConfig, rootFilesystem: RootFilesystemConfig, permissions?: PermissionsPolicy, limits?: VmLimitsConfig, dns?: VmDnsConfig, nativeRoot?: NativeRootFilesystemConfig, listen?: VmListenPolicyConfig, loopbackExemptPorts: Array<number>, jsRuntime?: JsRuntimeConfig, bootstrapCommands?: Array<string>, };
+export type CreateVmConfig = { cwd?: string, env: Record<string, string>, wasmBackend?: StandaloneWasmBackend, database?: VmSqliteDescriptor, user?: VmUserConfig, rootFilesystem: RootFilesystemConfig, permissions?: PermissionsPolicy, limits?: VmLimitsConfig, dns?: VmDnsConfig, nativeRoot?: NativeRootFilesystemConfig, listen?: VmListenPolicyConfig, loopbackExemptPorts: Array<number>, jsRuntime?: JsRuntimeConfig, bootstrapCommands?: Array<string>, };

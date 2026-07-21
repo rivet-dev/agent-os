@@ -664,7 +664,7 @@ revision has been sealed:
 - [x] Phase 2: production Wasmtime executor at current V8-WASM parity.
 - [x] Phase 3: performance decision, preferred-backend rollout, and initial
       project completion.
-- [ ] Phase 4: separately gated threaded-WASM roadmap completion.
+- [x] Phase 4: separately gated threaded-WASM roadmap completion.
 
 ### Phase 0 revision: Specification, inventory, and baseline
 
@@ -820,8 +820,12 @@ revision has been sealed:
 - [x] Keep V8 permanently for JavaScript and keep V8-WASM as an independent,
       maintained compatibility backend; add no V8-to-Wasmtime bridge.
 - [x] Keep shared memory, threads, memory64, multi-memory, relaxed SIMD, tail
-      calls, GC/function references, exceptions, components, custom page sizes,
+      calls, GC/function references, components, custom page sizes,
       AOT, pooling, Wizer, and live snapshots disabled for initial parity.
+      Enable finalized core exception tags/instructions and translate LLVM
+      19's legacy DuckDB encoding with checksum-verified Binaryen 128 during
+      the owned toolchain build; Wasmtime's compiler intentionally does not
+      accept the legacy encoding.
 - [x] Pass the complete differential ABI and working-software corpus—including
       `ls`, `vim`, `grep`, `curl`, shell pipelines, sqlite, git, tar/gzip, and
       metadata tools—against both standalone-WASM backends.
@@ -938,40 +942,89 @@ workspace, 2026-07-20 Pacific):
 
 ### Phase 4 revision: Threading as a separate later project
 
-- [ ] Confirm Phase 3 is complete before enabling shared memory or threads.
-- [ ] If threading cannot remain reviewable as one revision, approve a
+- [x] Confirm Phase 3 is complete before enabling shared memory or threads.
+- [x] If threading cannot remain reviewable as one revision, approve a
       replacement multi-revision threading specification before implementation;
       do not silently fragment this phase.
-- [ ] Rebuild the owned sysroot and libc for real pthread semantics instead of
+- [x] Rebuild the owned sysroot and libc for real pthread semantics instead of
       the current emulated single-thread implementation.
-- [ ] Add an explicit AgentOS thread-spawn ABI and enable the exact shared-memory
+- [x] Add an explicit AgentOS thread-spawn ABI and enable the exact shared-memory
       and atomic WASM feature profile only for configured threaded executions.
-- [ ] Implement bounded per-VM and process-wide thread admission, one accounted
+- [x] Implement bounded per-VM and process-wide thread admission, one accounted
       Store/instance/native stack per admitted guest thread where required, and
       transactional failure when capacity is unavailable.
-- [ ] Isolate each threaded WASM thread group in a killable worker process,
+- [x] Isolate each threaded WASM thread group in a killable worker process,
       keep AgentOS kernel state in the parent, use bounded typed host-operation
       IPC, and prove fixed-deadline termination/reaping for a guest parked in
       `memory.atomic.wait`.
-- [ ] Implement pthread mutex, condition variable, TLS, join/detach, exit,
+- [x] Implement pthread mutex, condition variable, TLS, join/detach, exit,
       cancellation, robust teardown, and required libc behavior.
-- [ ] Move masks and in-progress signal delivery to per-thread kernel records
+- [x] Move masks and in-progress signal delivery to per-thread kernel records
       while retaining process-wide dispositions and correct process/thread
       signal selection.
-- [ ] Define shared-memory ownership, growth, atomic wait/notify, limits,
+- [x] Define shared-memory ownership, growth, atomic wait/notify, limits,
       retained-memory accounting, and cross-thread guest-memory mutation rules.
-- [ ] Make trap, exit, cancellation, timeout, and VM teardown terminate and reap
+- [x] Make trap, exit, cancellation, timeout, and VM teardown terminate and reap
       the complete thread group without terminating or corrupting the sidecar.
-- [ ] Pass pthread/libc, signal, shared-memory, race, resource-exhaustion,
+- [x] Pass pthread/libc, signal, shared-memory, race, resource-exhaustion,
       teardown, isolation, and high-concurrency memory tests for hostile VMs.
-- [ ] Re-run the full single-thread parity and performance gates to prove the
+- [x] Re-run the full single-thread parity and performance gates to prove the
       threaded profile does not regress ordinary V8-WASM or Wasmtime execution.
-- [ ] Keep browser support, AOT artifacts, Wizer, components, pooling, and live
+- [x] Keep browser support, AOT artifacts, Wizer, components, pooling, and live
       process snapshot/fork outside the threading milestone unless separately
       specified and approved.
-- [ ] Seal the approved threading implementation and conformance evidence in
+- [x] Seal the approved threading implementation and conformance evidence in
       its own JJ revision or approved replacement revision stack. Completion of
       this checkbox means the full roadmap in this document is complete.
+
+Phase 4 evidence (Rust 1.94.0, release performance profile, Linux x86-64
+canonical workspace, 2026-07-21 Pacific):
+
+- The explicit `wasmtime-threads` selector uses the sealed
+  `AgentOsOwnedWasiV1Threads` profile. Plain `wasmtime` and V8-WASM remain
+  single-threaded and continue rejecting shared memory, atomics, and
+  `wasi.thread-spawn`. JavaScript remains on V8 and there is no V8/Wasmtime
+  memory bridge.
+- Each configured threaded group starts in its own native-sidecar worker
+  process. The child owns only Wasmtime Engine/Store/Instance/shared-memory and
+  guest-thread state; the parent retains the kernel, VFS, descriptors, sockets,
+  permissions, processes, and signal dispositions. Bounded CBOR frames carry
+  typed owned host operations, results, signals, stderr, group failures, and a
+  final completion acknowledgement. The child has two fixed IPC support
+  threads and one process-level Tokio runtime rather than per-operation threads
+  or per-thread/subsystem runtimes.
+- Admission reserves the complete configured group before guest entry:
+  per-VM and process-wide thread capacity, one Store/Instance/native stack per
+  guest thread, table space, and the maximum shared-memory envelope. The
+  group-owned `SharedMemory` supplies growth, atomic wait/notify, and
+  cross-Store mutation; every reservation is released on all teardown paths.
+- The owned pthread sysroot/libc passes the generated mutex, condition
+  variable, TLS, join, detach, exit, and cooperative-cancellation conformance
+  program. Kernel signal records now keep masks, temporary `ppoll` masks, and
+  in-progress handler state per thread while retaining process-wide
+  dispositions and deterministic process-directed thread selection.
+- The serial threaded safety suite passed 20 default tests plus its generated
+  pthread/libc test. It covers shared-memory growth/visibility, a four-thread
+  atomic race, transactional resource exhaustion, per-thread signals, eight
+  concurrent isolated groups, secondary-thread traps, process exit, timeout,
+  `SIGKILL`, VM disposal, and threads parked indefinitely in
+  `memory.atomic.wait`; fixed-deadline group reaping leaves the sidecar usable.
+- The ordinary single-thread raw-ABI suite passed 9/9 and the real-software
+  parity suite passed 6/6 (`ls`, loopback `curl`, the direct corpus,
+  shell/children, Vim, and the release command set). Wasmtime units and
+  architecture guards passed. Strict all-target native Clippy, Rust formatting, the native
+  workspace check, fixed-version/package/protocol inventory checks, all 54
+  JavaScript build tasks, and all 146 type-check tasks passed.
+- The post-threading canonical single-thread performance matrix completed with
+  zero correctness failures. Geometric-mean p50 (`0.2741` Wasmtime/V8) and
+  throughput passed; individual cold p95, retained RSS (`161,894,400` V8 versus
+  `256,995,328` Wasmtime), and retained PSS (`162,531,328` versus `257,593,344`)
+  failed. V8 therefore remains the omission/default and rollback backend. Raw
+  evidence is committed in
+  `packages/runtime-benchmarks/results/wasm-backend-comparison-phase4.json`.
+- Browser entrypoints remain dormant and excluded. AOT/serialized artifacts,
+  Wizer, components, pooling, and live process snapshots/fork remain disabled.
+  The repository-wide package-layout and fixed-version checks pass.
 
 ## 17. Principal risks
 

@@ -449,15 +449,22 @@ impl ActiveProcess {
                 // caller's mask before constructing the handler frame. This is
                 // what lets a signal unblocked only by ppoll interrupt the
                 // wait while nested handlers still observe the real mask.
-                let first_delivery = if let Some(token) = self
-                    .deferred_kernel_poll
-                    .as_mut()
-                    .and_then(|poll| poll.temporary_signal_mask_token.take())
-                {
-                    match self
-                        .kernel_handle
-                        .end_temporary_signal_mask_and_begin_signal_delivery(token)
-                    {
+                let temporary_mask = self.deferred_kernel_poll.as_mut().and_then(|poll| {
+                    poll.temporary_signal_mask_token
+                        .take()
+                        .map(|token| (token, poll.temporary_signal_thread_id.take()))
+                });
+                let first_delivery = if let Some((token, thread_id)) = temporary_mask {
+                    let result = if let Some(thread_id) = thread_id {
+                        self.kernel_handle
+                            .end_temporary_signal_mask_and_begin_signal_delivery_for_thread(
+                                thread_id, token,
+                            )
+                    } else {
+                        self.kernel_handle
+                            .end_temporary_signal_mask_and_begin_signal_delivery(token)
+                    };
+                    match result {
                         Ok(delivery) => delivery,
                         Err(error) => {
                             let failure = HostServiceError::new(error.code(), error.to_string());
@@ -494,6 +501,7 @@ impl ActiveProcess {
                         delivery.signal,
                         delivery.token,
                         delivery.action.flags,
+                        delivery.thread_id,
                     ) {
                         Ok(SignalCheckpointOutcome::Published) => {
                             // Every caught signal must release a parked guest syscall so
@@ -2747,6 +2755,7 @@ impl ExecutionBackend for BindingExecution {
         _signal: i32,
         _delivery_token: u64,
         _flags: u32,
+        _thread_id: u32,
     ) -> Result<SignalCheckpointOutcome, HostServiceError> {
         Ok(SignalCheckpointOutcome::Unsupported)
     }
@@ -2916,9 +2925,17 @@ impl ActiveExecution {
         signal: i32,
         delivery_token: u64,
         flags: u32,
+        thread_id: u32,
     ) -> Result<SignalCheckpointOutcome, SidecarError> {
-        ExecutionBackend::deliver_signal_checkpoint(self, identity, signal, delivery_token, flags)
-            .map_err(SidecarError::from)
+        ExecutionBackend::deliver_signal_checkpoint(
+            self,
+            identity,
+            signal,
+            delivery_token,
+            flags,
+            thread_id,
+        )
+        .map_err(SidecarError::from)
     }
 
     // Source-included integration tests exercise the adapter without a host
@@ -3009,14 +3026,6 @@ impl ActiveExecution {
 
     /// Probe the runtime event queue once without parking the sidecar thread or
     /// registering a waker outside the coalesced process-event broker.
-    pub(crate) fn try_poll_event(
-        &mut self,
-        identity: ProcessRuntimeIdentity,
-        max_reply_bytes: usize,
-    ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
-        self.try_poll_event_inner(identity, max_reply_bytes, None)
-    }
-
     pub(crate) fn try_poll_event_with_host(
         &mut self,
         identity: ProcessRuntimeIdentity,
@@ -3144,9 +3153,10 @@ impl ExecutionBackend for ActiveExecution {
         signal: i32,
         delivery_token: u64,
         flags: u32,
+        thread_id: u32,
     ) -> Result<SignalCheckpointOutcome, HostServiceError> {
         self.backend()
-            .deliver_signal_checkpoint(identity, signal, delivery_token, flags)
+            .deliver_signal_checkpoint(identity, signal, delivery_token, flags, thread_id)
     }
 
     fn take_signal_checkpoint(
@@ -3154,6 +3164,15 @@ impl ExecutionBackend for ActiveExecution {
         identity: ExecutionWakeIdentity,
     ) -> Result<Option<PublishedSignalCheckpoint>, HostServiceError> {
         self.backend().take_signal_checkpoint(identity)
+    }
+
+    fn take_signal_checkpoint_for_thread(
+        &self,
+        identity: ExecutionWakeIdentity,
+        thread_id: u32,
+    ) -> Result<Option<PublishedSignalCheckpoint>, HostServiceError> {
+        self.backend()
+            .take_signal_checkpoint_for_thread(identity, thread_id)
     }
 
     fn discard_signal_checkpoints(
@@ -4280,7 +4299,14 @@ pub(super) fn flush_parked_kernel_wait_rpc(process: &mut ActiveProcess) {
     }
     if let Some(poll) = process.clear_deferred_kernel_poll() {
         if let Some(token) = poll.temporary_signal_mask_token {
-            if let Err(error) = process.kernel_handle.end_temporary_signal_mask(token) {
+            let result = if let Some(thread_id) = poll.temporary_signal_thread_id {
+                process
+                    .kernel_handle
+                    .end_temporary_signal_mask_for_thread(thread_id, token)
+            } else {
+                process.kernel_handle.end_temporary_signal_mask(token)
+            };
+            if let Err(error) = result {
                 eprintln!("ERR_AGENTOS_PPOLL_MASK_RESTORE_TEARDOWN: {error}");
             }
         }

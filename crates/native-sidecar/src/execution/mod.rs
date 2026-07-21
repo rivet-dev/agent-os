@@ -431,7 +431,18 @@ pub(crate) async fn operation_deadline_timeout<F>(
 where
     F: Future,
 {
-    let mut deadline = OperationDeadlineTracker::new(limit);
+    operation_deadline_timeout_with_tracker(operation, OperationDeadlineTracker::new(limit), future)
+        .await
+}
+
+async fn operation_deadline_timeout_with_tracker<F>(
+    operation: &str,
+    mut deadline: OperationDeadlineTracker,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: Future,
+{
     tokio::pin!(future);
     match tokio::time::timeout_at(deadline.next_edge().into(), &mut future).await {
         Ok(output) => Ok(output),
@@ -465,15 +476,17 @@ const HTTP_LOOPBACK_REQUEST_TIMEOUT_MS_ENV: &str = "AGENTOS_TEST_HTTP_LOOPBACK_R
 #[cfg(test)]
 mod configured_socket_capacity_tests {
     use super::{
-        listener_accept_capacity, operation_deadline_timeout, reactor_io_limits,
+        listener_accept_capacity, operation_deadline_timeout,
+        operation_deadline_timeout_with_tracker, reactor_io_limits,
         set_deadline_limit_warning_handler, socket_completion_capacity, write_all_nonblocking,
+        OperationDeadlineTracker,
     };
     use crate::limits::VmLimits;
     use std::io::{self, Write};
     use std::os::fd::{AsFd, BorrowedFd};
     use std::os::unix::net::UnixStream;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     struct AlwaysWouldBlock {
         fd: UnixStream,
@@ -510,6 +523,9 @@ mod configured_socket_capacity_tests {
     async fn operation_deadline_warns_at_eighty_percent_before_success_or_typed_expiry() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&captured);
+        let (completion_sender, completion_receiver) = tokio::sync::oneshot::channel();
+        let completion_sender = Arc::new(Mutex::new(Some(completion_sender)));
+        let warning_completion_sender = Arc::clone(&completion_sender);
         set_deadline_limit_warning_handler(move |warning| {
             if warning.operation.starts_with("deadline-test-")
                 || warning.operation == "synchronous socket write"
@@ -518,13 +534,32 @@ mod configured_socket_capacity_tests {
                     .expect("deadline warning sink")
                     .push(warning.clone());
             }
+            if warning.operation == "deadline-test-completes-near-limit" {
+                if let Some(sender) = warning_completion_sender
+                    .lock()
+                    .expect("deadline completion sender")
+                    .take()
+                {
+                    sender.send(()).expect("release post-warning completion");
+                }
+            }
         });
 
-        let completed = operation_deadline_timeout(
+        // Construct the same 80%-warning state with the warning edge already
+        // reached and one full second remaining. A 5 ms real-time window made
+        // this regression test fail under concurrent linker load even though
+        // the production state machine behaved correctly.
+        let completed = operation_deadline_timeout_with_tracker(
             "deadline-test-completes-near-limit",
-            Duration::from_millis(50),
-            async {
-                tokio::time::sleep(Duration::from_millis(45)).await;
+            OperationDeadlineTracker::from_deadline(
+                Instant::now() + Duration::from_secs(1),
+                Duration::from_secs(5),
+                false,
+            ),
+            async move {
+                completion_receiver
+                    .await
+                    .expect("warning releases completion");
                 7
             },
         )
@@ -542,14 +577,20 @@ mod configured_socket_capacity_tests {
 
         let warnings = captured.lock().expect("deadline warnings").clone();
         assert_eq!(warnings.len(), 2);
-        for warning in warnings.iter() {
-            assert_eq!(warning.limit_name, "limits.reactor.operationDeadlineMs");
-            assert_eq!(warning.limit_ms, 50);
-            assert!(
-                warning.observed_ms >= 40 && warning.observed_ms < 50,
-                "warning must precede the hard deadline: {warning:?}"
-            );
-        }
+        assert_eq!(warnings[0].limit_name, "limits.reactor.operationDeadlineMs");
+        assert_eq!(warnings[0].limit_ms, 5_000);
+        assert!(
+            warnings[0].observed_ms >= 4_000 && warnings[0].observed_ms < 5_000,
+            "warning must precede the hard deadline: {:?}",
+            warnings[0]
+        );
+        assert_eq!(warnings[1].limit_name, "limits.reactor.operationDeadlineMs");
+        assert_eq!(warnings[1].limit_ms, 50);
+        assert!(
+            warnings[1].observed_ms >= 40 && warnings[1].observed_ms <= 50,
+            "warning must reach the hard deadline: {:?}",
+            warnings[1]
+        );
 
         // The synchronous TCP/Unix write path uses the same warning state
         // machine even though its readiness wait is `poll(2)`, not a Future.

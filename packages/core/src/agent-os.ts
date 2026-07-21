@@ -713,6 +713,10 @@ export interface AgentOsLimits {
 		activeCpuTimeLimitMs?: number;
 		wallClockLimitMs?: number;
 		deterministicFuel?: number;
+		/** Maximum threads, including the initial thread, for the explicit Wasmtime threaded backend. */
+		maxThreads?: number;
+		/** Maximum threads reserved by all concurrent threaded WASM processes in this VM. */
+		maxConcurrentThreads?: number;
 	};
 	/** Process spawn, I/O, and lifecycle-event backlog limits. */
 	process?: {
@@ -826,6 +830,8 @@ export interface AgentOsOptions {
 	 * Defaults to the hardened builtin set used by the native sidecar bridge.
 	 */
 	allowedNodeBuiltins?: string[];
+	/** VM-wide default for standalone WASM commands. JavaScript remains on V8. */
+	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 	/**
 	 * Opt in to a high-resolution monotonic guest clock (microsecond class)
 	 * for guest Node processes. Default `false` keeps the security-oriented
@@ -3264,6 +3270,7 @@ export class AgentOs {
 					serializePermissionsForSidecar(hostPermissions);
 				const createVmConfig: CreateVmConfig = {
 					env,
+					wasmBackend: options?.wasmBackend,
 					database: options?.database,
 					...(options?.user ? { user: options.user } : {}),
 					rootFilesystem: serializeRootFilesystemForSidecar(

@@ -24,16 +24,16 @@ where
     if !validate_context_host_call(sidecar, vm_id, process_id, &reply)? {
         return Ok(());
     }
-    let (fd, max_bytes, timeout_ms, response) = match operation {
+    let (fd, max_bytes, requested_timeout_ms, response) = match operation {
         FilesystemOperation::Read {
             fd,
             max_bytes,
             offset: None,
-            deadline_ms: Some(timeout_ms),
+            deadline_ms,
         } => (
             Some(fd),
             max_bytes,
-            timeout_ms,
+            deadline_ms,
             DeferredKernelReadResponse::DescriptorBytes,
         ),
         FilesystemOperation::StdinRead {
@@ -42,16 +42,24 @@ where
         } => (
             None,
             max_bytes,
-            timeout_ms,
+            Some(timeout_ms),
             DeferredKernelReadResponse::KernelStdin,
         ),
         _ => {
             return Err(SidecarError::host(
                 "EINVAL",
-                "deferred descriptor-read dispatcher received a non-timed read",
+                "deferred descriptor-read dispatcher received a non-read operation",
             ));
         }
     };
+    let timeout_ms = requested_timeout_ms
+        .or_else(|| {
+            sidecar
+                .vms
+                .get(vm_id)
+                .and_then(|vm| vm.limits.resources.max_blocking_read_ms)
+        })
+        .unwrap_or(agentos_kernel::resource_accounting::DEFAULT_BLOCKING_READ_TIMEOUT_MS);
     let deadline = match checked_deferred_guest_wait_deadline(timeout_ms) {
         Ok(deadline) => deadline,
         Err(error) => {
@@ -268,6 +276,18 @@ fn service_deferred_kernel_read_with_response(
                 .succeed(HostCallReply::Json(value))
                 .map_err(SidecarError::from);
         }
+        Err(error)
+            if matches!(error.code(), "EAGAIN" | "EWOULDBLOCK")
+                && kernel
+                    .fd_stat(EXECUTION_DRIVER_NAME, process.kernel_pid, read.fd)
+                    .map(|stat| stat.flags & agentos_kernel::fd_table::O_NONBLOCK != 0)
+                    .map_err(kernel_error)? =>
+        {
+            return read
+                .reply
+                .fail(kernel_host_error(error))
+                .map_err(SidecarError::from);
+        }
         Err(error) if matches!(error.code(), "EAGAIN" | "EWOULDBLOCK") && now >= read.deadline => {
             return match read.response {
                 DeferredKernelReadResponse::DescriptorBytes => read
@@ -322,6 +342,14 @@ pub(super) fn decode(
     let path_limit = payload_limit("runtime.filesystem.maxPathBytes", MAX_PATH_BYTES)?;
     let name_limit = payload_limit("runtime.filesystem.maxXattrNameBytes", MAX_XATTR_NAME_BYTES)?;
     let response_limit = payload_limit("limits.reactor.maxBridgeResponseBytes", max_reply_bytes)?;
+    // This second instance only types the configured maximum forwarded to the
+    // kernel. Actual reply sizes are admitted through `response_limit` above.
+    let response_bound = agentos_execution::backend::PayloadLimit::with_warning_hook(
+        "limits.reactor.maxBridgeResponseBytes",
+        max_reply_bytes,
+        None,
+    )
+    .map_err(SidecarError::Host)?;
     let request_limit = payload_limit("limits.reactor.maxBridgeRequestBytes", max_reply_bytes)?;
     let readdir_limit = payload_limit("runtime.filesystem.maxReaddirEntries", MAX_READDIR_ENTRIES)?;
 
@@ -592,7 +620,7 @@ pub(super) fn decode(
                 name: name_value,
                 value,
                 operation,
-                max_result_bytes: BoundedUsize::try_new(max_reply_bytes, &response_limit)
+                max_result_bytes: BoundedUsize::try_new(max_reply_bytes, &response_bound)
                     .map_err(SidecarError::Host)?,
             }
         }
@@ -633,7 +661,7 @@ pub(super) fn decode(
                 name: name_value,
                 value,
                 operation,
-                max_result_bytes: BoundedUsize::try_new(max_reply_bytes, &response_limit)
+                max_result_bytes: BoundedUsize::try_new(max_reply_bytes, &response_bound)
                     .map_err(SidecarError::Host)?,
             }
         }
@@ -660,7 +688,7 @@ pub(super) fn decode(
                 name: name_value,
                 value,
                 operation,
-                max_result_bytes: BoundedUsize::try_new(max_reply_bytes, &response_limit)
+                max_result_bytes: BoundedUsize::try_new(max_reply_bytes, &response_bound)
                     .map_err(SidecarError::Host)?,
             }
         }
@@ -728,7 +756,7 @@ pub(super) fn decode(
                 &readdir_limit,
             )
             .map_err(SidecarError::Host)?,
-            max_bytes: BoundedUsize::try_new(max_reply_bytes, &response_limit)
+            max_bytes: BoundedUsize::try_new(max_reply_bytes, &response_bound)
                 .map_err(SidecarError::Host)?,
         },
         "process.fd_close" => FilesystemOperation::Close {
@@ -953,6 +981,12 @@ fn decode_path_operation(
     request: &HostRpcRequest,
     path: &impl Fn(usize, &str) -> Result<BoundedString, SidecarError>,
 ) -> Result<FilesystemOperation, SidecarError> {
+    let path_bound = agentos_execution::backend::PayloadLimit::with_warning_hook(
+        "runtime.filesystem.maxPathBytes",
+        MAX_PATH_BYTES,
+        None,
+    )
+    .map_err(SidecarError::Host)?;
     Ok(match request.method.as_str() {
         "process.path_open_at" => FilesystemOperation::OpenAt {
             dir_fd: javascript_sync_rpc_arg_u32(&request.args, 0, "path_open_at dir fd")?,
@@ -1044,11 +1078,8 @@ fn decode_path_operation(
         "process.path_readlink_at" => FilesystemOperation::ReadLinkAt {
             dir_fd: javascript_sync_rpc_arg_u32(&request.args, 0, "path_readlink_at dir fd")?,
             path: path(1, "path_readlink_at path")?,
-            max_bytes: BoundedUsize::try_new(
-                MAX_PATH_BYTES,
-                &payload_limit("runtime.filesystem.maxPathBytes", MAX_PATH_BYTES)?,
-            )
-            .map_err(SidecarError::Host)?,
+            max_bytes: BoundedUsize::try_new(MAX_PATH_BYTES, &path_bound)
+                .map_err(SidecarError::Host)?,
         },
         "process.path_remove_dir_at" => FilesystemOperation::UnlinkAt {
             dir_fd: javascript_sync_rpc_arg_u32(&request.args, 0, "path_remove_dir_at dir fd")?,
@@ -1195,6 +1226,7 @@ impl SidecarHostCapability<FilesystemOperation> for FilesystemCapability {
                 path,
                 options,
             } => {
+                let dir_fd = super::canonical_path_dir_fd(dir_fd);
                 let parent_fd = (dir_fd != NODE_CWD_FD).then_some(dir_fd);
                 let requested_rights = match options.rights {
                     GuestOpenRights::Explicit { base, inheriting } => Some((base, inheriting)),
@@ -1269,7 +1301,7 @@ impl SidecarHostCapability<FilesystemOperation> for FilesystemCapability {
                     .collect(),
             ),
             FilesystemOperation::Preopen { fd } => kernel
-                .wasi_preopen(EXECUTION_DRIVER_NAME, pid, fd)
+                .wasi_preopen(EXECUTION_DRIVER_NAME, pid, super::canonical_path_dir_fd(fd))
                 .map_err(kernel_host_error)?
                 .map(preopen_value)
                 .unwrap_or(Value::Null),
@@ -1592,14 +1624,18 @@ impl SidecarHostCapability<FilesystemOperation> for FilesystemCapability {
                     HostServiceError::new("EINVAL", "fd_readdir cookie exceeds usize")
                 })?;
                 let entries = kernel
-                    .fd_read_dir_with_types(EXECUTION_DRIVER_NAME, pid, fd)
+                    .fd_read_dir_page_with_types(
+                        EXECUTION_DRIVER_NAME,
+                        pid,
+                        fd,
+                        cookie,
+                        max_entries.get(),
+                    )
                     .map_err(kernel_host_error)?;
                 Value::Array(
                     entries
                         .into_iter()
                         .enumerate()
-                        .skip(cookie)
-                        .take(max_entries.get())
                         .map(|(index, entry)| {
                             json!({
                                 "name": entry.name,
@@ -1611,7 +1647,7 @@ impl SidecarHostCapability<FilesystemOperation> for FilesystemCapability {
                                 } else {
                                     agentos_kernel::fd_table::FILETYPE_REGULAR_FILE
                                 },
-                                "next": index.saturating_add(1).to_string(),
+                                "next": cookie.saturating_add(index).saturating_add(1).to_string(),
                             })
                         })
                         .collect(),
@@ -2065,6 +2101,9 @@ fn resolve_path(
     dir_fd: u32,
     path: &str,
 ) -> Result<String, HostServiceError> {
+    // AgentOS extension imports use NODE_CWD_FD for an ordinary POSIX path.
+    // Patched libc instead tags its preserved private WASI preopen; strip only
+    // that tag and retain the preopen's capability-root semantics.
     if dir_fd == NODE_CWD_FD {
         let path = if path.starts_with('/') {
             normalize_path(path)
@@ -2086,6 +2125,7 @@ fn resolve_path(
         }
         return Ok(path);
     }
+    let dir_fd = super::canonical_path_dir_fd(dir_fd);
     if path.starts_with('/') {
         return Err(HostServiceError::new(
             "EACCES",
@@ -2688,20 +2728,18 @@ mod tests {
         let (mut kernel, handle) = kernel_process_at_tier(ProcessPermissionTier::Full);
         let pid = handle.pid();
         kernel
-            .mkdir("/cap", true)
-            .expect("create capability directory");
+            .mkdir("/workspace", true)
+            .expect("create workspace capability directory");
         kernel
             .mkdir("/outside", true)
             .expect("create outside directory");
         let cap_fd = kernel
-            .fd_open(
-                EXECUTION_DRIVER_NAME,
-                pid,
-                "/cap",
-                agentos_kernel::fd_table::O_DIRECTORY,
-                None,
-            )
-            .expect("open directory capability");
+            .initialize_canonical_wasi_preopens(EXECUTION_DRIVER_NAME, pid)
+            .expect("initialize canonical preopens")
+            .into_iter()
+            .find(|entry| entry.guest_path == "/workspace")
+            .expect("workspace preopen")
+            .fd;
         let process = ActiveProcess::new(
             pid,
             handle,
@@ -2710,7 +2748,8 @@ mod tests {
             agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             GuestRuntimeKind::WebAssembly,
             ActiveExecution::Binding(BindingExecution::default()),
-        );
+        )
+        .with_guest_cwd(String::from("/workspace"));
         let operation = HostOperation::Filesystem(FilesystemOperation::OpenAt {
             dir_fd: cap_fd,
             path: bounded_string("/outside"),
@@ -2734,8 +2773,44 @@ mod tests {
         assert_eq!(
             resolve_path(&mut kernel, &process, cap_fd, "child")
                 .expect("relative path remains confined"),
-            "/cap/child"
+            "/workspace/child"
         );
+        assert_eq!(
+            resolve_path(
+                &mut kernel,
+                &process,
+                agentos_kernel::fd_table::WASI_HIDDEN_PREOPEN_FD_TAG | cap_fd,
+                "/outside"
+            )
+            .expect_err("private libc preopen retains capability confinement")
+            .code,
+            "EACCES"
+        );
+        assert_eq!(
+            resolve_path(
+                &mut kernel,
+                &process,
+                agentos_kernel::fd_table::WASI_HIDDEN_PREOPEN_FD_TAG | cap_fd,
+                "child",
+            )
+            .expect("private libc preopen resolves from its capability root"),
+            "/workspace/child"
+        );
+        assert_eq!(
+            resolve_path(&mut kernel, &process, NODE_CWD_FD, "child")
+                .expect("extension cwd sentinel resolves from process cwd"),
+            "/workspace/child"
+        );
+        let cwd_metadata = HostOperation::Filesystem(FilesystemOperation::SetMode {
+            target: MetadataTarget::Path {
+                dir_fd: NODE_CWD_FD,
+                follow_symlinks: true,
+            },
+            path: Some(bounded_string("child")),
+            mode: 0o600,
+        });
+        super::authorize_host_operation(&kernel, pid, &cwd_metadata)
+            .expect("cwd sentinel bypasses descriptor-right lookup");
     }
 
     fn request(method: &str) -> HostRpcRequest {
@@ -3313,6 +3388,63 @@ mod tests {
         kernel
             .fd_close(EXECUTION_DRIVER_NAME, parent_pid, timeout_write_fd)
             .expect("close timeout writer");
+
+        let (nonblocking_read_fd, nonblocking_write_fd) = kernel
+            .open_pipe(EXECUTION_DRIVER_NAME, parent_pid)
+            .expect("open nonblocking pipe");
+        kernel
+            .fd_fcntl(
+                EXECUTION_DRIVER_NAME,
+                parent_pid,
+                nonblocking_read_fd,
+                agentos_kernel::fd_table::F_SETFL,
+                agentos_kernel::fd_table::O_NONBLOCK,
+            )
+            .expect("mark pipe reader nonblocking");
+        let nonblocking_target = Arc::new(RecordingTarget::default());
+        service_deferred_kernel_read(
+            identity.generation,
+            &runtime,
+            kernel.poll_wait_handle(),
+            Arc::new(tokio::sync::Notify::new()),
+            &mut kernel,
+            &mut parent,
+            Some((
+                nonblocking_read_fd,
+                BoundedUsize::try_new(64, &read_limit).expect("bounded nonblocking read"),
+                Instant::now() + Duration::from_secs(1),
+                direct_reply(
+                    Arc::clone(&nonblocking_target),
+                    identity.generation,
+                    parent_pid,
+                    4,
+                ),
+            )),
+        )
+        .expect("settle nonblocking not-ready read");
+        assert!(
+            parent.deferred_kernel_read.is_none(),
+            "O_NONBLOCK must never park a descriptor read"
+        );
+        let replies = nonblocking_target
+            .replies
+            .lock()
+            .expect("nonblocking reply lock");
+        assert_eq!(replies.len(), 1);
+        assert_eq!(
+            replies[0]
+                .as_ref()
+                .expect_err("nonblocking not-ready read must fail")
+                .code,
+            "EAGAIN"
+        );
+        drop(replies);
+        kernel
+            .fd_close(EXECUTION_DRIVER_NAME, parent_pid, nonblocking_read_fd)
+            .expect("close nonblocking reader");
+        kernel
+            .fd_close(EXECUTION_DRIVER_NAME, parent_pid, nonblocking_write_fd)
+            .expect("close nonblocking writer");
 
         child.finish(0);
         parent.kernel_handle.finish(0);

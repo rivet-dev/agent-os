@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 //! Native execution plane scaffold for the agentos runtime migration.
 
@@ -40,7 +40,10 @@ pub use python::{
     PythonVfsRpcStat, StartPythonExecutionRequest,
 };
 pub use signal::{ExecutionSignalDispositionAction, ExecutionSignalHandlerRegistration};
-pub use wasm::wasmtime::TRUSTED_INITIAL_MODULE_PREFIX;
+pub use wasm::wasmtime::{
+    run_worker_entry as run_wasmtime_thread_worker, TRUSTED_INITIAL_MODULE_PREFIX,
+    WORKER_MODE_ARGUMENT as WASMTIME_THREAD_WORKER_ARGUMENT,
+};
 pub use wasm::{
     CreateWasmContextRequest, NativeBinaryFormat, StandaloneWasmBackend, StartWasmExecutionRequest,
     WasmContext, WasmExecution, WasmExecutionEngine, WasmExecutionError, WasmExecutionEvent,

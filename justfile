@@ -11,6 +11,7 @@ release-preview REF:
 # --- @agentos-software/* software packages (independent, PER-PACKAGE versions) ---
 toolchain-build:
 	make -C toolchain commands
+	make -C toolchain cmd/duckdb cmd/vim
 
 toolchain-cmd name:
 	make -C toolchain cmd/{{ name }}

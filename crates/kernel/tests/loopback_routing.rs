@@ -3,7 +3,8 @@ use agentos_kernel::kernel::{KernelProcessHandle, KernelVm, KernelVmConfig, Spaw
 use agentos_kernel::permissions::Permissions;
 use agentos_kernel::resource_accounting::ResourceLimits;
 use agentos_kernel::socket_table::{
-    InetSocketAddress, SocketReadiness, SocketReadinessKind, SocketSpec, SocketState,
+    InetSocketAddress, SocketReadiness, SocketReadinessKind, SocketShutdown, SocketSpec,
+    SocketState,
 };
 use agentos_kernel::vfs::MemoryFileSystem;
 use std::sync::{Arc, Mutex};
@@ -203,7 +204,7 @@ fn kernel_loopback_readiness_events_are_edge_triggered() {
     let accepted = kernel
         .socket_accept("shell", server.pid(), listener)
         .expect("accept first connection");
-    let _second_accepted = kernel
+    let second_accepted = kernel
         .socket_accept("shell", server.pid(), listener)
         .expect("accept second connection");
     assert!(take_readiness_events(&events).is_empty());
@@ -252,6 +253,56 @@ fn kernel_loopback_readiness_events_are_edge_triggered() {
             socket_id: accepted,
             kind: SocketReadinessKind::Data,
         }]
+    );
+    assert_eq!(
+        kernel
+            .socket_read("shell", server.pid(), accepted, 8)
+            .expect("read final byte")
+            .expect("final payload"),
+        b"D"
+    );
+
+    kernel
+        .socket_shutdown("shell", client.pid(), client_socket, SocketShutdown::Write)
+        .expect("shutdown client write side");
+    assert_eq!(
+        take_readiness_events(&events),
+        vec![SocketReadiness {
+            socket_id: accepted,
+            kind: SocketReadinessKind::Data,
+        }],
+        "write shutdown must wake the peer to observe EOF"
+    );
+    assert_eq!(
+        kernel
+            .socket_read("shell", server.pid(), accepted, 8)
+            .expect("read shutdown EOF"),
+        None
+    );
+    kernel
+        .socket_shutdown("shell", client.pid(), client_socket, SocketShutdown::Write)
+        .expect("repeat client write shutdown");
+    assert!(
+        take_readiness_events(&events).is_empty(),
+        "repeated write shutdown must not emit a duplicate EOF edge"
+    );
+
+    kernel
+        .socket_close("shell", client.pid(), second_client_socket)
+        .expect("close second client");
+    assert_eq!(
+        take_readiness_events(&events),
+        vec![SocketReadiness {
+            socket_id: second_accepted,
+            kind: SocketReadinessKind::Data,
+        }],
+        "close must wake the peer to observe EOF"
+    );
+    assert_eq!(
+        kernel
+            .socket_read("shell", server.pid(), second_accepted, 8)
+            .expect("read close EOF"),
+        None
     );
 
     let udp_sender = kernel

@@ -50,6 +50,7 @@ impl ResourceUsageObserver for RuntimeMetrics {
             ResourceClass::WasmMemoryBytes => {
                 self.observe_buffer(BufferMetricClass::Executor, used)
             }
+            ResourceClass::WasmThreads => {}
             ResourceClass::Http2BufferedBytes => {
                 self.observe_buffer(BufferMetricClass::Http2, used)
             }

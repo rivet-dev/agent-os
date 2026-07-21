@@ -133,6 +133,12 @@ pub fn init_v8_platform() {
             .spawn(move || {
                 v8::icu::set_common_data_74(&ICU_COMMON_DATA.0)
                     .expect("failed to initialize V8 ICU common data");
+                // LLVM 19 emits the legacy Phase-3 WebAssembly exception
+                // encoding and our toolchain translates it to the finalized
+                // exnref form required by Wasmtime. V8 130 keeps that finalized
+                // form behind this process-global flag. The shared AgentOS
+                // validator still controls which guest proposals are accepted.
+                v8::V8::set_flags_from_string("--experimental-wasm-exnref");
                 let platform =
                     v8::new_default_platform(V8_PLATFORM_WORKER_THREADS, false).make_shared();
                 v8::V8::initialize_platform(platform);

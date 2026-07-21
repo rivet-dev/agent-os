@@ -73,6 +73,8 @@ pub const DEFAULT_WASM_SYNC_READ_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_WASM_PREWARM_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_WASM_RUNNER_HEAP_LIMIT_MB: u32 = 2048;
 pub const DEFAULT_WASM_ACTIVE_CPU_TIME_LIMIT_MS: u32 = 30_000;
+pub const DEFAULT_WASM_MAX_THREADS: usize = 16;
+pub const DEFAULT_WASM_MAX_CONCURRENT_THREADS: usize = 64;
 pub const DEFAULT_PROCESS_PENDING_STDIN_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_PROCESS_MAX_SPAWN_FILE_ACTIONS: usize = 4096;
 pub const DEFAULT_PROCESS_MAX_SPAWN_FILE_ACTION_BYTES: usize = 1024 * 1024;
@@ -376,6 +378,12 @@ pub struct WasmLimits {
     /// Optional deterministic instruction budget. The V8 compatibility backend
     /// rejects explicit values because V8 cannot meter deterministic fuel.
     pub deterministic_fuel: Option<u64>,
+    /// Maximum threads in one explicitly threaded standalone-WASM group,
+    /// including its initial thread.
+    pub max_threads: usize,
+    /// Maximum threads transactionally reserved by all concurrently running
+    /// threaded standalone-WASM groups in one VM.
+    pub max_concurrent_threads: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -537,6 +545,8 @@ impl Default for WasmLimits {
             active_cpu_time_limit_ms: DEFAULT_WASM_ACTIVE_CPU_TIME_LIMIT_MS,
             wall_clock_limit_ms: None,
             deterministic_fuel: None,
+            max_threads: DEFAULT_WASM_MAX_THREADS,
+            max_concurrent_threads: DEFAULT_WASM_MAX_CONCURRENT_THREADS,
         }
     }
 }
@@ -842,6 +852,16 @@ pub fn vm_limits_from_config(
         }
         limits.wasm.wall_clock_limit_ms = wasm.wall_clock_limit_ms;
         limits.wasm.deterministic_fuel = wasm.deterministic_fuel;
+        set_usize(
+            &mut limits.wasm.max_threads,
+            wasm.max_threads,
+            "limits.wasm.maxThreads",
+        )?;
+        set_usize(
+            &mut limits.wasm.max_concurrent_threads,
+            wasm.max_concurrent_threads,
+            "limits.wasm.maxConcurrentThreads",
+        )?;
     }
     if let Some(execution) = config.execution.as_ref() {
         set_u64(
@@ -1797,6 +1817,21 @@ pub fn validate_vm_limits(
     if limits.wasm.max_module_file_bytes == 0 {
         return Err(SidecarCoreError::new(
             "limits.wasm.max_module_file_bytes must be greater than zero".to_string(),
+        ));
+    }
+    if limits.wasm.max_threads == 0 {
+        return Err(SidecarCoreError::new(
+            "limits.wasm.max_threads must be greater than zero",
+        ));
+    }
+    if limits.wasm.max_concurrent_threads == 0 {
+        return Err(SidecarCoreError::new(
+            "limits.wasm.max_concurrent_threads must be greater than zero",
+        ));
+    }
+    if limits.wasm.max_threads > limits.wasm.max_concurrent_threads {
+        return Err(SidecarCoreError::new(
+            "limits.wasm.max_threads must not exceed limits.wasm.max_concurrent_threads",
         ));
     }
     if limits.js_runtime.v8_ipc_max_frame_bytes == 0 {

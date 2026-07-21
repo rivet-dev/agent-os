@@ -25,9 +25,10 @@ pub(in crate::execution) use network_compat::{
     close_with_managed_retirement, closefrom_with_managed_retirement,
     dispatch_claimed_context_stream_read, dispatch_claimed_context_udp_poll,
     dispatch_descendant_context_stream_read, dispatch_descendant_context_udp_poll,
-    prune_managed_process_routes_without_aliases, replace_descriptor_with_managed_retirement,
-    retire_managed_process_routes, retire_orphaned_managed_descriptions,
-    service_deferred_posix_poll, service_descendant_managed_fd_network_operation,
+    fd_snapshot_with_managed_routes, prune_managed_process_routes_without_aliases,
+    replace_descriptor_with_managed_retirement, retire_managed_process_routes,
+    retire_orphaned_managed_descriptions, service_deferred_posix_poll,
+    service_descendant_managed_fd_network_operation,
 };
 mod process;
 mod signal;
@@ -36,9 +37,10 @@ mod terminal;
 use super::*;
 use agentos_execution::backend::{ExecutionEvent, HostCallReply, PayloadLimit};
 use agentos_execution::host::{
-    BoundedBytes, BoundedProcessLaunchRequest, BoundedString, BoundedUsize, BoundedVec,
-    ClockOperation, CommittedProcessImage, DescriptorSyncKind, DescriptorWhence, DnsAddressFamily,
-    EntropyOperation, ExecutableImageSource, FileRangeOperation, FileTimeUpdate,
+    BoundedBytes, BoundedExecutableImageResolutionRequest, BoundedProcessLaunchRequest,
+    BoundedString, BoundedUsize, BoundedVec, ClockOperation, CommittedProcessImage,
+    DescriptorSyncKind, DescriptorWhence, DnsAddressFamily, EntropyOperation,
+    ExecutableImageResolutionRequest, ExecutableImageSource, FileRangeOperation, FileTimeUpdate,
     FilesystemOperation, FilesystemRecordLockKind, GuestClockId, GuestOpenRights, GuestOpenSpec,
     HostOperation, IdentityIdKind, IdentityOperation, KernelPollInterest, ManagedTcpEndpoint,
     ManagedUdpFamily, ManagedUnixAddress, MetadataTarget, NetworkOperation, PollInterest,
@@ -69,6 +71,13 @@ const MAX_SIGNAL_SET_ENTRIES: usize = 64;
 const MAX_SIGNAL_STATE_MASK_JSON_BYTES: usize = 4 * 1024;
 const MAX_ENTROPY_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_DEFERRED_GUEST_WAIT_MS: u64 = u32::MAX as u64;
+fn canonical_path_dir_fd(fd: u32) -> u32 {
+    // Hidden preopen aliases are real kernel-owned descriptor identities. Keep
+    // the tag so ordinary pathname resolution continues to use the capability
+    // root even after the guest closes or replaces the same-numbered visible
+    // preopen descriptor.
+    fd
+}
 
 pub(crate) fn checked_deferred_guest_wait_deadline(
     delay_ms: u64,
@@ -292,6 +301,7 @@ fn require_path_right(
     required: u64,
     operation: &FilesystemOperation,
 ) -> Result<(), HostServiceError> {
+    let dir_fd = canonical_path_dir_fd(dir_fd);
     if dir_fd == u32::MAX {
         return Ok(());
     }
@@ -681,13 +691,23 @@ pub(super) fn authorize_host_operation(
         )),
         HostOperation::Terminal(_) => Ok(()),
         HostOperation::Signal(
-            SignalOperation::UpdateMask {
+            SignalOperation::RegisterThread { .. }
+            | SignalOperation::UnregisterThread { .. }
+            | SignalOperation::UpdateMask {
                 how: SignalMaskHow::Block,
                 set: SignalSetValue(0),
             }
+            | SignalOperation::UpdateMaskForThread {
+                how: SignalMaskHow::Block,
+                set: SignalSetValue(0),
+                ..
+            }
             | SignalOperation::BeginDelivery
+            | SignalOperation::BeginDeliveryForThread { .. }
             | SignalOperation::TakePublishedDelivery
-            | SignalOperation::EndDelivery { .. },
+            | SignalOperation::TakePublishedDeliveryForThread { .. }
+            | SignalOperation::EndDelivery { .. }
+            | SignalOperation::EndDeliveryForThread { .. },
         ) => Ok(()),
         HostOperation::Signal(operation) => Err(tier_denied("EACCES", tier, "signal", operation)),
         HostOperation::Identity(_) | HostOperation::Entropy(_) => Ok(()),
@@ -1042,6 +1062,7 @@ fn decode_host_operation(
                     3,
                     "TLS connect deadline",
                 )?,
+                reject_unauthorized: request.args.get(4).and_then(Value::as_bool).unwrap_or(true),
             })
         }
         "process.fd_socket_shutdown" => {
@@ -1187,6 +1208,22 @@ fn decode_host_operation(
                     .filter(|value| !value.is_null())
                     .map(|value| decode_signal_set(Some(value)))
                     .transpose()?,
+                signal_thread_id: request
+                    .args
+                    .get(3)
+                    .filter(|value| !value.is_null())
+                    .map(|value| {
+                        value
+                            .as_u64()
+                            .and_then(|value| u32::try_from(value).ok())
+                            .ok_or_else(|| {
+                                SidecarError::host(
+                                    "EINVAL",
+                                    "POSIX poll signal thread id is invalid",
+                                )
+                            })
+                    })
+                    .transpose()?,
             })
         }
         "dns.lookup" => {
@@ -1315,6 +1352,7 @@ fn decode_host_operation(
                     )
                     .map_err(SidecarError::from)?,
                 ),
+                resolution: decode_executable_image_resolution(&request.args, 1, max_reply_bytes)?,
             })
         }
         "process.exec_image_open_fd" => {
@@ -1324,6 +1362,7 @@ fn decode_host_operation(
                     0,
                     "process.exec_image_open_fd fd",
                 )?),
+                resolution: decode_executable_image_resolution(&request.args, 1, max_reply_bytes)?,
             })
         }
         "process.exec_image_read" => {
@@ -1421,7 +1460,11 @@ fn decode_host_operation(
                 1,
                 "waitpid options",
             )?)?,
-            deadline_ms: None,
+            deadline_ms: javascript_sync_rpc_arg_u64_optional(
+                &request.args,
+                2,
+                "waitpid deadline ms",
+            )?,
             temporary_mask: None,
         }),
         "process.waitpid_transition" => HostOperation::Process(ProcessOperation::WaitTransition {
@@ -1440,8 +1483,12 @@ fn decode_host_operation(
         "process.image" => HostOperation::Process(ProcessOperation::GetImage {
             max_reply_bytes: BoundedUsize::try_new(
                 max_reply_bytes,
-                &PayloadLimit::new("limits.reactor.maxBridgeResponseBytes", max_reply_bytes)
-                    .map_err(SidecarError::from)?,
+                &PayloadLimit::with_warning_hook(
+                    "limits.reactor.maxBridgeResponseBytes",
+                    max_reply_bytes,
+                    None,
+                )
+                .map_err(SidecarError::from)?,
             )
             .map_err(SidecarError::from)?,
         }),
@@ -1837,7 +1884,10 @@ fn optional_identity_id(
 
 fn account_record_limit(max_reply_bytes: usize) -> Result<BoundedUsize, SidecarError> {
     let maximum = max_reply_bytes.min(MAX_ACCOUNT_RECORD_BYTES);
-    let limit = PayloadLimit::new("maxAccountRecordBytes", maximum).map_err(SidecarError::from)?;
+    // `maximum` is carried to the kernel as a bound. It is not an observed
+    // account-record size, so registering it must not emit a near-limit warning.
+    let limit = PayloadLimit::with_warning_hook("maxAccountRecordBytes", maximum, None)
+        .map_err(SidecarError::from)?;
     BoundedUsize::try_new(maximum, &limit).map_err(SidecarError::from)
 }
 
@@ -1925,6 +1975,44 @@ fn decode_process_exec_request(
         validate_wasm_fd_image_commit_request(request.as_request())?;
     }
     Ok(request)
+}
+
+fn decode_executable_image_resolution(
+    args: &[Value],
+    argv_index: usize,
+    max_request_bytes: usize,
+) -> Result<Option<BoundedExecutableImageResolutionRequest>, SidecarError> {
+    let Some(argv_value) = args.get(argv_index) else {
+        return Ok(None);
+    };
+    let argv = serde_json::from_value::<Vec<String>>(argv_value.clone()).map_err(|error| {
+        SidecarError::host(
+            "EINVAL",
+            format!("invalid exec image resolution argv: {error}"),
+        )
+    })?;
+    let close_on_exec_fds = serde_json::from_value::<Vec<u32>>(
+        args.get(argv_index + 1)
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )
+    .map_err(|error| {
+        SidecarError::host(
+            "EINVAL",
+            format!("invalid exec image close-on-exec descriptors: {error}"),
+        )
+    })?;
+    let limit = PayloadLimit::new("limits.reactor.maxBridgeRequestBytes", max_request_bytes)
+        .map_err(SidecarError::from)?;
+    BoundedExecutableImageResolutionRequest::try_new(
+        ExecutableImageResolutionRequest {
+            argv,
+            close_on_exec_fds,
+        },
+        &limit,
+    )
+    .map(Some)
+    .map_err(SidecarError::from)
 }
 
 fn bounded_dns_value(
@@ -2271,6 +2359,18 @@ pub(super) fn dispatch_host_operation(
         }
         other => Err(unsupported("host", other)),
     };
+    // Host operations such as kill(self), SIGPIPE-producing writes, and timer
+    // probes can queue kernel runtime controls. Publish those controls before
+    // releasing the direct waiter so every executor observes the checkpoint at
+    // the safe point immediately following this import.
+    let result = result.and_then(|response| {
+        if response.is_some() {
+            process
+                .apply_runtime_controls()
+                .map_err(|error| host_service_error(&error))?;
+        }
+        Ok(response)
+    });
     match result {
         Ok(Some(response)) => {
             reply.succeed(response).map_err(SidecarError::from)?;
@@ -2291,16 +2391,13 @@ pub(super) fn requires_context_host_dispatch(operation: &HostOperation) -> bool 
     matches!(
         operation,
         HostOperation::Filesystem(
-            FilesystemOperation::Close { .. }
+            FilesystemOperation::Snapshot
+                | FilesystemOperation::Close { .. }
                 | FilesystemOperation::CloseFrom { .. }
                 | FilesystemOperation::Renumber { .. }
                 | FilesystemOperation::DuplicateTo { .. }
                 | FilesystemOperation::Move { .. }
-                | FilesystemOperation::Read {
-                    offset: None,
-                    deadline_ms: Some(_),
-                    ..
-                }
+                | FilesystemOperation::Read { offset: None, .. }
                 | FilesystemOperation::StdinRead { .. },
         ) | HostOperation::Network(
             NetworkOperation::HttpRequest { .. }
@@ -2385,6 +2482,10 @@ where
             dispatch_context_http_operation(sidecar, vm_id, process_id, operation, reply)?;
             Ok(None)
         }
+        HostOperation::Filesystem(FilesystemOperation::Snapshot) => {
+            network_compat::dispatch_context_fd_snapshot(sidecar, vm_id, process_id, reply)?;
+            Ok(None)
+        }
         HostOperation::Filesystem(FilesystemOperation::Close { fd }) => {
             network_compat::dispatch_context_close_with_managed_retirement(
                 sidecar, vm_id, process_id, fd, reply,
@@ -2408,11 +2509,7 @@ where
             Ok(None)
         }
         HostOperation::Filesystem(
-            operation @ (FilesystemOperation::Read {
-                offset: None,
-                deadline_ms: Some(_),
-                ..
-            }
+            operation @ (FilesystemOperation::Read { offset: None, .. }
             | FilesystemOperation::StdinRead { .. }),
         ) => {
             filesystem::dispatch_context_deferred_kernel_read(
@@ -2637,6 +2734,15 @@ pub(super) fn service_deferred_guest_wait(
         });
     }
 
+    // ITIMER_REAL state remains sidecar-owned. A deferred syscall must wake at
+    // the timer deadline as well as its own deadline so the kernel can publish
+    // SIGALRM promptly without an executor-local timer or polling loop.
+    signal::materialize_real_timer_signal(process);
+    process.apply_runtime_controls()?;
+    if process.deferred_guest_wait.is_none() {
+        return Ok(());
+    }
+
     let now = Instant::now();
     let should_probe = process.deferred_guest_wait.as_ref().is_some_and(|wait| {
         newly_admitted
@@ -2701,14 +2807,18 @@ pub(super) fn service_deferred_guest_wait(
         };
     }
 
-    let deadline = wait.deadline;
+    let wake_deadline = match (wait.deadline, process.real_interval_timer.next_deadline()) {
+        (Some(wait), Some(timer)) => Some(wait.min(timer)),
+        (wait @ Some(_), None) => wait,
+        (None, timer) => timer,
+    };
     let task_class = if wait.kind == DeferredGuestWaitKind::Sleep {
         agentos_runtime::TaskClass::Timer
     } else {
         agentos_runtime::TaskClass::Vm
     };
     let wake_task = runtime.spawn(task_class, async move {
-        match deadline {
+        match wake_deadline {
             Some(deadline) => {
                 let delay = deadline.saturating_duration_since(Instant::now());
                 tokio::select! {
@@ -3354,6 +3464,27 @@ mod tests {
     }
 
     #[test]
+    fn typed_waitpid_decodes_an_optional_bounded_probe_deadline() {
+        let operation = decode_host_operation(
+            &request("process.waitpid", vec![json!(-1), json!(0), json!(10_000)]),
+            true,
+            1024,
+        )
+        .expect("decode waitpid")
+        .expect("typed waitpid operation");
+
+        assert!(matches!(
+            operation,
+            HostOperation::Process(ProcessOperation::Wait {
+                target: WaitTarget::Any,
+                options: 0,
+                deadline_ms: Some(10_000),
+                temporary_mask: None,
+            })
+        ));
+    }
+
+    #[test]
     fn typed_identity_route_accepts_explicit_unchanged_ids() {
         let operation = decode_host_operation(
             &request(
@@ -3660,7 +3791,7 @@ mod tests {
             ),
             ("process.system_identity", vec![]),
             ("process.umask", vec![Value::Null]),
-            ("process.waitpid", vec![json!(-1), json!(1)]),
+            ("process.waitpid", vec![json!(-1), json!(1), json!(10_000)]),
             ("process.waitpid_transition", vec![json!(-1), json!(1)]),
         ];
         let mut covered = BTreeSet::new();
@@ -3976,6 +4107,7 @@ mod tests {
     fn every_vm_scoped_host_family_is_classified_before_kernel_only_dispatch() {
         let cases = [
             request("__kernel_stdin_read", vec![json!(4096), json!(0)]),
+            request("process.fd_read", vec![json!(3), json!(4096), Value::Null]),
             request(
                 "dns.lookup",
                 vec![json!({"hostname":"localhost","family":4})],

@@ -30,6 +30,7 @@ XFSTESTS_CONCURRENCY ?= 2
 # write-back, durability, and request-amplification contract is incomplete.
 # XFSTESTS_BACKENDS ?= chunked_local,memory,chunked_s3,object_s3
 XFSTESTS_BACKENDS ?= chunked_local,memory,chunked_s3
+XFSTESTS_WASM_BACKENDS ?= v8 wasmtime
 XFSTESTS_MAX_TEMP_BYTES ?= 8589934592
 XFSTESTS_TEST_TIMEOUT_SECONDS ?= 3600
 
@@ -45,7 +46,6 @@ run: helpers
 	(pnpm install --frozen-lockfile --offline || pnpm install --frozen-lockfile) && \
 	node packages/build-tools/scripts/build-v8-bridge.mjs --out-dir "$(V8_BRIDGE_STAGE)" && \
 	export XFSTESTS_ROOT="$$run_tmp/source" && \
-	export XFSTESTS_REPORT_DIR="$(REPORT)" && \
 	export XFSTESTS_EXCEPTIONS="$(CURDIR)/exceptions.toml" && \
 	export XFSTESTS_CONCURRENCY="$(XFSTESTS_CONCURRENCY)" && \
 	export XFSTESTS_BACKENDS="$(XFSTESTS_BACKENDS)" && \
@@ -55,12 +55,18 @@ run: helpers
 	export CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" && \
 	export CARGO_BUILD_JOBS="$(CARGO_BUILD_JOBS)" && \
 	export AGENTOS_V8_BRIDGE_PREBUILT_DIR="$(V8_BRIDGE_STAGE)" && \
-	cargo test --manifest-path "$(CURDIR)/../../Cargo.toml" \
-			-p agentos-native-sidecar --test xfstests_correctness \
-			xfstests_wasi_helper_ports -- --ignored --exact --nocapture && \
-	cargo test --manifest-path "$(CURDIR)/../../Cargo.toml" \
-			-p agentos-native-sidecar --test xfstests_correctness \
-			xfstests_generic_quick_matrix -- --ignored --exact --nocapture
+	for wasm_backend in $(XFSTESTS_WASM_BACKENDS); do \
+		case "$$wasm_backend" in v8|wasmtime) ;; *) echo "unsupported XFSTESTS_WASM_BACKENDS entry: $$wasm_backend" >&2; exit 2;; esac; \
+		export AGENTOS_TEST_WASM_BACKEND="$$wasm_backend"; \
+		export XFSTESTS_REPORT_DIR="$(REPORT)/$$wasm_backend"; \
+		mkdir -p "$$XFSTESTS_REPORT_DIR"; \
+		cargo test --release --manifest-path "$(CURDIR)/../../Cargo.toml" \
+				-p agentos-native-sidecar --test xfstests_correctness \
+				xfstests_wasi_helper_ports -- --ignored --exact --nocapture && \
+		cargo test --release --manifest-path "$(CURDIR)/../../Cargo.toml" \
+				-p agentos-native-sidecar --test xfstests_correctness \
+				xfstests_generic_quick_matrix -- --ignored --exact --nocapture || exit $$?; \
+	done
 
 native-commands:
 	$(MAKE) -C "$(TOOLCHAIN)" wasm

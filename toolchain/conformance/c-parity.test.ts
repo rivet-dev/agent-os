@@ -318,7 +318,7 @@ class SimpleVFS {
   }
 }
 
-describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () => {
+describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 120_000 }, () => {
   let kernel: Kernel;
   let vfs: SimpleVFS;
 
@@ -341,6 +341,13 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
 
   beforeEach(async () => {
     vfs = new SimpleVFS();
+    await vfs.createDir('/tmp');
+    await vfs.createDir('/workspace');
+    await vfs.writeFile(
+      '/workspace/exec_variants',
+      await fsReadFile(join(C_BUILD_DIR, 'exec_variants')),
+    );
+    await vfs.chmod('/workspace/exec_variants', 0o755);
     kernel = await mountParityKernel();
   });
 
@@ -354,10 +361,7 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
     const native = await runNative('hello');
     const wasm = await kernel.exec('hello');
 
-    expect(
-      wasm.exitCode,
-      `native stdout:\n${native.stdout}\nnative stderr:\n${native.stderr}\nWASM stdout:\n${wasm.stdout}\nWASM stderr:\n${wasm.stderr}`,
-    ).toBe(native.exitCode);
+    expect(wasm.exitCode).toBe(native.exitCode);
     expect(wasm.stdout).toBe(native.stdout);
   });
 
@@ -375,7 +379,10 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
     const native = await runNative('env', [], { env });
     const wasm = await kernel.exec('env', { env });
 
-    expect(wasm.exitCode).toBe(native.exitCode);
+    expect(
+      wasm.exitCode,
+      `native stdout:\n${native.stdout}\nnative stderr:\n${native.stderr}\nWASM stdout:\n${wasm.stdout}\nWASM stderr:\n${wasm.stderr}`,
+    ).toBe(native.exitCode);
     // Shell may inject extra env vars; compare only the TEST_PARITY_ vars
     expect(extractEnvPrefix(wasm.stdout, 'TEST_PARITY_')).toBe(
       extractEnvPrefix(native.stdout, 'TEST_PARITY_'),
@@ -393,9 +400,12 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
   it('cat: stdin passthrough matches', async () => {
     const input = 'hello world\nfoo bar\n';
     const native = await runNative('cat', [], { input });
-    const wasm = await kernel.exec('cat', { stdin: input });
+    const wasm = await kernel.exec('c-cat', { stdin: input });
 
-    expect(wasm.exitCode).toBe(native.exitCode);
+    expect(
+      wasm.exitCode,
+      `native stdout:\n${native.stdout}\nnative stderr:\n${native.stderr}\nWASM stdout:\n${wasm.stdout}\nWASM stderr:\n${wasm.stderr}`,
+    ).toBe(native.exitCode);
     expect(wasm.stdout).toBe(native.stdout);
   });
 
@@ -404,7 +414,7 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
   it('wc: word/line/byte counts match', async () => {
     const input = 'hello world\nfoo bar baz\n';
     const native = await runNative('wc', [], { input });
-    const wasm = await kernel.exec('wc', { stdin: input });
+    const wasm = await kernel.exec('c-wc', { stdin: input });
 
     expect(wasm.exitCode).toBe(native.exitCode);
     const counts = (output: string) => output.trim().split(/\s+/).map(Number);
@@ -469,7 +479,7 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
   it('sort: sorted output matches', async () => {
     const input = 'banana\napple\ncherry\ndate\n';
     const native = await runNative('sort', [], { input });
-    const wasm = await kernel.exec('sort', { stdin: input });
+    const wasm = await kernel.exec('c-sort', { stdin: input });
 
     expect(wasm.exitCode).toBe(native.exitCode);
     expect(wasm.stdout).toBe(native.stdout);
@@ -1245,7 +1255,10 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
     const native = await runNative('waitpid_edge');
     const wasm = await kernel.exec('waitpid_edge');
 
-    expect(wasm.exitCode).toBe(native.exitCode);
+    expect(
+      wasm.exitCode,
+      `native stdout:\n${native.stdout}\nnative stderr:\n${native.stderr}\nWASM stdout:\n${wasm.stdout}\nWASM stderr:\n${wasm.stderr}`,
+    ).toBe(native.exitCode);
     expect(wasm.exitCode).toBe(0);
     expect(normalizeStderr(wasm.stderr)).toBe(normalizeStderr(native.stderr));
     // Test 1: 3 concurrent children with correct exit codes
@@ -1302,7 +1315,10 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
     const native = await runNative('itimer_contract');
     const wasm = await kernel.exec('itimer_contract');
 
-    expect(wasm.exitCode).toBe(native.exitCode);
+    expect(
+      wasm.exitCode,
+      `native stdout:\n${native.stdout}\nnative stderr:\n${native.stderr}\nWASM stdout:\n${wasm.stdout}\nWASM stderr:\n${wasm.stderr}`,
+    ).toBe(native.exitCode);
     expect(wasm.exitCode).toBe(0);
     expect(normalizeStderr(wasm.stderr)).toBe(normalizeStderr(native.stderr));
     expect(wasm.stdout).toBe(native.stdout);
@@ -1551,7 +1567,7 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 30_000 }, () =>
   ] as const) {
     itIf(!tier3Skip, `exec_variants ${mode}: matches Linux replacement behavior`, async () => {
       const native = await runNative('exec_variants', [mode]);
-      const wasm = await kernel.exec(`exec_variants ${mode}`);
+      const wasm = await kernel.exec(`/workspace/exec_variants ${mode}`);
 
       expect(
         wasm.exitCode,

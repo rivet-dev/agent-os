@@ -223,6 +223,7 @@ where
         interests,
         timeout_ms,
         signal_mask,
+        signal_thread_id,
     } = operation
     else {
         return Err(SidecarError::host(
@@ -257,10 +258,14 @@ where
     let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
     let capabilities = vm.capabilities.clone();
     let managed_descriptions = Arc::clone(&vm.managed_host_net_descriptions);
-    let process = vm
-        .active_processes
-        .get_mut(process_id)
-        .expect("validated POSIX-poll process remains registered");
+    let kernel_pid = reply.identity().pid;
+    let process = active_process_by_kernel_pid_mut(&mut vm.active_processes, kernel_pid)
+        .ok_or_else(|| {
+            SidecarError::host(
+                "ESTALE",
+                format!("active process for kernel pid {kernel_pid} disappeared"),
+            )
+        })?;
     service_deferred_posix_poll(
         generation,
         &runtime,
@@ -272,7 +277,7 @@ where
         managed_descriptions,
         &mut vm.kernel,
         process,
-        Some((interests, deadline, signal_mask, reply)),
+        Some((interests, deadline, signal_mask, signal_thread_id, reply)),
     )
 }
 
@@ -283,10 +288,14 @@ fn restore_deferred_posix_mask(
     let Some(token) = poll.temporary_signal_mask_token.take() else {
         return Ok(());
     };
-    process
-        .kernel_handle
-        .end_temporary_signal_mask(token)
-        .map_err(|error| HostServiceError::new(error.code(), error.to_string()))
+    let result = if let Some(thread_id) = poll.temporary_signal_thread_id.take() {
+        process
+            .kernel_handle
+            .end_temporary_signal_mask_for_thread(thread_id, token)
+    } else {
+        process.kernel_handle.end_temporary_signal_mask(token)
+    };
+    result.map_err(|error| HostServiceError::new(error.code(), error.to_string()))
 }
 
 fn fail_deferred_posix_poll(
@@ -324,11 +333,12 @@ pub(in crate::execution) fn service_deferred_posix_poll(
         BoundedVec<KernelPollInterest>,
         Option<Instant>,
         Option<SignalSetValue>,
+        Option<u32>,
         DirectHostReplyHandle,
     )>,
 ) -> Result<(), SidecarError> {
     let newly_admitted = incoming.is_some();
-    if let Some((interests, deadline, signal_mask, reply)) = incoming {
+    if let Some((interests, deadline, signal_mask, signal_thread_id, reply)) = incoming {
         if process.deferred_kernel_poll.is_some() {
             reply
                 .fail(HostServiceError::new(
@@ -373,7 +383,14 @@ pub(in crate::execution) fn service_deferred_posix_poll(
                         return Ok(());
                     }
                 };
-                match process.kernel_handle.begin_temporary_signal_mask(mask) {
+                let result = if let Some(thread_id) = signal_thread_id {
+                    process
+                        .kernel_handle
+                        .begin_temporary_signal_mask_for_thread(thread_id, mask)
+                } else {
+                    process.kernel_handle.begin_temporary_signal_mask(mask)
+                };
+                match result {
                     Ok(token) => Some(token),
                     Err(error) => {
                         reply
@@ -391,6 +408,7 @@ pub(in crate::execution) fn service_deferred_posix_poll(
             deadline,
             wake_task: None,
             temporary_signal_mask_token,
+            temporary_signal_thread_id: temporary_signal_mask_token.and(signal_thread_id),
             combined: true,
         });
         // Installing a ppoll mask can make a previously blocked signal
@@ -552,6 +570,7 @@ where
     if !validate_context_host_call(sidecar, vm_id, process_id, &reply)? {
         return Ok(());
     }
+    let kernel_pid = reply.identity().pid;
     let socket_paths = build_socket_path_context(
         sidecar
             .vms
@@ -566,11 +585,6 @@ where
         .vms
         .get_mut(vm_id)
         .expect("validated close VM remains registered");
-    let process = vm
-        .active_processes
-        .get(process_id)
-        .expect("validated close process remains registered");
-    let kernel_pid = process.kernel_pid;
     let result = close_with_managed_retirement(&bridge, vm_id, &socket_paths, vm, kernel_pid, fd);
     match result {
         Ok(response) => reply.succeed(response).map_err(SidecarError::from),
@@ -578,6 +592,84 @@ where
             .fail(host_service_error(&error))
             .map_err(SidecarError::from),
     }
+}
+
+pub(super) fn dispatch_context_fd_snapshot<B>(
+    sidecar: &mut NativeSidecar<B>,
+    vm_id: &str,
+    process_id: &str,
+    reply: DirectHostReplyHandle,
+) -> Result<(), SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    if !validate_context_host_call(sidecar, vm_id, process_id, &reply)? {
+        return Ok(());
+    }
+    let pid = reply.identity().pid;
+    if !reply.claim().map_err(SidecarError::from)? {
+        return Ok(());
+    }
+    let vm = sidecar
+        .vms
+        .get(vm_id)
+        .expect("validated fd-snapshot VM remains registered");
+    let result = fd_snapshot_with_managed_routes(vm, pid);
+    match result {
+        Ok(response) => reply.succeed(response).map_err(SidecarError::from),
+        Err(error) => reply
+            .fail(host_service_error(&error))
+            .map_err(SidecarError::from),
+    }
+}
+
+pub(in crate::execution) fn fd_snapshot_with_managed_routes(
+    vm: &VmState,
+    pid: u32,
+) -> Result<HostCallReply, SidecarError> {
+    let entries = vm
+        .kernel
+        .fd_snapshot(EXECUTION_DRIVER_NAME, pid)
+        .map_err(kernel_error)?;
+    let managed_ids = vm
+        .managed_host_net_descriptions
+        .lock()
+        .map_err(|_| SidecarError::host("EIO", "managed description registry lock poisoned"))?
+        .iter()
+        .filter_map(|(description_id, description)| {
+            description
+                .route_for(pid)
+                .is_some()
+                .then_some(*description_id)
+        })
+        .collect::<BTreeSet<_>>();
+    Ok(HostCallReply::Json(Value::Array(
+        entries
+            .into_iter()
+            .map(|entry| {
+                json!({
+                    "fd": entry.fd,
+                    "descriptionId": entry.description_id.to_string(),
+                    "managedHostNet": managed_ids.contains(&entry.description_id),
+                    "fdFlags": entry.fd_flags,
+                    "statusFlags": entry.status_flags,
+                    "filetype": entry.filetype,
+                    "rightsBase": entry.rights_base,
+                    "rightsInheriting": entry.rights_inheriting,
+                    "kind": if entry.is_socket {
+                        "socket"
+                    } else if entry.is_pipe {
+                        "pipe"
+                    } else if entry.is_pty {
+                        "pty"
+                    } else {
+                        "file"
+                    },
+                })
+            })
+            .collect(),
+    )))
 }
 
 pub(in crate::execution) fn close_with_managed_retirement<B>(
@@ -606,7 +698,7 @@ where
         socket_paths,
         vm,
         kernel_pid,
-        description_id.into_iter(),
+        description_id,
     )?;
     Ok(HostCallReply::Json(Value::Null))
 }
@@ -626,6 +718,7 @@ where
     if !validate_context_host_call(sidecar, vm_id, process_id, &reply)? {
         return Ok(());
     }
+    let kernel_pid = reply.identity().pid;
     let socket_paths = build_socket_path_context(
         sidecar
             .vms
@@ -640,11 +733,6 @@ where
         .vms
         .get_mut(vm_id)
         .expect("validated closefrom VM remains registered");
-    let process = vm
-        .active_processes
-        .get(process_id)
-        .expect("validated closefrom process remains registered");
-    let kernel_pid = process.kernel_pid;
     let response = closefrom_with_managed_retirement(
         &bridge,
         vm_id,
@@ -690,22 +778,18 @@ where
     let exact_set = exact_fds
         .as_ref()
         .map(|fds| fds.as_slice().iter().copied().collect::<BTreeSet<_>>());
-    let candidate_descriptions = match vm
+    let candidate_descriptions = vm
         .kernel
         .fd_snapshot(EXECUTION_DRIVER_NAME, kernel_pid)
-        .map_err(kernel_error)
-    {
-        Ok(snapshot) => snapshot
-            .into_iter()
-            .filter_map(|entry| {
-                exact_set
-                    .as_ref()
-                    .map_or(entry.fd >= min_fd, |fds| fds.contains(&entry.fd))
-                    .then_some(entry.description_id)
-            })
-            .collect::<BTreeSet<_>>(),
-        Err(error) => return Err(error),
-    };
+        .map_err(kernel_error)?
+        .into_iter()
+        .filter_map(|entry| {
+            exact_set
+                .as_ref()
+                .map_or(entry.fd >= min_fd, |fds| fds.contains(&entry.fd))
+                .then_some(entry.description_id)
+        })
+        .collect::<BTreeSet<_>>();
 
     // `fd_close_from` removes all matching table entries before it performs
     // fallible resource cleanup. Always reconcile managed routes from the
@@ -748,6 +832,7 @@ where
     if !validate_context_host_call(sidecar, vm_id, process_id, &reply)? {
         return Ok(());
     }
+    let pid = reply.identity().pid;
     if !reply.claim().map_err(SidecarError::from)? {
         return Ok(());
     }
@@ -762,11 +847,6 @@ where
         .vms
         .get_mut(vm_id)
         .expect("validated descriptor-mutation VM remains registered");
-    let process = vm
-        .active_processes
-        .get(process_id)
-        .expect("validated descriptor-mutation process remains registered");
-    let pid = process.kernel_pid;
     let result = replace_descriptor_with_managed_retirement(
         &bridge,
         vm_id,
@@ -844,7 +924,7 @@ where
                 socket_paths,
                 vm,
                 pid,
-                replaced_description_id.into_iter(),
+                replaced_description_id,
             )?;
             Ok(HostCallReply::Json(value))
         }
@@ -1521,6 +1601,18 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
+    let kernel_pid = reply.identity().pid;
+    let process_path = sidecar
+        .vms
+        .get(vm_id)
+        .and_then(|vm| vm.active_processes.get(process_id))
+        .and_then(|root| NativeSidecar::<B>::active_process_path_by_kernel_pid(root, kernel_pid))
+        .ok_or_else(|| {
+            SidecarError::host(
+                "ESTALE",
+                format!("active process for kernel pid {kernel_pid} disappeared"),
+            )
+        })?;
     if !reply.claim().map_err(SidecarError::from)? {
         return Ok(());
     }
@@ -1537,7 +1629,7 @@ where
         process_id,
         ManagedStreamReadRecheck {
             root_process_id: process_id.to_owned(),
-            process_path: Vec::new(),
+            process_path,
             socket_id,
             max_bytes,
             peek,
@@ -1744,6 +1836,7 @@ where
     if !validate_context_host_call(sidecar, vm_id, process_id, &reply)? {
         return Ok(());
     }
+    let kernel_pid = reply.identity().pid;
     if let NetworkOperation::ManagedRead {
         socket_id,
         max_bytes,
@@ -1774,13 +1867,9 @@ where
             .vms
             .get(vm_id)
             .expect("validated fd-network VM remains registered");
-        let process = vm
-            .active_processes
-            .get(process_id)
-            .expect("validated fd-network process remains registered");
         let description_id = vm
             .kernel
-            .fd_description_identity(EXECUTION_DRIVER_NAME, process.kernel_pid, *fd)
+            .fd_description_identity(EXECUTION_DRIVER_NAME, kernel_pid, *fd)
             .map_err(kernel_error)?
             .0;
         let route = vm
@@ -1788,7 +1877,7 @@ where
             .lock()
             .map_err(|_| SidecarError::host("EIO", "managed description registry lock poisoned"))?
             .get(&description_id)
-            .and_then(|description| description.route_for(process.kernel_pid).cloned());
+            .and_then(|description| description.route_for(kernel_pid).cloned());
         if let Some(ManagedHostNetRoute::UdpSocket(socket_id)) = route {
             return dispatch_context_udp_poll(
                 sidecar,
@@ -1839,10 +1928,13 @@ where
         let managed_descriptions = Arc::clone(&vm.managed_host_net_descriptions);
         let dns = vm.dns.clone();
         let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-        let process = vm
-            .active_processes
-            .get_mut(process_id)
-            .expect("validated fd-network process remains registered");
+        let process = active_process_by_kernel_pid_mut(&mut vm.active_processes, kernel_pid)
+            .ok_or_else(|| {
+                SidecarError::host(
+                    "ESTALE",
+                    format!("active process for kernel pid {kernel_pid} disappeared"),
+                )
+            })?;
         let response = service_managed_fd_network_operation(
             ManagedFdNetworkServiceContext {
                 bridge: &bridge,
@@ -1890,10 +1982,13 @@ where
         let capabilities = vm.capabilities.clone();
         let dns = vm.dns.clone();
         let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-        let process = vm
-            .active_processes
-            .get_mut(process_id)
-            .expect("validated managed UDP process remains registered");
+        let process = active_process_by_kernel_pid_mut(&mut vm.active_processes, kernel_pid)
+            .ok_or_else(|| {
+                SidecarError::host(
+                    "ESTALE",
+                    format!("active process for kernel pid {kernel_pid} disappeared"),
+                )
+            })?;
         let response = service_managed_udp_operation(
             ManagedUdpServiceRequest {
                 bridge: &bridge,
@@ -1941,10 +2036,13 @@ where
         let runtime = vm.runtime_context.clone();
         let capabilities = vm.capabilities.clone();
         let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-        let process = vm
-            .active_processes
-            .get_mut(process_id)
-            .expect("validated managed-network process remains registered");
+        let process = active_process_by_kernel_pid_mut(&mut vm.active_processes, kernel_pid)
+            .ok_or_else(|| {
+                SidecarError::host(
+                    "ESTALE",
+                    format!("active process for kernel pid {kernel_pid} disappeared"),
+                )
+            })?;
         let response = service_managed_network_operation(
             ManagedNetworkServiceContext {
                 vm_id,
@@ -1982,10 +2080,13 @@ where
         let capabilities = vm.capabilities.clone();
         let dns = vm.dns.clone();
         let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-        let process = vm
-            .active_processes
-            .get_mut(process_id)
-            .expect("validated managed-endpoint process remains registered");
+        let process = active_process_by_kernel_pid_mut(&mut vm.active_processes, kernel_pid)
+            .ok_or_else(|| {
+                SidecarError::host(
+                    "ESTALE",
+                    format!("active process for kernel pid {kernel_pid} disappeared"),
+                )
+            })?;
         let response = service_managed_endpoint_operation(
             ManagedEndpointServiceContext {
                 bridge: &bridge,
@@ -2031,10 +2132,13 @@ where
     let capabilities = vm.capabilities.clone();
     let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
     let dns = vm.dns.clone();
-    let process = vm
-        .active_processes
-        .get_mut(process_id)
-        .expect("validated managed-network process remains registered");
+    let process = active_process_by_kernel_pid_mut(&mut vm.active_processes, kernel_pid)
+        .ok_or_else(|| {
+            SidecarError::host(
+                "ESTALE",
+                format!("active process for kernel pid {kernel_pid} disappeared"),
+            )
+        })?;
     let response = service_descriptor_rights_compat_operation(
         &bridge,
         vm_id,
@@ -3228,6 +3332,7 @@ where
             fd,
             server_name,
             alpn,
+            reject_unauthorized,
             ..
         } => {
             let description_id = managed_fd_description_id(&context, fd)?;
@@ -3251,6 +3356,7 @@ where
                         json!({
                             "servername": server_name.as_str(),
                             "ALPNProtocols": protocols,
+                            "rejectUnauthorized": reject_unauthorized,
                         })
                         .to_string(),
                     )?,
@@ -3445,6 +3551,7 @@ where
     if !validate_context_host_call(sidecar, vm_id, process_id, &reply)? {
         return Ok(());
     }
+    let kernel_pid = reply.identity().pid;
     let NetworkOperation::ManagedUdpPoll {
         socket_id,
         wait_ms,
@@ -3460,10 +3567,23 @@ where
     if !reply.claim().map_err(SidecarError::from)? {
         return Ok(());
     }
+    let process_path = sidecar
+        .vms
+        .get(vm_id)
+        .and_then(|vm| vm.active_processes.get(process_id))
+        .and_then(|root| NativeSidecar::<B>::active_process_path_by_kernel_pid(root, kernel_pid))
+        .ok_or_else(|| {
+            SidecarError::host(
+                "ESTALE",
+                format!("active process for kernel pid {kernel_pid} disappeared"),
+            )
+        })?;
+    let path = process_path.iter().map(String::as_str).collect::<Vec<_>>();
     let socket = sidecar
         .vms
         .get(vm_id)
         .and_then(|vm| vm.active_processes.get(process_id))
+        .and_then(|root| NativeSidecar::<B>::active_process_by_path(root, &path))
         .and_then(|process| process.udp_sockets.get(socket_id.as_str()))
         .ok_or_else(|| SidecarError::host("EBADF", "unknown UDP socket"));
     let socket = match socket {
@@ -3484,7 +3604,7 @@ where
         process_id,
         ManagedUdpPollRecheck {
             root_process_id: process_id.to_owned(),
-            process_path: Vec::new(),
+            process_path,
             socket_id: socket_id.into_string(),
             peek,
             max_bytes,

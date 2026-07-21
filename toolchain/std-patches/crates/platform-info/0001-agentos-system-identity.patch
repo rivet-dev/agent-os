@@ -1,0 +1,21 @@
+Use AgentOS' kernel-owned system identity on WASI.
+
+The guest is a Linux-in-WASM environment, so target_os=wasi is an execution
+detail rather than the identity applications should observe. Route uname-style
+queries through the canonical host_system import used by both executors.
+
+--- a/src/lib_impl.rs
++++ b/src/lib_impl.rs
+@@ -62,9 +62,12 @@ const HOST_OS_NAME: &str = if cfg!(all(
+ #[cfg(windows)]
+ #[path = "platform/windows.rs"]
+ mod target;
+-#[cfg(not(any(unix, windows)))]
++#[cfg(all(not(any(unix, windows)), not(target_os = "wasi")))]
+ #[path = "platform/unknown.rs"]
+ mod target;
++#[cfg(target_os = "wasi")]
++#[path = "platform/wasi.rs"]
++mod target;
+ 
+ pub use target::*;

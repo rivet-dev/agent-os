@@ -34,6 +34,9 @@ pub enum WasmtimeFeatureProfile {
     /// AgentOS-owned Preview1/POSIX ABI with the proposal switches configured
     /// in `build_engine`; changing any switch requires a new keyed variant.
     AgentOsOwnedWasiV1,
+    /// AgentOS-owned Preview1/POSIX ABI plus the core WebAssembly threads
+    /// proposal. This profile is selected explicitly and never inferred.
+    AgentOsOwnedWasiV1Threads,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -44,6 +47,20 @@ pub struct WasmtimeEngineProfile {
 
 impl WasmtimeEngineProfile {
     pub fn new(wasm_stack_bytes: Option<u64>) -> Result<Self, HostServiceError> {
+        Self::with_feature_profile(wasm_stack_bytes, WasmtimeFeatureProfile::AgentOsOwnedWasiV1)
+    }
+
+    pub fn new_threaded(wasm_stack_bytes: Option<u64>) -> Result<Self, HostServiceError> {
+        Self::with_feature_profile(
+            wasm_stack_bytes,
+            WasmtimeFeatureProfile::AgentOsOwnedWasiV1Threads,
+        )
+    }
+
+    fn with_feature_profile(
+        wasm_stack_bytes: Option<u64>,
+        feature_profile: WasmtimeFeatureProfile,
+    ) -> Result<Self, HostServiceError> {
         let wasm_stack_bytes = wasm_stack_bytes
             .map(usize::try_from)
             .transpose()
@@ -56,7 +73,7 @@ impl WasmtimeEngineProfile {
             .checked_add(HOST_CALL_STACK_HEADROOM_BYTES)
             .ok_or_else(|| invalid_stack("WASM plus host-call stack reservation overflows"))?;
         Ok(Self {
-            feature_profile: WasmtimeFeatureProfile::AgentOsOwnedWasiV1,
+            feature_profile,
             wasm_stack_bytes,
         })
     }
@@ -269,6 +286,10 @@ fn process_retained_rss_bytes() -> Option<u64> {
 }
 
 fn build_engine(profile: WasmtimeEngineProfile) -> Result<WasmtimeEngineHandle, HostServiceError> {
+    let threaded = matches!(
+        profile.feature_profile,
+        WasmtimeFeatureProfile::AgentOsOwnedWasiV1Threads
+    );
     let mut config = Config::new();
     config
         .epoch_interruption(true)
@@ -278,9 +299,10 @@ fn build_engine(profile: WasmtimeEngineProfile) -> Result<WasmtimeEngineHandle, 
         .async_stack_zeroing(true)
         .cranelift_opt_level(OptLevel::Speed)
         .memory_init_cow(true)
+        .shared_memory(threaded)
         .wasm_features(WasmFeatures::TAIL_CALL, false)
         .wasm_features(WasmFeatures::CUSTOM_PAGE_SIZES, false)
-        .wasm_features(WasmFeatures::THREADS, false)
+        .wasm_features(WasmFeatures::THREADS, threaded)
         .wasm_features(WasmFeatures::SHARED_EVERYTHING_THREADS, false)
         .wasm_features(WasmFeatures::REFERENCE_TYPES, true)
         .wasm_features(WasmFeatures::FUNCTION_REFERENCES, false)
@@ -291,7 +313,8 @@ fn build_engine(profile: WasmtimeEngineProfile) -> Result<WasmtimeEngineHandle, 
         .wasm_features(WasmFeatures::MULTI_VALUE, true)
         .wasm_features(WasmFeatures::MULTI_MEMORY, false)
         .wasm_features(WasmFeatures::MEMORY64, false)
-        .wasm_features(WasmFeatures::EXCEPTIONS, false)
+        .wasm_features(WasmFeatures::EXCEPTIONS, true)
+        .wasm_features(WasmFeatures::LEGACY_EXCEPTIONS, false)
         .wasm_features(WasmFeatures::COMPONENT_MODEL, false)
         .wasm_features(WasmFeatures::STACK_SWITCHING, false)
         .wasm_features(WasmFeatures::WIDE_ARITHMETIC, false);
@@ -323,6 +346,17 @@ mod tests {
         assert_eq!(profile.wasm_stack_bytes, 512 * 1024);
         assert_eq!(profile.async_stack_bytes().unwrap(), 2 * 1024 * 1024);
         assert!(WasmtimeEngineProfile::new(Some(0)).is_err());
+    }
+
+    #[test]
+    fn threaded_profile_is_a_distinct_exact_engine_key() {
+        let ordinary = WasmtimeEngineProfile::new(None).unwrap();
+        let threaded = WasmtimeEngineProfile::new_threaded(None).unwrap();
+        assert_ne!(ordinary, threaded);
+        assert_eq!(
+            threaded.feature_profile,
+            WasmtimeFeatureProfile::AgentOsOwnedWasiV1Threads
+        );
     }
 
     #[test]

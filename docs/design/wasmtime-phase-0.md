@@ -429,8 +429,11 @@ by `just tools-rebuild` before a release-quality capture.
 1. **Feature profile.** Both standalone backends prevalidate with one
    `wasmparser` profile. Enable MVP, mutable globals, sign extension,
    nontrapping float-to-int, bulk memory, reference types, multivalue, and
-   SIMD128. Disable threads/shared memory, memory64, multi-memory, relaxed SIMD,
-   tail calls, function references/GC, exceptions, components, custom page
+   SIMD128 and finalized exnref exception instructions. The owned toolchain
+   translates the legacy encoding emitted by LLVM 19 for DuckDB with pinned,
+   checksum-verified Binaryen 128.
+   Disable threads/shared memory, memory64, multi-memory, relaxed SIMD, tail
+   calls, function references, components, custom page
    sizes, and other proposals until an explicit profile revision. Engine
    defaults never silently expand the accepted language.
 2. **Code placement.** Kernel semantic APIs stay in `agentos-kernel`. Shared

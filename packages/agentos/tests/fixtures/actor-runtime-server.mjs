@@ -12,6 +12,10 @@ const conformanceAgent = createProjectedAgentPackage({
 	name: CONFORMANCE_AGENT_NAME,
 	adapterScript: CONFORMANCE_ACP_ADAPTER,
 });
+const wasmBackend = process.env.AGENTOS_TEST_WASM_BACKEND;
+if (wasmBackend !== undefined && wasmBackend !== "v8" && wasmBackend !== "wasmtime") {
+	throw new Error(`invalid AGENTOS_TEST_WASM_BACKEND: ${wasmBackend}`);
+}
 for (const signal of ["SIGINT", "SIGTERM"]) {
 	process.once(signal, () => {
 		conformanceAgent.cleanup();
@@ -20,6 +24,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 }
 
 const vm = agentOS({
+	wasmBackend,
 	defaultSoftware: false,
 	software: [coreutils, conformanceAgent.software],
 	mounts: [

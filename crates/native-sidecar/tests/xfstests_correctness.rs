@@ -217,6 +217,14 @@ fn create_xfstests_vm_wire(
     );
     let mut config: agentos_vm_config::CreateVmConfig =
         serde_json::from_str(&payload.config).expect("decode xfstests VM config");
+    config.wasm_backend = match std::env::var("AGENTOS_TEST_WASM_BACKEND").as_deref() {
+        Ok("v8") => Some(agentos_vm_config::StandaloneWasmBackend::V8),
+        Ok("wasmtime") => Some(agentos_vm_config::StandaloneWasmBackend::Wasmtime),
+        Ok(value) => panic!(
+            "AGENTOS_TEST_WASM_BACKEND must be \"v8\" or \"wasmtime\" for xfstests, got {value:?}"
+        ),
+        Err(_) => None,
+    };
     config.limits = Some(agentos_vm_config::VmLimitsConfig {
         resources: Some(agentos_vm_config::ResourceLimitsConfig {
             max_open_fds: Some(4096),
@@ -236,7 +244,7 @@ fn create_xfstests_vm_wire(
         }),
         ..agentos_vm_config::VmLimitsConfig::default()
     });
-    config.user = Some(agentos_vm_config::VmUserConfig {
+    let user = agentos_vm_config::VmUserConfig {
         uid: Some(0),
         gid: Some(0),
         username: Some(String::from("root")),
@@ -318,7 +326,9 @@ fn create_xfstests_vm_wire(
             },
         ]),
         ..agentos_vm_config::VmUserConfig::default()
-    });
+    };
+    config.root_filesystem.bootstrap_entries = xfstests_account_database_entries(&user);
+    config.user = Some(user);
     payload.config = serde_json::to_string(&config).expect("encode xfstests VM config");
 
     let result = sidecar
@@ -332,6 +342,56 @@ fn create_xfstests_vm_wire(
         ResponsePayload::VmCreatedResponse(response) => response.vm_id,
         other => panic!("unexpected xfstests VM create response: {other:?}"),
     }
+}
+
+fn xfstests_account_database_entries(
+    user: &agentos_vm_config::VmUserConfig,
+) -> Vec<agentos_vm_config::RootFilesystemEntry> {
+    let username = user.username.as_deref().expect("xfstests primary username");
+    let uid = user.uid.expect("xfstests primary uid");
+    let gid = user.gid.expect("xfstests primary gid");
+    let homedir = user.homedir.as_deref().expect("xfstests primary homedir");
+    let shell = user.shell.as_deref().expect("xfstests primary shell");
+    let gecos = user.gecos.as_deref().unwrap_or_default();
+
+    let mut passwd = format!("{username}:x:{uid}:{gid}:{gecos}:{homedir}:{shell}\n");
+    for account in user.accounts.as_deref().unwrap_or_default() {
+        passwd.push_str(&format!(
+            "{}:x:{}:{}:{}:{}:{}\n",
+            account.username,
+            account.uid,
+            account.gid,
+            account.gecos.as_deref().unwrap_or_default(),
+            account.homedir,
+            account.shell
+        ));
+    }
+
+    let group_name = user.group_name.as_deref().unwrap_or(username);
+    let mut group = format!("{group_name}:x:{gid}:{username}\n");
+    for configured_group in user.groups.as_deref().unwrap_or_default() {
+        group.push_str(&format!(
+            "{}:x:{}:{}\n",
+            configured_group.name,
+            configured_group.gid,
+            configured_group.members.join(",")
+        ));
+    }
+
+    [("/etc/passwd", passwd), ("/etc/group", group)]
+        .into_iter()
+        .map(|(path, content)| agentos_vm_config::RootFilesystemEntry {
+            path: path.to_owned(),
+            kind: agentos_vm_config::RootFilesystemEntryKind::File,
+            mode: Some(0o644),
+            uid: Some(0),
+            gid: Some(0),
+            content: Some(content),
+            encoding: Some(agentos_vm_config::RootFilesystemEntryEncoding::Utf8),
+            target: None,
+            executable: false,
+        })
+        .collect()
 }
 
 fn command_root(package: &str) -> PathBuf {
@@ -1084,6 +1144,19 @@ fn verify_first(backend: &str, include_fd_lifecycle_probe: bool) {
         filesystem_request(GuestFilesystemOperation::ReadFile, "/mnt/test/root-only"),
     );
     assert_eq!(root_only.content.as_deref(), Some("secret"));
+    let root_only_stat = guest_filesystem_call(
+        &mut sidecar,
+        166,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        filesystem_request(GuestFilesystemOperation::Stat, "/mnt/test/root-only"),
+    )
+    .stat
+    .expect("root-only file stat");
+    assert_eq!(root_only_stat.uid, 0, "root-only file owner");
+    assert_eq!(root_only_stat.gid, 0, "root-only file group");
+    assert_eq!(root_only_stat.mode & 0o777, 0o600, "root-only file mode");
 
     let (stdout, stderr, exit_code) = execute_command(
         &mut sidecar,
@@ -1093,10 +1166,13 @@ fn verify_first(backend: &str, include_fd_lifecycle_probe: bool) {
         &vm_id,
         "xfstests-runas-dac-denied",
         "sh",
-        &["-c", "runas -u 1000 -g 1000 -- id -u; if runas -u 1000 -g 1000 -- cat /mnt/test/root-only; then exit 9; else echo denied; fi"],
+        &["-c", "runas -u 1000 -g 1000 -- id -u; runas -u 1000 -g 1000 -- sh -c 'id -u; stat -c \"%u:%g %a\" /mnt/test/root-only; if cat /mnt/test/root-only; then exit 9; else echo denied; fi'"],
     );
     assert_eq!(exit_code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    assert_eq!(stdout, "1000\ndenied\n", "su/DAC stderr: {stderr}");
+    assert_eq!(
+        stdout, "1000\n1000\n0:0 600\ndenied\n",
+        "su/DAC stderr: {stderr}"
+    );
 
     let root_only = guest_filesystem_call(
         &mut sidecar,
@@ -3875,7 +3951,7 @@ fn xfstests_mknod_creates_a_working_null_device() {
         "sh",
         &[
             "-c",
-            "printf 'No such attribute\\nOperation not permitted\\n' | sed -e 's:\\(No such attribute\\|Operation not permitted\\):normalized:'; printf '# file: b\\nx=2\\n\\n# file: a\\nx=1\\n\\n' | awk '{a[FNR]=$0}END{n = asort(a); for(i=1; i <= n; i++) print a[i]\"\\n\"}' RS=; touch /mnt/test/syscalltest && setfattr -n user.xfstests -v attr /mnt/test/syscalltest > /mnt/test/syscalltest.out 2>&1 && test ! -s /mnt/test/syscalltest.out && mknod /mnt/test/null c 1 3 && mknod -m 640 /mnt/test/block b 8 1 && mkfifo -m 600 /mnt/test/fifo && mkdir -p /mnt/test/link-target/child && ln -s link-target /mnt/test/link && test \"$(find /mnt/test | grep -c '/link/child')\" = 0 && setfattr -h -n trusted.link -v symlink /mnt/test/link && test \"$(getfattr -h --only-values -n trusted.link /mnt/test/link)\" = symlink && setfattr -h -n trusted.binary -v 0xbabe /mnt/test/link && getfattr --absolute-names -dh -m trusted.binary /mnt/test/link > /mnt/results/xattr.backup && setfattr -h -x trusted.binary /mnt/test/link && setfattr -h --restore=/mnt/results/xattr.backup && getfattr -h -e hex -n trusted.binary /mnt/test/link | grep -q 'trusted.binary=0xbabe' && setfattr -n trusted.walk -v child /mnt/test/link-target/child && getfattr -L -R -m trusted.walk /mnt/test/link | grep -q '# file: mnt/test/link/child' && if setfattr -h -n user.denied -v no /mnt/test/link 2>/dev/null; then exit 31; fi && if setfattr -n user.denied -v no /mnt/test/block 2>/dev/null; then exit 32; fi && if setfattr -n user.denied -v no /mnt/test/fifo 2>/dev/null; then exit 33; fi && stat -c '%F %t:%T' /mnt/test/null /mnt/test/block /mnt/test/fifo && printf x | sh -c 'test \"$(stat -c %F /dev/fd/0)\" = fifo; cat >/dev/null' && echo fred > /mnt/test/null && fifo_test /mnt/test/fifo && setfattr -n trusted.probe -v fifo /mnt/test/fifo && test \"$(getfattr --only-values -n trusted.probe /mnt/test/fifo)\" = fifo",
+            "printf 'No such attribute\\nOperation not permitted\\n' | sed -e 's:\\(No such attribute\\|Operation not permitted\\):normalized:'; printf '# file: b\\nx=2\\n\\n# file: a\\nx=1\\n\\n' | awk '{a[FNR]=$0}END{n = asort(a); for(i=1; i <= n; i++) print a[i]\"\\n\"}' RS=; touch /mnt/test/syscalltest && setfattr -n user.xfstests -v attr /mnt/test/syscalltest > /mnt/test/syscalltest.out 2>&1 && test ! -s /mnt/test/syscalltest.out && mknod /mnt/test/null c 1 3 && mknod /mnt/test/zerozero c 0 0 && mknod -m 640 /mnt/test/block b 8 1 && mkfifo -m 600 /mnt/test/fifo && mkdir -p /mnt/test/link-target/child && ln -s link-target /mnt/test/link && test \"$(find /mnt/test | grep -c '/link/child')\" = 0 && setfattr -h -n trusted.link -v symlink /mnt/test/link && test \"$(getfattr -h --only-values -n trusted.link /mnt/test/link)\" = symlink && setfattr -h -n trusted.binary -v 0xbabe /mnt/test/link && getfattr --absolute-names -dh -m trusted.binary /mnt/test/link > /mnt/results/xattr.backup && setfattr -h -x trusted.binary /mnt/test/link && setfattr -h --restore=/mnt/results/xattr.backup && getfattr -h -e hex -n trusted.binary /mnt/test/link | grep -q 'trusted.binary=0xbabe' && setfattr -n trusted.walk -v child /mnt/test/link-target/child && getfattr -L -R -m trusted.walk /mnt/test/link | grep -q '# file: mnt/test/link/child' && if setfattr -h -n user.denied -v no /mnt/test/link 2>/dev/null; then exit 31; fi && if setfattr -n user.denied -v no /mnt/test/block 2>/dev/null; then exit 32; fi && if setfattr -n user.denied -v no /mnt/test/fifo 2>/dev/null; then exit 33; fi && stat -c '%F %t:%T' /mnt/test/null /mnt/test/zerozero /mnt/test/block /mnt/test/fifo && printf x | sh -c 'test \"$(stat -c %F /dev/fd/0)\" = fifo; cat >/dev/null' && echo fred > /mnt/test/null && fifo_test /mnt/test/fifo && setfattr -n trusted.probe -v fifo /mnt/test/fifo && test \"$(getfattr --only-values -n trusted.probe /mnt/test/fifo)\" = fifo",
         ],
         command_env,
         Duration::from_secs(60),
@@ -3887,6 +3963,10 @@ fn xfstests_mknod_creates_a_working_null_device() {
     );
     assert!(
         stdout.contains("character special file 1:3"),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("character special file 0:0"),
         "stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
@@ -4930,12 +5010,12 @@ fn xfstests_wasi_dirstress_process_matrix() {
     support::assert_node_available();
     let source = PathBuf::from(env::var("XFSTESTS_ROOT").expect("XFSTESTS_ROOT from Makefile"));
     let file_count = env::var("XFSTESTS_DIRSTRESS_FILES")
-        .unwrap_or_else(|_| String::from("8"))
+        .unwrap_or_else(|_| String::from("1000"))
         .parse::<usize>()
         .expect("XFSTESTS_DIRSTRESS_FILES must be a positive integer");
     assert!(file_count > 0, "XFSTESTS_DIRSTRESS_FILES must be positive");
     let timeout = env::var("XFSTESTS_DIRSTRESS_TIMEOUT_SECONDS")
-        .unwrap_or_else(|_| String::from("120"))
+        .unwrap_or_else(|_| String::from("3600"))
         .parse::<u64>()
         .expect("XFSTESTS_DIRSTRESS_TIMEOUT_SECONDS must be a positive integer");
     assert!(
@@ -4989,6 +5069,13 @@ run_case five-by-five 5 5
 printf 'dirstress-ok\n'
 "#
     );
+    let mut command_env = HashMap::new();
+    if env::var_os("XFSTESTS_TRACE_HOST_PROCESS").is_some() {
+        command_env.insert(
+            String::from("AGENTOS_TRACE_HOST_PROCESS"),
+            String::from("1"),
+        );
+    }
     let output = try_execute_command_with_env(
         &mut sidecar,
         4,
@@ -4998,7 +5085,7 @@ printf 'dirstress-ok\n'
         "xfstests-dirstress-process-matrix",
         "sh",
         &["-c", &script],
-        HashMap::new(),
+        command_env,
         Duration::from_secs(timeout),
     );
     let (stdout, stderr, exit_code) = output.unwrap_or_else(|output| {

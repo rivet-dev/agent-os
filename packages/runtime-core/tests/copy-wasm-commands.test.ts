@@ -69,12 +69,14 @@ afterEach(() => {
 });
 
 describe("copy WASM commands", () => {
-	it("derives commands, aliases, and stubs while excluding optional builds", () => {
+	it("derives commands, aliases, stubs, and required heavy builds", () => {
 		const { softwareRoot } = fixture();
 		expect(requiredSoftwareCommandNames(softwareRoot)).toEqual([
 			"alpha",
 			"alpha-alias",
+			"duckdb",
 			"legacy",
+			"vim",
 		]);
 	});
 
@@ -122,7 +124,9 @@ describe("copy WASM commands", () => {
 				requireCommands: true,
 				log: () => {},
 			}),
-		).toThrow(/missing required default WASM commands.*alpha-alias, legacy/);
+		).toThrow(
+			/missing required default WASM commands.*alpha-alias, duckdb, legacy, vim/,
+		);
 		expect(readFileSync(join(destDir, "known-good"), "utf8")).toBe(
 			"preserve me",
 		);
@@ -130,7 +134,14 @@ describe("copy WASM commands", () => {
 
 	it("copies optional extras with exact basenames and dereferences aliases", () => {
 		const { sourceDir, destDir, softwareRoot } = fixture();
-		for (const name of ["alpha", "alpha-alias", "legacy", "codex"]) {
+		for (const name of [
+			"alpha",
+			"alpha-alias",
+			"duckdb",
+			"legacy",
+			"vim",
+			"codex",
+		]) {
 			writeFileSync(join(sourceDir, name), name);
 		}
 		writeFileSync(join(sourceDir, "extra-real"), "extra");
@@ -165,7 +176,9 @@ describe("copy WASM commands", () => {
 				requireCommands: true,
 				log: () => {},
 			}),
-		).toThrow(/missing required default WASM commands.*alpha-alias, legacy/);
+		).toThrow(
+			/missing required default WASM commands.*alpha-alias, duckdb, legacy, vim/,
+		);
 		expect(existsSync(join(destDir, "alpha"))).toBe(true);
 	});
 

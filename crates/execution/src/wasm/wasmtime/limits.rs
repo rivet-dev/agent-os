@@ -41,8 +41,33 @@ pub fn max_memory_bytes(limits: &WasmExecutionLimits) -> Result<usize, HostServi
 pub fn aggregate_store_memory_bytes(
     limits: &WasmExecutionLimits,
 ) -> Result<usize, HostServiceError> {
+    // Finalized WebAssembly exceptions allocate exnref objects in Wasmtime's
+    // internal GC heap. StoreLimits applies the same per-memory byte cap to
+    // both that heap and the guest's linear memory, so admission must reserve
+    // both worst-case regions even though the guest GC proposal stays disabled.
     max_memory_bytes(limits)?
+        .checked_mul(2)
+        .ok_or_else(|| limit_overflow("limits.resources.maxWasmMemoryBytes"))?
         .checked_add(DEFAULT_TABLE_ACCOUNTING_BYTES)
+        .ok_or_else(|| limit_overflow("limits.resources.maxWasmMemoryBytes"))
+}
+
+pub fn threaded_group_memory_bytes(
+    limits: &WasmExecutionLimits,
+    async_stack_bytes: usize,
+) -> Result<usize, HostServiceError> {
+    let maximum_threads = limits.max_threads.unwrap_or(16).max(1);
+    let per_store = async_stack_bytes
+        .checked_add(max_memory_bytes(limits)?)
+        .ok_or_else(|| limit_overflow("limits.resources.maxWasmMemoryBytes"))?
+        .checked_add(DEFAULT_TABLE_ACCOUNTING_BYTES)
+        .ok_or_else(|| limit_overflow("limits.resources.maxWasmMemoryBytes"))?;
+    max_memory_bytes(limits)?
+        .checked_add(
+            per_store
+                .checked_mul(maximum_threads)
+                .ok_or_else(|| limit_overflow("limits.resources.maxWasmMemoryBytes"))?,
+        )
         .ok_or_else(|| limit_overflow("limits.resources.maxWasmMemoryBytes"))
 }
 

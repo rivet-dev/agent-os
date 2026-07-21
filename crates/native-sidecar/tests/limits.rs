@@ -35,6 +35,8 @@ fn defaults_match_struct_default() {
         "WASM wall-clock cutoff must remain opt-in"
     );
     assert_eq!(parsed.wasm.deterministic_fuel, None);
+    assert_eq!(parsed.wasm.max_threads, 16);
+    assert_eq!(parsed.wasm.max_concurrent_threads, 64);
 }
 
 #[test]
@@ -49,6 +51,8 @@ fn overrides_only_present_keys() {
             active_cpu_time_limit_ms: Some(90_000),
             wall_clock_limit_ms: Some(120_000),
             deterministic_fuel: Some(1_000_000),
+            max_threads: Some(8),
+            max_concurrent_threads: Some(24),
             ..Default::default()
         }),
         js_runtime: Some(JsRuntimeLimitsConfig {
@@ -71,6 +75,8 @@ fn overrides_only_present_keys() {
     assert_eq!(parsed.wasm.active_cpu_time_limit_ms, 90_000);
     assert_eq!(parsed.wasm.wall_clock_limit_ms, Some(120_000));
     assert_eq!(parsed.wasm.deterministic_fuel, Some(1_000_000));
+    assert_eq!(parsed.wasm.max_threads, 8);
+    assert_eq!(parsed.wasm.max_concurrent_threads, 24);
     assert_eq!(parsed.js_runtime.v8_heap_limit_mb, Some(256));
     assert_eq!(parsed.python.execution_timeout_ms, 1000);
     assert_eq!(parsed.http.max_fetch_response_bytes, 65536);
@@ -150,4 +156,20 @@ fn rejects_zero_buffer_cap() {
     let error =
         vm_limits_from_config(Some(&config), SIDECAR_FRAME_CAP).expect_err("zero buffer cap");
     assert!(error.to_string().contains("captured_output_limit_bytes"));
+}
+
+#[test]
+fn rejects_per_group_threads_above_vm_concurrent_threads() {
+    let config = VmLimitsConfig {
+        wasm: Some(WasmLimitsConfig {
+            max_threads: Some(5),
+            max_concurrent_threads: Some(4),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let error = vm_limits_from_config(Some(&config), SIDECAR_FRAME_CAP)
+        .expect_err("per-group thread maximum above VM aggregate rejected");
+    assert!(error.to_string().contains("max_threads"));
+    assert!(error.to_string().contains("max_concurrent_threads"));
 }

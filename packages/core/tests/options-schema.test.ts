@@ -73,6 +73,32 @@ describe("AgentOsOptions validation", () => {
 		).toThrow(/runnerCpuTimeLimitMs/);
 	});
 
+	test("accepts distinct per-process and per-VM WASM thread limits", () => {
+		expect(
+			agentOsOptionsSchema.safeParse({
+				limits: {
+					wasm: { maxThreads: 8, maxConcurrentThreads: 32 },
+				},
+			}).success,
+		).toBe(true);
+		expect(
+			agentOsOptionsSchema.safeParse({
+				limits: { wasm: { maxConcurrentThreads: 0 } },
+			}).success,
+		).toBe(false);
+	});
+
+	test("accepts only supported VM-wide standalone WASM backends", () => {
+		for (const wasmBackend of ["v8", "wasmtime", "wasmtime-threads"] as const) {
+			expect(agentOsOptionsSchema.safeParse({ wasmBackend }).success).toBe(
+				true,
+			);
+		}
+		expect(
+			agentOsOptionsSchema.safeParse({ wasmBackend: "automatic" }).success,
+		).toBe(false);
+	});
+
 	test("bounds and materializes Linux account records", () => {
 		const exactPasswdRecord = {
 			uid: 0,

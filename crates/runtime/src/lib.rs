@@ -63,6 +63,7 @@ const DEFAULT_MAX_PROCESS_UDP_DATAGRAMS: usize = 65_536;
 const DEFAULT_MAX_PROCESS_UDP_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_MAX_PROCESS_TLS_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_MAX_PROCESS_WASM_MEMORY_BYTES: usize = 8 * 1024 * 1024 * 1024;
+const DEFAULT_MAX_PROCESS_WASM_THREADS: usize = 256;
 const DEFAULT_MAX_PROCESS_HTTP2_CONNECTIONS: usize = 4_096;
 const DEFAULT_MAX_PROCESS_HTTP2_STREAMS: usize = 65_536;
 const DEFAULT_MAX_PROCESS_HTTP2_BYTES: usize = 512 * 1024 * 1024;
@@ -221,6 +222,8 @@ pub struct RuntimeResourceConfig {
     /// Aggregate admitted linear-memory envelopes for active standalone WASM
     /// Stores. This must not share the blocking-work byte ledger.
     pub max_wasm_memory_bytes: usize,
+    /// Aggregate admitted native threads across explicitly threaded WASM VMs.
+    pub max_wasm_threads: usize,
     pub max_http2_connections: usize,
     pub max_http2_streams: usize,
     pub max_http2_buffered_bytes: usize,
@@ -254,6 +257,7 @@ impl Default for RuntimeResourceConfig {
             max_udp_bytes: DEFAULT_MAX_PROCESS_UDP_BYTES,
             max_tls_bytes: DEFAULT_MAX_PROCESS_TLS_BYTES,
             max_wasm_memory_bytes: DEFAULT_MAX_PROCESS_WASM_MEMORY_BYTES,
+            max_wasm_threads: DEFAULT_MAX_PROCESS_WASM_THREADS,
             max_http2_connections: DEFAULT_MAX_PROCESS_HTTP2_CONNECTIONS,
             max_http2_streams: DEFAULT_MAX_PROCESS_HTTP2_STREAMS,
             max_http2_buffered_bytes: DEFAULT_MAX_PROCESS_HTTP2_BYTES,
@@ -369,6 +373,10 @@ impl RuntimeResourceConfig {
                     self.max_wasm_memory_bytes,
                     "runtime.resources.maxWasmMemoryBytes",
                 ),
+            ),
+            (
+                ResourceClass::WasmThreads,
+                ResourceLimit::new(self.max_wasm_threads, "runtime.resources.maxWasmThreads"),
             ),
             (
                 ResourceClass::Http2Connections,

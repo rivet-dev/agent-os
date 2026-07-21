@@ -193,6 +193,7 @@ pub(in crate::execution) fn service_deferred_kernel_poll(
             deadline,
             wake_task: None,
             temporary_signal_mask_token: None,
+            temporary_signal_thread_id: None,
             combined: false,
         });
     }

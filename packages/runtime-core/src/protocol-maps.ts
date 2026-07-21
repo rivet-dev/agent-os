@@ -13,7 +13,7 @@ export type LiveWasmPermissionTier =
 	| "read-write"
 	| "read-only"
 	| "isolated";
-export type LiveStandaloneWasmBackend = "v8" | "wasmtime";
+export type LiveStandaloneWasmBackend = "v8" | "wasmtime" | "wasmtime-threads";
 export type LivePermissionMode = "allow" | "ask" | "deny";
 export type LiveGuestFilesystemOperation =
 	| "read_file"
@@ -156,6 +156,8 @@ export function toGeneratedStandaloneWasmBackend(
 			return protocol.StandaloneWasmBackend.V8;
 		case "wasmtime":
 			return protocol.StandaloneWasmBackend.Wasmtime;
+		case "wasmtime-threads":
+			return protocol.StandaloneWasmBackend.WasmtimeThreads;
 	}
 }
 

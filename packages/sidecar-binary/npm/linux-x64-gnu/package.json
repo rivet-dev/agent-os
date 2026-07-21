@@ -20,6 +20,9 @@
 	"files": [
 		"agentos-sidecar"
 	],
+	"bin": {
+		"agentos-sidecar": "./agentos-sidecar"
+	},
 	"engines": {
 		"node": ">=20"
 	},

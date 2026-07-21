@@ -1934,6 +1934,7 @@ const agentOsOptionKeys = [
 	"loopbackExemptPorts",
 	"allowedNodeBuiltins",
 	"highResolutionTime",
+	"wasmBackend",
 	"database",
 	"rootFilesystem",
 	"mounts",

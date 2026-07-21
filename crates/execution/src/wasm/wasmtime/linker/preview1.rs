@@ -49,6 +49,7 @@ const ERRNO_NFILE: i32 = 41;
 const ERRNO_NOBUFS: i32 = 42;
 const ERRNO_NOENT: i32 = 44;
 const ERRNO_NOEXEC: i32 = 45;
+const ERRNO_NOMEM: i32 = 48;
 const ERRNO_NOSPC: i32 = 51;
 const ERRNO_NOSYS: i32 = 52;
 const ERRNO_NOTCONN: i32 = 53;
@@ -216,6 +217,7 @@ pub(super) fn errno(error: &HostServiceError) -> i32 {
         "ENODATA" => ERRNO_NODATA,
         "ENOENT" => ERRNO_NOENT,
         "ENOEXEC" => ERRNO_NOEXEC,
+        "ENOMEM" => ERRNO_NOMEM,
         "ENOSPC" => ERRNO_NOSPC,
         "ENOSYS" => ERRNO_NOSYS,
         "ENOTCONN" => ERRNO_NOTCONN,
@@ -1351,6 +1353,7 @@ mod tests {
     fn stable_errno_mapping_matches_preview1() {
         assert_eq!(errno(&HostServiceError::new("EBADF", "bad fd")), 8);
         assert_eq!(errno(&HostServiceError::new("EWOULDBLOCK", "wait")), 6);
+        assert_eq!(errno(&HostServiceError::new("ENOMEM", "limit")), 48);
         assert_eq!(errno(&HostServiceError::new("unknown", "fault")), 29);
     }
 }
