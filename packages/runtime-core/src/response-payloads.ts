@@ -64,6 +64,16 @@ export interface LiveResourceSnapshot {
 	socket_connections: number;
 	socket_buffered_bytes: number;
 	socket_datagram_queue_len: number;
+	wasm_reserved_memory_bytes: number;
+	wasmtime_engine_profiles: number;
+	wasmtime_module_entries: number;
+	wasmtime_module_cache_hits: number;
+	wasmtime_module_cache_misses: number;
+	wasmtime_module_cache_evictions: number;
+	wasmtime_compiled_source_bytes: number;
+	wasmtime_charged_module_bytes: number;
+	wasmtime_compile_time_micros: number;
+	wasmtime_process_retained_rss_bytes?: number;
 	queue_snapshots: LiveQueueSnapshotEntry[];
 }
 
@@ -504,6 +514,50 @@ export function fromGeneratedResponsePayload(
 					payload.val.socketDatagramQueueLen,
 					"resource_snapshot.socket_datagram_queue_len",
 				),
+				wasm_reserved_memory_bytes: bigIntToSafeNumber(
+					payload.val.wasmReservedMemoryBytes,
+					"resource_snapshot.wasm_reserved_memory_bytes",
+				),
+				wasmtime_engine_profiles: bigIntToSafeNumber(
+					payload.val.wasmtimeEngineProfiles,
+					"resource_snapshot.wasmtime_engine_profiles",
+				),
+				wasmtime_module_entries: bigIntToSafeNumber(
+					payload.val.wasmtimeModuleEntries,
+					"resource_snapshot.wasmtime_module_entries",
+				),
+				wasmtime_module_cache_hits: bigIntToSafeNumber(
+					payload.val.wasmtimeModuleCacheHits,
+					"resource_snapshot.wasmtime_module_cache_hits",
+				),
+				wasmtime_module_cache_misses: bigIntToSafeNumber(
+					payload.val.wasmtimeModuleCacheMisses,
+					"resource_snapshot.wasmtime_module_cache_misses",
+				),
+				wasmtime_module_cache_evictions: bigIntToSafeNumber(
+					payload.val.wasmtimeModuleCacheEvictions,
+					"resource_snapshot.wasmtime_module_cache_evictions",
+				),
+				wasmtime_compiled_source_bytes: bigIntToSafeNumber(
+					payload.val.wasmtimeCompiledSourceBytes,
+					"resource_snapshot.wasmtime_compiled_source_bytes",
+				),
+				wasmtime_charged_module_bytes: bigIntToSafeNumber(
+					payload.val.wasmtimeChargedModuleBytes,
+					"resource_snapshot.wasmtime_charged_module_bytes",
+				),
+				wasmtime_compile_time_micros: bigIntToSafeNumber(
+					payload.val.wasmtimeCompileTimeMicros,
+					"resource_snapshot.wasmtime_compile_time_micros",
+				),
+				...(payload.val.wasmtimeProcessRetainedRssBytes !== null
+					? {
+							wasmtime_process_retained_rss_bytes: bigIntToSafeNumber(
+								payload.val.wasmtimeProcessRetainedRssBytes,
+								"resource_snapshot.wasmtime_process_retained_rss_bytes",
+							),
+						}
+					: {}),
 				queue_snapshots: payload.val.queueSnapshots.map((queue) => ({
 					name: queue.name,
 					category: queue.category,

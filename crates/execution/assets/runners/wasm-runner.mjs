@@ -507,6 +507,7 @@ function __agentOSWasmEmitPhaseMetrics(reason, extra = {}) {
     process.stderr.write(`__AGENTOS_WASM_PHASE_METRICS__:${JSON.stringify({
       reason,
       modulePath,
+      sourceModuleBytes: typeof moduleBytes !== 'undefined' ? moduleBytes.byteLength : null,
       moduleBytes: typeof moduleBinary !== 'undefined' ? moduleBinary.byteLength : null,
       phases: __agentOSWasmPhaseTimings,
       ...extra,
@@ -3744,7 +3745,13 @@ function writeHostNetBytesToGuestIovs(iovs, iovsLen, bytes, nreadPtr) {
       nreadPtr,
       writeBytesToGuestIovs(iovs, iovsLen, bytes),
     );
-  } catch {
+  } catch (error) {
+    const memoryBytes = instanceMemory instanceof WebAssembly.Memory
+      ? instanceMemory.buffer.byteLength
+      : 0;
+    process.stderr.write(
+      `[agentos] ERR_AGENTOS_V8_HOSTNET_GUEST_WRITE: failed to commit socket bytes to guest memory (iovs=${Number(iovs) >>> 0}, iovsLen=${Number(iovsLen) >>> 0}, nread=${Number(nreadPtr) >>> 0}, sourceBytes=${Buffer.from(bytes ?? []).length}, memoryBytes=${memoryBytes}): ${error?.message ?? String(error)}\n`,
+    );
     return WASI_ERRNO_FAULT;
   }
 }
@@ -3772,14 +3779,9 @@ function readHostNetSocketToGuestIovs(socket, iovs, iovsLen, nreadPtr, iovReques
         : hasConfiguredTimeout ? configuredTimeout : unixConnectTimeoutMs;
       const startedAt = Date.now();
       for (;;) {
-        if (!nonblocking) {
-          const remaining = Math.max(0, waitLimit - (Date.now() - startedAt));
-          const readable = waitManagedHostNetReadable(socket, remaining, true);
-          if (readable === WASI_ERRNO_INTR) return WASI_ERRNO_INTR;
-          if (!readable) {
-            return hasConfiguredTimeout ? WASI_ERRNO_AGAIN : WASI_ERRNO_TIMEDOUT;
-          }
-        }
+        // Linux's nonblocking-I/O pattern is read, then wait, then retry.
+        // Probing first also closes the race where bytes become durable just
+        // before a readiness subscription is armed and its wake is coalesced.
         const result = callSyncRpc('process.hostnet_recv', [
           targetFd,
           requestedLength,
@@ -3794,7 +3796,29 @@ function readHostNetSocketToGuestIovs(socket, iovs, iovsLen, nreadPtr, iovReques
         }
         if (result == null) return writeGuestUint32(nreadPtr, 0);
         if (nonblocking) return WASI_ERRNO_AGAIN;
-        if (Date.now() - startedAt >= waitLimit) {
+        const remaining = Math.max(0, waitLimit - (Date.now() - startedAt));
+        if (remaining === 0) {
+          return hasConfiguredTimeout ? WASI_ERRNO_AGAIN : WASI_ERRNO_TIMEDOUT;
+        }
+        const readable = waitManagedHostNetReadable(socket, remaining, true);
+        if (readable === WASI_ERRNO_INTR) return WASI_ERRNO_INTR;
+        if (!readable) {
+          // Readiness is only a hint. A final receive probe wins over a
+          // simultaneous timeout and prevents a coalesced wake from turning
+          // already-buffered bytes into a spurious 30-second failure.
+          const finalResult = callSyncRpc('process.hostnet_recv', [
+            targetFd,
+            requestedLength,
+            0,
+            0,
+          ]);
+          if (finalResult != null && !isHostNetWouldBlock(finalResult)) {
+            const bytes = finalResult?.type === 'message'
+              ? hostNetDatagramBytes(finalResult)
+              : decodeFsBytesPayload(finalResult, 'managed host-network read');
+            return writeHostNetBytesToGuestIovs(iovs, iovsLen, bytes, nreadPtr);
+          }
+          if (finalResult == null) return writeGuestUint32(nreadPtr, 0);
           return hasConfiguredTimeout ? WASI_ERRNO_AGAIN : WASI_ERRNO_TIMEDOUT;
         }
       }

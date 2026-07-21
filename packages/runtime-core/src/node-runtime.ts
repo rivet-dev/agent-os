@@ -21,25 +21,25 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { JsRuntimeConfig } from "./generated/JsRuntimeConfig.js";
+import type { VmUserConfig } from "./generated/VmUserConfig.js";
+import { parseNodeRuntimeCreateOptions } from "./node-runtime-options-schema.js";
+import type { SidecarProcess } from "./sidecar-process.js";
 import type {
-	ExecResult,
 	BindingDefinition,
+	ExecResult,
 	Kernel,
 	KernelBootTiming,
 	Permissions,
 	VirtualDirEntry,
 	VirtualFileSystem,
 } from "./test-runtime.js";
-import type { JsRuntimeConfig } from "./generated/JsRuntimeConfig.js";
-import type { VmUserConfig } from "./generated/VmUserConfig.js";
-import type { SidecarProcess } from "./sidecar-process.js";
 import {
 	createKernel,
 	createNodeRuntime,
 	createWasmVmRuntime,
 	NodeFileSystem,
 } from "./test-runtime.js";
-import { parseNodeRuntimeCreateOptions } from "./node-runtime-options-schema.js";
 
 export type {
 	BindingDefinition,
@@ -348,6 +348,11 @@ export interface NodeRuntimeExecResult {
 
 /** Options for a single {@link NodeRuntime.exec} call. */
 export interface NodeRuntimeExecOptions {
+	/**
+	 * Select the engine for a standalone WebAssembly command. JavaScript and
+	 * Python commands ignore this option. Omission preserves the runtime default.
+	 */
+	wasmBackend?: "v8" | "wasmtime";
 	/** Extra environment variables for this run, merged over the VM env. */
 	env?: Record<string, string>;
 	/** Working directory for this run. */
@@ -356,6 +361,8 @@ export interface NodeRuntimeExecOptions {
 	stdin?: string | Uint8Array;
 	/** Abort the run after this many milliseconds. */
 	timeout?: number;
+	/** Bound active guest CPU time independently of elapsed wall time. */
+	cpuTimeLimitMs?: number;
 	/**
 	 * Cancel the run when this signal aborts. On abort the guest process is
 	 * killed inside the VM (the kernel delivers `SIGTERM`) and the call rejects
@@ -509,6 +516,16 @@ export interface NodeRuntimeResourceSnapshot {
 	socketConnections: number;
 	socketBufferedBytes: number;
 	socketDatagramQueueLen: number;
+	wasmReservedMemoryBytes: number;
+	wasmtimeEngineProfiles: number;
+	wasmtimeModuleEntries: number;
+	wasmtimeModuleCacheHits: number;
+	wasmtimeModuleCacheMisses: number;
+	wasmtimeModuleCacheEvictions: number;
+	wasmtimeCompiledSourceBytes: number;
+	wasmtimeChargedModuleBytes: number;
+	wasmtimeCompileTimeMicros: number;
+	wasmtimeProcessRetainedRssBytes?: number;
 	queueSnapshots: Array<{
 		name: string;
 		category: string;
@@ -588,9 +605,7 @@ export class NodeRuntime {
 	 * session, creates the VM with a bootstrapped root filesystem, mounts the
 	 * shell and Node runtimes, and waits for the VM to report ready.
 	 */
-	static async create(
-		options: NodeRuntimeCreateOptions,
-	): Promise<NodeRuntime> {
+	static async create(options: NodeRuntimeCreateOptions): Promise<NodeRuntime> {
 		options = parseNodeRuntimeCreateOptions(options);
 		const commandsDir = resolveNodeRuntimeCommandsDir(options.commandsDir);
 
@@ -871,8 +886,10 @@ export class NodeRuntime {
 		options: NodeRuntimeSpawnOptions = {},
 	): NodeRuntimeProcess {
 		const proc = this.kernel.spawn(command, args, {
+			wasmBackend: options.wasmBackend,
 			env: options.env,
 			cwd: options.cwd,
+			cpuTimeLimitMs: options.cpuTimeLimitMs,
 			onStdout: options.onStdout,
 			onStderr: options.onStderr,
 			streamStdin: true,
@@ -909,8 +926,10 @@ export class NodeRuntime {
 		const stdoutChunks: Uint8Array[] = [];
 		const stderrChunks: Uint8Array[] = [];
 		const proc = this.spawnCommand(command, args, {
+			wasmBackend: options.wasmBackend,
 			env: options.env,
 			cwd: options.cwd,
+			cpuTimeLimitMs: options.cpuTimeLimitMs,
 			onStdout: (chunk) => {
 				stdoutChunks.push(chunk);
 				options.onStdout?.(chunk);
@@ -926,11 +945,25 @@ export class NodeRuntime {
 		proc.closeStdin();
 
 		let timer: ReturnType<typeof setTimeout> | undefined;
+		let aborted = options.signal?.aborted ?? false;
+		const onAbort = () => {
+			aborted = true;
+			proc.kill("SIGTERM");
+		};
 		if (options.timeout !== undefined) {
 			timer = setTimeout(() => proc.kill("SIGKILL"), options.timeout);
 		}
+		if (options.signal) {
+			options.signal.addEventListener("abort", onAbort, { once: true });
+			if (aborted) {
+				onAbort();
+			}
+		}
 		try {
 			const exitCode = await proc.wait();
+			if (aborted && options.signal) {
+				throw toAbortError(options.signal);
+			}
 			return {
 				stdout: decodeChunks(stdoutChunks),
 				stderr: decodeChunks(stderrChunks),
@@ -940,6 +973,7 @@ export class NodeRuntime {
 			if (timer !== undefined) {
 				clearTimeout(timer);
 			}
+			options.signal?.removeEventListener("abort", onAbort);
 		}
 	}
 

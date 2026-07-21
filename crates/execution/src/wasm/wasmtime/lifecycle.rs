@@ -1,9 +1,11 @@
 //! Execution lifecycle, cancellation, interruption, and teardown.
 
 use super::super::{StartWasmExecutionRequest, WasmExecutionError, WasmExecutionEvent};
+use super::diagnostics::ExecutionDiagnostics;
 use super::engine::{
     WasmtimeEngineHandle, WasmtimeEngineProfile, WasmtimeEngineRegistry, WasmtimeMetricsSnapshot,
 };
+use super::limits;
 use super::linker;
 use super::store::{self, WasmtimeHostClient};
 use crate::backend::{
@@ -22,7 +24,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
 const MODULE_READ_CHUNK_BYTES: usize = 512 * 1024;
@@ -466,6 +468,12 @@ async fn run_execution(
     event_sender: Sender<QueuedWasmtimeEvent>,
     event_notify: Option<Arc<Notify>>,
 ) -> Result<i32, HostServiceError> {
+    let diagnostics = Arc::new(ExecutionDiagnostics::new(
+        request
+            .env
+            .get("AGENTOS_WASM_WARMUP_DEBUG")
+            .is_some_and(|value| value == "1"),
+    ));
     wait_until_started(&control).await?;
     let host = wait_for_host(&host_latch, &control.cancelled).await?;
     let host = WasmtimeHostClient::new(
@@ -477,9 +485,12 @@ async fn run_execution(
         Arc::clone(runtime.resources()),
         event_sender,
         event_notify,
-    );
+    )
+    .with_diagnostics(Arc::clone(&diagnostics));
+    let engine_started = Instant::now();
     let profile = WasmtimeEngineProfile::new(request.limits.max_stack_bytes)?;
     let engine = WasmtimeEngineRegistry::process().get_or_create(profile)?;
+    diagnostics.phase("Engine", engine_started.elapsed());
     control
         .engine
         .lock()
@@ -492,16 +503,17 @@ async fn run_execution(
         .replace(Arc::clone(&engine));
 
     let future = run_loaded_module(
-        module_path,
+        module_path.clone(),
         request.clone(),
         runtime,
-        host,
+        host.clone(),
         engine,
         profile,
         Arc::clone(&control.paused),
         Arc::clone(&control.pause_notify),
+        Arc::clone(&diagnostics),
     );
-    if let Some(limit_ms) = request.limits.wall_clock_limit_ms {
+    let result = if let Some(limit_ms) = request.limits.wall_clock_limit_ms {
         match tokio::time::timeout(Duration::from_millis(limit_ms), future).await {
             Ok(result) => result,
             Err(_) => {
@@ -518,7 +530,23 @@ async fn run_execution(
         }
     } else {
         future.await
+    };
+    if diagnostics.enabled() {
+        let reason = if result.is_ok() {
+            "completed"
+        } else {
+            "failed"
+        };
+        if let Some(line) = diagnostics.line(reason, &module_path) {
+            if let Err(error) = host.publish_stderr(line).await {
+                eprintln!(
+                    "ERR_AGENTOS_WASMTIME_DIAGNOSTICS_PUBLISH: failed to publish phase diagnostics: {}: {}",
+                    error.code, error.message
+                );
+            }
+        }
     }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -531,19 +559,31 @@ async fn run_loaded_module(
     profile: WasmtimeEngineProfile,
     paused: Arc<AtomicBool>,
     pause_notify: Arc<Notify>,
+    diagnostics: Arc<ExecutionDiagnostics>,
 ) -> Result<i32, HostServiceError> {
     // The kernel owns the authoritative WASI capability roots and descriptor
     // numbers. Initialize them before guest code starts so both executors see
     // the same fd namespace without maintaining a Wasmtime-local projection.
+    let preopens_started = Instant::now();
     host.submit(
         HostOperation::Filesystem(FilesystemOperation::CanonicalPreopens),
         0,
     )
     .await?;
+    diagnostics.phase("canonicalPreopens", preopens_started.elapsed());
+    let module_read_started = Instant::now();
     let bytes = load_module(&host, &module_path, &request).await?;
-    let mut module = super::module::compile_module(&engine, &bytes)?;
+    diagnostics.phase("moduleRead", module_read_started.elapsed());
+    let compiled = super::module::compile_module(&engine, &bytes)?;
+    diagnostics.phase("profileValidation", compiled.profile_validation);
+    diagnostics.phase("moduleCompile", compiled.compilation);
+    diagnostics.module(bytes.len(), compiled.cache_hit);
+    let mut module = compiled.module;
     let mut request = request;
+    let import_validation_started = Instant::now();
     linker::validate_module_imports(&module, request.permission_tier)?;
+    diagnostics.phase("importValidation", import_validation_started.elapsed());
+    let linker_started = Instant::now();
     let linker =
         linker::build_linker(engine.engine(), request.permission_tier).map_err(|error| {
             eprintln!("ERR_AGENTOS_WASMTIME_LINKER: private linker diagnostic: {error:#}");
@@ -552,10 +592,12 @@ async fn run_loaded_module(
                 "failed to build the AgentOS WebAssembly host linker",
             )
         })?;
+    diagnostics.phase("Linker", linker_started.elapsed());
     // One process image may replace itself repeatedly with fexecve. Preserve
     // the same active-CPU origin across Stores so exec cannot reset its budget.
     let active_cpu_started_ns = store::thread_cpu_time_ns();
     loop {
+        let store_started = Instant::now();
         let mut store = store::create_store(
             Arc::clone(&engine),
             &runtime,
@@ -566,13 +608,22 @@ async fn run_loaded_module(
             Arc::clone(&paused),
             Arc::clone(&pause_notify),
         )?;
+        diagnostics.phase("Store", store_started.elapsed());
+        let async_stack_bytes = profile.async_stack_bytes()?;
+        let reserved_store_bytes = async_stack_bytes
+            .saturating_add(limits::aggregate_store_memory_bytes(&request.limits)?);
+        let instantiate_started = Instant::now();
         let instance = linker
             .instantiate_async(&mut store, &module)
             .await
             .map_err(|error| {
                 super::error::normalize("ERR_AGENTOS_WASMTIME_INSTANTIATE", &error, false)
             })?;
+        diagnostics.phase("Instance", instantiate_started.elapsed());
+        let signal_started = Instant::now();
         linker::initialize_inherited_signal_mask(&mut store, &instance).await?;
+        diagnostics.phase("signalMaskInit", signal_started.elapsed());
+        let entrypoint_started = Instant::now();
         let start = instance
             .get_typed_func::<(), ()>(&mut store, "_start")
             .map_err(|error| {
@@ -584,10 +635,35 @@ async fn run_loaded_module(
                     "WebAssembly module does not export a valid _start function",
                 )
             })?;
-        match start.call_async(&mut store, ()).await {
-            Ok(()) => return Ok(store.data().exit_code.unwrap_or(0)),
+        diagnostics.phase("entrypointLookup", entrypoint_started.elapsed());
+        diagnostics.store_memory(
+            guest_linear_memory_bytes(&instance, &mut store),
+            async_stack_bytes,
+            reserved_store_bytes,
+        );
+        let call_started = Instant::now();
+        let call_result = start.call_async(&mut store, ()).await;
+        diagnostics.phase("wasi.start", call_started.elapsed());
+        diagnostics.store_memory(
+            guest_linear_memory_bytes(&instance, &mut store),
+            async_stack_bytes,
+            reserved_store_bytes,
+        );
+        match call_result {
+            Ok(()) => {
+                let exit_code = store.data().exit_code.unwrap_or(0);
+                let teardown_started = Instant::now();
+                drop(start);
+                drop(store);
+                diagnostics.phase("Store.teardown", teardown_started.elapsed());
+                return Ok(exit_code);
+            }
             Err(error) => {
                 if let Some(exit_code) = store.data().exit_code {
+                    let teardown_started = Instant::now();
+                    drop(start);
+                    drop(store);
+                    diagnostics.phase("Store.teardown", teardown_started.elapsed());
                     return Ok(exit_code);
                 }
                 if let Some(replacement) = store.data_mut().pending_exec_replacement.take() {
@@ -595,22 +671,44 @@ async fn run_loaded_module(
                     request.env = replacement.env;
                     module = replacement.module;
                     linker::validate_module_imports(&module, request.permission_tier)?;
+                    let teardown_started = Instant::now();
+                    drop(start);
+                    drop(store);
+                    diagnostics.phase("Store.teardown", teardown_started.elapsed());
                     continue;
                 }
                 if store.data().exec_replaced {
+                    let teardown_started = Instant::now();
+                    drop(start);
+                    drop(store);
+                    diagnostics.phase("Store.teardown", teardown_started.elapsed());
                     return Err(HostServiceError::new(
                         "ERR_AGENTOS_EXEC_REPLACED",
                         "the kernel committed a replacement process image",
                     ));
                 }
-                return Err(super::error::normalize(
+                let normalized = super::error::normalize(
                     "ERR_AGENTOS_WASMTIME_TRAP",
                     &error,
                     store.data().canceled(),
-                ));
+                );
+                let teardown_started = Instant::now();
+                drop(start);
+                drop(store);
+                diagnostics.phase("Store.teardown", teardown_started.elapsed());
+                return Err(normalized);
             }
         }
     }
+}
+
+fn guest_linear_memory_bytes(
+    instance: &wasmtime::Instance,
+    store: &mut wasmtime::Store<store::WasmtimeStoreState>,
+) -> usize {
+    instance
+        .get_memory(&mut *store, "memory")
+        .map_or(0, |memory| memory.data_size(&*store))
 }
 
 async fn wait_until_started(control: &Control) -> Result<(), HostServiceError> {

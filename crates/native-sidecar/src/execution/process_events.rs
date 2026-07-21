@@ -1374,9 +1374,16 @@ where
                 )
                 .map(|payload| EventFrame::new(ownership, payload))),
             ActiveExecutionEvent::Common(ExecutionEvent::HostCall { operation, reply }) => {
+                let operation_debug = format!("{operation:?}");
                 let Some((operation, reply)) =
                     dispatch_context_host_operation(self, vm_id, process_id, operation, reply)
-                        .await?
+                        .await
+                        .map_err(|error| {
+                            eprintln!(
+                                "ERR_AGENTOS_HOST_OPERATION_CONTEXT_DISPATCH: vm={vm_id} process={process_id} operation={operation_debug} error={error}"
+                            );
+                            error
+                        })?
                 else {
                     return Ok(None);
                 };
@@ -1400,8 +1407,13 @@ where
                     );
                     return Ok(None);
                 };
-                let effects =
-                    dispatch_host_operation(generation, kernel, process, operation, reply)?;
+                let effects = dispatch_host_operation(generation, kernel, process, operation, reply)
+                    .map_err(|error| {
+                        eprintln!(
+                            "ERR_AGENTOS_HOST_OPERATION_DISPATCH: vm={vm_id} process={process_id} operation={operation_debug} error={error}"
+                        );
+                        error
+                    })?;
                 if effects.may_make_fd_readable {
                     Self::wake_ready_deferred_fd_reads(vm)?;
                 }

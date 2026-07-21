@@ -4139,7 +4139,13 @@ where
                     process_id,
                     &parent_path,
                     &child_process_id,
-                )?;
+                )
+                .map_err(|error| {
+                    eprintln!(
+                        "ERR_AGENTOS_CHILD_DEFERRED_RPC_RECHECK: vm={vm_id} process={process_id} child={child_process_id} error={error}"
+                    );
+                    error
+                })?;
                 self.service_descendant_guest_wait(
                     vm_id,
                     process_id,
@@ -4149,7 +4155,13 @@ where
                         .collect::<Vec<_>>()
                         .as_slice(),
                     None,
-                )?;
+                )
+                .map_err(|error| {
+                    eprintln!(
+                        "ERR_AGENTOS_CHILD_WAIT_RECHECK: vm={vm_id} process={process_id} child={child_process_id} error={error}"
+                    );
+                    error
+                })?;
                 self.service_descendant_kernel_read(
                     vm_id,
                     process_id,
@@ -4159,14 +4171,26 @@ where
                         .collect::<Vec<_>>()
                         .as_slice(),
                     None,
-                )?;
+                )
+                .map_err(|error| {
+                    eprintln!(
+                        "ERR_AGENTOS_CHILD_READ_RECHECK: vm={vm_id} process={process_id} child={child_process_id} error={error}"
+                    );
+                    error
+                })?;
 
                 self.expire_child_process_sync_if_needed(
                     vm_id,
                     process_id,
                     &parent_path,
                     &child_process_id,
-                )?;
+                )
+                .map_err(|error| {
+                    eprintln!(
+                        "ERR_AGENTOS_CHILD_SYNC_EXPIRY: vm={vm_id} process={process_id} child={child_process_id} error={error}"
+                    );
+                    error
+                })?;
 
                 let guest_owns_child_output = self
                     .vms
@@ -4198,7 +4222,12 @@ where
                 {
                     Ok(event) => event,
                     Err(error) if is_javascript_child_process_gone_error(&error) => continue,
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        eprintln!(
+                            "ERR_AGENTOS_CHILD_EVENT_POLL: vm={vm_id} process={process_id} child={child_process_id} error={error}"
+                        );
+                        return Err(error);
+                    }
                 };
                 if event.is_null() {
                     continue;
@@ -4209,7 +4238,14 @@ where
                     &parent_path,
                     &child_process_id,
                     event,
-                )? {
+                )
+                .map_err(|error| {
+                    eprintln!(
+                        "ERR_AGENTOS_CHILD_EVENT_ROUTE: vm={vm_id} process={process_id} child={child_process_id} error={error}"
+                    );
+                    error
+                })?
+                {
                     yielded = true;
                     delivery_backpressured = true;
                     break;
@@ -9922,15 +9958,29 @@ where
             InheritedOutputStream::Stdout => 1,
             InheritedOutputStream::Stderr => 2,
         };
-        let description = vm
-            .kernel
-            .fd_description_identity(EXECUTION_DRIVER_NAME, child.kernel_pid, source_fd)
-            .map_err(kernel_error)?
-            .0;
-        let path = vm
+        let description = match vm.kernel.fd_description_identity(
+            EXECUTION_DRIVER_NAME,
+            child.kernel_pid,
+            source_fd,
+        ) {
+            Ok((description, _)) => description,
+            Err(error) if error.code() == "EBADF" => {
+                // Executor diagnostics and already-buffered output can arrive
+                // after the guest closes its inherited destination during
+                // process teardown. A closed descriptor has no parent stream
+                // route; it is not a fatal process-pump failure.
+                return Ok(None);
+            }
+            Err(error) => return Err(kernel_error(error)),
+        };
+        let path = match vm
             .kernel
             .fd_path(EXECUTION_DRIVER_NAME, child.kernel_pid, source_fd)
-            .map_err(kernel_error)?;
+        {
+            Ok(path) => path,
+            Err(error) if error.code() == "EBADF" => return Ok(None),
+            Err(error) => return Err(kernel_error(error)),
+        };
         Ok(classify_inherited_output_stream(description, path.as_str()))
     }
 

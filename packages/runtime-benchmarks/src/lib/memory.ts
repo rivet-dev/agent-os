@@ -46,6 +46,50 @@ export function readRssBytes(pid: number | null): number {
 	}
 }
 
+export interface ProcessMemorySnapshot {
+	rssBytes: number;
+	peakRssBytes: number;
+	pssBytes: number;
+	virtualBytes: number;
+	minorFaults: number;
+	majorFaults: number;
+}
+
+/** Read orthogonal Linux process-memory counters without conflating VIRT/RSS/PSS. */
+export function readProcessMemorySnapshot(pid: number): ProcessMemorySnapshot {
+	const status = readFileSync(`/proc/${pid}/status`, "utf8");
+	const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+	let pssBytes = 0;
+	try {
+		const rollup = readFileSync(`/proc/${pid}/smaps_rollup`, "utf8");
+		pssBytes = readKibibytes(rollup, "Pss");
+	} catch {
+		// Some hardened Linux hosts deny smaps_rollup. Preserve an explicit zero.
+	}
+	const closingParen = stat.lastIndexOf(") ");
+	if (closingParen < 0) {
+		throw new Error(`could not parse /proc/${pid}/stat`);
+	}
+	const fields = stat
+		.slice(closingParen + 2)
+		.trim()
+		.split(/\s+/);
+	return {
+		rssBytes: readKibibytes(status, "VmRSS"),
+		peakRssBytes: readKibibytes(status, "VmHWM"),
+		pssBytes,
+		virtualBytes: readKibibytes(status, "VmSize"),
+		// `fields[0]` is field 3 (`state`); minflt/majflt are fields 10/12.
+		minorFaults: Number(fields[7] ?? 0),
+		majorFaults: Number(fields[9] ?? 0),
+	};
+}
+
+function readKibibytes(contents: string, field: string): number {
+	const match = contents.match(new RegExp(`^${field}:\\s+(\\d+)\\s+kB`, "m"));
+	return match ? Number(match[1]) * 1024 : 0;
+}
+
 export interface LaneMemory {
 	memBytes: number;
 	memProvenance: string;
@@ -69,7 +113,10 @@ export function procPeakMemorySupportReason(): string | undefined {
 	if (process.platform !== "linux") {
 		return "Linux /proc clear_refs/VmHWM memory measurement is unavailable on this platform";
 	}
-	if (!existsSync("/proc/self/status") || !existsSync("/proc/self/clear_refs")) {
+	if (
+		!existsSync("/proc/self/status") ||
+		!existsSync("/proc/self/clear_refs")
+	) {
 		return "Linux /proc status/clear_refs memory measurement is unavailable";
 	}
 	return undefined;
@@ -146,25 +193,34 @@ export function runCommandWithMaxRss(
 		const sample = () => {
 			if (child.pid === undefined) return;
 			try {
-				maxRssBytes = Math.max(maxRssBytes, readStatusBytes(child.pid, "VmHWM"));
+				maxRssBytes = Math.max(
+					maxRssBytes,
+					readStatusBytes(child.pid, "VmHWM"),
+				);
 			} catch {
 				try {
-					maxRssBytes = Math.max(maxRssBytes, readStatusBytes(child.pid, "VmRSS"));
+					maxRssBytes = Math.max(
+						maxRssBytes,
+						readStatusBytes(child.pid, "VmRSS"),
+					);
 				} catch {
 					// The child may have exited between polls.
 				}
 			}
 		};
-		const collect = (chunks: Buffer[], kind: "stdout" | "stderr") => (chunk: Buffer) => {
-			if (kind === "stdout") stdoutBytes += chunk.length;
-			else stderrBytes += chunk.length;
-			if (stdoutBytes + stderrBytes > maxBuffer) {
-				child.kill("SIGKILL");
-				reject(new Error(`${command} output exceeded maxBuffer ${maxBuffer}`));
-				return;
-			}
-			chunks.push(chunk);
-		};
+		const collect =
+			(chunks: Buffer[], kind: "stdout" | "stderr") => (chunk: Buffer) => {
+				if (kind === "stdout") stdoutBytes += chunk.length;
+				else stderrBytes += chunk.length;
+				if (stdoutBytes + stderrBytes > maxBuffer) {
+					child.kill("SIGKILL");
+					reject(
+						new Error(`${command} output exceeded maxBuffer ${maxBuffer}`),
+					);
+					return;
+				}
+				chunks.push(chunk);
+			};
 
 		child.stdout.on("data", collect(stdout, "stdout"));
 		child.stderr.on("data", collect(stderr, "stderr"));
@@ -204,7 +260,9 @@ export class SidecarPeakMemorySampler {
 	static forVm(vm: BenchVm): SidecarPeakMemorySampler | undefined {
 		if (procPeakMemorySupportReason()) return undefined;
 		const pid = vm.sidecarPid();
-		return typeof pid === "number" ? new SidecarPeakMemorySampler(pid) : undefined;
+		return typeof pid === "number"
+			? new SidecarPeakMemorySampler(pid)
+			: undefined;
 	}
 
 	async measure<T>(fn: () => Promise<T> | T): Promise<MeasuredValue<T>> {
@@ -248,7 +306,10 @@ function readStatusBytes(pid: number, field: "VmRSS" | "VmHWM"): number {
 	return Number(match[1]) * 1024;
 }
 
-export async function sampleMemory(vm: BenchVm, cycle: number): Promise<MemorySample> {
+export async function sampleMemory(
+	vm: BenchVm,
+	cycle: number,
+): Promise<MemorySample> {
 	forceGC();
 	const resource = await vm.getResourceSnapshot();
 	const guestHeapRss = await sampleGuestHeap(vm);
@@ -268,7 +329,10 @@ export async function sampleMemory(vm: BenchVm, cycle: number): Promise<MemorySa
 export function slope(samples: Array<{ cycle: number }>, key: string): number {
 	const n = samples.length;
 	const sx = samples.reduce((sum, sample) => sum + sample.cycle, 0);
-	const sy = samples.reduce((sum, sample) => sum + Number((sample as any)[key]), 0);
+	const sy = samples.reduce(
+		(sum, sample) => sum + Number((sample as any)[key]),
+		0,
+	);
 	const sxy = samples.reduce(
 		(sum, sample) => sum + sample.cycle * Number((sample as any)[key]),
 		0,

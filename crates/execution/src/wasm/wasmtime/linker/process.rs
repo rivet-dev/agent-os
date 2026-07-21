@@ -639,7 +639,7 @@ async fn exec(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val], by_fd
             Err(error) => return errno(&error),
         };
         let compiled = match module::compile_module(&engine, &bytes) {
-            Ok(module) => module,
+            Ok(compiled) => compiled.module,
             Err(error) if error.code == "ERR_AGENTOS_WASM_INVALID_MODULE" => {
                 return ERRNO_NOEXEC;
             }

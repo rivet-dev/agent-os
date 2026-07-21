@@ -6,6 +6,7 @@
 //! `wasmtime-wasi` context.
 
 mod cache;
+mod diagnostics;
 mod engine;
 mod error;
 mod lifecycle;

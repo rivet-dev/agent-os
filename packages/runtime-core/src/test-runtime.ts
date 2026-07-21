@@ -531,6 +531,16 @@ export interface Kernel extends KernelInterface {
 		socketConnections: number;
 		socketBufferedBytes: number;
 		socketDatagramQueueLen: number;
+		wasmReservedMemoryBytes: number;
+		wasmtimeEngineProfiles: number;
+		wasmtimeModuleEntries: number;
+		wasmtimeModuleCacheHits: number;
+		wasmtimeModuleCacheMisses: number;
+		wasmtimeModuleCacheEvictions: number;
+		wasmtimeCompiledSourceBytes: number;
+		wasmtimeChargedModuleBytes: number;
+		wasmtimeCompileTimeMicros: number;
+		wasmtimeProcessRetainedRssBytes?: number;
 		queueSnapshots: Array<{
 			name: string;
 			category: string;

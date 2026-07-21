@@ -1,19 +1,19 @@
 import { statSync } from "node:fs";
 import {
-	NodeRuntime,
-	resolveNodeRuntimeSidecarBinary,
-	resolveNodeRuntimeCommandsDir,
-	SidecarProcess,
 	type HostDirectoryMount,
+	NodeRuntime,
 	type NodeRuntimeCreateOptions,
 	type NodeRuntimeProcess,
 	type NodeRuntimeResourceSnapshot,
+	resolveNodeRuntimeCommandsDir,
+	resolveNodeRuntimeSidecarBinary,
+	SidecarProcess,
 	type SidecarSpawnOptions,
 	type VirtualDirEntry,
 } from "@rivet-dev/agentos-runtime-core";
 import { createInMemoryFileSystem } from "@rivet-dev/agentos-runtime-core/test-runtime";
-import { hasNativeBaselineWasm, supportsWasmLayer } from "./layers.js";
 import type { BenchmarkOp, CommandBenchmarkOp } from "./layers.js";
+import { hasNativeBaselineWasm, supportsWasmLayer } from "./layers.js";
 
 const NATIVE_BASELINE_WASM_COMMAND = "native-baseline";
 const NATIVE_BASELINE_WASM_PREWARM_DIR = "/tmp/native-baseline-wasm";
@@ -29,7 +29,20 @@ export interface BenchVmOptions {
 
 export interface BenchVmProcess {
 	pid: number;
+	kill(signal?: NodeJS.Signals | number): void;
 	wait(): Promise<number>;
+}
+
+export interface BenchVmExecOptions {
+	wasmBackend?: "v8" | "wasmtime";
+	env?: Record<string, string>;
+	cwd?: string;
+	stdin?: string | Uint8Array;
+	timeout?: number;
+	cpuTimeLimitMs?: number;
+	signal?: AbortSignal;
+	onStdout?: (data: Uint8Array) => void;
+	onStderr?: (data: Uint8Array) => void;
 }
 
 export interface BenchVm {
@@ -42,24 +55,12 @@ export interface BenchVm {
 	readDirWithTypes(path: string): Promise<VirtualDirEntry[]>;
 	exec(
 		commandLine: string,
-		options?: {
-			env?: Record<string, string>;
-			cwd?: string;
-			stdin?: string | Uint8Array;
-			onStdout?: (data: Uint8Array) => void;
-			onStderr?: (data: Uint8Array) => void;
-		},
+		options?: BenchVmExecOptions,
 	): Promise<{ stdout: string; stderr: string; exitCode: number }>;
 	execArgv(
 		command: string,
 		args: string[],
-		options?: {
-			env?: Record<string, string>;
-			cwd?: string;
-			stdin?: string | Uint8Array;
-			onStdout?: (data: Uint8Array) => void;
-			onStderr?: (data: Uint8Array) => void;
-		},
+		options?: BenchVmExecOptions,
 	): Promise<{ stdout: string; stderr: string; exitCode: number }>;
 	spawnNodeCapture(
 		argsOrProgramPath: string[] | string,
@@ -72,24 +73,13 @@ export interface BenchVm {
 	spawn(
 		command: string,
 		args: string[],
-		options?: {
-			env?: Record<string, string>;
-			cwd?: string;
-			onStdout?: (data: Uint8Array) => void;
-			onStderr?: (data: Uint8Array) => void;
-		},
+		options?: BenchVmExecOptions,
 	): BenchVmProcess;
 	waitProcess(pid: number): Promise<number>;
 	execWasmCommand(
 		cmd: string,
 		args: string[],
-		options?: {
-			env?: Record<string, string>;
-			cwd?: string;
-			stdin?: string | Uint8Array;
-			onStdout?: (data: Uint8Array) => void;
-			onStderr?: (data: Uint8Array) => void;
-		},
+		options?: BenchVmExecOptions,
 	): Promise<{ stdout: string; stderr: string; exitCode: number }>;
 	getResourceSnapshot(): Promise<NodeRuntimeResourceSnapshot>;
 	dispose(): Promise<void>;
@@ -104,7 +94,9 @@ export interface SidecarBinaryProvenance {
 	sizeBytes: number;
 }
 
-export async function createBenchVm(options: BenchVmOptions = {}): Promise<BenchVm> {
+export async function createBenchVm(
+	options: BenchVmOptions = {},
+): Promise<BenchVm> {
 	const runtime = await NodeRuntime.create({
 		filesystem: createInMemoryFileSystem(),
 		permissions: {
@@ -135,14 +127,18 @@ export async function createBenchVm(options: BenchVmOptions = {}): Promise<Bench
 			const args = options.recursive ? ["-p", path] : [path];
 			const result = await runtime.execCommand("mkdir", args);
 			if (result.exitCode !== 0) {
-				throw new Error(`mkdir ${path} exited ${result.exitCode}\n${result.stderr}`);
+				throw new Error(
+					`mkdir ${path} exited ${result.exitCode}\n${result.stderr}`,
+				);
 			}
 		},
 		async delete(path, options = {}) {
 			const args = options.recursive ? ["-rf", path] : [path];
 			const result = await runtime.execCommand("rm", args);
 			if (result.exitCode !== 0) {
-				throw new Error(`rm ${path} exited ${result.exitCode}\n${result.stderr}`);
+				throw new Error(
+					`rm ${path} exited ${result.exitCode}\n${result.stderr}`,
+				);
 			}
 		},
 		readFile(path) {
@@ -174,8 +170,9 @@ export async function createBenchVm(options: BenchVmOptions = {}): Promise<Bench
 				onStderr: captureOptions.onStderr,
 			});
 		},
-	spawn(command, args, spawnOptions = {}) {
+		spawn(command, args, spawnOptions = {}) {
 			const proc = runtime.spawnCommand(command, args, {
+				wasmBackend: spawnOptions.wasmBackend,
 				env: spawnOptions.env,
 				cwd: spawnOptions.cwd,
 				onStdout: spawnOptions.onStdout,
@@ -184,6 +181,7 @@ export async function createBenchVm(options: BenchVmOptions = {}): Promise<Bench
 			processes.set(proc.pid, proc);
 			return {
 				pid: proc.pid,
+				kill: (signal) => proc.kill(signal),
 				wait: async () => {
 					try {
 						return await proc.wait();
@@ -232,7 +230,9 @@ export async function prewarmBenchVm(
 ): Promise<void> {
 	const nodeResult = await vm.spawnNodeCapture(["-e", ""]);
 	if (nodeResult.exitCode !== 0) {
-		throw new Error(`guest node prewarm exited ${nodeResult.exitCode}\n${nodeResult.stderr}`);
+		throw new Error(
+			`guest node prewarm exited ${nodeResult.exitCode}\n${nodeResult.stderr}`,
+		);
 	}
 
 	if (
@@ -265,7 +265,9 @@ export async function prewarmBenchVm(
 	}
 }
 
-export function createBenchSidecar(options: SidecarSpawnOptions = {}): SidecarProcess {
+export function createBenchSidecar(
+	options: SidecarSpawnOptions = {},
+): SidecarProcess {
 	return SidecarProcess.spawn({
 		...options,
 		command: options.command ?? resolveNodeRuntimeSidecarBinary(),
@@ -295,17 +297,19 @@ export function formatSidecarProvenance(
 }
 
 function sidecarPidFromRuntime(runtime: NodeRuntime): number | null {
-	const kernel = (runtime as unknown as {
-		kernel?: {
-			client?: {
-				child?: { pid?: number };
-				protocolClient?: {
+	const kernel = (
+		runtime as unknown as {
+			kernel?: {
+				client?: {
 					child?: { pid?: number };
-					sidecarProcess?: { child?: { pid?: number } };
+					protocolClient?: {
+						child?: { pid?: number };
+						sidecarProcess?: { child?: { pid?: number } };
+					};
 				};
 			};
-		};
-	}).kernel;
+		}
+	).kernel;
 	const pid =
 		kernel?.client?.child?.pid ??
 		kernel?.client?.protocolClient?.child?.pid ??

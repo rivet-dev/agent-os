@@ -265,6 +265,41 @@ fn managed_blocking_socket_operations_wait_through_posix_poll() {
 }
 
 #[test]
+fn managed_wasm_socket_reads_probe_before_and_after_readiness_waits() {
+    let runner = std::fs::read_to_string(
+        repo_root().join("crates/execution/assets/runners/wasm-runner.mjs"),
+    )
+    .expect("read managed WASM runner");
+    let read = runner
+        .split("function readHostNetSocketToGuestIovs(")
+        .nth(1)
+        .expect("managed WASM socket read helper")
+        .split("\nfunction writeHostNetSocketFromGuestIovs(")
+        .next()
+        .expect("managed WASM socket read boundary");
+    let managed = read
+        .split("if (socket?.managed === true)")
+        .nth(1)
+        .expect("managed socket branch");
+    let first_receive = managed
+        .find("callSyncRpc('process.hostnet_recv'")
+        .expect("initial receive probe");
+    let readiness_wait = managed
+        .find("waitManagedHostNetReadable(socket, remaining, true)")
+        .expect("readiness wait");
+    assert!(
+        first_receive < readiness_wait,
+        "managed reads must follow the Linux read-then-wait pattern"
+    );
+    let after_wait = &managed[readiness_wait..];
+    assert!(
+        after_wait.contains("const finalResult = callSyncRpc('process.hostnet_recv'")
+            && after_wait.contains("if (finalResult == null)"),
+        "a timeout-boundary receive probe must win over a coalesced readiness wake"
+    );
+}
+
+#[test]
 fn sidecar_publishes_only_one_signal_delivery_scope_at_a_time() {
     let root = repo_root();
     let process =

@@ -4662,6 +4662,16 @@ export type ResourceSnapshotResponse = {
     readonly socketConnections: u64
     readonly socketBufferedBytes: u64
     readonly socketDatagramQueueLen: u64
+    readonly wasmReservedMemoryBytes: u64
+    readonly wasmtimeEngineProfiles: u64
+    readonly wasmtimeModuleEntries: u64
+    readonly wasmtimeModuleCacheHits: u64
+    readonly wasmtimeModuleCacheMisses: u64
+    readonly wasmtimeModuleCacheEvictions: u64
+    readonly wasmtimeCompiledSourceBytes: u64
+    readonly wasmtimeChargedModuleBytes: u64
+    readonly wasmtimeCompileTimeMicros: u64
+    readonly wasmtimeProcessRetainedRssBytes: u64 | null
     readonly queueSnapshots: readonly QueueSnapshotEntry[]
 }
 
@@ -4682,6 +4692,16 @@ export function readResourceSnapshotResponse(bc: bare.ByteCursor): ResourceSnaps
         socketConnections: bare.readU64(bc),
         socketBufferedBytes: bare.readU64(bc),
         socketDatagramQueueLen: bare.readU64(bc),
+        wasmReservedMemoryBytes: bare.readU64(bc),
+        wasmtimeEngineProfiles: bare.readU64(bc),
+        wasmtimeModuleEntries: bare.readU64(bc),
+        wasmtimeModuleCacheHits: bare.readU64(bc),
+        wasmtimeModuleCacheMisses: bare.readU64(bc),
+        wasmtimeModuleCacheEvictions: bare.readU64(bc),
+        wasmtimeCompiledSourceBytes: bare.readU64(bc),
+        wasmtimeChargedModuleBytes: bare.readU64(bc),
+        wasmtimeCompileTimeMicros: bare.readU64(bc),
+        wasmtimeProcessRetainedRssBytes: read21(bc),
         queueSnapshots: read41(bc),
     }
 }
@@ -4702,6 +4722,16 @@ export function writeResourceSnapshotResponse(bc: bare.ByteCursor, x: ResourceSn
     bare.writeU64(bc, x.socketConnections)
     bare.writeU64(bc, x.socketBufferedBytes)
     bare.writeU64(bc, x.socketDatagramQueueLen)
+    bare.writeU64(bc, x.wasmReservedMemoryBytes)
+    bare.writeU64(bc, x.wasmtimeEngineProfiles)
+    bare.writeU64(bc, x.wasmtimeModuleEntries)
+    bare.writeU64(bc, x.wasmtimeModuleCacheHits)
+    bare.writeU64(bc, x.wasmtimeModuleCacheMisses)
+    bare.writeU64(bc, x.wasmtimeModuleCacheEvictions)
+    bare.writeU64(bc, x.wasmtimeCompiledSourceBytes)
+    bare.writeU64(bc, x.wasmtimeChargedModuleBytes)
+    bare.writeU64(bc, x.wasmtimeCompileTimeMicros)
+    write21(bc, x.wasmtimeProcessRetainedRssBytes)
     write41(bc, x.queueSnapshots)
 }
 

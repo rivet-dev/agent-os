@@ -982,6 +982,16 @@ type ResourceSnapshotResponse struct {
   socketConnections: u64
   socketBufferedBytes: u64
   socketDatagramQueueLen: u64
+  wasmReservedMemoryBytes: u64
+  wasmtimeEngineProfiles: u64
+  wasmtimeModuleEntries: u64
+  wasmtimeModuleCacheHits: u64
+  wasmtimeModuleCacheMisses: u64
+  wasmtimeModuleCacheEvictions: u64
+  wasmtimeCompiledSourceBytes: u64
+  wasmtimeChargedModuleBytes: u64
+  wasmtimeCompileTimeMicros: u64
+  wasmtimeProcessRetainedRssBytes: optional<u64>
   queueSnapshots: list<QueueSnapshotEntry>
 }
 

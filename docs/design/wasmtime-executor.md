@@ -662,7 +662,7 @@ revision has been sealed:
 - [x] Phase 0: specification, inventory, baseline, and locked decisions.
 - [x] Phase 1: complete runtime-neutral kernel/executor prerequisite.
 - [x] Phase 2: production Wasmtime executor at current V8-WASM parity.
-- [ ] Phase 3: performance decision, preferred-backend rollout, and initial
+- [x] Phase 3: performance decision, preferred-backend rollout, and initial
       project completion.
 - [ ] Phase 4: separately gated threaded-WASM roadmap completion.
 
@@ -856,42 +856,85 @@ Phase 2 evidence (Rust 1.94.0, Linux x86-64 canonical workspace):
 
 ### Phase 3 revision: Measure and enable the preferred backend
 
-- [ ] Run release builds of both backends on the same canonical machine with
+- [x] Run release builds of both backends on the same canonical machine with
       identical module bytes, host-service path, output capture, permissions,
       limits, and cache state.
-- [ ] Measure at least five independent fresh-cache processes with five samples
+- [x] Measure at least five independent fresh-cache processes with five samples
       each, plus warm cache-hit runs, for trivial, coreutils, shell, curl,
       sqlite, vim, large-module, compute-heavy, and host-call-heavy workloads.
-- [ ] Run concurrency 1/10/50/100/200 with repeated-module and diverse-module
+- [x] Run concurrency 1/10/50/100/200 with repeated-module and diverse-module
       workloads, success, denial, cancellation, and resource-limit paths.
-- [ ] Record phase timing for VM/package setup, Engine lookup, module read,
+- [x] Record phase timing for VM/package setup, Engine lookup, module read,
       validation, compilation/cache, linking, Store/async stack, instantiation,
       memory initialization, first host call, first output byte, completion,
       and teardown.
-- [ ] Record baseline/incremental/peak RSS and PSS, VIRT separately, committed
+- [x] Record baseline/incremental/peak RSS and PSS, VIRT separately, committed
       linear memory, compiled-code/cache bytes, async-stack bytes, kernel
       buffers, page faults, and retained memory after teardown.
-- [ ] Benchmark on-demand memory allocation and eligible copy-on-write module
+- [x] Benchmark on-demand memory allocation and eligible copy-on-write module
       memory initialization; do not enable pooling, AOT, Wizer, or live
       snapshots in this phase.
-- [ ] Tune only evidence-supported Engine, Module-cache, memory-reservation,
+- [x] Tune only evidence-supported Engine, Module-cache, memory-reservation,
       async-stack, and concurrency defaults while retaining all named bounds.
-- [ ] Require zero correctness/safety regression, geometric-mean p50 regression
+- [x] Require zero correctness/safety regression, geometric-mean p50 regression
       no worse than 10%, no individual p95 regression worse than 20%, throughput
       regression no worse than 10%, and retained RSS/PSS regression no worse
       than the greater of 10% or 4 MiB.
-- [ ] If every preferred-backend threshold passes, make omission select
+- [x] If every preferred-backend threshold passes, make omission select
       Wasmtime; otherwise keep omission on V8 while leaving Wasmtime explicitly
       selectable and record the failed thresholds.
-- [ ] Add operator metrics, warnings, explicit backend override, rollback
+- [x] Add operator metrics, warnings, explicit backend override, rollback
       control, cache/profile-limit visibility, and stable error attribution.
-- [ ] Keep V8-WASM selectable, supported, and on the shared parity suite; never
+- [x] Keep V8-WASM selectable, supported, and on the shared parity suite; never
       shadow-run side-effecting executions through both engines.
-- [ ] Commit the raw benchmark results, selected defaults, threshold decision,
+- [x] Commit the raw benchmark results, selected defaults, threshold decision,
       rollback criteria, and operator documentation with the implementation.
-- [ ] Seal Phase 3 as one independently reviewable JJ revision on top of Phase
+- [x] Seal Phase 3 as one independently reviewable JJ revision on top of Phase
       2. Completion of this checkbox means the initial production Wasmtime
       project is complete.
+
+Phase 3 evidence (Rust 1.94.0, release profile, Linux x86-64 canonical
+workspace, 2026-07-20 Pacific):
+
+- The canonical matrix used the same release sidecar, host-service route,
+  permissions, limits, output capture, and SHA-256-inventoried source modules
+  for both engines. V8's existing safety transform adds a maximum to an
+  uncapped memory section (two bytes for this corpus); diagnostics record both
+  the identical source size and the transformed executable size.
+- Five fresh sidecar processes per engine ran five samples for each of nine
+  distinct workload modules, including a real recursive `find` host-call case.
+  Per-execution diagnostics record setup, Engine, read, profile validation,
+  compile/cache, Linker, Store/async stack, Instance (including memory
+  initialization), first host call, first guest host call, first output,
+  completion, teardown, guest linear memory, and Store reservations.
+- Repeated and diverse 1/10/50/100/200 concurrency rows completed. The 20-way
+  executor bound and 128-frame ingress bound produced their documented typed
+  admission failures above capacity; every comparable successful Wasmtime row
+  exceeded V8 throughput. Permission denial, abort cancellation, and active-CPU
+  limit paths passed for both engines.
+- Correctness, geometric-mean p50 (`0.2972` Wasmtime/V8), and throughput gates
+  passed. Individual p95 failed because cold compilation dominates substantial
+  modules. Retained RSS failed (`127,930,368` V8 versus `264,069,120` Wasmtime)
+  and retained PSS failed (`129,094,656` versus `264,836,096`). Omission
+  therefore remains V8; explicit Wasmtime and V8 overrides remain available.
+- No Engine, module-cache, memory, async-stack, or concurrency default was tuned:
+  the evidence supports Wasmtime for repeated warm modules but did not identify
+  a bounded default change that clears the cold-p95 and retained-memory gates.
+  Pooling, AOT, Wizer, serialized artifacts, and live snapshots remain off;
+  on-demand allocation and eligible copy-on-write initialization remain on.
+- Resource snapshots expose live WASM reservations, Engine profiles, cache
+  entries/hits/misses/evictions, source and charged cache bytes, compile time,
+  and whole-process Linux RSS. Near-limit warnings and stable typed failures
+  name their configuration bounds. Rollback is the explicit V8 selector or
+  removal of a Wasmtime override.
+- The readiness correction found during measurement passed 200 V8 curl samples
+  across 20 fresh sidecars (plus 200 matching Wasmtime samples) without the
+  former 30-second lost-wake failure. The canonical nine-workload result then
+  completed with zero validation failures.
+- Raw samples and environment/module provenance are committed in
+  `packages/runtime-benchmarks/results/wasm-backend-comparison.json`; operator
+  interpretation, override, rollback, metrics, cold-start, memory, and snapshot
+  guidance is in `docs/wasmvm/executors.md`.
 
 ### Phase 4 revision: Threading as a separate later project
 

@@ -492,11 +492,14 @@ where
             "process://resources",
         )?;
 
-        let snapshot = self
+        let vm = self
             .vms
             .get(&vm_id)
-            .map(|vm| vm.kernel.resource_snapshot())
-            .unwrap_or_default();
+            .ok_or_else(|| missing_vm_error(&vm_id))?;
+        let snapshot = vm.kernel.resource_snapshot();
+        let wasm_reserved_memory_bytes =
+            vm.resources.usage(ResourceClass::WasmMemoryBytes).used as u64;
+        let wasmtime = self.wasm_engine.wasmtime_metrics()?;
         let queue_snapshots = queue_tracker::queue_snapshot()
             .into_iter()
             .map(|queue| QueueSnapshotEntry {
@@ -528,6 +531,17 @@ where
                     socket_connections: snapshot.socket_connections as u64,
                     socket_buffered_bytes: snapshot.socket_buffered_bytes as u64,
                     socket_datagram_queue_len: snapshot.socket_datagram_queue_len as u64,
+                    wasm_reserved_memory_bytes,
+                    wasmtime_engine_profiles: wasmtime.engine_profiles as u64,
+                    wasmtime_module_entries: wasmtime.module_entries as u64,
+                    wasmtime_module_cache_hits: wasmtime.module_cache_hits,
+                    wasmtime_module_cache_misses: wasmtime.module_cache_misses,
+                    wasmtime_module_cache_evictions: wasmtime.module_cache_evictions,
+                    wasmtime_compiled_source_bytes: wasmtime.compiled_source_bytes,
+                    wasmtime_charged_module_bytes: wasmtime.charged_module_bytes as u64,
+                    wasmtime_compile_time_micros: u64::try_from(wasmtime.compile_time.as_micros())
+                        .unwrap_or(u64::MAX),
+                    wasmtime_process_retained_rss_bytes: wasmtime.process_retained_rss_bytes,
                     queue_snapshots,
                 }),
             ),

@@ -10,6 +10,7 @@
 		"bench:gate": "tsx src/quick-gate.ts",
 		"bench:memory": "node --expose-gc --import tsx/esm memory.bench.ts",
 		"bench:matrix": "tsx src/run-all.ts",
+		"bench:wasm-backends": "tsx src/focused/wasm-backend-comparison.bench.ts",
 		"check-types": "pnpm --dir ../runtime-core build && tsc --noEmit"
 	},
 	"dependencies": {

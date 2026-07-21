@@ -1,6 +1,7 @@
 //! Per-execution Store state backed by AgentOS host capabilities.
 
 use super::super::{guest_visible_wasm_env, StartWasmExecutionRequest, WasmExecutionEvent};
+use super::diagnostics::ExecutionDiagnostics;
 use super::engine::{WasmtimeEngineHandle, WasmtimeEngineProfile};
 use super::lifecycle::QueuedWasmtimeEvent;
 use super::limits;
@@ -39,6 +40,7 @@ pub struct WasmtimeHostClient {
     resources: Arc<ResourceLedger>,
     events: Sender<QueuedWasmtimeEvent>,
     event_notify: Option<Arc<Notify>>,
+    diagnostics: Option<Arc<ExecutionDiagnostics>>,
 }
 
 impl WasmtimeHostClient {
@@ -63,7 +65,13 @@ impl WasmtimeHostClient {
             resources,
             events,
             event_notify,
+            diagnostics: None,
         }
+    }
+
+    pub fn with_diagnostics(mut self, diagnostics: Arc<ExecutionDiagnostics>) -> Self {
+        self.diagnostics = Some(diagnostics);
+        self
     }
 
     pub fn process(&self) -> HostProcessContext {
@@ -83,6 +91,9 @@ impl WasmtimeHostClient {
         operation: HostOperation,
         retained_request_bytes: usize,
     ) -> Result<HostCallReply, HostServiceError> {
+        if let Some(diagnostics) = self.diagnostics.as_ref() {
+            diagnostics.first_host_call();
+        }
         if self.canceled() {
             return Err(HostServiceError::new(
                 "ECANCELED",
@@ -128,6 +139,18 @@ impl WasmtimeHostClient {
         args: Vec<Value>,
         raw_bytes_args: HashMap<usize, Vec<u8>>,
     ) -> Result<HostCallReply, HostServiceError> {
+        if let Some(diagnostics) = self.diagnostics.as_ref() {
+            diagnostics.first_host_call();
+            diagnostics.first_guest_host_call();
+            if matches!(method.as_str(), "__kernel_stdio_write" | "process.fd_write")
+                && args
+                    .first()
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|fd| matches!(fd, 1 | 2))
+            {
+                diagnostics.first_output();
+            }
+        }
         if self.canceled() {
             return Err(HostServiceError::new(
                 "ECANCELED",
