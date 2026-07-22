@@ -1,7 +1,7 @@
 // Nightly: projects the complete registry command bundle.
 import { resolve } from "node:path";
+import claude from "@agentos-software/claude-code";
 import type { Fixture, ToolCall } from "@copilotkit/llmock";
-import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AgentOs } from "../src/index.js";
 import { getAgentOsKernel } from "../src/test/runtime.js";
@@ -10,8 +10,9 @@ import {
 	startLlmock,
 	stopLlmock,
 } from "./helpers/llmock-helper.js";
-import { REGISTRY_SOFTWARE } from "./helpers/registry-commands.js";
+import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 import { ALLOW_ALL_VM_PERMISSIONS } from "./helpers/permissions.js";
+import { REGISTRY_SOFTWARE } from "./helpers/registry-commands.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
 function hasToolResult(req: unknown): boolean {
@@ -133,14 +134,14 @@ describe("filesystem operations", () => {
 			loopbackExemptPorts: [mockPort],
 			mounts: moduleAccessMounts(MODULE_ACCESS_CWD),
 			permissions: ALLOW_ALL_VM_PERMISSIONS,
-			software: [...REGISTRY_SOFTWARE],
+			software: [...REGISTRY_SOFTWARE, claude],
 		});
 
 		let sessionId: string | undefined;
 		try {
-			sessionId = "main";
+			const requestedSessionId = "main";
 			await vm.openSession({
-				sessionId,
+				sessionId: requestedSessionId,
 				agent: "claude",
 				cwd: "/home/agentos",
 				permissionPolicy: "allow_all",
@@ -149,6 +150,7 @@ describe("filesystem operations", () => {
 					ANTHROPIC_BASE_URL: url,
 				},
 			});
+			sessionId = requestedSessionId;
 			const response = await vm.prompt({
 				sessionId,
 				content: [

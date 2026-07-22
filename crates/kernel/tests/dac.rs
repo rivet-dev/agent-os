@@ -230,6 +230,28 @@ fn creation_uses_effective_ids_umask_and_setgid_parent() {
 }
 
 #[test]
+fn process_file_creation_requires_the_immediate_parent_to_exist() {
+    let mut kernel = kernel();
+    kernel.mkdir("/owned", false).unwrap();
+    kernel.chown("/owned", 1000, 1000).unwrap();
+    kernel.chmod("/owned", 0o755).unwrap();
+    let alice = process_as(&mut kernel, 1000);
+
+    let error = kernel
+        .write_file_for_process(
+            DRIVER,
+            alice,
+            "/owned/missing/file",
+            b"data".to_vec(),
+            Some(0o666),
+        )
+        .expect_err("POSIX file creation must not create missing parent directories");
+
+    assert_eq!(error.code(), "ENOENT");
+    assert!(!kernel.exists("/owned/missing").unwrap());
+}
+
+#[test]
 fn sticky_directory_only_allows_root_directory_owner_or_file_owner() {
     let mut kernel = kernel();
     kernel.mkdir("/tmp-sticky", false).unwrap();
@@ -1054,6 +1076,64 @@ fn access_acl_enforces_named_entries_mask_and_chmod_synchronization() {
 }
 
 #[test]
+fn chmod_fchmod_and_access_acl_clear_setgid_outside_process_groups() {
+    let mut kernel = kernel();
+    kernel.mkdir("/work", false).unwrap();
+    kernel.chmod("/work", 0o777).unwrap();
+    kernel.write_file("/work/file", b"data".to_vec()).unwrap();
+    kernel.chown("/work/file", 1000, 4242).unwrap();
+    kernel.chmod("/work/file", 0o2755).unwrap();
+    let alice = process_as(&mut kernel, 1000);
+
+    kernel
+        .chmod_for_process(DRIVER, alice, "/work/file", 0o2777)
+        .unwrap();
+    assert_eq!(kernel.stat("/work/file").unwrap().mode & 0o2777, 0o0777);
+
+    kernel.chmod("/work/file", 0o2755).unwrap();
+    let fd = kernel
+        .fd_open(DRIVER, alice, "/work/file", O_RDONLY, None)
+        .unwrap();
+    kernel
+        .fd_chmod_for_process(DRIVER, alice, fd, 0o2777)
+        .unwrap();
+    assert_eq!(kernel.stat("/work/file").unwrap().mode & 0o2777, 0o0777);
+
+    kernel.chmod("/work/file", 0o2755).unwrap();
+    kernel
+        .set_xattr_for_process(
+            DRIVER,
+            alice,
+            "/work/file",
+            "system.posix_acl_access",
+            extended_acl(0o4, 0o7),
+            0,
+            true,
+        )
+        .unwrap();
+    assert_eq!(kernel.stat("/work/file").unwrap().mode & 0o2777, 0o0670);
+
+    kernel.chown("/work/file", 1000, 2000).unwrap();
+    kernel.chmod("/work/file", 0o2755).unwrap();
+    kernel
+        .set_xattr_for_process(
+            DRIVER,
+            alice,
+            "/work/file",
+            "system.posix_acl_access",
+            extended_acl(0o4, 0o7),
+            2,
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        kernel.stat("/work/file").unwrap().mode & 0o2777,
+        0o2670,
+        "an owner who belongs to the file group may preserve SGID"
+    );
+}
+
+#[test]
 fn default_acl_is_inherited_and_restricts_requested_mode_instead_of_using_umask() {
     let mut kernel = kernel();
     kernel.mkdir("/parent", false).unwrap();
@@ -1103,6 +1183,35 @@ fn malformed_acls_and_symlink_mutation_are_rejected() {
     kernel.write_file("/work/file", b"x".to_vec()).unwrap();
     kernel.symlink("/work/file", "/work/link").unwrap();
     let root = process_as(&mut kernel, 0);
+
+    let noncanonical_ids = acl(&[
+        (ACL_USER_OBJ, 0, 0),
+        (ACL_GROUP_OBJ, 0, 0),
+        (ACL_MASK, 0o4, 0),
+        (ACL_OTHER, 0, 0),
+    ]);
+    kernel
+        .set_xattr_for_process(
+            DRIVER,
+            root,
+            "/work/file",
+            "system.posix_acl_access",
+            noncanonical_ids,
+            0,
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        kernel
+            .get_xattr("/work/file", "system.posix_acl_access", true)
+            .unwrap(),
+        acl(&[
+            (ACL_USER_OBJ, 0, u32::MAX),
+            (ACL_GROUP_OBJ, 0, u32::MAX),
+            (ACL_MASK, 0o4, u32::MAX),
+            (ACL_OTHER, 0, u32::MAX),
+        ])
+    );
 
     assert_eq!(
         kernel

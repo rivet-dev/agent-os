@@ -83,6 +83,7 @@ const ALLOWED_WASM_PROCESS_SYNC_RPCS: &[&str] = &[
     "process.path_open_at",
     "process.path_mkdir_at",
     "process.path_stat_at",
+    "process.path_statfs_at",
     "process.path_chmod_at",
     "process.path_chown_at",
     "process.path_utimes_at",
@@ -131,6 +132,7 @@ const ALLOWED_WASM_PROCESS_SYNC_RPCS: &[&str] = &[
     "process.fd_chmod",
     "process.fd_chown",
     "process.fd_truncate",
+    "process.fd_utimes",
     "process.fd_set_flags",
     "process.fd_getfd",
     "process.fd_setfd",
@@ -747,6 +749,12 @@ pub(crate) fn javascript_sync_rpc_arg_u64(
         return Err(SidecarError::InvalidState(format!("{label} is required")));
     };
 
+    if let Some(text) = value.as_str() {
+        return text
+            .parse::<u64>()
+            .map_err(|_| SidecarError::InvalidState(format!("{label} must be a u64")));
+    }
+
     value
         .as_u64()
         .or_else(|| {
@@ -967,9 +975,9 @@ fn wasm_process_utime_spec(
     }
     let nanoseconds = nanoseconds
         .parse::<u64>()
-        .map_err(|_| SidecarError::host("EINVAL", "pathname timestamp must be u64 nanoseconds"))?;
+        .map_err(|_| SidecarError::host("EINVAL", "timestamp must be u64 nanoseconds"))?;
     let seconds = i64::try_from(nanoseconds / 1_000_000_000)
-        .map_err(|_| SidecarError::host("EINVAL", "pathname timestamp exceeds i64 seconds"))?;
+        .map_err(|_| SidecarError::host("EINVAL", "timestamp exceeds i64 seconds"))?;
     VirtualTimeSpec::new(seconds, (nanoseconds % 1_000_000_000) as u32)
         .map(VirtualUtimeSpec::Set)
         .map_err(|error| SidecarError::host("EINVAL", error.to_string()))
@@ -1376,7 +1384,11 @@ where
                         2,
                         "ITIMER_REAL interval microseconds",
                     )?;
-                    process.real_interval_timer.set(value_us, interval_us)
+                    let values = process.real_interval_timer.set(value_us, interval_us);
+                    if values.2 {
+                        process.kernel_handle.kill(libc::SIGALRM);
+                    }
+                    (values.0, values.1)
                 }
                 other => {
                     return Err(SidecarError::host("EINVAL", format!("invalid ITIMER_REAL operation {other}"
@@ -1791,6 +1803,9 @@ where
             let dir_fd =
                 javascript_sync_rpc_arg_u32(&request.args, 0, "path_remove_dir_at dir fd")?;
             let path = javascript_sync_rpc_arg_str(&request.args, 1, "path_remove_dir_at path")?;
+            kernel
+                .validate_remove_directory_pathname(path)
+                .map_err(kernel_error)?;
             let path = wasm_process_resolve_at_path(kernel, process.kernel_pid, dir_fd, path)?;
             kernel
                 .remove_dir_for_process(EXECUTION_DRIVER_NAME, process.kernel_pid, &path)
@@ -2111,13 +2126,7 @@ where
                                 json!({
                                     "name": entry.name,
                                     "ino": entry.ino.to_string(),
-                                    "filetype": if entry.is_directory {
-                                        agentos_kernel::fd_table::FILETYPE_DIRECTORY
-                                    } else if entry.is_symbolic_link {
-                                        agentos_kernel::fd_table::FILETYPE_SYMBOLIC_LINK
-                                    } else {
-                                        agentos_kernel::fd_table::FILETYPE_REGULAR_FILE
-                                    },
+                                    "filetype": entry.filetype,
                                     "next": index.saturating_add(1).to_string(),
                                 })
                             })
@@ -2198,6 +2207,26 @@ where
                 .map_err(|_| SidecarError::InvalidState("fd_truncate length must be u64".into()))?;
             kernel
                 .fd_truncate(EXECUTION_DRIVER_NAME, process.kernel_pid, fd, length)
+                .map(|()| Value::Null)
+                .map_err(kernel_error)
+        }
+        "process.fd_utimes" => {
+            let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "fd_utimes fd")?;
+            let atime_ns = javascript_sync_rpc_arg_str(&request.args, 1, "fd_utimes atime")?;
+            let mtime_ns = javascript_sync_rpc_arg_str(&request.args, 2, "fd_utimes mtime")?;
+            let fst_flags = javascript_sync_rpc_arg_u32(&request.args, 3, "fd_utimes flags")?;
+            let atime =
+                wasm_process_utime_spec(atime_ns, fst_flags & 1 != 0, fst_flags & 2 != 0)?;
+            let mtime =
+                wasm_process_utime_spec(mtime_ns, fst_flags & 4 != 0, fst_flags & 8 != 0)?;
+            kernel
+                .futimes(
+                    EXECUTION_DRIVER_NAME,
+                    process.kernel_pid,
+                    fd,
+                    atime,
+                    mtime,
+                )
                 .map(|()| Value::Null)
                 .map_err(kernel_error)
         }
@@ -6219,11 +6248,22 @@ mod error_code_tests {
     use super::{
         host_service_error_code, host_service_error_message,
         ignore_stale_javascript_sync_rpc_response, javascript_sync_rpc_arg_rlim,
-        process_resource_limit_kind, SidecarError,
+        javascript_sync_rpc_arg_u64, process_resource_limit_kind, SidecarError,
     };
     use agentos_kernel::kernel::ProcessResourceLimitKind;
     use agentos_runtime::accounting::{LimitError, ResourceClass};
     use serde_json::json;
+
+    #[test]
+    fn wasm_u64_arguments_accept_lossless_decimal_strings() {
+        assert_eq!(
+            javascript_sync_rpc_arg_u64(&[json!(u64::MAX.to_string())], 0, "offset")
+                .expect("decode maximum u64"),
+            u64::MAX
+        );
+        assert!(javascript_sync_rpc_arg_u64(&[json!("-1")], 0, "offset").is_err());
+        assert!(javascript_sync_rpc_arg_u64(&[json!("1.5")], 0, "offset").is_err());
+    }
 
     #[test]
     fn wasm_resource_limit_numbers_cover_the_linux_surface() {
@@ -6251,19 +6291,6 @@ mod error_code_tests {
                 .code(),
             Some("EINVAL")
         );
-    }
-
-    #[test]
-    fn guest_errno_code_accepts_trusted_agentos_prefixes() {
-        assert_eq!(
-            guest_errno_code("ERR_AGENTOS_NODE_SYNC_RPC: EACCES: permission denied on /foo"),
-            Some("EACCES")
-        );
-        assert_eq!(
-            guest_errno_code("ERR_AGENTOS_PYTHON_VFS_RPC: ENOENT: missing file"),
-            Some("ENOENT")
-        );
-        assert_eq!(guest_errno_code("EEXIST: already exists"), Some("EEXIST"));
     }
 
     #[test]

@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Wed, 22 Jul 2026 22:15:00 -0700
+Subject: [PATCH] fstests: port generic 360 and classify host-only cases
+
+Generate generic/360's long component with shell builtins so the test does
+not depend on Perl.  Classify generic/361 and generic/364 at their actual
+capability boundaries: nested loop-mounted filesystems and shared-memory
+pthreads respectively.  Neither facility exists in the maintained V8-WASM
+baseline; dedicated Wasmtime thread tests cover the latter.
+
+diff --git a/tests/generic/360 b/tests/generic/360
+index 7312d8c3..b18f925b 100755
+--- a/tests/generic/360
++++ b/tests/generic/360
+@@ -19,6 +19,7 @@ linkfile=$TEST_DIR/$seq.symlink
+ rm -f $linkfile
+ 
+-FNAME=$(perl -e 'print "a"x254')
++printf -v FNAME '%*s' 254 ''
++FNAME=${FNAME// /a}
+ 
+ # Create a symlink points to a very long path, so that the path could not be
+ # hold in inode
+diff --git a/tests/generic/361 b/tests/generic/361
+index 6475edc2..5ec11c43 100755
+--- a/tests/generic/361
++++ b/tests/generic/361
+@@ -13,4 +13,8 @@ _begin_fstest auto quick
+ 
++if [ "$FSTYP" = "agentos" ]; then
++	_notrun "This test requires guest loop block-device support."
++fi
++
+ # Override the default cleanup function.
+ _cleanup()
+ {
+diff --git a/tests/generic/364 b/tests/generic/364
+index a2cf27ec..31f8262b 100755
+--- a/tests/generic/364
++++ b/tests/generic/364
+@@ -11,4 +11,8 @@ _begin_fstest auto quick
+ 
++if [ "$FSTYP" = "agentos" ]; then
++	_notrun "This test requires shared-memory pthread support."
++fi
++
+ _require_test
+ _require_odirect
+ _require_test_program dio-write-fsync-same-fd

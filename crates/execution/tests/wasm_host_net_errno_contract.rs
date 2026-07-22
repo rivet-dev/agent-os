@@ -47,7 +47,7 @@ fn host_net_fd_read_keeps_guest_faults_separate_from_socket_errors() {
     );
     assert!(
         guest_marshal.contains("writeBytesToGuestIovs(iovs, iovsLen, bytes)")
-            && guest_marshal.contains("catch {")
+            && guest_marshal.contains("catch (error) {")
             && guest_marshal.contains("return WASI_ERRNO_FAULT;"),
         "host-net read guest-memory marshalling must return EFAULT"
     );
@@ -127,7 +127,7 @@ fn host_net_socket_families_match_the_owned_wasi_libc_abi() {
         source.contains("const HOST_NET_AF_INET = 1;")
             && source.contains("const HOST_NET_AF_INET6 = 2;")
             && source.contains("const HOST_NET_AF_UNIX = 3;"),
-        "host_net domain values must match the AgentOS wasi-libc p1 ABI"
+        "host_net domain values must match the agentOS wasi-libc p1 ABI"
     );
 
     let socket_import = between(&source, "  net_socket(", "  net_set_nonblock(");

@@ -294,6 +294,8 @@ mod host_dir {
             let host_dir = temp_dir("agentos-native-sidecar-filesystem-host-dir-futimes");
             let tracked_file = host_dir.join("tracked.txt");
             fs::write(&tracked_file, b"tracked").expect("seed tracked file");
+            fs::set_permissions(&tracked_file, fs::Permissions::from_mode(0o666))
+                .expect("make tracked file writable by the guest fixture user");
 
             let mut config = KernelVmConfig::new("vm-host-dir-futimes");
             config.permissions = Permissions::allow_all();
@@ -357,6 +359,7 @@ mod kernel_authority {
     use serde_json::json;
     use std::collections::HashMap;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
     use crate::support::{
@@ -445,26 +448,7 @@ mod kernel_authority {
     }
 
     fn registry_command_root() -> Option<String> {
-        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .expect("canonicalize repo root");
-        let copied = repo_root.join("software/coreutils/wasm");
-        if copied.exists() {
-            return Some(copied.to_string_lossy().into_owned());
-        }
-
-        let fallback = repo_root.join("toolchain/target/wasm32-wasip1/release/commands");
-        if fallback.exists() {
-            return Some(fallback.to_string_lossy().into_owned());
-        }
-
-        eprintln!(
-            "registry WASM commands are required for filesystem tests: expected {} or {}",
-            copied.display(),
-            fallback.display()
-        );
-        None
+        support::registry_wasm_command_root().map(|path| path.to_string_lossy().into_owned())
     }
 
     fn guest_filesystem_call(
@@ -810,6 +794,8 @@ mod kernel_authority {
         }
 
         let host_dir = temp_dir("agentos-native-sidecar-cross-mount-rename-js");
+        fs::set_permissions(&host_dir, fs::Permissions::from_mode(0o777))
+            .expect("make mapped fixture directory writable by the guest user");
         fs::write(host_dir.join("source.txt"), "mapped-source\n").expect("seed mapped file");
 
         let mut sidecar = create_test_sidecar();

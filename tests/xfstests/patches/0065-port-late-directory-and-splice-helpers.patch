@@ -1,0 +1,21 @@
+diff --git a/src/t_readdir_3.c b/src/t_readdir_3.c
+index a9a75fc5..00000001 100644
+--- a/src/t_readdir_3.c
++++ b/src/t_readdir_3.c
+@@ -12,7 +12,6 @@
+ #include <stdint.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+-#include <sys/syscall.h>
+ 
+ /* Our own declaration taken from the kernel since glibc does not have it... */
+ struct linux_dirent64 {
+@@ -84,7 +83,7 @@ static void kernel_getentry(struct dirent *entry)
+ 	struct linux_dirent64 *lentry = (struct linux_dirent64 *)dirbuf;
+ 	int ret;
+ 
+-	ret = syscall(SYS_getdents64, dfd, lentry, sizeof(dirbuf));
++	ret = agentos_getdents64(dfd, lentry, sizeof(dirbuf));
+ 	if (ret < 0) {
+ 		if (ignore_error)
+ 			return;

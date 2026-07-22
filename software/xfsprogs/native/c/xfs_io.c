@@ -1,4 +1,6 @@
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -17,18 +19,9 @@
 #define DIRECT_IO_ALIGNMENT 512
 
 #ifdef __wasm__
-__attribute__((import_module("host_fs"), import_name("fd_punch_hole")))
-uint32_t agentos_fd_punch_hole(uint32_t fd, uint64_t offset, uint64_t length);
-__attribute__((import_module("host_fs"), import_name("fd_zero_range")))
-uint32_t agentos_fd_zero_range(uint32_t fd, uint64_t offset, uint64_t length,
-                              uint32_t keep_size);
 __attribute__((import_module("host_fs"), import_name("fd_fiemap")))
 uint32_t agentos_fd_fiemap(uint32_t fd, uint32_t index, uint64_t *start, uint64_t *end,
                           uint32_t *flags);
-__attribute__((import_module("host_fs"), import_name("fd_insert_range")))
-uint32_t agentos_fd_insert_range(uint32_t fd, uint64_t offset, uint64_t length);
-__attribute__((import_module("host_fs"), import_name("fd_collapse_range")))
-uint32_t agentos_fd_collapse_range(uint32_t fd, uint64_t offset, uint64_t length);
 #endif
 
 struct options {
@@ -42,6 +35,7 @@ struct options {
     int truncate;
     int sync;
     int tmpfile;
+    mode_t mode;
 };
 
 struct mapping_state {
@@ -85,14 +79,16 @@ static int split_words(char *command, char **words, int capacity) {
 
 static int parse_pattern(const char *text, unsigned char *pattern) {
     char *end = NULL;
+    errno = 0;
     unsigned long value = strtoul(text, &end, 0);
-    if (!text || !*text || !end || *end || value > 255) return -1;
+    if (!text || !*text || !end || *end || errno == ERANGE) return -1;
     *pattern = (unsigned char)value;
     return 0;
 }
 
 static int command_pwrite(int fd, int argc, char **argv, int direct) {
     unsigned char pattern = 0xcd;
+    const char *input_path = NULL;
     uint64_t block_size = IO_CHUNK;
     int quiet = 0;
     int index = 1;
@@ -108,6 +104,9 @@ static int command_pwrite(int fd, int argc, char **argv, int direct) {
                 fprintf(stderr, "pwrite: invalid block size\n");
                 return 1;
             }
+            index += 2;
+        } else if (!strcmp(argv[index], "-i") && index + 1 < argc) {
+            input_path = argv[index + 1];
             index += 2;
         } else if (!strcmp(argv[index], "-q")) {
             quiet = 1;
@@ -147,13 +146,44 @@ static int command_pwrite(int fd, int argc, char **argv, int direct) {
         buffer = malloc(capacity);
     }
     if (!buffer) { perror("pwrite"); return 1; }
-    memset(buffer, pattern, capacity);
+    int input_fd = -1;
+    if (input_path) {
+        input_fd = open(input_path, O_RDONLY);
+        if (input_fd < 0) {
+            perror(input_path);
+            free(buffer);
+            return 1;
+        }
+    } else {
+        memset(buffer, pattern, capacity);
+    }
     uint64_t written = 0;
     while (written < length) {
         size_t chunk = (size_t)((length - written) < capacity ? (length - written) : capacity);
+        if (input_fd >= 0) {
+            ssize_t read_result = pread(input_fd, buffer, chunk, (off_t)written);
+            if (read_result < 0) {
+                perror("pwrite input");
+                close(input_fd);
+                free(buffer);
+                return 1;
+            }
+            if (read_result == 0) break;
+            chunk = (size_t)read_result;
+        }
         ssize_t result = pwrite(fd, buffer, chunk, (off_t)(offset + written));
-        if (result <= 0) { perror("pwrite"); free(buffer); return 1; }
+        if (result <= 0) {
+            perror("pwrite");
+            if (input_fd >= 0) close(input_fd);
+            free(buffer);
+            return 1;
+        }
         written += (uint64_t)result;
+    }
+    if (input_fd >= 0 && close(input_fd) != 0) {
+        perror("pwrite input close");
+        free(buffer);
+        return 1;
     }
     free(buffer);
     if (!quiet) {
@@ -210,7 +240,7 @@ static int command_pread(int fd, int argc, char **argv, int direct) {
         ssize_t result = pread(fd, buffer, chunk, (off_t)(offset + read_bytes));
         if (result < 0) { perror("pread"); free(buffer); return 1; }
         if (result == 0) break;
-        if (verbose && !quiet) {
+        if (verbose) {
             for (size_t row = 0; row < (size_t)result; row += 16) {
                 size_t row_length = (size_t)result - row;
                 if (row_length > 16) row_length = 16;
@@ -236,6 +266,93 @@ static int command_pread(int fd, int argc, char **argv, int direct) {
         printf("read %" PRIu64 "/%" PRIu64 " bytes at offset %" PRIu64 "\n", read_bytes, length, offset);
         printf("%" PRIu64 " bytes, 1 ops; 0.0000 sec (%" PRIu64 " bytes/sec and 1 ops/sec)\n",
                read_bytes, read_bytes);
+    }
+    return 0;
+}
+
+static int command_sendfile(int output_fd, int argc, char **argv) {
+    const char *input_path = NULL;
+    int quiet = 0;
+    int index = 1;
+    while (index < argc && argv[index][0] == '-') {
+        if (!strcmp(argv[index], "-i") && index + 1 < argc) {
+            input_path = argv[index + 1];
+            index += 2;
+        } else if (!strcmp(argv[index], "-q")) {
+            quiet = 1;
+            index++;
+        } else {
+            fprintf(stderr, "sendfile: Operation not supported\n");
+            return 1;
+        }
+    }
+    uint64_t input_offset, length;
+    if (!input_path || index + 2 != argc ||
+        parse_size(argv[index], &input_offset) != 0 ||
+        parse_size(argv[index + 1], &length) != 0 ||
+        input_offset > INT64_MAX || length > INT64_MAX) {
+        fprintf(stderr, "sendfile: Invalid argument\n");
+        return 1;
+    }
+
+    int input_fd = open(input_path, O_RDONLY);
+    if (input_fd < 0) {
+        perror("sendfile");
+        return 1;
+    }
+    size_t capacity = length < IO_CHUNK ? (size_t)length : IO_CHUNK;
+    if (capacity == 0) capacity = 1;
+    unsigned char *buffer = malloc(capacity);
+    if (!buffer) {
+        perror("sendfile");
+        close(input_fd);
+        return 1;
+    }
+
+    uint64_t copied = 0;
+    while (copied < length) {
+        size_t requested = (size_t)((length - copied) < capacity ?
+                                    (length - copied) : capacity);
+        ssize_t read_result;
+        do {
+            read_result = pread(input_fd, buffer, requested,
+                                (off_t)(input_offset + copied));
+        } while (read_result < 0 && errno == EINTR);
+        if (read_result < 0) {
+            perror("sendfile");
+            free(buffer);
+            close(input_fd);
+            return 1;
+        }
+        if (read_result == 0) break;
+
+        size_t written = 0;
+        while (written < (size_t)read_result) {
+            ssize_t write_result;
+            do {
+                write_result = write(output_fd, buffer + written,
+                                     (size_t)read_result - written);
+            } while (write_result < 0 && errno == EINTR);
+            if (write_result <= 0) {
+                if (write_result == 0) errno = EIO;
+                perror("sendfile");
+                free(buffer);
+                close(input_fd);
+                return 1;
+            }
+            written += (size_t)write_result;
+        }
+        copied += (uint64_t)read_result;
+    }
+
+    free(buffer);
+    if (close(input_fd) != 0) {
+        perror("sendfile");
+        return 1;
+    }
+    if (!quiet) {
+        printf("sent %" PRIu64 "/%" PRIu64 " bytes at offset %" PRIu64 "\n",
+               copied, length, input_offset);
     }
     return 0;
 }
@@ -270,14 +387,9 @@ static int command_fpunch(int fd, int argc, char **argv) {
         fprintf(stderr, "fpunch: Invalid argument\n");
         return 1;
     }
-    uint32_t error;
-#ifdef __wasm__
-    error = agentos_fd_punch_hole((uint32_t)fd, offset, length);
-#else
-    error = fallocate(fd, 0x01 | 0x02, (off_t)offset, (off_t)length) == 0
+    uint32_t error = fallocate(fd, 0x01 | 0x02, (off_t)offset, (off_t)length) == 0
         ? 0
         : (uint32_t)errno;
-#endif
     if (error != 0) {
         errno = (int)error;
         perror("fpunch");
@@ -300,15 +412,10 @@ static int command_fzero(int fd, int argc, char **argv) {
     uint64_t offset, length;
     char *range[] = {argv[0], argv[index], argv[index + 1]};
     if (parse_range_command("fzero", 3, range, &offset, &length) != 0) return 1;
-    uint32_t error;
-#ifdef __wasm__
-    error = agentos_fd_zero_range((uint32_t)fd, offset, length, (uint32_t)keep_size);
-#else
     int mode = 0x10 | (keep_size ? 0x01 : 0);
-    error = fallocate(fd, mode, (off_t)offset, (off_t)length) == 0
+    uint32_t error = fallocate(fd, mode, (off_t)offset, (off_t)length) == 0
         ? 0
         : (uint32_t)errno;
-#endif
     if (error != 0) {
         errno = (int)error;
         perror("fzero");
@@ -330,7 +437,11 @@ static int parse_range_command(const char *command, int argc, char **argv,
 
 static int command_falloc(int fd, int argc, char **argv) {
     int index = 1;
-    if (index < argc && !strcmp(argv[index], "-k")) index++;
+    int keep_size = 0;
+    if (index < argc && !strcmp(argv[index], "-k")) {
+        keep_size = 1;
+        index++;
+    }
     if (index + 2 != argc) {
         fprintf(stderr, "falloc: Invalid argument\n");
         return 1;
@@ -338,16 +449,9 @@ static int command_falloc(int fd, int argc, char **argv) {
     uint64_t offset, length;
     char *range[] = {argv[0], argv[index], argv[index + 1]};
     if (parse_range_command("falloc", 3, range, &offset, &length) != 0) return 1;
-    struct stat before;
-    if (fstat(fd, &before) != 0) { perror("falloc"); return 1; }
-    int error = posix_fallocate(fd, (off_t)offset, (off_t)length);
-    if (error != 0) {
-        errno = error;
-        perror("falloc");
-        return 1;
-    }
-    if (index == 2 && ftruncate(fd, before.st_size) != 0) {
-        perror("falloc");
+    int mode = keep_size ? 0x01 : 0;
+    if (fallocate(fd, mode, (off_t)offset, (off_t)length) != 0) {
+        perror("fallocate");
         return 1;
     }
     return 0;
@@ -357,20 +461,15 @@ static int command_shift_range(int fd, int argc, char **argv, int insert) {
     const char *command = insert ? "finsert" : "fcollapse";
     uint64_t offset, length;
     if (parse_range_command(command, argc, argv, &offset, &length) != 0) return 1;
-    uint32_t error;
-#ifdef __wasm__
-    error = insert
-        ? agentos_fd_insert_range((uint32_t)fd, offset, length)
-        : agentos_fd_collapse_range((uint32_t)fd, offset, length);
-#else
     int mode = insert ? 0x20 : 0x08;
-    error = fallocate(fd, mode, (off_t)offset, (off_t)length) == 0
+    uint32_t error = fallocate(fd, mode, (off_t)offset, (off_t)length) == 0
         ? 0
         : (uint32_t)errno;
-#endif
     if (error != 0) {
         errno = (int)error;
-        perror(command);
+        // Upstream xfs_io reports the underlying syscall name for both
+        // finsert and fcollapse failures.
+        perror("fallocate");
         return 1;
     }
     return 0;
@@ -457,7 +556,7 @@ static int command_fadvise(int fd, int argc, char **argv) {
         return 1;
     }
 #ifdef __wasm__
-    // AgentOS VFS reads are authoritative and do not retain a guest-visible page cache.
+    // agentOS VFS reads are authoritative and do not retain a guest-visible page cache.
     (void)fd;
     (void)offset;
     (void)length;
@@ -700,8 +799,9 @@ static int command_munmap(int argc, struct mapping_state *mapping) {
 }
 
 static int print_help(const char *command) {
-    if (!strcmp(command, "pwrite")) puts(" pwrite [-q] [-S pattern] offset len -- writes a range");
+    if (!strcmp(command, "pwrite")) puts(" pwrite [-q] [-S pattern] [-i infile] offset len -- writes a range");
     else if (!strcmp(command, "pread")) puts(" pread [-q] offset len -- reads a range");
+    else if (!strcmp(command, "sendfile")) puts(" sendfile -i infile [-q] offset len -- copies a file range");
     else if (!strcmp(command, "truncate")) puts(" truncate size -- changes file size");
     else if (!strcmp(command, "falloc")) puts(" falloc [-k] offset len -- allocates a range");
     else if (!strcmp(command, "fpunch")) puts(" fpunch offset len -- deallocates a range");
@@ -741,9 +841,11 @@ static int execute_command(int *fd, const char *path, const char *text, int dire
         else if (close(*fd) != 0) status = (perror("close"), 1);
         else { *fd = -1; status = 0; }
     }
+    else if (!strcmp(words[0], "help")) status = count == 2 ? print_help(words[1]) : 1;
     else if (*fd < 0) { fprintf(stderr, "%s: file is closed\n", words[0]); status = 1; }
     else if (!strcmp(words[0], "pwrite")) status = command_pwrite(*fd, count, words, direct);
     else if (!strcmp(words[0], "pread")) status = command_pread(*fd, count, words, direct);
+    else if (!strcmp(words[0], "sendfile")) status = command_sendfile(*fd, count, words);
     else if (!strcmp(words[0], "truncate"))
         status = command_truncate(*fd, count, words, mapping);
     else if (!strcmp(words[0], "falloc")) status = command_falloc(*fd, count, words);
@@ -772,7 +874,6 @@ static int execute_command(int *fd, const char *path, const char *text, int dire
         status = command_msync(count, words, mapping);
     else if (!strcmp(words[0], "munmap") || !strcmp(words[0], "mu"))
         status = command_munmap(count, mapping);
-    else if (!strcmp(words[0], "help")) status = count == 2 ? print_help(words[1]) : 1;
     else if (!strcmp(words[0], "quit")) status = 0;
     else { fprintf(stderr, "%s: command not found\n", words[0]); status = 1; }
     free(copy);
@@ -781,45 +882,87 @@ static int execute_command(int *fd, const char *path, const char *text, int dire
 
 static int parse_options(int argc, char **argv, struct options *options) {
     for (int i = 1; i < argc; i++) {
-        if ((!strcmp(argv[i], "-c") || !strcmp(argv[i], "-C")) && i + 1 < argc) {
-            if (options->command_count == MAX_COMMANDS) return -1;
-            options->commands[options->command_count++] = argv[++i];
-        } else if (!strcmp(argv[i], "-f") || !strcmp(argv[i], "-F")) options->create = 1;
-        else if (!strcmp(argv[i], "-Tr") || !strcmp(argv[i], "-rT")) {
-            options->tmpfile = 1;
-            options->read_only = 1;
+        if (argv[i][0] != '-' || argv[i][1] == '\0') {
+            options->path = argv[i];
+            continue;
         }
-        else if (!strcmp(argv[i], "-r")) options->read_only = 1;
-        else if (!strcmp(argv[i], "-d")) options->direct = 1;
-        else if (!strcmp(argv[i], "-a")) options->append = 1;
-        else if (!strcmp(argv[i], "-t")) options->truncate = 1;
-        else if (!strcmp(argv[i], "-s")) options->sync = 1;
-        else if (!strcmp(argv[i], "-T")) options->tmpfile = 1;
-        else if (argv[i][0] == '-') continue;
-        else options->path = argv[i];
+
+        const char *option = argv[i];
+        for (size_t flag_index = 1; option[flag_index] != '\0'; flag_index++) {
+            switch (option[flag_index]) {
+            case 'c':
+            case 'C': {
+                if (options->command_count == MAX_COMMANDS) return -1;
+                const char *command = option[flag_index + 1] != '\0'
+                    ? &option[flag_index + 1]
+                    : (i + 1 < argc ? argv[++i] : NULL);
+                if (!command) return -1;
+                options->commands[options->command_count++] = command;
+                flag_index = strlen(option) - 1;
+                break;
+            }
+            case 'f':
+            case 'F': options->create = 1; break;
+            case 'r': options->read_only = 1; break;
+            case 'd': options->direct = 1; break;
+            case 'a': options->append = 1; break;
+            case 't': options->truncate = 1; break;
+            case 's': options->sync = 1; break;
+            case 'T': options->tmpfile = 1; break;
+            case 'm': {
+                const char *mode_text = option[flag_index + 1] != '\0'
+                    ? &option[flag_index + 1]
+                    : (i + 1 < argc ? argv[++i] : NULL);
+                if (!mode_text || !*mode_text) return -1;
+                char *end = NULL;
+                errno = 0;
+                unsigned long mode = strtoul(mode_text, &end, 8);
+                if (errno || end == mode_text || *end || mode > 07777) return -1;
+                options->mode = (mode_t)mode;
+                flag_index = strlen(option) - 1;
+                break;
+            }
+            default: break;
+            }
+        }
     }
-    return options->path && options->command_count ? 0 : -1;
+    if (!options->command_count) return -1;
+    if (options->path) return 0;
+
+    /* Upstream xfs_io permits global help queries without opening a file. */
+    for (size_t i = 0; i < options->command_count; i++) {
+        const char *command = options->commands[i];
+        while (*command == ' ' || *command == '\t') command++;
+        if (strncmp(command, "help", 4) != 0 ||
+            (command[4] != '\0' && command[4] != ' ' && command[4] != '\t'))
+            return -1;
+    }
+    return 0;
 }
 
 int main(int argc, char **argv) {
-    struct options options = {0};
+    struct options options = {.mode = 0600};
     if (parse_options(argc, argv, &options) != 0) {
         fprintf(stderr, "usage: xfs_io [-f] -c command file\n");
         return 1;
     }
-    int flags = options.read_only ? O_RDONLY : O_RDWR;
-    if (options.create) flags |= O_CREAT;
-    if (options.direct) flags |= O_DIRECT;
-    if (options.append) flags |= O_APPEND;
-    if (options.truncate) flags |= O_TRUNC;
-    if (options.sync) flags |= O_SYNC;
-    if (options.tmpfile) flags |= O_TMPFILE;
-    int fd = open(options.path, flags, 0600);
-    if (fd < 0) { perror(options.path); return 1; }
+    int fd = -1;
+    if (options.path) {
+        int flags = options.read_only ? O_RDONLY : O_RDWR;
+        if (options.create) flags |= O_CREAT;
+        if (options.direct) flags |= O_DIRECT;
+        if (options.append) flags |= O_APPEND;
+        if (options.truncate) flags |= O_TRUNC;
+        if (options.sync) flags |= O_SYNC;
+        if (options.tmpfile) flags |= O_TMPFILE;
+        fd = open(options.path, flags, options.mode);
+        if (fd < 0) { perror(options.path); return 1; }
+    }
     int status = 0;
     struct mapping_state mapping = {0};
     for (size_t i = 0; i < options.command_count; i++) {
-        if (execute_command(&fd, options.path, options.commands[i], options.direct, &mapping) != 0)
+        if (execute_command(&fd, options.path ? options.path : "", options.commands[i],
+                            options.direct, &mapping) != 0)
             status = 1;
     }
     if (mapping.address && munmap(mapping.address, (size_t)mapping.length) != 0) {

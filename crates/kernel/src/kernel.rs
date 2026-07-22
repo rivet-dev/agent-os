@@ -12,14 +12,15 @@ use crate::fd_table::{
     AnonymousFile, AnonymousFileUsage, DirectorySnapshotEntry, FdEntry, FdStat, FdTableError,
     FdTableManager, FileDescription, FileLockManager, FileLockTarget, FlockOperation,
     ProcessFdTable, RecordLock, RecordLockType, SharedAnonymousFile, TransferredFd, FD_CLOEXEC,
-    FILETYPE_CHARACTER_DEVICE, FILETYPE_DIRECTORY, FILETYPE_PIPE, FILETYPE_REGULAR_FILE,
-    FILETYPE_SOCKET_DGRAM, FILETYPE_SOCKET_STREAM, FILETYPE_SYMBOLIC_LINK, F_DUPFD, F_SETFD,
-    O_APPEND, O_CREAT, O_DIRECT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_RDWR,
-    O_TRUNC, O_WRONLY, WASI_PREOPEN_READ_RIGHTS_BASE, WASI_PREOPEN_READ_RIGHTS_INHERITING,
-    WASI_PREOPEN_READ_WRITE_RIGHTS_BASE, WASI_PREOPEN_READ_WRITE_RIGHTS_INHERITING,
-    WASI_PREOPEN_WRITE_RIGHTS_BASE, WASI_PREOPEN_WRITE_RIGHTS_INHERITING, WASI_RIGHT_FD_ALLOCATE,
-    WASI_RIGHT_FD_DATASYNC, WASI_RIGHT_FD_FILESTAT_SET_SIZE, WASI_RIGHT_FD_FILESTAT_SET_TIMES,
-    WASI_RIGHT_FD_READ, WASI_RIGHT_FD_SYNC, WASI_RIGHT_FD_WRITE, WASI_RIGHT_PATH_LINK_SOURCE,
+    FILETYPE_BLOCK_DEVICE, FILETYPE_CHARACTER_DEVICE, FILETYPE_DIRECTORY, FILETYPE_PIPE,
+    FILETYPE_REGULAR_FILE, FILETYPE_SOCKET_DGRAM, FILETYPE_SOCKET_STREAM, FILETYPE_SYMBOLIC_LINK,
+    F_DUPFD, F_SETFD, O_APPEND, O_CREAT, O_DIRECT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK,
+    O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, WASI_PREOPEN_READ_RIGHTS_BASE,
+    WASI_PREOPEN_READ_RIGHTS_INHERITING, WASI_PREOPEN_READ_WRITE_RIGHTS_BASE,
+    WASI_PREOPEN_READ_WRITE_RIGHTS_INHERITING, WASI_PREOPEN_WRITE_RIGHTS_BASE,
+    WASI_PREOPEN_WRITE_RIGHTS_INHERITING, WASI_RIGHT_FD_ALLOCATE, WASI_RIGHT_FD_DATASYNC,
+    WASI_RIGHT_FD_FILESTAT_SET_SIZE, WASI_RIGHT_FD_FILESTAT_SET_TIMES, WASI_RIGHT_FD_READ,
+    WASI_RIGHT_FD_SYNC, WASI_RIGHT_FD_WRITE, WASI_RIGHT_PATH_LINK_SOURCE,
     WASI_RIGHT_PATH_LINK_TARGET, WASI_RIGHT_PATH_OPEN, WASI_RIGHT_PATH_REMOVE_DIRECTORY,
     WASI_RIGHT_PATH_RENAME_SOURCE, WASI_RIGHT_PATH_RENAME_TARGET, WASI_RIGHT_PATH_SYMLINK,
     WASI_RIGHT_PATH_UNLINK_FILE,
@@ -42,7 +43,7 @@ use crate::process_runtime::{
 use crate::process_table::{
     ProcessContext, ProcessInfo, ProcessPermissionTier, ProcessStatus, ProcessTable,
     ProcessTableError, ProcessWaitResult, SigmaskHow, SignalAction, SignalDelivery, SignalSet,
-    DEFAULT_PROCESS_UMASK, SIGPIPE, SIGWINCH,
+    DEFAULT_PROCESS_UMASK, SIGPIPE, SIGWINCH, SIGXFSZ,
 };
 use crate::pty::{
     LineDisciplineConfig, PartialTermios, PtyError, PtyManager, PtyWindowSize, Termios,
@@ -89,6 +90,8 @@ pub use crate::process_table::{
 pub const SEEK_SET: u8 = 0;
 pub const SEEK_CUR: u8 = 1;
 pub const SEEK_END: u8 = 2;
+pub const SEEK_DATA: u8 = 3;
+pub const SEEK_HOLE: u8 = 4;
 const EXECUTABLE_PERMISSION_BITS: u32 = 0o111;
 const SHEBANG_LINE_MAX_BYTES: usize = 256;
 const MAX_EXEC_INTERPRETER_DEPTH: usize = 4;
@@ -474,8 +477,7 @@ const WASI_NAMESPACE_DESTRUCTIVE_RIGHTS: u64 = WASI_RIGHT_PATH_LINK_SOURCE
 pub struct ProcessFdDirEntry {
     pub name: String,
     pub ino: u64,
-    pub is_directory: bool,
-    pub is_symbolic_link: bool,
+    pub filetype: u8,
 }
 
 /// The canonical VFS object selected by Linux-style AF_UNIX pathname lookup.
@@ -969,6 +971,9 @@ fn prune_fd_sockets(sockets: &SocketTable, fd_sockets: &FdSocketRegistry) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProcNode {
     RootDir,
+    SysDir,
+    SysVmDir,
+    DropCachesFile,
     MountsFile,
     CpuInfoFile,
     MemInfoFile,
@@ -1809,6 +1814,46 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.check_dac_access(pid, path, DAC_READ)?;
         self.reject_unix_socket_data_path(path, "ENXIO")?;
         self.resources.check_pread_length(length)?;
+        if is_proc_path(path) {
+            let proc_node = self
+                .resolve_proc_node(path, Some(pid))?
+                .ok_or_else(|| proc_not_found_error(path))?;
+            match proc_node {
+                ProcNode::PidFdLink {
+                    pid: target_pid,
+                    fd,
+                } if target_pid == pid => {
+                    // A process reading its own proc-fd link addresses the
+                    // live open description. This must keep working after the
+                    // backing pathname is unlinked and must not advance the
+                    // description cursor.
+                    return self.fd_pread(requester_driver, pid, fd, length, offset);
+                }
+                node @ (ProcNode::SelfLink { .. }
+                | ProcNode::PidCwdLink { .. }
+                | ProcNode::PidFdLink { .. }) => {
+                    let target = self.proc_symlink_target(&node)?;
+                    return self.pread_file_for_process(
+                        requester_driver,
+                        pid,
+                        &target,
+                        offset,
+                        length,
+                    );
+                }
+                node => {
+                    let bytes = self.proc_read_file(Some(pid), &node)?;
+                    let start = usize::try_from(offset)
+                        .map_err(|_| KernelError::new("EINVAL", "pread offset out of range"))?;
+                    let end = start.saturating_add(length).min(bytes.len());
+                    return Ok(if start >= bytes.len() {
+                        Vec::new()
+                    } else {
+                        bytes[start..end].to_vec()
+                    });
+                }
+            }
+        }
         Ok(VirtualFileSystem::pread(
             &mut self.filesystem,
             path,
@@ -2163,17 +2208,23 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     ) -> KernelResult<()> {
         self.assert_not_terminated()?;
         self.assert_driver_owns(requester_driver, pid)?;
+        let content = content.into();
+        if let Some(node) = self.resolve_proc_node(path, Some(pid))? {
+            self.resources.check_fd_write_size(content.len())?;
+            self.proc_write_file(pid, &node, &content)?;
+            return Ok(());
+        }
         let existed = self.exists_internal(Some(pid), path)?;
         if existed {
             self.check_dac_access(pid, path, DAC_WRITE)?;
         } else {
             self.check_dac_parent_access(pid, path, DAC_WRITE | DAC_EXECUTE)?;
         }
-        let content = content.into();
         let new_size = content.len() as u64;
         self.reject_read_only_resolved_write_path(path)?;
         self.reject_unix_socket_data_path(path, "ENXIO")?;
         let existing = self.storage_stat(path)?;
+        self.check_process_file_size_limit(pid, new_size)?;
         self.check_write_file_limits_with_existing(path, existing.as_ref(), new_size)?;
         VirtualFileSystem::write_file_with_mode(&mut self.filesystem, path, content, mode)
             .map_err(|error| {
@@ -2285,6 +2336,13 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             return Err(KernelError::new(
                 "EOPNOTSUPP",
                 format!("unsupported special inode type for {path}"),
+            ));
+        }
+        self.check_dac_traversal(pid, path)?;
+        if self.entry_exists_no_follow(Some(pid), path)? {
+            return Err(KernelError::new(
+                "EEXIST",
+                format!("file already exists: {path}"),
             ));
         }
         self.check_dac_parent_access(pid, path, DAC_WRITE | DAC_EXECUTE)?;
@@ -2421,6 +2479,22 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.check_dac_traversal(pid, path)?;
         self.stat_internal(Some(pid), path)?;
 
+        self.filesystem_stats_for_resolved_path(path)
+    }
+
+    pub fn filesystem_stats_for_fd_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+    ) -> KernelResult<FileSystemStats> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        let path = self.fd_path(requester_driver, pid, fd)?;
+        self.filesystem_stats_for_resolved_path(&path)
+    }
+
+    fn filesystem_stats_for_resolved_path(&mut self, path: &str) -> KernelResult<FileSystemStats> {
         let max_bytes = self.resource_limits().max_filesystem_bytes;
         let max_inodes = self.resource_limits().max_inode_count;
         let filesystem = self.raw_filesystem_mut();
@@ -2672,6 +2746,28 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.remove_file(path)
     }
 
+    /// Validate the caller's unnormalized pathname for rmdir(2). Normalizing a
+    /// final `.` or `..` first can turn a required error into removal of the
+    /// referenced directory (for example, `/workspace/.` -> `/workspace`).
+    pub fn validate_remove_directory_pathname(&self, path: &str) -> KernelResult<()> {
+        let final_component = path
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or_default();
+        match final_component {
+            "." => Err(KernelError::new(
+                "EINVAL",
+                format!("cannot remove '.' directory entry: {path}"),
+            )),
+            ".." => Err(KernelError::new(
+                "ENOTEMPTY",
+                format!("cannot remove '..' directory entry: {path}"),
+            )),
+            _ => Ok(()),
+        }
+    }
+
     pub fn remove_dir(&mut self, path: &str) -> KernelResult<()> {
         self.assert_not_terminated()?;
         self.reject_read_only_entry_write_path(path)?;
@@ -2807,6 +2903,12 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
     pub fn symlink(&mut self, target: &str, link_path: &str) -> KernelResult<()> {
         self.assert_not_terminated()?;
+        if self.entry_exists_no_follow(None, link_path)? {
+            return Err(KernelError::new(
+                "EEXIST",
+                format!("file already exists: {link_path}"),
+            ));
+        }
         if is_proc_path(target) {
             self.filesystem
                 .check_virtual_path(FsOperation::Write, link_path)
@@ -2857,12 +2959,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 format!("chmod requires ownership of {path}"),
             ));
         }
-        if identity.euid != 0
-            && identity.egid != stat.gid
-            && !identity.supplementary_gids.contains(&stat.gid)
-        {
-            mode &= !0o2000;
-        }
+        mode = mode_after_chmod_group_check(mode, &identity, stat.gid);
         self.chmod(path, mode)
     }
 
@@ -2928,7 +3025,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
         self.filesystem
             .chown_spec(path, next_uid, next_gid, follow_symlinks)?;
-        if let Some(mode) = linux_chown_cleared_mode(&stat) {
+        if let Some(mode) = linux_cleared_setid_mode(&stat) {
             self.filesystem.chmod(path, mode)?;
         }
         Ok(())
@@ -3068,9 +3165,14 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         } else {
             None
         };
-        self.set_xattr(path, name, value, flags, follow_symlinks)?;
+        let stored_value = acl.as_ref().map_or_else(|| value, PosixAcl::encode);
+        self.set_xattr(path, name, stored_value, flags, follow_symlinks)?;
         if name == POSIX_ACL_ACCESS {
-            let mode = acl.expect("access ACL was parsed").mode(stat.mode);
+            let mode = mode_after_chmod_group_check(
+                acl.expect("access ACL was parsed").mode(stat.mode),
+                &identity,
+                stat.gid,
+            );
             self.filesystem.chmod(path, mode)?;
         }
         Ok(())
@@ -3225,11 +3327,16 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         } else {
             None
         };
+        let stored_value = acl.as_ref().map_or_else(|| value, PosixAcl::encode);
         description
-            .detached_set_xattr(name, value, flags)
+            .detached_set_xattr(name, stored_value, flags)
             .expect("detached xattr state was checked")?;
         if name == POSIX_ACL_ACCESS {
-            let mode = acl.expect("access ACL was parsed").mode(stat.mode);
+            let mode = mode_after_chmod_group_check(
+                acl.expect("access ACL was parsed").mode(stat.mode),
+                &identity,
+                stat.gid,
+            );
             description.detached_chmod(mode);
         }
         Ok(())
@@ -3377,6 +3484,8 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     ) -> KernelResult<()> {
         self.assert_driver_owns(requester_driver, pid)?;
         self.check_dac_access(pid, path, DAC_WRITE)?;
+        let existing_size = self.storage_stat(path)?.map_or(0, |stat| stat.size);
+        self.check_process_file_resize_limit(pid, existing_size, length)?;
         self.truncate(path, length)?;
         self.clear_setid_after_write(pid, path)
     }
@@ -3398,6 +3507,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 .ok_or_else(|| KernelError::bad_file_descriptor(fd))?
         };
         if let Some(stat) = entry.description.anonymous_stat() {
+            self.check_process_file_resize_limit(pid, stat.size, length)?;
             self.check_path_resize_limits_with_existing(stat.size, length)?;
             entry
                 .description
@@ -3409,6 +3519,8 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             return Err(KernelError::bad_file_descriptor(fd));
         }
         let path = entry.description.path().to_owned();
+        let existing_size = self.current_storage_file_size(&path)?;
+        self.check_process_file_resize_limit(pid, existing_size, length)?;
         self.truncate(&path, length)?;
         self.clear_setid_after_write(pid, &path)
     }
@@ -3443,6 +3555,8 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
         let existing = self.storage_stat(&path)?;
         let new_size = existing.as_ref().map_or(end, |stat| stat.size.max(end));
+        let existing_size = existing.as_ref().map_or(0, |stat| stat.size);
+        self.check_process_file_resize_limit(pid, existing_size, new_size)?;
         self.check_truncate_limits_with_existing(&path, existing.as_ref(), new_size)?;
         self.filesystem.allocate(&path, offset, length)?;
         self.update_filesystem_usage_cache_for_write(&path, existing.as_ref(), new_size);
@@ -3514,6 +3628,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         } else {
             old_size.max(end)
         };
+        self.check_process_file_resize_limit(pid, old_size, new_size)?;
         self.check_truncate_limits_with_existing(&path, existing.as_ref(), new_size)?;
         self.filesystem
             .zero_range(&path, offset, length, keep_size)?;
@@ -3548,9 +3663,8 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             .as_ref()
             .ok_or_else(|| KernelError::new("ENOENT", format!("no such file: {path}")))?
             .size;
-        let new_size = old_size
-            .checked_add(length)
-            .ok_or_else(|| KernelError::new("EINVAL", "insert range size overflows"))?;
+        let new_size = checked_insert_range_size(old_size, length)?;
+        self.check_process_file_resize_limit(pid, old_size, new_size)?;
         self.check_truncate_limits_with_existing(&path, existing.as_ref(), new_size)?;
         self.filesystem.insert_range(&path, offset, length)?;
         self.update_filesystem_usage_cache_for_write(&path, existing.as_ref(), new_size);
@@ -6623,10 +6737,22 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
         if let Some(proc_node) = self.resolve_proc_node(path, Some(pid))? {
             if open_requires_write_access(flags) {
+                if !matches!(proc_node, ProcNode::DropCachesFile) {
+                    self.filesystem
+                        .check_virtual_path(FsOperation::Write, path)
+                        .map_err(KernelError::from)?;
+                    return Err(read_only_filesystem_error(path));
+                }
+                let identity = self.process_identity(requester_driver, pid)?;
+                if identity.euid != 0 {
+                    return Err(KernelError::new(
+                        "EACCES",
+                        format!("permission denied, open '{path}'"),
+                    ));
+                }
                 self.filesystem
                     .check_virtual_path(FsOperation::Write, path)
                     .map_err(KernelError::from)?;
-                return Err(read_only_filesystem_error(path));
             }
 
             if let ProcNode::PidFdLink {
@@ -7269,6 +7395,19 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         let path = entry.description.path();
+        if is_proc_path(&path) {
+            if entry.description.flags() & 0b11 == O_RDONLY {
+                return Err(KernelError::bad_file_descriptor(fd));
+            }
+            let node = self
+                .resolve_proc_node(&path, Some(pid))?
+                .ok_or_else(|| proc_not_found_error(&path))?;
+            let written = self.proc_write_file(pid, &node, data)?;
+            entry
+                .description
+                .set_cursor(entry.description.cursor().saturating_add(written as u64));
+            return Ok(written);
+        }
         if let Some(stat) = entry.description.anonymous_stat() {
             if entry.description.flags() & 0b11 == O_RDONLY {
                 return Err(KernelError::bad_file_descriptor(fd));
@@ -7278,6 +7417,8 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             } else {
                 entry.description.cursor()
             };
+            let write_len = self.process_file_write_len(pid, cursor, data.len())?;
+            let data = &data[..write_len];
             let required_size = stat.size.max(checked_write_end(cursor, data.len())?);
             self.check_path_resize_limits_with_existing(stat.size, required_size)?;
             let new_size = entry
@@ -7306,6 +7447,8 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         let cursor = entry.description.cursor();
         if entry.description.flags() & O_APPEND != 0 {
             check_direct_io_alignment(entry.description.flags(), current_size, data.len())?;
+            let write_len = self.process_file_write_len(pid, current_size, data.len())?;
+            let data = &data[..write_len];
             let required_size = current_size.max(checked_write_end(current_size, data.len())?);
             self.check_path_resize_limits_with_existing(current_size, required_size)?;
             let new_len = VirtualFileSystem::append_file(&mut self.filesystem, &path, data)?;
@@ -7316,6 +7459,8 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         check_direct_io_alignment(entry.description.flags(), cursor, data.len())?;
+        let write_len = self.process_file_write_len(pid, cursor, data.len())?;
+        let data = &data[..write_len];
         let required_size = current_size.max(checked_write_end(cursor, data.len())?);
         self.check_path_resize_limits_with_existing(current_size, required_size)?;
         VirtualFileSystem::pwrite(&mut self.filesystem, &path, data, cursor)?;
@@ -7480,7 +7625,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             return Err(KernelError::new("ESPIPE", "illegal seek"));
         }
 
-        let base = match whence {
+        let next = match whence {
             SEEK_SET => 0_i128,
             SEEK_CUR => i128::from(entry.description.cursor()),
             SEEK_END => {
@@ -7494,6 +7639,43 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 };
                 i128::from(size)
             }
+            SEEK_DATA | SEEK_HOLE => {
+                let start = u64::try_from(offset).map_err(|_| {
+                    KernelError::new("ENXIO", "negative data or hole seek position")
+                })?;
+                let path = entry.description.path();
+                let size = if let Some(stat) = entry.description.anonymous_stat() {
+                    stat.size
+                } else if is_proc_path(&path) {
+                    self.proc_stat_from_open_path(Some(pid), &path)?.size
+                } else {
+                    self.filesystem.stat(&path)?.size
+                };
+                if start >= size {
+                    return Err(KernelError::new(
+                        "ENXIO",
+                        "no data or hole exists at or after the requested offset",
+                    ));
+                }
+                let ranges = if is_proc_path(&path) {
+                    vec![(0, size)]
+                } else {
+                    self.filesystem.allocated_ranges(&path)?
+                };
+                let found = if whence == SEEK_DATA {
+                    seek_data_offset(&ranges, start, size)
+                } else {
+                    seek_hole_offset(&ranges, start, size)
+                };
+                let found = found.ok_or_else(|| {
+                    KernelError::new(
+                        "ENXIO",
+                        "no data or hole exists at or after the requested offset",
+                    )
+                })?;
+                entry.description.set_cursor(found);
+                return Ok(found);
+            }
             _ => {
                 return Err(KernelError::new(
                     "EINVAL",
@@ -7501,7 +7683,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 ));
             }
         };
-        let next = base + i128::from(offset);
+        let next = next + i128::from(offset);
         if next < 0 {
             return Err(KernelError::new("EINVAL", "negative seek position"));
         }
@@ -7591,14 +7773,21 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
         let path = entry.description.path();
         if let Some(stat) = entry.description.anonymous_stat() {
-            let required_size = stat.size.max(checked_write_end(offset, data.len())?);
+            let write_offset = if entry.description.flags() & O_APPEND != 0 {
+                stat.size
+            } else {
+                offset
+            };
+            let write_len = self.process_file_write_len(pid, write_offset, data.len())?;
+            let data = &data[..write_len];
+            let required_size = stat.size.max(checked_write_end(write_offset, data.len())?);
             self.check_path_resize_limits_with_existing(stat.size, required_size)?;
             if entry.description.flags() & 0b11 == O_RDONLY {
                 return Err(KernelError::bad_file_descriptor(fd));
             }
             let new_size = entry
                 .description
-                .anonymous_pwrite(offset, data)
+                .anonymous_pwrite(write_offset, data)
                 .expect("anonymous stat and backing must agree")?;
             debug_assert_eq!(new_size, required_size);
             return Ok(data.len());
@@ -7606,13 +7795,31 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.reject_read_only_resolved_write_path(&path)?;
 
         let current_size = self.current_storage_file_size(&path)?;
-        let required_size = current_size.max(checked_write_end(offset, data.len())?);
-        self.check_path_resize_limits_with_existing(current_size, required_size)?;
         if entry.description.flags() & 0b11 == O_RDONLY {
             return Err(KernelError::bad_file_descriptor(fd));
         }
+        if entry.description.flags() & O_APPEND != 0 {
+            // Linux intentionally deviates from POSIX here: pwrite(2) on an
+            // O_APPEND description appends atomically even though it leaves
+            // the shared file offset unchanged.
+            check_direct_io_alignment(entry.description.flags(), current_size, data.len())?;
+            let write_len = self.process_file_write_len(pid, current_size, data.len())?;
+            let data = &data[..write_len];
+            let required_size = current_size.max(checked_write_end(current_size, data.len())?);
+            self.check_path_resize_limits_with_existing(current_size, required_size)?;
+            let new_len = VirtualFileSystem::append_file(&mut self.filesystem, &path, data)?;
+            self.update_filesystem_usage_cache_for_resize(&path, current_size, new_len);
+            self.clear_setid_after_write(pid, &path)?;
+            return Ok(data.len());
+        }
+        let write_len = self.process_file_write_len(pid, offset, data.len())?;
+        let data = &data[..write_len];
+        let required_size = current_size.max(checked_write_end(offset, data.len())?);
+        self.check_path_resize_limits_with_existing(current_size, required_size)?;
+        check_direct_io_alignment(entry.description.flags(), offset, data.len())?;
         VirtualFileSystem::pwrite(&mut self.filesystem, &path, data.to_vec(), offset)?;
         self.update_filesystem_usage_cache_for_resize(&path, current_size, required_size);
+        self.clear_setid_after_write(pid, &path)?;
         Ok(data.len())
     }
 
@@ -7654,7 +7861,12 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 format!("operation not permitted, process does not own fd {fd}"),
             ));
         }
-        self.fd_chmod(requester_driver, pid, fd, mode)
+        self.fd_chmod(
+            requester_driver,
+            pid,
+            fd,
+            mode_after_chmod_group_check(mode, &identity, stat.gid),
+        )
     }
 
     pub fn fd_chown_for_process(
@@ -7670,7 +7882,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         let stat = self.dev_fd_stat(requester_driver, pid, fd)?;
         let (next_uid, next_gid) =
             validate_chown_request(&identity, &stat, uid, gid, &format!("fd {fd}"))?;
-        let changed_mode = linux_chown_cleared_mode(&stat);
+        let changed_mode = linux_cleared_setid_mode(&stat);
         if description.detached_chown(next_uid, next_gid, changed_mode) {
             return Ok(());
         }
@@ -7687,7 +7899,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         let fd_type = self.fd_stat(requester_driver, pid, fd)?.filetype;
         if !matches!(fd_type, FILETYPE_REGULAR_FILE | FILETYPE_DIRECTORY) {
             // Character devices have no mutable descriptor-owned inode in
-            // AgentOS. The fixed unprivileged guest can only reach this branch
+            // agentOS. The fixed unprivileged guest can only reach this branch
             // for the Linux no-op (-1, -1) request.
             return Ok(());
         }
@@ -8184,14 +8396,12 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         entries.push(ProcessFdDirEntry {
             name: String::from("."),
             ino: required_dirent_ino(&path, current_stat.ino)?,
-            is_directory: true,
-            is_symbolic_link: false,
+            filetype: FILETYPE_DIRECTORY,
         });
         entries.push(ProcessFdDirEntry {
             name: String::from(".."),
             ino: required_dirent_ino(&parent, parent_stat.ino)?,
-            is_directory: true,
-            is_symbolic_link: false,
+            filetype: FILETYPE_DIRECTORY,
         });
         for child in children {
             let child_path = join_child_path(&path, &child.name);
@@ -8199,8 +8409,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             entries.push(ProcessFdDirEntry {
                 name: child.name,
                 ino: required_dirent_ino(&child_path, child_stat.ino)?,
-                is_directory: child.is_directory,
-                is_symbolic_link: child.is_symbolic_link,
+                filetype: dirent_filetype_for_stat(&child_stat),
             });
         }
         Ok(entries)
@@ -8242,8 +8451,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 snapshot.push(DirectorySnapshotEntry {
                     name: child.name,
                     ino: required_dirent_ino(&child_path, child_stat.ino)?,
-                    is_directory: child.is_directory,
-                    is_symbolic_link: child.is_symbolic_link,
+                    filetype: dirent_filetype_for_stat(&child_stat),
                 });
             }
             description.reset_directory_snapshot(snapshot);
@@ -8267,8 +8475,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             entries.push(ProcessFdDirEntry {
                 name: String::from("."),
                 ino: required_dirent_ino(&path, current_stat.ino)?,
-                is_directory: true,
-                is_symbolic_link: false,
+                filetype: FILETYPE_DIRECTORY,
             });
         }
         if cookie <= 1 && page_end > 1 {
@@ -8277,8 +8484,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             entries.push(ProcessFdDirEntry {
                 name: String::from(".."),
                 ino: required_dirent_ino(&parent, parent_stat.ino)?,
-                is_directory: true,
-                is_symbolic_link: false,
+                filetype: FILETYPE_DIRECTORY,
             });
         }
 
@@ -8286,8 +8492,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             entries.push(ProcessFdDirEntry {
                 name: child.name,
                 ino: child.ino,
-                is_directory: child.is_directory,
-                is_symbolic_link: child.is_symbolic_link,
+                filetype: child.filetype,
             });
         }
         Ok(entries)
@@ -8902,7 +9107,12 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         if follow_final_symlink {
-            if let Ok(resolved) = self.filesystem.realpath(&normalized) {
+            // This resolution protects the kernel-owned read-only agentOS
+            // projection; it is not a guest read. Use trusted VFS metadata so
+            // a write that policy permits does not also require `fs.read`.
+            // The eventual mutation still resolves and checks its own
+            // operation through `PermissionedFileSystem`.
+            if let Ok(resolved) = self.raw_filesystem_mut().realpath(&normalized) {
                 return Ok(Some(resolved));
             }
         }
@@ -8921,7 +9131,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             }
 
             raw_prefix = join_absolute_path(&raw_prefix, component);
-            match self.filesystem.realpath(&raw_prefix) {
+            match self.raw_filesystem_mut().realpath(&raw_prefix) {
                 Ok(resolved) => {
                     resolved_prefix = resolved;
                 }
@@ -9488,7 +9698,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     }
 
     fn resolve_registered_command_runtime_path(&mut self, command: &str) -> KernelResult<String> {
-        let mut roots = match self.read_dir("/__secure_exec/commands") {
+        let mut roots = match self.read_dir("/__agentos/commands") {
             Ok(roots) => roots,
             Err(error) if error.code() == "ENOENT" => Vec::new(),
             Err(error) => return Err(error),
@@ -9498,7 +9708,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         });
         roots.sort();
         for root in roots {
-            let candidate = normalize_path(&format!("/__secure_exec/commands/{root}/{command}"));
+            let candidate = normalize_path(&format!("/__agentos/commands/{root}/{command}"));
             if let Some(path) = self.resolve_live_runtime_file(&candidate)? {
                 return Ok(path);
             }
@@ -9754,6 +9964,14 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
     }
 
+    fn entry_exists_no_follow(&self, current_pid: Option<u32>, path: &str) -> KernelResult<bool> {
+        match self.lstat_internal(current_pid, path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.code() == "ENOENT" => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     fn stat_internal(&mut self, current_pid: Option<u32>, path: &str) -> KernelResult<VirtualStat> {
         if let Some(proc_node) = self.resolve_proc_node(path, current_pid)? {
             self.filesystem
@@ -9871,6 +10089,9 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         let root_node = match parts.as_slice() {
+            ["sys"] => Some(ProcNode::SysDir),
+            ["sys", "vm"] => Some(ProcNode::SysVmDir),
+            ["sys", "vm", "drop_caches"] => Some(ProcNode::DropCachesFile),
             ["mounts"] => Some(ProcNode::MountsFile),
             ["cpuinfo"] => Some(ProcNode::CpuInfoFile),
             ["meminfo"] => Some(ProcNode::MemInfoFile),
@@ -9940,6 +10161,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 self.read_file_internal(current_pid, &target)
             }
             ProcNode::MountsFile => Ok(self.proc_mounts_bytes()),
+            ProcNode::DropCachesFile => Ok(b"0\n".to_vec()),
             ProcNode::CpuInfoFile => Ok(self.proc_cpuinfo_bytes()),
             ProcNode::MemInfoFile => Ok(self.proc_meminfo_bytes()),
             ProcNode::LoadAvgFile => Ok(self.proc_loadavg_bytes()),
@@ -9949,15 +10171,17 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             ProcNode::PidEnviron { pid } => Ok(self.proc_environ_bytes(*pid)),
             ProcNode::PidStatFile { pid } => Ok(self.proc_stat_bytes(*pid)),
             ProcNode::PidStatusFile { pid } => Ok(self.proc_status_bytes(*pid)),
-            ProcNode::RootDir | ProcNode::PidDir { .. } | ProcNode::PidFdDir { .. } => {
-                Err(KernelError::new(
-                    "EISDIR",
-                    format!(
-                        "illegal operation on a directory, read '{}'",
-                        self.proc_canonical_path(node)
-                    ),
-                ))
-            }
+            ProcNode::RootDir
+            | ProcNode::SysDir
+            | ProcNode::SysVmDir
+            | ProcNode::PidDir { .. }
+            | ProcNode::PidFdDir { .. } => Err(KernelError::new(
+                "EISDIR",
+                format!(
+                    "illegal operation on a directory, read '{}'",
+                    self.proc_canonical_path(node)
+                ),
+            )),
         }
     }
 
@@ -9979,9 +10203,12 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
     fn proc_lstat(&self, node: &ProcNode) -> KernelResult<VirtualStat> {
         match node {
-            ProcNode::RootDir | ProcNode::PidDir { .. } | ProcNode::PidFdDir { .. } => {
-                Ok(proc_dir_stat(proc_inode(node)))
-            }
+            ProcNode::RootDir
+            | ProcNode::SysDir
+            | ProcNode::SysVmDir
+            | ProcNode::PidDir { .. }
+            | ProcNode::PidFdDir { .. } => Ok(proc_dir_stat(proc_inode(node))),
+            ProcNode::DropCachesFile => Ok(proc_writable_file_stat(proc_inode(node), 2)),
             ProcNode::MountsFile => Ok(proc_file_stat(
                 proc_inode(node),
                 self.proc_mounts_bytes().len() as u64,
@@ -10070,11 +10297,14 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 entries.push(String::from("meminfo"));
                 entries.push(String::from("mounts"));
                 entries.push(String::from("self"));
+                entries.push(String::from("sys"));
                 entries.push(String::from("uptime"));
                 entries.push(String::from("version"));
                 entries.sort();
                 Ok(entries)
             }
+            ProcNode::SysDir => Ok(vec![String::from("vm")]),
+            ProcNode::SysVmDir => Ok(vec![String::from("drop_caches")]),
             ProcNode::PidDir { .. } => Ok(vec![
                 String::from("cmdline"),
                 String::from("cwd"),
@@ -10133,6 +10363,9 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     fn proc_canonical_path(&self, node: &ProcNode) -> String {
         match node {
             ProcNode::RootDir => String::from("/proc"),
+            ProcNode::SysDir => String::from("/proc/sys"),
+            ProcNode::SysVmDir => String::from("/proc/sys/vm"),
+            ProcNode::DropCachesFile => String::from("/proc/sys/vm/drop_caches"),
             ProcNode::MountsFile => String::from("/proc/mounts"),
             ProcNode::CpuInfoFile => String::from("/proc/cpuinfo"),
             ProcNode::MemInfoFile => String::from("/proc/meminfo"),
@@ -10209,6 +10442,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
                 read_only: false,
                 access_time: crate::mount_table::AccessTimePolicy::Relatime,
                 no_dir_atime: false,
+                no_suid: false,
             }]
         };
 
@@ -10283,6 +10517,43 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             self.boot_time_ms,
         )
         .into_bytes()
+    }
+
+    fn proc_write_file(&mut self, pid: u32, node: &ProcNode, data: &[u8]) -> KernelResult<usize> {
+        let path = self.proc_canonical_path(node);
+        self.filesystem
+            .check_virtual_path(FsOperation::Write, &path)
+            .map_err(KernelError::from)?;
+        if !matches!(node, ProcNode::DropCachesFile) {
+            return Err(read_only_filesystem_error(&path));
+        }
+        let identity = self
+            .processes
+            .get(pid)
+            .ok_or_else(|| KernelError::no_such_process(pid))?
+            .identity;
+        if identity.euid != 0 {
+            return Err(KernelError::new(
+                "EACCES",
+                format!("permission denied, write '{path}'"),
+            ));
+        }
+        let value = std::str::from_utf8(data)
+            .ok()
+            .map(str::trim)
+            .and_then(|value| value.parse::<u8>().ok())
+            .filter(|value| matches!(value, 1..=3))
+            .ok_or_else(|| {
+                KernelError::new(
+                    "EINVAL",
+                    "drop_caches accepts only the Linux cache-selection values 1, 2, or 3",
+                )
+            })?;
+        debug_assert!((1..=3).contains(&value));
+        // agentOS has no independent host page cache behind its logical VFS.
+        // Every read observes the kernel-owned filesystem source of truth, so
+        // Linux's cache-eviction control is intentionally a coherent no-op.
+        Ok(data.len())
     }
 
     fn proc_status_bytes(&self, pid: u32) -> Vec<u8> {
@@ -10668,15 +10939,11 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     }
 
     fn check_dac_parent_access(&mut self, pid: u32, path: &str, access: u32) -> KernelResult<()> {
-        let mut parent = parent_path(path);
-        loop {
-            match self.check_dac_access(pid, &parent, access) {
-                Err(error) if error.code() == "ENOENT" && parent != "/" => {
-                    parent = parent_path(&parent);
-                }
-                result => return result,
-            }
-        }
+        // Guest creation syscalls require the immediate parent to exist. Some
+        // trusted VFS helpers create ancestors for bootstrap convenience, but
+        // exposing that behavior here would create those inodes with host
+        // defaults instead of the process identity and would diverge from Linux.
+        self.check_dac_access(pid, &parent_path(path), access)
     }
 
     fn check_sticky_directory_removal(&mut self, pid: u32, path: &str) -> KernelResult<()> {
@@ -10779,8 +11046,8 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             return Ok(());
         }
         let stat = self.filesystem.stat(path)?;
-        if stat.mode & 0o6000 != 0 {
-            self.filesystem.chmod(path, stat.mode & !0o6000)?;
+        if let Some(mode) = linux_cleared_setid_after_write_mode(&stat, &identity) {
+            self.filesystem.chmod(path, mode)?;
         }
         Ok(())
     }
@@ -10985,6 +11252,68 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(())
     }
 
+    fn check_process_file_resize_limit(
+        &self,
+        pid: u32,
+        existing_size: u64,
+        new_size: u64,
+    ) -> KernelResult<()> {
+        if new_size <= existing_size {
+            return Ok(());
+        }
+        self.check_process_file_size_limit(pid, new_size)
+    }
+
+    fn check_process_file_size_limit(&self, pid: u32, new_size: u64) -> KernelResult<()> {
+        let limit = self
+            .processes
+            .get_resource_limit(pid, ProcessResourceLimitKind::FileSize)?
+            .soft;
+        if let Some(limit) = limit {
+            if new_size > limit {
+                return self.reject_file_size_limit(pid, new_size, limit);
+            }
+        }
+        Ok(())
+    }
+
+    fn process_file_write_len(
+        &self,
+        pid: u32,
+        offset: u64,
+        requested: usize,
+    ) -> KernelResult<usize> {
+        if requested == 0 {
+            return Ok(0);
+        }
+        let limit = self
+            .processes
+            .get_resource_limit(pid, ProcessResourceLimitKind::FileSize)?
+            .soft;
+        let Some(limit) = limit else {
+            return Ok(requested);
+        };
+        if offset >= limit {
+            self.reject_file_size_limit(pid, offset.saturating_add(requested as u64), limit)?;
+            unreachable!("file-size-limit rejection always returns an error");
+        }
+        let available = usize::try_from(limit - offset).unwrap_or(usize::MAX);
+        Ok(requested.min(available))
+    }
+
+    fn reject_file_size_limit(
+        &self,
+        pid: u32,
+        attempted_size: u64,
+        limit: u64,
+    ) -> KernelResult<()> {
+        self.processes.kill(pid as i32, SIGXFSZ)?;
+        Err(KernelError::new(
+            "EFBIG",
+            format!("file size {attempted_size} exceeds process RLIMIT_FSIZE soft limit {limit}"),
+        ))
+    }
+
     fn blocking_read_timeout(&self) -> Option<Duration> {
         self.resources
             .limits()
@@ -11029,11 +11358,44 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     }
 }
 
+fn seek_data_offset(ranges: &[(u64, u64)], offset: u64, size: u64) -> Option<u64> {
+    ranges.iter().find_map(|&(start, end)| {
+        let start = start.min(size);
+        let end = end.min(size);
+        (end > offset && start < end).then_some(offset.max(start))
+    })
+}
+
+fn seek_hole_offset(ranges: &[(u64, u64)], offset: u64, size: u64) -> Option<u64> {
+    let mut cursor = offset;
+    for &(start, end) in ranges {
+        let start = start.min(size);
+        let end = end.min(size);
+        if start >= end || end <= cursor {
+            continue;
+        }
+        if start > cursor {
+            return Some(cursor);
+        }
+        cursor = cursor.max(end);
+        if cursor >= size {
+            return Some(size);
+        }
+    }
+    Some(cursor.min(size))
+}
+
 fn pty_signal_error_is_stale(error: &ProcessTableError) -> bool {
     error.code() == "ESRCH"
 }
 
 impl KernelVm<MountTable> {
+    /// Generation of the kernel-owned VFS contents, metadata, and mount
+    /// topology. Derived per-process caches must be discarded when it changes.
+    pub fn filesystem_mutation_generation(&self) -> u64 {
+        self.filesystem.inner().inner().mutation_generation()
+    }
+
     fn check_mount_permissions(&self, path: &str) -> KernelResult<()> {
         self.filesystem
             .check_path(FsOperation::Write, path)
@@ -11386,7 +11748,7 @@ fn check_unix_dac(
     operation: &str,
     path: &str,
 ) -> KernelResult<()> {
-    // AgentOS has no fsuid/fsgid or capability mutation. Match Linux's
+    // agentOS has no fsuid/fsgid or capability mutation. Match Linux's
     // ordinary case with euid/egid, and model uid 0 as CAP_DAC_OVERRIDE for
     // the write/search checks used by AF_UNIX pathname operations.
     if identity.euid == 0 {
@@ -11458,15 +11820,50 @@ fn validate_chown_request(
     Ok((next_uid, next_gid))
 }
 
-/// Linux clears S_ISUID on a regular file after chown, but preserves S_ISGID
-/// when the group-execute bit is clear because that combination represents
-/// mandatory-locking metadata rather than set-group-ID execution.
-fn linux_chown_cleared_mode(stat: &VirtualStat) -> Option<u32> {
+/// Linux permits a non-root owner to request S_ISGID through chmod or an ACL
+/// mode update only when the file's group is one of the process's groups.
+/// Apply the same rule to pathname and descriptor-backed metadata operations.
+fn mode_after_chmod_group_check(mode: u32, identity: &ProcessIdentity, file_gid: u32) -> u32 {
+    if identity.euid != 0
+        && identity.egid != file_gid
+        && !identity.supplementary_gids.contains(&file_gid)
+    {
+        mode & !0o2000
+    } else {
+        mode
+    }
+}
+
+/// Linux clears S_ISUID on regular-file ownership/content mutations, but
+/// preserves S_ISGID when the group-execute bit is clear because that
+/// combination represents mandatory-locking metadata rather than set-group-ID
+/// execution.
+fn linux_cleared_setid_mode(stat: &VirtualStat) -> Option<u32> {
     if stat.mode & 0o170000 != 0o100000 {
         return None;
     }
     let mut mode = stat.mode & !0o4000;
     if stat.mode & 0o0010 != 0 {
+        mode &= !0o2000;
+    }
+    (mode != stat.mode).then_some(mode)
+}
+
+/// Linux content mutations preserve a non-executable S_ISGID bit only for a
+/// writer that belongs to the file's group (or has CAP_FSETID, represented by
+/// the root fast path in `clear_setid_after_write`). A writer outside that
+/// group must clear both set-id bits even though S_IXGRP is absent.
+fn linux_cleared_setid_after_write_mode(
+    stat: &VirtualStat,
+    identity: &ProcessIdentity,
+) -> Option<u32> {
+    if stat.mode & 0o170000 != 0o100000 {
+        return None;
+    }
+    let belongs_to_file_group =
+        identity.egid == stat.gid || identity.supplementary_gids.contains(&stat.gid);
+    let mut mode = stat.mode & !0o4000;
+    if stat.mode & 0o0010 != 0 || !belongs_to_file_group {
         mode &= !0o2000;
     }
     (mode != stat.mode).then_some(mode)
@@ -11753,10 +12150,22 @@ impl PosixAcl {
         }
         let entries = value[4..]
             .chunks_exact(8)
-            .map(|bytes| PosixAclEntry {
-                tag: u16::from_le_bytes([bytes[0], bytes[1]]),
-                perm: u16::from_le_bytes([bytes[2], bytes[3]]),
-                id: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            .map(|bytes| {
+                let tag = u16::from_le_bytes([bytes[0], bytes[1]]);
+                let raw_id = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                PosixAclEntry {
+                    tag,
+                    perm: u16::from_le_bytes([bytes[2], bytes[3]]),
+                    // Linux ignores the serialized id for entries that do not
+                    // identify a named user or group and writes them back as
+                    // ACL_UNDEFINED_ID. Some real software relies on this
+                    // normalization when constructing ACL xattrs directly.
+                    id: if matches!(tag, ACL_USER | ACL_GROUP) {
+                        raw_id
+                    } else {
+                        ACL_UNDEFINED_ID
+                    },
+                }
             })
             .collect::<Vec<_>>();
         let acl = Self { entries };
@@ -11773,7 +12182,7 @@ impl PosixAcl {
                 return Err(invalid_acl(path, "permission bits exceed rwx"));
             }
             let named = matches!(entry.tag, ACL_USER | ACL_GROUP);
-            if (named && entry.id == ACL_UNDEFINED_ID) || (!named && entry.id != ACL_UNDEFINED_ID) {
+            if named && entry.id == ACL_UNDEFINED_ID {
                 return Err(invalid_acl(path, "entry id does not match its tag"));
             }
         }
@@ -12055,6 +12464,19 @@ fn checked_write_end(offset: u64, len: usize) -> KernelResult<u64> {
         .ok_or_else(|| KernelError::new("EINVAL", "write offset out of range"))
 }
 
+fn checked_insert_range_size(old_size: u64, length: u64) -> KernelResult<u64> {
+    let new_size = old_size.checked_add(length).ok_or_else(|| {
+        KernelError::new("EFBIG", "insert range would exceed the maximum file size")
+    })?;
+    if new_size > i64::MAX as u64 {
+        return Err(KernelError::new(
+            "EFBIG",
+            "insert range would exceed the signed 64-bit file-size limit",
+        ));
+    }
+    Ok(new_size)
+}
+
 fn check_direct_io_alignment(flags: u32, offset: u64, len: usize) -> KernelResult<()> {
     const DIRECT_IO_ALIGNMENT: u64 = 512;
     if flags & O_DIRECT == 0 {
@@ -12082,6 +12504,21 @@ fn filetype_for_path(path: &str, stat: &VirtualStat) -> u8 {
         FILETYPE_SYMBOLIC_LINK
     } else {
         FILETYPE_REGULAR_FILE
+    }
+}
+
+fn dirent_filetype_for_stat(stat: &VirtualStat) -> u8 {
+    match stat.mode & 0o170000 {
+        0o060000 => FILETYPE_BLOCK_DEVICE,
+        0o020000 => FILETYPE_CHARACTER_DEVICE,
+        0o040000 => FILETYPE_DIRECTORY,
+        // The owned wasi-libc maps Preview1's socket-stream value to DT_FIFO
+        // because Preview1 has no FIFO filetype. agentOS pathname sockets are
+        // not surfaced as ordinary VFS directory entries.
+        0o010000 => FILETYPE_SOCKET_STREAM,
+        0o120000 => FILETYPE_SYMBOLIC_LINK,
+        0o140000 => FILETYPE_SOCKET_STREAM,
+        _ => FILETYPE_REGULAR_FILE,
     }
 }
 
@@ -12161,6 +12598,12 @@ fn proc_file_stat(ino: u64, size: u64) -> VirtualStat {
     }
 }
 
+fn proc_writable_file_stat(ino: u64, size: u64) -> VirtualStat {
+    let mut stat = proc_file_stat(ino, size);
+    stat.mode = S_IFREG | 0o644;
+    stat
+}
+
 fn proc_symlink_stat(ino: u64, size: u64) -> VirtualStat {
     let now = now_ms();
     VirtualStat {
@@ -12187,13 +12630,16 @@ fn proc_symlink_stat(ino: u64, size: u64) -> VirtualStat {
 
 fn proc_filetype(node: &ProcNode) -> u8 {
     match node {
-        ProcNode::RootDir | ProcNode::PidDir { .. } | ProcNode::PidFdDir { .. } => {
-            FILETYPE_DIRECTORY
-        }
+        ProcNode::RootDir
+        | ProcNode::SysDir
+        | ProcNode::SysVmDir
+        | ProcNode::PidDir { .. }
+        | ProcNode::PidFdDir { .. } => FILETYPE_DIRECTORY,
         ProcNode::SelfLink { .. } | ProcNode::PidCwdLink { .. } | ProcNode::PidFdLink { .. } => {
             FILETYPE_SYMBOLIC_LINK
         }
-        ProcNode::MountsFile
+        ProcNode::DropCachesFile
+        | ProcNode::MountsFile
         | ProcNode::CpuInfoFile
         | ProcNode::MemInfoFile
         | ProcNode::LoadAvgFile
@@ -12209,6 +12655,9 @@ fn proc_filetype(node: &ProcNode) -> u8 {
 fn proc_inode(node: &ProcNode) -> u64 {
     match node {
         ProcNode::RootDir => 0xfffe_0001,
+        ProcNode::SysDir => 0xfffe_0008,
+        ProcNode::SysVmDir => 0xfffe_0009,
+        ProcNode::DropCachesFile => 0xfffe_000a,
         ProcNode::MountsFile => 0xfffe_0002,
         ProcNode::CpuInfoFile => 0xfffe_0003,
         ProcNode::MemInfoFile => 0xfffe_0004,
@@ -12275,6 +12724,53 @@ mod tests {
     use std::thread;
 
     #[test]
+    fn rmdir_pathname_validation_preserves_final_dot_components() {
+        let kernel = KernelVm::new(
+            MountTable::new(MemoryFileSystem::new()),
+            KernelVmConfig::new("vm-rmdir-pathname"),
+        );
+
+        for path in [".", "./", "/workspace/.", "/workspace/./"] {
+            assert_eq!(
+                kernel
+                    .validate_remove_directory_pathname(path)
+                    .expect_err("rmdir of a final dot component must fail")
+                    .code(),
+                "EINVAL"
+            );
+        }
+        for path in ["..", "../", "/workspace/..", "/workspace/../"] {
+            assert_eq!(
+                kernel
+                    .validate_remove_directory_pathname(path)
+                    .expect_err("rmdir of a final dot-dot component must fail")
+                    .code(),
+                "ENOTEMPTY"
+            );
+        }
+        kernel
+            .validate_remove_directory_pathname("/workspace/cache")
+            .expect("ordinary directory path remains valid");
+    }
+
+    #[test]
+    fn insert_range_rejects_sizes_beyond_signed_off_t_with_efbig() {
+        assert_eq!(checked_insert_range_size(8, 4).unwrap(), 12);
+        assert_eq!(
+            checked_insert_range_size(i64::MAX as u64, 1)
+                .expect_err("insert beyond signed off_t must fail")
+                .code(),
+            "EFBIG"
+        );
+        assert_eq!(
+            checked_insert_range_size(u64::MAX, 1)
+                .expect_err("u64 overflow must fail as file-too-large")
+                .code(),
+            "EFBIG"
+        );
+    }
+
+    #[test]
     fn pty_signal_error_classification_only_suppresses_stale_process_groups() {
         let process_table = ProcessTable::new();
         let stale_group = process_table
@@ -12331,6 +12827,85 @@ mod tests {
         );
     }
 
+    #[test]
+    fn existing_creation_targets_win_over_read_only_mount_errors() {
+        let root = RootFileSystem::from_descriptor(RootFilesystemDescriptor {
+            mode: RootFilesystemMode::Ephemeral,
+            disable_default_base_layer: true,
+            lowers: Vec::new(),
+            bootstrap_entries: Vec::new(),
+        })
+        .expect("build writable root");
+        let mut config = KernelVmConfig::new("vm-read-only-create-precedence");
+        config.permissions = Permissions::allow_all();
+        config.user = UserConfig {
+            uid: Some(0),
+            gid: Some(0),
+            euid: Some(0),
+            egid: Some(0),
+            ..UserConfig::default()
+        };
+        let mut kernel = KernelVm::new(MountTable::new(root), config);
+        kernel
+            .register_driver(CommandDriver::new("wasm", ["create-test"]))
+            .expect("register wasm driver");
+        let process = kernel
+            .spawn_process(
+                "create-test",
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from("wasm")),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn create test process");
+        let pid = process.pid();
+        kernel
+            .mkdir_for_process("wasm", pid, "/work", false, Some(0o755))
+            .expect("create work directory");
+        kernel
+            .write_file_for_process("wasm", pid, "/work/target", b"x".to_vec(), Some(0o644))
+            .expect("create symlink target");
+        kernel
+            .mknod_for_process("wasm", pid, "/work/node", 0o020666, (1 << 8) | 3)
+            .expect("create character device");
+        kernel
+            .symlink_for_process("wasm", pid, "/work/target", "/work/link")
+            .expect("create symlink");
+        kernel
+            .remount_filesystem_for_process("wasm", pid, "/", "remount,ro")
+            .expect("remount root read-only");
+
+        assert_eq!(
+            kernel
+                .mknod_for_process("wasm", pid, "/work/node", 0o020666, (1 << 8) | 3)
+                .expect_err("existing node must win over read-only mount")
+                .code(),
+            "EEXIST"
+        );
+        assert_eq!(
+            kernel
+                .mknod_for_process("wasm", pid, "/work/missing-node", 0o020666, (1 << 8) | 3)
+                .expect_err("new node remains forbidden on read-only mount")
+                .code(),
+            "EROFS"
+        );
+        assert_eq!(
+            kernel
+                .symlink_for_process("wasm", pid, "/work/target", "/work/link")
+                .expect_err("existing symlink must win over read-only mount")
+                .code(),
+            "EEXIST"
+        );
+        assert_eq!(
+            kernel
+                .symlink_for_process("wasm", pid, "/work/target", "/work/missing-link")
+                .expect_err("new symlink remains forbidden on read-only mount")
+                .code(),
+            "EROFS"
+        );
+    }
+
     fn kernel_with_process() -> (KernelVm<MemoryFileSystem>, KernelProcessHandle) {
         let mut config = KernelVmConfig::new("vm-fd-socket-test");
         config.permissions = Permissions::allow_all();
@@ -12349,6 +12924,75 @@ mod tests {
             )
             .expect("spawn socket test process");
         (kernel, process)
+    }
+
+    #[test]
+    fn seek_data_and_hole_use_kernel_owned_allocation_ranges() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        let fd = kernel
+            .fd_open("wasm", pid, "/sparse", O_CREAT | O_RDWR, Some(0o600))
+            .expect("open sparse file");
+        kernel
+            .fd_truncate("wasm", pid, fd, 4096)
+            .expect("establish sparse logical size");
+        kernel
+            .fd_pwrite("wasm", pid, fd, b"x", 1024)
+            .expect("allocate one logical sector");
+
+        assert_eq!(
+            kernel
+                .fd_allocated_ranges("wasm", pid, fd)
+                .expect("read authoritative extent map"),
+            vec![(1024, 1536)]
+        );
+        assert_eq!(kernel.fd_seek("wasm", pid, fd, 0, SEEK_HOLE).unwrap(), 0);
+        assert_eq!(kernel.fd_seek("wasm", pid, fd, 0, SEEK_DATA).unwrap(), 1024);
+        assert_eq!(
+            kernel.fd_seek("wasm", pid, fd, 1025, SEEK_DATA).unwrap(),
+            1025
+        );
+        assert_eq!(
+            kernel.fd_seek("wasm", pid, fd, 1024, SEEK_HOLE).unwrap(),
+            1536
+        );
+        assert_eq!(
+            kernel.fd_seek("wasm", pid, fd, 1536, SEEK_HOLE).unwrap(),
+            1536
+        );
+        assert_eq!(
+            kernel
+                .fd_seek("wasm", pid, fd, 1536, SEEK_DATA)
+                .expect_err("no later data extent")
+                .code(),
+            "ENXIO"
+        );
+        assert_eq!(
+            kernel
+                .fd_seek("wasm", pid, fd, 4096, SEEK_HOLE)
+                .expect_err("Linux rejects SEEK_HOLE at EOF")
+                .code(),
+            "ENXIO"
+        );
+        assert_eq!(
+            kernel
+                .fd_seek("wasm", pid, fd, -1, SEEK_DATA)
+                .expect_err("negative data seek")
+                .code(),
+            "ENXIO"
+        );
+        assert_eq!(
+            kernel
+                .fd_seek("wasm", pid, fd, -1, SEEK_HOLE)
+                .expect_err("negative hole seek")
+                .code(),
+            "ENXIO"
+        );
+        assert_eq!(
+            kernel.fd_seek("wasm", pid, fd, 0, SEEK_CUR).unwrap(),
+            1536,
+            "failed seeks do not disturb the last successful cursor"
+        );
     }
 
     #[test]
@@ -12521,6 +13165,18 @@ mod tests {
         kernel
             .remove_file_for_process("wasm", pid, "/program")
             .expect("unlink executable after open");
+        assert_eq!(
+            kernel
+                .pread_file_for_process(
+                    "wasm",
+                    pid,
+                    &format!("/proc/self/fd/{fd}"),
+                    0,
+                    image.len(),
+                )
+                .expect("ranged read follows the live proc fd description"),
+            image,
+        );
         let unlinked = kernel
             .load_process_runtime_image_from_fd("wasm", pid, fd, 1024)
             .expect("open description survives unlink");
@@ -12545,11 +13201,11 @@ mod tests {
             .register_driver(CommandDriver::new("wasm", ["sh"]))
             .expect("register shell projection");
         kernel
-            .mkdir("/__secure_exec/commands/0", true)
+            .mkdir("/__agentos/commands/0", true)
             .expect("create command projection root");
         let shell_image = b"\0asm\x01\0\0\0".to_vec();
         kernel
-            .write_file("/__secure_exec/commands/0/sh", shell_image.clone())
+            .write_file("/__agentos/commands/0/sh", shell_image.clone())
             .expect("write projected shell image");
         kernel
             .write_file_for_process(
@@ -13201,24 +13857,24 @@ mod tests {
             .register_driver(CommandDriver::new("wasm", ["projected-tool"]))
             .expect("register projected command");
         kernel
-            .mkdir("/__secure_exec/commands/0", true)
+            .mkdir("/__agentos/commands/0", true)
             .expect("create projected command root");
         kernel
             .write_file(
-                "/__secure_exec/commands/0/projected-tool",
+                "/__agentos/commands/0/projected-tool",
                 b"\0asmprojected".to_vec(),
             )
             .expect("write projected image");
 
         let stat = kernel
-            .stat("/__secure_exec/commands/0/projected-tool")
+            .stat("/__agentos/commands/0/projected-tool")
             .expect("stat projected image");
         assert_eq!(stat.mode & EXECUTABLE_PERMISSION_BITS, 0);
         let image = kernel
             .load_process_runtime_image(
                 "wasm",
                 process.pid(),
-                "/__secure_exec/commands/0/projected-tool",
+                "/__agentos/commands/0/projected-tool",
                 64,
             )
             .expect("registered projection should be executable");
@@ -13505,6 +14161,96 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "EPERM"
+        );
+    }
+
+    #[test]
+    fn rlimit_fsize_is_shared_by_regular_file_growth_paths() {
+        let (mut kernel, process) = kernel_with_process();
+        let pid = process.pid();
+        kernel
+            .write_file_for_process("wasm", pid, "/existing-limited", vec![0; 9], Some(0o600))
+            .expect("create file before lowering RLIMIT_FSIZE");
+        kernel
+            .signal_action(
+                "wasm",
+                pid,
+                SIGXFSZ,
+                Some(SignalAction {
+                    disposition: crate::process_table::SignalDisposition::Ignore,
+                    ..SignalAction::default()
+                }),
+            )
+            .expect("ignore SIGXFSZ while asserting EFBIG results");
+        kernel
+            .set_resource_limit(
+                "wasm",
+                pid,
+                ProcessResourceLimitKind::FileSize,
+                ProcessResourceLimit {
+                    soft: Some(8),
+                    hard: Some(8),
+                },
+            )
+            .expect("set RLIMIT_FSIZE");
+
+        let fd = kernel
+            .fd_open("wasm", pid, "/limited", O_CREAT | O_RDWR, Some(0o600))
+            .expect("open limited file");
+        assert_eq!(
+            kernel
+                .fd_write("wasm", pid, fd, b"0123456789")
+                .expect("a write crossing the limit is shortened"),
+            8
+        );
+        assert_eq!(kernel.stat("/limited").expect("stat limited file").size, 8);
+        assert_eq!(
+            kernel
+                .fd_write("wasm", pid, fd, b"x")
+                .expect_err("a write beginning at the limit must fail")
+                .code(),
+            "EFBIG"
+        );
+
+        assert_eq!(
+            kernel
+                .fd_truncate("wasm", pid, fd, 9)
+                .expect_err("truncate beyond RLIMIT_FSIZE must fail")
+                .code(),
+            "EFBIG"
+        );
+        assert_eq!(
+            kernel
+                .fd_allocate("wasm", pid, fd, 0, 9)
+                .expect_err("fallocate beyond RLIMIT_FSIZE must fail")
+                .code(),
+            "EFBIG"
+        );
+        kernel
+            .fd_truncate("wasm", pid, fd, 4)
+            .expect("shrinking remains permitted");
+        assert_eq!(
+            kernel
+                .fd_pwrite("wasm", pid, fd, b"abcdef", 3)
+                .expect("pwrite is shortened at RLIMIT_FSIZE"),
+            5
+        );
+        assert_eq!(kernel.stat("/limited").expect("stat final file").size, 8);
+        assert_eq!(
+            kernel
+                .write_file_for_process("wasm", pid, "/existing-limited", vec![1; 9], Some(0o600),)
+                .expect_err(
+                    "a whole-file rewrite beyond RLIMIT_FSIZE must fail even without growth"
+                )
+                .code(),
+            "EFBIG"
+        );
+        assert_eq!(
+            kernel
+                .write_file_for_process("wasm", pid, "/new-limited", vec![0; 9], Some(0o600))
+                .expect_err("path writes beyond RLIMIT_FSIZE must fail")
+                .code(),
+            "EFBIG"
         );
     }
 

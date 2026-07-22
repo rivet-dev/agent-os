@@ -1202,7 +1202,7 @@ describe("replica artifact lifecycle", () => {
 		vi.stubEnv("RIVET_TOKEN", "host-management-token");
 		const definitions = createAppsActors();
 		const replicaDefinition = definitions.agentOSAppsReplica;
-		const actions = replicaDefinition.config.actions as Record<
+		const actions = replicaDefinition.config.actions as unknown as Record<
 			string,
 			(...args: any[]) => any
 		>;

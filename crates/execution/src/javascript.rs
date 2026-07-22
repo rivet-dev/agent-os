@@ -21,8 +21,8 @@ use agentos_runtime::RuntimeContext;
 use agentos_v8_runtime::runtime_protocol::{RuntimeCommand, WarmSessionHint};
 use flume::{Receiver as EventReceiver, Sender as EventSender};
 use getrandom::getrandom;
-use serde::Deserialize;
 use serde::Serialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
@@ -747,6 +747,11 @@ struct LocalBridgeState {
     /// `None` means "route module resolution to the service loop" (the kernel-VFS
     /// fallback for callers that supply no reader).
     module_reader: Option<Box<dyn ModuleFsReader + Send>>,
+    /// The installed reader only exposes trusted host mappings; every other
+    /// path is owned by the live kernel VFS. Package-origin resolution must
+    /// bypass that partial reader before its `/root/node_modules` compatibility
+    /// mapping can shadow the package's dependency closure under `/opt/agentos`.
+    module_reader_forwards_to_kernel: bool,
 }
 
 impl Default for LocalBridgeState {
@@ -769,6 +774,7 @@ impl Default for LocalBridgeState {
             forward_kernel_stdin_rpc: false,
             v8_session: None,
             module_reader: None,
+            module_reader_forwards_to_kernel: false,
         }
     }
 }
@@ -820,21 +826,36 @@ struct GuestPathTranslator {
     implicit_host_cwd: PathBuf,
     sandbox_root: Option<PathBuf>,
     mappings: Vec<GuestPathMapping>,
+    /// Explicit, trusted host projections supplied by the sidecar. A live
+    /// kernel-VFS module reader may fall back only to these roots, never to the
+    /// implicit host cwd or sandbox root.
+    explicit_mapping_guest_roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct LocalPackageJson {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_package_string")]
     name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_package_string")]
     main: Option<String>,
-    #[serde(default)]
-    #[serde(rename = "type")]
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "deserialize_optional_package_string"
+    )]
     package_type: Option<String>,
     #[serde(default)]
     exports: Option<Value>,
     #[serde(default)]
     imports: Option<Value>,
+}
+
+fn deserialize_optional_package_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| value.as_str().map(str::to_owned)))
 }
 
 #[derive(Debug)]
@@ -1245,6 +1266,10 @@ impl GuestPathTranslator {
             .into_iter()
             .filter(|mapping| mapping.guest_path.starts_with('/'))
             .collect::<Vec<_>>();
+        let explicit_mapping_guest_roots = mappings
+            .iter()
+            .map(|mapping| mapping.guest_path.clone())
+            .collect();
 
         if !mappings
             .iter()
@@ -1266,7 +1291,15 @@ impl GuestPathTranslator {
                 .filter(|value| Path::new(value.as_str()).is_absolute())
                 .map(PathBuf::from),
             mappings,
+            explicit_mapping_guest_roots,
         }
+    }
+
+    fn explicitly_maps_guest_path(&self, guest_path: &str) -> bool {
+        let normalized = normalize_guest_path(guest_path);
+        self.explicit_mapping_guest_roots
+            .iter()
+            .any(|root| strip_guest_prefix(&normalized, root).is_some())
     }
 
     fn is_known_host_path(&self, host_path: &Path) -> bool {
@@ -1775,6 +1808,10 @@ impl ModuleResolutionTestHarness {
             implicit_guest_cwd: String::from("/root"),
             implicit_host_cwd: host_root,
             sandbox_root: None,
+            explicit_mapping_guest_roots: mappings
+                .iter()
+                .map(|mapping| mapping.guest_path.clone())
+                .collect(),
             mappings,
         };
         Self { local_bridge }
@@ -2130,6 +2167,7 @@ pub struct JavascriptExecution {
     events: EventReceiver<JavascriptExecutionEvent>,
     pending_sync_rpc: Arc<Mutex<PendingSyncRpcRegistry>>,
     exited: Arc<AtomicBool>,
+    termination_requested: AtomicBool,
     kernel_stdin: Arc<LocalKernelStdinBridge>,
     _import_cache_guard: Arc<NodeImportCacheCleanup>,
     v8_session: V8SessionHandle,
@@ -2291,15 +2329,21 @@ impl JavascriptExecution {
     }
 
     pub fn terminate(&self) -> Result<(), JavascriptExecutionError> {
-        // Completion may race an idempotent child-process cleanup kill. Once
-        // the terminal frame is published, preserve that result and avoid
-        // enqueueing TerminateExecution into an already-completed V8 session.
-        if self.has_exited() {
+        // Kernel control delivery, explicit cleanup, and the terminal frame can
+        // race. Exactly one path may request isolate termination; later
+        // idempotent shutdown attempts preserve the first result instead of
+        // enqueueing a late TerminateExecution diagnostic into guest stderr.
+        if self.has_exited() || self.termination_requested.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
-        self.v8_session
+        let result = self
+            .v8_session
             .terminate()
-            .map_err(JavascriptExecutionError::Terminate)
+            .map_err(JavascriptExecutionError::Terminate);
+        if result.is_err() {
+            self.termination_requested.store(false, Ordering::Release);
+        }
+        result
     }
 
     pub fn pause(&self) -> Result<(), JavascriptExecutionError> {
@@ -3455,14 +3499,16 @@ impl JavascriptExecutionEngine {
             .inline_code
             .clone()
             .map(|inline_code| strip_javascript_hashbang(&inline_code));
-        let use_module_mode = request
+        let explicit_module_mode = request
             .env
             .get(NODE_GUEST_ENTRYPOINT_MODULE_MODE_ENV)
-            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            || host_entrypoint_uses_module_mode(&host_entrypoint)
-            || inline_code
-                .as_deref()
-                .is_some_and(inline_code_uses_module_mode);
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        let use_module_mode = explicit_module_mode.unwrap_or_else(|| {
+            host_entrypoint_uses_module_mode(&host_entrypoint)
+                || inline_code
+                    .as_deref()
+                    .is_some_and(inline_code_uses_module_mode)
+        });
         if !matches!(guest_entrypoint.as_str(), "-e" | "--eval") && !use_module_mode {
             if let Some(inline_code) = inline_code.as_ref() {
                 if let Some(parent) = host_entrypoint.parent() {
@@ -3532,6 +3578,22 @@ impl JavascriptExecutionEngine {
         local_bridge.kernel_stdin = kernel_stdin.clone();
         local_bridge.v8_session = Some(v8_session.clone());
         local_bridge.module_reader = module_reader;
+        if local_bridge.module_reader.is_none()
+            && !local_bridge
+                .translator
+                .explicit_mapping_guest_roots
+                .is_empty()
+        {
+            // Production normally forwards module calls to the kernel when no
+            // VFS reader is installed. Trusted runtime projections (npm,
+            // Pyodide assets, and similar sidecar-created mappings) need a
+            // narrowly scoped host fallback first. This always-missing reader
+            // activates the layered resolver: explicit mappings resolve
+            // locally, while every other miss still falls through to the
+            // kernel service loop.
+            local_bridge.module_reader = Some(Box::new(ForwardingModuleFsReader));
+            local_bridge.module_reader_forwards_to_kernel = true;
+        }
         local_bridge.module_resolution = GuestModuleResolution::from_env(&request.env);
         local_bridge.forward_kernel_stdin_rpc = request
             .env
@@ -3601,6 +3663,7 @@ impl JavascriptExecutionEngine {
             events,
             pending_sync_rpc,
             exited,
+            termination_requested: AtomicBool::new(false),
             kernel_stdin,
             _import_cache_guard: import_cache_guard,
             v8_session,
@@ -5063,6 +5126,14 @@ fn send_single_javascript_event(
 /// Handle internal bridge calls that don't need to go to the sidecar.
 /// Returns Some(response) if handled locally, None if it should be forwarded.
 impl LocalBridgeState {
+    fn package_module_request_requires_kernel(&self, parent: &str) -> bool {
+        if !self.module_reader_forwards_to_kernel {
+            return false;
+        }
+        let parent = guest_path_from_file_url(parent).unwrap_or_else(|| parent.to_owned());
+        normalize_guest_path(&parent).starts_with("/opt/agentos/pkgs/")
+    }
+
     fn handle_internal_bridge_call(
         &mut self,
         call_id: u64,
@@ -5082,6 +5153,9 @@ impl LocalBridgeState {
                 if self.js_runtime_denies_specifier(specifier) {
                     return Some(LocalBridgeCallResult::Immediate(Value::Null));
                 }
+                if self.package_module_request_requires_kernel(parent) {
+                    return None;
+                }
                 let resolved = self.with_module_resolver(|resolver| {
                     resolver.resolve_module(specifier, parent, mode)
                 });
@@ -5097,11 +5171,23 @@ impl LocalBridgeState {
                 ))
             }
             "_moduleFormat" => {
-                let format =
-                    match self.module_format(args.first().and_then(Value::as_str).unwrap_or("")) {
-                        Ok(format) => format,
-                        Err(error) => return Some(LocalBridgeCallResult::Error(error)),
-                    };
+                let path = args.first().and_then(Value::as_str).unwrap_or("");
+                // A forwarding reader means the live kernel VFS owns paths
+                // outside the explicitly admitted host projections. The local
+                // resolver cannot distinguish a missing package.json there
+                // from Node's real default-CommonJS classification, so a
+                // locally inferred `commonjs` result would hide the
+                // authoritative package scope (notably projected `.aospkg`
+                // packages). Forward those paths to the kernel just like
+                // resolve/load misses; explicit trusted host mappings remain
+                // eligible for the fast local path.
+                if self.has_module_reader() && !self.translator.explicitly_maps_guest_path(path) {
+                    return None;
+                }
+                let format = match self.module_format(path) {
+                    Ok(format) => format,
+                    Err(error) => return Some(LocalBridgeCallResult::Error(error)),
+                };
                 if format.is_none() && self.has_module_reader() {
                     return None;
                 }
@@ -5125,6 +5211,23 @@ impl LocalBridgeState {
                 ))
             }
             "_batchResolveModules" => {
+                if args
+                    .first()
+                    .and_then(Value::as_array)
+                    .is_some_and(|requests| {
+                        requests.iter().any(|request| {
+                            request
+                                .as_array()
+                                .and_then(|pair| pair.get(1))
+                                .and_then(Value::as_str)
+                                .is_some_and(|parent| {
+                                    self.package_module_request_requires_kernel(parent)
+                                })
+                        })
+                    })
+                {
+                    return None;
+                }
                 let resolved = match self.batch_resolve_modules(args) {
                     Ok(resolved) => resolved,
                     Err(error) => return Some(LocalBridgeCallResult::Error(error)),
@@ -5575,7 +5678,11 @@ impl LocalBridgeState {
     ) -> T {
         let cache = &mut self.resolution_cache;
         if let Some(reader) = self.module_reader.as_deref_mut() {
-            let reader: &mut dyn ModuleFsReader = reader;
+            let mut layered = LayeredModuleFsReader {
+                primary: reader,
+                explicit_host_mappings: &mut self.translator,
+            };
+            let reader: &mut dyn ModuleFsReader = &mut layered;
             let mut resolver = ModuleResolver { reader, cache };
             f(&mut resolver)
         } else {
@@ -5584,6 +5691,92 @@ impl LocalBridgeState {
             let mut resolver = ModuleResolver { reader, cache };
             f(&mut resolver)
         }
+    }
+}
+
+struct LayeredModuleFsReader<'a> {
+    primary: &'a mut dyn ModuleFsReader,
+    explicit_host_mappings: &'a mut GuestPathTranslator,
+}
+
+struct ForwardingModuleFsReader;
+
+impl ModuleFsReader for ForwardingModuleFsReader {
+    fn canonical_guest_path(
+        &mut self,
+        _guest_path: &str,
+    ) -> Result<Option<String>, HostServiceError> {
+        Ok(None)
+    }
+
+    fn read_to_string(&mut self, _guest_path: &str) -> Result<Option<String>, HostServiceError> {
+        Ok(None)
+    }
+
+    fn path_is_dir(&mut self, _guest_path: &str) -> Result<Option<bool>, HostServiceError> {
+        Ok(None)
+    }
+
+    fn path_exists(&mut self, _guest_path: &str) -> Result<bool, HostServiceError> {
+        Ok(false)
+    }
+}
+
+impl ModuleFsReader for LayeredModuleFsReader<'_> {
+    fn canonical_guest_path(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<Option<String>, HostServiceError> {
+        if let Some(path) = self.primary.canonical_guest_path(guest_path)? {
+            return Ok(Some(path));
+        }
+        if !self
+            .explicit_host_mappings
+            .explicitly_maps_guest_path(guest_path)
+        {
+            return Ok(None);
+        }
+        self.explicit_host_mappings
+            .canonical_module_guest_path(guest_path)
+    }
+
+    fn read_to_string(&mut self, guest_path: &str) -> Result<Option<String>, HostServiceError> {
+        if let Some(source) = self.primary.read_to_string(guest_path)? {
+            return Ok(Some(source));
+        }
+        if !self
+            .explicit_host_mappings
+            .explicitly_maps_guest_path(guest_path)
+        {
+            return Ok(None);
+        }
+        ModuleFsReader::read_to_string(&mut self.explicit_host_mappings, guest_path)
+    }
+
+    fn path_is_dir(&mut self, guest_path: &str) -> Result<Option<bool>, HostServiceError> {
+        if let Some(is_dir) = self.primary.path_is_dir(guest_path)? {
+            return Ok(Some(is_dir));
+        }
+        if !self
+            .explicit_host_mappings
+            .explicitly_maps_guest_path(guest_path)
+        {
+            return Ok(None);
+        }
+        ModuleFsReader::path_is_dir(&mut self.explicit_host_mappings, guest_path)
+    }
+
+    fn path_exists(&mut self, guest_path: &str) -> Result<bool, HostServiceError> {
+        if self.primary.path_exists(guest_path)? {
+            return Ok(true);
+        }
+        if !self
+            .explicit_host_mappings
+            .explicitly_maps_guest_path(guest_path)
+        {
+            return Ok(false);
+        }
+        ModuleFsReader::path_exists(&mut self.explicit_host_mappings, guest_path)
     }
 }
 
@@ -8374,6 +8567,32 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::tempdir;
 
+    struct MissingModuleReader;
+
+    impl ModuleFsReader for MissingModuleReader {
+        fn canonical_guest_path(
+            &mut self,
+            _guest_path: &str,
+        ) -> Result<Option<String>, HostServiceError> {
+            Ok(None)
+        }
+
+        fn read_to_string(
+            &mut self,
+            _guest_path: &str,
+        ) -> Result<Option<String>, HostServiceError> {
+            Ok(None)
+        }
+
+        fn path_is_dir(&mut self, _guest_path: &str) -> Result<Option<bool>, HostServiceError> {
+            Ok(None)
+        }
+
+        fn path_exists(&mut self, _guest_path: &str) -> Result<bool, HostServiceError> {
+            Ok(false)
+        }
+    }
+
     #[test]
     fn malformed_bridge_payload_is_a_typed_decode_error() {
         let error = decode_bridge_call_args("_resolveModule", 17, &[0xff])
@@ -8400,6 +8619,128 @@ mod tests {
             .as_str()
             .expect("dispatch error response")
             .contains("ERR_AGENTOS_BRIDGE_DISPATCH_DECODE"));
+    }
+
+    #[test]
+    fn live_module_reader_falls_back_only_to_explicit_host_mappings() {
+        let root = tempdir().expect("create explicit mapping root");
+        let mapped_root = root.path().join("npm");
+        fs::create_dir_all(mapped_root.join("lib/utils")).expect("create mapped module tree");
+        fs::write(
+            mapped_root.join("lib/utils/display.js"),
+            "module.exports = 1;\n",
+        )
+        .expect("write mapped module");
+        fs::write(root.path().join("hidden.js"), "module.exports = 2;\n")
+            .expect("write implicit-cwd module");
+        let env = BTreeMap::from([(
+            String::from(NODE_GUEST_PATH_MAPPINGS_ENV),
+            serde_json::to_string(&vec![json!({
+                "guestPath": "/__agentos/node-runtime/npm",
+                "hostPath": mapped_root,
+            })])
+            .expect("serialize explicit mapping"),
+        )]);
+        let mut bridge = LocalBridgeState::default();
+        bridge.translator = GuestPathTranslator::from_host_context(
+            &env,
+            root.path().to_path_buf(),
+            String::from("/workspace"),
+        );
+        bridge.module_reader = Some(Box::new(MissingModuleReader));
+
+        assert_eq!(
+            bridge
+                .resolve_module(
+                    "/__agentos/node-runtime/npm/lib/utils/display.js",
+                    "/workspace/[eval]",
+                    ModuleResolveMode::Require,
+                )
+                .expect("resolve explicit host mapping"),
+            Some(String::from(
+                "/__agentos/node-runtime/npm/lib/utils/display.js"
+            ))
+        );
+        assert_eq!(
+            bridge
+                .resolve_module(
+                    "/workspace/hidden.js",
+                    "/workspace/[eval]",
+                    ModuleResolveMode::Require,
+                )
+                .expect("implicit host cwd remains unavailable"),
+            None
+        );
+    }
+
+    #[test]
+    fn partial_host_reader_defers_agentos_package_resolution_to_kernel_vfs() {
+        let mut bridge = LocalBridgeState::default();
+        bridge.module_reader = Some(Box::new(MissingModuleReader));
+        bridge.module_reader_forwards_to_kernel = true;
+        let parent =
+            "/opt/agentos/pkgs/codex/0.0.1/node_modules/@agentos-software/codex/dist/adapter.js";
+
+        assert!(
+            bridge
+                .handle_internal_bridge_call(
+                    1,
+                    "_resolveModule",
+                    &[
+                        Value::String(String::from("@agentclientprotocol/sdk")),
+                        Value::String(parent.to_owned()),
+                        Value::String(String::from("import")),
+                    ],
+                )
+                .is_none(),
+            "a /root/node_modules host mapping must not shadow package-local dependencies"
+        );
+        assert!(
+            bridge
+                .handle_internal_bridge_call(
+                    2,
+                    "_resolveModule",
+                    &[
+                        Value::String(String::from("@agentclientprotocol/sdk")),
+                        Value::String(format!("file://{parent}")),
+                        Value::String(String::from("import")),
+                    ],
+                )
+                .is_none(),
+            "file URL referrers inside projected packages must also use the kernel VFS"
+        );
+        assert!(
+            bridge
+                .handle_internal_bridge_call(
+                    3,
+                    "_batchResolveModules",
+                    &[Value::Array(vec![Value::Array(vec![
+                        Value::String(String::from("@agentclientprotocol/sdk")),
+                        Value::String(parent.to_owned()),
+                    ])])],
+                )
+                .is_none(),
+            "batched package resolution must preserve the same kernel ownership"
+        );
+    }
+
+    #[test]
+    fn vfs_owned_module_format_falls_through_to_the_authoritative_reader() {
+        let mut bridge = LocalBridgeState::default();
+        bridge.module_reader = Some(Box::new(MissingModuleReader));
+
+        assert!(
+            bridge
+                .handle_internal_bridge_call(
+                    1,
+                    "_moduleFormat",
+                    &[Value::String(String::from(
+                        "/opt/agentos/pkgs/demo/0.0.1/node_modules/demo/index.js",
+                    ))],
+                )
+                .is_none(),
+            "a local default-CommonJS guess must not hide live VFS package metadata"
+        );
     }
 
     #[test]

@@ -65,34 +65,6 @@ fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-fn options(
-    process: ProcessExecutionOptions,
-) -> (
-    ExecutionIdentityOptions,
-    ExecutionOutputOptions,
-    Option<String>,
-    bool,
-    Vec<String>,
-    Option<String>,
-    BTreeMap<String, String>,
-    Option<Vec<u8>>,
-    Option<ExecutionPtyOptions>,
-    Option<u64>,
-) {
-    (
-        process.identity,
-        process.output,
-        process.operation_id,
-        process.background.unwrap_or(false),
-        process.args,
-        process.cwd,
-        process.env.unwrap_or_default().into_iter().collect(),
-        process.stdin,
-        process.pty,
-        process.timeout_ms,
-    )
-}
-
 fn inline_inputs_prefix(inputs: Option<String>, python: bool) -> String {
     let inputs = inputs.unwrap_or_else(|| String::from("{}"));
     if python {
@@ -117,8 +89,7 @@ fn semantic_result_path() -> String {
 fn typescript_check_runner(request: serde_json::Value, result_path: &str) -> String {
     const RUNNER: &str = r#"
 const __request = __AGENTOS_TYPESCRIPT_REQUEST__;
-const __compilerPath = process.env.AGENTOS_TYPESCRIPT_COMPILER_PATH;
-if (!__compilerPath) throw new Error("bundled TypeScript compiler path is unavailable");
+const __compilerPath = "/.agentos/runtime/typescript/typescript.js";
 const ts = require(__compilerPath);
 const path = require("node:path");
 
@@ -450,18 +421,28 @@ fn lowered_process(
     command: impl Into<String>,
     mut prefix_args: Vec<String>,
 ) -> LoweredOperation {
-    let (identity, output, operation_id, background, args, cwd, env, stdin, pty, timeout_ms) =
-        options(process);
+    let ProcessExecutionOptions {
+        identity,
+        output,
+        operation_id,
+        background,
+        args,
+        cwd,
+        env,
+        stdin,
+        pty,
+        timeout_ms,
+    } = process;
     prefix_args.extend(args);
     LoweredOperation {
         identity,
         output,
         operation_id,
-        background,
+        background: background.unwrap_or(false),
         command: command.into(),
         args: prefix_args,
         cwd,
-        env,
+        env: env.unwrap_or_default().into_iter().collect(),
         stdin,
         pty,
         timeout_ms,
@@ -935,7 +916,6 @@ where
             .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         {
             const COMPILER_ROOT: &str = "/.agentos/runtime/typescript";
-            const COMPILER_PATH: &str = "/.agentos/runtime/typescript/typescript.js";
             let vm = self
                 .vms
                 .get_mut(&vm_id)
@@ -963,10 +943,6 @@ where
                 }
                 vm.typescript_compiler_staged = true;
             }
-            operation.env.insert(
-                String::from("AGENTOS_TYPESCRIPT_COMPILER_PATH"),
-                String::from(COMPILER_PATH),
-            );
         }
 
         let now = now_ms();
@@ -2028,20 +2004,20 @@ where
             .flat_map(|(vm_id, vm)| {
                 vm.executions
                     .iter()
-                    .filter_map(move |(execution_id, execution)| {
-                        (execution.public
+                    .filter(|(_, execution)| {
+                        execution.public
                             && !execution.context
                             && execution.descriptor.state != ExecutionState::Running
                             && execution
                                 .expires_at_ms
-                                .is_some_and(|expires_at| now >= expires_at))
-                        .then(|| {
-                            (
-                                vm_id.clone(),
-                                execution_id.clone(),
-                                execution.resident_process_id.clone(),
-                            )
-                        })
+                                .is_some_and(|expires_at| now >= expires_at)
+                    })
+                    .map(move |(execution_id, execution)| {
+                        (
+                            vm_id.clone(),
+                            execution_id.clone(),
+                            execution.resident_process_id.clone(),
+                        )
                     })
             })
             .take(64)
@@ -2110,19 +2086,20 @@ where
             .vms
             .iter()
             .flat_map(|(vm_id, vm)| {
-                vm.executions.iter().filter_map(move |(_, execution)| {
-                    (execution.descriptor.state == ExecutionState::Running
+                vm.executions.values().filter_map(move |execution| {
+                    if execution.descriptor.state == ExecutionState::Running
                         && execution
                             .deadline_ms
-                            .is_some_and(|deadline| now >= deadline))
-                    .then(|| {
+                            .is_some_and(|deadline| now >= deadline)
+                    {
                         execution
                             .descriptor
                             .process_id
                             .as_ref()
                             .map(|process_id| (vm_id.clone(), process_id.clone()))
-                    })
-                    .flatten()
+                    } else {
+                        None
+                    }
                 })
             })
             .collect::<Vec<_>>();

@@ -104,6 +104,12 @@ describe("duckdb registry package", () => {
 			`duckdb -csv /tmp/app.duckdb -c "CREATE TABLE items(id INTEGER, value INTEGER); INSERT INTO items VALUES (1, 10), (2, 20); UPDATE items SET value = value + 1 WHERE id = 2;"`,
 		);
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+		expect(
+			await vm.exists("/workspace"),
+			`DuckDB removed the VM working directory; root entries: ${JSON.stringify(
+				await vm.readdir("/"),
+			)}`,
+		).toBe(true);
 
 		result = await vm.exec(
 			`duckdb -csv /tmp/app.duckdb -c "SELECT id, value FROM items ORDER BY id;"`,
@@ -129,6 +135,12 @@ describe("duckdb registry package", () => {
 			].join(""),
 		);
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+		expect(
+			await vm.exists("/workspace"),
+			`DuckDB removed the VM working directory; root entries: ${JSON.stringify(
+				await vm.readdir("/"),
+			)}`,
+		).toBe(true);
 
 		result = await vm.exec(
 			`duckdb -csv /tmp/analytics.duckdb -c "SELECT region, total, deals FROM read_csv_auto('/tmp/region_totals.csv') ORDER BY total DESC;"`,

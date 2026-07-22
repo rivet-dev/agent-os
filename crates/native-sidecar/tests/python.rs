@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, UdpSocket};
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{symlink, MetadataExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -152,6 +152,8 @@ fn collect_process_output_with_timeout(
                     exit = Some((exited.exit_code, Instant::now()));
                 }
                 EventPayload::ProcessExitedEvent(_)
+                | EventPayload::ExecutionOutputEvent(_)
+                | EventPayload::ExecutionCompletedEvent(_)
                 | EventPayload::VmLifecycleEvent(_)
                 | EventPayload::StructuredEvent(_)
                 | EventPayload::ExtEnvelope(_) => {}
@@ -486,6 +488,52 @@ fn create_vm_with_root_filesystem(
             )),
         ))
         .expect("create sidecar VM through wire");
+
+    match result.response.payload {
+        ResponsePayload::VmCreatedResponse(response) => response.vm_id,
+        other => panic!("unexpected wire vm create response: {other:?}"),
+    }
+}
+
+fn create_vm_for_host_dir_owner(
+    sidecar: &mut agentos_native_sidecar::NativeSidecar<support::RecordingBridge>,
+    request_id: RequestId,
+    connection_id: &str,
+    session_id: &str,
+    runtime: GuestRuntimeKind,
+    cwd: &Path,
+    host_dir: &Path,
+) -> String {
+    let metadata = fs::metadata(host_dir).expect("stat host_dir fixture owner");
+    let mut request = support::create_vm_request_with_selected_wasm_backend(
+        runtime.clone(),
+        HashMap::from([(String::from("cwd"), cwd.to_string_lossy().into_owned())]),
+        RootFilesystemDescriptor {
+            mode: RootFilesystemMode::Ephemeral,
+            disable_default_base_layer: false,
+            lowers: Vec::new(),
+            bootstrap_entries: Vec::new(),
+        },
+        Some(wire_permissions_allow_all()),
+    );
+    let mut config: agentos_vm_config::CreateVmConfig =
+        serde_json::from_str(&request.config).expect("decode host_dir fixture VM config");
+    config.user = Some(agentos_vm_config::VmUserConfig {
+        uid: Some(metadata.uid()),
+        gid: Some(metadata.gid()),
+        euid: Some(metadata.uid()),
+        egid: Some(metadata.gid()),
+        ..Default::default()
+    });
+    request = CreateVmRequest::json_config(runtime, config);
+
+    let result = sidecar
+        .dispatch_wire_blocking(wire_request(
+            request_id,
+            wire_session(connection_id, session_id),
+            RequestPayload::CreateVmRequest(request),
+        ))
+        .expect("create sidecar VM as host_dir fixture owner");
 
     match result.response.payload {
         ResponsePayload::VmCreatedResponse(response) => response.vm_id,
@@ -923,6 +971,8 @@ fn wait_for_stdout_chunk(
                 );
             }
             EventPayload::ProcessExitedEvent(_)
+            | EventPayload::ExecutionOutputEvent(_)
+            | EventPayload::ExecutionCompletedEvent(_)
             | EventPayload::VmLifecycleEvent(_)
             | EventPayload::StructuredEvent(_)
             | EventPayload::ExtEnvelope(_) => {}
@@ -1255,7 +1305,9 @@ fn concurrent_python_processes_stay_isolated_across_vms() {
                 assert_eq!(exited.process_id, "proc");
                 result.exit_code = Some(exited.exit_code);
             }
-            EventPayload::VmLifecycleEvent(_)
+            EventPayload::ExecutionOutputEvent(_)
+            | EventPayload::ExecutionCompletedEvent(_)
+            | EventPayload::VmLifecycleEvent(_)
             | EventPayload::StructuredEvent(_)
             | EventPayload::ExtEnvelope(_) => {}
         }
@@ -1736,13 +1788,14 @@ fn workspace_files_are_shared_between_javascript_and_python_runtimes() {
     let js_entry = workspace_host_dir.join("cross-runtime.cjs");
     let connection_id = authenticate_wire(&mut sidecar, "conn-cross-runtime");
     let session_id = open_session_wire(&mut sidecar, 2, &connection_id);
-    let (vm_id, _) = create_vm_wire(
+    let vm_id = create_vm_for_host_dir_owner(
         &mut sidecar,
         3,
         &connection_id,
         &session_id,
         GuestRuntimeKind::JavaScript,
         &cwd,
+        &workspace_host_dir,
     );
 
     write_fixture(

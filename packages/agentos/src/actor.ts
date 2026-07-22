@@ -1187,6 +1187,8 @@ export function createAgentOsActions(
 		) => (await ensureVm(c, options)).process.signal(...args),
 		listProcesses: async (c: AnyContext) =>
 			(await ensureVm(c, options)).process.list(),
+		allProcesses: async (c: AnyContext) =>
+			(await ensureVm(c, options)).allProcesses(),
 		processTree: async (c: AnyContext) =>
 			(await ensureVm(c, options)).process.tree(),
 		getProcess: async (
@@ -1792,6 +1794,7 @@ export function createAgentOsActions(
 		waitProcess: nested.process.wait,
 		killProcess: nested.process.kill,
 		listProcesses: nested.process.list,
+		allProcesses: flat.allProcesses,
 		processTree: nested.process.tree,
 		getProcess: nested.process.get,
 		writeProcessStdin: nested.process.writeStdin,

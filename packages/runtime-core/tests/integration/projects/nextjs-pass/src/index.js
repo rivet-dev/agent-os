@@ -33,17 +33,49 @@ async function ensureBuild() {
 	process.env.NEXT_TELEMETRY_DISABLED = "1";
 	var stdoutWrite = process.stdout.write;
 	var stderrWrite = process.stderr.write;
-	process.stdout.write = function () {
+	var processExit = process.exit;
+	var capturedOutput = [];
+	var capturedBytes = 0;
+	var maxCapturedBytes = 1024 * 1024;
+	function captureOutput(chunk) {
+		var text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+		var remainingBytes = maxCapturedBytes - capturedBytes;
+		if (remainingBytes > 0) {
+			var captured = Buffer.from(text).subarray(0, remainingBytes).toString();
+			capturedOutput.push(captured);
+			capturedBytes += Buffer.byteLength(captured);
+		}
 		return true;
+	}
+	process.stdout.write = captureOutput;
+	process.stderr.write = captureOutput;
+	process.exit = function (code) {
+		var error = new Error(
+			"Next.js build called process.exit(" + String(code ?? 0) + ")",
+		);
+		error.code = "NEXT_BUILD_PROCESS_EXIT";
+		error.exitCode = code ?? 0;
+		throw error;
 	};
-	process.stderr.write = function () {
-		return true;
-	};
+	var buildError;
 	try {
 		await require("../run-next-build.cjs")();
+	} catch (error) {
+		buildError = error;
 	} finally {
 		process.stdout.write = stdoutWrite;
 		process.stderr.write = stderrWrite;
+		process.exit = processExit;
+	}
+	if (buildError) {
+		var output = capturedOutput.join("");
+		if (capturedBytes === maxCapturedBytes) {
+			output += "\n[Next.js build output truncated at 1048576 bytes]\n";
+		}
+		if (output) {
+			stderrWrite.call(process.stderr, output);
+		}
+		throw buildError;
 	}
 }
 

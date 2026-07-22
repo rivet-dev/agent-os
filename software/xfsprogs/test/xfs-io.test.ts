@@ -47,6 +47,13 @@ describeIf(hasXfsIo, "xfs_io command", { timeout: 30_000 }, () => {
 		return { exitCode, stdout, stderr };
 	}
 
+	it("supports global help without a file operand", async () => {
+		const result = await run(["-c", "help pwrite"]);
+		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+		expect(result.stderr).toBe("");
+		expect(result.stdout).toContain("pwrite");
+	});
+
 	it("writes, truncates, and reports metadata for a kernel-backed file", async () => {
 		const path = "/workspace/data.bin";
 		const result = await run([
@@ -79,6 +86,73 @@ describeIf(hasXfsIo, "xfs_io command", { timeout: 30_000 }, () => {
 			0,
 			0,
 		]);
+	});
+
+	it("accepts the full unsigned pattern seed used by xfs_io", async () => {
+		const path = "/workspace/pattern.bin";
+		const copyPath = "/workspace/pattern-copy.bin";
+		const result = await run([
+			"-f",
+			"-c",
+			"pwrite -q -S 0xa5a55a5a 0 8",
+			path,
+		]);
+		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+		expect(result.stdout).toBe("");
+		expect(result.stderr).toBe("");
+
+		const bytes = await filesystem.readFile(path);
+		expect(Array.from(bytes)).toEqual(new Array(8).fill(0x5a));
+
+		const copyResult = await run([
+			"-f",
+			"-c",
+			`sendfile -i ${path} -q 0 8`,
+			copyPath,
+		]);
+		expect(copyResult.exitCode, copyResult.stderr || copyResult.stdout).toBe(0);
+		expect(copyResult.stdout).toBe("");
+		expect(copyResult.stderr).toBe("");
+		expect(Array.from(await filesystem.readFile(copyPath))).toEqual(
+			Array.from(bytes),
+		);
+	});
+
+	it("keeps verbose pread output when quiet suppresses the summary", async () => {
+		const path = "/workspace/verbose-read.bin";
+		const result = await run([
+			"-f",
+			"-c",
+			"pwrite -q -S 0x61 0 1",
+			"-c",
+			"pread -v -q 0 1",
+			path,
+		]);
+		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+		expect(result.stderr).toBe("");
+		expect(result.stdout).toBe("00000000:  61  a\n");
+	});
+
+	it("writes bytes from an input file", async () => {
+		const inputPath = "/workspace/input-pattern.bin";
+		const outputPath = "/workspace/input-copy.bin";
+		const input = Uint8Array.from([
+			0x00, 0x11, 0x22, 0x33, 0x80, 0x99, 0xaa, 0xff,
+		]);
+		await filesystem.writeFile(inputPath, input);
+
+		const result = await run([
+			"-f",
+			"-c",
+			`pwrite -q -i ${inputPath} 0 ${input.length}`,
+			outputPath,
+		]);
+		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+		expect(result.stdout).toBe("");
+		expect(result.stderr).toBe("");
+		expect(Array.from(await filesystem.readFile(outputPath))).toEqual(
+			Array.from(input),
+		);
 	});
 
 	it("punches a complete extent and exposes the resulting hole", async () => {
@@ -133,5 +207,22 @@ describeIf(hasXfsIo, "xfs_io command", { timeout: 30_000 }, () => {
 		const linked = await filesystem.readFile(linkedPath);
 		expect(Array.from(original)).toEqual([0x2a, 0x2a, 0x2a, 0x2a]);
 		expect(Array.from(linked)).toEqual(Array.from(original));
+	});
+
+	it("honors the O_TMPFILE creation mode before linking", async () => {
+		const directory = "/workspace/tmpfiles";
+		const linkedPath = `${directory}/linked.bin`;
+		await filesystem.mkdir(directory, { recursive: true });
+		const result = await run([
+			"-T",
+			"-m",
+			"0604",
+			"-c",
+			`flink ${linkedPath}`,
+			directory,
+		]);
+		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+		expect(result.stderr).toBe("");
+		expect((await filesystem.stat(linkedPath)).mode & 0o777).toBe(0o604);
 	});
 });

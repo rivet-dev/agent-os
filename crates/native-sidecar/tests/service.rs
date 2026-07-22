@@ -168,6 +168,30 @@ mod service {
             }
         }
 
+        #[derive(Default)]
+        struct RecordingDirectReplyTarget {
+            replies: std::sync::Mutex<Vec<Result<HostCallReply, HostServiceError>>>,
+        }
+
+        impl DirectHostReplyTarget for RecordingDirectReplyTarget {
+            fn claim(&self, _call_id: u64) -> Result<bool, HostServiceError> {
+                Ok(true)
+            }
+
+            fn respond(
+                &self,
+                _call_id: u64,
+                _claimed: bool,
+                result: Result<HostCallReply, HostServiceError>,
+            ) -> Result<(), HostServiceError> {
+                self.replies
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(result);
+                Ok(())
+            }
+        }
+
         fn dispatch_test_host_operation(
             sidecar: &mut NativeSidecar<RecordingBridge>,
             vm_id: &str,
@@ -349,6 +373,47 @@ mod service {
                 current_process_path,
                 request,
             ))
+        }
+
+        fn poll_descendant_process_for_test(
+            sidecar: &mut NativeSidecar<RecordingBridge>,
+            vm_id: &str,
+            process_id: &str,
+            current_process_path: &[&str],
+            child_process_id: &str,
+            timeout_ms: u64,
+        ) -> Result<Value, SidecarError> {
+            let handle = sidecar
+                .vms
+                .get(vm_id)
+                .ok_or_else(|| SidecarError::InvalidState(format!("unknown VM {vm_id}")))?
+                .runtime_context
+                .handle()
+                .clone();
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+            loop {
+                let event = handle.block_on(sidecar.poll_descendant_process_for_test(
+                    vm_id,
+                    process_id,
+                    current_process_path,
+                    child_process_id,
+                    0,
+                ))?;
+                if !event.is_null() || Instant::now() >= deadline {
+                    return Ok(event);
+                }
+
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let event_notify = Arc::clone(&sidecar.process_event_notify);
+                if handle
+                    .block_on(async {
+                        tokio::time::timeout(remaining, event_notify.notified()).await
+                    })
+                    .is_err()
+                {
+                    return Ok(Value::Null);
+                }
+            }
         }
         use agentos_execution::{
             CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
@@ -3025,6 +3090,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                         | ActiveExecutionEvent::HostCallCompletion(_)
                         | ActiveExecutionEvent::ManagedStreamReadRecheck(_)
                         | ActiveExecutionEvent::ManagedUdpPollRecheck(_)
+                        | ActiveExecutionEvent::DeferredPosixPollWake
                         | ActiveExecutionEvent::SignalState { .. } => {}
                     }
                     block_on_sidecar!(
@@ -3871,6 +3937,13 @@ console.log(JSON.stringify({ status: "ok", summary }));
             // is the authoritative bound for this synchronous test helper.
             while Instant::now() < deadline {
                 events_drained = events_drained.saturating_add(1);
+                // This helper consumes executor events directly instead of
+                // entering the public service pump, so explicitly drive the
+                // same root deferred-operation recheck before polling. Without
+                // it, a reactor wake is durable but never settled here.
+                sidecar
+                    .recheck_root_deferred_operations(vm_id, process_id, false)
+                    .expect("recheck root deferred operations");
                 pump_sibling_internal_process_events(sidecar, vm_id, process_id);
                 block_on_sidecar!(sidecar, sidecar.pump_child_process_events(vm_id))
                     .expect("pump attached child process events");
@@ -3937,6 +4010,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     ActiveExecutionEvent::HostCallCompletion(_) => completion_events += 1,
                     ActiveExecutionEvent::ManagedStreamReadRecheck(_) => read_rechecks += 1,
                     ActiveExecutionEvent::ManagedUdpPollRecheck(_) => udp_rechecks += 1,
+                    ActiveExecutionEvent::DeferredPosixPollWake => {}
                     ActiveExecutionEvent::SignalState { .. } => signal_events += 1,
                 }
 
@@ -8808,6 +8882,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                         read_only: false,
                         access_time: agentos_kernel::mount_table::AccessTimePolicy::Relatime,
                         no_dir_atime: false,
+                        no_suid: false,
                     },
                     MountEntry {
                         path: String::from("/"),
@@ -8817,6 +8892,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                         read_only: false,
                         access_time: agentos_kernel::mount_table::AccessTimePolicy::Relatime,
                         no_dir_atime: false,
+                        no_suid: false,
                     },
                 ]
             );
@@ -9598,7 +9674,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                 }
 
                 let error = match (call.operation.as_str(), path) {
-                    ("realpath", Some("/missing.txt")) | ("readFile", Some("/missing.txt")) => {
+                    ("realpath" | "stat" | "lstat" | "readFile", Some("/missing.txt")) => {
                         "not found"
                     }
                     ("writeFile", Some("/output.txt")) => "permission denied",
@@ -13542,17 +13618,48 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
             nested: bool,
             request: agentos_execution::host::ProcessLaunchRequest,
         ) -> Result<Value, SidecarError> {
-            if nested {
+            let current_process_path = if nested {
+                &["posix-spawnp-nested-parent"][..]
+            } else {
+                &[][..]
+            };
+            let spawned = if nested {
                 spawn_descendant_process_for_test(
                     sidecar,
                     vm_id,
                     "posix-spawnp-parent",
-                    &["posix-spawnp-nested-parent"],
+                    current_process_path,
                     request,
                 )
             } else {
                 spawn_child_process_for_test(sidecar, vm_id, "posix-spawnp-parent", request)
+            }?;
+            let child_id = spawned["childId"]
+                .as_str()
+                .ok_or_else(|| {
+                    SidecarError::InvalidState(String::from(
+                        "posix_spawnp fixture omitted its child id",
+                    ))
+                })?
+                .to_owned();
+
+            for _ in 0..64 {
+                let event = poll_descendant_process_for_test(
+                    sidecar,
+                    vm_id,
+                    "posix-spawnp-parent",
+                    current_process_path,
+                    &child_id,
+                    250,
+                )?;
+                if event.get("type").and_then(Value::as_str) == Some("exit") {
+                    return Ok(spawned);
+                }
             }
+
+            Err(SidecarError::Execution(format!(
+                "posix_spawnp fixture child {child_id} did not exit"
+            )))
         }
 
         fn posix_spawnp_path_and_recursive_shebang_match_linux() {
@@ -14254,44 +14361,46 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
             let parent_env = vm.guest_env.clone();
             let parent_guest_cwd = vm.guest_cwd.clone();
             let parent_host_cwd = vm.host_cwd.clone();
-            let resolved = NativeSidecar::<RecordingBridge>::
-                resolve_javascript_child_process_execution_with_mode(
-                    vm,
-                    &parent_env,
-                    &parent_guest_cwd,
-                    &parent_host_cwd,
-                    &agentos_execution::host::ProcessLaunchRequest {
-                        command: String::from("/usr/local/bin/agentos-math"),
-                        args: vec![
-                            String::from("add"),
-                            String::from("--a"),
-                            String::from("2"),
-                            String::from("--b"),
-                            String::from("3"),
-                        ],
-                        options: agentos_execution::host::ProcessLaunchOptions::default(),
-                    },
-                    false,
-                    None,
-                )
-                .expect("resolve binding collection child process");
+            for exact_exec_path in [false, true] {
+                let resolved = NativeSidecar::<RecordingBridge>::
+                    resolve_javascript_child_process_execution_with_mode(
+                        vm,
+                        &parent_env,
+                        &parent_guest_cwd,
+                        &parent_host_cwd,
+                        &agentos_execution::host::ProcessLaunchRequest {
+                            command: String::from("/usr/local/bin/agentos-math"),
+                            args: vec![
+                                String::from("add"),
+                                String::from("--a"),
+                                String::from("2"),
+                                String::from("--b"),
+                                String::from("3"),
+                            ],
+                            options: agentos_execution::host::ProcessLaunchOptions::default(),
+                        },
+                        exact_exec_path,
+                        None,
+                    )
+                    .expect("resolve binding collection child process");
 
-            assert!(
-                resolved.binding_command,
-                "binding command should stay on the binding path"
-            );
-            assert_eq!(resolved.command, "agentos-math");
-            assert_eq!(
-                resolved.process_args,
-                vec![
-                    String::from("agentos-math"),
-                    String::from("add"),
-                    String::from("--a"),
-                    String::from("2"),
-                    String::from("--b"),
-                    String::from("3"),
-                ]
-            );
+                assert!(
+                    resolved.binding_command,
+                    "binding command should stay on the binding path with exact={exact_exec_path}"
+                );
+                assert_eq!(resolved.command, "agentos-math");
+                assert_eq!(
+                    resolved.process_args,
+                    vec![
+                        String::from("agentos-math"),
+                        String::from("add"),
+                        String::from("--a"),
+                        String::from("2"),
+                        String::from("--b"),
+                        String::from("3"),
+                    ]
+                );
+            }
         }
         fn javascript_child_process_spawns_internal_binding_command_paths() {
             let mut sidecar = create_test_sidecar();
@@ -15631,6 +15740,12 @@ export async function loadPyodide() {
                 PermissionsPolicy::allow_all(),
             )
             .expect("create vm");
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .create_dir("/rpc")
+                    .expect("create guest RPC fixture directory");
+            }
             let cwd = temp_dir("agentos-native-sidecar-js-sync-rpc-cwd");
             write_fixture(
                 &cwd.join("entry.mjs"),
@@ -16136,6 +16251,7 @@ console.log(
                     | ActiveExecutionEvent::HostCallCompletion(_)
                     | ActiveExecutionEvent::ManagedStreamReadRecheck(_)
                     | ActiveExecutionEvent::ManagedUdpPollRecheck(_)
+                    | ActiveExecutionEvent::DeferredPosixPollWake
                     | ActiveExecutionEvent::SignalState { .. } => {}
                 }
 
@@ -17213,6 +17329,12 @@ console.log(seen.join("\n"));
                 PermissionsPolicy::allow_all(),
             )
             .expect("create vm");
+            {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
+                vm.kernel
+                    .create_dir("/rpc")
+                    .expect("create guest RPC fixture directory");
+            }
             let cwd = temp_dir("agentos-native-sidecar-js-promises-rpc-cwd");
             write_fixture(
                 &cwd.join("entry.mjs"),
@@ -17254,6 +17376,7 @@ await new Promise(() => {});
             let mut held_exit = None;
             let mut pending_requests = Vec::new();
             let mut observed_stdout = Vec::new();
+            let mut observed_stderr = Vec::new();
             let mut observed_rpc_methods = BTreeMap::<String, usize>::new();
             let mut observed_other_events = BTreeMap::<String, usize>::new();
 
@@ -17351,6 +17474,9 @@ await new Promise(() => {});
                     ActiveExecutionEvent::Exited(code) => {
                         held_exit = Some(code);
                     }
+                    ActiveExecutionEvent::Stderr(chunk) => {
+                        observed_stderr.push(String::from_utf8_lossy(&chunk).into_owned());
+                    }
                     other => {
                         let label = match &other {
                             ActiveExecutionEvent::Common(
@@ -17360,7 +17486,6 @@ await new Promise(() => {});
                                 },
                             ) => format!("host_call:{operation:?}"),
                             ActiveExecutionEvent::Common(event) => format!("common:{event:?}"),
-                            ActiveExecutionEvent::Stderr(_) => String::from("stderr"),
                             ActiveExecutionEvent::HostCallCompletion(_) => {
                                 String::from("host_call_completion")
                             }
@@ -17370,11 +17495,15 @@ await new Promise(() => {});
                             ActiveExecutionEvent::ManagedUdpPollRecheck(_) => {
                                 String::from("managed_udp_recheck")
                             }
+                            ActiveExecutionEvent::DeferredPosixPollWake => {
+                                String::from("deferred_posix_poll_wake")
+                            }
                             ActiveExecutionEvent::SignalState { .. } => {
                                 String::from("signal_state")
                             }
                             ActiveExecutionEvent::HostRpcRequest(_)
                             | ActiveExecutionEvent::Stdout(_)
+                            | ActiveExecutionEvent::Stderr(_)
                             | ActiveExecutionEvent::Exited(_) => {
                                 unreachable!("handled by an earlier match arm")
                             }
@@ -17388,6 +17517,27 @@ await new Promise(() => {});
                     }
                 }
             }
+
+            assert!(
+                saw_write_batch,
+                "expected Promise.all(writeFile) to issue a full batch before the first response; pending methods={:?}, rpc_methods={observed_rpc_methods:?}, exit={held_exit:?}, stdout={observed_stdout:?}, stderr={observed_stderr:?}, other_events={observed_other_events:?}",
+                pending_requests
+                    .iter()
+                    .map(|request| request.method.as_str())
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                saw_read_batch,
+                "expected Promise.all(readFile) to issue a full batch before the first response; pending methods={:?}, rpc_methods={observed_rpc_methods:?}, exit={held_exit:?}, stdout={observed_stdout:?}, stderr={observed_stderr:?}, other_events={observed_other_events:?}",
+                pending_requests
+                    .iter()
+                    .map(|request| request.method.as_str())
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                saw_stdout || held_exit == Some(0),
+                "expected guest stdout marker or clean exit after the concurrent fs.promises round-trip (saw_stdout={saw_stdout}, exit={held_exit:?})"
+            );
 
             let content = {
                 let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
@@ -17407,22 +17557,6 @@ await new Promise(() => {});
                 (0..10)
                     .map(|index| format!("value-{index}"))
                     .collect::<Vec<_>>()
-            );
-            assert!(
-                saw_write_batch,
-                "expected Promise.all(writeFile) to issue a full batch before the first response"
-            );
-            assert!(
-                saw_read_batch,
-                "expected Promise.all(readFile) to issue a full batch before the first response; pending methods={:?}, rpc_methods={observed_rpc_methods:?}, exit={held_exit:?}, stdout={observed_stdout:?}, other_events={observed_other_events:?}",
-                pending_requests
-                    .iter()
-                    .map(|request| request.method.as_str())
-                    .collect::<Vec<_>>()
-            );
-            assert!(
-                saw_stdout || held_exit == Some(0),
-                "expected guest stdout marker or clean exit after the concurrent fs.promises round-trip (saw_stdout={saw_stdout}, exit={held_exit:?})"
             );
 
             let process = {
@@ -22249,7 +22383,9 @@ const server = http.createServer((req, res) => {
   });
   req.on("end", () => {
     res.writeHead(200, { "content-type": "text/plain" });
-    res.end(`${req.method}:${req.url}:${body}`);
+    res.end(
+      `${req.method}:${req.url}:${body}:${req.headers["x-agentos-hop"] ?? "absent"}`
+    );
   });
 });
 
@@ -22280,6 +22416,48 @@ await new Promise(() => {});
                 "http.createServer should register a kernel TCP listener",
             );
 
+            let resources_before_invalid = vm_network_resources(&sidecar, &vm_id);
+            for (request_id, method, headers_json) in [
+                (
+                    903,
+                    "GET\r\nX-agentOS-Injected: method",
+                    r#"{"content-type":"text/plain"}"#,
+                ),
+                (
+                    904,
+                    "GET",
+                    "{\"content-type\":\"text/plain\",\"x-test\":\"ok\\r\\nX-agentOS-Injected: header\"}",
+                ),
+            ] {
+                let rejected = sidecar
+                    .dispatch_blocking(request(
+                        request_id,
+                        OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                        RequestPayload::VmFetch(crate::protocol::VmFetchRequest {
+                            port: 3000,
+                            method: String::from(method),
+                            path: String::from("/from-host"),
+                            headers_json: String::from(headers_json),
+                            body: Some(String::from("hello")),
+                            body_base64: None,
+                            stream_operation: None,
+                            stream_id: None,
+                            max_bytes: None,
+                        }),
+                    ))
+                    .expect("invalid host fetch dispatch");
+                match rejected.response.payload {
+                    ResponsePayload::Rejected(rejected) => {
+                        assert_eq!(rejected.code, "EINVAL", "{rejected:?}");
+                    }
+                    other => panic!("expected invalid host fetch rejection, got {other:?}"),
+                }
+                assert_network_resources_unchanged(
+                    resources_before_invalid.clone(),
+                    vm_network_resources(&sidecar, &vm_id),
+                );
+            }
+
             let response = sidecar
                 .dispatch_blocking(request(
                     1,
@@ -22288,7 +22466,9 @@ await new Promise(() => {});
                         port: 3000,
                         method: String::from("POST"),
                         path: String::from("/from-host"),
-                        headers_json: String::from(r#"{"content-type":"text/plain"}"#),
+                        headers_json: String::from(
+                            r#"{"connection":"keep-alive, x-agentos-hop","content-length":"999","content-type":"text/plain","proxy-authorization":"secret","transfer-encoding":"chunked","x-agentos-hop":"must-not-forward"}"#,
+                        ),
                         body: Some(String::from("hello")),
                         body_base64: None,
                         stream_operation: None,
@@ -22311,7 +22491,7 @@ await new Promise(() => {});
                         parsed["body"],
                         Value::String(
                             base64::engine::general_purpose::STANDARD
-                                .encode("POST:/from-host:hello")
+                                .encode("POST:/from-host:hello:absent")
                         )
                     );
                     assert_eq!(
@@ -22321,6 +22501,173 @@ await new Promise(() => {});
                 }
                 other => panic!("unexpected vm_fetch response payload: {other:?}"),
             }
+        }
+
+        fn vm_fetch_stream_start_pumps_deferred_target_host_calls() {
+            assert_node_available();
+
+            let dependency_listener =
+                TcpListener::bind("127.0.0.1:0").expect("bind host dependency listener");
+            let dependency_port = dependency_listener
+                .local_addr()
+                .expect("host dependency address")
+                .port();
+            let dependency_server = thread::spawn(move || {
+                for _ in 0..2 {
+                    let (mut stream, _) = dependency_listener
+                        .accept()
+                        .expect("accept host dependency request");
+                    let mut request = [0_u8; 1024];
+                    let read = stream
+                        .read(&mut request)
+                        .expect("read host dependency request");
+                    assert!(
+                        String::from_utf8_lossy(&request[..read])
+                            .starts_with("GET /dependency HTTP/1.1\r\n"),
+                        "unexpected dependency request: {:?}",
+                        String::from_utf8_lossy(&request[..read])
+                    );
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\ndependency-body",
+                        )
+                        .expect("write host dependency response");
+                }
+            });
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            sidecar
+                .dispatch_blocking(request(
+                    905,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: Vec::new(),
+                        software: Vec::new(),
+                        permissions: None,
+                        module_access_cwd: None,
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: std::collections::HashMap::new(),
+                        loopback_exempt_ports: vec![dependency_port],
+                        packages: Vec::new(),
+                        packages_mount_at: String::new(),
+                        bootstrap_commands: Vec::new(),
+                        binding_shim_commands: Vec::new(),
+                    }),
+                ))
+                .expect("configure host dependency port");
+
+            let server_cwd = temp_dir("agentos-native-sidecar-host-fetch-deferred-server-cwd");
+            write_fixture(
+                &server_cwd.join("entry.mjs"),
+                format!(
+                    r#"
+import http from "node:http";
+
+const server = http.createServer(async (req, res) => {{
+  try {{
+    if (req.url === "/after-head") {{
+      res.writeHead(200, {{ "content-type": "text/plain" }});
+      res.flushHeaders();
+    }}
+    const dependency = await new Promise((resolve, reject) => {{
+      const request = http.get(
+        {{ host: "127.0.0.1", port: {dependency_port}, path: "/dependency" }},
+        (response) => {{
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk) => {{ body += chunk; }});
+          response.on("end", () => resolve(body));
+        }},
+      );
+      request.on("error", reject);
+    }});
+    if (!res.headersSent) {{
+      res.writeHead(200, {{ "content-type": "text/plain" }});
+    }}
+    res.end(dependency);
+  }} catch (error) {{
+    res.writeHead(500, {{ "content-type": "text/plain" }});
+    res.end(String(error));
+  }}
+}});
+
+server.listen(3000, "127.0.0.1", () => console.log("READY"));
+await new Promise(() => {{}});
+"#
+                ),
+            );
+            start_fake_javascript_process(&mut sidecar, &vm_id, &server_cwd, "proc-js-server");
+            wait_for_process_stdout_contains(&mut sidecar, &vm_id, "proc-js-server", "READY");
+
+            let dispatch_stream = |sidecar: &mut NativeSidecar<RecordingBridge>,
+                                   request_id,
+                                   operation: &str,
+                                   stream_id: Option<&str>,
+                                   path: &str| {
+                sidecar.dispatch_blocking(request(
+                    request_id,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::VmFetch(crate::protocol::VmFetchRequest {
+                        port: 3000,
+                        method: String::from("GET"),
+                        path: String::from(path),
+                        headers_json: String::from("{}"),
+                        body: None,
+                        body_base64: None,
+                        stream_operation: Some(String::from(operation)),
+                        stream_id: stream_id.map(String::from),
+                        max_bytes: Some(64 * 1024),
+                    }),
+                ))
+            };
+            let response_json = |result: DispatchResult| match result.response.payload {
+                ResponsePayload::VmFetchResult(result) => result.response_json,
+                other => panic!("unexpected vm_fetch stream response: {other:?}"),
+            };
+
+            for (base_request_id, path) in [(906, "/before-head"), (930, "/after-head")] {
+                let head: Value = serde_json::from_str(&response_json(
+                    dispatch_stream(&mut sidecar, base_request_id, "start", None, path)
+                        .expect("stream start should drive deferred target host calls"),
+                ))
+                .expect("parse stream head");
+                assert_eq!(head["status"], Value::from(200));
+                let stream_id = head["streamId"].as_str().expect("stream id").to_owned();
+                let mut body = Vec::new();
+                for request_id in base_request_id + 1..base_request_id + 20 {
+                    let chunk: Value = serde_json::from_str(&response_json(
+                        dispatch_stream(&mut sidecar, request_id, "read", Some(&stream_id), "/")
+                            .expect("stream read should drive deferred target host calls"),
+                    ))
+                    .expect("parse stream chunk");
+                    body.extend(
+                        base64::engine::general_purpose::STANDARD
+                            .decode(chunk["body"].as_str().expect("base64 response body"))
+                            .expect("decode response body"),
+                    );
+                    if chunk["done"] == Value::Bool(true) {
+                        break;
+                    }
+                }
+                assert_eq!(body, b"dependency-body");
+            }
+
+            sidecar
+                .kill_process_internal(&vm_id, "proc-js-server", "SIGKILL")
+                .expect("kill javascript server process");
+            dependency_server
+                .join()
+                .expect("join host dependency listener");
         }
 
         fn vm_fetch_stream_flushes_chunks_and_cancel_releases_socket() {
@@ -22440,9 +22787,47 @@ await new Promise(() => {});
                     .expect("start held stream"),
             ))
             .expect("parse held stream head");
-            let held_stream_id = held_head["streamId"].as_str().expect("held stream id");
-            dispatch_stream(&mut sidecar, 941, "cancel", Some(held_stream_id), "/", None)
-                .expect("cancel held stream");
+            let held_stream_id = held_head["streamId"]
+                .as_str()
+                .expect("held stream id")
+                .to_owned();
+            let second_held_head: Value = serde_json::from_str(&response_json(
+                dispatch_stream(&mut sidecar, 941, "start", None, "/hold", None)
+                    .expect("start concurrent held stream"),
+            ))
+            .expect("parse second held stream head");
+            let second_held_stream_id = second_held_head["streamId"]
+                .as_str()
+                .expect("second held stream id")
+                .to_owned();
+            assert_ne!(second_held_stream_id, held_stream_id);
+            assert_eq!(
+                sidecar.vms.get(&vm_id).expect("vm").vm_fetch_streams.len(),
+                2,
+                "kernel-assigned ephemeral source ports must support concurrent clients"
+            );
+            dispatch_stream(
+                &mut sidecar,
+                942,
+                "cancel",
+                Some(&held_stream_id),
+                "/",
+                None,
+            )
+            .expect("cancel first held stream");
+            assert_eq!(
+                sidecar.vms.get(&vm_id).expect("vm").vm_fetch_streams.len(),
+                1
+            );
+            dispatch_stream(
+                &mut sidecar,
+                943,
+                "cancel",
+                Some(&second_held_stream_id),
+                "/",
+                None,
+            )
+            .expect("cancel second held stream");
             assert!(sidecar
                 .vms
                 .get(&vm_id)
@@ -22525,6 +22910,73 @@ await new Promise(() => {});
                         !body.windows(3).any(|window| window == b"\r\n6"),
                         "chunk framing leaked into decoded body: {body:?}"
                     );
+                }
+                other => panic!("unexpected vm_fetch response payload: {other:?}"),
+            }
+        }
+
+        fn vm_fetch_kernel_tcp_completed_response_wins_same_turn_target_exit() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let server_cwd = temp_dir("agentos-native-sidecar-host-fetch-js-one-shot-cwd");
+            write_fixture(
+                &server_cwd.join("entry.mjs"),
+                r#"
+import net from "node:net";
+
+const response =
+  "HTTP/1.1 200 OK\r\n" +
+  "Content-Type: text/plain\r\n" +
+  "Content-Length: 8\r\n" +
+  "Connection: close\r\n" +
+  "\r\n" +
+  "one-shot";
+
+const server = net.createServer((socket) => {
+  socket.end(response, () => process.exit(0));
+});
+
+server.listen(3000, "127.0.0.1", () => {
+  console.log("READY");
+});
+
+await new Promise(() => {});
+"#,
+            );
+            start_fake_javascript_process(&mut sidecar, &vm_id, &server_cwd, "proc-js-server");
+            wait_for_process_stdout_contains(&mut sidecar, &vm_id, "proc-js-server", "READY");
+
+            let response = dispatch_host_vm_fetch(
+                &mut sidecar,
+                909,
+                &connection_id,
+                &session_id,
+                &vm_id,
+                3000,
+                "/one-shot",
+                None,
+            )
+            .expect("complete HTTP response must win over same-turn target exit");
+
+            match response.response.payload {
+                ResponsePayload::VmFetchResult(result) => {
+                    let parsed: Value =
+                        serde_json::from_str(&result.response_json).expect("parse fetch response");
+                    assert_eq!(parsed["status"], Value::from(200));
+                    let body = base64::engine::general_purpose::STANDARD
+                        .decode(parsed["body"].as_str().expect("base64 response body"))
+                        .expect("decode response body");
+                    assert_eq!(body, b"one-shot");
                 }
                 other => panic!("unexpected vm_fetch response payload: {other:?}"),
             }
@@ -25047,6 +25499,16 @@ console.log(JSON.stringify({
             sidecar
                 .validate_child_poll_target(&vm_id, "root", &[], "child-1")
                 .expect("live child validates");
+            assert_eq!(
+                sidecar
+                    .vms
+                    .get(&vm_id)
+                    .and_then(|vm| vm.active_processes.get("root"))
+                    .and_then(|root| root.child_processes.get("child-1"))
+                    .map(|child| child.pending_execution_events.len()),
+                Some(1),
+                "the pull-owned child output must be durable before polling"
+            );
             let result = block_on_sidecar!(
                 sidecar,
                 sidecar.poll_child_process(&vm_id, "root", "child-1", 5_000)
@@ -25190,6 +25652,130 @@ console.log(JSON.stringify({
                 ActiveExecutionEvent::Stdout(chunk) => assert_eq!(chunk, b"pull-owned"),
                 other => panic!("expected queued child stdout, got {other:?}"),
             }
+        }
+
+        #[test]
+        fn descendant_exit_settles_root_wait_in_the_same_process_pump_turn() {
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate sidecar");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+
+            let mut root = spawn_vm_wasm_binding_process(&mut sidecar, &vm_id);
+            let root_pid = root.kernel_pid;
+            let child = {
+                let vm = sidecar.vms.get_mut(&vm_id).expect("test vm");
+                let kernel_handle = vm
+                    .kernel
+                    .spawn_process(
+                        WASM_COMMAND,
+                        Vec::new(),
+                        SpawnOptions {
+                            requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                            parent_pid: Some(root_pid),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .expect("spawn waitable child");
+                active_process_for_vm_tests(
+                    kernel_handle.pid(),
+                    kernel_handle,
+                    vm.runtime_context.clone(),
+                    vm.limits.clone(),
+                    GuestRuntimeKind::WebAssembly,
+                    ActiveExecution::Binding(
+                        BindingExecution::default()
+                            .with_descendant_wait_ownership(
+                                agentos_execution::backend::DescendantWaitOwnership::Guest,
+                            )
+                            .with_descendant_output_ownership(
+                                agentos_execution::backend::DescendantOutputOwnership::GuestDescriptors,
+                            ),
+                    ),
+                )
+                .with_vm_pending_byte_budgets(
+                    Arc::clone(&vm.pending_stdin_bytes_budget),
+                    Arc::clone(&vm.pending_event_bytes_budget),
+                )
+            };
+            let child_pid = child.kernel_pid;
+            let mut child = child;
+            child
+                .queue_pending_execution_event(ActiveExecutionEvent::Exited(0))
+                .expect("queue child exit");
+            root.child_processes.insert(String::from("child-1"), child);
+            sidecar
+                .vms
+                .get_mut(&vm_id)
+                .expect("test vm")
+                .active_processes
+                .insert(String::from("wasm-root"), root);
+
+            let generation = sidecar.vms.get(&vm_id).expect("test vm").generation;
+            let target = Arc::new(RecordingDirectReplyTarget::default());
+            let reply = DirectHostReplyHandle::new(
+                HostCallIdentity {
+                    generation,
+                    pid: root_pid,
+                    call_id: 1,
+                },
+                target.clone(),
+                1024,
+            )
+            .expect("create wait reply");
+            let event = ActiveExecutionEvent::Common(
+                agentos_execution::backend::ExecutionEvent::HostCall {
+                    operation: agentos_execution::host::HostOperation::Process(
+                        agentos_execution::host::ProcessOperation::Wait {
+                            target: agentos_execution::host::WaitTarget::Pid(child_pid),
+                            options: 0,
+                            deadline_ms: None,
+                            temporary_mask: None,
+                        },
+                    ),
+                    reply,
+                },
+            );
+            block_on_sidecar!(
+                sidecar,
+                sidecar.handle_execution_event(&vm_id, "wasm-root", event)
+            )
+            .expect("admit blocking wait");
+            assert!(
+                target
+                    .replies
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty(),
+                "the child has not exited in the kernel before the pump consumes its event"
+            );
+
+            let ownership = OwnershipScope::vm(&connection_id, &session_id, &vm_id);
+            assert!(
+                block_on_sidecar!(sidecar, sidecar.pump_process_events(&ownership))
+                    .expect("pump child exit and root wait"),
+                "the child exit is observable process-pump work"
+            );
+            let replies = target
+                .replies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let HostCallReply::Json(value) = replies
+                .first()
+                .expect("same-turn wait settlement")
+                .as_ref()
+                .expect("successful wait")
+            else {
+                panic!("waitpid must return a JSON result");
+            };
+            assert_eq!(value["pid"], child_pid);
+            assert_eq!(value["exitCode"], 0);
         }
 
         #[test]
@@ -26423,37 +27009,47 @@ try {
         }
 
         #[test]
-        fn aag_vm_fetch_kernel_tcp_rejects_chunked_with_content_length() {
+        fn aaf_vm_fetch_stream_pumps_deferred_target_host_calls() {
+            run_isolated_service_test("vm-fetch-kernel-tcp-stream-deferred-host-call");
+        }
+
+        #[test]
+        fn aag_vm_fetch_kernel_tcp_completed_response_wins_same_turn_target_exit() {
+            run_isolated_service_test("vm-fetch-kernel-tcp-one-shot-exit");
+        }
+
+        #[test]
+        fn aah_vm_fetch_kernel_tcp_rejects_chunked_with_content_length() {
             run_isolated_service_test("vm-fetch-kernel-tcp-chunked-content-length");
         }
 
         #[test]
-        fn aah_vm_fetch_kernel_tcp_socket_cap_failure_closes_no_extra_resources() {
+        fn aai_vm_fetch_kernel_tcp_socket_cap_failure_closes_no_extra_resources() {
             run_isolated_service_test("vm-fetch-kernel-tcp-socket-cap");
         }
 
         #[test]
-        fn aai_vm_fetch_kernel_tcp_oversized_response_closes_client_socket() {
+        fn aaj_vm_fetch_kernel_tcp_oversized_response_closes_client_socket() {
             run_isolated_service_test("vm-fetch-kernel-tcp-oversized");
         }
 
         #[test]
-        fn aaj_vm_fetch_kernel_tcp_honors_configured_response_limit() {
+        fn aak_vm_fetch_kernel_tcp_honors_configured_response_limit() {
             run_isolated_service_test("vm-fetch-kernel-tcp-configured-limit");
         }
 
         #[test]
-        fn aak_vm_fetch_kernel_tcp_malformed_response_closes_client_socket() {
+        fn aal_vm_fetch_kernel_tcp_malformed_response_closes_client_socket() {
             run_isolated_service_test("vm-fetch-kernel-tcp-malformed");
         }
 
         #[test]
-        fn aal_vm_fetch_kernel_tcp_timeout_closes_client_socket() {
+        fn aam_vm_fetch_kernel_tcp_timeout_closes_client_socket() {
             run_isolated_service_test("vm-fetch-kernel-tcp-timeout");
         }
 
         #[test]
-        fn aam_vm_fetch_kernel_tcp_target_exit_cleans_up_process_resources() {
+        fn aan_vm_fetch_kernel_tcp_target_exit_cleans_up_process_resources() {
             run_isolated_service_test("vm-fetch-kernel-tcp-target-exit");
         }
 
@@ -26616,6 +27212,12 @@ try {
                 }
                 "vm-fetch-kernel-tcp-stream" => {
                     vm_fetch_stream_flushes_chunks_and_cancel_releases_socket();
+                }
+                "vm-fetch-kernel-tcp-stream-deferred-host-call" => {
+                    vm_fetch_stream_start_pumps_deferred_target_host_calls();
+                }
+                "vm-fetch-kernel-tcp-one-shot-exit" => {
+                    vm_fetch_kernel_tcp_completed_response_wins_same_turn_target_exit();
                 }
                 "vm-fetch-kernel-tcp-chunked-content-length" => {
                     vm_fetch_kernel_tcp_rejects_chunked_with_content_length();

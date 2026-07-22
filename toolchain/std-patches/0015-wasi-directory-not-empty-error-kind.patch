@@ -1,0 +1,12 @@
+Map WASI ENOTEMPTY to Rust's stable DirectoryNotEmpty error kind.
+
+--- a/library/std/src/sys/io/error/wasi.rs
++++ b/library/std/src/sys/io/error/wasi.rs
+@@ -39,6 +39,7 @@ pub fn decode_error_kind(errno: i32) -> std_io::ErrorKind {
+         libc::ENETUNREACH => NetworkUnreachable,
+         libc::ENOTCONN => NotConnected,
+         libc::ENOTDIR => NotADirectory,
++        libc::ENOTEMPTY => DirectoryNotEmpty,
+         libc::EPIPE => BrokenPipe,
+         libc::EROFS => ReadOnlyFilesystem,
+         libc::ESPIPE => NotSeekable,

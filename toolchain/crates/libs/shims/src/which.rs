@@ -28,6 +28,9 @@ mod host_fs {
     }
 }
 
+#[cfg(target_os = "wasi")]
+const AGENTOS_CWD_FD: u32 = u32::MAX;
+
 fn print_usage<W: Write>(out: &mut W) -> io::Result<()> {
     writeln!(out, "Usage: which [-a] name [...]")
 }
@@ -52,8 +55,11 @@ fn executable_mode_bits(path: &Path, _metadata: &fs::Metadata) -> bool {
     let Ok(path_len) = u32::try_from(bytes.len()) else {
         return false;
     };
-    // dir_fd 3 = cwd preopen; absolute paths ignore it.
-    let mode = unsafe { host_fs::path_mode(3, bytes.as_ptr(), path_len, 1) };
+    // The host extension uses this sentinel for a pathname resolved from the
+    // process cwd. Private WASI preopens do not occupy guest-visible fd 3.
+    let mode = unsafe {
+        host_fs::path_mode(AGENTOS_CWD_FD, bytes.as_ptr(), path_len, 1)
+    };
     (mode & 0o111) != 0
 }
 

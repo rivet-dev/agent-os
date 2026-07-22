@@ -1,0 +1,77 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`brush interactive PTY repaint > Enter preserves scrollback; history and word-edit work 1`] = `
+"# startup prompt
+cursor=5,0
+01|AOS$
+02|
+03|
+04|
+05|
+06|
+07|
+08|
+09|
+10|
+11|
+12|
+13|
+14|"
+`;
+
+exports[`brush interactive PTY repaint > Enter preserves scrollback; history and word-edit work 2`] = `
+"# after three commands (scrollback intact)
+cursor=5,6
+01|AOS$ echo alpha
+02|alpha
+03|AOS$ echo bravo
+04|bravo
+05|AOS$ echo charlie
+06|charlie
+07|AOS$
+08|
+09|
+10|
+11|
+12|
+13|
+14|"
+`;
+
+exports[`brush interactive PTY repaint > Enter preserves scrollback; history and word-edit work 3`] = `
+"# after up-arrow recall
+cursor=17,6
+01|AOS$ echo alpha
+02|alpha
+03|AOS$ echo bravo
+04|bravo
+05|AOS$ echo charlie
+06|charlie
+07|AOS$ echo charlie
+08|
+09|
+10|
+11|
+12|
+13|
+14|"
+`;
+
+exports[`brush interactive PTY repaint > Enter preserves scrollback; history and word-edit work 4`] = `
+"# after ctrl-w edit + enter
+cursor=5,8
+01|AOS$ echo alpha
+02|alpha
+03|AOS$ echo bravo
+04|bravo
+05|AOS$ echo charlie
+06|charlie
+07|AOS$ echo delta
+08|delta
+09|AOS$
+10|
+11|
+12|
+13|
+14|"
+`;

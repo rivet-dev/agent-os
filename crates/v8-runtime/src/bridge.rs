@@ -1867,7 +1867,17 @@ pub(crate) fn declared_bridge_response_bytes(
     requested_read_bytes: Option<usize>,
 ) -> usize {
     if let Some(requested_read_bytes) = requested_read_bytes {
-        return requested_read_bytes.saturating_add(READ_RESPONSE_ENVELOPE_BYTES);
+        // Raw reads normally return the requested bytes directly, but nested
+        // compatibility/deferred routes may preserve the legacy JSON byte
+        // shape, whose base64 payload is larger. Admission must cover either
+        // representation; concrete response bytes, not this declaration, are
+        // what consume the shared response ledger at settlement.
+        let payload_bytes = requested_read_bytes
+            .checked_add(2)
+            .and_then(|rounded| rounded.checked_div(3))
+            .and_then(|groups| groups.checked_mul(4))
+            .unwrap_or(usize::MAX);
+        return payload_bytes.saturating_add(READ_RESPONSE_ENVELOPE_BYTES);
     }
     bridge_contract()
         .response_max_bytes
@@ -2363,7 +2373,11 @@ mod tests {
         );
         assert_eq!(
             declared_bridge_response_bytes("_fsReadRaw", Some(32 * 1024)),
-            36 * 1024
+            47_788
+        );
+        assert_eq!(
+            declared_bridge_response_bytes("fs.readSync", Some(16 * 1024)),
+            25_944
         );
         assert_eq!(
             declared_bridge_response_bytes("_unclassifiedBridge", None),
@@ -2375,19 +2389,6 @@ mod tests {
     fn bridge_error_decoder_rejects_unstructured_diagnostics() {
         assert!(decode_bridge_error(b"user said 'EACCES: denied'").is_none());
         assert!(decode_bridge_error(b"ERR_AGENTOS_FAKE: EACCES: denied").is_none());
-    }
-
-    #[test]
-    fn bridge_error_code_accepts_trusted_agentos_prefixes() {
-        assert_eq!(
-            bridge_error_code("ERR_AGENTOS_NODE_SYNC_RPC: EACCES: permission denied on /foo"),
-            Some("EACCES")
-        );
-        assert_eq!(
-            bridge_error_code("ERR_AGENTOS_PYTHON_VFS_RPC: ENOENT: missing file"),
-            Some("ENOENT")
-        );
-        assert_eq!(bridge_error_code("EEXIST: already exists"), Some("EEXIST"));
     }
 
     #[test]

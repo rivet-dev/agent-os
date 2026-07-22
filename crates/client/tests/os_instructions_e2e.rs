@@ -9,6 +9,7 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -97,8 +98,11 @@ fn write_mock_pi_adapter(module_root: &std::path::Path) -> std::path::PathBuf {
         "__MOCK_SESSION_ID__",
         &format!("mock-session-{}", Uuid::new_v4()),
     );
-    std::fs::write(package_dir.join("adapter.mjs"), adapter)
+    let adapter_path = package_dir.join("adapter.mjs");
+    std::fs::write(&adapter_path, format!("#!/usr/bin/env node\n{adapter}"))
         .expect("write mock adapter entrypoint");
+    std::fs::set_permissions(&adapter_path, std::fs::Permissions::from_mode(0o755))
+        .expect("make mock adapter executable");
     package_dir
 }
 

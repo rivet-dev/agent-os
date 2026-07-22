@@ -1,6 +1,6 @@
 // Nightly: requires a non-core registry command.
 import { existsSync } from "node:fs";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,9 +36,7 @@ async function createTestVFS(): Promise<NodeFileSystem> {
 		"/project/edit.vim",
 		"set nomore\nedit /project/input.txt\n%s/beta/delta/\nwrite\nquitall!\n",
 	);
-	await cp(VIM_RUNTIME_DIR, join(tempRoot, "usr/local/share/vim/vim92"), {
-		recursive: true,
-	});
+	await mkdir(join(tempRoot, "usr/local/share/vim"), { recursive: true });
 	return new NodeFileSystem({ root: tempRoot });
 }
 
@@ -57,6 +55,11 @@ describeIf(hasVimPackage, "vim command", { timeout: 60_000 }, () => {
 	async function mountFixture(): Promise<void> {
 		const vfs = await createTestVFS();
 		kernel = createKernel({ filesystem: vfs });
+		kernel.mountFs(
+			"/usr/local/share/vim/vim92",
+			new NodeFileSystem({ root: VIM_RUNTIME_DIR }),
+			{ readOnly: true },
+		);
 		await kernel.mount(createWasmVmRuntime({ commandDirs: [VIM_COMMAND_DIR] }));
 	}
 

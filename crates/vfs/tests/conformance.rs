@@ -447,6 +447,60 @@ async fn chunked_fs_zero_range_reallocates_exact_bytes_and_honors_keep_size() {
 }
 
 #[tokio::test]
+async fn chunked_fs_expansion_preserves_keep_size_allocation_past_new_eof() {
+    let fs = ChunkedFs::with_options(
+        InMemoryMetadataStore::new(),
+        MemoryBlockStore::new(),
+        ChunkedFsOptions {
+            inline_threshold: 1,
+            chunk_size: 512,
+            ..ChunkedFsOptions::default()
+        },
+    );
+    fs.write_file("/reserved", &vec![b'x'; 2048]).await.unwrap();
+    fs.zero_range("/reserved", 2048, 2048, true).await.unwrap();
+    assert_eq!(fs.stat("/reserved").await.unwrap().size, 2048);
+    assert_eq!(
+        fs.unwritten_ranges("/reserved").await.unwrap(),
+        vec![(2048, 4096)]
+    );
+
+    fs.truncate("/reserved", 3072).await.unwrap();
+    assert_eq!(fs.stat("/reserved").await.unwrap().size, 3072);
+    assert_eq!(
+        fs.allocated_ranges("/reserved").await.unwrap(),
+        vec![(0, 4096)]
+    );
+    assert_eq!(
+        fs.unwritten_ranges("/reserved").await.unwrap(),
+        vec![(2048, 4096)]
+    );
+}
+
+#[tokio::test]
+async fn chunked_fs_same_size_truncate_discards_keep_size_allocation_past_eof() {
+    let fs = ChunkedFs::with_options(
+        InMemoryMetadataStore::new(),
+        MemoryBlockStore::new(),
+        ChunkedFsOptions {
+            inline_threshold: 1,
+            chunk_size: 512,
+            ..ChunkedFsOptions::default()
+        },
+    );
+    fs.write_file("/reserved", &vec![b'x'; 2048]).await.unwrap();
+    fs.zero_range("/reserved", 2048, 2048, true).await.unwrap();
+
+    fs.truncate("/reserved", 2048).await.unwrap();
+
+    assert_eq!(
+        fs.allocated_ranges("/reserved").await.unwrap(),
+        vec![(0, 2048)]
+    );
+    assert!(fs.unwritten_ranges("/reserved").await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn chunked_fs_dedups_identical_content_and_gc_deletes_on_unlink() {
     let metadata = InMemoryMetadataStore::new();
     let blocks = MemoryBlockStore::new();

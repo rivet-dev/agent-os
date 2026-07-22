@@ -476,6 +476,16 @@ pub(super) fn typed_kernel_stdio_write(
 ) -> Result<Value, SidecarError> {
     let is_stdout = kernel_stdio_output_is_stdout(kernel, process.kernel_pid, fd)?;
 
+    // A descendant sharing an ancestor's PTY must write through its inherited
+    // slave without also publishing a child stdout event. The sidecar child
+    // pump drains the owner's master into the one ordered host-facing stream.
+    if process.tty_master_owner.is_some() {
+        let written = kernel
+            .fd_write(EXECUTION_DRIVER_NAME, process.kernel_pid, fd, &chunk)
+            .map_err(kernel_error)?;
+        return Ok(json!(written));
+    }
+
     // COOKED TTY (line shell): route the write through the PTY slave so it flows
     // through process_output (ONLCR) into the master output buffer interleaved
     // with cooked-mode echo, then surface that single ordered master stream so
@@ -1026,9 +1036,14 @@ pub(crate) fn close_kernel_process_stdin(
     let Some(writer_fd) = process.kernel_stdin_writer_fd.take() else {
         return Ok(());
     };
-    kernel
-        .fd_close(EXECUTION_DRIVER_NAME, process.kernel_pid, writer_fd)
-        .map_err(kernel_error)
+    match kernel.fd_close(EXECUTION_DRIVER_NAME, process.kernel_pid, writer_fd) {
+        Ok(()) => Ok(()),
+        // CloseStdin is a high-level, idempotent lifecycle operation. The
+        // guest may already have closed the sidecar-owned pipe with
+        // closefrom(2), as OpenSSH does during startup.
+        Err(error) if error.code() == "EBADF" => Ok(()),
+        Err(error) => Err(kernel_error(error)),
+    }
 }
 
 #[cfg(test)]
@@ -1039,6 +1054,12 @@ mod tests {
     use agentos_kernel::mount_table::MountTable;
     use agentos_kernel::permissions::Permissions;
     use agentos_kernel::vfs::MemoryFileSystem;
+
+    fn test_runtime_context() -> agentos_runtime::RuntimeContext {
+        agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+            .expect("create test runtime")
+            .context()
+    }
 
     #[test]
     fn sidecar_owned_stdin_writer_is_nonblocking() {
@@ -1072,6 +1093,49 @@ mod tests {
             .expect("read stdin writer flags");
 
         assert_ne!(flags & agentos_kernel::fd_table::O_NONBLOCK, 0);
+    }
+
+    #[test]
+    fn close_stdin_succeeds_after_guest_closefrom_removed_writer() {
+        let mut config = KernelVmConfig::new("vm-idempotent-stdin-close");
+        config.permissions = Permissions::allow_all();
+        let mut kernel = SidecarKernel::new(MountTable::new(MemoryFileSystem::new()), config);
+        kernel
+            .register_driver(CommandDriver::new(EXECUTION_DRIVER_NAME, [WASM_COMMAND]))
+            .expect("register execution driver");
+        let kernel_handle = kernel
+            .spawn_process(
+                WASM_COMMAND,
+                Vec::new(),
+                SpawnOptions {
+                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                    ..SpawnOptions::default()
+                },
+            )
+            .expect("spawn kernel process");
+        let pid = kernel_handle.pid();
+        let writer_fd =
+            install_kernel_stdin_pipe(&mut kernel, pid).expect("install kernel stdin pipe");
+        let mut process = ActiveProcess::new(
+            pid,
+            kernel_handle,
+            test_runtime_context(),
+            crate::limits::VmLimits::default(),
+            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            GuestRuntimeKind::WebAssembly,
+            ActiveExecution::Binding(BindingExecution::default()),
+        )
+        .with_kernel_stdin_writer_fd(writer_fd);
+
+        kernel
+            .fd_close(EXECUTION_DRIVER_NAME, pid, writer_fd)
+            .expect("simulate guest closefrom");
+
+        close_kernel_process_stdin(&mut kernel, &mut process)
+            .expect("already-closed stdin must be idempotent");
+        assert!(process.kernel_stdin_writer_fd.is_none());
+        close_kernel_process_stdin(&mut kernel, &mut process)
+            .expect("repeated stdin close must remain idempotent");
     }
 
     #[test]

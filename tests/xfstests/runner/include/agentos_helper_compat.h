@@ -5,12 +5,14 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <netdb.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -23,6 +25,7 @@ extern char **environ;
 pid_t fork(void);
 int agentos_mknod(const char *path, mode_t mode, dev_t device);
 int agentos_mknodat(int dirfd, const char *path, mode_t mode, dev_t device);
+int agentos_getdents64(int fd, void *buffer, size_t length);
 struct hostent *agentos_gethostbyname(const char *name);
 char *agentos_strsignal(int signal_number);
 
@@ -30,6 +33,12 @@ char *agentos_strsignal(int signal_number);
 #define mknod agentos_mknod
 #define mknodat agentos_mknodat
 #define strsignal agentos_strsignal
+
+/* Wasm EH provides setjmp/longjmp through libsetjmp. The pinned fsstress
+ * source only uses the signal-mask variants to recover from SIGBUS, and the
+ * agentOS guest signal model does not expose a distinct process mask here. */
+#define sigsetjmp(buffer, save_mask) setjmp(buffer)
+#define siglongjmp(buffer, value) longjmp(buffer, value)
 
 #ifndef F_SETLEASE
 #define F_SETLEASE 1024

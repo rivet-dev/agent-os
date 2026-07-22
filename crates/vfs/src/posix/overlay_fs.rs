@@ -1603,6 +1603,13 @@ impl VirtualFileSystem for OverlayFileSystem {
         if self.is_whited_out(path) {
             return Err(Self::entry_not_found(path));
         }
+        let stat = self.merged_lstat(path)?;
+        if stat.is_directory && !stat.is_symbolic_link {
+            return Err(VfsError::new(
+                "EISDIR",
+                format!("illegal operation on a directory, unlink '{path}'"),
+            ));
+        }
         // POSIX unlink(2) removes the directory entry itself and never follows
         // a symlink leaf, so existence must be checked with lstat semantics.
         // `exists()` resolves symlinks, which made dangling symlinks (for
@@ -2251,6 +2258,28 @@ mod tests {
             .expect("unlink the symlink entry without following it");
 
         assert_error_code(overlay.lstat("/self"), "ENOENT");
+    }
+
+    #[test]
+    fn remove_file_rejects_lower_layer_directories_without_whiteouting_them() {
+        let mut lower = MemoryFileSystem::new();
+        lower
+            .mkdir("/workspace", true)
+            .expect("create lower directory");
+        let mut overlay = OverlayFileSystem::new(vec![lower], OverlayMode::Ephemeral);
+
+        assert_error_code(overlay.remove_file("/workspace"), "EISDIR");
+        assert!(
+            overlay
+                .lstat("/workspace")
+                .expect("failed unlink must preserve lower directory")
+                .is_directory
+        );
+        assert!(overlay
+            .read_dir("/")
+            .expect("read overlay root")
+            .iter()
+            .any(|entry| entry == "workspace"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { createServer } from "node:http";
 import { describe, it } from "node:test";
-import { readLoadConfig, runLoadTest } from "./load.js";
+import { readLoadConfig, runLoadTest } from "../src/load.js";
 
 describe("AgentOS Apps load driver", () => {
 	it("rejects an impossible success-rate gate", () => {

@@ -1,0 +1,14 @@
+diff --git a/tests/generic/680 b/tests/generic/680
+index df82d0d6..00000001 100755
+--- a/tests/generic/680
++++ b/tests/generic/680
+@@ -11,6 +11,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "Dirty Pipe does not apply to the agentOS VFS and pipe implementation"
++
+ _require_test
+ _require_user
+ _require_chmod

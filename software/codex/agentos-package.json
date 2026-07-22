@@ -7,6 +7,7 @@
 		}
 	},
 	"registry": {
+		"category": "agents",
 		"title": "Codex",
 		"description": "Run OpenAI's Codex coding agent inside agentOS with programmatic API access.",
 		"beta": true,

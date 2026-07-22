@@ -1,8 +1,8 @@
-//! AgentOS filesystem extension ABI codecs.
+//! agentOS filesystem extension ABI codecs.
 
 use super::preview1::{
     call, commit, errno, i64_arg, json_reply, reply_bytes, simple_call, value_u64, ERRNO_2BIG,
-    ERRNO_FAULT, ERRNO_INVAL, ERRNO_IO, ERRNO_NODATA, ERRNO_RANGE, SUCCESS,
+    ERRNO_FAULT, ERRNO_INVAL, ERRNO_IO, ERRNO_NODATA, ERRNO_NOENT, ERRNO_RANGE, SUCCESS,
 };
 use super::{i32_arg, set_i32_result};
 use crate::abi::{AbiBinding, ImportId};
@@ -13,6 +13,22 @@ use wasmtime::{Caller, Val};
 
 const XATTR_NAME_MAX: usize = 255;
 const XATTR_SIZE_MAX: usize = 64 * 1024;
+
+// The owned wasi-libc uses its public fcntl bit layout at this custom import
+// boundary. Decode it here, before constructing the generic kernel operation;
+// the kernel accepts Linux-style flags and must not know which executor
+// delivered the call.
+const WASI_FDFLAGS_APPEND: u32 = 1;
+const WASI_FDFLAGS_NONBLOCK: u32 = 4;
+const WASI_OFLAGS_EXCL: u32 = 4;
+const WASI_LIBC_O_RDONLY: u32 = 0x0400_0000;
+const WASI_LIBC_O_WRONLY: u32 = 0x1000_0000;
+const WASI_LIBC_O_DIRECT: u32 = 0x2000_0000;
+const KERNEL_O_WRONLY: u32 = 0o1;
+const KERNEL_O_RDWR: u32 = 0o2;
+const KERNEL_O_APPEND: u32 = 0o2000;
+const KERNEL_O_NONBLOCK: u32 = 0o4000;
+const KERNEL_O_DIRECT: u32 = 0o40000;
 
 pub async fn dispatch(
     caller: &mut Caller<'_, WasmtimeStoreState>,
@@ -33,7 +49,7 @@ pub async fn dispatch(
                 "wasm.abi.maxXattrNameBytes",
                 length as usize,
                 XATTR_NAME_MAX,
-                ERRNO_RANGE,
+                ERRNO_INVAL,
             )
             .await;
             if status != SUCCESS {
@@ -220,15 +236,16 @@ async fn open_tmpfile(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val
     if memory::validate_range(caller, output, 4).is_err() {
         return ERRNO_FAULT;
     }
+    let (kernel_flags, linkable) = decode_tmpfile_open_flags(flags);
     match call(
         caller,
         "process.open_tmpfile_at",
         vec![
             json!(fd),
             json!(path),
-            json!(flags),
+            json!(kernel_flags),
             json!(mode),
-            json!(flags & (1 << 15) == 0),
+            json!(linkable),
         ],
         HashMap::new(),
     )
@@ -237,6 +254,29 @@ async fn open_tmpfile(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val
         Ok(reply) => resource_u32(caller, output, reply, "process.fd_close").await,
         Err(error) => errno(&error),
     }
+}
+
+fn decode_tmpfile_open_flags(flags: u32) -> (u32, bool) {
+    let wants_read = flags & WASI_LIBC_O_RDONLY != 0;
+    let wants_write = flags & WASI_LIBC_O_WRONLY != 0;
+    let mut kernel_flags = if wants_read && wants_write {
+        KERNEL_O_RDWR
+    } else if wants_write {
+        KERNEL_O_WRONLY
+    } else {
+        0
+    };
+    if flags & WASI_FDFLAGS_APPEND != 0 {
+        kernel_flags |= KERNEL_O_APPEND;
+    }
+    if flags & WASI_FDFLAGS_NONBLOCK != 0 {
+        kernel_flags |= KERNEL_O_NONBLOCK;
+    }
+    if flags & WASI_LIBC_O_DIRECT != 0 {
+        kernel_flags |= KERNEL_O_DIRECT;
+    }
+    let linkable = flags & (WASI_OFLAGS_EXCL << 12) == 0;
+    (kernel_flags, linkable)
 }
 
 async fn fd_link(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val]) -> i32 {
@@ -543,8 +583,11 @@ async fn xattr_get(
         let Ok(path) = path(caller, params, 1, 2) else {
             return ERRNO_FAULT;
         };
+        if path.is_empty() {
+            return ERRNO_NOENT;
+        }
         let Ok(name) = bounded_name(caller, params, 3, 4) else {
-            return ERRNO_RANGE;
+            return ERRNO_INVAL;
         };
         let (Ok(value), Ok(capacity), Ok(follow), Ok(size)) = (
             i32_arg(params, 5),
@@ -563,7 +606,7 @@ async fn xattr_get(
         )
     } else {
         let Ok(name) = bounded_name(caller, params, 1, 2) else {
-            return ERRNO_RANGE;
+            return ERRNO_INVAL;
         };
         let (Ok(value), Ok(capacity), Ok(size)) =
             (i32_arg(params, 3), i32_arg(params, 4), i32_arg(params, 5))
@@ -610,6 +653,9 @@ async fn xattr_list(
         let Ok(path) = path(caller, params, 1, 2) else {
             return ERRNO_FAULT;
         };
+        if path.is_empty() {
+            return ERRNO_NOENT;
+        }
         let (Ok(output), Ok(capacity), Ok(follow), Ok(size)) = (
             i32_arg(params, 3),
             i32_arg(params, 4),
@@ -669,8 +715,11 @@ async fn xattr_set(
         let Ok(path) = path(caller, params, 1, 2) else {
             return ERRNO_FAULT;
         };
+        if path.is_empty() {
+            return ERRNO_NOENT;
+        }
         let Ok(name) = bounded_name(caller, params, 3, 4) else {
-            return ERRNO_RANGE;
+            return ERRNO_INVAL;
         };
         let (Ok(value_ptr), Ok(length), Ok(flags), Ok(follow)) = (
             i32_arg(params, 5),
@@ -701,7 +750,7 @@ async fn xattr_set(
         )
     } else {
         let Ok(name) = bounded_name(caller, params, 1, 2) else {
-            return ERRNO_RANGE;
+            return ERRNO_INVAL;
         };
         let (Ok(value_ptr), Ok(length), Ok(flags)) =
             (i32_arg(params, 3), i32_arg(params, 4), i32_arg(params, 5))
@@ -741,8 +790,11 @@ async fn xattr_remove(
         let Ok(path) = path(caller, params, 1, 2) else {
             return ERRNO_FAULT;
         };
+        if path.is_empty() {
+            return ERRNO_NOENT;
+        }
         let Ok(name) = bounded_name(caller, params, 3, 4) else {
-            return ERRNO_RANGE;
+            return ERRNO_INVAL;
         };
         let Ok(follow) = i32_arg(params, 5) else {
             return ERRNO_INVAL;
@@ -753,7 +805,7 @@ async fn xattr_remove(
         )
     } else {
         let Ok(name) = bounded_name(caller, params, 1, 2) else {
-            return ERRNO_RANGE;
+            return ERRNO_INVAL;
         };
         (vec![json!(fd), json!(name)], "fs.fremovexattrSync")
     };
@@ -768,7 +820,7 @@ fn bounded_name(
 ) -> Result<String, i32> {
     let length_value = i32_arg(params, length).map_err(|_| ERRNO_FAULT)? as usize;
     if length_value > XATTR_NAME_MAX {
-        return Err(ERRNO_RANGE);
+        return Err(ERRNO_INVAL);
     }
     path(caller, params, pointer, length)
 }
@@ -818,6 +870,8 @@ async fn scalar_stat(
         let follow = i32_arg(params, 3).unwrap_or(0) != 0;
         (
             "process.path_stat_at",
+            // Extension callers use u32::MAX (Wasm i32 -1) as the cwd
+            // sentinel. Preserve the raw Wasm i32 bits on the wire.
             vec![json!(fd), json!(path), json!(follow)],
         )
     } else {
@@ -872,4 +926,40 @@ async fn resource_u32(
         return ERRNO_FAULT;
     }
     memory::write_u32(caller, output, fd).map_or(ERRNO_FAULT, |_| SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tmpfile_flags_decode_owned_libc_access_and_status_bits() {
+        let flags = WASI_LIBC_O_RDONLY
+            | WASI_LIBC_O_WRONLY
+            | WASI_LIBC_O_DIRECT
+            | WASI_FDFLAGS_APPEND
+            | WASI_FDFLAGS_NONBLOCK;
+        assert_eq!(
+            decode_tmpfile_open_flags(flags),
+            (
+                KERNEL_O_RDWR | KERNEL_O_DIRECT | KERNEL_O_APPEND | KERNEL_O_NONBLOCK,
+                true,
+            )
+        );
+        assert_eq!(
+            decode_tmpfile_open_flags(WASI_LIBC_O_WRONLY),
+            (KERNEL_O_WRONLY, true)
+        );
+        assert_eq!(decode_tmpfile_open_flags(WASI_LIBC_O_RDONLY), (0, true));
+    }
+
+    #[test]
+    fn tmpfile_exclusive_flag_creates_an_unlinkable_descriptor() {
+        assert_eq!(
+            decode_tmpfile_open_flags(
+                WASI_LIBC_O_RDONLY | WASI_LIBC_O_WRONLY | (WASI_OFLAGS_EXCL << 12)
+            ),
+            (KERNEL_O_RDWR, false)
+        );
+    }
 }

@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it, expect, afterEach } from 'vitest';
 import { createWasmVmRuntime } from '@rivet-dev/agentos-test-harness';
-import { COMMANDS_DIR, createKernel, describeIf, hasWasmBinaries, NodeFileSystem } from '@rivet-dev/agentos-test-harness';
+import { COMMANDS_DIR, createKernel, describeIf, wasmBackendTestTimeout, hasWasmBinaries, NodeFileSystem } from '@rivet-dev/agentos-test-harness';
 import type { Kernel } from '@rivet-dev/agentos-test-harness';
 
 let tempRoot: string | undefined;
@@ -63,7 +63,7 @@ function parseLines(stdout: string): string[] {
   return stdout.split('\n').filter(l => l.length > 0).sort();
 }
 
-describeIf(hasWasmBinaries, 'fd-find command', { timeout: 10_000 }, () => {
+describeIf(hasWasmBinaries, 'fd-find command', { timeout: wasmBackendTestTimeout(10_000, 30_000) }, () => {
   let kernel: Kernel;
 
   afterEach(async () => {

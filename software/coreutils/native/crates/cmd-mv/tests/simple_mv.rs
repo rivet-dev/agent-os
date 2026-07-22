@@ -75,6 +75,28 @@ fn same_filesystem_move_preserves_inode() {
     );
 }
 
+#[test]
+fn nonempty_directory_destination_reports_the_destination_without_host_errno_numbers() {
+    let dir = TestDir::new("nonempty-destination");
+    let source = dir.path().join("source");
+    let target_root = dir.path().join("target");
+    let destination = target_root.join("source");
+    fs::create_dir(&source).expect("source dir should be created");
+    fs::create_dir(&target_root).expect("target root should be created");
+    fs::create_dir(&destination).expect("destination dir should be created");
+    fs::write(destination.join("existing"), "payload").expect("destination should be nonempty");
+
+    let output = run_mv(&[&source, &target_root]);
+    let stderr = String::from_utf8(output.stderr).expect("mv stderr should be UTF-8");
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains(&format!("cannot overwrite '{}'", destination.display())),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(!stderr.contains("(os error"), "unexpected stderr: {stderr}");
+}
+
 #[cfg(unix)]
 #[test]
 fn rejects_destination_inside_source_through_symlink() {

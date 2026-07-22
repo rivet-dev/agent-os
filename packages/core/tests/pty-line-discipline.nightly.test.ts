@@ -24,8 +24,11 @@
 // assert for broken cells (see the snapshot() impl). If it did, a future FIX would
 // change the screen, the stored snapshot would mismatch and throw, and it.fails
 // would stay green — silently masking the fix. Snapshots are therefore recorded and
-// asserted only for the PASSING (real `it`) cells; a regression there turns the cell
-// RED, and a fix to a broken cell turns its it.fails RED.
+// asserted only for the PASSING (real `it`) JS cells; a regression there turns the
+// cell RED, and a fix to a broken cell turns its it.fails RED. The opt-in C matrix
+// uses the same load-bearing assertions but does not own a second snapshot set:
+// Vitest otherwise reports those snapshots as obsolete in every normal run where
+// the C toolchain matrix is disabled.
 //
 // Signal-death cells (sigint/sigquit/vintr-buffer) POSITIVELY assert death: they
 // `await waitShell` and require it to RESOLVE (status is never the 15s "timeout"),
@@ -60,10 +63,7 @@ const C_PROBE_SOURCE = join(FIXTURE_DIR, "pty_probe.c");
 const NODE_PROBE_SOURCE = join(FIXTURE_DIR, "pty_probe.mjs");
 const NODE_PROBE_GUEST_PATH = "/pty_probe.mjs";
 
-const WASI_SDK = resolve(
-	REPO_ROOT,
-	"toolchain/c/vendor/wasi-sdk",
-);
+const WASI_SDK = resolve(REPO_ROOT, "toolchain/c/vendor/wasi-sdk");
 const SIDECAR_BINARY = resolve(
 	REPO_ROOT,
 	process.env.CARGO_TARGET_DIR ?? "target",
@@ -110,8 +110,17 @@ function buildCProbe(binDir: string): void {
 	}
 	// Validate wasm magic so a bad build fails loudly here, not in the resolver.
 	const magic = readFileSync(out).subarray(0, 4);
-	if (!(magic[0] === 0x00 && magic[1] === 0x61 && magic[2] === 0x73 && magic[3] === 0x6d)) {
-		throw new Error(`pty_probe build is not a wasm module (magic=${magic.toString("hex")})`);
+	if (
+		!(
+			magic[0] === 0x00 &&
+			magic[1] === 0x61 &&
+			magic[2] === 0x73 &&
+			magic[3] === 0x6d
+		)
+	) {
+		throw new Error(
+			`pty_probe build is not a wasm module (magic=${magic.toString("hex")})`,
+		);
 	}
 }
 
@@ -254,9 +263,9 @@ const CASES: Case[] = [
 			await ctx.writeShell("\n");
 			await ctx.waitForScreen("#BYTES tag=echo");
 			ctx.snapshot("after-newline");
-			ctx.expect(ctx.screen()).toContain(
-				"#BYTES tag=echo n=4 hex=61 62 63 0A text=abc\\n",
-			);
+			ctx
+				.expect(ctx.screen())
+				.toContain("#BYTES tag=echo n=4 hex=61 62 63 0A text=abc\\n");
 			await ctx.waitForScreen("#DONE id=cooked-echo");
 		},
 	},
@@ -276,9 +285,9 @@ const CASES: Case[] = [
 			await ctx.writeShell("\n");
 			await ctx.waitForScreen("#BYTES tag=ctl");
 			ctx.snapshot("report");
-			ctx.expect(ctx.screen()).toContain(
-				"#BYTES tag=ctl n=2 hex=01 0A text=\\x01\\n",
-			);
+			ctx
+				.expect(ctx.screen())
+				.toContain("#BYTES tag=ctl n=2 hex=01 0A text=\\x01\\n");
 		},
 	},
 	{
@@ -298,9 +307,9 @@ const CASES: Case[] = [
 			await ctx.writeShell("!");
 			await ctx.waitForScreen("#BYTES tag=raw");
 			ctx.snapshot("done");
-			ctx.expect(ctx.screen()).toContain(
-				"#BYTES tag=raw n=4 hex=61 62 63 21 text=abc!",
-			);
+			ctx
+				.expect(ctx.screen())
+				.toContain("#BYTES tag=raw n=4 hex=61 62 63 21 text=abc!");
 			await ctx.waitForScreen("#DONE id=raw-no-echo");
 		},
 	},
@@ -322,9 +331,9 @@ const CASES: Case[] = [
 			ctx.snapshot("report");
 			// Load-bearing: VERASE drops the last buffered char, so the delivered
 			// line is "a\n" (n=2), independent of the broken cooked screen echo.
-			ctx.expect(ctx.markerLine("#BYTES tag=erase")).toBe(
-				"#BYTES tag=erase n=2 hex=61 0A text=a\\n",
-			);
+			ctx
+				.expect(ctx.markerLine("#BYTES tag=erase"))
+				.toBe("#BYTES tag=erase n=2 hex=61 0A text=a\\n");
 		},
 	},
 	{
@@ -363,9 +372,9 @@ const CASES: Case[] = [
 			await ctx.writeShell("\n");
 			await ctx.waitForScreen("#BYTES tag=werase");
 			ctx.snapshot("report");
-			ctx.expect(ctx.screen()).toContain(
-				"#BYTES tag=werase n=5 hex=66 6F 6F 20 0A text=foo \\n",
-			);
+			ctx
+				.expect(ctx.screen())
+				.toContain("#BYTES tag=werase n=5 hex=66 6F 6F 20 0A text=foo \\n");
 		},
 	},
 	{
@@ -386,17 +395,16 @@ const CASES: Case[] = [
 			await ctx.writeShell("\n");
 			await ctx.waitForScreen("#BYTES tag=canon");
 			ctx.snapshot("delivered");
-			ctx.expect(ctx.screen()).toContain(
-				"#BYTES tag=canon n=6 hex=68 65 6C 6C 6F 0A text=hello\\n",
-			);
+			ctx
+				.expect(ctx.screen())
+				.toContain("#BYTES tag=canon n=6 hex=68 65 6C 6C 6F 0A text=hello\\n");
 		},
 	},
 	{
 		// ISIG VINTR (^C 0x03) raises SIGINT to the foreground pgid; the byte is
-		// neither delivered nor echoed. Both runtimes prove this via process
-		// death: guest-node stdin is now a real kernel PTY (slave on fd 0), so
-		// the discipline consumes the byte as a signal and SIGINT terminates the
-		// shell process exactly like wasm-c.
+		// neither delivered nor echoed. The C probe has no handler and is
+		// terminated. The guest-Node probe installs a handler, which must run and
+		// exit cleanly without receiving the control byte as stdin.
 		id: "sigint",
 		knownBroken: false,
 		ttyDependent: false,
@@ -405,21 +413,18 @@ const CASES: Case[] = [
 			await ctx.writeShell("\x03");
 			const status = await ctx.waitShellStatus();
 			ctx.snapshot("after");
-			// Correct: VINTR is consumed as a signal -> the byte is neither echoed
-			// nor delivered (no #BYTES) and the probe is killed mid-read so it never
-			// reaches #DONE.
+			// Correct: VINTR is consumed as a signal, so the byte is neither
+			// echoed nor delivered.
 			ctx.expect(ctx.screen()).not.toContain("#BYTES tag=sigint");
-			ctx.expect(ctx.screen()).not.toContain("#DONE id=sigint");
 			ctx.expect(ctx.screen()).not.toContain("^C");
-			// POSITIVE proof of death (fixes the prior weakness where a merely-HUNG
-			// process — signal silently dropped — also satisfied the negatives above):
-			// waitShell RESOLVED, so SIGINT actually TERMINATED the process instead of
-			// the read blocking the full 15s — `status` is a real exit status, never
-			// "timeout"/"error". Combined with the missing #DONE that means it died
-			// mid-read. (The wasm PTY-signal kill surfaces a racy/zero exit code, so
-			// death is proven by termination + no #DONE, not a 128+sig code.) guest-node
-			// survives the signal and reaches #DONE via EOF, so `not #DONE` throws and
-			// the cell stays correctly RED under it.fails until signal->isolate lands.
+			if (ctx.runtime.name === "js-node") {
+				ctx.expect(ctx.screen()).toContain("#SIG name=SIGINT");
+				ctx.expect(ctx.screen()).toContain("#DONE id=sigint");
+			} else {
+				ctx.expect(ctx.screen()).not.toContain("#DONE id=sigint");
+			}
+			// waitShell resolving proves the signal was acted on instead of the
+			// read blocking indefinitely.
 			ctx.expect(status).not.toBe("timeout");
 			ctx.expect(status).not.toBe("error");
 		},
@@ -435,6 +440,10 @@ const CASES: Case[] = [
 			await ctx.waitForScreen("#READY tag=sigquit");
 			await ctx.writeShell(Uint8Array.of(0x1c));
 			const status = await ctx.waitShellStatus();
+			// The process status and final stderr/output are separate protocol
+			// events. Let the terminal consume the trailing output before
+			// capturing a deterministic screen.
+			await ctx.settle();
 			ctx.snapshot("after");
 			// Correct: VQUIT is consumed as a signal (no #BYTES, no #DONE).
 			ctx.expect(ctx.screen()).not.toContain("#BYTES tag=sigquit");
@@ -459,7 +468,9 @@ const CASES: Case[] = [
 			await ctx.writeShell("\x03");
 			await ctx.waitForScreen("#BYTES tag=rawc");
 			ctx.snapshot("after");
-			ctx.expect(ctx.screen()).toContain("#BYTES tag=rawc n=1 hex=03 text=\\x03");
+			ctx
+				.expect(ctx.screen())
+				.toContain("#BYTES tag=rawc n=1 hex=03 text=\\x03");
 			ctx.expect(ctx.screen()).not.toContain("^C");
 			await ctx.waitForScreen("#DONE id=raw-ctrlc-byte");
 		},
@@ -506,9 +517,9 @@ const CASES: Case[] = [
 			ctx.snapshot("report");
 			// Load-bearing: ^H erased the last buffered byte exactly like DEL, so the
 			// delivered line is "a\n" (n=2), independent of the screen echo.
-			ctx.expect(ctx.markerLine("#BYTES tag=eraseh")).toBe(
-				"#BYTES tag=eraseh n=2 hex=61 0A text=a\\n",
-			);
+			ctx
+				.expect(ctx.markerLine("#BYTES tag=eraseh"))
+				.toBe("#BYTES tag=eraseh n=2 hex=61 0A text=a\\n");
 		},
 	},
 	{
@@ -529,7 +540,10 @@ const CASES: Case[] = [
 			await ctx.writeShell("\x03");
 			await ctx.writeShell("de\n");
 			const status = await ctx.waitShellStatus();
-			ctx.snapshot("after");
+			await ctx.settle();
+			// Bytes typed after VINTR can race the terminating process's final
+			// terminal drain, so their echo is intentionally not snapshot
+			// material. The assertions below cover the stable contract.
 			// Killed by SIGINT mid-read: "abc" is never delivered (no #BYTES) and
 			// the probe never completes (no #DONE). waitShell RESOLVED (not a 15s
 			// "timeout"), proving the signal actually terminated it.
@@ -575,9 +589,9 @@ const CASES: Case[] = [
 			ctx.snapshot("final");
 			// Load-bearing: the typed CR (0x0D) was mapped by ICRNL to NL (0x0A),
 			// terminating the line AND being the byte delivered -> "x\n" (78 0A).
-			ctx.expect(ctx.screen()).toContain(
-				"#BYTES tag=icrnl n=2 hex=78 0A text=x\\n",
-			);
+			ctx
+				.expect(ctx.screen())
+				.toContain("#BYTES tag=icrnl n=2 hex=78 0A text=x\\n");
 		},
 	},
 	{
@@ -624,10 +638,11 @@ const CASES: Case[] = [
 			// no signal handler, so it re-queries only after this read completes.
 			await ctx.writeShell("!\r");
 			await ctx.waitForScreen("#SIZE tag=after rc=0 cols=120 rows=40");
+			await ctx.waitForScreen("#DONE id=resize-sigwinch");
 			ctx.snapshot("resize");
-			ctx.expect(ctx.screen()).toContain(
-				"#SIZE tag=before rc=0 cols=80 rows=24",
-			);
+			ctx
+				.expect(ctx.screen())
+				.toContain("#SIZE tag=before rc=0 cols=80 rows=24");
 		},
 	},
 	{
@@ -642,9 +657,7 @@ const CASES: Case[] = [
 			await ctx.waitForScreen("#CPR sent=1");
 			await ctx.waitForScreen("#CPRREPLY");
 			ctx.snapshot("cpr-reply");
-			const m = ctx
-				.screen()
-				.match(/#CPRREPLY n=\d+ hex=[0-9A-F ]+ text=(\S+)/);
+			const m = ctx.screen().match(/#CPRREPLY n=\d+ hex=[0-9A-F ]+ text=(\S+)/);
 			ctx.expect(m, "expected a #CPRREPLY marker line").toBeTruthy();
 			ctx.expect(m?.[1] ?? "").toMatch(/^\\e\[\d+;\d+R$/);
 		},
@@ -679,17 +692,14 @@ const CASES: Case[] = [
 			await ctx.waitForScreen("#SIZE tag=open");
 			await ctx.waitForScreen("#DONE id=winsize");
 			ctx.snapshot("winsize");
-			ctx.expect(ctx.screen()).toContain(
-				"#SIZE tag=open rc=0 cols=100 rows=37",
-			);
+			ctx
+				.expect(ctx.screen())
+				.toContain("#SIZE tag=open rc=0 cols=100 rows=37");
 		},
 	},
 ];
 
-const RUNTIMES: Runtime[] = [
-	...(ENABLE_WASM_C_PTY ? ([{ name: "wasm-c" }] as const) : []),
-	{ name: "js-node" },
-];
+const RUNTIMES: Runtime[] = [{ name: "wasm-c" }, { name: "js-node" }];
 
 // ---------------------------------------------------------------------------
 // suite
@@ -720,7 +730,9 @@ describe("PTY line discipline matrix", () => {
 	});
 
 	for (const rt of RUNTIMES) {
-		describe(rt.name, () => {
+		const runtimeSuite =
+			rt.name === "wasm-c" && !ENABLE_WASM_C_PTY ? describe.skip : describe;
+		runtimeSuite(rt.name, () => {
 			let term: Terminal | undefined;
 			let shellId: string | undefined;
 			let unsubscribe: (() => void) | undefined;
@@ -798,12 +810,9 @@ function registerCase(
 			const term = new Terminal({ cols, rows, allowProposedApi: true });
 			const rawBytes = hooks.getRawBytes();
 
-			const command =
-				rt.name === "wasm-c" ? "pty_probe" : "node";
+			const command = rt.name === "wasm-c" ? "pty_probe" : "node";
 			const args =
-				rt.name === "wasm-c"
-					? [c.id]
-					: [NODE_PROBE_GUEST_PATH, c.id];
+				rt.name === "wasm-c" ? [c.id] : [NODE_PROBE_GUEST_PATH, c.id];
 
 			const { shellId } = vm.openShell({
 				command,
@@ -817,9 +826,9 @@ function registerCase(
 				},
 			});
 
-			const unsubscribe = vm.onShellData(shellId, (data) => {
-				for (let i = 0; i < data.length; i++) rawBytes.push(data[i]);
-				term.write(data);
+			const unsubscribe = vm.onShellData(shellId, (event) => {
+				for (const byte of event.data) rawBytes.push(byte);
+				term.write(event.data);
 			});
 			const disposeOnData = term.onData((data) => {
 				vm.writeShell(shellId, data);
@@ -898,7 +907,7 @@ function registerCase(
 					// masking the very fix it should flag. So for it.fails cells the
 					// snapshot is captured for review but NOT asserted; the behavior
 					// assertion is the sole arbiter, so a fix turns the cell RED.
-					if (!effectiveKnownBroken) {
+					if (!effectiveKnownBroken && rt.name === "js-node") {
 						expect(snap).toMatchSnapshot(label);
 					}
 					return snap;

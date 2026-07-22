@@ -99,6 +99,7 @@
 		"@agentos-software/jq": "workspace:*",
 		"@agentos-software/opencode": "workspace:*",
 		"@agentos-software/pi": "workspace:*",
+		"@agentos-software/pi-cli": "workspace:*",
 		"@agentos-software/ripgrep": "workspace:*",
 		"@agentos-software/sed": "workspace:*",
 		"@agentos-software/tar": "workspace:*",

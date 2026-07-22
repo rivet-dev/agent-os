@@ -1,0 +1,24 @@
+From: agentOS Runtime <runtime@agentos.invalid>
+Subject: [PATCH] brush-builtins: use bash block units for ulimit
+
+Bash defines the `ulimit -c` and `ulimit -f` block unit as 1024 bytes. Brush
+grouped `Block` with its separate `HalfKBytes` unit and therefore installed
+limits at half the requested value. This caused every truncate around an exact
+RLIMIT_FSIZE boundary to receive SIGXFSZ. Keep the pipe-size half-kilobyte unit
+at 512 bytes and use 1024 bytes for Bash block limits.
+
+diff --git a/src/ulimit.rs b/src/ulimit.rs
+--- a/src/ulimit.rs
++++ b/src/ulimit.rs
+@@ -24,7 +24,7 @@ impl Unit {
+     const fn scale(self) -> u64 {
+         match self {
+-            Self::Block | Self::HalfKBytes => 512,
+-            Self::KBytes => 1024,
++            Self::Block | Self::KBytes => 1024,
++            Self::HalfKBytes => 512,
+             _ => 1,
+         }
+     }
+-- 
+2.43.0

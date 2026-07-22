@@ -23,12 +23,12 @@ mod network_compat;
 pub(in crate::execution) use network_compat::managed_socket_address_from_info;
 pub(in crate::execution) use network_compat::{
     close_with_managed_retirement, closefrom_with_managed_retirement,
-    dispatch_claimed_context_stream_read, dispatch_claimed_context_udp_poll,
-    dispatch_descendant_context_stream_read, dispatch_descendant_context_udp_poll,
-    fd_snapshot_with_managed_routes, prune_managed_process_routes_without_aliases,
-    replace_descriptor_with_managed_retirement, retire_managed_process_routes,
-    retire_orphaned_managed_descriptions, service_deferred_posix_poll,
-    service_descendant_managed_fd_network_operation,
+    deferred_posix_poll_wake_lane, dispatch_claimed_context_stream_read,
+    dispatch_claimed_context_udp_poll, dispatch_descendant_context_stream_read,
+    dispatch_descendant_context_udp_poll, fd_snapshot_with_managed_routes,
+    prune_managed_process_routes_without_aliases, replace_descriptor_with_managed_retirement,
+    retire_managed_process_routes, retire_orphaned_managed_descriptions,
+    service_deferred_posix_poll, service_descendant_managed_fd_network_operation,
 };
 mod process;
 mod signal;
@@ -72,6 +72,15 @@ const MAX_SIGNAL_STATE_MASK_JSON_BYTES: usize = 4 * 1024;
 const MAX_ENTROPY_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_DEFERRED_GUEST_WAIT_MS: u64 = u32::MAX as u64;
 fn canonical_path_dir_fd(fd: u32) -> u32 {
+    // wasi-libc historically defines AT_FDCWD as -2 while Linux defines it as
+    // -100. Extension imports carry either value through the unsigned WebAssembly
+    // ABI. Normalize both spellings to the executor-independent cwd sentinel.
+    const WASI_LIBC_AT_FDCWD: u32 = (-2_i32) as u32;
+    const LINUX_AT_FDCWD: u32 = (-100_i32) as u32;
+    if matches!(fd, WASI_LIBC_AT_FDCWD | LINUX_AT_FDCWD) {
+        return u32::MAX;
+    }
+
     // Hidden preopen aliases are real kernel-owned descriptor identities. Keep
     // the tag so ordinary pathname resolution continues to use the capability
     // root even after the guest closes or replaces the same-numbered visible
@@ -351,6 +360,7 @@ fn authorize_filesystem_rights(
         ),
         FilesystemOperation::DescriptorFileStat { fd }
         | FilesystemOperation::DescriptorPath { fd, .. }
+        | FilesystemOperation::DescriptorFilesystemStats { fd }
         | FilesystemOperation::Extents { fd, .. }
         | FilesystemOperation::ExtentAt { fd, .. } => {
             require_descriptor_right(kernel, pid, *fd, WASI_RIGHT_FD_FILESTAT_GET, operation)
@@ -750,6 +760,8 @@ fn decode_host_operation(
                 0 => DescriptorWhence::Set,
                 1 => DescriptorWhence::Current,
                 2 => DescriptorWhence::End,
+                3 => DescriptorWhence::Data,
+                4 => DescriptorWhence::Hole,
                 _ => {
                     return Err(SidecarError::host(
                         "EINVAL",

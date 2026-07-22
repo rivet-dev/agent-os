@@ -12,6 +12,20 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use wasmtime::{Caller, Val};
 
+const KERNEL_WAIT_SLICE_MS: u32 = 10_000;
+
+fn tty_read_timeout_slice(timeout: u32) -> (u32, bool) {
+    let blocking = timeout == u32::MAX;
+    (
+        if blocking {
+            KERNEL_WAIT_SLICE_MS
+        } else {
+            timeout
+        },
+        blocking,
+    )
+}
+
 pub async fn dispatch(
     caller: &mut Caller<'_, WasmtimeStoreState>,
     abi: AbiBinding,
@@ -100,23 +114,23 @@ async fn tty_read(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val]) -
     if capacity == 0 || memory::validate_range(caller, output, capacity as usize).is_err() {
         return 0;
     }
-    let timeout = if timeout == u32::MAX {
-        Value::Null
-    } else {
-        json!(timeout)
-    };
-    match call(
-        caller,
-        "__kernel_stdin_read",
-        vec![json!(capacity), timeout],
-        HashMap::new(),
-    )
-    .await
-    {
-        Ok(reply) => {
-            let bytes = match reply {
-                crate::backend::HostCallReply::Raw(bytes) => bytes,
-                crate::backend::HostCallReply::Json(value) => value
+    let (timeout_ms, blocking) = tty_read_timeout_slice(timeout);
+    loop {
+        let reply = match call(
+            caller,
+            "__kernel_stdin_read",
+            vec![json!(capacity), json!(timeout_ms)],
+            HashMap::new(),
+        )
+        .await
+        {
+            Ok(reply) => reply,
+            Err(_) => return 0,
+        };
+        let (bytes, done) = match reply {
+            crate::backend::HostCallReply::Raw(bytes) => (bytes, false),
+            crate::backend::HostCallReply::Json(value) => (
+                value
                     .get("dataBase64")
                     .and_then(Value::as_str)
                     .and_then(|encoded| {
@@ -125,18 +139,22 @@ async fn tty_read(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val]) -
                             .ok()
                     })
                     .unwrap_or_default(),
-                crate::backend::HostCallReply::Empty => Vec::new(),
-            };
-            let length = bytes.len().min(capacity as usize);
+                value.get("done").and_then(Value::as_bool).unwrap_or(false),
+            ),
+            crate::backend::HostCallReply::Empty => (Vec::new(), false),
+        };
+        let length = bytes.len().min(capacity as usize);
+        if length > 0 {
             if memory::validate_range(caller, output, capacity as usize).is_err()
                 || memory::write_bytes(caller, output, &bytes[..length]).is_err()
             {
-                0
-            } else {
-                length as i32
+                return 0;
             }
+            return length as i32;
         }
-        Err(_) => 0,
+        if done || !blocking {
+            return 0;
+        }
     }
 }
 
@@ -314,5 +332,20 @@ async fn tty_scalar_output(
             memory::write_u32(caller, output, value).map_or(ERRNO_FAULT, |_| SUCCESS)
         }
         Err(error) => errno(&error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocking_tty_reads_use_bounded_deferred_slices() {
+        assert_eq!(
+            tty_read_timeout_slice(u32::MAX),
+            (KERNEL_WAIT_SLICE_MS, true)
+        );
+        assert_eq!(tty_read_timeout_slice(1_999), (1_999, false));
+        assert_eq!(tty_read_timeout_slice(0), (0, false));
     }
 }

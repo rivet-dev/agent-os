@@ -31,6 +31,24 @@ fn created_null_device_keeps_device_semantics_after_rename() {
     assert_eq!(stat.rdev, (1 << 8) | 3);
 }
 
+#[test]
+fn created_zero_device_keeps_device_semantics_outside_dev() {
+    let mut filesystem = create_test_vfs();
+    filesystem.mkdir("/tmp", false).unwrap();
+    filesystem
+        .mknod("/tmp/zero", 0o020666, (1 << 8) | 5)
+        .unwrap();
+
+    assert_eq!(
+        filesystem.pread("/tmp/zero", 123, 513).unwrap(),
+        vec![0; 513]
+    );
+    filesystem
+        .pwrite("/tmp/zero", b"discarded", 99)
+        .expect("writes to a created zero device are discarded");
+    assert_eq!(filesystem.stat("/tmp/zero").unwrap().size, 0);
+}
+
 fn assert_not_trivial_pattern(bytes: &[u8]) {
     assert!(bytes.iter().any(|byte| *byte != 0));
     assert!(

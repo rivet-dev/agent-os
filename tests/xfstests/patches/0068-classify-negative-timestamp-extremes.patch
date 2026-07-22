@@ -1,0 +1,14 @@
+diff --git a/tests/generic/634 b/tests/generic/634
+index 45481320..00000001 100755
+--- a/tests/generic/634
++++ b/tests/generic/634
+@@ -19,6 +19,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick atime bigtime
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentos does not support negative timestamps"
++
+ # Import common functions.
+ 
+ _require_scratch

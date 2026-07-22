@@ -25,6 +25,7 @@ pub const SIGTSTP: i32 = 20;
 pub const SIGTERM: i32 = 15;
 pub const SIGKILL: i32 = 9;
 pub const SIGPIPE: i32 = 13;
+pub const SIGXFSZ: i32 = 25;
 pub const SIGWINCH: i32 = 28;
 const MAX_SIGNAL: i32 = 64;
 const MAX_SIGNAL_HANDLER_DEPTH: usize = 64;

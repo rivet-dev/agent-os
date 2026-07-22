@@ -792,6 +792,32 @@ fn malformed_present_package_json_is_a_typed_error() {
 }
 
 #[test]
+fn non_string_package_string_fields_are_ignored_like_node() {
+    let fixture = Fixture::new();
+    fixture.write_json(
+        "node_modules/legacy/package.json",
+        serde_json::json!({
+            "main": false,
+            "name": false,
+            "type": false,
+        }),
+    );
+    fixture.write("node_modules/legacy/index.js", "module.exports = 1;");
+
+    let mut resolver = fixture.resolver();
+    assert_eq!(
+        resolver
+            .try_resolve_require("legacy", "/root/project/index.js")
+            .expect("non-string package metadata must not invalidate package.json"),
+        Some(String::from("/root/node_modules/legacy/index.js"))
+    );
+    assert_eq!(
+        resolver.module_format("/root/node_modules/legacy/index.js"),
+        Some("commonjs")
+    );
+}
+
+#[test]
 fn pnpm_symlinked_referrer_prefers_package_store_dependency_over_generic_hoist() {
     let fixture = Fixture::new();
     fixture.write_json(

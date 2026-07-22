@@ -399,6 +399,57 @@ fn shell_pipeline_and_child_backend_affinity_match_v8_wasm() {
 }
 
 #[test]
+#[ignore = "requires the generated packages/runtime-core/commands corpus"]
+fn shell_ulimit_fsize_is_kernel_backed_on_both_wasm_backends() {
+    let script = "ulimit -f 102400; flim=$(ulimit -f); printf 'fsize=<%s>\\n' \"$flim\"; [ \"$flim\" -eq 102400 ]";
+    for shell in ["sh", "bash"] {
+        let (stdout, stderr, exit_code) = assert_command_parity(shell, &["-c", script]);
+        assert_eq!(exit_code, 0, "{shell} stderr: {stderr}");
+        assert_eq!(stdout, "fsize=<102400>\n", "{shell} stderr: {stderr}");
+    }
+
+    let child_script =
+        "ulimit -f 102400; /workspace/bash -c 'printf \"child-fsize=<%s>\\n\" \"$(ulimit -f)\"'";
+    let (stdout, stderr, exit_code) =
+        assert_command_parity_with_files("bash", &["-c", child_script], &["bash"]);
+    assert_eq!(exit_code, 0, "nested bash stderr: {stderr}");
+    assert_eq!(
+        stdout, "child-fsize=<102400>\n",
+        "nested bash stderr: {stderr}"
+    );
+
+    let enforce_script = "ulimit -f 2048; /workspace/bash -c \"trap '' SIGXFSZ; /workspace/xfs_io -f -c 'truncate 2097153' /workspace/limited\"";
+    let (stdout, stderr, exit_code) =
+        assert_command_parity_with_files("bash", &["-c", enforce_script], &["bash", "xfs_io"]);
+    assert_ne!(
+        exit_code, 0,
+        "xfs_io unexpectedly exceeded RLIMIT_FSIZE; stdout: {stdout}; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("File too large"),
+        "xfs_io did not expose EFBIG; exit={exit_code}; stdout: {stdout}; stderr: {stderr}"
+    );
+
+    let default_signal_script = "ulimit -f 2048; /workspace/xfs_io -f -c 'truncate 2097151' /workspace/under-limit; /workspace/xfs_io -f -c 'truncate 2097152' /workspace/at-limit; /workspace/xfs_io -f -c 'truncate 2097153' /workspace/over-limit";
+    let (stdout, stderr, exit_code) =
+        assert_command_parity_with_files("bash", &["-c", default_signal_script], &["xfs_io"]);
+    assert_eq!(
+        exit_code,
+        128 + 25,
+        "default SIGXFSZ action did not preserve the signaled status; stdout: {stdout}; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("File size limit exceeded"),
+        "shell omitted the foreground SIGXFSZ diagnostic; exit={exit_code}; stdout: {stdout}; stderr: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("File size limit exceeded").count(),
+        1,
+        "only the write above the byte-exact RLIMIT_FSIZE boundary should be signaled; stdout: {stdout}; stderr: {stderr}"
+    );
+}
+
+#[test]
 #[ignore = "requires the generated toolchain/c/build/exec_variants fixture"]
 fn exec_variants_match_linux_behavior_on_both_wasm_backends() {
     for (mode, marker) in [

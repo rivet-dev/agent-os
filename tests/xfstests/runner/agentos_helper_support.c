@@ -10,6 +10,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef __wasm__
+#include <wasi/api.h>
+#endif
+
 int h_errno;
 
 #ifdef __wasm__
@@ -19,6 +23,122 @@ uint32_t agentos_path_mknod(uint32_t fd, const char *path, uint32_t path_len,
 #endif
 
 #define AT_FDCWD_SENTINEL UINT32_MAX
+#define AGENTOS_GETDENTS_MAX_BYTES (1024U * 1024U)
+#define AGENTOS_LINUX_DIRENT_HEADER_BYTES 19U
+
+#ifdef __wasm__
+static unsigned char agentos_linux_dirent_type(__wasi_filetype_t type) {
+    switch (type) {
+    case __WASI_FILETYPE_BLOCK_DEVICE:
+        return 6;
+    case __WASI_FILETYPE_CHARACTER_DEVICE:
+        return 2;
+    case __WASI_FILETYPE_DIRECTORY:
+        return 4;
+    case __WASI_FILETYPE_REGULAR_FILE:
+        return 8;
+    case __WASI_FILETYPE_SOCKET_DGRAM:
+    case __WASI_FILETYPE_SOCKET_STREAM:
+        return 12;
+    case __WASI_FILETYPE_SYMBOLIC_LINK:
+        return 10;
+    default:
+        return 0;
+    }
+}
+#endif
+
+int agentos_getdents64(int fd, void *buffer, size_t length) {
+#ifdef __wasm__
+    uint8_t *wasi_buffer;
+    __wasi_size_t wasi_used = 0;
+    __wasi_dircookie_t cookie;
+    __wasi_dircookie_t next_cookie = 0;
+    size_t input_offset = 0;
+    size_t output_offset = 0;
+    off_t current_offset;
+    __wasi_errno_t error;
+
+    if (buffer == NULL || length < AGENTOS_LINUX_DIRENT_HEADER_BYTES + 1 ||
+        length > AGENTOS_GETDENTS_MAX_BYTES) {
+        errno = EINVAL;
+        return -1;
+    }
+    current_offset = lseek(fd, 0, SEEK_CUR);
+    if (current_offset < 0)
+        return -1;
+    cookie = (__wasi_dircookie_t)current_offset;
+    wasi_buffer = malloc(length);
+    if (wasi_buffer == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    error = __wasi_fd_readdir((__wasi_fd_t)fd, wasi_buffer,
+                              (__wasi_size_t)length, cookie, &wasi_used);
+    if (error != __WASI_ERRNO_SUCCESS) {
+        free(wasi_buffer);
+        errno = (int)error;
+        return -1;
+    }
+
+    while (input_offset + sizeof(__wasi_dirent_t) <= wasi_used) {
+        __wasi_dirent_t wasi_entry;
+        size_t input_record_length;
+        size_t linux_record_length;
+        uint16_t linux_reclen;
+        uint8_t *linux_entry;
+
+        memcpy(&wasi_entry, wasi_buffer + input_offset, sizeof(wasi_entry));
+        input_record_length = sizeof(wasi_entry) + (size_t)wasi_entry.d_namlen;
+        if (input_record_length > (size_t)wasi_used - input_offset)
+            break;
+        if ((size_t)wasi_entry.d_namlen >
+            SIZE_MAX - AGENTOS_LINUX_DIRENT_HEADER_BYTES - 8) {
+            free(wasi_buffer);
+            errno = EOVERFLOW;
+            return -1;
+        }
+        linux_record_length =
+            (AGENTOS_LINUX_DIRENT_HEADER_BYTES +
+             (size_t)wasi_entry.d_namlen + 1 + 7) & ~(size_t)7;
+        if (linux_record_length > UINT16_MAX ||
+            linux_record_length > length - output_offset)
+            break;
+
+        linux_entry = (uint8_t *)buffer + output_offset;
+        memset(linux_entry, 0, linux_record_length);
+        memcpy(linux_entry, &wasi_entry.d_ino, sizeof(wasi_entry.d_ino));
+        memcpy(linux_entry + 8, &wasi_entry.d_next, sizeof(wasi_entry.d_next));
+        linux_reclen = (uint16_t)linux_record_length;
+        memcpy(linux_entry + 16, &linux_reclen, sizeof(linux_reclen));
+        linux_entry[18] = agentos_linux_dirent_type(wasi_entry.d_type);
+        memcpy(linux_entry + AGENTOS_LINUX_DIRENT_HEADER_BYTES,
+               wasi_buffer + input_offset + sizeof(wasi_entry),
+               (size_t)wasi_entry.d_namlen);
+
+        output_offset += linux_record_length;
+        input_offset += input_record_length;
+        next_cookie = wasi_entry.d_next;
+    }
+    free(wasi_buffer);
+
+    if (output_offset == 0 && wasi_used == length) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (output_offset != 0 &&
+        (next_cookie > INT64_MAX ||
+         lseek(fd, (off_t)next_cookie, SEEK_SET) < 0))
+        return -1;
+    return (int)output_offset;
+#else
+    (void)fd;
+    (void)buffer;
+    (void)length;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
 
 struct hostent *agentos_gethostbyname(const char *name) {
     static struct hostent host;
@@ -119,40 +239,44 @@ static void print_message(const char *format, va_list args, int include_errno) {
     fputc('\n', stderr);
 }
 
-void vwarn(const char *format, va_list args) { print_message(format, args, 1); }
-void vwarnx(const char *format, va_list args) { print_message(format, args, 0); }
+__attribute__((weak)) void vwarn(const char *format, va_list args) {
+    print_message(format, args, 1);
+}
+__attribute__((weak)) void vwarnx(const char *format, va_list args) {
+    print_message(format, args, 0);
+}
 
-void warn(const char *format, ...) {
+__attribute__((weak)) void warn(const char *format, ...) {
     va_list args;
     va_start(args, format);
     vwarn(format, args);
     va_end(args);
 }
 
-void warnx(const char *format, ...) {
+__attribute__((weak)) void warnx(const char *format, ...) {
     va_list args;
     va_start(args, format);
     vwarnx(format, args);
     va_end(args);
 }
 
-void verr(int status, const char *format, va_list args) {
+__attribute__((weak)) void verr(int status, const char *format, va_list args) {
     vwarn(format, args);
     exit(status);
 }
 
-void verrx(int status, const char *format, va_list args) {
+__attribute__((weak)) void verrx(int status, const char *format, va_list args) {
     vwarnx(format, args);
     exit(status);
 }
 
-void err(int status, const char *format, ...) {
+__attribute__((weak)) void err(int status, const char *format, ...) {
     va_list args;
     va_start(args, format);
     verr(status, format, args);
 }
 
-void errx(int status, const char *format, ...) {
+__attribute__((weak)) void errx(int status, const char *format, ...) {
     va_list args;
     va_start(args, format);
     verrx(status, format, args);

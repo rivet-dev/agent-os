@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Wed, 22 Jul 2026 16:10:00 -0700
+Subject: [PATCH] fstests: normalize generic 294 uutils diagnostics
+
+agentOS runs the upstream uutils implementations of mkdir, touch, and ln.
+Their error prefixes differ from GNU coreutils, while the trailing strerror
+still carries the behavior generic/294 is intended to verify. Normalize only
+those prefixes so EEXIST-versus-EROFS remains checked against the upstream
+golden output.
+
+diff --git a/tests/generic/294 b/tests/generic/294
+index 9d507ed6..536a737f 100755
+--- a/tests/generic/294
++++ b/tests/generic/294
+@@ -34,6 +34,18 @@ _create_files()
+ 	ln -s $THIS_TEST_DIR/testtarget $THIS_TEST_DIR/testlink 2>&1 | _filter_ln
+ }
+ 
++_filter_agentos_creation_errors()
++{
++	if [ "$FSTYP" != "agentos" ]; then
++		cat
++		return
++	fi
++
++	sed -e "s|^mkdir: \(.*\): |mkdir: cannot create directory '\1': |" \
++	    -e "s|^touch: setting times of |touch: cannot touch |" \
++	    -e "s|^ln: Already exists$|ln: creating symbolic link '$THIS_TEST_DIR/testlink': File exists|"
++}
++
+ _scratch_mount
+ 
+ rm -rf $THIS_TEST_DIR
+@@ -41,7 +53,7 @@ mkdir $THIS_TEST_DIR || _fail "Could not create dir for test"
+ 
+-_create_files 2>&1 | _filter_scratch
++_create_files 2>&1 | _filter_agentos_creation_errors | _filter_scratch
+ _try_scratch_mount -o remount,ro || _fail "Could not remount scratch readonly"
+-_create_files 2>&1 | _filter_scratch
++_create_files 2>&1 | _filter_agentos_creation_errors | _filter_scratch
+ 
+ # success, all done
+ status=0
+-- 
+2.47.3

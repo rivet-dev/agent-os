@@ -1,4 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import coreutils from "@agentos-software/coreutils";
@@ -107,43 +113,41 @@ describe("AgentOs base filesystem", () => {
 	});
 
 	test("read-only roots preseed WASM command stubs before runtime mount", async () => {
-			await vm.dispose();
-			vm = await AgentOs.create({
-				software: [coreutils],
-				rootFilesystem: {
-					mode: "read-only",
-					disableDefaultBaseLayer: true,
-				},
-			});
+		await vm.dispose();
+		vm = await AgentOs.create({
+			software: [coreutils],
+			rootFilesystem: {
+				mode: "read-only",
+				disableDefaultBaseLayer: true,
+			},
+		});
 
-			expect(await vm.exists("/bin/sh")).toBe(true);
-			expect(await vm.exists("/bin/ls")).toBe(true);
-			expect(await vm.exists("/bin/env")).toBe(true);
+		expect(await vm.exists("/bin/sh")).toBe(true);
+		expect(await vm.exists("/bin/ls")).toBe(true);
+		expect(await vm.exists("/bin/env")).toBe(true);
 	});
 
 	test("read-only roots preserve software-declared alias commands on the sidecar path", async () => {
-		const commandDir = mkdtempSync(join(tmpdir(), "agentos-command-fixture-"));
+		const packageDir = mkdtempSync(join(tmpdir(), "agentos-command-fixture-"));
 		try {
+			const binDir = join(packageDir, "bin");
+			mkdirSync(binDir);
 			writeFileSync(
-				join(commandDir, "fixture"),
+				join(packageDir, "agentos-package.json"),
+				JSON.stringify({
+					name: "fixture-package",
+					version: "1.0.0",
+				}),
+			);
+			writeFileSync(
+				join(binDir, "fixture"),
 				new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]),
 			);
+			symlinkSync("fixture", join(binDir, "fixture-alias"));
 
 			await vm.dispose();
 			vm = await AgentOs.create({
-				software: [
-					{
-						commandDir,
-						commands: [
-							{ name: "fixture", permissionTier: "read-only" as const },
-							{
-								name: "fixture-alias",
-								permissionTier: "read-only" as const,
-								aliasOf: "fixture",
-							},
-						],
-					},
-				],
+				software: [packageDir],
 				rootFilesystem: {
 					mode: "read-only",
 					disableDefaultBaseLayer: true,
@@ -157,7 +161,7 @@ describe("AgentOs base filesystem", () => {
 			expect(kernel.commands.get("fixture")).toBe("wasmvm");
 			expect(kernel.commands.get("fixture-alias")).toBe("wasmvm");
 		} finally {
-			rmSync(commandDir, { recursive: true, force: true });
+			rmSync(packageDir, { recursive: true, force: true });
 		}
 	});
 
@@ -195,7 +199,9 @@ describe("AgentOs base filesystem", () => {
 
 	test("snapshotRootFilesystem exports a reusable lower snapshot", async () => {
 		await vm.writeFile("/home/agentos/snap.txt", "snapshotted");
-		const snapshot = await vm.exportRootFilesystem({ maxBytes: 64 * 1024 * 1024 });
+		const snapshot = await vm.exportRootFilesystem({
+			maxBytes: 64 * 1024 * 1024,
+		});
 
 		const secondVm = await AgentOs.create({
 			rootFilesystem: {

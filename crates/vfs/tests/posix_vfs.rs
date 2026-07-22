@@ -1,12 +1,43 @@
 use std::{fmt::Debug, thread::sleep, time::Duration};
 use vfs::posix::{
     normalize_path, validate_path, FileExtent, MemoryFileSystem, VfsResult, VirtualFileSystem,
-    RENAME_EXCHANGE, RENAME_NOREPLACE, S_IFLNK, S_IFREG, XATTR_CREATE, XATTR_REPLACE,
+    VirtualTimeSpec, VirtualUtimeSpec, AGENTOS_TIMESTAMP_MAX_SECONDS, RENAME_EXCHANGE,
+    RENAME_NOREPLACE, S_IFLNK, S_IFREG, XATTR_CREATE, XATTR_REPLACE,
 };
 
 fn assert_error_code<T: Debug>(result: vfs::posix::VfsResult<T>, expected: &str) {
     let error = result.expect_err("operation should fail");
     assert_eq!(error.code(), expected);
+}
+
+#[test]
+fn timestamps_reject_pre_epoch_values_and_clamp_after_2106() {
+    assert_error_code(
+        VirtualTimeSpec::new(-1, 0).unwrap().to_truncated_millis(),
+        "EINVAL",
+    );
+
+    let beyond = VirtualTimeSpec::new(AGENTOS_TIMESTAMP_MAX_SECONDS + 1, 123_000_000).unwrap();
+    assert_eq!(
+        beyond.to_truncated_millis().unwrap(),
+        AGENTOS_TIMESTAMP_MAX_SECONDS as u64 * 1_000 + 123
+    );
+
+    let mut filesystem = MemoryFileSystem::new();
+    filesystem.write_file("/time", b"").unwrap();
+    filesystem
+        .utimes_spec(
+            "/time",
+            VirtualUtimeSpec::Set(beyond),
+            VirtualUtimeSpec::Set(beyond),
+            true,
+        )
+        .unwrap();
+    let stat = filesystem.stat("/time").unwrap();
+    assert_eq!(
+        stat.mtime_ms,
+        AGENTOS_TIMESTAMP_MAX_SECONDS as u64 * 1_000 + 123
+    );
 }
 
 #[test]
@@ -995,6 +1026,12 @@ fn xattr_value_and_name_list_limits_accept_boundary_and_rollback_plus_one() {
             .get_xattr("/value", "user.limit", true)
             .expect("rejected replacement preserves old value"),
         exact_value
+    );
+    let oversized_name = format!("user.{}", "x".repeat(251));
+    assert_eq!(oversized_name.len(), 256);
+    assert_error_code(
+        filesystem.set_xattr("/value", &oversized_name, Vec::new(), XATTR_CREATE, true),
+        "EINVAL",
     );
 
     filesystem.write_file("/list", b"data").unwrap();

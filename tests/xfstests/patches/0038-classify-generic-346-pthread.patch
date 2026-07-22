@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Wed, 22 Jul 2026 20:25:00 -0700
+Subject: [PATCH] fstests: classify generic 346 pthread requirement
+
+generic/346 races file-backed mmap faults and pwrite from shared-memory
+pthreads. The maintained V8-WASM baseline cannot execute a shared-memory
+pthread module, and isolated executor processes do not share a coherent mmap
+page cache. Keep the dual-engine filesystem matrix honest by reporting the
+capability boundary explicitly. The Wasmtime-threads suite owns real pthread,
+shared-memory, and fault-isolation coverage.
+
+diff --git a/tests/generic/346 b/tests/generic/346
+index aaf4c28e..e9368a55 100755
+--- a/tests/generic/346
++++ b/tests/generic/346
+@@ -11,6 +11,10 @@ _begin_fstest auto quick rw mmap
+ 
+ # get standard environment and checks
+ 
++if [ "$FSTYP" = "agentos" ]; then
++	_notrun "This test requires shared-memory pthread support."
++fi
++
+ _require_scratch
+ _require_test_program "holetest"
+ 
+-- 
+2.47.3

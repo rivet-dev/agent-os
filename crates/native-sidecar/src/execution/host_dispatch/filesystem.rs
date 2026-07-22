@@ -538,10 +538,15 @@ pub(super) fn decode(
             dir_fd: NODE_CWD_FD,
             path: path(0, "filesystem statfs path")?,
         },
-        "process.path_statfs_at" => FilesystemOperation::FilesystemStatsAt {
-            dir_fd: javascript_sync_rpc_arg_u32(&request.args, 0, "statfs dir fd")?,
-            path: path(1, "filesystem statfs path")?,
-        },
+        "process.path_statfs_at" => {
+            let dir_fd = javascript_sync_rpc_arg_u32(&request.args, 0, "statfs dir fd")?;
+            let path = path(1, "filesystem statfs path")?;
+            if path.as_str().is_empty() {
+                FilesystemOperation::DescriptorFilesystemStats { fd: dir_fd }
+            } else {
+                FilesystemOperation::FilesystemStatsAt { dir_fd, path }
+            }
+        }
         "fs.statSync" => FilesystemOperation::NodeStatAt {
             dir_fd: NODE_CWD_FD,
             path: path(0, "filesystem stat path")?,
@@ -835,6 +840,33 @@ pub(super) fn decode(
             fd: javascript_sync_rpc_arg_u32(&request.args, 0, "fd_truncate fd")?,
             length: parse_u64_string(request, 1, "fd_truncate length")?,
         },
+        "process.fd_utimes" => {
+            let flags = javascript_sync_rpc_arg_u32(&request.args, 3, "fd_utimes flags")?;
+            let parse_time = |index: usize,
+                              explicit: bool,
+                              now: bool,
+                              label: &str|
+             -> Result<Option<u64>, SidecarError> {
+                if now || !explicit {
+                    return Ok(None);
+                }
+                Ok(Some(parse_u64_string(request, index, label)?))
+            };
+            FilesystemOperation::SetTimes {
+                target: MetadataTarget::Descriptor(javascript_sync_rpc_arg_u32(
+                    &request.args,
+                    0,
+                    "fd_utimes fd",
+                )?),
+                path: None,
+                update: FileTimeUpdate {
+                    atime_ns: parse_time(1, flags & 1 != 0, flags & 2 != 0, "atime")?,
+                    mtime_ns: parse_time(2, flags & 4 != 0, flags & 8 != 0, "mtime")?,
+                    atime_now: flags & 2 != 0,
+                    mtime_now: flags & 8 != 0,
+                },
+            }
+        }
         "process.fd_set_flags" => FilesystemOperation::SetDescriptorFlags {
             fd: javascript_sync_rpc_arg_u32(&request.args, 0, "fd_set_flags fd")?,
             flags: javascript_sync_rpc_arg_u32(&request.args, 1, "fd_set_flags flags")?,
@@ -898,6 +930,8 @@ pub(super) fn decode(
                 0 => DescriptorWhence::Set,
                 1 => DescriptorWhence::Current,
                 2 => DescriptorWhence::End,
+                3 => DescriptorWhence::Data,
+                4 => DescriptorWhence::Hole,
                 value => {
                     return Err(SidecarError::host(
                         "EINVAL",
@@ -1435,6 +1469,8 @@ impl SidecarHostCapability<FilesystemOperation> for FilesystemCapability {
                     DescriptorWhence::Set => agentos_kernel::kernel::SEEK_SET,
                     DescriptorWhence::Current => agentos_kernel::kernel::SEEK_CUR,
                     DescriptorWhence::End => agentos_kernel::kernel::SEEK_END,
+                    DescriptorWhence::Data => agentos_kernel::kernel::SEEK_DATA,
+                    DescriptorWhence::Hole => agentos_kernel::kernel::SEEK_HOLE,
                 };
                 Value::String(
                     kernel
@@ -1640,13 +1676,7 @@ impl SidecarHostCapability<FilesystemOperation> for FilesystemCapability {
                             json!({
                                 "name": entry.name,
                                 "ino": entry.ino.to_string(),
-                                "filetype": if entry.is_directory {
-                                    agentos_kernel::fd_table::FILETYPE_DIRECTORY
-                                } else if entry.is_symbolic_link {
-                                    agentos_kernel::fd_table::FILETYPE_SYMBOLIC_LINK
-                                } else {
-                                    agentos_kernel::fd_table::FILETYPE_REGULAR_FILE
-                                },
+                                "filetype": entry.filetype,
                                 "next": cookie.saturating_add(index).saturating_add(1).to_string(),
                             })
                         })
@@ -1764,24 +1794,30 @@ impl SidecarHostCapability<FilesystemOperation> for FilesystemCapability {
                 path,
                 update,
             } => {
-                let MetadataTarget::Path {
-                    dir_fd,
-                    follow_symlinks,
-                } = target
-                else {
-                    return Err(unsupported("filesystem set-times target", target));
-                };
-                let path = resolve_path(kernel, process, dir_fd, required_path(path.as_ref())?)?;
-                kernel
-                    .utimes_spec_for_process(
-                        EXECUTION_DRIVER_NAME,
-                        pid,
-                        &path,
-                        time_spec(update.atime_ns, update.atime_now)?,
-                        time_spec(update.mtime_ns, update.mtime_now)?,
+                let atime = time_spec(update.atime_ns, update.atime_now)?;
+                let mtime = time_spec(update.mtime_ns, update.mtime_now)?;
+                match target {
+                    MetadataTarget::Descriptor(fd) => kernel
+                        .futimes(EXECUTION_DRIVER_NAME, pid, fd, atime, mtime)
+                        .map_err(kernel_host_error)?,
+                    MetadataTarget::Path {
+                        dir_fd,
                         follow_symlinks,
-                    )
-                    .map_err(kernel_host_error)?;
+                    } => {
+                        let path =
+                            resolve_path(kernel, process, dir_fd, required_path(path.as_ref())?)?;
+                        kernel
+                            .utimes_spec_for_process(
+                                EXECUTION_DRIVER_NAME,
+                                pid,
+                                &path,
+                                atime,
+                                mtime,
+                                follow_symlinks,
+                            )
+                            .map_err(kernel_host_error)?;
+                    }
+                }
                 Value::Null
             }
             FilesystemOperation::SetMode { target, path, mode } => {
@@ -1953,6 +1989,11 @@ impl SidecarHostCapability<FilesystemOperation> for FilesystemCapability {
                 path,
                 remove_directory,
             } => {
+                if remove_directory {
+                    kernel
+                        .validate_remove_directory_pathname(path.as_str())
+                        .map_err(kernel_host_error)?;
+                }
                 let path = resolve_path(kernel, process, dir_fd, path.as_str())?;
                 if remove_directory {
                     kernel.remove_dir_for_process(EXECUTION_DRIVER_NAME, pid, &path)
@@ -2046,6 +2087,18 @@ impl SidecarHostCapability<FilesystemOperation> for FilesystemCapability {
                     "freeInodes": stats.free_inodes,
                 })
             }
+            FilesystemOperation::DescriptorFilesystemStats { fd } => {
+                let stats = kernel
+                    .filesystem_stats_for_fd_process(EXECUTION_DRIVER_NAME, pid, fd)
+                    .map_err(kernel_host_error)?;
+                json!({
+                    "totalBytes": stats.total_bytes,
+                    "usedBytes": stats.used_bytes,
+                    "availableBytes": stats.available_bytes,
+                    "totalInodes": stats.total_inodes,
+                    "freeInodes": stats.free_inodes,
+                })
+            }
             FilesystemOperation::Remount { path, options } => {
                 let path = resolve_path(kernel, process, NODE_CWD_FD, path.as_str())?;
                 kernel
@@ -2101,9 +2154,10 @@ fn resolve_path(
     dir_fd: u32,
     path: &str,
 ) -> Result<String, HostServiceError> {
-    // AgentOS extension imports use NODE_CWD_FD for an ordinary POSIX path.
-    // Patched libc instead tags its preserved private WASI preopen; strip only
-    // that tag and retain the preopen's capability-root semantics.
+    let dir_fd = super::canonical_path_dir_fd(dir_fd);
+    // agentOS extension imports use NODE_CWD_FD for an ordinary POSIX path.
+    // Patched libc may use either supported AT_FDCWD encoding. Hidden preopen
+    // tags remain intact and retain the preopen's capability-root semantics.
     if dir_fd == NODE_CWD_FD {
         let path = if path.starts_with('/') {
             normalize_path(path)
@@ -2125,7 +2179,6 @@ fn resolve_path(
         }
         return Ok(path);
     }
-    let dir_fd = super::canonical_path_dir_fd(dir_fd);
     if path.starts_with('/') {
         return Err(HostServiceError::new(
             "EACCES",
@@ -2801,6 +2854,13 @@ mod tests {
                 .expect("extension cwd sentinel resolves from process cwd"),
             "/workspace/child"
         );
+        for at_fdcwd in [(-2_i32) as u32, (-100_i32) as u32] {
+            assert_eq!(
+                resolve_path(&mut kernel, &process, at_fdcwd, "child")
+                    .expect("libc AT_FDCWD resolves from process cwd"),
+                "/workspace/child"
+            );
+        }
         let cwd_metadata = HostOperation::Filesystem(FilesystemOperation::SetMode {
             target: MetadataTarget::Path {
                 dir_fd: NODE_CWD_FD,
@@ -2880,6 +2940,7 @@ mod tests {
             }
             "process.fd_seek" => vec![json!(3), json!("0"), json!(0)],
             "process.fd_truncate" => vec![json!(3), json!("0")],
+            "process.fd_utimes" => vec![json!(3), json!("0"), json!("0"), json!(5)],
             "process.fd_write" => vec![json!(3), json!("x")],
             "process.path_chmod_at" => vec![json!(3), json!("x"), json!(0o644)],
             "process.path_chown_at" => {
@@ -2904,6 +2965,7 @@ mod tests {
                 vec![json!(3), json!("a"), json!(3), json!("b")]
             }
             "process.path_stat_at" => vec![json!(3), json!("x"), json!(true)],
+            "process.path_statfs_at" => vec![json!(3), json!("x")],
             "process.path_symlink_at" => vec![json!("a"), json!(3), json!("b")],
             "process.path_utimes_at" => vec![
                 json!(3),
@@ -3497,6 +3559,7 @@ mod tests {
             "process.fd_setfd",
             "process.fd_sync",
             "process.fd_truncate",
+            "process.fd_utimes",
             "process.fd_write",
             "process.path_chmod_at",
             "process.path_chown_at",

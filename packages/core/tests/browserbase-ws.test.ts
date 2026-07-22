@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 import { AgentOs, type Permissions } from "../src/index.js";
+import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
 const BROWSER_BASE_API_KEY = process.env.BROWSER_BASE_API_KEY ?? "";
@@ -9,17 +9,17 @@ const BROWSER_BASE_PROJECT_ID = process.env.BROWSER_BASE_PROJECT_ID ?? "";
 const HAS_BROWSERBASE_CREDENTIALS = Boolean(
 	BROWSER_BASE_API_KEY && BROWSER_BASE_PROJECT_ID,
 );
-const REQUIRES_BROWSERBASE_CREDENTIALS = process.env.AGENTOS_E2E_NETWORK === "1";
+const BROWSERBASE_E2E_ENABLED = process.env.AGENTOS_BROWSERBASE_E2E === "1";
 
-if (!HAS_BROWSERBASE_CREDENTIALS && REQUIRES_BROWSERBASE_CREDENTIALS) {
+if (BROWSERBASE_E2E_ENABLED && !HAS_BROWSERBASE_CREDENTIALS) {
 	throw new Error(
-		"Browserbase websocket tests require BROWSER_BASE_API_KEY and BROWSER_BASE_PROJECT_ID when AGENTOS_E2E_NETWORK=1.",
+		"Browserbase websocket tests require BROWSER_BASE_API_KEY and BROWSER_BASE_PROJECT_ID when AGENTOS_BROWSERBASE_E2E=1.",
 	);
 }
 
-if (!HAS_BROWSERBASE_CREDENTIALS && !REQUIRES_BROWSERBASE_CREDENTIALS) {
+if (!BROWSERBASE_E2E_ENABLED) {
 	console.warn(
-		"Skipping Browserbase websocket tests: source ~/misc/env.txt so BROWSER_BASE_API_KEY and BROWSER_BASE_PROJECT_ID are available.",
+		"Skipping Browserbase websocket tests: set AGENTOS_BROWSERBASE_E2E=1 and provide Browserbase credentials to opt in.",
 	);
 }
 
@@ -895,7 +895,8 @@ describe("Browserbase websocket smoke test", () => {
 		}
 	});
 
-	const browserbaseTest = HAS_BROWSERBASE_CREDENTIALS ? test : test.skip;
+	const browserbaseTest =
+		BROWSERBASE_E2E_ENABLED && HAS_BROWSERBASE_CREDENTIALS ? test : test.skip;
 
 	browserbaseTest(
 		"opens a Browserbase CDP websocket and completes one command",
@@ -949,29 +950,36 @@ describe("Browserbase websocket smoke test", () => {
 				mounts: moduleAccessMounts(MODULE_ACCESS_CWD),
 				permissions: BROWSERBASE_PERMISSIONS,
 			});
-			await vm.writeFile("/tmp/browserbase-cli-pages-test.mjs", CLI_PAGES_SCRIPT);
+			await vm.writeFile(
+				"/tmp/browserbase-cli-pages-test.mjs",
+				CLI_PAGES_SCRIPT,
+			);
 
 			let stdout = "";
 			let stderr = "";
 
-			const { pid } = vm.spawn("node", ["/tmp/browserbase-cli-pages-test.mjs"], {
-				env: {
-					BROWSERBASE_API_KEY: BROWSER_BASE_API_KEY,
-					BROWSERBASE_PROJECT_ID: BROWSER_BASE_PROJECT_ID,
-					BROWSE_SESSION: `browserbase-pages-${Date.now()}`,
-					BROWSERBASE_CONFIG_DIR: "/tmp/browserbase-cli-debug",
-					BROWSERBASE_FLOW_LOGS: "1",
-					BROWSERBASE_CDP_CONNECT_MAX_MS: "5000",
-					BROWSERBASE_SESSION_CREATE_MAX_MS: "10000",
-					STAGEHAND_FIRST_TOP_LEVEL_PAGE_TIMEOUT_MS: "2000",
+			const { pid } = vm.spawn(
+				"node",
+				["/tmp/browserbase-cli-pages-test.mjs"],
+				{
+					env: {
+						BROWSERBASE_API_KEY: BROWSER_BASE_API_KEY,
+						BROWSERBASE_PROJECT_ID: BROWSER_BASE_PROJECT_ID,
+						BROWSE_SESSION: `browserbase-pages-${Date.now()}`,
+						BROWSERBASE_CONFIG_DIR: "/tmp/browserbase-cli-debug",
+						BROWSERBASE_FLOW_LOGS: "1",
+						BROWSERBASE_CDP_CONNECT_MAX_MS: "5000",
+						BROWSERBASE_SESSION_CREATE_MAX_MS: "10000",
+						STAGEHAND_FIRST_TOP_LEVEL_PAGE_TIMEOUT_MS: "2000",
+					},
+					onStdout: (data: Uint8Array) => {
+						stdout += new TextDecoder().decode(data);
+					},
+					onStderr: (data: Uint8Array) => {
+						stderr += new TextDecoder().decode(data);
+					},
 				},
-				onStdout: (data: Uint8Array) => {
-					stdout += new TextDecoder().decode(data);
-				},
-				onStderr: (data: Uint8Array) => {
-					stderr += new TextDecoder().decode(data);
-				},
-			});
+			);
 
 			const exitCode = await vm.waitProcess(pid);
 			expect(exitCode, `stdout:\n${stdout}\nstderr:\n${stderr}`).toBe(0);
@@ -1058,7 +1066,10 @@ describe("Browserbase websocket smoke test", () => {
 				mounts: moduleAccessMounts(MODULE_ACCESS_CWD),
 				permissions: BROWSERBASE_PERMISSIONS,
 			});
-			await vm.writeFile("/tmp/browserbase-sdk-test.mjs", BROWSERBASE_SDK_SCRIPT);
+			await vm.writeFile(
+				"/tmp/browserbase-sdk-test.mjs",
+				BROWSERBASE_SDK_SCRIPT,
+			);
 
 			let stdout = "";
 			let stderr = "";
@@ -1165,23 +1176,30 @@ describe("Browserbase websocket smoke test", () => {
 				mounts: moduleAccessMounts(MODULE_ACCESS_CWD),
 				permissions: BROWSERBASE_PERMISSIONS,
 			});
-			await vm.writeFile("/tmp/browserbase-bootstrap-test.mjs", CDP_BOOTSTRAP_SCRIPT);
+			await vm.writeFile(
+				"/tmp/browserbase-bootstrap-test.mjs",
+				CDP_BOOTSTRAP_SCRIPT,
+			);
 
 			let stdout = "";
 			let stderr = "";
 
-			const { pid } = vm.spawn("node", ["/tmp/browserbase-bootstrap-test.mjs"], {
-				env: {
-					BROWSERBASE_API_KEY: BROWSER_BASE_API_KEY,
-					BROWSERBASE_PROJECT_ID: BROWSER_BASE_PROJECT_ID,
+			const { pid } = vm.spawn(
+				"node",
+				["/tmp/browserbase-bootstrap-test.mjs"],
+				{
+					env: {
+						BROWSERBASE_API_KEY: BROWSER_BASE_API_KEY,
+						BROWSERBASE_PROJECT_ID: BROWSER_BASE_PROJECT_ID,
+					},
+					onStdout: (data: Uint8Array) => {
+						stdout += new TextDecoder().decode(data);
+					},
+					onStderr: (data: Uint8Array) => {
+						stderr += new TextDecoder().decode(data);
+					},
 				},
-				onStdout: (data: Uint8Array) => {
-					stdout += new TextDecoder().decode(data);
-				},
-				onStderr: (data: Uint8Array) => {
-					stderr += new TextDecoder().decode(data);
-				},
-			});
+			);
 
 			const exitCode = await vm.waitProcess(pid);
 			expect(exitCode, `stdout:\n${stdout}\nstderr:\n${stderr}`).toBe(0);

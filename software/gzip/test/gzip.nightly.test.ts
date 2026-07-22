@@ -8,7 +8,7 @@ import {
 	NodeFileSystem,
 	createKernel,
 	createWasmVmRuntime,
-	describeIf,
+	describeIf, wasmBackendTestTimeout,
 } from "@rivet-dev/agentos-test-harness";
 import type { Kernel } from "@rivet-dev/agentos-test-harness";
 import { afterEach, expect, it } from "vitest";
@@ -34,7 +34,7 @@ async function createTestVFS(): Promise<NodeFileSystem> {
 
 const textDecoder = new TextDecoder();
 
-describeIf(hasGzipPackageBinary, "gzip command", { timeout: 10_000 }, () => {
+describeIf(hasGzipPackageBinary, "gzip command", { timeout: wasmBackendTestTimeout(10_000, 30_000) }, () => {
 	let kernel: Kernel | undefined;
 
 	afterEach(async () => {

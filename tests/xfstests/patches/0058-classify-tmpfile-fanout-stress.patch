@@ -1,0 +1,15 @@
+diff --git a/tests/generic/531 b/tests/generic/531
+index fbb85a02..00000001 100755
+--- a/tests/generic/531
++++ b/tests/generic/531
+@@ -13,6 +13,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick unlink
+ testfile=$TEST_DIR/$seq.txt
+ 
++[ "$FSTYP" = "agentos" ] && \
++        _notrun "agentOS does not ship the O_TMPFILE fanout stress harness"
++
+ # Import common functions.
+ 
+ _require_scratch

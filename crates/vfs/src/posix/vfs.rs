@@ -141,7 +141,7 @@ pub fn validate_xattr_name(name: &str) -> VfsResult<()> {
     if name.is_empty() || name.len() > XATTR_NAME_MAX || !name.contains('.') || name.contains('\0')
     {
         return Err(VfsError::new(
-            "ERANGE",
+            "EINVAL",
             format!("invalid extended attribute name: {name:?}"),
         ));
     }
@@ -239,6 +239,12 @@ pub struct VirtualTimeSpec {
     pub nsec: u32,
 }
 
+/// Inclusive upper timestamp bound for agentOS filesystem metadata.
+///
+/// agentOS deliberately uses the traditional unsigned 32-bit seconds range:
+/// pre-epoch timestamps are rejected and later timestamps clamp to this bound.
+pub const AGENTOS_TIMESTAMP_MAX_SECONDS: i64 = u32::MAX as i64;
+
 impl VirtualTimeSpec {
     pub fn new(sec: i64, nsec: u32) -> VfsResult<Self> {
         if nsec >= 1_000_000_000 {
@@ -267,7 +273,7 @@ impl VirtualTimeSpec {
                 ),
             ));
         }
-        let seconds = u64::try_from(self.sec).map_err(|_| {
+        let seconds = u64::try_from(self.sec.min(AGENTOS_TIMESTAMP_MAX_SECONDS)).map_err(|_| {
             VfsError::new("EINVAL", format!("timestamp is out of range: {}", self.sec))
         })?;
         Ok(seconds.saturating_mul(1_000) + (self.nsec as u64 / 1_000_000))

@@ -1,4 +1,4 @@
-//! AgentOS process, descriptor-control, and signal-registration ABI codecs.
+//! agentOS process, descriptor-control, and signal-registration ABI codecs.
 //!
 //! Process and descriptor state remains sidecar/kernel-owned. The adapter
 //! snapshots live fds only while constructing one spawn request and never
@@ -647,6 +647,10 @@ async fn exec(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val], by_fd
     };
     let open = match call(caller, open_method, open_args, HashMap::new()).await {
         Ok(reply) => reply,
+        Err(error) if !by_fd && error.code == "ENOEXEC" => {
+            return commit_cross_runtime_exec(caller, &command, &original_argv, &env, &close_fds)
+                .await;
+        }
         Err(error) => return errno(&error),
     };
     let prepared_replacement = {
@@ -662,29 +666,14 @@ async fn exec(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val], by_fd
         let compiled = match module::compile_module(&engine, &bytes) {
             Ok(compiled) => compiled.module,
             Err(error) if error.code == "ERR_AGENTOS_WASM_INVALID_MODULE" && !by_fd => {
-                let request = json!({
-                    "command": command,
-                    "args": original_argv.iter().skip(1).cloned().collect::<Vec<_>>(),
-                    "options": {
-                        "argv0": original_argv.first().cloned().unwrap_or_else(|| command.clone()),
-                        "env": env,
-                        "shell": false,
-                        "cloexecFds": close_fds,
-                        "localReplacement": false,
-                        "internalBootstrapEnv": {},
-                    }
-                });
-                return match call(caller, "process.exec", vec![request], HashMap::new()).await {
-                    Ok(_) => {
-                        caller.data_mut().exec_replaced = true;
-                        ERRNO_IO
-                    }
-                    Err(error) if error.code == "ERR_AGENTOS_EXEC_REPLACED" => {
-                        caller.data_mut().exec_replaced = true;
-                        ERRNO_IO
-                    }
-                    Err(error) => errno(&error),
-                };
+                return commit_cross_runtime_exec(
+                    caller,
+                    &command,
+                    &original_argv,
+                    &env,
+                    &close_fds,
+                )
+                .await;
             }
             Err(error) if error.code == "ERR_AGENTOS_WASM_INVALID_MODULE" => {
                 return ERRNO_NOEXEC;
@@ -732,6 +721,38 @@ async fn exec(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val], by_fd
             );
             errno(&error)
         }
+    }
+}
+
+async fn commit_cross_runtime_exec(
+    caller: &mut Caller<'_, WasmtimeStoreState>,
+    command: &str,
+    argv: &[String],
+    env: &BTreeMap<String, String>,
+    close_fds: &[u32],
+) -> i32 {
+    let request = json!({
+        "command": command,
+        "args": argv.iter().skip(1).cloned().collect::<Vec<_>>(),
+        "options": {
+            "argv0": argv.first().cloned().unwrap_or_else(|| command.to_owned()),
+            "env": env,
+            "shell": false,
+            "cloexecFds": close_fds,
+            "localReplacement": false,
+            "internalBootstrapEnv": {},
+        }
+    });
+    match call(caller, "process.exec", vec![request], HashMap::new()).await {
+        Ok(_) => {
+            caller.data_mut().exec_replaced = true;
+            ERRNO_IO
+        }
+        Err(error) if error.code == "ERR_AGENTOS_EXEC_REPLACED" => {
+            caller.data_mut().exec_replaced = true;
+            ERRNO_IO
+        }
+        Err(error) => errno(&error),
     }
 }
 
@@ -1882,13 +1903,23 @@ async fn ppoll(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Val]) -> i
             let Some(ready_fds) = value.get("fds").and_then(Value::as_array) else {
                 return ERRNO_IO;
             };
+            if ready_fds.len() != count {
+                return ERRNO_IO;
+            }
             for (index, fd) in fds.iter().copied().enumerate().take(count) {
-                let revents = ready_fds
-                    .iter()
-                    .find(|entry| entry.get("fd").and_then(value_u64) == Some(fd as u64))
-                    .and_then(|entry| entry.get("revents"))
+                let Some(entry) = ready_fds.get(index) else {
+                    return ERRNO_IO;
+                };
+                if entry.get("fd").and_then(value_u64) != Some(fd as u64) {
+                    return ERRNO_IO;
+                }
+                let Some(revents) = entry
+                    .get("revents")
                     .and_then(value_u64)
-                    .unwrap_or(0) as u16;
+                    .and_then(|value| u16::try_from(value).ok())
+                else {
+                    return ERRNO_IO;
+                };
                 if commit(
                     caller,
                     pointer + (index * 8 + 6) as u32,

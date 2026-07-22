@@ -19,13 +19,16 @@ PATCHES := $(wildcard std-patches/*.patch)
 PATCH_SCRIPT := scripts/patch-std.sh
 
 # Disable rustc's stock self-contained WASI libraries and explicitly link the
-# command CRT and libc from AgentOS's owned sysroot. Merely putting this libdir
+# command CRT and libc from agentOS's owned sysroot. Merely putting this libdir
 # first in -L is insufficient: rustc selects its bundled libc internally.
 # Include the libc digest in rustc's metadata so Cargo relinks Rust commands
 # whenever the external sysroot is rebuilt; Cargo does not otherwise track
-# archives passed as linker arguments.
+# archives passed as linker arguments. Hash every owned Rust patch and
+# companion source as well: Cargo cannot see changes copied into vendored
+# sources before a cached build.
 WASI_C_LIBC_DIGEST = $(shell if command -v sha256sum >/dev/null 2>&1; then sha256sum "$(WASI_C_LIBDIR)/libc.a"; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$(WASI_C_LIBDIR)/libc.a"; else cksum "$(WASI_C_LIBDIR)/libc.a"; fi 2>/dev/null | cut -d ' ' -f1 | cut -c1-16)
-WASI_RUST_STD_PATCH_DIGEST = $(shell cat $(PATCHES) 2>/dev/null | if command -v sha256sum >/dev/null 2>&1; then sha256sum; elif command -v shasum >/dev/null 2>&1; then shasum -a 256; else cksum; fi | cut -d ' ' -f1 | cut -c1-16)
+WASI_RUST_PATCH_INPUTS := $(shell find std-patches -type f \( -name '*.patch' -o -name '*.rs' \) -print 2>/dev/null | LC_ALL=C sort)
+WASI_RUST_STD_PATCH_DIGEST = $(shell cat $(WASI_RUST_PATCH_INPUTS) 2>/dev/null | if command -v sha256sum >/dev/null 2>&1; then sha256sum; elif command -v shasum >/dev/null 2>&1; then shasum -a 256; else cksum; fi | cut -d ' ' -f1 | cut -c1-16)
 WASI_RUSTFLAGS = -C link-self-contained=no -C link-arg=$(WASI_C_LIBDIR)/crt1-command.o -C link-arg=$(WASI_C_LIBDIR)/libc.a -C link-arg=$(WASI_C_LIBDIR)/libwasi-emulated-pthread.a -C link-arg=-L$(WASI_C_LIBDIR) -C metadata=agentos-libc-$(WASI_C_LIBC_DIGEST)-std-$(WASI_RUST_STD_PATCH_DIGEST) --cfg tokio_unstable
 
 # Discover command binary names from colocated package crates plus toolchain
@@ -47,6 +50,8 @@ COMMAND_PACKAGES := $(foreach command,$(COMMAND_NAMES),-p $(call cargo_package_f
 COREUTILS_COMMAND_CRATES := $(wildcard ../software/coreutils/native/crates/cmd-*)
 PR_COMMAND_NAMES := $(patsubst cmd-%,%,$(notdir $(COREUTILS_COMMAND_CRATES))) _stubs
 PR_COMMAND_PACKAGES := $(foreach command,$(PR_COMMAND_NAMES),-p $(call cargo_package_for_command,$(command)))
+PR_C_COMMANDS := mknod getconf
+PR_C_BUILD_TARGETS := $(addprefix build/,$(PR_C_COMMANDS))
 
 # Alias symlinks: link_name:target_binary
 ALIAS_SYMLINKS := \
@@ -87,7 +92,7 @@ pr-commands:
 	$(MAKE) wasm \
 		COMMAND_NAMES="$(PR_COMMAND_NAMES)" \
 		COMMAND_PACKAGES="$(PR_COMMAND_PACKAGES)"
-	$(MAKE) -C c build/mknod install COMMANDS="mknod"
+	$(MAKE) -C c $(PR_C_BUILD_TARGETS) install COMMANDS="$(PR_C_COMMANDS)"
 
 # Build the real wasm32-wasip1 `codex-exec` agent engine and install it where
 # @agentos-software/codex-cli stages commands from.
@@ -309,7 +314,7 @@ wasm: c/sysroot/lib/wasm32-wasi/libc.a vendor patch-vendor patch-std wasm-opt-ch
 #   codex     the codex fork build    (codex, codex-exec)
 # `just toolchain-cmd <name>` calls this. `make wasm` builds the fast
 # Rust set; `make -C c programs install` builds/installs the fast C set.
-C_COMMANDS := zip unzip envsubst sqlite3 curl wget grep git duckdb vim ssh ssh-keysign ssh-sk-helper
+C_COMMANDS := zip unzip envsubst sqlite3 curl wget grep git duckdb vim ssh ssh-keysign ssh-sk-helper getconf
 
 .PHONY: cmd/%
 cmd/%:

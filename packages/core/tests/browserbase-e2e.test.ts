@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 import { AgentOs, type Permissions } from "../src/index.js";
+import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
 const BROWSER_BASE_API_KEY = process.env.BROWSER_BASE_API_KEY ?? "";
@@ -9,17 +9,17 @@ const BROWSER_BASE_PROJECT_ID = process.env.BROWSER_BASE_PROJECT_ID ?? "";
 const HAS_BROWSERBASE_CREDENTIALS = Boolean(
 	BROWSER_BASE_API_KEY && BROWSER_BASE_PROJECT_ID,
 );
-const REQUIRES_BROWSERBASE_CREDENTIALS = process.env.AGENTOS_E2E_NETWORK === "1";
+const BROWSERBASE_E2E_ENABLED = process.env.AGENTOS_BROWSERBASE_E2E === "1";
 
-if (!HAS_BROWSERBASE_CREDENTIALS && REQUIRES_BROWSERBASE_CREDENTIALS) {
+if (BROWSERBASE_E2E_ENABLED && !HAS_BROWSERBASE_CREDENTIALS) {
 	throw new Error(
-		"Browserbase e2e requires BROWSER_BASE_API_KEY and BROWSER_BASE_PROJECT_ID when AGENTOS_E2E_NETWORK=1.",
+		"Browserbase e2e requires BROWSER_BASE_API_KEY and BROWSER_BASE_PROJECT_ID when AGENTOS_BROWSERBASE_E2E=1.",
 	);
 }
 
-if (!HAS_BROWSERBASE_CREDENTIALS && !REQUIRES_BROWSERBASE_CREDENTIALS) {
+if (!BROWSERBASE_E2E_ENABLED) {
 	console.warn(
-		"Skipping Browserbase e2e: source ~/misc/env.txt so BROWSER_BASE_API_KEY and BROWSER_BASE_PROJECT_ID are available.",
+		"Skipping Browserbase e2e: set AGENTOS_BROWSERBASE_E2E=1 and provide Browserbase credentials to opt in.",
 	);
 }
 
@@ -38,7 +38,8 @@ const BROWSERBASE_PERMISSIONS: Permissions = {
 	},
 };
 
-const BROWSE_PATH = "/root/node_modules/@browserbasehq/browse-cli/dist/index.js";
+const BROWSE_PATH =
+	"/root/node_modules/@browserbasehq/browse-cli/dist/index.js";
 const CLI_PATH = "/root/node_modules/@browserbasehq/cli/dist/main.js";
 const JSON_OUTPUT_TIMEOUT_MS = 60_000;
 const BROWSE_COMMAND_SCRIPT_PATH = "/tmp/browserbase-browse-command.mjs";
@@ -73,7 +74,9 @@ async function runVmNodeCommand(
 					try {
 						vm.killProcess(pid);
 					} catch {}
-					reject(new Error(`${label} timed out after ${JSON_OUTPUT_TIMEOUT_MS}ms`));
+					reject(
+						new Error(`${label} timed out after ${JSON_OUTPUT_TIMEOUT_MS}ms`),
+					);
 				}, JSON_OUTPUT_TIMEOUT_MS);
 			}),
 		]);
@@ -206,7 +209,8 @@ describe("Browserbase e2e", () => {
 		}
 	});
 
-	const browserbaseTest = HAS_BROWSERBASE_CREDENTIALS ? test : test.skip;
+	const browserbaseTest =
+		BROWSERBASE_E2E_ENABLED && HAS_BROWSERBASE_CREDENTIALS ? test : test.skip;
 
 	browserbaseTest(
 		"runs Browserbase browser automation inside the VM with restricted guest egress",
@@ -293,14 +297,7 @@ describe("Browserbase e2e", () => {
 				const screenshotBytes = await vm.readFile(SCREENSHOT_PATH);
 				expect(screenshotBytes.byteLength).toBeGreaterThanOrEqual(1024);
 				expect(Array.from(screenshotBytes.slice(0, 8))).toEqual([
-					0x89,
-					0x50,
-					0x4e,
-					0x47,
-					0x0d,
-					0x0a,
-					0x1a,
-					0x0a,
+					0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 				]);
 			} finally {
 				await runVmNodeCommand(

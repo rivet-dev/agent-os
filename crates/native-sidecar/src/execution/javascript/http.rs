@@ -1,4 +1,5 @@
 use super::super::*;
+use agentos_execution::host::{BoundedString, HttpHeader};
 
 const HTTP_LOOPBACK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const VM_FETCH_STREAM_CHUNK_MAX_BYTES: usize = 64 * 1024;
@@ -151,7 +152,7 @@ pub(in crate::execution) fn serialize_http_loopback_request(
     .map_err(|error| SidecarError::host("ERR_AGENTOS_NODE_SYNC_RPC", format!("{error}")))
 }
 
-fn http_request_target(url: &Url) -> String {
+pub(in crate::execution) fn http_request_target(url: &Url) -> String {
     let path = if url.path().is_empty() {
         "/"
     } else {
@@ -198,30 +199,68 @@ fn serialize_kernel_http_fetch_request(
     options: &JavascriptHttpRequestOptions,
     headers: &HttpHeaderCollection,
     body_bytes: Option<&[u8]>,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, SidecarError> {
     let method = options.method.as_deref().unwrap_or("GET");
     let path = format!("/{}", path.trim_start_matches('/'));
+    let metadata_limit =
+        PayloadLimit::new("vm.fetch.requestMetadata", VM_FETCH_BUFFER_LIMIT_BYTES)?;
+    let metadata_headers = headers
+        .raw_pairs
+        .iter()
+        .map(|(name, value)| {
+            Ok(HttpHeader {
+                name: BoundedString::try_new(name.clone(), &metadata_limit)?,
+                value: BoundedString::try_new(value.clone(), &metadata_limit)?,
+            })
+        })
+        .collect::<Result<Vec<_>, HostServiceError>>()?;
+    validate_http_request_metadata(method, &metadata_headers)?;
+
+    let connection_scoped_headers = headers
+        .normalized
+        .get("connection")
+        .into_iter()
+        .flatten()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<BTreeSet<_>>();
     let mut lines = vec![format!("{method} {path} HTTP/1.1")];
     let mut has_host = false;
-    let mut has_connection = false;
-    let mut has_content_length = false;
     for (name, values) in &headers.normalized {
-        match name.as_str() {
-            "host" => has_host = true,
-            "connection" => has_connection = true,
-            "content-length" => has_content_length = true,
-            _ => {}
+        // This function creates a new HTTP/1.1 message from a decoded request
+        // body. Forwarding the source connection's framing, fixed hop-by-hop
+        // headers, or fields nominated by Connection can produce an invalid
+        // CL/TE combination or leak connection-scoped metadata.
+        if connection_scoped_headers.contains(name)
+            || matches!(
+                name.as_str(),
+                "connection"
+                    | "content-length"
+                    | "keep-alive"
+                    | "proxy-connection"
+                    | "te"
+                    | "proxy-authenticate"
+                    | "proxy-authorization"
+                    | "trailer"
+                    | "transfer-encoding"
+                    | "upgrade"
+            )
+        {
+            continue;
+        }
+        if name == "host" {
+            has_host = true;
         }
         lines.push(format!("{name}: {}", values.join(", ")));
     }
     if !has_host {
         lines.push(format!("Host: 127.0.0.1:{port}"));
     }
-    if !has_connection {
-        lines.push(String::from("Connection: close"));
-    }
+    lines.push(String::from("Connection: close"));
     let body = body_bytes.unwrap_or_else(|| options.body.as_deref().unwrap_or("").as_bytes());
-    if !has_content_length && !body.is_empty() {
+    if !body.is_empty() {
         lines.push(format!("Content-Length: {}", body.len()));
     }
     lines.push(String::new());
@@ -229,7 +268,7 @@ fn serialize_kernel_http_fetch_request(
 
     let mut request = lines.join("\r\n").into_bytes();
     request.extend_from_slice(body);
-    request
+    Ok(request)
 }
 
 fn find_http_header_end(buffer: &[u8]) -> Option<usize> {
@@ -451,106 +490,6 @@ fn decode_stream_body(state: &mut VmFetchStreamState) -> Result<(), SidecarError
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn service_host_fetch_target_event<B>(
-    bridge: &SharedBridge<B>,
-    vm_id: &str,
-    dns: &VmDnsConfig,
-    socket_paths: &SocketPathContext,
-    kernel: &mut SidecarKernel,
-    kernel_readiness: &KernelSocketReadinessRegistry,
-    process: &mut ActiveProcess,
-    wait: Duration,
-    capabilities: &CapabilityRegistry,
-) -> Result<bool, SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
-    let identity = process.kernel_handle.runtime_identity();
-    let max_reply_bytes = process.limits.reactor.max_bridge_response_bytes;
-    let event = process
-        .execution
-        .poll_event(identity, max_reply_bytes, wait)
-        .await?;
-    let Some(event) = event else { return Ok(false) };
-
-    match event {
-        ActiveExecutionEvent::HostRpcRequest(request) if request.method == "net.http_wait" => {
-            // The listener wait intentionally remains pending until server
-            // close. A nested vm.fetch pump must not steal it from the main
-            // sidecar dispatcher or wait for it inline.
-            process.queue_pending_execution_event(ActiveExecutionEvent::HostRpcRequest(request))?;
-        }
-        ActiveExecutionEvent::HostRpcRequest(request) => {
-            let response = service_javascript_sync_rpc(JavascriptSyncRpcServiceRequest {
-                bridge,
-                vm_id,
-                dns,
-                socket_paths,
-                kernel,
-                kernel_readiness: Arc::clone(kernel_readiness),
-                process,
-                sync_request: &request,
-                capabilities: capabilities.clone(),
-                managed_descriptions: None,
-            })
-            .await;
-            settle_execution_host_call(&request.reply, response)?;
-        }
-        ActiveExecutionEvent::Exited(code) => {
-            return Err(SidecarError::Execution(format!(
-                "vm.fetch target exited before responding (exit code {code})"
-            )));
-        }
-        other => {
-            process.queue_pending_execution_event(other)?;
-        }
-    }
-    Ok(true)
-}
-
-async fn drain_host_fetch_target_events<B>(
-    bridge: &SharedBridge<B>,
-    vm_id: &str,
-    vm: &mut VmState,
-    target_process_id: &str,
-    socket_paths: &SocketPathContext,
-) -> Result<(), SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
-    for _ in 0..32 {
-        let dns = vm.dns.clone();
-        let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-        let capabilities = vm.capabilities.clone();
-        let Some(process) = vm.active_processes.get_mut(target_process_id) else {
-            break;
-        };
-        let serviced = service_host_fetch_target_event(
-            bridge,
-            vm_id,
-            &dns,
-            socket_paths,
-            &mut vm.kernel,
-            &kernel_readiness,
-            process,
-            Duration::from_millis(1),
-            &capabilities,
-        )
-        .await?;
-        if !serviced {
-            // A just-closed client socket may need another bounded reactor
-            // turn before the guest observes EOF and retires its accepted
-            // socket. Keep probing within this fixed 32 ms cleanup budget
-            // instead of returning after the first empty 1 ms poll.
-            continue;
-        }
-    }
-    Ok(())
-}
-
 pub(in crate::execution) struct KernelHttpFetch {
     kernel_pid: u32,
     socket_id: SocketId,
@@ -573,6 +512,10 @@ pub(in crate::execution) fn begin_kernel_http_fetch(
     body_bytes: Option<&[u8]>,
     max_fetch_response_bytes: usize,
 ) -> Result<KernelHttpFetch, SidecarError> {
+    // Validate and serialize before reserving capabilities or creating a
+    // socket. Rejected request metadata must have no observable side effects.
+    let request_bytes =
+        serialize_kernel_http_fetch_request(port, path, options, headers, body_bytes)?;
     // Client source ports belong to the kernel socket table. The listen-port
     // allocator does not reserve active client sockets and can hand the same
     // source port to concurrent requests.
@@ -611,8 +554,6 @@ pub(in crate::execution) fn begin_kernel_http_fetch(
             InetSocketAddress::new("127.0.0.1", port),
         )
         .map_err(kernel_error)?;
-    let request_bytes =
-        serialize_kernel_http_fetch_request(port, path, options, headers, body_bytes);
     vm.kernel
         .socket_write(EXECUTION_DRIVER_NAME, kernel_pid, socket_id, &request_bytes)
         .map_err(kernel_error)?;
@@ -705,6 +646,21 @@ pub(in crate::execution) fn poll_kernel_http_fetch(
     if revents.intersects(POLLHUP) {
         fetch.peer_closed = true;
     }
+    // A readiness probe must settle data made available in that same probe.
+    // Returning Pending after draining a complete response forces callers to
+    // wait for a second edge that may instead be the one-shot server's exit.
+    if let Some(response) =
+        parse_kernel_http_fetch_response(&fetch.response_buffer, fetch.peer_closed, &fetch.url)
+            .map_err(sidecar_core_execution_error)?
+    {
+        ensure_vm_fetch_response_within_limit(
+            &response,
+            "vm.fetch",
+            fetch.max_fetch_response_bytes,
+        )
+        .map_err(sidecar_core_execution_error)?;
+        return Ok(Some(response));
+    }
     Ok(None)
 }
 
@@ -717,10 +673,35 @@ pub(in crate::execution) fn close_kernel_http_fetch(
         .map_err(kernel_error)
 }
 
+pub(in crate::execution) struct PendingKernelHttpFetchStream {
+    target_process_id: String,
+    kernel_pid: u32,
+    socket_id: SocketId,
+    capability: agentos_runtime::capability::CapabilityLease,
+    response_buffer: Vec<u8>,
+    peer_closed: bool,
+    deadline: Instant,
+    request_method: String,
+    max_response_bytes: usize,
+}
+
+pub(in crate::execution) struct KernelHttpFetchStreamHead {
+    status: u16,
+    status_text: String,
+    response_headers: Vec<(String, String)>,
+    body_mode: VmFetchBodyMode,
+}
+
+pub(in crate::execution) enum KernelHttpFetchStreamRead {
+    Pending,
+    Chunk {
+        response_json: String,
+        closed_target_process_id: Option<String>,
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(in crate::execution) async fn start_kernel_http_fetch_stream<B>(
-    bridge: &SharedBridge<B>,
-    vm_id: &str,
+pub(in crate::execution) fn begin_kernel_http_fetch_stream(
     vm: &mut VmState,
     target_process_id: &str,
     port: u16,
@@ -729,11 +710,7 @@ pub(in crate::execution) async fn start_kernel_http_fetch_stream<B>(
     headers: &HttpHeaderCollection,
     body_bytes: Option<&[u8]>,
     max_response_bytes: usize,
-) -> Result<String, SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
+) -> Result<PendingKernelHttpFetchStream, SidecarError> {
     if vm.vm_fetch_streams.len() >= VM_FETCH_STREAM_COUNT_LIMIT {
         return Err(SidecarError::Execution(format!(
             "ERR_AGENTOS_VM_FETCH_STREAM_LIMIT: VM has {} open fetch streams; close or cancel a stream before opening another (limit {})",
@@ -741,11 +718,8 @@ where
             VM_FETCH_STREAM_COUNT_LIMIT
         )));
     }
-    let socket_paths = build_socket_path_context(vm)?;
-    // Keep the source port kernel-owned for the lifetime of the stream. Using
-    // the listen-port allocator here can return the same port to every active
-    // request because client sockets are not part of its reservation table.
-    let local_port = 0;
+    let request_bytes =
+        serialize_kernel_http_fetch_request(port, path, options, headers, body_bytes)?;
     let pending_capability = reserve_capability(&vm.capabilities, CapabilityKind::TcpSocket)?;
     let kernel_pid = vm
         .active_processes
@@ -764,13 +738,15 @@ where
         .commit(CapabilityBackend::Kernel { socket_id })
         .map_err(|error| SidecarError::Execution(error.to_string()))?;
 
-    let result = async {
+    let setup_result = (|| {
+        // Port zero delegates ephemeral source-port selection to the kernel
+        // socket table. The listener allocator does not reserve client ports.
         vm.kernel
             .socket_bind_inet(
                 EXECUTION_DRIVER_NAME,
                 kernel_pid,
                 socket_id,
-                InetSocketAddress::new("127.0.0.1", local_port),
+                InetSocketAddress::new("127.0.0.1", 0),
             )
             .map_err(kernel_error)?;
         vm.kernel
@@ -781,242 +757,240 @@ where
                 InetSocketAddress::new("127.0.0.1", port),
             )
             .map_err(kernel_error)?;
-        let request_bytes =
-            serialize_kernel_http_fetch_request(port, path, options, headers, body_bytes);
         vm.kernel
             .socket_write(EXECUTION_DRIVER_NAME, kernel_pid, socket_id, &request_bytes)
-            .map_err(kernel_error)?;
+            .map_err(kernel_error)
+    })();
+    if let Err(error) = setup_result {
+        if let Err(close_error) =
+            vm.kernel
+                .socket_close(EXECUTION_DRIVER_NAME, kernel_pid, socket_id)
+        {
+            tracing::error!(
+                socket_id,
+                error = %close_error,
+                "failed to close kernel socket after VM fetch stream setup error"
+            );
+        }
+        return Err(error);
+    }
 
-        let deadline = Instant::now() + http_loopback_request_timeout();
-        let mut response_buffer = Vec::new();
-        let mut peer_closed = false;
-        let (status, status_text, response_headers, body_mode) = loop {
-            if let Some(header_end) = find_http_header_end(&response_buffer) {
-                let parsed = parse_stream_response_head(
-                    &response_buffer[..header_end],
-                    options.method.as_deref().unwrap_or("GET"),
-                    max_response_bytes,
-                )?;
-                if (100..200).contains(&parsed.0) && parsed.0 != 101 {
-                    response_buffer.drain(..header_end + 4);
-                    continue;
-                }
-                response_buffer.drain(..header_end + 4);
-                break parsed;
-            }
-            if Instant::now() >= deadline {
-                return Err(SidecarError::Execution(format!(
-                    "ERR_AGENTOS_VM_FETCH_TIMEOUT: timed out waiting for response headers after {} ms; raise AGENTOS_HTTP_LOOPBACK_REQUEST_TIMEOUT_MS",
-                    http_loopback_request_timeout().as_millis()
-                )));
-            }
-            {
-                let dns = vm.dns.clone();
-                let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-                let capabilities = vm.capabilities.clone();
-                let process = vm
-                    .active_processes
-                    .get_mut(target_process_id)
-                    .ok_or_else(|| {
-                        SidecarError::InvalidState(format!(
-                            "vm.fetch target process disappeared: {target_process_id}"
-                        ))
-                    })?;
-                service_host_fetch_target_event(
-                    bridge,
-                    vm_id,
-                    &dns,
-                    &socket_paths,
-                    &mut vm.kernel,
-                    &kernel_readiness,
-                    process,
-                    Duration::ZERO,
-                    &capabilities,
-                )
-                .await?;
-            }
-            let poll = vm
-                .kernel
-                .poll_targets(
-                    EXECUTION_DRIVER_NAME,
-                    kernel_pid,
-                    vec![PollTargetEntry::socket(
-                        socket_id,
-                        POLLIN | POLLHUP | POLLERR,
-                    )],
-                    0,
-                )
-                .map_err(kernel_error)?;
-            let revents = poll
-                .targets
-                .first()
-                .map(|entry| entry.revents)
-                .unwrap_or_else(PollEvents::empty);
-            if revents.intersects(POLLERR) {
-                return Err(SidecarError::Execution(String::from(
-                    "ERR_AGENTOS_VM_FETCH_SOCKET: kernel TCP socket reported POLLERR",
-                )));
-            }
-            if revents.intersects(POLLIN) {
-                loop {
-                    match vm
-                        .kernel
-                        .socket_read(EXECUTION_DRIVER_NAME, kernel_pid, socket_id, 64 * 1024)
-                    {
-                        Ok(Some(bytes)) if !bytes.is_empty() => {
-                            response_buffer.extend(bytes);
-                            ensure_vm_fetch_raw_response_buffer_within_limit(
-                                response_buffer.len(),
-                                "vm.fetchStream",
-                            )
-                            .map_err(sidecar_core_execution_error)?;
-                        }
-                        Ok(Some(_)) => break,
-                        Ok(None) => {
-                            peer_closed = true;
-                            break;
-                        }
-                        Err(error) if error.code() == "EAGAIN" => break,
-                        Err(error) => return Err(kernel_error(error)),
-                    }
-                }
-            }
-            if revents.intersects(POLLHUP) {
-                peer_closed = true;
-            }
-            if peer_closed && find_http_header_end(&response_buffer).is_none() {
-                return Err(SidecarError::Execution(String::from(
-                    "ERR_AGENTOS_VM_FETCH_TRUNCATED: peer closed before response headers completed",
-                )));
-            }
-            tokio::task::yield_now().await;
-        };
+    Ok(PendingKernelHttpFetchStream {
+        target_process_id: target_process_id.to_owned(),
+        kernel_pid,
+        socket_id,
+        capability,
+        response_buffer: Vec::new(),
+        peer_closed: false,
+        deadline: Instant::now() + http_loopback_request_timeout(),
+        request_method: options.method.as_deref().unwrap_or("GET").to_owned(),
+        max_response_bytes,
+    })
+}
 
-        vm.next_vm_fetch_stream_id = vm.next_vm_fetch_stream_id.wrapping_add(1);
-        let stream_id = format!("{}:{}", vm.generation, vm.next_vm_fetch_stream_id);
-        let mut state = VmFetchStreamState {
-            target_process_id: target_process_id.to_owned(),
-            kernel_pid,
-            socket_id,
-            _capability: capability,
-            raw_buffer: response_buffer,
-            decoded_buffer: VecDeque::new(),
-            body_mode,
-            peer_closed,
-            response_bytes: 0,
-            max_response_bytes,
-            last_progress_at: Instant::now(),
-        };
+pub(in crate::execution) fn poll_kernel_http_fetch_stream_start(
+    vm: &mut VmState,
+    pending: &mut PendingKernelHttpFetchStream,
+) -> Result<Option<KernelHttpFetchStreamHead>, SidecarError> {
+    loop {
+        if let Some(header_end) = find_http_header_end(&pending.response_buffer) {
+            let (status, status_text, response_headers, body_mode) = parse_stream_response_head(
+                &pending.response_buffer[..header_end],
+                &pending.request_method,
+                pending.max_response_bytes,
+            )?;
+            pending.response_buffer.drain(..header_end + 4);
+            if (100..200).contains(&status) && status != 101 {
+                continue;
+            }
+            return Ok(Some(KernelHttpFetchStreamHead {
+                status,
+                status_text,
+                response_headers,
+                body_mode,
+            }));
+        }
+        break;
+    }
+
+    if Instant::now() >= pending.deadline {
+        return Err(SidecarError::Execution(format!(
+            "ERR_AGENTOS_VM_FETCH_TIMEOUT: timed out waiting for response headers after {} ms; raise AGENTOS_HTTP_LOOPBACK_REQUEST_TIMEOUT_MS",
+            http_loopback_request_timeout().as_millis()
+        )));
+    }
+    let poll = vm
+        .kernel
+        .poll_targets(
+            EXECUTION_DRIVER_NAME,
+            pending.kernel_pid,
+            vec![PollTargetEntry::socket(
+                pending.socket_id,
+                POLLIN | POLLHUP | POLLERR,
+            )],
+            0,
+        )
+        .map_err(kernel_error)?;
+    let revents = poll
+        .targets
+        .first()
+        .map(|entry| entry.revents)
+        .unwrap_or_else(PollEvents::empty);
+    if revents.intersects(POLLERR) {
+        return Err(SidecarError::Execution(String::from(
+            "ERR_AGENTOS_VM_FETCH_SOCKET: kernel TCP socket reported POLLERR",
+        )));
+    }
+    if revents.intersects(POLLIN) {
+        loop {
+            match vm.kernel.socket_read(
+                EXECUTION_DRIVER_NAME,
+                pending.kernel_pid,
+                pending.socket_id,
+                VM_FETCH_STREAM_CHUNK_MAX_BYTES,
+            ) {
+                Ok(Some(bytes)) if !bytes.is_empty() => {
+                    pending.response_buffer.extend(bytes);
+                    ensure_vm_fetch_raw_response_buffer_within_limit(
+                        pending.response_buffer.len(),
+                        "vm.fetchStream",
+                    )
+                    .map_err(sidecar_core_execution_error)?;
+                }
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    pending.peer_closed = true;
+                    break;
+                }
+                Err(error) if error.code() == "EAGAIN" => break,
+                Err(error) => return Err(kernel_error(error)),
+            }
+        }
+    }
+    if revents.intersects(POLLHUP) {
+        pending.peer_closed = true;
+    }
+    if pending.peer_closed && find_http_header_end(&pending.response_buffer).is_none() {
+        return Err(SidecarError::Execution(String::from(
+            "ERR_AGENTOS_VM_FETCH_TRUNCATED: peer closed before response headers completed",
+        )));
+    }
+    Ok(None)
+}
+
+pub(in crate::execution) fn complete_kernel_http_fetch_stream_start(
+    vm: &mut VmState,
+    pending: PendingKernelHttpFetchStream,
+    head: KernelHttpFetchStreamHead,
+) -> Result<String, SidecarError> {
+    let PendingKernelHttpFetchStream {
+        target_process_id,
+        kernel_pid,
+        socket_id,
+        capability,
+        response_buffer,
+        peer_closed,
+        max_response_bytes,
+        ..
+    } = pending;
+    vm.next_vm_fetch_stream_id = vm.next_vm_fetch_stream_id.wrapping_add(1);
+    let stream_id = format!("{}:{}", vm.generation, vm.next_vm_fetch_stream_id);
+    let mut state = VmFetchStreamState {
+        target_process_id,
+        kernel_pid,
+        socket_id,
+        _capability: capability,
+        raw_buffer: response_buffer,
+        decoded_buffer: VecDeque::new(),
+        body_mode: head.body_mode,
+        peer_closed,
+        response_bytes: 0,
+        max_response_bytes,
+        last_progress_at: Instant::now(),
+    };
+    let result = (|| {
         decode_stream_body(&mut state)?;
-        vm.vm_fetch_streams.insert(stream_id.clone(), state);
         serde_json::to_string(&json!({
             "streamId": stream_id,
-            "status": status,
-            "statusText": status_text,
-            "headers": response_headers,
+            "status": head.status,
+            "statusText": head.status_text,
+            "headers": head.response_headers,
         }))
         .map_err(|error| {
             SidecarError::Execution(format!(
                 "ERR_AGENTOS_VM_FETCH_SERIALIZE: failed to serialize response head: {error}"
             ))
         })
-    }
-    .await;
-
-    if result.is_err() {
-        if let Err(error) = vm
-            .kernel
-            .socket_close(EXECUTION_DRIVER_NAME, kernel_pid, socket_id)
-        {
-            tracing::error!(
-                socket_id,
-                error = %error,
-                "failed to close kernel socket after VM fetch stream start error"
-            );
+    })();
+    match result {
+        Ok(response_json) => {
+            vm.vm_fetch_streams.insert(stream_id, state);
+            Ok(response_json)
+        }
+        Err(error) => {
+            if let Err(close_error) =
+                vm.kernel
+                    .socket_close(EXECUTION_DRIVER_NAME, kernel_pid, socket_id)
+            {
+                tracing::error!(
+                    socket_id,
+                    error = %close_error,
+                    "failed to close kernel socket after VM fetch stream completion error"
+                );
+            }
+            Err(error)
         }
     }
-    result
 }
 
-async fn close_fetch_stream_socket<B>(
-    bridge: &SharedBridge<B>,
-    vm_id: &str,
+pub(in crate::execution) fn abort_kernel_http_fetch_stream_start(
+    vm: &mut VmState,
+    pending: PendingKernelHttpFetchStream,
+) -> Result<(), SidecarError> {
+    vm.kernel
+        .socket_close(EXECUTION_DRIVER_NAME, pending.kernel_pid, pending.socket_id)
+        .map_err(kernel_error)
+}
+
+fn close_kernel_http_fetch_stream_state(
     vm: &mut VmState,
     state: VmFetchStreamState,
-) -> Result<(), SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
+) -> Result<String, SidecarError> {
     let target_process_id = state.target_process_id.clone();
-    let close_result = vm
-        .kernel
+    vm.kernel
         .socket_close(EXECUTION_DRIVER_NAME, state.kernel_pid, state.socket_id)
-        .map_err(kernel_error);
+        .map_err(kernel_error)?;
     drop(state);
-    let socket_paths = build_socket_path_context(vm)?;
-    let cleanup_result =
-        drain_host_fetch_target_events(bridge, vm_id, vm, &target_process_id, &socket_paths).await;
-    close_result.and(cleanup_result)
+    Ok(target_process_id)
 }
 
-pub(in crate::execution) async fn read_kernel_http_fetch_stream<B>(
-    bridge: &SharedBridge<B>,
-    vm_id: &str,
+pub(in crate::execution) fn poll_kernel_http_fetch_stream_read(
     vm: &mut VmState,
     stream_id: &str,
     requested_max_bytes: usize,
-) -> Result<String, SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
+) -> Result<KernelHttpFetchStreamRead, SidecarError> {
     let max_bytes = requested_max_bytes.clamp(1, VM_FETCH_STREAM_CHUNK_MAX_BYTES);
-    let mut state = vm.vm_fetch_streams.remove(stream_id).ok_or_else(|| {
-        SidecarError::InvalidState(format!(
-            "ERR_AGENTOS_VM_FETCH_STREAM_NOT_FOUND: stream {stream_id:?} is closed or unknown"
-        ))
-    })?;
-    let result = async {
-        decode_stream_body(&mut state)?;
-        while state.decoded_buffer.is_empty()
-            && !matches!(state.body_mode, VmFetchBodyMode::Empty)
-        {
+    enum Probe {
+        Pending,
+        Chunk { response_json: String, done: bool },
+    }
+
+    let probe_result = (|| {
+        let (kernel, streams) = (&mut vm.kernel, &mut vm.vm_fetch_streams);
+        let state = streams.get_mut(stream_id).ok_or_else(|| {
+            SidecarError::InvalidState(format!(
+                "ERR_AGENTOS_VM_FETCH_STREAM_NOT_FOUND: stream {stream_id:?} is closed or unknown"
+            ))
+        })?;
+        decode_stream_body(state)?;
+        if state.decoded_buffer.is_empty() && !matches!(state.body_mode, VmFetchBodyMode::Empty) {
             if state.last_progress_at.elapsed() >= http_loopback_request_timeout() {
                 return Err(SidecarError::Execution(format!(
                     "ERR_AGENTOS_VM_FETCH_TIMEOUT: stream produced no data for {} ms; raise AGENTOS_HTTP_LOOPBACK_REQUEST_TIMEOUT_MS",
                     http_loopback_request_timeout().as_millis()
                 )));
             }
-            let socket_paths = build_socket_path_context(vm)?;
-            {
-                let dns = vm.dns.clone();
-                let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-                let capabilities = vm.capabilities.clone();
-                let process = vm
-                    .active_processes
-                    .get_mut(&state.target_process_id)
-                    .ok_or_else(|| {
-                        SidecarError::InvalidState(format!(
-                            "vm.fetch target process disappeared: {}",
-                            state.target_process_id
-                        ))
-                    })?;
-                service_host_fetch_target_event(
-                    bridge,
-                    vm_id,
-                    &dns,
-                    &socket_paths,
-                    &mut vm.kernel,
-                    &kernel_readiness,
-                    process,
-                    Duration::ZERO,
-                    &capabilities,
-                )
-                .await?;
-            }
-            let poll = vm
-                .kernel
+            let poll = kernel
                 .poll_targets(
                     EXECUTION_DRIVER_NAME,
                     state.kernel_pid,
@@ -1038,9 +1012,10 @@ where
                 )));
             }
             let before = state.raw_buffer.len();
+            let was_peer_closed = state.peer_closed;
             if revents.intersects(POLLIN) {
                 loop {
-                    match vm.kernel.socket_read(
+                    match kernel.socket_read(
                         EXECUTION_DRIVER_NAME,
                         state.kernel_pid,
                         state.socket_id,
@@ -1067,21 +1042,20 @@ where
             if revents.intersects(POLLHUP) {
                 state.peer_closed = true;
             }
-            if state.raw_buffer.len() != before || state.peer_closed {
+            if state.raw_buffer.len() != before || state.peer_closed != was_peer_closed {
                 state.last_progress_at = Instant::now();
             }
-            decode_stream_body(&mut state)?;
-            if state.decoded_buffer.is_empty()
-                && !matches!(state.body_mode, VmFetchBodyMode::Empty)
-            {
-                tokio::task::yield_now().await;
-            }
+            decode_stream_body(state)?;
+        }
+
+        if state.decoded_buffer.is_empty() && !matches!(state.body_mode, VmFetchBodyMode::Empty) {
+            return Ok(Probe::Pending);
         }
         let take = max_bytes.min(state.decoded_buffer.len());
         let body: Vec<u8> = state.decoded_buffer.drain(..take).collect();
-        let done = state.decoded_buffer.is_empty()
-            && matches!(state.body_mode, VmFetchBodyMode::Empty);
-        let response = serde_json::to_string(&json!({
+        let done =
+            state.decoded_buffer.is_empty() && matches!(state.body_mode, VmFetchBodyMode::Empty);
+        let response_json = serde_json::to_string(&json!({
             "body": base64::engine::general_purpose::STANDARD.encode(body),
             "done": done,
         }))
@@ -1090,45 +1064,62 @@ where
                 "ERR_AGENTOS_VM_FETCH_SERIALIZE: failed to serialize stream chunk: {error}"
             ))
         })?;
-        Ok((response, done))
-    }
-    .await;
+        Ok(Probe::Chunk {
+            response_json,
+            done,
+        })
+    })();
 
-    match result {
-        Ok((response, true)) => {
-            close_fetch_stream_socket(bridge, vm_id, vm, state).await?;
-            Ok(response)
-        }
-        Ok((response, false)) => {
-            vm.vm_fetch_streams.insert(stream_id.to_owned(), state);
-            Ok(response)
+    match probe_result {
+        Ok(Probe::Pending) => Ok(KernelHttpFetchStreamRead::Pending),
+        Ok(Probe::Chunk {
+            response_json,
+            done: false,
+        }) => Ok(KernelHttpFetchStreamRead::Chunk {
+            response_json,
+            closed_target_process_id: None,
+        }),
+        Ok(Probe::Chunk {
+            response_json,
+            done: true,
+        }) => {
+            let state = vm.vm_fetch_streams.remove(stream_id).ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "ERR_AGENTOS_VM_FETCH_STREAM_NOT_FOUND: stream {stream_id:?} disappeared while closing"
+                ))
+            })?;
+            let target_process_id = close_kernel_http_fetch_stream_state(vm, state)?;
+            Ok(KernelHttpFetchStreamRead::Chunk {
+                response_json,
+                closed_target_process_id: Some(target_process_id),
+            })
         }
         Err(error) => {
-            if let Err(close_error) = close_fetch_stream_socket(bridge, vm_id, vm, state).await {
-                tracing::error!(stream_id, error = %close_error, "failed to close errored VM fetch stream");
+            if let Some(state) = vm.vm_fetch_streams.remove(stream_id) {
+                if let Err(close_error) = close_kernel_http_fetch_stream_state(vm, state) {
+                    tracing::error!(
+                        stream_id,
+                        error = %close_error,
+                        "failed to close errored VM fetch stream"
+                    );
+                }
             }
             Err(error)
         }
     }
 }
 
-pub(in crate::execution) async fn cancel_kernel_http_fetch_stream<B>(
-    bridge: &SharedBridge<B>,
-    vm_id: &str,
+pub(in crate::execution) fn cancel_kernel_http_fetch_stream_nonblocking(
     vm: &mut VmState,
     stream_id: &str,
-) -> Result<String, SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
+) -> Result<(String, String), SidecarError> {
     let state = vm.vm_fetch_streams.remove(stream_id).ok_or_else(|| {
         SidecarError::InvalidState(format!(
             "ERR_AGENTOS_VM_FETCH_STREAM_NOT_FOUND: stream {stream_id:?} is closed or unknown"
         ))
     })?;
-    close_fetch_stream_socket(bridge, vm_id, vm, state).await?;
-    Ok(String::from("{\"cancelled\":true}"))
+    let target_process_id = close_kernel_http_fetch_stream_state(vm, state)?;
+    Ok((String::from("{\"cancelled\":true}"), target_process_id))
 }
 
 pub(in crate::execution) fn begin_loopback_http_request(
@@ -1249,4 +1240,53 @@ pub(crate) fn ensure_vm_fetch_response_frame_within_limit(
         .encode(&frame)
         .map(|_| ())
         .map_err(|error| SidecarError::FrameTooLarge(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_options(method: &str) -> JavascriptHttpRequestOptions {
+        JavascriptHttpRequestOptions {
+            method: Some(method.to_owned()),
+            headers: BTreeMap::new(),
+            body: None,
+            reject_unauthorized: None,
+        }
+    }
+
+    #[test]
+    fn vm_fetch_serializes_exactly_one_leading_path_slash() {
+        let options = request_options("GET");
+        let headers =
+            parse_http_header_collection(&BTreeMap::new(), "test headers").expect("headers");
+        let request =
+            serialize_kernel_http_fetch_request(3000, "///nested?q=1", &options, &headers, None)
+                .expect("serialize request");
+        assert!(
+            request.starts_with(b"GET /nested?q=1 HTTP/1.1\r\n"),
+            "request line was {:?}",
+            String::from_utf8_lossy(&request)
+        );
+    }
+
+    #[test]
+    fn vm_fetch_serializes_binary_body_without_utf8_or_json_round_trip() {
+        let options = request_options("POST");
+        let headers =
+            parse_http_header_collection(&BTreeMap::new(), "test headers").expect("headers");
+        let body = [0, 0xff, b'\r', b'\n', 0x80, b'Z'];
+        let request =
+            serialize_kernel_http_fetch_request(3000, "/", &options, &headers, Some(&body))
+                .expect("serialize request");
+        let header_end = find_http_header_end(&request).expect("request header terminator") + 4;
+        assert_eq!(&request[header_end..], body);
+        assert!(
+            request[..header_end]
+                .windows(b"Content-Length: 6\r\n".len())
+                .any(|window| window == b"Content-Length: 6\r\n"),
+            "request headers were {:?}",
+            String::from_utf8_lossy(&request[..header_end])
+        );
+    }
 }

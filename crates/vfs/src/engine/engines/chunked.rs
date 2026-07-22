@@ -813,9 +813,16 @@ impl<M: MetadataStore, B: BlockStore> VirtualFileSystem for ChunkedFs<M, B> {
     async fn truncate(&self, path: &str, length: u64) -> VfsResult<()> {
         let meta = self.metadata.resolve(path).await?;
         self.ensure_file(path, &meta)?;
-        if length == meta.size {
-            return Ok(());
-        }
+        let next_allocated_extents = if length <= meta.size {
+            allocation_after_truncate(&meta.allocated_extents, length)
+        } else {
+            meta.allocated_extents.clone()
+        };
+        let next_unwritten_extents = if length <= meta.size {
+            unwritten_after_truncate(&decode_unwritten_extents(&meta.xattrs)?, length)
+        } else {
+            decode_unwritten_extents(&meta.xattrs)?
+        };
 
         if usize::try_from(length)
             .ok()
@@ -825,10 +832,7 @@ impl<M: MetadataStore, B: BlockStore> VirtualFileSystem for ChunkedFs<M, B> {
                 .read_file_range(&meta, 0, usize::try_from(length).unwrap_or(0))
                 .await?;
             let mut xattrs = meta.xattrs.clone();
-            encode_unwritten_extents(
-                &mut xattrs,
-                &unwritten_after_truncate(&decode_unwritten_extents(&meta.xattrs)?, length),
-            );
+            encode_unwritten_extents(&mut xattrs, &next_unwritten_extents);
             let freed = self
                 .metadata
                 .set_attr(
@@ -836,10 +840,7 @@ impl<M: MetadataStore, B: BlockStore> VirtualFileSystem for ChunkedFs<M, B> {
                     InodePatch {
                         storage: Some(Storage::Inline(data)),
                         size: Some(length),
-                        allocated_extents: Some(allocation_after_truncate(
-                            &meta.allocated_extents,
-                            length,
-                        )),
+                        allocated_extents: Some(next_allocated_extents),
                         xattrs: Some(xattrs),
                         ..InodePatch::default()
                     },
@@ -896,19 +897,11 @@ impl<M: MetadataStore, B: BlockStore> VirtualFileSystem for ChunkedFs<M, B> {
 
         let freed = self
             .metadata
-            .commit_write(
-                meta.ino,
-                edits,
-                length,
-                allocation_after_truncate(&meta.allocated_extents, length),
-            )
+            .commit_write(meta.ino, edits, length, next_allocated_extents)
             .await?;
         self.blocks.delete_many(&freed).await?;
-        self.set_unwritten_extents(
-            &meta,
-            &unwritten_after_truncate(&decode_unwritten_extents(&meta.xattrs)?, length),
-        )
-        .await
+        self.set_unwritten_extents(&meta, &next_unwritten_extents)
+            .await
     }
 
     async fn allocate(&self, path: &str, offset: u64, length: u64) -> VfsResult<()> {
@@ -1145,22 +1138,30 @@ impl<M: MetadataStore, B: BlockStore> VirtualFileSystem for ChunkedFs<M, B> {
     async fn allocated_ranges(&self, path: &str) -> VfsResult<Vec<(u64, u64)>> {
         let meta = self.metadata.resolve(path).await?;
         self.ensure_file(path, &meta)?;
-        Ok(allocation_byte_ranges(&meta.allocated_extents, meta.size))
+        let unwritten = unwritten_sector_ranges(&meta.xattrs)?;
+        let extent_limit = allocation_limit(unwritten, meta.size);
+        Ok(allocation_byte_ranges(
+            &meta.allocated_extents,
+            extent_limit,
+        ))
     }
 
     async fn unwritten_ranges(&self, path: &str) -> VfsResult<Vec<(u64, u64)>> {
         let meta = self.metadata.resolve(path).await?;
         self.ensure_file(path, &meta)?;
-        unwritten_byte_ranges(&meta.xattrs, meta.size)
+        let unwritten = unwritten_sector_ranges(&meta.xattrs)?;
+        let extent_limit = allocation_limit(unwritten, meta.size);
+        unwritten_byte_ranges(&meta.xattrs, extent_limit)
     }
 
     async fn extent_at(&self, path: &str, index: usize) -> VfsResult<Option<FileExtent>> {
         let meta = self.metadata.resolve(path).await?;
         self.ensure_file(path, &meta)?;
         let unwritten = unwritten_sector_ranges(&meta.xattrs)?;
+        let extent_limit = allocation_limit(unwritten.clone(), meta.size);
         let extent = crate::extent::classified_file_extent_at(
-            crate::extent::sector_byte_ranges(meta.allocated_extents.iter().copied(), meta.size),
-            crate::extent::sector_byte_ranges(unwritten, meta.size),
+            crate::extent::sector_byte_ranges(meta.allocated_extents.iter().copied(), extent_limit),
+            crate::extent::sector_byte_ranges(unwritten, extent_limit),
             index,
         );
         Ok(extent.map(|extent| FileExtent {
@@ -1332,12 +1333,18 @@ fn normalize_extents(extents: impl IntoIterator<Item = (u64, u64)>) -> Vec<(u64,
     merged
 }
 
-fn allocation_byte_ranges(extents: &[(u64, u64)], size: u64) -> Vec<(u64, u64)> {
+fn allocation_limit(extents: impl Iterator<Item = (u64, u64)>, size: u64) -> u64 {
+    extents
+        .last()
+        .map_or(size, |(_, end)| size.max(end.saturating_mul(512)))
+}
+
+fn allocation_byte_ranges(extents: &[(u64, u64)], limit: u64) -> Vec<(u64, u64)> {
     extents
         .iter()
         .filter_map(|&(start, end)| {
-            let start = start.saturating_mul(512).min(size);
-            let end = end.saturating_mul(512).min(size);
+            let start = start.saturating_mul(512).min(limit);
+            let end = end.saturating_mul(512).min(limit);
             (start < end).then_some((start, end))
         })
         .collect()

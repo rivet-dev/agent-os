@@ -189,14 +189,13 @@ describe("cron integration via AgentOs API", () => {
 		const events: CronEvent[] = [];
 		vm.onCronEvent((e) => events.push(e));
 
-		const error = new Error("cron-boom");
 		vm.scheduleCron({
 			id: "event-err-job",
 			schedule: "* * * * *",
 			action: {
 				type: "callback",
 				fn: () => {
-					throw error;
+					throw new Error("cron-boom");
 				},
 			},
 		});
@@ -207,7 +206,7 @@ describe("cron integration via AgentOs API", () => {
 		expect(errEvent).toBeDefined();
 		expect(errEvent?.jobId).toBe("event-err-job");
 		if (errEvent?.type === "cron:error") {
-			expect(errEvent.error).toBe(error);
+			expect(errEvent.error).toBe("cron-boom");
 		}
 	});
 

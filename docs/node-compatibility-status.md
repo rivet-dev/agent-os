@@ -118,15 +118,15 @@ packages:
 | `typescript-cli-pass` | TypeScript 6 compiler CLI producing JavaScript from a real project |
 | `vercel-ai-pass` | AI SDK core, OpenAI/Anthropic/Gateway providers, React/ReactDOM server rendering, and Workflow |
 | `vercel-platform-pass` | Vercel Blob, Edge Config, Express/Fastify/Hono adapters, current and legacy Flags, Functions, NFT, OG, OIDC, OpenTelemetry, Sandbox, and a representative SDK operation module |
+| `vite-react-esbuild-pass` | Vite React plugin and esbuild-backed production build with exact host-node output parity |
 
 ### Deferred, open, and native-service probes
 
 | Fixture | Status | Latest failure | Next action |
 | --- | --- | --- | --- |
-| `node-test-runner-blocked` | `open` | AgentOS does not currently expose the core `node:test` module. | Implement the Node test-runner builtin; this is a runtime compatibility gap, not a native-addon limitation. |
+| `node-test-runner-blocked` | `open` | The `node:test` module imports and registers tests, but a normal script entrypoint does not automatically execute and report them. | Complete the automatic test lifecycle and reporter behavior; the separate `node --test` compatibility path already drives the current builtin explicitly. |
 | `nextjs-turbopack-blocked` | `blocked-native` | Next 16 Turbopack attempts the platform SWC `.node` addons and then requires `node:worker_threads`; the staged SWC WASM fallback is insufficient for Turbopack. | Retain the exact expected-failure contract. The non-Turbopack Next production build remains passing. |
 | `jest-native-resolver-blocked` | `blocked-native` | Jest 30.4.2 delegates module resolution to `unrs-resolver` 1.12.2, whose supported Node path loads a platform N-API `.node` binding. Host Node runs the real Jest test; AgentOS fails the explicit native-resolver contract. | Retain the expected-failure contract until Jest or `unrs-resolver` offers a usable non-native Node path. |
-| `vite-react-esbuild-blocked` | `deferred` | Vite's React build requires the esbuild native service executable and does not settle in the JavaScript-only VM. | Retain as an explicit expected-failure contract; core Vite/Rollup coverage remains passing in `vite-pass`. |
 | `vitest-default-rolldown-native-blocked` | `blocked-native` | Vitest's current default dependency graph uses Vite 8/Rolldown and loads `rolldown-binding.linux-x64-gnu.node`. | Keep the native failure contract. Supported Vitest uses Vite 7 plus `@rollup/wasm-node` in `vitest-pass`. |
 | `rollup-native-blocked` | `blocked-native` | Rollup's default Linux package loads its platform native binding. | Keep the native contract and use the passing official WASM Rollup path where native code is unavailable. |
 | `tsx-esbuild-native-blocked` | `open` | The public `tsx/esm/api` path first reaches unsupported `module.register()` loader hooks; esbuild's native service is a downstream limitation. | Implement public Node loader-hook behavior before reclassifying the remaining esbuild dependency. |

@@ -21,3 +21,53 @@
  mod kill;
  
  use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+@@ -1464,7 +1468,48 @@
+         let stdout_fut = read_to_end(&mut stdout_pipe);
+         let stderr_fut = read_to_end(&mut stderr_pipe);
+ 
+-        let (status, stdout, stderr) = try_join3(self.wait(), stdout_fut, stderr_fut).await?;
++        #[cfg(target_os = "wasi")]
++        let (stdout, stderr) = {
++            // agentOS WASI child pipes are kernel-backed and become EOF-ready
++            // when the child exits. Drain both pipes concurrently before
++            // reaping so the single-threaded guest never has to spin on
++            // waitpid while output is still flowing.
++            let mut stdout_fut = std::pin::pin!(stdout_fut);
++            let mut stderr_fut = std::pin::pin!(stderr_fut);
++            let mut stdout = None;
++            let mut stderr = None;
++            std::future::poll_fn(|cx| {
++                if stdout.is_none() {
++                    match stdout_fut.as_mut().poll(cx) {
++                        Poll::Ready(Ok(bytes)) => stdout = Some(bytes),
++                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
++                        Poll::Pending => {}
++                    }
++                }
++                if stderr.is_none() {
++                    match stderr_fut.as_mut().poll(cx) {
++                        Poll::Ready(Ok(bytes)) => stderr = Some(bytes),
++                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
++                        Poll::Pending => {}
++                    }
++                }
++                match (stdout.take(), stderr.take()) {
++                    (Some(stdout), Some(stderr)) => Poll::Ready(Ok((stdout, stderr))),
++                    (maybe_stdout, maybe_stderr) => {
++                        stdout = maybe_stdout;
++                        stderr = maybe_stderr;
++                        Poll::Pending
++                    }
++                }
++            })
++            .await?
++        };
++
++        #[cfg(target_os = "wasi")]
++        let status = self.wait().await?;
++
++        #[cfg(not(target_os = "wasi"))]
++        let (status, stdout, stderr) = try_join3(self.wait(), stdout_fut, stderr_fut).await?;
+ 
+         // Drop happens after `try_join` due to <https://github.com/tokio-rs/tokio/issues/4309>
+         drop(stdout_pipe);

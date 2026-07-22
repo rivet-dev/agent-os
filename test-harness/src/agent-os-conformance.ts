@@ -272,11 +272,15 @@ export function defineAgentOsConformanceSuite(
 			const execResult = await backend.call<any>(
 				"process.exec",
 				"printf exec-ok",
+				{ output: { capture: "all" } },
 			);
 			expect(execResult).toMatchObject({ exitCode: 0, stdout: "exec-ok" });
-			const argvResult = await backend.call<any>("process.execFile", "printf", [
-				"argv-ok",
-			]);
+			const argvResult = await backend.call<any>(
+				"process.execFile",
+				"printf",
+				["argv-ok"],
+				{ output: { capture: "all" } },
+			);
 			expect(argvResult).toMatchObject({ exitCode: 0, stdout: "argv-ok" });
 
 			const output: any[] = [];
@@ -301,24 +305,24 @@ export function defineAgentOsConformanceSuite(
 					(process) => process.pid === spawned.pid,
 				),
 			).toBe(true);
-			expect(
-				(await backend.call<any[]>("process.tree")).some(
-					(process) => process.pid === spawned.pid,
-				),
-			).toBe(true);
+			await eventually(
+				() => backend.call<any[]>("process.tree"),
+				(processes) =>
+					processes.some((process) => process.pid === spawned.pid),
+			);
 			await backend.call("process.writeStdin", spawned.pid, "hello");
-			await backend.call("process.closeStdin", spawned.pid);
-			expect(await backend.call("process.wait", spawned.pid)).toMatchObject({
-				pid: spawned.pid,
-				outcome: "exited",
-				exitCode: 0,
-			});
 			await eventually(
 				() => output,
 				(events) =>
 					events.some((event) => text(event.data).includes("stdin:hello")) &&
 					events.some((event) => event.stream === "stderr"),
 			);
+			await backend.call("process.closeStdin", spawned.pid);
+			expect(await backend.call("process.wait", spawned.pid)).toMatchObject({
+				pid: spawned.pid,
+				outcome: "exited",
+				exitCode: 0,
+			});
 			await eventually(
 				() => exits,
 				(events) =>

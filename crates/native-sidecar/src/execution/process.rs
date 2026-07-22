@@ -334,6 +334,7 @@ impl ActiveProcess {
             tty_master_owner: None,
             tty_raw_mode_generation: None,
             deferred_kernel_wait_rpc: None,
+            deferred_kernel_wait_task: None,
             deferred_kernel_wait_deadline_warned: false,
             deferred_child_write_timer: None,
             deferred_guest_wait: None,
@@ -342,11 +343,15 @@ impl ActiveProcess {
             deferred_kernel_poll: None,
             deferred_kernel_read: None,
             module_resolution_cache: agentos_execution::LocalModuleResolutionCache::default(),
+            module_resolution_cache_generation: None,
         }
     }
 
     pub(crate) fn clear_deferred_kernel_wait_rpc(&mut self) {
         self.deferred_kernel_wait_rpc = None;
+        if let Some(task) = self.deferred_kernel_wait_task.take() {
+            task.abort();
+        }
         self.deferred_kernel_wait_deadline_warned = false;
         if let Some(timer) = self.deferred_child_write_timer.take() {
             timer.abort();
@@ -1034,6 +1039,13 @@ impl ActiveProcess {
             limits.pending_event_bytes,
         );
         self
+    }
+
+    pub(crate) fn configure_current_execution_event_limits(&mut self) {
+        self.execution.configure_adapter_event_limits(
+            self.pending_execution_event_count_limit,
+            self.pending_execution_event_bytes_limit,
+        );
     }
 
     pub(crate) fn with_vm_pending_byte_budgets(
@@ -2589,6 +2601,7 @@ impl ActiveExecutionEvent {
             // wire payload is independently frame-bounded.
             Self::HostRpcRequest(_)
             | Self::HostCallCompletion(_)
+            | Self::DeferredPosixPollWake
             | Self::ManagedStreamReadRecheck(_)
             | Self::ManagedUdpPollRecheck(_) => 4 * 1024,
             Self::SignalState { .. } | Self::Exited(_) => std::mem::size_of::<Self>(),

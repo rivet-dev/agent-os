@@ -27,9 +27,9 @@ use crate::AcpCoreError;
 
 /// Matches the native sidecar's `SESSION_CLOSE_TIMEOUT` (5s).
 const SESSION_CLOSE_TIMEOUT_MS: u64 = 5_000;
-/// Matches the native `INITIALIZE_TIMEOUT` (10s) and `SESSION_NEW_TIMEOUT` (30s).
-const INITIALIZE_TIMEOUT_MS: u64 = 10_000;
-const SESSION_NEW_TIMEOUT_MS: u64 = 30_000;
+/// Matches the native bootstrap/control-operation timeout policy.
+const INITIALIZE_TIMEOUT_MS: u64 = 60_000;
+const SESSION_NEW_TIMEOUT_MS: u64 = 120_000;
 const MAX_ACP_ADDITIONAL_DIRECTORIES: usize = 128;
 const MAX_ACP_GUEST_PATH_BYTES: usize = 4_096;
 
@@ -1458,8 +1458,8 @@ mod tests {
     #[test]
     fn prompt_has_no_deadline_while_bootstrap_close_and_machine_rpcs_remain_bounded() {
         assert_eq!(request_timeout_ms("session/prompt"), None);
-        assert_eq!(request_timeout_ms("initialize"), Some(10_000));
-        assert_eq!(request_timeout_ms("session/new"), Some(30_000));
+        assert_eq!(request_timeout_ms("initialize"), Some(60_000));
+        assert_eq!(request_timeout_ms("session/new"), Some(120_000));
         assert_eq!(request_timeout_ms("session/set_mode"), Some(120_000));
         assert_eq!(SESSION_CLOSE_TIMEOUT_MS, 5_000);
     }

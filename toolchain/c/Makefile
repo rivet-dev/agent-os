@@ -67,7 +67,7 @@ endif
 
 # Compile flags
 WASM_CFLAGS  := --target=wasm32-wasip1 --sysroot=$(SYSROOT) -O2 -flto -I include/
-NATIVE_CFLAGS := -O0 -g -D_LARGEFILE64_SOURCE -I include/
+NATIVE_CFLAGS := -O0 -g -D_GNU_SOURCE -D_LARGEFILE64_SOURCE -I include/
 
 # COMMANDS_DIR for install target (configurable, matches Rust binary output)
 COMMANDS_DIR ?= ../target/wasm32-wasip1/release/commands
@@ -75,7 +75,7 @@ COMMANDS_DIR ?= ../target/wasm32-wasip1/release/commands
 # Fast real commands installed by the default software gate. Slow/heavy commands
 # (duckdb, vim) remain available through explicit parent `make cmd/<name>`.
 COMMANDS := zip unzip envsubst sqlite3 curl wget grep git git-remote-http tree ssh ssh-keysign ssh-sk-helper \
-	acl_tools xattr_tools xfs_io mknod
+	acl_tools xattr_tools xfs_io mknod getconf
 
 # Public command names emitted by multi-call filesystem helper binaries.
 COMMAND_ALIASES := chacl:acl_tools getfacl:acl_tools setfacl:acl_tools \

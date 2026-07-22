@@ -14,7 +14,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -839,16 +839,26 @@ fn worker_executable() -> Result<PathBuf, HostServiceError> {
     {
         return Ok(current);
     }
-    let sibling = current
-        .parent()
-        .and_then(|directory| directory.parent())
-        .map(|directory| directory.join("agentos-native-sidecar"));
-    sibling.filter(|path| path.is_file()).ok_or_else(|| {
-        HostServiceError::new(
-            "ERR_AGENTOS_WASMTIME_WORKER_PATH",
-            "cannot locate the agentos-native-sidecar worker executable",
-        )
-    })
+    worker_executable_candidates(&current)
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            HostServiceError::new(
+                "ERR_AGENTOS_WASMTIME_WORKER_PATH",
+                "cannot locate the agentos-native-sidecar worker executable",
+            )
+        })
+}
+
+fn worker_executable_candidates(current: &Path) -> Vec<PathBuf> {
+    let Some(directory) = current.parent() else {
+        return Vec::new();
+    };
+    let mut candidates = vec![directory.join("agentos-native-sidecar")];
+    if let Some(parent) = directory.parent() {
+        candidates.push(parent.join("agentos-native-sidecar"));
+    }
+    candidates
 }
 
 fn encode<T: Serialize>(value: &T, maximum: usize) -> Result<Vec<u8>, HostServiceError> {
@@ -1022,6 +1032,24 @@ mod tests {
         assert!(
             output.is_empty(),
             "failed frame must not write a partial header"
+        );
+    }
+
+    #[test]
+    fn worker_path_candidates_cover_release_and_cargo_test_layouts() {
+        assert_eq!(
+            worker_executable_candidates(Path::new("/repo/target/release/agentos-sidecar")),
+            vec![
+                PathBuf::from("/repo/target/release/agentos-native-sidecar"),
+                PathBuf::from("/repo/target/agentos-native-sidecar"),
+            ]
+        );
+        assert_eq!(
+            worker_executable_candidates(Path::new("/repo/target/release/deps/execution-test")),
+            vec![
+                PathBuf::from("/repo/target/release/deps/agentos-native-sidecar"),
+                PathBuf::from("/repo/target/release/agentos-native-sidecar"),
+            ]
         );
     }
 }

@@ -3,8 +3,8 @@ import {
 	URLSearchParams as UpstreamURLSearchParams,
 } from "whatwg-url";
 
-const kBlobUrlStore = /* @__PURE__ */ Symbol.for("secureExec.blobUrlStore");
-const kBlobUrlCounter = /* @__PURE__ */ Symbol.for("secureExec.blobUrlCounter");
+const kBlobUrlStore = /* @__PURE__ */ Symbol.for("agentOs.blobUrlStore");
+const kBlobUrlCounter = /* @__PURE__ */ Symbol.for("agentOs.blobUrlCounter");
 const MAX_BLOB_URLS = 1024;
 
 function createNodeTypeError(message, code) {

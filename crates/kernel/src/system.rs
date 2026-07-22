@@ -21,10 +21,10 @@ pub struct SystemIdentity {
 impl Default for SystemIdentity {
     fn default() -> Self {
         Self {
-            hostname: String::from("secure-exec"),
+            hostname: String::from("agentos"),
             os_type: String::from("Linux"),
-            os_release: String::from("6.8.0-secure-exec"),
-            os_version: String::from("#1 SMP PREEMPT_DYNAMIC secure-exec"),
+            os_release: String::from("6.8.0-agentos"),
+            os_version: String::from("#1 SMP PREEMPT_DYNAMIC agentos"),
             machine: String::from("x86_64"),
             domain_name: String::from("localdomain"),
         }

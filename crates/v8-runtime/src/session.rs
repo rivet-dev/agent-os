@@ -478,7 +478,6 @@ impl Drop for RuntimeEventOutputReceiver {
     }
 }
 
-const LATE_TERMINATE_EXECUTION_ERROR_CODE: &str = "ERR_LATE_TERMINATE_EXECUTION";
 const LATE_STREAM_EVENT_ERROR_CODE: &str = "ERR_LATE_STREAM_EVENT";
 const LATE_BRIDGE_RESPONSE_ERROR_CODE: &str = "ERR_LATE_BRIDGE_RESPONSE";
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -2205,12 +2204,14 @@ fn handle_late_session_message(
                 ),
             )
         }
-        SessionMessage::TerminateExecution => send_late_message_warning(
-            event_tx,
-            session_id,
-            output_generation,
-            LATE_TERMINATE_EXECUTION_ERROR_CODE,
-            String::from("dropping TerminateExecution after execution completed"),
+        // Termination is idempotent. The executor can complete after the
+        // out-of-band isolate/abort signal succeeds but before this queued
+        // control message is observed. The requested terminal state has
+        // already been reached, so this is expected stale control—not a guest
+        // execution error. Keep it host-visible without contaminating stderr
+        // inside the VM.
+        SessionMessage::TerminateExecution => eprintln!(
+            "INFO_AGENTOS_STALE_TERMINATE_EXECUTION: session={session_id} generation={output_generation:?} execution already completed"
         ),
         SessionMessage::InjectGlobals { .. } | SessionMessage::Execute { .. } => {}
     }
@@ -3416,6 +3417,9 @@ fn run_event_loop_with_readiness(
             scope.terminate_execution();
             return EventLoopStatus::Terminated;
         }
+        if execution::global_process_exit_requested(scope) {
+            return EventLoopStatus::Completed;
+        }
         if pending.is_empty()
             && !execution::pending_module_evaluation_needs_wait(scope)
             && !execution::pending_script_evaluation_needs_wait(scope)
@@ -3460,6 +3464,9 @@ fn run_event_loop_with_readiness(
         // a fixed empty-work floor to every readiness and bridge completion.
         scope.perform_microtask_checkpoint();
         pump_v8_message_loop(scope);
+        if execution::global_process_exit_requested(scope) {
+            return EventLoopStatus::Completed;
+        }
 
         if pending_guest_immediate_count(scope) > 0 {
             match try_recv_session_command(scope, rx, ready_rx, ready_broker, bridge_rx, abort_rx) {
@@ -3627,6 +3634,9 @@ fn run_event_loop_with_readiness(
             // response and exit conditions.
             scope.perform_microtask_checkpoint();
             pump_v8_message_loop(scope);
+            if execution::global_process_exit_requested(scope) {
+                return EventLoopStatus::Completed;
+            }
             // Check if we should exit
             if pending.is_empty()
                 && !execution::pending_module_evaluation_needs_wait(scope)
@@ -4513,7 +4523,7 @@ mod tests {
     }
 
     #[test]
-    fn late_terminate_execution_is_logged_instead_of_silently_dropped() {
+    fn late_terminate_execution_does_not_emit_a_guest_error() {
         let (mut mgr, rx) = test_manager_with_events(1);
         mgr.create_session("late-terminate".into(), None, None, None)
             .expect("create session");
@@ -4521,11 +4531,10 @@ mod tests {
         mgr.send_to_session("late-terminate", SessionMessage::TerminateExecution)
             .expect("send late terminate");
 
-        expect_late_message_warning(
-            &rx,
-            "late-terminate",
-            LATE_TERMINATE_EXECUTION_ERROR_CODE,
-            "TerminateExecution",
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(50)),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout),
+            "idempotent late termination must not write a false error into guest stderr"
         );
 
         mgr.destroy_session("late-terminate")

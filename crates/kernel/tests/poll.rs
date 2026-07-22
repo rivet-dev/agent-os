@@ -1,6 +1,7 @@
 use agentos_kernel::command_registry::CommandDriver;
 use agentos_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions};
 use agentos_kernel::permissions::Permissions;
+use agentos_kernel::pipe_manager::{MAX_PIPE_BUFFER_BYTES, PIPE_BUF_BYTES};
 use agentos_kernel::poll::{
     PollFd, PollTargetEntry, POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM,
 };
@@ -122,6 +123,45 @@ fn poll_reports_pipe_peer_close_as_pollerr_on_writer() {
     assert_eq!(ready.ready_count, 1);
     assert!(ready.fds[0].revents.contains(POLLERR));
     assert!(!ready.fds[0].revents.contains(POLLOUT));
+}
+
+#[test]
+fn poll_reports_pipe_writable_only_at_atomic_write_capacity() {
+    let mut kernel = kernel_vm("vm-poll-pipe-atomic-capacity");
+    let pid = spawn_shell(&mut kernel);
+    let (read_fd, write_fd) = kernel.open_pipe("shell", pid).expect("open pipe");
+
+    kernel
+        .fd_write("shell", pid, write_fd, &vec![0; MAX_PIPE_BUFFER_BYTES])
+        .expect("fill pipe");
+    let full = kernel
+        .poll_fds("shell", pid, vec![PollFd::new(write_fd, POLLOUT)], 0)
+        .expect("poll full pipe");
+    assert_eq!(full.ready_count, 0);
+
+    assert_eq!(
+        kernel
+            .fd_read("shell", pid, read_fd, PIPE_BUF_BYTES - 1)
+            .expect("drain below atomic threshold")
+            .len(),
+        PIPE_BUF_BYTES - 1
+    );
+    let below_atomic = kernel
+        .poll_fds("shell", pid, vec![PollFd::new(write_fd, POLLOUT)], 0)
+        .expect("poll below atomic write capacity");
+    assert_eq!(below_atomic.ready_count, 0);
+
+    assert_eq!(
+        kernel
+            .fd_read("shell", pid, read_fd, 1)
+            .expect("reach atomic threshold"),
+        vec![0]
+    );
+    let atomic_ready = kernel
+        .poll_fds("shell", pid, vec![PollFd::new(write_fd, POLLOUT)], 0)
+        .expect("poll at atomic write capacity");
+    assert_eq!(atomic_ready.ready_count, 1);
+    assert_eq!(atomic_ready.fds[0].revents, POLLOUT);
 }
 
 #[test]

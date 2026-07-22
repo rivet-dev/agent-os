@@ -5,8 +5,8 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
-	rmSync,
 	realpathSync,
+	rmSync,
 	statSync,
 	symlinkSync,
 	writeFileSync,
@@ -20,10 +20,10 @@ import { createHostDirBackend } from "../src/host-dir-mount.js";
 import {
 	createKernel,
 	createNodeRuntime,
-	NodeFileSystem,
 	createWasmVmRuntime,
+	NodeFileSystem,
 } from "../src/runtime-compat.js";
-import { createInMemoryFileSystem } from "../src/test/runtime.js";
+import { serializePermissionsForSidecar } from "../src/sidecar/permissions.js";
 import {
 	NativeSidecarKernelProxy,
 	NativeSidecarProcessClient,
@@ -34,7 +34,7 @@ import {
 	serializeRootFilesystemForSidecar,
 	toSidecarSignalName,
 } from "../src/sidecar/rpc-client.js";
-import { serializePermissionsForSidecar } from "../src/sidecar/permissions.js";
+import { createInMemoryFileSystem } from "../src/test/runtime.js";
 import {
 	findPackageWithCommand,
 	packageCommandsDir,
@@ -44,9 +44,7 @@ const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const SIDECAR_BINARY = process.env.AGENTOS_SIDECAR_BIN
 	? resolve(process.env.AGENTOS_SIDECAR_BIN)
 	: join(REPO_ROOT, "target/debug/agentos-sidecar");
-const REGISTRY_COMMANDS_DIR = packageCommandsDir(
-	findPackageWithCommand("sh"),
-);
+const REGISTRY_COMMANDS_DIR = packageCommandsDir(findPackageWithCommand("sh"));
 const SIGNAL_STATE_CONTROL_PREFIX = "__AGENT_OS_SIGNAL_STATE__:";
 const ALLOW_ALL_VM_PERMISSIONS = {
 	fs: "allow",
@@ -181,7 +179,7 @@ const writeFrame = (frame) => {
 	const payload = encodeProtocolFrame(frame);
 	const prefix = Buffer.allocUnsafe(4);
 	prefix.writeUInt32BE(payload.length, 0);
-	process.stdout.write(Buffer.concat([prefix, payload]));
+	control.write(Buffer.concat([prefix, payload]));
 };
 const readVarUint = (state) => {
 	let result = 0n;
@@ -397,8 +395,10 @@ describe("native sidecar process client", () => {
 			driverPath,
 			[
 				"import { writeFileSync } from 'node:fs';",
+				"import { Socket } from 'node:net';",
 				"const capturePath = process.argv[2];",
 				"const schema = { name: 'agentos-native-sidecar', version: 8 };",
+				"const control = new Socket({ fd: 3, readable: true, writable: true });",
 				"let stdinBuffer = Buffer.alloc(0);",
 				BARE_FIXTURE_PROTOCOL_HELPERS,
 				"const drain = () => {",
@@ -413,11 +413,11 @@ describe("native sidecar process client", () => {
 				"    }",
 				"  }",
 				"};",
-				"process.stdin.on('data', (chunk) => {",
+				"control.on('data', (chunk) => {",
 				"  stdinBuffer = Buffer.concat([stdinBuffer, Buffer.from(chunk)]);",
 				"  drain();",
 				"});",
-				"process.stdin.resume();",
+				"control.resume();",
 				"setTimeout(() => {",
 				"  writeFrame({",
 				"    frame_type: 'sidecar_request',",
@@ -650,13 +650,15 @@ describe("native sidecar process client", () => {
 		writeFileSync(
 			driverPath,
 			[
+				"import { Socket } from 'node:net';",
 				"const schema = { name: 'agentos-native-sidecar', version: 8 };",
+				"const control = new Socket({ fd: 3, readable: true, writable: true });",
 				"let stdinBuffer = Buffer.alloc(0);",
 				"const writeFrame = (frame) => {",
 				"  const payload = Buffer.from(JSON.stringify(frame), 'utf8');",
 				"  const prefix = Buffer.allocUnsafe(4);",
 				"  prefix.writeUInt32BE(payload.length, 0);",
-				"  process.stdout.write(Buffer.concat([prefix, payload]));",
+				"  control.write(Buffer.concat([prefix, payload]));",
 				"};",
 				"const respond = (request, payload) => {",
 				"  writeFrame({",
@@ -823,6 +825,8 @@ describe("native sidecar process client", () => {
 		const dependencyRoot = mkdtempSync(
 			join(tmpdir(), "agentos-node-modules-store-"),
 		);
+		chmodSync(projectRoot, 0o755);
+		chmodSync(dependencyRoot, 0o755);
 		cleanupPaths.push(projectRoot, dependencyRoot);
 		const packageJsonPath = join(dependencyRoot, "package.json");
 		writeFileSync(packageJsonPath, '{"name":"dependency"}\n');
@@ -834,6 +838,12 @@ describe("native sidecar process client", () => {
 		const kernel = createKernel({
 			filesystem: new NodeFileSystem({ root: projectRoot }),
 			permissions: ALLOW_ALL_VM_PERMISSIONS,
+			user: {
+				uid: process.getuid?.() ?? 1000,
+				gid: process.getgid?.() ?? 1000,
+				euid: process.geteuid?.() ?? process.getuid?.() ?? 1000,
+				egid: process.getegid?.() ?? process.getgid?.() ?? 1000,
+			},
 		});
 
 		try {

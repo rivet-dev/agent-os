@@ -343,6 +343,7 @@ where
         // users, but feeding it here would replicate state and can double-deliver
         // bytes when the guest also reads fd 0 through the host bridge.
         write_kernel_process_stdin(&mut vm.kernel, process, &payload.chunk)?;
+        self.process_event_notify.notify_one();
 
         Ok(DispatchResult {
             response: stdin_written_response(
@@ -376,6 +377,7 @@ where
                 ))
             })?;
         close_kernel_process_stdin(&mut vm.kernel, process)?;
+        self.process_event_notify.notify_one();
 
         Ok(DispatchResult {
             response: stdin_closed_response(request, payload.process_id),
@@ -596,29 +598,59 @@ where
                     "vm.fetch stream read/cancel requires stream_id",
                 ))
             })?;
-            let vm = self
-                .vms
-                .get_mut(&vm_id)
-                .ok_or_else(|| SidecarError::InvalidState(String::from("unknown sidecar VM")))?;
-            let response_json = if stream_operation.as_deref() == Some("read") {
-                read_kernel_http_fetch_stream(
-                    &self.bridge,
-                    &vm_id,
-                    vm,
-                    stream_id,
-                    payload.max_bytes.unwrap_or(64 * 1024) as usize,
-                )
-                .await?
+            let ownership = OwnershipScope::vm(&connection_id, &session_id, &vm_id);
+            let process_event_notify = Arc::clone(&self.process_event_notify);
+            let (response_json, closed_stream) = if stream_operation.as_deref() == Some("read") {
+                loop {
+                    // Register before probing durable socket and execution
+                    // state so a racing response cannot lose its only wake.
+                    let notified = process_event_notify.notified();
+                    let result = {
+                        let vm = self.vms.get_mut(&vm_id).ok_or_else(|| {
+                            SidecarError::InvalidState(String::from("unknown sidecar VM"))
+                        })?;
+                        poll_kernel_http_fetch_stream_read(
+                            vm,
+                            stream_id,
+                            payload.max_bytes.unwrap_or(64 * 1024) as usize,
+                        )?
+                    };
+                    match result {
+                        KernelHttpFetchStreamRead::Chunk {
+                            response_json,
+                            closed_target_process_id,
+                        } => {
+                            break (response_json, closed_target_process_id.is_some());
+                        }
+                        KernelHttpFetchStreamRead::Pending => {}
+                    }
+                    if self.pump_process_events(&ownership).await? {
+                        // A hot guest can keep the bounded event turn
+                        // continuously non-empty. Yield so deferred Tokio
+                        // completions (managed connect/write, timers, TLS)
+                        // can publish the event that unblocks this request.
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    tokio::select! {
+                        _ = notified => {}
+                        _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+                    }
+                }
             } else {
-                let response_json =
-                    cancel_kernel_http_fetch_stream(&self.bridge, &vm_id, vm, stream_id).await?;
-                // Cancellation closes the client socket immediately, but the
-                // server process retires its accepted peer only after the
-                // shared readiness/event pump delivers EOF. Give that
-                // sidecar-owned path a small fixed cleanup budget so a
-                // successful cancel does not return with a leaked socket.
-                let ownership = OwnershipScope::vm(&connection_id, &session_id, &vm_id);
-                let process_event_notify = Arc::clone(&self.process_event_notify);
+                let (response_json, _target_process_id) = {
+                    let vm = self.vms.get_mut(&vm_id).ok_or_else(|| {
+                        SidecarError::InvalidState(String::from("unknown sidecar VM"))
+                    })?;
+                    cancel_kernel_http_fetch_stream_nonblocking(vm, stream_id)?
+                };
+                (response_json, true)
+            };
+            if closed_stream {
+                // Closing the client socket is immediate. The server process
+                // retires its accepted peer only after the shared VM-scoped
+                // event pump delivers EOF, so give that path a fixed cleanup
+                // budget before reporting successful completion/cancellation.
                 for _ in 0..32 {
                     let notified = process_event_notify.notified();
                     if self.pump_process_events(&ownership).await? {
@@ -629,9 +661,8 @@ where
                         _ = tokio::time::sleep(Duration::from_millis(1)) => {}
                     }
                 }
-                self.process_event_notify.notify_one();
-                response_json
-            };
+            }
+            self.process_event_notify.notify_one();
             let response = self.respond(
                 request,
                 ResponsePayload::VmFetchResult(VmFetchResponse { response_json }),
@@ -662,6 +693,7 @@ where
                     "invalid vm.fetch target {target_path:?}: {error}"
                 ))
             })?;
+        let request_target = http_request_target(&request_url);
         let header_values: BTreeMap<String, Value> = serde_json::from_str(&payload.headers_json)
             .map_err(|error| {
                 SidecarError::InvalidState(format!(
@@ -697,9 +729,7 @@ where
         if let Some(target_process_id) = target_process_id {
             let max_fetch_response_bytes = vm.limits.http.max_fetch_response_bytes;
             if stream_operation.as_deref() == Some("start") {
-                let response_json = start_kernel_http_fetch_stream(
-                    &self.bridge,
-                    &vm_id,
+                let mut pending = begin_kernel_http_fetch_stream(
                     vm,
                     &target_process_id,
                     payload.port,
@@ -708,8 +738,73 @@ where
                     &headers,
                     body_bytes.as_deref(),
                     max_fetch_response_bytes,
-                )
-                .await?;
+                )?;
+                let ownership = OwnershipScope::vm(&connection_id, &session_id, &vm_id);
+                let process_event_notify = Arc::clone(&self.process_event_notify);
+                let _ = vm;
+                let head = loop {
+                    // Socket readiness and execution events are durable, but
+                    // the wake is coalesced. Register before checking either.
+                    let notified = process_event_notify.notified();
+                    let probe = {
+                        let vm = self.vms.get_mut(&vm_id).ok_or_else(|| {
+                            SidecarError::InvalidState(format!(
+                                "VM {vm_id} is no longer active during vm.fetch stream start"
+                            ))
+                        })?;
+                        poll_kernel_http_fetch_stream_start(vm, &mut pending)
+                    };
+                    match probe {
+                        Ok(Some(head)) => break head,
+                        Ok(None) => {}
+                        Err(error) => {
+                            if let Some(vm) = self.vms.get_mut(&vm_id) {
+                                if let Err(close_error) =
+                                    abort_kernel_http_fetch_stream_start(vm, pending)
+                                {
+                                    tracing::error!(
+                                        error = %close_error,
+                                        "failed to close errored VM fetch stream start"
+                                    );
+                                }
+                            }
+                            return Err(error);
+                        }
+                    }
+                    match self.pump_process_events(&ownership).await {
+                        Ok(true) => {
+                            tokio::task::yield_now().await;
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            if let Some(vm) = self.vms.get_mut(&vm_id) {
+                                if let Err(close_error) =
+                                    abort_kernel_http_fetch_stream_start(vm, pending)
+                                {
+                                    tracing::error!(
+                                        error = %close_error,
+                                        "failed to close VM fetch stream after event-pump error"
+                                    );
+                                }
+                            }
+                            return Err(error);
+                        }
+                    }
+                    tokio::select! {
+                        _ = notified => {}
+                        _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+                    }
+                };
+                let response_json = {
+                    let vm = self.vms.get_mut(&vm_id).ok_or_else(|| {
+                        SidecarError::InvalidState(format!(
+                            "VM {vm_id} disappeared while completing vm.fetch stream start"
+                        ))
+                    })?;
+                    complete_kernel_http_fetch_stream_start(vm, pending, head)?
+                };
+                self.process_event_notify.notify_one();
                 let response = self.respond(
                     request,
                     ResponsePayload::VmFetchResult(VmFetchResponse { response_json }),
@@ -727,7 +822,7 @@ where
                 vm,
                 &target_process_id,
                 payload.port,
-                &target_path,
+                &request_target,
                 &options,
                 &headers,
                 body_bytes.as_deref(),
@@ -756,6 +851,24 @@ where
                     }
 
                     if self.pump_process_events(&ownership).await? {
+                        // A one-shot server can finish writing the complete
+                        // response and exit in the same process-pump turn. The
+                        // socket transition is durable and must win over the
+                        // subsequently queued exit; otherwise vm.fetch reports
+                        // a clean target exit even though Linux clients can
+                        // read the complete response before EOF.
+                        let response = {
+                            let vm = self.vms.get_mut(&vm_id).ok_or_else(|| {
+                                SidecarError::InvalidState(format!(
+                                    "VM {vm_id} is no longer active during vm.fetch"
+                                ))
+                            })?;
+                            poll_kernel_http_fetch(vm, &mut fetch)?
+                        };
+                        if let Some(response) = response {
+                            break Ok(response);
+                        }
+
                         let queued_exit_code = self.pending_process_events.iter().find_map(
                             |envelope| {
                                 if envelope.vm_id == vm_id
@@ -808,6 +921,7 @@ where
                             target_exited = true;
                             break Err(error);
                         }
+                        tokio::task::yield_now().await;
                         continue;
                     }
 
@@ -952,7 +1066,10 @@ where
             }
 
             match self.pump_process_events(&ownership).await {
-                Ok(true) => continue,
+                Ok(true) => {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
                 Ok(false) => {}
                 Err(error) => {
                     if let Some(process) = self

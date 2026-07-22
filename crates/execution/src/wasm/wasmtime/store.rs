@@ -1,4 +1,4 @@
-//! Per-execution Store state backed by AgentOS host capabilities.
+//! Per-execution Store state backed by agentOS host capabilities.
 
 use super::super::{guest_visible_wasm_env, StartWasmExecutionRequest, WasmExecutionEvent};
 use super::diagnostics::ExecutionDiagnostics;
@@ -107,6 +107,10 @@ impl WasmtimeHostClient {
 
     pub fn process(&self) -> HostProcessContext {
         self.process
+    }
+
+    pub(super) fn max_host_reply_bytes(&self) -> usize {
+        self.max_host_reply_bytes
     }
 
     pub fn canceled(&self) -> bool {
@@ -369,6 +373,7 @@ impl WasmtimeStoreState {
         active_cpu_started_ns: u64,
         paused: Arc<AtomicBool>,
         pause_notify: Arc<Notify>,
+        environment_is_guest_visible: bool,
         group_memory_pre_reserved: bool,
         thread_group: Option<Arc<ThreadGroup>>,
         thread_id: i32,
@@ -419,7 +424,7 @@ impl WasmtimeStoreState {
             )
         };
         let argv = nul_terminated_strings(request.argv.iter().map(String::as_str), "argv")?;
-        let guest_env = guest_visible_wasm_env(&request.env);
+        let guest_env = store_guest_environment(&request.env, environment_is_guest_visible);
         let env = nul_terminated_strings(
             guest_env
                 .iter()
@@ -515,6 +520,17 @@ impl WasmtimeStoreState {
     }
 }
 
+fn store_guest_environment(
+    environment: &BTreeMap<String, String>,
+    environment_is_guest_visible: bool,
+) -> BTreeMap<String, String> {
+    if environment_is_guest_visible {
+        environment.clone()
+    } else {
+        guest_visible_wasm_env(environment)
+    }
+}
+
 pub fn max_host_reply_bytes(
     request: &StartWasmExecutionRequest,
 ) -> Result<usize, HostServiceError> {
@@ -542,6 +558,7 @@ pub fn create_store(
     active_cpu_started_ns: u64,
     paused: Arc<AtomicBool>,
     pause_notify: Arc<Notify>,
+    environment_is_guest_visible: bool,
     group_memory_pre_reserved: bool,
     thread_group: Option<Arc<ThreadGroup>>,
     thread_id: i32,
@@ -558,24 +575,26 @@ pub fn create_store(
             active_cpu_started_ns,
             paused,
             pause_notify,
+            environment_is_guest_visible,
             group_memory_pre_reserved,
             thread_group,
             thread_id,
         )?,
     );
     store.limiter(|state| &mut state.limits);
-    // Fuel instrumentation is enabled on every Engine so the optional policy
-    // is Store-local. A Store with no requested deterministic budget receives
-    // effectively unbounded fuel while active CPU time remains epoch-managed.
-    store
-        .set_fuel(deterministic_fuel.unwrap_or(u64::MAX))
-        .map_err(|error| {
+    // Fuel instrumentation is Engine-wide, so ordinary execution uses an
+    // uninstrumented exact Engine profile and remains epoch-managed. Only an
+    // explicit deterministic budget selects the fuel-enabled profile and
+    // configures its Store counter.
+    if let Some(deterministic_fuel) = deterministic_fuel {
+        store.set_fuel(deterministic_fuel).map_err(|error| {
             eprintln!("ERR_AGENTOS_WASMTIME_FUEL_CONFIG: private Store diagnostic: {error:#}");
             HostServiceError::new(
                 "ERR_AGENTOS_WASMTIME_FUEL_CONFIG",
                 "failed to configure the deterministic execution budget",
             )
         })?;
+    }
     store.set_epoch_deadline(1);
     store.epoch_deadline_callback(|context| {
         if context.data().canceled() {
@@ -734,6 +753,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(Notify::new()),
             false,
+            false,
             None,
             0,
         )
@@ -745,5 +765,23 @@ mod tests {
         drop(state);
         assert_eq!(resources.usage(ResourceClass::WasmMemoryBytes).used, 0);
         assert!(resources.integrity_ok());
+    }
+
+    #[test]
+    fn exec_replacement_does_not_refilter_guest_constructed_environment() {
+        let environment = BTreeMap::from([
+            ("AGENTOS_EXEC_MARK".to_owned(), "from-exec".to_owned()),
+            ("VISIBLE".to_owned(), "yes".to_owned()),
+        ]);
+
+        let initial = store_guest_environment(&environment, false);
+        assert_eq!(initial.get("VISIBLE").map(String::as_str), Some("yes"));
+        assert!(!initial.contains_key("AGENTOS_EXEC_MARK"));
+
+        let replacement = store_guest_environment(&environment, true);
+        assert_eq!(
+            replacement.get("AGENTOS_EXEC_MARK").map(String::as_str),
+            Some("from-exec")
+        );
     }
 }

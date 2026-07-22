@@ -34,6 +34,7 @@ pub struct ThreadGroup {
     profile: WasmtimeEngineProfile,
     paused: Arc<std::sync::atomic::AtomicBool>,
     pause_notify: Arc<Notify>,
+    environment_is_guest_visible: bool,
     memory: SharedMemory,
     maximum_threads: usize,
     debug: bool,
@@ -63,6 +64,7 @@ impl ThreadGroup {
         profile: WasmtimeEngineProfile,
         paused: Arc<std::sync::atomic::AtomicBool>,
         pause_notify: Arc<Notify>,
+        environment_is_guest_visible: bool,
     ) -> Result<Arc<Self>, HostServiceError> {
         let memory_type = module
             .imports()
@@ -135,6 +137,7 @@ impl ThreadGroup {
             profile,
             paused,
             pause_notify,
+            environment_is_guest_visible,
             memory,
             state: Mutex::new(ThreadGroupState {
                 next_tid: 1,
@@ -275,6 +278,7 @@ impl ThreadGroup {
             store::thread_cpu_time_ns(),
             Arc::clone(&self.paused),
             Arc::clone(&self.pause_notify),
+            self.environment_is_guest_visible,
             true,
             Some(Arc::clone(self)),
             tid,

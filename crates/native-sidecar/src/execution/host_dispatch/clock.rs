@@ -44,6 +44,9 @@ impl SidecarHostCapability<ClockOperation> for ClockCapability {
                 interval_us,
             } => {
                 let values = process.real_interval_timer.set(initial_us, interval_us);
+                if values.2 {
+                    process.kernel_handle.kill(libc::SIGALRM);
+                }
                 json!({ "remainingUs": values.0, "intervalUs": values.1 })
             }
             other => return Err(unsupported("clock", other)),

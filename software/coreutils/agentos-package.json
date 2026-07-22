@@ -34,6 +34,7 @@
 		"fold",
 		"findmnt",
 		"getent",
+		"getconf",
 		"head",
 		"hostname",
 		"id",

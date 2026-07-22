@@ -13,6 +13,9 @@ toolchain-build:
 	make -C toolchain commands
 	make -C toolchain cmd/duckdb cmd/vim
 
+toolchain-codex:
+	make -C toolchain codex-required
+
 toolchain-cmd name:
 	make -C toolchain cmd/{{ name }}
 
@@ -48,6 +51,7 @@ software-build:
 # land in ignored build/bin/commands directories and must not be committed.
 tools-rebuild:
 	just toolchain-build
+	just toolchain-codex
 	just toolchain-copy-commands
 	just software-build
 	just toolchain-audit-imports

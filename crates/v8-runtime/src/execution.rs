@@ -742,6 +742,24 @@ pub(crate) fn extract_global_process_exit_code(scope: &mut v8::HandleScope) -> O
     }
 }
 
+pub(crate) fn global_process_exit_requested(scope: &mut v8::HandleScope) -> bool {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let Some(key) = v8::String::new(scope, "_processExitRequested") else {
+        return false;
+    };
+    let Some(value) = global.get(scope, key.into()) else {
+        return false;
+    };
+    let Ok(function) = v8::Local::<v8::Function>::try_from(value) else {
+        return false;
+    };
+    let receiver = v8::undefined(scope).into();
+    function
+        .call(scope, receiver, &[])
+        .is_some_and(|requested| requested.is_true())
+}
+
 /// Extract error info and exit code from a V8 exception.
 /// For ProcessExitError (detected via _isProcessExit sentinel), returns the error's exit code.
 /// For other errors, returns exit code 1.

@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,6 +106,49 @@ static int verify_seekdir(const char *path) {
 	    entry->d_ino == expected_ino;
 	closedir(dir);
 	return index;
+}
+
+static int verify_all_seekdir_positions(const char *path) {
+	struct observed_entry entries[MAX_ENTRIES];
+	long cookies[MAX_ENTRIES];
+	DIR *dir = opendir(path);
+	struct dirent *entry;
+	size_t count = 0;
+	size_t index;
+	int ok = 1;
+
+	if (dir == NULL)
+		return 0;
+	for (;;) {
+		long cookie = telldir(dir);
+		entry = readdir(dir);
+		if (entry == NULL)
+			break;
+		if (count >= MAX_ENTRIES) {
+			ok = 0;
+			break;
+		}
+		cookies[count] = cookie;
+		snprintf(entries[count].name, sizeof(entries[count].name), "%s",
+		    entry->d_name);
+		entries[count].ino = entry->d_ino;
+		count++;
+	}
+	if (errno != 0 || count != FILE_COUNT + 2)
+		ok = 0;
+
+	/* 137 is coprime to 222, so this replays every saved position in a
+	 * deterministic non-sequential order and crosses every refill boundary. */
+	for (index = 0; ok && index < count; index++) {
+		size_t position = (index * 137) % count;
+		seekdir(dir, cookies[position]);
+		entry = readdir(dir);
+		if (entry == NULL || entry->d_ino != entries[position].ino ||
+		    strcmp(entry->d_name, entries[position].name) != 0)
+			ok = 0;
+	}
+	(void)closedir(dir);
+	return ok;
 }
 
 static int verify_short_buffer_cookie(const char *path) {
@@ -364,6 +408,8 @@ int main(void) {
 	int first_matches_stat = 0, second_matches_stat = 0;
 	int stable = 1;
 	int seek_ok;
+	int all_seek_positions_ok;
+	int linux_struct_capacity_ok;
 	int short_buffer_ok;
 	int detached_ok;
 	int deleted_file_ok;
@@ -402,6 +448,9 @@ int main(void) {
 	}
 
 	seek_ok = verify_seekdir(directory);
+	all_seek_positions_ok = verify_all_seekdir_positions(directory);
+	linux_struct_capacity_ok = sizeof(((struct dirent *)0)->d_name) >= 256 &&
+	    sizeof(struct dirent) >= offsetof(struct dirent, d_name) + 256;
 	short_buffer_ok = verify_short_buffer_cookie(directory);
 	if (collect(directory, first, &first_count, &first_dots,
 	    &first_nonzero, &first_matches_stat) != 0 ||
@@ -423,6 +472,10 @@ int main(void) {
 	printf("readdir_ino_matches_stat=%s\n",
 	    first_matches_stat && second_matches_stat ? "yes" : "no");
 	printf("readdir_seekdir_resume=%s\n", seek_ok ? "yes" : "no");
+	printf("readdir_all_seekdir_positions=%s\n",
+	    all_seek_positions_ok ? "yes" : "no");
+	printf("readdir_linux_struct_capacity=%s\n",
+	    linux_struct_capacity_ok ? "yes" : "no");
 	printf("readdir_short_buffer_cookie=%s\n", short_buffer_ok ? "yes" : "no");
 	printf("readdir_stable_ino=%s\n", stable ? "yes" : "no");
 	printf("readdir_detached_directory=%s\n", detached_ok ? "yes" : "no");
@@ -440,7 +493,8 @@ int main(void) {
 
 	if (first_dots != 2 || second_dots != 2 || !first_nonzero ||
 	    !second_nonzero || !first_matches_stat || !second_matches_stat ||
-	    !seek_ok || !short_buffer_ok || !stable || !detached_ok ||
+	    !seek_ok || !all_seek_positions_ok || !linux_struct_capacity_ok ||
+	    !short_buffer_ok || !stable || !detached_ok ||
 	    !deleted_file_ok || !renamed_ok || !fdopendir_first_read_ok ||
 	    first_count != FILE_COUNT + 2) {
 		puts("readdir_contract=failed");

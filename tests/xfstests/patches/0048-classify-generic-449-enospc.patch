@@ -1,0 +1,14 @@
+diff --git a/tests/generic/449 b/tests/generic/449
+index 0124a360..cc854030 100755
+--- a/tests/generic/449
++++ b/tests/generic/449
+@@ -15,6 +15,9 @@ _begin_fstest auto quick acl attr enospc
+ . ./common/filter
+ . ./common/attr
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS does not expose filesystem capacity ENOSPC"
++
+ 
+ # Modify as appropriate.
+ _require_scratch

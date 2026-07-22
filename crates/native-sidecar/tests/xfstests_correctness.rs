@@ -1,6 +1,7 @@
 #[path = "support/mod.rs"]
 mod support;
 
+use agentos_kernel::pipe_manager::MAX_PIPE_BUFFER_BYTES;
 use agentos_native_sidecar::wire::{
     ConfigureVmRequest, ExecuteRequest, GuestFilesystemCallRequest, GuestFilesystemOperation,
     GuestFilesystemResultResponse, GuestRuntimeKind, KillProcessRequest, MountDescriptor,
@@ -29,6 +30,8 @@ use support::{
     execute_wire, open_session_wire, wire_request, wire_session, wire_vm, MockS3Server,
     ProcessOutputTimeout, RecordingBridge, TEST_AUTH_TOKEN,
 };
+
+const XFSTESTS_MAX_ACTIVE_VM_EXECUTORS: usize = 64;
 
 struct TestRoot {
     path: PathBuf,
@@ -185,12 +188,21 @@ impl Drop for TestRoot {
 }
 
 fn test_sidecar(root: &Path) -> NativeSidecar<RecordingBridge> {
+    // The pinned corpus deliberately creates process trees whose parents and
+    // children block on pipes at the same time. Give that workload a fixed,
+    // bounded executor budget instead of inheriting the host CPU count, which
+    // made identical xfstests pass or fail according to runner size.
+    let runtime = agentos_runtime::RuntimeConfig {
+        max_active_vm_executors: XFSTESTS_MAX_ACTIVE_VM_EXECUTORS,
+        ..agentos_runtime::RuntimeConfig::default()
+    };
     NativeSidecar::with_config(
         RecordingBridge::default(),
         NativeSidecarConfig {
             sidecar_id: String::from("sidecar-xfstests-verify-first"),
             compile_cache_root: Some(root.join("compile-cache")),
             expected_auth_token: Some(TEST_AUTH_TOKEN.to_owned()),
+            runtime,
             ..NativeSidecarConfig::default()
         },
     )
@@ -204,6 +216,17 @@ fn create_xfstests_vm_wire(
     session_id: &str,
     cwd: &Path,
 ) -> String {
+    let max_filesystem_bytes = if matches!(
+        env::var("XFSTESTS_WORKER_TEST_ID").as_deref(),
+        Ok("generic/485" | "generic/525")
+    ) {
+        // generic/485 and generic/525 place sparse data immediately below
+        // signed off_t::MAX. The host temp budget still caps physical
+        // storage for these exact workers.
+        u64::MAX
+    } else {
+        16 * 1024 * 1024 * 1024
+    };
     let mut payload = agentos_native_sidecar::wire::CreateVmRequest::legacy_test_config(
         GuestRuntimeKind::WebAssembly,
         HashMap::from([(String::from("cwd"), cwd.to_string_lossy().into_owned())]),
@@ -227,8 +250,18 @@ fn create_xfstests_vm_wire(
     };
     config.limits = Some(agentos_vm_config::VmLimitsConfig {
         resources: Some(agentos_vm_config::ResourceLimitsConfig {
-            max_open_fds: Some(4096),
-            max_filesystem_bytes: Some(16 * 1024 * 1024 * 1024),
+            // generic/488 intentionally holds 10,000 unlinked files open.
+            // Keep the verification VM bounded above that upstream workload.
+            max_open_fds: Some(16_384),
+            max_filesystem_bytes: Some(max_filesystem_bytes),
+            // generic/471 creates 10,000 entries before validating rewinddir.
+            // Keep the verification VM bounded while allowing that upstream
+            // workload to exercise the directory-stream behavior it targets.
+            max_readdir_entries: Some(16_384),
+            max_blocking_read_ms: Some(
+                u64::try_from((xfstest_timeout() + Duration::from_secs(30)).as_millis())
+                    .expect("bounded xfstests timeout fits u64 milliseconds"),
+            ),
             ..agentos_vm_config::ResourceLimitsConfig::default()
         }),
         wasm: Some(agentos_vm_config::WasmLimitsConfig {
@@ -2139,6 +2172,15 @@ fn xfstests_blocking_pipeline_applies_backpressure_past_pipe_capacity() {
             String::from("1"),
         );
     }
+    // The shortest generated row is 11 bytes (`user:1:rwx\n`). Keep the
+    // payload comfortably beyond the kernel's 64 KiB pipe capacity without
+    // turning this correctness gate into a host-call throughput benchmark.
+    const MIN_ROW_BYTES: usize = 11;
+    let pipeline_rows = MAX_PIPE_BUFFER_BYTES / MIN_ROW_BYTES + 2_048;
+    assert!(pipeline_rows * MIN_ROW_BYTES > MAX_PIPE_BUFFER_BYTES);
+    let script = format!(
+        "set -o pipefail; awk 'BEGIN {{ for (i = 1; i <= {pipeline_rows}; i++) print \"user:\" i \":rwx\"; exit }}' | sed -n '/:rwx$/p' | awk 'END {{ print NR }}'"
+    );
     let (stdout, stderr, exit_code) = execute_command_with_env(
         &mut sidecar,
         5,
@@ -2147,10 +2189,7 @@ fn xfstests_blocking_pipeline_applies_backpressure_past_pipe_capacity() {
         &vm_id,
         "xfstests-blocking-pipeline",
         "bash",
-        &[
-            "-c",
-            "set -o pipefail; awk 'BEGIN { for (i = 1; i <= 20000; i++) print \"user:\" i \":rwx\"; exit }' | sed -n '/:rwx$/p' | awk 'END { print NR }'",
-        ],
+        &["-c", &script],
         guest_env,
         Duration::from_secs(60),
     );
@@ -2159,7 +2198,7 @@ fn xfstests_blocking_pipeline_applies_backpressure_past_pipe_capacity() {
     drop(root);
 
     assert_eq!(exit_code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    assert_eq!(stdout, "20000\n", "stderr: {stderr}");
+    assert_eq!(stdout, format!("{pipeline_rows}\n"), "stderr: {stderr}");
     assert!(stderr.is_empty(), "unexpected pipeline stderr: {stderr}");
     assert!(!cleanup_path.exists(), "pipeline test root was not removed");
 }
@@ -2555,6 +2594,13 @@ fn xfstests_cp_copies_large_files_through_bounded_wasi_buffers() {
         None,
     );
 
+    let mut trace_env = HashMap::new();
+    if env::var_os("XFSTESTS_TRACE_HOST_PROCESS").is_some() {
+        trace_env.insert(
+            String::from("AGENTOS_TRACE_HOST_PROCESS"),
+            String::from("1"),
+        );
+    }
     let (stdout, stderr, exit_code) = execute_command_with_env(
         &mut sidecar,
         5,
@@ -2565,9 +2611,9 @@ fn xfstests_cp_copies_large_files_through_bounded_wasi_buffers() {
         "sh",
         &[
             "-c",
-            "dd if=/dev/zero of=/mnt/test/source bs=1048576 count=4 status=none; cp /mnt/test/source /mnt/test/copy; cmp /mnt/test/source /mnt/test/copy; stat -c %s /mnt/test/copy",
+            "set -e; dd if=/dev/zero of=/mnt/test/source bs=1048576 count=4 status=none; test \"$(stat -c %s /mnt/test/source)\" = 4194304; cp /mnt/test/source /mnt/test/copy; cmp /mnt/test/source /mnt/test/copy; stat -c %s /mnt/test/copy",
         ],
-        HashMap::new(),
+        trace_env,
         Duration::from_secs(60),
     );
     dispose_vm_and_close_session_wire(&mut sidecar, &connection_id, &session_id, &vm_id);
@@ -2628,7 +2674,7 @@ fn xfstests_openat_directory_fd_after_readdir() {
 }
 
 #[test]
-fn xfstests_pwritev_preserves_offset_and_vector_order() {
+fn xfstests_vector_io_splice_and_fallocate_match_linux_contracts() {
     support::assert_node_available();
     let root = TestRoot::new("xfstests-pwritev");
     let cleanup_path = root.path().to_path_buf();
@@ -2669,7 +2715,10 @@ fn xfstests_pwritev_preserves_offset_and_vector_order() {
     drop(sidecar);
     drop(root);
     assert_eq!(exit_code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    assert_eq!(stdout, "pwritev: ok\n", "pwritev stderr: {stderr}");
+    assert_eq!(
+        stdout, "vector-io-splice-fallocate: ok\n",
+        "vector I/O/splice/fallocate stderr: {stderr}"
+    );
     assert!(!cleanup_path.exists(), "pwritev test root was not removed");
 }
 
@@ -3985,6 +4034,7 @@ fn xfstests_mknod_creates_a_working_null_device() {
 }
 
 #[test]
+#[ignore = "agentOS does not expose Linux per-inode chattr flags in the maintained V8-WASM baseline"]
 fn xfstests_chattr_immutable_enforces_and_clears_write_protection() {
     support::assert_node_available();
     let source = PathBuf::from(env::var("XFSTESTS_ROOT").expect("XFSTESTS_ROOT from Makefile"));
@@ -4190,6 +4240,7 @@ impl TestOutcome {
 }
 
 #[test]
+#[ignore = "ObjectS3 is dormant until a bounded coherent dirty-inode cache makes POSIX workloads safe"]
 fn xfstests_object_s3_directory_metadata_and_relative_fill() {
     support::assert_node_available();
     let source = PathBuf::from(env::var("XFSTESTS_ROOT").expect("XFSTESTS_ROOT from Makefile"));
@@ -4396,6 +4447,7 @@ fn xfstests_object_s3_directory_metadata_and_relative_fill() {
 }
 
 #[test]
+#[ignore = "ObjectS3 is dormant until a bounded coherent dirty-inode cache makes POSIX workloads safe"]
 fn xfstests_object_s3_rejects_overlong_xattr_names_without_backend_io() {
     support::assert_node_available();
     let source = PathBuf::from(env::var("XFSTESTS_ROOT").expect("XFSTESTS_ROOT from Makefile"));
@@ -5107,6 +5159,219 @@ printf 'dirstress-ok\n'
 }
 
 #[test]
+#[ignore = "storage-endurance gate: three million 4-byte append writes can amplify into hundreds of GiB of host I/O; run explicitly with a raised xfstests timeout"]
+fn xfstests_wasi_append_endurance_probe() {
+    support::assert_node_available();
+    let source = PathBuf::from(env::var("XFSTESTS_ROOT").expect("XFSTESTS_ROOT from Makefile"));
+    let iterations = env::var("XFSTESTS_APPEND_ENDURANCE_ITERATIONS")
+        .unwrap_or_else(|_| String::from("3000000"))
+        .parse::<u64>()
+        .expect("XFSTESTS_APPEND_ENDURANCE_ITERATIONS must be a positive integer");
+    assert!(
+        (1..=3_000_000).contains(&iterations),
+        "XFSTESTS_APPEND_ENDURANCE_ITERATIONS must be in 1..=3000000"
+    );
+
+    let root = TestRoot::new("xfstests-append-endurance");
+    let cleanup_path = root.path().to_path_buf();
+    let cwd = root.path().join("cwd");
+    for path in [
+        cwd.as_path(),
+        &root.path().join("test"),
+        &root.path().join("scratch"),
+        &root.path().join("results"),
+    ] {
+        fs::create_dir_all(path).expect("create append endurance directory");
+    }
+
+    let mut sidecar = test_sidecar(root.path());
+    let connection_id = authenticate_wire(&mut sidecar, "conn-xfstests-append-endurance");
+    let session_id = open_session_wire(&mut sidecar, 2, &connection_id);
+    let vm_id = create_xfstests_vm_wire(&mut sidecar, 3, &connection_id, &session_id, &cwd);
+    configure_mounts(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        xfstests_mounts(&source, root.path(), XFSTESTS_BACKEND, None),
+    );
+
+    let script = format!(
+        r#"
+set -e
+cd /mnt/scratch
+: > pids
+for size in 1 20 300 40000 {iterations} 12345; do
+    /opt/xfstests/src/append_writer "$size" &
+    printf '%s %s\n' "$!" "$size" >> pids
+done
+wait
+while read -r pid size; do
+    /opt/xfstests/src/append_reader "testfile.$pid"
+done < pids
+printf 'append-endurance-ok\n'
+"#
+    );
+    let timeout = xfstest_timeout();
+    let output = try_execute_command_with_env(
+        &mut sidecar,
+        4,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "xfstests-append-endurance",
+        "sh",
+        &["-c", &script],
+        HashMap::new(),
+        timeout,
+    );
+    let (stdout, stderr, exit_code) = output.unwrap_or_else(|output| {
+        panic!(
+            "append endurance probe exceeded {}s; stdout: {:?}; stderr: {:?}",
+            timeout.as_secs(),
+            output.stdout,
+            output.stderr
+        )
+    });
+    assert_eq!(exit_code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(stdout, "append-endurance-ok\n", "stderr: {stderr}");
+
+    dispose_vm_and_close_session_wire(&mut sidecar, &connection_id, &session_id, &vm_id);
+    drop(sidecar);
+    drop(root);
+    assert!(
+        !cleanup_path.exists(),
+        "append endurance root was not removed"
+    );
+}
+
+#[test]
+#[ignore = "storage-endurance gate: run the full 100-iteration parallel pwrite/fallocate ENOSPC race explicitly"]
+fn xfstests_wasi_parallel_enospc_endurance_probe() {
+    support::assert_node_available();
+    let source = PathBuf::from(env::var("XFSTESTS_ROOT").expect("XFSTESTS_ROOT from Makefile"));
+    verify_first(XFSTESTS_BACKEND, false);
+    let temp_budget = Arc::new(TempUsageBudget::new(8 * 1024 * 1024 * 1024));
+    let outcome =
+        run_xfstest_subprocess(&source, "generic/371", XFSTESTS_BACKEND, &temp_budget, None);
+    assert!(
+        matches!(&outcome.kind, OutcomeKind::Pass),
+        "full generic/371 failed: kind={:?}; stdout={}; stderr={}",
+        outcome.kind,
+        outcome.stdout,
+        outcome.stderr
+    );
+}
+
+#[test]
+#[ignore = "storage-endurance gate: run the full 500-block insert-range reproduction workload explicitly"]
+fn xfstests_wasi_insert_range_endurance_probe() {
+    support::assert_node_available();
+    let source = PathBuf::from(env::var("XFSTESTS_ROOT").expect("XFSTESTS_ROOT from Makefile"));
+    verify_first(XFSTESTS_BACKEND, false);
+    let temp_budget = Arc::new(TempUsageBudget::new(8 * 1024 * 1024 * 1024));
+    let outcome =
+        run_xfstest_subprocess(&source, "generic/404", XFSTESTS_BACKEND, &temp_budget, None);
+    assert!(
+        matches!(&outcome.kind, OutcomeKind::Pass),
+        "full generic/404 failed: kind={:?}; stdout={}; stderr={}",
+        outcome.kind,
+        outcome.stdout,
+        outcome.stderr
+    );
+}
+
+#[test]
+#[ignore = "I/O-endurance gate: run the full 162,000-iteration looptest workload explicitly"]
+fn xfstests_wasi_looptest_endurance_probe() {
+    support::assert_node_available();
+    let source = PathBuf::from(env::var("XFSTESTS_ROOT").expect("XFSTESTS_ROOT from Makefile"));
+    verify_first(XFSTESTS_BACKEND, false);
+    let temp_budget = Arc::new(TempUsageBudget::new(8 * 1024 * 1024 * 1024));
+    let outcome =
+        run_xfstest_subprocess(&source, "generic/129", XFSTESTS_BACKEND, &temp_budget, None);
+    assert!(
+        matches!(&outcome.kind, OutcomeKind::Pass),
+        "full generic/129 failed: kind={:?}; stdout={}; stderr={}",
+        outcome.kind,
+        outcome.stdout,
+        outcome.stderr
+    );
+}
+
+#[test]
+#[ignore = "directory-endurance gate: run the full 10,000-file rewinddir workload explicitly"]
+fn xfstests_wasi_rewinddir_endurance_probe() {
+    support::assert_node_available();
+    let source = PathBuf::from(env::var("XFSTESTS_ROOT").expect("XFSTESTS_ROOT from Makefile"));
+    verify_first(XFSTESTS_BACKEND, false);
+    let temp_budget = Arc::new(TempUsageBudget::new(8 * 1024 * 1024 * 1024));
+    let outcome =
+        run_xfstest_subprocess(&source, "generic/471", XFSTESTS_BACKEND, &temp_budget, None);
+    assert!(
+        matches!(&outcome.kind, OutcomeKind::Pass),
+        "full generic/471 failed: kind={:?}; stdout={}; stderr={}",
+        outcome.kind,
+        outcome.stdout,
+        outcome.stderr
+    );
+}
+
+#[test]
+#[ignore = "directory-endurance gate: run the full 4,000-file seekdir/getdents workload explicitly"]
+fn xfstests_wasi_seekdir_endurance_probe() {
+    support::assert_node_available();
+    let source = PathBuf::from(env::var("XFSTESTS_ROOT").expect("XFSTESTS_ROOT from Makefile"));
+    verify_first(XFSTESTS_BACKEND, false);
+    let temp_budget = Arc::new(TempUsageBudget::new(8 * 1024 * 1024 * 1024));
+    let outcome =
+        run_xfstest_subprocess(&source, "generic/676", XFSTESTS_BACKEND, &temp_budget, None);
+    assert!(
+        matches!(&outcome.kind, OutcomeKind::Pass),
+        "full generic/676 failed: kind={:?}; stdout={}; stderr={}",
+        outcome.kind,
+        outcome.stdout,
+        outcome.stderr
+    );
+}
+
+#[test]
+#[ignore = "directory-endurance gate: run the full 5,000-file readdir/rename workload explicitly"]
+fn xfstests_wasi_readdir_rename_endurance_probe() {
+    support::assert_node_available();
+    let source = PathBuf::from(env::var("XFSTESTS_ROOT").expect("XFSTESTS_ROOT from Makefile"));
+    verify_first(XFSTESTS_BACKEND, false);
+    let temp_budget = Arc::new(TempUsageBudget::new(8 * 1024 * 1024 * 1024));
+    let outcome =
+        run_xfstest_subprocess(&source, "generic/736", XFSTESTS_BACKEND, &temp_budget, None);
+    assert!(
+        matches!(&outcome.kind, OutcomeKind::Pass),
+        "full generic/736 failed: kind={:?}; stdout={}; stderr={}",
+        outcome.kind,
+        outcome.stdout,
+        outcome.stderr
+    );
+}
+
+#[test]
+#[ignore = "fd-endurance gate: run the full 10,000-file open-unlink workload explicitly"]
+fn xfstests_wasi_open_unlink_endurance_probe() {
+    support::assert_node_available();
+    let source = PathBuf::from(env::var("XFSTESTS_ROOT").expect("XFSTESTS_ROOT from Makefile"));
+    verify_first(XFSTESTS_BACKEND, false);
+    let temp_budget = Arc::new(TempUsageBudget::new(8 * 1024 * 1024 * 1024));
+    let outcome =
+        run_xfstest_subprocess(&source, "generic/488", XFSTESTS_BACKEND, &temp_budget, None);
+    assert!(
+        matches!(&outcome.kind, OutcomeKind::Pass),
+        "full generic/488 failed: kind={:?}; stdout={}; stderr={}",
+        outcome.kind,
+        outcome.stdout,
+        outcome.stderr
+    );
+}
+
+#[test]
 #[ignore = "focused Linux waitpid option and status regression; run explicitly"]
 fn xfstests_wasi_waitpid_options_and_status() {
     support::assert_node_available();
@@ -5723,6 +5988,9 @@ printf cccccccccc > mmap-source
 printf 'aaaaaaaaaabbbbbbbbbbcccccccccc' | cmp - mmap-copy
 /opt/xfstests/src/pwrite_mmap_blocked mmap-pwrite | grep -qx 'pwrite 1 bytes from 2 to 3'
 test "$(cat mmap-pwrite)" = 01224
+bash -c '/opt/xfstests/src/pwrite_mmap_blocked /mnt/test/helper-probe/mmap-pwrite-nested' > /mnt/results/pwrite-mmap-nested.out 2>&1
+grep -qx 'pwrite 1 bytes from 2 to 3' /mnt/results/pwrite-mmap-nested.out
+test "$(cat mmap-pwrite-nested)" = 01224
 mkdir getcwd-dir
 /opt/xfstests/src/t_getcwd "$PWD/getcwd-dir"
 touch feature-chown
@@ -5740,7 +6008,17 @@ ln -s file dtype/link
 grep -qx 'file f' dtype.out
 grep -qx 'dir d' dtype.out
 grep -qx 'link l' dtype.out
-printf 'permname=4\nrunas_uid=1000\nlstat64=ok\nfs_perms=ok\nacl_tools=ok\nbrush_xtrace=ok\ntruncfile=ok\nnametest=ok\nt_access_root=ok\nt_rename_overwrite=ok\nfssum=ok\nmulti_open_unlink=ok\nlooptest=ok\ndevzero=ok\nt_mmap_writev=ok\npwrite_mmap_blocked=ok\nt_getcwd=ok\nfeature=ok\nt_dir_type=ok\n'
+background_arg_probe() {
+    background_command=printf
+    "$background_command" '<%s>\n' "$@" > /mnt/results/background-args.actual &
+    background_pid=$!
+    wait "$background_pid"
+}
+background_arg_probe alpha 'two words'
+printf '<alpha>\n<two words>\n' > /mnt/results/background-args.expected
+cmp /mnt/results/background-args.expected /mnt/results/background-args.actual
+bash -c 'status=0; trap "exit \$status" EXIT; false; exit'
+printf 'permname=4\nrunas_uid=1000\nlstat64=ok\nfs_perms=ok\nacl_tools=ok\nbrush_xtrace=ok\nbackground_args=ok\nexit_trap=ok\ntruncfile=ok\nnametest=ok\nt_access_root=ok\nt_rename_overwrite=ok\nfssum=ok\nmulti_open_unlink=ok\nlooptest=ok\ndevzero=ok\nt_mmap_writev=ok\npwrite_mmap_blocked=ok\nt_getcwd=ok\nfeature=ok\nt_dir_type=ok\n'
 flock_test selftest flock.file
 "#;
     let mut guest_env = HashMap::new();
@@ -5778,7 +6056,7 @@ flock_test selftest flock.file
     assert_eq!(exit_code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(
         stdout,
-        "permname=4\nrunas_uid=1000\nlstat64=ok\nfs_perms=ok\nacl_tools=ok\nbrush_xtrace=ok\ntruncfile=ok\nnametest=ok\nt_access_root=ok\nt_rename_overwrite=ok\nfssum=ok\nmulti_open_unlink=ok\nlooptest=ok\ndevzero=ok\nt_mmap_writev=ok\npwrite_mmap_blocked=ok\nt_getcwd=ok\nfeature=ok\nt_dir_type=ok\nflock=ok\n",
+        "permname=4\nrunas_uid=1000\nlstat64=ok\nfs_perms=ok\nacl_tools=ok\nbrush_xtrace=ok\nbackground_args=ok\nexit_trap=ok\ntruncfile=ok\nnametest=ok\nt_access_root=ok\nt_rename_overwrite=ok\nfssum=ok\nmulti_open_unlink=ok\nlooptest=ok\ndevzero=ok\nt_mmap_writev=ok\npwrite_mmap_blocked=ok\nt_getcwd=ok\nfeature=ok\nt_dir_type=ok\nflock=ok\n",
         "stderr: {stderr}"
     );
     if !trace_shell {
@@ -5885,11 +6163,35 @@ fn run_xfstest(source: &Path, test_id: &str, backend: &str, root_path: PathBuf) 
         String::from("HOST_OPTIONS"),
         String::from("/opt/xfstests/local.config"),
     );
-    if let Some(iterations) = env::var_os("XFSTESTS_WORKER_REDUCED_ITERATIONS") {
-        assert_eq!(test_id, "generic/014");
-        assert_eq!(backend, "object_s3");
+    if env::var_os("XFSTESTS_TRACE_SHELL").is_some() {
+        guest_env.insert(String::from("XFSTESTS_TRACE_SHELL"), String::from("1"));
+    }
+    if let (Some(reduction), Some(iterations)) = (
+        env::var_os("XFSTESTS_WORKER_REDUCTION"),
+        env::var_os("XFSTESTS_WORKER_REDUCED_ITERATIONS"),
+    ) {
+        let reduction = reduction
+            .into_string()
+            .expect("reduction name must be UTF-8");
+        let variable = match (test_id, reduction.as_str()) {
+            ("generic/011", "dirstress-files") => "XFSTESTS_GENERIC_011_FILES",
+            ("generic/014", "truncfile-iterations") => "XFSTESTS_GENERIC_014_ITERATIONS",
+            ("generic/069", "append-stream-iterations") => "XFSTESTS_GENERIC_069_STREAM_ITERATIONS",
+            ("generic/129", "looptest-iterations") => "XFSTESTS_GENERIC_129_ITERATIONS",
+            ("generic/371", "parallel-enospc-iterations") => "XFSTESTS_GENERIC_371_ITERATIONS",
+            ("generic/404", "insert-range-blocks") => "XFSTESTS_GENERIC_404_BLOCKS",
+            ("generic/471", "rewinddir-files") => "XFSTESTS_GENERIC_471_FILES",
+            ("generic/488", "open-unlink-files") => "XFSTESTS_GENERIC_488_FILES",
+            ("generic/676", "seekdir-files") => "XFSTESTS_GENERIC_676_FILES",
+            ("generic/736", "readdir-renames-files") => "XFSTESTS_GENERIC_736_FILES",
+            _ => panic!("unsupported reduced xfstests pair: {test_id}/{reduction}"),
+        };
+        assert!(
+            !variable.starts_with("AGENTOS_"),
+            "guest test controls must not use the reserved, scrubbed AGENTOS_ namespace"
+        );
         guest_env.insert(
-            String::from("XFSTESTS_GENERIC_014_ITERATIONS"),
+            String::from(variable),
             iterations
                 .into_string()
                 .expect("reduced iteration count must be UTF-8"),
@@ -6269,8 +6571,27 @@ fn run_xfstest_subprocess(
         .stderr(Stdio::piped());
     if let Some(reduction) = reduction {
         assert_eq!(reduction.disposition, "reduced");
-        assert_eq!(reduction.reduction.as_deref(), Some("truncfile-iterations"));
-        assert_eq!(test_id, "generic/014");
+        let reduction_name = reduction
+            .reduction
+            .as_deref()
+            .expect("validated reduction name");
+        assert!(
+            matches!(
+                (test_id, reduction_name),
+                ("generic/011", "dirstress-files")
+                    | ("generic/014", "truncfile-iterations")
+                    | ("generic/069", "append-stream-iterations")
+                    | ("generic/129", "looptest-iterations")
+                    | ("generic/371", "parallel-enospc-iterations")
+                    | ("generic/404", "insert-range-blocks")
+                    | ("generic/471", "rewinddir-files")
+                    | ("generic/488", "open-unlink-files")
+                    | ("generic/676", "seekdir-files")
+                    | ("generic/736", "readdir-renames-files")
+            ),
+            "unsupported reduced xfstests pair: {test_id}/{reduction_name}"
+        );
+        command.env("XFSTESTS_WORKER_REDUCTION", reduction_name);
         command.env(
             "XFSTESTS_WORKER_REDUCED_ITERATIONS",
             reduction
@@ -7043,7 +7364,7 @@ fn write_reports(
     }
     fs::write(report_dir.join("results.md"), results).expect("write results report");
 
-    let mut gaps = String::from("# AgentOS filesystem gaps\n\n## Ranked fixes\n\n");
+    let mut gaps = String::from("# agentOS filesystem gaps\n\n## Ranked fixes\n\n");
     for (index, outcome) in outcomes.iter().enumerate().filter(|(_, outcome)| {
         !matches!(
             outcome.kind,

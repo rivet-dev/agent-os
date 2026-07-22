@@ -1,0 +1,29 @@
+diff --git a/src/wasi/mod.rs b/src/wasi/mod.rs
+index 1111111..2222222 100644
+--- a/src/wasi/mod.rs
++++ b/src/wasi/mod.rs
+@@ -211,18 +211,18 @@ s! {
+     }
+ }
+ 
+-// Declare dirent outside of s! so that it doesn't implement Copy, Eq, Hash,
+-// etc., since it contains a flexible array member with a dynamic size.
++// Keep this layout byte-for-byte aligned with agentOS's patched wasi-libc
++// `struct dirent`. agentOS exposes the Linux fields and fixed NAME_MAX-sized
++// name buffer instead of stock wasi-libc's flexible-array layout.
+ #[repr(C)]
+ #[allow(missing_copy_implementations)]
+ #[derive(Debug)]
+ pub struct dirent {
+     pub d_ino: ino_t,
++    pub d_off: off_t,
++    pub d_reclen: c_ushort,
+     pub d_type: c_uchar,
+-    /// d_name is declared in WASI libc as a flexible array member, which
+-    /// can't be directly expressed in Rust. As an imperfect workaround,
+-    /// declare it as a zero-length array instead.
+-    pub d_name: [c_char; 0],
++    pub d_name: [c_char; 256],
+ }
+ 
+ pub const EXIT_SUCCESS: c_int = 0;

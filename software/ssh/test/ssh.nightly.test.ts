@@ -173,7 +173,10 @@ async function listen(server: SshServer): Promise<number> {
   return (server.address() as import('node:net').AddressInfo).port;
 }
 
-async function createSshKernel(loopbackExemptPorts: number[]) {
+async function createSshKernel(
+  loopbackExemptPorts: number[],
+  wasmActiveCpuTimeLimitMs?: number,
+) {
   const vfs = createInMemoryFileSystem();
   await (vfs as any).chmod('/', 0o1777);
   await vfs.mkdir('/tmp', { recursive: true });
@@ -182,6 +185,9 @@ async function createSshKernel(loopbackExemptPorts: number[]) {
     filesystem: vfs,
     permissions: allowAll,
     loopbackExemptPorts,
+    ...(wasmActiveCpuTimeLimitMs === undefined
+      ? {}
+      : { limits: { wasm: { activeCpuTimeLimitMs: wasmActiveCpuTimeLimitMs } } }),
     syncFilesystemOnDispose: false,
   });
   await kernel.mount(createWasmVmRuntime({ commandDirs: sshCommandDirs }));
@@ -699,7 +705,10 @@ describeIf(hasSsh, 'ssh command', () => {
     });
 
     it('clones and pushes over ssh://', async () => {
-      ({ kernel, vfs, dispose } = await createSshKernel([port]));
+      // This is a functional transport/concurrency test, not the active-CPU
+      // safeguard test. A cold Wasmtime Git + OpenSSH process tree can exceed
+      // the 30s default; limit behavior is covered by wasmtime_safety.rs.
+      ({ kernel, vfs, dispose } = await createSshKernel([port], 120_000));
       const home = await guestHome(kernel);
       await seedSshDir(
         kernel,
@@ -739,6 +748,6 @@ describeIf(hasSsh, 'ssh command', () => {
       );
       expect(originRef.status).toBe(0);
       expect(originRef.stdout.trim()).toMatch(/^[0-9a-f]{40,64}$/);
-    });
+    }, 300_000);
   });
 });

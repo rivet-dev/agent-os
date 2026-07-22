@@ -581,7 +581,7 @@ fn procfs_exposes_linux_like_identity_and_system_files() {
     assert!(idle_seconds >= uptime_seconds);
 
     let version = read_utf8(&mut kernel, "/proc/version");
-    assert!(version.starts_with("Linux version 6.8.0-secure-exec"));
+    assert!(version.starts_with("Linux version 6.8.0-agentos"));
 
     let status_stat = kernel
         .stat(&format!("/proc/{pid}/status"))

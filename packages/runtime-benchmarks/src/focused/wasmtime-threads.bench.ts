@@ -83,16 +83,19 @@ async function main(): Promise<void> {
 		);
 	}
 	const maxThreadsPerGroup =
-		Math.max(
-			...threadCounts,
-			concurrentWorkerThreadsPerGroup,
-			steadyStateWorkerThreads,
-		) + 1;
+		Math.max(...threadCounts, steadyStateWorkerThreads) + 1;
+	const concurrentThreadsPerGroup = concurrentWorkerThreadsPerGroup + 1;
 	const maxConcurrentThreads =
-		maxThreadsPerGroup * Math.max(...concurrencyLevels);
-	const vmLimits = {
+		concurrentThreadsPerGroup * Math.max(...concurrencyLevels);
+	const measurementVmLimits = {
 		wasm: {
 			maxThreads: maxThreadsPerGroup,
+			maxConcurrentThreads: maxThreadsPerGroup,
+		},
+	};
+	const concurrencyVmLimits = {
+		wasm: {
+			maxThreads: concurrentThreadsPerGroup,
 			maxConcurrentThreads,
 		},
 	};
@@ -120,6 +123,7 @@ async function main(): Promise<void> {
 			threadCounts,
 			concurrencyLevels,
 			concurrentWorkerThreadsPerGroup,
+			concurrentThreadsPerGroup,
 			maxThreadsPerGroup,
 			maxConcurrentThreads,
 			backend: "wasmtime-threads",
@@ -145,7 +149,7 @@ async function main(): Promise<void> {
 			vm = await createBenchVm({
 				sidecar,
 				wasmCommandDirs: [fixtureDirectory],
-				limits: vmLimits,
+				limits: measurementVmLimits,
 			});
 			const vmSetupMs = performance.now() - vmStarted;
 			const pid = requiredSidecarPid(vm);
@@ -176,31 +180,34 @@ async function main(): Promise<void> {
 					workload.stdout().includes(`done:${steadyStateWorkerThreads}`),
 			});
 		} finally {
-			if (vm) await vm.dispose().catch(() => undefined);
-			await sidecar.dispose();
+			try {
+				if (vm) await vm.dispose();
+			} finally {
+				await sidecar.dispose();
+			}
 		}
 		writeCheckpoint(result);
 	}
 
-	const sidecar = createBenchSidecar();
-	let vm: BenchVm | undefined;
+	const measurementSidecar = createBenchSidecar();
+	let measurementVm: BenchVm | undefined;
 	try {
-		vm = await createBenchVm({
-			sidecar,
+		measurementVm = await createBenchVm({
+			sidecar: measurementSidecar,
 			wasmCommandDirs: [fixtureDirectory],
-			limits: vmLimits,
+			limits: measurementVmLimits,
 		});
-		const pid = requiredSidecarPid(vm);
-		await runCompleted(vm, 1);
-		await waitForDrain(vm);
+		const pid = requiredSidecarPid(measurementVm);
+		await runCompleted(measurementVm, 1);
+		await waitForDrain(measurementVm);
 
 		const throughputDurations: number[] = [];
 		for (let index = 0; index < throughputSamples; index++) {
 			const started = performance.now();
-			await runCompleted(vm, steadyStateWorkerThreads);
+			await runCompleted(measurementVm, steadyStateWorkerThreads);
 			throughputDurations.push(performance.now() - started);
 		}
-		await waitForDrain(vm);
+		await waitForDrain(measurementVm);
 		result.throughput = {
 			workerThreadsPerExecution: steadyStateWorkerThreads,
 			totalGuestThreadsPerExecution: steadyStateWorkerThreads + 1,
@@ -219,7 +226,7 @@ async function main(): Promise<void> {
 					`thread memory count=${threadCount} sample=${sample + 1}`,
 				);
 				const baseline = readProcessTreeMemorySnapshot(pid);
-				const workload = await startWorkload(vm, threadCount, true);
+				const workload = await startWorkload(measurementVm, threadCount, true);
 				await delay(50);
 				const live = readProcessTreeMemorySnapshot(pid);
 				const terminationStarted = performance.now();
@@ -230,7 +237,7 @@ async function main(): Promise<void> {
 					`termination with ${threadCount} threads`,
 				);
 				const terminationMs = performance.now() - terminationStarted;
-				const drainMs = await waitForDrain(vm);
+				const drainMs = await waitForDrain(measurementVm);
 				(result.memory as any[]).push({
 					threadCount,
 					sample,
@@ -244,7 +251,25 @@ async function main(): Promise<void> {
 				});
 			}
 		}
+	} finally {
+		try {
+			if (measurementVm) await measurementVm.dispose();
+		} finally {
+			await measurementSidecar.dispose();
+		}
+	}
 
+	const concurrencySidecar = createBenchSidecar();
+	let concurrencyVm: BenchVm | undefined;
+	try {
+		concurrencyVm = await createBenchVm({
+			sidecar: concurrencySidecar,
+			wasmCommandDirs: [fixtureDirectory],
+			limits: concurrencyVmLimits,
+		});
+		const pid = requiredSidecarPid(concurrencyVm);
+		await runCompleted(concurrencyVm, 1);
+		await waitForDrain(concurrencyVm);
 		for (const groupCount of concurrencyLevels) {
 			console.error(
 				`thread concurrency groups=${groupCount} workersPerGroup=${concurrentWorkerThreadsPerGroup}`,
@@ -252,7 +277,7 @@ async function main(): Promise<void> {
 			const baseline = readProcessTreeMemorySnapshot(pid);
 			const workloads = await Promise.all(
 				Array.from({ length: groupCount }, () =>
-					startWorkload(vm!, concurrentWorkerThreadsPerGroup, true),
+					startWorkload(concurrencyVm!, concurrentWorkerThreadsPerGroup, true),
 				),
 			);
 			await delay(50);
@@ -265,7 +290,7 @@ async function main(): Promise<void> {
 				`terminating ${groupCount} concurrent thread groups`,
 			);
 			const terminationMs = performance.now() - terminationStarted;
-			const drainMs = await waitForDrain(vm);
+			const drainMs = await waitForDrain(concurrencyVm);
 			(result.concurrency as any[]).push({
 				groupCount,
 				workerThreadsPerGroup: concurrentWorkerThreadsPerGroup,
@@ -283,8 +308,11 @@ async function main(): Promise<void> {
 			});
 		}
 	} finally {
-		if (vm) await vm.dispose().catch(() => undefined);
-		await sidecar.dispose();
+		try {
+			if (concurrencyVm) await concurrencyVm.dispose();
+		} finally {
+			await concurrencySidecar.dispose();
+		}
 	}
 
 	result.summary = summarize(result);

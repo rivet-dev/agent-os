@@ -2,11 +2,11 @@ use agentos_kernel::command_registry::CommandDriver;
 use agentos_kernel::fd_table::{
     RecordLockType, FD_CLOEXEC, F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, LOCK_EX, LOCK_NB,
     LOCK_SH, LOCK_UN, O_APPEND, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY,
-    O_RDWR, O_TRUNC,
+    O_RDWR, O_TRUNC, O_WRONLY,
 };
 use agentos_kernel::kernel::{
     ExecOptions, KernelVm, KernelVmConfig, OpenShellOptions, SpawnOptions, WaitPidFlags,
-    WaitPidResult, SEEK_SET,
+    WaitPidResult, SEEK_CUR, SEEK_SET,
 };
 use agentos_kernel::mount_table::{MountOptions, MountTable};
 use agentos_kernel::permissions::Permissions;
@@ -276,10 +276,12 @@ fn kernel_fd_surface_supports_open_seek_positional_io_dup_and_dev_fd_views() {
         .fd_read_dir_with_types("shell", process.pid(), directory_fd)
         .expect("read directory through fd");
     assert!(directory_entries.iter().any(|entry| {
-        entry.name == "data.txt" && !entry.is_directory && !entry.is_symbolic_link
+        entry.name == "data.txt"
+            && entry.filetype == agentos_kernel::fd_table::FILETYPE_REGULAR_FILE
     }));
     assert!(directory_entries.iter().any(|entry| {
-        entry.name == "created.txt" && !entry.is_directory && !entry.is_symbolic_link
+        entry.name == "created.txt"
+            && entry.filetype == agentos_kernel::fd_table::FILETYPE_REGULAR_FILE
     }));
     assert_kernel_error_code(
         kernel.fd_read_dir_with_types("shell", process.pid(), created_fd),
@@ -421,6 +423,57 @@ fn kernel_fd_surface_supports_open_seek_positional_io_dup_and_dev_fd_views() {
 }
 
 #[test]
+fn fd_readdir_reports_special_inode_types_from_kernel_stat() {
+    use agentos_kernel::fd_table::{
+        FILETYPE_BLOCK_DEVICE, FILETYPE_CHARACTER_DEVICE, FILETYPE_SOCKET_STREAM,
+    };
+
+    let mut config = KernelVmConfig::new("vm-api-dirent-types");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+    kernel.create_dir("/nodes").expect("create node directory");
+    let process = spawn_shell(&mut kernel);
+    kernel
+        .mknod_for_process("shell", process.pid(), "/nodes/block", 0o060600, 0)
+        .expect("create block device");
+    kernel
+        .mknod_for_process("shell", process.pid(), "/nodes/char", 0o020600, 0)
+        .expect("create character device");
+    kernel
+        .mknod_for_process("shell", process.pid(), "/nodes/fifo", 0o010600, 0)
+        .expect("create fifo");
+    let directory_fd = kernel
+        .fd_open("shell", process.pid(), "/nodes", O_RDONLY, None)
+        .expect("open node directory");
+    let entries = kernel
+        .fd_read_dir_with_types("shell", process.pid(), directory_fd)
+        .expect("read special inode directory entries");
+
+    for (name, expected) in [
+        ("block", FILETYPE_BLOCK_DEVICE),
+        ("char", FILETYPE_CHARACTER_DEVICE),
+        // Preview1 has no FIFO type; owned wasi-libc maps socket-stream to
+        // DT_FIFO at its dirent boundary.
+        ("fifo", FILETYPE_SOCKET_STREAM),
+    ] {
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.filetype),
+            Some(expected),
+            "wrong filetype for {name}"
+        );
+    }
+
+    process.finish(0);
+    kernel.wait_and_reap(process.pid()).expect("reap shell");
+}
+
+#[test]
 fn fd_open_directory_truncate_rejects_regular_file_without_truncating_it() {
     let mut config = KernelVmConfig::new("vm-open-directory-truncate");
     config.permissions = Permissions::allow_all();
@@ -538,6 +591,42 @@ fn fd_open_nofollow_rejects_proc_and_dev_fd_symlink_aliases() {
             "ENOENT",
         );
     }
+}
+
+#[test]
+fn filesystem_stats_follow_an_open_descriptor_after_unlink() {
+    let mut config = KernelVmConfig::new("vm-api-fd-filesystem-stats");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+    kernel
+        .write_file("/statfs-target", b"payload")
+        .expect("seed statfs target");
+    let process = spawn_shell(&mut kernel);
+    let fd = kernel
+        .fd_open("shell", process.pid(), "/statfs-target", O_RDONLY, None)
+        .expect("open statfs target");
+
+    let before = kernel
+        .filesystem_stats_for_fd_process("shell", process.pid(), fd)
+        .expect("stat filesystem by descriptor");
+    assert!(before.total_bytes >= before.used_bytes);
+    assert!(before.total_inodes >= before.free_inodes);
+
+    kernel
+        .remove_file("/statfs-target")
+        .expect("unlink statfs target");
+    assert_kernel_error_code(
+        kernel.filesystem_stats_for_process("shell", process.pid(), "/statfs-target"),
+        "ENOENT",
+    );
+    let after = kernel
+        .filesystem_stats_for_fd_process("shell", process.pid(), fd)
+        .expect("fstatfs remains valid after unlink");
+    assert!(after.total_bytes >= after.used_bytes);
+    assert!(after.total_inodes >= after.free_inodes);
 }
 
 #[test]
@@ -696,6 +785,7 @@ fn kernel_process_umask_applies_to_created_files_and_directories() {
     kernel
         .register_driver(CommandDriver::new("shell", ["sh"]))
         .expect("register shell");
+    kernel.mkdir("/tmp", false).expect("create POSIX temp root");
 
     let process = spawn_shell(&mut kernel);
     assert_eq!(
@@ -1298,6 +1388,47 @@ fn kernel_fd_surface_uses_atomic_append_writes() {
 }
 
 #[test]
+fn kernel_fd_surface_uses_linux_append_semantics_for_pwrite() {
+    let target = "/tmp/positioned-race.txt";
+    let filesystem = AtomicityProbeFileSystem::new(target);
+    filesystem.trigger_append_race();
+
+    let mut config = KernelVmConfig::new("vm-api-append-pwrite");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(filesystem, config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+
+    let process = spawn_shell_in(&mut kernel);
+    let fd = kernel
+        .fd_open("shell", process.pid(), target, O_APPEND | O_RDWR, None)
+        .expect("open append target");
+    assert_eq!(
+        kernel
+            .fd_pwrite("shell", process.pid(), fd, b"positioned", 0)
+            .expect("Linux O_APPEND positional write"),
+        10
+    );
+    assert_eq!(
+        kernel
+            .filesystem_mut()
+            .read_file(target)
+            .expect("read positioned append result"),
+        b"RACEpositioned".to_vec()
+    );
+    assert_eq!(
+        kernel
+            .fd_seek("shell", process.pid(), fd, 0, SEEK_CUR)
+            .expect("positioned append must not move the shared cursor"),
+        0
+    );
+
+    process.finish(0);
+    kernel.waitpid(process.pid()).expect("wait shell");
+}
+
+#[test]
 fn kernel_fd_surface_supports_advisory_locks_and_releases_on_last_close() {
     let mut config = KernelVmConfig::new("vm-api-flock-close");
     config.permissions = Permissions::allow_all();
@@ -1787,6 +1918,10 @@ fn waitpid_with_options_supports_wnohang_and_any_child_waits() {
 fn proc_filesystem_exposes_live_process_metadata_and_fd_symlinks() {
     let mut config = KernelVmConfig::new("vm-api-procfs");
     config.permissions = Permissions::allow_all();
+    config.user.uid = Some(0);
+    config.user.gid = Some(0);
+    config.user.euid = Some(0);
+    config.user.egid = Some(0);
     let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
     kernel
         .register_driver(CommandDriver::new("shell", ["sh"]))
@@ -1820,7 +1955,46 @@ fn proc_filesystem_exposes_live_process_metadata_and_fd_symlinks() {
         .expect("read /proc");
     assert!(proc_entries.contains(&String::from("self")));
     assert!(proc_entries.contains(&String::from("mounts")));
+    assert!(proc_entries.contains(&String::from("sys")));
     assert!(proc_entries.contains(&process.pid().to_string()));
+
+    assert_eq!(
+        kernel
+            .read_dir_for_process("shell", process.pid(), "/proc/sys")
+            .expect("read /proc/sys"),
+        vec![String::from("vm")]
+    );
+    assert_eq!(
+        kernel
+            .read_dir_for_process("shell", process.pid(), "/proc/sys/vm")
+            .expect("read /proc/sys/vm"),
+        vec![String::from("drop_caches")]
+    );
+    assert_eq!(
+        kernel
+            .read_file_for_process("shell", process.pid(), "/proc/sys/vm/drop_caches")
+            .expect("read drop_caches"),
+        b"0\n"
+    );
+    let drop_caches_fd = kernel
+        .fd_open(
+            "shell",
+            process.pid(),
+            "/proc/sys/vm/drop_caches",
+            O_WRONLY,
+            None,
+        )
+        .expect("open drop_caches for writing");
+    assert_eq!(
+        kernel
+            .fd_write("shell", process.pid(), drop_caches_fd, b"3\n")
+            .expect("drop logical VFS caches"),
+        2
+    );
+    let invalid_drop = kernel
+        .fd_write("shell", process.pid(), drop_caches_fd, b"all\n")
+        .expect_err("drop_caches must validate its Linux selector");
+    assert_eq!(invalid_drop.code(), "EINVAL");
 
     assert_eq!(
         kernel

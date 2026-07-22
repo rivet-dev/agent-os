@@ -153,7 +153,7 @@ pub fn wasi_rights_for_open(flags: u32, filetype: u8) -> (u64, u64) {
             | WASI_RIGHT_FD_FILESTAT_SET_SIZE
             | WASI_RIGHT_FD_FILESTAT_SET_TIMES;
     }
-    // AgentOS' Linux extensions use Preview1's closest metadata-mutation
+    // agentOS' Linux extensions use Preview1's closest metadata-mutation
     // capability for fchmod/fchown. Anonymous pipes and sockets own mutable
     // inode metadata even though neither resource is seekable and a pipe's
     // read end is O_RDONLY. Grant the synthesized capability at creation;
@@ -406,7 +406,7 @@ fn remove_detached_xattr(xattrs: &mut BTreeMap<String, Vec<u8>>, name: &str) -> 
 fn validate_detached_xattr_name(name: &str) -> FdResult<()> {
     if name.is_empty() || name.len() > 255 || !name.contains('.') || name.contains('\0') {
         return Err(FdTableError::new(
-            "ERANGE",
+            "EINVAL",
             format!("invalid extended attribute name: {name:?}"),
         ));
     }
@@ -431,8 +431,7 @@ pub struct FileDescription {
 pub struct DirectorySnapshotEntry {
     pub name: String,
     pub ino: u64,
-    pub is_directory: bool,
-    pub is_symbolic_link: bool,
+    pub filetype: u8,
 }
 
 impl FileDescription {
@@ -1952,7 +1951,10 @@ fn visible_fd_flags(description_flags: u32, entry_status_flags: u32) -> u32 {
         | (entry_status_flags & ENTRY_STATUS_FLAG_MASK)
 }
 
-const SHARED_STATUS_FLAG_MASK: u32 = O_APPEND;
+// Linux permits both O_APPEND and O_DIRECT to be changed with F_SETFL. These
+// flags belong to the shared open-file description, so dup/fork observers see
+// the update together.
+const SHARED_STATUS_FLAG_MASK: u32 = O_APPEND | O_DIRECT;
 const ENTRY_STATUS_FLAG_MASK: u32 = O_NONBLOCK;
 
 impl<'a> IntoIterator for &'a ProcessFdTable {
@@ -2610,6 +2612,37 @@ mod wasi_preopen_tests {
         );
         assert!(table.close(fd));
         assert!(table.stat(fd).is_err());
+    }
+
+    #[test]
+    fn setfl_round_trips_direct_io_across_shared_descriptors() {
+        let mut manager = FdTableManager::new();
+        let table = manager.create(70);
+        let fd = table
+            .open("/direct", O_RDWR | O_DIRECT)
+            .expect("open direct descriptor");
+        let duplicate = table.dup(fd).expect("duplicate direct descriptor");
+
+        assert_ne!(
+            table.fcntl(fd, F_GETFL, 0).expect("get direct flags") & O_DIRECT,
+            0
+        );
+        table
+            .fcntl(fd, F_SETFL, O_APPEND)
+            .expect("replace shared status flags");
+        let duplicate_flags = table
+            .fcntl(duplicate, F_GETFL, 0)
+            .expect("get duplicate flags");
+        assert_eq!(duplicate_flags & O_DIRECT, 0);
+        assert_ne!(duplicate_flags & O_APPEND, 0);
+
+        table
+            .fcntl(duplicate, F_SETFL, O_DIRECT)
+            .expect("restore direct flag through duplicate");
+        let original_flags = table.fcntl(fd, F_GETFL, 0).expect("get original flags");
+        assert_ne!(original_flags & O_DIRECT, 0);
+        assert_eq!(original_flags & O_APPEND, 0);
+        assert_eq!(original_flags & 0b11, O_RDWR);
     }
 
     #[test]

@@ -18,6 +18,7 @@
 // default shell instead of the registry build under test.
 
 import {
+	chmodSync,
 	copyFileSync,
 	existsSync,
 	mkdirSync,
@@ -96,13 +97,16 @@ describe.skipIf(REGISTRY_SH === undefined)(
 			// Materialize a self-contained `{ packageDir }` fixture: bin/<cmd> plus
 			// the agentos-package.json manifest the sidecar projection requires.
 			fixtureDir = mkdtempSync(join(tmpdir(), "brush-fixture-"));
+			chmodSync(fixtureDir, 0o755);
 			const binDir = join(fixtureDir, "bin");
 			mkdirSync(binDir, { recursive: true });
 			copyFileSync(REGISTRY_SH as string, join(binDir, FIXTURE_COMMAND));
+			chmodSync(join(binDir, FIXTURE_COMMAND), 0o755);
 			// A real external command (spawned as a CHILD of the shell) for the
 			// child-output regression below; a unique name avoids /bin/cat.
 			if (REGISTRY_CAT !== undefined) {
 				copyFileSync(REGISTRY_CAT, join(binDir, "childcat"));
+				chmodSync(join(binDir, "childcat"), 0o755);
 			}
 			writeFileSync(
 				join(fixtureDir, "package.json"),
@@ -147,19 +151,34 @@ describe.skipIf(REGISTRY_SH === undefined)(
 					LINES: "14",
 				},
 			}));
-			vm.onShellData(shellId, (d) => term?.write(d));
+			vm.onShellData(shellId, (event) => term?.write(event.data));
 			const t = term;
 			const s = shellId;
 			const v = vm;
 			// Forwarding xterm's responses back makes it answer DSR (`ESC[6n`) queries.
-			t.onData((d) => v.writeShell(s, d));
+			let terminalWriteError: unknown;
+			let terminalResponseWrites = Promise.resolve();
+			t.onData((data) => {
+				terminalResponseWrites = terminalResponseWrites
+					.then(() => v.writeShell(s, data))
+					.catch((error: unknown) => {
+						terminalWriteError ??= error;
+					});
+			});
+			const write = async (data: string) => {
+				await terminalResponseWrites;
+				if (terminalWriteError !== undefined) {
+					throw terminalWriteError;
+				}
+				await v.writeShell(s, data);
+			};
 
 			await waitFor(t, "AOS$");
 			expect(snapshot("startup prompt", t)).toMatchSnapshot();
 
 			// Run three commands. Each output must remain on screen after Enter.
 			for (const word of ["alpha", "bravo", "charlie"]) {
-				v.writeShell(s, `echo ${word}\r`);
+				await write(`echo ${word}\r`);
 				await waitFor(t, word);
 			}
 			expect(
@@ -167,12 +186,12 @@ describe.skipIf(REGISTRY_SH === undefined)(
 			).toMatchSnapshot();
 
 			// Up-arrow recalls the last command ("echo charlie").
-			v.writeShell(s, "\x1b[A");
+			await write("\x1b[A");
 			await new Promise((r) => setTimeout(r, 300));
 			expect(snapshot("after up-arrow recall", t)).toMatchSnapshot();
 
 			// Ctrl-W deletes the recalled word ("charlie"), then type a new one and run it.
-			v.writeShell(s, "\x17delta\r");
+			await write("\x17delta\r");
 			// Wait for the new command's output line, then settle.
 			await waitFor(t, "echo delta");
 			await new Promise((r) => setTimeout(r, 400));
@@ -215,7 +234,7 @@ describe.skipIf(REGISTRY_SH === undefined)(
 					PS1: "AOS$ ",
 				},
 			}));
-			vm.onShellData(shellId, (d) => term?.write(d));
+			vm.onShellData(shellId, (event) => term?.write(event.data));
 			const t = term;
 			const s = shellId;
 			const v = vm;
@@ -223,7 +242,7 @@ describe.skipIf(REGISTRY_SH === undefined)(
 			await waitFor(t, "AOS$");
 			const promptsBeforeRedirectedStdin =
 				snapshot("before redirected stdin", t).split("AOS$").length - 1;
-			v.writeShell(s, "node /tmp/redirected-stdin-parent.mjs\r");
+			await v.writeShell(s, "node /tmp/redirected-stdin-parent.mjs\r");
 			await waitFor(t, "ignored-stdin-status:0 error:none");
 			await waitFor(t, "piped-stdin-status:0 error:none");
 			const redirectedPromptDeadline = Date.now() + 20_000;
@@ -238,7 +257,10 @@ describe.skipIf(REGISTRY_SH === undefined)(
 			const promptsBeforeRaw =
 				snapshot("before raw child", t).split("AOS$").length - 1;
 			expect(promptsBeforeRaw).toBeGreaterThan(promptsBeforeRedirectedStdin);
-			v.writeShell(s, "node /tmp/raw-child.mjs\r");
+			const afterRedirectedStdin = snapshot("after redirected stdin", t);
+			expect(afterRedirectedStdin).toContain("ignored-stdin-child");
+			expect(afterRedirectedStdin).toContain("piped-stdin-child");
+			await v.writeShell(s, "node /tmp/raw-child.mjs\r");
 			await waitFor(t, "raw-child-exited");
 
 			const promptDeadline = Date.now() + 20_000;
@@ -258,7 +280,7 @@ describe.skipIf(REGISTRY_SH === undefined)(
 
 			// A raw child disables ICRNL. If the sidecar does not restore the
 			// parent's cooked termios, this carriage return never submits the line.
-			v.writeShell(s, "node /tmp/cooked-check.mjs\r");
+			await v.writeShell(s, "node /tmp/cooked-check.mjs\r");
 			await waitFor(t, "cooked-output-after-raw-child");
 		}, 60000);
 
@@ -290,14 +312,29 @@ describe.skipIf(REGISTRY_SH === undefined)(
 						LINES: "14",
 					},
 				}));
-				vm.onShellData(shellId, (d) => term?.write(d));
+				vm.onShellData(shellId, (event) => term?.write(event.data));
 				const t = term;
 				const s = shellId;
 				const v = vm;
-				t.onData((d) => v.writeShell(s, d));
+				let terminalWriteError: unknown;
+				let terminalResponseWrites = Promise.resolve();
+				t.onData((data) => {
+					terminalResponseWrites = terminalResponseWrites
+						.then(() => v.writeShell(s, data))
+						.catch((error: unknown) => {
+							terminalWriteError ??= error;
+						});
+				});
+				const write = async (data: string) => {
+					await terminalResponseWrites;
+					if (terminalWriteError !== undefined) {
+						throw terminalWriteError;
+					}
+					await v.writeShell(s, data);
+				};
 
 				await waitFor(t, "AOS$");
-				v.writeShell(s, "childcat /tmp/marker.txt\r");
+				await write("childcat /tmp/marker.txt\r");
 				await waitFor(t, "child-once-marker");
 				await new Promise((r) => setTimeout(r, 500));
 

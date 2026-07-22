@@ -393,19 +393,20 @@ pub(crate) fn service_javascript_module_sync_rpc(
         .env
         .get("AGENTOS_GUEST_ENTRYPOINT")
         .and_then(|entrypoint| agentos_package_version_root(entrypoint));
-    // Resolution must observe live kernel mount/VFS state. Until the kernel
-    // exposes a generation token suitable for a keyed immutable cache, keep
-    // this cache request-local so a rename, symlink change, or mount update can
-    // never leave the V8 adapter with stale authority.
-    let mut cache = agentos_execution::LocalModuleResolutionCache::default();
-    let value = {
+    let filesystem_generation = kernel.filesystem_mutation_generation();
+    if process.module_resolution_cache_generation != Some(filesystem_generation) {
+        process.module_resolution_cache = Default::default();
+        process.module_resolution_cache_generation = Some(filesystem_generation);
+    }
+    let mut cache = std::mem::take(&mut process.module_resolution_cache);
+    let value = (|| -> Result<Value, SidecarError> {
         let reader = ProcessModuleFsReader {
             kernel,
             process: &*process,
         };
         let mut resolver = ModuleResolver::new(reader, &mut cache);
 
-        match request.method.as_str() {
+        Ok(match request.method.as_str() {
             "__resolve_module" | "_resolveModule" | "_resolveModuleSync" => {
                 let specifier =
                     javascript_sync_rpc_arg_str(&request.args, 0, "module resolve specifier")?;
@@ -461,9 +462,10 @@ pub(crate) fn service_javascript_module_sync_rpc(
                     "unsupported JavaScript module sync RPC method {other}"
                 )));
             }
-        }
-    };
-    Ok(value)
+        })
+    })();
+    process.module_resolution_cache = cache;
+    value
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1162,6 +1164,10 @@ pub(crate) fn service_javascript_fs_sync_rpc(
                 .map_err(kernel_error)
         }
         "fs.rmdirSync" | "fs.promises.rmdir" => {
+            let raw_path = javascript_sync_rpc_arg_str(&request.args, 0, "filesystem rmdir path")?;
+            kernel
+                .validate_remove_directory_pathname(raw_path)
+                .map_err(kernel_error)?;
             let path =
                 javascript_sync_rpc_path_arg(process, &request.args, 0, "filesystem rmdir path")?;
             let path = path.as_str();

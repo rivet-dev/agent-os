@@ -20,6 +20,71 @@ const POSIX_POLLWRNORM: u16 = 0x100;
 const POSIX_READ_EVENTS: u16 = POSIX_POLLIN | POSIX_POLLRDNORM;
 const POSIX_WRITE_EVENTS: u16 = POSIX_POLLOUT | POSIX_POLLWRNORM;
 
+/// Durable return lane for an off-owner POSIX-poll readiness/deadline task.
+///
+/// `process_event_notify` is a coalesced broker shared by the owner pump and
+/// readiness waiters, so a notification alone can be consumed by a different
+/// waiter. Queueing an internal event first preserves the wake until the owner
+/// lane re-enters and probes the process-owned poll state.
+#[derive(Clone)]
+pub(in crate::execution) struct DeferredPosixPollWakeLane {
+    sender: tokio::sync::mpsc::Sender<ProcessEventEnvelope>,
+    notify: Arc<tokio::sync::Notify>,
+    connection_id: String,
+    session_id: String,
+    vm_id: String,
+    process_id: String,
+}
+
+impl DeferredPosixPollWakeLane {
+    async fn publish(self) {
+        let envelope = ProcessEventEnvelope {
+            connection_id: self.connection_id,
+            session_id: self.session_id,
+            vm_id: self.vm_id,
+            process_id: self.process_id,
+            event: ActiveExecutionEvent::DeferredPosixPollWake,
+        };
+        // Wake the owner before waiting for bounded queue admission. If the
+        // lane is already full, the owner may be asleep with the event that
+        // would free capacity sitting in this queue. Notifying only after
+        // `send` would then delay a poll deadline until some unrelated wake.
+        self.notify.notify_waiters();
+        self.notify.notify_one();
+        if let Err(error) = self.sender.send(envelope).await {
+            eprintln!(
+                "ERR_AGENTOS_POSIX_POLL_WAKE_DROPPED: owner event lane closed before deferred poll wake: {error}"
+            );
+            return;
+        }
+        // `Notify` is shared by the owner pump and the bounded set of active
+        // deferred waiters. Wake every waiter already registered so one poll
+        // cannot steal another poll's deadline edge, then retain one coalesced
+        // permit for an owner pump currently between select turns.
+        self.notify.notify_waiters();
+        self.notify.notify_one();
+    }
+}
+
+pub(in crate::execution) fn deferred_posix_poll_wake_lane<B>(
+    sidecar: &NativeSidecar<B>,
+    vm_id: &str,
+    process_id: &str,
+) -> Result<DeferredPosixPollWakeLane, SidecarError> {
+    let vm = sidecar
+        .vms
+        .get(vm_id)
+        .ok_or_else(|| missing_vm_error(vm_id))?;
+    Ok(DeferredPosixPollWakeLane {
+        sender: sidecar.process_event_sender.clone(),
+        notify: Arc::clone(&sidecar.process_event_notify),
+        connection_id: vm.connection_id.clone(),
+        session_id: vm.session_id.clone(),
+        vm_id: vm_id.to_owned(),
+        process_id: process_id.to_owned(),
+    })
+}
+
 fn posix_signal_set(set: SignalSetValue) -> Result<SignalSet, SidecarError> {
     SignalSet::from_signals((1..=64).filter(|signal| set.0 & (1_u64 << (signal - 1)) != 0))
         .map_err(|error| SidecarError::host(error.code(), error.to_string()))
@@ -35,10 +100,11 @@ fn managed_posix_poll_response(
     interests: &[KernelPollInterest],
 ) -> Result<Value, SidecarError> {
     let mut kernel_interests = Vec::new();
-    let mut managed_revents = BTreeMap::<u32, u16>::new();
+    let mut kernel_interest_indexes = Vec::new();
+    let mut revents_by_index = vec![None; interests.len()];
     let trace_enabled = net_tcp_trace_enabled(&process.env);
 
-    for interest in interests {
+    for (index, interest) in interests.iter().enumerate() {
         let description_id = match kernel.fd_description_identity(
             EXECUTION_DRIVER_NAME,
             process.kernel_pid,
@@ -46,7 +112,7 @@ fn managed_posix_poll_response(
         ) {
             Ok((description_id, _)) => description_id,
             Err(error) if error.code() == "EBADF" => {
-                managed_revents.insert(interest.fd, POSIX_POLLNVAL);
+                revents_by_index[index] = Some(POSIX_POLLNVAL);
                 continue;
             }
             Err(error) => return Err(kernel_error(error)),
@@ -58,6 +124,7 @@ fn managed_posix_poll_response(
             .and_then(|description| description.route_for(process.kernel_pid).cloned());
         let Some(route) = route else {
             kernel_interests.push(*interest);
+            kernel_interest_indexes.push(index);
             continue;
         };
 
@@ -120,7 +187,7 @@ fn managed_posix_poll_response(
                 revents |= interest.events & POSIX_READ_EVENTS;
             }
         }
-        managed_revents.insert(interest.fd, revents);
+        revents_by_index[index] = Some(revents);
     }
 
     let kernel_response =
@@ -130,24 +197,30 @@ fn managed_posix_poll_response(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    for (kernel_index, interest_index) in kernel_interest_indexes.into_iter().enumerate() {
+        revents_by_index[interest_index] = Some(
+            kernel_fds
+                .get(kernel_index)
+                .and_then(|entry| entry.get("revents"))
+                .and_then(Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+                .unwrap_or_default(),
+        );
+    }
+    Ok(indexed_posix_poll_response(interests, &revents_by_index))
+}
+
+fn indexed_posix_poll_response(
+    interests: &[KernelPollInterest],
+    revents_by_index: &[Option<u16>],
+) -> Value {
+    debug_assert_eq!(interests.len(), revents_by_index.len());
     let mut ready_count = 0_u64;
     let fds = interests
         .iter()
-        .map(|interest| {
-            let revents = managed_revents
-                .get(&interest.fd)
-                .copied()
-                .unwrap_or_else(|| {
-                    kernel_fds
-                        .iter()
-                        .find(|entry| {
-                            entry.get("fd").and_then(Value::as_u64) == Some(u64::from(interest.fd))
-                        })
-                        .and_then(|entry| entry.get("revents"))
-                        .and_then(Value::as_u64)
-                        .and_then(|value| u16::try_from(value).ok())
-                        .unwrap_or_default()
-                });
+        .zip(revents_by_index)
+        .map(|(interest, revents)| {
+            let revents = revents.unwrap_or_default();
             if revents != 0 {
                 ready_count += 1;
             }
@@ -158,7 +231,7 @@ fn managed_posix_poll_response(
             })
         })
         .collect::<Vec<_>>();
-    Ok(json!({ "readyCount": ready_count, "fds": fds }))
+    json!({ "readyCount": ready_count, "fds": fds })
 }
 
 fn native_tcp_listener_waiters(
@@ -205,6 +278,84 @@ fn native_tcp_listener_waiters(
     Ok(waiters)
 }
 
+fn managed_posix_poll_read_notifies(
+    managed_descriptions: &ManagedHostNetDescriptionRegistry,
+    kernel: &SidecarKernel,
+    process: &ActiveProcess,
+    interests: &[KernelPollInterest],
+) -> Result<Vec<Arc<tokio::sync::Notify>>, SidecarError> {
+    let descriptions = managed_descriptions
+        .lock()
+        .map_err(|_| SidecarError::host("EIO", "managed description registry lock poisoned"))?;
+    let mut notifies = Vec::new();
+    for interest in interests
+        .iter()
+        .filter(|interest| interest.events & POSIX_READ_EVENTS != 0)
+    {
+        let Ok((description_id, _)) =
+            kernel.fd_description_identity(EXECUTION_DRIVER_NAME, process.kernel_pid, interest.fd)
+        else {
+            continue;
+        };
+        let Some(route) = descriptions
+            .get(&description_id)
+            .and_then(|description| description.route_for(process.kernel_pid))
+        else {
+            continue;
+        };
+        let notify = match route {
+            ManagedHostNetRoute::TcpSocket(socket_id) => process
+                .tcp_sockets
+                .get(socket_id)
+                .map(|socket| Arc::clone(&socket.read_event_notify)),
+            ManagedHostNetRoute::UnixSocket(socket_id) => process
+                .unix_sockets
+                .get(socket_id)
+                .map(|socket| Arc::clone(&socket.read_event_notify)),
+            ManagedHostNetRoute::UdpSocket(socket_id) => process
+                .udp_sockets
+                .get(socket_id)
+                .map(|socket| Arc::clone(&socket.read_event_notify)),
+            ManagedHostNetRoute::Unbound
+            | ManagedHostNetRoute::TcpBound { .. }
+            | ManagedHostNetRoute::UnixBound { .. }
+            | ManagedHostNetRoute::TcpListener(_)
+            | ManagedHostNetRoute::UnixListener(_) => None,
+        };
+        if let Some(notify) = notify {
+            if !notifies
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, &notify))
+            {
+                notifies.push(notify);
+            }
+        }
+    }
+    Ok(notifies)
+}
+
+async fn wait_for_managed_posix_poll_readiness(notifies: Vec<Arc<tokio::sync::Notify>>) {
+    if notifies.is_empty() {
+        std::future::pending::<()>().await;
+        return;
+    }
+    let mut waiters = notifies
+        .into_iter()
+        .map(|notify| Box::pin(notify.notified_owned()))
+        .collect::<Vec<_>>();
+    std::future::poll_fn(move |context| {
+        if waiters
+            .iter_mut()
+            .any(|waiter| std::future::Future::poll(waiter.as_mut(), context).is_ready())
+        {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+}
+
 pub(super) fn dispatch_context_posix_poll<B>(
     sidecar: &mut NativeSidecar<B>,
     vm_id: &str,
@@ -241,6 +392,7 @@ where
             return Ok(());
         }
     };
+    let wake_lane = deferred_posix_poll_wake_lane(sidecar, vm_id, process_id)?;
     let socket_paths = build_socket_path_context(
         sidecar
             .vms
@@ -275,6 +427,7 @@ where
         kernel_readiness,
         capabilities,
         managed_descriptions,
+        wake_lane,
         &mut vm.kernel,
         process,
         Some((interests, deadline, signal_mask, signal_thread_id, reply)),
@@ -327,6 +480,7 @@ pub(in crate::execution) fn service_deferred_posix_poll(
     kernel_readiness: KernelSocketReadinessRegistry,
     capabilities: CapabilityRegistry,
     managed_descriptions: ManagedHostNetDescriptionRegistry,
+    wake_lane: DeferredPosixPollWakeLane,
     kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
     incoming: Option<(
@@ -508,7 +662,19 @@ pub(in crate::execution) fn service_deferred_posix_poll(
             return fail_deferred_posix_poll(process, poll, host_service_error(&error));
         }
     };
+    let managed_read_notifies = match managed_posix_poll_read_notifies(
+        &managed_descriptions,
+        kernel,
+        process,
+        poll.interests.as_slice(),
+    ) {
+        Ok(notifies) => notifies,
+        Err(error) => {
+            return fail_deferred_posix_poll(process, poll, host_service_error(&error));
+        }
+    };
     let task_notify = Arc::clone(&notify);
+    let task_wake_lane = wake_lane.clone();
     let wake_task = runtime.spawn(agentos_runtime::TaskClass::Vm, async move {
         let native_listener_ready = std::future::poll_fn(|cx| {
             if native_listener_waiters.is_empty() {
@@ -522,6 +688,8 @@ pub(in crate::execution) fn service_deferred_posix_poll(
             std::task::Poll::Pending
         });
         tokio::pin!(native_listener_ready);
+        let managed_read_ready = wait_for_managed_posix_poll_readiness(managed_read_notifies);
+        tokio::pin!(managed_read_ready);
         match deadline {
             Some(deadline) => {
                 let delay = deadline.saturating_duration_since(Instant::now());
@@ -529,6 +697,7 @@ pub(in crate::execution) fn service_deferred_posix_poll(
                     _ = wait_handle.wait_for_change_async(observed) => {}
                     _ = task_notify.notified() => {}
                     _ = &mut native_listener_ready => {}
+                    _ = &mut managed_read_ready => {}
                     _ = tokio::time::sleep(delay) => {}
                 }
             }
@@ -537,10 +706,11 @@ pub(in crate::execution) fn service_deferred_posix_poll(
                     _ = wait_handle.wait_for_change_async(observed) => {}
                     _ = task_notify.notified() => {}
                     _ = &mut native_listener_ready => {}
+                    _ = &mut managed_read_ready => {}
                 }
             }
         }
-        task_notify.notify_one();
+        task_wake_lane.publish().await;
     });
     match wake_task {
         Ok(task) => {
@@ -3072,6 +3242,9 @@ where
                 context.process.kernel_pid,
             );
             accepted.receive_timeout_ms = parent.receive_timeout_ms;
+            accepted.reuse_address = parent.reuse_address;
+            accepted.linger_enabled = parent.linger_enabled;
+            accepted.linger_seconds = parent.linger_seconds;
             accepted.no_delay = parent.no_delay;
             accepted.keep_alive = parent.keep_alive;
             accepted.local_address = local_address;
@@ -3240,6 +3413,26 @@ where
                 SidecarError::host("EIO", "managed description registry lock poisoned")
             })?;
             match (name, value) {
+                (SocketOptionName::ReuseAddress, SocketOptionValue::Bool(value)) => {
+                    // The agentOS TCP namespace has no TIME_WAIT state, so
+                    // there is no host bind conflict for SO_REUSEADDR to
+                    // relax. Retain the open-description option nonetheless:
+                    // dup/fork aliases and getsockopt observe Linux-compatible
+                    // state, and both executor adapters share this owner.
+                    descriptions
+                        .get_mut(&description_id)
+                        .ok_or_else(|| {
+                            SidecarError::host("ENOTSOCK", "managed socket description disappeared")
+                        })?
+                        .reuse_address = value;
+                }
+                (SocketOptionName::Linger, SocketOptionValue::Linger { enabled, seconds }) => {
+                    let description = descriptions.get_mut(&description_id).ok_or_else(|| {
+                        SidecarError::host("ENOTSOCK", "managed socket description disappeared")
+                    })?;
+                    description.linger_enabled = enabled;
+                    description.linger_seconds = seconds;
+                }
                 (SocketOptionName::ReceiveTimeout, SocketOptionValue::DurationMs(value)) => {
                     descriptions
                         .get_mut(&description_id)
@@ -3314,6 +3507,11 @@ where
             let description = managed_description(&context, description_id)?;
             let value = match name {
                 SocketOptionName::Error => json!(0),
+                SocketOptionName::ReuseAddress => json!(description.reuse_address),
+                SocketOptionName::Linger => json!({
+                    "enabled": description.linger_enabled,
+                    "seconds": description.linger_seconds,
+                }),
                 SocketOptionName::ReceiveTimeout => {
                     json!({ "durationMs": description.receive_timeout_ms })
                 }
@@ -4921,6 +5119,142 @@ mod managed_tests {
             .expect("closed lane settles reply");
         assert!(result.0, "reply must stay claimed through cancellation");
         assert_eq!(result.1.expect_err("cancellation error").code, "ECANCELED");
+    }
+
+    #[test]
+    fn deferred_posix_poll_wake_is_durable_with_a_competing_broker_waiter() {
+        let runtime =
+            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+                .expect("create POSIX-poll wake test runtime");
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let lane = DeferredPosixPollWakeLane {
+            sender,
+            notify: Arc::clone(&notify),
+            connection_id: "connection".to_owned(),
+            session_id: "session".to_owned(),
+            vm_id: "vm".to_owned(),
+            process_id: "process".to_owned(),
+        };
+
+        let envelope = runtime.context().handle().block_on(async move {
+            // Two waiters model the owner pump and a competing deferred poll.
+            // Both registered waiters must wake, and one coalesced permit must
+            // remain for an owner that registers immediately after publication.
+            let mut first_waiter = Box::pin(notify.notified());
+            let mut second_waiter = Box::pin(notify.notified());
+            first_waiter.as_mut().enable();
+            second_waiter.as_mut().enable();
+            lane.publish().await;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                first_waiter.as_mut().await;
+                second_waiter.as_mut().await;
+            })
+            .await
+            .expect("both registered broker waiters complete");
+            tokio::time::timeout(Duration::from_secs(1), notify.notified())
+                .await
+                .expect("one coalesced broker permit remains");
+            tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("durable wake arrives before deadline")
+                .expect("wake lane remains open")
+        });
+
+        assert_eq!(envelope.process_id, "process");
+        assert!(matches!(
+            envelope.event,
+            ActiveExecutionEvent::DeferredPosixPollWake
+        ));
+
+        // A full event lane must not put the publisher to sleep before the
+        // owner receives a wake that lets it drain the lane.
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let filler = ProcessEventEnvelope {
+            connection_id: "connection".to_owned(),
+            session_id: "session".to_owned(),
+            vm_id: "vm".to_owned(),
+            process_id: "filler".to_owned(),
+            event: ActiveExecutionEvent::DeferredPosixPollWake,
+        };
+        sender.try_send(filler).expect("fill bounded owner lane");
+        let lane = DeferredPosixPollWakeLane {
+            sender,
+            notify: Arc::clone(&notify),
+            connection_id: "connection".to_owned(),
+            session_id: "session".to_owned(),
+            vm_id: "vm".to_owned(),
+            process_id: "deadline".to_owned(),
+        };
+
+        runtime.context().handle().block_on(async move {
+            let mut owner_wake = Box::pin(notify.notified());
+            owner_wake.as_mut().enable();
+            let publisher = tokio::spawn(lane.publish());
+            tokio::time::timeout(Duration::from_secs(1), owner_wake.as_mut())
+                .await
+                .expect("saturated lane wakes owner before publisher admission");
+            receiver.recv().await.expect("owner drains filler");
+            publisher.await.expect("deadline publisher completes");
+            let envelope = receiver.recv().await.expect("owner receives deadline wake");
+            assert_eq!(envelope.process_id, "deadline");
+        });
+    }
+
+    #[test]
+    fn managed_posix_poll_waits_on_socket_readiness_after_broker_wake_is_consumed() {
+        let runtime =
+            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+                .expect("create managed POSIX-poll readiness test runtime");
+        runtime.context().handle().block_on(async {
+            let broker_notify = Arc::new(tokio::sync::Notify::new());
+            let socket_notify = Arc::new(tokio::sync::Notify::new());
+
+            let competing_broker = {
+                let notify = Arc::clone(&broker_notify);
+                tokio::spawn(async move { notify.notified().await })
+            };
+            let socket_waiter =
+                tokio::spawn(wait_for_managed_posix_poll_readiness(vec![Arc::clone(
+                    &socket_notify,
+                )]));
+            tokio::task::yield_now().await;
+
+            // Model the owner pump consuming the generic broker notification.
+            // Managed transport readiness must still wake the poll directly.
+            broker_notify.notify_one();
+            competing_broker
+                .await
+                .expect("competing broker waiter completes");
+            socket_notify.notify_one();
+            tokio::time::timeout(Duration::from_secs(1), socket_waiter)
+                .await
+                .expect("socket readiness wakes POSIX poll")
+                .expect("socket readiness waiter completes");
+        });
+    }
+
+    #[test]
+    fn indexed_posix_poll_preserves_duplicate_fd_event_masks() {
+        let interests = [
+            KernelPollInterest {
+                fd: 8,
+                events: POSIX_POLLIN,
+            },
+            KernelPollInterest { fd: 8, events: 0 },
+        ];
+        let response = indexed_posix_poll_response(&interests, &[Some(POSIX_POLLIN), Some(0)]);
+
+        assert_eq!(response["readyCount"], 1);
+        let fds = response["fds"].as_array().expect("poll fd response array");
+        assert_eq!(fds.len(), 2);
+        assert_eq!(fds[0]["fd"], 8);
+        assert_eq!(fds[0]["events"], POSIX_POLLIN);
+        assert_eq!(fds[0]["revents"], POSIX_POLLIN);
+        assert_eq!(fds[1]["fd"], 8);
+        assert_eq!(fds[1]["events"], 0);
+        assert_eq!(fds[1]["revents"], 0);
     }
 
     #[test]

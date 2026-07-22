@@ -507,10 +507,18 @@ pub fn validate_xattr_name(name: &str) -> VfsResult<()> {
             format!("reserved extended attribute namespace: {name}"),
         ));
     }
-    if name.is_empty() || name.len() > XATTR_NAME_MAX || !name.contains('.') || name.contains('\0')
-    {
+    if name.len() > XATTR_NAME_MAX {
         return Err(VfsError::new(
             "ERANGE",
+            format!(
+                "extended attribute name is {} bytes; maximum is {XATTR_NAME_MAX}",
+                name.len()
+            ),
+        ));
+    }
+    if name.is_empty() || !name.contains('.') || name.contains('\0') {
+        return Err(VfsError::new(
+            "EINVAL",
             format!("invalid extended attribute name: {name:?}"),
         ));
     }

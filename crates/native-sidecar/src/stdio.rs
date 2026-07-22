@@ -1068,6 +1068,35 @@ async fn run_async(
             break;
         }
 
+        // Register the level-triggered executor waiter before probing durable
+        // process state. An executor can publish its only event while this
+        // owner is already inside a pump turn; probing first and registering
+        // afterward leaves a window where that edge can be consumed without
+        // the newly queued state being visible. With this ordering, a racing
+        // publication is either drained below or leaves this future ready.
+        let process_event_notified = process_event_notify.notified();
+        tokio::pin!(process_event_notified);
+        process_event_notified.as_mut().enable();
+        let mut process_events_progressed = false;
+        for session in active_sessions.iter().cloned().collect::<Vec<_>>() {
+            process_events_progressed |= sidecar
+                .pump_process_events(&session.compat_ownership_scope())
+                .await?;
+        }
+        if process_events_progressed {
+            match event_ready_tx.try_send(()) {
+                Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "event-ready wake receiver closed",
+                    )
+                    .into());
+                }
+            }
+            flush_sidecar_requests(&mut sidecar, &frame_writer)?;
+        }
+
         tokio::select! {
             biased;
             maybe_shutdown = shutdown_rx.recv() => {
@@ -1192,7 +1221,7 @@ async fn run_async(
                 }
                 flush_sidecar_requests(&mut sidecar, &frame_writer)?;
             }
-            _ = process_event_notify.notified() => {
+            _ = process_event_notified.as_mut() => {
                 for session in active_sessions.iter().cloned().collect::<Vec<_>>() {
                     sidecar.pump_process_events(&session.compat_ownership_scope()).await?;
                     // A request-scoped inline pump can already have moved

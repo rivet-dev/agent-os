@@ -60,7 +60,7 @@ BENCH_FAMILIES=net BENCH_OP_FILTER=tls_loopback_get pnpm --dir packages/benchmar
 
 ## Baseline And PR Gate
 
-The committed local baseline is `packages/benchmarks/results/baseline-local.json`. It is generated from the full 70-row latency matrix and records:
+The committed local baseline is `packages/runtime-benchmarks/results/baseline-local.json`. It is generated from the full latency matrix and records:
 
 - **Hardware**: `getHardware()` output for the canonical machine.
 - **Sidecar provenance**: binary path, inferred profile, mtime, and size.
@@ -72,18 +72,21 @@ Regenerate it only from a release sidecar on the canonical machine:
 ```bash
 pnpm install --frozen-lockfile --filter "@rivet-dev/agentos-runtime-benchmarks..."
 cargo build --release -p agentos-native-sidecar
-cargo build --release -p native-baseline
-cargo build --release -p native-baseline --target wasm32-wasip1
+cargo build --release -p agentos-native-baseline
+cargo build --release -p agentos-native-baseline --target wasm32-wasip1
 AGENTOS_SIDECAR_BIN="$PWD/target/release/agentos-native-sidecar" \
-	pnpm --dir packages/benchmarks bench:baseline
+	pnpm --dir packages/runtime-benchmarks bench:baseline
 ```
 
 `bench:baseline` refuses debug sidecars and refuses filtered matrix runs. A complete baseline has `engine.rowCount = 70`.
 
-`pnpm --dir packages/benchmarks bench:gate` runs the deterministic PR subset with 9 measured iterations and 3 warmup iterations, then compares p50 against the baseline:
+`pnpm --dir packages/runtime-benchmarks bench:gate` runs the deterministic PR subset with 9 measured iterations and 3 warmup iterations, then compares p50 against the baseline:
 
 - **Threshold**: fail when current p50 is greater than `2.0x` the baseline p50. Override with `BENCH_GATE_THRESHOLD`.
-- **Tiny-row floor**: rows with baseline p50 below `0.3ms` are ignored unless current p50 reaches at least `1ms`, so sub-millisecond timer noise does not flap the gate.
+- **Tiny-row allowance**: rows with baseline p50 below `0.5ms` ignore less
+  than `1ms` of absolute regression, so sub-millisecond timer noise does not
+  flap the gate. A tiny row still fails when both its ratio exceeds the normal
+  threshold and its absolute regression reaches `1ms`.
 - **Row override**: use `BENCH_GATE_ROWS=family/op[:lane],...` to run a smaller or different subset.
 - **Release-only**: the gate exits `2` if `AGENTOS_SIDECAR_BIN` resolves to a debug sidecar.
 
@@ -91,7 +94,7 @@ Gate rows:
 
 | Row | Lane | Why it is gated |
 | --- | --- | --- |
-| `fs/fs_write_small` | `guest` | Tiny sync write hot path, with the 1ms tiny-row floor. |
+| `fs/fs_write_small` | `guest` | Tiny sync write hot path, with the 1ms absolute-regression allowance. |
 | `fs/fs_write_big` | `guest` | Large write payload catches whole-buffer copy regressions. |
 | `fs/fs_read_small` | `guest` | Small read bridge/VFS floor. |
 | `fs/stat_storm` | `guest` | Metadata syscall hot path. |
@@ -104,11 +107,11 @@ Gate rows:
 | `control/cpu_loop` | `wasm` | WASM runtime lane sanity check. |
 | `ecosystem/ls_100` | `vmCmd` | End-to-end WASM command tier. |
 
-The CI baseline is environment-specific because GitHub-hosted runner hardware differs from the canonical machine. In CI, `bench:gate` uses `packages/benchmarks/results/baseline-ci.json`. If it is missing, PR gates skip loudly. The nightly workflow runs the full matrix, writes a candidate `baseline-ci.json`, and uploads it as an artifact. Bootstrap is:
+The CI baseline is environment-specific because GitHub-hosted runner hardware differs from the canonical machine. In CI, `bench:gate` uses `packages/runtime-benchmarks/results/baseline-ci.json`. If it is missing, PR gates skip loudly. The nightly workflow runs the full matrix, writes a candidate `baseline-ci.json`, and uploads it as an artifact. Bootstrap is:
 
 1. Let the first nightly workflow finish.
 2. Download `baseline-ci.json` from the `nightly-benchmark-results` artifact.
-3. Commit it at `packages/benchmarks/results/baseline-ci.json`.
+3. Commit it at `packages/runtime-benchmarks/results/baseline-ci.json`.
 4. Future PRs enforce the quick gate against that CI baseline.
 
 ### Latency Matrix VM Lifecycle

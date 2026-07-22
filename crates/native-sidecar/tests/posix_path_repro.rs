@@ -6,6 +6,8 @@ use agentos_native_sidecar::wire::{
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -39,25 +41,9 @@ fn strip_benign_child_pid_warnings(stderr: &str) -> String {
 }
 
 fn registry_command_root() -> PathBuf {
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("canonicalize repo root");
-    let copied = repo_root.join("software/coreutils/wasm");
-    if copied.exists() {
-        return copied;
-    }
-
-    let fallback = repo_root.join("toolchain/target/wasm32-wasip1/release/commands");
-    if fallback.exists() {
-        return fallback;
-    }
-
-    panic!(
-        "registry WASM commands are required for posix path repro tests: expected {} or {}",
-        copied.display(),
-        fallback.display()
-    );
+    support::registry_wasm_command_root().expect(
+        "registry WASM commands are required for posix path repro tests; set AGENTOS_WASM_COMMANDS_DIR",
+    )
 }
 
 fn configure_mounts(
@@ -228,7 +214,18 @@ fn write_probe(case_name: &str, script: &str) -> (PathBuf, PathBuf) {
     let cwd = temp_dir(&format!("posix-path-repro-{case_name}"));
     let entrypoint = cwd.join("entry.mjs");
     write_fixture(&entrypoint, script);
+    fs::set_permissions(&cwd, fs::Permissions::from_mode(0o777))
+        .expect("make POSIX path workspace fixture guest-writable");
     (cwd, entrypoint)
+}
+
+fn prepare_guest_writable_files(cwd: &Path) {
+    for name in ["note.txt", "written.txt"] {
+        let path = cwd.join(name);
+        write_fixture(&path, []);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666))
+            .expect("make POSIX path file fixture guest-writable");
+    }
 }
 
 fn assert_guest_matches_host(case_name: &str, script: &str) {
@@ -320,6 +317,7 @@ console.log(JSON.stringify({
 }));
 "#,
     );
+    prepare_guest_writable_files(&cwd);
     let guest = run_guest_probe(
         "relative-shell",
         &cwd,
@@ -447,6 +445,7 @@ console.log(JSON.stringify({
 }));
 "#,
     );
+    prepare_guest_writable_files(&cwd);
     let guest = run_guest_probe(
         "absolute-shell",
         &cwd,

@@ -374,7 +374,7 @@ impl AgentOs {
                                     retained.pop_front();
                                 }
                             }
-                            let _ = exit_tx.send(Some(exited.exit_code));
+                            let _ = exit_tx.send_replace(Some(exited.exit_code));
                             break;
                         }
                     }
@@ -470,7 +470,7 @@ impl AgentOs {
                     tracing::warn!(?error, shell_id = %exit_shell_id, "acp_open_terminal spawn failed");
                     agent.inner().shells.remove(&exit_shell_id);
                     agent.inner().pending_shell_exits.remove(&exit_key);
-                    let _ = exit_tx.send(Some(1));
+                    let _ = exit_tx.send_replace(Some(1));
                     return;
                 }
             };
@@ -529,7 +529,7 @@ impl AgentOs {
             agent.inner().shells.remove_if(&exit_shell_id, |existing| {
                 existing.process_id == route_process_id
             });
-            let _ = exit_tx.send(Some(exit_code));
+            let _ = exit_tx.send_replace(Some(exit_code));
         });
 
         // The fan-out/exit task is tracked in `pending_shell_exits` (drained by `dispose`), exactly

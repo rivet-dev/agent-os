@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import type { IntegrationKernelResult } from "@rivet-dev/agentos-vm-test-harness";
 import {
 	COMMANDS_DIR,
+	createInMemoryFileSystem,
 	createIntegrationKernel,
 	createKernel,
 	createNodeRuntime,
@@ -143,6 +144,83 @@ describeIf(
 			expect(proc.pid).toBeGreaterThan(0);
 
 			await proc.wait();
+		});
+
+		it("spawned Node children inherit non-default filesystem credentials", async () => {
+			const uid = 2101;
+			const gid = 2102;
+			const vfs = createInMemoryFileSystem();
+			await vfs.writeFile(
+				"/credential-child.cjs",
+				[
+					"const fs = require('node:fs');",
+					"let implicitError = null;",
+					"try { fs.writeFileSync('/owned/implicit/file', 'bad'); }",
+					"catch (error) { implicitError = error.code; }",
+					"fs.mkdirSync('/owned/child', { recursive: true });",
+					"const stat = fs.statSync('/owned/child');",
+					"console.log(JSON.stringify({ uid: stat.uid, gid: stat.gid, implicitError, implicitExists: fs.existsSync('/owned/implicit') }));",
+					"process.exit(0);",
+				].join("\n"),
+			);
+			await vfs.chown("/", uid, gid);
+			const kernel = createKernel({
+				filesystem: vfs,
+				cwd: "/",
+				user: { uid, gid, euid: uid, egid: gid },
+			});
+			await kernel.mount(createNodeRuntime());
+			ctx = {
+				kernel,
+				vfs,
+				dispose: () => kernel.dispose(),
+			};
+
+			const stdout: Uint8Array[] = [];
+			const stderr: Uint8Array[] = [];
+			const proc = kernel.spawn(
+				"node",
+				[
+					"-e",
+					[
+						"const fs = require('node:fs');",
+						"const { fork } = require('node:child_process');",
+						"fs.mkdirSync('/owned');",
+						"const child = fork('/credential-child.cjs', [], { silent: true });",
+						"let output = '';",
+						"child.stdout.on('data', (chunk) => { output += chunk; });",
+						"child.stderr.pipe(process.stderr);",
+						"child.on('close', (code) => {",
+						"  if (code !== 0) throw new Error('child exited ' + code);",
+						"  fs.writeFileSync('/owned/child/from-parent', 'ok');",
+						"  const stat = fs.statSync('/owned/child');",
+						"  console.log(JSON.stringify({ child: JSON.parse(output), parent: { uid: stat.uid, gid: stat.gid } }));",
+						"});",
+					].join("\n"),
+				],
+				{
+					onStdout: (data) => stdout.push(data),
+					onStderr: (data) => stderr.push(data),
+				},
+			);
+
+			expect(await proc.wait()).toBe(0);
+			expect(
+				stderr.map((chunk) => new TextDecoder().decode(chunk)).join(""),
+			).toBe("");
+			expect(
+				JSON.parse(
+					stdout.map((chunk) => new TextDecoder().decode(chunk)).join(""),
+				),
+			).toEqual({
+				child: {
+					uid,
+					gid,
+					implicitError: "ENOENT",
+					implicitExists: false,
+				},
+				parent: { uid, gid },
+			});
 		});
 
 		it("stdout from spawned child processes pipes back to Node caller", async () => {

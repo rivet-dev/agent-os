@@ -1,0 +1,14 @@
+diff --git a/tests/generic/519 b/tests/generic/519
+index bd93a255..00000001 100755
+--- a/tests/generic/519
++++ b/tests/generic/519
+@@ -11,6 +11,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiemap
+ 
++[ "$FSTYP" = "agentos" ] && \
++        _notrun "agentOS logical storage does not expose FIBMAP/filefrag"
++
+ # Import common functions.
+ . ./common/filter
+ 

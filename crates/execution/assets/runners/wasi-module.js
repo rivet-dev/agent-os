@@ -1745,10 +1745,20 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
               const waitMs = nonblocking ? 0 : 10;
               let chunk = null;
               while (true) {
-                const response = syncRpc.callSync("__kernel_stdin_read", [
-                  totalLength,
-                  waitMs,
-                ]);
+                let response;
+                try {
+                  response = syncRpc.callSync("__kernel_stdin_read", [
+                    totalLength,
+                    waitMs,
+                  ]);
+                } catch (error) {
+                  if (error?.code === "EINTR") {
+                    // Node/libuv retries interrupted stream reads. A caught
+                    // guest signal must not turn an open kernel PTY into EOF.
+                    continue;
+                  }
+                  throw error;
+                }
                 if (
                   response &&
                   typeof response === "object" &&

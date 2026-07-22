@@ -31,10 +31,10 @@ pub struct WasmtimeMetricsSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WasmtimeFeatureProfile {
-    /// AgentOS-owned Preview1/POSIX ABI with the proposal switches configured
+    /// agentOS-owned Preview1/POSIX ABI with the proposal switches configured
     /// in `build_engine`; changing any switch requires a new keyed variant.
     AgentOsOwnedWasiV1,
-    /// AgentOS-owned Preview1/POSIX ABI plus the core WebAssembly threads
+    /// agentOS-owned Preview1/POSIX ABI plus the core WebAssembly threads
     /// proposal. This profile is selected explicitly and never inferred.
     AgentOsOwnedWasiV1Threads,
 }
@@ -43,23 +43,44 @@ pub enum WasmtimeFeatureProfile {
 pub struct WasmtimeEngineProfile {
     pub feature_profile: WasmtimeFeatureProfile,
     pub wasm_stack_bytes: usize,
+    pub deterministic_fuel: bool,
 }
 
 impl WasmtimeEngineProfile {
     pub fn new(wasm_stack_bytes: Option<u64>) -> Result<Self, HostServiceError> {
-        Self::with_feature_profile(wasm_stack_bytes, WasmtimeFeatureProfile::AgentOsOwnedWasiV1)
+        Self::new_with_deterministic_fuel(wasm_stack_bytes, false)
+    }
+
+    pub fn new_with_deterministic_fuel(
+        wasm_stack_bytes: Option<u64>,
+        deterministic_fuel: bool,
+    ) -> Result<Self, HostServiceError> {
+        Self::with_feature_profile(
+            wasm_stack_bytes,
+            WasmtimeFeatureProfile::AgentOsOwnedWasiV1,
+            deterministic_fuel,
+        )
     }
 
     pub fn new_threaded(wasm_stack_bytes: Option<u64>) -> Result<Self, HostServiceError> {
+        Self::new_threaded_with_deterministic_fuel(wasm_stack_bytes, false)
+    }
+
+    pub fn new_threaded_with_deterministic_fuel(
+        wasm_stack_bytes: Option<u64>,
+        deterministic_fuel: bool,
+    ) -> Result<Self, HostServiceError> {
         Self::with_feature_profile(
             wasm_stack_bytes,
             WasmtimeFeatureProfile::AgentOsOwnedWasiV1Threads,
+            deterministic_fuel,
         )
     }
 
     fn with_feature_profile(
         wasm_stack_bytes: Option<u64>,
         feature_profile: WasmtimeFeatureProfile,
+        deterministic_fuel: bool,
     ) -> Result<Self, HostServiceError> {
         let wasm_stack_bytes = wasm_stack_bytes
             .map(usize::try_from)
@@ -75,6 +96,7 @@ impl WasmtimeEngineProfile {
         Ok(Self {
             feature_profile,
             wasm_stack_bytes,
+            deterministic_fuel,
         })
     }
 
@@ -293,7 +315,7 @@ fn build_engine(profile: WasmtimeEngineProfile) -> Result<WasmtimeEngineHandle, 
     let mut config = Config::new();
     config
         .epoch_interruption(true)
-        .consume_fuel(true)
+        .consume_fuel(profile.deterministic_fuel)
         .max_wasm_stack(profile.wasm_stack_bytes)
         .async_stack_size(profile.async_stack_bytes()?)
         .async_stack_zeroing(true)
@@ -357,6 +379,15 @@ mod tests {
             threaded.feature_profile,
             WasmtimeFeatureProfile::AgentOsOwnedWasiV1Threads
         );
+    }
+
+    #[test]
+    fn deterministic_fuel_instrumentation_is_a_distinct_exact_engine_key() {
+        let ordinary = WasmtimeEngineProfile::new(None).unwrap();
+        let fuelled = WasmtimeEngineProfile::new_with_deterministic_fuel(None, true).unwrap();
+        assert_ne!(ordinary, fuelled);
+        assert!(!ordinary.deterministic_fuel);
+        assert!(fuelled.deterministic_fuel);
     }
 
     #[test]

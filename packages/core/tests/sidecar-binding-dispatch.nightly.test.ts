@@ -98,10 +98,28 @@ describe("native sidecar binding dispatch", () => {
 		const result = await vm.exec(
 			"sh /tmp/run-binding.sh && cat /tmp/binding-output.json",
 		);
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
 		expect(JSON.parse(result.stdout)).toEqual({
 			ok: true,
 			result: { sum: 5 },
+		});
+	});
+
+	test("guest exec can replace a WASM shell image with a binding command", async () => {
+		const result = await vm.exec("exec agentos-math add --a 13 --b 29");
+		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+		expect(JSON.parse(result.stdout)).toEqual({
+			ok: true,
+			result: { sum: 42 },
+		});
+	});
+
+	test("guest pipelines route binding output through kernel descriptors", async () => {
+		const result = await vm.exec("agentos-math add --a 17 --b 25 | cat");
+		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+		expect(JSON.parse(result.stdout)).toEqual({
+			ok: true,
+			result: { sum: 42 },
 		});
 	});
 

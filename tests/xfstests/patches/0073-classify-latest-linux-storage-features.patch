@@ -1,0 +1,396 @@
+diff --git a/tests/generic/752 b/tests/generic/752
+--- a/tests/generic/752
++++ b/tests/generic/752
+@@ -8,6 +8,8 @@
+ 
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
++
++_notrun "agentOS does not support exchange-range ioctls"
+ 
+ # Override the default cleanup function.
+ _cleanup()
+diff --git a/tests/generic/756 b/tests/generic/756
+--- a/tests/generic/756
++++ b/tests/generic/756
+@@ -10,6 +10,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick exportfs
++
++_notrun "agentOS does not expose Linux exportfs file handles"
+ 
+ # Import common functions.
+ . ./common/filter
+diff --git a/tests/generic/757 b/tests/generic/757
+--- a/tests/generic/757
++++ b/tests/generic/757
+@@ -9,6 +9,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick metadata log recoveryloop aio thin
++
++_notrun "agentOS does not expose Linux device-mapper crash replay"
+ 
+ _cleanup()
+ {
+diff --git a/tests/generic/759 b/tests/generic/759
+--- a/tests/generic/759
++++ b/tests/generic/759
+@@ -8,6 +8,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest rw auto quick
++
++_notrun "agentOS WASM does not expose Linux transparent huge-page VM semantics"
+ 
+ . ./common/filter
+ 
+diff --git a/tests/generic/760 b/tests/generic/760
+--- a/tests/generic/760
++++ b/tests/generic/760
+@@ -8,6 +8,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest rw auto quick
++
++_notrun "agentOS WASM does not expose Linux transparent huge-page VM semantics"
+ 
+ . ./common/filter
+ 
+diff --git a/tests/generic/761 b/tests/generic/761
+--- a/tests/generic/761
++++ b/tests/generic/761
+@@ -14,6 +14,8 @@
+ 
+ . ./common/preamble
+ _begin_fstest auto quick
++
++_notrun "agentOS cross-engine quick tests do not run pthread O_DIRECT race helpers"
+ 
+ _require_scratch
+ _require_odirect
+diff --git a/tests/generic/764 b/tests/generic/764
+--- a/tests/generic/764
++++ b/tests/generic/764
+@@ -10,6 +10,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick log
++
++_notrun "agentOS does not expose Linux device-mapper crash replay"
+ 
+ _cleanup()
+ {
+diff --git a/tests/generic/765 b/tests/generic/765
+--- a/tests/generic/765
++++ b/tests/generic/765
+@@ -8,6 +8,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick rw atomicwrites
++
++_notrun "agentOS does not expose block-device atomic-write units"
+ 
+ . ./common/atomicwrites
+ 
+diff --git a/tests/generic/766 b/tests/generic/766
+--- a/tests/generic/766
++++ b/tests/generic/766
+@@ -18,6 +18,8 @@
+ seqfull=$0
+ . ./common/preamble
+ _begin_fstest shutdown mount auto quick
++
++_notrun "agentOS does not expose block-filesystem log devices or forced shutdown"
+ 
+ # Override the default cleanup function.
+ _cleanup()
+diff --git a/tests/generic/767 b/tests/generic/767
+--- a/tests/generic/767
++++ b/tests/generic/767
+@@ -8,6 +8,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick rw atomicwrites
++
++_notrun "agentOS does not expose block-device atomic-write units"
+ 
+ . ./common/scsi_debug
+ . ./common/atomicwrites
+diff --git a/tests/generic/768 b/tests/generic/768
+--- a/tests/generic/768
++++ b/tests/generic/768
+@@ -8,6 +8,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick rw atomicwrites
++
++_notrun "agentOS does not expose block-device atomic-write units"
+ 
+ . ./common/atomicwrites
+ 
+diff --git a/tests/generic/769 b/tests/generic/769
+--- a/tests/generic/769
++++ b/tests/generic/769
+@@ -8,6 +8,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick rw atomicwrites
++
++_notrun "agentOS does not expose block-device atomic-write units"
+ 
+ . ./common/atomicwrites
+ . ./common/filter
+diff --git a/tests/generic/770 b/tests/generic/770
+--- a/tests/generic/770
++++ b/tests/generic/770
+@@ -8,6 +8,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick rw atomicwrites
++
++_notrun "agentOS does not expose block-device atomic-write units"
+ 
+ . ./common/atomicwrites
+ . ./common/filter
+diff --git a/tests/generic/771 b/tests/generic/771
+--- a/tests/generic/771
++++ b/tests/generic/771
+@@ -10,6 +10,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick log
++
++_notrun "agentOS does not expose Linux device-mapper crash replay"
+ 
+ _cleanup()
+ {
+diff --git a/tests/generic/775 b/tests/generic/775
+--- a/tests/generic/775
++++ b/tests/generic/775
+@@ -10,6 +10,8 @@
+ . ./common/preamble
+ . ./common/atomicwrites
+ _begin_fstest auto quick rw atomicwrites
++
++_notrun "agentOS does not expose block-device atomic-write units"
+ 
+ _require_scratch_write_atomic_multi_fsblock
+ _require_atomic_write_test_commands
+diff --git a/tests/generic/776 b/tests/generic/776
+--- a/tests/generic/776
++++ b/tests/generic/776
+@@ -9,6 +9,8 @@
+ . ./common/preamble
+ . ./common/atomicwrites
+ _begin_fstest rw auto quick atomicwrites
++
++_notrun "agentOS does not expose block-device atomic-write units"
+ 
+ _require_odirect
+ _require_scratch_write_atomic
+diff --git a/tests/generic/777 b/tests/generic/777
+--- a/tests/generic/777
++++ b/tests/generic/777
+@@ -15,6 +15,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick exportfs
++
++_notrun "agentOS does not expose Linux exportfs file handles"
+ 
+ # Import common functions.
+ . ./common/filter
+diff --git a/tests/generic/779 b/tests/generic/779
+--- a/tests/generic/779
++++ b/tests/generic/779
+@@ -10,6 +10,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick log
++
++_notrun "agentOS does not expose Linux device-mapper crash replay"
+ 
+ _cleanup()
+ {
+diff --git a/tests/generic/780 b/tests/generic/780
+--- a/tests/generic/780
++++ b/tests/generic/780
+@@ -9,6 +9,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest quick
++
++_notrun "agentOS does not expose Linux FS_XFLAG ioctls on special files"
+ 
+ # Import common functions.
+ . ./common/filter
+diff --git a/tests/generic/781 b/tests/generic/781
+--- a/tests/generic/781
++++ b/tests/generic/781
+@@ -10,6 +10,8 @@
+ . ./common/zoned
+ 
+ _begin_fstest auto zone quick
++
++_notrun "agentOS does not expose zoned loop block devices"
+ 
+ _cleanup()
+ {
+diff --git a/tests/generic/782 b/tests/generic/782
+--- a/tests/generic/782
++++ b/tests/generic/782
+@@ -11,6 +11,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick log
++
++_notrun "agentOS does not expose Linux device-mapper crash replay"
+ 
+ _cleanup()
+ {
+diff --git a/tests/generic/783 b/tests/generic/783
+--- a/tests/generic/783
++++ b/tests/generic/783
+@@ -15,6 +15,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick mount casefold
++
++_notrun "agentOS does not expose overlayfs or casefold mounts"
+ 
+ # Override the default cleanup function.
+ _cleanup()
+diff --git a/tests/generic/784 b/tests/generic/784
+--- a/tests/generic/784
++++ b/tests/generic/784
+@@ -11,6 +11,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick log
++
++_notrun "agentOS does not expose Linux device-mapper crash replay"
+ 
+ _cleanup()
+ {
+diff --git a/tests/generic/785 b/tests/generic/785
+--- a/tests/generic/785
++++ b/tests/generic/785
+@@ -12,6 +12,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick log
++
++_notrun "agentOS does not expose Linux device-mapper crash replay"
+ 
+ _cleanup()
+ {
+diff --git a/tests/generic/786 b/tests/generic/786
+--- a/tests/generic/786
++++ b/tests/generic/786
+@@ -8,6 +8,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto locks quick
++
++_notrun "agentOS does not expose Linux file delegation leases"
+ 
+ . ./common/filter
+ . ./common/locktest
+diff --git a/tests/generic/787 b/tests/generic/787
+--- a/tests/generic/787
++++ b/tests/generic/787
+@@ -8,6 +8,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick locks
++
++_notrun "agentOS does not expose Linux file delegation leases"
+ 
+ # Import common functions.
+ . ./common/filter
+diff --git a/tests/generic/788 b/tests/generic/788
+--- a/tests/generic/788
++++ b/tests/generic/788
+@@ -8,6 +8,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick verity
++
++_notrun "agentOS does not expose Linux fs-verity"
+ 
+ _cleanup()
+ {
+diff --git a/tests/generic/789 b/tests/generic/789
+--- a/tests/generic/789
++++ b/tests/generic/789
+@@ -10,6 +10,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick log
++
++_notrun "agentOS does not expose Linux device-mapper crash replay"
+ 
+ _cleanup()
+ {
+diff --git a/tests/generic/790 b/tests/generic/790
+--- a/tests/generic/790
++++ b/tests/generic/790
+@@ -13,6 +13,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick log
++
++_notrun "agentOS does not expose Linux device-mapper crash replay"
+ 
+ _cleanup()
+ {
+diff --git a/tests/generic/791 b/tests/generic/791
+--- a/tests/generic/791
++++ b/tests/generic/791
+@@ -8,6 +8,8 @@
+ 
+ . ./common/preamble
+ _begin_fstest auto quick eio selfhealing
++
++_notrun "agentOS does not expose device-mapper I/O errors or fanotify error events"
+ 
+ # Override the default cleanup function.
+ _cleanup()
+diff --git a/tests/generic/792 b/tests/generic/792
+--- a/tests/generic/792
++++ b/tests/generic/792
+@@ -10,6 +10,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick log
++
++_notrun "agentOS does not expose Linux device-mapper crash replay"
+ 
+ _cleanup()
+ {
+diff --git a/tests/generic/793 b/tests/generic/793
+--- a/tests/generic/793
++++ b/tests/generic/793
+@@ -9,6 +9,8 @@
+ 
+ . ./common/preamble
+ _begin_fstest auto quick zone
++
++_notrun "agentOS does not expose zoned block devices"
+ 
+ . ./common/filter
+ . ./common/zoned
+diff --git a/tests/generic/794 b/tests/generic/794
+--- a/tests/generic/794
++++ b/tests/generic/794
+@@ -22,6 +22,8 @@
+ #
+ . ./common/preamble
+ _begin_fstest auto quick rw shutdown fiemap prealloc
++
++_notrun "agentOS does not expose block-filesystem shutdown and journal recovery"
+ 
+ . ./common/filter
+ 

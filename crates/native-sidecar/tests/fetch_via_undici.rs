@@ -532,7 +532,8 @@ console.log(JSON.stringify({{
 
     assert_eq!(payload["timeoutSignalAborted"], true);
     assert_eq!(payload["timeoutSignalEvents"], 1);
-    assert_eq!(payload["timeoutSignalReasonName"], "AbortError");
+    assert_eq!(payload["timeoutSignalReasonName"], "TimeoutError");
+    assert_eq!(payload["timeoutResult"]["name"], "TimeoutError");
     assert_ne!(
         payload["timeoutResult"]["message"],
         "timeout unexpectedly resolved"

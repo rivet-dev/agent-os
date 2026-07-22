@@ -445,7 +445,8 @@ impl PipeManager {
                 if pipe.readers == 0 {
                     events |= POLLERR;
                 } else if requested.intersects(POLLOUT)
-                    && (available_capacity(pipe) > 0 || !pipe.waiting_reads.is_empty())
+                    && (available_capacity(pipe) >= PIPE_BUF_BYTES
+                        || !pipe.waiting_reads.is_empty())
                 {
                     events |= POLLOUT;
                 }
@@ -455,7 +456,8 @@ impl PipeManager {
                     events |= POLLIN;
                 }
                 if requested.intersects(POLLOUT)
-                    && (available_capacity(pipe) > 0 || !pipe.waiting_reads.is_empty())
+                    && (available_capacity(pipe) >= PIPE_BUF_BYTES
+                        || !pipe.waiting_reads.is_empty())
                 {
                     events |= POLLOUT;
                 }

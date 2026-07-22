@@ -1,0 +1,22 @@
+diff --git a/tests/generic/556 b/tests/generic/556
+index 84bf7fd1..00000001 100755
+--- a/tests/generic/556
++++ b/tests/generic/556
+@@ -1,5 +1,5 @@
+-# SPDX-License-Identifier: GPL-2.0+
+-#!/bin/bash
++#!/bin/bash
++# SPDX-License-Identifier: GPL-2.0+
+ # FS QA Test No. 556
+ #
+ # Test the basic functionality of filesystems with case-insensitive
+@@ -7,5 +7,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick casefold
+ 
++if [[ "$FSTYP" == "agentos" ]]; then
++        _notrun "agentOS does not expose casefold directories"
++fi
++
+ . ./common/filter
+ . ./common/casefold

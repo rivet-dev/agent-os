@@ -8,7 +8,7 @@ description = "AgentOS language execution virtual filesystem backends"
 
 [dependencies]
 async-trait = "0.1"
-aws-sdk-s3 = "1"
+aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
 base64 = "0.22"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }

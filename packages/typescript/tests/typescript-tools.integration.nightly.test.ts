@@ -1,13 +1,13 @@
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTypeScriptTools } from "@rivet-dev/agentos-internal-typescript";
+import { nodeModulesMount } from "@rivet-dev/agentos-core";
 import {
 	allowAllFs,
 	createKernel,
 	createNodeDriver,
 	createNodeRuntime,
 	createNodeRuntimeDriverFactory,
-	nodeModulesMount,
 	type NodeRuntimeDriverFactory,
 } from "@rivet-dev/agentos-core/internal/runtime-compat";
 import { createInMemoryFileSystem } from "@rivet-dev/agentos-core/test/runtime";

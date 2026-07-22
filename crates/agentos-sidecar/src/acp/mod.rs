@@ -48,7 +48,10 @@ use turn::*;
 // opening their local database on a contended host. Keep both bootstrap phases
 // bounded by one attempt without imposing a shorter deadline on either phase.
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
-const SESSION_NEW_TIMEOUT: Duration = Duration::from_secs(60);
+// Cold agent adapters can spend close to a minute loading projected packages
+// before replying. Keep bootstrap bounded, but use the standard control-plane
+// budget so healthy cold starts do not fail under CI or host contention.
+const SESSION_NEW_TIMEOUT: Duration = Duration::from_secs(120);
 const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const ACP_MACHINE_HOST_CALLBACK_TIMEOUT: Duration = Duration::from_secs(120);
 // Long-running turns and human-mediated permission waits are not failures.
@@ -1614,7 +1617,7 @@ mod tests {
         assert_eq!(request_timeout("initialize"), Some(Duration::from_secs(60)));
         assert_eq!(
             request_timeout("session/new"),
-            Some(Duration::from_secs(60))
+            Some(Duration::from_secs(120))
         );
         assert_eq!(request_timeout("session/prompt"), None);
         assert_eq!(SESSION_CLOSE_TIMEOUT, Duration::from_secs(5));

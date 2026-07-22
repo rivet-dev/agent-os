@@ -27,6 +27,7 @@ void actions.cron.list();
 void actions.exec("printf legacy");
 void actions.openShell();
 void actions.readFile("/workspace/example.txt");
+void actions.allProcesses();
 void actions.process.exec("printf nested").then((result) => result.stdout);
 void actions.exec("printf legacy").then((result) => result.stdout);
 // @ts-expect-error legacy exec preserves KernelExecResult, not execution lifecycle metadata.

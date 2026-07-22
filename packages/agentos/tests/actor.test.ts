@@ -84,6 +84,7 @@ describe("agentOS actor", () => {
 		expect(definition.config.actions).toHaveProperty("increment");
 		expect(definition.config.actions).toHaveProperty("readFile");
 		expect(definition.config.actions).toHaveProperty("openSession");
+		expect(definition.config.actions).toHaveProperty("allProcesses");
 		expect(definition.config.actions).toHaveProperty("filesystem.readFile");
 		expect(definition.config.actions).toHaveProperty("process.spawn");
 		expect(definition.config.actions).toHaveProperty("terminal.open");
@@ -124,6 +125,7 @@ describe("agentOS actor", () => {
 		expect(actions.process.exec).not.toBe(actions.exec);
 		expect(actions.process.execFile).not.toBe(actions.execArgv);
 		expect(actions.process.spawn).toBe(actions.spawn);
+		expect(actions.allProcesses).toBeTypeOf("function");
 		expect(actions.terminal.open).toBe(actions.openShell);
 		expect(actions.filesystem.readFile).toBe(actions.readFile);
 		expect(actions.sessions.open).toBe(actions.openSession);

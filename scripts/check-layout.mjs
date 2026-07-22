@@ -25,6 +25,7 @@ const ignoredDirs = new Set([
 	"dist",
 	"build",
 	"vendor",
+	".codex-build",
 	".turbo",
 ]);
 
@@ -49,6 +50,7 @@ const allowedTestHomes = [
 	/^software\/[^/]+\/test\/.+\.test\.ts$/,
 	/^toolchain\/conformance\/.+\.test\.ts$/,
 	/^packages\/[^/]+\/tests\/.+\.test\.ts$/,
+	/^benchmarks\/[^/]+\/tests\/.+\.test\.ts$/,
 	/^experiments\/[^/]+\/.+\.test\.ts$/,
 	/^scripts\/.+\.test\.ts$/,
 ];

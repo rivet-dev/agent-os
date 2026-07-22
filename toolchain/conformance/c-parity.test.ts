@@ -607,6 +607,8 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 120_000 }, () =
     expect(wasm.stdout).toContain('pclose_close_error=yes');
     expect(wasm.stdout).toContain('setrlimit_truthful=yes');
     expect(wasm.stdout).toContain('setrlimit_hard_raise_denied=yes');
+		expect(wasm.stdout).toContain('statvfs_metadata=yes');
+		expect(wasm.stdout).toContain('dirent_metadata=yes');
     expect(wasm.stderr).toContain('syslog-visible=17');
   });
 
@@ -932,6 +934,8 @@ describeIf(!skipReason(), 'C parity: native vs WASM', { timeout: 120_000 }, () =
       expect(wasm.stdout).toContain('readdir_nonzero_ino=yes');
       expect(wasm.stdout).toContain('readdir_ino_matches_stat=yes');
       expect(wasm.stdout).toContain('readdir_seekdir_resume=yes');
+      expect(wasm.stdout).toContain('readdir_all_seekdir_positions=yes');
+      expect(wasm.stdout).toContain('readdir_linux_struct_capacity=yes');
       expect(wasm.stdout).toContain('readdir_short_buffer_cookie=yes');
       expect(wasm.stdout).toContain('readdir_stable_ino=yes');
       expect(wasm.stdout).toContain('readdir_detached_directory=yes');

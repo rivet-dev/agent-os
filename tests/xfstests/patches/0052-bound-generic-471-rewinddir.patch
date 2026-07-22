@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Wed, 22 Jul 2026 12:00:00 -0700
+Subject: [PATCH] generic/471: accept exact quick-matrix file reduction
+
+Keep the upstream 10,000-file default for the dedicated nightly directory
+endurance gate. The agentOS quick-matrix runner supplies a smaller value only
+for an exact reviewed test/backend reduction record. Every retained run still
+opens the directory before adding names, rewinds it, and verifies that every
+new name is returned exactly once.
+---
+ src/rewinddir-test.c | 26 ++++++++++++++++++++------
+ 1 file changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/src/rewinddir-test.c b/src/rewinddir-test.c
+index a7dd0069..21aa452e 100644
+--- a/src/rewinddir-test.c
++++ b/src/rewinddir-test.c
+@@ -14,11 +14,13 @@
+  * Number of files we add to the test directory after calling opendir(3) and
+  * before calling rewinddir(3).
+  */
+-#define NUM_FILES 10000
++#define MAX_FILES 10000
+ 
+ int main(int argc, char *argv[])
+ {
+-	int file_counters[NUM_FILES] = { 0 };
++	int file_counters[MAX_FILES] = { 0 };
++	const char *configured_files;
++	int num_files = MAX_FILES;
+ 	int dot_count = 0;
+ 	int dot_dot_count = 0;
+ 	struct dirent *entry;
+@@ -34,6 +36,19 @@ int main(int argc, char *argv[])
+ 		goto out;
+ 	}
+ 
++	configured_files = getenv("XFSTESTS_GENERIC_471_FILES");
++	if (configured_files != NULL) {
++		char *end;
++		long value = strtol(configured_files, &end, 10);
++
++		if (*configured_files == '\0' || *end != '\0' || value < 1 ||
++		    value > MAX_FILES) {
++			fprintf(stderr, "Invalid file count: %s\n", configured_files);
++			return EINVAL;
++		}
++		num_files = value;
++	}
++
+ 	dir_path = malloc(strlen(argv[1]) + strlen("/testdir") + 1);
+ 	if (!dir_path) {
+ 		fprintf(stderr, "malloc failure\n");
+@@ -70,10 +85,10 @@ int main(int argc, char *argv[])
+ 
+ 	/*
+ 	 * Now create all files inside the directory.
+-	 * File names go from 1 to NUM_FILES, 0 is unused as it's the return
++	 * File names go from 1 to num_files, 0 is unused as it's the return
+ 	 * value for atoi(3) when an error happens.
+ 	 */
+-	for (i = 1; i <= NUM_FILES; i++) {
++	for (i = 1; i <= num_files; i++) {
+ 		FILE *f;
+ 
+ 		sprintf(file_path, "%s/%d", dir_path, i);
+@@ -118,7 +133,7 @@ int main(int argc, char *argv[])
+ 			ret = errno;
+ 			goto out;
+ 		}
+-		/* File names go from 1 to NUM_FILES, so subtract 1. */
++		/* File names go from 1 to num_files, so subtract 1. */
+ 		file_counters[i - 1]++;
+ 	}
+ 
+@@ -134,7 +149,7 @@ int main(int argc, char *argv[])
+ 	 * repeated, don't exit immediatelly, so that we print a message for
+ 	 * all missing or repeated names.
+ 	 */
+-	for (i = 0; i < NUM_FILES; i++) {
++	for (i = 0; i < num_files; i++) {
+ 		if (file_counters[i] != 1) {
+ 			fprintf(stderr, "File name %d appeared %d times\n",
+ 				i + 1,  file_counters[i]);
+-- 
+2.47.2

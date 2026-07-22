@@ -1,0 +1,16 @@
+Use the Linux/glibc ERANGE diagnostic expected by Linux command-line tools and
+the upstream xfstests golden outputs.
+
+diff --git a/libc-top-half/musl/src/errno/__strerror.h b/libc-top-half/musl/src/errno/__strerror.h
+index 716a1ec..d4b7cee 100644
+--- a/libc-top-half/musl/src/errno/__strerror.h
++++ b/libc-top-half/musl/src/errno/__strerror.h
+@@ -11,7 +11,7 @@ E(0,            "Success")
+ 
+ E(EILSEQ,       "Illegal byte sequence")
+ E(EDOM,         "Domain error")
+-E(ERANGE,       "Result not representable")
++E(ERANGE,       "Numerical result out of range")
+ 
+ E(ENOTTY,       "Not a tty")
+ E(EACCES,       "Permission denied")

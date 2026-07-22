@@ -1,0 +1,78 @@
+Route statvfs and fstatvfs through agentOS's kernel-owned filesystem usage
+accounting. An empty path names the supplied descriptor itself, matching the
+descriptor semantics needed by fstatvfs and Linux fstatfs.
+
+diff --git a/libc-bottom-half/sources/posix.c b/libc-bottom-half/sources/posix.c
+index 1b5940c..90b1177 100644
+--- a/libc-bottom-half/sources/posix.c
++++ b/libc-bottom-half/sources/posix.c
+@@ -85,6 +85,39 @@ uint32_t __agentos_host_fd_link(uint32_t fd, uint32_t new_dirfd,
+     __import_name__("fd_link")
+ ));
+ 
++uint32_t __agentos_host_path_statfs(
++    uint32_t fd, const char *path, size_t path_len,
++    uint64_t *total_bytes, uint64_t *used_bytes, uint64_t *available_bytes,
++    uint64_t *total_inodes, uint64_t *free_inodes) __attribute__((
++    __import_module__("host_fs"),
++    __import_name__("path_statfs")
++));
++
++static int statvfs_from_host(uint32_t fd, const char *path, size_t path_len,
++                             struct statvfs *buf) {
++    uint64_t total_bytes, used_bytes, available_bytes;
++    uint64_t total_inodes, free_inodes;
++    uint32_t result = __agentos_host_path_statfs(
++        fd, path, path_len, &total_bytes, &used_bytes, &available_bytes,
++        &total_inodes, &free_inodes);
++    if (result != 0) {
++        errno = (int)result;
++        return -1;
++    }
++
++    memset(buf, 0, sizeof(*buf));
++    buf->f_bsize = 4096;
++    buf->f_frsize = 4096;
++    buf->f_blocks = total_bytes / 4096;
++    buf->f_bfree = available_bytes / 4096;
++    buf->f_bavail = available_bytes / 4096;
++    buf->f_files = total_inodes;
++    buf->f_ffree = free_inodes;
++    buf->f_favail = free_inodes;
++    buf->f_namemax = 255;
++    return 0;
++}
++
+ static int chmod_errno_from_host_result(uint32_t result) {
+     if (result == 0) return 0;
+     errno = (int)result;
+@@ -543,19 +576,19 @@ int fchownat(int fd, const char *path, uid_t uid, gid_t gid, int flag) {
+ }
+ 
+ int statvfs(const char *__restrict path, struct statvfs *__restrict buf) {
+-    // TODO: We plan to support this eventually in WASI, but not yet.
+-    // Meanwhile, we provide a stub so that libc++'s `<filesystem>`
+-    // implementation will build unmodified.
+-    errno = ENOSYS;
+-    return -1;
++    char *relative_path;
++    int dirfd = find_relpath(path, &relative_path);
++    if (dirfd == -1) {
++        errno = ENOENT;
++        return -1;
++    }
++
++    return statvfs_from_host((uint32_t)dirfd, relative_path,
++                             strlen(relative_path), buf);
+ }
+ 
+ int fstatvfs(int fd, struct statvfs *buf) {
+-    // TODO: We plan to support this eventually in WASI, but not yet.
+-    // Meanwhile, we provide a stub so that libc++'s `<filesystem>`
+-    // implementation will build unmodified.
+-    errno = ENOSYS;
+-    return -1;
++    return statvfs_from_host((uint32_t)fd, "", 0, buf);
+ }
+ 
+ // Like `access`, but with `faccessat`'s flags argument.

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "vitest";
 
@@ -76,6 +76,7 @@ import {
 	createKernel as createKernelBase,
 	createNodeRuntime,
 	createWasmVmRuntime,
+	NodeFileSystem,
 } from "../../runtime-core/src/test-runtime.js";
 
 export type {
@@ -112,15 +113,45 @@ function configuredTestWasmBackend(): TestWasmBackend | undefined {
 }
 
 /**
+ * Keep existing V8 regression ceilings while allowing Wasmtime's measured
+ * debug-mode cold compilation cost in dual-backend integration suites.
+ */
+export function wasmBackendTestTimeout(
+	v8TimeoutMs: number,
+	wasmtimeTimeoutMs: number,
+): number {
+	return configuredTestWasmBackend() === "wasmtime"
+		? wasmtimeTimeoutMs
+		: v8TimeoutMs;
+}
+
+/**
  * Registry integration tests assume they can bootstrap runtimes and /bin stubs
  * unless they explicitly opt into a stricter permission policy.
  */
 export function createKernel(
 	options: Parameters<typeof createKernelBase>[0],
 ): ReturnType<typeof createKernelBase> {
+	// Node-backed fixtures retain their host numeric ownership in the VM
+	// snapshot. Match that owner by default so tests do not depend on the
+	// runner account happening to use agentOS's usual uid/gid 1000.
+	const fixtureOwner =
+		options.filesystem instanceof NodeFileSystem
+			? statSync(options.filesystem.rootPath)
+			: undefined;
 	return createKernelBase({
 		...options,
 		permissions: options.permissions ?? allowAll,
+		user:
+			options.user ??
+			(fixtureOwner
+				? {
+						uid: fixtureOwner.uid,
+						gid: fixtureOwner.gid,
+						euid: fixtureOwner.uid,
+						egid: fixtureOwner.gid,
+					}
+				: undefined),
 		wasmBackend: options.wasmBackend ?? configuredTestWasmBackend(),
 	});
 }

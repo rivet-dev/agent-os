@@ -673,7 +673,7 @@ pub(super) fn apply_shell_cwd_prefix(
     }
 
     // Bash accepts login-shell flags between `-c` and its command text (for
-    // example `bash -c -l 'echo ok'`). The compact shell shipped in AgentOS
+    // example `bash -c -l 'echo ok'`). The compact shell shipped in agentOS
     // expects the command immediately after `-c`, so preserve Bash semantics
     // by folding the login flag into the option group before execution.
     if args.len() >= 3 && args[0] == "-c" && matches!(args[1].as_str(), "-l" | "--login") {
@@ -1998,21 +1998,21 @@ mod live_kernel_command_resolution_tests {
         );
 
         kernel
-            .mkdir("/__secure_exec/commands/001", true)
+            .mkdir("/__agentos/commands/001", true)
             .expect("create late legacy command root");
         kernel
             .write_file(
-                "/__secure_exec/commands/001/late",
+                "/__agentos/commands/001/late",
                 b"#!/usr/bin/env node\n".to_vec(),
             )
             .expect("write late legacy command");
         assert_eq!(
             resolve_guest_command_path_candidate(&mut kernel, "/bin/late").as_deref(),
-            Some("/__secure_exec/commands/001/late"),
+            Some("/__agentos/commands/001/late"),
             "live legacy roots retain their established precedence"
         );
         kernel
-            .remove_file("/__secure_exec/commands/001/late")
+            .remove_file("/__agentos/commands/001/late")
             .expect("delete late legacy command");
         assert_eq!(
             resolve_guest_command_path_candidate(&mut kernel, "/bin/late").as_deref(),
@@ -2025,21 +2025,21 @@ mod live_kernel_command_resolution_tests {
     fn registered_command_resolution_does_not_reuse_deleted_backing_paths() {
         let mut kernel = test_kernel(["legacy"]);
         kernel
-            .mkdir("/__secure_exec/commands/001", true)
+            .mkdir("/__agentos/commands/001", true)
             .expect("create legacy command root");
         kernel
             .write_file(
-                "/__secure_exec/commands/001/legacy",
+                "/__agentos/commands/001/legacy",
                 b"#!/usr/bin/env node\n".to_vec(),
             )
             .expect("write legacy command");
         assert_eq!(
             resolve_guest_command_path_candidate(&mut kernel, "/bin/legacy").as_deref(),
-            Some("/__secure_exec/commands/001/legacy")
+            Some("/__agentos/commands/001/legacy")
         );
 
         kernel
-            .remove_file("/__secure_exec/commands/001/legacy")
+            .remove_file("/__agentos/commands/001/legacy")
             .expect("delete legacy backing command");
         assert_eq!(
             resolve_guest_command_path_candidate(&mut kernel, "/bin/legacy").as_deref(),
@@ -3130,7 +3130,7 @@ pub(super) fn stage_agentos_package_command(
         return Err(SidecarError::host(
             "EACCES",
             format!(
-                "AgentOS package command resolved outside its package mount: {guest_entrypoint} -> {real_entrypoint}"
+                "agentOS package command resolved outside its package mount: {guest_entrypoint} -> {real_entrypoint}"
             ),
         ));
     }
@@ -3185,6 +3185,18 @@ pub(super) fn stage_kernel_wasm_launch_asset(
     }
     .map_err(kernel_error)?;
     let real_entrypoint = normalize_path(&image.canonical_path);
+    if let Some(format) =
+        agentos_execution::wasm::detect_native_binary_format(image.bytes.as_slice())
+    {
+        let header = image.bytes.iter().copied().take(4).collect();
+        return Err(wasm_error(
+            agentos_execution::wasm::WasmExecutionError::NativeBinaryNotSupported {
+                path: PathBuf::from(&real_entrypoint),
+                header,
+                format,
+            },
+        ));
+    }
     let asset_path = runtime_asset_path_for_guest(vm, &real_entrypoint);
     if let Some(parent) = asset_path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -3353,37 +3365,58 @@ pub(super) fn resolve_agentos_package_javascript_launch_entrypoint(
     else {
         return Ok(None);
     };
-    if !guest_path_is_within_agentos_package_mount(vm, &guest_entrypoint) {
-        return Ok(None);
-    }
-
-    let real_entrypoint = normalize_path(
-        &vm.kernel
-            .realpath_for_process(EXECUTION_DRIVER_NAME, requester_pid, &guest_entrypoint)
-            .map_err(kernel_error)?,
-    );
-    if !guest_path_is_within_agentos_package_mount(vm, &real_entrypoint) {
-        return Err(SidecarError::host(
-            "EACCES",
-            format!(
-                "AgentOS package JavaScript entrypoint resolved outside its package mount: {guest_entrypoint} -> {real_entrypoint}"
-            ),
-        ));
-    }
-
-    env.insert(
-        String::from("AGENTOS_GUEST_ENTRYPOINT"),
-        real_entrypoint.clone(),
-    );
-    if guest_javascript_entrypoint_uses_module_mode(vm, requester_pid, &real_entrypoint)? {
+    let package_entrypoint = guest_path_is_within_agentos_package_mount(vm, &guest_entrypoint);
+    let resolved_entrypoint =
+        vm.kernel
+            .realpath_for_process(EXECUTION_DRIVER_NAME, requester_pid, &guest_entrypoint);
+    let module_mode_entrypoint = if package_entrypoint {
+        let real_entrypoint = normalize_path(&resolved_entrypoint.map_err(kernel_error)?);
+        if !guest_path_is_within_agentos_package_mount(vm, &real_entrypoint) {
+            return Err(SidecarError::host(
+                "EACCES",
+                format!(
+                    "agentOS package JavaScript entrypoint resolved outside its package mount: {guest_entrypoint} -> {real_entrypoint}"
+                ),
+            ));
+        }
         env.insert(
-            String::from("AGENTOS_GUEST_ENTRYPOINT_MODULE_MODE"),
-            String::from("1"),
+            String::from("AGENTOS_GUEST_ENTRYPOINT"),
+            real_entrypoint.clone(),
         );
+        real_entrypoint
     } else {
-        env.remove("AGENTOS_GUEST_ENTRYPOINT_MODULE_MODE");
+        match resolved_entrypoint {
+            Ok(real_entrypoint) => normalize_path(&real_entrypoint),
+            Err(error) if matches!(error.code(), "ENOENT" | "ENOTDIR") => guest_entrypoint.clone(),
+            Err(error) => return Err(kernel_error(error)),
+        }
+    };
+
+    let module_mode = guest_javascript_entrypoint_module_mode_override(
+        &mut vm.kernel,
+        requester_pid,
+        &module_mode_entrypoint,
+    )?;
+    match module_mode {
+        Some(uses_module_mode) => {
+            env.insert(
+                String::from("AGENTOS_GUEST_ENTRYPOINT_MODULE_MODE"),
+                if uses_module_mode {
+                    String::from("1")
+                } else {
+                    String::from("0")
+                },
+            );
+        }
+        None => {
+            // This is per-launch adapter state, not guest environment. Remove
+            // any selector inherited from a parent and let the execution
+            // engine preserve its inline-source compatibility detection when
+            // neither an extension nor a package scope chooses a mode.
+            env.remove("AGENTOS_GUEST_ENTRYPOINT_MODULE_MODE");
+        }
     }
-    Ok(Some(real_entrypoint))
+    Ok(package_entrypoint.then_some(module_mode_entrypoint))
 }
 
 fn guest_path_is_within_agentos_package_mount(vm: &VmState, guest_path: &str) -> bool {
@@ -3396,32 +3429,38 @@ fn guest_path_is_within_agentos_package_mount(vm: &VmState, guest_path: &str) ->
     })
 }
 
-fn guest_javascript_entrypoint_uses_module_mode(
-    vm: &mut VmState,
+fn guest_javascript_entrypoint_module_mode_override(
+    kernel: &mut SidecarKernel,
     requester_pid: u32,
     guest_path: &str,
-) -> Result<bool, SidecarError> {
+) -> Result<Option<bool>, SidecarError> {
     match Path::new(guest_path)
         .extension()
         .and_then(|ext| ext.to_str())
     {
-        Some("mjs" | "mts") => Ok(true),
+        Some("mjs" | "mts") => Ok(Some(true)),
+        Some("cjs" | "cts") => Ok(Some(false)),
         Some("js") => {
             Ok(
-                nearest_guest_package_json_type(&mut vm.kernel, requester_pid, guest_path)?
-                    .as_deref()
-                    == Some("module"),
+                nearest_guest_package_json_module_mode(kernel, requester_pid, guest_path)?
+                    .map(|mode| mode == GuestPackageModuleMode::Module),
             )
         }
-        _ => Ok(false),
+        _ => Ok(None),
     }
 }
 
-fn nearest_guest_package_json_type(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuestPackageModuleMode {
+    Module,
+    CommonJs,
+}
+
+fn nearest_guest_package_json_module_mode(
     kernel: &mut SidecarKernel,
     requester_pid: u32,
     guest_path: &str,
-) -> Result<Option<String>, SidecarError> {
+) -> Result<Option<GuestPackageModuleMode>, SidecarError> {
     let mut dir = dirname(guest_path);
     loop {
         let package_json_path = if dir == "/" {
@@ -3453,11 +3492,17 @@ fn nearest_guest_package_json_type(
                     format!("invalid package configuration {package_json_path}: {error}"),
                 )
             })?;
-            if let Some(package_type) = value.get("type").and_then(Value::as_str) {
-                return Ok(Some(package_type.to_owned()));
-            }
+            return Ok(Some(
+                if value.get("type").and_then(Value::as_str) == Some("module") {
+                    GuestPackageModuleMode::Module
+                } else {
+                    GuestPackageModuleMode::CommonJs
+                },
+            ));
         }
-        if dir == "/" {
+        if dir == "/"
+            || Path::new(&dir).file_name().and_then(|name| name.to_str()) == Some("node_modules")
+        {
             return Ok(None);
         }
         dir = dirname(&dir);
@@ -3512,10 +3557,9 @@ mod package_json_launch_tests {
             .write_file("/pkg/package.json", exact.to_vec())
             .expect("write exact package config");
         assert_eq!(
-            nearest_guest_package_json_type(&mut kernel, pid, "/pkg/sub/main.js")
-                .expect("read exact package config")
-                .as_deref(),
-            Some("module")
+            nearest_guest_package_json_module_mode(&mut kernel, pid, "/pkg/sub/main.js")
+                .expect("read exact package config"),
+            Some(GuestPackageModuleMode::Module)
         );
 
         let mut plus_one = exact.to_vec();
@@ -3523,7 +3567,7 @@ mod package_json_launch_tests {
         kernel
             .write_file("/pkg/package.json", plus_one)
             .expect("write plus-one package config");
-        let error = nearest_guest_package_json_type(&mut kernel, pid, "/pkg/sub/main.js")
+        let error = nearest_guest_package_json_module_mode(&mut kernel, pid, "/pkg/sub/main.js")
             .expect_err("plus-one package config must exceed the bounded read");
         assert_eq!(error.code(), Some("EINVAL"));
         assert!(error.to_string().contains("limits.resources.maxPreadBytes"));
@@ -3536,7 +3580,7 @@ mod package_json_launch_tests {
             .write_file("/pkg/package.json", vec![0xff])
             .expect("write invalid UTF-8 package config");
         assert_eq!(
-            nearest_guest_package_json_type(&mut kernel, pid, "/pkg/sub/main.js")
+            nearest_guest_package_json_module_mode(&mut kernel, pid, "/pkg/sub/main.js")
                 .expect_err("invalid UTF-8 must fail")
                 .code(),
             Some("EILSEQ")
@@ -3546,7 +3590,7 @@ mod package_json_launch_tests {
             .write_file("/pkg/package.json", b"{".to_vec())
             .expect("write malformed package config");
         assert_eq!(
-            nearest_guest_package_json_type(&mut kernel, pid, "/pkg/sub/main.js")
+            nearest_guest_package_json_module_mode(&mut kernel, pid, "/pkg/sub/main.js")
                 .expect_err("malformed JSON must fail")
                 .code(),
             Some("ERR_INVALID_PACKAGE_CONFIG")
@@ -3559,7 +3603,7 @@ mod package_json_launch_tests {
             .chmod("/pkg/package.json", 0)
             .expect("deny package config read");
         assert_eq!(
-            nearest_guest_package_json_type(&mut kernel, pid, "/pkg/sub/main.js")
+            nearest_guest_package_json_module_mode(&mut kernel, pid, "/pkg/sub/main.js")
                 .expect_err("package config DAC failure must propagate")
                 .code(),
             Some("EACCES")
@@ -3575,10 +3619,74 @@ mod package_json_launch_tests {
             .symlink("/pkg/package.json", "/pkg/package-loop")
             .expect("create second package config loop link");
         assert_eq!(
-            nearest_guest_package_json_type(&mut kernel, pid, "/pkg/sub/main.js")
+            nearest_guest_package_json_module_mode(&mut kernel, pid, "/pkg/sub/main.js")
                 .expect_err("package config symlink loop must propagate")
                 .code(),
             Some("ELOOP")
+        );
+    }
+
+    #[test]
+    fn javascript_entrypoint_module_mode_uses_guest_package_scope() {
+        let (mut kernel, pid) = package_json_test_kernel(128);
+        kernel
+            .write_file("/pkg/package.json", br#"{"type":"module"}"#.to_vec())
+            .expect("write package config");
+
+        assert_eq!(
+            guest_javascript_entrypoint_module_mode_override(&mut kernel, pid, "/pkg/sub/main.js")
+                .expect("detect package module mode"),
+            Some(true)
+        );
+        assert_eq!(
+            guest_javascript_entrypoint_module_mode_override(&mut kernel, pid, "/pkg/sub/main.mjs")
+                .expect("detect extension module mode"),
+            Some(true)
+        );
+        assert_eq!(
+            guest_javascript_entrypoint_module_mode_override(&mut kernel, pid, "/pkg/sub/main.cjs")
+                .expect("preserve CommonJS extension mode"),
+            Some(false)
+        );
+        assert_eq!(
+            guest_javascript_entrypoint_module_mode_override(&mut kernel, pid, "/unscoped/main.js")
+                .expect("leave unscoped JavaScript unspecified"),
+            None
+        );
+    }
+
+    #[test]
+    fn javascript_entrypoint_module_mode_uses_resolved_symlink_package_scope() {
+        let (mut kernel, pid) = package_json_test_kernel(128);
+        kernel
+            .write_file("/package.json", br#"{"type":"module"}"#.to_vec())
+            .expect("write root package config");
+        kernel
+            .mkdir("/store/tool/bin", true)
+            .expect("create real package directory");
+        kernel
+            .write_file("/store/tool/package.json", b"{}".to_vec())
+            .expect("write real package config without a type");
+        kernel
+            .write_file("/store/tool/bin/tool.js", b"module.exports = 1;\n".to_vec())
+            .expect("write real CommonJS entrypoint");
+        kernel
+            .mkdir("/pkg/node_modules", true)
+            .expect("create node_modules directory");
+        kernel
+            .symlink("/store/tool", "/pkg/node_modules/tool")
+            .expect("create package symlink");
+
+        let guest_entrypoint = String::from("/pkg/node_modules/tool/bin/tool.js");
+        let resolved = kernel
+            .realpath_for_process(EXECUTION_DRIVER_NAME, pid, &guest_entrypoint)
+            .expect("resolve package symlink");
+        assert_eq!(resolved, "/store/tool/bin/tool.js");
+        assert_eq!(
+            guest_javascript_entrypoint_module_mode_override(&mut kernel, pid, &resolved)
+                .expect("classify resolved package entrypoint"),
+            Some(false),
+            "the real package scope must win over the module-typed project root"
         );
     }
 }
@@ -4555,6 +4663,13 @@ where
                 payload.process_id
             )));
         }
+        // ConfigureVm normally closes the trusted bootstrap window after
+        // projecting package command stubs. Legacy/create-only callers can
+        // execute without ConfigureVm, so seal here as a final boundary before
+        // any untrusted guest code can observe a writable read-only root.
+        vm.kernel
+            .finish_root_filesystem_bootstrap()
+            .map_err(kernel_error)?;
         let vm_pending_stdin_bytes_budget = Arc::clone(&vm.pending_stdin_bytes_budget);
         let vm_pending_event_bytes_budget = Arc::clone(&vm.pending_event_bytes_budget);
         let standalone_wasm_backend = match payload.wasm_backend {
@@ -4655,6 +4770,10 @@ where
                 }
                 vm.active_processes
                     .insert(payload.process_id.clone(), process);
+                // Registration is the publication boundary for an execution
+                // that may already have queued work. Never rely solely on a
+                // pre-publication executor wake.
+                self.process_event_notify.notify_one();
                 if let Err(error) = self.bridge.emit_lifecycle(&vm_id, LifecycleState::Busy) {
                     rollback_published_top_level_process_start(
                         vm,
@@ -5167,6 +5286,10 @@ where
         }
         vm.active_processes
             .insert(payload.process_id.clone(), process);
+        // A fast executor can publish its first event before this process is
+        // visible to the pump. Rearm after the authoritative registration
+        // commit so that event cannot remain stranded.
+        self.process_event_notify.notify_one();
         if let Err(error) = self.bridge.emit_lifecycle(&vm_id, LifecycleState::Busy) {
             rollback_published_top_level_process_start(
                 vm,

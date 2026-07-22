@@ -55,12 +55,17 @@ impl<V: VirtualFileSystem> VirtualFileSystem for DeviceLayer<V> {
             return bytes;
         }
 
-        if self
-            .inner
-            .stat(path)
-            .is_ok_and(|stat| is_null_character_device(&stat))
-        {
-            return Ok(Vec::new());
+        if let Ok(stat) = self.inner.stat(path) {
+            match emulated_character_device(&stat) {
+                Some(EmulatedCharacterDevice::Null) => return Ok(Vec::new()),
+                Some(EmulatedCharacterDevice::Zero) => {
+                    return Ok(vec![0; DEFAULT_STREAM_DEVICE_READ_BYTES]);
+                }
+                Some(EmulatedCharacterDevice::Urandom) => {
+                    return random_bytes(DEFAULT_STREAM_DEVICE_READ_BYTES);
+                }
+                None => {}
+            }
         }
 
         self.inner.read_file(path)
@@ -119,12 +124,7 @@ impl<V: VirtualFileSystem> VirtualFileSystem for DeviceLayer<V> {
     }
 
     fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
-        if is_sink_device_path(path)
-            || self
-                .inner
-                .stat(path)
-                .is_ok_and(|stat| is_null_character_device(&stat))
-        {
+        if is_sink_device_path(path) || self.is_emulated_character_device(path) {
             let _ = content.into();
             return Ok(());
         }
@@ -143,12 +143,7 @@ impl<V: VirtualFileSystem> VirtualFileSystem for DeviceLayer<V> {
     }
 
     fn append_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<u64> {
-        if is_sink_device_path(path)
-            || self
-                .inner
-                .stat(path)
-                .is_ok_and(|stat| is_null_character_device(&stat))
-        {
+        if is_sink_device_path(path) || self.is_emulated_character_device(path) {
             return Ok(content.into().len() as u64);
         }
         self.inner.append_file(path, content)
@@ -344,12 +339,7 @@ impl<V: VirtualFileSystem> VirtualFileSystem for DeviceLayer<V> {
     }
 
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {
-        if is_sink_device_path(path)
-            || self
-                .inner
-                .stat(path)
-                .is_ok_and(|stat| is_null_character_device(&stat))
-        {
+        if is_sink_device_path(path) || self.is_emulated_character_device(path) {
             let _ = length;
             return Ok(());
         }
@@ -457,28 +447,34 @@ impl<V: VirtualFileSystem> VirtualFileSystem for DeviceLayer<V> {
             return bytes;
         }
 
-        if self
-            .inner
-            .stat(path)
-            .is_ok_and(|stat| is_null_character_device(&stat))
-        {
-            return Ok(Vec::new());
+        if let Ok(stat) = self.inner.stat(path) {
+            match emulated_character_device(&stat) {
+                Some(EmulatedCharacterDevice::Null) => return Ok(Vec::new()),
+                Some(EmulatedCharacterDevice::Zero) => return Ok(vec![0; length]),
+                Some(EmulatedCharacterDevice::Urandom) => return random_bytes(length),
+                None => {}
+            }
         }
 
         self.inner.pread(path, offset, length)
     }
 
     fn pwrite(&mut self, path: &str, content: impl Into<Vec<u8>>, offset: u64) -> VfsResult<()> {
-        if is_sink_device_path(path)
-            || self
-                .inner
-                .stat(path)
-                .is_ok_and(|stat| is_null_character_device(&stat))
-        {
+        if is_sink_device_path(path) || self.is_emulated_character_device(path) {
             let _ = (content.into(), offset);
             return Ok(());
         }
         self.inner.pwrite(path, content, offset)
+    }
+}
+
+impl<V: VirtualFileSystem> DeviceLayer<V> {
+    fn is_emulated_character_device(&mut self, path: &str) -> bool {
+        self.inner
+            .stat(path)
+            .ok()
+            .and_then(|stat| emulated_character_device(&stat))
+            .is_some()
     }
 }
 
@@ -585,8 +581,23 @@ fn encode_device_id(major: u64, minor: u64) -> u64 {
     (major << 8) | minor
 }
 
-fn is_null_character_device(stat: &VirtualStat) -> bool {
-    stat.mode & 0o170000 == 0o020000 && stat.rdev == encode_device_id(1, 3)
+#[derive(Clone, Copy)]
+enum EmulatedCharacterDevice {
+    Null,
+    Zero,
+    Urandom,
+}
+
+fn emulated_character_device(stat: &VirtualStat) -> Option<EmulatedCharacterDevice> {
+    if stat.mode & 0o170000 != 0o020000 {
+        return None;
+    }
+    match stat.rdev {
+        value if value == encode_device_id(1, 3) => Some(EmulatedCharacterDevice::Null),
+        value if value == encode_device_id(1, 5) => Some(EmulatedCharacterDevice::Zero),
+        value if value == encode_device_id(1, 9) => Some(EmulatedCharacterDevice::Urandom),
+        _ => None,
+    }
 }
 
 fn random_bytes(length: usize) -> VfsResult<Vec<u8>> {

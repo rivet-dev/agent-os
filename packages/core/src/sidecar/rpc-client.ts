@@ -351,6 +351,7 @@ interface NativeSidecarKernelProxyOptions {
 	 */
 	packages?: Parameters<SidecarProcess["configureVm"]>[2]["packages"];
 	packagesMountAt?: string;
+	bootstrapCommands?: string[];
 	bindingShimCommands?: string[];
 	commandGuestPaths: ReadonlyMap<string, string>;
 	onWasmCommandResolved?: (command: string) => void;
@@ -391,6 +392,7 @@ export class NativeSidecarKernelProxy {
 		Parameters<SidecarProcess["configureVm"]>[2]["packages"]
 	>;
 	private readonly packagesMountAt: string | undefined;
+	private readonly bootstrapCommands: string[] | undefined;
 	private readonly bindingShimCommands: string[] | undefined;
 	private readonly commandDrivers: Map<string, string>;
 	private readonly onWasmCommandResolved:
@@ -443,6 +445,7 @@ export class NativeSidecarKernelProxy {
 		this.loopbackExemptPorts = options.loopbackExemptPorts;
 		this.packages = options.packages ? [...options.packages] : [];
 		this.packagesMountAt = options.packagesMountAt;
+		this.bootstrapCommands = options.bootstrapCommands;
 		this.bindingShimCommands = options.bindingShimCommands;
 		this.commandDrivers = buildCommandMap(options.commandGuestPaths);
 		this.onWasmCommandResolved = options.onWasmCommandResolved;
@@ -1654,6 +1657,7 @@ export class NativeSidecarKernelProxy {
 				loopbackExemptPorts: this.loopbackExemptPorts,
 				packages: this.packages,
 				packagesMountAt: this.packagesMountAt,
+				bootstrapCommands: this.bootstrapCommands,
 				bindingShimCommands: this.bindingShimCommands,
 			});
 		};

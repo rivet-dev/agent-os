@@ -15,10 +15,7 @@ import type { AgentOs } from "../src/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "../../..");
-const AGENTOS_C_ROOT = resolve(
-	REPO_ROOT,
-	"toolchain/c",
-);
+const AGENTOS_C_ROOT = resolve(REPO_ROOT, "toolchain/c");
 const SIDECAR_BINARY = process.env.AGENTOS_SIDECAR_BIN
 	? resolve(process.env.AGENTOS_SIDECAR_BIN)
 	: resolve(REPO_ROOT, "target/debug/agentos-sidecar");
@@ -129,89 +126,89 @@ async function waitForScreen(
 describe.skipIf(!ENABLE_WASM_C_PTY)(
 	"PTY protocol snapshots (set AGENTOS_CORE_PTY_C=1)",
 	() => {
-	let vm: AgentOs | undefined;
-	let term: Terminal | undefined;
-	let shellId: string | undefined;
-	let unsubscribeShellData: (() => void) | undefined;
-	let disposeTerminalData: { dispose(): void } | undefined;
+		let vm: AgentOs | undefined;
+		let term: Terminal | undefined;
+		let shellId: string | undefined;
+		let unsubscribeShellData: (() => void) | undefined;
+		let disposeTerminalData: { dispose(): void } | undefined;
 
-	afterEach(async () => {
-		if (unsubscribeShellData) {
-			unsubscribeShellData();
-			unsubscribeShellData = undefined;
-		}
-		if (disposeTerminalData) {
-			disposeTerminalData.dispose();
-			disposeTerminalData = undefined;
-		}
-		if (vm && shellId) {
-			try {
-				vm.closeShell(shellId);
-			} catch {
-				// The probe may already have exited.
+		afterEach(async () => {
+			if (unsubscribeShellData) {
+				unsubscribeShellData();
+				unsubscribeShellData = undefined;
 			}
-		}
-		term?.dispose();
-		term = undefined;
-		shellId = undefined;
-		if (vm) {
-			await vm.dispose();
-			vm = undefined;
-		}
-	});
-
-	test("C WASM probe snapshots raw, cooked, CPR, resize, and EOF terminal protocol", async () => {
-		ensureWorkspaceSidecarBuilt();
-		ensurePtyProbeBuilt();
-		const { AgentOs } = await import("../src/index.js");
-
-		term = new Terminal({ cols: 80, rows: 18, allowProposedApi: true });
-		vm = await AgentOs.create({
-			software: [materializePtyProbePackage()],
-		});
-
-		({ shellId } = vm.openShell({
-			command: "pty_probe",
-			cols: term.cols,
-			rows: term.rows,
-			env: {
-				TERM: "xterm-256color",
-				COLUMNS: String(term.cols),
-				LINES: String(term.rows),
-			},
-		}));
-
-		unsubscribeShellData = vm.onShellData(shellId, (data) => {
-			term?.write(data);
-		});
-		disposeTerminalData = term.onData((data) => {
+			if (disposeTerminalData) {
+				disposeTerminalData.dispose();
+				disposeTerminalData = undefined;
+			}
 			if (vm && shellId) {
-				vm.writeShell(shellId, data);
+				try {
+					vm.closeShell(shellId);
+				} catch {
+					// The probe may already have exited.
+				}
+			}
+			term?.dispose();
+			term = undefined;
+			shellId = undefined;
+			if (vm) {
+				await vm.dispose();
+				vm = undefined;
 			}
 		});
 
-		await waitForScreen(term, "RAW_INPUT>");
-		expect(terminalSnapshot("startup through CPR", term)).toMatchSnapshot();
+		test("C WASM probe snapshots raw, cooked, CPR, resize, and EOF terminal protocol", async () => {
+			ensureWorkspaceSidecarBuilt();
+			ensurePtyProbeBuilt();
+			const { AgentOs } = await import("../src/index.js");
 
-		vm.writeShell(shellId, "A\r\x1b[A\x17!");
-		await waitForScreen(term, "COOKED_INPUT>");
-		expect(terminalSnapshot("after raw input bytes", term)).toMatchSnapshot();
+			term = new Terminal({ cols: 80, rows: 18, allowProposedApi: true });
+			vm = await AgentOs.create({
+				software: [materializePtyProbePackage()],
+			});
 
-		vm.writeShell(shellId, "hello cooked\r");
-		await waitForScreen(term, "RESIZE_READY>");
-		expect(terminalSnapshot("after cooked enter", term)).toMatchSnapshot();
+			({ shellId } = vm.openShell({
+				command: "pty_probe",
+				cols: term.cols,
+				rows: term.rows,
+				env: {
+					TERM: "xterm-256color",
+					COLUMNS: String(term.cols),
+					LINES: String(term.rows),
+				},
+			}));
 
-		term.resize(100, 20);
-		vm.resizeShell(shellId, 100, 20);
-		vm.writeShell(shellId, "resize-now\r");
-		await waitForScreen(term, "EOF_READY>");
-		expect(terminalSnapshot("after resize trigger", term)).toMatchSnapshot();
+			unsubscribeShellData = vm.onShellData(shellId, (event) => {
+				term?.write(event.data);
+			});
+			disposeTerminalData = term.onData((data) => {
+				if (vm && shellId) {
+					vm.writeShell(shellId, data);
+				}
+			});
 
-		vm.writeShell(shellId, "\x04");
-		await waitForScreen(term, "PTY_PROBE done");
-		expect(terminalSnapshot("after eof", term)).toMatchSnapshot();
+			await waitForScreen(term, "RAW_INPUT>");
+			expect(terminalSnapshot("startup through CPR", term)).toMatchSnapshot();
 
-		await expect(vm.waitShell(shellId)).resolves.toBe(0);
-	}, 60_000);
+			vm.writeShell(shellId, "A\r\x1b[A\x17!");
+			await waitForScreen(term, "COOKED_INPUT>");
+			expect(terminalSnapshot("after raw input bytes", term)).toMatchSnapshot();
+
+			vm.writeShell(shellId, "hello cooked\r");
+			await waitForScreen(term, "RESIZE_READY>");
+			expect(terminalSnapshot("after cooked enter", term)).toMatchSnapshot();
+
+			term.resize(100, 20);
+			vm.resizeShell(shellId, 100, 20);
+			vm.writeShell(shellId, "resize-now\r");
+			await waitForScreen(term, "EOF_READY>");
+			expect(terminalSnapshot("after resize trigger", term)).toMatchSnapshot();
+
+			vm.writeShell(shellId, "\x04");
+			await waitForScreen(term, "PTY_PROBE done");
+			expect(terminalSnapshot("after eof", term)).toMatchSnapshot();
+
+			await expect(vm.waitShell(shellId)).resolves.toBe(0);
+		}, 60_000);
 	},
 );

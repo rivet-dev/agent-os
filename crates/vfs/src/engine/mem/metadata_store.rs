@@ -53,13 +53,17 @@ impl InMemoryMetadataStore {
     pub const ROOT_INO: u64 = 1;
 
     pub fn new() -> Self {
+        Self::new_with_root(0, 0, 0o755)
+    }
+
+    pub fn new_with_root(uid: u32, gid: u32, mode: u32) -> Self {
         let now = Timespec::now();
         let root = InodeMeta {
             ino: Self::ROOT_INO,
             kind: InodeType::Directory,
-            mode: 0o755,
-            uid: 0,
-            gid: 0,
+            mode,
+            uid,
+            gid,
             size: 0,
             nlink: 2,
             atime: now,

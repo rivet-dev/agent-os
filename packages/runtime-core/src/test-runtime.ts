@@ -6,24 +6,24 @@ import * as path from "node:path";
 import * as posixPath from "node:path/posix";
 import { fileURLToPath } from "node:url";
 import "./native-client.js";
-import {
-	type AuthenticatedSession,
-	type CreatedVm,
-	type LocalCompatMount,
-	NativeSidecarKernelProxy,
-	SidecarProcess,
-	type RootFilesystemEntry,
-	type SidecarRegisteredHostCallbackDefinition,
-	type SidecarRequestFrame,
-	type SidecarResponsePayload,
-	serializeMountConfigForSidecar,
-} from "./kernel-proxy.js";
 import { resolvePublishedSidecarBinary } from "./binary.js";
 import { findCargoBinary, resolveCargoBinary } from "./cargo.js";
 import type { JsRuntimeConfig } from "./generated/JsRuntimeConfig.js";
 import type { PermissionsPolicy } from "./generated/PermissionsPolicy.js";
 import type { VmLimitsConfig } from "./generated/VmLimitsConfig.js";
 import type { VmUserConfig } from "./generated/VmUserConfig.js";
+import {
+	type AuthenticatedSession,
+	type CreatedVm,
+	type LocalCompatMount,
+	NativeSidecarKernelProxy,
+	type RootFilesystemEntry,
+	SidecarProcess,
+	type SidecarRegisteredHostCallbackDefinition,
+	type SidecarRequestFrame,
+	type SidecarResponsePayload,
+	serializeMountConfigForSidecar,
+} from "./kernel-proxy.js";
 
 export const AF_INET = 2;
 export const AF_UNIX = 1;

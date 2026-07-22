@@ -1,19 +1,19 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: AgentOS Runtime <runtime@agentos.invalid>
+From: agentOS Runtime <runtime@agentos.invalid>
 Date: Thu, 9 Jul 2026 22:35:00 -0700
 Subject: [PATCH] brush-core: parse Linux signals on WASI
 
-AgentOS provides Linux-compatible process signals through its WASI bridge.
+agentOS provides Linux-compatible process signals through its WASI bridge.
 Keep Brush trap/kill parsing aligned with those guest-visible numbers.
 
 --- a/src/sys/stubs/signal.rs
 +++ b/src/sys/stubs/signal.rs
-@@ -2,25 +2,120 @@
+@@ -2,25 +2,156 @@
  
  use crate::{error, sys, traps};
  
 -/// A stub enum representing system signals on unsupported platforms.
-+/// Linux-compatible signal numbers used by the AgentOS WASI process bridge.
++/// Linux-compatible signal numbers used by the agentOS WASI process bridge.
  #[allow(unnameable_types)]
 +#[repr(i32)]
  #[derive(Clone, Copy, Eq, Hash, PartialEq)]
@@ -34,20 +34,29 @@ Keep Brush trap/kill parsing aligned with those guest-visible numbers.
 +    Sigpipe = 13,
 +    Sigalrm = 14,
 +    Sigterm = 15,
++    Sigstkflt = 16,
 +    Sigchld = 17,
 +    Sigcont = 18,
 +    Sigstop = 19,
 +    Sigtstp = 20,
 +    Sigttin = 21,
 +    Sigttou = 22,
++    Sigurg = 23,
++    Sigxcpu = 24,
++    Sigxfsz = 25,
++    Sigvtalrm = 26,
++    Sigprof = 27,
 +    Sigwinch = 28,
++    Sigio = 29,
++    Sigpwr = 30,
++    Sigsys = 31,
 +}
  
  impl Signal {
      /// Returns an iterator over all possible signals.
      pub fn iterator() -> impl Iterator<Item = Self> {
 -        std::iter::empty()
-+        const SIGNALS: [Signal; 22] = [
++        const SIGNALS: [Signal; 31] = [
 +            Signal::Sighup,
 +            Signal::Sigint,
 +            Signal::Sigquit,
@@ -63,13 +72,22 @@ Keep Brush trap/kill parsing aligned with those guest-visible numbers.
 +            Signal::Sigpipe,
 +            Signal::Sigalrm,
 +            Signal::Sigterm,
++            Signal::Sigstkflt,
 +            Signal::Sigchld,
 +            Signal::Sigcont,
 +            Signal::Sigstop,
 +            Signal::Sigtstp,
 +            Signal::Sigttin,
 +            Signal::Sigttou,
++            Signal::Sigurg,
++            Signal::Sigxcpu,
++            Signal::Sigxfsz,
++            Signal::Sigvtalrm,
++            Signal::Sigprof,
 +            Signal::Sigwinch,
++            Signal::Sigio,
++            Signal::Sigpwr,
++            Signal::Sigsys,
 +        ];
 +        SIGNALS.into_iter()
      }
@@ -93,13 +111,22 @@ Keep Brush trap/kill parsing aligned with those guest-visible numbers.
 +            Self::Sigpipe => "SIGPIPE",
 +            Self::Sigalrm => "SIGALRM",
 +            Self::Sigterm => "SIGTERM",
++            Self::Sigstkflt => "SIGSTKFLT",
 +            Self::Sigchld => "SIGCHLD",
 +            Self::Sigcont => "SIGCONT",
 +            Self::Sigstop => "SIGSTOP",
 +            Self::Sigtstp => "SIGTSTP",
 +            Self::Sigttin => "SIGTTIN",
 +            Self::Sigttou => "SIGTTOU",
++            Self::Sigurg => "SIGURG",
++            Self::Sigxcpu => "SIGXCPU",
++            Self::Sigxfsz => "SIGXFSZ",
++            Self::Sigvtalrm => "SIGVTALRM",
++            Self::Sigprof => "SIGPROF",
 +            Self::Sigwinch => "SIGWINCH",
++            Self::Sigio => "SIGIO",
++            Self::Sigpwr => "SIGPWR",
++            Self::Sigsys => "SIGSYS",
 +        }
      }
  
@@ -122,19 +149,28 @@ Keep Brush trap/kill parsing aligned with those guest-visible numbers.
 +            "SIGPIPE" => Ok(Self::Sigpipe),
 +            "SIGALRM" => Ok(Self::Sigalrm),
 +            "SIGTERM" => Ok(Self::Sigterm),
++            "SIGSTKFLT" => Ok(Self::Sigstkflt),
 +            "SIGCHLD" | "SIGCLD" => Ok(Self::Sigchld),
 +            "SIGCONT" => Ok(Self::Sigcont),
 +            "SIGSTOP" => Ok(Self::Sigstop),
 +            "SIGTSTP" => Ok(Self::Sigtstp),
 +            "SIGTTIN" => Ok(Self::Sigttin),
 +            "SIGTTOU" => Ok(Self::Sigttou),
++            "SIGURG" => Ok(Self::Sigurg),
++            "SIGXCPU" => Ok(Self::Sigxcpu),
++            "SIGXFSZ" => Ok(Self::Sigxfsz),
++            "SIGVTALRM" => Ok(Self::Sigvtalrm),
++            "SIGPROF" => Ok(Self::Sigprof),
 +            "SIGWINCH" => Ok(Self::Sigwinch),
++            "SIGIO" | "SIGPOLL" => Ok(Self::Sigio),
++            "SIGPWR" => Ok(Self::Sigpwr),
++            "SIGSYS" => Ok(Self::Sigsys),
 +            _ => Err(error::ErrorKind::InvalidSignal(s.into()).into()),
 +        }
      }
  }
  
-@@ -28,7 +123,31 @@
+@@ -28,7 +159,40 @@
      type Error = error::Error;
  
      fn try_from(value: i32) -> Result<Self, Self::Error> {
@@ -155,15 +191,23 @@ Keep Brush trap/kill parsing aligned with those guest-visible numbers.
 +            13 => Ok(Self::Sigpipe),
 +            14 => Ok(Self::Sigalrm),
 +            15 => Ok(Self::Sigterm),
++            16 => Ok(Self::Sigstkflt),
 +            17 => Ok(Self::Sigchld),
 +            18 => Ok(Self::Sigcont),
 +            19 => Ok(Self::Sigstop),
 +            20 => Ok(Self::Sigtstp),
 +            21 => Ok(Self::Sigttin),
 +            22 => Ok(Self::Sigttou),
++            23 => Ok(Self::Sigurg),
++            24 => Ok(Self::Sigxcpu),
++            25 => Ok(Self::Sigxfsz),
++            26 => Ok(Self::Sigvtalrm),
++            27 => Ok(Self::Sigprof),
 +            28 => Ok(Self::Sigwinch),
++            29 => Ok(Self::Sigio),
++            30 => Ok(Self::Sigpwr),
++            31 => Ok(Self::Sigsys),
 +            _ => Err(error::ErrorKind::InvalidSignal(std::format!("{value}")).into()),
 +        }
      }
  }
-

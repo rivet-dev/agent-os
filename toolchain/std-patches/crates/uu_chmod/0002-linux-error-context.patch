@@ -1,0 +1,20 @@
+Report chmod failures with the operand and normalize the raw errno suffix to
+match GNU/Linux diagnostics.
+
+diff --git a/src/chmod.rs b/src/chmod.rs
+index 4ce7b80..64c2ad1 100644
+--- a/src/chmod.rs
++++ b/src/chmod.rs
+@@ -789,7 +789,11 @@ impl ChmodExecutor {
+             { wasi_compat::set_permissions_from_mode(file, mode) }
+         } {
+             if !self.quiet {
+-                show_error!("{err}");
++                show_error!(
++                    "changing permissions of {}: {}",
++                    file.quote(),
++                    uucore::error::strip_errno(&err)
++                );
+             }
+             if self.verbose {
+                 println!(

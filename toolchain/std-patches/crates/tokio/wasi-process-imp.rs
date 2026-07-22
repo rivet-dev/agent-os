@@ -1,20 +1,14 @@
-//! wasm32-wasip1 process `imp` for tokio (DRAFT — pipeline-only codex port).
-//!
-//! Status: starting artifact for `std-patches/crates/tokio/`. Needs compile-test
-//! iteration against tokio 1.52.x internals (trait/type exactness) before being
-//! captured as the actual .patch. See ~/tmp/agent-e2e-checklist.md.
+//! wasm32-wasip1 process `imp` for Tokio.
 //!
 //! Approach: route to the PATCHED `std::process` (host_process bridge). The VM is
-//! single-threaded, so `Child::poll` must NOT block on the synchronous `wait()`:
-//! that pins the only executor thread for the child's whole lifetime, starving
-//! every other task (the agent submission loop, the concurrent stdout/stderr
-//! drains `output()`/`wait_with_output()` rely on) and deadlocking the runtime.
-//! Instead `Child::poll` polls the child non-blockingly via std `try_wait()`
-//! (host_process `proc_waitpid` with WNOHANG) and yields until it exits, exactly
-//! like a normal Linux async runtime — the child runs for real in the host, we
-//! just cooperatively await its exit. `ChildStdio` reads/writes the blocking OS
-//! fd and resolves on first poll (a guest pipe read returns available bytes or
-//! EOF; the cooperative `wait` is what keeps the executor live).
+//! single-threaded. An inherited-FD child can use the interruptible blocking
+//! `wait()` import because agentOS suspends the Store while sibling processes
+//! continue independently. Captured children use nonblocking `try_wait()`
+//! probes so callers that manage their own pipes can still drain concurrently.
+//! Tokio's patched `wait_with_output()` drains both kernel-backed pipes to EOF
+//! before reaping the child, avoiding a waitpid/read busy loop entirely.
+//! `ChildStdio` uses nonblocking OS fds so captured-output drains yield instead
+//! of pinning the only guest executor thread.
 //! No SIGCHLD / orphan reaping / mio / pidfd on wasi.
 //!
 //! Wiring: in `src/process/mod.rs`, add alongside the unix/windows imp selection:
@@ -46,6 +40,16 @@ use std::process::Stdio;
 use std::task::Context;
 use std::task::Poll;
 
+const CHILD_WAIT_POLL_INTERVAL_MS: u32 = 1;
+const CHILD_WAIT_POLLS_PER_BACKOFF: u8 = 1;
+const CHILD_STDIO_RETRY_INTERVAL_MS: u32 = 1;
+
+#[link(wasm_import_module = "host_process")]
+unsafe extern "C" {
+    #[link_name = "sleep_ms"]
+    fn agentos_sleep_ms(milliseconds: u32) -> u32;
+}
+
 /// No-op orphan queue: wasm32-wasip1 has no SIGCHLD, and the host reaps the
 /// child when `wait()` returns. Kept to satisfy the imp surface.
 #[derive(Debug)]
@@ -57,6 +61,8 @@ impl GlobalOrphanQueue {
 
 pub(crate) struct Child {
     inner: StdChild,
+    has_captured_output: bool,
+    pending_polls: u8,
 }
 
 impl fmt::Debug for Child {
@@ -66,11 +72,16 @@ impl fmt::Debug for Child {
 }
 
 pub(crate) fn build_child(mut child: StdChild) -> io::Result<SpawnedChild> {
+    let has_captured_output = child.stdout.is_some() || child.stderr.is_some();
     let stdin = child.stdin.take().map(stdio).transpose()?;
     let stdout = child.stdout.take().map(stdio).transpose()?;
     let stderr = child.stderr.take().map(stdio).transpose()?;
     Ok(SpawnedChild {
-        child: Child { inner: child },
+        child: Child {
+            inner: child,
+            has_captured_output,
+            pending_polls: 0,
+        },
         stdin,
         stdout,
         stderr,
@@ -97,18 +108,40 @@ impl Future for Child {
     type Output = io::Result<ExitStatus>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Single-threaded VM: the child runs for real in the host. Do NOT block
-        // the only executor thread on the synchronous `wait()` — that starves the
-        // rest of the runtime (the agent submission loop, the concurrent
-        // stdout/stderr drains that `output()` polls alongside this future) and
-        // deadlocks the agent turn. Poll non-blockingly (host_process WNOHANG via
-        // std `try_wait`) and yield until the child exits, like a normal async
-        // runtime reaping a child.
-        match self.get_mut().inner.try_wait() {
+        let child = self.get_mut();
+        if !child.has_captured_output {
+            // Inherited and explicitly mapped pipeline FDs are sidecar-owned,
+            // so sibling processes keep moving data while this Store is
+            // suspended. A caught signal interrupts the deferred host wait and
+            // lets the guest scheduler service its signal futures before retrying.
+            return match child.inner.wait() {
+                Ok(status) => Poll::Ready(Ok(status)),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                Err(error) => Poll::Ready(Err(error)),
+            };
+        }
+
+        match child.inner.try_wait() {
             Ok(Some(status)) => Poll::Ready(Ok(status)),
             Ok(None) => {
-                // Still running: re-poll on the next runtime tick so other tasks
-                // (and this child's output drains) get to run in between.
+                // `wake_by_ref` without a delay makes the single-threaded guest
+                // runtime issue waitpid + clock_time host calls at CPU speed.
+                // The agentOS sleep import suspends the Wasmtime Store on the
+                // sidecar's deferred process.sleep operation (and V8 on its
+                // dedicated guest thread), so this does not block a shared
+                // Tokio worker. Rust's WASI thread::sleep must not be used here:
+                // its current implementation busy-polls clock_time.
+                child.pending_polls += 1;
+                if child.pending_polls == CHILD_WAIT_POLLS_PER_BACKOFF {
+                    child.pending_polls = 0;
+                    let errno = unsafe { agentos_sleep_ms(CHILD_WAIT_POLL_INTERVAL_MS) };
+                    if errno != 0 {
+                        return Poll::Ready(Err(io::Error::from_raw_os_error(errno as i32)));
+                    }
+                }
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }
@@ -152,6 +185,10 @@ impl AsyncRead for ChildStdio {
             // `_fdRead` still drives the child via `_pumpPipeProducers`, so the
             // child keeps making progress between reads.
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                let errno = unsafe { agentos_sleep_ms(CHILD_STDIO_RETRY_INTERVAL_MS) };
+                if errno != 0 {
+                    return Poll::Ready(Err(io::Error::from_raw_os_error(errno as i32)));
+                }
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }

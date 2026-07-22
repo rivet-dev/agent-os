@@ -136,13 +136,24 @@ impl Extension for EchoExtension {
             assert_eq!(lifecycle_started.process_id, lifecycle_process_id);
             ctx.bind_process_to_session("extension-lifecycle-session", lifecycle_process_id)
                 .await?;
-            ctx.dispose_session_resources("extension-lifecycle-session")
+            let mut response_events = ctx
+                .dispose_session_resources_wire("extension-lifecycle-session")
                 .await?;
 
             let mut stdout = handoff.stdout;
             let mut exit_code = None;
-            let mut lifecycle_exit_code = None;
-            while exit_code.is_none() || lifecycle_exit_code.is_none() {
+            if !response_events.iter().any(|event| {
+                matches!(
+                    &event.payload,
+                    EventPayload::ProcessExitedEvent(exited)
+                        if exited.process_id == lifecycle_process_id
+                )
+            }) {
+                return Err(SidecarError::InvalidState(String::from(
+                    "extension session disposal did not return the lifecycle process exit event",
+                )));
+            }
+            while exit_code.is_none() {
                 let event = ctx
                     .poll_event_wire(Duration::from_secs(5))
                     .await?
@@ -161,13 +172,10 @@ impl Extension for EchoExtension {
                     EventPayload::ProcessExitedEvent(exited) if exited.process_id == process_id => {
                         exit_code = Some(exited.exit_code);
                     }
-                    EventPayload::ProcessExitedEvent(exited)
-                        if exited.process_id == lifecycle_process_id =>
-                    {
-                        lifecycle_exit_code = Some(exited.exit_code);
-                    }
                     EventPayload::ProcessOutputEvent(_)
                     | EventPayload::ProcessExitedEvent(_)
+                    | EventPayload::ExecutionOutputEvent(_)
+                    | EventPayload::ExecutionCompletedEvent(_)
                     | EventPayload::VmLifecycleEvent(_)
                     | EventPayload::StructuredEvent(_)
                     | EventPayload::ExtEnvelope(_) => {}
@@ -183,9 +191,12 @@ impl Extension for EchoExtension {
                 stdout.trim().replace('\n', "|"),
                 exit_code.expect("exit code set before loop exits"),
             );
+            response_events.push(
+                ctx.ext_event_wire(format!("extension-event:{process_summary}").into_bytes())?,
+            );
             ExtensionResponse::with_wire_events(
                 process_summary.clone().into_bytes(),
-                vec![ctx.ext_event_wire(format!("extension-event:{process_summary}").into_bytes())?],
+                response_events,
             )
         })
     }
@@ -282,17 +293,22 @@ fn registered_extension_round_trips_ext_request_callback_and_event() {
         other => panic!("unexpected extension response: {other:?}"),
     }
 
-    assert_eq!(result.events.len(), 1);
-    match &result.events[0].payload {
-        EventPayload::ExtEnvelope(envelope) => {
-            assert_eq!(envelope.namespace, TEST_NAMESPACE);
-            assert_eq!(
-                envelope.payload,
-                b"extension-event:callback-output:extension-buffered-output|extension-process-output:0",
-            );
-        }
-        other => panic!("unexpected extension event: {other:?}"),
-    }
+    assert!(result.events.iter().any(|event| {
+        matches!(
+            &event.payload,
+            EventPayload::ProcessExitedEvent(exited)
+                if exited.process_id == "extension-lifecycle-process"
+        )
+    }));
+    assert!(result.events.iter().any(|event| {
+        matches!(
+            &event.payload,
+            EventPayload::ExtEnvelope(envelope)
+                if envelope.namespace == TEST_NAMESPACE
+                    && envelope.payload
+                        == b"extension-event:callback-output:extension-buffered-output|extension-process-output:0"
+        )
+    }));
 }
 
 #[test]

@@ -110,6 +110,7 @@ interface RuntimeNodeModulesMount {
 }
 
 const DEFAULT_COMPILER_SPECIFIER = "typescript";
+const DEFAULT_TYPESCRIPT_MEMORY_LIMIT_MB = 256;
 const moduleRequire = createRequire(import.meta.url);
 const GUEST_NODE_PATH_DELIMITER = ":";
 let nextRuntimeRequestId = 0;
@@ -356,8 +357,23 @@ async function runCompilerWithKernelRuntime(
 
 	const kernel = createKernel({
 		filesystem,
+		syncFilesystemOnDispose: request.kind === "compileProject",
 		permissions: normalizeKernelPermissions(options.systemDriver.permissions),
 		env: buildRuntimeEnv(options, nodeModulesMount.guestPath),
+		user: {
+			uid: 0,
+			gid: 0,
+			euid: 0,
+			egid: 0,
+			username: "root",
+			homedir: "/root",
+		},
+		limits: {
+			jsRuntime: {
+				v8HeapLimitMb: normalizeMemoryLimit(options.memoryLimit),
+				cpuTimeLimitMs: normalizeCpuTimeLimit(options.cpuTimeLimitMs),
+			},
+		},
 		cwd: request.options.cwd ?? "/root",
 		mounts: [
 			{
@@ -512,13 +528,35 @@ function buildRuntimeEnv(
 	env.NODE_PATH = [env.NODE_PATH, nodeModulesGuestPath]
 		.filter(Boolean)
 		.join(GUEST_NODE_PATH_DELIMITER);
-	if (options.memoryLimit !== undefined) {
-		const limit = Math.max(1, Math.floor(options.memoryLimit));
-		env.NODE_OPTIONS = [env.NODE_OPTIONS, `--max-old-space-size=${limit}`]
+	const memoryLimit = normalizeMemoryLimit(options.memoryLimit);
+	if (memoryLimit !== DEFAULT_TYPESCRIPT_MEMORY_LIMIT_MB) {
+		env.NODE_OPTIONS = [env.NODE_OPTIONS, `--max-old-space-size=${memoryLimit}`]
 			.filter(Boolean)
 			.join(" ");
 	}
 	return env;
+}
+
+function normalizeMemoryLimit(memoryLimit: number | undefined): number {
+	if (memoryLimit === undefined) {
+		return DEFAULT_TYPESCRIPT_MEMORY_LIMIT_MB;
+	}
+	if (!Number.isFinite(memoryLimit) || memoryLimit <= 0) {
+		throw new RangeError("memoryLimit must be a positive finite number");
+	}
+	return Math.max(1, Math.floor(memoryLimit));
+}
+
+function normalizeCpuTimeLimit(
+	cpuTimeLimitMs: number | undefined,
+): number | undefined {
+	if (cpuTimeLimitMs === undefined) {
+		return undefined;
+	}
+	if (!Number.isFinite(cpuTimeLimitMs) || cpuTimeLimitMs < 0) {
+		throw new RangeError("cpuTimeLimitMs must be a non-negative finite number");
+	}
+	return Math.floor(cpuTimeLimitMs);
 }
 
 function buildCompilerRuntimeScript(requestPath: string): string {

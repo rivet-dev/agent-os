@@ -25,16 +25,13 @@ const REPO_ROOT = resolve(__dirname, "../../..");
 // The vim binary comes from the @agentos-software/vim registry package (an
 // unbuilt placeholder has no bin/vim -> the suite skips). Overridable for
 // one-off fixture builds.
-const VIM_PACKAGE_DIR = resolve(
-	REPO_ROOT,
-	"../agentos/software/vim/dist/package",
-);
+const VIM_PACKAGE_DIR = resolve(REPO_ROOT, "software/vim/dist/package");
 const VIM_COMMAND_DIR =
 	process.env.AGENTOS_VIM_FIXTURE_DIR ?? resolve(VIM_PACKAGE_DIR, "bin");
 const VIM_BINARY = resolve(VIM_COMMAND_DIR, "vim");
 const SNAP_DIR =
 	process.env.AGENTOS_VIM_SNAPSHOT_DIR ??
-	"/home/nathan/progress/agent-os/2026-06-28-just-shell-fix/vim-snapshots";
+	join(tmpdir(), "agentos-vim-snapshots");
 
 const VIM_ARGS = [
 	"-N",
@@ -128,8 +125,8 @@ describe.skipIf(!existsSync(VIM_BINARY))("interactive vim over VM PTY", () => {
 				cwd: "/work",
 				env: { TERM: "xterm" },
 			});
-			const offData = vm.onShellData(shellId, (data) => {
-				const bytes = Buffer.from(data);
+			const offData = vm.onShellData(shellId, (event) => {
+				const bytes = Buffer.from(event.data);
 				writes = writes.then(
 					() => new Promise<void>((resolve) => term.write(bytes, resolve)),
 				);
@@ -248,9 +245,9 @@ describe.skipIf(!existsSync(VIM_BINARY))("interactive vim over VM PTY", () => {
 			await vm.writeShell(shellId, ":q\r");
 			await settle(1500);
 
-			const fileContent = Buffer.from(await vm.readFile("/work/hello.txt")).toString(
-				"utf8",
-			);
+			const fileContent = Buffer.from(
+				await vm.readFile("/work/hello.txt"),
+			).toString("utf8");
 			writeFileSync(
 				resolve(SNAP_DIR, "FILE.txt"),
 				`# /work/hello.txt after :w\n${JSON.stringify(fileContent)}\n\n---raw---\n${fileContent}`,
@@ -291,8 +288,8 @@ describe.skipIf(!existsSync(VIM_BINARY))("interactive vim over VM PTY", () => {
 				cwd: "/work",
 				env: { TERM: "xterm" },
 			});
-			const offData = vm.onShellData(shellId, (data) => {
-				const bytes = Buffer.from(data);
+			const offData = vm.onShellData(shellId, (event) => {
+				const bytes = Buffer.from(event.data);
 				writes = writes.then(
 					() => new Promise<void>((resolve) => term.write(bytes, resolve)),
 				);

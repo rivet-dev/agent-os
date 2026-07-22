@@ -1,4 +1,4 @@
-//! AgentOS-owned Preview1 codecs.
+//! agentOS-owned Preview1 codecs.
 //!
 //! These codecs deliberately use kernel descriptor numbers directly. Unlike
 //! the V8 compatibility runner there is no ambient Node-WASI descriptor table
@@ -12,6 +12,7 @@ use crate::wasm::wasmtime::{memory, store::WasmtimeStoreState};
 use base64::Engine as _;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::time::Instant;
 use wasmtime::{Caller, Val};
 
 pub(super) const SUCCESS: i32 = 0;
@@ -47,7 +48,7 @@ pub(super) const ERRNO_NAMETOOLONG: i32 = 37;
 const ERRNO_NETUNREACH: i32 = 40;
 const ERRNO_NFILE: i32 = 41;
 const ERRNO_NOBUFS: i32 = 42;
-const ERRNO_NOENT: i32 = 44;
+pub(super) const ERRNO_NOENT: i32 = 44;
 const ERRNO_NOEXEC: i32 = 45;
 const ERRNO_NOMEM: i32 = 48;
 const ERRNO_NOSPC: i32 = 51;
@@ -380,7 +381,8 @@ async fn fd_fdstat_get(caller: &mut Caller<'_, WasmtimeStoreState>, params: &[Va
             let filetype = stat.get("filetype").and_then(value_u64).unwrap_or(0) as u8;
             let kernel_flags = stat.get("flags").and_then(value_u64).unwrap_or(0) as u32;
             let flags = (if kernel_flags & 0x400 != 0 { 1 } else { 0 })
-                | (if kernel_flags & 0x800 != 0 { 4 } else { 0 });
+                | (if kernel_flags & 0x800 != 0 { 4 } else { 0 })
+                | (if kernel_flags & 0x4000 != 0 { 0x20 } else { 0 });
             let rights_base = stat.get("rightsBase").and_then(value_u64).unwrap_or(0);
             let rights_inheriting = stat
                 .get("rightsInheriting")
@@ -401,8 +403,9 @@ async fn fd_fdstat_set_flags(caller: &mut Caller<'_, WasmtimeStoreState>, params
     let (Ok(fd), Ok(flags)) = (i32_arg(params, 0), i32_arg(params, 1)) else {
         return ERRNO_INVAL;
     };
-    let kernel =
-        (if flags & 1 != 0 { 0x400 } else { 0 }) | (if flags & 4 != 0 { 0x800 } else { 0 });
+    let kernel = (if flags & 1 != 0 { 0x400 } else { 0 })
+        | (if flags & 4 != 0 { 0x800 } else { 0 })
+        | (if flags & 0x20 != 0 { 0x4000 } else { 0 });
     simple_call(
         caller,
         "process.fd_set_flags",
@@ -495,12 +498,29 @@ fn iovec_total(iovecs: &[Iovec]) -> Result<usize, i32> {
 fn collect_iovecs(
     caller: &mut Caller<'_, WasmtimeStoreState>,
     iovecs: &[Iovec],
+    maximum: usize,
 ) -> Result<Vec<u8>, i32> {
-    let mut bytes = Vec::with_capacity(iovec_total(iovecs)?);
+    let mut bytes = Vec::with_capacity(iovec_total(iovecs)?.min(maximum));
     for iov in iovecs {
-        bytes.extend(memory::read_bytes(caller, iov.pointer, iov.length).map_err(|_| ERRNO_FAULT)?);
+        if bytes.len() == maximum {
+            break;
+        }
+        let length = iov.length.min(maximum - bytes.len());
+        bytes.extend(memory::read_bytes(caller, iov.pointer, length).map_err(|_| ERRNO_FAULT)?);
     }
     Ok(bytes)
+}
+
+/// Largest raw byte string whose compatibility JSON envelope fits the direct
+/// host-reply limit. The common host dispatcher uses this exact envelope for
+/// descriptor reads, even though Wasmtime receives it through a direct waiter.
+fn max_host_bytes_reply_payload(encoded_limit: usize) -> usize {
+    const EMPTY_ENCODED_BYTES_JSON_LEN: usize = 37;
+    encoded_limit
+        .saturating_sub(EMPTY_ENCODED_BYTES_JSON_LEN)
+        .checked_div(4)
+        .unwrap_or_default()
+        .saturating_mul(3)
 }
 
 fn scatter_iovecs(
@@ -542,9 +562,18 @@ async fn fd_read(
     if memory::validate_range(caller, result_ptr, 4).is_err() {
         return ERRNO_FAULT;
     }
-    let Ok(total) = iovec_total(&iovecs) else {
+    let Ok(offered) = iovec_total(&iovecs) else {
         return ERRNO_2BIG;
     };
+    // Preview1 reads, like Linux readv(2), may complete short. Cap the host
+    // operation instead of rejecting a valid large destination buffer: libc's
+    // mmap and executable-image readers deliberately loop until complete.
+    let total = offered.min(max_host_bytes_reply_payload(
+        caller.data().host.max_host_reply_bytes(),
+    ));
+    if offered != 0 && total == 0 {
+        return ERRNO_2BIG;
+    }
     let mut args = vec![json!(fd), json!(total)];
     let method = if positioned {
         let Ok(offset) = i64_arg(params, 3) else {
@@ -599,10 +628,17 @@ async fn fd_write(
     if memory::validate_range(caller, result_ptr, 4).is_err() {
         return ERRNO_FAULT;
     }
-    let bytes = match collect_iovecs(caller, &iovecs) {
+    // A write may likewise complete short. Keeping each owned request within
+    // the configured payload cap lets libc retry without retaining an
+    // attacker-sized duplicate of guest memory across the async host wait.
+    let maximum = caller.data().host.max_host_reply_bytes();
+    let bytes = match collect_iovecs(caller, &iovecs, maximum) {
         Ok(value) => value,
         Err(error) => return error,
     };
+    if iovec_total(&iovecs).is_ok_and(|offered| offered != 0) && bytes.is_empty() {
+        return ERRNO_2BIG;
+    }
     let mut args = vec![json!(fd), Value::Null];
     let method = if positioned {
         let Ok(offset) = i64_arg(params, 3) else {
@@ -619,12 +655,48 @@ async fn fd_write(
     // capture, PTY cooking, and 1>&2/2>&1 routing match the V8 adapter. The
     // typed operation rejects ordinary descriptors with EINVAL without a
     // write side effect; those continue through the regular fd path.
-    let reply = if positioned {
-        call(caller, method, args, raw).await
-    } else {
-        match call(caller, "__kernel_stdio_write", args.clone(), raw.clone()).await {
-            Err(error) if error.code == "EINVAL" => call(caller, method, args, raw).await,
-            result => result,
+    let started = Instant::now();
+    let mut warned_near_limit = false;
+    let mut cached_nonblocking = None;
+    let reply = loop {
+        let reply = if positioned {
+            call(caller, method, args.clone(), raw.clone()).await
+        } else {
+            match call(caller, "__kernel_stdio_write", args.clone(), raw.clone()).await {
+                Err(error) if error.code == "EINVAL" => {
+                    call(caller, method, args.clone(), raw.clone()).await
+                }
+                result => result,
+            }
+        };
+        match reply {
+            Err(error) if !positioned && errno(&error) == ERRNO_AGAIN => {
+                let is_nonblocking = match cached_nonblocking {
+                    Some(nonblocking) => nonblocking,
+                    None => match super::network::fd_is_nonblocking(caller, fd).await {
+                        Ok(nonblocking) => {
+                            cached_nonblocking = Some(nonblocking);
+                            nonblocking
+                        }
+                        Err(error) => return error,
+                    },
+                };
+                if is_nonblocking {
+                    break Err(error);
+                }
+                let wait = super::network::wait_for_fd_writable(
+                    caller,
+                    fd,
+                    "blocking descriptor write",
+                    started,
+                    &mut warned_near_limit,
+                )
+                .await;
+                if wait != SUCCESS {
+                    return wait;
+                }
+            }
+            reply => break reply,
         }
     };
     match reply {
@@ -1349,11 +1421,26 @@ pub(super) fn commit(
 mod tests {
     use super::*;
 
+    fn encoded_bytes_reply_size(byte_length: usize) -> usize {
+        byte_length.div_ceil(3) * 4 + 37
+    }
+
     #[test]
     fn stable_errno_mapping_matches_preview1() {
         assert_eq!(errno(&HostServiceError::new("EBADF", "bad fd")), 8);
         assert_eq!(errno(&HostServiceError::new("EWOULDBLOCK", "wait")), 6);
         assert_eq!(errno(&HostServiceError::new("ENOMEM", "limit")), 48);
         assert_eq!(errno(&HostServiceError::new("unknown", "fault")), 29);
+    }
+
+    #[test]
+    fn descriptor_read_payload_fits_encoded_host_reply_limit() {
+        for limit in [37, 38, 256 * 1024, 16 * 1024 * 1024] {
+            let payload = max_host_bytes_reply_payload(limit);
+            assert!(encoded_bytes_reply_size(payload) <= limit.max(37));
+            if payload <= usize::MAX - 3 && encoded_bytes_reply_size(payload + 3) <= limit {
+                panic!("payload cap left a complete base64 quantum unused");
+            }
+        }
     }
 }

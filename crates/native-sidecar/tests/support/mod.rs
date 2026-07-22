@@ -52,6 +52,30 @@ pub fn temp_dir(name: &str) -> PathBuf {
     root
 }
 
+pub fn registry_wasm_command_root() -> Option<PathBuf> {
+    if let Some(configured) = std::env::var_os("AGENTOS_WASM_COMMANDS_DIR") {
+        let configured = PathBuf::from(configured);
+        assert!(
+            configured.is_dir(),
+            "AGENTOS_WASM_COMMANDS_DIR must name an existing directory: {}",
+            configured.display()
+        );
+        return Some(configured);
+    }
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("canonicalize repo root");
+    [
+        repo_root.join("packages/runtime-core/commands"),
+        repo_root.join("software/coreutils/wasm"),
+        repo_root.join("toolchain/target/wasm32-wasip1/release/commands"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_dir())
+}
+
 pub fn new_sidecar(name: &str) -> NativeSidecar<RecordingBridge> {
     new_sidecar_with_auth_token(name, TEST_AUTH_TOKEN)
 }

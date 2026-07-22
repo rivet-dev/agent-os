@@ -12,7 +12,7 @@ agentos-resource = { workspace = true }
 vfs = { workspace = true }
 base64 = "0.22"
 event-listener = "5.4"
-hickory-proto = { version = "=0.26.0-beta.3", default-features = false }
+hickory-proto = { version = "=0.26.1", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # Drop-in std::time replacement that works on wasm32 (std SystemTime/Instant

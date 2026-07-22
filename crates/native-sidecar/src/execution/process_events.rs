@@ -779,7 +779,47 @@ where
             }
         }
         for envelope in queued_envelopes {
-            self.queue_pending_process_event(envelope)?;
+            if Self::internal_execution_event(&envelope.event) {
+                let root_exists = self
+                    .vms
+                    .get(&envelope.vm_id)
+                    .is_some_and(|vm| vm.active_processes.contains_key(&envelope.process_id));
+                if root_exists {
+                    self.vms
+                        .get_mut(&envelope.vm_id)
+                        .and_then(|vm| vm.active_processes.get_mut(&envelope.process_id))
+                        .expect("root process existence checked above")
+                        .queue_pending_execution_event(envelope.event)?;
+                    continue;
+                }
+                let descendant_exists = self.vms.get(&envelope.vm_id).is_some_and(|vm| {
+                    vm.active_processes.keys().any(|root_process_id| {
+                        envelope
+                            .process_id
+                            .strip_prefix(root_process_id)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                    })
+                });
+                if descendant_exists {
+                    // Descendant pumps transfer these envelopes into the
+                    // child's bounded event queue using the slash-qualified
+                    // route. Handling them as a missing root would cancel a
+                    // still-live deferred reply.
+                    self.queue_pending_process_event(envelope)?;
+                } else {
+                    // A stale root completion still owns a reply handle. Fail
+                    // it immediately instead of leaving it in a public queue
+                    // that can no longer have a matching process consumer.
+                    self.handle_execution_event(
+                        &envelope.vm_id,
+                        &envelope.process_id,
+                        envelope.event,
+                    )
+                    .await?;
+                }
+            } else {
+                self.queue_pending_process_event(envelope)?;
+            }
         }
 
         let vm_ids = self.vm_ids_for_scope(ownership)?;
@@ -811,9 +851,7 @@ where
                     {
                         continue;
                     }
-                    self.recheck_root_deferred_guest_wait(&vm_id, &process_id)?;
-                    self.recheck_root_deferred_kernel_poll(&vm_id, &process_id)?;
-                    self.recheck_root_deferred_kernel_read(&vm_id, &process_id)?;
+                    self.recheck_root_deferred_operations(&vm_id, &process_id, false)?;
                     enum ProcessPollResult {
                         Event(Box<Option<PolledExecutionEvent>>),
                         RecoverClosedChannel,
@@ -899,6 +937,28 @@ where
 
             if self.pump_child_process_events(&vm_id).await? {
                 emitted_any = true;
+                // Root waits, descriptor polls, and reads are probed before
+                // descendant execution events in the main pass above. A
+                // descendant exit in this turn can make all three ready by
+                // changing process state, closing pipe writers, and releasing
+                // record locks. Settle those durable kernel transitions in
+                // the same turn instead of relying on a second coalesced
+                // broker edge that another ready branch could absorb.
+                let process_ids = self
+                    .vms
+                    .get(&vm_id)
+                    .map(|vm| vm.active_processes.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                for process_id in process_ids {
+                    if self
+                        .vms
+                        .get(&vm_id)
+                        .is_some_and(|vm| vm.detached_child_processes.contains(&process_id))
+                    {
+                        continue;
+                    }
+                    self.recheck_root_deferred_operations(&vm_id, &process_id, true)?;
+                }
             }
             if self.pump_detached_child_process_events(&vm_id).await? {
                 emitted_any = true;
@@ -907,6 +967,51 @@ where
 
         self.rearm_kernel_reaper_task()?;
         Ok(emitted_any)
+    }
+
+    pub(crate) fn recheck_root_deferred_operations(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        force_probe: bool,
+    ) -> Result<(), SidecarError> {
+        if force_probe {
+            // Descendant progress is itself durable evidence that wait state,
+            // pipe EOF/readiness, or record-lock ownership may have changed.
+            // Do not wait for the notifier task to observe the same generation
+            // transition before probing on the owner thread. Retire its old
+            // registration now; each service below rearms it if still blocked.
+            if let Some(process) = self
+                .vms
+                .get_mut(vm_id)
+                .and_then(|vm| vm.active_processes.get_mut(process_id))
+            {
+                if let Some(task) = process
+                    .deferred_guest_wait
+                    .as_mut()
+                    .and_then(|wait| wait.wake_task.take())
+                {
+                    task.abort();
+                }
+                if let Some(task) = process
+                    .deferred_kernel_poll
+                    .as_mut()
+                    .and_then(|poll| poll.wake_task.take())
+                {
+                    task.abort();
+                }
+                if let Some(task) = process
+                    .deferred_kernel_read
+                    .as_mut()
+                    .and_then(|read| read.wake_task.take())
+                {
+                    task.abort();
+                }
+            }
+        }
+        self.recheck_root_deferred_guest_wait(vm_id, process_id)?;
+        self.recheck_root_deferred_kernel_poll(vm_id, process_id)?;
+        self.recheck_root_deferred_kernel_read(vm_id, process_id)
     }
 
     fn recheck_root_deferred_guest_wait(
@@ -946,6 +1051,7 @@ where
         process_id: &str,
     ) -> Result<(), SidecarError> {
         let notify = Arc::clone(&self.process_event_notify);
+        let wake_lane = host_dispatch::deferred_posix_poll_wake_lane(self, vm_id, process_id)?;
         let socket_paths = self
             .vms
             .get(vm_id)
@@ -984,6 +1090,7 @@ where
                 kernel_readiness,
                 capabilities,
                 managed_descriptions,
+                wake_lane,
                 kernel,
                 process,
                 None,
@@ -1091,6 +1198,9 @@ where
             ActiveExecutionEvent::Common(ExecutionEvent::HostCall { .. })
                 | ActiveExecutionEvent::Common(ExecutionEvent::Warning(_))
                 | ActiveExecutionEvent::HostRpcRequest(_)
+                | ActiveExecutionEvent::HostCallCompletion(_)
+                | ActiveExecutionEvent::DeferredPosixPollWake
+                | ActiveExecutionEvent::ManagedStreamReadRecheck(_)
                 | ActiveExecutionEvent::ManagedUdpPollRecheck(_)
                 | ActiveExecutionEvent::SignalState { .. }
         )
@@ -1484,6 +1594,7 @@ where
                 self.handle_host_call_completion(vm_id, process_id, completion)?;
                 Ok(None)
             }
+            ActiveExecutionEvent::DeferredPosixPollWake => Ok(None),
             ActiveExecutionEvent::ManagedStreamReadRecheck(pending) => {
                 dispatch_claimed_context_stream_read(self, vm_id, process_id, *pending)?;
                 Ok(None)
@@ -1644,6 +1755,10 @@ where
         record_execute_phase("process_exit_cleanup_build_snapshot", phase_start.elapsed());
         let phase_start = Instant::now();
         let detached_children = Self::adopt_detached_child_processes(process_id, &mut process);
+        let detached_process_ids = detached_children
+            .iter()
+            .map(|(detached_process_id, _)| detached_process_id.clone())
+            .collect::<Vec<_>>();
         record_execute_phase("process_exit_cleanup_adopt_detached", phase_start.elapsed());
         let raw_mode_result = release_inherited_child_raw_mode(&mut vm.kernel, &process);
         let phase_start = Instant::now();
@@ -1697,7 +1812,7 @@ where
         let became_idle = vm.active_processes.is_empty();
         record_execute_phase("process_exit_cleanup_became_idle", phase_start.elapsed());
         let phase_start = Instant::now();
-        self.prune_extension_process_resource(process_id);
+        self.transfer_extension_process_resource(process_id, &detached_process_ids);
         record_execute_phase("process_exit_cleanup_prune_resource", phase_start.elapsed());
 
         // The process was removed from active_processes before the fallible

@@ -105,20 +105,20 @@ mod tests {
     fn kernel_command_inventory_tracks_live_files_and_roots() {
         let mut kernel = test_kernel();
         kernel
-            .mkdir("/__secure_exec/commands/001", true)
+            .mkdir("/__agentos/commands/001", true)
             .expect("create first command root");
         kernel
-            .mkdir("/__secure_exec/commands/002/directory", true)
+            .mkdir("/__agentos/commands/002/directory", true)
             .expect("create non-command directory");
         kernel
             .write_file(
-                "/__secure_exec/commands/001/alpha",
+                "/__agentos/commands/001/alpha",
                 b"#!/usr/bin/env node\n".to_vec(),
             )
             .expect("write command");
         kernel
             .write_file(
-                "/__secure_exec/commands/001/.hidden",
+                "/__agentos/commands/001/.hidden",
                 b"#!/usr/bin/env node\n".to_vec(),
             )
             .expect("write hidden entry");
@@ -127,11 +127,11 @@ mod tests {
         assert_eq!(discovered.names, BTreeSet::from([String::from("alpha")]));
         assert_eq!(
             discovered.search_roots,
-            vec![String::from("/__secure_exec/commands/001")]
+            vec![String::from("/__agentos/commands/001")]
         );
 
         kernel
-            .remove_file("/__secure_exec/commands/001/alpha")
+            .remove_file("/__agentos/commands/001/alpha")
             .expect("remove command after initial discovery");
         assert_eq!(
             discover_kernel_commands(&mut kernel),

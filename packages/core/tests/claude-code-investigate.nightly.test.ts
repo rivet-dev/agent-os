@@ -1,22 +1,23 @@
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 import { AgentOs } from "../src/index.js";
+import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 
 /**
- * US-010: Investigate Claude Code SDK projection in the Agent OS VM
+ * US-010: Investigate Claude Agent SDK projection in the agentOS VM
  *
  * FINDINGS SUMMARY:
- * The @anthropic-ai/claude-code package is a ~13MB bundled ESM JavaScript file (cli.js).
+ * The @anthropic-ai/claude-agent-sdk package includes Claude Code's bundled ESM
+ * JavaScript entrypoint (cli.js).
  * Unlike OpenCode (native Go binary), Claude Code is pure JS. The ESM bundle can be
  * loaded (dynamic import succeeds) after runtime fixes, but the CLI cannot complete
  * startup because it depends on native vendor binaries and complex runtime infrastructure.
  *
  * Package characteristics:
- * - bin: { "claude": "cli.js" } — single bundled ESM entry point (~13MB)
+ * - cli.js — bundled ESM entry point (~13MB)
  * - ESM entry point remains loadable via import.meta.url + createRequire()
  * - No "exports" or "main" field — CLI-only package, no library API
- * - dependencies: {} — everything bundled into cli.js
+ * - SDK dependencies plus the bundled Claude Code runtime in cli.js
  * - vendor/ripgrep/ — native ELF binary for code search (Grep tool)
  * - vendor/audio-capture/ — native .node addon for audio (voice features)
  * - Has built-in JSON-RPC / ACP support (speaks ACP natively like OpenCode)
@@ -34,7 +35,7 @@ import { AgentOs } from "../src/index.js";
  * - import.meta.url works correctly for the adapter path we actually ship.
  * - Direct `claude-code` bundle execution still depends on unsupported builtin
  *   surface and native vendor binaries.
- * - Real Claude Agent sessions still force Agent OS ripgrep via env for consistency.
+ * - Real Claude Agent sessions still force agentOS ripgrep via env for consistency.
  *
  * CONCLUSION: Keep these as real regression tests instead of skipping them.
  */
@@ -57,10 +58,10 @@ describe("Claude Code SDK investigation", () => {
 		vm = undefined;
 	}, 60_000);
 
-	test("claude-code package is mounted in VM via the /root/node_modules mount", async () => {
+	test("claude-agent-sdk package is mounted in VM via the /root/node_modules mount", async () => {
 		const script = `
 const fs = require("fs");
-const pkgPath = "/root/node_modules/@anthropic-ai/claude-code/package.json";
+const pkgPath = "/root/node_modules/@anthropic-ai/claude-agent-sdk/package.json";
 const exists = fs.existsSync(pkgPath);
 console.log("exists:" + exists);
 if (exists) {
@@ -89,13 +90,13 @@ if (exists) {
 
 		expect(exitCode, `Failed. stderr: ${stderr}`).toBe(0);
 		expect(stdout).toContain("exists:true");
-		expect(stdout).toContain("name:@anthropic-ai/claude-code");
+		expect(stdout).toContain("name:@anthropic-ai/claude-agent-sdk");
 	}, 30_000);
 
 	test("cli.js entry point is accessible and is ESM", async () => {
 		const script = `
 const fs = require("fs");
-const cliPath = "/root/node_modules/@anthropic-ai/claude-code/cli.js";
+const cliPath = "/root/node_modules/@anthropic-ai/claude-agent-sdk/cli.js";
 const exists = fs.existsSync(cliPath);
 console.log("cli-exists:" + exists);
 if (exists) {
@@ -131,11 +132,11 @@ if (exists) {
 		expect(stdout).toContain("is-esm:true");
 	}, 30_000);
 
-test("vendor ripgrep binary is projected and fails deterministically if executed in the VM", async () => {
+	test("vendor ripgrep binary is projected and fails deterministically if executed in the VM", async () => {
 		// Claude Code bundles native ripgrep (ELF) for code search.
 		// The binary file is accessible via the /root/node_modules mount,
 		// but projected native binaries are not executable guest-side.
-		// Production Claude sessions still force Agent OS ripgrep via env.
+		// Production Claude sessions still force agentOS ripgrep via env.
 		// Note: .node native addons (audio-capture) are blocked by the
 		// module loader itself (ERR_MODULE_ACCESS_NATIVE_ADDON).
 		const script = `
@@ -146,7 +147,7 @@ const os = require("os");
 const platform = os.platform();
 const arch = os.arch();
 
-const rgPath = "/root/node_modules/@anthropic-ai/claude-code/vendor/ripgrep/" + arch + "-" + platform + "/rg";
+const rgPath = "/root/node_modules/@anthropic-ai/claude-agent-sdk/vendor/ripgrep/" + arch + "-" + platform + "/rg";
 const rgExists = fs.existsSync(rgPath);
 console.log("rg-exists:" + rgExists);
 
@@ -204,7 +205,7 @@ if (rgExists) {
 	}, 30_000);
 
 	test("import.meta.url works correctly in VM ESM modules", async () => {
-		// Agent OS fix: Added HostInitializeImportMetaObjectCallback to V8 runtime
+		// agentOS fix: Added HostInitializeImportMetaObjectCallback to V8 runtime
 		// so import.meta.url returns a proper file: URL. Claude Code uses
 		// createRequire(import.meta.url) which requires this to be a valid URL.
 		const script = `
@@ -235,7 +236,7 @@ try {
 	}, 30_000);
 
 	test("cli.js ESM bundle import attempt returns a deterministic result", async () => {
-		// Agent OS fixes verified: After adding ESM wrappers for deferred
+		// agentOS fixes verified: After adding ESM wrappers for deferred
 		// core modules (async_hooks, perf_hooks, etc.), path submodules
 		// (path/win32, path/posix), stream/consumers, and the import.meta.url
 		// callback, the 13MB ESM bundle loads successfully via dynamic import.
@@ -248,7 +249,7 @@ try {
 async function main() {
   try {
     console.log("attempting-import");
-    const mod = await import("/root/node_modules/@anthropic-ai/claude-code/cli.js");
+    const mod = await import("/root/node_modules/@anthropic-ai/claude-agent-sdk/cli.js");
     console.log("import-success");
     console.log("exports:" + Object.keys(mod).join(","));
   } catch (e) {
@@ -284,11 +285,11 @@ main();
 	}, 30_000);
 
 	test("cli.js --version exits promptly inside the VM", async () => {
-		// Direct claude-code execution is not the supported session path yet,
+		// Direct Claude Code execution is not the supported session path yet,
 		// but the probe should exit promptly rather than hanging indefinitely.
 		let stdout = "";
 
-		const cliPath = "/root/node_modules/@anthropic-ai/claude-code/cli.js";
+		const cliPath = "/root/node_modules/@anthropic-ai/claude-agent-sdk/cli.js";
 
 		const { pid } = vm.spawn("node", [cliPath, "--version"], {
 			onStdout: (data: Uint8Array) => {

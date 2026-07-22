@@ -308,8 +308,11 @@ impl WasmtimeExecution {
                             })),
                     )
                 })?;
-            let profile = WasmtimeEngineProfile::new_threaded(request.limits.max_stack_bytes)
-                .map_err(WasmExecutionError::Host)?;
+            let profile = WasmtimeEngineProfile::new_threaded_with_deterministic_fuel(
+                request.limits.max_stack_bytes,
+                request.limits.deterministic_fuel.is_some(),
+            )
+            .map_err(WasmExecutionError::Host)?;
             let async_stack_bytes = profile
                 .async_stack_bytes()
                 .map_err(WasmExecutionError::Host)?;
@@ -623,10 +626,17 @@ async fn run_execution(
         return super::worker::run_worker_process(bytes, request, host, control).await;
     }
     let engine_started = Instant::now();
+    let deterministic_fuel = request.limits.deterministic_fuel.is_some();
     let profile = if threaded {
-        WasmtimeEngineProfile::new_threaded(request.limits.max_stack_bytes)?
+        WasmtimeEngineProfile::new_threaded_with_deterministic_fuel(
+            request.limits.max_stack_bytes,
+            deterministic_fuel,
+        )?
     } else {
-        WasmtimeEngineProfile::new(request.limits.max_stack_bytes)?
+        WasmtimeEngineProfile::new_with_deterministic_fuel(
+            request.limits.max_stack_bytes,
+            deterministic_fuel,
+        )?
     };
     let engine = WasmtimeEngineRegistry::process().get_or_create(profile)?;
     diagnostics.phase("Engine", engine_started.elapsed());
@@ -747,6 +757,12 @@ async fn run_loaded_module_bytes(
     diagnostics.module(bytes.len(), compiled.cache_hit);
     let mut module = compiled.module;
     let mut request = request;
+    // The launch request contains trusted runtime-only AGENTOS_* transport
+    // fields that must be hidden from the first image. An exec replacement's
+    // environment was constructed by guest libc and is already guest-visible;
+    // filtering it again would incorrectly delete ordinary variables whose
+    // names happen to use that prefix.
+    let mut environment_is_guest_visible = false;
     let import_validation_started = Instant::now();
     let threaded = matches!(
         profile.feature_profile,
@@ -769,6 +785,7 @@ async fn run_loaded_module_bytes(
                 profile,
                 Arc::clone(&paused),
                 Arc::clone(&pause_notify),
+                environment_is_guest_visible,
             )?)
         } else {
             None
@@ -779,7 +796,7 @@ async fn run_loaded_module_bytes(
             eprintln!("ERR_AGENTOS_WASMTIME_LINKER: private linker diagnostic: {error:#}");
             HostServiceError::new(
                 "ERR_AGENTOS_WASMTIME_LINKER",
-                "failed to build the AgentOS WebAssembly host linker",
+                "failed to build the agentOS WebAssembly host linker",
             )
         })?;
         diagnostics.phase("Linker", linker_started.elapsed());
@@ -793,6 +810,7 @@ async fn run_loaded_module_bytes(
             active_cpu_started_ns,
             Arc::clone(&paused),
             Arc::clone(&pause_notify),
+            environment_is_guest_visible,
             matches!(
                 profile.feature_profile,
                 super::engine::WasmtimeFeatureProfile::AgentOsOwnedWasiV1Threads
@@ -885,6 +903,7 @@ async fn run_loaded_module_bytes(
                 if let Some(replacement) = store.data_mut().pending_exec_replacement.take() {
                     request.argv = replacement.argv;
                     request.env = replacement.env;
+                    environment_is_guest_visible = true;
                     module = replacement.module;
                     linker::validate_module_imports(&module, request.permission_tier, threaded)?;
                     let teardown_started = Instant::now();
@@ -950,7 +969,10 @@ pub(super) async fn run_worker_loaded_module(
         Arc::clone(runtime.resources()),
         events,
     );
-    let profile = WasmtimeEngineProfile::new_threaded(request.limits.max_stack_bytes)?;
+    let profile = WasmtimeEngineProfile::new_threaded_with_deterministic_fuel(
+        request.limits.max_stack_bytes,
+        request.limits.deterministic_fuel.is_some(),
+    )?;
     let engine = WasmtimeEngineRegistry::process().get_or_create(profile)?;
     run_loaded_module_bytes(
         String::from("<thread-worker>"),
@@ -1672,6 +1694,190 @@ mod tests {
         reply
             .succeed_json(serde_json::json!(5))
             .expect("write reply");
+        assert_eq!(
+            execution
+                .poll_event_blocking(Duration::from_secs(10))
+                .expect("exit event"),
+            Some(WasmExecutionEvent::Exited(0))
+        );
+        host_worker.join().expect("host worker");
+    }
+
+    #[test]
+    fn native_preview1_blocking_write_waits_for_readiness_after_eagain() {
+        let runtime = SidecarRuntime::process(&RuntimeConfig::default())
+            .expect("test runtime")
+            .context();
+        let module = wat::parse_str(
+            r#"(module
+                (import "wasi_snapshot_preview1" "fd_write"
+                    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 32) "hello")
+                (func (export "_start")
+                    (i32.store (i32.const 8) (i32.const 32))
+                    (i32.store (i32.const 12) (i32.const 5))
+                    (if (i32.ne
+                        (call $fd_write
+                            (i32.const 4) (i32.const 8) (i32.const 1) (i32.const 16))
+                        (i32.const 0))
+                        (then unreachable))
+                    (if (i32.ne (i32.load (i32.const 16)) (i32.const 5))
+                        (then unreachable))))"#,
+        )
+        .expect("test module");
+        let request = StartWasmExecutionRequest {
+            vm_id: String::from("vm-blocking-write"),
+            context_id: String::from("ctx-blocking-write"),
+            managed_kernel_host: true,
+            argv: vec![String::from("/blocking-write.wasm")],
+            env: BTreeMap::new(),
+            cwd: PathBuf::from("/"),
+            permission_tier: WasmPermissionTier::Full,
+            limits: WasmExecutionLimits::default(),
+            guest_runtime: GuestRuntimeConfig::default(),
+        };
+        let process = crate::host::HostProcessContext {
+            generation: 9,
+            pid: 44,
+        };
+        let (submission, host_events) = bounded_execution_event_channel(
+            process,
+            16,
+            PayloadLimit::new("limits.process.pendingEventBytes", 1024 * 1024)
+                .expect("event byte limit"),
+            Arc::new(|| {}),
+        )
+        .expect("host event channel");
+        let module_for_host = module.clone();
+        let host_worker = std::thread::spawn(move || {
+            let mut completed = 0;
+            while completed < 5 {
+                let Some(event) = host_events.try_recv().expect("host event poll") else {
+                    std::thread::yield_now();
+                    continue;
+                };
+                let ExecutionEvent::HostCall { operation, reply } = event else {
+                    panic!("unexpected non-host event");
+                };
+                match operation {
+                    HostOperation::Filesystem(FilesystemOperation::CanonicalPreopens) => reply
+                        .succeed_json(Value::Null)
+                        .expect("canonical-preopens reply"),
+                    HostOperation::Process(ProcessOperation::OpenExecutableImage { .. }) => reply
+                        .succeed_json(serde_json::json!({
+                            "handle": "1",
+                            "size": module_for_host.len(),
+                        }))
+                        .expect("open reply"),
+                    HostOperation::Process(ProcessOperation::ReadExecutableImage {
+                        offset,
+                        max_bytes,
+                        ..
+                    }) => {
+                        let start = offset as usize;
+                        let end = start
+                            .saturating_add(max_bytes.get())
+                            .min(module_for_host.len());
+                        reply
+                            .succeed_raw(module_for_host[start..end].to_vec())
+                            .expect("read reply");
+                    }
+                    HostOperation::Process(ProcessOperation::CloseExecutableImage { .. }) => {
+                        reply.succeed_json(Value::Null).expect("close reply");
+                    }
+                    HostOperation::Signal(crate::host::SignalOperation::UpdateMask { .. }) => {
+                        reply
+                            .succeed_json(serde_json::json!({ "signals": [] }))
+                            .expect("signal-mask reply");
+                    }
+                    operation => panic!("unexpected host operation: {operation:?}"),
+                }
+                completed += 1;
+            }
+        });
+        let execution = WasmtimeExecution::spawn(
+            String::from("exec-blocking-write-test"),
+            String::from("/blocking-write.wasm"),
+            request,
+            runtime,
+            None,
+            false,
+            false,
+        )
+        .expect("spawn executor");
+        execution
+            .configure_host_services(ProcessHostCapabilitySet::from_event_submission(submission));
+        let expected_methods = [
+            "__kernel_stdio_write",
+            "process.fd_write",
+            "process.fd_stat",
+            "process.posix_poll",
+            "__kernel_stdio_write",
+            "process.fd_write",
+        ];
+        for (index, expected_method) in expected_methods.into_iter().enumerate() {
+            let event = execution
+                .poll_event_blocking(Duration::from_secs(10))
+                .expect("host-call event")
+                .expect("host-call event present");
+            let WasmExecutionEvent::HostCall { request, reply } = event else {
+                panic!("unexpected execution event: {event:?}");
+            };
+            assert_eq!(request.method, expected_method);
+            match index {
+                0 | 1 | 4 | 5 => {
+                    assert_eq!(request.args.first(), Some(&serde_json::json!(4)));
+                    assert_eq!(request.raw_bytes_args.get(&1), Some(&b"hello".to_vec()));
+                }
+                2 => assert_eq!(request.args, vec![serde_json::json!(4)]),
+                3 => {
+                    assert_eq!(
+                        request.args.first(),
+                        Some(&serde_json::json!([{"fd": 4, "events": 0x104}]))
+                    );
+                    assert!(request
+                        .args
+                        .get(1)
+                        .and_then(Value::as_u64)
+                        .is_some_and(|timeout_ms| timeout_ms > 0));
+                }
+                _ => unreachable!("expected method index"),
+            }
+            match index {
+                0 | 4 => reply
+                    .fail(HostServiceError::new(
+                        "EINVAL",
+                        "ordinary descriptor is not stdio",
+                    ))
+                    .expect("stdio fallback reply"),
+                1 => reply
+                    .fail(HostServiceError::new("EAGAIN", "pipe is full"))
+                    .expect("backpressure reply"),
+                2 => reply
+                    .succeed_json(serde_json::json!({
+                        "filetype": 0,
+                        "flags": 0,
+                        "rightsBase": 0,
+                        "rightsInheriting": 0,
+                    }))
+                    .expect("descriptor status reply"),
+                3 => reply
+                    .succeed_json(serde_json::json!({
+                        "readyCount": 1,
+                        "targets": [{
+                            "fd": 4,
+                            "events": 0x104,
+                            "revents": 0x004,
+                        }],
+                    }))
+                    .expect("poll reply"),
+                5 => reply
+                    .succeed_json(serde_json::json!(5))
+                    .expect("write reply"),
+                _ => unreachable!("expected method index"),
+            }
+        }
         assert_eq!(
             execution
                 .poll_event_blocking(Duration::from_secs(10))

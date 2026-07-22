@@ -54,10 +54,10 @@ describe("guest http.request transport", () => {
 			'  socket.on("data", (chunk) => {',
 			"    buffered += chunk;",
 			'    if (!buffered.includes("\\r\\n\\r\\n")) return;',
-			'    socket.end([',
+			"    socket.end([",
 			'      "HTTP/1.1 200 OK",',
 			'      "Content-Type: application/json",',
-			'      `Content-Length: ${Buffer.byteLength(body)}`,',
+			"      `Content-Length: ${Buffer.byteLength(body)}`,",
 			'      "Connection: close",',
 			'      "",',
 			"      body,",
@@ -71,7 +71,7 @@ describe("guest http.request transport", () => {
 			"    process.exit(1);",
 			"    return;",
 			"  }",
-			'  const req = http.get(`http://127.0.0.1:${address.port}/transport-check`, (res) => {',
+			"  const req = http.get(`http://127.0.0.1:${address.port}/transport-check`, (res) => {",
 			'    let responseBody = "";',
 			'    res.setEncoding("utf8");',
 			'    res.on("data", (chunk) => {',
@@ -79,12 +79,12 @@ describe("guest http.request transport", () => {
 			"    });",
 			'    res.on("end", () => {',
 			"      console.log(JSON.stringify({ statusCode: res.statusCode, body: responseBody }));",
-			'      server.close(() => process.exit(0));',
+			"      server.close(() => process.exit(0));",
 			"    });",
 			"  });",
 			'  req.on("error", (error) => {',
-			'    console.error(error?.stack ?? String(error));',
-			'    server.close(() => process.exit(1));',
+			"    console.error(error?.stack ?? String(error));",
+			"    server.close(() => process.exit(1));",
 			"  });",
 			"});",
 		].join("\n");
@@ -176,11 +176,11 @@ describe("guest http.request transport", () => {
 			'const http = require("node:http");',
 			"void (async () => {",
 			"const server = http.createServer((request, response) => {",
-			'  response.end(`self:${request.url}`);',
+			"  response.end(`self:${request.url}`);",
 			"});",
 			'await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });',
 			"const address = server.address();",
-			'const response = await fetch(`http://127.0.0.1:${address.port}/self-fetch`);',
+			"const response = await fetch(`http://127.0.0.1:${address.port}/self-fetch`);",
 			"console.log(await response.text());",
 			"await new Promise((resolve) => server.close(resolve));",
 			"})();",
@@ -191,6 +191,48 @@ describe("guest http.request transport", () => {
 		expect(result, result.stderr).toMatchObject({
 			exitCode: 0,
 			stdout: "self:/self-fetch\n",
+			stderr: "",
+		});
+	});
+
+	test("buffers a request body until async server middleware attaches listeners", async () => {
+		vm = await AgentOs.create({
+			permissions: {
+				fs: "allow",
+				network: "allow",
+				childProcess: "allow",
+			},
+		});
+
+		const script = [
+			'const http = require("node:http");',
+			"void (async () => {",
+			"const server = http.createServer((request, response) => {",
+			"  setTimeout(() => {",
+			'    let body = "";',
+			'    request.setEncoding("utf8");',
+			'    request.on("data", (chunk) => { body += chunk; });',
+			'    request.on("end", () => response.end(body));',
+			"  }, 25);",
+			"});",
+			'await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });',
+			"const address = server.address();",
+			'const payload = JSON.stringify({ delayed: true, value: "retained" });',
+			"const response = await fetch(`http://127.0.0.1:${address.port}/delayed-body`, {",
+			'  method: "POST",',
+			'  headers: { "content-type": "application/json" },',
+			"  body: payload,",
+			"});",
+			"console.log(await response.text());",
+			"await new Promise((resolve) => server.close(resolve));",
+			"})().catch((error) => { console.error(error?.stack ?? String(error)); process.exit(1); });",
+		].join("\n");
+
+		const result = await runSpawnedProcess(vm, "node", ["-e", script]);
+
+		expect(result, result.stderr).toMatchObject({
+			exitCode: 0,
+			stdout: '{"delayed":true,"value":"retained"}\n',
 			stderr: "",
 		});
 	});
@@ -215,12 +257,12 @@ describe("guest http.request transport", () => {
 			'    response.write("data: ready\\n\\n");',
 			"    return;",
 			"  }",
-			'  response.end(`control:${request.url}`);',
+			"  response.end(`control:${request.url}`);",
 			"});",
 			'await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });',
 			"const address = server.address();",
 			"const abort = new AbortController();",
-			'const events = await fetch(`http://127.0.0.1:${address.port}/events`, { signal: abort.signal });',
+			"const events = await fetch(`http://127.0.0.1:${address.port}/events`, { signal: abort.signal });",
 			"const reader = events.body.getReader();",
 			"await reader.read();",
 			"const controls = [];",
@@ -241,7 +283,8 @@ describe("guest http.request transport", () => {
 
 		expect(result, result.stderr).toMatchObject({
 			exitCode: 0,
-			stdout: "control:/control-0,control:/control-1,control:/control-2,control:/control-3,control:/control-4\n",
+			stdout:
+				"control:/control-0,control:/control-1,control:/control-2,control:/control-3,control:/control-4\n",
 			stderr: "",
 		});
 	});
@@ -265,7 +308,7 @@ describe("guest http.request transport", () => {
 			'  await fs.mkdir("/workspace/nested-fs", { recursive: true });',
 			'  const fd = fsSync.openSync("/workspace/nested-fs/session.jsonl", "wx");',
 			'  try { fsSync.writeFileSync(fd, "first\\n"); fsSync.writeFileSync(fd, "second\\n"); }',
-			'  finally { fsSync.closeSync(fd); }',
+			"  finally { fsSync.closeSync(fd); }",
 			'  await fs.writeFile("/workspace/nested-fs/result.txt", "nested-ok", "utf8");',
 			'  console.log(await fs.readFile("/workspace/nested-fs/result.txt", "utf8"));',
 			'  console.log((await fs.readFile("/workspace/nested-fs/session.jsonl", "utf8")).trim());',
@@ -293,7 +336,9 @@ describe("guest http.request transport", () => {
 			response.write("data: first\n\n");
 			setTimeout(() => response.end("data: done\n\n"), 100);
 		});
-		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		await new Promise<void>((resolve) =>
+			server.listen(0, "127.0.0.1", resolve),
+		);
 		const address = server.address();
 		if (!address || typeof address === "string") {
 			throw new Error("missing host TCP address");
@@ -363,7 +408,9 @@ describe("guest http.request transport", () => {
 			}
 			response.end();
 		});
-		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		await new Promise<void>((resolve) =>
+			server.listen(0, "127.0.0.1", resolve),
+		);
 		const address = server.address();
 		if (!address || typeof address === "string") {
 			throw new Error("missing host TCP address");

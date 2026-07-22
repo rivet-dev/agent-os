@@ -1,15 +1,14 @@
 import { chunkedS3MountPlugin } from "@rivet-dev/agentos-runtime-core/descriptors";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/index.js";
-import type {
-	MockS3Request,
-	MockS3ServerHandle,
-} from "./helpers/mock-s3.js";
+import type { MockS3Request, MockS3ServerHandle } from "./helpers/mock-s3.js";
 import { startMockS3Server } from "./helpers/mock-s3.js";
 
 const DATA_DIR = "/mnt/data";
 const NOTES_PATH = `${DATA_DIR}/notes.txt`;
-const NOTES_CONTENT = "Hello from agentOS!";
+// The chunked engine keeps files at or below 64 KiB in SQLite metadata. Use a
+// larger payload so this integration test actually exercises the S3 block path.
+const NOTES_CONTENT = "Hello from agentOS!".repeat(4_096);
 const ALLOW_LOCAL_S3_ENDPOINTS_ENV = "AGENT_OS_ALLOW_LOCAL_S3_ENDPOINTS";
 const skipS3 = process.env.SKIP_S3 === "1";
 
@@ -78,56 +77,53 @@ describe("S3 filesystem quickstart truth test", () => {
 		if (previousAllowLocalS3Endpoints == null) {
 			delete process.env[ALLOW_LOCAL_S3_ENDPOINTS_ENV];
 		} else {
-			process.env[ALLOW_LOCAL_S3_ENDPOINTS_ENV] =
-				previousAllowLocalS3Endpoints;
+			process.env[ALLOW_LOCAL_S3_ENDPOINTS_ENV] = previousAllowLocalS3Endpoints;
 		}
 	});
 
-	test(
-		"round-trips writeFile, readFile, and readdir through createS3Backend",
-		async () => {
-			if (!server) {
-				throw new Error("Mock S3 test harness did not start.");
-			}
-			const vmPrefix = `quickstart-${Date.now()}`;
+	test("round-trips writeFile, readFile, and readdir through createS3Backend", async () => {
+		if (!server) {
+			throw new Error("Mock S3 test harness did not start.");
+		}
+		const vmPrefix = `quickstart-${Date.now()}`;
 
-			vm = await AgentOs.create({
-				mounts: [
-					{
-						path: DATA_DIR,
-						plugin: createMount(server, vmPrefix),
-					},
-				],
-			});
+		vm = await AgentOs.create({
+			mounts: [
+				{
+					path: DATA_DIR,
+					plugin: createMount(server, vmPrefix),
+				},
+			],
+		});
 
-			await vm.writeFile(NOTES_PATH, NOTES_CONTENT);
+		await vm.writeFile(NOTES_PATH, NOTES_CONTENT);
 
-			const content = await vm.readFile(NOTES_PATH);
-			expect(new TextDecoder().decode(content)).toBe(NOTES_CONTENT);
+		const content = await vm.readFile(NOTES_PATH);
+		expect(new TextDecoder().decode(content)).toBe(NOTES_CONTENT);
 
-			const files = (await vm.readdir(DATA_DIR)).filter(
-				(entry) => entry !== "." && entry !== "..",
-			);
-			expect(files).toContain("notes.txt");
+		const files = (await vm.readdir(DATA_DIR)).filter(
+			(entry) => entry !== "." && entry !== "..",
+		);
+		expect(files).toContain("notes.txt");
 
-			const requestMethods = server.requests().map(
-				(request: MockS3Request) => request.method,
-			);
-			expect(requestMethods.length).toBeGreaterThan(0);
-			expect(
-				requestMethods.every((method) => ["GET", "PUT"].includes(method)),
-			).toBe(true);
-			expect(
-				server
-					.requests()
-					.every(
-						(request: MockS3Request) =>
-							request.path.startsWith(`/${server.bucket}/${vmPrefix}/`) &&
-							(request.query === "x-id=GetObject" ||
-								request.query === "x-id=PutObject"),
-					),
-			).toBe(true);
-		},
-		120_000,
-	);
+		const requestMethods = server
+			.requests()
+			.map((request: MockS3Request) => request.method);
+		expect(requestMethods.length).toBeGreaterThan(0);
+		expect(
+			requestMethods.every((method) => ["GET", "HEAD", "PUT"].includes(method)),
+		).toBe(true);
+		expect(
+			server
+				.requests()
+				.every(
+					(request: MockS3Request) =>
+						request.path.startsWith(`/${server.bucket}/${vmPrefix}/`) &&
+						(request.query === "" ||
+							request.query === "x-id=GetObject" ||
+							request.query === "x-id=HeadObject" ||
+							request.query === "x-id=PutObject"),
+				),
+		).toBe(true);
+	}, 120_000);
 });

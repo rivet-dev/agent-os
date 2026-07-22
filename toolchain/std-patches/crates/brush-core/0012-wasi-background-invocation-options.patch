@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Runtime <runtime@agentos.invalid>
+Date: Wed, 22 Jul 2026 05:38:00 -0700
+Subject: [PATCH] brush-core: omit invocation flags from background state
+
+The `i` and `s` entries in Brush's set-option registry describe how the shell
+was invoked; Bash does not accept `set +/-i` or `set +/-s` at runtime.  The
+WASI background-child serializer emitted both commands while reconstructing a
+real child shell.  Brush's set builtin consequently treated `--+s` as a new
+positional parameter, so a background command using `"$@"` lost its real
+arguments and received only `--+s`.
+
+Do not serialize invocation-only state.  Background children are deliberately
+non-interactive and execute their generated source through `-c`, so neither
+flag is transferable child state.
+
+diff --git a/src/interp.rs b/src/interp.rs
+index 6ad61d7..07bdc41 100644
+--- a/src/interp.rs
++++ b/src/interp.rs
+@@ -394,5 +394,6 @@ fn background_child_source(
+     for option in crate::namedoptions::options(crate::namedoptions::ShellOptionKind::Set)
+         .iter()
++        .filter(|option| !matches!(option.name, "i" | "s"))
+         .sorted_by_key(|option| option.name)
+     {
+         let sign = if option.definition.get(&shell.options) {
+-- 
+2.39.5

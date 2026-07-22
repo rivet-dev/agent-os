@@ -71,7 +71,7 @@ async fn every_public_wasm_backend_selector_executes_projected_commands() {
         .await
         .expect("create VM for explicit WASM backend");
         let result = os
-            .exec("printf selector | tr a-z A-Z", ExecOptions::default())
+            .exec_process("printf selector | tr a-z A-Z", ExecOptions::default())
             .await
             .expect("execute projected command through selected backend");
         assert_eq!(

@@ -333,7 +333,7 @@ fn dns_resolution_to_node_value(
             resolution
                 .records()
                 .iter()
-                .filter_map(|record| match record.data() {
+                .filter_map(|record| match &record.data {
                     RData::MX(mx) => Some(json!({
                         "priority": mx.preference,
                         "exchange": normalize_dns_name_for_node(&mx.exchange),
@@ -347,7 +347,7 @@ fn dns_resolution_to_node_value(
             resolution
                 .records()
                 .iter()
-                .filter_map(|record| match record.data() {
+                .filter_map(|record| match &record.data {
                     RData::TXT(txt) => Some(Value::Array(
                         txt.txt_data
                             .iter()
@@ -362,7 +362,7 @@ fn dns_resolution_to_node_value(
             resolution
                 .records()
                 .iter()
-                .filter_map(|record| match record.data() {
+                .filter_map(|record| match &record.data {
                     RData::SRV(srv) => Some(json!({
                         "priority": srv.priority,
                         "weight": srv.weight,
@@ -378,7 +378,7 @@ fn dns_resolution_to_node_value(
             resolution
                 .records()
                 .iter()
-                .filter_map(|record| match record.data() {
+                .filter_map(|record| match &record.data {
                     RData::CNAME(name) => Some(Value::String(normalize_dns_name_for_node(&name.0))),
                     _ => None,
                 })
@@ -388,7 +388,7 @@ fn dns_resolution_to_node_value(
             resolution
                 .records()
                 .iter()
-                .filter_map(|record| match record.data() {
+                .filter_map(|record| match &record.data {
                     RData::PTR(name) => Some(Value::String(normalize_dns_name_for_node(&name.0))),
                     _ => None,
                 })
@@ -398,7 +398,7 @@ fn dns_resolution_to_node_value(
             resolution
                 .records()
                 .iter()
-                .filter_map(|record| match record.data() {
+                .filter_map(|record| match &record.data {
                     RData::NS(name) => Some(Value::String(normalize_dns_name_for_node(&name.0))),
                     _ => None,
                 })
@@ -407,7 +407,7 @@ fn dns_resolution_to_node_value(
         "SOA" => resolution
             .records()
             .iter()
-            .find_map(|record| match record.data() {
+            .find_map(|record| match &record.data {
                 RData::SOA(soa) => Some(json!({
                     "nsname": normalize_dns_name_for_node(&soa.mname),
                     "hostmaster": normalize_dns_name_for_node(&soa.rname),
@@ -426,7 +426,7 @@ fn dns_resolution_to_node_value(
             resolution
                 .records()
                 .iter()
-                .filter_map(|record| match record.data() {
+                .filter_map(|record| match &record.data {
                     RData::NAPTR(naptr) => Some(json!({
                         "flags": String::from_utf8_lossy(&naptr.flags).into_owned(),
                         "service": String::from_utf8_lossy(&naptr.services).into_owned(),
@@ -443,7 +443,7 @@ fn dns_resolution_to_node_value(
             resolution
                 .records()
                 .iter()
-                .filter_map(|record| match record.data() {
+                .filter_map(|record| match &record.data {
                     RData::CAA(caa) => {
                         let mut value = serde_json::Map::new();
                         value.insert(
@@ -530,7 +530,7 @@ fn dns_resolution_ip_addrs(records: &[Record]) -> Option<Vec<IpAddr>> {
 }
 
 fn dns_record_ip_addr(record: &Record) -> Option<IpAddr> {
-    match record.data() {
+    match &record.data {
         RData::A(address) => Some(IpAddr::V4(**address)),
         RData::AAAA(address) => Some(IpAddr::V6(**address)),
         _ => None,
@@ -543,10 +543,10 @@ fn dns_record_ip_string(record: &Record, safe_ips: &BTreeSet<IpAddr>) -> Option<
 }
 
 fn dns_any_record_to_value(record: &Record, safe_ips: &BTreeSet<IpAddr>) -> Option<Value> {
-    let value = match record.data() {
+    let value = match &record.data {
         RData::A(_) | RData::AAAA(_) => json!({
             "address": dns_record_ip_string(record, safe_ips)?,
-            "ttl": record.ttl(),
+            "ttl": record.ttl,
             "type": record.record_type().to_string(),
         }),
         RData::MX(mx) => json!({
@@ -644,9 +644,9 @@ fn normalize_dns_name_for_node(name: &impl ToString) -> String {
 }
 
 fn summarize_dns_record(record: &Record) -> String {
-    match record.data() {
-        RData::A(_) | RData::AAAA(_) => record.data().to_string(),
-        _ => format!("{} {}", record.record_type(), record.data()),
+    match &record.data {
+        RData::A(_) | RData::AAAA(_) => record.data.to_string(),
+        _ => format!("{} {}", record.record_type(), record.data),
     }
 }
 
@@ -667,7 +667,7 @@ fn dns_raw_rr_response(resolution: &DnsRecordResolution, requested_type: &str) -
         .records()
         .iter()
         .filter_map(|record| {
-            let data = match record.data() {
+            let data = match &record.data {
                 RData::PTR(name) if requested_type == "PTR" => {
                     normalize_dns_name_for_node(&name.0).into_bytes()
                 }
@@ -682,7 +682,7 @@ fn dns_raw_rr_response(resolution: &DnsRecordResolution, requested_type: &str) -
             };
             Some(json!({
                 "data": base64::engine::general_purpose::STANDARD.encode(data),
-                "ttl": record.ttl(),
+                "ttl": record.ttl,
             }))
         })
         .collect::<Vec<_>>();

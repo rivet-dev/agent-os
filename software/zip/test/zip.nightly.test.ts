@@ -10,12 +10,12 @@ import {
 	createInMemoryFileSystem,
 	createKernel,
 	createWasmVmRuntime,
-	describeIf,
+	describeIf, wasmBackendTestTimeout,
 	hasCWasmBinaries,
 	type Kernel,
 } from "@rivet-dev/agentos-test-harness";
 
-describeIf(hasCWasmBinaries("zip"), "zip command", { timeout: 10_000 }, () => {
+describeIf(hasCWasmBinaries("zip"), "zip command", { timeout: wasmBackendTestTimeout(10_000, 30_000) }, () => {
 	let kernel: Kernel;
 
 	afterEach(async () => {

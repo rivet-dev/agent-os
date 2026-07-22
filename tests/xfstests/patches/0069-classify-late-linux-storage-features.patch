@@ -1,0 +1,256 @@
+diff --git a/tests/generic/673 b/tests/generic/673
+--- a/tests/generic/673
++++ b/tests/generic/673
+@@ -9,6 +9,8 @@
+ . ./common/preamble
+ _begin_fstest auto clone quick perms
+ 
++_notrun "agentOS does not support reflink copy-on-write"
++
+ # Import common functions.
+ . ./common/filter
+ . ./common/reflink
+diff --git a/tests/generic/674 b/tests/generic/674
+--- a/tests/generic/674
++++ b/tests/generic/674
+@@ -9,6 +9,8 @@
+ . ./common/preamble
+ _begin_fstest auto clone quick perms dedupe
+ 
++_notrun "agentOS does not support extent deduplication"
++
+ # Import common functions.
+ . ./common/filter
+ . ./common/reflink
+diff --git a/tests/generic/675 b/tests/generic/675
+--- a/tests/generic/675
++++ b/tests/generic/675
+@@ -9,6 +9,8 @@
+ . ./common/preamble
+ _begin_fstest auto clone quick
+ 
++_notrun "agentOS does not support reflink copy-on-write"
++
+ # Import common functions.
+ . ./common/filter
+ . ./common/reflink
+diff --git a/tests/generic/677 b/tests/generic/677
+--- a/tests/generic/677
++++ b/tests/generic/677
+@@ -11,4 +11,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick log prealloc fiemap
+ 
++_notrun "agentOS does not expose Linux device-mapper fault targets"
++
+ _cleanup()
+diff --git a/tests/generic/678 b/tests/generic/678
+--- a/tests/generic/678
++++ b/tests/generic/678
+@@ -13,6 +13,8 @@
+ . ./common/preamble
+ _begin_fstest auto quick io_uring
+ 
++_notrun "agentOS does not expose Linux io_uring"
++
+ # Override the default cleanup function.
+ _cleanup()
+ {
+diff --git a/tests/generic/681 b/tests/generic/681
+--- a/tests/generic/681
++++ b/tests/generic/681
+@@ -14,6 +14,8 @@
+ . ./common/preamble
+ _begin_fstest auto quick quota
+ 
++_notrun "agentOS does not support filesystem quotas"
++
+ # Import common functions.
+ . ./common/filter
+ . ./common/quota
+diff --git a/tests/generic/682 b/tests/generic/682
+--- a/tests/generic/682
++++ b/tests/generic/682
+@@ -14,6 +14,8 @@
+ . ./common/preamble
+ _begin_fstest auto quick quota
+ 
++_notrun "agentOS does not support filesystem quotas"
++
+ # Import common functions.
+ . ./common/filter
+ . ./common/quota
+diff --git a/tests/generic/688 b/tests/generic/688
+--- a/tests/generic/688
++++ b/tests/generic/688
+@@ -9,6 +9,8 @@
+ . ./common/preamble
+ _begin_fstest auto prealloc quick
+ 
++_notrun "agentOS does not support Linux file capabilities"
++
+ # Override the default cleanup function.
+ _cleanup()
+ {
+diff --git a/tests/generic/689 b/tests/generic/689
+--- a/tests/generic/689
++++ b/tests/generic/689
+@@ -13,4 +13,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick perms idmapped
+ 
++_notrun "agentOS does not expose Linux idmapped mounts"
++
+ # Import common functions.
+diff --git a/tests/generic/690 b/tests/generic/690
+--- a/tests/generic/690
++++ b/tests/generic/690
+@@ -17,4 +17,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick log
+ 
++_notrun "agentOS does not expose Linux device-mapper fault targets"
++
+ _cleanup()
+diff --git a/tests/generic/692 b/tests/generic/692
+--- a/tests/generic/692
++++ b/tests/generic/692
+@@ -15,4 +15,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick verity
+ 
++_notrun "agentOS does not support fs-verity"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/693 b/tests/generic/693
+--- a/tests/generic/693
++++ b/tests/generic/693
+@@ -13,6 +13,8 @@
+ . ./common/preamble
+ _begin_fstest auto quick encrypt
+ 
++_notrun "agentOS does not support fscrypt"
++
+ # Import common functions.
+ . ./common/filter
+ . ./common/encrypt
+diff --git a/tests/generic/695 b/tests/generic/695
+--- a/tests/generic/695
++++ b/tests/generic/695
+@@ -14,4 +14,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick log punch fiemap
+ 
++_notrun "agentOS does not expose Linux device-mapper fault targets"
++
+ _cleanup()
+diff --git a/tests/generic/696 b/tests/generic/696
+--- a/tests/generic/696
++++ b/tests/generic/696
+@@ -14,6 +14,8 @@
+ . ./common/preamble
+ _begin_fstest auto quick cap idmapped mount perms rw unlink
+ 
++_notrun "agentOS does not expose Linux mount syscalls to WASM guests"
++
+ # Import common functions.
+ . ./common/filter
+ 
+diff --git a/tests/generic/697 b/tests/generic/697
+--- a/tests/generic/697
++++ b/tests/generic/697
+@@ -13,6 +13,8 @@
+ . ./common/preamble
+ _begin_fstest auto quick cap acl idmapped mount perms rw unlink
+ 
++_notrun "agentOS does not expose Linux mount syscalls to WASM guests"
++
+ # Import common functions.
+ . ./common/filter
+ . ./common/attr
+diff --git a/tests/generic/698 b/tests/generic/698
+--- a/tests/generic/698
++++ b/tests/generic/698
+@@ -13,4 +13,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick perms attr idmapped mount
+ 
++_notrun "agentOS does not expose Linux idmapped mounts"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/699 b/tests/generic/699
+--- a/tests/generic/699
++++ b/tests/generic/699
+@@ -10,4 +10,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick perms attr idmapped mount
+ 
++_notrun "agentOS does not expose Linux idmapped mounts"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/700 b/tests/generic/700
+--- a/tests/generic/700
++++ b/tests/generic/700
+@@ -11,6 +11,8 @@
+ . ./common/preamble
+ _begin_fstest auto quick rename attr whiteout
+ 
++_notrun "agentOS does not support SELinux labels or rename whiteouts"
++
+ # Import common functions.
+ . ./common/attr
+ . ./common/renameat2
+diff --git a/tests/generic/702 b/tests/generic/702
+--- a/tests/generic/702
++++ b/tests/generic/702
+@@ -11,4 +11,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick clone fiemap
+ 
++_notrun "agentOS does not support reflink copy-on-write"
++
+ . ./common/filter
+diff --git a/tests/generic/703 b/tests/generic/703
+--- a/tests/generic/703
++++ b/tests/generic/703
+@@ -10,4 +10,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick log prealloc io_uring
+ 
++_notrun "agentOS does not expose Linux io_uring"
++
+ _cleanup()
+diff --git a/tests/generic/704 b/tests/generic/704
+--- a/tests/generic/704
++++ b/tests/generic/704
+@@ -9,4 +9,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick
+ 
++_notrun "agentOS does not expose SCSI block devices"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/709 b/tests/generic/709
+--- a/tests/generic/709
++++ b/tests/generic/709
+@@ -9,6 +9,8 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange quota
+ 
++_notrun "agentOS does not support filesystem quotas or exchange-range ioctls"
++
+ # Import common functions.
+ . ./common/filter
+ . ./common/quota
+diff --git a/tests/generic/710 b/tests/generic/710
+--- a/tests/generic/710
++++ b/tests/generic/710
+@@ -9,6 +9,8 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange quota
+ 
++_notrun "agentOS does not support filesystem quotas or exchange-range ioctls"
++
+ # Import common functions.
+ . ./common/filter
+ . ./common/quota

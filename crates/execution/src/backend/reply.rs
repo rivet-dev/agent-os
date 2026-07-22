@@ -368,6 +368,19 @@ impl DirectHostReplyHandle {
         self.settle(Err(error))
     }
 
+    /// Whether this exact response lane has reached a terminal state.
+    ///
+    /// Readiness-driven host calls can have a retry event already queued when
+    /// a signal or teardown settles the lane. The owner uses this observation
+    /// to discard only that stale retry; settlement methods remain strict and
+    /// still return `EALREADY` for every attempted duplicate response.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.inner.state.load(Ordering::Acquire),
+            REPLY_SETTLED | REPLY_DELIVERY_FAILED
+        )
+    }
+
     /// Mark a successfully claimed exec request complete without sending a
     /// response into the replaced image. Ordinary operations must settle with
     /// `succeed` or `fail`; using this on an open or settled lane is an error.

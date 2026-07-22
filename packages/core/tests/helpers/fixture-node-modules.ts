@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	cpSync,
 	existsSync,
@@ -9,7 +10,6 @@ import {
 	realpathSync,
 	renameSync,
 	rmSync,
-	statSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -68,6 +68,74 @@ function isInside(root: string, candidate: string): boolean {
 	const r = resolve(root);
 	const c = resolve(candidate);
 	return c === r || c.startsWith(r + sep);
+}
+
+function updateGeneratedTreeFingerprint(
+	hash: ReturnType<typeof createHash>,
+	root: string,
+	label: string,
+): void {
+	if (!existsSync(root)) return;
+	for (const entry of readdirSync(root).sort()) {
+		const full = join(root, entry);
+		const stat = lstatSync(full);
+		const entryLabel = `${label}/${entry}`;
+		hash
+			.update("\0")
+			.update(entryLabel)
+			.update("\0")
+			.update(stat.isDirectory() ? "d" : stat.isSymbolicLink() ? "l" : "f")
+			.update("\0")
+			.update(String(stat.size))
+			.update("\0")
+			.update(String(stat.mtimeMs));
+		if (stat.isDirectory()) {
+			updateGeneratedTreeFingerprint(hash, full, entryLabel);
+		}
+	}
+}
+
+/**
+ * Include generated outputs from direct workspace dependencies in the cache
+ * key. The lockfile and consumer manifest alone do not change when a source
+ * package such as OpenCode is rebuilt, which previously let a persistent CI
+ * runner project an older `dist` tree into the VM.
+ */
+function updateWorkspaceBuildFingerprint(
+	hash: ReturnType<typeof createHash>,
+	repoRoot: string,
+	cwd: string,
+	manifest: {
+		dependencies?: Record<string, string>;
+		devDependencies?: Record<string, string>;
+	},
+): void {
+	const dependencies = {
+		...(manifest.dependencies ?? {}),
+		...(manifest.devDependencies ?? {}),
+	};
+	for (const [name, specifier] of Object.entries(dependencies).sort(
+		([a], [b]) => a.localeCompare(b),
+	)) {
+		if (!specifier.startsWith("workspace:")) continue;
+		const installedPath = join(cwd, "node_modules", ...name.split("/"));
+		if (!existsSync(installedPath)) continue;
+		const packageRoot = realpathSync(installedPath);
+		if (!isInside(repoRoot, packageRoot)) continue;
+
+		hash.update("\0workspace\0").update(name);
+		const dependencyManifest = join(packageRoot, "package.json");
+		if (existsSync(dependencyManifest)) {
+			hash.update("\0manifest\0").update(readFileSync(dependencyManifest));
+		}
+		for (const generatedDir of ["dist", "wasm", "bin"]) {
+			updateGeneratedTreeFingerprint(
+				hash,
+				join(packageRoot, generatedDir),
+				`${name}/${generatedDir}`,
+			);
+		}
+	}
 }
 
 /**
@@ -139,11 +207,31 @@ export function ensureFlatNodeModules(cwd: string): string {
 	const target = join(cacheRoot, safe);
 	const readyMarker = join(target, ".ready");
 	const lockfile = join(repoRoot, "pnpm-lock.yaml");
+	const packageManifest = join(cwd, "package.json");
+	const packageManifestBytes = readFileSync(packageManifest);
+	const fixtureHash = createHash("sha256")
+		.update(readFileSync(lockfile))
+		.update("\0")
+		.update(packageManifestBytes);
+	const githubSha = process.env.GITHUB_SHA;
+	if (githubSha) {
+		fixtureHash.update("\0github-sha\0").update(githubSha);
+	}
+	updateWorkspaceBuildFingerprint(
+		fixtureHash,
+		repoRoot,
+		cwd,
+		JSON.parse(packageManifestBytes.toString("utf8")) as {
+			dependencies?: Record<string, string>;
+			devDependencies?: Record<string, string>;
+		},
+	);
+	const fixtureFingerprint = fixtureHash.digest("hex");
 
 	const isFresh = (): boolean => {
 		if (!existsSync(readyMarker)) return false;
 		try {
-			return statSync(readyMarker).mtimeMs >= statSync(lockfile).mtimeMs;
+			return readFileSync(readyMarker, "utf8").trim() === fixtureFingerprint;
 		} catch {
 			return false;
 		}
@@ -175,7 +263,9 @@ export function ensureFlatNodeModules(cwd: string): string {
 	}
 
 	try {
-		if (!isFresh()) buildInto(repoRoot, packageName, target);
+		if (!isFresh()) {
+			buildInto(repoRoot, packageName, target, fixtureFingerprint);
+		}
 	} finally {
 		rmSync(lockDir, { recursive: true, force: true });
 	}
@@ -186,6 +276,7 @@ function buildInto(
 	repoRoot: string,
 	packageName: string,
 	target: string,
+	fixtureFingerprint: string,
 ): void {
 	// Build into a sibling staging dir, then atomically swap into place so
 	// readers never observe a half-built tree.
@@ -222,5 +313,5 @@ function buildInto(
 	stripEscapingSymlinks(stagedModules);
 
 	renameSync(staging, target);
-	writeFileSync(join(target, ".ready"), `${new Date().toISOString()}\n`);
+	writeFileSync(join(target, ".ready"), `${fixtureFingerprint}\n`);
 }

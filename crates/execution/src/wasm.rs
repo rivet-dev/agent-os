@@ -367,7 +367,7 @@ pub enum NativeBinaryFormat {
 }
 
 impl NativeBinaryFormat {
-    fn display_name(self) -> &'static str {
+    pub fn display_name(self) -> &'static str {
         match self {
             Self::Elf => "ELF",
             Self::MachO => "Mach-O",
@@ -2297,7 +2297,7 @@ impl WasmExecutionEngine {
         verify_wasm_module_header(&resolved_module)?;
         // Enforce bounded structural parsing before the complete feature
         // validator. Oversized section counts and pathological varuints must
-        // fail at AgentOS's explicit parser limits rather than being obscured
+        // fail at agentOS's explicit parser limits rather than being obscured
         // by a later engine/validator EOF diagnostic.
         validate_module_limits(&resolved_module, &request)?;
         validate_module_profile(&resolved_module)?;
@@ -4262,6 +4262,7 @@ fn build_wasm_runner_bootstrap(
     format!(
         r#"const __agentOSWasmInternalEnv = {internal_env_json};
 	const __agentOSWasmSyncRpcReadPayloadBytes = {wasm_sync_rpc_read_payload_bytes};
+	const __agentOSWasmSyncReadLimitBytes = {WASM_SYNC_READ_LIMIT_BYTES};
 	const __agentOSWasmEntropyLimitBytes = {WASM_SYNC_READ_LIMIT_BYTES};
 const __agentOSRequireBuiltin = (specifier) => {{
   if (typeof globalThis.require === "function") {{
@@ -4645,6 +4646,7 @@ if (typeof globalThis !== "undefined") {{
         case "process.path_open_at":
         case "process.path_mkdir_at":
         case "process.path_stat_at":
+        case "process.path_statfs_at":
         case "process.path_chmod_at":
         case "process.path_utimes_at":
         case "process.path_chown_at":
@@ -4689,6 +4691,7 @@ if (typeof globalThis !== "undefined") {{
         case "process.fd_chmod":
         case "process.fd_chown":
         case "process.fd_truncate":
+        case "process.fd_utimes":
         case "process.fd_set_flags":
         case "process.fd_getfd":
         case "process.fd_setfd":
@@ -5520,7 +5523,7 @@ fn validate_module_profile(resolved_module: &ResolvedWasmModule) -> Result<(), W
     profile::validate_locked_profile(bytes.as_slice()).map_err(WasmExecutionError::Host)
 }
 
-fn detect_native_binary_format(header: &[u8]) -> Option<NativeBinaryFormat> {
+pub fn detect_native_binary_format(header: &[u8]) -> Option<NativeBinaryFormat> {
     if header.len() >= 4 && &header[..4] == b"\x7fELF" {
         return Some(NativeBinaryFormat::Elf);
     }
@@ -6299,6 +6302,9 @@ mod tests {
         assert!(bootstrap.contains(&format!(
             "const __agentOSWasmSyncRpcReadPayloadBytes = {raw_limit};"
         )));
+        assert!(bootstrap.contains(&format!(
+            "const __agentOSWasmSyncReadLimitBytes = {WASM_SYNC_READ_LIMIT_BYTES};"
+        )));
         for method in [
             "process.exec_image_open",
             "process.exec_image_open_fd",
@@ -6312,6 +6318,11 @@ mod tests {
         }
         let runner = include_str!("../assets/runners/wasm-runner.mjs");
         assert!(runner.contains("boundedWasmSyncRpcReadLength("));
+        assert!(runner.contains("boundedWasmGuestReadLength("));
+        assert!(runner.contains("kernelFdReadFillsRequestedLength(kernelFd, stat)"));
+        assert!(runner.contains("rdev === AGENTOS_RDEV_ZERO || rdev === AGENTOS_RDEV_URANDOM"));
+        assert!(runner.contains("Buffer.concat(chunks, totalLength)"));
+        assert!(runner.contains("readOffset + BigInt(totalLength)"));
         assert!(runner.contains("callSyncRpc('process.fd_read'"));
         assert!(runner.contains("callSyncRpc('process.fd_pread'"));
         assert!(runner.contains("callSyncRpc('process.exec_image_open'"));
@@ -6449,6 +6460,25 @@ process.stdout.write(JSON.stringify({{ overflow, exactLine: exact.line, exactRet
                 < get_size.find("callSyncRpc('__kernel_tty_size'").unwrap(),
             "guest output pointers must be validated before the tty-size RPC"
         );
+    }
+
+    #[test]
+    fn sidecar_managed_passthrough_stdin_uses_the_kernel_pipe() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let fd_read_start = runner
+            .find("wasiImport.fd_read = (fd, iovs")
+            .expect("wrapped fd_read must exist");
+        let fd_read_end = runner[fd_read_start..]
+            .find("wasiImport.fd_readdir = (fd")
+            .map(|offset| fd_read_start + offset)
+            .expect("fd_read must precede fd_readdir");
+        let fd_read = &runner[fd_read_start..fd_read_end];
+
+        assert!(fd_read.contains("typeof handle.ioFd === 'number'"));
+        assert!(fd_read.contains(
+            "handle.targetFd === 0 &&\n      (SIDECAR_MANAGED_PROCESS || KERNEL_STDIO_SYNC_RPC)"
+        ));
+        assert!(fd_read.contains("readKernelStdinChunk(requestedLength, nonblocking)"));
     }
 
     #[test]
@@ -6849,6 +6879,34 @@ process.stdout.write(JSON.stringify({{ overflow, exactLine: exact.line, exactRet
         assert!(section.contains("callSyncRpc('process.exec_image_read'"));
         assert!(section.contains("callSyncRpc('process.exec_image_close'"));
         assert!(!section[managed..projection].contains("fsModule."));
+    }
+
+    #[test]
+    fn standalone_registered_exec_stubs_defer_to_sidecar_classification() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let loader_start = runner
+            .find("function loadExecImageFromPath(command, argv, interpreterDepth = 0) {")
+            .expect("path exec loader");
+        let loader_end = runner[loader_start..]
+            .find("function executableTargetForHandle")
+            .map(|offset| loader_start + offset)
+            .expect("path exec loader end");
+        let loader = &runner[loader_start..loader_end];
+        assert!(loader.contains("bytes.equals(INTERNAL_KERNEL_COMMAND_STUB)"));
+        assert!(loader.contains(
+            "throw execError(\n        'ENOEXEC',\n        `registered command ${command} requires sidecar executable resolution`,"
+        ));
+
+        let exec_start = runner
+            .find("        proc_exec(\n")
+            .expect("proc_exec import");
+        let exec_end = runner[exec_start..]
+            .find("        proc_fexec(")
+            .map(|offset| exec_start + offset)
+            .expect("proc_exec import end");
+        let exec_import = &runner[exec_start..exec_end];
+        assert!(exec_import.contains("loadError?.code === 'ENOEXEC'"));
+        assert!(exec_import.contains("callSyncRpc('process.exec'"));
     }
 
     #[test]
@@ -7397,7 +7455,7 @@ process.stdout.write(JSON.stringify({{ overflow, exactLine: exact.line, exactRet
     #[test]
     fn wasi_preview1_import_manifest_matches_native_runner() {
         let manifest: Value = serde_json::from_str(include_str!("../assets/agentos-wasm-abi.json"))
-            .expect("parse AgentOS WASM ABI manifest");
+            .expect("parse agentOS WASM ABI manifest");
         let expected = manifest["imports"]
             .as_array()
             .expect("ABI imports array")
@@ -7993,6 +8051,14 @@ process.stdout.write(JSON.stringify({{ overflow, exactLine: exact.line, exactRet
         assert!(runner.contains("attachManagedHostNetDescription(guestFd, descriptionId);"));
         assert!(runner.contains("descriptionId: handle?.hostNetDescriptionId ?? null"));
         assert!(runner.contains("fd = registerKernelDelegateFd(received.fd);"));
+        assert!(runner.contains("function managedHostNetOperationIsNonblocking("));
+        assert_eq!(
+            runner
+                .matches("managedHostNetOperationIsNonblocking(socket, recvFlags)")
+                .count(),
+            2,
+            "recv and recvfrom must both honor kernel-owned O_NONBLOCK"
+        );
         assert!(runner.contains("const managedHostNetKernelGuestFds = new Set("));
         assert!(runner.contains(
             "initialKernelGuestFds.has(guestFd) && !managedHostNetKernelGuestFds.has(guestFd)"
@@ -8084,9 +8150,25 @@ process.stdout.write(JSON.stringify({{ overflow, exactLine: exact.line, exactRet
         let mapper = &runner[start..end];
         assert!(mapper.contains("case 'ENOENT':\n      return WASI_ERRNO_NOENT;"));
         assert!(mapper.contains("case 'EINTR':\n      return WASI_ERRNO_INTR;"));
+        assert!(mapper.contains("case 'ENOSPC':\n      return WASI_ERRNO_NOSPC;"));
         assert!(mapper.contains("default:\n      return WASI_ERRNO_FAULT;"));
         assert!(!mapper.contains("command not found"));
         assert!(!mapper.contains("error?.message"));
+    }
+
+    #[test]
+    fn synthetic_filesystem_errno_mapping_preserves_file_size_limit_errors() {
+        let runner = include_str!("../assets/runners/wasm-runner.mjs");
+        let start = runner
+            .find("function mapSyntheticFsError(error) {")
+            .expect("synthetic filesystem errno mapper");
+        let end = runner[start..]
+            .find("function mapHostProcessError(error) {")
+            .map(|offset| start + offset)
+            .expect("synthetic filesystem errno mapper end");
+        assert!(runner[start..end].contains("case 'EFBIG':\n      return WASI_ERRNO_FBIG;"));
+        assert!(runner.contains("const rangeOffset = BigInt(offset);"));
+        assert!(runner.contains("rangeOffset.toString(),\n      rangeLength.toString(),"));
     }
 
     #[test]
@@ -8097,7 +8179,7 @@ process.stdout.write(JSON.stringify({{ overflow, exactLine: exact.line, exactRet
             .expect("signal dispatch helper");
         let helper = &runner[start..];
         let end = helper
-            .find("Object.defineProperty(globalThis, '__secureExecWasmSignalDispatch'")
+            .find("Object.defineProperty(globalThis, '__agentOsWasmSignalDispatch'")
             .expect("signal dispatch helper end");
         let helper = &helper[..end];
 

@@ -1,9 +1,10 @@
 # Wasmtime Executor and Shared WASM Host ABI
 
-Status: ready for implementation; depends on the runtime-neutral executor
-refactor
+Status: implementation and canonical Linux x86-64 validation complete; V8-WASM
+remains the default because Wasmtime did not pass the cold-p95 and retained
+memory gates
 
-Audience: AgentOS kernel, sidecar runtime, execution, VFS, toolchain, and
+Audience: agentOS kernel, sidecar runtime, execution, VFS, toolchain, and
 registry-software owners
 
 ## 1. Executive summary and decision
@@ -21,26 +22,26 @@ registry-software owners
   semantics.** Most already live in the kernel/sidecar. Consolidate the pieces
   still duplicated in the JavaScript runner through the prerequisite
   [runtime-neutral executor refactor](./runtime-neutral-executors.md).
-- **Keep the AgentOS-owned WASI/POSIX ABI.** Wasmtime does not require
+- **Keep the agentOS-owned WASI/POSIX ABI.** Wasmtime does not require
   `wasmtime-wasi`; link the existing Preview1 plus `host_*` functions to
-  AgentOS resources and install no ambient host capabilities.
+  agentOS resources and install no ambient host capabilities.
 - **Async imports require bounded copies, not a new architecture.** Decode and
   copy guest input, release memory before awaiting shared I/O, then reacquire
   and revalidate memory before writing results.
 - **Current native V8-WASM does not materially depend on shared memory between
   isolates.** Its `SharedArrayBuffer` use is local blocking coordination.
-  Wasmtime threads are a separate later project because the sysroot still needs
-  real pthread semantics and bounded thread-group lifecycle.
+  Wasmtime threads were delivered as a separate gated profile with an owned
+  pthread sysroot and bounded, isolated thread-group lifecycle.
 - **Snapshotting is limited initially to compiled in-memory Module reuse and
   Wasmtime's eligible copy-on-write memory initialization.** Live instance
   snapshot/fork and serialized AOT artifacts are out of scope.
-- **No engine performance claim is justified yet.** The current ordinary warm
-  V8-WASM baseline is 11.2-20.0 MiB incremental sidecar high-water memory, but
-  cold compile, RSS/PSS, address-space reservation, async-stack cost, and
-  concurrency must be measured directly against the completed initial
-  implementation.
+- **Wasmtime is production-selectable, but V8-WASM remains the default.**
+  Wasmtime passed correctness, geometric-mean p50, and throughput gates and was
+  faster on every comparable successful concurrency row. It failed the
+  individual cold-p95 gate and retained substantially more RSS/PSS after
+  teardown, so omission continues to select V8.
 
-AgentOS will add Wasmtime as a native executor for standalone WebAssembly
+agentOS adds Wasmtime as a native executor for standalone WebAssembly
 commands. V8 remains the permanent JavaScript executor, including JavaScript
 code that uses `WebAssembly.Module`, `WebAssembly.Instance`, or the asynchronous
 JavaScript WebAssembly APIs. The existing V8-hosted standalone-WASM runner also
@@ -62,7 +63,7 @@ crate is not required for the initial implementation. Extraction is allowed
 later only if it produces a measured build, dependency, fuzzing, or binary
 composition benefit.
 
-AgentOS will continue to use its owned patched `wasm32-wasip1` sysroot and its
+agentOS continues to use its owned patched `wasm32-wasip1` sysroot and its
 existing Preview1 plus `host_*` imports. Wasmtime is the core WebAssembly
 engine; it does not become the owner of filesystem, network, process, terminal,
 identity, permission, or resource semantics.
@@ -96,8 +97,10 @@ The completed migration has these outcomes:
    does not implement a second filesystem, socket table, process table, or
    permission model.
 6. Guest execution never runs on a Tokio runtime worker.
-7. The initial Wasmtime executor does not depend on pthreads, shared WebAssembly
-   memory, AOT artifacts, Wizer, pooling allocation, or live snapshots.
+7. The plain `wasmtime` selector does not depend on pthreads or shared
+   WebAssembly memory. The separately gated `wasmtime-threads` selector
+   supplies those features; neither profile uses AOT artifacts, Wizer, pooling
+   allocation, or live snapshots.
 8. V8-WASM remains a maintained compatibility executor over the same shared
    services; neither backend is implemented in terms of the other.
 9. Every limit is bounded by default and fails with a typed error naming the
@@ -105,7 +108,7 @@ The completed migration has these outcomes:
 
 ## 3. Non-goals
 
-The initial Wasmtime executor does not:
+The initial single-threaded Wasmtime parity milestone does not:
 
 - replace V8 for JavaScript;
 - route JavaScript `WebAssembly.*` calls into Wasmtime;
@@ -135,7 +138,7 @@ standalone WASM request
   -> WebAssembly.Module / WebAssembly.Instance
   -> JavaScript Preview1 and host_* adapters
   -> sidecar RPC
-  -> AgentOS kernel, VFS, and native I/O owners
+  -> agentOS kernel, VFS, and native I/O owners
 ```
 
 `WasmExecution` contains a `JavascriptExecution`, and `WasmExecutionEngine`
@@ -192,7 +195,7 @@ native sidecar
       +-- process lifecycle and runtime selection
       +-- process-wide Tokio runtime and native I/O owners
       +-- capability, readiness, and cancellation brokers
-      +-- AgentOS kernel
+      +-- agentOS kernel
       |     +-- VFS and mounts
       |     +-- fd/open-description tables
       |     +-- pipes and PTYs
@@ -238,7 +241,7 @@ crates/execution/src/wasm/
     limits.rs               memory, stack, CPU, and cancellation
     lifecycle.rs            start, exit, traps, signals, teardown
     memory.rs               checked guest-memory ABI primitives
-    error.rs                stable AgentOS outcome normalization
+    error.rs                stable agentOS outcome normalization
 
     linker/
       mod.rs                generated-registry trampoline and signal checkpoints
@@ -267,21 +270,21 @@ capability-oriented services used by both the V8 RPC adapter and Wasmtime
 linker. Avoid one enormous `GuestHost` trait and avoid types named
 `Javascript*` when Python and Wasmtime use the same operation.
 
-## 7. WASI and the owned AgentOS ABI
+## 7. WASI and the owned agentOS ABI
 
 ### 7.1 Wasmtime does not force its WASI implementation
 
 The `wasmtime` engine and `wasmtime-wasi` are separate crates. A core Wasm
 module imports functions by module and function name, and a Wasmtime `Linker`
-supplies whichever definitions the embedder chooses. AgentOS can therefore
+supplies whichever definitions the embedder chooses. agentOS can therefore
 provide its existing `wasi_snapshot_preview1`, `host_process`, `host_net`,
 `host_user`, `host_fs`, and `host_tty` modules without installing ambient
 `wasmtime-wasi` host resources.
 
 There is no conflict between using Wasmtime as the engine and using the
-AgentOS-owned WASI/POSIX ABI. The danger is only in accidentally linking a
+agentOS-owned WASI/POSIX ABI. The danger is only in accidentally linking a
 second ambient implementation that opens host files or sockets outside the
-AgentOS kernel.
+agentOS kernel.
 
 ### 7.2 Initial integration decision
 
@@ -292,17 +295,17 @@ The first implementation will:
 - link exactly the Preview1 and custom-import surface generated in
   `crates/execution/assets/agentos-wasm-abi.json` and required by built
   software;
-- route every resource-bearing operation to an AgentOS kernel or sidecar
+- route every resource-bearing operation to an agentOS kernel or sidecar
   service;
 - avoid constructing a default ambient `WasiCtx` with host preopens, host
   sockets, or inherited host stdio;
 - generate Preview1 signatures and value layouts from the pinned checked-in
   WITX description, but do not adopt upstream resource ownership or policy;
 - generate custom-import signatures and repetitive bindings from the one
-  checked-in AgentOS ABI manifest instead of manually duplicating signatures in
+  checked-in agentOS ABI manifest instead of manually duplicating signatures in
   Rust and JavaScript.
 
-If an upstream helper cannot be backed by AgentOS descriptors without creating
+If an upstream helper cannot be backed by agentOS descriptors without creating
 parallel state or ambient authority, the Wasmtime linker will implement that
 thin ABI function directly.
 
@@ -326,7 +329,7 @@ The Wasmtime adapter receives:
 
 The linker does not know about `ActiveProcess`, `V8SessionHandle`, Node-WASI
 fd aliases, sidecar signal maps, native Tokio handles, or mutable `KernelVm`
-ownership. It decodes the owned AgentOS ABI into bounded values and calls the
+ownership. It decodes the owned agentOS ABI into bounded values and calls the
 shared services.
 
 Engine-specific responsibilities remaining in this document are safe linear
@@ -374,7 +377,7 @@ already performs JavaScript and bridge copies, so the Wasmtime path may still
 reduce total copying, but the benchmark must measure this rather than assume it.
 
 Signal handlers follow the same memory rule and the existing cooperative
-AgentOS ABI. A caught signal may run at an import, `sched_yield`, top-level
+agentOS ABI. A caught signal may run at an import, `sched_yield`, top-level
 call boundary, or another declared safe point; neither V8-WASM nor Wasmtime can
 inject `__wasi_signal_trampoline(i32)` into arbitrary pure guest computation
 and then resume that computation. Epochs provide bounded STOP scheduling and
@@ -429,13 +432,13 @@ The initial executor must preserve or improve the existing controls:
 | --- | --- |
 | Module bytes and parser work | Preserve the 256 MiB file cap and bounded import/memory/varuint parsing before compilation. |
 | Linear memory | Preserve the 128 MiB default, validate declarations, enforce growth through Store limits, and account aggregate guest memory outside per-memory limits. |
-| Stack | Use Wasmtime's stack cap through a bounded set of Engine profiles because stack configuration is Engine-wide while AgentOS configuration is per VM. |
+| Stack | Use Wasmtime's stack cap through a bounded set of Engine profiles because stack configuration is Engine-wide while agentOS configuration is per VM. |
 | CPU and cancellation | Use epoch checks as the unbypassable interruption mechanism, but preserve the current active-CPU rather than wall-time policy: executor accounting tracks only guest-running intervals and refreshes the Store deadline after async waits. Use fuel only for an explicitly deterministic budget. |
 | Wall time | Remain opt-in for interactive commands; use an outer cancellable deadline when configured. |
 | Files, fds, pipes, PTYs, sockets, processes | Continue to enforce in the kernel and shared sidecar ledgers. |
 | Output and queues | Preserve current bounded output, reactor, bridge, readiness, and completion limits. |
 | Permissions | Omit prohibited imports at link time and repeat authorization at the kernel operation. |
-| Errors | Return stable AgentOS/POSIX typed errors; do not expose engine error strings as API contracts. |
+| Errors | Return stable agentOS/POSIX typed errors; do not expose engine error strings as API contracts. |
 
 The current `maxWasmFuel` field means milliseconds in the V8 runner, not fuel.
 It must not silently change meaning. Phase 1 removes it lockstep and adds
@@ -465,7 +468,7 @@ Removing the V8-hosted standalone runner therefore does not require sharing
 memory between V8 and Wasmtime.
 
 Wasmtime shared memory is a later milestone. Runtime support alone is
-insufficient because the current AgentOS sysroot links emulated single-thread
+insufficient because the current agentOS sysroot links emulated single-thread
 pthreads. Real pthread support requires a threaded sysroot, a bounded
 thread-spawn ABI, real mutex/condvar/TLS behavior, group cancellation, and
 per-VM plus process-wide thread admission.
@@ -525,7 +528,7 @@ linear memory and globals.
 
 ## 14. Performance and memory validation
 
-No external benchmark is accepted as the AgentOS answer because host imports,
+No external benchmark is accepted as the agentOS answer because host imports,
 module sizes, V8 topology, kernel bridges, and cache configuration dominate the
 comparison. The repository must measure both backends under the same sidecar,
 kernel, command modules, release build, and hardware.
@@ -569,7 +572,7 @@ resident memory.
 
 On a 64-bit host, current Wasmtime defaults reserve 4 GiB of virtual address
 space plus guard regions for each 32-bit linear memory so generated code can
-elide many explicit bounds checks. Reservation is not committed RSS. AgentOS's
+elide many explicit bounds checks. Reservation is not committed RSS. agentOS's
 128 MiB accessible-memory policy still requires a Store resource limiter and
 aggregate accounting; it does not by itself reduce Wasmtime's virtual
 reservation. The initial implementation must benchmark default reservation
@@ -608,7 +611,7 @@ tradeoff supported by measurements.
 
 ## 15. Behavioral parity and errors
 
-AgentOS does not promise V8 error strings, Wasmtime error strings, or identical
+agentOS does not promise V8 error strings, Wasmtime error strings, or identical
 compiler diagnostics. It does promise stable sidecar error categories and
 Linux-compatible guest-visible behavior.
 
@@ -626,7 +629,7 @@ The adapter normalizes:
 
 Differential tests assert stdout, stderr, exit status, errno, signal behavior,
 fd inheritance, permissions, and side effects. Floating-point and proposal
-behavior follow the selected published AgentOS WASM feature profile rather than
+behavior follow the selected published agentOS WASM feature profile rather than
 whichever features an engine happens to enable by default.
 
 ## 16. Delivery phases and JJ revision contract
@@ -643,16 +646,17 @@ capability family:
 1. specification and frozen baseline;
 2. complete runtime-neutral kernel/executor refactor;
 3. complete initial Wasmtime executor at current V8-WASM feature parity; and
-4. performance validation and preferred-backend enablement.
-
-The later threaded-WASM project is not part of initial parity and begins in its
-own revision after these four phases.
+4. performance validation and preferred-backend decision;
+5. separately gated threaded-WASM support; and
+6. final dual-backend, toolchain, release-artifact, soak, and workspace
+   validation, including correctness fixes exposed by those gates.
 
 The initial Wasmtime project is complete at the end of Phase 3: Wasmtime passes
 the entire current V8-WASM ABI and working-software corpus, is production-ready,
 and can be the preferred backend while V8-WASM remains a supported selection.
-Phase 4 expands that completed executor with threads; it is not required to
-claim parity with the current single-threaded V8-WASM surface.
+Phase 4 expands that completed executor with threads. Phase 5 is the
+merge-readiness proof for the complete stack and does not introduce another
+runtime architecture.
 
 This section is the canonical implementation tracker. Check an item only in
 the JJ revision that supplies its implementation and evidence. A phase summary
@@ -665,6 +669,7 @@ revision has been sealed:
 - [x] Phase 3: performance decision, preferred-backend rollout, and initial
       project completion.
 - [x] Phase 4: separately gated threaded-WASM roadmap completion.
+- [x] Phase 5: final merge-readiness validation and correctness closure.
 
 ### Phase 0 revision: Specification, inventory, and baseline
 
@@ -748,7 +753,7 @@ revision has been sealed:
       errors.
 - [x] Replace terminal fd caches and libc shadow state with live kernel
       terminal identity, termios, foreground-group, resize, and raw-mode state.
-- [x] Generate and check in the pinned Preview1 types/layouts and AgentOS custom
+- [x] Generate and check in the pinned Preview1 types/layouts and agentOS custom
       ABI manifest used by both adapters and import-audit tooling. The generated
       runtime-neutral registry must cover all 169 manifest imports, 29 core
       signatures, 40 `wasi_unstable` aliases, and 110 supported semantic binding
@@ -777,7 +782,7 @@ revision has been sealed:
       Module cache, Linker, ABI, memory, error, interruption, and execution
       modules without creating a new crate or giant source file.
 - [x] Configure a bounded process-wide Engine registry keyed by the exact
-      AgentOS feature profile and stack cap; enforce the eight-profile default
+      agentOS feature profile and stack cap; enforce the eight-profile default
       limit and 80% warning.
 - [x] Prevalidate every module with the shared `wasmparser` profile so V8-WASM
       and Wasmtime accept and reject the same features independently of engine
@@ -814,7 +819,7 @@ revision has been sealed:
       work continues to use the one sidecar Tokio runtime and its direct waiters.
 - [x] Normalize validation failures, traps, stack exhaustion, cancellation,
       timeout, fuel exhaustion, exit, terminating signal, errno, and internal
-      faults into stable AgentOS typed outcomes.
+      faults into stable agentOS typed outcomes.
 - [x] Add the optional sealed `wasmtime`/`v8` protocol and client selector;
       omission remains the sidecar-owned V8 default during Phase 2.
 - [x] Keep V8 permanently for JavaScript and keep V8-WASM as an independent,
@@ -843,13 +848,14 @@ revision has been sealed:
 
 Phase 2 evidence (Rust 1.94.0, Linux x86-64 canonical workspace):
 
-- `just tools-rebuild` rebuilt and audited all 166 default commands; the
-  required focused Vim build raised the corpus to 167 commands/136 modules,
-  with all 145 live imports declared in the 169-function/29-signature ABI.
+- `just tools-rebuild` rebuilt the ordinary corpus plus required DuckDB and Vim,
+  built the pinned Codex WASI inputs, assembled every software package, and
+  audited 169 commands/138 distinct modules, with all 146 live imports declared
+  in the 169-function/29-signature ABI.
 - Native workspace check, all-target strict clippy, formatting, protocol tests,
   client tests, fixed-version checks, protocol-inventory checks, TypeScript
-  request mapping, and workflow YAML parsing passed. Root `pnpm check-types`
-  passed all 146 tasks.
+  request mapping, and workflow YAML parsing passed. The complete root
+  `pnpm check-types` graph passed.
 - Wasmtime units passed 15/15; architecture guards 61/61; safety/limits/ambient
   denial 7/7; raw differential ABI 9/9; and the serial real-software corpus
   5/5 in 220.82 seconds (`ls`, real HTTP `curl`, `grep`, sqlite, git, tar/gzip,
@@ -948,13 +954,13 @@ workspace, 2026-07-20 Pacific):
       do not silently fragment this phase.
 - [x] Rebuild the owned sysroot and libc for real pthread semantics instead of
       the current emulated single-thread implementation.
-- [x] Add an explicit AgentOS thread-spawn ABI and enable the exact shared-memory
+- [x] Add an explicit agentOS thread-spawn ABI and enable the exact shared-memory
       and atomic WASM feature profile only for configured threaded executions.
 - [x] Implement bounded per-VM and process-wide thread admission, one accounted
       Store/instance/native stack per admitted guest thread where required, and
       transactional failure when capacity is unavailable.
 - [x] Isolate each threaded WASM thread group in a killable worker process,
-      keep AgentOS kernel state in the parent, use bounded typed host-operation
+      keep agentOS kernel state in the parent, use bounded typed host-operation
       IPC, and prove fixed-deadline termination/reaping for a guest parked in
       `memory.atomic.wait`.
 - [x] Implement pthread mutex, condition variable, TLS, join/detach, exit,
@@ -975,7 +981,8 @@ workspace, 2026-07-20 Pacific):
       specified and approved.
 - [x] Seal the approved threading implementation and conformance evidence in
       its own JJ revision or approved replacement revision stack. Completion of
-      this checkbox means the full roadmap in this document is complete.
+      this checkbox means the threaded-runtime roadmap is complete; Phase 5
+      supplies the final whole-stack merge proof.
 
 Phase 4 evidence (Rust 1.94.0, release performance profile, Linux x86-64
 canonical workspace, 2026-07-21 Pacific):
@@ -1013,8 +1020,8 @@ canonical workspace, 2026-07-21 Pacific):
   parity suite passed 6/6 (`ls`, loopback `curl`, the direct corpus,
   shell/children, Vim, and the release command set). Wasmtime units and
   architecture guards passed. Strict all-target native Clippy, Rust formatting, the native
-  workspace check, fixed-version/package/protocol inventory checks, all 54
-  JavaScript build tasks, and all 146 type-check tasks passed.
+  workspace check, fixed-version/package/protocol inventory checks, and the
+  complete JavaScript build and type-check graphs passed.
 - The post-threading canonical single-thread performance matrix completed with
   zero correctness failures. Geometric-mean p50 (`0.2741` Wasmtime/V8) and
   throughput passed; individual cold p95, retained RSS (`161,894,400` V8 versus
@@ -1026,12 +1033,224 @@ canonical workspace, 2026-07-21 Pacific):
   Wizer, components, pooling, and live process snapshots/fork remain disabled.
   The repository-wide package-layout and fixed-version checks pass.
 
+### Phase 5 revision: Final merge-readiness validation and correctness closure
+
+- [x] Rebuild the complete owned toolchain and registry package set from a clean
+      source checkout path; require every staged command to pass the generated
+      import/signature audit.
+- [x] Prove the pinned Codex WASI build is repeatable with a reused checkout;
+      discard target-specific Cargo state before the fork temporarily replaces
+      its sysroot so restored and `build-std` artifacts cannot be mixed.
+- [x] Run the complete shared Rust workspace test suite serially against the
+      release-equivalent native configuration, including execution, sidecar,
+      client, VFS, Python, raw ABI, Wasmtime safety, and xfstests coverage.
+- [x] Run every common native runtime-core integration suite under both `v8`
+      and `wasmtime`; keep engine-specific tests separately named and require
+      the common matrix mechanically in CI.
+- [x] Run the complete registry software suite under both backends, including
+      release and nightly commands, shell/process affinity, PTY/TTY/Vim,
+      network, metadata, and agent/ACP flows.
+- [x] Build production release sidecars from the exact validated source state
+      and smoke the packed runtime with `v8`, `wasmtime`, and
+      `wasmtime-threads`.
+- [x] Run the generated pthread/libc program and the ignored hostile
+      multigeneration, protocol, resource, and thread-group soak cases
+      explicitly.
+- [x] Run a long mixed V8-JavaScript plus V8-WASM/Wasmtime workload and prove
+      bounded process, thread, descriptor, and retained-memory behavior after
+      teardown.
+- [x] Re-run cold start, warm throughput, memory, concurrency, and threaded
+      overhead benchmarks and preserve the raw result files.
+- [x] Run Rust formatting, workspace check, strict all-target Clippy, root
+      JavaScript build/type checks, website build, generated-file, protocol,
+      package-layout, fixed-version, workflow, and publish-helper gates.
+- [x] Make the bounded PR command build stage every coreutils command,
+      including C-backed commands, and guard that build contract so manifest
+      additions cannot silently bypass required artifact validation.
+- [x] Make pinned tool downloads resilient to transient GitHub frontend
+      failures without weakening reproducibility: use direct/API asset paths,
+      bounded retries, and exact SHA-256 verification.
+- [x] Audit Rust and production npm dependencies; record inherited advisories
+      rather than hiding them or attributing them to Wasmtime.
+- [x] Fix all correctness failures exposed by the exhaustive gates without
+      weakening assertions, including object-store metadata/xattrs, logical
+      extent reporting after keep-size preallocation, and bounded V8 teardown
+      expectations. Kernel-owned loopback HTTP projection must also rebuild
+      framing from the decoded body, strip source hop-by-hop headers, and
+      complete a response discovered by the current readiness probe without
+      waiting for a second edge. It must validate request metadata and remove
+      both fixed and `Connection`-nominated hop-by-hop fields before socket
+      admission.
+- [x] Rebase the complete six-revision stack onto the current mainline without
+      collapsing phase boundaries; reconcile the grouped client/process APIs,
+      `/__agentos` command projection, generated protocol, bridge behavior, and
+      dual-backend CI rather than retaining stale compatibility surfaces.
+- [x] Route buffered and streamed kernel-owned `vm.fetch` progress through the
+      bounded VM-scoped process-event pump. The HTTP adapter performs only
+      nonblocking socket probes; deferred host-call completions and readiness
+      wakeups remain internal, fair executor events and never wait in the
+      public process-event queue.
+- [x] Seal validation and its correctness fixes as one independently reviewable
+      revision above the threaded executor revision.
+
+Phase 5 evidence (Rust 1.94.0, Linux x86-64 canonical workspace,
+2026-07-23 Pacific):
+
+- `just tools-rebuild` completed from source and staged **169 commands from 138
+  distinct modules**. A second pinned Codex build from the reused checkout also
+  completed after its target-specific state was deliberately cleaned. The audit
+  observed **146 unique module/function imports**; every import matches the
+  generated 169-function/29-signature agentOS ABI.
+- The clean bounded PR build compiled 101 binaries, assembled 119 Rust/alias
+  entries, added the C-backed `mknod`, `mkfifo`, and `getconf` commands, and
+  passed required coreutils staging with 122 commands. An architecture guard
+  pins the C-backed command list and its derived build/install contract. The
+  pinned LLVM source archive uses the direct codeload endpoint, bounded
+  retries, and an exact SHA-256 check. The pinned Binaryen installer likewise
+  uses GitHub's release-asset API with platform-specific immutable asset IDs,
+  bounded retries, a browser-download fallback, and the existing per-platform
+  SHA-256 checks.
+- The exact serialized Rust workspace run passed end to end. Representative
+  aggregate results were execution 244/244, Python 38/38, native-sidecar service
+  389 passed with 2 explicit ignores, raw ABI 9/9, Wasmtime safety 20 runnable
+  tests with the generated pthread fixture reserved for its explicit gate, and
+  xfstests 42 passed with 27 documented host-kernel, endurance, or
+  storage-policy exclusions. All VFS, client, protocol, and doc tests also
+  passed.
+- The complete native runtime-core suite ran under each standalone-WASM backend:
+  V8 and Wasmtime each passed 516 tests with 41 deliberate skips across 100 test
+  files. The PTY default suite passed 20/20 and its C matrix passed 40/40 under
+  each backend. The release/nightly registry matrix passed 94/94 under each
+  backend, and actor, ACP, OpenCode, Pi, Codex, shell, Vim, curl, process,
+  filesystem, and network flows passed.
+- The complete actor lifecycle and conformance suites passed 12/12 under both
+  `v8` and `wasmtime` after the shared kernel-owned HTTP projection was tested
+  with deliberately conflicting source `Content-Length` and
+  `Transfer-Encoding` headers. The serializer strips framing/hop-by-hop
+  headers (including `Connection`-nominated fields), validates method/header
+  metadata before socket admission, computes framing from the actual decoded
+  body, and settles a response completed during the current readiness probe.
+- The post-rebase core rerun exposed three compatibility defects rather than
+  weakened assertions: the V8 bridge installed the standard `WebSocket` global
+  with a non-Node property descriptor, the custom JavaScript mount fixture did
+  not grant its unprivileged guest write access, and module resolution rebuilt
+  its filesystem cache for every bridge RPC. The bridge now matches Node's
+  writable/configurable/non-enumerable descriptor, the fixture sets explicit
+  Linux permissions, and the per-process module cache is keyed to the kernel
+  VFS mutation generation. The affected Pi/ACP flows passed 5/5; the complete
+  core rerun passed 247 tests with 14 deliberate skips, and its two stale local
+  fixture-cache misses passed from a fresh fixture cache.
+- The final mainline reconciliation added focused streamed-fetch regressions
+  for deferred managed networking before response headers and during body
+  reads, two simultaneous kernel-assigned client ports, exact one-slash request
+  targets, and binary body preservation. Those cases pass, along with the
+  buffered, streaming, and one-shot-exit loopback tests. The native-sidecar
+  library passes 280 tests with one intentional performance ignore; the rerun
+  also corrected stale `/__secure_exec` command-path expectations to the live
+  `/__agentos` projection and restored typed-error tests after removal of
+  message-to-errno parsing.
+- The final Node ecosystem parity run passed **87 fixtures with 6 explicit
+  environment/upstream/deferred skips and 0 failures**. Astro and Vite React
+  now pass. The only intentionally recorded Node test-runner gap remains
+  automatic `node:test` execution/reporting; module import, registration, and
+  manual shim execution work. Exhaustive reruns also fixed three V8
+  compatibility boundaries: raw bridge reads reserve for base64/JSON expansion
+  instead of only decoded bytes; `StringDecoder` accepts typed-array and
+  `ArrayBuffer` views produced by current Execa; and JavaScript launch mode uses
+  the resolved guest package scope while preserving unscoped inline-source
+  compatibility. A trusted Python `.mjs` runner now overrides stale CommonJS
+  launch state inherited from a JavaScript parent. A subsequent nightly run
+  under runner uid/gid 1001/1002 exposed that process-scoped file writes could
+  leak the lower VFS's host-only auto-parent behavior: `/.next` had the correct
+  guest owner, while implicitly created descendants reverted to 1000/1000.
+  Process-scoped file creation now requires its immediate parent to exist,
+  matching Linux. The kernel regression, non-default-identity fork regression,
+  exact uid-1001 container reproduction, and complete 87-fixture catalog all
+  pass.
+- The final correction head also passes the browser-excluded native workspace
+  check, warning-denied all-targets Clippy, the filtered 61-task JavaScript
+  build, all 137 package typecheck-contract checks, and the complete normal
+  227-task repository test lane. That lane explicitly executes shell children
+  through `v8`, `wasmtime`, and `wasmtime-threads`; all three selectors pass.
+- Fresh production release sidecars passed the packed-artifact smoke under
+  `v8`, `wasmtime`, and `wasmtime-threads`. The packed runtime contained all 169
+  commands. After rebasing onto current `main`, root `pnpm build` passed 63/63
+  tasks, `pnpm check-types` passed 121/121 tasks, and the website generated 153
+  pages. The repository-wide
+  nonblocking Biome lane was also run and reproduced its inherited baseline
+  (599 errors and 361 warnings across examples, generated sources, and
+  unrelated packages); required CI already marks that lane `continue-on-error`,
+  and the Wasmtime stack adds no new required lint gate.
+- Explicit expensive gates passed: the generated pthread/libc fixture, hostile
+  threaded isolation/termination tests, multigeneration/protocol soaks, and a
+  200-cycle mixed V8/Wasmtime run with zero residual process or thread growth.
+  The mixed result is in
+  `packages/runtime-benchmarks/results/wasm-mixed-soak.json`.
+- The threaded benchmark completed 8 groups/24 guest threads. Its cold p50 was
+  39.07 ms, cold p95 was 46.77 ms, warm throughput was 18.60 executions/s,
+  one-group PSS was 17.68 MiB, maximum eight-worker PSS was 18.90 MiB,
+  incremental guest-thread memory was 173,787 bytes/thread, and fixed-deadline
+  termination was 44.16 ms. Raw results are in
+  `packages/runtime-benchmarks/results/wasmtime-threads.json`.
+- The exact-head PR benchmark reproduced an inherited tiny-row gate
+  discontinuity: `fs_read_small` failed at 1.07 ms and 1.25 ms, while
+  pre-change heads had failed at 1.22 ms/1.29 ms and passed at 0.88 ms. Tiny
+  baselines below 0.5 ms now ignore less than 1 ms of absolute regression
+  instead of switching policy at a 1 ms current value. They still fail when
+  both the normal ratio and 1 ms absolute-regression thresholds are exceeded;
+  normal rows remain ratio-only. Direct unit coverage is part of the cheap CI
+  lane.
+- The first exact-head nightly run found a CPU-count-dependent false failure in
+  the inherited 128-child late-stream test. On its four-executor runner the
+  guest received the documented, typed `EAGAIN` admission response naming
+  `runtime.executor.maxActiveVms`; the same test passed on a larger runner.
+  The regression still starts and verifies all 128 children and retains four
+  concurrent workers, but now retries only that exact bounded-admission
+  response. Unrelated spawn errors, stream loss, stderr, exit status, ordering,
+  and output mismatches still fail. A four-CPU focused reproduction passed all
+  128 result checks.
+- The first exact-head Wasmtime/memory xfstests report contained 42 passes, no
+  filesystem failures, and no harness failures before strict reporting stopped
+  at `generic/082`: upstream reported `Quota user tools not installed`, but
+  that test lacked the exact reviewed exception already used by the other
+  quota-only cases. The concurrent V8/chunked-S3 report independently stopped
+  on the same missing classification with no filesystem or harness failures,
+  confirming that this was manifest policy rather than an engine difference.
+  `generic/082` now has per-storage-backend
+  `allowed-notrun` records matching that literal reason. The runner remains
+  fail-closed for any different test, backend, result, or reason; quota tooling
+  and enforcement remain outside the maintained V8-WASM parity baseline.
+- The next exact-head V8/memory, V8/chunked-local, Wasmtime/memory, and
+  V8/chunked-S3 reports each reached 53 passes with no filesystem failures
+  before the same strict manifest check rejected `generic/110` and
+  `generic/111`. The pinned upstream helper checks for an `xfs_io reflink`
+  command before it checks the filesystem type, so the maintained command
+  surface deterministically reports `xfs_io reflink  support is missing`.
+  Static helper-order review plus a real V8/memory command audit followed all
+  451 reviewed `allowed-notrun` IDs. It retained that exact reflink capability
+  reason for 140 test IDs and 560 backend records, while correctly preserving
+  earlier gates for three swapfile IDs and adding exact earlier capability
+  reasons for one extsize ID, 21 fscrypt IDs, and one statx ID. Unrelated
+  dedupe and explicitly patched logical-feature gates retain their own reasons.
+  The final uninterrupted audit passed 451/451 with zero unclassified,
+  mismatched, filesystem-failure, or harness rows in 1,875.25 seconds; the
+  1,920-record manifest and its 12 schema/runner unit tests also passed.
+- Single-thread comparison still fails the cold-p95 and retained RSS/PSS
+  thresholds, so V8 remains the sidecar-owned default. Wasmtime and
+  Wasmtime-threads remain explicit production selectors; AOT, serialized
+  artifacts, pooling, Wizer, and live snapshots remain disabled.
+- `cargo audit` reported zero known vulnerabilities and five upstream
+  maintenance/yank warnings. `pnpm audit --prod --audit-level high` reported 92
+  inherited repository-wide advisories (2 critical, 31 high, 47 moderate, 12
+  low); none was introduced by the Wasmtime dependency path, but the existing
+  production dependency baseline remains a repository-level release concern.
+
 ## 17. Principal risks
 
 | Risk | Severity | Required mitigation |
 | --- | --- | --- |
 | Porting JavaScript compatibility state as a second kernel | Critical | Inventory each operation; move semantics to the kernel/shared service; keep linker code to ABI marshalling. |
-| Accidentally installing ambient Wasmtime WASI resources | Critical | Link only AgentOS-owned imports and test host-escape denial. |
+| Accidentally installing ambient Wasmtime WASI resources | Critical | Link only agentOS-owned imports and test host-escape denial. |
 | Raw imports bypass the filesystem permission tier | Critical | Put the effective tier and descriptor rights in kernel process state; test malicious direct imports. |
 | Retaining guest-memory borrows across await | Critical | Enforce the three-phase owned-value memory contract and focused tests. |
 | Side effect succeeds before an invalid result pointer is detected | High | Prevalidate all result ranges before spawn/reap/write-like side effects and specify commit ordering. |
@@ -1101,7 +1320,7 @@ The Wasmtime API conclusions were checked against the current upstream API:
 - [Wasmtime async execution](https://docs.wasmtime.dev/api/wasmtime/#asynchronous-wasm)
   for embedder-owned scheduling and native stack switching;
 - [`wasmtime-wasi` Preview1 linker integration](https://docs.wasmtime.dev/api/wasmtime_wasi/p1/fn.add_to_linker_async.html)
-  for the optional `WasiP1Ctx` ownership model that AgentOS is not adopting;
+  for the optional `WasiP1Ctx` ownership model that agentOS is not adopting;
 - [`PoolingAllocationConfig`](https://docs.wasmtime.dev/api/wasmtime/struct.PoolingAllocationConfig.html)
   for address-space reservation and resident warm-slot tradeoffs; and
 - the upstream

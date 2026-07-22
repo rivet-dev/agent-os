@@ -1799,7 +1799,10 @@ type BoundVirtualFileSystemMethods = Partial<
 >;
 
 interface LiveFilesystemBinding {
-	syncFromLive(paths: readonly string[]): Promise<void>;
+	syncFromLive(
+		paths: readonly string[],
+		excludedPaths: readonly string[],
+	): Promise<void>;
 	restore(): void;
 }
 
@@ -1862,10 +1865,12 @@ async function syncLiveFilesystemToBoundMethods(
 	live: VirtualFileSystem,
 	methods: BoundVirtualFileSystemMethods,
 	paths: readonly string[],
+	excludedPaths: readonly string[],
 	maxBytes: number,
 ): Promise<void> {
 	const snapshot: LiveFilesystemSnapshotEntry[] = [];
 	const usage = { bytes: 0 };
+	const normalizedExcludedPaths = excludedPaths.map(normalizePath);
 	for (const targetPath of [...new Set(paths.map(normalizePath))].sort(
 		(left, right) => left.localeCompare(right),
 	)) {
@@ -1878,6 +1883,7 @@ async function syncLiveFilesystemToBoundMethods(
 			snapshot,
 			usage,
 			maxBytes,
+			normalizedExcludedPaths,
 		);
 	}
 	if (usage.bytes >= maxBytes * 0.8) {
@@ -1898,8 +1904,19 @@ async function snapshotLiveFilesystemPath(
 	snapshot: LiveFilesystemSnapshotEntry[],
 	usage: { bytes: number },
 	maxBytes: number,
+	excludedPaths: readonly string[],
 	knownEntry?: Pick<VirtualDirEntry, "isDirectory" | "isSymbolicLink">,
 ): Promise<void> {
+	const normalizedTargetPath = normalizePath(targetPath);
+	if (
+		excludedPaths.some(
+			(excludedPath) =>
+				normalizedTargetPath === excludedPath ||
+				normalizedTargetPath.startsWith(`${excludedPath}/`),
+		)
+	) {
+		return;
+	}
 	const stat =
 		knownEntry ??
 		(targetPath === "/"
@@ -1927,6 +1944,7 @@ async function snapshotLiveFilesystemPath(
 				snapshot,
 				usage,
 				maxBytes,
+				excludedPaths,
 				child,
 			);
 		}
@@ -2018,7 +2036,10 @@ function bindLiveFilesystem(
 	}
 
 	return {
-		async syncFromLive(paths: readonly string[]): Promise<void> {
+		async syncFromLive(
+			paths: readonly string[],
+			excludedPaths: readonly string[],
+		): Promise<void> {
 			const filesystem = getFilesystem();
 			if (!filesystem) {
 				return;
@@ -2027,6 +2048,7 @@ function bindLiveFilesystem(
 				filesystem,
 				fallback,
 				paths,
+				excludedPaths,
 				maxBytes,
 			);
 		},
@@ -2106,6 +2128,8 @@ class NativeKernel implements Kernel {
 			permissions?: Permissions;
 			env?: Record<string, string>;
 			cwd?: string;
+			user?: CreateVmConfig["user"];
+			limits?: CreateVmConfig["limits"];
 			wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 			hostNetworkAdapter?: unknown;
 			loopbackExemptPorts?: number[];
@@ -2245,6 +2269,7 @@ class NativeKernel implements Kernel {
 			try {
 				await this.liveFilesystemBinding.syncFromLive(
 					this.liveFilesystemSyncRoots,
+					this.pendingLocalMounts.map((mount) => mount.path),
 				);
 			} catch (error) {
 				syncError = error;
@@ -2517,6 +2542,8 @@ class NativeKernel implements Kernel {
 		const session = await client.authenticateAndOpenSession();
 		const createVmConfig: CreateVmConfig = {
 			env: createVmEnv,
+			user: this.options.user,
+			limits: this.options.limits,
 			wasmBackend: this.options.wasmBackend,
 			rootFilesystem,
 			permissions: bootstrapPermissions
@@ -2609,6 +2636,8 @@ export function createKernel(options: {
 	permissions?: Permissions;
 	env?: Record<string, string>;
 	cwd?: string;
+	user?: CreateVmConfig["user"];
+	limits?: CreateVmConfig["limits"];
 	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 	maxProcesses?: number;
 	hostNetworkAdapter?: unknown;

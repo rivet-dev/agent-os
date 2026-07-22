@@ -116,7 +116,9 @@ fn concurrent_vm_processes_stay_isolated_with_vm_scoped_events() {
                 assert_eq!(exited.process_id, "proc");
                 result.exit_code = Some(exited.exit_code);
             }
-            EventPayload::VmLifecycleEvent(_)
+            EventPayload::ExecutionOutputEvent(_)
+            | EventPayload::ExecutionCompletedEvent(_)
+            | EventPayload::VmLifecycleEvent(_)
             | EventPayload::StructuredEvent(_)
             | EventPayload::ExtEnvelope(_) => {}
         }

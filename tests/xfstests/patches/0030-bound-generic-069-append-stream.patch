@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Tue, 21 Jul 2026 23:00:00 -0700
+Subject: [PATCH] generic/069: accept exact append-stream reduction
+
+Keep upstream's three-million-write default available for an explicit storage
+endurance run. The agentOS quick matrix supplies a smaller value only for an
+exact reviewed test/backend reduction record; all six concurrent O_APPEND
+streams and exact readback validation remain unchanged.
+---
+ tests/generic/069 | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/tests/generic/069 b/tests/generic/069
+index e4516683..21eb95c0 100755
+--- a/tests/generic/069
++++ b/tests/generic/069
+@@ -27,8 +27,17 @@ echo "*** mount FS"
+ _scratch_mount
+ 
+ cd $SCRATCH_MNT
+ 
+-sizes="1 20 300 40000 3000000 12345"
++stream_iterations=${XFSTESTS_GENERIC_069_STREAM_ITERATIONS:-3000000}
++case "$stream_iterations" in
++    ''|*[!0-9]*)
++        _fail "invalid generic/069 stream iteration count: $stream_iterations"
++        ;;
++esac
++if [ "$stream_iterations" -lt 1 ] || [ "$stream_iterations" -gt 3000000 ]; then
++    _fail "generic/069 stream iteration count must be in 1..3000000: $stream_iterations"
++fi
++sizes="1 20 300 40000 $stream_iterations 12345"
+ for size in $sizes ; do
+ 	$here/src/append_writer $size &
+ 	echo $! $size >> pids
+@@ -44,6 +53,10 @@ cat $SCRATCH_MNT/pids >> $seqres.full
+ cat $SCRATCH_MNT/pids | while read pid size
+ do
+-	echo "*** checking file with $size integers"
++	display_size=$size
++	if [ "$size" = "$stream_iterations" ] && [ "$stream_iterations" != 3000000 ]; then
++		display_size=3000000
++	fi
++	echo "*** checking file with $display_size integers"
+ 	echo checking pid=$pid size=$size >> $seqres.full
+ 	$here/src/append_reader $SCRATCH_MNT/testfile.$pid
+ 	status=$?
+-- 
+2.47.2

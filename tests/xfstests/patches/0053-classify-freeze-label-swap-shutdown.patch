@@ -1,0 +1,154 @@
+diff --git a/tests/generic/491 b/tests/generic/491
+index d300e1a7..00000001 100755
+--- a/tests/generic/491
++++ b/tests/generic/491
+@@ -12,6 +12,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick freeze mount
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS does not expose guest filesystem freeze"
++
+ # Override the default cleanup function.
+ _cleanup()
+ {
+diff --git a/tests/generic/492 b/tests/generic/492
+index bb7d61ec..00000002 100755
+--- a/tests/generic/492
++++ b/tests/generic/492
+@@ -9,6 +9,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS logical mounts do not expose filesystem labels"
++
+ # Import common functions.
+ . ./common/filter
+ 
+diff --git a/tests/generic/493 b/tests/generic/493
+index 225ec0f7..00000003 100755
+--- a/tests/generic/493
++++ b/tests/generic/493
+@@ -9,6 +9,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick swap dedupe
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS does not expose guest swap activation"
++
+ . ./common/filter
+ . ./common/reflink
+ 
+diff --git a/tests/generic/494 b/tests/generic/494
+index 84dfdf84..00000004 100755
+--- a/tests/generic/494
++++ b/tests/generic/494
+@@ -9,6 +9,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick swap punch
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS does not expose guest swap activation"
++
+ . ./common/filter
+ 
+ _require_scratch_swapfile
+diff --git a/tests/generic/495 b/tests/generic/495
+index 8823a0bc..00000005 100755
+--- a/tests/generic/495
++++ b/tests/generic/495
+@@ -9,6 +9,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick swap
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS does not expose guest swap activation"
++
+ # Import common functions.
+ . ./common/filter
+ 
+diff --git a/tests/generic/496 b/tests/generic/496
+index 416f33e3..00000006 100755
+--- a/tests/generic/496
++++ b/tests/generic/496
+@@ -10,6 +10,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick swap prealloc
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS does not expose guest swap activation"
++
+ # Override the default cleanup function.
+ _cleanup()
+ {
+diff --git a/tests/generic/497 b/tests/generic/497
+index fdb6188b..00000007 100755
+--- a/tests/generic/497
++++ b/tests/generic/497
+@@ -10,6 +10,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick swap collapse
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS does not expose guest swap activation"
++
+ # Override the default cleanup function.
+ _cleanup()
+ {
+diff --git a/tests/generic/505 b/tests/generic/505
+index 1173192c..00000008 100755
+--- a/tests/generic/505
++++ b/tests/generic/505
+@@ -20,6 +20,9 @@
+ . ./common/preamble
+ _begin_fstest shutdown auto quick metadata
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentos does not support shutdown"
++
+ # Import common functions.
+ . ./common/filter
+ 
+diff --git a/tests/generic/506 b/tests/generic/506
+index bfa3dfe8..00000009 100755
+--- a/tests/generic/506
++++ b/tests/generic/506
+@@ -19,6 +19,9 @@
+ . ./common/preamble
+ _begin_fstest shutdown auto quick metadata quota
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentos does not support shutdown"
++
+ # Import common functions.
+ . ./common/filter
+ . ./common/quota
+diff --git a/tests/generic/507 b/tests/generic/507
+index 0155bbdb..0000000a 100755
+--- a/tests/generic/507
++++ b/tests/generic/507
+@@ -25,6 +25,9 @@
+ . ./common/preamble
+ _begin_fstest shutdown auto quick metadata
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentos does not support shutdown"
++
+ # Override the default cleanup function.
+ _cleanup()
+ {
+diff --git a/tests/generic/508 b/tests/generic/508
+index 69196e84..0000000b 100755
+--- a/tests/generic/508
++++ b/tests/generic/508
+@@ -20,6 +20,9 @@
+ . ./common/preamble
+ _begin_fstest shutdown auto quick metadata
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentos does not support shutdown"
++
+ # Import common functions.
+ . ./common/filter
+ 

@@ -42,6 +42,24 @@ impl SidecarHostCapability<ProcessOperation> for ProcessCapability {
                         "this process already owns an executable-image snapshot",
                     ));
                 }
+                if let (ExecutableImageSource::Path(path), Some(_)) = (&source, &resolution) {
+                    let path = if path.as_str().starts_with('/') {
+                        normalize_path(path.as_str())
+                    } else {
+                        normalize_path(&format!("{}/{}", process.guest_cwd, path.as_str()))
+                    };
+                    let binding_image = registered_command_name_for_path(kernel, &path)
+                        .and_then(|command| kernel.commands().get(&command).cloned())
+                        .is_some_and(|driver| driver == BINDING_DRIVER_NAME);
+                    if binding_image {
+                        return Err(HostServiceError::new(
+                            "ENOEXEC",
+                            format!(
+                                "registered binding command {path} requires sidecar executable resolution"
+                            ),
+                        ));
+                    }
+                }
                 let (image, resolved_argv) = match (source, resolution) {
                     (ExecutableImageSource::TrustedInitialPath(path), None) => kernel
                         .load_trusted_initial_runtime_image(

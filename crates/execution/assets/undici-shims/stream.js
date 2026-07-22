@@ -65,13 +65,12 @@ export const finished = (stream, options, callback) => {
 	const readableEnabled = normalizedOptions?.readable !== false;
 	const writableEnabled = normalizedOptions?.writable !== false;
 	let cancelled = false;
-	let timer = null;
+	const restoreHooks = [];
 
 	const cleanup = () => {
 		cancelled = true;
-		if (timer !== null) {
-			clearTimeout(timer);
-			timer = null;
+		while (restoreHooks.length > 0) {
+			restoreHooks.pop()();
 		}
 	};
 
@@ -83,27 +82,87 @@ export const finished = (stream, options, callback) => {
 		queueMicrotask(() => done(error));
 	};
 
-	const poll = () => {
-		if (cancelled) {
-			return;
+	const observeClosedPromise = (owner) => {
+		const closed = owner?._closedPromise ?? owner?.closed;
+		if (!closed || typeof closed.then !== "function") {
+			return false;
 		}
-		const state = stream?._state;
-		if (state === "errored") {
-			complete(normalizeStreamError(stream?._storedError));
-			return;
-		}
-		if (
-			state === "closed" ||
-			(isWebReadableStream(stream) && !readableEnabled) ||
-			(isWebWritableStream(stream) && !writableEnabled)
-		) {
-			complete();
-			return;
-		}
-		timer = setTimeout(poll, 0);
+		Promise.resolve(closed).then(
+			() => complete(),
+			(error) => complete(normalizeStreamError(error)),
+		);
+		return true;
 	};
 
-	poll();
+	const state = stream?._state;
+	if (state === "errored") {
+		complete(normalizeStreamError(stream?._storedError));
+		return cleanup;
+	}
+	if (
+		state === "closed" ||
+		(isWebReadableStream(stream) && !readableEnabled) ||
+		(isWebWritableStream(stream) && !writableEnabled)
+	) {
+		complete();
+		return cleanup;
+	}
+
+	const existingOwner = isWebReadableStream(stream)
+		? stream?._reader
+		: stream?._writer;
+	if (observeClosedPromise(existingOwner)) {
+		return cleanup;
+	}
+
+	const acquisitionMethod = isWebReadableStream(stream)
+		? "getReader"
+		: "getWriter";
+	const originalAcquire = stream?.[acquisitionMethod];
+	if (typeof originalAcquire === "function") {
+		const observedAcquire = function (...args) {
+			const owner = originalAcquire.apply(this, args);
+			observeClosedPromise(owner);
+			return owner;
+		};
+		stream[acquisitionMethod] = observedAcquire;
+		restoreHooks.push(() => {
+			if (stream[acquisitionMethod] === observedAcquire) {
+				stream[acquisitionMethod] = originalAcquire;
+			}
+		});
+	}
+
+	// agentOS's Web Streams implementation exposes its controller. Hook its
+	// terminal transitions so `finished()` remains event-driven even when no
+	// reader or writer has been acquired yet.
+	const controller = isWebReadableStream(stream)
+		? stream?._readableStreamController
+		: stream?._writableStreamController;
+	for (const [method, errorResult] of [
+		["close", false],
+		["error", true],
+	]) {
+		const original = controller?.[method];
+		if (typeof original !== "function") {
+			continue;
+		}
+		const observed = function (...args) {
+			const result = original.apply(this, args);
+			if (errorResult) {
+				complete(normalizeStreamError(args[0]));
+			} else {
+				complete();
+			}
+			return result;
+		};
+		controller[method] = observed;
+		restoreHooks.push(() => {
+			if (controller[method] === observed) {
+				controller[method] = original;
+			}
+		});
+	}
 	return cleanup;
 };
 

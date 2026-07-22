@@ -12,16 +12,17 @@ NATIVE_C := $(TOOLCHAIN)/c
 TOOLCHAIN_COMMANDS := $(TOOLCHAIN)/target/wasm32-wasip1/release/commands
 WASI_CC := $(NATIVE_C)/vendor/wasi-sdk/bin/clang
 WASI_SYSROOT := $(NATIVE_C)/sysroot
-XFSTESTS_C_HELPERS := af_unix append_reader append_writer attr_replace_test devzero dirstress fill fs_perms locktest looptest \
+XFSTESTS_C_HELPERS := af_unix append_reader append_writer attr_replace_test devzero dio-append-buf-fault dio-buf-fault dirstress fiemap-fault fiemap-tester fill fs_perms locktest looptest \
 	feature listxattr lstat64 nametest permname \
-	multi_open_unlink preallo_rw_pattern_reader preallo_rw_pattern_writer pwrite_mmap_blocked \
-	readdir-while-renames rename renameat2 rewinddir-test runas seek_copy_test \
+	min_dio_alignment mmap-rw-fault multi_open_unlink preallo_rw_pattern_reader preallo_rw_pattern_writer punch-alternating pwrite_mmap_blocked t_dir_offset2 \
+	readdir-while-renames rename renameat2 rewinddir-test runas seek_copy_test seek_sanity_test splice-test \
 	t_access_root t_attr_corruption t_dir_type t_futimens t_getcwd t_rename_overwrite t_truncate_cmtime \
-	t_mmap_writev testx trunc truncate truncfile unlink-fsync \
+	t_mmap_writev t_mmap_writev_overlap t_readdir_3 testx trunc truncate truncfile unlink-fsync \
 	writev_on_pagefault
 XFSTESTS_HELPER_INCLUDES := -D_GNU_SOURCE -I$(CURDIR)/runner/include -I$(WORK)/src \
 	-I$(NATIVE_C)/include -include agentos_helper_compat.h
 XFSTESTS_HELPER_SUPPORT := $(CURDIR)/runner/agentos_helper_support.c
+XFSTESTS_LTP_HELPERS := fsstress fsx
 CARGO_TARGET_DIR ?= $(CURDIR)/.cache/cargo-target
 CARGO_BUILD_JOBS ?= 1
 XFSTESTS_CONCURRENCY ?= 2
@@ -33,6 +34,7 @@ XFSTESTS_BACKENDS ?= chunked_local,memory,chunked_s3
 XFSTESTS_WASM_BACKENDS ?= v8 wasmtime
 XFSTESTS_MAX_TEMP_BYTES ?= 8589934592
 XFSTESTS_TEST_TIMEOUT_SECONDS ?= 3600
+XFSTESTS_BUILD_NATIVE_COMMANDS ?= 1
 
 .PHONY: run native-commands c-probes helpers stage check clean
 
@@ -69,8 +71,14 @@ run: helpers
 	done
 
 native-commands:
-	$(MAKE) -C "$(TOOLCHAIN)" wasm
-	$(MAKE) -C "$(TOOLCHAIN)" cmd/grep
+
+ifeq ($(XFSTESTS_BUILD_NATIVE_COMMANDS),1)
+	$(MAKE) -C "$(TOOLCHAIN)" commands
+else ifeq ($(XFSTESTS_BUILD_NATIVE_COMMANDS),0)
+	test -d "$(TOOLCHAIN_COMMANDS)"
+else
+	$(error XFSTESTS_BUILD_NATIVE_COMMANDS must be 0 or 1)
+endif
 
 c-probes:
 	$(MAKE) -C "$(NATIVE_C)" sysroot
@@ -80,6 +88,7 @@ c-probes:
 		"$(NATIVE_C)/build/acl_tools" "$(NATIVE_C)/build/acl_tools.wasm" \
 		"$(NATIVE_C)/build/xfs_io" "$(NATIVE_C)/build/xfs_io.wasm" \
 		"$(NATIVE_C)/build/mknod" "$(NATIVE_C)/build/mknod.wasm" \
+		"$(NATIVE_C)/build/getconf" "$(NATIVE_C)/build/getconf.wasm" \
 		"$(NATIVE_C)/build/fifo_test" "$(NATIVE_C)/build/fifo_test.wasm" \
 		"$(NATIVE_C)/build/mmap_test" "$(NATIVE_C)/build/mmap_test.wasm" \
 		"$(NATIVE_C)/build/openat_test" "$(NATIVE_C)/build/openat_test.wasm" \
@@ -89,13 +98,13 @@ c-probes:
 		"$(NATIVE_C)/build/signal_tests" "$(NATIVE_C)/build/signal_tests.wasm" \
 		"$(NATIVE_C)/build/waitpid_status" "$(NATIVE_C)/build/waitpid_status.wasm" \
 		"$(NATIVE_C)/build/self_stop_status" "$(NATIVE_C)/build/self_stop_status.wasm"
-	$(MAKE) -C "$(NATIVE_C)" build/credentials_test build/xattr_test build/xattr_tools build/acl_tools build/xfs_io build/mknod build/fifo_test build/mmap_test build/openat_test build/pwritev_test build/sync_test build/flock_test build/signal_tests build/waitpid_status build/self_stop_status
+	$(MAKE) -C "$(NATIVE_C)" build/credentials_test build/xattr_test build/xattr_tools build/acl_tools build/xfs_io build/mknod build/getconf build/fifo_test build/mmap_test build/openat_test build/pwritev_test build/sync_test build/flock_test build/signal_tests build/waitpid_status build/self_stop_status
 	chmod +x "$(NATIVE_C)"/build/{credentials_test,xattr_test,xattr_tools,acl_tools,xfs_io,mknod,fifo_test,mmap_test,openat_test,pwritev_test,sync_test,flock_test}
 	mkdir -p "$(TOOLCHAIN_COMMANDS)"
 	for spec in \
 		attr:xattr_tools getfattr:xattr_tools setfattr:xattr_tools \
 		chacl:acl_tools getfacl:acl_tools setfacl:acl_tools \
-		xfs_io:xfs_io mknod:mknod mkfifo:mknod; do \
+		xfs_io:xfs_io mknod:mknod mkfifo:mknod getconf:getconf; do \
 		command=$${spec%%:*}; source=$${spec##*:}; \
 		cp "$(NATIVE_C)/build/$$source" "$(TOOLCHAIN_COMMANDS)/$$command"; \
 		chmod +x "$(TOOLCHAIN_COMMANDS)/$$command"; \
@@ -106,8 +115,10 @@ helpers: stage native-commands c-probes
 	set -e; for helper in $(XFSTESTS_C_HELPERS); do \
 		source="$(WORK)/src/$$helper.c"; \
 		if [[ "$$helper" == feature ]]; then source="$(CURDIR)/runner/feature_wasi.c"; fi; \
+		extra_flags=; \
+		if [[ "$$helper" == fiemap-tester ]]; then extra_flags=-DHAVE_FALLOCATE; fi; \
 		"$(WASI_CC)" --target=wasm32-wasip1 --sysroot="$(WASI_SYSROOT)" -O2 \
-			$(XFSTESTS_HELPER_INCLUDES) \
+			$(XFSTESTS_HELPER_INCLUDES) $$extra_flags \
 			-o "$(WORK)/src/$$helper" "$$source" \
 			"$(XFSTESTS_HELPER_SUPPORT)"; \
 		chmod +x "$(WORK)/src/$$helper"; \
@@ -117,6 +128,15 @@ helpers: stage native-commands c-probes
 		-o "$(WORK)/src/fssum" "$(WORK)/src/fssum.c" "$(WORK)/src/md5.c" \
 		"$(XFSTESTS_HELPER_SUPPORT)"
 	chmod +x "$(WORK)/src/fssum"
+	set -e; for helper in $(XFSTESTS_LTP_HELPERS); do \
+		"$(WASI_CC)" --target=wasm32-wasip1 --sysroot="$(WASI_SYSROOT)" -O2 \
+			-D_GNU_SOURCE -D_LARGEFILE64_SOURCE -mllvm -wasm-enable-sjlj \
+			-I$(CURDIR)/runner/include -I$(WORK)/src -I$(NATIVE_C)/include \
+			-include agentos_helper_compat.h \
+			-o "$(WORK)/ltp/$$helper" "$(WORK)/ltp/$$helper.c" \
+			"$(XFSTESTS_HELPER_SUPPORT)" -lsetjmp; \
+		chmod +x "$(WORK)/ltp/$$helper"; \
+	done
 	printf '%s\n' $(XFSTESTS_C_HELPERS) fssum > "$(WORK)/agentos-built-helpers"
 	rm -rf "$(WORK)/agentos-command-bin"
 	rm -rf "$(WORK)/agentos-command-packages"
@@ -133,7 +153,7 @@ helpers: stage native-commands c-probes
 				"$(WORK)/agentos-command-bin/$$command"; \
 		done; \
 	done
-	printf '%s\n' pwrite pread truncate falloc fpunch fzero finsert fcollapse fiemap fadvise flink utimes fsync s fdatasync syncfs stat \
+	printf '%s\n' pwrite pread sendfile truncate falloc fpunch fzero finsert fcollapse fiemap fadvise flink utimes fsync s fdatasync syncfs stat \
 		> "$(WORK)/agentos-xfs-io-commands"
 	printf '%s\n' xattrs acls > "$(WORK)/agentos-built-features"
 	python3 "$(CURDIR)/runner/surface_audit.py" \
@@ -170,7 +190,7 @@ stage: check
 
 check:
 	test "$$(printf '%s' "$(PIN)" | wc -c)" -eq 40
-	test "$$(find "$(CURDIR)/patches" -maxdepth 1 -name '*.patch' | wc -l)" -eq 27
+	test "$$(find "$(CURDIR)/patches" -maxdepth 1 -name '*.patch' | wc -l)" -eq 74
 	python3 "$(CURDIR)/runner/prepare.py" \
 		--exceptions "$(CURDIR)/exceptions.toml" \
 		--exclude "$(CURDIR)/exclude.generic" --check

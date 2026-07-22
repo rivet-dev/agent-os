@@ -534,6 +534,39 @@ defineMissingModuleProperty(
 var builtinStringDecoderStdlibModule = cloneStdlibModule(
 	stringDecoderStdlibModuleNs,
 );
+function normalizeStringDecoderInput(value) {
+	const BufferCtor = builtinBufferStdlibModule?.Buffer;
+	if (
+		typeof BufferCtor !== "function" ||
+		value == null ||
+		BufferCtor.isBuffer(value)
+	) {
+		return value;
+	}
+	if (ArrayBuffer.isView(value)) {
+		return BufferCtor.from(value.buffer, value.byteOffset, value.byteLength);
+	}
+	if (
+		value instanceof ArrayBuffer ||
+		(typeof SharedArrayBuffer !== "undefined" &&
+			value instanceof SharedArrayBuffer)
+	) {
+		return BufferCtor.from(value);
+	}
+	return value;
+}
+const BuiltinStringDecoder = builtinStringDecoderStdlibModule?.StringDecoder;
+if (typeof BuiltinStringDecoder === "function") {
+	for (const method of ["write", "end"]) {
+		const original = BuiltinStringDecoder.prototype?.[method];
+		if (typeof original !== "function") continue;
+		BuiltinStringDecoder.prototype[method] = function stringDecoderMethod(
+			value,
+		) {
+			return original.call(this, normalizeStringDecoderInput(value));
+		};
+	}
+}
 const upstreamUrlStdlibModule = unwrapStdlibModule(upstreamUrlHelpersModule);
 
 function withNodeErrorCode(error, code) {
@@ -589,6 +622,12 @@ function fileURLToPath2(input, options) {
 			),
 			"ERR_INVALID_ARG_TYPE",
 		);
+	}
+	// Guest packages commonly pass already-decoded absolute paths through this
+	// helper. Keep those paths inside the guest namespace instead of asking the
+	// upstream URL parser to reinterpret them as URL strings.
+	if (!options?.windows && typeof input === "string" && input.startsWith("/")) {
+		return input;
 	}
 	try {
 		if (options?.windows) {

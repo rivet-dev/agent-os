@@ -38,7 +38,7 @@ static int create_node(const char *path, uint32_t type, uint32_t permissions,
                                         (uint32_t)strlen(path),
                                         type | permissions, rdev);
     if (error != 0) {
-        fprintf(stderr, "mknod: %s: host errno %u\n", path, error);
+        fprintf(stderr, "mknod: %s: %s\n", path, strerror((int)error));
         return 1;
     }
     return 0;
@@ -48,7 +48,7 @@ static int create_node(const char *path, uint32_t type, uint32_t permissions,
     (void)permissions;
     (void)major;
     (void)minor;
-    fprintf(stderr, "mknod: AgentOS host import is only available in a VM\n");
+    fprintf(stderr, "mknod: agentOS host import is only available in a VM\n");
     return 1;
 #endif
 }

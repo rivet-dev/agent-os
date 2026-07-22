@@ -643,9 +643,9 @@ fn raw_abi_memory_contract_assertions() -> Vec<RawCallAssertion> {
             [
                 i32c(-1),
                 i32c(0),
-                i32c(0),
-                i32c(0),
-                i32c(0),
+                i32c(1),
+                i32c(1),
+                i32c(1),
                 i32c(65_520),
                 i32c(32),
                 i32c(0),
@@ -732,9 +732,9 @@ fn raw_abi_memory_contract_assertions() -> Vec<RawCallAssertion> {
             [
                 i32c(3),
                 i32c(0),
-                i32c(0),
-                i32c(0),
-                i32c(0),
+                i32c(1),
+                i32c(1),
+                i32c(1),
                 i32c(65_520),
                 i32c(32),
                 i32c(0),
@@ -1218,7 +1218,7 @@ fn raw_fixed_limit_family_module() -> Vec<u8> {
         (i32.const 120016) (i32.const 256)
         (i32.const 131072) (i32.const 0)
         (i32.const 0) (i32.const 1))
-      (i32.const 68))
+      (i32.const 28))
       (then (call $fail (i32.const 213))))
   )
 )

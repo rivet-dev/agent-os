@@ -22,7 +22,7 @@ const DEFAULT_BUCKET = "test-bucket";
 const DEFAULT_ACCESS_KEY_ID = "minioadmin";
 const DEFAULT_SECRET_ACCESS_KEY = "minioadmin";
 const EMPTY_PAYLOAD_HASH = sha256Hex("");
-const SUPPORTED_METHODS = new Set(["GET", "PUT", "DELETE"]);
+const SUPPORTED_METHODS = new Set(["GET", "HEAD", "PUT", "DELETE"]);
 
 interface ParsedAuthorization {
 	accessKeyId: string;
@@ -71,7 +71,10 @@ function canonicalQueryString(searchParams: URLSearchParams): string {
 		.sort(([aKey, aValue], [bKey, bValue]) =>
 			aKey === bKey ? aValue.localeCompare(bValue) : aKey.localeCompare(bKey),
 		)
-		.map(([key, value]) => `${encodeAwsComponent(key)}=${encodeAwsComponent(value)}`)
+		.map(
+			([key, value]) =>
+				`${encodeAwsComponent(key)}=${encodeAwsComponent(value)}`,
+		)
 		.join("&");
 }
 
@@ -208,10 +211,7 @@ function verifySigV4(options: {
 
 	const signingKey = hmac(
 		hmac(
-			hmac(
-				hmac(`AWS4${options.secretAccessKey}`, parsed.date),
-				parsed.region,
-			),
+			hmac(hmac(`AWS4${options.secretAccessKey}`, parsed.date), parsed.region),
 			parsed.service,
 		),
 		parsed.terminal,
@@ -273,9 +273,11 @@ export async function startMockS3Server(): Promise<MockS3ServerHandle> {
 		const expectedOperationId =
 			method === "GET"
 				? "GetObject"
-				: method === "PUT"
-					? "PutObject"
-					: "DeleteObject";
+				: method === "HEAD"
+					? "HeadObject"
+					: method === "PUT"
+						? "PutObject"
+						: "DeleteObject";
 		if (query && query !== `x-id=${expectedOperationId}`) {
 			fail(
 				501,
@@ -318,6 +320,27 @@ export async function startMockS3Server(): Promise<MockS3ServerHandle> {
 		requestLog.push({ method, path: decodedPath, query, key });
 
 		switch (method) {
+			case "HEAD": {
+				const stored = objects.get(key);
+				if (!stored) {
+					response.writeHead(404, {
+						"Content-Type": "application/xml",
+						"Content-Length": "0",
+						"x-amz-request-id": "test",
+					});
+					response.end();
+					return;
+				}
+
+				response.writeHead(200, {
+					"Content-Type": "application/octet-stream",
+					"Content-Length": String(stored.length),
+					ETag: `"${createHash("md5").update(stored).digest("hex")}"`,
+					"x-amz-request-id": "test",
+				});
+				response.end();
+				return;
+			}
 			case "GET": {
 				const stored = objects.get(key);
 				if (!stored) {

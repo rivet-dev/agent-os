@@ -1085,6 +1085,9 @@ impl MountEntry {
         if self.no_dir_atime {
             options.push("nodiratime");
         }
+        if self.no_suid {
+            options.push("nosuid");
+        }
         options.join(",")
     }
 }
@@ -1098,6 +1101,7 @@ pub struct MountEntry {
     pub read_only: bool,
     pub access_time: AccessTimePolicy,
     pub no_dir_atime: bool,
+    pub no_suid: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1108,8 +1112,14 @@ pub struct MountOptions {
     pub read_only: bool,
     pub access_time: AccessTimePolicy,
     pub no_dir_atime: bool,
+    pub no_suid: bool,
     pub max_bytes: Option<u64>,
     pub max_inodes: Option<usize>,
+    /// Interpret absolute symlink targets stored by the backing filesystem in
+    /// that filesystem's root namespace. Package images need this because
+    /// their archive root becomes a guest mount point; ordinary guest-created
+    /// symlinks retain Linux's VM-root absolute semantics.
+    pub absolute_symlinks_mount_relative: bool,
 }
 
 impl MountOptions {
@@ -1122,8 +1132,10 @@ impl MountOptions {
             read_only: false,
             access_time: AccessTimePolicy::Relatime,
             no_dir_atime: false,
+            no_suid: false,
             max_bytes: None,
             max_inodes: None,
+            absolute_symlinks_mount_relative: false,
         }
     }
 
@@ -1152,6 +1164,11 @@ impl MountOptions {
         self
     }
 
+    pub fn no_suid(mut self, no_suid: bool) -> Self {
+        self.no_suid = no_suid;
+        self
+    }
+
     pub fn max_bytes(mut self, max_bytes: Option<u64>) -> Self {
         self.max_bytes = max_bytes;
         self
@@ -1159,6 +1176,11 @@ impl MountOptions {
 
     pub fn max_inodes(mut self, max_inodes: Option<usize>) -> Self {
         self.max_inodes = max_inodes;
+        self
+    }
+
+    pub fn absolute_symlinks_mount_relative(mut self, enabled: bool) -> Self {
+        self.absolute_symlinks_mount_relative = enabled;
         self
     }
 }
@@ -1171,8 +1193,10 @@ struct MountRegistration {
     read_only: bool,
     access_time: AccessTimePolicy,
     no_dir_atime: bool,
+    no_suid: bool,
     max_bytes: Option<u64>,
     max_inodes: Option<usize>,
+    absolute_symlinks_mount_relative: bool,
     cached_usage: Option<FileSystemUsage>,
     filesystem: Box<dyn MountedFileSystem>,
 }
@@ -1180,6 +1204,7 @@ struct MountRegistration {
 pub struct MountTable {
     mounts: Vec<MountRegistration>,
     mount_indices: BTreeMap<String, usize>,
+    mutation_generation: u64,
 }
 
 impl MountTable {
@@ -1193,12 +1218,15 @@ impl MountTable {
                 read_only: false,
                 access_time: AccessTimePolicy::Relatime,
                 no_dir_atime: false,
+                no_suid: false,
                 max_bytes: None,
                 max_inodes: None,
+                absolute_symlinks_mount_relative: false,
                 cached_usage: None,
                 filesystem: Box::new(MountedVirtualFileSystem::new(root_fs)),
             }],
             mount_indices: BTreeMap::from([(String::from("/"), 0)]),
+            mutation_generation: 0,
         }
     }
 
@@ -1218,13 +1246,26 @@ impl MountTable {
                 read_only: options.read_only,
                 access_time: options.access_time,
                 no_dir_atime: options.no_dir_atime,
+                no_suid: options.no_suid,
                 max_bytes: options.max_bytes,
                 max_inodes: options.max_inodes,
+                absolute_symlinks_mount_relative: options.absolute_symlinks_mount_relative,
                 cached_usage: None,
                 filesystem,
             }],
             mount_indices: BTreeMap::from([(String::from("/"), 0)]),
+            mutation_generation: 0,
         }
+    }
+
+    /// Monotonic token for cache consumers that derive data from filesystem
+    /// contents, metadata, or mount topology.
+    pub fn mutation_generation(&self) -> u64 {
+        self.mutation_generation
+    }
+
+    fn advance_mutation_generation(&mut self) {
+        self.mutation_generation = self.mutation_generation.wrapping_add(1);
     }
 
     pub fn mount(
@@ -1296,14 +1337,17 @@ impl MountTable {
             read_only: options.read_only,
             access_time: options.access_time,
             no_dir_atime: options.no_dir_atime,
+            no_suid: options.no_suid,
             max_bytes: options.max_bytes,
             max_inodes: options.max_inodes,
+            absolute_symlinks_mount_relative: options.absolute_symlinks_mount_relative,
             cached_usage: None,
             filesystem,
         });
         self.mounts
             .sort_by_key(|mount| std::cmp::Reverse(mount.path.len()));
         self.rebuild_mount_indices();
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -1338,6 +1382,7 @@ impl MountTable {
 
         let mut mount = self.mounts.remove(index);
         self.rebuild_mount_indices();
+        self.advance_mutation_generation();
         mount.filesystem.shutdown()?;
         Ok(())
     }
@@ -1353,6 +1398,7 @@ impl MountTable {
         let mut read_only = mount.read_only;
         let mut access_time = mount.access_time.clone();
         let mut no_dir_atime = mount.no_dir_atime;
+        let mut no_suid = mount.no_suid;
         let mut max_bytes = mount.max_bytes;
         let mut max_inodes = mount.max_inodes;
         for option in options
@@ -1369,6 +1415,8 @@ impl MountTable {
                 "strictatime" => access_time = AccessTimePolicy::StrictAtime,
                 "nodiratime" => no_dir_atime = true,
                 "diratime" => no_dir_atime = false,
+                "nosuid" => no_suid = true,
+                "suid" => no_suid = false,
                 value if value.starts_with("size=") => {
                     max_bytes = Some(parse_mount_limit(value, "size")?);
                 }
@@ -1393,9 +1441,11 @@ impl MountTable {
         mount.read_only = read_only;
         mount.access_time = access_time;
         mount.no_dir_atime = no_dir_atime;
+        mount.no_suid = no_suid;
         mount.max_bytes = max_bytes;
         mount.max_inodes = max_inodes;
         mount.cached_usage = Some(usage);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -1410,6 +1460,7 @@ impl MountTable {
                 read_only: mount.read_only,
                 access_time: mount.access_time.clone(),
                 no_dir_atime: mount.no_dir_atime,
+                no_suid: mount.no_suid,
             })
             .collect()
     }
@@ -1417,6 +1468,10 @@ impl MountTable {
     pub fn root_virtual_filesystem_mut<T: VirtualFileSystem + 'static>(
         &mut self,
     ) -> Option<&mut T> {
+        // Returning a raw mutable root handle permits mutations that bypass the
+        // MountTable methods below. Advance eagerly so derived caches cannot
+        // retain authority across any such access.
+        self.advance_mutation_generation();
         let root = self.mounts.iter_mut().find(|mount| mount.path == "/")?;
         root.filesystem
             .as_any_mut()
@@ -1931,6 +1986,7 @@ impl VirtualFileSystem for MountTable {
             .filesystem
             .write_file(&relative_path, content)?;
         self.update_cached_path_usage(index, before, &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -1948,6 +2004,7 @@ impl VirtualFileSystem for MountTable {
             .filesystem
             .write_file_with_mode(&relative_path, content, mode)?;
         self.update_cached_path_usage(index, before, &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -1960,6 +2017,7 @@ impl VirtualFileSystem for MountTable {
             .filesystem
             .create_file_exclusive(&relative_path, content)?;
         self.update_cached_path_usage(index, before, &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -1977,6 +2035,7 @@ impl VirtualFileSystem for MountTable {
             .filesystem
             .create_file_exclusive_with_mode(&relative_path, content, mode)?;
         self.update_cached_path_usage(index, before, &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -1995,6 +2054,7 @@ impl VirtualFileSystem for MountTable {
             .filesystem
             .append_file(&relative_path, content)?;
         self.update_cached_path_usage(index, before, &relative_path);
+        self.advance_mutation_generation();
         Ok(size)
     }
 
@@ -2007,6 +2067,7 @@ impl VirtualFileSystem for MountTable {
         )?;
         self.mounts[index].filesystem.create_dir(&relative_path)?;
         self.update_cached_path_usage(index, before, &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -2021,6 +2082,7 @@ impl VirtualFileSystem for MountTable {
             .filesystem
             .create_dir_with_mode(&relative_path, mode)?;
         self.update_cached_path_usage(index, before, &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -2043,6 +2105,7 @@ impl VirtualFileSystem for MountTable {
         } else {
             self.update_cached_path_usage(index, before, &relative_path);
         }
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -2057,6 +2120,7 @@ impl VirtualFileSystem for MountTable {
             .filesystem
             .mknod(&relative_path, mode, rdev)?;
         self.update_cached_path_usage(index, before, &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -2079,6 +2143,7 @@ impl VirtualFileSystem for MountTable {
         } else {
             self.update_cached_path_usage(index, before, &relative_path);
         }
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -2100,6 +2165,7 @@ impl VirtualFileSystem for MountTable {
         let before = self.mounts[index].filesystem.lstat(&relative_path).ok();
         self.mounts[index].filesystem.remove_file(&relative_path)?;
         self.update_cached_path_usage(index, before, &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -2108,6 +2174,7 @@ impl VirtualFileSystem for MountTable {
         let before = self.mounts[index].filesystem.lstat(&relative_path).ok();
         self.mounts[index].filesystem.remove_dir(&relative_path)?;
         self.update_cached_path_usage(index, before, &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -2147,6 +2214,7 @@ impl VirtualFileSystem for MountTable {
                 }
             }
         }
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -2184,27 +2252,25 @@ impl VirtualFileSystem for MountTable {
                     ));
                 }
 
-                // Mounted filesystems express absolute symlink targets in their
-                // own root namespace. Keep the mount index while reading the
-                // link so the component-walk fallback does not accidentally
-                // reinterpret `/target` as the VM root after crossing a
-                // synthetic leaf mount.
+                // Package-image filesystems can explicitly scope absolute
+                // targets to their backing root. All ordinary guest mounts use
+                // Linux semantics, where an absolute target starts at the VM
+                // root even when the link itself lives on another mount.
                 let (link_index, relative_path) = self.resolve_link_leaf_index(&candidate)?;
                 let target = self.mounts[link_index]
                     .filesystem
                     .read_link(&relative_path)?;
                 let target_path = if target.starts_with('/') {
                     let mount_path = &self.mounts[link_index].path;
-                    let guest_absolute_target =
-                        target == *mount_path || target.starts_with(&format!("{mount_path}/"));
-                    if mount_path == "/" || guest_absolute_target {
-                        normalize_path(&target)
-                    } else {
+                    if mount_path != "/" && self.mounts[link_index].absolute_symlinks_mount_relative
+                    {
                         normalize_path(&format!(
                             "{}/{}",
                             mount_path,
                             target.trim_start_matches('/')
                         ))
+                    } else {
+                        normalize_path(&target)
                     }
                 } else {
                     normalize_path(&format!("{}/{}", parent_path(&candidate), target))
@@ -2236,21 +2302,7 @@ impl VirtualFileSystem for MountTable {
 
     fn symlink(&mut self, target: &str, link_path: &str) -> VfsResult<()> {
         let normalized_link_path = normalize_path(link_path);
-        let link_parent = parent_path(&normalized_link_path);
-        let absolute_target = if target.starts_with('/') {
-            normalize_path(target)
-        } else {
-            normalize_path(&format!("{link_parent}/{target}"))
-        };
-
         let (index, relative_path) = self.resolve_index(&normalized_link_path)?;
-        let (target_index, _) = self.resolve_index(&absolute_target)?;
-        if index != target_index {
-            return Err(VfsError::new(
-                "EXDEV",
-                format!("symlink across mounts: {link_path} -> {target}"),
-            ));
-        }
         self.ensure_writable(index, link_path)?;
         let before = self.mounts[index].filesystem.lstat(&relative_path).ok();
         self.check_file_growth(index, &relative_path, target.len() as u64, true)?;
@@ -2259,12 +2311,23 @@ impl VirtualFileSystem for MountTable {
             .filesystem
             .symlink(target, &relative_path)?;
         self.update_cached_path_usage(index, before, &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
     fn read_link(&self, path: &str) -> VfsResult<String> {
         let (index, relative_path) = self.resolve_link_leaf_index(path)?;
-        self.mounts[index].filesystem.read_link(&relative_path)
+        let target = self.mounts[index].filesystem.read_link(&relative_path)?;
+        let mount = &self.mounts[index];
+        if target.starts_with('/') && mount.path != "/" && mount.absolute_symlinks_mount_relative {
+            Ok(normalize_path(&format!(
+                "{}/{}",
+                mount.path,
+                target.trim_start_matches('/')
+            )))
+        } else {
+            Ok(target)
+        }
     }
 
     fn lstat(&self, path: &str) -> VfsResult<VirtualStat> {
@@ -2285,12 +2348,16 @@ impl VirtualFileSystem for MountTable {
 
         self.mounts[old_index]
             .filesystem
-            .link(&old_relative_path, &new_relative_path)
+            .link(&old_relative_path, &new_relative_path)?;
+        self.advance_mutation_generation();
+        Ok(())
     }
 
     fn chmod(&mut self, path: &str, mode: u32) -> VfsResult<()> {
         let (index, relative_path) = self.resolve_writable_index(path)?;
-        self.mounts[index].filesystem.chmod(&relative_path, mode)
+        self.mounts[index].filesystem.chmod(&relative_path, mode)?;
+        self.advance_mutation_generation();
+        Ok(())
     }
 
     fn chown(&mut self, path: &str, uid: u32, gid: u32) -> VfsResult<()> {
@@ -2312,7 +2379,9 @@ impl VirtualFileSystem for MountTable {
         self.ensure_writable(index, path)?;
         self.mounts[index]
             .filesystem
-            .chown_spec(&relative_path, uid, gid, follow_symlinks)
+            .chown_spec(&relative_path, uid, gid, follow_symlinks)?;
+        self.advance_mutation_generation();
+        Ok(())
     }
 
     fn lchown(&mut self, path: &str, uid: u32, gid: u32) -> VfsResult<()> {
@@ -2320,7 +2389,9 @@ impl VirtualFileSystem for MountTable {
         self.ensure_writable(index, path)?;
         self.mounts[index]
             .filesystem
-            .lchown(&relative_path, uid, gid)
+            .lchown(&relative_path, uid, gid)?;
+        self.advance_mutation_generation();
+        Ok(())
     }
 
     fn get_xattr(&mut self, path: &str, name: &str, follow_symlinks: bool) -> VfsResult<Vec<u8>> {
@@ -2359,9 +2430,15 @@ impl VirtualFileSystem for MountTable {
             self.resolve_link_leaf_index(path)?
         };
         self.ensure_writable(index, path)?;
-        self.mounts[index]
-            .filesystem
-            .set_xattr(&relative_path, name, value, flags, follow_symlinks)
+        self.mounts[index].filesystem.set_xattr(
+            &relative_path,
+            name,
+            value,
+            flags,
+            follow_symlinks,
+        )?;
+        self.advance_mutation_generation();
+        Ok(())
     }
 
     fn remove_xattr(&mut self, path: &str, name: &str, follow_symlinks: bool) -> VfsResult<()> {
@@ -2373,14 +2450,18 @@ impl VirtualFileSystem for MountTable {
         self.ensure_writable(index, path)?;
         self.mounts[index]
             .filesystem
-            .remove_xattr(&relative_path, name, follow_symlinks)
+            .remove_xattr(&relative_path, name, follow_symlinks)?;
+        self.advance_mutation_generation();
+        Ok(())
     }
 
     fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()> {
         let (index, relative_path) = self.resolve_writable_index(path)?;
         self.mounts[index]
             .filesystem
-            .utimes(&relative_path, atime_ms, mtime_ms)
+            .utimes(&relative_path, atime_ms, mtime_ms)?;
+        self.advance_mutation_generation();
+        Ok(())
     }
 
     fn utimes_spec(
@@ -2393,17 +2474,21 @@ impl VirtualFileSystem for MountTable {
         let (index, relative_path) = self.resolve_writable_index(path)?;
         self.mounts[index]
             .filesystem
-            .utimes_spec(&relative_path, atime, mtime, follow_symlinks)
+            .utimes_spec(&relative_path, atime, mtime, follow_symlinks)?;
+        self.advance_mutation_generation();
+        Ok(())
     }
 
     fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {
-        let (index, relative_path) = self.resolve_writable_index(path)?;
+        let (index, relative_path) = self.resolve_content_index(path)?;
+        self.ensure_writable(index, path)?;
         let before = self.mounts[index].filesystem.lstat(&relative_path).ok();
         self.check_file_growth(index, &relative_path, length, false)?;
         self.mounts[index]
             .filesystem
             .truncate(&relative_path, length)?;
         self.update_cached_path_usage(index, before, &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -2427,6 +2512,7 @@ impl VirtualFileSystem for MountTable {
             .filesystem
             .allocate(&relative_path, offset, length)?;
         self.update_cached_path_usage(index, Some(before), &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -2445,6 +2531,7 @@ impl VirtualFileSystem for MountTable {
             .filesystem
             .insert_range(&relative_path, offset, length)?;
         self.update_cached_path_usage(index, Some(before), &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -2456,6 +2543,7 @@ impl VirtualFileSystem for MountTable {
             .filesystem
             .collapse_range(&relative_path, offset, length)?;
         self.update_cached_path_usage(index, Some(before), &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -2482,6 +2570,7 @@ impl VirtualFileSystem for MountTable {
             .filesystem
             .zero_range(&relative_path, offset, length, keep_size)?;
         self.update_cached_path_usage(index, Some(before), &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 
@@ -2490,7 +2579,9 @@ impl VirtualFileSystem for MountTable {
         self.ensure_writable(index, path)?;
         self.mounts[index]
             .filesystem
-            .punch_hole(&relative_path, offset, length)
+            .punch_hole(&relative_path, offset, length)?;
+        self.advance_mutation_generation();
+        Ok(())
     }
 
     fn allocated_ranges(&mut self, path: &str) -> VfsResult<Vec<(u64, u64)>> {
@@ -2540,6 +2631,7 @@ impl VirtualFileSystem for MountTable {
             .filesystem
             .pwrite(&relative_path, content, offset)?;
         self.update_cached_path_usage(index, before, &relative_path);
+        self.advance_mutation_generation();
         Ok(())
     }
 }

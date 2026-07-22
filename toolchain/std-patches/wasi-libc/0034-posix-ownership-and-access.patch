@@ -1,8 +1,21 @@
 Expose real file ownership, ownership mutations, and process-aware access checks.
 
 WASI Preview 1 filestat omits uid/gid, and the prior access fallback only checked
-whether any permission bit existed. Route these operations through AgentOS so C
+whether any permission bit existed. Route these operations through agentOS so C
 helpers observe the same ownership and DAC decisions as the kernel.
+
+diff --git a/libc-bottom-half/headers/public/__header_fcntl.h b/libc-bottom-half/headers/public/__header_fcntl.h
+--- a/libc-bottom-half/headers/public/__header_fcntl.h
++++ b/libc-bottom-half/headers/public/__header_fcntl.h
+@@ -53,7 +53,7 @@
+ 
+ #define FD_CLOEXEC (1)
+ 
+-#define AT_EACCESS          (0x0)
++#define AT_EACCESS          (0x200)
+ #define AT_SYMLINK_NOFOLLOW (0x1)
+ #define AT_SYMLINK_FOLLOW   (0x2)
+ #define AT_REMOVEDIR        (0x4)
 
 diff --git a/libc-bottom-half/cloudlibc/src/libc/sys/stat/fstat.c b/libc-bottom-half/cloudlibc/src/libc/sys/stat/fstat.c
 index d735134..521a9eb 100644

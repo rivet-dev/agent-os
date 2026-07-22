@@ -1021,7 +1021,7 @@ impl HostDirFilesystem {
             .map_err(|error| io_error_to_vfs("utimes", &normalized, nix_to_io(error)));
         }
 
-        let (parent_dir, _, name, normalized) = self.split_parent(path, false)?;
+        let (parent_dir, _, name, _) = self.split_parent(path, false)?;
         if follow_symlinks {
             // `utimes` (follow) rejects a symlink leaf, matching `chmod`/`chown`;
             // the richer `lutimes` path (`follow_symlinks == false`) instead
@@ -1434,22 +1434,14 @@ impl VirtualFileSystem for HostDirFilesystem {
     }
 
     fn read_link(&self, path: &str) -> VfsResult<String> {
-        let (parent_dir, _, name, normalized) = self.split_parent(path, false)?;
-        let parent_host_path = self.host_path_for_fd(&parent_dir, &normalized)?;
-        let host_link_path = parent_host_path.join(&name);
+        let (parent_dir, _, name, _) = self.split_parent(path, false)?;
         let link_target = readlinkat(Some(parent_dir.as_raw_fd()), name.as_os_str())
             .map_err(|error| io_error_to_vfs("readlink", path, nix_to_io(error)))?;
         let link_target_path = PathBuf::from(&link_target);
-        let resolved_target = if link_target_path.is_absolute() {
-            lexical_normalize_path(&link_target_path)
-        } else {
-            lexical_normalize_path(
-                &host_link_path
-                    .parent()
-                    .unwrap_or(self.host_root.as_path())
-                    .join(link_target_path),
-            )
-        };
+        if !link_target_path.is_absolute() {
+            return Ok(link_target.to_string_lossy().into_owned());
+        }
+        let resolved_target = lexical_normalize_path(&link_target_path);
         self.host_to_virtual_path(&resolved_target, path)
     }
 

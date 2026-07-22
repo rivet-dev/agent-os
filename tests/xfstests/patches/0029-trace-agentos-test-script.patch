@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Wed, 22 Jul 2026 04:42:00 -0700
+Subject: [PATCH] fstests: trace the nested agentOS test script
+
+The agentOS harness already has an opt-in shell trace, but the check process
+executes each test through a second bash process.  Carry the trace through that
+boundary so command arguments and test-local helper calls are visible when a
+focused conformance run fails.
+
+diff --git a/check b/check
+index 7999a85..b98b04b 100755
+--- a/check
++++ b/check
+@@ -724,7 +724,11 @@ _run_seq() {
+ 	fi
+ 	local cmd
+ 	if [ "$FSTYP" = "agentos" ]; then
+-		cmd=(bash -c "exec \"$seq_path\"")
++		if [ -n "$XFSTESTS_TRACE_SHELL" ]; then
++			cmd=(bash -x "$seq_path")
++		else
++			cmd=(bash -c "exec \"$seq_path\"")
++		fi
+ 	else
+ 		cmd=(bash -c "test -w ${OOM_SCORE_ADJ} && echo 250 > ${OOM_SCORE_ADJ}; exec \"$seq_path\"")
+ 	fi
+-- 
+2.39.5
+

@@ -1,6 +1,6 @@
 //! Architecture / boundary guards (CI hardening, item #2).
 //!
-//! This is a *chokepoint lint*: it scans the AgentOS Rust source tree and
+//! This is a *chokepoint lint*: it scans the agentOS Rust source tree and
 //! FAILS if a security-sensitive host API ("banned API") appears OUTSIDE an
 //! explicit allowlist of sanctioned modules. The goal is to keep host access
 //! funnelled through a small, reviewable set of files so that a NEW use of
@@ -208,7 +208,12 @@ fn managed_wasm_uses_one_sidecar_owned_posix_poll() {
     assert!(
         sidecar.contains("pub(in crate::execution) fn service_deferred_posix_poll")
             && sidecar.contains("task_notify.notified()")
-            && sidecar.contains("wait_handle.wait_for_change_async(observed)"),
+            && sidecar.contains("wait_handle.wait_for_change_async(observed)")
+            && sidecar.contains("DeferredPosixPollWake")
+            && sidecar.contains("managed_posix_poll_read_notifies")
+            && sidecar.contains("wait_for_managed_posix_poll_readiness")
+            && sidecar.contains("indexed_posix_poll_response")
+            && sidecar.contains("kernel_interest_indexes"),
         "the sidecar must own one coalesced managed/kernel/deadline wait task"
     );
 }
@@ -440,6 +445,14 @@ fn owned_toolchain_pins_binaryen_for_finalized_wasm_exceptions() {
         "BINARYEN_VERSION=128",
         "--translate-to-exnref",
         "binaryen-version_${BINARYEN_VERSION}-${PLATFORM}.tar.gz",
+        "https://api.github.com/repos/WebAssembly/binaryen/releases/assets/${ASSET_ID}",
+        "Accept: application/octet-stream",
+        "--retry-all-errors",
+        "--connect-timeout 30",
+        "ASSET_ID=373217228",
+        "ASSET_ID=373212794",
+        "ASSET_ID=373206713",
+        "ASSET_ID=373206711",
         "4ce79586d1c4762502eebe9a1db071fa5e446ef8897f2f766eb1cce5ec6dee9e",
         "bafe0468976d923f09052f8ec6a6a0a9d942ee7f02ac113c85a80afea7ba3679",
         "0b4bbd58c46b73a3de1fd485579a56cd413dd395414306d9f33df407fde58b9b",
@@ -457,6 +470,38 @@ fn owned_toolchain_pins_binaryen_for_finalized_wasm_exceptions() {
 }
 
 #[test]
+fn bounded_pr_corpus_includes_c_backed_coreutils_commands() {
+    let root = repo_root();
+    let toolchain =
+        std::fs::read_to_string(root.join("toolchain/Makefile")).expect("read toolchain Makefile");
+    let wasi_libc = std::fs::read_to_string(root.join("toolchain/scripts/patch-wasi-libc.sh"))
+        .expect("read wasi-libc build script");
+
+    assert!(
+        toolchain.contains("PR_C_COMMANDS := mknod getconf")
+            && toolchain.contains("PR_C_BUILD_TARGETS := $(addprefix build/,$(PR_C_COMMANDS))")
+            && toolchain.contains(
+                "$(MAKE) -C c $(PR_C_BUILD_TARGETS) install COMMANDS=\"$(PR_C_COMMANDS)\""
+            ),
+        "the bounded PR corpus must build every C-backed command in the coreutils manifest"
+    );
+    assert!(
+        wasi_libc.contains("--retry 5")
+            && wasi_libc.contains("--retry-all-errors")
+            && wasi_libc.contains("--connect-timeout 30")
+            && wasi_libc.contains("--tries=5")
+            && wasi_libc.contains("--waitretry=2")
+            && wasi_libc.contains(
+                "https://codeload.github.com/llvm/llvm-project/tar.gz/refs/tags/"
+            )
+            && wasi_libc
+                .contains("e2204b9903cd9d7ee833a2f56a18bef40a33df4793e31cc090906b32cbd8a1f5")
+            && wasi_libc.contains("llvm-project archive checksum mismatch"),
+        "required pinned toolchain downloads must use a verified direct source with bounded retries"
+    );
+}
+
+#[test]
 fn maintained_wasm_surfaces_are_mechanically_gated_on_both_backends() {
     let root = repo_root();
     let ci =
@@ -464,18 +509,32 @@ fn maintained_wasm_surfaces_are_mechanically_gated_on_both_backends() {
     for required in [
         "backend: [v8, wasmtime]",
         "AGENTOS_TEST_WASM_BACKEND: ${{ matrix.backend }}",
+        "needs: [checks, wasm-commands, rust, core-pr, runtime-core-pr, actor-pr, wasm-backend-matrix]",
+        "EXPECT_WASM_BACKEND_MATRIX:",
+        "required dual-backend CI job did not succeed",
         "cargo test --release -p agentos-native-sidecar --tests -- --test-threads=1",
+        "Run artifact-backed V8-WASM and Wasmtime software parity",
+        "cargo test --release -p agentos-native-sidecar --test wasm_software_parity -- --ignored --nocapture --test-threads=1",
         "toolchain/conformance/c-parity.test.ts",
         "wasm-c-parity-fixtures",
         "packages/runtime-core exec vitest run",
         "packages/core exec vitest run",
         "cargo test -p agentos-client -- --test-threads=1",
         "turbo test --concurrency=1 --filter='@agentos-software/*'",
+        "turbo test:nightly --concurrency=1 --filter='@agentos-software/*'",
+        "make -C toolchain codex-required",
+        "name: codex-wasi",
         "@rivet-dev/agentos test:e2e:run",
         "pthread-conformance-wasm pthread-benchmark-wasm",
         "owned_pthread_libc_mutex_cond_tls_join_detach_and_cancel_conform",
         "test:wasm-mixed-smoke",
         "AGENT_OS_CLIENT_ALLOW_E2E_SKIPS: '0'",
+        "XFSTESTS_ROOT: ${{ github.workspace }}/tests/xfstests/.work/xfstests",
+        "helpers XFSTESTS_BUILD_NATIVE_COMMANDS=0",
+        "pnpm --filter @agentos-software/manifest build",
+        "pnpm --filter @rivet-dev/agentos-toolchain build",
+        "pnpm --filter '@agentos-software/*' build",
+        "pnpm --filter @rivet-dev/agentos-test-harness build",
     ] {
         assert!(
             ci.contains(required),
@@ -488,6 +547,28 @@ fn maintained_wasm_surfaces_are_mechanically_gated_on_both_backends() {
         turbo.contains("\"AGENTOS_TEST_WASM_BACKEND\""),
         "Turbo must pass and hash the backend selector for registry software tests"
     );
+
+    for (path, required) in [
+        (
+            "packages/vm-test-harness/src/index.ts",
+            "wasmBackend: options.wasmBackend ?? configuredTestWasmBackend()",
+        ),
+        (
+            "packages/core/tests/helpers/default-vm-permissions.ts",
+            "const backend = process.env.AGENTOS_TEST_WASM_BACKEND",
+        ),
+        (
+            "packages/agentos/tests/fixtures/actor-runtime-server.mjs",
+            "wasmBackend = process.env.AGENTOS_TEST_WASM_BACKEND",
+        ),
+    ] {
+        let source = std::fs::read_to_string(root.join(path))
+            .unwrap_or_else(|error| panic!("read {path}: {error}"));
+        assert!(
+            source.contains(required),
+            "{path} must route its shared WASM tests through the CI backend selector"
+        );
+    }
 
     let publish = std::fs::read_to_string(root.join(".github/workflows/publish.yaml"))
         .expect("read publish workflow");
@@ -506,13 +587,23 @@ fn maintained_wasm_surfaces_are_mechanically_gated_on_both_backends() {
             && xfstests.contains("AGENTOS_TEST_WASM_BACKEND=\"$$wasm_backend\""),
         "xfstests must execute its WASM helper corpus through V8 and Wasmtime"
     );
+    assert!(
+        xfstests.contains("$(MAKE) -C \"$(TOOLCHAIN)\" commands")
+            && !xfstests.contains("$(MAKE) -C \"$(TOOLCHAIN)\" wasm"),
+        "xfstests must stage the canonical complete command corpus; the Rust-only `wasm` target overwrites upstream C commands with compatibility binaries"
+    );
 
     let nightly = std::fs::read_to_string(root.join(".github/workflows/ci-nightly.yml"))
         .expect("read nightly CI workflow");
     for required in [
+        "xfstests-endurance:",
+        "wasm_backend: [v8, wasmtime]",
         "xfstests_wasi_dirstress_process_matrix",
-        "if: matrix.storage_backend == 'chunked_local'",
+        "xfstests_wasi_looptest_endurance_probe",
+        "xfstests_wasi_seekdir_endurance_probe",
         "AGENTOS_TEST_WASM_BACKEND: ${{ matrix.wasm_backend }}",
+        "make -C toolchain cmd/duckdb cmd/vim",
+        "helpers XFSTESTS_BUILD_NATIVE_COMMANDS=0",
     ] {
         assert!(
             nightly.contains(required),
@@ -805,6 +896,33 @@ fn loopback_vm_fetch_uses_the_vm_scoped_event_pump() {
     assert!(
         !http.contains("dispatch_host_operation"),
         "loopback HTTP must not bypass VM-scoped context dispatch through the kernel-only fallback"
+    );
+}
+
+#[test]
+fn stdio_process_events_register_before_probing_durable_state() {
+    let stdio = include_str!("../src/stdio.rs");
+    let protocol_loop = stdio
+        .split_once("let process_event_notified = process_event_notify.notified();")
+        .expect("registered process-event waiter")
+        .1;
+    let enable = protocol_loop
+        .find("process_event_notified.as_mut().enable();")
+        .expect("enable process-event waiter");
+    let probe = protocol_loop
+        .find(".pump_process_events(&session.compat_ownership_scope())")
+        .expect("probe durable process-event state");
+    let select_waiter = protocol_loop
+        .find("_ = process_event_notified.as_mut() =>")
+        .expect("select on the registered process-event waiter");
+
+    assert!(
+        enable < probe && probe < select_waiter,
+        "the stdio event owner must register and enable its waiter before probing durable process state"
+    );
+    assert!(
+        !protocol_loop[..select_waiter].contains("_ = process_event_notify.notified() =>"),
+        "the protocol loop must not recreate an edge-triggered waiter after probing process state"
     );
 }
 
@@ -2078,6 +2196,55 @@ fn every_production_active_process_attaches_the_real_kernel_runtime_endpoint() {
 }
 
 #[test]
+fn wasi_tokio_child_waits_use_bounded_host_backoff() {
+    let root = repo_root();
+    let toolchain =
+        std::fs::read_to_string(root.join("toolchain/Makefile")).expect("read toolchain Makefile");
+    let source = std::fs::read_to_string(
+        root.join("toolchain/std-patches/crates/tokio/wasi-process-imp.rs"),
+    )
+    .expect("read owned Tokio WASI process implementation");
+    let tokio_patch = std::fs::read_to_string(
+        root.join("toolchain/std-patches/crates/tokio/0001-tokio-wasi-process.patch"),
+    )
+    .expect("read owned Tokio WASI process patch");
+    let child_poll = rust_braced_item(&source, "impl Future for Child");
+
+    assert!(
+        child_poll.contains("agentos_sleep_ms(CHILD_WAIT_POLL_INTERVAL_MS)")
+            && child_poll.contains("CHILD_WAIT_POLLS_PER_BACKOFF")
+            && child_poll.contains("cx.waker().wake_by_ref()"),
+        "a captured-output Tokio WASI child must yield through the host-backed bounded delay before requeueing"
+    );
+    assert!(
+        child_poll.contains("child.inner.try_wait()")
+            && child_poll.contains("if !child.has_captured_output")
+            && child_poll.contains("child.inner.wait()"),
+        "Tokio WASI captured children must stay cooperative while inherited-FD children use one interruptible kernel wait"
+    );
+    assert!(
+        source.contains("const CHILD_WAIT_POLL_INTERVAL_MS: u32 = 1;")
+            && source.contains("const CHILD_WAIT_POLLS_PER_BACKOFF: u8 = 1;")
+            && source.contains("const CHILD_STDIO_RETRY_INTERVAL_MS: u32 = 1;")
+            && source.contains("agentos_sleep_ms(CHILD_STDIO_RETRY_INTERVAL_MS)")
+            && source.contains("#[link_name = \"sleep_ms\"]"),
+        "the Tokio WASI child-wait and pipe-retry delays must remain explicitly bounded"
+    );
+    assert!(
+        tokio_patch.contains("let (stdout, stderr) = {")
+            && tokio_patch.contains("std::future::poll_fn")
+            && tokio_patch.contains("let status = self.wait().await?;"),
+        "Tokio WASI wait_with_output must drain both child pipes before reaping"
+    );
+    assert!(
+        toolchain.contains("WASI_RUST_PATCH_INPUTS := $(shell find std-patches -type f")
+            && toolchain.contains("-name '*.patch' -o -name '*.rs'")
+            && toolchain.contains("cat $(WASI_RUST_PATCH_INPUTS)"),
+        "the Rust toolchain cache key must include owned patch files and companion sources"
+    );
+}
+
+#[test]
 fn neutral_host_contracts_and_shared_capabilities_have_no_engine_types() {
     let root = repo_root();
     let contract_files = production_source_files(&root)
@@ -2570,7 +2737,7 @@ fn shared_acp_runtime_has_no_adapter_name_policy() {
     ] {
         assert!(
             !production.contains(adapter_name),
-            "shared ACP runtime must not branch on adapter name {adapter_name}; put launch compatibility in the AgentOS-owned package launcher"
+            "shared ACP runtime must not branch on adapter name {adapter_name}; put launch compatibility in the agentOS-owned package launcher"
         );
     }
     assert!(
@@ -3583,6 +3750,7 @@ fn browser_sources_are_retained_but_disabled_from_native_build_and_publish_gates
         for package in [
             "!@rivet-dev/agentos-browser",
             "!@rivet-dev/agentos-runtime-browser",
+            "!@rivet-dev/agentos-example-browser-terminal",
         ] {
             assert!(
                 source.contains(package),
@@ -3604,23 +3772,6 @@ fn browser_sources_are_retained_but_disabled_from_native_build_and_publish_gates
                 "{relative_path} must exclude disabled Rust crate {browser_crate}"
             );
         }
-    }
-
-    let mirror_generator =
-        std::fs::read_to_string(root.join("scripts/generate-agentos-mirror.mjs"))
-            .expect("read compatibility mirror generator");
-    assert!(
-        mirror_generator.contains("browserShim ? { private: true } : {}")
-            && mirror_generator.contains("browserShim ? \"publish = false\" : \"\""),
-        "generated browser compatibility shims must remain private and unpublishable"
-    );
-    for relative_path in [".github/workflows/ci.yml", "scripts/ci.sh"] {
-        let source = std::fs::read_to_string(root.join(relative_path))
-            .unwrap_or_else(|error| panic!("read {relative_path}: {error}"));
-        assert!(
-            source.contains("node --test scripts/generate-agentos-mirror.test.mjs"),
-            "{relative_path} must enforce compatibility-mirror reproducibility"
-        );
     }
 }
 

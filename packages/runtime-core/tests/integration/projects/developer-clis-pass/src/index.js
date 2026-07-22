@@ -89,9 +89,14 @@ module.exports = {
   await runBin("rimraf", "rimraf", ["remove-me"], root);
   results.rimraf = await stat(path.join(root, "remove-me")).then(() => false, () => true);
 
-  await writeFile(path.join(root, "print-env.cjs"), "console.log(process.env.AGENTOS_CLI_VALUE);\n");
-  const crossEnv = await runBin("cross-env", "cross-env", ["AGENTOS_CLI_VALUE=42", process.execPath, "print-env.cjs"], root);
+  await writeFile(path.join(root, "print-env.cjs"), "console.log(process.env.ECOSYSTEM_CLI_VALUE);\n");
+  const crossEnv = await runBin("cross-env", "cross-env", ["ECOSYSTEM_CLI_VALUE=42", process.execPath, "print-env.cjs"], root);
   results.crossEnv = crossEnv.stdout.trim() === "42";
+  if (!results.crossEnv) {
+    throw new Error(
+      `cross-env output mismatch: stdout=${JSON.stringify(crossEnv.stdout)} stderr=${JSON.stringify(crossEnv.stderr)}`,
+    );
+  }
 
   await writeFile(path.join(root, "data.json"), "{\"value\":41}\n");
   await runBin("json", "json", ["-I", "-f", "data.json", "-e", "this.value += 1"], root);
@@ -115,7 +120,14 @@ module.exports = {
   await writeFile(path.join(root, "graph", "a.js"), "import './b.js';\n");
   await writeFile(path.join(root, "graph", "b.js"), "export const value = 42;\n");
   const madge = await runBin("madge", "madge", ["--json", "graph/a.js"], root);
-  const graph = JSON.parse(madge.stdout);
+  let graph;
+  try {
+    graph = JSON.parse(madge.stdout);
+  } catch (error) {
+    throw new Error(
+      `madge stdout was not JSON: ${JSON.stringify(madge.stdout)} (${error.message})`,
+    );
+  }
   results.madge = Array.isArray(graph["a.js"]) && graph["a.js"].includes("b.js");
 
   if (Object.values(results).some(result => result !== true)) {

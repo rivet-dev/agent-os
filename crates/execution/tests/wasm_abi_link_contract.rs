@@ -133,7 +133,8 @@ fn manifest_permission_tiers_omit_denied_and_undeclared_imports() {
             "{module}.{name} must not link at {tier:?}"
         );
         assert!(
-            stderr.contains(module) || stderr.contains(name),
+            stderr.contains("ERR_AGENTOS_WASM_INSTANTIATION")
+                || stderr.contains("ERR_AGENTOS_WASM_UNSUPPORTED_IMPORT"),
             "unexpected denied-import error for {module}.{name}: {stderr}"
         );
     }
@@ -154,7 +155,8 @@ fn manifest_permission_tiers_omit_denied_and_undeclared_imports() {
     let stderr = String::from_utf8_lossy(&rejected.stderr);
     assert_ne!(rejected.exit_code, 0, "undeclared import must not link");
     assert!(
-        stderr.contains("host_unknown") || stderr.contains("ambient_escape"),
+        stderr.contains("ERR_AGENTOS_WASM_INSTANTIATION")
+            || stderr.contains("ERR_AGENTOS_WASM_UNSUPPORTED_IMPORT"),
         "unexpected undeclared-import error: {stderr}"
     );
 }

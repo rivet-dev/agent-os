@@ -1,18 +1,18 @@
-Expose resource limits and supplementary groups in the AgentOS WASI sysroot.
+Expose resource limits and supplementary groups in the agentOS WASI sysroot.
 
 GNU Wget's configure script and source expect getgroups(2) and getrlimit(2).
-The patched sysroot reports the runtime-enforced open-descriptor cap, one
-effective supplementary group, and deterministic values for unenforced
-resources. RLIMIT_NOFILE changes are routed to the runtime so the mutable
-per-process soft and hard limits are inherited and enforced across execution.
+The patched sysroot reports runtime-enforced resource limits, one effective
+supplementary group, and deterministic values for unenforced resources.
+Host-managed limits are routed to the runtime so mutable per-process soft and
+hard limits are inherited and enforced across execution.
 
 diff --git a/libc-bottom-half/sources/host_resource_user.c b/libc-bottom-half/sources/host_resource_user.c
 new file mode 100644
 index 0000000..8d91a2f
 --- /dev/null
 +++ b/libc-bottom-half/sources/host_resource_user.c
-@@ -0,0 +1,137 @@
-+// Process resource and group compatibility for AgentOS WASI commands.
+@@ -0,0 +1,155 @@
++// Process resource and group compatibility for agentOS WASI commands.
 +
 +#include <errno.h>
 +#include <stdint.h>
@@ -30,6 +30,32 @@ index 0000000..8d91a2f
 +
 +static int is_known_rlimit_resource(int resource) {
 +    return resource >= 0 && resource < RLIMIT_NLIMITS;
++}
++
++static int is_host_managed_rlimit_resource(int resource) {
++    switch (resource) {
++        case RLIMIT_CPU:
++        case RLIMIT_FSIZE:
++        case RLIMIT_DATA:
++        case RLIMIT_STACK:
++        case RLIMIT_CORE:
++#ifdef RLIMIT_RSS
++        case RLIMIT_RSS:
++#endif
++#ifdef RLIMIT_NPROC
++        case RLIMIT_NPROC:
++#endif
++        case RLIMIT_NOFILE:
++#ifdef RLIMIT_MEMLOCK
++        case RLIMIT_MEMLOCK:
++#endif
++#ifdef RLIMIT_AS
++        case RLIMIT_AS:
++#endif
++            return 1;
++        default:
++            return 0;
++    }
 +}
 +
 +static rlim_t default_limit_for(int resource) {
@@ -98,7 +124,7 @@ index 0000000..8d91a2f
 +        errno = EINVAL;
 +        return -1;
 +    }
-+    if (resource == RLIMIT_NOFILE) {
++    if (is_host_managed_rlimit_resource(resource)) {
 +        error = host_proc_getrlimit((uint32_t)resource, &soft, &hard);
 +        if (error != __WASI_ERRNO_SUCCESS) {
 +            errno = error;
@@ -108,14 +134,6 @@ index 0000000..8d91a2f
 +        rlim->rlim_max = (rlim_t)hard;
 +        return 0;
 +    }
-+
-+#ifdef RLIMIT_MEMLOCK
-+    if (resource == RLIMIT_MEMLOCK) {
-+        rlim->rlim_cur = default_limit_for(resource);
-+        rlim->rlim_max = default_limit_for(resource);
-+        return 0;
-+    }
-+#endif
 +    rlim->rlim_cur = default_limit_for(resource);
 +    rlim->rlim_max = default_limit_for(resource);
 +    return 0;
@@ -137,7 +155,7 @@ index 0000000..8d91a2f
 +        return -1;
 +    }
 +
-+    if (resource != RLIMIT_NOFILE) {
++    if (!is_host_managed_rlimit_resource(resource)) {
 +        errno = ENOTSUP;
 +        return -1;
 +    }
@@ -165,7 +183,7 @@ index d1fb724..deddb7f 100644
  #include <bits/resource.h>
  
 -#ifdef __wasilibc_unmodified_upstream /* Use alternate WASI libc headers */
-+#if 1 /* AgentOS exposes POSIX resource-limit declarations in patched WASI. */
++#if 1 /* agentOS exposes POSIX resource-limit declarations in patched WASI. */
  typedef unsigned long long rlim_t;
  
  struct rlimit {

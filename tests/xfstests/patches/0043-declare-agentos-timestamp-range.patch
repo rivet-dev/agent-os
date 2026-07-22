@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Thu, 23 Jul 2026 01:15:00 -0700
+Subject: [PATCH] common: declare agentOS timestamp range
+
+agentOS filesystem metadata rejects pre-epoch values and clamps timestamps
+after the inclusive unsigned 32-bit seconds bound.  Expose that kernel-owned
+contract to the generic timestamp-range tests.
+
+diff --git a/common/rc b/common/rc
+--- a/common/rc
++++ b/common/rc
+@@ -2849,6 +2849,9 @@ _filesystem_timestamp_range()
+ 	s64min=$((1<<63))
+ 
+ 	case $fstyp in
++	agentos)
++		echo "0 $u32max"
++		;;
+ 	ext2)
+ 		echo "$s32min $s32max"
+ 		;;
+-- 
+2.47.3

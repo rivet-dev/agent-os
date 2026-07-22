@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Thu, 23 Jul 2026 03:00:00 -0700
+Subject: [PATCH] generic/428: classify DAX mappings
+
+The test is a host-kernel DAX stale-PMD regression and its helper depends on
+DAX mappings.  agentOS logical mounts expose neither DAX nor host PMD state.
+
+diff --git a/tests/generic/428 b/tests/generic/428
+--- a/tests/generic/428
++++ b/tests/generic/428
+@@ -16,6 +16,10 @@ _begin_fstest auto quick dax mmap
+ # Import common functions.
+ . ./common/filter
+ 
++if [ "$FSTYP" = "agentos" ]; then
++	_notrun "agentOS does not support DAX mappings"
++fi
++
+ # Modify as appropriate.
+ _require_test
+ _require_test_program "t_mmap_stale_pmd"
+-- 
+2.47.3

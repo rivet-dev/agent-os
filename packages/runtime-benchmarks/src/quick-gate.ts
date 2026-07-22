@@ -3,8 +3,8 @@ import { pathToFileURL } from "node:url";
 import {
 	baselinePathForEnvironment,
 	baselineRowFromLatency,
-	loadMatrixBaseline,
 	type GateLane,
+	loadMatrixBaseline,
 } from "./baseline.js";
 import { compareMatrixBaseline, type GateRow } from "./compare-baseline.js";
 import { printTable } from "./lib/perf-utils.js";
@@ -18,20 +18,70 @@ const GATE_DEFAULTS = {
 	warmup: 3,
 	threshold: 2.0,
 	tinyBaselineFloorMs: 0.5,
-	tinyCurrentFloorMs: 1.0,
+	tinyAllowedRegressionMs: 1.0,
 	rows: [
-		{ key: "fs/fs_write_small", lane: "guest", reason: "tiny sync write hot path; protected by the 1ms tiny-row floor" },
-		{ key: "fs/fs_write_big", lane: "guest", reason: "large write payload catches whole-buffer copy regressions" },
-		{ key: "fs/fs_read_small", lane: "guest", reason: "small read bridge/VFS floor" },
-		{ key: "fs/stat_storm", lane: "guest", reason: "metadata syscall hot path" },
-		{ key: "fs/readdir_small", lane: "guest", reason: "directory enumeration without the high variance of large listings" },
-		{ key: "net/tcp_connect_close", lane: "guest", reason: "TCP socket lifecycle floor" },
-		{ key: "net/tcp_echo_small", lane: "guest", reason: "small TCP payload round trip" },
-		{ key: "net/http_loopback_get", lane: "guest", reason: "HTTP over kernel sockets with loopback server" },
-		{ key: "modules/import_fresh_file", lane: "guest", reason: "dynamic import and filesystem resolution" },
-		{ key: "modules/require_100_small", lane: "guest", reason: "CommonJS resolver/cache behavior" },
-		{ key: "control/cpu_loop", lane: "wasm", reason: "WASM runtime lane sanity check" },
-		{ key: "ecosystem/ls_100", lane: "vmCmd", reason: "end-to-end WASM command tier" },
+		{
+			key: "fs/fs_write_small",
+			lane: "guest",
+			reason:
+				"tiny sync write hot path; protected by the 1ms absolute-regression allowance",
+		},
+		{
+			key: "fs/fs_write_big",
+			lane: "guest",
+			reason: "large write payload catches whole-buffer copy regressions",
+		},
+		{
+			key: "fs/fs_read_small",
+			lane: "guest",
+			reason: "small read bridge/VFS floor",
+		},
+		{
+			key: "fs/stat_storm",
+			lane: "guest",
+			reason: "metadata syscall hot path",
+		},
+		{
+			key: "fs/readdir_small",
+			lane: "guest",
+			reason:
+				"directory enumeration without the high variance of large listings",
+		},
+		{
+			key: "net/tcp_connect_close",
+			lane: "guest",
+			reason: "TCP socket lifecycle floor",
+		},
+		{
+			key: "net/tcp_echo_small",
+			lane: "guest",
+			reason: "small TCP payload round trip",
+		},
+		{
+			key: "net/http_loopback_get",
+			lane: "guest",
+			reason: "HTTP over kernel sockets with loopback server",
+		},
+		{
+			key: "modules/import_fresh_file",
+			lane: "guest",
+			reason: "dynamic import and filesystem resolution",
+		},
+		{
+			key: "modules/require_100_small",
+			lane: "guest",
+			reason: "CommonJS resolver/cache behavior",
+		},
+		{
+			key: "control/cpu_loop",
+			lane: "wasm",
+			reason: "WASM runtime lane sanity check",
+		},
+		{
+			key: "ecosystem/ls_100",
+			lane: "vmCmd",
+			reason: "end-to-end WASM command tier",
+		},
 	] satisfies Array<GateRow & { reason: string }>,
 };
 
@@ -73,20 +123,23 @@ async function main(): Promise<void> {
 	process.env.BENCH_OP_FILTER = gateRows.map((row) => row.key).join(",");
 	process.env.BENCH_ITERATIONS ??= String(GATE_DEFAULTS.iterations);
 	process.env.BENCH_WARMUP ??= String(GATE_DEFAULTS.warmup);
-	process.env.BENCH_REQUIRED_WASM_COMMANDS ??= requiredWasmCommands(gateRows).join(",");
+	process.env.BENCH_REQUIRED_WASM_COMMANDS ??=
+		requiredWasmCommands(gateRows).join(",");
 
 	const { runLatencyMatrix } = await import("./run-all.js");
 	const matrix = await runLatencyMatrix();
 	const currentRows = matrix.results.map(baselineRowFromLatency);
-	const threshold = Number(process.env.BENCH_GATE_THRESHOLD ?? GATE_DEFAULTS.threshold);
+	const threshold = Number(
+		process.env.BENCH_GATE_THRESHOLD ?? GATE_DEFAULTS.threshold,
+	);
 	const comparisons = compareMatrixBaseline(currentRows, baseline, gateRows, {
 		threshold,
 		tinyBaselineFloorMs: GATE_DEFAULTS.tinyBaselineFloorMs,
-		tinyCurrentFloorMs: GATE_DEFAULTS.tinyCurrentFloorMs,
+		tinyAllowedRegressionMs: GATE_DEFAULTS.tinyAllowedRegressionMs,
 	});
 
 	console.error(
-		`Bench gate baseline: ${baselinePath}; threshold > ${threshold}x; tiny rows baseline < ${GATE_DEFAULTS.tinyBaselineFloorMs}ms ignored until current >= ${GATE_DEFAULTS.tinyCurrentFloorMs}ms`,
+		`Bench gate baseline: ${baselinePath}; threshold > ${threshold}x; tiny rows baseline < ${GATE_DEFAULTS.tinyBaselineFloorMs}ms ignore absolute regressions < ${GATE_DEFAULTS.tinyAllowedRegressionMs}ms`,
 	);
 	printTable(
 		["row", "lane", "baseline p50", "current p50", "ratio", "status", "reason"],

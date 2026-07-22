@@ -95,6 +95,16 @@ describeIf(hasAttrCommands, "attr commands", { timeout: 30_000 }, () => {
 		expect(getBinary.stdout).toContain("# file: /workspace/metadata.txt");
 		expect(getBinary.stdout).toContain("user.binary=0x0001ff");
 		expect(getBinary.stderr).toBe("");
+
+		const getBinaryBase64 = await run("getfattr", [
+			"--absolute-names",
+			"-nuser.binary",
+			"-ebase64",
+			path,
+		]);
+		expect(getBinaryBase64.exitCode, getBinaryBase64.stderr).toBe(0);
+		expect(getBinaryBase64.stdout).toContain("user.binary=0sAAH/");
+		expect(getBinaryBase64.stderr).toBe("");
 	});
 
 	it("lists and removes xattrs with the legacy attr interface", async () => {

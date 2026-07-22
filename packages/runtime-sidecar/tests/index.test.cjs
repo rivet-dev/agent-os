@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { mkdtempSync, rmSync, writeFileSync } = require("node:fs");
+const Module = require("node:module");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const test = require("node:test");
@@ -45,8 +46,27 @@ test("rejects a missing AGENTOS_SIDECAR_BIN override", () => {
 test("reports missing platform packages without chmod fallbacks", () => {
 	delete process.env.AGENTOS_SIDECAR_BIN;
 
-	assert.throws(
-		() => getSidecarPath(),
-		/@rivet-dev\/agentos-runtime-sidecar: platform package .* is not installed/,
-	);
+	const originalResolveFilename = Module._resolveFilename;
+	Module._resolveFilename = function resolveWithoutPlatformPackage(
+		request,
+		...args
+	) {
+		if (
+			typeof request === "string" &&
+			request.startsWith("@rivet-dev/agentos-runtime-sidecar-")
+		) {
+			const error = new Error(`Cannot find module '${request}'`);
+			error.code = "MODULE_NOT_FOUND";
+			throw error;
+		}
+		return Reflect.apply(originalResolveFilename, this, [request, ...args]);
+	};
+	try {
+		assert.throws(
+			() => getSidecarPath(),
+			/@rivet-dev\/agentos-runtime-sidecar: platform package .* is not installed/,
+		);
+	} finally {
+		Module._resolveFilename = originalResolveFilename;
+	}
 });

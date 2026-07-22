@@ -37,6 +37,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 const NODE_ALLOW_PROCESS_BINDINGS_ENV: &str = "AGENTOS_ALLOW_PROCESS_BINDINGS";
+const NODE_GUEST_ENTRYPOINT_MODULE_MODE_ENV: &str = "AGENTOS_GUEST_ENTRYPOINT_MODULE_MODE";
 const NODE_GUEST_PATH_MAPPINGS_ENV: &str = "AGENTOS_GUEST_PATH_MAPPINGS";
 const NODE_SYNC_RPC_DATA_BYTES_ENV: &str = "AGENTOS_NODE_SYNC_RPC_DATA_BYTES";
 const PYODIDE_INDEX_URL_ENV: &str = "AGENTOS_PYODIDE_INDEX_URL";
@@ -2685,6 +2686,11 @@ fn start_python_javascript_execution(
         build_python_runner_module_source(import_cache, &internal_env, options.warmup_metrics)?;
     let mut env = request.env.clone();
     env.extend(internal_env);
+    // The trusted Python runner is always an `.mjs` module and uses top-level
+    // await. A JavaScript parent can otherwise pass its own internal CommonJS
+    // selector through an inherited `process.env`, incorrectly forcing this
+    // nested runner through `require()`.
+    enforce_python_runner_module_mode(&mut env);
 
     // The Pyodide runner is itself a V8 execution. Its heap cap (the Python
     // `maxOldSpaceMb` knob) and sync-RPC wait ceiling ride the typed runner
@@ -2712,6 +2718,13 @@ fn start_python_javascript_execution(
         javascript_engine.start_execution_with_runtime(javascript_request, runtime.clone())
     }
     .map_err(map_javascript_error)
+}
+
+fn enforce_python_runner_module_mode(env: &mut BTreeMap<String, String>) {
+    env.insert(
+        String::from(NODE_GUEST_ENTRYPOINT_MODULE_MODE_ENV),
+        String::from("1"),
+    );
 }
 
 fn python_runner_javascript_limits(
@@ -4066,16 +4079,17 @@ fn warmup_metrics_line(
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_pending_vfs_rpc, clear_pending_vfs_rpc, python_javascript_sync_rpc_action,
-        python_managed_path_kind, python_runner_javascript_limits, python_vfs_rpc_admission_error,
-        python_wait_remaining, set_pending_vfs_rpc_state, CreatePythonContextRequest,
-        HostRpcRequest, PendingVfsRpc, PendingVfsRpcRegistry, PendingVfsRpcResolution,
-        PendingVfsRpcState, PythonExecutionEngine, PythonExecutionError, PythonExecutionLimits,
-        PythonHostReplyKind, PythonJavascriptSyncRpcAction, PythonManagedHostFiles,
-        PythonManagedPathKind, PYODIDE_CACHE_GUEST_ROOT, PYODIDE_GUEST_ROOT,
+        cancel_pending_vfs_rpc, clear_pending_vfs_rpc, enforce_python_runner_module_mode,
+        python_javascript_sync_rpc_action, python_managed_path_kind,
+        python_runner_javascript_limits, python_vfs_rpc_admission_error, python_wait_remaining,
+        set_pending_vfs_rpc_state, CreatePythonContextRequest, HostRpcRequest, PendingVfsRpc,
+        PendingVfsRpcRegistry, PendingVfsRpcResolution, PendingVfsRpcState, PythonExecutionEngine,
+        PythonExecutionError, PythonExecutionLimits, PythonHostReplyKind,
+        PythonJavascriptSyncRpcAction, PythonManagedHostFiles, PythonManagedPathKind,
+        NODE_GUEST_ENTRYPOINT_MODULE_MODE_ENV, PYODIDE_CACHE_GUEST_ROOT, PYODIDE_GUEST_ROOT,
     };
     use crate::backend::HostCallReply;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -4095,6 +4109,22 @@ mod tests {
         assert_eq!(javascript.v8_heap_limit_mb, Some(256));
         assert_eq!(javascript.reactor_work_quantum, Some(23));
         assert_eq!(javascript.bridge_call_timeout_ms, Some(54_321));
+    }
+
+    #[test]
+    fn python_runner_module_mode_overrides_inherited_commonjs_selector() {
+        let mut env = BTreeMap::from([(
+            String::from(NODE_GUEST_ENTRYPOINT_MODULE_MODE_ENV),
+            String::from("0"),
+        )]);
+
+        enforce_python_runner_module_mode(&mut env);
+
+        assert_eq!(
+            env.get(NODE_GUEST_ENTRYPOINT_MODULE_MODE_ENV)
+                .map(String::as_str),
+            Some("1")
+        );
     }
 
     #[test]

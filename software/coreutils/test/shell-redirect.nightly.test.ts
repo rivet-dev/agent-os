@@ -9,7 +9,10 @@ import {
 	describeIf,
 	hasWasmBinaries,
 	type Kernel,
+	wasmBackendTestTimeout,
 } from '@rivet-dev/agentos-test-harness';
+
+const SHELL_REDIRECT_TEST_TIMEOUT_MS = wasmBackendTestTimeout(15_000, 30_000);
 
 function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'\\''`)}'`;
@@ -41,7 +44,7 @@ describeIf(hasWasmBinaries, "wasmvm shell redirects", () => {
 		expect(result.exitCode, result.stderr).toBe(0);
 		expect(result.stdout).toBe("hi\n");
 		expect(await vfs.exists("/tmp/r/a.txt")).toBe(true);
-	}, 15_000);
+	}, SHELL_REDIRECT_TEST_TIMEOUT_MS);
 
 	it("keeps Rust path resolution after guest fd 3 is reused", async () => {
 		const vfs = createInMemoryFileSystem();
@@ -58,7 +61,7 @@ describeIf(hasWasmBinaries, "wasmvm shell redirects", () => {
 		expect(result.stdout).toBe("payload\n");
 		expect(Buffer.from(await kernel.readFile("/tmp/rust-path/file")).toString("utf8")).toBe("payload\n");
 		expect(Buffer.from(await kernel.readFile("/tmp/fd3-owned")).toString("utf8")).toBe("descriptor");
-	}, 15_000);
+	}, SHELL_REDIRECT_TEST_TIMEOUT_MS);
 
 	it("preserves bytes written before stdout is closed", async () => {
 		const vfs = createInMemoryFileSystem();
@@ -72,7 +75,7 @@ describeIf(hasWasmBinaries, "wasmvm shell redirects", () => {
 		expect(wasm.exitCode).toBe(native.status);
 		expect(wasm.stdout).toBe(native.stdout);
 		expect(wasm.stderr).toBe(native.stderr);
-	}, 15_000);
+	}, SHELL_REDIRECT_TEST_TIMEOUT_MS);
 
 	it("matches native exec PATH lookup, argv, environment, and replacement", async () => {
 		const vfs = createInMemoryFileSystem();

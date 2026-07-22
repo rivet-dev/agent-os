@@ -8,6 +8,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { StringDecoder } from "node:string_decoder";
 
 const command = new Command()
   .exitOverride()
@@ -17,6 +18,12 @@ const parsed = yargs(["--name", "agentos"])
   .exitProcess(false)
   .option("name", { type: "string" })
   .parse();
+if (
+  new StringDecoder("utf8").write(new Uint8Array([112, 114, 111, 98, 101])) !==
+  "probe"
+) {
+  throw new Error("node:string_decoder did not decode a Uint8Array");
+}
 const child = execaSync(
   process.execPath,
   [
@@ -26,6 +33,14 @@ const child = execaSync(
   ],
   { maxBuffer: 1024 * 1024 },
 );
+let childArgv;
+try {
+  childArgv = JSON.parse(child.stdout);
+} catch (error) {
+  throw new Error(
+    `execa child stdout was not JSON: ${JSON.stringify(child.stdout)} (${error.message})`,
+  );
+}
 const spinner = ora({ isEnabled: false, isSilent: true }).start();
 spinner.succeed();
 
@@ -39,7 +54,7 @@ try {
   console.log(JSON.stringify({
     commander: command.opts().count,
     yargs: parsed.name,
-    execa: JSON.parse(child.stdout),
+    execa: childArgv,
     oraStopped: !spinner.isSpinning,
     glob: globFiles,
     fastGlob: fastGlobFiles,

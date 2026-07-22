@@ -78,7 +78,7 @@ const ROOT_BOOTSTRAP_DIRS: &[(&str, u32, u32, u32)] = &[
     ("/sbin", 0o755, 0, 0),
     ("/boot", 0o755, 0, 0),
     ("/etc", 0o755, 0, 0),
-    // AgentOS retains `/root/node_modules` as a compatibility projection.
+    // agentOS retains `/root/node_modules` as a compatibility projection.
     // Permit traversal without allowing the default guest to list `/root`.
     ("/root", 0o711, 0, 0),
     ("/run", 0o755, 0, 0),
@@ -493,9 +493,6 @@ where
                 execution_commands,
             ))
             .map_err(kernel_error)?;
-        kernel
-            .finish_root_filesystem_bootstrap()
-            .map_err(kernel_error)?;
         self.bridge
             .set_vm_permissions(&vm_id, &permissions_policy)?;
 
@@ -733,6 +730,12 @@ where
                     EXECUTION_DRIVER_NAME,
                     execution_commands,
                 ))
+                .map_err(kernel_error)?;
+            // Package manifests are sidecar-owned, so their command names are
+            // only known during configure. Seal the root after those trusted
+            // `/bin` stubs have been projected, never during create_vm.
+            vm.kernel
+                .finish_root_filesystem_bootstrap()
                 .map_err(kernel_error)?;
             refresh_guest_command_path_env(&mut vm.guest_env, &kernel_commands.search_roots);
             vm.command_permissions = payload.command_permissions.clone().into_iter().collect();
@@ -2256,7 +2259,15 @@ where
                     .guest_fstype(mount.guest_fstype.clone())
                     .read_only(mount.read_only)
                     .max_bytes(max_filesystem_bytes)
-                    .max_inodes(max_inode_count),
+                    .max_inodes(max_inode_count)
+                    .absolute_symlinks_mount_relative(
+                        matches!(mount.plugin.id.as_str(), "host_dir" | "module_access")
+                            || (mount.plugin.id == "agentos_packages"
+                                && matches!(
+                                    config_value.get("kind").and_then(serde_json::Value::as_str),
+                                    Some("tar" | "hostDir")
+                                )),
+                    ),
             )
             .map_err(kernel_error)?;
         emit_security_audit_event(
@@ -2855,7 +2866,7 @@ fn is_managed_guest_command_path_segment(segment: &str) -> bool {
         return true;
     }
     normalized
-        .strip_prefix("/__secure_exec/commands/")
+        .strip_prefix("/__agentos/commands/")
         .is_some_and(|root| {
             !root.is_empty() && !root.contains('/') && root.chars().all(|ch| ch.is_ascii_digit())
         })
@@ -2962,19 +2973,16 @@ mod tests {
         let mut guest_env = BTreeMap::from([(
             String::from("PATH"),
             format!(
-                "/__secure_exec/commands/001:{DEFAULT_GUEST_PATH_ENV}:/custom/bin:relative:/__secure_exec/commands/custom"
+                "/__agentos/commands/001:{DEFAULT_GUEST_PATH_ENV}:/custom/bin:relative:/__agentos/commands/custom"
             ),
         )]);
 
-        refresh_guest_command_path_env(
-            &mut guest_env,
-            &[String::from("/__secure_exec/commands/002")],
-        );
+        refresh_guest_command_path_env(&mut guest_env, &[String::from("/__agentos/commands/002")]);
 
         assert_eq!(
             guest_env.get("PATH").map(String::as_str),
             Some(
-                "/__secure_exec/commands/002:/usr/local/sbin:/usr/local/bin:/opt/agentos/bin:/usr/sbin:/usr/bin:/sbin:/bin:/custom/bin:relative:/__secure_exec/commands/custom"
+                "/__agentos/commands/002:/usr/local/sbin:/usr/local/bin:/opt/agentos/bin:/usr/sbin:/usr/bin:/sbin:/bin:/custom/bin:relative:/__agentos/commands/custom"
             )
         );
     }
@@ -2983,7 +2991,7 @@ mod tests {
     fn transient_inventory_drives_registration_and_projection_reporting() {
         let kernel_commands = KernelCommandInventory {
             names: BTreeSet::from([String::from("legacy"), String::from("shadowed")]),
-            search_roots: vec![String::from("/__secure_exec/commands/001")],
+            search_roots: vec![String::from("/__agentos/commands/001")],
         };
         let provided_commands = BTreeMap::from([
             (

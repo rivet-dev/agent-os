@@ -1044,11 +1044,13 @@ impl<B> FileSystemPluginFactory<MountPluginContext<B>> for MemoryMountPlugin {
         request: OpenFileSystemPluginRequest<'_, MountPluginContext<B>>,
     ) -> Result<Box<dyn MountedFileSystem>, PluginError> {
         let filesystem = ChunkedFs::with_options(
-            InMemoryMetadataStore::new(),
+            InMemoryMetadataStore::new_with_root(0, 0, 0o1777),
             MemoryBlockStore::new(),
             ChunkedFsOptions {
                 inline_threshold: 4 * 1024,
                 chunk_size: 8 * 1024,
+                file_mode: 0o666,
+                dir_mode: 0o1777,
                 ..ChunkedFsOptions::default()
             },
         );

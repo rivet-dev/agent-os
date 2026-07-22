@@ -1,0 +1,14 @@
+diff --git a/tests/generic/632 b/tests/generic/632
+index b3292fd2..00000001 100755
+--- a/tests/generic/632
++++ b/tests/generic/632
+@@ -19,6 +19,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick mount
+ 
++[[ "$FSTYP" == "agentos" ]] && \
++	_notrun "mount namespaces and detached mounts are not supported"
++
+ _require_test
+ _require_test_program "detached_mounts_propagation"
+ 

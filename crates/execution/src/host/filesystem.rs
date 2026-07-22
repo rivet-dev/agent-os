@@ -5,6 +5,8 @@ pub enum DescriptorWhence {
     Set,
     Current,
     End,
+    Data,
+    Hole,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +367,9 @@ pub enum FilesystemOperation {
     FilesystemStatsAt {
         dir_fd: u32,
         path: BoundedString,
+    },
+    DescriptorFilesystemStats {
+        fd: u32,
     },
     Remount {
         path: BoundedString,

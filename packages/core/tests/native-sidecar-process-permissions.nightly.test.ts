@@ -103,15 +103,17 @@ describe("native sidecar process client permissions", () => {
 			driverPath,
 			[
 				"import { writeFileSync } from 'node:fs';",
+				"import { Socket } from 'node:net';",
 				"const capturePath = process.argv[2];",
 				"const schema = { name: 'agentos-native-sidecar', version: 8 };",
+				"const control = new Socket({ fd: 3, readable: true, writable: true });",
 				"let stdinBuffer = Buffer.alloc(0);",
 				"const captures = [];",
 				"const writeFrame = (frame) => {",
 				"  const payload = Buffer.from(JSON.stringify(frame), 'utf8');",
 				"  const prefix = Buffer.allocUnsafe(4);",
 				"  prefix.writeUInt32BE(payload.length, 0);",
-				"  process.stdout.write(Buffer.concat([prefix, payload]));",
+				"  control.write(Buffer.concat([prefix, payload]));",
 				"};",
 				"const respond = (requestId, ownership, payload) => {",
 				"  writeFrame({ frame_type: 'response', schema, request_id: requestId, ownership, payload });",
@@ -150,6 +152,8 @@ describe("native sidecar process client permissions", () => {
 				"        type: 'vm_configured',",
 				"        applied_mounts: 0,",
 				"        applied_software: 0,",
+				"        projected_commands: [],",
+				"        agents: [],",
 				"      });",
 				"      flushCapture();",
 				"      setTimeout(() => process.exit(0), 25);",
@@ -280,7 +284,9 @@ describe("native sidecar process client permissions", () => {
 			const createCapture = captured[0];
 			const configureCapture = captured[1];
 			if (!createCapture || !configureCapture) {
-				throw new Error("expected create_vm and configure_vm permission captures");
+				throw new Error(
+					"expected create_vm and configure_vm permission captures",
+				);
 			}
 			expect("child_process" in createCapture.permissions).toBe(false);
 			expect("childProcess" in configureCapture.permissions).toBe(false);

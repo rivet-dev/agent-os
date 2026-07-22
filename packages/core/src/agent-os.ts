@@ -400,6 +400,7 @@ export interface AgentRegistryEntry {
 import {
 	OPT_AGENTOS_ROOT,
 	type PackageDescriptor,
+	type SoftwarePackageRef,
 	tryReadAgentosPackageManifest,
 } from "./agentos-package.js";
 import { getBaseEnvironment } from "./base-filesystem.js";
@@ -563,7 +564,7 @@ export type RootFilesystemConfig =
 	| OverlayRootFilesystemConfig
 	| NativeRootFilesystemConfig;
 
-/** VM-scoped SQLite storage shared by VFS and AgentOS durable state. */
+/** VM-scoped SQLite storage shared by VFS and agentOS durable state. */
 export type VmSqliteConfig =
 	| { type: "actor_uds"; path: string }
 	| { type: "sqlite_file"; path: string };
@@ -745,7 +746,7 @@ function defaultAgentStderrHandler(event: AgentStderrEvent): void {
 }
 
 /**
- * Restart disposition reported on an {@link AgentExitEvent}. AgentOS never
+ * Restart disposition reported on an {@link AgentExitEvent}. agentOS never
  * respawns an adapter or replays an interrupted request implicitly.
  */
 export type AgentRestartOutcome = "not_attempted";
@@ -763,7 +764,7 @@ export interface AgentExitEvent {
 	pid: number | null;
 	/** Adapter exit code; `null` when the exit was observed indirectly. */
 	exitCode: number | null;
-	/** Always `"not_attempted"`; AgentOS does not restart adapters implicitly. */
+	/** Always `"not_attempted"`; agentOS does not restart adapters implicitly. */
 	restart: AgentRestartOutcome;
 	/** Always zero. */
 	restartCount: number;
@@ -896,6 +897,15 @@ export interface AgentOsRuntimeAdmin {
 	sidecar: AgentOsSidecar;
 }
 
+/** @deprecated Use {@link ProcessDescriptor} through `process.get()` or `process.list()`. */
+export interface SpawnedProcessInfo {
+	pid: number;
+	command: string;
+	args: string[];
+	running: boolean;
+	exitCode: number | null;
+}
+
 class AcpDispatchError extends Error {
 	readonly code: number;
 	readonly data?: Record<string, unknown>;
@@ -976,6 +986,9 @@ function normalizePackageRef(value: unknown): NormalizedPackageRef | undefined {
 	const record = toRecord(value);
 	if (typeof record.packagePath === "string") {
 		return { path: record.packagePath };
+	}
+	if (typeof record.path === "string") {
+		return { path: record.path };
 	}
 	// Recognizably-legacy shapes fail loudly: silently dropping a software
 	// entry boots a VM with missing packages and no diagnostic.
@@ -3002,7 +3015,11 @@ export class AgentOs {
 	readonly process = {
 		exec: this._exec.bind(this),
 		execFile: this._execFile.bind(this),
-		spawn: this._spawnProcess.bind(this),
+		spawn: async (
+			command: string,
+			args: string[] = [],
+			options?: SpawnOptions,
+		) => this._spawnProcess(command, args, options),
 		get: this._getProcess.bind(this),
 		list: this._listProcesses.bind(this),
 		tree: this._processTree.bind(this),
@@ -3066,7 +3083,9 @@ export class AgentOs {
 
 	readonly filesystem = {
 		readFile: this._readFile.bind(this),
+		pread: this._pread.bind(this),
 		writeFile: this._writeFile.bind(this),
+		pwrite: this._pwrite.bind(this),
 		readFiles: this._readFiles.bind(this),
 		writeFiles: this._writeFiles.bind(this),
 		stat: this._stat.bind(this),
@@ -3329,6 +3348,17 @@ export class AgentOs {
 						event.ownership.vm_id === nativeVm.vmId,
 					10_000,
 				);
+				if (options?.rootFilesystem?.type !== "native") {
+					// Root bootstrap is a one-way kernel transition. Add any
+					// trusted POSIX directories before configureVm projects
+					// package command stubs and seals a read-only root.
+					await bootstrapLiveBootstrapDirectories(
+						client,
+						session,
+						nativeVm,
+						options?.rootFilesystem,
+					);
+				}
 				const configuredVm = await client.configureVm(session, nativeVm, {
 					mounts: sidecarMounts,
 					permissions: sidecarPermissions,
@@ -3336,6 +3366,7 @@ export class AgentOs {
 					loopbackExemptPorts: options?.loopbackExemptPorts,
 					packages: sidecarPackages,
 					packagesMountAt: OPT_AGENTOS_ROOT,
+					bootstrapCommands,
 					bindingShimCommands: bindingBootstrapCommands,
 				});
 				for (const command of configuredVm.projectedCommands) {
@@ -3373,6 +3404,7 @@ export class AgentOs {
 					// must resend the boot packages and binding shims.
 					packages: sidecarPackages,
 					packagesMountAt: OPT_AGENTOS_ROOT,
+					bootstrapCommands,
 					bindingShimCommands: bindingBootstrapCommands,
 					commandGuestPaths,
 					onDispose: cleanup,
@@ -3380,14 +3412,6 @@ export class AgentOs {
 					// shared across VMs; disposing this VM must not kill the process.
 					ownsClient: false,
 				});
-				if (options?.rootFilesystem?.type !== "native") {
-					await bootstrapLiveBootstrapDirectories(
-						client,
-						session,
-						nativeVm,
-						options?.rootFilesystem,
-					);
-				}
 
 				kernel = rootBridge as unknown as Kernel;
 				const snapshotClient = client;
@@ -3504,7 +3528,7 @@ export class AgentOs {
 			if (cleanupErrors.length > 0) {
 				throw new AggregateError(
 					[error, ...cleanupErrors],
-					"AgentOS VM creation and cleanup failed",
+					"agentOS VM creation and cleanup failed",
 				);
 			}
 			throw error;
@@ -4578,11 +4602,11 @@ export class AgentOs {
 		};
 	}
 
-	private async _spawnProcess(
+	private _spawnProcess(
 		command: string,
 		args: string[] = [],
 		options: SpawnOptions = {},
-	): Promise<ProcessDescriptor> {
+	): ProcessDescriptor {
 		const outputHandlers = new Set<(event: ProcessOutput) => void>();
 		const exitHandlers = new Set<(event: ProcessExit) => void>();
 		const recordOutput = (
@@ -4608,6 +4632,7 @@ export class AgentOs {
 			env: options.env,
 			stdin: options.stdin,
 			timeout: options.timeoutMs,
+			streamStdin: true,
 			onStdout: (data) => {
 				recordOutput("stdout", data);
 				options?.onStdout?.(data);
@@ -4638,8 +4663,21 @@ export class AgentOs {
 		command: string,
 		args: string[] = [],
 		options?: SpawnOptions,
-	): Promise<ProcessDescriptor> {
-		return this.process.spawn(command, args, options);
+	): ProcessDescriptor {
+		return this._spawnProcess(command, args, options);
+	}
+
+	/** @deprecated Use `process.writeStdin()`. */
+	writeProcessStdin(
+		pid: number,
+		data: string | Uint8Array,
+	): Promise<void> {
+		return this._writeProcessStdin(pid, data);
+	}
+
+	/** @deprecated Use `process.closeStdin()`. */
+	closeProcessStdin(pid: number): Promise<void> {
+		return this._closeProcessStdin(pid);
 	}
 
 	/** Write data to a process's stdin. */
@@ -4733,6 +4771,12 @@ export class AgentOs {
 		);
 	}
 
+	/** @deprecated Use `process.wait()` and inspect the returned `ProcessExit`. */
+	async waitProcess(pid: number): Promise<number> {
+		const exit = await this.process.wait(pid);
+		return exit.exitCode ?? 1;
+	}
+
 	private _assertSafeAbsolutePath(path: string): void {
 		if (!path.startsWith("/")) {
 			throw new Error(`Path must be absolute: ${path}`);
@@ -4758,12 +4802,30 @@ export class AgentOs {
 		return this.#kernel.readFile(path);
 	}
 
+	private async _pread(
+		path: string,
+		offset: number,
+		length: number,
+	): Promise<Uint8Array> {
+		this._assertSafeAbsolutePath(path);
+		return this._vfs().pread(path, offset, length);
+	}
+
 	private async _writeFile(
 		path: string,
 		content: string | Uint8Array,
 	): Promise<void> {
 		this._assertWritableAbsolutePath(path);
 		return this.#kernel.writeFile(path, content);
+	}
+
+	private async _pwrite(
+		path: string,
+		offset: number,
+		data: Uint8Array,
+	): Promise<void> {
+		this._assertWritableAbsolutePath(path);
+		return this._vfs().pwrite(path, offset, data);
 	}
 
 	private async _writeFiles(
@@ -4974,9 +5036,19 @@ export class AgentOs {
 		return this.filesystem.readFile(path);
 	}
 
+	/** @deprecated Use `filesystem.pread()`. */
+	pread(path: string, offset: number, length: number): Promise<Uint8Array> {
+		return this.filesystem.pread(path, offset, length);
+	}
+
 	/** @deprecated Use `filesystem.writeFile()`. */
 	writeFile(path: string, content: string | Uint8Array): Promise<void> {
 		return this.filesystem.writeFile(path, content);
+	}
+
+	/** @deprecated Use `filesystem.pwrite()`. */
+	pwrite(path: string, offset: number, data: Uint8Array): Promise<void> {
+		return this.filesystem.pwrite(path, offset, data);
 	}
 
 	/** @deprecated Use `filesystem.writeFiles()`. */
@@ -5406,6 +5478,17 @@ export class AgentOs {
 		];
 	}
 
+	/** @deprecated Use `process.list()`. */
+	listProcesses(): SpawnedProcessInfo[] {
+		return [...this._processes.values()].map(({ proc, command, args }) => ({
+			pid: proc.pid,
+			command,
+			args,
+			running: proc.exitCode === null,
+			exitCode: proc.exitCode,
+		}));
+	}
+
 	/** Returns all kernel processes across all active runtimes (WASM and Node). */
 	private _listAllProcesses(): KernelProcessInfo[] {
 		if (this.#kernel instanceof NativeSidecarKernelProxy) {
@@ -5414,8 +5497,12 @@ export class AgentOs {
 		return [...this.#kernel.processes.values()];
 	}
 
-	/** Returns processes organized as a tree using ppid relationships. */
-	private async _processTree(): Promise<ProcessTreeNode[]> {
+	/** @deprecated Use `process.list()`. */
+	allProcesses(): KernelProcessInfo[] {
+		return this._listAllProcesses();
+	}
+
+	private _buildProcessTree(): ProcessTreeNode[] {
 		const all = this._listAllProcesses();
 		const nodeMap = new Map<number, ProcessTreeNode>();
 
@@ -5454,6 +5541,16 @@ export class AgentOs {
 		return roots;
 	}
 
+	/** Returns processes organized as a tree using ppid relationships. */
+	private async _processTree(): Promise<ProcessTreeNode[]> {
+		return this._buildProcessTree();
+	}
+
+	/** @deprecated Use `process.tree()`. */
+	processTree(): ProcessTreeNode[] {
+		return this._buildProcessTree();
+	}
+
 	/** Returns info about a specific process by PID. Throws if not found. */
 	private async _getProcess(pid: number): Promise<ProcessDescriptor> {
 		const language = this._languageProcesses.get(pid);
@@ -5467,6 +5564,21 @@ export class AgentOs {
 			command: entry.command,
 			state: entry.proc.exitCode === null ? "running" : "exited",
 			startedAtMs: entry.startedAtMs,
+		};
+	}
+
+	/** @deprecated Use `process.get()`. */
+	getProcess(pid: number): SpawnedProcessInfo {
+		const entry = this._processes.get(pid);
+		if (!entry) {
+			throw new Error(`Process not found: ${pid}`);
+		}
+		return {
+			pid: entry.proc.pid,
+			command: entry.command,
+			args: entry.args,
+			running: entry.proc.exitCode === null,
+			exitCode: entry.proc.exitCode,
 		};
 	}
 
@@ -5490,9 +5602,35 @@ export class AgentOs {
 		entry.proc.kill(number);
 	}
 
+	/** @deprecated Use `process.signal(pid, "SIGTERM")`. */
+	stopProcess(pid: number): void {
+		const entry = this._processes.get(pid);
+		if (entry) {
+			if (entry.proc.exitCode === null) entry.proc.kill();
+			return;
+		}
+		if (!this._languageProcesses.has(pid)) {
+			throw new Error(`Process not found: ${pid}`);
+		}
+		void this.process.signal(pid, "SIGTERM");
+	}
+
 	/** Send SIGKILL to force-kill a process. No-op if already exited. */
 	private async _killProcess(pid: number): Promise<void> {
 		await this._signalProcess(pid, "SIGKILL");
+	}
+
+	/** @deprecated Use `process.kill()`. */
+	killProcess(pid: number): void {
+		const entry = this._processes.get(pid);
+		if (entry) {
+			if (entry.proc.exitCode === null) entry.proc.kill(9);
+			return;
+		}
+		if (!this._languageProcesses.has(pid)) {
+			throw new Error(`Process not found: ${pid}`);
+		}
+		void this.process.kill(pid);
 	}
 
 	private async _resizeProcessPty(
@@ -5873,15 +6011,23 @@ export class AgentOs {
 	 * block registers the package for `openSession({ agent: name })`. Persists for the VM's
 	 * lifetime (and across a snapshot iff the volume persists).
 	 */
-	private async _linkSoftware(descriptor: PackageDescriptor): Promise<void> {
+	private async _linkSoftware(
+		descriptor: PackageDescriptor | SoftwarePackageRef | string,
+	): Promise<void> {
 		// Forward to the sidecar, which owns the `/opt/agentos` projection and
 		// appends the package to its live host-backed staging dir; the commands
 		// appear under `/opt/agentos/bin` immediately. The sidecar rejects a
 		// duplicate command, surfaced here as a thrown error.
+		const normalized = normalizePackageRef(descriptor);
+		if (!normalized) {
+			throw new TypeError(
+				"linkSoftware requires a package path string, { path }, or { packagePath }",
+			);
+		}
 		const commands = await this._sidecarClient.linkPackage(
 			this._sidecarSession,
 			this._sidecarVm,
-			descriptor,
+			normalized,
 		);
 		if (this.#kernel instanceof NativeSidecarKernelProxy) {
 			this.#kernel.registerCommandGuestPaths(
@@ -5895,7 +6041,7 @@ export class AgentOs {
 			// Retain the linked package for runtime mount reconfigures:
 			// `configure_vm` is replace-on-write, so a later `mountFs` that
 			// resent only the boot packages would unproject this one.
-			this.#kernel.registerLinkedPackage(descriptor);
+			this.#kernel.registerLinkedPackage(normalized);
 		}
 		// The client parses no manifests: an `agent` block in the linked package is
 		// picked up by the sidecar (it owns the projected `/opt/agentos` and answers
@@ -5932,7 +6078,9 @@ export class AgentOs {
 	}
 
 	/** @deprecated Use `software.link()`. */
-	linkSoftware(descriptor: PackageDescriptor): Promise<void> {
+	linkSoftware(
+		descriptor: PackageDescriptor | SoftwarePackageRef | string,
+	): Promise<void> {
 		return this.software.link(descriptor);
 	}
 
@@ -5968,7 +6116,7 @@ export class AgentOs {
 				chunk: new Uint8Array(event.chunk),
 			});
 		} catch (error) {
-			console.error("AgentOS stderr handler failed", error);
+			console.error("agentOS stderr handler failed", error);
 		}
 	}
 
@@ -5997,7 +6145,7 @@ export class AgentOs {
 			try {
 				handler(publicEvent);
 			} catch (error) {
-				console.error("AgentOS agent-exit handler failed", error);
+				console.error("agentOS agent-exit handler failed", error);
 			}
 		}
 		for (const key of ["*", event.sessionId]) {
@@ -6005,7 +6153,7 @@ export class AgentOs {
 				try {
 					subscription(publicEvent);
 				} catch (error) {
-					console.error("AgentOS agent-exit subscription failed", error);
+					console.error("agentOS agent-exit subscription failed", error);
 				}
 			}
 		}
@@ -6119,7 +6267,7 @@ export class AgentOs {
 				fillPercent: toNumber(detail.fillPercent),
 			});
 		} catch (error) {
-			console.error("AgentOS limit-warning handler failed", error);
+			console.error("agentOS limit-warning handler failed", error);
 		}
 	}
 
@@ -6163,7 +6311,7 @@ export class AgentOs {
 				}
 			}
 		} catch (error) {
-			console.error("AgentOS failed to decode an ACP sidecar event", error);
+			console.error("agentOS failed to decode an ACP sidecar event", error);
 		}
 	}
 
@@ -6174,7 +6322,7 @@ export class AgentOs {
 			try {
 				handler(entry);
 			} catch (error) {
-				console.error("AgentOS session event handler failed", error);
+				console.error("agentOS session event handler failed", error);
 			}
 		}
 	}
@@ -6854,7 +7002,7 @@ export class AgentOs {
 		);
 		if (errors.length === 1) throw errors[0];
 		if (errors.length > 1) {
-			throw new AggregateError(errors, "AgentOS VM disposal failed");
+			throw new AggregateError(errors, "agentOS VM disposal failed");
 		}
 	}
 }

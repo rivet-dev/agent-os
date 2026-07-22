@@ -12,6 +12,7 @@
     }
   },
   "registry": {
+    "category": "agents",
     "slug": "claude-code",
     "title": "Claude Code",
     "description": "Run Claude Code as an agentOS agent with full tool access, file editing, and shell execution.",

@@ -1,0 +1,88 @@
+diff --git a/libc-bottom-half/headers/public/__struct_dirent.h b/libc-bottom-half/headers/public/__struct_dirent.h
+index 56e4cb2..0000001 100644
+--- a/libc-bottom-half/headers/public/__struct_dirent.h
++++ b/libc-bottom-half/headers/public/__struct_dirent.h
+@@ -2,11 +2,16 @@
+ #define __wasilibc___struct_dirent_h
+ 
+ #include <__typedef_ino_t.h>
++#include <__typedef_off_t.h>
+ 
++#define _DIRENT_HAVE_D_OFF
++#define _DIRENT_HAVE_D_RECLEN
+ #define _DIRENT_HAVE_D_TYPE
+ 
+ struct dirent {
+     ino_t d_ino;
++    off_t d_off;
++    unsigned short d_reclen;
+     unsigned char d_type;
+-    char d_name[];
++    char d_name[256];
+ };
+diff --git a/libc-bottom-half/cloudlibc/src/libc/dirent/readdir.c b/libc-bottom-half/cloudlibc/src/libc/dirent/readdir.c
+index d609fe5..0000002 100644
+--- a/libc-bottom-half/cloudlibc/src/libc/dirent/readdir.c
++++ b/libc-bottom-half/cloudlibc/src/libc/dirent/readdir.c
+@@ -10,6 +10,7 @@
+ #include <dirent.h>
+ #include <errno.h>
+ #include <stddef.h>
++#include <stdint.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
+@@ -67,9 +68,19 @@ struct dirent *readdir(DIR *dirp) {
+ 
+     // Return the next directory entry. Ensure that the dirent is large
+     // enough to fit the filename.
+-    GROW(dirp->dirent, dirp->dirent_size,
+-         offsetof(struct dirent, d_name) + entry.d_namlen + 1);
++    size_t dirent_length =
++        offsetof(struct dirent, d_name) + entry.d_namlen + 1;
++    if (entry.d_next > INT64_MAX || dirent_length > UINT16_MAX) {
++      errno = EOVERFLOW;
++      return NULL;
++    }
++    /* Linux exposes a fixed d_name[256] member. Allocate the complete public
++     * object even for short names so callers may copy sizeof(struct dirent)
++     * without reading beyond libc's internal allocation. */
++    GROW(dirp->dirent, dirp->dirent_size, sizeof(struct dirent));
+     struct dirent *dirent = dirp->dirent;
++    dirent->d_off = (off_t)entry.d_next;
++    dirent->d_reclen = (unsigned short)dirent_length;
+     dirent->d_type = entry.d_type;
+     memcpy(dirent->d_name, name, entry.d_namlen);
+     dirent->d_name[entry.d_namlen] = '\0';
+diff --git a/libc-bottom-half/cloudlibc/src/libc/dirent/scandirat.c b/libc-bottom-half/cloudlibc/src/libc/dirent/scandirat.c
+index e175046..0000003 100644
+--- a/libc-bottom-half/cloudlibc/src/libc/dirent/scandirat.c
++++ b/libc-bottom-half/cloudlibc/src/libc/dirent/scandirat.c
+@@ -8,6 +8,7 @@
+ #include <fcntl.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <stdint.h>
+ #include <unistd.h>
+ #include <sys/stat.h>
+ 
+@@ -82,10 +83,17 @@ int __wasilibc_nocwd_scandirat(int dirfd, const char *dir, struct dirent ***name
+       continue;
+ 
+     // Create the new directory entry.
+-    struct dirent *dirent =
+-        malloc(offsetof(struct dirent, d_name) + entry.d_namlen + 1);
++    size_t dirent_length =
++        offsetof(struct dirent, d_name) + entry.d_namlen + 1;
++    if (entry.d_next > INT64_MAX || dirent_length > UINT16_MAX) {
++      errno = EOVERFLOW;
++      goto bad;
++    }
++    struct dirent *dirent = malloc(sizeof(struct dirent));
+     if (dirent == NULL)
+       goto bad;
++    dirent->d_off = (off_t)entry.d_next;
++    dirent->d_reclen = (unsigned short)dirent_length;
+     dirent->d_type = entry.d_type;
+     memcpy(dirent->d_name, name, entry.d_namlen);
+     dirent->d_name[entry.d_namlen] = '\0';

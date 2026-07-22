@@ -1,0 +1,18 @@
+Expose the Linux statfs aliases over wasi-libc's existing statvfs implementation.
+
+diff --git a/scripts/install-include-headers.sh b/scripts/install-include-headers.sh
+index c234b1f..7180dc4 100755
+--- a/scripts/install-include-headers.sh
++++ b/scripts/install-include-headers.sh
+@@ -54,9 +54,9 @@ MUSL_OMIT_HEADERS+=("bits/errno.h")
+ # Remove headers that aren't supported yet or that aren't relevant for WASI.
+ MUSL_OMIT_HEADERS+=("sys/procfs.h" "sys/user.h" "sys/kd.h" "sys/vt.h" \
+     "sys/soundcard.h" "sys/sem.h" "sys/shm.h" "sys/msg.h" "sys/ipc.h" \
+-    "sys/ptrace.h" "sys/statfs.h" "bits/kd.h" "bits/vt.h" "bits/soundcard.h" \
++    "sys/ptrace.h" "bits/kd.h" "bits/vt.h" "bits/soundcard.h" \
+     "bits/sem.h" "bits/shm.h" "bits/msg.h" "bits/ipc.h" "bits/ptrace.h" \
+-    "bits/statfs.h" "sys/vfs.h" "sys/syslog.h" "wait.h" \
++    "sys/syslog.h" "wait.h" \
+     "ucontext.h" "sys/ucontext.h" "utmp.h" "utmpx.h" \
+     "lastlog.h" "sys/acct.h" "sys/cachectl.h" "sys/epoll.h" "sys/reboot.h" \
+     "sys/swap.h" "sys/sendfile.h" "sys/inotify.h" "sys/quota.h" "sys/klog.h" \

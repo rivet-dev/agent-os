@@ -1,8 +1,8 @@
-//! Packed OpenCode ACP smoke test against the real AgentOS sidecar.
+//! Packed OpenCode ACP smoke test against the real agentOS sidecar.
 //!
 //! It proves that the production `.aospkg` projects, its native upstream ACP
 //! adapter initializes, exposes its real model directory, creates a session,
-//! and completes a prompt through a host llmock LLM inside an AgentOS VM.
+//! and completes a prompt through a host llmock LLM inside an agentOS VM.
 
 mod common;
 
@@ -20,6 +20,7 @@ use agentos_client::fs::MkdirOptions;
 use agentos_client::{
     AgentOs, ContentBlock, ExecOptions, ListSessionsInput, OpenSessionInput, PromptInput,
 };
+use agentos_vm_config::VmSqliteDescriptor;
 
 const LLMOCK_SENTINEL: &str = "PONG_FROM_LLMOCK";
 
@@ -31,15 +32,15 @@ fn repo_root() -> PathBuf {
 }
 
 fn opencode_package_path() -> Option<PathBuf> {
-    let package = repo_root().join("registry/agent/opencode/dist/package.aospkg");
+    let package = repo_root().join("software/opencode/dist/package.aospkg");
     package.is_file().then_some(package)
 }
 
 fn coreutils_package_path() -> PathBuf {
-    let package = repo_root().join("registry/software/coreutils/dist/package.aospkg");
+    let package = repo_root().join("software/coreutils/dist/package.aospkg");
     assert!(
         package.is_file(),
-        "Coreutils package is not built; run `pnpm --dir registry/software/coreutils build`"
+        "Coreutils package is not built; run `pnpm --dir software/coreutils build`"
     );
     package
 }
@@ -98,11 +99,20 @@ async fn packed_opencode_initializes_and_creates_session() {
         return;
     }
     let package_path = opencode_package_path()
-        .expect("OpenCode package is not built; run `pnpm --dir registry/agent/opencode build`");
+        .expect("OpenCode package is not built; run `pnpm --dir software/opencode build`");
     let coreutils_path = coreutils_package_path();
     let llmock = LlmockServer::start();
 
     let os = AgentOs::create(AgentOsConfig {
+        database: Some(VmSqliteDescriptor::SqliteFile {
+            path: std::env::temp_dir()
+                .join(format!(
+                    "agentos-opencode-session-{}.sqlite",
+                    std::process::id()
+                ))
+                .to_string_lossy()
+                .into_owned(),
+        }),
         loopback_exempt_ports: vec![llmock.port()],
         packages: vec![
             PackageRef {
@@ -165,7 +175,7 @@ async fn packed_opencode_initializes_and_creates_session() {
     .expect("write OpenCode llmock config");
 
     let temp_dir_probe = os
-        .exec_argv(
+        .exec_argv_process(
             "node",
             &[
                 "-e".to_string(),
@@ -243,7 +253,7 @@ console.log(JSON.stringify({
     .expect("OpenCode ACP initialize/session creation timed out");
     if let Err(error) = &session_result {
         let log = os
-            .exec_argv(
+            .exec_argv_process(
                 "node",
                 &[
                     "-e".to_string(),
@@ -298,12 +308,14 @@ catch (error) { process.stderr.write(String(error)); process.exitCode = 1; }"#
         model_count > 1,
         "native OpenCode ACP should expose more than one model; got {model_options:?}"
     );
-    assert_eq!(
-        model_options
-            .get("currentValue")
-            .and_then(|value| value.as_str()),
-        Some("anthropic/claude-sonnet-4-6"),
-        "native OpenCode ACP should honor the configured current model"
+    let current_model = model_options
+        .get("currentValue")
+        .and_then(|value| value.as_str())
+        .expect("native OpenCode ACP should expose the current model");
+    assert!(
+        current_model == "anthropic/claude-sonnet-4-6"
+            || current_model.starts_with("anthropic/claude-sonnet-4-6/"),
+        "native OpenCode ACP should honor the configured current model, optionally with an ACP reasoning variant; got {current_model:?}"
     );
 
     let prompt = tokio::time::timeout(
@@ -324,7 +336,7 @@ catch (error) { process.stderr.write(String(error)); process.exitCode = 1; }"#
     let prompt_text = serde_json::to_string(&prompt.message).expect("serialize prompt message");
     if !prompt_text.contains(LLMOCK_SENTINEL) {
         let log = os
-            .exec_argv(
+            .exec_argv_process(
                 "node",
                 &[
                     "-e".to_string(),

@@ -94,11 +94,77 @@ async function createVmWorkspace(vm: AgentOs): Promise<string> {
 }
 
 describe("full openSession({ agent: 'pi' }) inside the VM", () => {
+	test("projected Pi CLI answers an RPC request while stdin remains open", async () => {
+		const { mock, url } = await startLlmock([]);
+		const vm = await createPiVm(url);
+		let pid: number | undefined;
+		try {
+			const homeDir = await createVmPiHome(vm, url);
+			const workspaceDir = await createVmWorkspace(vm);
+			let stdout = "";
+			let stderr = "";
+			const response = new Promise<Record<string, unknown>>(
+				(resolve, reject) => {
+					const timeout = setTimeout(() => {
+						reject(
+							new Error(
+								`timed out waiting for Pi RPC response; stdout=${JSON.stringify(stdout)} stderr=${JSON.stringify(stderr)}`,
+							),
+						);
+					}, 60_000);
+					const spawned = vm.spawn("pi", ["--mode", "rpc", "--no-themes"], {
+						cwd: workspaceDir,
+						env: {
+							HOME: homeDir,
+							ANTHROPIC_API_KEY: "mock-key",
+							ANTHROPIC_BASE_URL: url,
+							PI_SKIP_VERSION_CHECK: "1",
+						},
+						streamStdin: true,
+						onStdout: (chunk) => {
+							stdout += new TextDecoder().decode(chunk);
+							const line = stdout
+								.split("\n")
+								.find((candidate) =>
+									candidate.includes('"id":"agentos-probe"'),
+								);
+							if (!line) return;
+							clearTimeout(timeout);
+							resolve(JSON.parse(line) as Record<string, unknown>);
+						},
+						onStderr: (chunk) => {
+							stderr += new TextDecoder().decode(chunk);
+						},
+					});
+					pid = spawned.pid;
+				},
+			);
+			if (pid === undefined) throw new Error("Pi RPC process did not start");
+			await vm.writeProcessStdin(
+				pid,
+				`${JSON.stringify({ type: "get_state", id: "agentos-probe" })}\n`,
+			);
+			await expect(response).resolves.toMatchObject({
+				id: "agentos-probe",
+				type: "response",
+				success: true,
+			});
+		} finally {
+			if (pid !== undefined) {
+				vm.killProcess(pid);
+				await vm.waitProcess(pid);
+			}
+			await vm.dispose();
+			await stopLlmock(mock);
+		}
+	}, 90_000);
+
 	test("openSession({ agent: 'pi' }) initializes over the default native sidecar transport", async () => {
 		const { mock, url } = await startLlmock([]);
 		const vm = await createPiVm(url);
 
 		let sessionId: string | undefined;
+		let sessionOpened = false;
 		try {
 			const homeDir = await createVmPiHome(vm, url);
 			const workspaceDir = await createVmWorkspace(vm);
@@ -114,6 +180,7 @@ describe("full openSession({ agent: 'pi' }) inside the VM", () => {
 					PI_SKIP_VERSION_CHECK: "1",
 				},
 			});
+			sessionOpened = true;
 
 			expect(sessionId).toBeTruthy();
 			expect(
@@ -122,7 +189,7 @@ describe("full openSession({ agent: 'pi' }) inside the VM", () => {
 				),
 			).toBe(true);
 		} finally {
-			if (sessionId) {
+			if (sessionOpened && sessionId) {
 				await vm.unloadSession({ sessionId });
 			}
 			await vm.dispose();
@@ -246,6 +313,7 @@ describe("full openSession({ agent: 'pi' }) inside the VM", () => {
 		const vm = await createPiVm(url);
 
 		let sessionId: string | undefined;
+		let sessionOpened = false;
 		try {
 			const homeDir = await createVmPiHome(vm, url);
 			const workspaceDir = await createVmWorkspace(vm);
@@ -260,6 +328,7 @@ describe("full openSession({ agent: 'pi' }) inside the VM", () => {
 					ANTHROPIC_BASE_URL: url,
 				},
 			});
+			sessionOpened = true;
 
 			const agentInfo = await vm.getSessionAgentInfo({ sessionId });
 			expect(agentInfo.name).toBe("pi-acp");
@@ -273,7 +342,7 @@ describe("full openSession({ agent: 'pi' }) inside the VM", () => {
 
 			const config = await vm.getSessionConfig({ sessionId });
 			// Pi currently advertises legacy ACP `modes`, not native
-			// `configOptions`; AgentOS deliberately does not invent a mapping.
+			// `configOptions`; agentOS deliberately does not invent a mapping.
 			expect(config.options.some((option) => option.id === "mode")).toBe(false);
 
 			const events: SessionStreamEntry[] = [];
@@ -304,7 +373,7 @@ describe("full openSession({ agent: 'pi' }) inside the VM", () => {
 
 			expect(events.some((event) => event.type === "tool_call")).toBe(true);
 		} finally {
-			if (sessionId) {
+			if (sessionOpened && sessionId) {
 				await vm.unloadSession({ sessionId });
 			}
 			await vm.dispose();
@@ -330,6 +399,7 @@ describe("full openSession({ agent: 'pi' }) inside the VM", () => {
 			const vm = await createPiVm(url);
 
 			let sessionId: string | undefined;
+			let sessionOpened = false;
 			try {
 				const homeDir = await createVmPiHome(vm, url);
 				const workspaceDir = await createVmWorkspace(vm);
@@ -344,6 +414,7 @@ describe("full openSession({ agent: 'pi' }) inside the VM", () => {
 						ANTHROPIC_BASE_URL: url,
 					},
 				});
+				sessionOpened = true;
 
 				const result = await vm.prompt({
 					sessionId,
@@ -366,7 +437,7 @@ describe("full openSession({ agent: 'pi' }) inside the VM", () => {
 				).toBe("bash-ok");
 				expect(mock.getRequests().length).toBeGreaterThanOrEqual(2);
 			} finally {
-				if (sessionId) {
+				if (sessionOpened && sessionId) {
 					await vm.unloadSession({ sessionId });
 				}
 				await vm.dispose();

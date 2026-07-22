@@ -2,9 +2,9 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import {
 	baselineRowFromLatency,
+	type GateLane,
 	laneMetric,
 	loadMatrixBaseline,
-	type GateLane,
 	type MatrixBaseline,
 	type MatrixBaselineRow,
 } from "./baseline.js";
@@ -34,7 +34,7 @@ export function compareMatrixBaseline(
 	options: {
 		threshold: number;
 		tinyBaselineFloorMs: number;
-		tinyCurrentFloorMs: number;
+		tinyAllowedRegressionMs: number;
 	},
 ): MatrixComparison[] {
 	const currentByKey = new Map(currentRows.map((row) => [row.key, row]));
@@ -65,7 +65,7 @@ export function compareMatrixBaseline(
 		const ratio = round(currentMetric.p50Ms / baselineMetric.p50Ms, 2);
 		const deltaMs = round(currentMetric.p50Ms - baselineMetric.p50Ms, 3);
 		const tinyBaseline = baselineMetric.p50Ms < options.tinyBaselineFloorMs;
-		if (tinyBaseline && currentMetric.p50Ms < options.tinyCurrentFloorMs) {
+		if (tinyBaseline && deltaMs < options.tinyAllowedRegressionMs) {
 			return {
 				key: gate.key,
 				lane: gate.lane,
@@ -74,7 +74,7 @@ export function compareMatrixBaseline(
 				ratio,
 				deltaMs,
 				status: "ignored",
-				reason: `baseline < ${options.tinyBaselineFloorMs}ms and current < ${options.tinyCurrentFloorMs}ms`,
+				reason: `baseline < ${options.tinyBaselineFloorMs}ms and absolute regression < ${options.tinyAllowedRegressionMs}ms`,
 			};
 		}
 		const failed = ratio > options.threshold;
@@ -86,7 +86,9 @@ export function compareMatrixBaseline(
 			ratio,
 			deltaMs,
 			status: failed ? "fail" : "pass",
-			reason: failed ? `ratio ${ratio} > ${options.threshold}` : `ratio ${ratio} <= ${options.threshold}`,
+			reason: failed
+				? `ratio ${ratio} > ${options.threshold}`
+				: `ratio ${ratio} <= ${options.threshold}`,
 		};
 	});
 }
@@ -104,11 +106,11 @@ export function compareBaselineFile(
 	options: {
 		threshold: number;
 		tinyBaselineFloorMs: number;
-		tinyCurrentFloorMs: number;
+		tinyAllowedRegressionMs: number;
 	} = {
 		threshold: 2,
 		tinyBaselineFloorMs: 0.5,
-		tinyCurrentFloorMs: 1,
+		tinyAllowedRegressionMs: 1,
 	},
 ) {
 	const baseline = loadMatrixBaseline(baselinePath);
@@ -133,8 +135,10 @@ export function compareBaselineFile(
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
-	const current = process.argv[2] ?? "packages/benchmarks/results/latency-matrix.json";
-	const baseline = process.argv[3] ?? "packages/benchmarks/results/baseline-local.json";
+	const current =
+		process.argv[2] ?? "packages/benchmarks/results/latency-matrix.json";
+	const baseline =
+		process.argv[3] ?? "packages/benchmarks/results/baseline-local.json";
 	const rowsArg = process.argv[4] ?? "";
 	const gateRows = rowsArg
 		.split(",")
@@ -149,7 +153,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
 			compareBaselineFile(current, baseline, gateRows, {
 				threshold: 2,
 				tinyBaselineFloorMs: 0.5,
-				tinyCurrentFloorMs: 1,
+				tinyAllowedRegressionMs: 1,
 			}),
 			null,
 			2,

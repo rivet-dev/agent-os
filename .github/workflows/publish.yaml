@@ -405,6 +405,7 @@ jobs:
             --filter='!@rivet-dev/agentos-website' \
             --filter='!@rivet-dev/agentos-browser' \
             --filter='!@rivet-dev/agentos-runtime-browser' \
+            --filter='!@rivet-dev/agentos-example-browser-terminal' \
             --filter='!@rivet-dev/agentos-playground' \
             --filter='!./examples/*' \
             --filter='!./examples/quickstart/*'

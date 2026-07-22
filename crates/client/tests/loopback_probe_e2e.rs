@@ -45,7 +45,7 @@ async fn guest_fetch_reaches_host_loopback() {
     let args = vec![String::from("-e"), script];
     let result = tokio::time::timeout(
         Duration::from_secs(15),
-        os.exec_argv("node", &args, ExecOptions::default()),
+        os.exec_argv_process("node", &args, ExecOptions::default()),
     )
     .await
     .expect("guest fetch timed out")

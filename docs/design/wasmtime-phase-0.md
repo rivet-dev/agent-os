@@ -3,7 +3,7 @@
 Status: complete; normative input to the runtime-neutral refactor and Wasmtime
 executor revisions
 
-Audience: AgentOS kernel, sidecar runtime, execution, VFS, toolchain, test, and
+Audience: agentOS kernel, sidecar runtime, execution, VFS, toolchain, test, and
 registry-software owners
 
 ## 1. Purpose and completion statement
@@ -30,7 +30,7 @@ The inventory was checked against:
 - native-sidecar execution, filesystem, and network services.
 
 No import below permits Wasmtime to use ambient host resources. `wasmtime-wasi`
-does not own the context. Both engines call the same AgentOS host services.
+does not own the context. Both engines call the same agentOS host services.
 
 ## 2. Inventory notation and cross-cutting contract
 
@@ -349,14 +349,11 @@ of a hard-coded rejection alone does not close it.
 
 ### Phase 0 artifact evidence
 
-The Phase 1 tree completed `just tools-rebuild` after removing the obsolete
-`wasi-libc-overrides/ownership.c` definitions and retaining the canonical
-patched-libc ownership implementation. The rebuild produced 119 standalone
-Rust commands, compiled 98 C programs, installed the selected C commands, and
-confirmed 166 entries in the default command corpus. Because a focused Vim
-build was already present in `toolchain/target`, that completed rebuild/copy
-invocation staged and audited 167 command entries. The generated ABI remained
-current at 169 functions.
+The final canonical `just tools-rebuild` completed from source after removing
+the obsolete `wasi-libc-overrides/ownership.c` definitions and retaining the
+canonical patched-libc ownership implementation. It staged 169 command entries
+from 138 distinct modules. The generated ABI remained current at 169
+functions.
 
 Those 169 manifest rows have 29 distinct core function signatures. The 40
 Preview1 rows also link through the `wasi_unstable` module alias, yielding 209
@@ -367,16 +364,13 @@ those counts and map every import to explicit handler, decoder, encoder,
 execution-class, restartability, return-convention, permission, and
 transaction/prevalidation metadata.
 
-The automated Binaryen audit inspected all 167 staged command entries (136 distinct
-modules) and found 145 unique module/function imports. Every observed import
-has the exact signature declared in Sections 3–7; no undeclared import or
-conflicting signature remains. The artifact set specifically confirms that
-both `path_chown`/`fd_chown` legacy aliases and `proc_spawn_v3`/`proc_spawn_v4`
-plus `proc_waitpid_v2`/`proc_waitpid_v3` version pairs remain live. Generated
-command and package outputs are ignored build evidence and are not committed.
-A subsequent focused DuckDB build expanded the optional staged corpus to 168
-commands and 137 distinct modules without changing the 145-import inventory or
-the 169-function ABI manifest; it is not part of the 166-command default corpus.
+The automated Binaryen audit inspected all 169 staged command entries and
+found 146 unique module/function imports. Every observed import has the exact
+signature declared in Sections 3–7; no undeclared import or conflicting
+signature remains. The artifact set specifically confirms that both
+`path_chown`/`fd_chown` legacy aliases and `proc_spawn_v3`/`proc_spawn_v4` plus
+`proc_waitpid_v2`/`proc_waitpid_v3` version pairs remain live. Generated command
+and package outputs are ignored build evidence and are not committed.
 
 ## 10. V8-WASM performance and memory baseline
 
@@ -444,9 +438,9 @@ by `just tools-rebuild` before a release-quality capture.
    actual dependency graph produces a cycle that cannot be removed by moving
    transport-neutral types to the existing bridge crate.
 3. **ABI generation.** Generate Preview1 layouts/types from a checked-in pinned
-   Preview1 WITX description; generated glue implements AgentOS host traits and
+   Preview1 WITX description; generated glue implements agentOS host traits and
    does not construct a `wasmtime-wasi` context. Generate custom-import
-   signatures from one checked-in AgentOS ABI manifest shared by linker tests
+   signatures from one checked-in agentOS ABI manifest shared by linker tests
    and import-audit tooling. Handwritten code remains only for bounded memory
    copying and version-to-canonical request conversion.
 4. **CPU fields.** Remove the misleading lockstep `maxWasmFuel` field. Replace

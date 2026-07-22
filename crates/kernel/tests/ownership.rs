@@ -85,6 +85,73 @@ fn chown_preserves_non_executable_setgid_like_linux() {
 }
 
 #[test]
+fn unprivileged_truncate_preserves_mandatory_locking_sgid_only() {
+    let (mut kernel, pid) = kernel_and_pid();
+    kernel
+        .write_file_for_process(DRIVER, pid, "/mandatory-lock-write", b"data", None)
+        .expect("create mandatory-locking file");
+    kernel
+        .chmod("/mandatory-lock-write", 0o6744)
+        .expect("set non-group-executable set-id mode");
+
+    kernel
+        .truncate_for_process(DRIVER, pid, "/mandatory-lock-write", 0)
+        .expect("truncate mandatory-locking file");
+    assert_eq!(
+        kernel
+            .stat("/mandatory-lock-write")
+            .expect("stat mandatory-locking file")
+            .mode
+            & 0o7777,
+        0o2744,
+        "truncate clears setuid but preserves mandatory-locking setgid"
+    );
+
+    kernel
+        .chmod("/mandatory-lock-write", 0o6754)
+        .expect("set group-executable set-id mode");
+    kernel
+        .truncate_for_process(DRIVER, pid, "/mandatory-lock-write", 1)
+        .expect("truncate group-executable file");
+    assert_eq!(
+        kernel
+            .stat("/mandatory-lock-write")
+            .expect("stat group-executable file")
+            .mode
+            & 0o7777,
+        0o754,
+        "truncate clears executable setuid and setgid bits"
+    );
+}
+
+#[test]
+fn unprivileged_foreign_group_write_clears_non_executable_setgid() {
+    let (mut kernel, pid) = kernel_and_pid();
+    kernel
+        .write_file("/foreign-group-write", b"data".to_vec())
+        .expect("create foreign-group file");
+    kernel
+        .chown("/foreign-group-write", 2000, 2000)
+        .expect("set foreign owner and group");
+    kernel
+        .chmod("/foreign-group-write", 0o6666)
+        .expect("make foreign set-id file writable");
+
+    kernel
+        .truncate_for_process(DRIVER, pid, "/foreign-group-write", 0)
+        .expect("other-writable foreign file may be truncated");
+    assert_eq!(
+        kernel
+            .stat("/foreign-group-write")
+            .expect("stat foreign-group file")
+            .mode
+            & 0o7777,
+        0o666,
+        "Linux clears setuid and non-executable setgid when the writer is not in the file group"
+    );
+}
+
+#[test]
 fn chown_follows_but_lchown_mutates_the_symlink_inode() {
     let (mut kernel, pid) = kernel_and_pid();
     kernel

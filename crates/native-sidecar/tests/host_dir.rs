@@ -96,7 +96,7 @@ mod host_dir {
 
         #[test]
         fn mount_table_pwrite_delegates_without_reading_the_whole_host_file() {
-            let host_dir = temp_dir("secure-exec-host-dir-mounted-pwrite");
+            let host_dir = temp_dir("agentos-host-dir-mounted-pwrite");
             fs::write(host_dir.join("large.bin"), vec![b'a'; 32]).expect("seed host file");
 
             let mounted = HostDirFilesystem::new_with_read_limit(&host_dir, Some(4))
@@ -211,6 +211,23 @@ mod host_dir {
 
             fs::remove_dir_all(host_dir).expect("remove temp dir");
             fs::remove_dir_all(outside_dir).expect("remove outside temp dir");
+        }
+
+        #[test]
+        fn filesystem_readlink_preserves_confined_relative_target() {
+            let host_dir = temp_dir("host-dir-plugin-relative-readlink");
+            fs::create_dir_all(host_dir.join(".pnpm/pkg/node_modules/pkg"))
+                .expect("seed pnpm package directory");
+            std::os::unix::fs::symlink("./.pnpm/pkg/node_modules/pkg", host_dir.join("pkg"))
+                .expect("seed relative package symlink");
+
+            let filesystem = HostDirFilesystem::new(&host_dir).expect("create host dir filesystem");
+            assert_eq!(
+                filesystem.read_link("/pkg").expect("read relative link"),
+                "./.pnpm/pkg/node_modules/pkg"
+            );
+
+            fs::remove_dir_all(host_dir).expect("remove temp dir");
         }
 
         #[test]

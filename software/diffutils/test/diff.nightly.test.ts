@@ -8,7 +8,7 @@ import {
 	NodeFileSystem,
 	createKernel,
 	createWasmVmRuntime,
-	describeIf,
+	describeIf, wasmBackendTestTimeout,
 } from "@rivet-dev/agentos-test-harness";
 import type { Kernel } from "@rivet-dev/agentos-test-harness";
 import { afterEach, expect, it } from "vitest";
@@ -38,7 +38,7 @@ async function createTestVFS(): Promise<NodeFileSystem> {
 	return new NodeFileSystem({ root: tempRoot });
 }
 
-describeIf(hasDiffPackageBinary, "diff command", { timeout: 10_000 }, () => {
+describeIf(hasDiffPackageBinary, "diff command", { timeout: wasmBackendTestTimeout(10_000, 30_000) }, () => {
 	let kernel: Kernel | undefined;
 
 	afterEach(async () => {

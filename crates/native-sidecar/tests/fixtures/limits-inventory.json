@@ -1925,6 +1925,12 @@
 		"wired": "VmLimits.resources.max_inode_count"
 	},
 	{
+		"name": "AGENTOS_TIMESTAMP_MAX_SECONDS",
+		"path": "crates/vfs/src/posix/vfs.rs",
+		"class": "invariant",
+		"rationale": "Filesystem timestamp ABI ceiling shared by every storage backend; changing it would alter guest-visible metadata semantics."
+	},
+	{
 		"name": "MAX_PATH_LENGTH",
 		"path": "crates/vfs/src/posix/vfs.rs",
 		"class": "invariant",
@@ -1941,6 +1947,12 @@
 		"path": "packages/core/src/agent-os.ts",
 		"class": "policy-deferred",
 		"rationale": "Bounded TypeScript client retention set; expose through client configuration if operators need to tune it."
+	},
+	{
+		"name": "PROCESS_OUTPUT_EVENT_LIMIT",
+		"path": "packages/core/src/agent-os.ts",
+		"class": "policy-deferred",
+		"rationale": "Bounded TypeScript client replay cache; callers can page authoritative output through process.readOutput(), and the client cap can become configurable if larger live replay windows are required."
 	},
 	{
 		"name": "DEFAULT_LIVE_FILESYSTEM_SYNC_MAX_BYTES",
@@ -2089,6 +2101,13 @@
 		"wired": "VmLimits.process.max_pending_child_sync_bytes"
 	},
 	{
+		"name": "DEFAULT_EXECUTION_MAX_COMPLETED_EXECUTIONS",
+		"path": "crates/native-sidecar-core/src/limits.rs",
+		"class": "policy",
+		"rationale": "Default retained completed-language-execution count.",
+		"wired": "VmLimits.execution.max_completed_executions"
+	},
+	{
 		"name": "DEFAULT_PROCESS_MAX_PENDING_CHILD_SYNC_COUNT",
 		"path": "crates/native-sidecar-core/src/limits.rs",
 		"class": "policy",
@@ -2110,10 +2129,28 @@
 		"wired": "WasmExecutionLimits.max_sync_rpc_response_line_bytes"
 	},
 	{
+		"name": "EXECUTION_EVENT_BYTES_LIMIT",
+		"path": "crates/native-sidecar/src/language_execution.rs",
+		"class": "policy-deferred",
+		"rationale": "Bounded retained event-history bytes per language execution; expose through typed execution limits if operators need a larger replay window."
+	},
+	{
+		"name": "MAX_EXECUTION_OUTPUT_PAGE_EVENTS",
+		"path": "crates/native-sidecar/src/language_execution.rs",
+		"class": "invariant",
+		"rationale": "Per-response pagination ceiling that bounds protocol work; callers can continue paging without raising it."
+	},
+	{
 		"name": "MAX_ACCOUNTS",
 		"path": "crates/vm-config/src/lib.rs",
 		"class": "policy-deferred",
 		"rationale": "Bounded configured guest account count; expose separately only if larger account databases are required."
+	},
+	{
+		"name": "MAX_SAFE_INTEGER",
+		"path": "crates/vm-config/src/lib.rs",
+		"class": "invariant",
+		"rationale": "JavaScript/JSON exact-integer ceiling for cross-language configuration values."
 	},
 	{
 		"name": "MAX_ACCOUNT_RECORD_BYTES",
@@ -2668,5 +2705,53 @@
 		"class": "policy",
 		"rationale": "Default aggregate sidecar-process threaded-WASM admission bound.",
 		"wired": "RuntimeConfig.resources.max_wasm_threads"
+	},
+	{
+		"name": "MAX_ABORT_SIGNAL_ANY_INPUTS",
+		"path": "packages/build-tools/bridge-src/polyfills/abort.ts",
+		"class": "invariant",
+		"rationale": "Per-call iterable materialization ceiling that bounds AbortSignal.any() parser amplification; not an aggregate VM resource budget."
+	},
+	{
+		"name": "MAX_BLOB_BYTES",
+		"path": "packages/build-tools/bridge-src/polyfills/blob-file.ts",
+		"class": "policy-deferred",
+		"rationale": "Per-Blob guest allocation bound; expose through JavaScript VM limits if operators need to tune it."
+	},
+	{
+		"name": "MAX_BLOB_PARTS",
+		"path": "packages/build-tools/bridge-src/polyfills/blob-file.ts",
+		"class": "policy-deferred",
+		"rationale": "Per-Blob retained-part bound; expose through JavaScript VM limits if operators need to tune it."
+	},
+	{
+		"name": "MAX_BLOB_URLS",
+		"path": "packages/build-tools/bridge-src/polyfills/whatwg-url.ts",
+		"class": "policy-deferred",
+		"rationale": "Per-isolate retained Blob URL bound; expose through JavaScript VM limits if operators need to tune it."
+	},
+	{
+		"name": "MAX_EVENT_LISTENERS",
+		"path": "packages/build-tools/bridge-src/polyfills/dom-events.ts",
+		"class": "policy-deferred",
+		"rationale": "Per-EventTarget retained-listener bound; expose through JavaScript VM limits if operators need to tune it."
+	},
+	{
+		"name": "MAX_EVENT_TYPES",
+		"path": "packages/build-tools/bridge-src/polyfills/dom-events.ts",
+		"class": "policy-deferred",
+		"rationale": "Per-EventTarget retained event-type bound; expose through JavaScript VM limits if operators need to tune it."
+	},
+	{
+		"name": "VM_FETCH_STREAM_CHUNK_MAX_BYTES",
+		"path": "crates/native-sidecar/src/execution/javascript/http.rs",
+		"class": "invariant",
+		"rationale": "Internal fetch-stream read and delivery work quantum below the separately configured response and frame byte budgets."
+	},
+	{
+		"name": "VM_FETCH_STREAM_COUNT_LIMIT",
+		"path": "crates/native-sidecar/src/execution/javascript/http.rs",
+		"class": "policy-deferred",
+		"rationale": "Per-VM open fetch-stream bound; expose through HTTP VM limits if operators need to tune concurrent streaming fetches."
 	}
 ]

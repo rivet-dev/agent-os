@@ -958,10 +958,9 @@ fn assert_isolate_churn_recreates_embedded_sessions_without_segv() -> io::Result
             session_id: session_id.clone(),
         })?;
         runtime.unregister_session(&session_id);
-        assert_eq!(
-            (runtime.session_count(), runtime.active_slot_count()),
-            (0, 0),
-            "explicit destruction must join each executor before its successor starts",
+        wait_until(
+            "quarantined executor must release its slot before its successor starts",
+            || runtime.session_count() == 0 && runtime.active_slot_count() == 0,
         );
     }
 
@@ -985,7 +984,7 @@ fn assert_isolate_churn_recreates_embedded_sessions_without_segv() -> io::Result
     Ok(())
 }
 
-fn assert_destroy_joins_active_handle_executor() -> io::Result<()> {
+fn assert_destroy_quarantines_active_handle_executor() -> io::Result<()> {
     let runtime = Arc::new(embedded_runtime(1)?);
     let session_id = next_session_id();
     let _receiver = register_and_create_session(&runtime, &session_id)?;
@@ -1007,10 +1006,9 @@ fn assert_destroy_joins_active_handle_executor() -> io::Result<()> {
         "active-handle destruction must observe abort before re-entering V8"
     );
     runtime.unregister_session(&session_id);
-    assert_eq!(
-        (runtime.session_count(), runtime.active_slot_count()),
-        (0, 0),
-        "active-handle destruction must be quiescent on return"
+    wait_until(
+        "active-handle destruction must release its quarantined executor",
+        || runtime.session_count() == 0 && runtime.active_slot_count() == 0,
     );
     Ok(())
 }
@@ -1036,6 +1034,6 @@ fn embedded_runtime_session_consolidated_behaviors() -> io::Result<()> {
     assert_pause_preserves_synchronous_execution_stack()?;
     assert_cpu_terminated_session_can_execute_again()?;
     assert_isolate_churn_recreates_embedded_sessions_without_segv()?;
-    assert_destroy_joins_active_handle_executor()?;
+    assert_destroy_quarantines_active_handle_executor()?;
     Ok(())
 }

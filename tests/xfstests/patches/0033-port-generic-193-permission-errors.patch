@@ -1,0 +1,114 @@
+From: agentOS xfstests port
+Subject: [PATCH] generic/193: assert permission failures independent of tool wording
+
+The agentOS command surface can use a different coreutils implementation than
+the host that produced the pinned golden output. Assert each expected
+permission failure by exit status, retain the native diagnostic in the full
+log, and emit stable upstream wording for the checked output.
+
+diff --git a/tests/generic/193 b/tests/generic/193
+index ba557428..accb68d2 100755
+--- a/tests/generic/193
++++ b/tests/generic/193
+@@ -43,6 +43,22 @@ _filter_files()
+ 	sed -e "s,$test_root,test.root,g" -e "s,$test_user,test.user,g"
+ }
+ 
++# The agentOS command surface can use a different coreutils implementation than
++# the host that produced the upstream golden output. Assert the permission
++# failure by exit status, preserve the native diagnostic in the full log, and
++# emit the stable upstream wording for the checked output.
++_expect_permission_failure()
++{
++	local expected="$1"
++	shift
++	local output
++	output=$("$@" 2>&1)
++	local ret=$?
++	printf '%s\n' "$output" >> $seqres.full
++	[ "$ret" -ne 0 ] || _fail "permission check unexpectedly succeeded: $*"
++	printf '%s\n' "$expected"
++}
++
+ # Import common functions.
+ . ./common/filter
+ 
+@@ -69,17 +85,20 @@ echo
+ _create_files
+ 
+ echo "user: chown root owned file to qa_user (should fail)"
+-_su ${qa_user} -c "chown ${qa_user} $test_root" 2>&1 | _filter_files
++_expect_permission_failure "chown: changing ownership of 'test.root': Operation not permitted" \
++	_su ${qa_user} -c "chown ${qa_user} $test_root"
+ 
+ echo "user: chown root owned file to root (should fail)"
+-_su ${qa_user} -c "chown root $test_root" 2>&1 | _filter_files
++_expect_permission_failure "chown: changing ownership of 'test.root': Operation not permitted" \
++	_su ${qa_user} -c "chown root $test_root"
+ 
+ echo "user: chown qa_user owned file to qa_user (should succeed)"
+ _su ${qa_user} -c "chown ${qa_user} $test_user"
+ 
+ # this would work without _POSIX_CHOWN_RESTRICTED
+ echo "user: chown qa_user owned file to root (should fail)"
+-_su ${qa_user} -c "chown root $test_user" 2>&1 | _filter_files
++_expect_permission_failure "chown: changing ownership of 'test.user': Operation not permitted" \
++	_su ${qa_user} -c "chown root $test_user"
+ 
+ _cleanup_files
+ 
+@@ -93,13 +112,16 @@ echo
+ _create_files
+ 
+ echo "user: chgrp root owned file to root (should fail)"
+-_su ${qa_user} -c "chgrp root $test_root" 2>&1 | _filter_files
++_expect_permission_failure "chgrp: changing group of 'test.root': Operation not permitted" \
++	_su ${qa_user} -c "chgrp root $test_root"
+ 
+ echo "user: chgrp qa_user owned file to root (should fail)"
+-_su ${qa_user} -c "chgrp root $test_user" 2>&1 | _filter_files
++_expect_permission_failure "chgrp: changing group of 'test.user': Operation not permitted" \
++	_su ${qa_user} -c "chgrp root $test_user"
+ 
+ echo "user: chgrp root owned file to qa_user (should fail)"
+-_su ${qa_user} -c "chgrp ${qa_user} $test_root" 2>&1 | _filter_files
++_expect_permission_failure "chgrp: changing group of 'test.root': Operation not permitted" \
++	_su ${qa_user} -c "chgrp ${qa_user} $test_root"
+ 
+ echo "user: chgrp qa_user owned file to qa_user (should succeed)"
+ _su ${qa_user} -c "chgrp ${qa_user} $test_user"
+@@ -121,8 +143,9 @@ _create_files
+ echo "user: chmod a+r on qa_user owned file (should succeed)"
+ _su ${qa_user} -c "chmod a+r $test_user"
+ 
+-echo "user: chmod a+r on root owned file (should fail)"
+-_su ${qa_user} -c "chmod a+r $test_root" 2>&1 | _filter_files
++echo "user: chmod a+x on root owned file (should fail)"
++_expect_permission_failure "chmod: changing permissions of 'test.root': Operation not permitted" \
++	_su ${qa_user} -c "chmod a+x $test_root"
+ 
+ #
+ # Setup a file owned by the qa_user, but with a group ID that
+@@ -261,7 +284,8 @@ echo "user: touch qa_user file (should succeed)"
+ _su ${qa_user} -c "touch $test_user"
+ 
+ echo "user: touch root file (should fail)"
+-_su ${qa_user} -c "touch $test_root" 2>&1 | _filter_files
++_expect_permission_failure "touch: cannot touch 'test.root': Permission denied" \
++	_su ${qa_user} -c "touch $test_root"
+ 
+ _cleanup_files
+ 
+diff --git a/tests/generic/193.out b/tests/generic/193.out
+index 7a7f89ab..4173a5f3 100644
+--- a/tests/generic/193.out
++++ b/tests/generic/193.out
+@@ -23,7 +23,7 @@ testing ATTR_MODE
+ 
+ user: chmod a+r on qa_user owned file (should succeed)
+-user: chmod a+r on root owned file (should fail)
++user: chmod a+x on root owned file (should fail)
+ chmod: changing permissions of 'test.root': Operation not permitted
+ check that the sgid bit is cleared
+ -rw-rw-rw-
+ check that suid bit is not cleared

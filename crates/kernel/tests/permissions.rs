@@ -3,7 +3,7 @@ use agentos_kernel::kernel::{KernelVm, KernelVmConfig, SpawnOptions};
 use agentos_kernel::mount_table::{MountOptions, MountTable};
 use agentos_kernel::permissions::{
     check_command_execution, check_network_access, filter_env, permission_glob_matches,
-    EnvAccessRequest, FsAccessRequest, NetworkOperation, PermissionDecision,
+    EnvAccessRequest, FsAccessRequest, FsOperation, NetworkOperation, PermissionDecision,
     PermissionedFileSystem, Permissions,
 };
 use agentos_kernel::vfs::{MemoryFileSystem, VfsResult, VirtualFileSystem};
@@ -543,6 +543,30 @@ fn kernel_vm_config_defaults_to_deny_all_permissions() {
     let error = kernel
         .write_file("/tmp/denied.txt", b"nope".to_vec())
         .expect_err("default config should deny filesystem writes");
+    assert_eq!(error.code(), "EACCES");
+}
+
+#[test]
+fn kernel_write_does_not_require_read_permission_for_write_guard_resolution() {
+    let mut config = KernelVmConfig::new("vm-write-only");
+    config.permissions = Permissions {
+        filesystem: Some(Arc::new(|request: &FsAccessRequest| {
+            if request.op == FsOperation::Read && request.path == "/blocked.txt" {
+                PermissionDecision::deny("read blocked by policy")
+            } else {
+                PermissionDecision::allow()
+            }
+        })),
+        ..Permissions::allow_all()
+    };
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+
+    kernel
+        .write_file("/blocked.txt", b"write-only".to_vec())
+        .expect("write authorization must not imply read authorization");
+    let error = kernel
+        .read_file("/blocked.txt")
+        .expect_err("read policy must still be enforced");
     assert_eq!(error.code(), "EACCES");
 }
 

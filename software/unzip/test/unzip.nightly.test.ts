@@ -10,7 +10,7 @@ import {
 	createInMemoryFileSystem,
 	createKernel,
 	createWasmVmRuntime,
-	describeIf,
+	describeIf, wasmBackendTestTimeout,
 	hasCWasmBinaries,
 	type Kernel,
 } from "@rivet-dev/agentos-test-harness";
@@ -68,7 +68,7 @@ function buildFallbackArchive(
 describeIf(
 	hasCWasmBinaries("zip", "unzip"),
 	"unzip command",
-	{ timeout: 10_000 },
+	{ timeout: wasmBackendTestTimeout(10_000, 30_000) },
 	() => {
 		let kernel: Kernel;
 

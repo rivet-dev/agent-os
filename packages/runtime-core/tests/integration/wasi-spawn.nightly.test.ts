@@ -141,6 +141,14 @@ describeIf(!skipReason(), 'wasi-spawn: WasiChild host_process integration', { ti
     expect(result.stderr).toBe('');
   });
 
+  it('drains captured Tokio child output past the kernel pipe capacity', async () => {
+    await vfs.createDir('/workspace');
+    const result = await kernel.exec('spawn-test-host tokio-large-output');
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(/PASS bytes=\d+ rows=6000/);
+    expect(result.stderr).toBe('');
+  });
+
   it('spawn failing command, verify non-zero exit code', async () => {
     const result = await kernel.exec('spawn-test-host fail');
     expect(result.stdout).toContain('exit:42');

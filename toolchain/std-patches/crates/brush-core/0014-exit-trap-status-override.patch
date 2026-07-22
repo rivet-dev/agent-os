@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Runtime <runtime@agentos.invalid>
+Date: Wed, 22 Jul 2026 14:30:00 -0700
+Subject: [PATCH] brush-core: honor explicit exit from EXIT traps
+
+Bash preserves the shell's pending status while an EXIT trap runs, unless the
+trap explicitly invokes `exit N`. In that case the trap's exit request becomes
+the process status. Preserve the existing status for normally completing traps
+but retain an explicit ExitShell result.
+
+--- a/src/shell.rs
++++ b/src/shell.rs
+@@ -988,7 +988,14 @@ impl Shell {
+         let result = self.run_string(handler, &params).await;
+ 
+         self.traps.handler_depth -= 1;
+-        self.last_exit_status = orig_last_exit_status;
++        self.last_exit_status = match &result {
++            Ok(result)
++                if matches!(result.next_control_flow, ExecutionControlFlow::ExitShell) =>
++            {
++                u8::from(&result.exit_code)
++            }
++            _ => orig_last_exit_status,
++        };
+ 
+         result
+     }
+-- 
+2.47.2

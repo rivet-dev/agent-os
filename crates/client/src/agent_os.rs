@@ -418,7 +418,7 @@ impl AgentOs {
                     loopback_exempt_ports: config.loopback_exempt_ports.clone(),
                     packages,
                     packages_mount_at: config.packages_mount_at.clone().unwrap_or_default(),
-                    bootstrap_commands: Vec::new(),
+                    bootstrap_commands: runtime_bootstrap_commands(),
                     binding_shim_commands: Vec::new(),
                 }),
             )
@@ -1102,14 +1102,15 @@ fn serialize_create_vm_config_for_sidecar(
                 high_resolution_time: None,
             }
         }),
-        bootstrap_commands: Some(vec![
-            String::from("node"),
-            String::from("npm"),
-            String::from("npx"),
-            String::from("python"),
-            String::from("python3"),
-        ]),
+        bootstrap_commands: Some(runtime_bootstrap_commands()),
     })
+}
+
+pub(crate) fn runtime_bootstrap_commands() -> Vec<String> {
+    ["node", "npm", "npx", "python", "python3"]
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 fn serialize_root_filesystem_config_for_sidecar(

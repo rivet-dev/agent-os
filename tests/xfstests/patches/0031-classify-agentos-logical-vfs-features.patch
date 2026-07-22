@@ -1,0 +1,42 @@
+diff --git a/tests/generic/076 b/tests/generic/076
+index 5a92e2ab..eeb69608 100755
+--- a/tests/generic/076
++++ b/tests/generic/076
+@@ -28,6 +28,9 @@ _cleanup()
+ 
+ _require_scratch
+ _require_local_device $SCRATCH_DEV
++if [ "$FSTYP" = "agentos" ]; then
++	_notrun 'raw block device access is not supported for fstype "agentos"'
++fi
+ 
+ echo "*** init fs"
+ 
+diff --git a/tests/generic/078 b/tests/generic/078
+index 37b1511b..75b0163f 100755
+--- a/tests/generic/078
++++ b/tests/generic/078
+@@ -13,6 +13,10 @@ _begin_fstest auto quick metadata
+ # Import common functions.
+ . ./common/renameat2
+ 
++if [ "$FSTYP" = "agentos" ]; then
++	_notrun 'rename whiteout is not supported for fstype "agentos"'
++fi
++
+ 
+ _require_test
+ _require_renameat2 whiteout
+diff --git a/common/rc b/common/rc
+index a87362bc..e735cd10 100644
+--- a/common/rc
++++ b/common/rc
+@@ -5871,7 +5871,7 @@ _require_xfs_scrub_unicode_names() {
+ # exfat timestamps start at 1980 and cannot be prior to epoch
+ _require_negative_timestamps() {
+ 	case "$FSTYP" in
+-	ceph|exfat)
++	agentos|ceph|exfat)
+ 		_notrun "$FSTYP does not support negative timestamps"
+ 		;;
+ 	nfs*)

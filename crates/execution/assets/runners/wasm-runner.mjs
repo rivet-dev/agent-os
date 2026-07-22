@@ -77,12 +77,18 @@ const WASI_FILETYPE_DIRECTORY = 3;
 const WASI_FILETYPE_REGULAR_FILE = 4;
 const WASI_FILETYPE_SOCKET_DGRAM = 5;
 const WASI_FILETYPE_SOCKET_STREAM = 6;
+const AGENTOS_RDEV_ZERO = (1 << 8) | 5;
+const AGENTOS_RDEV_URANDOM = (1 << 8) | 9;
 const WASI_OFLAGS_CREAT = 1;
 const WASI_OFLAGS_DIRECTORY = 2;
 const WASI_OFLAGS_EXCL = 4;
 const WASI_OFLAGS_TRUNC = 8;
 const WASI_FDFLAGS_APPEND = 1;
 const WASI_FDFLAGS_NONBLOCK = 4;
+// agentOS extends the spare Preview 1 fdflags space so libc can round-trip
+// O_DIRECT through fcntl(F_GETFL/F_SETFL). This is an agentOS ABI bit, not a
+// stock WASI capability.
+const WASI_FDFLAGS_AGENTOS_DIRECT = 0x20;
 const WASI_LIBC_O_DIRECT = 0x20000000;
 const WASI_LIBC_O_RDONLY = 0x04000000;
 const WASI_LIBC_O_WRONLY = 0x10000000;
@@ -140,6 +146,28 @@ function boundedWasmSyncRpcReadLength(length) {
     Number(length) >>> 0,
     __agentOSWasmSyncRpcReadPayloadBytes,
   );
+}
+
+function boundedWasmGuestReadLength(length) {
+  return Math.min(
+    Number(length) >>> 0,
+    __agentOSWasmSyncReadLimitBytes,
+  );
+}
+
+function kernelFdReadFillsRequestedLength(kernelFd, stat) {
+  const filetype = Number(stat?.filetype) >>> 0;
+  if (filetype === WASI_FILETYPE_REGULAR_FILE) return true;
+  if (filetype !== WASI_FILETYPE_CHARACTER_DEVICE) return false;
+
+  // The V8 sync bridge has a smaller per-response payload than a legal guest
+  // read. agentOS's deterministic fill devices always satisfy the requested
+  // length, so aggregate bridge-sized host reads rather than leaking the
+  // transport boundary as a guest-visible short read. TTYs and other character
+  // devices remain single-read because their short reads are meaningful.
+  const filestat = callSyncRpc('process.fd_filestat', [kernelFd]);
+  const rdev = Number(filestat?.rdev);
+  return rdev === AGENTOS_RDEV_ZERO || rdev === AGENTOS_RDEV_URANDOM;
 }
 const POSIX_SPAWN_RESETIDS = 1;
 const POSIX_SPAWN_SETPGROUP = 2;
@@ -1075,7 +1103,13 @@ function loadExecImageFromPath(command, argv, interpreterDepth = 0) {
   if (bytes.equals(INTERNAL_KERNEL_COMMAND_STUB)) {
     bytes = projectedCommandImageBytes(command);
     if (bytes === null) {
-      throw execError('ENOENT', `registered command image for ${command} is unavailable`);
+      // The kernel registry is authoritative for generated stubs. A stub with
+      // no projected WASM image can still be a sidecar-owned binding (or
+      // another virtual command), so hand classification to process.exec.
+      throw execError(
+        'ENOEXEC',
+        `registered command ${command} requires sidecar executable resolution`,
+      );
     }
   }
   return compileExecImage(
@@ -2417,6 +2451,16 @@ if (typeof wasiImport.path_filestat_set_times !== 'function') {
 if (typeof wasiImport.fd_filestat_set_times !== 'function') {
   wasiImport.fd_filestat_set_times = (fd, atimNs, mtimNs, fstFlags) => {
     try {
+      const handle = lookupFdHandle(fd);
+      if (handle?.kind === 'kernel-fd' && SIDECAR_MANAGED_PROCESS) {
+        callSyncRpc('process.fd_utimes', [
+          Number(handle.targetFd) >>> 0,
+          String(atimNs),
+          String(mtimNs),
+          Number(fstFlags) >>> 0,
+        ]);
+        return WASI_ERRNO_SUCCESS;
+      }
       const guestPath = guestPathForManagedFd(fd);
       if (typeof guestPath !== 'string') {
         return WASI_ERRNO_BADF;
@@ -2938,6 +2982,8 @@ function mapSyntheticFsError(error) {
       return WASI_ERRNO_EXIST;
     case 'EFAULT':
       return WASI_ERRNO_FAULT;
+    case 'EFBIG':
+      return WASI_ERRNO_FBIG;
     case 'EISDIR':
       return WASI_ERRNO_ISDIR;
     case 'ELOOP':
@@ -3039,6 +3085,8 @@ function mapHostProcessError(error) {
       return WASI_ERRNO_NOEXEC;
     case 'ENOMEM':
       return WASI_ERRNO_NOMEM;
+    case 'ENOSPC':
+      return WASI_ERRNO_NOSPC;
     case 'ENOTDIR':
       return WASI_ERRNO_NOTDIR;
     case 'ENOTEMPTY':
@@ -5810,6 +5858,12 @@ function managedHostNetTargetFd(socket) {
   return Number(socket.targetFd) >>> 0;
 }
 
+function managedHostNetOperationIsNonblocking(socket, messageFlags = 0) {
+  if (((Number(messageFlags) >>> 0) & HOST_NET_MSG_DONTWAIT) !== 0) return true;
+  const stat = callSyncRpc('process.fd_stat', [managedHostNetTargetFd(socket)]);
+  return (Number(stat?.flags) & KERNEL_O_NONBLOCK) !== 0;
+}
+
 function managedHostNetAddressText(value) {
   if (typeof value?.address === 'string' && Number.isInteger(Number(value?.port))) {
     return formatHostNetAddressInfo(value);
@@ -5883,7 +5937,7 @@ function formatHostNetAddressInfo(info) {
   return `${address}:${port}`;
 }
 
-// These are the AgentOS wasi-libc p1 ABI values, not Linux's numeric values.
+// These are the agentOS wasi-libc p1 ABI values, not Linux's numeric values.
 // libc serializes Linux-compatible socket behavior over host_net, while the
 // private guest/runner boundary retains wasi-libc's AF_INET=1, AF_INET6=2,
 // AF_UNIX=3 assignments.
@@ -5901,6 +5955,7 @@ const HOST_NET_SOCK_NONBLOCK = 0x4000;
 const HOST_NET_SOCK_CLOEXEC = 0x2000;
 const HOST_NET_SOL_SOCKET = 1;
 const HOST_NET_WASI_SOL_SOCKET = 0x7fffffff;
+const HOST_NET_SO_REUSEADDR = 2;
 const HOST_NET_SO_ERROR = 4;
 const HOST_NET_SO_RCVTIMEO_64 = 20;
 const HOST_NET_SO_RCVTIMEO_32 = 66;
@@ -5914,6 +5969,7 @@ const HOST_NET_TIMEVAL_BYTES = 16;
 // every connection (ssh_packet_set_tos / set_nodelay in opacket/misc) and
 // treats failure as per-connection stderr noise.
 const HOST_NET_SO_KEEPALIVE = 9; // SOL_SOCKET, socket(7)
+const HOST_NET_SO_LINGER = 13;
 const HOST_NET_IPPROTO_IP = 0;
 const HOST_NET_IP_TOS = 1; // ip(7)
 const HOST_NET_IPPROTO_TCP = 6;
@@ -5976,6 +6032,12 @@ function hostNetSockoptKind(level, optname, optvalLen) {
     normalizedLevel !== HOST_NET_WASI_SOL_SOCKET
   ) {
     return null;
+  }
+  if (normalizedOptname === HOST_NET_SO_REUSEADDR && normalizedOptvalLen === 4) {
+    return 'reuse-address';
+  }
+  if (normalizedOptname === HOST_NET_SO_LINGER && normalizedOptvalLen === 8) {
+    return 'linger';
   }
   if (normalizedOptvalLen !== HOST_NET_TIMEVAL_BYTES) {
     return null;
@@ -7534,10 +7596,11 @@ const hostNetImport = {
     try {
       const recvFlags = Number(flags) >>> 0;
       if (socket.managed === true) {
-        const nonblocking = (recvFlags & HOST_NET_MSG_DONTWAIT) !== 0;
+        const targetFd = managedHostNetTargetFd(socket);
+        const nonblocking = managedHostNetOperationIsNonblocking(socket, recvFlags);
         const configured = nonblocking ? null : callSyncRpc(
           'process.hostnet_get_option',
-          [managedHostNetTargetFd(socket), 'receive-timeout'],
+          [targetFd, 'receive-timeout'],
         );
         const configuredTimeout = Number(configured?.durationMs);
         const hasConfiguredTimeout = configured?.durationMs != null
@@ -7557,7 +7620,7 @@ const hostNetImport = {
             }
           }
           result = callSyncRpc('process.hostnet_recv', [
-            managedHostNetTargetFd(socket),
+            targetFd,
             Number(bufLen) >>> 0,
             recvFlags,
             0,
@@ -7767,10 +7830,11 @@ const hostNetImport = {
         return WASI_ERRNO_INVAL;
       }
       if (socket.managed === true) {
-        const nonblocking = (recvFlags & HOST_NET_MSG_DONTWAIT) !== 0;
+        const targetFd = managedHostNetTargetFd(socket);
+        const nonblocking = managedHostNetOperationIsNonblocking(socket, recvFlags);
         const configured = nonblocking ? null : callSyncRpc(
           'process.hostnet_get_option',
-          [managedHostNetTargetFd(socket), 'receive-timeout'],
+          [targetFd, 'receive-timeout'],
         );
         const configuredTimeout = Number(configured?.durationMs);
         const hasConfiguredTimeout = configured?.durationMs != null
@@ -7790,7 +7854,7 @@ const hostNetImport = {
             }
           }
           event = callSyncRpc('process.hostnet_recv', [
-            managedHostNetTargetFd(socket),
+            targetFd,
             Number(bufLen) >>> 0,
             recvFlags,
             0,
@@ -7865,6 +7929,25 @@ const hostNetImport = {
       return WASI_ERRNO_SUCCESS;
     }
     try {
+      if (sockoptKind === 'reuse-address') {
+        callSyncRpc('process.hostnet_set_option', [
+          managedHostNetTargetFd(socket),
+          'reuse-address',
+          readGuestUint32(optvalPtr) !== 0,
+        ]);
+        return WASI_ERRNO_SUCCESS;
+      }
+      if (sockoptKind === 'linger') {
+        callSyncRpc('process.hostnet_set_option', [
+          managedHostNetTargetFd(socket),
+          'linger',
+          {
+            enabled: readGuestUint32(optvalPtr) !== 0,
+            seconds: readGuestUint32(Number(optvalPtr) + 4),
+          },
+        ]);
+        return WASI_ERRNO_SUCCESS;
+      }
       const timeoutMs = parseHostNetTimevalMs(readGuestBytes(optvalPtr, optvalLen));
       if (timeoutMs == null && readGuestBytes(optvalPtr, optvalLen).some((byte) => byte !== 0)) {
         return WASI_ERRNO_INVAL;
@@ -8154,7 +8237,7 @@ const hostProcessImport = {
             (flags & POSIX_SPAWN_SETSCHEDULER) !== 0 &&
             requestedPolicy !== 0
           ) {
-            // AgentOS exposes SCHED_OTHER. Real-time policies require host
+            // agentOS exposes SCHED_OTHER. Real-time policies require host
             // scheduling privileges and are deliberately not virtualized.
             return WASI_ERRNO_PERM;
           }
@@ -8489,7 +8572,7 @@ const hostProcessImport = {
             try {
               replacement = loadExecImageFromPath(command, argv);
             } catch (loadError) {
-              // The trusted sidecar owns AgentOS image selection. The local
+              // The trusted sidecar owns agentOS image selection. The local
               // runner only replaces WASM->WASM after successful compilation;
               // an otherwise valid non-WASM image is prepared and committed
               // by the sidecar without ever resuming this image.
@@ -10764,20 +10847,15 @@ function mutateGuestFileRange(fd, offset, length, method, extraArgs = []) {
     if (handle?.kind !== 'guest-file' && handle?.kind !== 'kernel-fd' || typeof handle.targetFd !== 'number') {
       return WASI_ERRNO_BADF;
     }
-    const rangeOffset = Number(offset);
-    const rangeLength = Number(length);
-    if (
-      !Number.isSafeInteger(rangeOffset) ||
-      !Number.isSafeInteger(rangeLength) ||
-      rangeOffset < 0 ||
-      rangeLength < 0
-    ) {
+    const rangeOffset = BigInt(offset);
+    const rangeLength = BigInt(length);
+    if (rangeOffset < 0n || rangeLength < 0n) {
       return WASI_ERRNO_INVAL;
     }
     const args = [
       Number(handle.targetFd) >>> 0,
-      rangeOffset,
-      rangeLength,
+      rangeOffset.toString(),
+      rangeLength.toString(),
       ...extraArgs,
     ];
     switch (method) {
@@ -10964,13 +11042,31 @@ const hostFsImport = {
         return WASI_ERRNO_FAULT;
       }
       const rawTarget = readGuestString(pathPtr, pathLen);
-      target = Number(fd) >>> 0 === 0xffffffff
-        ? path.posix.resolve(HOST_FS_GUEST_CWD, rawTarget)
-        : resolvePathOpenGuestPath(fd, pathPtr, pathLen);
-      if (typeof target !== 'string') {
-        return WASI_ERRNO_BADF;
+      const numericFd = Number(fd) >>> 0;
+      let stats;
+      if (rawTarget.length === 0 && numericFd !== 0xffffffff) {
+        const handle = lookupFdHandle(numericFd);
+        if (!handle) return WASI_ERRNO_BADF;
+        if (SIDECAR_MANAGED_PROCESS && handle.kind === 'kernel-fd') {
+          stats = callSyncRpc('process.path_statfs_at', [
+            Number(handle.targetFd) >>> 0,
+            '',
+          ]);
+        } else if (typeof handle.guestPath === 'string') {
+          target = handle.guestPath;
+          stats = callSyncRpc('fs.statfsSync', [target]);
+        } else {
+          return WASI_ERRNO_BADF;
+        }
+      } else {
+        target = numericFd === 0xffffffff
+          ? path.posix.resolve(HOST_FS_GUEST_CWD, rawTarget)
+          : resolvePathOpenGuestPath(fd, pathPtr, pathLen);
+        if (typeof target !== 'string') {
+          return WASI_ERRNO_BADF;
+        }
+        stats = callSyncRpc('fs.statfsSync', [target]);
       }
-      const stats = callSyncRpc('fs.statfsSync', [target]);
       return (
         writeGuestUint64(retTotalBytesPtr, BigInt(stats.totalBytes)) ||
         writeGuestUint64(retUsedBytesPtr, BigInt(stats.usedBytes)) ||
@@ -11021,20 +11117,15 @@ const hostFsImport = {
       if (handle?.kind !== 'guest-file' && handle?.kind !== 'kernel-fd' || typeof handle.targetFd !== 'number') {
         return WASI_ERRNO_BADF;
       }
-      const punchOffset = Number(offset);
-      const punchLength = Number(length);
-      if (
-        !Number.isSafeInteger(punchOffset) ||
-        !Number.isSafeInteger(punchLength) ||
-        punchOffset < 0 ||
-        punchLength < 0
-      ) {
+      const punchOffset = BigInt(offset);
+      const punchLength = BigInt(length);
+      if (punchOffset < 0n || punchLength < 0n) {
         return WASI_ERRNO_INVAL;
       }
       callSyncRpc('fs.punchHoleSync', [
         Number(handle.targetFd) >>> 0,
-        punchOffset,
-        punchLength,
+        punchOffset.toString(),
+        punchLength.toString(),
       ]);
       return WASI_ERRNO_SUCCESS;
     } catch (error) {
@@ -11187,11 +11278,12 @@ const hostFsImport = {
     retSizePtr,
   ) {
     try {
+      if ((Number(pathLen) >>> 0) === 0) return WASI_ERRNO_NOENT;
       const nameErrno = checkFixedRequestLimit(
         'wasm.abi.maxXattrNameBytes',
         nameLen,
         XATTR_NAME_MAX,
-        WASI_ERRNO_RANGE,
+        WASI_ERRNO_INVAL,
       );
       if (nameErrno !== WASI_ERRNO_SUCCESS) return nameErrno;
       const capacity = Number(size) >>> 0;
@@ -11225,7 +11317,7 @@ const hostFsImport = {
         'wasm.abi.maxXattrNameBytes',
         nameLen,
         XATTR_NAME_MAX,
-        WASI_ERRNO_RANGE,
+        WASI_ERRNO_INVAL,
       );
       if (nameErrno !== WASI_ERRNO_SUCCESS) return nameErrno;
       const capacity = Number(size) >>> 0;
@@ -11251,6 +11343,7 @@ const hostFsImport = {
   },
   path_listxattr(fd, pathPtr, pathLen, listPtr, size, followSymlinks, retSizePtr) {
     try {
+      if ((Number(pathLen) >>> 0) === 0) return WASI_ERRNO_NOENT;
       const capacity = Number(size) >>> 0;
       if (!guestRangesAreValid([retSizePtr, 4], [listPtr, capacity])) {
         return WASI_ERRNO_FAULT;
@@ -11305,11 +11398,12 @@ const hostFsImport = {
   ) {
     let target;
     try {
+      if ((Number(pathLen) >>> 0) === 0) return WASI_ERRNO_NOENT;
       const nameErrno = checkFixedRequestLimit(
         'wasm.abi.maxXattrNameBytes',
         nameLen,
         XATTR_NAME_MAX,
-        WASI_ERRNO_RANGE,
+        WASI_ERRNO_INVAL,
       );
       if (nameErrno !== WASI_ERRNO_SUCCESS) return nameErrno;
       const valueErrno = checkFixedRequestLimit(
@@ -11347,7 +11441,7 @@ const hostFsImport = {
         'wasm.abi.maxXattrNameBytes',
         nameLen,
         XATTR_NAME_MAX,
-        WASI_ERRNO_RANGE,
+        WASI_ERRNO_INVAL,
       );
       if (nameErrno !== WASI_ERRNO_SUCCESS) return nameErrno;
       const valueErrno = checkFixedRequestLimit(
@@ -11372,11 +11466,12 @@ const hostFsImport = {
   },
   path_removexattr(fd, pathPtr, pathLen, namePtr, nameLen, followSymlinks) {
     try {
+      if ((Number(pathLen) >>> 0) === 0) return WASI_ERRNO_NOENT;
       const nameErrno = checkFixedRequestLimit(
         'wasm.abi.maxXattrNameBytes',
         nameLen,
         XATTR_NAME_MAX,
-        WASI_ERRNO_RANGE,
+        WASI_ERRNO_INVAL,
       );
       if (nameErrno !== WASI_ERRNO_SUCCESS) return nameErrno;
       const rawTarget = readGuestString(pathPtr, pathLen);
@@ -11400,7 +11495,7 @@ const hostFsImport = {
         'wasm.abi.maxXattrNameBytes',
         nameLen,
         XATTR_NAME_MAX,
-        WASI_ERRNO_RANGE,
+        WASI_ERRNO_INVAL,
       );
       if (nameErrno !== WASI_ERRNO_SUCCESS) return nameErrno;
       const handle = lookupFdHandle(fd);
@@ -11988,7 +12083,7 @@ function kernelPathOperand(fd, pathPtr, pathLen) {
   const numericFd = Number(fd) >>> 0;
   if (numericFd === NODE_CWD_FD) {
     return {
-      // AgentOS extension imports use this sentinel for an ordinary pathname
+      // agentOS extension imports use this sentinel for an ordinary pathname
       // resolved from the process cwd. WASI's private tagged preopens still go
       // through lookupFdHandle so they retain their capability-root identity.
       dirFd: numericFd,
@@ -12321,57 +12416,97 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
   );
   if (handle?.kind === 'kernel-fd') {
     try {
-      const requestedLength = boundedWasmSyncRpcReadLength(
+      const requestedLength = boundedWasmGuestReadLength(
         guestIovByteLength(iovs, iovsLen, iovRequest),
       );
       const kernelFd = Number(handle.targetFd) >>> 0;
-      let bytes;
       const stat = callSyncRpc('process.fd_stat', [kernelFd]);
+      const fillsRequestedLength = kernelFdReadFillsRequestedLength(kernelFd, stat);
+      traceHostProcess('fd-read-managed-start', {
+        guestFd: numericFd,
+        kernelFd,
+        filetype: Number(stat?.filetype) >>> 0,
+        fillsRequestedLength,
+        requestedLength,
+      });
       const nonblocking = (Number(stat?.flags) & KERNEL_O_NONBLOCK) !== 0;
       const deadline = nonblocking
         ? Date.now()
         : maxBlockingReadMs == null
           ? null
           : Date.now() + maxBlockingReadMs;
-      while (bytes == null) {
-        try {
-          // A process with local descendants must return to its own event pump
-          // between zero-time probes. A leaf process can instead issue a
-          // bounded wait: the sidecar parks descendant reads by reply token,
-          // freeing the parent/sibling dispatcher until data or EOF arrives.
-          const pumpsLocalChildren = hasActiveSpawnedChildren();
-          const remainingMs = deadline == null
-            ? KERNEL_WAIT_SLICE_MS
-            : Math.max(0, deadline - Date.now());
-          const waitMs = nonblocking || pumpsLocalChildren
-            ? 0
-            : Math.min(KERNEL_WAIT_SLICE_MS, remainingMs);
-          bytes = Buffer.from(callSyncRpc('process.fd_read', [
-            kernelFd,
-            requestedLength,
-            waitMs,
-          ]) ?? []);
-        } catch (error) {
-          if (error?.code !== 'EAGAIN' && error?.code !== 'EWOULDBLOCK') {
-            throw error;
-          }
-          if (nonblocking) {
-            throw error;
-          }
-          if (deadline != null && Date.now() >= deadline) {
-            const timeout = new Error(
-              'blocking file descriptor read timed out; raise limits.resources.maxBlockingReadMs',
-            );
-            timeout.code = 'EAGAIN';
-            throw timeout;
-          }
-          const progressed = pumpSpawnedChildren(SPAWNED_CHILD_WAIT_SLICE_MS);
-          dispatchPendingWasmSignals();
-          if (!progressed && !hasActiveSpawnedChildren()) {
-            Atomics.wait(syntheticWaitArray, 0, 0, 1);
+      const readChunk = (chunkLength) => {
+        let chunk;
+        while (chunk == null) {
+          try {
+            // A process with local descendants must return to its own event pump
+            // between zero-time probes. A leaf process can instead issue a
+            // bounded wait: the sidecar parks descendant reads by reply token,
+            // freeing the parent/sibling dispatcher until data or EOF arrives.
+            const pumpsLocalChildren = hasActiveSpawnedChildren();
+            const remainingMs = deadline == null
+              ? KERNEL_WAIT_SLICE_MS
+              : Math.max(0, deadline - Date.now());
+            const waitMs = nonblocking || pumpsLocalChildren
+              ? 0
+              : Math.min(KERNEL_WAIT_SLICE_MS, remainingMs);
+            chunk = Buffer.from(callSyncRpc('process.fd_read', [
+              kernelFd,
+              chunkLength,
+              waitMs,
+            ]) ?? []);
+          } catch (error) {
+            if (error?.code !== 'EAGAIN' && error?.code !== 'EWOULDBLOCK') {
+              throw error;
+            }
+            if (nonblocking) {
+              throw error;
+            }
+            if (deadline != null && Date.now() >= deadline) {
+              const timeout = new Error(
+                'blocking file descriptor read timed out; raise limits.resources.maxBlockingReadMs',
+              );
+              timeout.code = 'EAGAIN';
+              throw timeout;
+            }
+            const progressed = pumpSpawnedChildren(SPAWNED_CHILD_WAIT_SLICE_MS);
+            dispatchPendingWasmSignals();
+            if (!progressed && !hasActiveSpawnedChildren()) {
+              Atomics.wait(syntheticWaitArray, 0, 0, 1);
+            }
           }
         }
+        if (chunk.byteLength > chunkLength) {
+          const invalid = new Error('descriptor read exceeded its admitted chunk length');
+          invalid.code = 'EIO';
+          throw invalid;
+        }
+        return chunk;
+      };
+
+      let bytes;
+      if (fillsRequestedLength) {
+        const chunks = [];
+        let totalLength = 0;
+        while (totalLength < requestedLength) {
+          const chunkLength = boundedWasmSyncRpcReadLength(requestedLength - totalLength);
+          const chunk = readChunk(chunkLength);
+          if (chunk.byteLength > 0) {
+            chunks.push(chunk);
+            totalLength += chunk.byteLength;
+          }
+          if (chunk.byteLength < chunkLength) break;
+        }
+        bytes = Buffer.concat(chunks, totalLength);
+      } else {
+        bytes = readChunk(boundedWasmSyncRpcReadLength(requestedLength));
       }
+      traceHostProcess('fd-read-managed-complete', {
+        guestFd: numericFd,
+        kernelFd,
+        requestedLength,
+        returnedLength: bytes.byteLength,
+      });
       const written = writeBytesToGuestIovs(iovs, iovsLen, bytes, iovRequest);
       return writeGuestUint32(nreadPtr, written);
     } catch (error) {
@@ -12457,7 +12592,14 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
     }
   }
 
-  if (handle?.kind === 'passthrough' && typeof handle.ioFd === 'number') {
+  if (
+    handle?.kind === 'passthrough' &&
+    typeof handle.ioFd === 'number' &&
+    !(
+      handle.targetFd === 0 &&
+      (SIDECAR_MANAGED_PROCESS || KERNEL_STDIO_SYNC_RPC)
+    )
+  ) {
     try {
       const requestedLength = boundedWasmSyncRpcReadLength(
         __agentOSWasiMeasurePhase('fd_read', 'iov_scan', () => iovRequest.totalLength),
@@ -12642,14 +12784,44 @@ wasiImport.fd_pread = (fd, iovs, iovsLen, offset, nreadPtr) => {
   const handle = lookupFdHandle(fd);
   if (handle?.kind === 'kernel-fd') {
     try {
-      const requestedLength = boundedWasmSyncRpcReadLength(
+      const requestedLength = boundedWasmGuestReadLength(
         guestIovByteLength(iovs, iovsLen, iovRequest),
       );
-      const bytes = Buffer.from(callSyncRpc('process.fd_pread', [
-        Number(handle.targetFd) >>> 0,
-        requestedLength,
-        BigInt(offset).toString(),
-      ]) ?? []);
+      const kernelFd = Number(handle.targetFd) >>> 0;
+      const readOffset = BigInt(offset);
+      const stat = callSyncRpc('process.fd_stat', [kernelFd]);
+      const fillsRequestedLength = kernelFdReadFillsRequestedLength(kernelFd, stat);
+      let bytes;
+      if (fillsRequestedLength) {
+        const chunks = [];
+        let totalLength = 0;
+        while (totalLength < requestedLength) {
+          const chunkLength = boundedWasmSyncRpcReadLength(requestedLength - totalLength);
+          const chunk = Buffer.from(callSyncRpc('process.fd_pread', [
+            kernelFd,
+            chunkLength,
+            (readOffset + BigInt(totalLength)).toString(),
+          ]) ?? []);
+          if (chunk.byteLength > chunkLength) {
+            const invalid = new Error('positioned read exceeded its admitted chunk length');
+            invalid.code = 'EIO';
+            throw invalid;
+          }
+          if (chunk.byteLength > 0) {
+            chunks.push(chunk);
+            totalLength += chunk.byteLength;
+          }
+          if (chunk.byteLength < chunkLength) break;
+        }
+        bytes = Buffer.concat(chunks, totalLength);
+      } else {
+        const chunkLength = boundedWasmSyncRpcReadLength(requestedLength);
+        bytes = Buffer.from(callSyncRpc('process.fd_pread', [
+          kernelFd,
+          chunkLength,
+          readOffset.toString(),
+        ]) ?? []);
+      }
       return writeGuestUint32(
         nreadPtr,
         writeBytesToGuestIovs(iovs, iovsLen, bytes, iovRequest),
@@ -12978,7 +13150,8 @@ wasiImport.fd_fdstat_get = (fd, statPtr) => {
       const stat = callSyncRpc('process.fd_stat', [Number(handle.targetFd) >>> 0]);
       const kernelFlags = Number(stat?.flags) >>> 0;
       const wasiFlags = (kernelFlags & KERNEL_O_APPEND ? WASI_FDFLAGS_APPEND : 0)
-        | (kernelFlags & KERNEL_O_NONBLOCK ? WASI_FDFLAGS_NONBLOCK : 0);
+        | (kernelFlags & KERNEL_O_NONBLOCK ? WASI_FDFLAGS_NONBLOCK : 0)
+        | (kernelFlags & KERNEL_O_DIRECT ? WASI_FDFLAGS_AGENTOS_DIRECT : 0);
       return writeGuestFdstat(
         statPtr,
         Number(stat?.filetype) >>> 0,
@@ -13136,7 +13309,8 @@ wasiImport.fd_fdstat_set_flags = (fd, flags) => {
     try {
       const wasiFlags = Number(flags) >>> 0;
       const kernelFlags = (wasiFlags & WASI_FDFLAGS_APPEND ? KERNEL_O_APPEND : 0)
-        | (wasiFlags & WASI_FDFLAGS_NONBLOCK ? KERNEL_O_NONBLOCK : 0);
+        | (wasiFlags & WASI_FDFLAGS_NONBLOCK ? KERNEL_O_NONBLOCK : 0)
+        | (wasiFlags & WASI_FDFLAGS_AGENTOS_DIRECT ? KERNEL_O_DIRECT : 0);
       callSyncRpc('process.fd_set_flags', [Number(handle.targetFd) >>> 0, kernelFlags]);
       const hostNetSocket = getHostNetSocket(fd);
       if (hostNetSocket && !hostNetSocket.closed) {
@@ -13511,6 +13685,12 @@ wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
       const written = stdioStream != null
         ? Number(callSyncRpc('__kernel_stdio_write', [kernelFd, bytes])) >>> 0
         : writeKernelFdCooperatively(kernelFd, bytes);
+      traceHostProcess('fd-write-managed-complete', {
+        guestFd: numericFd,
+        kernelFd,
+        requestedLength: bytes.length,
+        written,
+      });
       if (!Number.isSafeInteger(written) || written < 0 || written > bytes.length) {
         return WASI_ERRNO_FAULT;
       }
@@ -14393,7 +14573,7 @@ function initializeSignalMaskForInstance(targetInstance) {
   const setter = targetInstance?.exports?.__agentos_set_initial_sigmask;
   if (typeof setter !== 'function') {
     throw new Error(
-      'spawned WASM image cannot initialize its inherited signal mask; rebuild it with the current AgentOS sysroot',
+      'spawned WASM image cannot initialize its inherited signal mask; rebuild it with the current agentOS sysroot',
     );
   }
   setter(mask.lo, mask.hi);

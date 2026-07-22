@@ -1,6 +1,68 @@
 {
 	"entries": [
 		{
+			"slug": "pi",
+			"title": "PI",
+			"description": "Run the PI coding agent with lightweight, fast execution.",
+			"types": [
+				"agent"
+			],
+			"category": "agents",
+			"priority": 100,
+			"package": "@agentos-software/pi",
+			"status": "available",
+			"image": "/images/registry/pi.svg",
+			"docsHref": "/docs/agents/pi",
+			"agentId": "pi"
+		},
+		{
+			"slug": "claude-code",
+			"title": "Claude Code",
+			"description": "Run Claude Code as an agentOS agent with full tool access, file editing, and shell execution.",
+			"types": [
+				"agent"
+			],
+			"category": "agents",
+			"priority": 90,
+			"package": "@agentos-software/claude-code",
+			"status": "docs",
+			"beta": true,
+			"image": "/images/registry/claude-code.svg",
+			"docsHref": "/docs/agents/claude",
+			"agentId": "claude"
+		},
+		{
+			"slug": "codex",
+			"title": "Codex",
+			"description": "Run OpenAI's Codex coding agent inside agentOS with programmatic API access.",
+			"types": [
+				"agent"
+			],
+			"category": "agents",
+			"priority": 80,
+			"package": "@agentos-software/codex",
+			"status": "docs",
+			"beta": true,
+			"image": "/images/registry/codex.svg",
+			"docsHref": "/docs/agents/codex",
+			"agentId": "codex"
+		},
+		{
+			"slug": "opencode",
+			"title": "OpenCode",
+			"description": "Run OpenCode, an open-source coding agent, inside agentOS.",
+			"types": [
+				"agent"
+			],
+			"category": "agents",
+			"priority": 70,
+			"package": "@agentos-software/opencode",
+			"status": "docs",
+			"image": "/images/registry/opencode.svg",
+			"docsHref": "/docs/agents/opencode",
+			"agentId": "opencode"
+		},
+		{
 			"slug": "browserbase",
 			"title": "Browserbase",
 			"description": "The Browserbase `browse` CLI: let agents browse the web with a cloud browser, no sandbox required.",
@@ -39,19 +101,6 @@
 			"status": "available"
 		},
 		{
-			"slug": "pi",
-			"title": "PI",
-			"description": "Run the PI coding agent with lightweight, fast execution.",
-			"types": [
-				"software"
-			],
-			"category": "agents",
-			"priority": 100,
-			"package": "@agentos-software/pi",
-			"status": "available",
-			"image": "/images/registry/pi.svg"
-		},
-		{
 			"slug": "common",
 			"title": "Common",
 			"description": "Meta-package: coreutils + sed + grep + gawk + findutils + diffutils + tar + gzip.",
@@ -62,21 +111,6 @@
 			"priority": 95,
 			"package": "@agentos-software/common",
 			"status": "available"
-		},
-		{
-			"slug": "claude-code",
-			"title": "Claude Code",
-			"description": "Run Claude Code as an agentOS agent with full tool access, file editing, and shell execution.",
-			"types": [
-				"software"
-			],
-			"category": "agents",
-			"priority": 90,
-			"package": "@agentos-software/claude-code",
-			"status": "docs",
-			"beta": true,
-			"image": "/images/registry/claude-code.svg",
-			"docsHref": "/docs/agents/claude"
 		},
 		{
 			"slug": "git",
@@ -102,21 +136,6 @@
 			"priority": 85,
 			"package": "@agentos-software/ripgrep",
 			"status": "available"
-		},
-		{
-			"slug": "codex",
-			"title": "Codex",
-			"description": "Run OpenAI's Codex coding agent inside agentOS with programmatic API access.",
-			"types": [
-				"software"
-			],
-			"category": "agents",
-			"priority": 80,
-			"package": "@agentos-software/codex",
-			"status": "docs",
-			"beta": true,
-			"image": "/images/registry/codex.svg",
-			"docsHref": "/docs/agents/codex"
 		},
 		{
 			"slug": "jq",
@@ -156,20 +175,6 @@
 			"package": "@agentos-software/duckdb",
 			"status": "available",
 			"image": "/images/registry/duckdb.svg"
-		},
-		{
-			"slug": "opencode",
-			"title": "OpenCode",
-			"description": "Run OpenCode, an open-source coding agent, inside agentOS.",
-			"types": [
-				"software"
-			],
-			"category": "agents",
-			"priority": 70,
-			"package": "@agentos-software/opencode",
-			"status": "docs",
-			"image": "/images/registry/opencode.svg",
-			"docsHref": "/docs/agents/opencode"
 		},
 		{
 			"slug": "vim",

@@ -9,12 +9,12 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { TerminalHarness as BaseTerminalHarness } from '@rivet-dev/agentos-test-harness';
 import { createWasmVmRuntime } from '@rivet-dev/agentos-test-harness';
-import { COMMANDS_DIR, createKernel, describeIf, hasWasmBinaries } from '@rivet-dev/agentos-test-harness';
+import { COMMANDS_DIR, createKernel, describeIf, hasWasmBinaries, wasmBackendTestTimeout } from '@rivet-dev/agentos-test-harness';
 import type { Kernel } from '@rivet-dev/agentos-test-harness';
 
 /** brush-shell interactive prompt (captured empirically). */
 const PROMPT = "sh-0.4$ ";
-const TERMINAL_TEST_TIMEOUT_MS = 15_000;
+const TERMINAL_TEST_TIMEOUT_MS = wasmBackendTestTimeout(15_000, 30_000);
 
 // Starting and driving a real sidecar-backed shell can exceed Vitest's 5s
 // unit-test default under the package's parallel file load. Keep this
@@ -189,7 +189,7 @@ describeIf(hasWasmBinaries, "wasmvm-shell-terminal", () => {
 		expect(harness.screenshotTrimmed()).toBe(
 			[`${PROMPT}echo hello`, "hello", PROMPT].join("\n"),
 		);
-	}, 15_000);
+	}, TERMINAL_TEST_TIMEOUT_MS);
 
 	it("ls / shows listing — directory entries include /bin from command registration", async () => {
 		const { kernel } = await createShellKernel();

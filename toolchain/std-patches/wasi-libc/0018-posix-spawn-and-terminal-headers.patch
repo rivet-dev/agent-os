@@ -1,6 +1,6 @@
-Expose POSIX spawn and terminal compatibility headers in AgentOS wasi-libc.
+Expose POSIX spawn and terminal compatibility headers in agentOS wasi-libc.
 
-The AgentOS process broker already implements posix_spawn through host_process
+The agentOS process broker already implements posix_spawn through host_process
 imports, but the C sysroot still omitted <spawn.h>. Upstream programs such as
 GNU Wget include standard POSIX headers directly, so install those headers and
 provide terminal/process-group helpers through the shared sysroot rather than
@@ -11,8 +11,8 @@ new file mode 100644
 index 0000000..3b70693
 --- /dev/null
 +++ b/libc-bottom-half/sources/host_terminal_compat.c
-@@ -0,0 +1,281 @@
-+// Terminal/process-group compatibility for AgentOS WASI commands.
+@@ -0,0 +1,379 @@
++// Terminal/process-group compatibility for agentOS WASI commands.
 +//
 +// The kernel owns PTY state and exposes it through host_tty imports. Keep the
 +// POSIX surface here in the sysroot so upstream C programs can use termios and
@@ -29,6 +29,29 @@ index 0000000..3b70693
 +#ifndef TIOCGWINSZ
 +#define TIOCGWINSZ 0x5413
 +#endif
++#define FIBMAP 1
++#define FIGETBSZ 2
++#define FS_IOC_FIEMAP 0xC020660B
++#define FIEMAP_EXTENT_UNWRITTEN 0x00000800
++
++struct agentos_fiemap_extent {
++    uint64_t logical;
++    uint64_t physical;
++    uint64_t length;
++    uint64_t reserved64[2];
++    uint32_t flags;
++    uint32_t reserved[3];
++};
++
++struct agentos_fiemap {
++    uint64_t start;
++    uint64_t length;
++    uint32_t flags;
++    uint32_t mapped_extents;
++    uint32_t extent_count;
++    uint32_t reserved;
++    struct agentos_fiemap_extent extents[];
++};
 +
 +#define WASM_IMPORT(mod, fn) \
 +    __attribute__((__import_module__(mod), __import_name__(fn)))
@@ -59,6 +82,11 @@ index 0000000..3b70693
 +
 +WASM_IMPORT("host_tty", "get_sid")
 +uint32_t __host_tty_get_sid(uint32_t fd, uint32_t *sid);
++
++WASM_IMPORT("host_fs", "fd_fiemap")
++uint32_t __host_fs_fd_fiemap(uint32_t fd, uint32_t index,
++                             uint64_t *start, uint64_t *end,
++                             uint32_t *flags);
 +
 +#define HOST_TTY_ICRNL  (1u << 0)
 +#define HOST_TTY_OPOST  (1u << 1)
@@ -276,6 +304,40 @@ index 0000000..3b70693
 +    return 0;
 +}
 +
++static int agentos_fiemap(int fd, struct agentos_fiemap *map) {
++    if (map == NULL) {
++        errno = EFAULT;
++        return -1;
++    }
++    uint64_t query_end = map->start > UINT64_MAX - map->length
++        ? UINT64_MAX : map->start + map->length;
++    uint32_t mapped = 0;
++    for (uint32_t index = 0;; index++) {
++        uint64_t start = 0;
++        uint64_t end = 0;
++        uint32_t flags = 0;
++        uint32_t rc = __host_fs_fd_fiemap((uint32_t)fd, index,
++                                           &start, &end, &flags);
++        if (rc == ENODATA) break;
++        if (rc != 0) {
++            errno = (int)rc;
++            return -1;
++        }
++        start = start < map->start ? map->start : start;
++        end = end > query_end ? query_end : end;
++        if (start >= end) continue;
++        if (mapped >= map->extent_count) break;
++        struct agentos_fiemap_extent *extent = &map->extents[mapped++];
++        memset(extent, 0, sizeof(*extent));
++        extent->logical = start;
++        extent->physical = start;
++        extent->length = end - start;
++        extent->flags = flags & FIEMAP_EXTENT_UNWRITTEN;
++    }
++    map->mapped_extents = mapped;
++    return 0;
++}
++
 +int ioctl(int fd, int request, ...) {
 +    va_list ap;
 +    va_start(ap, request);
@@ -283,6 +345,42 @@ index 0000000..3b70693
 +    va_end(ap);
 +    if (request == TIOCGWINSZ) {
 +        return tcgetwinsize(fd, (struct winsize *)arg);
++    }
++    if (request == FIGETBSZ) {
++        if (arg == NULL) {
++            errno = EFAULT;
++            return -1;
++        }
++        *(int *)arg = 4096;
++        return 0;
++    }
++    if (request == FS_IOC_FIEMAP) {
++        return agentos_fiemap(fd, (struct agentos_fiemap *)arg);
++    }
++    if (request == FIBMAP) {
++        if (arg == NULL || *(int *)arg < 0) {
++            errno = EINVAL;
++            return -1;
++        }
++        uint64_t wanted = (uint64_t)*(int *)arg * 4096;
++        *(int *)arg = 0;
++        for (uint32_t index = 0;; index++) {
++            uint64_t start = 0;
++            uint64_t end = 0;
++            uint32_t flags = 0;
++            uint32_t rc = __host_fs_fd_fiemap((uint32_t)fd, index,
++                                               &start, &end, &flags);
++            if (rc == ENODATA) break;
++            if (rc != 0) {
++                errno = (int)rc;
++                return -1;
++            }
++            if (start <= wanted && wanted < end) {
++                *(int *)arg = (int)(wanted / 4096) + 1;
++                break;
++            }
++        }
++        return 0;
 +    }
 +    errno = ENOTTY;
 +    return -1;

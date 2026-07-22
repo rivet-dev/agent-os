@@ -285,6 +285,9 @@ static int getfattr_main(int argc, char **argv) {
         else if (!strncmp(arg, "--match=", 8)) options.match = arg + 8;
         else if ((!strcmp(arg, "-e") || !strcmp(arg, "--encoding")) && i + 1 < argc) options.encoding = argv[++i];
         else if (!strncmp(arg, "--encoding=", 11)) options.encoding = arg + 11;
+        else if (!strncmp(arg, "-n", 2) && arg[2]) options.name = arg + 2;
+        else if (!strncmp(arg, "-m", 2) && arg[2]) options.match = arg + 2;
+        else if (!strncmp(arg, "-e", 2) && arg[2]) options.encoding = arg + 2;
         else if (!strcmp(arg, "-d") || !strcmp(arg, "--dump")) options.dump = 1;
         else if (!strcmp(arg, "--only-values")) options.only_values = 1;
         else if (!strcmp(arg, "--absolute-names")) options.absolute = 1;

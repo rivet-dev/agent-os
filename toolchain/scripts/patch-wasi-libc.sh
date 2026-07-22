@@ -23,7 +23,8 @@ PATCHES_DIR="$WASMCORE_DIR/std-patches/wasi-libc"
 WASI_LIBC_COMMIT="574b88da481569b65a237cb80daf9a2d5aeaf82d"
 WASI_LIBC_REPO="https://github.com/WebAssembly/wasi-libc.git"
 LLVM_PROJECT_TAG="llvmorg-19.1.5"
-LLVM_PROJECT_URL="https://github.com/llvm/llvm-project/archive/refs/tags/${LLVM_PROJECT_TAG}.tar.gz"
+LLVM_PROJECT_URL="https://codeload.github.com/llvm/llvm-project/tar.gz/refs/tags/${LLVM_PROJECT_TAG}"
+LLVM_PROJECT_SHA256="e2204b9903cd9d7ee833a2f56a18bef40a33df4793e31cc090906b32cbd8a1f5"
 
 # Directories
 VENDOR_DIR="$WASMCORE_DIR/c/vendor"
@@ -105,11 +106,29 @@ if [ ! -d "$LLVM_PROJECT_DIR/runtimes" ]; then
     mkdir -p "$VENDOR_DIR"
     LLVM_TARBALL="$VENDOR_DIR/${LLVM_PROJECT_TAG}.tar.gz"
     if command -v curl >/dev/null 2>&1; then
-        curl -fSL "$LLVM_PROJECT_URL" -o "$LLVM_TARBALL"
+        curl -fSL \
+            --retry 5 \
+            --retry-delay 2 \
+            --retry-all-errors \
+            --connect-timeout 30 \
+            "$LLVM_PROJECT_URL" \
+            -o "$LLVM_TARBALL"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q "$LLVM_PROJECT_URL" -O "$LLVM_TARBALL"
+        wget -q \
+            --tries=5 \
+            --timeout=30 \
+            --waitretry=2 \
+            "$LLVM_PROJECT_URL" \
+            -O "$LLVM_TARBALL"
     else
         echo "ERROR: neither curl nor wget found"
+        exit 1
+    fi
+    LLVM_PROJECT_ACTUAL_SHA256="$(sha256sum "$LLVM_TARBALL" | awk '{print $1}')"
+    if [ "$LLVM_PROJECT_ACTUAL_SHA256" != "$LLVM_PROJECT_SHA256" ]; then
+        echo "ERROR: llvm-project archive checksum mismatch"
+        echo "Expected: $LLVM_PROJECT_SHA256"
+        echo "Actual:   $LLVM_PROJECT_ACTUAL_SHA256"
         exit 1
     fi
     rm -rf "$LLVM_PROJECT_DIR"
@@ -385,7 +404,7 @@ if [ -d "$OVERRIDES_DIR" ] && ls "$OVERRIDES_DIR"/*.c >/dev/null 2>&1; then
     # are in a single mutex.o — remove it so our override replaces them all.
     # pthread_key: create, delete, and tsd_run_dtors are in a single .o — remove
     # via __pthread_key_create to replace the whole TSD compilation unit.
-    REPLACED_SYMBOLS="fcntl close strfmon open_wmemstream swprintf inet_ntop fmtmsg"
+    REPLACED_SYMBOLS="fcntl close strfmon open_wmemstream swprintf inet_ntop fmtmsg pwrite pwritev"
     if [ "$THREAD_MODEL" = "single" ]; then
         REPLACED_SYMBOLS="$REPLACED_SYMBOLS __pthread_mutex_lock pthread_attr_setguardsize pthread_mutexattr_setrobust __pthread_key_create"
     fi
@@ -417,6 +436,15 @@ if [ -d "$OVERRIDES_DIR" ] && ls "$OVERRIDES_DIR"/*.c >/dev/null 2>&1; then
         "$WASI_AR" r "$SYSROOT_LIB/libc.a" "$SYSROOT_LIB/override_${name}.o"
         rm -f "$SYSROOT_LIB/override_${name}.o"
     done
+
+    # The agentOS mmap override above is the sole implementation of mmap(),
+    # munmap(), and mprotect() in the owned sysroot. Keep an empty compatibility
+    # archive because upstream build systems commonly add
+    # -lwasi-emulated-mman when targeting WASI; retaining wasi-sdk's populated
+    # archive would make those symbols collide with override_mman.o.
+    EMULATED_MMAN_LIB="$SYSROOT_LIB/libwasi-emulated-mman.a"
+    rm -f "$EMULATED_MMAN_LIB"
+    "$WASI_AR" crs "$EMULATED_MMAN_LIB"
 
     echo "Sysroot overrides installed"
 fi

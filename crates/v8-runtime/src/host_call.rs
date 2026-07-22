@@ -263,6 +263,14 @@ impl BridgeResponseReceiver for ReaderBridgeResponseReceiver {
 const MAX_PENDING_BRIDGE_CALLS: usize = 16_384;
 pub(crate) const DEFAULT_BRIDGE_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+fn bridge_call_uses_session_lifetime(method: &str) -> bool {
+    // This read is the durable readiness wait behind Node's stdin stream. It
+    // can legitimately remain pending for the entire process lifetime and is
+    // canceled by session/process teardown. Admission and byte limits still
+    // bound the route while it is pending.
+    method == "_kernelStdinRead"
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BridgeCallTargetKind {
     Sync,
@@ -279,9 +287,9 @@ struct BridgeCallTarget {
     response_resources: Arc<agentos_runtime::accounting::ResourceLedger>,
     response_reservation: Reservation,
     max_response_bytes: usize,
-    deadline: Instant,
-    timeout: Duration,
-    _deadline_cancellation: tokio::sync::oneshot::Sender<()>,
+    deadline: Option<Instant>,
+    timeout: Option<Duration>,
+    _deadline_cancellation: Option<tokio::sync::oneshot::Sender<()>>,
     host_visible: bool,
 }
 
@@ -404,7 +412,10 @@ fn bridge_call_timeout_message(call_id: u64, timeout: Duration) -> String {
 }
 
 fn deliver_bridge_call_timeout(call_id: u64, target: BridgeCallTarget) -> Result<String, String> {
-    let message = bridge_call_timeout_message(call_id, target.timeout);
+    let timeout = target
+        .timeout
+        .expect("only operation-deadline bridge calls can time out");
+    let message = bridge_call_timeout_message(call_id, timeout);
     let error = format!("ERR_AGENTOS_BRIDGE_CALL_TIMEOUT: {message}");
     let payload = encode_terminal_error_payload(
         "ERR_AGENTOS_BRIDGE_CALL_TIMEOUT",
@@ -580,9 +591,9 @@ impl BridgeCallRegistry {
         session_generation: Option<u64>,
         kind: BridgeCallTargetKind,
         sender: crossbeam_channel::Sender<BridgeResponse>,
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> Result<tokio::sync::oneshot::Receiver<()>, String> {
-        if timeout.is_zero() {
+        if timeout.is_some_and(|timeout| timeout.is_zero()) {
             return Err(String::from(
                 "ERR_AGENTOS_BRIDGE_CALL_TIMEOUT_INVALID: limits.reactor.operationDeadlineMs must be greater than zero",
             ));
@@ -665,6 +676,15 @@ impl BridgeCallRegistry {
             })?
             .remove(call_id);
         let (deadline_cancellation, deadline_cancelled) = tokio::sync::oneshot::channel();
+        let deadline = timeout
+            .map(|timeout| {
+                Instant::now().checked_add(timeout).ok_or_else(|| {
+                    String::from(
+                        "ERR_AGENTOS_BRIDGE_CALL_TIMEOUT_INVALID: limits.reactor.operationDeadlineMs exceeds the host clock range",
+                    )
+                })
+            })
+            .transpose()?;
         pending.insert(
             call_id,
             BridgeCallTarget {
@@ -677,11 +697,9 @@ impl BridgeCallRegistry {
                 response_resources: Arc::clone(runtime.resources()),
                 response_reservation,
                 max_response_bytes,
-                deadline: Instant::now()
-                    .checked_add(timeout)
-                    .unwrap_or_else(Instant::now),
+                deadline,
                 timeout,
-                _deadline_cancellation: deadline_cancellation,
+                _deadline_cancellation: Some(deadline_cancellation),
                 host_visible: false,
             },
         );
@@ -744,7 +762,7 @@ impl BridgeCallRegistry {
             session_generation,
             BridgeCallTargetKind::Sync,
             sender,
-            timeout,
+            Some(timeout),
         )?;
         Ok(receiver)
     }
@@ -769,7 +787,7 @@ impl BridgeCallRegistry {
             session_generation,
             BridgeCallTargetKind::Async,
             sender,
-            DEFAULT_BRIDGE_CALL_TIMEOUT,
+            Some(DEFAULT_BRIDGE_CALL_TIMEOUT),
         )
         .map(drop)
     }
@@ -795,8 +813,33 @@ impl BridgeCallRegistry {
             session_generation,
             BridgeCallTargetKind::Async,
             sender,
-            timeout,
+            Some(timeout),
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn register_async_for_session_lifetime(
+        &self,
+        runtime: &RuntimeContext,
+        request_bytes: usize,
+        max_response_bytes: usize,
+        call_id: u64,
+        session_id: &str,
+        session_generation: Option<u64>,
+        sender: crossbeam_channel::Sender<BridgeResponse>,
+    ) -> Result<(), String> {
+        self.register(
+            runtime,
+            request_bytes,
+            max_response_bytes,
+            call_id,
+            session_id,
+            session_generation,
+            BridgeCallTargetKind::Async,
+            sender,
+            None,
+        )
+        .map(drop)
     }
 
     fn timeout(&self, call_id: u64) -> Result<bool, String> {
@@ -805,7 +848,8 @@ impl BridgeCallRegistry {
         })?;
         if pending
             .get(&call_id)
-            .is_none_or(|target| Instant::now() < target.deadline)
+            .and_then(|target| target.deadline)
+            .is_none_or(|deadline| Instant::now() < deadline)
         {
             return Ok(false);
         }
@@ -891,7 +935,9 @@ impl BridgeCallRegistry {
         // response reservations exactly once. Keep the registry lock through
         // delivery so an async response lane's registered slot cannot be
         // re-admitted in the gap between the take and try_send.
-        let deadline_expired = Instant::now() >= target.deadline;
+        let deadline_expired = target
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline);
         let mut target = pending
             .remove(&call_id)
             .expect("validated bridge target must remain registered while locked");
@@ -1587,7 +1633,10 @@ impl BridgeCallContext {
                     frame
                 }
                 Err(e) => {
-                    return Err(self.cleanup_pending_call_after_error(call_id, e));
+                    return Err(self.cleanup_pending_call_after_error(
+                        call_id,
+                        format!("{e}; bridge_method={method}"),
+                    ));
                 }
             }
         } else {
@@ -1669,35 +1718,47 @@ impl BridgeCallContext {
                     "ERR_AGENTOS_BRIDGE_RESPONSE_DELIVERY: async response lane is unavailable",
                 )
             })?;
-            let mut deadline_cancelled = registry.register_async_with_timeout(
-                runtime,
-                args.len(),
-                max_response_bytes,
-                call_id,
-                &self.session_id,
-                self.session_generation,
-                sender.clone(),
-                self.bridge_call_timeout,
-            )?;
-            let deadline_registry = Arc::clone(registry);
-            let timeout = self.bridge_call_timeout;
-            if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Timer, async move {
-                if tokio::time::timeout(timeout, &mut deadline_cancelled)
-                    .await
-                    .is_err()
-                {
-                    if let Err(error) = deadline_registry.timeout(call_id) {
-                        eprintln!("{error}");
+            if bridge_call_uses_session_lifetime(method) {
+                registry.register_async_for_session_lifetime(
+                    runtime,
+                    args.len(),
+                    max_response_bytes,
+                    call_id,
+                    &self.session_id,
+                    self.session_generation,
+                    sender.clone(),
+                )?;
+            } else {
+                let mut deadline_cancelled = registry.register_async_with_timeout(
+                    runtime,
+                    args.len(),
+                    max_response_bytes,
+                    call_id,
+                    &self.session_id,
+                    self.session_generation,
+                    sender.clone(),
+                    self.bridge_call_timeout,
+                )?;
+                let deadline_registry = Arc::clone(registry);
+                let timeout = self.bridge_call_timeout;
+                if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Timer, async move {
+                    if tokio::time::timeout(timeout, &mut deadline_cancelled)
+                        .await
+                        .is_err()
+                    {
+                        if let Err(error) = deadline_registry.timeout(call_id) {
+                            eprintln!("{error}");
+                        }
                     }
+                }) {
+                    // Registration already owns call/request/response capacity.
+                    // If supervision rejects the timer, retract the unpublished
+                    // route before returning so admission cannot leak permanently.
+                    registry.cancel_unpublished(call_id);
+                    return Err(format!(
+                        "ERR_AGENTOS_BRIDGE_DEADLINE_TASK: failed to arm bridge call_id {call_id} deadline: {error}"
+                    ));
                 }
-            }) {
-                // Registration already owns call/request/response capacity.
-                // If supervision rejects the timer, retract the unpublished
-                // route before returning so admission cannot leak permanently.
-                registry.cancel_unpublished(call_id);
-                return Err(format!(
-                    "ERR_AGENTOS_BRIDGE_DEADLINE_TASK: failed to arm bridge call_id {call_id} deadline: {error}"
-                ));
             }
             Some(PendingBridgeRoute::new(Arc::clone(registry), call_id))
         } else {
@@ -3358,6 +3419,65 @@ mod tests {
 
         drop(ctx);
         assert!(registry.pending_len() == 0);
+        assert_ledger_settles_to_zero(&resources);
+    }
+
+    #[test]
+    fn kernel_stdin_read_uses_session_lifetime_instead_of_operation_deadline() {
+        let (runtime, resources) = limited_bridge_runtime(1, 4, 4);
+        let registry: CallIdRouter = Arc::new(BridgeCallRegistry::new(4));
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (async_tx, async_rx) = crossbeam_channel::bounded(1);
+        let (_abort_tx, abort_rx) = crossbeam_channel::bounded(1);
+        let ctx = BridgeCallContext::with_registry(
+            Box::new(ChannelRuntimeEventSender::new(event_tx, Some(7))),
+            String::from("session-stdin"),
+            Some(7),
+            Arc::clone(&registry),
+            Arc::new(AtomicU64::new(1)),
+            async_tx,
+            abort_rx,
+            runtime,
+            Arc::new(crate::session::SessionPauseControl::default()),
+            Duration::from_millis(10),
+        );
+
+        let prepared = ctx
+            .prepare_async_call_with_max_response_bytes("_kernelStdinRead", Vec::new(), 4)
+            .expect("admit durable stdin readiness wait");
+        let call_id = prepared.call_id;
+        ctx.dispatch_async_call(prepared)
+            .expect("publish durable stdin readiness wait");
+        event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("host receives stdin readiness wait");
+
+        std::thread::sleep(Duration::from_millis(25));
+        assert_eq!(registry.pending_len(), 1);
+        assert!(
+            !registry
+                .timeout(call_id)
+                .expect("session-lifetime route has no operation deadline"),
+            "operation deadline must not retire a durable stdin readiness wait"
+        );
+
+        registry
+            .settle(
+                "session-stdin",
+                Some(7),
+                BridgeResponse {
+                    call_id,
+                    status: 0,
+                    payload: vec![0xA5],
+                    reservation: None,
+                },
+            )
+            .expect("stdin data settles the durable wait");
+        drop(
+            async_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("guest receives stdin data"),
+        );
         assert_ledger_settles_to_zero(&resources);
     }
 
