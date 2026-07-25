@@ -1,0 +1,17 @@
+# Parsing and HTTP behavior are owned by lychee. The TypeScript launcher adds
+# checkout-specific remaps for the website's /docs and /images routes.
+no_progress = true
+format = "detailed"
+include_fragments = "anchor-only"
+fallback_extensions = ["mdx", "md"]
+
+timeout = 10
+max_retries = 1
+max_concurrency = 16
+host_concurrency = 4
+method = "get"
+accept = ["100..=103", "200..=299", "401", "403", "429"]
+user_agent = "agentOS-markdown-link-check/1.0"
+
+include_mail = false
+exclude_all_private = true

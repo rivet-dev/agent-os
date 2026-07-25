@@ -10,7 +10,7 @@
     "docs:gen:ts": "typedoc",
     "gen:registry": "node scripts/gen-registry.mjs",
     "check-types": "astro check",
-    "build": "node scripts/gen-registry.mjs && pnpm run docs:gen:ts && astro build",
+    "build": "node scripts/gen-registry.mjs && pnpm run docs:gen:ts && astro build && node scripts/generate-page-markdown.mjs",
     "preview": "astro preview",
     "astro": "astro",
     "docs:index": "node --input-type=module -e \"import('@rivet-dev/docs-theme/scripts/index-docs').then(m => m.indexDocs())\""

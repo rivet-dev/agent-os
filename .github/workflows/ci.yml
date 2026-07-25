@@ -37,7 +37,19 @@ jobs:
           git -C /tmp/docs-theme checkout 450c498555135098c6a927adfdf13458be9be22a
           rm -rf website/vendor/theme && mkdir -p website/vendor
           cp -r /tmp/docs-theme/packages/theme website/vendor/theme
+          git -C /tmp/docs-theme checkout 71c3e482fe43e4cbc4f4327a26c8899b6bd4aaa7
+          rm -rf website/vendor/theme/vendor/icons/dist
+          cp -r /tmp/docs-theme/packages/theme/vendor/icons/dist website/vendor/theme/vendor/icons/dist
       - run: pnpm install --frozen-lockfile
+      - name: Install lychee
+        run: |
+          version=0.24.2
+          archive=/tmp/lychee.tar.gz
+          curl -fsSL -o "$archive" \
+            "https://github.com/lycheeverse/lychee/releases/download/lychee-v${version}/lychee-x86_64-unknown-linux-musl.tar.gz"
+          echo "73657a111819a30c47c08352896796f23d64e4eb2b3ed39b6d32149241566fc5  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C /tmp
+          sudo install -m 0755 /tmp/lychee-x86_64-unknown-linux-musl/lychee /usr/local/bin/lychee
       - run: |
           # Browser runtime sources remain in-tree, but are intentionally disabled
           # until their sidecar/reactor architecture has a separate approved design.
@@ -60,6 +72,10 @@ jobs:
               --filter='!@rivet-dev/agentos-runtime-browser' \
               --filter='!@rivet-dev/agentos-playground'
           fi
+      - name: Check documentation links and generated Markdown assets
+        run: |
+          pnpm --dir website build
+          pnpm exec tsx scripts/check-markdown-links.ts --built-site website/dist
       # The Codex adapter is ordinary TypeScript, while its executable is a
       # reproducibly built 56 MB WASI artifact. Keep the cheap PR lane source-only;
       # nightly and publish workflows build the pinned executable explicitly.

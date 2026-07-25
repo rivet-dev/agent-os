@@ -3190,6 +3190,15 @@ export class AgentOs {
 		return this.#kernel.readFile(path);
 	}
 
+	async pread(
+		path: string,
+		offset: number,
+		length: number,
+	): Promise<Uint8Array> {
+		this._assertSafeAbsolutePath(path);
+		return this._vfs().pread(path, offset, length);
+	}
+
 	async writeFile(path: string, content: string | Uint8Array): Promise<void> {
 		this._assertWritableAbsolutePath(path);
 		return this.#kernel.writeFile(path, content);
