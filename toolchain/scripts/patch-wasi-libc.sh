@@ -124,11 +124,16 @@ if [ "$MODE" = "apply" ] || [ "$MODE" = "check" ]; then
 fi
 
 # Find patch files
-if [ "$MODE" = "reverse" ]; then
-    mapfile -t PATCH_FILES < <(find "$PATCHES_DIR" -name '*.patch' -type f 2>/dev/null | sort -r)
-else
-    mapfile -t PATCH_FILES < <(find "$PATCHES_DIR" -name '*.patch' -type f 2>/dev/null | sort)
-fi
+PATCH_FILES=()
+while IFS= read -r patch; do
+    PATCH_FILES+=("$patch")
+done < <(
+    if [ "$MODE" = "reverse" ]; then
+        find "$PATCHES_DIR" -name '*.patch' -type f 2>/dev/null | sort -r
+    else
+        find "$PATCHES_DIR" -name '*.patch' -type f 2>/dev/null | sort
+    fi
+)
 
 if [ "${#PATCH_FILES[@]}" -eq 0 ]; then
     echo "No patch files found in $PATCHES_DIR"
