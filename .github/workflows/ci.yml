@@ -37,6 +37,9 @@ jobs:
           git -C /tmp/docs-theme checkout 450c498555135098c6a927adfdf13458be9be22a
           rm -rf website/vendor/theme && mkdir -p website/vendor
           cp -r /tmp/docs-theme/packages/theme website/vendor/theme
+          git -C /tmp/docs-theme checkout 71c3e482fe43e4cbc4f4327a26c8899b6bd4aaa7
+          rm -rf website/vendor/theme/vendor/icons/dist
+          cp -r /tmp/docs-theme/packages/theme/vendor/icons/dist website/vendor/theme/vendor/icons/dist
       - run: pnpm install --frozen-lockfile
       - name: Install lychee
         run: |
