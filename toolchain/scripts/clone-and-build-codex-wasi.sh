@@ -63,6 +63,15 @@ STOP_AFTER="${STOP_AFTER:-}"
 }
 command -v cargo >/dev/null 2>&1 || { echo "ERROR: cargo not on PATH" >&2; exit 1; }
 
+if command -v sha256sum >/dev/null 2>&1; then
+	SHA256=(sha256sum)
+elif command -v shasum >/dev/null 2>&1; then
+	SHA256=(shasum -a 256)
+else
+	echo "ERROR: neither sha256sum nor shasum is available" >&2
+	exit 1
+fi
+
 # --- 1. parse the pin --------------------------------------------------------
 REF="$(tr -d '[:space:]' < "$CODEX_REF_FILE")"
 REPO="${REF%@*}"      # owner/repo
@@ -70,7 +79,7 @@ SHA="${REF#*@}"       # commit sha
 [ -n "$REPO" ] && [ -n "$SHA" ] && [ "$REPO" != "$SHA" ] || {
 	echo "ERROR: malformed codex-ref '$REF' (expected '<owner>/<repo>@<sha>')" >&2; exit 1; }
 URL="$CODEX_GIT_BASE/$REPO.git"
-PATCH_DIGEST="$({ find "$CODEX_PATCH_DIR" -maxdepth 1 -type f -name '*.patch' -print0 | sort -z | xargs -0 sha256sum; } | sha256sum | cut -d ' ' -f1)"
+PATCH_DIGEST="$({ find "$CODEX_PATCH_DIR" -maxdepth 1 -type f -name '*.patch' -print0 | sort -z | xargs -0 "${SHA256[@]}"; } | "${SHA256[@]}" | cut -d ' ' -f1)"
 EXPECTED_STAMP="$SHA:$PATCH_DIGEST"
 
 echo "== codex-ref: $REPO @ $SHA =="
