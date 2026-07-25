@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # patch-wasi-libc.sh — Vendor, patch, and build wasi-libc as a custom sysroot
 #
 # Clones wasi-libc at the commit pinned by wasi-sdk-25, applies patches from

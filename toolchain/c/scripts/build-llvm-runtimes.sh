@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Build the libc++/libc++abi/libunwind runtime set ourselves so C++ exception
