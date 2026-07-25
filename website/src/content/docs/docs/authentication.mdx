@@ -4,7 +4,7 @@ description: "Authenticate connections to agentOS actors using Rivet Actor conne
 skill: true
 ---
 
-agentOS uses the same authentication system as [Rivet Actors](/docs/actors/authentication): clients send credentials as connection params, and you validate them server-side.
+agentOS uses the same authentication system as [Rivet Actors](https://rivet.dev/docs/actors/authentication): clients send credentials as connection params, and you validate them server-side.
 
 - Clients pass credentials in `params` when they connect.
 - Validate them on the server in `onBeforeConnect` (throw to reject the connection), or extract user data into connection state with `createConnState` (read it in actions via `c.conn.state`).
@@ -21,4 +21,4 @@ The server declares the credential shape and validates it in `onBeforeConnect` (
 <CodeSnippet file="examples/authentication/client.ts" />
 </CodeGroup>
 
-See [Actor Authentication](/docs/actors/authentication) for JWT validation, role-based access control, external auth providers, and token caching.
+See [Actor Authentication](https://rivet.dev/docs/actors/authentication) for JWT validation, role-based access control, external auth providers, and token caching.

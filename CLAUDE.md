@@ -237,7 +237,11 @@ custom host-syscall imports. Treat that target as **native POSIX**;
 - Runnable docs code must come from real checked example files via the docs
   theme `<CodeSnippet>` mechanism. Inline code is fine only for shell commands,
   config fragments, or non-runnable examples.
-- Validate docs changes with `pnpm --dir website build` when the site changes.
+- Whenever website, docs, README, or other Markdown content changes, run
+  `just check-site-links` before submitting the work. It builds the website and
+  verifies local and external source links plus client-generated Markdown
+  assets such as `/docs/apps.md`. Use `just check-site-links --no-external`
+  only for fast iteration, not as the final check.
 
 ## Tests
 

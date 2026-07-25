@@ -244,6 +244,15 @@ docs:
 docs-build:
 	pnpm --filter @rivet-dev/agentos-website build
 
+# Check links in authored Markdown/MDX. Pass --no-external for a fast local-only check.
+check-markdown-links *args:
+	pnpm exec tsx scripts/check-markdown-links.ts "$@"
+
+# Build the website, then verify client-generated Markdown URLs and source links.
+check-site-links *args:
+	pnpm --dir website build
+	pnpm exec tsx scripts/check-markdown-links.ts --built-site website/dist "$@"
+
 test-bounded cmd='pnpm test':
 	#!/usr/bin/env bash
 	set -euo pipefail

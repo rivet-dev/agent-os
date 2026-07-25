@@ -5,6 +5,8 @@ readonly pnpm_version="10.13.1"
 readonly docs_theme_revision="450c498555135098c6a927adfdf13458be9be22a"
 readonly docs_theme_icons_revision="71c3e482fe43e4cbc4f4327a26c8899b6bd4aaa7"
 readonly docs_theme_dir="website/vendor/theme"
+readonly lychee_version="0.24.2"
+readonly lychee_linux_x64_sha256="73657a111819a30c47c08352896796f23d64e4eb2b3ed39b6d32149241566fc5"
 
 if [[ "$(node --version | cut -d. -f1)" != "v24" ]]; then
 	echo "Installing Node.js 24..."
@@ -16,6 +18,19 @@ fi
 echo "Installing pnpm ${pnpm_version}..."
 if ! command -v pnpm >/dev/null 2>&1 || [[ "$(pnpm --version)" != "$pnpm_version" ]]; then
 	npm install --global "pnpm@${pnpm_version}"
+fi
+
+if ! command -v lychee >/dev/null 2>&1 || [[ "$(lychee --version)" != "lychee ${lychee_version}" ]]; then
+	echo "Installing lychee ${lychee_version}..."
+	lychee_archive="$(mktemp)"
+	lychee_dir="$(mktemp -d)"
+	curl -fsSL -o "$lychee_archive" \
+		"https://github.com/lycheeverse/lychee/releases/download/lychee-v${lychee_version}/lychee-x86_64-unknown-linux-musl.tar.gz"
+	echo "${lychee_linux_x64_sha256}  ${lychee_archive}" | sha256sum -c -
+	tar -xzf "$lychee_archive" -C "$lychee_dir"
+	mkdir -p "$HOME/.local/bin"
+	install -m 0755 "$(find "$lychee_dir" -type f -name lychee -print -quit)" "$HOME/.local/bin/lychee"
+	rm -rf "$lychee_archive" "$lychee_dir"
 fi
 
 if [[ ! -f "${docs_theme_dir}/package.json" || ! -f "${docs_theme_dir}/vendor/icons/dist/index.js" ]]; then
