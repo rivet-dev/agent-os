@@ -1,21 +1,33 @@
-export { pack, verifyPackageDir, type PackOptions, type PackResult } from "./pack.js";
 export {
-	detectExecutableKind,
-	isNativeKind,
-	parseShebangInterpreter,
-	type ExecutableKind,
-} from "./header.js";
-export { stage, type StageOptions, type StageResult } from "./stage.js";
-export { build, type BuildResult } from "./build.js";
-export {
-	publish,
-	resolveTag,
-	type PublishOptions,
-	type PublishResult,
-} from "./publish.js";
-export { readManifest, type AgentosPackageManifest } from "./manifest.js";
-export {
+	type AospkgSummary,
+	type DecodedAospkgManifest,
+	decodeAospkgManifest,
 	packAospkgFromTar,
 	packAospkgFromTarBytes,
-	type AospkgSummary,
+	verifyAospkgCommands,
 } from "./aospkg.js";
+export { type BuildResult, build } from "./build.js";
+export {
+	detectExecutableKind,
+	type ExecutableKind,
+	isNativeKind,
+	parseShebangInterpreter,
+} from "./header.js";
+export {
+	type AgentosPackageManifest,
+	declaredCommandNames,
+	readManifest,
+} from "./manifest.js";
+export {
+	type PackOptions,
+	type PackResult,
+	pack,
+	verifyPackageDir,
+} from "./pack.js";
+export {
+	type PublishOptions,
+	type PublishResult,
+	publish,
+	resolveTag,
+} from "./publish.js";
+export { type StageOptions, type StageResult, stage } from "./stage.js";

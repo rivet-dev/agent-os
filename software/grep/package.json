@@ -1,6 +1,6 @@
 {
 	"name": "@agentos-software/grep",
-	"version": "0.3.4",
+	"version": "0.3.5-rc.1",
 	"type": "module",
 	"license": "Apache-2.0",
 	"description": "GNU grep pattern matching for agentos VMs (grep, egrep, fgrep)",

@@ -21,6 +21,28 @@ export interface AgentosPackageManifest {
 	stubs?: string[];
 }
 
+/** Flat command names a built package must project, in deterministic order. */
+export function declaredCommandNames(
+	manifest: AgentosPackageManifest | undefined,
+): string[] {
+	const names = [
+		...(manifest?.commands ?? []),
+		...Object.keys(manifest?.aliases ?? {}),
+		...(manifest?.stubs ?? []),
+	];
+	const seen = new Set<string>();
+	for (const name of names) {
+		if (typeof name !== "string" || name.length === 0 || name.includes("/")) {
+			throw new Error(`invalid declared command name: ${JSON.stringify(name)}`);
+		}
+		if (seen.has(name)) {
+			throw new Error(`command is declared more than once: ${name}`);
+		}
+		seen.add(name);
+	}
+	return [...seen].sort();
+}
+
 export function readManifest(
 	packageDir: string,
 ): AgentosPackageManifest | undefined {

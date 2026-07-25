@@ -1,20 +1,22 @@
-import {
-	execFileSync,
-} from "node:child_process";
+import { execFileSync } from "node:child_process";
 import {
 	chmodSync,
 	cpSync,
 	existsSync,
 	mkdirSync,
-	readFileSync,
 	readdirSync,
+	readFileSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import { packAospkgFromTar } from "./aospkg.js";
-import { readManifest, unscopedName } from "./manifest.js";
+import { packAospkgFromTar, verifyAospkgCommands } from "./aospkg.js";
+import {
+	declaredCommandNames,
+	readManifest,
+	unscopedName,
+} from "./manifest.js";
 
 export interface BuildResult {
 	name: string;
@@ -106,6 +108,17 @@ export function build(packageDirInput?: string): BuildResult {
 				.map((entry) => entry.name)
 				.sort()
 		: [];
+	const declaredCommands = declaredCommandNames(srcManifest);
+	if (
+		commands.length > 0 &&
+		(commands.length !== declaredCommands.length ||
+			commands.some((command, index) => command !== declaredCommands[index]))
+	) {
+		throw new Error(
+			`refusing partial command package ${name}: declared=${declaredCommands.join(",")} ` +
+				`staged=${commands.join(",")}`,
+		);
+	}
 
 	const outDir = join(packageDir, "dist", "package");
 	rmSync(outDir, { recursive: true, force: true });
@@ -149,6 +162,9 @@ export function build(packageDirInput?: string): BuildResult {
 	const outAospkg = join(packageDir, "dist", "package.aospkg");
 	rmSync(outAospkg, { force: true });
 	packAospkgFromTar(outTar, outAospkg);
+	if (commands.length > 0) {
+		verifyAospkgCommands(readFileSync(outAospkg), declaredCommands);
+	}
 
 	process.stdout.write(
 		commands.length > 0
