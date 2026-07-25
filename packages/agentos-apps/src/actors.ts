@@ -1,5 +1,5 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdtemp, open, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,7 +18,6 @@ import {
 import {
 	AgentOs,
 	type AgentOsOptions,
-	createHostDirBackend,
 } from "@rivet-dev/agentos-core";
 import { packAospkgFromTarBytes } from "@rivet-dev/agentos-toolchain";
 import { actor, UserError } from "rivetkit";
@@ -3131,52 +3130,27 @@ export function createAppsActors(
 		},
 	};
 	const createBuildVm = async (): Promise<BuildHandle> => {
-		const outputDirectory = await mkdtemp(
-			join(tmpdir(), "agentos-apps-build-output-"),
-		);
-		const artifactGuestPath = "/agentos-app-output/agentos-app.tar";
-		const artifactHostPath = join(outputDirectory, "agentos-app.tar");
-		let vm: AgentOs;
-		try {
-			vm = await AgentOs.create({
-				...buildVmOptions,
-				mounts: [
-					...(buildVmOptions.mounts ?? []),
-					{
-						path: "/agentos-app-output",
-						readOnly: false,
-						plugin: createHostDirBackend({
-							hostPath: outputDirectory,
-							readOnly: false,
-						}),
-					},
-				],
-			});
-		} catch (error) {
-			await rm(outputDirectory, { recursive: true, force: true });
-			throw error;
-		}
+		// The artifact stays on the guest filesystem and is read back over the
+		// host VM API instead of a writable host_dir mount: guest-side access
+		// to host_dir mounts fails with "Permission denied (os error 2)"
+		// (rivet-dev/agentos#1872), which made every pack step fail. Reading
+		// through vm.readFile also removes the host temp directory and its
+		// cleanup entirely.
+		const artifactGuestPath = "/agentos-app.tar";
+		const vm = await AgentOs.create(buildVmOptions);
+		let artifact: Uint8Array | undefined;
+		const readArtifact = async (): Promise<Uint8Array> => {
+			artifact ??= new Uint8Array(await vm.readFile(artifactGuestPath));
+			return artifact;
+		};
 		return {
 			artifactGuestPath,
 			writeFiles: (...args) => vm.writeFiles(...args),
 			execArgv: (...args) => vm.execArgv(...args),
-			artifactSize: async () => (await stat(artifactHostPath)).size,
-			readArtifact: async () =>
-				new Uint8Array(await readFile(artifactHostPath)),
+			artifactSize: async () => (await readArtifact()).byteLength,
+			readArtifact,
 			dispose: async () => {
-				const results = await Promise.allSettled([
-					vm.dispose(),
-					rm(outputDirectory, { recursive: true, force: true }),
-				]);
-				const failures = results.flatMap((result) =>
-					result.status === "rejected" ? [result.reason] : [],
-				);
-				if (failures.length > 0) {
-					throw new AggregateError(
-						failures,
-						"failed to dispose AgentOS Apps build VM output",
-					);
-				}
+				await vm.dispose();
 			},
 		};
 	};
