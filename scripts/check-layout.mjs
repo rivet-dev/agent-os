@@ -49,6 +49,7 @@ const allowedTestHomes = [
 	/^software\/[^/]+\/test\/.+\.test\.ts$/,
 	/^toolchain\/conformance\/.+\.test\.ts$/,
 	/^packages\/[^/]+\/tests\/.+\.test\.ts$/,
+	/^benchmarks\/[^/]+\/.+\.test\.ts$/,
 	/^experiments\/[^/]+\/.+\.test\.ts$/,
 	/^scripts\/.+\.test\.ts$/,
 ];
