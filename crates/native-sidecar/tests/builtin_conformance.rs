@@ -69,6 +69,7 @@ const BUILTIN_CONFORMANCE_CASES: &[&str] = &[
     "events",
     "stream",
     "buffer",
+    "global_base64",
     "url",
     "stdlib_polyfill",
     "web_streams",
@@ -3834,6 +3835,39 @@ fn buffer_concat_truncation_matches_host_node() {
     run_isolated_builtin_conformance_test("buffer-concat-truncation");
 }
 
+fn global_base64_conformance_matches_host_node() {
+    assert_conformance(
+        "global_base64",
+        r#"
+function describeError(callback) {
+  try {
+    callback();
+    return { threw: false };
+  } catch (error) {
+    return {
+      threw: true,
+      name: error?.name ?? null,
+      code: error?.code ?? null,
+      message: error?.message ?? null,
+    };
+  }
+}
+
+console.log(JSON.stringify({
+  atobText: atob("aGVsbG8="),
+  atobWhitespace: atob(" YQ== \n"),
+  atobNumberCoercion: atob(1234),
+  btoaText: btoa("hello"),
+  btoaNumberCoercion: btoa(1234),
+  invalidAtob: describeError(() => atob("%%%")),
+  invalidUrlSafeDashAtob: describeError(() => atob("AA-A")),
+  invalidUrlSafeUnderscoreAtob: describeError(() => atob("AA_A")),
+  invalidBtoa: describeError(() => btoa("✓")),
+}));
+"#,
+    );
+}
+
 fn mkdtemp_sync_collision_safe_matches_host_node_impl() {
     let cwd = temp_dir("mkdtemp-sync-collision-safe");
     let entrypoint = cwd.join("entry.mjs");
@@ -4874,6 +4908,7 @@ fn run_named_case(case_name: &str) {
         "events" => events_conformance_matches_host_node(),
         "stream" => stream_conformance_matches_host_node(),
         "buffer" => buffer_conformance_matches_host_node(),
+        "global_base64" => global_base64_conformance_matches_host_node(),
         "url" => url_conformance_matches_host_node(),
         "stdlib_polyfill" => stdlib_polyfill_conformance_matches_host_node(),
         "web_streams" => web_streams_conformance_matches_host_node(),
