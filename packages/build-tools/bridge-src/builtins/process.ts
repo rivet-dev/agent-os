@@ -1176,6 +1176,7 @@ function setupGlobals() {
         // implements RFC 4648 section 4 instead, so normalize the input and
         // reject URL-safe characters before handing it over.
         const input = String(value).replace(/[\t\n\f\r ]+/g, "");
+        const hasPadding = input.includes("=");
         if (/[^A-Za-z0-9+/=]/.test(input) || /={3,}/.test(input) || /=[^=]/.test(input)) {
           throw createInvalidCharacterError();
         }
@@ -1183,7 +1184,10 @@ function setupGlobals() {
         if (remainder === 1) {
           throw createInvalidCharacterError("The string to be decoded is not correctly encoded.");
         }
-        const normalizedInput = remainder === 2 ? `${input}==` : remainder === 3 ? `${input}=` : input;
+        if (hasPadding && remainder !== 0) {
+          throw createInvalidCharacterError();
+        }
+        const normalizedInput = !hasPadding && remainder === 2 ? `${input}==` : !hasPadding && remainder === 3 ? `${input}=` : input;
         let bytes = new Uint8Array(0);
         try {
           bytes = base64.toByteArray(normalizedInput);

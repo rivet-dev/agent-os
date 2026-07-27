@@ -3864,6 +3864,8 @@ console.log(JSON.stringify({
   invalidAtob: describeError(() => atob("%%%")),
   invalidShortAtob: describeError(() => atob("Y")),
   invalidPaddingAtob: describeError(() => atob("AA=A")),
+  invalidPartialPaddingAtob: describeError(() => atob("YQ=")),
+  invalidOnlyPaddingAtob: describeError(() => atob("==")),
   invalidUrlSafeDashAtob: describeError(() => atob("AA-A")),
   invalidUrlSafeUnderscoreAtob: describeError(() => atob("AA_A")),
   invalidBtoa: describeError(() => btoa("✓")),
