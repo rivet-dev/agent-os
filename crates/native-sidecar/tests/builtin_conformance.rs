@@ -3855,11 +3855,15 @@ function describeError(callback) {
 
 console.log(JSON.stringify({
   atobText: atob("aGVsbG8="),
+  atobUnpaddedSingleByte: atob("YQ"),
+  atobUnpaddedTwoBytes: atob("YWI"),
   atobWhitespace: atob(" YQ== \n"),
   atobNumberCoercion: atob(1234),
   btoaText: btoa("hello"),
   btoaNumberCoercion: btoa(1234),
   invalidAtob: describeError(() => atob("%%%")),
+  invalidShortAtob: describeError(() => atob("Y")),
+  invalidPaddingAtob: describeError(() => atob("AA=A")),
   invalidUrlSafeDashAtob: describeError(() => atob("AA-A")),
   invalidUrlSafeUnderscoreAtob: describeError(() => atob("AA_A")),
   invalidBtoa: describeError(() => btoa("✓")),
