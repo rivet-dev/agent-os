@@ -679,18 +679,39 @@ async function runTerminalAttempt(
 	}
 }
 
+function coreShellVm(vm: AgentOs): ShellVmHandle {
+	return {
+		spawn: (command, args, options) => vm.process.spawn(command, args, options),
+		writeProcessStdin: (pid, data) => vm.process.writeStdin(pid, data),
+		closeProcessStdin: (pid) => vm.process.closeStdin(pid),
+		async waitProcess(pid) {
+			const exit = await vm.process.wait(pid);
+			return exit.exitCode ?? 1;
+		},
+		openShell: (options) => vm.terminal.open(options),
+		writeShell: (shellId, data) => vm.terminal.write(shellId, data),
+		resizeShell: (shellId, cols, rows) =>
+			vm.terminal.resize(shellId, cols, rows),
+		onShellData: (shellId, handler) => vm.onShellData(shellId, handler),
+		waitShell: (shellId) => vm.terminal.wait(shellId),
+		dispose: () => vm.dispose(),
+	};
+}
+
 const cli = parseCli(process.argv.slice(2));
 const env = buildEnv(cli);
 const mounts = buildMounts(cli);
 
 const vm: ShellVmHandle = cli.actor
 	? await createActorShellVm({ software, mounts, defaultSoftware: false })
-	: await AgentOs.create({
-			mounts,
-			permissions: allowAll,
-			software,
-			defaultSoftware: false,
-		});
+	: coreShellVm(
+			await AgentOs.create({
+				mounts,
+				permissions: allowAll,
+				software,
+				defaultSoftware: false,
+			}),
+		);
 
 let exitCode = 1;
 try {

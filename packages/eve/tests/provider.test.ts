@@ -313,20 +313,26 @@ describe("agentOSBackend", () => {
 	it("adapts and disposes a caller-created standalone Core VM", async () => {
 		const vm = {
 			dispose: vi.fn(async () => {}),
-			spawn: vi.fn(
-				(
-					_command: string,
-					_args: string[],
-					options: { onStdout(data: Uint8Array): void },
-				) => {
-					queueMicrotask(() =>
-						options.onStdout(new TextEncoder().encode("from core")),
-					);
-					return { pid: 31 };
-				},
-			),
-			waitProcess: vi.fn(async () => 0),
-			killProcess: vi.fn(),
+			process: {
+				spawn: vi.fn(
+					async (
+						_command: string,
+						_args: string[],
+						options: { onStdout(data: Uint8Array): void },
+					) => {
+						queueMicrotask(() =>
+							options.onStdout(new TextEncoder().encode("from core")),
+						);
+						return { pid: 31 };
+					},
+				),
+				wait: vi.fn(async (pid: number) => ({
+					pid,
+					outcome: "exited" as const,
+					exitCode: 0,
+				})),
+				kill: vi.fn(async () => {}),
+			},
 			readFile: vi.fn(async () => new Uint8Array()),
 			writeFile: vi.fn(async () => {}),
 			exists: vi.fn(async () => true),
@@ -349,7 +355,7 @@ describe("agentOSBackend", () => {
 			stdout: "from core",
 			stderr: "",
 		});
-		expect(vm.spawn).toHaveBeenCalledWith(
+		expect(vm.process.spawn).toHaveBeenCalledWith(
 			"sh",
 			["-lc", "echo ignored"],
 			expect.objectContaining({ cwd: "/workspace" }),

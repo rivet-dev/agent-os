@@ -376,9 +376,6 @@ function coreConnection(vm: AgentOs): AgentOSActorConnection {
 	const methods = vm as unknown as Record<string, unknown>;
 	for (const method of [
 		"dispose",
-		"spawn",
-		"waitProcess",
-		"killProcess",
 		"readFile",
 		"writeFile",
 		"exists",
@@ -386,6 +383,16 @@ function coreConnection(vm: AgentOs): AgentOSActorConnection {
 		"remove",
 	]) {
 		if (typeof methods?.[method] !== "function") {
+			throw new TypeError(
+				"agentOSCoreBackend create() must return an AgentOs instance",
+			);
+		}
+	}
+	const processMethods = vm.process as unknown as
+		| Record<string, unknown>
+		| undefined;
+	for (const method of ["spawn", "wait", "kill"]) {
+		if (typeof processMethods?.[method] !== "function") {
 			throw new TypeError(
 				"agentOSCoreBackend create() must return an AgentOs instance",
 			);
@@ -420,7 +427,7 @@ function coreConnection(vm: AgentOs): AgentOSActorConnection {
 					listener({ pid: processPid, stream, data });
 				}
 			};
-			const process = vm.spawn(command, args, {
+			const process = await vm.process.spawn(command, args, {
 				...options,
 				onStdout: (data) => emit("stdout", data),
 				onStderr: (data) => emit("stderr", data),
@@ -429,10 +436,11 @@ function coreConnection(vm: AgentOs): AgentOSActorConnection {
 			for (const event of earlyOutput) emit(event.stream, event.data);
 			return process;
 		},
-		waitProcess: (pid) => vm.waitProcess(pid),
-		async killProcess(pid) {
-			vm.killProcess(pid);
+		async waitProcess(pid) {
+			const exit = await vm.process.wait(pid);
+			return exit.exitCode ?? 1;
 		},
+		killProcess: (pid) => vm.process.kill(pid),
 		readFile: (path) => vm.readFile(path),
 		writeFile: (path, content) => vm.writeFile(path, content),
 		exists: (path) => vm.exists(path),
