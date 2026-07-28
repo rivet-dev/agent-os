@@ -3229,8 +3229,8 @@ export function createAppsActors(
 		id: string,
 		event: "ack" | "cancel",
 	) => {
-		void bridge.vm
-			.writeProcessStdin(bridge.pid, `${JSON.stringify({ id, event })}\n`)
+		void bridge.vm.process
+			.writeStdin(bridge.pid, `${JSON.stringify({ id, event })}\n`)
 			.catch((error) => {
 				const pending = bridge.pending.get(id);
 				bridge.pending.delete(id);
@@ -3430,6 +3430,8 @@ export function createAppsActors(
 				}
 			}
 			const pendingStdout: Uint8Array[] = [];
+			const pendingStderr: Uint8Array[] = [];
+			let processPid: number | undefined;
 			let bridge: GuestBridge | undefined;
 			const engineRegistration = guestEngineRegistrations.get(c.actorId);
 			if (configuration.usesRivetKit && !engineRegistration) {
@@ -3438,7 +3440,27 @@ export function createAppsActors(
 					"RivetKit execution replica is missing its scoped Engine capability",
 				);
 			}
-			const process = vm.spawn("node", ["/app/main.mjs"], {
+			const handleStderr = (data: Uint8Array) => {
+				if (processPid === undefined) {
+					pendingStderr.push(data);
+					return;
+				}
+				const output = boundedOutput(
+					new TextDecoder().decode(data),
+					DEFAULT_MAX_BUILD_OUTPUT_BYTES,
+				);
+				c.log.error({
+					msg: "AgentOS Apps guest stderr",
+					pid: processPid,
+					output,
+				});
+				c.broadcast("processOutput", {
+					pid: processPid,
+					stream: "stderr",
+					data,
+				});
+			};
+			const process = await vm.process.spawn("node", ["/app/main.mjs"], {
 				cwd: "/app",
 				// Never forward the host's RIVET_TOKEN. RivetKit releases receive
 				// only non-secret placement metadata.
@@ -3450,23 +3472,9 @@ export function createAppsActors(
 					if (bridge) handleGuestStdout(c, bridge, data);
 					else pendingStdout.push(data);
 				},
-				onStderr: (data) => {
-					const output = boundedOutput(
-						new TextDecoder().decode(data),
-						DEFAULT_MAX_BUILD_OUTPUT_BYTES,
-					);
-					c.log.error({
-						msg: "AgentOS Apps guest stderr",
-						pid: process.pid,
-						output,
-					});
-					c.broadcast("processOutput", {
-						pid: process.pid,
-						stream: "stderr",
-						data,
-					});
-				},
+				onStderr: handleStderr,
 			});
+			processPid = process.pid;
 			bridge = {
 				vm,
 				pid: process.pid,
@@ -3475,10 +3483,12 @@ export function createAppsActors(
 			};
 			guestBridges.set(c.actorId, bridge);
 			for (const data of pendingStdout) handleGuestStdout(c, bridge, data);
+			for (const data of pendingStderr) handleStderr(data);
 			state.guestPid = process.pid;
 			void c
 				.keepAwake(
-					vm.waitProcess(process.pid).then((exitCode) => {
+					vm.process.wait(process.pid).then((exit) => {
+						const exitCode = exit.exitCode ?? 1;
 						c.broadcast("processExit", { pid: process.pid, exitCode });
 						if (exitCode === 0) {
 							c.log.info({
@@ -3519,10 +3529,10 @@ export function createAppsActors(
 				),
 			);
 			if (typeof guestPid === "number") {
-				vm.stopProcess(guestPid);
+				await vm.process.signal(guestPid, "SIGTERM");
 				let timeout: ReturnType<typeof setTimeout> | undefined;
 				const exited = await Promise.race([
-					vm.waitProcess(guestPid).then(() => true),
+					vm.process.wait(guestPid).then(() => true),
 					new Promise<false>((resolve) => {
 						timeout = setTimeout(
 							() => resolve(false),
@@ -3781,7 +3791,7 @@ export function createAppsActors(
 				bridge.pending.set(id, pending);
 			});
 			try {
-				await bridge.vm.writeProcessStdin(
+				await bridge.vm.process.writeStdin(
 					bridge.pid,
 					`${JSON.stringify({
 						id,
