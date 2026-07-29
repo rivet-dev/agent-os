@@ -2,13 +2,12 @@
 // tab is its own iframe, so "global" means "in every iframe's chrome"). An
 // agent blocked on a permission request otherwise looks frozen: the session
 // sits in durable "waiting" until someone answers. Cards come from two sources
-// merged on `sessionId:requestId`: a one-off backfill on mount (durable
-// "waiting" sessions via `listSessions`, so requests raised while no inspector
-// iframe was open still surface) plus live `sessionEvent` entries of type
-// `permission_request`. A `permission_response` entry drops the card another
-// viewer already answered.
+// merged on `sessionId:requestId`: a backfill fetch (durable "waiting" sessions
+// via `listSessions`, so requests raised while no inspector iframe was open
+// still surface) plus live `sessionEvent` entries of type `permission_request`.
+// A `permission_response` entry drops the card another viewer already answered.
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { ChevronRight } from "./common";
 import { isInspectorActionError } from "./lib/actor-client";
 import { useAgentOsActor } from "./lib/rivet";
@@ -18,27 +17,54 @@ import React from "react";
 
 // Bounded queue: drop the oldest card beyond this (an unbounded queue would
 // just stack dead cards; resolutions arrive as `permission_response` entries).
+// The same bound caps the per-request status map.
 const MAX_CARDS = 32;
 
-interface PermissionCard {
+interface PermissionRequest {
 	sessionId: string;
 	requestId: string;
 	/** The request's OWN ACP options — one button per entry (never a fixed set). */
 	options: PendingPermissionDisplay["options"];
 	toolCall: PendingPermissionDisplay["toolCall"];
-	state: "pending" | "busy" | "resolved" | "failed";
-	/** `PermissionTerminalReason` when the request resolved out from under us. */
-	reason?: string;
-	error?: string;
 }
 
-function cardKey(card: Pick<PermissionCard, "sessionId" | "requestId">): string {
+/** Per-request status, kept apart from the request itself so the rendered list
+ * can be derived from (backfill + live) instead of copied into state. */
+type CardStatus =
+	| { state: "pending" }
+	| { state: "busy" }
+	/** `PermissionTerminalReason` when the request resolved out from under us. */
+	| { state: "resolved"; reason?: string }
+	| { state: "failed"; error: string }
+	/** Answered here, answered elsewhere, or dismissed: no card. */
+	| { state: "hidden" };
+
+const PENDING: CardStatus = { state: "pending" };
+
+function cardKey(card: Pick<PermissionRequest, "sessionId" | "requestId">): string {
 	return `${card.sessionId}:${card.requestId}`;
+}
+
+/** Insert into a bounded, insertion-ordered map; oldest key drops first. */
+function withStatus(
+	prev: ReadonlyMap<string, CardStatus>,
+	key: string,
+	status: CardStatus,
+): Map<string, CardStatus> {
+	const next = new Map(prev);
+	next.delete(key);
+	next.set(key, status);
+	while (next.size > MAX_CARDS) {
+		const oldest = next.keys().next().value;
+		if (oldest === undefined) break;
+		next.delete(oldest);
+	}
+	return next;
 }
 
 /** Detail payload for the collapsible block: the tool call's raw input,
  * hidden when absent or an empty object. */
-function toolCallDetail(toolCall: PermissionCard["toolCall"]): unknown {
+function toolCallDetail(toolCall: PermissionRequest["toolCall"]): unknown {
 	const raw = toolCall?.rawInput;
 	if (raw == null) return undefined;
 	if (typeof raw === "object" && !Array.isArray(raw) && Object.keys(raw).length === 0) {
@@ -48,35 +74,37 @@ function toolCallDetail(toolCall: PermissionCard["toolCall"]): unknown {
 }
 
 export function PermissionPrompts({ actorId }: { actorId: string }) {
-	const [cards, setCards] = useState<PermissionCard[]>([]);
+	// Requests seen live on this iframe's subscription.
+	const [liveRequests, setLiveRequests] = useState<PermissionRequest[]>([]);
+	const [statuses, setStatuses] = useState<ReadonlyMap<string, CardStatus>>(() => new Map());
 
-	// One-off backfill of requests raised before this iframe subscribed.
-	// `data === null` means the runtime predates the durable-sessions contract
-	// (contract-layer error) — stay live-only silently.
+	// Backfill of requests raised before this iframe subscribed. `data === null`
+	// means the runtime predates the durable-sessions contract (contract-layer
+	// error) — stay live-only silently.
 	const backfill = useQuery(pendingPermissionsQueryOptions(actorId));
 	const backfillRows = backfill.data;
-	useEffect(() => {
-		if (!backfillRows || backfillRows.length === 0) return;
-		setCards((prev) => {
-			// Live cards win the dedupe: a `sessionEvent` that raced the fetch
-			// already carries the same request (identity is sessionId:requestId).
-			const have = new Set(prev.map(cardKey));
-			const added = backfillRows
-				.filter((row) => !have.has(cardKey(row)))
-				.map(
-					(row): PermissionCard => ({
-						sessionId: row.sessionId,
-						requestId: row.requestId,
-						options: row.options,
-						toolCall: row.toolCall,
-						state: "pending",
-					}),
-				);
-			if (added.length === 0) return prev;
-			// Backfilled requests predate anything received live: keep them first.
-			return [...added, ...prev].slice(-MAX_CARDS);
-		});
-	}, [backfillRows]);
+
+	// Live cards win the dedupe: a `sessionEvent` that raced the fetch already
+	// carries the same request (identity is sessionId:requestId). Backfilled
+	// requests predate anything received live, so they stay first.
+	const cards = useMemo(() => {
+		const liveKeys = new Set(liveRequests.map(cardKey));
+		const merged: PermissionRequest[] = [
+			...(backfillRows ?? [])
+				.filter((row) => !liveKeys.has(cardKey(row)))
+				.map((row) => ({
+					sessionId: row.sessionId,
+					requestId: row.requestId,
+					options: row.options,
+					toolCall: row.toolCall,
+				})),
+			...liveRequests,
+		];
+		return merged
+			.map((request) => ({ request, status: statuses.get(cardKey(request)) ?? PENDING }))
+			.filter((card) => card.status.state !== "hidden")
+			.slice(-MAX_CARDS);
+	}, [backfillRows, liveRequests, statuses]);
 
 	// Live stream: durable `sessionEvent` entries carry both new requests and
 	// their resolutions — same cast pattern as transcript.tsx (the handler
@@ -91,17 +119,16 @@ export function PermissionPrompts({ actorId }: { actorId: string }) {
 		if (!entry) return;
 		if (entry.type === "permission_request") {
 			if (!entry.sessionId || !entry.requestId) return;
-			const next: PermissionCard = {
+			const next: PermissionRequest = {
 				sessionId: entry.sessionId,
 				requestId: entry.requestId,
 				options: entry.options,
 				toolCall: entry.toolCall,
-				state: "pending",
 			};
-			setCards((prev) => {
-				const deduped = prev.filter((c) => cardKey(c) !== cardKey(next));
-				return [...deduped, next].slice(-MAX_CARDS);
-			});
+			const key = cardKey(next);
+			setLiveRequests((prev) => [...prev.filter((c) => cardKey(c) !== key), next].slice(-MAX_CARDS));
+			// A re-raised request is pending again, whatever its last outcome was.
+			setStatuses((prev) => withStatus(prev, key, PENDING));
 			return;
 		}
 		// Another viewer (or a headless client) answered: its card is stale here,
@@ -111,23 +138,24 @@ export function PermissionPrompts({ actorId }: { actorId: string }) {
 		if (entry.type === "permission_response") {
 			if (!entry.sessionId || !entry.requestId) return;
 			const key = cardKey(entry);
-			setCards((prev) => prev.filter((c) => cardKey(c) !== key || c.state === "busy"));
+			setStatuses((prev) =>
+				prev.get(key)?.state === "busy" ? prev : withStatus(prev, key, { state: "hidden" }),
+			);
 		}
 	});
 
-	const respond = async (card: PermissionCard, optionId: string) => {
-		const key = cardKey(card);
-		const patch = (changes: Partial<PermissionCard>) =>
-			setCards((prev) => prev.map((c) => (cardKey(c) === key ? { ...c, ...changes } : c)));
+	const respond = async (request: PermissionRequest, optionId: string) => {
+		const key = cardKey(request);
+		const patch = (status: CardStatus) => setStatuses((prev) => withStatus(prev, key, status));
 		patch({ state: "busy" });
 		try {
 			const result = await agentOsSource.respondPermission(
-				card.sessionId,
-				card.requestId,
+				request.sessionId,
+				request.requestId,
 				optionId,
 			);
 			if (result.status === "accepted") {
-				setCards((prev) => prev.filter((c) => cardKey(c) !== key));
+				patch({ state: "hidden" });
 				return;
 			}
 			// `not_pending`: another viewer answered first or the prompt ended —
@@ -140,18 +168,18 @@ export function PermissionPrompts({ actorId }: { actorId: string }) {
 		}
 	};
 
-	const dismiss = (card: PermissionCard) =>
-		setCards((prev) => prev.filter((c) => cardKey(c) !== cardKey(card)));
+	const dismiss = (request: PermissionRequest) =>
+		setStatuses((prev) => withStatus(prev, cardKey(request), { state: "hidden" }));
 
 	if (cards.length === 0) return null;
 
 	return (
 		<div className="shrink-0 border-b">
-			{cards.map((card) => {
-				const detail = toolCallDetail(card.toolCall);
+			{cards.map(({ request, status }) => {
+				const detail = toolCallDetail(request.toolCall);
 				return (
 					<div
-						key={cardKey(card)}
+						key={cardKey(request)}
 						className="flex flex-col gap-1.5 border-b border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs last:border-b-0"
 					>
 						<div className="flex items-start gap-2">
@@ -159,11 +187,11 @@ export function PermissionPrompts({ actorId }: { actorId: string }) {
 								<div className="text-amber-500">
 									Agent requests permission
 									<span className="ml-2 font-mono text-[10px] text-muted-foreground/70">
-										session …{card.sessionId.slice(-10)}
+										session …{request.sessionId.slice(-10)}
 									</span>
 								</div>
 								<div className="mt-0.5 text-foreground/90">
-									{card.toolCall?.title ?? card.requestId}
+									{request.toolCall?.title ?? request.requestId}
 								</div>
 								{detail !== undefined ? (
 									<details className="group mt-1 text-muted-foreground/70">
@@ -177,14 +205,14 @@ export function PermissionPrompts({ actorId }: { actorId: string }) {
 									</details>
 								) : null}
 							</div>
-							{card.state === "pending" || card.state === "busy" ? (
+							{status.state === "pending" || status.state === "busy" ? (
 								<div className="flex shrink-0 items-center gap-1.5">
-									{card.options.map((option) => (
+									{request.options.map((option) => (
 										<button
 											key={option.optionId}
 											type="button"
-											disabled={card.state === "busy"}
-											onClick={() => void respond(card, option.optionId)}
+											disabled={status.state === "busy"}
+											onClick={() => void respond(request, option.optionId)}
 											className={
 												option.kind === "reject_once" || option.kind === "reject_always"
 													? "rounded-md border border-destructive/50 px-2.5 py-1 text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-40"
@@ -198,13 +226,15 @@ export function PermissionPrompts({ actorId }: { actorId: string }) {
 							) : (
 								<div className="flex shrink-0 items-center gap-2">
 									<span className="text-muted-foreground">
-										{card.state === "resolved"
-											? `No longer pending (${(card.reason ?? "already resolved").replace(/_/g, " ")})`
-											: (card.error ?? "Reply failed")}
+										{status.state === "resolved"
+											? `No longer pending (${(status.reason ?? "already resolved").replace(/_/g, " ")})`
+											: status.state === "failed"
+												? status.error
+												: "Reply failed"}
 									</span>
 									<button
 										type="button"
-										onClick={() => dismiss(card)}
+										onClick={() => dismiss(request)}
 										className="rounded border px-2 py-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 									>
 										Dismiss

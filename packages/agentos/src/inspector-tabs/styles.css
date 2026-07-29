@@ -55,7 +55,9 @@ body,
 }
 
 body {
-	background: hsl(var(--background));
+	/* Each tab is an iframe mounted inside a dashboard panel, whose surface is
+	   `--card`, not the dashboard's page `--background`. */
+	background: hsl(var(--card));
 	color: hsl(var(--foreground));
 	font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
 	-webkit-font-smoothing: antialiased;
