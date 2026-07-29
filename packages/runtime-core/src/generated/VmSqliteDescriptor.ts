@@ -3,4 +3,4 @@
 /**
  * Transport used by the VM-scoped SQLite substrate.
  */
-export type VmSqliteDescriptor = { "type": "actor_uds", path: string, token: string, } | { "type": "sqlite_file", path: string, };
+export type VmSqliteDescriptor = { "type": "actor_uds", path: string, } | { "type": "sqlite_file", path: string, };

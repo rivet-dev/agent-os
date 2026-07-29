@@ -4,7 +4,7 @@ name = "cmd-tr"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "tr standalone binary for secure-exec VM"
+description = "tr standalone binary for agentos VM"
 
 [[bin]]
 name = "tr"

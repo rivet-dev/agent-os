@@ -1,0 +1,8 @@
+{
+  "name": "project-matrix-libsql-local-native-blocked",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@libsql/client": "0.17.4"
+  }
+}

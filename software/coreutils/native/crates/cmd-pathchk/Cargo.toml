@@ -4,7 +4,7 @@ name = "cmd-pathchk"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "pathchk standalone binary for secure-exec VM"
+description = "pathchk standalone binary for agentos VM"
 
 [[bin]]
 name = "pathchk"

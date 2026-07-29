@@ -12,6 +12,13 @@ import {
 } from "./helpers/llmock-helper.js";
 import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 import { hasBuiltRegistryCommands } from "./helpers/registry-command-availability.js";
+import {
+	ONE_PIXEL_PNG_BASE64,
+	ONE_PIXEL_PNG_BYTES,
+	requestContainsExactPng,
+	requestContainsExactPngToolResult,
+	startRawRequestCapture,
+} from "./helpers/rich-media.js";
 import { promptResultText } from "./helpers/session-result.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
@@ -123,6 +130,106 @@ describe("full openSession({ agent: 'pi' }) inside the VM", () => {
 		}
 	}, 120_000);
 
+	test("preserves exact PNG media in Pi prompts and read results", async () => {
+		const fixtures: Fixture[] = [
+			createAnthropicFixture(
+				{ userMessage: /Inspect this direct PNG/ },
+				{ content: "Direct PNG received." },
+			),
+			createAnthropicFixture(
+				{
+					predicate: (request) =>
+						!JSON.stringify(getRequestBody(request)).includes('"role":"tool"'),
+				},
+				{
+					toolCalls: [
+						{
+							name: "read",
+							arguments: JSON.stringify({
+								path: "/home/agentos/workspace/pixel.png",
+							}),
+						},
+					],
+				},
+			),
+			createAnthropicFixture(
+				{
+					predicate: (request) =>
+						JSON.stringify(getRequestBody(request)).includes('"role":"tool"'),
+				},
+				{ content: "Pi preserved the PNG." },
+			),
+		];
+		const { mock, url } = await startLlmock(fixtures);
+		const capture = await startRawRequestCapture(url);
+		const vm = await createPiVm(capture.url);
+		const sessionId = "pi-rich-media";
+		let sessionOpened = false;
+		let unsubscribe: (() => void) | undefined;
+		try {
+			const homeDir = await createVmPiHome(vm, capture.url);
+			const workspaceDir = await createVmWorkspace(vm);
+			await vm.writeFile(`${workspaceDir}/pixel.png`, ONE_PIXEL_PNG_BYTES);
+			await vm.openSession({
+				sessionId,
+				agent: "pi",
+				cwd: workspaceDir,
+				env: {
+					HOME: homeDir,
+					ANTHROPIC_API_KEY: "mock-key",
+					ANTHROPIC_BASE_URL: capture.url,
+				},
+			});
+			sessionOpened = true;
+			const direct = await vm.prompt({
+				sessionId,
+				content: [
+					{ type: "text", text: "Inspect this direct PNG." },
+					{
+						type: "image",
+						data: ONE_PIXEL_PNG_BASE64,
+						mimeType: "image/png",
+					},
+				],
+			});
+			expect(direct.stopReason).toBe("end_turn");
+			expect(capture.requests.some(requestContainsExactPng)).toBe(true);
+
+			const events: SessionStreamEntry[] = [];
+			unsubscribe = vm.onSessionEvent(sessionId, (event) => {
+				events.push(event);
+			});
+			const result = await vm.prompt({
+				sessionId,
+				content: [
+					{
+						type: "text",
+						text: "Read pixel.png and inspect the image.",
+					},
+				],
+			});
+			unsubscribe();
+			unsubscribe = undefined;
+
+			expect(result.stopReason).toBe("end_turn");
+			expect(capture.requests.some(requestContainsExactPngToolResult)).toBe(
+				true,
+			);
+			expect(JSON.stringify(capture.requests)).toContain(ONE_PIXEL_PNG_BASE64);
+			// pi-acp currently preserves image tool results on the provider path but
+			// advertises no embedded-context capability for structured ACP output.
+			expect(events.some(requestContainsExactPng)).toBe(false);
+		} finally {
+			unsubscribe?.();
+			if (sessionOpened) {
+				await vm.unloadSession({ sessionId });
+			}
+			await vm.dispose();
+			await capture.stop();
+			await stopLlmock(mock);
+		}
+	}, 120_000);
+
 	test("runs the real Pi SDK ACP flow end-to-end for write tool calls", async () => {
 		const fixtures = createToolFixtures(
 			{
@@ -155,8 +262,8 @@ describe("full openSession({ agent: 'pi' }) inside the VM", () => {
 			});
 
 			const agentInfo = await vm.getSessionAgentInfo({ sessionId });
-			expect(agentInfo.name).toBe("pi-sdk-acp");
-			expect(agentInfo.title).toBe("Pi SDK ACP adapter");
+			expect(agentInfo.name).toBe("pi-acp");
+			expect(agentInfo.title).toBe("pi ACP adapter");
 			expect(agentInfo.version).toBeTruthy();
 
 			const capabilities = await vm.getSessionCapabilities({ sessionId });

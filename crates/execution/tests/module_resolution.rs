@@ -439,6 +439,27 @@ fn exports_wildcard_subpaths_expand_requested_segment() {
 }
 
 #[test]
+fn exports_wildcard_subpaths_prefer_the_more_specific_pattern() {
+    let fixture = Fixture::new();
+    fixture.write_json(
+        "node_modules/pkg/package.json",
+        serde_json::json!({
+            "exports": {
+                "./*.js": "./esm/*.js",
+                "./*": "./esm/*.js"
+            }
+        }),
+    );
+    fixture.write("node_modules/pkg/esm/sdk/user.js", "export class User {};");
+    assert_import(
+        &fixture,
+        "pkg/sdk/user.js",
+        "/root/project/src/index.js",
+        "/root/node_modules/pkg/esm/sdk/user.js",
+    );
+}
+
+#[test]
 fn exports_explicit_subpath_resolves_direct_mapping() {
     let fixture = Fixture::new();
     fixture.write_json(
@@ -544,6 +565,27 @@ fn imports_wildcard_subpaths_expand_requested_segment() {
 }
 
 #[test]
+fn imports_wildcard_subpaths_prefer_the_more_specific_pattern() {
+    let fixture = Fixture::new();
+    fixture.write_json(
+        "project/package.json",
+        serde_json::json!({
+            "imports": {
+                "#utils/*.js": "./src/utils/*.js",
+                "#utils/*": "./src/utils/*.js"
+            }
+        }),
+    );
+    fixture.write("project/src/utils/math.js", "export default 1;");
+    assert_import(
+        &fixture,
+        "#utils/math.js",
+        "/root/project/src/index.js",
+        "/root/project/src/utils/math.js",
+    );
+}
+
+#[test]
 fn imports_walk_up_to_nearest_package_json() {
     let fixture = Fixture::new();
     fixture.write_json(
@@ -633,6 +675,24 @@ fn pnpm_store_dir_is_not_checked_without_flattened_package_symlink() {
         "module.exports = 1;",
     );
     assert_require_missing(&fixture, "pkg", "/root/project/src/index.js");
+}
+
+#[test]
+fn npm_workspace_symlink_resolves_to_package_inside_project_root() {
+    let fixture = Fixture::new();
+    fixture.write_json(
+        "packages/lib/package.json",
+        serde_json::json!({ "name": "@workspace-test/lib", "main": "src/index.js" }),
+    );
+    fixture.write("packages/lib/src/index.js", "module.exports = 1;");
+    fixture.symlink_dir("packages/lib", "node_modules/@workspace-test/lib");
+
+    assert_require(
+        &fixture,
+        "@workspace-test/lib",
+        "/root/packages/app/src/index.js",
+        "/root/node_modules/@workspace-test/lib/src/index.js",
+    );
 }
 
 #[test]

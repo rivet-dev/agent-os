@@ -1,0 +1,11 @@
+{
+  "name": "project-matrix-documents-agent-pass",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pdf-lib": "1.17.1",
+    "mammoth": "1.12.0",
+    "exceljs": "4.4.0",
+    "jszip": "3.10.1"
+  }
+}

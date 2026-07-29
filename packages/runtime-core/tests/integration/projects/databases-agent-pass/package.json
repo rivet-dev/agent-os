@@ -1,0 +1,12 @@
+{
+  "name": "project-matrix-databases-agent-pass",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "postgres": "3.4.9",
+    "mongodb": "7.5.0",
+    "redis": "6.1.0",
+    "@libsql/client": "0.17.4",
+    "@aws-sdk/client-s3": "3.1090.0"
+  }
+}

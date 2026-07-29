@@ -1,0 +1,8 @@
+{
+  "name": "pnpm-cli-pass",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "pnpm": "10.13.1"
+  }
+}

@@ -42,7 +42,7 @@ process.stdin.on("data", (chunk) => {
         writeResponse(msg.id, {
           protocolVersion: 1,
           agentInfo: { name: "mock-agent", version: "1.0.0" },
-          agentCapabilities: { plan_mode: false, tool_calls: false, promptCapabilities: {} },
+          agentCapabilities: { plan_mode: false, tool_calls: false, promptCapabilities: { image: true, audio: true, embeddedContext: true } },
           modes: { currentModeId: "default", availableModes: [{ id: "default", label: "Default" }] },
           configOptions: [],
         });
@@ -55,9 +55,11 @@ process.stdin.on("data", (chunk) => {
         });
         break;
       case "session/prompt":
-        writeMessage({ jsonrpc: "2.0", method: "session/update", params: {
-          sessionId: "__MOCK_SESSION_ID__",
-          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "__MOCK_PROMPT_TEXT__" } } } });
+        for (const content of msg.params.prompt) {
+          writeMessage({ jsonrpc: "2.0", method: "session/update", params: {
+            sessionId: "__MOCK_SESSION_ID__",
+            update: { sessionUpdate: "agent_message_chunk", content } } });
+        }
         writeResponse(msg.id, { stopReason: "end_turn" });
         break;
       case "session/cancel":
@@ -148,23 +150,50 @@ async fn durable_session_surface_persists_native_acp_history() {
     );
 
     let (mut events, _subscription) = os.on_session_event(Some("main"));
-    let content = serde_json::from_value(serde_json::json!({
-        "type": "text",
-        "text": "Say PONG",
-    }))
-    .expect("content block");
+    let rich_content = serde_json::json!([
+        { "type": "text", "text": MOCK_PROMPT_TEXT },
+        {
+            "type": "image",
+            "data": "iVBORw0KGgo=",
+            "mimeType": "image/png",
+            "uri": "file:///workspace/pixel.png"
+        },
+        {
+            "type": "resource_link",
+            "uri": "https://example.test/reference.txt",
+            "name": "reference.txt",
+            "mimeType": "text/plain"
+        },
+        {
+            "type": "resource",
+            "resource": {
+                "uri": "file:///workspace/context.txt",
+                "mimeType": "text/plain",
+                "text": "context"
+            }
+        },
+        {
+            "type": "resource",
+            "resource": {
+                "uri": "file:///workspace/pixel-copy.png",
+                "mimeType": "image/png",
+                "blob": "iVBORw0KGgo="
+            }
+        },
+        { "type": "audio", "data": "UklGRg==", "mimeType": "audio/wav" }
+    ]);
+    let content = serde_json::from_value(rich_content.clone()).expect("rich content blocks");
     let result = os
         .prompt(PromptInput {
             session_id: None,
             idempotency_key: Some(String::from("prompt-1")),
-            content: vec![content],
+            content,
         })
         .await
         .expect("durable prompt");
     assert_eq!(result.session_id, "main");
-    assert!(serde_json::to_string(&result.message)
-        .expect("serialize prompt message")
-        .contains(MOCK_PROMPT_TEXT));
+    let result_message = serde_json::to_value(&result.message).expect("serialize prompt message");
+    assert_eq!(result_message["content"], rich_content);
 
     let live = tokio::time::timeout(std::time::Duration::from_secs(5), events.next())
         .await
@@ -177,9 +206,16 @@ async fn durable_session_surface_persists_native_acp_history() {
         .read_history(ReadHistoryInput::default())
         .await
         .expect("history");
-    assert_eq!(history.events.len(), 2, "user and completed agent messages");
+    assert_eq!(
+        history.events.len(),
+        12,
+        "six user and six completed agent message blocks"
+    );
     assert_eq!(history.events[0].sequence, 1);
-    assert_eq!(history.events[1].sequence, 2);
+    assert_eq!(history.events[11].sequence, 12);
+    assert!(serde_json::to_string(&history.events)
+        .expect("serialize rich history")
+        .contains("iVBORw0KGgo="));
 
     os.unload_session(None).await.expect("unload");
     assert_eq!(
@@ -187,7 +223,7 @@ async fn durable_session_surface_persists_native_acp_history() {
             .await
             .expect("SQLite get")
             .latest_sequence,
-        2
+        12
     );
     os.delete_session(None).await.expect("delete");
     assert!(os.get_session(None).await.is_err());

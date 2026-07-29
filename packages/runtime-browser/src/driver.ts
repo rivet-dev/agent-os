@@ -19,7 +19,7 @@ const S_IFREG = 0o100000;
 const S_IFDIR = 0o040000;
 
 const BROWSER_SYSTEM_DRIVER_OPTIONS = Symbol.for(
-	"secure-exec.browserSystemDriverOptions",
+	"agentos.browserSystemDriverOptions",
 );
 
 const LOOPBACK_DNS_NAMES = new Set([

@@ -1,0 +1,13 @@
+{
+  "name": "project-matrix-better-sqlite3-native-blocked",
+  "private": true,
+  "type": "module",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3"
+    ]
+  },
+  "dependencies": {
+    "better-sqlite3": "12.11.1"
+  }
+}

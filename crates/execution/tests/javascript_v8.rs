@@ -917,7 +917,7 @@ fn javascript_execution_uses_v8_runtime_without_spawning_guest_node_binary() {
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
             wasm_module_bytes: None,
-            inline_code: Some(String::from("globalThis.__secureExecRanInV8 = true;")),
+            inline_code: Some(String::from("globalThis.__agentOsRanInV8 = true;")),
         })
         .expect("start JavaScript execution");
 
@@ -963,7 +963,7 @@ fn javascript_execution_virtual_os_identity_comes_from_guest_runtime_not_env() {
                 os_tmpdir: Some(String::from("/vm-tmp")),
                 os_type: Some(String::from("VMType")),
                 os_release: Some(String::from("1.2.3-vm")),
-                os_version: Some(String::from("VM secure-exec build 42")),
+                os_version: Some(String::from("VM agentos build 42")),
                 os_machine: Some(String::from("vm64")),
                 ..Default::default()
             },
@@ -992,7 +992,7 @@ if (os.hostname() !== "vm-hostname") throw new Error(`hostname=${os.hostname()}`
 if (os.tmpdir() !== "/vm-tmp") throw new Error(`tmpdir=${os.tmpdir()}`);
 if (os.type() !== "VMType") throw new Error(`type=${os.type()}`);
 if (os.release() !== "1.2.3-vm") throw new Error(`release=${os.release()}`);
-if (os.version() !== "VM secure-exec build 42") throw new Error(`version=${os.version()}`);
+if (os.version() !== "VM agentos build 42") throw new Error(`version=${os.version()}`);
 if (os.machine() !== "vm64") throw new Error(`machine=${os.machine()}`);
 "#,
             )),
@@ -1044,6 +1044,9 @@ fn javascript_execution_virtualizes_process_metadata_for_inline_v8_code() {
                 r#"
 if (process.argv[1] !== "/root/entry.mjs") throw new Error(`argv=${process.argv[1]}`);
 if (process.argv[2] !== "alpha") throw new Error(`arg2=${process.argv[2]}`);
+const processModule = require("process");
+if (processModule.argv[1] !== "/root/entry.mjs") throw new Error(`module argv=${processModule.argv[1]}`);
+if (processModule.argv[2] !== "alpha") throw new Error(`module arg2=${processModule.argv[2]}`);
 if (process.argv0 !== "") throw new Error(`argv0=${process.argv0}`);
 if (process.cwd() !== "/root") throw new Error(`cwd=${process.cwd()}`);
 if (process.pid !== 4242) throw new Error(`pid=${process.pid}`);
@@ -1058,6 +1061,62 @@ if (process.ppid !== 41) throw new Error(`ppid=${process.ppid}`);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert_eq!(result.exit_code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(result.stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+fn javascript_execution_refreshes_process_cwd_between_reused_context_executions() {
+    let temp = tempdir().expect("create temp dir");
+    let nested = temp.path().join("nested");
+    fs::create_dir_all(&nested).expect("create nested cwd");
+    let mut engine = support::javascript_engine();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js-cwd"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    for (cwd, expected) in [
+        (temp.path(), "/workspace-first"),
+        (nested.as_path(), "/workspace-second"),
+    ] {
+        write_fixture(
+            &cwd.join("capture-cwd.mjs"),
+            r#"
+export const capturedCwd = process.cwd();
+export const capturedPwd = process.env.PWD;
+"#,
+        );
+        let execution = engine
+            .start_execution(StartJavascriptExecutionRequest {
+                limits: Default::default(),
+				argv0: None,
+                guest_runtime: Default::default(),
+                vm_id: String::from("vm-js-cwd"),
+                context_id: context.context_id.clone(),
+                argv: vec![String::from("./entry.mjs")],
+                env: BTreeMap::from([
+                    (String::from("PWD"), String::from(expected)),
+                    (String::from("EXECUTION_MARKER"), format!("marker-{expected}")),
+                ]),
+                cwd: cwd.to_path_buf(),
+                wasm_module_bytes: None,
+                inline_code: Some(format!(
+					r#"
+import {{ capturedCwd, capturedPwd }} from "./capture-cwd.mjs";
+if (capturedCwd !== {expected:?}) throw new Error(`import cwd=${{capturedCwd}}`);
+if (capturedPwd !== {expected:?}) throw new Error(`import PWD=${{capturedPwd}}`);
+if (process.cwd() !== {expected:?}) throw new Error(`cwd=${{process.cwd()}}`);
+if (process.env.PWD !== {expected:?}) throw new Error(`PWD=${{process.env.PWD}}`);
+if (process.env.EXECUTION_MARKER !== {marker:?}) throw new Error(`marker=${{process.env.EXECUTION_MARKER}}`);
+"#,
+					marker = format!("marker-{expected}"),
+                )),
+            })
+            .expect("start JavaScript execution");
+
+        let result = execution.wait().expect("wait for JavaScript execution");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(result.exit_code, 0, "stderr:\n{stderr}");
+    }
 }
 
 fn javascript_execution_process_kill_rejects_invalid_pid_in_guest_js() {
@@ -1590,7 +1649,7 @@ fn javascript_execution_file_url_to_path_accepts_guest_absolute_paths() {
             wasm_module_bytes: None,
             inline_code: Some(String::from(
                 r#"
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const guestPath = "/root/node_modules/@mariozechner/pi-coding-agent/dist/config.js";
 if (fileURLToPath(guestPath) !== guestPath) {
@@ -1600,6 +1659,11 @@ if (fileURLToPath(guestPath) !== guestPath) {
 const href = "file:///root/node_modules/@mariozechner/pi-coding-agent/dist/config.js";
 if (fileURLToPath(href) !== guestPath) {
   throw new Error(`file url mismatch: ${fileURLToPath(href)}`);
+}
+
+const viteInternal = pathToFileURL("/@id//node_modules/vitest/dist/index.js").href;
+if (viteInternal !== "file:///@id/node_modules/vitest/dist/index.js") {
+  throw new Error(`path url mismatch: ${viteInternal}`);
 }
 "#,
             )),
@@ -1829,14 +1893,14 @@ fn javascript_execution_high_resolution_time_opt_in_enables_sub_ms_hrtime() {
             wasm_module_bytes: None,
             inline_code: Some(String::from(
                 r#"
-if (typeof __secureExecHrNowUs !== "function") {
+if (typeof __agentOsHrNowUs !== "function") {
   throw new Error("high-resolution host clock was not installed");
 }
 let sawSubMs = false;
 for (let attempt = 0; attempt < 80 && !sawSubMs; attempt++) {
   const start = process.hrtime.bigint();
-  const until = __secureExecHrNowUs() + 200;
-  while (__secureExecHrNowUs() < until) {}
+  const until = __agentOsHrNowUs() + 200;
+  while (__agentOsHrNowUs() < until) {}
   const delta = process.hrtime.bigint() - start;
   if (delta > 0n && delta < 1000000n) {
     sawSubMs = true;
@@ -1878,7 +1942,7 @@ fn javascript_execution_high_resolution_time_default_off_keeps_coarse_clock() {
             wasm_module_bytes: None,
             inline_code: Some(String::from(
                 r#"
-if (typeof __secureExecHrNowUs !== "undefined") {
+if (typeof __agentOsHrNowUs !== "undefined") {
   throw new Error("high-resolution host clock exists without opt-in");
 }
 for (let attempt = 0; attempt < 20; attempt++) {
@@ -1952,7 +2016,15 @@ if (!workerDenied) {
   throw new Error("node:worker_threads Worker should stay unavailable");
 }
 
-for (const builtin of ["inspector", "cluster"]) {
+const inspector = require("node:inspector");
+if (typeof inspector.Session !== "function" || inspector.url() !== undefined) {
+  throw new Error("node:inspector compatibility shim is not inert");
+}
+const inspectorSession = new inspector.Session();
+inspectorSession.connect();
+inspectorSession.disconnect();
+
+for (const builtin of ["cluster"]) {
   let denied = false;
   try {
     require(`node:${builtin}`);
@@ -1971,7 +2043,12 @@ for (const builtin of ["inspector", "cluster"]) {
         .expect("start JavaScript execution");
 
     let result = execution.wait().expect("wait for JavaScript execution");
-    assert_eq!(result.exit_code, 0);
+    assert_eq!(
+        result.exit_code,
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     assert!(
         result.stderr.is_empty(),
         "unexpected stderr: {:?}",
@@ -1985,12 +2062,22 @@ fn javascript_execution_v8_util_format_with_options_matches_node() {
         &temp.path().join("entry.mjs"),
         r#"
 import { createRequire } from "node:module";
-import { formatWithOptions as namedFormatWithOptions } from "node:util";
+import {
+  formatWithOptions as namedFormatWithOptions,
+  parseEnv as namedParseEnv,
+  stripVTControlCharacters as namedStripVTControlCharacters,
+} from "node:util";
 
 const require = createRequire(import.meta.url);
 const util = require("node:util");
 const circular = {};
 circular.self = circular;
+let stripTypeError;
+try {
+  util.stripVTControlCharacters(42);
+} catch (error) {
+  stripTypeError = { name: error.name, code: error.code };
+}
 
 console.log(JSON.stringify({
   type: typeof util.formatWithOptions,
@@ -1999,6 +2086,13 @@ console.log(JSON.stringify({
   extra: util.formatWithOptions({ colors: false }, "value", { alpha: 1 }, "tail"),
   object: util.formatWithOptions({ colors: false, depth: 1 }, "%O", { nested: { value: 1 } }),
   circular: util.formatWithOptions({}, "%j", circular),
+  stripType: typeof util.stripVTControlCharacters,
+  namedStripType: typeof namedStripVTControlCharacters,
+  stripped: util.stripVTControlCharacters("plain \u001b[31mred\u001b[39m \u001b]8;;https://example.com\u0007link\u001b]8;;\u0007"),
+  stripTypeError,
+  parseEnvType: typeof util.parseEnv,
+  namedParseEnvType: typeof namedParseEnv,
+  parsedEnv: util.parseEnv('BASIC=basic\nSPACED = value with spaces\nEMPTY=\nCOMMENT=value # comment\nDOUBLE="line\\nvalue"\nSINGLE=\'raw\\nvalue\'\nexport EXPORTED=ready\n'),
 }));
 "#,
     );
@@ -2999,16 +3093,18 @@ fn javascript_execution_v8_builtin_wrappers_expose_common_named_exports() {
             inline_code: Some(String::from(
                 r#"
 import { spawn, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, toNamespacedPath } from "node:path";
 
 if (typeof spawn !== "function" || typeof spawnSync !== "function") throw new Error("child_process exports missing");
 if (typeof closeSync !== "function" || typeof existsSync !== "function" || typeof mkdirSync !== "function") throw new Error("fs exports missing");
 if (typeof openSync !== "function" || typeof readFileSync !== "function" || typeof readSync !== "function") throw new Error("fs exports missing");
 if (typeof readdirSync !== "function" || typeof realpathSync !== "function" || typeof statSync !== "function" || typeof writeFileSync !== "function") throw new Error("fs exports missing");
+if (typeof copyFileSync !== "function" || typeof cpSync !== "function" || typeof mkdtempSync !== "function" || typeof rmSync !== "function" || typeof symlinkSync !== "function") throw new Error("fs package exports missing");
 if (typeof homedir !== "function" || typeof platform !== "function") throw new Error("os exports missing");
 if (typeof basename !== "function" || typeof dirname !== "function" || typeof isAbsolute !== "function" || typeof join !== "function" || typeof resolve !== "function") throw new Error("path exports missing");
+if (typeof toNamespacedPath !== "function") throw new Error("path package exports missing");
 "#,
             )),
         })
@@ -3912,6 +4008,29 @@ if (writableOutput !== "hi") {
 }
 if (lifecycle.join(",") !== "write,finish,destroy") {
   throw new Error(`unexpected writable lifecycle: ${lifecycle.join(",")}`);
+}
+
+let webWritableOutput = "";
+const webWritable = Writable.toWeb(new Writable({
+  write(chunk, _encoding, callback) {
+    webWritableOutput += Buffer.from(chunk).toString("utf8");
+    callback();
+  },
+}));
+const webWriter = webWritable.getWriter();
+await webWriter.write(Buffer.from("web-write"));
+await webWriter.close();
+if (webWritableOutput !== "web-write") {
+  throw new Error(`Writable.toWeb lost output: ${webWritableOutput}`);
+}
+
+const webReader = Readable.toWeb(Readable.from([Buffer.from("web-read")])).getReader();
+const webRead = await webReader.read();
+if (webRead.done || Buffer.from(webRead.value).toString("utf8") !== "web-read") {
+  throw new Error(`Readable.toWeb returned the wrong first chunk: ${JSON.stringify(webRead)}`);
+}
+if (!(await webReader.read()).done) {
+  throw new Error("Readable.toWeb did not close after the source ended");
 }
 "#,
     );
@@ -5736,6 +5855,60 @@ console.log(JSON.stringify({ href, value: module.default.value }));
     );
 }
 
+fn javascript_execution_v8_import_meta_resolve_uses_guest_module_resolution() {
+    let temp = tempdir().expect("create temp dir");
+    write_fixture(
+        &temp.path().join("dep.mjs"),
+        r#"
+export default "ok";
+"#,
+    );
+    write_fixture(
+        &temp.path().join("entry.mjs"),
+        r#"
+const relative = import.meta.resolve("./dep.mjs");
+const builtin = import.meta.resolve("node:path");
+console.log(JSON.stringify({ relative, builtin }));
+"#,
+    );
+
+    let mut engine = support::javascript_engine();
+    let context = engine.create_context(CreateJavascriptContextRequest {
+        vm_id: String::from("vm-js"),
+        bootstrap_module: None,
+        compile_cache_root: None,
+    });
+
+    let execution = engine
+        .start_execution(StartJavascriptExecutionRequest {
+            limits: Default::default(),
+            argv0: None,
+            guest_runtime: Default::default(),
+            vm_id: String::from("vm-js"),
+            context_id: context.context_id,
+            argv: vec![String::from("./entry.mjs")],
+            env: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            wasm_module_bytes: None,
+            inline_code: None,
+        })
+        .expect("start JavaScript execution");
+
+    let result = execution.wait().expect("wait for JavaScript execution");
+    let stderr = String::from_utf8(result.stderr).expect("stderr utf8");
+    assert_eq!(result.exit_code, 0, "unexpected stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+
+    let output: Value = serde_json::from_slice(&result.stdout).expect("parse stdout JSON");
+    assert_eq!(output["relative"], "file:///root/dep.mjs");
+    assert!(
+        output["builtin"]
+            .as_str()
+            .is_some_and(|url| !url.is_empty()),
+        "builtin resolution should return a non-empty URL: {output}"
+    );
+}
+
 fn javascript_execution_v8_wasm_instantiate_streaming_never_hangs() {
     let temp = tempdir().expect("create temp dir");
     let mut engine = support::javascript_engine();
@@ -6974,6 +7147,7 @@ fn javascript_v8_suite() {
     javascript_execution_virtual_os_identity_comes_from_guest_runtime_not_env();
     javascript_execution_uses_v8_runtime_without_spawning_guest_node_binary();
     javascript_execution_virtualizes_process_metadata_for_inline_v8_code();
+    javascript_execution_refreshes_process_cwd_between_reused_context_executions();
     javascript_execution_process_kill_rejects_invalid_pid_in_guest_js();
     javascript_execution_preserves_binary_process_stdio_writes();
     javascript_execution_intl_number_format_does_not_require_host_icu();
@@ -7043,6 +7217,7 @@ fn javascript_v8_suite() {
     javascript_execution_v8_net_socket_backpressure_stops_and_resumes_transport_reads();
     javascript_execution_v8_net_close_connect_and_accept_wakes_match_node_ordering();
     javascript_execution_v8_dynamic_import_accepts_file_urls();
+    javascript_execution_v8_import_meta_resolve_uses_guest_module_resolution();
     javascript_execution_v8_wasm_instantiate_streaming_never_hangs();
     javascript_execution_v8_structured_clone_rebinds_to_sandbox_realm();
     js_runtime_node_platform_keeps_full_node_surface();

@@ -107,7 +107,7 @@ packed files, so the JSON never ships into the VM and the metadata never travels
 command/WASM packages it is **generated** for you (name from `package.json`); for agents you
 author the `agent` block (or `agentos-toolchain pack --agent <cmd>` writes it).
 
-```jsonc
+```json
 {
   "name": "my-agent",            // → /opt/agentos/<name>
   "agent": {                     // optional — also exposes an agent session

@@ -15,7 +15,6 @@ import {
 	faHardDrive,
 	faNodeJs,
 	faGauge,
-	faLink,
 	faTowerBroadcast,
 	faArrowsLeftRight,
 	faDiagramNext,
@@ -68,6 +67,15 @@ export const docsLandings: Record<string, DocsLandingData> = {
 				],
 			},
 			{
+				title: "Code Execution",
+				items: [
+					{ title: "AI Agent Code Exec", href: "/cookbooks/js-ai-agent-code-exec", icon: faRobot, description: "Execute generated code with explicit limits." },
+					{ title: "Code Mode", href: "/cookbooks/js-code-mode", icon: faTerminal, description: "Let generated code orchestrate narrow bindings." },
+					{ title: "Dev Servers", href: "/cookbooks/js-dev-servers", icon: faGlobe, description: "Run and drive a long-lived guest server." },
+					{ title: "Plugin Systems", href: "/cookbooks/js-plugin-systems", icon: faWrench, description: "Evaluate plugins inside a restricted VM." },
+				],
+			},
+			{
 				title: "Sessions & Permissions",
 				items: [
 					{ title: "Sessions", href: "/cookbooks/sessions", icon: faMessages, description: "Session lifecycle." },
@@ -83,7 +91,6 @@ export const docsLandings: Record<string, DocsLandingData> = {
 				items: [
 					{ title: "Cron", href: "/cookbooks/cron", icon: faClock, description: "Scheduled jobs." },
 					{ title: "Workflows", href: "/cookbooks/workflows", icon: faDiagramNext, description: "Durable workflows." },
-					{ title: "Webhooks", href: "/cookbooks/webhooks", icon: faLink, description: "Webhook handling." },
 				],
 			},
 			{

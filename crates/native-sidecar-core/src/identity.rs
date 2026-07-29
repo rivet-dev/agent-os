@@ -42,13 +42,13 @@ pub fn shared_guest_runtime_identity(
         os_totalmem: virtual_os_totalmem_bytes(resource_limits),
         os_freemem: virtual_os_freemem_bytes(resource_limits),
         os_homedir: user.homedir.clone(),
-        os_hostname: String::from("secure-exec"),
+        os_hostname: String::from("agentos"),
         os_shell: user.shell.clone(),
         os_user: user.username.clone(),
         os_tmpdir: String::from("/tmp"),
         os_type: String::from("Linux"),
-        os_release: String::from("6.8.0-secure-exec"),
-        os_version: String::from("#1 SMP PREEMPT_DYNAMIC secure-exec"),
+        os_release: String::from("6.8.0-agentos"),
+        os_version: String::from("#1 SMP PREEMPT_DYNAMIC agentos"),
         os_machine: String::from("x86_64"),
     }
 }
@@ -86,13 +86,13 @@ mod tests {
         assert_eq!(identity.os_cpu_count, 6);
         assert_eq!(identity.os_totalmem, 512 * 1024 * 1024);
         assert_eq!(identity.os_homedir, "/Users/runner");
-        assert_eq!(identity.os_hostname, "secure-exec");
+        assert_eq!(identity.os_hostname, "agentos");
         assert_eq!(identity.os_shell, "/bin/zsh");
         assert_eq!(identity.os_user, "runner");
         assert_eq!(identity.os_tmpdir, "/tmp");
         assert_eq!(identity.os_type, "Linux");
-        assert_eq!(identity.os_release, "6.8.0-secure-exec");
-        assert_eq!(identity.os_version, "#1 SMP PREEMPT_DYNAMIC secure-exec");
+        assert_eq!(identity.os_release, "6.8.0-agentos");
+        assert_eq!(identity.os_version, "#1 SMP PREEMPT_DYNAMIC agentos");
         assert_eq!(identity.os_machine, "x86_64");
     }
 }

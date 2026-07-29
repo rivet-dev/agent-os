@@ -1,5 +1,5 @@
 Expose the socket option and poll constants needed by POSIX networking
-applications when secure-exec routes sockets through host_net on WASI p1.
+applications when agentos routes sockets through host_net on WASI p1.
 
 This keeps the WASI-native AF_/SOCK_ values, but publishes the common
 socket-level constants and non-conflicting extra poll bits that upstream
@@ -34,7 +34,7 @@ software such as curl expects to find in <sys/socket.h> and <poll.h>.
  #endif // __wasilibc_use_wasip2
  
 +/*
-+ * secure-exec exposes a POSIX-style socket layer over host_net for WASI p1.
++ * agentos exposes a POSIX-style socket layer over host_net for WASI p1.
 + * Keep the WASI-native domain/type values below, but expose the common
 + * socket option and message flag constants that networking applications
 + * expect to find in <sys/socket.h>.

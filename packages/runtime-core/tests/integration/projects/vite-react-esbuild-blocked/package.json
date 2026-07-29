@@ -1,0 +1,17 @@
+{
+	"name": "project-matrix-vite-react-esbuild-blocked",
+	"private": true,
+	"type": "commonjs",
+	"dependencies": {
+		"@vitejs/plugin-react": "4.3.1",
+		"react": "18.3.1",
+		"react-dom": "18.3.1",
+		"vite": "5.4.2"
+	},
+	"pnpm": {
+		"overrides": {
+			"esbuild": "npm:esbuild-wasm@0.21.5",
+			"rollup": "npm:@rollup/wasm-node@4.61.0"
+		}
+	}
+}

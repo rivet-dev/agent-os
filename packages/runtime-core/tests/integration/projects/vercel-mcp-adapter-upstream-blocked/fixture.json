@@ -1,0 +1,5 @@
+{
+  "entry": "src/index.js",
+  "expectation": "skip",
+  "reason": "@vercel/mcp-adapter 0.3.2 publishes package metadata but no resolvable root entrypoint, including on host Node"
+}

@@ -1,0 +1,5 @@
+{
+  "entry": "node_modules/yarn/bin/yarn.js",
+  "args": ["--version"],
+  "expectation": "pass"
+}

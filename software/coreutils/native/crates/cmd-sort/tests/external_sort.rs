@@ -29,7 +29,7 @@ impl Drop for TestDir {
     }
 }
 
-// The workspace patches ctrlc to the secure-exec stub, which reports
+// The workspace patches ctrlc to the agentos stub, which reports
 // ErrorKind::Unsupported for signal registration on every target. Forcing an
 // external-sort spill into a temp directory exercises uu_sort's
 // ensure_signal_handler_installed soft-skip path. Before the soft skip this

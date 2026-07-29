@@ -1,0 +1,8 @@
+{
+  "name": "turbo-native-blocked",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "turbo": "2.10.5"
+  }
+}

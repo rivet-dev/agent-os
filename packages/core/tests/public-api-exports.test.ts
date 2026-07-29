@@ -2,47 +2,52 @@ import { describe, expect, test } from "vitest";
 import * as publicApi from "../src/index.js";
 import {
 	AgentOs,
+	type AgentOsLimits,
 	AgentOsSidecar,
-	CronManager,
-	KernelError,
-	MAX_BINDING_DESCRIPTION_LENGTH,
-	InvalidScheduleError,
-	PastScheduleError,
-	TimerScheduleDriver,
 	agentOsLimitsSchema,
 	agentOsOptionsSchema,
+	binding,
+	bindingSchema,
+	bindings,
+	bindingsSchema,
+	type ContextDescriptor,
+	CronManager,
 	createHostDirBackend,
 	createSnapshotExport,
 	defineSoftware,
-	isPackageDescriptor,
-	OPT_AGENTOS_BIN,
-	OPT_AGENTOS_ROOT,
-	binding,
-	bindingSchema,
-	mountConfigSchema,
-	nodeModulesMount,
-	parseAgentOsOptions,
-	rootFilesystemConfigSchema,
-	bindings,
-	bindingsSchema,
-	validateBindings,
-	type AgentOsLimits,
 	type ExecOptions,
 	type HostDirMountPluginConfig,
+	InvalidScheduleError,
+	isPackageDescriptor,
+	KernelError,
 	type KernelExecOptions,
 	type KernelExecResult,
 	type KernelSpawnOptions,
+	type LanguageSpawnOptions,
+	MAX_BINDING_DESCRIPTION_LENGTH,
 	type MountConfigJsonPrimitive,
+	mountConfigSchema,
 	type NodeModulesMountConfig,
-	type OpenShellOptions,
+	nodeModulesMount,
+	OPT_AGENTOS_BIN,
+	OPT_AGENTOS_ROOT,
 	type OpenSessionInput,
+	type OpenShellOptions,
+	PastScheduleError,
 	type PermissionResponse,
+	type ProcessDescriptor,
+	type ProcessExit,
 	type PromptResult,
+	parseAgentOsOptions,
+	rootFilesystemConfigSchema,
 	type SessionCapabilities,
 	type SessionInfo,
 	type SessionStreamEntry,
+	type SpawnOptions,
 	type StdioChannel,
+	TimerScheduleDriver,
 	type TimingMitigation,
+	validateBindings,
 } from "../src/index.js";
 
 describe("root public API exports", () => {
@@ -52,6 +57,7 @@ describe("root public API exports", () => {
 	});
 	test("re-exports the main public value surface from the root entrypoint", () => {
 		expect(AgentOs).toBeTypeOf("function");
+		expect(AgentOs.prototype.pread).toBeTypeOf("function");
 		expect(AgentOsSidecar).toBeTypeOf("function");
 		expect(CronManager).toBeTypeOf("function");
 		expect(TimerScheduleDriver).toBeTypeOf("function");
@@ -63,6 +69,7 @@ describe("root public API exports", () => {
 		expect(agentOsLimitsSchema.safeParse({}).success).toBe(true);
 		expect(
 			agentOsLimitsSchema.safeParse({
+				tls: { maxBufferedBytes: 16 * 1024 * 1024 },
 				process: {
 					maxSpawnFileActions: 4096,
 					maxSpawnFileActionBytes: 1024 * 1024,
@@ -108,21 +115,26 @@ describe("root public API exports", () => {
 
 	test("re-exports current public SDK types from the root entrypoint", () => {
 		void (null as AgentOsLimits | null);
+		void (null as ContextDescriptor | null);
 		void (null as ExecOptions | null);
 		void (null as HostDirMountPluginConfig | null);
 		void (null as KernelExecOptions | null);
 		void (null as KernelExecResult | null);
 		void (null as KernelSpawnOptions | null);
+		void (null as LanguageSpawnOptions | null);
 		void (null as MountConfigJsonPrimitive | null);
 		void (null as NodeModulesMountConfig | null);
 		void (null as OpenShellOptions | null);
 		void (null as OpenSessionInput | null);
 		void (null as PermissionResponse | null);
 		void (null as PromptResult | null);
+		void (null as ProcessDescriptor | null);
+		void (null as ProcessExit | null);
 		void (null as SessionCapabilities | null);
 		void (null as SessionInfo | null);
 		void (null as SessionStreamEntry | null);
 		void (null as StdioChannel | null);
+		void (null as SpawnOptions | null);
 		void (null as TimingMitigation | null);
 
 		expect(true).toBe(true);

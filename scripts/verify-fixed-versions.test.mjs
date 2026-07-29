@@ -26,6 +26,39 @@ test("passes on the current tree", () => {
 	runGate();
 });
 
+test("ignores generated package caches", () => {
+	const root = mkdtempSync(join(tmpdir(), "fixed-versions-"));
+	try {
+		writeFileSync(join(root, "Cargo.toml"), '[workspace.package]\nversion = "0.0.1"\n');
+		mkdirSync(join(root, "packages", "runtime", ".cache", "fixture"), {
+			recursive: true,
+		});
+		writeFileSync(
+			join(root, "packages", "runtime", ".cache", "fixture", "package.json"),
+			JSON.stringify({ name: "third-party-fixture", version: "9.9.9" }),
+		);
+		mkdirSync(join(root, "examples", "app", ".output", "server", "node_modules", "dependency"), {
+			recursive: true,
+		});
+		writeFileSync(
+			join(
+				root,
+				"examples",
+				"app",
+				".output",
+				"server",
+				"node_modules",
+				"dependency",
+				"package.json",
+			),
+			JSON.stringify({ name: "third-party-output", version: "9.9.9" }),
+		);
+		runGate(root);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("fails when a product package drifts off 0.0.1", () => {
 	const root = mkdtempSync(join(tmpdir(), "fixed-versions-"));
 	try {

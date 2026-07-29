@@ -1,0 +1,50 @@
+{
+	"name": "@rivet-dev/agentos-eve",
+	"version": "0.0.1",
+	"description": "agentOS sandbox backend for Vercel Eve",
+	"type": "module",
+	"license": "Apache-2.0",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"files": ["dist", "README.md"],
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"default": "./dist/index.js"
+		}
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"scripts": {
+		"build": "tsc",
+		"check-types": "tsc --noEmit",
+		"test": "vitest run"
+	},
+	"peerDependencies": {
+		"@rivet-dev/agentos": ">=0.0.1",
+		"@rivet-dev/agentos-core": ">=0.0.1",
+		"eve": ">=0.27.0 <0.28.0"
+	},
+	"peerDependenciesMeta": {
+		"@rivet-dev/agentos": {
+			"optional": true
+		},
+		"@rivet-dev/agentos-core": {
+			"optional": true
+		}
+	},
+	"devDependencies": {
+		"@rivet-dev/agentos": "workspace:*",
+		"@rivet-dev/agentos-core": "workspace:*",
+		"@types/node": "^24.0.0",
+		"ai": "7.0.26",
+		"eve": "0.27.0",
+		"typescript": "^5.7.2",
+		"vitest": "^2.1.8"
+	},
+	"engines": {
+		"node": ">=24.0.0"
+	}
+}

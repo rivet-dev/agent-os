@@ -40,7 +40,6 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Notify;
-use tokio::time;
 
 // Cadence of sidecar→host heartbeat frames. The host treats sustained inbound
 // silence (several missed beats) as a dead or wedged sidecar and tears the
@@ -419,10 +418,9 @@ impl ProtocolOutputQueue {
         }
         queue.push_back(frame);
         drop(state);
+        self.available.notify_one();
         if control {
             self.control_available.notify_one();
-        } else {
-            self.available.notify_one();
         }
         Ok(())
     }
@@ -434,6 +432,31 @@ impl ProtocolOutputQueue {
         });
         loop {
             if let Some(frame) = state.ordinary.pop_front() {
+                return Some(frame);
+            }
+            if !state.open {
+                return None;
+            }
+            state = self.available.wait(state).unwrap_or_else(|poisoned| {
+                eprintln!(
+                    "ERR_AGENTOS_PROTOCOL_OUTPUT_QUEUE_POISONED: recovering output queue after wait"
+                );
+                poisoned.into_inner()
+            });
+        }
+    }
+
+    fn recv_combined(&self) -> Option<EncodedProtocolFrame> {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| {
+            eprintln!("ERR_AGENTOS_PROTOCOL_OUTPUT_QUEUE_POISONED: recovering output queue");
+            poisoned.into_inner()
+        });
+        loop {
+            if let Some(frame) = state
+                .control
+                .pop_front()
+                .or_else(|| state.ordinary.pop_front())
+            {
                 return Some(frame);
             }
             if !state.open {
@@ -703,9 +726,26 @@ pub fn run(control_fd: OwnedFd) -> Result<(), Box<dyn Error>> {
     run_with_extensions(Vec::new(), control_fd)
 }
 
+pub fn run_combined() -> Result<(), Box<dyn Error>> {
+    run_combined_with_extensions(Vec::new())
+}
+
 pub fn run_with_extensions(
     extensions: Vec<Box<dyn Extension>>,
     control_fd: OwnedFd,
+) -> Result<(), Box<dyn Error>> {
+    run_with_optional_control(extensions, Some(control_fd))
+}
+
+pub fn run_combined_with_extensions(
+    extensions: Vec<Box<dyn Extension>>,
+) -> Result<(), Box<dyn Error>> {
+    run_with_optional_control(extensions, None)
+}
+
+fn run_with_optional_control(
+    extensions: Vec<Box<dyn Extension>>,
+    control_fd: Option<OwnedFd>,
 ) -> Result<(), Box<dyn Error>> {
     let config = NativeSidecarConfig {
         compile_cache_root: Some(default_compile_cache_root()),
@@ -727,15 +767,21 @@ async fn run_async(
     extensions: Vec<Box<dyn Extension>>,
     config: NativeSidecarConfig,
     runtime_context: agentos_runtime::RuntimeContext,
-    control_fd: OwnedFd,
+    control_fd: Option<OwnedFd>,
 ) -> Result<(), Box<dyn Error>> {
     let callback_limits = FrameSidecarRequestLimits::from_config(&config);
     let protocol = config.runtime.protocol.clone();
     let max_frame_bytes = config.max_frame_bytes;
     validate_protocol_transport_config(&protocol, max_frame_bytes)?;
     let codec = WireFrameCodec::new(max_frame_bytes);
-    let control_stream = inherited_control_stream(control_fd)?;
-    let (mut control_reader, mut control_writer) = control_stream.into_split();
+    let control_stream = control_fd.map(inherited_control_stream).transpose()?;
+    let (mut control_reader, mut control_writer) = match control_stream {
+        Some(stream) => {
+            let (reader, writer) = stream.into_split();
+            (Some(reader), Some(writer))
+        }
+        None => (None, None),
+    };
     let metrics = runtime_context.metrics().clone();
     let ingress_budget = ProtocolBudget::new(
         ProtocolBudgetConfig {
@@ -847,10 +893,15 @@ async fn run_async(
     let reader_codec = codec.clone();
     let reader_frame_writer = frame_writer.clone();
     let writer_error_tx = write_error_tx.clone();
+    let combined_stdio = control_writer.is_none();
     // AGENTOS_THREAD_SITE: constant-stdio-writer
     thread::spawn(move || {
         let mut writer = io::BufWriter::new(io::stdout());
-        while let Some(frame) = output_queue.recv_ordinary() {
+        while let Some(frame) = if combined_stdio {
+            output_queue.recv_combined()
+        } else {
+            output_queue.recv_ordinary()
+        } {
             if let Err(error) = write_encoded_frame(&mut writer, &frame.bytes) {
                 if let Err(send_error) = writer_error_tx.try_send(error.to_string()) {
                     eprintln!(
@@ -862,96 +913,134 @@ async fn run_async(
             }
         }
     });
-    let control_output_queue = Arc::clone(&frame_writer.output);
-    let control_write_error_tx = write_error_tx.clone();
-    runtime_context.spawn(agentos_runtime::TaskClass::Runtime, async move {
-        while let Some(frame) = control_output_queue.recv_control().await {
-            let result = async {
-                control_writer.write_all(&frame.bytes).await?;
-                control_writer.flush().await
-            }
-            .await;
-            if let Err(error) = result {
-                if let Err(send_error) = control_write_error_tx.try_send(error.to_string()) {
-                    eprintln!(
-                        "ERR_AGENTOS_TRANSPORT_ERROR_QUEUE: could not enqueue control writer error: {send_error}"
-                    );
+    if let Some(mut control_writer) = control_writer.take() {
+        let control_output_queue = Arc::clone(&frame_writer.output);
+        let control_write_error_tx = write_error_tx.clone();
+        runtime_context.spawn(agentos_runtime::TaskClass::Runtime, async move {
+            while let Some(frame) = control_output_queue.recv_control().await {
+                let result = async {
+                    control_writer.write_all(&frame.bytes).await?;
+                    control_writer.flush().await
                 }
-                control_output_queue.close();
-                break;
+                .await;
+                if let Err(error) = result {
+                    if let Err(send_error) = control_write_error_tx.try_send(error.to_string()) {
+                        eprintln!(
+                            "ERR_AGENTOS_TRANSPORT_ERROR_QUEUE: could not enqueue control writer error: {send_error}"
+                        );
+                    }
+                    control_output_queue.close();
+                    break;
+                }
             }
-        }
-    })?;
-    let _heartbeat_task =
-        spawn_heartbeat_task(&runtime_context, frame_writer.clone(), HEARTBEAT_INTERVAL)?;
+        })?;
+    }
+    let _heartbeat_thread = spawn_heartbeat_thread(frame_writer.clone(), HEARTBEAT_INTERVAL);
 
-    // AGENTOS_THREAD_SITE: constant-stdio-reader
-    thread::spawn({
-        let read_error_tx = write_error_tx.clone();
-        move || {
-            let mut stdin = io::stdin();
-            loop {
-                let frame = match read_frame(&reader_codec, &mut stdin) {
-                    Ok(Some(frame)) => frame,
-                    Ok(None) => break,
-                    Err(error) => {
-                        if let Err(send_error) = read_error_tx.try_send(error.to_string()) {
-                            eprintln!(
-                                "ERR_AGENTOS_TRANSPORT_ERROR_QUEUE: could not enqueue stdin reader error: {send_error}"
-                            );
+    if let Some(mut control_reader) = control_reader.take() {
+        // AGENTOS_THREAD_SITE: constant-stdio-reader
+        thread::spawn({
+            let read_error_tx = write_error_tx.clone();
+            move || {
+                let mut stdin = io::stdin();
+                loop {
+                    let frame = match read_frame(&reader_codec, &mut stdin) {
+                        Ok(Some(frame)) => frame,
+                        Ok(None) => break,
+                        Err(error) => {
+                            if let Err(send_error) = read_error_tx.try_send(error.to_string()) {
+                                eprintln!(
+                                    "ERR_AGENTOS_TRANSPORT_ERROR_QUEUE: could not enqueue stdin reader error: {send_error}"
+                                );
+                            }
+                            break;
                         }
+                    };
+                    if matches!(
+                        route_decoded_stdin_frame(
+                            frame,
+                            &stdin_tx,
+                            &reader_frame_writer,
+                            &ingress_budget,
+                        ),
+                        StdinReaderFlow::Stop
+                    ) {
+                        break;
+                    }
+                    stdin_gauge
+                        .observe_depth(stdin_tx.max_capacity().saturating_sub(stdin_tx.capacity()));
+                }
+            }
+        });
+        let control_reader_codec = codec.clone();
+        let control_reader_transport = callback_transport.clone();
+        let control_read_error_tx = write_error_tx.clone();
+        runtime_context.spawn(agentos_runtime::TaskClass::Runtime, async move {
+            loop {
+                let frame = match read_frame_async(&control_reader_codec, &mut control_reader).await
+                {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => {
+                        let _ = control_read_error_tx
+                            .try_send(String::from("response/control stream closed"));
+                        break;
+                    }
+                    Err(error) => {
+                        let _ = control_read_error_tx.try_send(error.to_string());
                         break;
                     }
                 };
                 if matches!(
-                    route_decoded_stdin_frame(
+                    route_decoded_control_frame(
                         frame,
-                        &stdin_tx,
-                        &reader_frame_writer,
-                        &ingress_budget,
+                        &control_reader_transport,
+                        &stdin_control_tx,
+                        &shutdown_tx,
+                        &control_ingress_budget,
                     ),
                     StdinReaderFlow::Stop
                 ) {
                     break;
                 }
-                // Sample inbound queue depth so the centralized tracker can warn
-                // before host requests back up on the sidecar.
-                stdin_gauge
-                    .observe_depth(stdin_tx.max_capacity().saturating_sub(stdin_tx.capacity()));
             }
-        }
-    });
-    let control_reader_codec = codec.clone();
-    let control_reader_transport = callback_transport.clone();
-    let control_read_error_tx = write_error_tx.clone();
-    runtime_context.spawn(agentos_runtime::TaskClass::Runtime, async move {
-        loop {
-            let frame = match read_frame_async(&control_reader_codec, &mut control_reader).await {
-                Ok(Some(frame)) => frame,
-                Ok(None) => {
-                    let _ = control_read_error_tx
-                        .try_send(String::from("response/control stream closed"));
-                    break;
+        })?;
+    } else {
+        // Rivet's V8 child-process bridge cannot currently inherit fd 3. Keep
+        // the logical lane priorities, but multiplex both lanes over stdio.
+        thread::spawn({
+            let read_error_tx = write_error_tx.clone();
+            move || {
+                let mut stdin = io::stdin();
+                loop {
+                    let frame = match read_frame(&reader_codec, &mut stdin) {
+                        Ok(Some(frame)) => frame,
+                        Ok(None) => break,
+                        Err(error) => {
+                            let _ = read_error_tx.try_send(error.to_string());
+                            break;
+                        }
+                    };
+                    if matches!(
+                        route_decoded_combined_frame(
+                            frame,
+                            &stdin_tx,
+                            &callback_transport,
+                            &stdin_control_tx,
+                            &shutdown_tx,
+                            &reader_frame_writer,
+                            &ingress_budget,
+                            &control_ingress_budget,
+                        ),
+                        StdinReaderFlow::Stop
+                    ) {
+                        break;
+                    }
+                    stdin_gauge
+                        .observe_depth(stdin_tx.max_capacity().saturating_sub(stdin_tx.capacity()));
                 }
-                Err(error) => {
-                    let _ = control_read_error_tx.try_send(error.to_string());
-                    break;
-                }
-            };
-            if matches!(
-                route_decoded_control_frame(
-                    frame,
-                    &control_reader_transport,
-                    &stdin_control_tx,
-                    &shutdown_tx,
-                    &control_ingress_budget,
-                ),
-                StdinReaderFlow::Stop
-            ) {
-                break;
             }
-        }
-    })?;
+        });
+    }
 
     flush_sidecar_requests(&mut sidecar, &frame_writer)?;
     let mut pending_frame: Option<AccountedProtocolFrame> = None;
@@ -1135,9 +1224,14 @@ async fn handle_protocol_frame(
     } = accounted_frame;
     match frame {
         ProtocolFrame::RequestFrame(request) => {
-            let (dispatch, extra_responses) =
-                dispatch_with_prompt_interrupt(sidecar, request.clone(), stdin_rx, pending_frame)
-                    .await?;
+            let dispatch = dispatch_with_prompt_interrupt(
+                sidecar,
+                request.clone(),
+                stdin_rx,
+                pending_frame,
+                write_tx,
+            )
+            .await?;
             track_session_state(
                 &dispatch.response.payload,
                 active_sessions,
@@ -1145,9 +1239,6 @@ async fn handle_protocol_frame(
             );
 
             send_output_frame(write_tx, ProtocolFrame::ResponseFrame(dispatch.response))?;
-            for response in extra_responses {
-                send_output_frame(write_tx, ProtocolFrame::ResponseFrame(response))?;
-            }
             for event in dispatch.events {
                 send_output_frame(write_tx, ProtocolFrame::EventFrame(event))?;
             }
@@ -1192,35 +1283,40 @@ async fn dispatch_with_prompt_interrupt(
     request: RequestFrame,
     stdin_rx: &mut Receiver<Result<Option<AccountedProtocolFrame>, String>>,
     pending_frame: &mut Option<AccountedProtocolFrame>,
-) -> Result<(WireDispatchResult, Vec<ResponseFrame>), Box<dyn Error>> {
+    write_tx: &ProtocolFrameWriter,
+) -> Result<WireDispatchResult, Box<dyn Error>> {
     let Some(blocking_request) = blocking_extension_request(sidecar, &request) else {
-        return Ok((sidecar.dispatch_wire(request).await?, Vec::new()));
+        return Ok(sidecar.dispatch_wire(request).await?);
     };
 
     let mut dispatch = Box::pin(sidecar.dispatch_wire(request.clone()));
-    let mut extra_responses = Vec::new();
     loop {
         tokio::select! {
-            result = dispatch.as_mut() => return Ok((result?, extra_responses)),
+            result = dispatch.as_mut() => return Ok(result?),
             maybe_frame = stdin_rx.recv() => {
                 let frame = decode_stdin_frame(maybe_frame)?;
                 let Some(frame) = frame else {
-                    return Ok((dispatch.await?, extra_responses));
+                    return Ok(dispatch.await?);
                 };
                 if let Some(interrupt) = extension_interrupt_response(&blocking_request, &request, &frame.frame) {
                     if let Some(response) = interrupt.interrupting_response {
-                        extra_responses.push(response);
+                        // Permission and cancellation requests are control-lane
+                        // interrupts. Their effects are applied synchronously by
+                        // `interrupt_blocking_request`, so acknowledge them now
+                        // instead of buffering the response until the active prompt
+                        // eventually completes.
+                        send_output_frame(write_tx, ProtocolFrame::ResponseFrame(response))?;
                     } else {
                         *pending_frame = Some(frame);
                     }
                     if interrupt.interrupt_active {
                         drop(dispatch);
-                        return Ok((interrupt.interrupted_dispatch, extra_responses));
+                        return Ok(interrupt.interrupted_dispatch);
                     }
                     continue;
                 }
                 *pending_frame = Some(frame);
-                return Ok((dispatch.await?, extra_responses));
+                return Ok(dispatch.await?);
             }
         }
     }
@@ -1587,6 +1683,40 @@ fn route_decoded_control_frame(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn route_decoded_combined_frame(
+    decoded: DecodedProtocolFrame,
+    ordinary_sender: &Sender<Result<Option<AccountedProtocolFrame>, String>>,
+    callback_transport: &FrameSidecarRequestTransport,
+    control_sender: &Sender<AccountedProtocolFrame>,
+    shutdown_sender: &Sender<wire::ControlFrame>,
+    overload_writer: &ProtocolFrameWriter,
+    ingress_budget: &ProtocolBudget,
+    control_budget: &ProtocolBudget,
+) -> StdinReaderFlow {
+    match &decoded.frame {
+        ProtocolFrame::RequestFrame(_) => {
+            route_decoded_stdin_frame(decoded, ordinary_sender, overload_writer, ingress_budget)
+        }
+        ProtocolFrame::SidecarResponseFrame(_) | ProtocolFrame::ControlFrame(_) => {
+            route_decoded_control_frame(
+                decoded,
+                callback_transport,
+                control_sender,
+                shutdown_sender,
+                control_budget,
+            )
+        }
+        frame => {
+            eprintln!(
+                "ERR_AGENTOS_PROTOCOL_WRONG_LANE: host cannot write {} frame",
+                frame_kind(frame)
+            );
+            StdinReaderFlow::Stop
+        }
+    }
+}
+
 fn reject_stdin_ingress_frame(
     frame: ProtocolFrame,
     error: ProtocolLimitError,
@@ -1684,19 +1814,16 @@ fn send_output_frame(writer: &ProtocolFrameWriter, frame: ProtocolFrame) -> Resu
 /// `interval` for as long as the stdout writer is alive. This is the host's
 /// liveness signal: it resets the host's silence watchdog, so a host that sees
 /// no frames at all for several intervals can conclude the sidecar process is
-/// dead or wedged rather than merely busy. Runs on the process SidecarRuntime.
-fn spawn_heartbeat_task(
-    runtime: &agentos_runtime::RuntimeContext,
+/// dead or wedged rather than merely busy. Runs on a dedicated thread so a
+/// long synchronous dispatch cannot starve the heartbeat and trigger a false
+/// host-side silence timeout.
+fn spawn_heartbeat_thread(
     write_tx: ProtocolFrameWriter,
     interval: Duration,
-) -> Result<tokio::task::JoinHandle<()>, agentos_runtime::TaskSpawnError> {
-    runtime.spawn(agentos_runtime::TaskClass::Runtime, async move {
-        let mut ticker = time::interval(interval);
-        ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-        // The old thread slept before its first heartbeat; retain that ordering.
-        ticker.tick().await;
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
         loop {
-            ticker.tick().await;
+            thread::sleep(interval);
             let frame = match crate::service::structured_event_frame(
                 HEARTBEAT_CONNECTION_ID,
                 "heartbeat",
@@ -1751,7 +1878,7 @@ mod tests {
     use crate::{ExtensionContext, ExtensionFuture, ExtensionInterruptResponse, ExtensionResponse};
     use std::io::Cursor;
 
-    const TEST_EXTENSION_NAMESPACE: &str = "dev.rivet.secure-exec.test.blocking";
+    const TEST_EXTENSION_NAMESPACE: &str = "dev.rivet.agentos.test.blocking";
 
     fn test_protocol_budget(
         max_frames: usize,
@@ -1812,12 +1939,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn heartbeat_task_emits_periodic_structured_heartbeat_frames() {
         let (write_tx, write_rx) = test_frame_writer(16);
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("initialize heartbeat test process runtime")
-                .context();
-        let _heartbeat_task = spawn_heartbeat_task(&runtime, write_tx, Duration::from_millis(5))
-            .expect("heartbeat task admission");
+        let _heartbeat_thread = spawn_heartbeat_thread(write_tx, Duration::from_millis(5));
 
         // Two beats prove the emitter is periodic, not one-shot.
         for beat in 0..2 {

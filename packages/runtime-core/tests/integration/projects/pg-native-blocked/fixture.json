@@ -1,0 +1,6 @@
+{
+  "entry": "src/index.js",
+  "expectation": "skip",
+  "reason": "The host libpq binding links to a newer glibc than the compatibility runner; pg-native remains a known native-addon limitation.",
+  "packageManager": "npm"
+}

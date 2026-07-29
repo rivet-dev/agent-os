@@ -4,8 +4,8 @@ use super::vfs::{
     VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem, VirtualStat, VirtualUtimeSpec,
 };
 use std::any::Any;
-use std::collections::BTreeSet;
 use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 use web_time::{SystemTime, UNIX_EPOCH};
 
@@ -281,12 +281,24 @@ pub trait MountedFileSystem: Any {
     fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>>;
     fn pwrite(&mut self, path: &str, content: Vec<u8>, offset: u64) -> VfsResult<()> {
         let mut existing = self.read_file(path)?;
-        let start = usize::try_from(offset)
-            .map_err(|_| VfsError::new("EINVAL", "pwrite offset is too large"))?;
-        let end = start
-            .checked_add(content.len())
-            .ok_or_else(|| VfsError::new("EINVAL", "pwrite length overflow"))?;
-        existing.resize(end.max(existing.len()), 0);
+        let start = usize::try_from(offset).map_err(|_| {
+            VfsError::new("EINVAL", format!("pwrite offset is too large: {offset}"))
+        })?;
+        if start > existing.len() {
+            existing.resize(start, 0);
+        }
+        let end = start.checked_add(content.len()).ok_or_else(|| {
+            VfsError::new(
+                "EINVAL",
+                format!(
+                    "pwrite range overflows usize: offset={offset}, length={}",
+                    content.len()
+                ),
+            )
+        })?;
+        if end > existing.len() {
+            existing.resize(end, 0);
+        }
         existing[start..end].copy_from_slice(&content);
         self.write_file(path, existing)
     }
@@ -1140,6 +1152,7 @@ struct MountRegistration {
 
 pub struct MountTable {
     mounts: Vec<MountRegistration>,
+    mount_indices: BTreeMap<String, usize>,
 }
 
 impl MountTable {
@@ -1158,6 +1171,7 @@ impl MountTable {
                 cached_usage: None,
                 filesystem: Box::new(MountedVirtualFileSystem::new(root_fs)),
             }],
+            mount_indices: BTreeMap::from([(String::from("/"), 0)]),
         }
     }
 
@@ -1182,6 +1196,7 @@ impl MountTable {
                 cached_usage: None,
                 filesystem,
             }],
+            mount_indices: BTreeMap::from([(String::from("/"), 0)]),
         }
     }
 
@@ -1261,6 +1276,7 @@ impl MountTable {
         });
         self.mounts
             .sort_by_key(|mount| std::cmp::Reverse(mount.path.len()));
+        self.rebuild_mount_indices();
         Ok(())
     }
 
@@ -1294,6 +1310,7 @@ impl MountTable {
         };
 
         let mut mount = self.mounts.remove(index);
+        self.rebuild_mount_indices();
         mount.filesystem.shutdown()?;
         Ok(())
     }
@@ -1562,27 +1579,44 @@ impl MountTable {
 
     fn resolve_index(&self, full_path: &str) -> VfsResult<(usize, String)> {
         let normalized = normalize_path(full_path);
-        for (index, mount) in self.mounts.iter().enumerate() {
-            if mount.path == "/" {
-                return Ok((index, normalized));
+        let mut candidate = normalized.as_str();
+        loop {
+            if let Some(index) = self.mount_indices.get(candidate).copied() {
+                let relative_path = if candidate == "/" {
+                    normalized
+                } else if candidate.len() == normalized.len() {
+                    String::from("/")
+                } else {
+                    // Strip exactly the mount prefix once. `trim_start_matches`
+                    // would strip repeated path components and alias distinct
+                    // paths such as `/data/data/file` and `/data/file`.
+                    format!("/{}", &normalized[candidate.len() + 1..])
+                };
+                return Ok((index, relative_path));
             }
-            if normalized == mount.path {
-                return Ok((index, String::from("/")));
+            if candidate == "/" {
+                break;
             }
-            let mount_prefix = format!("{}/", mount.path);
-            if let Some(suffix) = normalized.strip_prefix(&mount_prefix) {
-                // Strip exactly the mount prefix once. `trim_start_matches` would
-                // strip every leading repetition of `mount.path`, so a path like
-                // `/data/data/file` under mount `/data` would alias to `/file`
-                // instead of `/data/file`, routing reads/writes to the wrong file.
-                return Ok((index, format!("/{suffix}")));
-            }
+            candidate = candidate
+                .rfind('/')
+                .map(|index| if index == 0 { "/" } else { &candidate[..index] })
+                .unwrap_or("/");
         }
 
         Err(VfsError::new(
             "ENOENT",
             format!("no such file or directory, resolve '{full_path}'"),
         ))
+    }
+
+    fn rebuild_mount_indices(&mut self) {
+        self.mount_indices.clear();
+        self.mount_indices.extend(
+            self.mounts
+                .iter()
+                .enumerate()
+                .map(|(index, mount)| (mount.path.clone(), index)),
+        );
     }
 
     fn resolve_writable_index(&self, full_path: &str) -> VfsResult<(usize, String)> {

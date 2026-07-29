@@ -1,6 +1,6 @@
 ---
 title: "Network"
-description: "Start an HTTP server inside the VM and call it with vm.httpRequest()."
+description: "Start an HTTP server inside the VM and call it with vm.network.httpRequest()."
 category: "Quickstart"
 order: 6
 ---
@@ -11,9 +11,9 @@ Run a real HTTP server inside the VM and call it from your host code. Reach for 
 
 ## How it works
 
-Create a VM with `network` and `childProcess` permissions, then `writeFile` a small Node server script into the VM. `vm.spawn` launches it, and the server prints its bound port on stdout, which an `onProcessOutput` subscription parses out. With the port in hand, `vm.httpRequest({ port, path })` routes a buffered request to that in-VM server over localhost and returns the serializable `HttpResponse` DTO. Cleanup waits briefly on the process and disposes the VM.
+Create a VM with `network` and `childProcess` permissions, then `filesystem.writeFile` a small Node server script into the VM. `vm.process.spawn` launches it, and the server prints its bound port on stdout, which an `onProcessOutput` subscription parses out. With the port in hand, `vm.network.httpRequest({ port, path })` routes a buffered request to that in-VM server over localhost and returns the serializable `HttpResponse` DTO. Cleanup waits briefly on the process and disposes the VM.
 
-> Preview URLs (`agent.createPreviewUrl`) live only in the RivetKit actor wrapper, not the core API — see `examples/networking/`.
+> Preview URLs (`agent.createPreviewUrl`) live only in the RivetKit actor wrapper, not the direct VM API — see `examples/networking/`.
 
 ## Run it
 

@@ -1,0 +1,22 @@
+--- a/exec/src/session_turn_wasi.rs
++++ b/exec/src/session_turn_wasi.rs
+@@ -110,5 +110,9 @@ async fn session_turn() -> anyhow::Result<()> {
+     let start: Value = serde_json::from_str(start_raw.trim()).context("bad start json")?;
+     let model = start["model"].as_str().unwrap_or("gpt-5").to_string();
++    let reasoning_effort = start["reasoning_effort"]
++        .as_str()
++        .unwrap_or("medium")
++        .to_string();
+     let cwd = start["cwd"].as_str().unwrap_or(".").to_string();
+     let prompt = start["prompt"].as_str().unwrap_or("").to_string();
+ 
+@@ -117,5 +121,9 @@ async fn session_turn() -> anyhow::Result<()> {
+     let overrides = vec![
+         ("model".to_string(), toml::Value::String(model)),
++        (
++            "model_reasoning_effort".to_string(),
++            toml::Value::String(reasoning_effort),
++        ),
+         (
+             "approval_policy".to_string(),
+             toml::Value::String("on-request".to_string()),

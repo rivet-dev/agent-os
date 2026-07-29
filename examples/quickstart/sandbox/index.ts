@@ -3,11 +3,8 @@
 // Requires Docker. Starts a sandbox-agent container, mounts its filesystem
 // at /mnt/sandbox, and registers sandbox bindings for running commands.
 
-import { AgentOs } from "@rivet-dev/agentos-core";
-import {
-	createSandboxFs,
-	createSandboxBindings,
-} from "@rivet-dev/agentos-sandbox";
+import { AgentOs } from "@rivet-dev/agentos";
+import { docker } from "@rivet-dev/agentos-sandbox";
 
 const SANDBOX_QUICKSTART_PERMISSIONS = {
 	fs: "allow",
@@ -24,50 +21,34 @@ if (skipDocker) {
 	process.exit(0);
 }
 
-const [{ SandboxAgent }, { docker }] = await Promise.all([
-	import("sandbox-agent"),
-	import("sandbox-agent/docker"),
-]);
-
-// Start a Docker-backed sandbox.
-const sandbox = await SandboxAgent.start({
-	sandbox: docker(),
-});
-
-// Mount the sandbox filesystem and register the bindings.
+// Start a Docker-backed sandbox, mount its filesystem, and register its bindings.
 const vm = await AgentOs.create({
 	permissions: SANDBOX_QUICKSTART_PERMISSIONS,
-	mounts: [
-		{
-			path: SANDBOX_MOUNT,
-			plugin: createSandboxFs({ client: sandbox }),
-		},
-	],
-	bindings: [createSandboxBindings({ client: sandbox })],
+	sandbox: { provider: docker() },
 });
 
 try {
 	// Write and read a file through the mounted sandbox filesystem.
-	await vm.writeFile(`${SANDBOX_MOUNT}/hello.txt`, "Hello from agentOS!");
-	const content = await vm.readFile(`${SANDBOX_MOUNT}/hello.txt`);
+	await vm.filesystem.writeFile(`${SANDBOX_MOUNT}/hello.txt`, "Hello from agentOS!");
+	const content = await vm.filesystem.readFile(`${SANDBOX_MOUNT}/hello.txt`);
 	console.log("Read from sandbox mount:", new TextDecoder().decode(content));
 
-	const runCommandResult = await vm.exec(
+	const runCommandResult = await vm.process.exec(
 		"agentos-sandbox run-command --command echo --args 'hello from Docker sandbox'",
 	);
 	console.log("Sandbox command:", runCommandResult.stdout.trim());
 
-	const processList = await vm.exec("agentos-sandbox list-processes");
+	const processList = await vm.process.exec("agentos-sandbox list-processes");
 	console.log("Sandbox processes:", processList.stdout.trim());
 
 	const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 	if (ANTHROPIC_API_KEY) {
-		await vm.openSession({
+		await vm.sessions.open({
 			agent: "pi",
 			cwd: SANDBOX_MOUNT,
 			env: { ANTHROPIC_API_KEY },
 		});
-		const result = await vm.prompt({
+		const result = await vm.sessions.prompt({
 			content: [
 				{
 					type: "text",
@@ -76,15 +57,14 @@ try {
 			],
 		});
 		console.log("Agent:", result.message?.content ?? []);
-		if (!(await vm.exists(`${SANDBOX_MOUNT}/fib.c`))) {
+		if (!(await vm.filesystem.exists(`${SANDBOX_MOUNT}/fib.c`))) {
 			throw new Error(`Expected the agent to create ${SANDBOX_MOUNT}/fib.c`);
 		}
 		console.log(`Verified ${SANDBOX_MOUNT}/fib.c exists.`);
-		await vm.deleteSession();
+		await vm.sessions.delete();
 	} else {
 		console.log("Skipping agent prompt because ANTHROPIC_API_KEY is not set.");
 	}
 } finally {
 	await vm.dispose();
-	await sandbox.dispose();
 }

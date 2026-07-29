@@ -28,6 +28,7 @@ RUN git clone https://github.com/rivet-dev/docs-theme.git /theme \
 
 # Copy the site source + the SDK source the typedoc step reads from ../packages.
 COPY website/ ./
+COPY tsconfig.base.json /tsconfig.base.json
 COPY packages/agentos /packages/agentos
 # The <CodeSnippet> docs embeds read example files from the embed root (/),
 # resolved as /examples/<topic>/<file>.

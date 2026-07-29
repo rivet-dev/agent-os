@@ -1,10 +1,10 @@
 [package]
 workspace = "../../../../../toolchain"
-name = "secureexec-tar"
+name = "agentos-tar"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "tar implementation for secure-exec standalone binaries"
+description = "tar implementation for agentos standalone binaries"
 
 [dependencies]
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }

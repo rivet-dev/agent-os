@@ -1,9 +1,9 @@
 {
 	"name": "@agentos-software/findutils",
-	"version": "0.3.3",
+	"version": "0.3.4",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "GNU findutils for secure-exec VMs (find, xargs)",
+	"description": "GNU findutils for agentos VMs (find, xargs)",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [
@@ -20,7 +20,8 @@
 	"scripts": {
 		"build": "agentos-toolchain stage --commands-dir ../../toolchain/target/wasm32-wasip1/release/commands --if-missing skip && tsc && agentos-toolchain build",
 		"check-types": "tsc --noEmit",
-		"test": "vitest run test/ --passWithNoTests"
+		"test": "vitest run test/ --exclude '**/*.nightly.test.ts' --passWithNoTests",
+		"test:nightly": "vitest run test/*.nightly.test.ts --passWithNoTests"
 	},
 	"devDependencies": {
 		"@agentos-software/manifest": "workspace:*",

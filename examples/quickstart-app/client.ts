@@ -13,16 +13,16 @@ conn.on("sessionEvent", (event) => {
 });
 
 // Open a durable session and send a prompt.
-await handle.openSession({
+await handle.sessions.open({
 	agent: "pi",
 	env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
-await handle.prompt({
+await handle.sessions.prompt({
 	content: [
 		{ type: "text", text: "Write a hello world script to /workspace/hello.js" },
 	],
 });
 
 // Read the file the agent created
-const content = await handle.readFile("/workspace/hello.js");
+const content = await handle.filesystem.readFile("/workspace/hello.js");
 console.log(new TextDecoder().decode(content));

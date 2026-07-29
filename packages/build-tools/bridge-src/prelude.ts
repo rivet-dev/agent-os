@@ -19,19 +19,21 @@ import undiciApiModule from "undici/lib/api/index.js";
 import undiciAgentModule from "undici/lib/dispatcher/agent.js";
 import undiciClientModule from "undici/lib/dispatcher/client.js";
 import undiciFetchModule from "undici/lib/web/fetch/index.js";
+import undiciFormDataModule from "undici/lib/web/fetch/formdata.js";
 import undiciGlobalModule from "undici/lib/global.js";
 import undiciHeadersModule from "undici/lib/web/fetch/headers.js";
 import undiciRequestModule from "undici/lib/web/fetch/request.js";
 import undiciResponseModule from "undici/lib/web/fetch/response.js";
 import undiciWebidlModule from "undici/lib/web/webidl/index.js";
-
-const NativeAbortControllerGlobal = globalThis.AbortController;
-const NativeAbortSignalGlobal = globalThis.AbortSignal;
+import loadWebSocketModule from "./undici-shims/websocket-lazy.js";
 
 const EarlyBufferGlobal =
   bufferStdlibModuleNs.Buffer ??
   bufferStdlibModuleNs.default?.Buffer ??
   bufferStdlibModuleNs.default;
+if (typeof EarlyBufferGlobal === "function") {
+  delete EarlyBufferGlobal.TYPED_ARRAY_SUPPORT;
+}
 function normalizeBase64UrlEncoding(encoding) {
   return typeof encoding === "string" && encoding.toLowerCase() === "base64url" ? "base64" : encoding;
 }
@@ -215,8 +217,6 @@ if (EarlyUtilTypes && typeof EarlyUtilTypes.isProxy !== "function") {
 export {
   EarlyBufferGlobal,
   EarlyUtilTypes,
-  NativeAbortControllerGlobal,
-  NativeAbortSignalGlobal,
   StructuredCloneTypedArrayCtors,
   WebReadableStream,
   WebTextDecoderStream,
@@ -242,11 +242,13 @@ export {
   undiciApiModule,
   undiciClientModule,
   undiciFetchModule,
+  undiciFormDataModule,
   undiciGlobalModule,
   undiciHeadersModule,
   undiciRequestModule,
   undiciResponseModule,
   undiciWebidlModule,
+  loadWebSocketModule,
   urlStdlibModuleNs,
   utilStdlibModuleNs,
 };

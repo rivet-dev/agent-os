@@ -116,9 +116,109 @@ pub fn install_high_resolution_time_global(scope: &mut v8::HandleScope, origin: 
     let Some(func) = template.get_function(scope) else {
         return;
     };
-    let key = v8::String::new(scope, "__secureExecHrNowUs").unwrap();
+    let key = v8::String::new(scope, "__agentOsHrNowUs").unwrap();
     let attr = v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_DELETE;
     global.define_own_property(scope, key.into(), func.into(), attr);
+}
+
+pub fn install_require_esm_sync_global(scope: &mut v8::HandleScope) {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let template = v8::FunctionTemplate::builder(require_esm_sync_callback).build(scope);
+    let Some(function) = template.get_function(scope) else {
+        return;
+    };
+    let key = v8::String::new(scope, "__agentOsRequireEsmSync").unwrap();
+    let attributes = v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_DELETE;
+    global.define_own_property(scope, key.into(), function.into(), attributes);
+}
+
+fn require_esm_sync_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let specifier = args.get(0).to_rust_string_lossy(scope);
+    let referrer = args.get(1).to_rust_string_lossy(scope);
+    if specifier.is_empty() {
+        throw_module_error_with_code(
+            scope,
+            "require() expected a non-empty ES module filename",
+            "ERR_INVALID_ARG_VALUE",
+        );
+        return;
+    }
+
+    let Some(module) = resolve_or_compile_module(scope, &specifier, &referrer) else {
+        return;
+    };
+    if module.get_status() == v8::ModuleStatus::Uninstantiated
+        && module
+            .instantiate_module(scope, module_resolve_callback)
+            .is_none()
+    {
+        return;
+    }
+    if module.get_status() == v8::ModuleStatus::Errored {
+        let exception = module.get_exception();
+        scope.throw_exception(exception);
+        return;
+    }
+    if module.is_graph_async() {
+        throw_module_error_with_code(
+            scope,
+            &format!("require() cannot be used on an ESM graph with top-level await: {specifier}"),
+            "ERR_REQUIRE_ASYNC_MODULE",
+        );
+        return;
+    }
+
+    if module.get_status() != v8::ModuleStatus::Evaluated {
+        let Some(result) = module.evaluate(scope) else {
+            return;
+        };
+        if module.is_graph_async() {
+            throw_module_error_with_code(
+                scope,
+                &format!(
+                    "require() cannot be used on an ESM graph with top-level await: {specifier}"
+                ),
+                "ERR_REQUIRE_ASYNC_MODULE",
+            );
+            return;
+        }
+        if result.is_promise() {
+            let Ok(promise) = v8::Local::<v8::Promise>::try_from(result) else {
+                throw_module_error(scope, "ES module evaluation returned an invalid promise");
+                return;
+            };
+            scope.perform_microtask_checkpoint();
+            match promise.state() {
+                v8::PromiseState::Pending => {
+                    throw_module_error_with_code(
+                        scope,
+                        &format!(
+                            "require() cannot be used on an ESM graph with top-level await: {specifier}"
+                        ),
+                        "ERR_REQUIRE_ASYNC_MODULE",
+                    );
+                    return;
+                }
+                v8::PromiseState::Rejected => {
+                    let rejection = promise.result(scope);
+                    scope.throw_exception(rejection);
+                    return;
+                }
+                v8::PromiseState::Fulfilled => {}
+            }
+        }
+    }
+    if module.get_status() == v8::ModuleStatus::Errored {
+        let exception = module.get_exception();
+        scope.throw_exception(exception);
+        return;
+    }
+    rv.set(module.get_module_namespace());
 }
 
 fn high_resolution_time_callback(
@@ -473,6 +573,10 @@ pub fn execute_script_with_options(
         }
     }
 
+    if bridge_ctx.is_some() {
+        install_require_esm_sync_global(scope);
+    }
+
     // Run user code
     {
         let tc = &mut v8::TryCatch::new(scope);
@@ -617,7 +721,7 @@ pub fn extract_process_exit_code(
     }
 }
 
-fn extract_global_process_exit_code(scope: &mut v8::HandleScope) -> Option<i32> {
+pub(crate) fn extract_global_process_exit_code(scope: &mut v8::HandleScope) -> Option<i32> {
     let context = scope.get_current_context();
     let global = context.global(scope);
     let process_key = v8::String::new(scope, "process")?;
@@ -888,9 +992,11 @@ thread_local! {
         RefCell::new(HashSet::new());
 }
 
-const MAX_MODULE_RESOLVE_MODULES: usize = 1024;
-const MAX_MODULE_RESOLVE_CACHE_ENTRIES: usize = 4096;
-const MAX_MODULE_PREFETCH_GRAPH_MODULES: usize = 1024;
+// Framework build graphs routinely cross one thousand ESM modules. Keep the
+// cache bounded, but leave enough headroom for Astro/Vite production builds.
+const MAX_MODULE_RESOLVE_MODULES: usize = 4096;
+const MAX_MODULE_RESOLVE_CACHE_ENTRIES: usize = 16384;
+const MAX_MODULE_PREFETCH_GRAPH_MODULES: usize = 4096;
 const MAX_MODULE_PREFETCH_BATCH_SIZE: usize = 256;
 const MAX_MODULE_BATCH_RESOLVE_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CJS_NAMED_EXPORTS: usize = 1024;
@@ -1106,7 +1212,11 @@ pub fn finalize_pending_module_evaluation(
             }
 
             match serialize_module_exports(tc, module) {
-                Ok(exports) => Some((0, Some(exports), None)),
+                Ok(exports) => Some((
+                    extract_global_process_exit_code(tc).unwrap_or(0),
+                    Some(exports),
+                    None,
+                )),
                 Err(err) => Some((1, None, Some(err))),
             }
         }
@@ -1150,6 +1260,8 @@ pub fn execute_module(
             return (code, None, err);
         }
     }
+
+    install_require_esm_sync_global(scope);
 
     // Compile and evaluate as ES module
     {
@@ -1312,7 +1424,11 @@ pub fn execute_module(
 
         // Keep module resolve state available after the initial module finishes.
         // Dynamic imports can still fire later on the same session event loop.
-        (0, Some(exports_bytes), None)
+        (
+            extract_global_process_exit_code(tc).unwrap_or(0),
+            Some(exports_bytes),
+            None,
+        )
     }
 }
 
@@ -1627,8 +1743,65 @@ fn cache_resolved_module(
     })
 }
 
+fn import_meta_resolve_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let specifier = args.get(0);
+    if specifier.is_undefined() {
+        let message = v8::String::new(scope, "import.meta.resolve requires a specifier").unwrap();
+        let error = v8::Exception::type_error(scope, message);
+        scope.throw_exception(error);
+        return;
+    }
+
+    let specifier = specifier.to_rust_string_lossy(scope);
+    let referrer = args.data().to_rust_string_lossy(scope);
+    let bridge_ctx_ptr = MODULE_RESOLVE_STATE.with(|cell| {
+        let state = cell.borrow();
+        state.as_ref().map(|state| state.bridge_ctx)
+    });
+    let Some(bridge_ctx_ptr) = bridge_ctx_ptr else {
+        throw_module_error(scope, "module resolver is unavailable");
+        return;
+    };
+
+    let direct_resolved = MODULE_RESOLVE_STATE.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .and_then(|state| state.guest_reader.as_mut())
+            .and_then(|reader| reader.resolve_module(&specifier, &referrer))
+    });
+    let resolved = match direct_resolved {
+        Some(resolved) => resolved,
+        None => {
+            // SAFETY: ModuleResolveState owns this pointer for the lifetime of the
+            // active module execution, and import.meta callbacks run synchronously
+            // on that same session thread.
+            let bridge_ctx = unsafe { &*bridge_ctx_ptr };
+            let Some(resolved) = resolve_module_via_ipc(scope, bridge_ctx, &specifier, &referrer)
+            else {
+                return;
+            };
+            resolved
+        }
+    };
+
+    let resolved_url = if resolved.starts_with('/') {
+        format!("file://{resolved}")
+    } else {
+        resolved
+    };
+    let Some(value) = v8::String::new(scope, &resolved_url) else {
+        throw_module_error(scope, "resolved module URL is too large for V8");
+        return;
+    };
+    rv.set(value.into());
+}
+
 /// Callback invoked by V8 when `import.meta` is accessed in an ES module.
-/// Sets `import.meta.url` to a `file://` URL derived from the module's resource name.
+/// Sets `import.meta.url` and Node-compatible `import.meta.resolve` values.
 #[cfg_attr(test, allow(dead_code))]
 pub extern "C" fn import_meta_object_callback(
     context: v8::Local<v8::Context>,
@@ -1640,27 +1813,37 @@ pub extern "C" fn import_meta_object_callback(
     // Look up the module's resource name from MODULE_RESOLVE_STATE.module_names
     // which maps identity_hash → resource_name.
     let identity_hash = module.get_identity_hash();
-    let url_str = MODULE_RESOLVE_STATE.with(|cell| {
+    let module_location = MODULE_RESOLVE_STATE.with(|cell| {
         let state_opt = cell.borrow();
         if let Some(ref state) = *state_opt {
             if let Some(name) = state.module_names.get(&identity_hash) {
                 let n = name.clone();
-                if n.starts_with("file://") {
-                    return Some(n);
+                let url = if n.starts_with("file://") {
+                    n.clone()
                 } else if n.starts_with("/") {
-                    return Some(format!("file://{}", n));
+                    format!("file://{n}")
                 } else {
-                    return Some(n);
-                }
+                    n.clone()
+                };
+                return Some((n, url));
             }
         }
         None
     });
 
-    if let Some(url) = url_str {
+    if let Some((referrer, url)) = module_location {
         let key = v8::String::new(scope, "url").unwrap();
         let value = v8::String::new(scope, &url).unwrap();
         meta.set(scope, key.into(), value.into());
+
+        let data = v8::String::new(scope, &referrer).unwrap();
+        let template = v8::FunctionTemplate::builder(import_meta_resolve_callback)
+            .data(data.into())
+            .build(scope);
+        if let Some(resolve) = template.get_function(scope) {
+            let key = v8::String::new(scope, "resolve").unwrap();
+            meta.set(scope, key.into(), resolve.into());
+        }
     }
 }
 
@@ -1772,7 +1955,12 @@ fn resolve_dynamic_import_referrer_name(
     resource_name: v8::Local<v8::Value>,
 ) -> String {
     let candidate = resource_name.to_rust_string_lossy(scope);
-    if candidate.starts_with('/') || candidate.starts_with("file://") {
+    // CommonJS modules execute through a synthetic script whose V8 resource
+    // name is the entry placeholder. Dynamic imports made by a nested CJS
+    // module must resolve relative to that module, not to the placeholder.
+    if candidate != "/<entry>.js"
+        && (candidate.starts_with('/') || candidate.starts_with("file://"))
+    {
         return candidate;
     }
 
@@ -2086,6 +2274,17 @@ fn throw_module_error(scope: &mut v8::HandleScope, message: &str) {
     let msg = v8::String::new(scope, message).unwrap();
     let exc = v8::Exception::error(scope, msg);
     scope.throw_exception(exc);
+}
+
+fn throw_module_error_with_code(scope: &mut v8::HandleScope, message: &str, code: &str) {
+    let message = v8::String::new(scope, message).unwrap();
+    let exception = v8::Exception::error(scope, message);
+    if let Ok(object) = v8::Local::<v8::Object>::try_from(exception) {
+        let code_key = v8::String::new(scope, "code").unwrap();
+        let code_value = v8::String::new(scope, code).unwrap();
+        object.set(scope, code_key.into(), code_value.into());
+    }
+    scope.throw_exception(exception);
 }
 
 /// Detect if source code is likely CommonJS (not ESM).
@@ -3017,20 +3216,6 @@ fn add_esm_runtime_prelude(source: &str) -> String {
             .push_str("const require = globalThis._moduleModule.createRequire(import.meta.url);\n");
     }
 
-    for (name, triggers) in [
-        ("fetch", &["fetch("][..]),
-        ("Headers", &["Headers", "new Headers("][..]),
-        ("Request", &["Request", "new Request("][..]),
-        ("Response", &["Response", "new Response("][..]),
-        ("Blob", &["Blob", "new Blob("][..]),
-        ("File", &["File", "new File("][..]),
-        ("FormData", &["FormData", "new FormData("][..]),
-    ] {
-        if needs_esm_global_alias(source, name, triggers) {
-            prelude.push_str(&format!("const {name} = globalThis.{name};\n"));
-        }
-    }
-
     if prelude.is_empty() {
         source.to_owned()
     } else {
@@ -3038,6 +3223,7 @@ fn add_esm_runtime_prelude(source: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn needs_esm_global_alias(source: &str, name: &str, triggers: &[&str]) -> bool {
     if !triggers.iter().any(|trigger| source.contains(trigger)) {
         return false;
@@ -3064,6 +3250,7 @@ fn needs_esm_global_alias(source: &str, name: &str, triggers: &[&str]) -> bool {
     true
 }
 
+#[cfg(test)]
 fn has_named_import_binding(source: &str, name: &str) -> bool {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum ScanState {
@@ -3193,6 +3380,7 @@ fn has_named_import_binding(source: &str, name: &str) -> bool {
     false
 }
 
+#[cfg(test)]
 fn named_imports_bind_name(imports: &str, name: &str) -> bool {
     imports.split(',').any(|part| {
         let local = part
@@ -4875,7 +5063,36 @@ export const file = new File([], "empty.txt");
             }
         }
 
-        // --- Part 25a: ESM root modules receive fetch globals from the runtime prelude ---
+        // --- Part 25a: ESM completion honors process.exitCode ---
+        {
+            let mut iso = isolate::create_isolate(None);
+            let ctx = isolate::create_context(&mut iso);
+
+            let bridge_ctx = BridgeCallContext::new(
+                Box::new(Vec::new()),
+                Box::new(Cursor::new(Vec::new())),
+                "test-session".into(),
+            );
+            let (code, exports, error) = {
+                let scope = &mut v8::HandleScope::new(&mut iso);
+                let local = v8::Local::new(scope, &ctx);
+                let scope = &mut v8::ContextScope::new(scope, local);
+                execute_module(
+                    scope,
+                    &bridge_ctx,
+                    "globalThis.process = { exitCode: 0 };",
+                    "process.exitCode = 5; export const done = true;",
+                    None,
+                    &mut None,
+                )
+            };
+
+            assert_eq!(code, 5);
+            assert!(exports.is_some());
+            assert!(error.is_none());
+        }
+
+        // --- Part 25b: ESM root modules receive fetch globals from the runtime prelude ---
         {
             let mut iso = isolate::create_isolate(None);
             let ctx = isolate::create_context(&mut iso);

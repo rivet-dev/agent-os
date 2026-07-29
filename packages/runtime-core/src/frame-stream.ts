@@ -208,6 +208,7 @@ export class StdioFrameTransport<TReadFrame, TWriteFrame = TReadFrame>
 	private readonly stdout: Readable;
 	private readonly encodeFrame: (frame: TWriteFrame) => Uint8Array;
 	private readonly decodeFrame: (payload: Uint8Array) => TReadFrame;
+	private readonly sharedStdio: boolean;
 	private readonly frameListeners = new Set<(frame: TReadFrame) => void>();
 	private readonly errorListeners = new Set<(error: Error) => void>();
 	private readonly endListeners = new Set<() => void>();
@@ -218,6 +219,10 @@ export class StdioFrameTransport<TReadFrame, TWriteFrame = TReadFrame>
 		this.stdout = options.stdout;
 		this.encodeFrame = options.encodeFrame;
 		this.decodeFrame = options.decodeFrame;
+		this.sharedStdio = this.stdin === (this.stdout as unknown as Writable);
+		if (!this.sharedStdio) {
+			this.stdin.on("error", this.handleError);
+		}
 		this.stdout.on("data", this.handleData);
 		this.stdout.on("end", this.handleEnd);
 		this.stdout.on("error", this.handleError);
@@ -259,6 +264,9 @@ export class StdioFrameTransport<TReadFrame, TWriteFrame = TReadFrame>
 	}
 
 	dispose(): void {
+		if (!this.sharedStdio) {
+			this.stdin.off("error", this.handleError);
+		}
 		this.stdout.off("data", this.handleData);
 		this.stdout.off("end", this.handleEnd);
 		this.stdout.off("error", this.handleError);

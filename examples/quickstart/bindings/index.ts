@@ -1,4 +1,4 @@
-import { AgentOs, binding, bindings } from "@rivet-dev/agentos-core";
+import { AgentOs, binding, bindings } from "@rivet-dev/agentos";
 import { z } from "zod";
 
 const weatherBindings = bindings({
@@ -47,10 +47,10 @@ const vm = await AgentOs.create({
 });
 
 try {
-	const weather = await vm.exec("agentos-weather get --city London");
+	const weather = await vm.process.exec("agentos-weather get --city London");
 	console.log("Weather:", weather.stdout.trim());
 
-	const sum = await vm.exec("agentos-calc add --a 10 --b 32");
+	const sum = await vm.process.exec("agentos-calc add --a 10 --b 32");
 	console.log("Sum:", sum.stdout.trim());
 } finally {
 	await vm.dispose();

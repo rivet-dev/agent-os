@@ -119,7 +119,9 @@ function classifyActionError(action: string, error: unknown): InspectorActionErr
 
 function getHandle(): Any {
 	if (!client || !actorId) {
-		throw new Error("not initialized: rivet client unset (missing <RivetProvider>)");
+		throw new Error(
+			"not initialized: rivet client unset (missing <RivetProvider>)",
+		);
 	}
 	if (!handle) handle = client.getForId(INSPECTOR_ACTOR_NAME, actorId);
 	return handle;
@@ -139,7 +141,9 @@ export async function callAction<T = unknown>(
 ): Promise<T> {
 	const h = getHandle();
 	const ctrl = new AbortController();
-	const timer = opts.timeoutMs ? setTimeout(() => ctrl.abort(), opts.timeoutMs) : undefined;
+	const timer = opts.timeoutMs
+		? setTimeout(() => ctrl.abort(), opts.timeoutMs)
+		: undefined;
 	try {
 		return (await h.action({ name, args, signal: ctrl.signal })) as T;
 	} catch (error) {

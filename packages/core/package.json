@@ -19,6 +19,11 @@
 			"import": "./dist/runtime-compat.js",
 			"default": "./dist/runtime-compat.js"
 		},
+		"./internal/code-execution": {
+			"types": "./dist/code-execution.d.ts",
+			"import": "./dist/code-execution.js",
+			"default": "./dist/code-execution.js"
+		},
 		"./test/file-system": {
 			"types": "./dist/test/file-system.d.ts",
 			"import": "./dist/test/file-system.js",
@@ -50,7 +55,10 @@
 		"build": "pnpm run build:protocols && tsc",
 		"build:agentos-protocol": "node ./scripts/compile-agentos-protocol.mjs",
 		"build:protocols": "pnpm run build:agentos-protocol",
-		"test": "vitest run --reporter=verbose"
+		"test": "vitest run --exclude '**/*.nightly.test.ts' --reporter=verbose",
+		"test:unit": "vitest run tests/agent-exit-event.test.ts tests/agentos-package.test.ts tests/agentos-protocol.test.ts tests/allowed-node-builtins.test.ts tests/bindings-zod.test.ts tests/bindings.test.ts tests/cron-manager.test.ts tests/cron-timer-driver.test.ts tests/generated-protocol.test.ts tests/leak-agent-os-processes.test.ts tests/leak-rpc-client.test.ts tests/mount-descriptors.test.ts tests/mount-reconfigure.test.ts tests/options-schema.test.ts tests/public-api-exports.test.ts tests/root-filesystem-descriptors.test.ts tests/runtime-compat-mount.test.ts tests/session-event-ordering.test.ts tests/session-permission-surface.test.ts tests/sidecar-client.test.ts tests/sidecar-permission-descriptors.test.ts tests/wasm-permission-tiers.test.ts --fileParallelism=false",
+		"test:pr": "pnpm test:unit && vitest run tests/migration-parity.test.ts --fileParallelism=false --reporter=verbose",
+		"test:nightly": "vitest run tests/*.nightly.test.ts --reporter=verbose --passWithNoTests"
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "0.16.1",
@@ -60,7 +68,6 @@
 		"@agentos-software/manifest": "workspace:*",
 		"@agentos-software/opencode": "workspace:*",
 		"@agentos-software/pi": "workspace:*",
-		"@agentos-software/pi-cli": "workspace:*",
 		"@aws-sdk/client-s3": "^3.1019.0",
 		"@rivet-dev/agentos-sidecar": "workspace:*",
 		"@rivetkit/bare-ts": "^0.6.2",
@@ -92,7 +99,6 @@
 		"@agentos-software/jq": "workspace:*",
 		"@agentos-software/opencode": "workspace:*",
 		"@agentos-software/pi": "workspace:*",
-		"@agentos-software/pi-cli": "workspace:*",
 		"@agentos-software/ripgrep": "workspace:*",
 		"@agentos-software/sed": "workspace:*",
 		"@agentos-software/tar": "workspace:*",
@@ -108,9 +114,7 @@
 		"@browserbasehq/cli": "0.5.4",
 		"@browserbasehq/sdk": "2.10.0",
 		"@copilotkit/llmock": "^1.6.0",
-		"@mariozechner/pi-coding-agent": "^0.60.0",
 		"@types/node": "^22.10.2",
-		"pi-acp": "^0.0.23",
 		"sandbox-agent": "^0.4.2",
 		"typescript": "^5.7.2",
 		"vitest": "^2.1.8",

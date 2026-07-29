@@ -1,10 +1,12 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveCargoBinary } from "../../../core/src/sidecar/cargo.js";
 import { createClient } from "../../src/client.js";
+import type { agentOS, Registry } from "../../src/index.js";
 
 const DEBUG_E2E = process.env.AGENTOS_ACTOR_E2E_DEBUG === "1";
 export const ACTOR_E2E_NAMESPACE = "default";
@@ -18,24 +20,67 @@ const fixturePath = join(
 	packageRoot,
 	"tests/fixtures/actor-runtime-server.mjs",
 );
-const sidecarPath = process.env.AGENTOS_SIDECAR_BIN
-	? resolve(process.env.AGENTOS_SIDECAR_BIN)
-	: join(workspaceRoot, "target/debug/agentos-sidecar");
 const require_ = createRequire(import.meta.url);
 
 export interface ActorRuntimeHandle {
-	child: ChildProcess;
+	child?: ChildProcess;
 	engine: ChildProcess;
 	endpoint: string;
 	logs(): string;
 	stop(): Promise<void>;
 }
 
+export interface ActorRuntimeOptions {
+	engineOnly?: boolean;
+	requestedPort?: number;
+}
+
 function resolveEngineBinary(): string {
+	if (process.env.RIVET_ENGINE_BINARY) {
+		return resolve(process.env.RIVET_ENGINE_BINARY);
+	}
 	const rivetkitRequire = createRequire(require_.resolve("rivetkit"));
 	return (
 		rivetkitRequire("@rivetkit/engine-cli") as { getEnginePath(): string }
 	).getEnginePath();
+}
+
+export function ensureActorE2ESidecarBinary(): string {
+	const configuredPath = process.env.AGENTOS_SIDECAR_BIN?.trim();
+	const sidecarPath = configuredPath
+		? resolve(configuredPath)
+		: join(workspaceRoot, "target/debug/agentos-sidecar");
+	if (existsSync(sidecarPath)) return sidecarPath;
+	if (configuredPath) {
+		throw new Error(
+			`AGENTOS_SIDECAR_BIN is set to ${sidecarPath} but the file does not exist`,
+		);
+	}
+
+	try {
+		execFileSync(
+			resolveCargoBinary(),
+			["build", "-q", "-p", "agentos-sidecar"],
+			{
+				cwd: workspaceRoot,
+				stdio: "pipe",
+			},
+		);
+	} catch (error) {
+		const detail =
+			error instanceof Error && "stderr" in error
+				? String((error as Error & { stderr?: Buffer }).stderr ?? error.message)
+				: String(error);
+		throw new Error(`failed to build actor E2E agentos-sidecar\n${detail}`, {
+			cause: error,
+		});
+	}
+	if (!existsSync(sidecarPath)) {
+		throw new Error(
+			`cargo build completed without producing actor E2E sidecar at ${sidecarPath}`,
+		);
+	}
+	return sidecarPath;
 }
 
 function appendBounded(current: string, chunk: Buffer): string {
@@ -128,18 +173,25 @@ async function waitUntil(
 
 export async function startActorRuntime(
 	storagePath: string,
-	requestedPort?: number,
+	requestedPortOrOptions?: number | ActorRuntimeOptions,
 ): Promise<ActorRuntimeHandle> {
-	if (!existsSync(sidecarPath)) {
-		throw new Error(
-			`actor E2E requires ${sidecarPath}; run cargo build -p agentos-sidecar`,
-		);
-	}
-	const allocatedPorts = await getFreePorts(requestedPort === undefined ? 3 : 2);
+	const options =
+		typeof requestedPortOrOptions === "number"
+			? { requestedPort: requestedPortOrOptions }
+			: (requestedPortOrOptions ?? {});
+	const { engineOnly = false, requestedPort } = options;
+	const sidecarPath = engineOnly ? undefined : ensureActorE2ESidecarBinary();
+	const allocatedPorts = await getFreePorts(
+		requestedPort === undefined ? 3 : 2,
+	);
 	const port = requestedPort ?? allocatedPorts[0];
 	const peerPort = allocatedPorts[requestedPort === undefined ? 1 : 0];
 	const metricsPort = allocatedPorts[requestedPort === undefined ? 2 : 1];
-	if (port === undefined || peerPort === undefined || metricsPort === undefined) {
+	if (
+		port === undefined ||
+		peerPort === undefined ||
+		metricsPort === undefined
+	) {
 		throw new Error("failed to allocate actor E2E ports");
 	}
 	const endpoint = `http://127.0.0.1:${port}`;
@@ -183,7 +235,25 @@ export async function startActorRuntime(
 		throw error;
 	}
 
-	const child = spawn(process.execPath, [fixturePath], {
+	let child: ChildProcess | undefined;
+	let stopped = false;
+	const runtime: ActorRuntimeHandle = {
+		get child() {
+			return child;
+		},
+		engine,
+		endpoint,
+		logs,
+		async stop() {
+			if (stopped) return;
+			stopped = true;
+			if (child) await stopChildProcess(child);
+			await stopChildProcess(engine);
+		},
+	};
+	if (engineOnly) return runtime;
+
+	child = spawn(process.execPath, [fixturePath], {
 		cwd: workspaceRoot,
 		env: {
 			...process.env,
@@ -205,19 +275,6 @@ export async function startActorRuntime(
 		stderr = appendBounded(stderr, chunk);
 		if (DEBUG_E2E) process.stderr.write(`[actor-e2e] ${chunk}`);
 	});
-	let stopped = false;
-	const runtime: ActorRuntimeHandle = {
-		child,
-		engine,
-		endpoint,
-		logs,
-		async stop() {
-			if (stopped) return;
-			stopped = true;
-			await stopChildProcess(child);
-			await stopChildProcess(engine);
-		},
-	};
 
 	try {
 		const auth = { Authorization: `Bearer ${ACTOR_E2E_TOKEN}` };
@@ -274,14 +331,15 @@ export async function startActorRuntime(
 	}
 }
 
-function client(endpoint: string): any {
-	return createClient<never>({
+type ActorE2ERegistry = Registry<{ vm: ReturnType<typeof agentOS> }>;
+
+function client(endpoint: string) {
+	return createClient<ActorE2ERegistry>({
 		endpoint,
 		token: ACTOR_E2E_TOKEN,
 		namespace: ACTOR_E2E_NAMESPACE,
 		poolName: ACTOR_E2E_POOL_NAME,
-		disableMetadataLookup: true,
-	} as never) as any;
+	});
 }
 
 export function actorHandle(
@@ -305,12 +363,5 @@ export async function createActorHandle(
 
 export function actorBytes(value: unknown): Uint8Array {
 	if (value instanceof Uint8Array) return value;
-	if (
-		Array.isArray(value) &&
-		value[0] === "$Uint8Array" &&
-		typeof value[1] === "string"
-	) {
-		return Buffer.from(value[1], "base64");
-	}
 	throw new TypeError(`expected Uint8Array, received ${String(value)}`);
 }

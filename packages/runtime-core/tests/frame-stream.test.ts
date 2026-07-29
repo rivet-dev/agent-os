@@ -65,6 +65,52 @@ describe("stdio frame transport", () => {
 		transport.dispose();
 	});
 
+	test("reports stdin errors instead of emitting an unhandled stream error", async () => {
+		const stdin = new PassThrough();
+		const stdout = new PassThrough();
+		const transport = new StdioFrameTransport<string>({
+			stdin,
+			stdout,
+			encodeFrame: (frame) => Buffer.from(frame, "utf8"),
+			decodeFrame: (payload) => Buffer.from(payload).toString("utf8"),
+		});
+		const error = new Promise<Error>((resolve) => {
+			transport.onError(resolve);
+		});
+
+		const brokenPipe = Object.assign(new Error("write EPIPE"), {
+			code: "EPIPE",
+		});
+		stdin.destroy(brokenPipe);
+
+		await expect(error).resolves.toBe(brokenPipe);
+		await expect(transport.writeFrame("late")).rejects.toThrow();
+		transport.dispose();
+	});
+
+	test("uses one error listener when stdin and stdout share a duplex stream", () => {
+		const stdio = new PassThrough();
+		const initialErrorListeners = stdio.listenerCount("error");
+		const transport = new StdioFrameTransport<string>({
+			stdin: stdio,
+			stdout: stdio,
+			encodeFrame: (frame) => Buffer.from(frame, "utf8"),
+			decodeFrame: (payload) => Buffer.from(payload).toString("utf8"),
+		});
+		const errors: Error[] = [];
+		transport.onError((error) => errors.push(error));
+
+		expect(stdio.listenerCount("error")).toBe(initialErrorListeners + 1);
+		const brokenPipe = Object.assign(new Error("write EPIPE"), {
+			code: "EPIPE",
+		});
+		stdio.emit("error", brokenPipe);
+		expect(errors).toEqual([brokenPipe]);
+
+		transport.dispose();
+		expect(stdio.listenerCount("error")).toBe(initialErrorListeners);
+	});
+
 	test("reports decode errors", async () => {
 		const stdin = new PassThrough();
 		const stdout = new PassThrough();

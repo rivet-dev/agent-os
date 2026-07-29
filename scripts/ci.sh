@@ -34,7 +34,7 @@ run_step node scripts/check-rust-package-metadata.mjs
 run_step node --test scripts/check-agentos-client-protocol-compat.test.mjs
 run_step node scripts/check-agentos-client-protocol-compat.mjs
 run_step pnpm check-layout
-run_step node --test scripts/generate-secure-exec-mirror.test.mjs
+run_step node --test scripts/generate-agentos-mirror.test.mjs
 if [[ -f scripts/check-registry-test-runtime-boundary.test.mjs ]]; then
 	run_step node --test scripts/check-registry-test-runtime-boundary.test.mjs
 	run_step node scripts/check-registry-test-runtime-boundary.mjs

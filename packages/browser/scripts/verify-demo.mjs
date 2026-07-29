@@ -26,7 +26,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(here, "..");
 const AB = process.env.AGENT_BROWSER_BIN ?? "agent-browser";
 const PORT = Number(process.env.DEMO_PORT ?? 43185);
-const SESSION = "secure-exec-demo-verify";
+const SESSION = "agentos-demo-verify";
 const URL = `http://localhost:${PORT}/agent-demo.html`;
 const PROMPT = process.argv[2] ?? "Reply with the single word PONG.";
 

@@ -1,5 +1,7 @@
 use super::*;
 
+static NEXT_SQLITE_HOST_NAMESPACE: AtomicU64 = AtomicU64::new(1);
+
 /// Ownership of VM-wide retained-byte accounting for an event temporarily
 /// removed from a process queue. Keeping this reservation alive across a
 /// capacity check prevents a concurrent producer from consuming the bytes an
@@ -108,6 +110,7 @@ impl ActiveProcess {
             next_mapped_host_fd: MAPPED_HOST_FD_START,
             process_event_notify: Arc::new(tokio::sync::Notify::new()),
             process_event_capacity,
+            wasm_flock_fds: BTreeMap::new(),
             pending_execution_events: VecDeque::new(),
             pending_execution_event_bytes: 0,
             pending_execution_event_count_limit: pending_event_count_limit,
@@ -152,11 +155,18 @@ impl ActiveProcess {
             next_udp_socket_id: 0,
             python_sockets: BTreeMap::new(),
             next_python_socket_id: 0,
+            hash_sessions: BTreeMap::new(),
+            next_hash_session_id: 0,
             cipher_sessions: BTreeMap::new(),
             next_cipher_session_id: 0,
             diffie_hellman_sessions: BTreeMap::new(),
             next_diffie_hellman_session_id: 0,
             sqlite_databases: BTreeMap::new(),
+            sqlite_host_namespace: format!(
+                "{}-{}",
+                std::process::id(),
+                NEXT_SQLITE_HOST_NAMESPACE.fetch_add(1, Ordering::Relaxed)
+            ),
             next_sqlite_database_id: 0,
             sqlite_statements: BTreeMap::new(),
             next_sqlite_statement_id: 0,
@@ -1531,6 +1541,30 @@ impl ActiveExecution {
         }
     }
 
+    pub(crate) fn has_exited(&self) -> bool {
+        matches!(self, Self::Javascript(execution) if execution.has_exited())
+    }
+
+    pub(crate) fn execute_retained_language(
+        &mut self,
+        language: RetainedExecutionLanguage,
+        source: String,
+        file_path: String,
+        module: bool,
+    ) -> Result<(), SidecarError> {
+        match (self, language) {
+            (Self::Javascript(execution), RetainedExecutionLanguage::JavaScript) => execution
+                .execute_retained(source, file_path, module)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            (Self::Python(execution), RetainedExecutionLanguage::Python) => execution
+                .execute_retained(source)
+                .map_err(|error| SidecarError::Execution(error.to_string())),
+            _ => Err(SidecarError::InvalidState(String::from(
+                "retained language does not match the resident executor",
+            ))),
+        }
+    }
+
     pub(crate) fn child_pid(&self) -> u32 {
         match self {
             Self::Javascript(execution) => execution.child_pid(),
@@ -2563,7 +2597,7 @@ pub(super) fn flush_parked_kernel_wait_rpc(process: &mut ActiveProcess) {
     }
 }
 
-pub(super) fn terminate_child_process_tree(
+pub(crate) fn terminate_child_process_tree(
     kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
     kernel_readiness: &KernelSocketReadinessRegistry,
@@ -2572,7 +2606,12 @@ pub(super) fn terminate_child_process_tree(
     flush_parked_kernel_wait_rpc(process);
     let sqlite_database_ids = process.sqlite_databases.keys().copied().collect::<Vec<_>>();
     for database_id in sqlite_database_ids {
-        let _ = close_sqlite_database(kernel, process, database_id);
+        if let Err(error) = close_sqlite_database(kernel, process, database_id, true) {
+            eprintln!(
+                "ERR_AGENTOS_SQLITE_CLOSE: pid={} database_id={database_id} error={error}",
+                process.kernel_pid
+            );
+        }
     }
     process.sqlite_statements.clear();
     let http_servers = std::mem::take(&mut process.http_servers);

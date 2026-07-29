@@ -4,6 +4,7 @@
 //! types, and other shared data structures extracted from service.rs.
 
 use crate::protocol::{
+    ExecutionCompletedResponse, ExecutionDescriptor, ExecutionOutputCapture, ExecutionOutputEvent,
     GuestRuntimeKind, MountDescriptor, ProjectedModuleDescriptor, RegisterHostCallbacksRequest,
     SidecarRequestFrame, SidecarRequestPayload, SidecarResponseFrame, SidecarResponsePayload,
     SignalHandlerRegistration, SoftwareDescriptor, WasmPermissionTier,
@@ -528,7 +529,7 @@ pub(crate) const VM_LISTEN_PORT_MAX_METADATA_KEY: &str = "network.listen.port_ma
 pub(crate) const VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY: &str = "network.listen.allow_privileged";
 pub(crate) const DEFAULT_JAVASCRIPT_NET_BACKLOG: u32 = 511;
 pub(crate) const LOOPBACK_EXEMPT_PORTS_ENV: &str = "AGENTOS_LOOPBACK_EXEMPT_PORTS";
-pub(crate) const BINDING_DRIVER_NAME: &str = "secure-exec-host-callbacks";
+pub(crate) const BINDING_DRIVER_NAME: &str = "agentos-host-callbacks";
 pub(crate) const MAPPED_HOST_FD_START: u32 = 1_000_000_000;
 
 // ---------------------------------------------------------------------------
@@ -870,6 +871,22 @@ pub(crate) struct VmState {
     pub(crate) command_permissions: BTreeMap<String, WasmPermissionTier>,
     pub(crate) bindings: BTreeMap<String, RegisterHostCallbacksRequest>,
     pub(crate) active_processes: BTreeMap<String, ActiveProcess>,
+    /// Pull-driven host fetches retained between sidecar requests. A stream
+    /// owns exactly one kernel socket and capability lease; reads advance it
+    /// only when the trusted client asks for another bounded chunk.
+    pub(crate) vm_fetch_streams: BTreeMap<String, VmFetchStreamState>,
+    pub(crate) next_vm_fetch_stream_id: u64,
+    /// Public language/process executions keyed by their sole lifecycle ID.
+    /// Process IDs remain internal routing details in `execution_processes`.
+    pub(crate) executions: BTreeMap<String, ManagedLanguageExecution>,
+    pub(crate) execution_processes: BTreeMap<String, String>,
+    pub(crate) next_public_execution_id: u64,
+    pub(crate) execution_retention_wake_deadline_ms: Option<u64>,
+    pub(crate) execution_retention_wake_task: Option<tokio::task::JoinHandle<()>>,
+    /// The VM filesystem is shared across executions, so package-manager
+    /// mutations must never run concurrently.
+    pub(crate) package_mutation_execution_id: Option<String>,
+    pub(crate) typescript_compiler_staged: bool,
     pub(crate) exited_process_snapshots: VecDeque<ExitedProcessSnapshot>,
     pub(crate) detached_child_processes: BTreeSet<String>,
     /// Rotating start positions for bounded child-process event turns. Durable
@@ -898,6 +915,29 @@ pub(crate) struct VmState {
     pub(crate) shadow_sync_inventory: BTreeMap<String, ShadowSyncInventoryEntry>,
     pub(crate) unix_address_registry: GuestUnixAddressRegistry,
     pub(crate) unix_socket_host_dir: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) enum VmFetchBodyMode {
+    Empty,
+    ContentLength { remaining: usize },
+    Chunked { chunk_remaining: Option<usize> },
+    UntilClose,
+}
+
+#[derive(Debug)]
+pub(crate) struct VmFetchStreamState {
+    pub(crate) target_process_id: String,
+    pub(crate) kernel_pid: u32,
+    pub(crate) socket_id: SocketId,
+    pub(crate) _capability: agentos_runtime::capability::CapabilityLease,
+    pub(crate) raw_buffer: Vec<u8>,
+    pub(crate) decoded_buffer: VecDeque<u8>,
+    pub(crate) body_mode: VmFetchBodyMode,
+    pub(crate) peer_closed: bool,
+    pub(crate) response_bytes: usize,
+    pub(crate) max_response_bytes: usize,
+    pub(crate) last_progress_at: Instant,
 }
 
 /// Minimal ownership retained when a VM generation misses its teardown
@@ -1198,6 +1238,10 @@ pub(crate) struct ActiveProcess {
     /// Durable event backlog bound inherited from
     /// `runtime.protocol.maxProcessEvents` when this process is admitted.
     pub(crate) process_event_capacity: usize,
+    /// Kernel file descriptors held on behalf of WASI `File::lock` calls,
+    /// keyed by canonical guest path. These preserve advisory-lock ownership
+    /// until the guest unlocks the file or the process exits.
+    pub(crate) wasm_flock_fds: BTreeMap<String, u32>,
     pub(crate) pending_execution_events: VecDeque<ActiveExecutionEvent>,
     pub(crate) pending_execution_event_bytes: usize,
     pub(crate) pending_execution_event_count_limit: usize,
@@ -1250,11 +1294,17 @@ pub(crate) struct ActiveProcess {
     /// `udp_sockets`; Python does not own a parallel descriptor or I/O task.
     pub(crate) python_sockets: BTreeMap<u64, PythonHostSocket>,
     pub(crate) next_python_socket_id: u64,
+    pub(crate) hash_sessions: BTreeMap<u64, ActiveHashSession>,
+    pub(crate) next_hash_session_id: u64,
     pub(crate) cipher_sessions: BTreeMap<u64, ActiveCipherSession>,
     pub(crate) next_cipher_session_id: u64,
     pub(crate) diffie_hellman_sessions: BTreeMap<u64, ActiveDiffieHellmanSession>,
     pub(crate) next_diffie_hellman_session_id: u64,
     pub(crate) sqlite_databases: BTreeMap<u64, ActiveSqliteDatabase>,
+    /// Host-side SQLite materializations must not be keyed by the guest PID:
+    /// each VM starts a fresh PID namespace, while the native sidecar process
+    /// and its temporary directory survive across VM generations.
+    pub(crate) sqlite_host_namespace: String,
     pub(crate) next_sqlite_database_id: u64,
     pub(crate) sqlite_statements: BTreeMap<u64, ActiveSqliteStatement>,
     pub(crate) next_sqlite_statement_id: u64,
@@ -1326,6 +1376,10 @@ pub(crate) struct ActiveMappedHostFd {
 
 pub(crate) struct ActiveCipherSession {
     pub(crate) context: crate::crypto_cipher::StreamCipherSession,
+}
+
+pub(crate) struct ActiveHashSession {
+    pub(crate) context: openssl::hash::Hasher,
 }
 
 pub(crate) struct ActiveSqliteDatabase {
@@ -2058,6 +2112,10 @@ pub(crate) struct ActiveTcpSocket {
     pub(crate) saw_local_shutdown: Arc<AtomicBool>,
     pub(crate) saw_remote_end: Arc<AtomicBool>,
     pub(crate) close_notified: Arc<AtomicBool>,
+    /// A transport event may contain more bytes than the guest requested from
+    /// `net.socket_read`. Retain the unread suffix on the shared socket
+    /// description so the next read observes it before later transport events.
+    pub(crate) pending_read_event: Arc<Mutex<Option<JavascriptTcpSocketEvent>>>,
     /// Bytes already read from the transport but not yet consumed by the
     /// shared open socket description. Keeping this in the sidecar (rather
     /// than per runner fd) preserves dup/SCM_RIGHTS read and MSG_PEEK
@@ -2203,6 +2261,7 @@ pub(crate) struct JavascriptTlsClientHello {
 #[serde(default, rename_all = "camelCase")]
 pub(crate) struct JavascriptTlsBridgeOptions {
     pub(crate) is_server: bool,
+    pub(crate) host: Option<String>,
     pub(crate) servername: Option<String>,
     pub(crate) reject_unauthorized: Option<bool>,
     pub(crate) request_cert: Option<bool>,
@@ -2327,6 +2386,7 @@ pub(crate) struct ActiveUnixSocket {
     pub(crate) saw_local_shutdown: Arc<AtomicBool>,
     pub(crate) saw_remote_end: Arc<AtomicBool>,
     pub(crate) close_notified: Arc<AtomicBool>,
+    pub(crate) pending_read_event: Arc<Mutex<Option<JavascriptTcpSocketEvent>>>,
     /// Bytes already drained from the async completion lane but not yet
     /// consumed by the shared Unix open description. Duplicated and
     /// SCM_RIGHTS-transferred descriptors retain this same buffer so partial
@@ -2533,6 +2593,50 @@ pub(crate) struct ActiveUdpSocket {
 // ---------------------------------------------------------------------------
 // Execution types
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutionValueKind {
+    None,
+    JavaScript,
+    Python,
+    TypeScriptCheck,
+}
+
+#[derive(Debug)]
+pub(crate) struct ManagedLanguageExecution {
+    /// False for an attached ephemeral operation. Its map key is an internal
+    /// correlation token and is never exposed through lifecycle enumeration.
+    pub(crate) public: bool,
+    /// True only for caller-created reusable contexts. Background processes are
+    /// retained internally but must not appear in the context collection.
+    pub(crate) context: bool,
+    pub(crate) descriptor: ExecutionDescriptor,
+    pub(crate) result: Option<ExecutionCompletedResponse>,
+    pub(crate) events: VecDeque<ExecutionOutputEvent>,
+    pub(crate) retained_event_bytes: usize,
+    pub(crate) output_truncated: bool,
+    pub(crate) next_sequence: u64,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    pub(crate) stdout_truncated: bool,
+    pub(crate) stderr_truncated: bool,
+    pub(crate) output_limit_bytes: usize,
+    pub(crate) output_limit_setting: &'static str,
+    pub(crate) capture: ExecutionOutputCapture,
+    pub(crate) retain_events: bool,
+    pub(crate) event_limit: usize,
+    pub(crate) event_bytes_limit: usize,
+    pub(crate) uses_pty: bool,
+    pub(crate) value_kind: ExecutionValueKind,
+    pub(crate) semantic_result_path: Option<String>,
+    pub(crate) pending_outcome: Option<crate::protocol::ExecutionOutcome>,
+    pub(crate) deadline_ms: Option<u64>,
+    pub(crate) expires_at_ms: Option<u64>,
+    pub(crate) deadline_task: Option<tokio::task::JoinHandle<()>>,
+    /// Internal process whose V8/Pyodide context is parked while the public
+    /// execution is idle. It is never exposed as a second lifecycle identity.
+    pub(crate) resident_process_id: Option<String>,
+}
 
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)] // execution state is process-registry owned and preserves backend drop affinity

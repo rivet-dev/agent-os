@@ -1,0 +1,8 @@
+{
+  "name": "project-matrix-browserbase-browse-cli-pass",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "browse": "0.9.5"
+  }
+}

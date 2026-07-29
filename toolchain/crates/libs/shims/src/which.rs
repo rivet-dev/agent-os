@@ -1,4 +1,4 @@
-//! Minimal `which` implementation for the secure-exec VM.
+//! Minimal `which` implementation for the agentos VM.
 //!
 //! Searches the current PATH for one or more command names and prints the first
 //! matching executable path for each command. This is primarily needed for
@@ -89,6 +89,15 @@ where
     }
 
     Ok(found)
+}
+
+pub(crate) fn resolve_program(command: &str) -> PathBuf {
+    let mut resolved = None;
+    let _ = search_path(command, false, |path| {
+        resolved = Some(path.to_path_buf());
+        Ok(())
+    });
+    resolved.unwrap_or_else(|| PathBuf::from(command))
 }
 
 pub fn which(args: Vec<OsString>) -> i32 {

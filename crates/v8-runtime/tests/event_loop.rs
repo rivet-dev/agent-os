@@ -84,6 +84,35 @@ fn assert_event_loop_watchdog_did_not_fire(status: &EventLoopStatus) {
     );
 }
 
+fn fresh_isolate_supports_rgi_emoji_unicode_sets() {
+    isolate::init_v8_platform();
+
+    let mut isolate = isolate::create_isolate(None);
+    let context = isolate::create_context(&mut isolate);
+    let scope = &mut v8::HandleScope::new(&mut isolate);
+    let context = v8::Local::new(scope, &context);
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let source = v8::String::new(
+        scope,
+        r#"(() => {
+          const rgi = new RegExp("^\\p{RGI_Emoji}$", "v");
+          const ascii = new RegExp("^[\\p{ASCII}&&\\p{Letter}]+$", "v");
+          return rgi.test("👨🏾‍⚕️") &&
+            rgi.test("🇧🇪") &&
+            !rgi.test("hello") &&
+            ascii.test("AgentOS") &&
+            !ascii.test("Agent0S");
+        })()"#,
+    )
+    .unwrap();
+    let script = v8::Script::compile(scope, source, None).unwrap();
+    let result = script.run(scope).unwrap();
+    assert!(
+        result.boolean_value(scope),
+        "fresh V8 isolate must support RGI_Emoji and Unicode set expressions"
+    );
+}
+
 fn event_loop_pumps_v8_platform_tasks_for_native_wasm_promises() {
     isolate::init_v8_platform();
 
@@ -374,6 +403,7 @@ fn event_loop_handles_native_async_wasm_paths_without_hanging() {
     // Keep the async WASM event-loop coverage inside one top-level libtest case.
     // Splitting these into separate tests in the same binary still trips the
     // V8 init/teardown SIGSEGV boundary that affects other consolidated suites.
+    fresh_isolate_supports_rgi_emoji_unicode_sets();
     event_loop_pumps_v8_platform_tasks_for_native_wasm_promises();
     event_loop_completes_native_async_wasm_instantiate_promises();
     event_loop_surfaces_native_async_wasm_compile_errors_without_hanging();

@@ -2,7 +2,7 @@ import { EventEmitter, once } from "./events.js";
 import { process2 } from "./process.js";
 
 function createWorkerThreadsNotImplementedError(feature) {
-  const error = new Error(`node:worker_threads ${feature} is not available in the secure-exec guest runtime`);
+  const error = new Error(`node:worker_threads ${feature} is not available in the agentos guest runtime`);
   error.code = "ERR_NOT_IMPLEMENTED";
   return error;
 }
@@ -41,7 +41,7 @@ var builtinWorkerThreadsModule = {
   BroadcastChannel: globalThis.BroadcastChannel,
   MessageChannel: globalThis.MessageChannel ?? WorkerThreadMessageChannel,
   MessagePort: globalThis.MessagePort ?? WorkerThreadPort,
-  SHARE_ENV: Symbol.for("secure-exec.worker_threads.SHARE_ENV"),
+  SHARE_ENV: Symbol.for("agentos.worker_threads.SHARE_ENV"),
   Worker: WorkerThreadWorker,
   getEnvironmentData() {
     return void 0;
@@ -108,6 +108,12 @@ var builtinTtyModule = {
   WriteStream: class WriteStream {
     constructor(fd) {
       return TtyWriteStream(fd);
+    }
+    getColorDepth() {
+      return this?.isTTY ? 8 : 1;
+    }
+    hasColors(count = 16) {
+      return !!this?.isTTY && Number(count) <= 2 ** 8;
     }
   },
   isatty: ttyIsatty
@@ -357,7 +363,7 @@ var builtinStreamPromisesModule = {
 
 function createAccessDeniedBuiltinError(request) {
   const normalized = String(request).replace(/^node:/, "");
-  const error = new Error(`node:${normalized} is not available in the secure-exec guest runtime`);
+  const error = new Error(`node:${normalized} is not available in the agentos guest runtime`);
   error.code = "ERR_ACCESS_DENIED";
   return error;
 }
@@ -460,6 +466,35 @@ var builtinDiagnosticsChannelModule = {
   }
 };
 
+class InspectorSession extends EventEmitter {
+  connect() {
+  }
+  connectToMainThread() {
+  }
+  disconnect() {
+  }
+  post(method, params, callback) {
+    const done = typeof params === "function" ? params : callback;
+    if (typeof done === "function") {
+      queueMicrotask(() => done(null, {}));
+    }
+  }
+}
+
+var builtinInspectorModule = {
+  Session: InspectorSession,
+  close() {
+  },
+  console,
+  open() {
+  },
+  url() {
+    return void 0;
+  },
+  waitForDebugger() {
+  },
+};
+
 function padDateTimeField(value, length = 2) {
   return String(Math.trunc(value)).padStart(length, "0");
 }
@@ -494,7 +529,7 @@ function formatSafeDateTimeValue(value, options = {}) {
   return datePart;
 }
 
-class SafeDateTimeFormat {
+class SafeDateTimeFormatInstance {
   constructor(locales = "en-US", options = {}) {
     this.locales = locales;
     this.options = options && typeof options === "object" ? { ...options } : {};
@@ -530,6 +565,20 @@ class SafeDateTimeFormat {
   }
 }
 
+// ECMA-402 constructors are deliberately callable with or without `new`.
+// Keep the implementation in a class, but expose a normal function whose
+// explicit return value preserves both call forms and `instanceof` behavior.
+function SafeDateTimeFormat(locales = "en-US", options = {}) {
+  return new SafeDateTimeFormatInstance(locales, options);
+}
+SafeDateTimeFormat.prototype = SafeDateTimeFormatInstance.prototype;
+Object.defineProperty(SafeDateTimeFormat.prototype, "constructor", {
+  value: SafeDateTimeFormat,
+  configurable: true,
+  writable: true
+});
+SafeDateTimeFormat.supportedLocalesOf = SafeDateTimeFormatInstance.supportedLocalesOf;
+
 function normalizeFractionDigitOption(value, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
@@ -544,7 +593,7 @@ function applySafeNumberGrouping(value) {
   return fraction === void 0 ? `${sign}${grouped}` : `${sign}${grouped}.${fraction}`;
 }
 
-class SafeNumberFormat {
+class SafeNumberFormatInstance {
   constructor(locales = "en-US", options = {}) {
     this.locales = locales;
     this.options = options && typeof options === "object" ? { ...options } : {};
@@ -594,10 +643,52 @@ class SafeNumberFormat {
   }
 }
 
+class SafeListFormat {
+  constructor(locales = "en-US", options = {}) {
+    this.locales = locales;
+    this.options = options && typeof options === "object" ? { ...options } : {};
+    this.format = this.format.bind(this);
+  }
+  format(values) {
+    const items = Array.from(values ?? [], (value) => String(value));
+    if (items.length < 2) return items[0] ?? "";
+    const conjunction = this.options.type === "disjunction" ? "or" : "and";
+    if (items.length === 2) return `${items[0]} ${conjunction} ${items[1]}`;
+    return `${items.slice(0, -1).join(", ")}, ${conjunction} ${items.at(-1)}`;
+  }
+  formatToParts(values) {
+    return [{ type: "element", value: this.format(values) }];
+  }
+  resolvedOptions() {
+    const locale = Array.isArray(this.locales) ? this.locales.find((entry) => typeof entry === "string") || "en-US" : typeof this.locales === "string" ? this.locales : "en-US";
+    return {
+      locale,
+      style: this.options.style ?? "long",
+      type: this.options.type ?? "conjunction"
+    };
+  }
+  static supportedLocalesOf(locales) {
+    if (Array.isArray(locales)) return locales.filter((entry) => typeof entry === "string");
+    return typeof locales === "string" ? [locales] : [];
+  }
+}
+
+function SafeNumberFormat(locales = "en-US", options = {}) {
+  return new SafeNumberFormatInstance(locales, options);
+}
+SafeNumberFormat.prototype = SafeNumberFormatInstance.prototype;
+Object.defineProperty(SafeNumberFormat.prototype, "constructor", {
+  value: SafeNumberFormat,
+  configurable: true,
+  writable: true
+});
+SafeNumberFormat.supportedLocalesOf = SafeNumberFormatInstance.supportedLocalesOf;
+
 function installSafeIntlFormatters(target) {
   const existingIntl = target.Intl && typeof target.Intl === "object" ? target.Intl : {};
   existingIntl.DateTimeFormat = SafeDateTimeFormat;
   existingIntl.NumberFormat = SafeNumberFormat;
+  existingIntl.ListFormat = SafeListFormat;
   target.Intl = existingIntl;
   Date.prototype.toLocaleString = function(locales, options) {
     return new target.Intl.DateTimeFormat(locales, options).format(this);
@@ -617,4 +708,4 @@ function installSafeIntlFormatters(target) {
     return new target.Intl.NumberFormat(locales, options).format(this.valueOf());
   };
 }
-export { DiagnosticsChannel, SafeDateTimeFormat, SafeNumberFormat, TtyReadStream, TtyWriteStream, WorkerThreadMessageChannel, WorkerThreadPort, WorkerThreadWorker, applySafeNumberGrouping, builtinDiagnosticsChannelModule, builtinStreamConsumersModule, builtinStreamPromisesModule, builtinTtyModule, builtinWorkerThreadsModule, coerceIntlDate, collectReadableChunks, createAccessDeniedBuiltinError, createBuiltinBlob, createDiagnosticsTracingChannel, createWorkerThreadsNotImplementedError, diagnosticsChannelCache, formatSafeDateTimeValue, getDiagnosticsChannel, getNodeReadableAsyncIterable, installSafeIntlFormatters, normalizeFractionDigitOption, padDateTimeField, ttyIsatty };
+export { DiagnosticsChannel, InspectorSession, SafeDateTimeFormat, SafeListFormat, SafeNumberFormat, TtyReadStream, TtyWriteStream, WorkerThreadMessageChannel, WorkerThreadPort, WorkerThreadWorker, applySafeNumberGrouping, builtinDiagnosticsChannelModule, builtinInspectorModule, builtinStreamConsumersModule, builtinStreamPromisesModule, builtinTtyModule, builtinWorkerThreadsModule, coerceIntlDate, collectReadableChunks, createAccessDeniedBuiltinError, createBuiltinBlob, createDiagnosticsTracingChannel, createWorkerThreadsNotImplementedError, diagnosticsChannelCache, formatSafeDateTimeValue, getDiagnosticsChannel, getNodeReadableAsyncIterable, installSafeIntlFormatters, normalizeFractionDigitOption, padDateTimeField, ttyIsatty };

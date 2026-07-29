@@ -1,0 +1,14 @@
+{
+  "name": "project-matrix-vercel-ai-pass",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@ai-sdk/anthropic": "4.0.16",
+    "@ai-sdk/gateway": "4.0.23",
+    "@ai-sdk/openai": "4.0.16",
+    "ai": "7.0.31",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "workflow": "4.6.0"
+  }
+}

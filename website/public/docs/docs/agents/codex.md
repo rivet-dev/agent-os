@@ -6,7 +6,7 @@ Run the Codex coding agent inside a VM with skills, MCP servers, and custom conf
 
 Read [Sessions](/docs/sessions) first for session options, streaming events, prompts, and lifecycle management.
 
-## LLM Credentials
+## Model & credentials
 
 Set the relevant variable(s) on the session's `env`, sourced from your server's environment:
 
@@ -14,7 +14,7 @@ Set the relevant variable(s) on the session's `env`, sourced from your server's 
 - `OPENAI_BASE_URL` — route through a gateway or OpenAI-compatible endpoint.
 - Custom providers — defined in `~/.codex/config.toml`; each provider's `env_key` names the variable Codex reads for its key (e.g. `AZURE_OPENAI_API_KEY`, `MISTRAL_API_KEY`).
 
-See [LLM Credentials](/docs/llm-credentials), and Codex's [config reference](https://developers.openai.com/codex/config-reference) for details.
+See [Models & Credentials](/docs/models-and-credentials), and Codex's [config reference](https://developers.openai.com/codex/config-reference) for details.
 
 ## Skills
 
@@ -24,7 +24,7 @@ Codex discovers `SKILL.md` files from its skills directory. Write the skill into
 
 Expose extra tools to the agent by passing `mcpServers` to `openSession`. Both local child-process servers and remote URLs are supported.
 
-**Pre-install `npx`-launched servers.** A local server started with `npx -y …` writes install progress to **stdout** on its first run, which corrupts the MCP stdio handshake (you'll see `Connection closed`). Pre-install it in the VM so `npx` is silent — `await agent.exec("npm install -g @modelcontextprotocol/server-filesystem")` before the session — or pin the package and point `command` at the installed binary.
+**Pre-install `npx`-launched servers.** A local server started with `npx -y …` writes install progress to **stdout** on its first run, which corrupts the MCP stdio handshake (you'll see `Connection closed`). Pre-install it in the VM so `npx` is silent — `await agent.process.exec("npm install -g @modelcontextprotocol/server-filesystem")` before the session — or pin the package and point `command` at the installed binary.
 
 ## Customizing the agent
 

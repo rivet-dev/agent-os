@@ -434,6 +434,7 @@ mod tests {
             "_netSocketSetNoDelayRaw",
             "_kernelStdioWriteRaw",
             "_kernelPollRaw",
+            "_kernelFlockRaw",
             "_kernelTtySizeRaw",
             "_netSocketUpgradeTlsRaw",
             "_tlsGetCiphersRaw",

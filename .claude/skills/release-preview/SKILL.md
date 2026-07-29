@@ -9,8 +9,8 @@ AgentOS previews are branch snapshots from this repository. The workflow builds
 debug artifacts and publishes npm packages under a sanitized branch dist-tag.
 No crates.io release, git tag, or GitHub release is created.
 
-secure-exec is a generated mirror. Do not bump a secure-exec ref or cut a
-secure-exec preview by hand.
+agentos is a generated mirror. Do not bump a agentos ref or cut a
+agentos preview by hand.
 
 ## Procedure
 
@@ -32,6 +32,6 @@ npm install @rivet-dev/agentos-core@<sanitized-branch>
 ## Rules
 
 - Release-preview is for previews only; releases use the `release` skill.
-- All code changes belong in AgentOS. The secure-exec mirror is regenerated
+- All code changes belong in AgentOS. The agentos mirror is regenerated
   from AgentOS and follows the published AgentOS version.
 - On failure: `gh run view <run> --log-failed`, fix, re-dispatch, re-watch.

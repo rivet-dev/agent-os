@@ -9,6 +9,15 @@ const CONTROL_FD: i32 = 3;
 fn main() {
     init_tracing();
     tracing::info!(target: "agentos_native_sidecar::perf", "sidecar process started");
+    if env_flag("AGENTOS_SIDECAR_COMBINED_STDIO") {
+        if let Err(error) = agentos_native_sidecar::stdio::run_combined_with_extensions(
+            agentos_sidecar_wrapper::extensions(),
+        ) {
+            tracing::error!(?error, "agentos-sidecar startup failed");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Err(error) = fcntl(CONTROL_FD, FcntlArg::F_GETFD) {
         tracing::error!(
             ?error,

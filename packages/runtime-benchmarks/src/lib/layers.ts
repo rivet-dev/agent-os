@@ -29,7 +29,7 @@ const DEFAULT_NATIVE_BASELINE_WASM =
 		"target/wasm32-wasip1/release/agentos-native-baseline.wasm",
 	);
 const WASM_COMMAND_NAME = "native-baseline";
-const WASM_BASE_DIR = "/mnt/native-baseline-wasm";
+const WASM_BASE_DIR = "/tmp/native-baseline-wasm";
 const WASM_SUPPORTED_OPS = new Set<NativeOp>([
 	"fs_stat",
 	"fs_stat_x32",
@@ -47,7 +47,6 @@ const WASM_SUPPORTED_OPS = new Set<NativeOp>([
 	"alloc_free",
 ]);
 let wasmCommandDir: string | undefined;
-let wasmWritableDir: string | undefined;
 
 export interface LayerSamples {
 	native: number[];
@@ -182,13 +181,6 @@ export function wasmLayerOptions(): BenchVmOptions | undefined {
 	if (!wasm) return undefined;
 	return {
 		wasmCommandDirs: [ensureWasmCommandDir(wasm)],
-		mounts: [
-			{
-				guestPath: WASM_BASE_DIR,
-				hostPath: ensureWasmWritableDir(),
-				readOnly: false,
-			},
-		],
 	};
 }
 
@@ -221,7 +213,7 @@ export function runNodeProgram(
 	iters: number,
 	warmup: number,
 ): number[] {
-	const dir = mkdtempSync(join(tmpdir(), "secure-exec-fuzz-perf-node-"));
+	const dir = mkdtempSync(join(tmpdir(), "agentos-fuzz-perf-node-"));
 	const file = join(dir, "bench.mjs");
 	try {
 		writeFileSync(file, source);
@@ -245,7 +237,7 @@ export async function runNodeProgramMeasured(
 	iters: number,
 	warmup: number,
 ): Promise<LayerSampleSet> {
-	const dir = mkdtempSync(join(tmpdir(), "secure-exec-fuzz-perf-node-"));
+	const dir = mkdtempSync(join(tmpdir(), "agentos-fuzz-perf-node-"));
 	const file = join(dir, "bench.mjs");
 	try {
 		writeFileSync(file, source);
@@ -347,17 +339,11 @@ function resolveNativeBaselineWasm(): string | undefined {
 
 function ensureWasmCommandDir(wasmPath: string): string {
 	if (wasmCommandDir) return wasmCommandDir;
-	const dir = mkdtempSync(join(tmpdir(), "secure-exec-native-baseline-wasm-cmd-"));
+	const dir = mkdtempSync(join(tmpdir(), "agentos-native-baseline-wasm-cmd-"));
 	mkdirSync(dir, { recursive: true });
 	copyFileSync(wasmPath, join(dir, WASM_COMMAND_NAME));
 	wasmCommandDir = dir;
 	return wasmCommandDir;
-}
-
-function ensureWasmWritableDir(): string {
-	if (wasmWritableDir) return wasmWritableDir;
-	wasmWritableDir = mkdtempSync(join(tmpdir(), "secure-exec-native-baseline-wasm-data-"));
-	return wasmWritableDir;
 }
 
 export async function runWasmLayer(
@@ -369,10 +355,6 @@ export async function runWasmLayer(
 ): Promise<number[] | undefined> {
 	if (!supportsWasmLayer(nativeOp)) return undefined;
 	if (!resolveNativeBaselineWasm()) return undefined;
-	const hostBaseDir = join(ensureWasmWritableDir(), nativeOp);
-	rmSync(hostBaseDir, { recursive: true, force: true });
-	mkdirSync(hostBaseDir, { recursive: true });
-	const guestBaseDir = `${WASM_BASE_DIR}/${nativeOp}`;
 	const result = await vm.execWasmCommand(WASM_COMMAND_NAME, [
 		"--op",
 		nativeOp,
@@ -381,7 +363,7 @@ export async function runWasmLayer(
 		"--warmup",
 		String(warmup),
 		"--base-dir",
-		guestBaseDir,
+		WASM_BASE_DIR,
 		...extraArgs,
 	]);
 	if (result.exitCode !== 0) {

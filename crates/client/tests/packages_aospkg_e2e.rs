@@ -31,7 +31,7 @@ async fn spawn_capture(os: &AgentOs, cmd: &str, args: Vec<String>) -> (i32, Stri
     let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
     let err_cap = Arc::new(Mutex::new(Vec::<u8>::new()));
     let handle = os
-        .spawn(cmd, args, SpawnOptions::default())
+        .spawn_process(cmd, args, SpawnOptions::default())
         .unwrap_or_else(|e| panic!("spawn {cmd}: {e:?}"));
     let cb = captured.clone();
     let ecb = err_cap.clone();

@@ -1065,6 +1065,7 @@ where
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
     let vm_id = vm_id.to_owned();
+    let filesystem_unrestricted = bridge.filesystem_unrestricted(&vm_id);
 
     let filesystem_bridge = bridge.clone();
     let filesystem_vm_id = vm_id.clone();
@@ -1138,6 +1139,7 @@ where
 
             decision
         })),
+        filesystem_unrestricted,
         network: Some(Arc::new(move |request: &NetworkAccessRequest| {
             network_bridge.network_decision(&network_vm_id, request)
         })),

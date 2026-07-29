@@ -196,6 +196,11 @@ impl AcpExtension {
             agent_type: request.agent_type.clone(),
             runtime: AcpRuntimeKind::JavaScript,
             cwd: request.cwd.clone(),
+            additional_directories: request
+                .additional_directories
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
             args: Vec::new(),
             env: request.env.clone(),
             protocol_version: ACP_RESUME_PROTOCOL_VERSION,
@@ -211,6 +216,10 @@ impl AcpExtension {
         args.extend(create_like.args.iter().cloned());
         let mut env = hash_to_btree(create_like.env.clone());
         env.insert(String::from("AGENTOS_KEEP_STDIN_OPEN"), String::from("1"));
+        env.insert(
+            String::from("AGENTOS_EAGER_STDIN_HANDLE"),
+            String::from("1"),
+        );
         // Manifest env applies as DEFAULTS; caller/base env wins on conflicts.
         for (key, value) in &resolved.env {
             env.entry(key.clone()).or_insert_with(|| value.clone());
@@ -220,9 +229,9 @@ impl AcpExtension {
         let started = match ctx
             .spawn_process_wire(ExecuteRequest {
                 process_id: process_id.clone(),
-                command: None,
-                runtime: Some(convert_runtime(create_like.runtime.clone())),
-                entrypoint: Some(resolved.entrypoint.clone()),
+                command: Some(resolved.entrypoint.clone()),
+                runtime: None,
+                entrypoint: None,
                 args,
                 env: env.into_iter().collect(),
                 cwd: Some(create_like.cwd.clone()),

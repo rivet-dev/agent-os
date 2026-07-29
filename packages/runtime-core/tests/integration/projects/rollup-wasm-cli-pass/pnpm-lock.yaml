@@ -1,0 +1,41 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      rollup:
+        specifier: npm:@rollup/wasm-node@4.62.2
+        version: '@rollup/wasm-node@4.62.2'
+
+packages:
+
+  '@rollup/wasm-node@4.62.2':
+    resolution: {integrity: sha512-LseVv64SSO6S7eyc+LFGUnH36NMMFbtKN28vTUHFinRVzFKH4cVQ/BB22JfXM9Ei5l7x46AIQp+n2QzzJ9kxHg==}
+    engines: {node: '>=18.0.0', npm: '>=8.0.0'}
+    hasBin: true
+
+  '@types/estree@1.0.9':
+    resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
+
+  fsevents@2.3.3:
+    resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
+    engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
+    os: [darwin]
+
+snapshots:
+
+  '@rollup/wasm-node@4.62.2':
+    dependencies:
+      '@types/estree': 1.0.9
+    optionalDependencies:
+      fsevents: 2.3.3
+
+  '@types/estree@1.0.9': {}
+
+  fsevents@2.3.3:
+    optional: true

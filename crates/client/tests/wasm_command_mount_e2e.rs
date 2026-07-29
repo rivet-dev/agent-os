@@ -30,7 +30,7 @@ async fn wasm_command_software_mounts_into_vm() {
     // Before the mount fix this failed with "command not found"; before the exec command-line fix
     // the space made the whole string resolve as one command name.
     let result = os
-        .exec("echo hello", ExecOptions::default())
+        .exec_process("echo hello", ExecOptions::default())
         .await
         .expect("exec echo hello");
     assert_eq!(

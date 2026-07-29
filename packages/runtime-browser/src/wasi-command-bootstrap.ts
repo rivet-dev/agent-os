@@ -23,7 +23,7 @@ function json(value: unknown): string {
 
 /**
  * Builds the guest JavaScript that launches a real WASI command in the browser
- * executor with the production `secure-exec:wasi-command-host` spawn/FD bridge.
+ * executor with the production `agentos:wasi-command-host` spawn/FD bridge.
  */
 export function createWasiCommandBootstrapScript(
 	options: WasiCommandBootstrapOptions,
@@ -58,7 +58,7 @@ export function createWasiCommandBootstrapScript(
 				process.stdout.write(${json(bytesMessagePrefix)} + bytes.byteLength + "\\n");
 			}
 			const { WASI } = require("node:wasi");
-			const { createWasiCommandHost } = require("secure-exec:wasi-command-host");
+			const { createWasiCommandHost } = require("agentos:wasi-command-host");
 			const commandHost = await createWasiCommandHost({
 				WASI,
 				commands: ${json(commands)},

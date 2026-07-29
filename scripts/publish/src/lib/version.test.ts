@@ -26,6 +26,17 @@ agentos-kernel = { path = "crates/kernel", version = "0.2.0-rc.3" }
 serde = "1"
 `,
 		);
+		await mkdir(join(repoRoot, "crates", "excluded-core"), { recursive: true });
+		await writeFile(
+			join(repoRoot, "crates", "excluded-core", "Cargo.toml"),
+			`[package]
+name = "agentos-excluded-core"
+version = "0.2.0"
+
+[dependencies]
+agentos-protocol = { path = "../agentos-protocol", version = "0.2.0" }
+`,
+		);
 
 		await bumpCargoVersions(repoRoot, "0.3.0");
 
@@ -42,6 +53,15 @@ serde = "1"
 			/agentos-kernel = \{ path = "crates\/kernel", version = "0\.3\.0" \}/,
 		);
 		assert.match(cargoToml, /serde = "1"/);
+		const excludedCargoToml = await readFile(
+			join(repoRoot, "crates", "excluded-core", "Cargo.toml"),
+			"utf8",
+		);
+		assert.match(excludedCargoToml, /version = "0\.3\.0"/);
+		assert.match(
+			excludedCargoToml,
+			/agentos-protocol = \{ path = "\.\.\/agentos-protocol", version = "0\.3\.0" \}/,
+		);
 	} finally {
 		await rm(repoRoot, { recursive: true, force: true });
 	}
@@ -119,6 +139,62 @@ test("bumpPackageJsons injects sidecar platform optional dependencies", async ()
 			),
 		);
 
+	} finally {
+		await rm(repoRoot, { recursive: true, force: true });
+	}
+});
+
+test("bumpPackageJsons pins lockstep and independent AgentOS Apps runtimes", async () => {
+	const repoRoot = await mkdtemp(join(tmpdir(), "agentos-version-test-"));
+	try {
+		await writeJson(repoRoot, "package.json", {
+			name: "agentos-workspace",
+			private: true,
+			packageManager: "pnpm@10.13.1",
+		});
+		await writeFile(
+			join(repoRoot, "pnpm-workspace.yaml"),
+			["packages:", "  - packages/*", "  - software/*", ""].join("\n"),
+		);
+		await writeJson(repoRoot, "packages/apps/package.json", {
+			name: "@rivet-dev/agentos-apps",
+			version: "0.0.1",
+			dependencies: {
+				"@agentos-software/apps-builder": "workspace:*",
+				"@agentos-software/sh": "workspace:*",
+				"@agentos-software/tar": "workspace:*",
+			},
+		});
+		for (const name of [
+			"@agentos-software/apps-builder",
+			"@agentos-software/sh",
+			"@agentos-software/tar",
+		]) {
+			await writeJson(
+				repoRoot,
+				`software/${name.split("/")[1]}/package.json`,
+				{ name, version: "0.0.1" },
+			);
+		}
+
+		await bumpPackageJsons(repoRoot, "0.0.0-preview.abc1234", {
+			resolveNpmLatestVersion: async (name) => {
+				assert.equal(name, "@agentos-software/tar");
+				return "0.3.5";
+			},
+		});
+
+		const appsManifest = JSON.parse(
+			await readFile(
+				join(repoRoot, "packages/apps/package.json"),
+				"utf8",
+			),
+		);
+		assert.deepEqual(appsManifest.dependencies, {
+			"@agentos-software/apps-builder": "0.0.0-preview.abc1234",
+			"@agentos-software/sh": "0.0.0-preview.abc1234",
+			"@agentos-software/tar": "0.3.5",
+		});
 	} finally {
 		await rm(repoRoot, { recursive: true, force: true });
 	}

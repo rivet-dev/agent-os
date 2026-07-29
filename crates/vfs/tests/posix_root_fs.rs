@@ -304,7 +304,7 @@ fn root_filesystem_uses_bundled_base_and_round_trips_snapshots() {
         .any(|window| window == b"smtp\t\t25/tcp\t\tmail"));
     assert_eq!(
         root.read_file("/etc/hosts").expect("read bundled hosts file"),
-        b"127.0.0.1 localhost localhost.localdomain\n::1 localhost localhost.localdomain ip6-localhost ip6-loopback\nfe00:: ip6-localnet\nff00:: ip6-mcastprefix\nff02::1 ip6-allnodes\nff02::2 ip6-allrouters\n127.0.1.1 secure-exec\n"
+        b"127.0.0.1 localhost localhost.localdomain\n::1 localhost localhost.localdomain ip6-localhost ip6-loopback\nfe00:: ip6-localnet\nff00:: ip6-mcastprefix\nff02::1 ip6-allnodes\nff02::2 ip6-allrouters\n127.0.1.1 agentos\n"
     );
 
     root.mkdir("/workspace", true).expect("create workspace");
@@ -503,7 +503,7 @@ fn snapshot_round_trip_preserves_file_type_bits_in_modes() {
 fn decode_snapshot_accepts_zero_mode_strings() {
     let decoded = decode_snapshot(
         br#"{
-            "format": "secure_exec_filesystem_snapshot_v1",
+            "format": "agentos_filesystem_snapshot_v1",
             "filesystem": {
                 "entries": [
                     {
@@ -581,7 +581,7 @@ fn decode_snapshot_rejects_encoded_payloads_that_exceed_import_limits() {
 
     let error = decode_snapshot_with_import_limits(
         br#"{
-            "format": "secure_exec_filesystem_snapshot_v1",
+            "format": "agentos_filesystem_snapshot_v1",
             "filesystem": { "entries": [] }
         }"#,
         &limits,
@@ -601,7 +601,7 @@ fn decode_snapshot_rejects_entry_counts_that_exceed_import_limits() {
 
     let error = decode_snapshot_with_import_limits(
         br#"{
-            "format": "secure_exec_filesystem_snapshot_v1",
+            "format": "agentos_filesystem_snapshot_v1",
             "filesystem": {
                 "entries": [
                     {
@@ -638,7 +638,7 @@ fn decode_snapshot_rejects_content_bytes_that_exceed_import_limits() {
 
     let error = decode_snapshot_with_import_limits(
         br#"{
-            "format": "secure_exec_filesystem_snapshot_v1",
+            "format": "agentos_filesystem_snapshot_v1",
             "filesystem": {
                 "entries": [
                     {
@@ -665,7 +665,7 @@ fn decode_snapshot_allows_metadata_heavy_entries_within_import_limits() {
     let path = format!("/{}", "a".repeat(4000));
     let snapshot = format!(
         r#"{{
-            "format": "secure_exec_filesystem_snapshot_v1",
+            "format": "agentos_filesystem_snapshot_v1",
             "filesystem": {{
                 "entries": [
                     {{

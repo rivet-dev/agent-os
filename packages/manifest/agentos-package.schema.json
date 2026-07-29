@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://secureexec.dev/schemas/agentos-package.schema.json",
+  "$id": "https://agentos-sdk.dev/schemas/agentos-package.schema.json",
   "title": "agentos-package.json",
   "type": "object",
   "additionalProperties": false,

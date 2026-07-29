@@ -41,6 +41,15 @@ pub(crate) fn service_javascript_crypto_sync_rpc(
                 base64::engine::general_purpose::STANDARD.encode(algorithm.digest(&data)),
             ))
         }
+        "crypto.hashCreate" => service_javascript_crypto_hash_create_sync_rpc(process, request),
+        "crypto.hashUpdate" => service_javascript_crypto_hash_update_sync_rpc(process, request),
+        "crypto.hashFinal" => service_javascript_crypto_hash_final_sync_rpc(process, request),
+        "crypto.hashDestroy" => {
+            let session_id =
+                javascript_sync_rpc_arg_u64(&request.args, 0, "crypto.hashDestroy session id")?;
+            process.hash_sessions.remove(&session_id);
+            Ok(Value::Null)
+        }
         "crypto.hmacDigest" => {
             let algorithm = javascript_crypto_digest_algorithm(
                 &request.args,
@@ -175,6 +184,62 @@ pub(crate) fn service_javascript_crypto_sync_rpc(
     }
 }
 
+fn service_javascript_crypto_hash_create_sync_rpc(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    ensure_per_process_state_handle_capacity(process.hash_sessions.len(), "hash session")?;
+    let algorithm =
+        javascript_crypto_digest_algorithm(&request.args, 0, "crypto.hashCreate algorithm")?;
+    let context = openssl::hash::Hasher::new(algorithm.message_digest()).map_err(|error| {
+        SidecarError::InvalidState(format!("failed to create crypto hash session: {error}"))
+    })?;
+    process.next_hash_session_id += 1;
+    let session_id = process.next_hash_session_id;
+    process
+        .hash_sessions
+        .insert(session_id, ActiveHashSession { context });
+    Ok(json!(session_id))
+}
+
+fn service_javascript_crypto_hash_update_sync_rpc(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let session_id = javascript_sync_rpc_arg_u64(&request.args, 0, "crypto.hashUpdate session id")?;
+    let data = request
+        .raw_bytes_args
+        .get(&1)
+        .cloned()
+        .map(Ok)
+        .unwrap_or_else(|| {
+            javascript_sync_rpc_bytes_arg(&request.args, 1, "crypto.hashUpdate data")
+        })?;
+    let session = process.hash_sessions.get_mut(&session_id).ok_or_else(|| {
+        SidecarError::InvalidState(format!("Hash session {session_id} not found"))
+    })?;
+    session.context.update(&data).map_err(|error| {
+        SidecarError::InvalidState(format!("failed to update crypto hash session: {error}"))
+    })?;
+    Ok(Value::Null)
+}
+
+fn service_javascript_crypto_hash_final_sync_rpc(
+    process: &mut ActiveProcess,
+    request: &JavascriptSyncRpcRequest,
+) -> Result<Value, SidecarError> {
+    let session_id = javascript_sync_rpc_arg_u64(&request.args, 0, "crypto.hashFinal session id")?;
+    let mut session = process.hash_sessions.remove(&session_id).ok_or_else(|| {
+        SidecarError::InvalidState(format!("Hash session {session_id} not found"))
+    })?;
+    let digest = session.context.finish().map_err(|error| {
+        SidecarError::InvalidState(format!("failed to finish crypto hash session: {error}"))
+    })?;
+    Ok(Value::String(
+        base64::engine::general_purpose::STANDARD.encode(digest),
+    ))
+}
+
 fn javascript_crypto_digest_algorithm(
     args: &[Value],
     index: usize,
@@ -206,6 +271,17 @@ impl JavascriptCryptoDigestAlgorithm {
             Self::Sha256 => Sha256::digest(data).to_vec(),
             Self::Sha384 => Sha384::digest(data).to_vec(),
             Self::Sha512 => Sha512::digest(data).to_vec(),
+        }
+    }
+
+    fn message_digest(self) -> MessageDigest {
+        match self {
+            Self::Md5 => MessageDigest::md5(),
+            Self::Sha1 => MessageDigest::sha1(),
+            Self::Sha224 => MessageDigest::sha224(),
+            Self::Sha256 => MessageDigest::sha256(),
+            Self::Sha384 => MessageDigest::sha384(),
+            Self::Sha512 => MessageDigest::sha512(),
         }
     }
 
@@ -1063,10 +1139,75 @@ fn service_javascript_crypto_subtle_sync_rpc(
             ))
         }
         "encrypt" | "decrypt" => service_javascript_crypto_subtle_aes_crypt_sync_rpc(op, &parsed),
+        "sign" | "verify" => service_javascript_crypto_subtle_hmac_sync_rpc(op, &parsed),
         _ => Err(SidecarError::InvalidState(format!(
             "Unsupported subtle operation: {op}"
         ))),
     }
+}
+
+fn service_javascript_crypto_subtle_hmac_sync_rpc(
+    op: &str,
+    parsed: &Value,
+) -> Result<Value, SidecarError> {
+    let algorithm = parsed.get("algorithm").ok_or_else(|| {
+        SidecarError::InvalidState(format!("crypto.subtle.{op} missing algorithm"))
+    })?;
+    let name = javascript_crypto_subtle_algorithm_name(algorithm, &format!("crypto.subtle.{op}"))?;
+    if name != "HMAC" {
+        return Err(SidecarError::InvalidState(format!(
+            "Unsupported subtle {op} algorithm: {name}"
+        )));
+    }
+    let hash = algorithm.get("hash").ok_or_else(|| {
+        SidecarError::InvalidState(format!("crypto.subtle.{op} HMAC algorithm missing hash"))
+    })?;
+    let hash_name =
+        javascript_crypto_subtle_algorithm_name(hash, &format!("crypto.subtle.{op} HMAC hash"))?;
+    let digest = JavascriptCryptoDigestAlgorithm::parse(hash_name)?;
+    let key = javascript_crypto_subtle_key_raw(
+        parsed
+            .get("key")
+            .ok_or_else(|| SidecarError::InvalidState(format!("crypto.subtle.{op} missing key")))?,
+        &format!("crypto.subtle.{op} key"),
+    )?;
+    let data = javascript_crypto_subtle_base64_field(parsed, "data", op)?;
+    let mac = digest.hmac(&key, &data)?;
+    if op == "verify" {
+        let signature = javascript_crypto_subtle_base64_field(parsed, "signature", op)?;
+        return Ok(Value::String(
+            serde_json::to_string(&json!({
+                "result": openssl::memcmp::eq(&mac, &signature),
+            }))
+            .map_err(|error| {
+                SidecarError::InvalidState(format!("serialize crypto.subtle verify: {error}"))
+            })?,
+        ));
+    }
+    Ok(Value::String(
+        serde_json::to_string(&json!({
+            "data": base64::engine::general_purpose::STANDARD.encode(mac),
+        }))
+        .map_err(|error| {
+            SidecarError::InvalidState(format!("serialize crypto.subtle sign: {error}"))
+        })?,
+    ))
+}
+
+fn javascript_crypto_subtle_base64_field(
+    parsed: &Value,
+    field: &str,
+    op: &str,
+) -> Result<Vec<u8>, SidecarError> {
+    let value = parsed
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| SidecarError::InvalidState(format!("crypto.subtle.{op} missing {field}")))?;
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|error| {
+            SidecarError::InvalidState(format!("crypto.subtle.{op} {field} base64: {error}"))
+        })
 }
 
 fn javascript_crypto_subtle_algorithm_name<'a>(
@@ -1151,7 +1292,7 @@ fn service_javascript_crypto_subtle_aes_crypt_sync_rpc(
         SidecarError::InvalidState(format!("crypto.subtle.{op} missing algorithm"))
     })?;
     let name = javascript_crypto_subtle_algorithm_name(algorithm, &format!("crypto.subtle.{op}"))?;
-    if name != "AES-GCM" {
+    if !matches!(name, "AES-GCM" | "AES-CBC") {
         return Err(SidecarError::InvalidState(format!(
             "Unsupported subtle AES operation algorithm: {name}"
         )));
@@ -1163,7 +1304,7 @@ fn service_javascript_crypto_subtle_aes_crypt_sync_rpc(
         &format!("crypto.subtle.{op} key"),
     )?;
     let iv = algorithm.get("iv").and_then(Value::as_str).ok_or_else(|| {
-        SidecarError::InvalidState(format!("crypto.subtle.{op} AES-GCM missing iv"))
+        SidecarError::InvalidState(format!("crypto.subtle.{op} {name} missing iv"))
     })?;
     let iv = base64::engine::general_purpose::STANDARD
         .decode(iv)
@@ -1179,6 +1320,36 @@ fn service_javascript_crypto_subtle_aes_crypt_sync_rpc(
         .map_err(|error| {
             SidecarError::InvalidState(format!("crypto.subtle.{op} data base64: {error}"))
         })?;
+    if name == "AES-CBC" {
+        if iv.len() != 16 {
+            return Err(SidecarError::InvalidState(format!(
+                "crypto.subtle.{op} AES-CBC iv must be 16 bytes"
+            )));
+        }
+        let cipher_name = format!("aes-{}-cbc", key.len() * 8);
+        let mut session = javascript_crypto_build_cipher_session(
+            &cipher_name,
+            &key,
+            Some(&iv),
+            op == "decrypt",
+            None,
+        )?;
+        let mut output = javascript_crypto_cipher_update(&mut session, &data)?;
+        output.extend(
+            session
+                .finalize()
+                .map_err(javascript_crypto_cipher_error)?
+                .data,
+        );
+        return Ok(Value::String(
+            serde_json::to_string(&json!({
+                "data": base64::engine::general_purpose::STANDARD.encode(output),
+            }))
+            .map_err(|error| {
+                SidecarError::InvalidState(format!("serialize crypto.subtle {op}: {error}"))
+            })?,
+        ));
+    }
     let tag_len = javascript_crypto_subtle_aes_gcm_tag_len(algorithm)?;
     let mut options = Map::new();
     options.insert(String::from("authTagLength"), json!(tag_len));

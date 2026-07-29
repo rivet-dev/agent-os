@@ -6,7 +6,7 @@ import { ensureFlatNodeModules } from "./fixture-node-modules.js";
  * at `/root/node_modules` in the VM. The resolver reads the mounted tree
  * through the kernel VFS.
  *
- * The host `node_modules` must be a FLAT install: the secure-exec `host_dir`
+ * The host `node_modules` must be a FLAT install: the agentos `host_dir`
  * mount resolves strictly beneath the mount root and refuses symlinks that
  * escape it, so pnpm's default symlinked `<pkg>/node_modules` (whose entries
  * point into the workspace-root `.pnpm` store) cannot be mounted directly.

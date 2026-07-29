@@ -1,0 +1,14 @@
+{
+  "name": "project-matrix-agent-sdks-pass",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "openai": "6.48.0",
+    "@anthropic-ai/sdk": "0.112.3",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "langchain": "1.5.3",
+    "@langchain/core": "1.2.3",
+    "googleapis": "173.0.0",
+    "octokit": "5.0.5"
+  }
+}

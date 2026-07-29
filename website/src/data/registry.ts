@@ -242,7 +242,7 @@ export const registry = setup({ use: { vm } });`,
 			"Mount a sandbox filesystem and expose process management bindings. Works with any Sandbox Agent provider.",
 		types: ["binding", "file-system"],
 		icon: "Monitor",
-		docsHref: "/docs/sandbox",
+		docsHref: "/docs/sandboxes",
 	},
 	// Sandbox Mounting
 	{

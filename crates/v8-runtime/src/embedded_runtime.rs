@@ -594,7 +594,7 @@ impl EmbeddedV8SessionHandle {
 }
 
 fn validate_execute_mode(mode: u8) -> io::Result<()> {
-    if mode > 1 {
+    if mode > 3 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unknown Execute mode: {mode}"),
@@ -854,11 +854,19 @@ fn dispatch_runtime_command(
             )
             .map_err(other_io_error)
         }
-        RuntimeCommand::DestroySession { session_id } => session_mgr
-            .lock()
-            .expect("session manager lock poisoned")
-            .detach_session(&session_id)
-            .map_err(other_io_error),
+        RuntimeCommand::DestroySession { session_id } => {
+            // Explicit destruction is a quiescence boundary. Remove the entry
+            // while holding the manager lock, then join after releasing it so
+            // the executor cannot leak into a successor session and the event
+            // dispatcher remains free to drain terminal output.
+            let shutdown = session_mgr
+                .lock()
+                .expect("session manager lock poisoned")
+                .begin_destroy_session(&session_id)
+                .map_err(other_io_error)?;
+            shutdown.finish();
+            Ok(())
+        }
         RuntimeCommand::PauseSession { session_id } => {
             let mgr = session_mgr.lock().expect("session manager lock poisoned");
             mgr.pause_session(&session_id).map_err(other_io_error)
@@ -954,7 +962,8 @@ fn dispatch_runtime_command(
                     .try_send(SessionCommand::SetModuleReader(reader))
                     .map_err(|error| match error {
                         crossbeam_channel::TrySendError::Full(_) => other_io_error(format!(
-                            "ERR_AGENTOS_SESSION_COMMAND_LIMIT: session {session_id} command queue exceeded limit of {command_capacity}; raise limits.reactor.maxHandleCommands"
+                            "ERR_AGENTOS_SESSION_COMMAND_LIMIT: session {session_id} command queue exceeded limit of {command_capacity} while admitting module_reader (queued={}); raise limits.reactor.maxHandleCommands",
+                            sender.len()
                         )),
                         crossbeam_channel::TrySendError::Disconnected(_) => other_io_error(
                             format!("session thread disconnected for session {session_id}"),

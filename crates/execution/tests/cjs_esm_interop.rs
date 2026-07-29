@@ -450,7 +450,7 @@ console.log(JSON.stringify({ alpha, beta, defaultAlpha: dep.alpha }));
     assert_eq!(output, json!({ "alpha": 1, "beta": 2, "defaultAlpha": 1 }));
 }
 
-fn runtime_require_of_esm_only_packages_either_loads_or_throws_clearly() {
+fn runtime_require_of_sync_esm_packages_returns_namespace_exports() {
     let fixture = Fixture::new();
     fixture.write_json(
         "node_modules/pkg/package.json",
@@ -470,7 +470,8 @@ try {
   const value = require("pkg");
   console.log(JSON.stringify({
     mode: "loaded",
-    value: value && value.default ? value.default.value : value.value
+    value: value && value.default ? value.default.value : value.value,
+    esModule: value && value.__esModule
   }));
 } catch (error) {
   console.log(JSON.stringify({
@@ -483,22 +484,12 @@ try {
     );
 
     let output = run_guest_json(&fixture, "./entry.cjs");
-    match output.get("mode").and_then(Value::as_str) {
-        Some("loaded") => {
-            assert_eq!(output.get("value"), Some(&json!(42)));
-        }
-        Some("error") => {
-            let message = output
-                .get("message")
-                .and_then(Value::as_str)
-                .expect("error message");
-            assert!(!message.is_empty(), "expected a non-empty error message");
-        }
-        other => panic!("unexpected require(pkg) mode: {other:?}"),
-    }
+    assert_eq!(output.get("mode"), Some(&json!("loaded")));
+    assert_eq!(output.get("value"), Some(&json!(42)));
+    assert_eq!(output.get("esModule"), Some(&json!(true)));
 }
 
-fn runtime_require_type_module_js_main_throws_require_esm() {
+fn runtime_require_type_module_js_main_loads_synchronously() {
     let fixture = Fixture::new();
     fixture.write_json(
         "node_modules/pkg/package.json",
@@ -508,6 +499,39 @@ fn runtime_require_type_module_js_main_throws_require_esm() {
         }),
     );
     fixture.write("node_modules/pkg/dist/index.js", "export const value = 42;");
+    fixture.write(
+        "entry.cjs",
+        r#"
+try {
+  const pkg = require("pkg");
+  console.log(JSON.stringify({ mode: "loaded", value: pkg.value }));
+} catch (error) {
+  console.log(JSON.stringify({
+    mode: "error",
+    code: error && error.code ? error.code : null,
+    message: String(error && error.message ? error.message : error)
+  }));
+}
+"#,
+    );
+
+    let output = run_guest_json(&fixture, "./entry.cjs");
+    assert_eq!(output, json!({ "mode": "loaded", "value": 42 }));
+}
+
+fn runtime_require_esm_with_top_level_await_fails_with_async_module_error() {
+    let fixture = Fixture::new();
+    fixture.write_json(
+        "node_modules/pkg/package.json",
+        json!({
+            "type": "module",
+            "exports": "./index.mjs"
+        }),
+    );
+    fixture.write(
+        "node_modules/pkg/index.mjs",
+        "await Promise.resolve(); export const value = 42;",
+    );
     fixture.write(
         "entry.cjs",
         r#"
@@ -526,12 +550,11 @@ try {
 
     let output = run_guest_json(&fixture, "./entry.cjs");
     assert_eq!(output.get("mode"), Some(&json!("error")));
-    assert_eq!(output.get("code"), Some(&json!("ERR_REQUIRE_ESM")));
-    let message = output
+    assert_eq!(output.get("code"), Some(&json!("ERR_REQUIRE_ASYNC_MODULE")));
+    assert!(output
         .get("message")
         .and_then(Value::as_str)
-        .expect("error message");
-    assert!(message.contains("require() of ES Module"));
+        .is_some_and(|message| message.contains("top-level await")));
 }
 
 fn runtime_require_fails_closed_when_module_format_bridge_is_missing() {
@@ -1098,13 +1121,26 @@ fn runtime_intl_datetime_format_does_not_crash() {
         "entry.mjs",
         r#"
 console.log(JSON.stringify({
-  formatted: new Intl.DateTimeFormat("en-US").format(new Date("2024-01-02T03:04:05Z"))
+  formatted: new Intl.DateTimeFormat("en-US").format(new Date("2024-01-02T03:04:05Z")),
+  calledFormatted: Intl.DateTimeFormat("en-US").format(new Date("2024-01-02T03:04:05Z")),
+  number: Intl.NumberFormat("en-US").format(1234),
+  dateInstance: Intl.DateTimeFormat() instanceof Intl.DateTimeFormat,
+  numberInstance: Intl.NumberFormat() instanceof Intl.NumberFormat
 }));
 "#,
     );
 
     let output = run_guest_json(&fixture, "./entry.mjs");
-    assert_eq!(output, json!({ "formatted": "2024-01-02" }));
+    assert_eq!(
+        output,
+        json!({
+            "formatted": "2024-01-02",
+            "calledFormatted": "2024-01-02",
+            "number": "1,234",
+            "dateInstance": true,
+            "numberInstance": true
+        })
+    );
 }
 
 fn runtime_buffer_base64url_encoding_matches_node_behavior() {
@@ -1204,6 +1240,31 @@ fn runtime_cjs_entrypoints_can_use_dynamic_import() {
     assert_eq!(output, json!({ "answer": 42 }));
 }
 
+fn runtime_nested_cjs_modules_resolve_dynamic_imports_relative_to_themselves() {
+    let fixture = Fixture::new();
+    fixture.write("nested/dep.mjs", "export const answer = 42;\n");
+    fixture.write(
+        "nested/loader.cjs",
+        r#"
+module.exports = import("./dep.mjs");
+"#,
+    );
+    fixture.write(
+        "entry.cjs",
+        r#"
+require("./nested/loader.cjs").then((mod) => {
+  console.log(JSON.stringify({ answer: mod.answer }));
+}).catch((error) => {
+  console.error(String(error && error.stack ? error.stack : error));
+  process.exit(1);
+});
+"#,
+    );
+
+    let output = run_guest_json(&fixture, "./entry.cjs");
+    assert_eq!(output, json!({ "answer": 42 }));
+}
+
 fn runtime_export_star_reexport_with_own_static_exports_exposes_all_named_esm_imports() {
     // Reproduces `@sinclair/typebox/compiler`: a tsc-compiled barrel that BOTH assigns its own
     // export statically (`exports.ValueErrorType = ...`, which static extraction finds, so the set
@@ -1287,8 +1348,9 @@ fn cjs_esm_interop_suite() {
     runtime_object_create_descriptor_exports_expose_named_esm_imports_via_runtime_fallback();
     runtime_cjs_reexport_preserves_named_esm_imports_via_runtime_fallback();
     runtime_export_star_reexport_with_own_static_exports_exposes_all_named_esm_imports();
-    runtime_require_of_esm_only_packages_either_loads_or_throws_clearly();
-    runtime_require_type_module_js_main_throws_require_esm();
+    runtime_require_of_sync_esm_packages_returns_namespace_exports();
+    runtime_require_type_module_js_main_loads_synchronously();
+    runtime_require_esm_with_top_level_await_fails_with_async_module_error();
     runtime_require_fails_closed_when_module_format_bridge_is_missing();
     runtime_import_module_condition_js_target_uses_esm_syntax();
     runtime_type_module_export_subpaths_keep_js_files_in_esm_mode();
@@ -1314,4 +1376,5 @@ fn cjs_esm_interop_suite() {
     runtime_relative_file_urls_preserve_directory_trailing_slashes();
     runtime_require_module_returns_the_module_constructor_shape();
     runtime_cjs_entrypoints_can_use_dynamic_import();
+    runtime_nested_cjs_modules_resolve_dynamic_imports_relative_to_themselves();
 }

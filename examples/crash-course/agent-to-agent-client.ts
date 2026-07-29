@@ -5,14 +5,14 @@ const client = createClient<typeof registry>({
 	endpoint: "http://localhost:6420",
 });
 const coderAgent = client.coder.getOrCreate("feature-auth");
-await coderAgent.openSession({
+await coderAgent.sessions.open({
 	agent: "pi",
 	env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
 
 // The coder implements the feature, then calls the `review` binding itself so the
 // reviewer agent reviews the code. This is true agent-to-agent: the coder drives it.
-await coderAgent.prompt({
+await coderAgent.sessions.prompt({
 	content: [
 		{
 			type: "text",

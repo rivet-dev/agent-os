@@ -4,11 +4,11 @@ var config = {
   platform: typeof _osConfig !== "undefined" && _osConfig.platform || "linux",
   arch: typeof _osConfig !== "undefined" && _osConfig.arch || "x64",
   type: typeof _osConfig !== "undefined" && _osConfig.type || "Linux",
-  release: typeof _osConfig !== "undefined" && _osConfig.release || "6.8.0-secure-exec",
-  version: typeof _osConfig !== "undefined" && _osConfig.version || "#1 SMP PREEMPT_DYNAMIC secure-exec",
+  release: typeof _osConfig !== "undefined" && _osConfig.release || "6.8.0-agentos",
+  version: typeof _osConfig !== "undefined" && _osConfig.version || "#1 SMP PREEMPT_DYNAMIC agentos",
   homedir: typeof _osConfig !== "undefined" && _osConfig.homedir || "/home/user",
   tmpdir: typeof _osConfig !== "undefined" && _osConfig.tmpdir || "/tmp",
-  hostname: typeof _osConfig !== "undefined" && _osConfig.hostname || "secure-exec",
+  hostname: typeof _osConfig !== "undefined" && _osConfig.hostname || "agentos",
   machine: typeof _osConfig !== "undefined" && _osConfig.machine || "x86_64"
 };
 function getRuntimeHomeDir() {

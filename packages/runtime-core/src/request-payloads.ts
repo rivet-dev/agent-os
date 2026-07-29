@@ -215,6 +215,10 @@ export type LiveRequestPayload =
 			path: string;
 			headers_json: string;
 			body?: string;
+			body_base64?: string;
+			stream_operation?: "start" | "read" | "cancel";
+			stream_id?: string;
+			max_bytes?: number;
 	  }
 	| {
 			type: "get_signal_state";
@@ -237,6 +241,82 @@ export type LiveRequestPayload =
 			type: "persistence_flush";
 			key: string;
 			payload_size_bytes: number;
+	  }
+	| { type: "shell_execution"; request: protocol.ShellExecutionRequest }
+	| { type: "argv_execution"; request: protocol.ArgvExecutionRequest }
+	| {
+			type: "javascript_execution";
+			request: protocol.JavaScriptExecutionRequest;
+	  }
+	| {
+			type: "javascript_evaluation";
+			request: protocol.JavaScriptEvaluationRequest;
+	  }
+	| {
+			type: "javascript_file_execution";
+			request: protocol.JavaScriptFileExecutionRequest;
+	  }
+	| {
+			type: "typescript_execution";
+			request: protocol.TypeScriptExecutionRequest;
+	  }
+	| {
+			type: "typescript_evaluation";
+			request: protocol.TypeScriptEvaluationRequest;
+	  }
+	| {
+			type: "typescript_file_execution";
+			request: protocol.TypeScriptFileExecutionRequest;
+	  }
+	| { type: "typescript_check"; request: protocol.TypeScriptCheckRequest }
+	| {
+			type: "typescript_project_check";
+			request: protocol.TypeScriptProjectCheckRequest;
+	  }
+	| { type: "npm_project_install"; request: protocol.NpmProjectInstallRequest }
+	| { type: "npm_package_install"; request: protocol.NpmPackageInstallRequest }
+	| {
+			type: "npm_script_execution";
+			request: protocol.NpmScriptExecutionRequest;
+	  }
+	| {
+			type: "npm_package_execution";
+			request: protocol.NpmPackageExecutionRequest;
+	  }
+	| { type: "python_execution"; request: protocol.PythonExecutionRequest }
+	| { type: "python_evaluation"; request: protocol.PythonEvaluationRequest }
+	| {
+			type: "python_file_execution";
+			request: protocol.PythonFileExecutionRequest;
+	  }
+	| {
+			type: "python_module_execution";
+			request: protocol.PythonModuleExecutionRequest;
+	  }
+	| { type: "python_install"; request: protocol.PythonInstallRequest }
+	| { type: "create_context"; request: protocol.CreateContextRequest }
+	| { type: "get_execution"; request: protocol.GetExecutionRequest }
+	| { type: "list_executions" }
+	| { type: "wait_execution"; request: protocol.WaitExecutionRequest }
+	| { type: "cancel_execution"; request: protocol.CancelExecutionRequest }
+	| { type: "signal_execution"; request: protocol.SignalExecutionRequest }
+	| { type: "reset_execution"; request: protocol.ResetExecutionRequest }
+	| { type: "delete_execution"; request: protocol.DeleteExecutionRequest }
+	| {
+			type: "write_execution_stdin";
+			request: protocol.WriteExecutionStdinRequest;
+	  }
+	| {
+			type: "close_execution_stdin";
+			request: protocol.CloseExecutionStdinRequest;
+	  }
+	| {
+			type: "resize_execution_pty";
+			request: protocol.ResizeExecutionPtyRequest;
+	  }
+	| {
+			type: "read_execution_output";
+			request: protocol.ReadExecutionOutputRequest;
 	  }
 	| {
 			type: "ext";
@@ -491,6 +571,10 @@ export function toGeneratedRequestPayload(
 					path: payload.path,
 					headersJson: payload.headers_json,
 					body: payload.body ?? null,
+					bodyBase64: payload.body_base64 ?? null,
+					streamOperation: payload.stream_operation ?? null,
+					streamId: payload.stream_id ?? null,
+					maxBytes: payload.max_bytes ?? null,
 				},
 			};
 		case "get_signal_state":
@@ -522,6 +606,68 @@ export function toGeneratedRequestPayload(
 					payloadSizeBytes: BigInt(payload.payload_size_bytes),
 				},
 			};
+		case "shell_execution":
+			return { tag: "ShellExecutionRequest", val: payload.request };
+		case "argv_execution":
+			return { tag: "ArgvExecutionRequest", val: payload.request };
+		case "javascript_execution":
+			return { tag: "JavaScriptExecutionRequest", val: payload.request };
+		case "javascript_evaluation":
+			return { tag: "JavaScriptEvaluationRequest", val: payload.request };
+		case "javascript_file_execution":
+			return { tag: "JavaScriptFileExecutionRequest", val: payload.request };
+		case "typescript_execution":
+			return { tag: "TypeScriptExecutionRequest", val: payload.request };
+		case "typescript_evaluation":
+			return { tag: "TypeScriptEvaluationRequest", val: payload.request };
+		case "typescript_file_execution":
+			return { tag: "TypeScriptFileExecutionRequest", val: payload.request };
+		case "typescript_check":
+			return { tag: "TypeScriptCheckRequest", val: payload.request };
+		case "typescript_project_check":
+			return { tag: "TypeScriptProjectCheckRequest", val: payload.request };
+		case "npm_project_install":
+			return { tag: "NpmProjectInstallRequest", val: payload.request };
+		case "npm_package_install":
+			return { tag: "NpmPackageInstallRequest", val: payload.request };
+		case "npm_script_execution":
+			return { tag: "NpmScriptExecutionRequest", val: payload.request };
+		case "npm_package_execution":
+			return { tag: "NpmPackageExecutionRequest", val: payload.request };
+		case "python_execution":
+			return { tag: "PythonExecutionRequest", val: payload.request };
+		case "python_evaluation":
+			return { tag: "PythonEvaluationRequest", val: payload.request };
+		case "python_file_execution":
+			return { tag: "PythonFileExecutionRequest", val: payload.request };
+		case "python_module_execution":
+			return { tag: "PythonModuleExecutionRequest", val: payload.request };
+		case "python_install":
+			return { tag: "PythonInstallRequest", val: payload.request };
+		case "create_context":
+			return { tag: "CreateContextRequest", val: payload.request };
+		case "get_execution":
+			return { tag: "GetExecutionRequest", val: payload.request };
+		case "list_executions":
+			return { tag: "ListExecutionsRequest", val: null };
+		case "wait_execution":
+			return { tag: "WaitExecutionRequest", val: payload.request };
+		case "cancel_execution":
+			return { tag: "CancelExecutionRequest", val: payload.request };
+		case "signal_execution":
+			return { tag: "SignalExecutionRequest", val: payload.request };
+		case "reset_execution":
+			return { tag: "ResetExecutionRequest", val: payload.request };
+		case "delete_execution":
+			return { tag: "DeleteExecutionRequest", val: payload.request };
+		case "write_execution_stdin":
+			return { tag: "WriteExecutionStdinRequest", val: payload.request };
+		case "close_execution_stdin":
+			return { tag: "CloseExecutionStdinRequest", val: payload.request };
+		case "resize_execution_pty":
+			return { tag: "ResizeExecutionPtyRequest", val: payload.request };
+		case "read_execution_output":
+			return { tag: "ReadExecutionOutputRequest", val: payload.request };
 		case "ext":
 			return {
 				tag: "ExtEnvelope",

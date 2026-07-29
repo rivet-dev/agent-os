@@ -1,0 +1,13 @@
+{
+  "name": "project-matrix-argon2-native-blocked",
+  "private": true,
+  "type": "module",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "argon2"
+    ]
+  },
+  "dependencies": {
+    "argon2": "0.45.0"
+  }
+}

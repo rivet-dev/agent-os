@@ -3,7 +3,7 @@
  *
  * A package is a self-contained directory produced by `@rivet-dev/agentos-toolchain
  * pack`. The HOST no longer projects it: the client forwards only the package
- * directory over the wire and the secure-exec sidecar owns the `/opt/agentos`
+ * directory over the wire and the agentos sidecar owns the `/opt/agentos`
  * projection. Package metadata lives in `<dir>/agentos-package.json`.
  *
  * This module is therefore only the client-facing package-dir surface plus the
@@ -33,7 +33,7 @@ export interface PackageDescriptor {
 	path: string;
 }
 
-/** Discriminate the dir-only package reference. */
+/** Discriminate the path-only package reference. */
 export function isPackageDescriptor(
 	value: unknown,
 ): value is PackageDescriptor {

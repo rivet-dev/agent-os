@@ -176,6 +176,25 @@ impl Default for PipeManager {
 }
 
 impl PipeManager {
+    pub fn is_write_to_read_pair(
+        &self,
+        write_description_id: u64,
+        read_description_id: u64,
+    ) -> bool {
+        let state = lock_or_recover(&self.inner.state);
+        match (
+            state.desc_to_pipe.get(&write_description_id),
+            state.desc_to_pipe.get(&read_description_id),
+        ) {
+            (Some(write), Some(read)) => {
+                write.pipe_id == read.pipe_id
+                    && write.end == PipeSide::Write
+                    && read.end == PipeSide::Read
+            }
+            _ => false,
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

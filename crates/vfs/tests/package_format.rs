@@ -1,5 +1,6 @@
 #![cfg(not(target_arch = "wasm32"))]
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -47,6 +48,28 @@ fn package_format_round_trips_manifest_all_none_and_mount_index() {
 }
 
 #[test]
+fn package_format_round_trips_agent_metadata() {
+    let manifest = v1::PackageManifest {
+        name: "wasm-agent".into(),
+        version: "1.0.0".into(),
+        agent: Some(v1::AgentBlock {
+            acp_entrypoint: "pi-acp".into(),
+            snapshot: false,
+            env: HashMap::new(),
+            launch_args: Vec::new(),
+        }),
+        provides: None,
+        commands: Vec::new(),
+        man_pages: Vec::new(),
+        snapshot_bundle_path: None,
+    };
+    let encoded = encode_package_manifest(manifest).expect("encode v1 manifest");
+    assert_eq!(u16::from_le_bytes([encoded[0], encoded[1]]), 1);
+    let decoded = decode_package_manifest(&encoded).expect("decode v1 manifest");
+    assert_eq!(decoded.agent.expect("agent block").acp_entrypoint, "pi-acp");
+}
+
+#[test]
 fn package_format_rejects_unknown_schema_version_and_corrupt_headers() {
     let mut bad_version = 2u16.to_le_bytes().to_vec();
     bad_version.extend_from_slice(&[]);
@@ -74,7 +97,7 @@ fn package_format_rejects_unknown_schema_version_and_corrupt_headers() {
 
 #[test]
 fn tar_filesystem_rejects_unsorted_index() {
-    let path = unique_path("secure-exec-unsorted-aospkg");
+    let path = unique_path("agentos-unsorted-aospkg");
     let manifest = encode_package_manifest(v1::PackageManifest {
         name: String::from("unsorted"),
         version: String::from("1.0.0"),

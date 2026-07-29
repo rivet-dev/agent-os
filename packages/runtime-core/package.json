@@ -184,14 +184,17 @@
 	},
 	"scripts": {
 		"build:protocol": "pnpm --dir ../build-tools build:protocol",
-		"build:vm-config": "cargo test -p agentos-vm-config --quiet",
+		"generate:vm-config": "cargo test -p agentos-vm-config --quiet",
 		"copy-commands": "node scripts/copy-wasm-commands.mjs",
-		"check-types": "pnpm run build:protocol && pnpm run build:vm-config && tsc --noEmit",
-		"build": "pnpm run build:protocol && pnpm run build:vm-config && tsc && pnpm run copy-commands",
+		"check-types": "pnpm run build:protocol && tsc --noEmit",
+		"build": "pnpm run build:protocol && tsc && pnpm run copy-commands",
 		"prepack": "node scripts/copy-wasm-commands.mjs --require",
-		"pretest": "cargo build -q -p agentos-native-sidecar",
-		"test": "vitest run",
-		"test:ecosystem": "AGENTOS_ECOSYSTEM_E2E=1 vitest run tests/integration/e2e-project-matrix.test.ts -t 'required Node ecosystem reactor matrix' --reporter=verbose"
+		"test": "vitest run --exclude '**/*.nightly.test.ts'",
+		"test:pr": "vitest run --exclude '**/*.nightly.test.ts' --fileParallelism=false",
+		"test:nightly": "vitest run tests/integration/*.nightly.test.ts --passWithNoTests",
+		"test:ecosystem": "AGENTOS_ECOSYSTEM_E2E=1 vitest run tests/integration/e2e-project-matrix.nightly.test.ts -t 'required Node ecosystem reactor matrix' --reporter=verbose",
+		"test:ecosystem:full": "AGENTOS_ECOSYSTEM_FULL_E2E=1 vitest run tests/integration/e2e-project-matrix.nightly.test.ts -t 'full Node ecosystem matrix through kernel' --reporter=verbose",
+		"test:npm-workflows": "AGENTOS_NPM_WORKFLOWS_E2E=1 vitest run tests/integration/e2e-npm-*.nightly.test.ts tests/integration/e2e-npx-and-pipes.nightly.test.ts tests/integration/e2e-concurrently.nightly.test.ts tests/integration/e2e-nextjs-build.nightly.test.ts --reporter=verbose"
 	},
 	"dependencies": {
 		"@rivet-dev/agentos-runtime-sidecar": "workspace:*",

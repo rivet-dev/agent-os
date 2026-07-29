@@ -1,10 +1,11 @@
-import { createServer } from "node:https";
-import { resolve } from "node:path";
-import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import type { AddressInfo } from "node:net";
+import { resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { WebSocketServer } from "ws";
 import { AgentOs } from "../src/index.js";
+import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
 
@@ -59,7 +60,7 @@ ykAheWCsAteSEWVc0w==
 -----END CERTIFICATE-----
 `;
 
-const GUEST_SCRIPT = String.raw`
+const GUEST_SCRIPT = `
 import WebSocket from "ws";
 
 const wsUrl = process.env.WS_URL;
@@ -103,6 +104,41 @@ const reply = await new Promise((resolve, reject) => {
 console.log("WS_REPLY:" + reply);
 `;
 
+const GLOBAL_WEBSOCKET_GUEST_SCRIPT = `
+const wsUrl = process.env.WS_URL;
+if (!wsUrl) {
+  throw new Error("missing WS_URL");
+}
+
+const reply = await new Promise((resolve, reject) => {
+  const socket = new WebSocket(wsUrl);
+  const timer = setTimeout(() => {
+    reject(new Error("timed out waiting for websocket reply"));
+  }, 15_000);
+
+  socket.addEventListener("open", () => {
+    socket.send(JSON.stringify({ kind: "global-ping" }));
+  });
+  socket.addEventListener("message", (event) => {
+    clearTimeout(timer);
+    socket.close();
+    resolve(event.data);
+  });
+  socket.addEventListener("error", (event) => {
+    clearTimeout(timer);
+    reject(
+      event.error ??
+        new Error(
+          "global WebSocket emitted an error: " +
+            (event.message ?? "unknown"),
+        ),
+    );
+  });
+});
+
+console.log("WS_GLOBAL_REPLY:" + reply);
+`;
+
 describe("guest websocket over wss", () => {
 	let vm: AgentOs | null = null;
 
@@ -114,7 +150,7 @@ describe("guest websocket over wss", () => {
 	});
 
 	test("connects to a host wss endpoint and exchanges a message", async () => {
-		const server = createServer({
+		const server = createHttpsServer({
 			key: TLS_TEST_KEY_PEM,
 			cert: TLS_TEST_CERT_PEM,
 		});
@@ -155,10 +191,7 @@ describe("guest websocket over wss", () => {
 						rules: [
 							{
 								mode: "allow",
-								patterns: [
-									`dns://localhost`,
-									`tcp://localhost:${port}`,
-								],
+								patterns: [`tcp://127.0.0.1:${port}`],
 							},
 						],
 					},
@@ -171,26 +204,119 @@ describe("guest websocket over wss", () => {
 
 			const { pid } = vm.spawn("node", ["/tmp/websocket-wss-test.mjs"], {
 				env: {
-					WS_URL: `wss://localhost:${port}`,
+					WS_URL: `wss://127.0.0.1:${port}`,
 				},
-				onStdout: (data: Uint8Array) => {
-					stdout += new TextDecoder().decode(data);
-				},
-				onStderr: (data: Uint8Array) => {
-					stderr += new TextDecoder().decode(data);
-				},
+			});
+			const unsubscribeOutput = vm.onProcessOutput(pid, (event) => {
+				const decoded = new TextDecoder().decode(event.data);
+				if (event.stream === "stdout") {
+					stdout += decoded;
+				} else {
+					stderr += decoded;
+				}
 			});
 
 			const exitCode = await vm.waitProcess(pid);
+			unsubscribeOutput();
 			expect(exitCode, `stdout:\n${stdout}\nstderr:\n${stderr}`).toBe(0);
 
 			const replyLine = stdout
 				.split("\n")
 				.find((line) => line.startsWith("WS_REPLY:"));
 			expect(replyLine, `stdout:\n${stdout}\nstderr:\n${stderr}`).toBeTruthy();
-			expect(JSON.parse(replyLine!.slice("WS_REPLY:".length))).toEqual({
+			if (replyLine === undefined) {
+				throw new Error("guest did not emit a WebSocket reply");
+			}
+			expect(JSON.parse(replyLine.slice("WS_REPLY:".length))).toEqual({
 				ok: true,
 				payload: JSON.stringify({ kind: "ping" }),
+			});
+		} finally {
+			await new Promise<void>((resolvePromise, reject) => {
+				wss.close((error) => {
+					if (error) {
+						reject(error);
+						return;
+					}
+					resolvePromise();
+				});
+			});
+			await new Promise<void>((resolvePromise, reject) => {
+				server.close((error) => {
+					if (error) {
+						reject(error);
+						return;
+					}
+					resolvePromise();
+				});
+			});
+		}
+	});
+
+	test("exposes a working standard WebSocket global", async () => {
+		const server = createHttpServer();
+		const wss = new WebSocketServer({ server });
+
+		wss.on("connection", (socket) => {
+			socket.once("message", (data) => {
+				socket.send(
+					JSON.stringify({
+						ok: true,
+						payload: data.toString(),
+					}),
+				);
+			});
+		});
+
+		await new Promise<void>((resolvePromise) => {
+			server.listen(0, "127.0.0.1", () => resolvePromise());
+		});
+
+		try {
+			const port = (server.address() as AddressInfo).port;
+			vm = await AgentOs.create({
+				loopbackExemptPorts: [port],
+				permissions: {
+					fs: "allow",
+					childProcess: "allow",
+					env: "allow",
+					network: {
+						default: "deny",
+						rules: [
+							{
+								mode: "allow",
+								patterns: [`tcp://127.0.0.1:${port}`],
+							},
+						],
+					},
+				},
+			});
+			await vm.writeFile(
+				"/tmp/global-websocket-test.mjs",
+				GLOBAL_WEBSOCKET_GUEST_SCRIPT,
+			);
+
+			const result = await vm.execArgv(
+				"node",
+				["/tmp/global-websocket-test.mjs"],
+				{ env: { WS_URL: `ws://127.0.0.1:${port}` } },
+			);
+			expect(
+				result.exitCode,
+				`stdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+			).toBe(0);
+
+			const replyLine = result.stdout
+				.split("\n")
+				.find((line) => line.startsWith("WS_GLOBAL_REPLY:"));
+			if (!replyLine) {
+				throw new Error(
+					`missing global WebSocket reply; stdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+				);
+			}
+			expect(JSON.parse(replyLine.slice("WS_GLOBAL_REPLY:".length))).toEqual({
+				ok: true,
+				payload: JSON.stringify({ kind: "global-ping" }),
 			});
 		} finally {
 			await new Promise<void>((resolvePromise, reject) => {

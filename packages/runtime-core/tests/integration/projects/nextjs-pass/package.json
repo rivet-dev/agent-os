@@ -2,6 +2,9 @@
 	"name": "project-matrix-nextjs-pass",
 	"private": true,
 	"type": "commonjs",
+	"scripts": {
+		"postinstall": "node prepare-next-wasm.cjs"
+	},
 	"dependencies": {
 		"@babel/runtime": "7.26.0",
 		"@next/swc-wasm-nodejs": "14.2.15",

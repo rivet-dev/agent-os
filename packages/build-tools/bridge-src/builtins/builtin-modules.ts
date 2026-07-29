@@ -1,3 +1,4 @@
+import upstreamUrlHelpersModule from "agentos-node-url-polyfill";
 import { exposeCustomGlobal } from "../global-exposure.js";
 import { TextDecoder } from "../polyfills/index.js";
 import {
@@ -24,6 +25,7 @@ import { builtinCryptoModule } from "./crypto.js";
 import { eventsModule } from "./events.js";
 import {
 	builtinDiagnosticsChannelModule,
+	builtinInspectorModule,
 	builtinStreamConsumersModule,
 	builtinStreamPromisesModule,
 	builtinTtyModule,
@@ -31,19 +33,20 @@ import {
 	createAccessDeniedBuiltinError,
 } from "./misc-stubs.js";
 import { builtinPerfHooksModule } from "./perf.js";
-import { fileURLToPath2, pathToFileURL2, process_default } from "./process.js";
+import { process_default } from "./process.js";
 import {
 	builtinAsyncHooksModule,
 	builtinTimersPromisesModule,
 } from "./timers.js";
 import { builtinV8Module } from "./v8.js";
 import { builtinVmModule } from "./vm.js";
-import { URL2, URLSearchParams } from "./whatwg-url.js";
+import { resolveObjectURL, URL2, URLSearchParams } from "./whatwg-url.js";
 
 // biome-ignore lint/complexity/noStaticOnlyClass: generated bridge consumers rely on this registry shape.
 class BuiltinModuleRegistry {
 	static builtinModules = [
 		"assert",
+		"assert/strict",
 		"async_hooks",
 		"buffer",
 		"child_process",
@@ -140,6 +143,90 @@ function defineMissingModuleProperty(target, key, value) {
 		target[key] = value;
 	}
 }
+function defineModuleProperty(target, key, value) {
+	if (target == null) return;
+	Object.defineProperty(target, key, {
+		configurable: true,
+		writable: true,
+		value,
+	});
+}
+function bufferValidationBytes(input) {
+	if (
+		input instanceof ArrayBuffer ||
+		(typeof SharedArrayBuffer !== "undefined" &&
+			input instanceof SharedArrayBuffer)
+	) {
+		return new Uint8Array(input);
+	}
+	if (ArrayBuffer.isView(input) && !(input instanceof DataView)) {
+		return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+	}
+	const error = new TypeError(
+		'The "input" argument must be an instance of ArrayBuffer, Buffer, or TypedArray',
+	);
+	error.code = "ERR_INVALID_ARG_TYPE";
+	throw error;
+}
+function bufferIsAscii(input) {
+	const bytes = bufferValidationBytes(input);
+	for (let index = 0; index < bytes.length; index += 1) {
+		if (bytes[index] > 0x7f) {
+			return false;
+		}
+	}
+	return true;
+}
+function bufferIsUtf8(input) {
+	const bytes = bufferValidationBytes(input);
+	let index = 0;
+	while (index < bytes.length) {
+		const first = bytes[index];
+		if (first <= 0x7f) {
+			index += 1;
+			continue;
+		}
+
+		let continuationCount = 0;
+		let minimumCodePoint = 0;
+		let codePoint = 0;
+		if (first >= 0xc2 && first <= 0xdf) {
+			continuationCount = 1;
+			minimumCodePoint = 0x80;
+			codePoint = first & 0x1f;
+		} else if (first >= 0xe0 && first <= 0xef) {
+			continuationCount = 2;
+			minimumCodePoint = 0x800;
+			codePoint = first & 0x0f;
+		} else if (first >= 0xf0 && first <= 0xf4) {
+			continuationCount = 3;
+			minimumCodePoint = 0x10000;
+			codePoint = first & 0x07;
+		} else {
+			return false;
+		}
+
+		if (index + continuationCount >= bytes.length) {
+			return false;
+		}
+		for (let offset = 1; offset <= continuationCount; offset += 1) {
+			const continuation = bytes[index + offset];
+			if ((continuation & 0xc0) !== 0x80) {
+				return false;
+			}
+			codePoint = (codePoint << 6) | (continuation & 0x3f);
+		}
+		if (
+			codePoint < minimumCodePoint ||
+			codePoint > 0x10ffff ||
+			(codePoint >= 0xd800 && codePoint <= 0xdfff)
+		) {
+			return false;
+		}
+		index += continuationCount + 1;
+	}
+	return true;
+}
 function trimNonRootTrailingSlash(pathValue) {
 	return typeof pathValue === "string" &&
 		pathValue.length > 1 &&
@@ -165,6 +252,17 @@ defineMissingModuleProperty(
 );
 defineMissingModuleProperty(builtinBufferStdlibModule, "Blob", globalThis.Blob);
 defineMissingModuleProperty(builtinBufferStdlibModule, "File", globalThis.File);
+defineMissingModuleProperty(
+	builtinBufferStdlibModule,
+	"isAscii",
+	bufferIsAscii,
+);
+defineMissingModuleProperty(builtinBufferStdlibModule, "isUtf8", bufferIsUtf8);
+defineMissingModuleProperty(
+	builtinBufferStdlibModule,
+	"resolveObjectURL",
+	resolveObjectURL,
+);
 var builtinConstantsStdlibModule = cloneStdlibModule(constantsStdlibModuleNs);
 var builtinEventsStdlibModule = cloneStdlibModule(eventsStdlibModuleNs);
 var builtinEventsConstructor = null;
@@ -178,24 +276,11 @@ function ensureBuiltinEventsStdlibModule() {
 		typeof builtinEventsStdlibModule === "function"
 			? builtinEventsStdlibModule
 			: builtinEventsStdlibModule?.EventEmitter;
-	if (typeof builtinEventsConstructor === "function") {
-		Object.assign(
-			builtinEventsConstructor.prototype,
-			eventsModule.EventEmitter.prototype,
-		);
-		Object.assign(
-			eventsModule.EventEmitter,
-			builtinEventsStdlibModule,
-			eventsModule,
-		);
-		builtinEventsStdlibModule = eventsModule.EventEmitter;
-		builtinEventsStdlibModule.EventEmitter = builtinEventsStdlibModule;
-	} else {
-		builtinEventsStdlibModule = {
-			...builtinEventsStdlibModule,
-			...eventsModule,
-		};
-	}
+	builtinEventsStdlibModule =
+		typeof builtinEventsConstructor === "function"
+			? Object.assign(builtinEventsConstructor, eventsModule)
+			: eventsModule;
+	builtinEventsStdlibModule.EventEmitter = builtinEventsStdlibModule;
 	return builtinEventsStdlibModule;
 }
 var builtinPathStdlibModule = cloneStdlibModule(pathStdlibModuleNs);
@@ -216,6 +301,16 @@ if (builtinPathStdlibModule?.normalize) {
 	builtinPathStdlibModule.normalize = (pathValue) =>
 		trimNonRootTrailingSlash(builtinPathNormalize(pathValue));
 }
+defineMissingModuleProperty(
+	builtinPathStdlibModule,
+	"toNamespacedPath",
+	(pathValue) => String(pathValue),
+);
+defineMissingModuleProperty(
+	builtinPathStdlibModule.posix,
+	"toNamespacedPath",
+	builtinPathStdlibModule.toNamespacedPath,
+);
 var builtinPunycodeStdlibModule = cloneStdlibModule(punycodeStdlibModuleNs);
 var builtinQuerystringStdlibModule = cloneStdlibModule(
 	querystringStdlibModuleNs,
@@ -334,6 +429,72 @@ defineReadableAsyncIterator(builtinStreamStdlibModule?.Readable?.prototype);
 defineReadableAsyncIterator(builtinStreamStdlibModule?.PassThrough?.prototype);
 defineReadableAsyncIterator(builtinStreamStdlibModule?.Transform?.prototype);
 defineReadableAsyncIterator(builtinStreamStdlibModule?.Duplex?.prototype);
+let defaultByteHighWaterMark = 64 * 1024;
+let defaultObjectHighWaterMark = 16;
+defineMissingModuleProperty(
+	builtinStreamStdlibModule,
+	"getDefaultHighWaterMark",
+	(objectMode) =>
+		objectMode ? defaultObjectHighWaterMark : defaultByteHighWaterMark,
+);
+defineMissingModuleProperty(
+	builtinStreamStdlibModule,
+	"setDefaultHighWaterMark",
+	(objectMode, value) => {
+		if (!Number.isInteger(value) || value < 0) {
+			const error = new RangeError(
+				`The value of "value" is out of range. It must be a non-negative integer. Received ${value}.`,
+			);
+			error.code = "ERR_OUT_OF_RANGE";
+			throw error;
+		}
+		if (objectMode) defaultObjectHighWaterMark = value;
+		else defaultByteHighWaterMark = value;
+	},
+);
+// readable-stream's browser build exposes toWeb(), but its lazy internal adapter
+// table is empty. Replace those unusable stubs with the bridge-owned adapters.
+defineModuleProperty(
+	builtinStreamStdlibModule?.Readable,
+	"toWeb",
+	(stream) =>
+		new ReadableStream({
+			start(controller) {
+				stream.on("data", (chunk) => controller.enqueue(chunk));
+				stream.once("end", () => controller.close());
+				stream.once("error", (error) => controller.error(error));
+				stream.resume?.();
+			},
+			cancel(reason) {
+				stream.destroy?.(reason instanceof Error ? reason : void 0);
+			},
+		}),
+);
+defineModuleProperty(
+	builtinStreamStdlibModule?.Writable,
+	"toWeb",
+	(stream) =>
+		new WritableStream({
+			write(chunk) {
+				return new Promise((resolve, reject) => {
+					stream.write(chunk, (error) => (error ? reject(error) : resolve()));
+				});
+			},
+			close() {
+				return new Promise((resolve, reject) => {
+					stream.once?.("error", reject);
+					stream.end(resolve);
+				});
+			},
+			abort(reason) {
+				stream.destroy?.(reason instanceof Error ? reason : void 0);
+			},
+		}),
+);
+defineModuleProperty(builtinStreamStdlibModule?.Duplex, "toWeb", (stream) => ({
+	readable: builtinStreamStdlibModule.Readable.toWeb(stream),
+	writable: builtinStreamStdlibModule.Writable.toWeb(stream),
+}));
 defineMissingModuleProperty(
 	builtinStreamStdlibModule,
 	"isReadable",
@@ -373,6 +534,115 @@ defineMissingModuleProperty(
 var builtinStringDecoderStdlibModule = cloneStdlibModule(
 	stringDecoderStdlibModuleNs,
 );
+const upstreamUrlStdlibModule = unwrapStdlibModule(upstreamUrlHelpersModule);
+
+function withNodeErrorCode(error, code) {
+	error.code = code;
+	return error;
+}
+
+function pathToFileURL2(filePath, options) {
+	if (typeof filePath !== "string") {
+		throw withNodeErrorCode(
+			new TypeError('The "path" argument must be of type string.'),
+			"ERR_INVALID_ARG_TYPE",
+		);
+	}
+	if (options?.windows) {
+		const windowsPath = filePath.replace(/\//g, "\\");
+		let result = new URL2("file:///");
+		if (windowsPath.startsWith("\\\\")) {
+			const [host, ...segments] = windowsPath.slice(2).split("\\");
+			result = new URL2("file:///");
+			result.hostname = host;
+			result.pathname = `/${segments.join("/")}`;
+		} else if (/^[A-Za-z]:\\/.test(windowsPath)) {
+			result = new URL2("file:///");
+			result.pathname = `/${windowsPath.replace(/\\/g, "/")}`;
+		} else {
+			const relative = windowsPath.replace(/\\/g, "/");
+			const trailingSlash = filePath.endsWith("\\") || filePath.endsWith("/");
+			let resolved = builtinPathStdlibModule.posix.resolve(
+				process_default.cwd(),
+				relative,
+			);
+			if (trailingSlash && !resolved.endsWith("/")) resolved += "/";
+			return upstreamUrlStdlibModule.pathToFileURL(resolved);
+		}
+		return result;
+	}
+	let resolved = builtinPathStdlibModule.posix.resolve(
+		process_default.cwd(),
+		filePath,
+	);
+	if (filePath.endsWith("/") && !resolved.endsWith("/")) {
+		resolved += "/";
+	}
+	return upstreamUrlStdlibModule.pathToFileURL(resolved);
+}
+
+function fileURLToPath2(input, options) {
+	if (!(input instanceof URL2) && typeof input !== "string") {
+		throw withNodeErrorCode(
+			new TypeError(
+				'The "path" argument must be of type string or an instance of URL.',
+			),
+			"ERR_INVALID_ARG_TYPE",
+		);
+	}
+	try {
+		if (options?.windows) {
+			const parsed = input instanceof URL2 ? input : new URL2(input);
+			if (parsed.protocol !== "file:") {
+				throw withNodeErrorCode(
+					new TypeError("The URL must be of scheme file"),
+					"ERR_INVALID_URL_SCHEME",
+				);
+			}
+			if (/%2f|%5c/i.test(parsed.pathname)) {
+				throw withNodeErrorCode(
+					new TypeError(
+						"File URL path must not include encoded / or \\ characters",
+					),
+					"ERR_INVALID_FILE_URL_PATH",
+				);
+			}
+			const pathname = decodeURIComponent(parsed.pathname);
+			if (parsed.hostname) {
+				return `\\\\${parsed.hostname}${pathname.replace(/\//g, "\\")}`;
+			}
+			if (!/^\/[A-Za-z]:/.test(pathname)) {
+				throw withNodeErrorCode(
+					new TypeError("File URL path must be absolute"),
+					"ERR_INVALID_FILE_URL_PATH",
+				);
+			}
+			return pathname.slice(1).replace(/\//g, "\\");
+		}
+		return upstreamUrlStdlibModule.fileURLToPath(input);
+	} catch (error) {
+		if (error?.code) throw error;
+		const message = String(error?.message ?? error);
+		if (message.includes("scheme file")) {
+			throw withNodeErrorCode(error, "ERR_INVALID_URL_SCHEME");
+		}
+		if (message.includes("host must be") || message.includes("File URL host")) {
+			throw withNodeErrorCode(error, "ERR_INVALID_FILE_URL_HOST");
+		}
+		if (
+			message.includes("encoded /") ||
+			message.includes("encoded \\") ||
+			message.includes("must not include encoded")
+		) {
+			throw withNodeErrorCode(error, "ERR_INVALID_FILE_URL_PATH");
+		}
+		if (message.includes("Invalid URL")) {
+			throw withNodeErrorCode(error, "ERR_INVALID_URL");
+		}
+		throw error;
+	}
+}
+
 var builtinUrlStdlibModule = cloneStdlibModule(urlStdlibModuleNs);
 var builtinUrlStdlibModuleInitialized = false;
 function ensureBuiltinUrlStdlibModule() {
@@ -429,7 +699,12 @@ function loadBuiltinModule(request) {
 	const normalized = rejectRestrictedBuiltinRequest(request);
 	switch (normalized) {
 		case "assert":
-			return globalThis.__secureExecBuiltinAssertModule;
+			return globalThis.__agentOsBuiltinAssertModule;
+		case "assert/strict":
+			return (
+				globalThis.__agentOsBuiltinAssertModule?.strict ??
+				globalThis.__agentOsBuiltinAssertModule
+			);
 		case "async_hooks":
 			return builtinAsyncHooksModule;
 		case "buffer":
@@ -698,15 +973,15 @@ function loadBuiltinModule(request) {
 			return ensureBuiltinUrlStdlibModule();
 		case "sys":
 			return installBuiltinUtilFormatWithOptions(
-				globalThis.__secureExecBuiltinUtilModule,
+				globalThis.__agentOsBuiltinUtilModule,
 			);
 		case "util":
 			return installBuiltinUtilFormatWithOptions(
-				globalThis.__secureExecBuiltinUtilModule,
+				globalThis.__agentOsBuiltinUtilModule,
 			);
 		case "util/types":
 			return installBuiltinUtilFormatWithOptions(
-				globalThis.__secureExecBuiltinUtilModule,
+				globalThis.__agentOsBuiltinUtilModule,
 			).types;
 		case "child_process":
 			return _childProcessModule;
@@ -731,13 +1006,13 @@ function loadBuiltinModule(request) {
 		case "https":
 			return _httpsModule;
 		case "inspector":
-			throw createAccessDeniedBuiltinError(request);
+			return builtinInspectorModule;
 		case "module":
 			return _moduleModule;
 		case "wasi":
 			throw createAccessDeniedBuiltinError(request);
 		case "zlib":
-			return globalThis.__secureExecBuiltinZlibModule;
+			return globalThis.__agentOsBuiltinZlibModule;
 		case "v8":
 			return builtinV8Module;
 		case "vm":
@@ -751,6 +1026,15 @@ function loadBuiltinModule(request) {
 		}
 	}
 }
+
+// Node 20.16+ exposes the same permission-gated builtin resolver on process.
+// Install it on the shared process object so ESM dependencies can use it before
+// an entrypoint-specific CommonJS `require` has been created.
+defineMissingModuleProperty(
+	process_default,
+	"getBuiltinModule",
+	loadBuiltinModule,
+);
 
 export {
 	__jsRuntimeBuiltinAllowlist,

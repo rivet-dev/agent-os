@@ -12,8 +12,8 @@ use agentos_native_sidecar::limits::AcpLimits;
 #[cfg(test)]
 use agentos_native_sidecar::limits::DEFAULT_ACP_MAX_READ_LINE_BYTES;
 use agentos_native_sidecar::wire::{
-    CloseStdinRequest, EventPayload, ExecuteRequest, GuestRuntimeKind, KillProcessRequest,
-    OwnershipScope, StreamChannel, WriteStdinRequest,
+    CloseStdinRequest, EventPayload, ExecuteRequest, KillProcessRequest, OwnershipScope,
+    StreamChannel, WriteStdinRequest,
 };
 use agentos_native_sidecar::{
     Extension, ExtensionContext, ExtensionFuture, ExtensionInterruptRequest,
@@ -44,12 +44,24 @@ pub(crate) use runtime::request_timeout;
 use runtime::*;
 use turn::*;
 
-const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
-const SESSION_NEW_TIMEOUT: Duration = Duration::from_secs(30);
+// Cold Node adapters can spend tens of seconds loading their module graph and
+// opening their local database on a contended host. Keep both bootstrap phases
+// bounded by one attempt without imposing a shorter deadline on either phase.
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
+const SESSION_NEW_TIMEOUT: Duration = Duration::from_secs(60);
 const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+const ACP_MACHINE_HOST_CALLBACK_TIMEOUT: Duration = Duration::from_secs(120);
+// Long-running turns and human-mediated permission waits are not failures.
+// Warn after sustained inactivity, then repeat at the same conservative cadence
+// without imposing a deadline or changing the request's outcome.
+const ACP_INACTIVITY_WARNING_INTERVAL: Duration = Duration::from_secs(30);
+// Some ACP adapters resolve `session/prompt` before their final session/update
+// notification reaches stdout. Keep the transport attached for one short quiet
+// window so the prompt result and its durable tool history stay atomic.
+const PROMPT_RESPONSE_DRAIN_QUIET: Duration = Duration::from_millis(50);
 // While an ACP request is in flight the stdio loop is inside the extension
 // dispatch, so this wait loop becomes the cooperative VM I/O pump. Keep it at
-// the same cadence as secure-exec's outer event pump so adapter fetches and
+// the same cadence as agentos's outer event pump so adapter fetches and
 // process output keep moving mid-turn.
 const ACP_CANCEL_METHOD: &str = "session/cancel";
 const ACP_TRACE_PATH_ENV: &str = "AGENT_OS_ACP_TRACE_PATH";
@@ -73,7 +85,7 @@ const AGENTOS_SYSTEM_PROMPT: &str = include_str!("../AGENTOS_SYSTEM_PROMPT.md");
 /// evict the now-dead session record instead of leaking it until an explicit
 /// internal runtime cleanup that may never run.
 const ADAPTER_EXITED_ERROR_MARKER: &str = "exited with code";
-/// Substring of the secure-exec process-table error returned when an operation
+/// Substring of the agentos process-table error returned when an operation
 /// targets a process that already exited ("VM <vm> has no active process <id>").
 /// Writing a request to an adapter that crashed while *idle* surfaces this way
 /// (the exit is observed lazily, on the next stdin write), so it is classified
@@ -83,6 +95,66 @@ const ADAPTER_NO_ACTIVE_PROCESS_MARKER: &str = "has no active process";
 /// respawns adapters or replays requests implicitly; restoration is an
 /// explicit session operation initiated by the caller.
 const ADAPTER_RESTART_OUTCOME_NOT_ATTEMPTED: &str = "not_attempted";
+
+#[derive(Debug)]
+struct InactivityWarnings {
+    started_at: Instant,
+    last_activity_at: Instant,
+    last_activity: String,
+    next_warning_at: Instant,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct InactivityWarning {
+    elapsed: Duration,
+    inactive: Duration,
+    last_activity_elapsed: Duration,
+    last_activity: String,
+}
+
+impl InactivityWarnings {
+    fn new(description: impl Into<String>) -> Self {
+        Self::new_at(description, Instant::now())
+    }
+
+    fn new_at(description: impl Into<String>, now: Instant) -> Self {
+        Self {
+            started_at: now,
+            last_activity_at: now,
+            last_activity: description.into(),
+            next_warning_at: now + ACP_INACTIVITY_WARNING_INTERVAL,
+        }
+    }
+
+    fn record(&mut self, description: impl Into<String>) {
+        self.record_at(description, Instant::now());
+    }
+
+    fn record_at(&mut self, description: impl Into<String>, now: Instant) {
+        self.last_activity_at = now;
+        self.last_activity = description.into();
+        self.next_warning_at = now + ACP_INACTIVITY_WARNING_INTERVAL;
+    }
+
+    fn wait_duration(&self, now: Instant) -> Duration {
+        self.next_warning_at.saturating_duration_since(now)
+    }
+
+    fn take_due(&mut self, now: Instant) -> Option<InactivityWarning> {
+        if now < self.next_warning_at {
+            return None;
+        }
+        self.next_warning_at = now + ACP_INACTIVITY_WARNING_INTERVAL;
+        Some(InactivityWarning {
+            elapsed: now.saturating_duration_since(self.started_at),
+            inactive: now.saturating_duration_since(self.last_activity_at),
+            last_activity_elapsed: self
+                .last_activity_at
+                .saturating_duration_since(self.started_at),
+            last_activity: self.last_activity.clone(),
+        })
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct AcpExtension {
@@ -212,23 +284,7 @@ impl AcpExtension {
             kind
         ));
 
-        // Stall watchdog: while the request is in flight, warn periodically so a
-        // hang surfaces as a breadcrumb long before the host's 120s frame
-        // timeout. This never interrupts the work itself.
-        tokio::pin!(work);
-        let response = loop {
-            tokio::select! {
-                result = &mut work => break result,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
-                    tracing::warn!(
-                        target: "agentos_sidecar::acp_extension",
-                        kind,
-                        elapsed_ms = start.elapsed().as_millis() as u64,
-                        "ext request still pending — possible stall before response frame",
-                    );
-                }
-            }
-        };
+        let response = work.await;
 
         tracing::info!(
             target: "agentos_sidecar::acp_extension",
@@ -372,6 +428,10 @@ impl AcpExtension {
             agent_type: request.agent.clone(),
             runtime: AcpRuntimeKind::JavaScript,
             cwd: cwd.clone(),
+            additional_directories: additional_directories
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
             args: Vec::new(),
             env,
             protocol_version: ACP_RESUME_PROTOCOL_VERSION,
@@ -1364,7 +1424,7 @@ mod tests {
         assert_eq!(adapter_exit_code_from_error(&exited), Some(7));
 
         // Lazy observation: a request write to an already-reaped adapter fails
-        // with secure-exec's process-table error (the exact production shape:
+        // with agentos's process-table error (the exact production shape:
         // "VM vm-5 has no active process agent-6"). No exit code is observed.
         let gone =
             SidecarError::InvalidState(String::from("VM vm-5 has no active process agent-6"));
@@ -1543,16 +1603,60 @@ mod tests {
 
     #[test]
     fn request_timeout_uses_acp_method_overrides() {
-        assert_eq!(request_timeout("initialize"), Some(Duration::from_secs(10)));
+        assert_eq!(request_timeout("initialize"), Some(Duration::from_secs(60)));
         assert_eq!(
             request_timeout("session/new"),
-            Some(Duration::from_secs(30))
+            Some(Duration::from_secs(60))
         );
         assert_eq!(request_timeout("session/prompt"), None);
+        assert_eq!(SESSION_CLOSE_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(ACP_MACHINE_HOST_CALLBACK_TIMEOUT, Duration::from_secs(120));
         assert_eq!(
             request_timeout("session/set_mode"),
             Some(Duration::from_secs(120))
         );
+    }
+
+    #[test]
+    fn active_acp_progress_resets_inactivity_warnings() {
+        let start = Instant::now();
+        let mut warnings = InactivityWarnings::new_at("sent prompt", start);
+
+        for step in 1..=4 {
+            let activity_at = start + Duration::from_secs(step * 29);
+            assert_eq!(warnings.take_due(activity_at), None);
+            warnings.record_at(format!("streamed progress {step}"), activity_at);
+        }
+
+        assert_eq!(
+            warnings.take_due(start + Duration::from_secs(4 * 29 + 29)),
+            None
+        );
+    }
+
+    #[test]
+    fn inactive_prompt_and_permission_waits_warn_repeatedly_without_a_deadline() {
+        let start = Instant::now();
+        let mut prompt = InactivityWarnings::new_at("sent prompt", start);
+        let first = prompt
+            .take_due(start + ACP_INACTIVITY_WARNING_INTERVAL)
+            .expect("first prompt inactivity warning");
+        assert_eq!(first.elapsed, Duration::from_secs(30));
+        assert_eq!(first.inactive, Duration::from_secs(30));
+        assert_eq!(first.last_activity, "sent prompt");
+        assert!(prompt
+            .take_due(start + ACP_INACTIVITY_WARNING_INTERVAL * 2)
+            .is_some());
+
+        let mut permission = InactivityWarnings::new_at("emitted permission request per_1", start);
+        assert!(permission
+            .take_due(start + ACP_INACTIVITY_WARNING_INTERVAL)
+            .is_some());
+        assert!(permission
+            .take_due(start + ACP_INACTIVITY_WARNING_INTERVAL * 2)
+            .is_some());
+
+        assert_eq!(request_timeout("session/prompt"), None);
     }
 
     #[test]

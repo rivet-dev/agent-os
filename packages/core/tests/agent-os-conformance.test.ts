@@ -64,17 +64,21 @@ async function createCoreBackend(): Promise<AgentOsConformanceBackend> {
 		...args: unknown[]
 	): Promise<T> => {
 		switch (action) {
-			case "remove":
-				return (await vm.remove(
-					...(args as Parameters<AgentOs["remove"]>),
+			case "filesystem.remove":
+				return (await vm.filesystem.remove(
+					...(args as Parameters<AgentOs["filesystem"]["remove"]>),
 				)) as T;
-			case "spawn": {
+			case "process.spawn": {
 				const [command, processArgs, spawnOptions] = args as [
 					string,
 					string[],
 					Record<string, unknown> | undefined,
 				];
-				const process = vm.spawn(command, processArgs, spawnOptions);
+				const process = await vm.process.spawn(
+					command,
+					processArgs,
+					spawnOptions,
+				);
 				vm.onProcessOutput(process.pid, (event) =>
 					events.emit("processOutput", event),
 				);
@@ -83,9 +87,9 @@ async function createCoreBackend(): Promise<AgentOsConformanceBackend> {
 				);
 				return process as T;
 			}
-			case "openShell": {
-				const shell = vm.openShell(
-					args[0] as Parameters<AgentOs["openShell"]>[0],
+			case "terminal.open": {
+				const shell = vm.terminal.open(
+					args[0] as Parameters<AgentOs["terminal"]["open"]>[0],
 				);
 				vm.onShellData(shell.shellId, (event) =>
 					events.emit("shellData", event),
@@ -98,34 +102,39 @@ async function createCoreBackend(): Promise<AgentOsConformanceBackend> {
 				);
 				return shell as T;
 			}
-			case "httpRequest":
-				return (await vm.httpRequest(
-					...(args as Parameters<AgentOs["httpRequest"]>),
+			case "network.httpRequest":
+				return (await vm.network.httpRequest(
+					...(args as Parameters<AgentOs["network"]["httpRequest"]>),
 				)) as T;
-			case "scheduleCron": {
-				const job = vm.scheduleCron(
-					args[0] as Parameters<AgentOs["scheduleCron"]>[0],
+			case "cron.schedule": {
+				const job = vm.cron.schedule(
+					args[0] as Parameters<AgentOs["cron"]["schedule"]>[0],
 				);
 				return { id: job.id } as T;
 			}
-			case "listCronJobs":
-				return vm.listCronJobs() as T;
-			case "listMounts":
-				return (await vm.listMounts()) as T;
-			case "listSoftware":
-				return (await vm.listSoftware()) as T;
-			case "openSession": {
-				const [input] = args as Parameters<AgentOs["openSession"]>;
-				await vm.openSession(...(args as Parameters<AgentOs["openSession"]>));
+			case "cron.list":
+				return vm.cron.list() as T;
+			case "filesystem.listMounts":
+				return (await vm.filesystem.listMounts()) as T;
+			case "software.list":
+				return (await vm.software.list()) as T;
+			case "sessions.open": {
+				const [input] = args as Parameters<AgentOs["sessions"]["open"]>;
+				await vm.sessions.open(
+					...(args as Parameters<AgentOs["sessions"]["open"]>),
+				);
 				trackSession(input.sessionId ?? "main");
 				return undefined as T;
 			}
 			default: {
-				const method = (vm as any)[action];
+				const path = action.split(".");
+				let owner: any = vm;
+				for (const segment of path.slice(0, -1)) owner = owner[segment];
+				const method = owner[path.at(-1)!];
 				if (typeof method !== "function") {
 					throw new Error(`Core backend does not implement ${action}`);
 				}
-				return (await method.apply(vm, args)) as T;
+				return (await method.apply(owner, args)) as T;
 			}
 		}
 	};

@@ -33,7 +33,7 @@ struct WireExtension;
 
 impl BrowserExtension for WireExtension {
     fn namespace(&self) -> &str {
-        "dev.rivet.secure-exec.browser-wire-test"
+        "dev.rivet.agentos.browser-wire-test"
     }
 
     fn handle_request(
@@ -775,7 +775,7 @@ fn browser_wire_dispatcher_routes_extension_frames() {
                 connection_id: String::from("client"),
             }),
             payload: RequestPayload::ExtEnvelope(ExtEnvelope {
-                namespace: String::from("dev.rivet.secure-exec.browser-wire-test"),
+                namespace: String::from("dev.rivet.agentos.browser-wire-test"),
                 payload: b"ping".to_vec(),
             }),
         },
@@ -784,10 +784,7 @@ fn browser_wire_dispatcher_routes_extension_frames() {
     let ResponsePayload::ExtEnvelope(envelope) = response.payload else {
         panic!("unexpected extension response: {:?}", response.payload);
     };
-    assert_eq!(
-        envelope.namespace,
-        "dev.rivet.secure-exec.browser-wire-test"
-    );
+    assert_eq!(envelope.namespace, "dev.rivet.agentos.browser-wire-test");
     assert_eq!(envelope.payload, b"wire-ext:ping");
 }
 
@@ -1538,6 +1535,10 @@ fn browser_wire_dispatcher_rejects_vm_fetch_when_guest_listener_is_missing() {
                 path: String::from("/"),
                 headers_json: String::from("{}"),
                 body: None,
+                body_base64: None,
+                stream_operation: None,
+                stream_id: None,
+                max_bytes: None,
             }),
         },
     );
@@ -1582,6 +1583,10 @@ fn browser_wire_dispatcher_rejects_vm_fetch_with_invalid_headers_json() {
                 path: String::from("/"),
                 headers_json: String::from("{not-json"),
                 body: None,
+                body_base64: None,
+                stream_operation: None,
+                stream_id: None,
+                max_bytes: None,
             }),
         },
     );
@@ -1653,6 +1658,10 @@ fn browser_wire_dispatcher_vm_fetch_enters_kernel_loopback_when_listener_exists(
                 path: String::from("/health"),
                 headers_json: String::from("{}"),
                 body: None,
+                body_base64: None,
+                stream_operation: None,
+                stream_id: None,
+                max_bytes: None,
             }),
         },
     );

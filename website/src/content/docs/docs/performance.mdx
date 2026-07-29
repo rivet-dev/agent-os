@@ -1,0 +1,195 @@
+---
+title: "Performance"
+description: "AgentOS latency, memory, cost, and benchmark methodology."
+skill: true
+---
+
+Benchmark figures shown on the agentOS marketing page, computed from the same
+data source. Use the methodology below to measure your own workload and
+hardware.
+
+## Cold start
+
+Time from requesting an execution to first code running. Measured with the sleep
+workload (minimal VM, idle Node.js process). Baseline: **E2B**, fastest
+mainstream sandbox as of March 30, 2026. See
+[ComputeSDK benchmarks](https://www.computesdk.com/benchmarks/).
+
+| Metric | agentOS | Fastest sandbox (E2B) |
+|---|--:|--:|
+| Cold start p50 | 4.8 ms | 440 ms |
+| Cold start p95 | 5.6 ms | 950 ms |
+| Cold start p99 | 6.1 ms | 3,150 ms |
+
+## Memory per instance
+
+Measured via staircase benchmarking:
+
+1. **Warmup** — a throwaway VM is created and destroyed to pay one-time costs
+   (module cache, JIT) amortized away in real deployments.
+2. **Baseline** — GC forced twice (`--expose-gc`), then RSS sampled across the
+   whole process tree via `/proc/[pid]/statm` (captures child V8 isolate
+   processes `process.memoryUsage().rss` would miss).
+3. **Staircase** — add VMs one at a time; after each settles, force GC and
+   resample. Delta = incremental cost of that VM.
+4. **Average** — per-VM cost is the mean of step deltas.
+5. **Teardown** — dispose all VMs, record reclaimed RSS.
+
+RSS includes thread stacks and OS-mapped pages beyond the VM, so the reported
+figure is an **upper bound**. Baseline: **Daytona**, cheapest mainstream
+sandbox as of March 30, 2026 (1 vCPU + 1 GiB).
+
+### Full coding agent
+
+Pi session with MCP servers and mounted filesystems.
+
+| Metric | agentOS | Cheapest sandbox (Daytona) |
+|---|--:|--:|
+| Memory per instance | ~131 MB | ~1024 MB |
+
+### Simple shell command
+
+| Metric | agentOS | Cheapest sandbox (Daytona) |
+|---|--:|--:|
+| Memory per instance | ~22 MB | ~1024 MB |
+
+## Cost per execution-second
+
+- Assumes one agent per sandbox (isolation) and 70% host utilization (standard
+  HPA threshold).
+- Formula: `server cost per second / concurrent executions per server`, where
+  `concurrent = floor(server RAM / agent memory) × 0.7`.
+- Baseline: **Daytona** at $0.0504/vCPU-h + $0.0162/GiB-h, 1 vCPU + 1 GiB min.
+  Source: [daytona.io/pricing](https://www.daytona.io/pricing).
+
+### Full coding agent
+
+| Host tier | agentOS | Cheapest sandbox | Difference |
+|---|--:|--:|--:|
+| AWS ARM | $0.00000058/s | $0.000018/s | 32x cheaper |
+| AWS x86 | $0.00000072/s | $0.000018/s | 26x cheaper |
+| Hetzner ARM | $0.000000066/s | $0.000018/s | 281x cheaper |
+| Hetzner x86 | $0.00000011/s | $0.000018/s | 171x cheaper |
+
+### Simple shell command
+
+| Host tier | agentOS | Cheapest sandbox | Difference |
+|---|--:|--:|--:|
+| AWS ARM | $0.000000073/s | $0.000018/s | 254x cheaper |
+| AWS x86 | $0.000000090/s | $0.000018/s | 205x cheaper |
+| Hetzner ARM | $0.000000011/s | $0.000018/s | 1738x cheaper |
+| Hetzner x86 | $0.000000017/s | $0.000018/s | 1061x cheaper |
+
+## Evaluating your own cost
+
+- agentOS runs on hardware you provision, not per-VM-second billing.
+- Estimate: instance cost per second ÷ concurrent VMs it holds with realistic
+  memory + utilization headroom.
+- A VM per task/tenant → strongest isolation; safely reusing a VM for trusted
+  sequential work amortizes boot + filesystem setup.
+- Small short executions benefit most from dense packing; heavy long-lived work
+  depends more on hardware choice and avoiding per-sandbox minimums.
+
+<Warning>Provider prices, instance prices, and workload memory change. Measure
+on your target hardware before quoting a cost ratio.</Warning>
+
+## Test environment
+
+| Component | Details |
+|---|---|
+| CPU | 12th Gen Intel i7-12700KF, 12 cores / 20 threads @ 3.7 GHz, 25 MB cache |
+| RAM | 2× 32 GB DDR4 @ 2400 MT/s |
+| Node.js | v24.13.0 |
+| OS | Linux 6.1.0 (Debian), x86_64 |
+
+## Sandbox baselines
+
+| Comparison | Provider | Why |
+|---|---|---|
+| Cold start | E2B | Fastest mainstream sandbox on [ComputeSDK](https://www.computesdk.com/benchmarks/) as of March 30, 2026 |
+| Memory and cost | Daytona | Cheapest mainstream sandbox as of March 30, 2026 ($0.0504/vCPU-h + $0.0162/GiB-h) |
+
+Self-hosted tiers: AWS t4g.micro (ARM, $0.0084/h, 1 GiB), AWS t3.micro (x86,
+$0.0104/h, 1 GiB), Hetzner CAX11 (ARM, €3.29/mo, 4 GiB), Hetzner CX22 (x86,
+€5.39/mo, 4 GiB). On-demand pricing.
+
+## Reproducing
+
+Benchmarks live in the
+[agent-os repository](https://github.com/rivet-dev/agentos) under
+`scripts/benchmarks/`.
+
+**Prerequisites:**
+
+- Node.js (see `.nvmrc`) and `pnpm`; `pnpm install`.
+- A Rust toolchain (`cargo`) — benchmarks build and run the native release
+  sidecar.
+- An **idle machine** — cold-start tails are sensitive to background CPU/GC
+  jitter.
+
+**Run everything** (from repo root):
+
+```sh
+./scripts/benchmarks/run-benchmarks.sh
+```
+
+Builds the TS packages + an **optimized release sidecar**, points the SDK at it
+via `AGENT_OS_SIDECAR_BIN`, and writes one JSON per benchmark to
+`scripts/benchmarks/results/`:
+
+| Result file | Feeds marketing input |
+|---|---|
+| `coldstart-sleep.json` | `COLDSTART_P50/P95/P99_MS` |
+| `memory-sleep.json` | `MEMORY_SHELL_MB` (`result.avgPerVmRssBytes / 1024²`) |
+| `memory-pi-session.json` | `MEMORY_AGENT_MB` (`result.avgPerVmRssBytes / 1024²`) |
+
+Copy those into `website/src/data/bench.ts`; every figure recomputes from them.
+
+**Run a single benchmark** — build first (`pnpm build` and
+`cargo build --release -p agent-os-sidecar`), then:
+
+```sh
+export AGENT_OS_SIDECAR_BIN="$PWD/target/release/agent-os-sidecar"
+
+# Cold start (sleep workload)
+pnpm exec tsx scripts/benchmarks/coldstart.bench.ts --workload=sleep --iterations=2000
+
+# Memory — simple shell command
+pnpm exec tsx --expose-gc scripts/benchmarks/memory.bench.ts --workload=sleep --count=20
+
+# Memory — full coding agent
+pnpm exec tsx --expose-gc scripts/benchmarks/memory.bench.ts --workload=pi-session --count=10
+```
+
+JSON → stdout; human-readable table + progress → stderr.
+
+**Sample sizes** — percentiles are nearest-rank
+(`sorted[ceil(p/100 · n) − 1]`). Too few samples makes the tail meaningless
+(at `n = 30`, p99 is literally the single slowest run):
+
+| Statistic | Minimum iterations |
+|---|--:|
+| p50 (median) | ~30 |
+| p95 | ~200 |
+| p99 | ~1,000 |
+
+- `run-benchmarks.sh` uses `--iterations=2000` for cold start so p95/p99 are
+  trustworthy.
+- Memory per VM is a low-variance mean of step deltas, so `--count=20` (shell) /
+  `--count=10` (agent) suffices.
+
+> The `pi-session` memory workload needs a working in-VM agent runtime. Where
+> unavailable it fails its process check instead of reporting a number.
+
+**Methodology:**
+
+- Each benchmark **creates the sidecar once** (`AgentOs.createSidecar()`) and
+  leases all VMs from it — VMs are incremental tenants of one shared process, so
+  figures measure the marginal cost of a VM, not a fresh process.
+  (`AgentOs.create()` with no `sidecar` option already uses the shared
+  `default`-pool sidecar — the default everywhere, including RivetKit actors.)
+- Before any measured iteration, a **cold run** (throwaway VM, created, started,
+  snapshotted for cold start) pays one-time spawn + bootstrap, so numbers
+  reflect warm steady-state per-VM cost.
+- The release sidecar is required — a debug build is several times slower and
+  inflates numbers.

@@ -3,7 +3,7 @@
 	"version": "0.3.0-rc.2",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "All available WASM command packages for secure-exec VMs in a single bundle",
+	"description": "All available WASM command packages for agentos VMs in a single bundle",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [

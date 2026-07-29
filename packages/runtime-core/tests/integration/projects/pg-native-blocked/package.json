@@ -1,0 +1,8 @@
+{
+  "name": "project-matrix-pg-native-blocked",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pg-native": "3.8.0"
+  }
+}

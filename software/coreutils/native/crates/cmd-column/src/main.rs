@@ -1,4 +1,4 @@
 fn main() {
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    std::process::exit(secureexec_column::main(args));
+    std::process::exit(agentos_column::main(args));
 }

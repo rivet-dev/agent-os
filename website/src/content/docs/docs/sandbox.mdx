@@ -29,19 +29,33 @@ The sandbox integration ships as the `@rivet-dev/agentos-sandbox` package. It wo
 - **Filesystem mount**: Projects the sandbox into the VM as a native directory, like mounting a hard drive on your own machine. Read and write files through the mount directly.
 - **Bindings**: Exposes sandbox process management as [bindings](/docs/bindings). Execute commands on the sandbox from within the VM.
 
-Both are powered by [Sandbox Agent](https://sandboxagent.dev), and you can swap providers without changing agent code. Install both packages:
+Both are powered by [Sandbox Agent](https://sandboxagent.dev), and you can swap providers without changing agent code:
 
 ```bash
-npm install @rivet-dev/agentos-sandbox sandbox-agent
+npm install @rivet-dev/agentos-sandbox
 ```
 
-`createSandboxFs` and `createSandboxBindings` come from `@rivet-dev/agentos-sandbox`. `SandboxAgent` and the provider helpers (such as `docker`) come from the `sandbox-agent` package.
-
-Pass a provider as `sandbox: { provider: docker() }`. Agent OS starts a Sandbox Agent client, mounts it at `/mnt/sandbox`, registers the process bindings, and disposes the sandbox client when the VM is disposed. In RivetKit actors, pass the provider directly to `agentOS(...)`; the provider starts a fresh client for each actor VM.
+Pass a provider as `sandbox: { provider: docker() }`. AgentOS starts a fresh sandbox for each VM, mounts it at `/mnt/sandbox`, registers the process bindings, and destroys it when the VM is disposed.
 
 <CodeGroup>
 <CodeSnippet file="examples/sandbox/server.ts" />
 </CodeGroup>
+
+## Configuration
+
+The default VM mount is `/mnt/sandbox`. Change the VM path with `mountPath`, scope it to a directory inside the external sandbox with `sandboxRoot`, or make the mount read-only:
+
+```ts
+const vm = agentOS({
+	sandbox: {
+		provider: docker(),
+		mountPath: "/workspace",
+		sandboxRoot: "/app",
+		readOnly: true,
+		timeoutMs: 30_000,
+	},
+});
+```
 
 ## Calling the mounted bindings
 
@@ -76,4 +90,43 @@ agentos-sandbox send-input --id "proc_abc123" --data "yes"
 
 ## Sandbox providers
 
-The extension works with any [Sandbox Agent](https://sandboxagent.dev) provider. See the [Sandbox Agent documentation](https://sandboxagent.dev) for available providers and setup instructions.
+The examples use Docker. Every Sandbox Agent provider is available through an isolated entrypoint, so you only install the SDK for the provider you use:
+
+```ts
+// Docker is also available from "@rivet-dev/agentos-sandbox/docker".
+import { docker } from "@rivet-dev/agentos-sandbox";
+import { local } from "@rivet-dev/agentos-sandbox/local";
+import { e2b } from "@rivet-dev/agentos-sandbox/e2b";
+import { daytona } from "@rivet-dev/agentos-sandbox/daytona";
+import { vercel } from "@rivet-dev/agentos-sandbox/vercel";
+import { cloudflare } from "@rivet-dev/agentos-sandbox/cloudflare";
+import { modal } from "@rivet-dev/agentos-sandbox/modal";
+import { computesdk } from "@rivet-dev/agentos-sandbox/computesdk";
+import { sprites } from "@rivet-dev/agentos-sandbox/sprites";
+
+const vm = agentOS({ sandbox: { provider: docker() } });
+```
+
+Install the matching provider SDK for E2B (`@e2b/code-interpreter`), Daytona (`@daytonaio/sdk`), Vercel (`@vercel/sandbox`), Cloudflare (`@cloudflare/sandbox`), Modal (`modal`), ComputeSDK (`computesdk`), or Sprites (`@fly/sprites`). Docker and local execution do not require an additional provider SDK. You can also adapt a custom [Sandbox Agent](https://sandboxagent.dev) backend with `sandboxAgentProvider(backend)` from the package root.
+
+## Advanced: existing clients
+
+Standalone `AgentOs.create()` can mount an already-connected client. The caller owns it by default; provide a disposal callback to transfer ownership to the VM:
+
+Install `sandbox-agent` directly when using this manual path.
+
+```ts
+import { AgentOs } from "@rivet-dev/agentos-core";
+import { SandboxAgent } from "sandbox-agent";
+import { docker } from "sandbox-agent/docker";
+
+const sandbox = await SandboxAgent.start({ sandbox: docker() });
+const vm = await AgentOs.create({
+	sandbox: {
+		client: sandbox,
+		dispose: () => sandbox.destroySandbox(),
+	},
+});
+```
+
+RivetKit `agentOS()` intentionally rejects `{ client }` because one client cannot be shared safely across actor VMs. Use `{ provider }` there so every actor VM owns a fresh sandbox.

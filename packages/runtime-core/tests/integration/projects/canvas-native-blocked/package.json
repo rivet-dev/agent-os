@@ -1,0 +1,13 @@
+{
+  "name": "project-matrix-canvas-native-blocked",
+  "private": true,
+  "type": "module",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "canvas"
+    ]
+  },
+  "dependencies": {
+    "canvas": "3.2.3"
+  }
+}

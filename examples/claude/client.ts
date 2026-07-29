@@ -9,12 +9,12 @@ const agent = client.vm.getOrCreate("my-agent");
 // ── Quick start ───────────────────────────────────────────────────
 async function quickStart() {
 	// docs:start quickstart
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "claude",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
 
-	const result = await agent.prompt({
+	const result = await agent.sessions.prompt({
 		content: [
 			{ type: "text", text: "What files are in the current directory?" },
 		],
@@ -38,14 +38,14 @@ Write commit messages in the imperative mood and keep the subject under 50 chara
 `;
 
 	// Write the skill before creating the session
-	await agent.mkdir("/home/agentos/.claude/skills/commit-style");
-	await agent.writeFile(
+	await agent.filesystem.mkdir("/home/agentos/.claude/skills/commit-style");
+	await agent.filesystem.writeFile(
 		"/home/agentos/.claude/skills/commit-style/SKILL.md",
 		skill,
 	);
 
 	// Claude Code discovers the skill automatically
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "claude",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
@@ -60,7 +60,7 @@ Write commit messages in the imperative mood and keep the subject under 50 chara
 async function withMcp() {
 	// Pre-install the MCP server so `npx` is silent — first-run install output
 	// would otherwise corrupt the MCP stdio handshake ("Connection closed").
-	await agent.exec("npm install -g @modelcontextprotocol/server-filesystem");
+	await agent.process.exec("npm install -g @modelcontextprotocol/server-filesystem");
 
 	// docs:start mcp
 	const mcpConfig = {
@@ -80,12 +80,12 @@ async function withMcp() {
 			},
 		},
 	};
-	await agent.writeFile(
+	await agent.filesystem.writeFile(
 		"/home/agentos/.claude.json",
 		JSON.stringify(mcpConfig),
 	);
 
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "claude",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
@@ -102,15 +102,15 @@ description: How to write commit messages in this project.
 Write commit messages in the imperative mood and keep the subject under 50 characters.
 `;
 
-	await agent.mkdir("/home/agentos/.claude/skills/commit-style");
-	await agent.writeFile(
+	await agent.filesystem.mkdir("/home/agentos/.claude/skills/commit-style");
+	await agent.filesystem.writeFile(
 		"/home/agentos/.claude/skills/commit-style/SKILL.md",
 		skill,
 	);
 
 	// Pre-install the MCP server so `npx` is silent — first-run install output
 	// would otherwise corrupt the MCP stdio handshake ("Connection closed").
-	await agent.exec("npm install -g @modelcontextprotocol/server-filesystem");
+	await agent.process.exec("npm install -g @modelcontextprotocol/server-filesystem");
 
 	// Claude Code reads its MCP servers from ~/.claude.json (see `withMcp`).
 	const mcpConfig = {
@@ -125,17 +125,17 @@ Write commit messages in the imperative mood and keep the subject under 50 chara
 			},
 		},
 	};
-	await agent.writeFile(
+	await agent.filesystem.writeFile(
 		"/home/agentos/.claude.json",
 		JSON.stringify(mcpConfig),
 	);
 
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "claude",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
 
-	const result = await agent.prompt({
+	const result = await agent.sessions.prompt({
 		content: [
 			{
 				type: "text",

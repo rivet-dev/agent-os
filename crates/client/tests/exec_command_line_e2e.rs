@@ -24,7 +24,7 @@ async fn exec_command_line_paths() {
 
     // Direct path: a simple command with arguments runs and returns its output.
     let echo = os
-        .exec("echo hello world", ExecOptions::default())
+        .exec_process("echo hello world", ExecOptions::default())
         .await
         .expect("exec echo");
     assert_eq!(echo.exit_code, 0, "echo exit (stderr: {:?})", echo.stderr);
@@ -32,7 +32,7 @@ async fn exec_command_line_paths() {
 
     // Direct path preserves a real non-zero exit code (the `sh -c` wrapper can swallow it).
     let missing = os
-        .exec("cat /no/such/file", ExecOptions::default())
+        .exec_process("cat /no/such/file", ExecOptions::default())
         .await
         .expect("exec cat missing returns a result");
     assert_ne!(
@@ -42,7 +42,7 @@ async fn exec_command_line_paths() {
 
     // Shell path: a `&&` chain runs as a single `sh -c` execution.
     let chain = os
-        .exec("echo a && echo b", ExecOptions::default())
+        .exec_process("echo a && echo b", ExecOptions::default())
         .await
         .expect("exec && chain");
     assert_eq!(
@@ -54,7 +54,7 @@ async fn exec_command_line_paths() {
 
     // Shell path: a redirect writes a file the VM can read back.
     let redirect = os
-        .exec(
+        .exec_process(
             "echo redirected > /tmp/exec_redirect.txt",
             ExecOptions::default(),
         )
@@ -77,14 +77,16 @@ async fn exec_command_line_paths() {
 
     // Shell path: a quoted argument with a space stays one token through `sh -c`.
     let quoted = os
-        .exec("echo 'a b'", ExecOptions::default())
+        .exec_process("echo 'a b'", ExecOptions::default())
         .await
         .expect("exec quoted");
     assert_eq!(quoted.stdout.trim_end(), "a b", "quoted stdout");
 
     // An empty command line is an explicit error, not a silent no-op.
     assert!(
-        os.exec("   ", ExecOptions::default()).await.is_err(),
+        os.exec_process("   ", ExecOptions::default())
+            .await
+            .is_err(),
         "empty command line must error"
     );
 

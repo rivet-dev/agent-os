@@ -20,31 +20,35 @@ function readManifest() {
 	return JSON.parse(fs.readFileSync(buildManifestPath, "utf8"));
 }
 
-function ensureBuild() {
+async function ensureBuild() {
+	if (!fs.existsSync(path.join(projectDir, ".babelrc"))) {
+		throw new Error("Next.js Babel fallback configuration is missing");
+	}
 	try {
 		readManifest();
 		return;
 	} catch (e) {
 		// Build manifest missing — run build
 	}
-	var execSync = require("child_process").execSync;
-	var buildEnv = Object.assign({}, process.env);
-	if (!buildEnv.PATH) {
-		buildEnv.PATH =
-			"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+	process.env.NEXT_TELEMETRY_DISABLED = "1";
+	var stdoutWrite = process.stdout.write;
+	var stderrWrite = process.stderr.write;
+	process.stdout.write = function () {
+		return true;
+	};
+	process.stderr.write = function () {
+		return true;
+	};
+	try {
+		await require("../run-next-build.cjs")();
+	} finally {
+		process.stdout.write = stdoutWrite;
+		process.stderr.write = stderrWrite;
 	}
-	buildEnv.NEXT_TELEMETRY_DISABLED = "1";
-	var buildCommand = "node " + JSON.stringify(path.join(projectDir, "run-next-build.cjs"));
-	execSync(buildCommand, {
-		cwd: projectDir,
-		stdio: "pipe",
-		timeout: 30000,
-		env: buildEnv,
-	});
 }
 
-function main() {
-	ensureBuild();
+async function main() {
+	await ensureBuild();
 
 	var manifest = readManifest();
 	var pages = Object.keys(manifest.pages).sort();
@@ -90,4 +94,7 @@ function main() {
 	console.log(JSON.stringify(results));
 }
 
-main();
+main().catch(function (error) {
+	console.error(error);
+	process.exitCode = 1;
+});

@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  * AGENT × PACKAGE-MANAGER e2e MATRIX (real API, skipped by default).
  *
  * For every package manager (npm/pnpm/yarn/bun) × every agent
- * (pi/pi-cli/claude/opencode) this installs the PUBLISHED packages into an
+ * (pi/claude/opencode/codex) this installs the PUBLISHED packages into an
  * isolated temp project and asserts a real user can: install → create a session
  * → prompt → stream tokens LIVE. It is the regression net for the exact issues
  * that bit us shipping the preview:
@@ -27,7 +27,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  *
  * Env knobs:
  *   AGENTOS_MATRIX_E2E=1        required to enable (also gated out in vitest.config.ts)
- *   ANTHROPIC_API_KEY          required
+ *   ANTHROPIC_API_KEY          required for pi/claude/opencode
+ *   OPENAI_API_KEY             required for codex
  *   AGENTOS_MATRIX_CORE        @rivet-dev/agentos-core version/tag (default "latest")
  *   AGENTOS_MATRIX_AGENTS      @agentos-software/* version/tag (default "latest")
  *   AGENTOS_MATRIX_MODEL       opencode model id (default a current Haiku)
@@ -43,9 +44,9 @@ const CELL_TIMEOUT_MS = 240_000;
 
 const AGENT_PKGS: Record<string, string> = {
 	pi: "@agentos-software/pi",
-	"pi-cli": "@agentos-software/pi-cli",
 	claude: "@agentos-software/claude-code",
 	opencode: "@agentos-software/opencode",
+	codex: "@agentos-software/codex",
 };
 
 function commandAvailable(cmd: string): boolean {
@@ -89,7 +90,7 @@ const ALL_PMS = (process.env.AGENTOS_MATRIX_PMS || "npm,pnpm,yarn,bun")
 	.map((s) => s.trim())
 	.filter(Boolean);
 const ALL_AGENTS = (
-	process.env.AGENTOS_MATRIX_AGENTS_LIST || "pi,pi-cli,claude,opencode"
+	process.env.AGENTOS_MATRIX_AGENTS_LIST || "pi,claude,opencode,codex"
 )
 	.split(",")
 	.map((s) => s.trim())
@@ -97,46 +98,55 @@ const ALL_AGENTS = (
 
 const availablePms = ALL_PMS.filter(commandAvailable);
 
-describe.skipIf(!ENABLED)("agent × package-manager e2e matrix (real API)", () => {
-	const tmpDirs: string[] = [];
+describe.skipIf(!ENABLED)(
+	"agent × package-manager e2e matrix (real API)",
+	() => {
+		const tmpDirs: string[] = [];
 
-	beforeAll(() => {
-		if (!process.env.ANTHROPIC_API_KEY) {
-			throw new Error(
-				"AGENTOS_MATRIX_E2E requires ANTHROPIC_API_KEY in the environment",
-			);
-		}
-		const skipped = ALL_PMS.filter((p) => !availablePms.includes(p));
-		if (skipped.length) {
+		beforeAll(() => {
+			const anthropicAgents = ALL_AGENTS.filter((agent) => agent !== "codex");
+			if (anthropicAgents.length > 0 && !process.env.ANTHROPIC_API_KEY) {
+				throw new Error(
+					`AGENTOS_MATRIX_E2E requires ANTHROPIC_API_KEY for ${anthropicAgents.join(", ")}`,
+				);
+			}
+			if (ALL_AGENTS.includes("codex") && !process.env.OPENAI_API_KEY) {
+				throw new Error("AGENTOS_MATRIX_E2E requires OPENAI_API_KEY for codex");
+			}
+			const skipped = ALL_PMS.filter((p) => !availablePms.includes(p));
+			if (skipped.length) {
+				// eslint-disable-next-line no-console
+				console.warn(
+					`[matrix] package managers not on PATH, skipping: ${skipped.join(", ")}`,
+				);
+			}
 			// eslint-disable-next-line no-console
-			console.warn(
-				`[matrix] package managers not on PATH, skipping: ${skipped.join(", ")}`,
+			console.log(
+				`[matrix] core=${CORE_VERSION} agents=${AGENTS_VERSION} pms=[${availablePms.join(",")}] agents=[${ALL_AGENTS.join(",")}]`,
 			);
-		}
-		// eslint-disable-next-line no-console
-		console.log(
-			`[matrix] core=${CORE_VERSION} agents=${AGENTS_VERSION} pms=[${availablePms.join(",")}] agents=[${ALL_AGENTS.join(",")}]`,
-		);
-	});
+		});
 
-	afterAll(() => {
-		for (const d of tmpDirs) {
-			try {
-				rmSync(d, { recursive: true, force: true });
-			} catch {}
-		}
-	});
+		afterAll(() => {
+			for (const d of tmpDirs) {
+				try {
+					rmSync(d, { recursive: true, force: true });
+				} catch (error) {
+					console.warn(`[matrix] failed to remove ${d}: ${String(error)}`);
+				}
+			}
+		});
 
-	for (const pm of availablePms) {
-		for (const agent of ALL_AGENTS) {
-			it(
-				`${pm} + ${agent}: install → session → live token streaming`,
-				// opencode's ACP bootstrap (and real LLM APIs) flake transiently;
-				// retry the whole cell so a flake doesn't red the gate. Persistent
-				// failures still fail after the retries.
-				{ timeout: CELL_TIMEOUT_MS + 200_000, retry: 2 },
-				async () => {
-					const dir = mkdtempSync(join(tmpdir(), `agentos-matrix-${pm}-${agent}-`));
+		for (const pm of availablePms) {
+			for (const agent of ALL_AGENTS) {
+				// OpenCode's ACP bootstrap and real LLM APIs can fail transiently;
+				// retry the complete install/run cell, while persistent failures stay red.
+				it(`${pm} + ${agent}: install → session → live token streaming`, {
+					timeout: CELL_TIMEOUT_MS + 200_000,
+					retry: 2,
+				}, async () => {
+					const dir = mkdtempSync(
+						join(tmpdir(), `agentos-matrix-${pm}-${agent}-`),
+					);
 					tmpDirs.push(dir);
 					// yarn 1.x global cache contends under repeated runs; isolate it.
 					const cacheDir = join(dir, ".pm-cache");
@@ -180,17 +190,21 @@ describe.skipIf(!ENABLED)("agent × package-manager e2e matrix (real API)", () =
 					const result = JSON.parse(line.slice("E2E_RESULT_JSON:".length));
 
 					// eslint-disable-next-line no-console
-					console.log(`[matrix] ${pm}/${agent}:`, JSON.stringify(result.metrics));
-
-					expect(result.ok, `prompt produced output (err: ${result.error})`).toBe(
-						true,
+					console.log(
+						`[matrix] ${pm}/${agent}:`,
+						JSON.stringify(result.metrics),
 					);
+
+					expect(
+						result.ok,
+						`prompt produced output (err: ${result.error})`,
+					).toBe(true);
 					expect(
 						result.streaming,
 						`tokens streamed live (metrics: ${JSON.stringify(result.metrics)})`,
 					).toBe(true);
-				},
-			);
+				});
+			}
 		}
-	}
-});
+	},
+);

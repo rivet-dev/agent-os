@@ -184,7 +184,7 @@ async fn fetch_surface_get_post_and_headers() {
     }
 
     let server = os
-        .spawn(
+        .spawn_process(
             "node",
             vec![
                 "-e".to_string(),

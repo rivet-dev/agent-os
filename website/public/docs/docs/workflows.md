@@ -1,4 +1,4 @@
-# Workflow Automation
+# Workflows & Graphs
 
 Orchestrate multi-step agent tasks with durable workflows.
 
@@ -6,7 +6,7 @@ Orchestrate multi-step agent tasks with durable workflows that survive crashes a
 
 ## Basic workflow
 
-A workflow is the durable `run` handler of an actor. Wrap it in `workflow()` and drive a multi-step agent task as an ordered series of steps: clone the repo, let an agent fix the bug, then run the tests. Trigger work by sending to a queue; the workflow loops and waits durably for the next message.
+A workflow is the durable `run` handler of an actor. Wrap it in `workflow()` and drive a multi-step agent task as an ordered series of steps: clone the repo, let an agent fix the bug, then run the tests. Each actor instance is one workflow run initialized with creation input, so no application queue is required.
 
 Session creation and prompting happen within the step that uses them, so a session never has to outlive the work it backs (sessions are ephemeral and would not survive a replay). Steps reach the agentOS VM, a separate actor, through `ctx.client()`.
 
@@ -20,6 +20,6 @@ Output of one agent session feeds into the next. Each session is created and com
 - Keep step names stable across code changes. Renaming a step breaks replay for in-progress workflows.
 - Create and close sessions within the step that uses them. Sessions are ephemeral, so keep their lifetime scoped to one unit of work.
 - Pass data between steps via the filesystem or step return values, not session state.
-- Keep `state` changes and other actor-local side effects inside `ctx.step()` callbacks; use non-step workflow code (queue waits, loops, sleeps) only for orchestration.
+- Keep `state` changes and other actor-local side effects inside `ctx.step()` callbacks; use non-step workflow code only for orchestration.
 - Reach the agentOS VM, a separate actor, from inside a step with `ctx.client()`.
 - See [Workflows](https://rivet.dev/docs/actors/workflows) for the full workflow API reference including timers, joins, and races.

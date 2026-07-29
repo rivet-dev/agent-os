@@ -6,13 +6,13 @@ const client = createClient<typeof registry>({
 });
 const writerAgent = client.writer.getOrCreate("my-project");
 
-await writerAgent.openSession({
+await writerAgent.sessions.open({
 	agent: "claude",
 	env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
 
 // The writer calls the `review` binding collection, which bridges to the reviewer VM.
-await writerAgent.prompt({
+await writerAgent.sessions.prompt({
 	content: [
 		{
 			type: "text",

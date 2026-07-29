@@ -74,6 +74,31 @@ export function requiredSoftwareCommandNames(softwareRoot = SOFTWARE_ROOT) {
 	return [...required].sort();
 }
 
+export function requiredPackageArtifactNames(
+	softwareRoot = SOFTWARE_ROOT,
+	packageNames = [],
+) {
+	const required = new Set();
+	for (const packageName of packageNames) {
+		const manifestPath = path.join(
+			softwareRoot,
+			packageName,
+			"agentos-package.json",
+		);
+		if (!existsSync(manifestPath)) {
+			throw new Error(`software package manifest not found: ${manifestPath}`);
+		}
+		const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+		for (const name of commandNames(manifest, manifestPath)) {
+			required.add(name);
+		}
+		if ((manifest.stubs ?? []).length > 0) {
+			required.add("_stubs");
+		}
+	}
+	return [...required].sort();
+}
+
 function commandFiles(dir, { requireRealFiles = false } = {}) {
 	const files = [];
 	for (const name of readdirSync(dir).sort()) {
@@ -141,11 +166,14 @@ export function copyWasmCommands({
 	destDir = DEST_DIR,
 	softwareRoot = SOFTWARE_ROOT,
 	requireCommands = false,
+	requiredPackageNames = [],
 	log = console.log,
 	warn = console.warn,
 } = {}) {
 	const required = requireCommands
-		? requiredSoftwareCommandNames(softwareRoot)
+		? requiredPackageNames.length > 0
+			? requiredPackageArtifactNames(softwareRoot, requiredPackageNames)
+			: requiredSoftwareCommandNames(softwareRoot)
 		: [];
 
 	if (!existsSync(sourceDir)) {
@@ -177,10 +205,15 @@ export function copyWasmCommands({
 
 	// Complete every fallible source/manifest check before clearing a previously
 	// valid vendored directory. A partial build must not erase known-good output.
-	const sourceFiles = commandFiles(sourceDir);
+	const availableSourceFiles = commandFiles(sourceDir);
 	if (requireCommands) {
-		assertRequiredCommands(sourceFiles, required, sourceDir);
+		assertRequiredCommands(availableSourceFiles, required, sourceDir);
 	}
+	const requiredNames = new Set(required);
+	const sourceFiles =
+		requiredPackageNames.length > 0
+			? availableSourceFiles.filter(({ name }) => requiredNames.has(name))
+			: availableSourceFiles;
 
 	rmSync(destDir, { recursive: true, force: true });
 	mkdirSync(destDir, { recursive: true });
@@ -201,7 +234,12 @@ export function copyWasmCommands({
 
 function main() {
 	try {
-		copyWasmCommands({ requireCommands: process.argv.includes("--require") });
+		const requireCoreutils = process.argv.includes("--require-coreutils");
+		copyWasmCommands({
+			requireCommands:
+				requireCoreutils || process.argv.includes("--require"),
+			requiredPackageNames: requireCoreutils ? ["coreutils"] : [],
+		});
 	} catch (error) {
 		console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
 		process.exitCode = 1;

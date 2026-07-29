@@ -7,11 +7,11 @@ const client = createClient<typeof registry>({
 const agent = client.vm.getOrCreate("my-agent");
 
 // allow_all selects an adapter-supplied allow option without a client round-trip.
-await agent.openSession({
+await agent.sessions.open({
 	agent: "pi",
 	permissionPolicy: "allow_all",
 	env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
-await agent.prompt({
+await agent.sessions.prompt({
 	content: [{ type: "text", text: "Write files as needed" }],
 });

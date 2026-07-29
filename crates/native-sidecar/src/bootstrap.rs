@@ -36,7 +36,7 @@ where
 
 pub(crate) fn discover_command_guest_paths(kernel: &mut SidecarKernel) -> BTreeMap<String, String> {
     let mut command_guest_paths = BTreeMap::new();
-    let Ok(command_roots) = kernel.read_dir("/__secure_exec/commands") else {
+    let Ok(command_roots) = kernel.read_dir("/__agentos/commands") else {
         return command_guest_paths;
     };
 
@@ -47,7 +47,7 @@ pub(crate) fn discover_command_guest_paths(kernel: &mut SidecarKernel) -> BTreeM
     ordered_roots.sort();
 
     for root in ordered_roots {
-        let guest_root = format!("/__secure_exec/commands/{root}");
+        let guest_root = format!("/__agentos/commands/{root}");
         let Ok(entries) = kernel.read_dir(&guest_root) else {
             continue;
         };

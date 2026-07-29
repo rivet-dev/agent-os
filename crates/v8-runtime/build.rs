@@ -75,14 +75,70 @@ fn find_v8_icu_data(crate_root: &Path) -> PathBuf {
     panic!("failed to locate ICU data under {}", crate_root.display(),);
 }
 
-fn build_v8_thread_support(manifest_dir: &Path, crate_root: &Path) {
+fn prepare_v8_include_overlay(crate_root: &Path, out_dir: &Path) -> PathBuf {
+    const OLD_ITERATOR_ALIAS: &str = "using iterator_concept = Iterator::iterator_concept;";
+    const FIXED_ITERATOR_ALIAS: &str =
+        "using iterator_concept = typename Iterator::iterator_concept;";
+
+    let source_include = crate_root.join("v8/include");
+    let overlay_include = out_dir.join("v8-include");
+    fs::create_dir_all(&overlay_include).unwrap_or_else(|error| {
+        panic!(
+            "failed to create V8 include overlay {}: {}",
+            overlay_include.display(),
+            error,
+        )
+    });
+
+    let sandbox_header = source_include.join("v8-sandbox.h");
+    fs::copy(&sandbox_header, overlay_include.join("v8-sandbox.h")).unwrap_or_else(|error| {
+        panic!(
+            "failed to copy V8 sandbox header {}: {}",
+            sandbox_header.display(),
+            error,
+        )
+    });
+
+    let internal_header = source_include.join("v8-internal.h");
+    let internal = fs::read_to_string(&internal_header).unwrap_or_else(|error| {
+        panic!(
+            "failed to read V8 internal header {}: {}",
+            internal_header.display(),
+            error,
+        )
+    });
+    let patched = if internal.contains(FIXED_ITERATOR_ALIAS) {
+        internal
+    } else if internal.matches(OLD_ITERATOR_ALIAS).count() == 1 {
+        internal.replacen(OLD_ITERATOR_ALIAS, FIXED_ITERATOR_ALIAS, 1)
+    } else {
+        panic!(
+            "V8 iterator alias in {} did not match the expected declaration",
+            internal_header.display(),
+        );
+    };
+    fs::write(overlay_include.join("v8-internal.h"), patched).unwrap_or_else(|error| {
+        panic!(
+            "failed to write patched V8 internal header overlay: {}",
+            error,
+        )
+    });
+
+    println!("cargo:rerun-if-changed={}", sandbox_header.display());
+    println!("cargo:rerun-if-changed={}", internal_header.display());
+    overlay_include
+}
+
+fn build_v8_thread_support(manifest_dir: &Path, crate_root: &Path, out_dir: &Path) {
     let source = manifest_dir.join("src/v8_thread_support.cc");
     let include = crate_root.join("v8/include");
+    let overlay_include = prepare_v8_include_overlay(crate_root, out_dir);
     println!("cargo:rerun-if-changed={}", source.display());
     cc::Build::new()
         .cpp(true)
         .std("c++20")
         .warnings(false)
+        .include(overlay_include)
         .include(include)
         .file(source)
         .compile("agentos_v8_thread_support");
@@ -101,7 +157,7 @@ fn main() {
 
     let v8_version = read_v8_version(&lock_path);
     let v8_crate_root = find_v8_crate_root(&v8_version);
-    build_v8_thread_support(&manifest_dir, &v8_crate_root);
+    build_v8_thread_support(&manifest_dir, &v8_crate_root, &out_dir);
     let icu_data = find_v8_icu_data(&v8_crate_root);
     let dest_path = out_dir.join("icudtl.dat");
 

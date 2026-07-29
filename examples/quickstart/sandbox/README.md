@@ -9,7 +9,7 @@ Back a VM with a Docker-backed sandbox so guest reads, writes, and commands run 
 
 ## How it works
 
-A `SandboxAgent` starts a Docker container via `sandbox-agent`. Two pieces wire it into the VM: `createSandboxFs` mounts the container's filesystem at `/sandbox`, and `createSandboxBindings` registers a `sandbox` binding collection for running commands. Files written under `/sandbox` land in the container, while bindings such as `run-command` and `list-processes` execute against it through generated `agentos-sandbox` CLI commands. Set `SKIP_DOCKER=1` to no-op the example where Docker is unavailable.
+The `docker()` provider starts one Docker container for the VM. AgentOS mounts its filesystem at `/mnt/sandbox`, registers a `sandbox` binding collection for running commands, and destroys the container when the VM is disposed. Set `SKIP_DOCKER=1` to no-op the example where Docker is unavailable.
 
 ## Run it
 

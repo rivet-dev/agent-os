@@ -1,0 +1,15 @@
+{
+  "name": "vitest-pass",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "vite": "7.3.6",
+    "vitest": "4.1.10"
+  },
+  "pnpm": {
+    "overrides": {
+      "rollup": "npm:@rollup/wasm-node@4.62.2"
+    }
+  }
+}

@@ -13,7 +13,7 @@ function formatNumber(num: number): string {
   return num.toString();
 }
 
-export function GitHubStars({ repo = "rivet-dev/secure-exec", className, ...props }: GitHubStarsProps) {
+export function GitHubStars({ repo = "rivet-dev/agentos", className, ...props }: GitHubStarsProps) {
   const [stars, setStars] = useState<number | null>(null);
 
   useEffect(() => {

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Dependencies are persisted with the orb. Long-lived services declared in
+# .amp/services.yaml are repaired by Amp's service supervisor.
+echo "Frontend orb ready."

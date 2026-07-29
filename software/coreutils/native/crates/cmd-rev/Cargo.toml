@@ -4,11 +4,11 @@ name = "cmd-rev"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "rev standalone binary for secure-exec VM"
+description = "rev standalone binary for agentos VM"
 
 [[bin]]
 name = "rev"
 path = "src/main.rs"
 
 [dependencies]
-secureexec-rev = { path = "../rev" }
+agentos-rev = { path = "../rev" }

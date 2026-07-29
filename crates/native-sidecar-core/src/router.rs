@@ -57,6 +57,8 @@ pub enum RequestRoute {
     GetZombieTimerCount(GetZombieTimerCountRequest),
     LinkPackage(LinkPackageRequest),
     ProvidedCommands(ProvidedCommandsRequest),
+    ExecutionOperation(RequestPayload),
+    ExecutionLifecycle(RequestPayload),
     Ext(ExtEnvelope),
     UnsupportedHostCallbackDirection,
 }
@@ -105,6 +107,37 @@ pub fn route_request_payload(request: &RequestFrame) -> RequestRoute {
         RequestPayload::GetZombieTimerCount(payload) => RequestRoute::GetZombieTimerCount(payload),
         RequestPayload::LinkPackage(payload) => RequestRoute::LinkPackage(payload),
         RequestPayload::ProvidedCommands(payload) => RequestRoute::ProvidedCommands(payload),
+        payload @ (RequestPayload::ShellExecution(_)
+        | RequestPayload::ArgvExecution(_)
+        | RequestPayload::JavaScriptExecution(_)
+        | RequestPayload::JavaScriptEvaluation(_)
+        | RequestPayload::JavaScriptFileExecution(_)
+        | RequestPayload::TypeScriptExecution(_)
+        | RequestPayload::TypeScriptEvaluation(_)
+        | RequestPayload::TypeScriptFileExecution(_)
+        | RequestPayload::TypeScriptCheck(_)
+        | RequestPayload::TypeScriptProjectCheck(_)
+        | RequestPayload::NpmProjectInstall(_)
+        | RequestPayload::NpmPackageInstall(_)
+        | RequestPayload::NpmScriptExecution(_)
+        | RequestPayload::NpmPackageExecution(_)
+        | RequestPayload::PythonExecution(_)
+        | RequestPayload::PythonEvaluation(_)
+        | RequestPayload::PythonFileExecution(_)
+        | RequestPayload::PythonModuleExecution(_)
+        | RequestPayload::PythonInstall(_)) => RequestRoute::ExecutionOperation(payload),
+        payload @ (RequestPayload::CreateContext(_)
+        | RequestPayload::GetExecution(_)
+        | RequestPayload::ListExecutions(_)
+        | RequestPayload::WaitExecution(_)
+        | RequestPayload::CancelExecution(_)
+        | RequestPayload::SignalExecution(_)
+        | RequestPayload::ResetExecution(_)
+        | RequestPayload::DeleteExecution(_)
+        | RequestPayload::WriteExecutionStdin(_)
+        | RequestPayload::CloseExecutionStdin(_)
+        | RequestPayload::ResizeExecutionPty(_)
+        | RequestPayload::ReadExecutionOutput(_)) => RequestRoute::ExecutionLifecycle(payload),
         RequestPayload::HostFilesystemCall(_)
         | RequestPayload::PersistenceLoad(_)
         | RequestPayload::PersistenceFlush(_) => RequestRoute::UnsupportedHostCallbackDirection,
@@ -169,6 +202,37 @@ pub fn request_dispatch_mode(request: &RequestFrame) -> RequestDispatchMode {
         | RequestPayload::GetZombieTimerCount(_)
         | RequestPayload::LinkPackage(_)
         | RequestPayload::ProvidedCommands(_)
+        | RequestPayload::ShellExecution(_)
+        | RequestPayload::ArgvExecution(_)
+        | RequestPayload::JavaScriptExecution(_)
+        | RequestPayload::JavaScriptEvaluation(_)
+        | RequestPayload::JavaScriptFileExecution(_)
+        | RequestPayload::TypeScriptExecution(_)
+        | RequestPayload::TypeScriptEvaluation(_)
+        | RequestPayload::TypeScriptFileExecution(_)
+        | RequestPayload::TypeScriptCheck(_)
+        | RequestPayload::TypeScriptProjectCheck(_)
+        | RequestPayload::NpmProjectInstall(_)
+        | RequestPayload::NpmPackageInstall(_)
+        | RequestPayload::NpmScriptExecution(_)
+        | RequestPayload::NpmPackageExecution(_)
+        | RequestPayload::PythonExecution(_)
+        | RequestPayload::PythonEvaluation(_)
+        | RequestPayload::PythonFileExecution(_)
+        | RequestPayload::PythonModuleExecution(_)
+        | RequestPayload::PythonInstall(_)
+        | RequestPayload::CreateContext(_)
+        | RequestPayload::GetExecution(_)
+        | RequestPayload::ListExecutions(_)
+        | RequestPayload::WaitExecution(_)
+        | RequestPayload::CancelExecution(_)
+        | RequestPayload::SignalExecution(_)
+        | RequestPayload::ResetExecution(_)
+        | RequestPayload::DeleteExecution(_)
+        | RequestPayload::WriteExecutionStdin(_)
+        | RequestPayload::CloseExecutionStdin(_)
+        | RequestPayload::ResizeExecutionPty(_)
+        | RequestPayload::ReadExecutionOutput(_)
         | RequestPayload::HostFilesystemCall(_)
         | RequestPayload::PersistenceLoad(_)
         | RequestPayload::PersistenceFlush(_) => RequestDispatchMode::Immediate,

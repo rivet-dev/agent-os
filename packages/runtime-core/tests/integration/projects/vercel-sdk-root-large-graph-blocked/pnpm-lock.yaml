@@ -1,0 +1,29 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      '@vercel/sdk':
+        specifier: 1.28.8
+        version: 1.28.8
+
+packages:
+
+  '@vercel/sdk@1.28.8':
+    resolution: {integrity: sha512-uAl+pEZZnFYRFzE/43ihP3aYTJ+4v0+coiMYobYMqtaERWknYKuRZWEj9Dk9r87yWXfxclsQugXkN42kaOcySw==}
+
+  zod@4.4.3:
+    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+
+snapshots:
+
+  '@vercel/sdk@1.28.8':
+    dependencies:
+      zod: 4.4.3
+
+  zod@4.4.3: {}

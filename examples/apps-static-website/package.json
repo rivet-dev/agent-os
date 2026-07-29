@@ -1,0 +1,22 @@
+{
+	"name": "@rivet-dev/agentos-example-apps-static-website",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"start": "node --import tsx src/server.ts",
+		"check-types": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@hono/node-server": "^2.0.11",
+		"@rivet-dev/agentos": "workspace:*",
+		"@rivet-dev/agentos-apps": "workspace:*",
+		"hono": "^4.12.9",
+		"rivetkit": "catalog:rivetkit"
+	},
+	"devDependencies": {
+		"@types/node": "^22.19.15",
+		"tsx": "^4.20.6",
+		"typescript": "^5.7.3"
+	}
+}

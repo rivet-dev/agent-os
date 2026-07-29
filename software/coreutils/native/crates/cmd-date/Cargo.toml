@@ -4,7 +4,7 @@ name = "cmd-date"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "date standalone binary for secure-exec VM"
+description = "date standalone binary for agentos VM"
 
 [[bin]]
 name = "date"

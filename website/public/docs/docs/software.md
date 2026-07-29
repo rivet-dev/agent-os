@@ -22,4 +22,4 @@ Browse all available software packages on the [Registry](/registry).
 
 ## Custom Software
 
-Package your own agents, command packages, and WASM commands. See [Software Definition](/docs/custom-software/definition) to define a package, and [Building Binaries](/docs/custom-software/building-wasm) to compile WASM commands from source in the [secure-exec registry](https://github.com/rivet-dev/secure-exec/tree/main/registry).
+Package your own agents, command packages, and WASM commands. See [Software Definition](/docs/custom-software/definition) to define a package, and [Building Binaries](/docs/custom-software/building-wasm) to compile WASM commands from source in the [agentos registry](https://github.com/rivet-dev/agentos/tree/main/registry).

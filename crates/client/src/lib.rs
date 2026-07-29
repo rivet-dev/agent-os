@@ -8,7 +8,7 @@
 //!
 //! The client spawns the native `agentos-sidecar` binary and speaks the existing framed BARE
 //! protocol over its stdio (see [`transport`]). It does NOT embed the kernel in-process and does NOT
-//! define a new sidecar wire protocol. The generated Secure Exec schema surface comes from
+//! define a new sidecar wire protocol. The generated AgentOS language execution schema surface comes from
 //! `agentos_sidecar_client::wire`; Agent OS layers ACP/session semantics on top of those generated wire
 //! frames through the wrapper client.
 //!
@@ -21,6 +21,7 @@ pub mod config;
 pub mod cron;
 pub mod error;
 pub mod fs;
+pub mod language_execution;
 pub mod net;
 pub mod process;
 pub mod session;
@@ -53,6 +54,11 @@ pub const CRON_JOB_LIMIT: usize = 1024;
 
 pub use agent_os::{AgentOs, PackageDescriptor, ProjectedAgent, SoftwareInfo};
 pub use error::{ClientError, ClientResult, ResourceLimitDetails};
+pub use language_execution::{
+    CodeEvaluationResult, CodeExecutionResult, ContextDescriptor, ExecutionPtyOptions,
+    InlineExecutionOptions, JavaScriptExecutionOptions, JavaScriptModuleFormat,
+    LanguageExecutionOptions, LanguageSpawnOptions, ProcessDescriptor, TypeScriptDiagnostic,
+};
 pub use sidecar::{
     AgentOsSidecar, AgentOsSidecarDescription, AgentOsSidecarPlacement, SidecarState,
 };

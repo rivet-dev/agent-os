@@ -3,7 +3,7 @@ import { NetServer, NetSocket, buildSerializedTlsOptions, isTlsSecureContextWrap
 
 function createSecureContextWrapper(options) {
   return {
-    __secureExecTlsContext: buildSerializedTlsOptions(options),
+    __agentOsTlsContext: buildSerializedTlsOptions(options),
     context: {}
   };
 }
@@ -38,11 +38,17 @@ class TLSSocket extends NetSocket {
   constructor(socketOrOptions, options) {
     if (socketOrOptions instanceof NetSocket) {
       super({ allowHalfOpen: socketOrOptions.allowHalfOpen === true });
-      return adoptRawTlsSocket(socketOrOptions, options);
+      const adopted = adoptRawTlsSocket(socketOrOptions, options);
+      adopted._handle ??= { _parentWrap: { constructor: NetSocket } };
+      return adopted;
     }
     super(
       socketOrOptions && typeof socketOrOptions === "object" ? socketOrOptions : options
     );
+    // http2-wrapper feature-detects Node's internal JSStreamSocket constructor
+    // through this shape at module load. Preserve the shape without exposing a
+    // host descriptor; proxy transports still flow through AgentOS NetSocket.
+    this._handle ??= { _parentWrap: { constructor: NetSocket } };
   }
 }
 
@@ -299,7 +305,7 @@ var TLSServer = class {
     }
     const resolvedOptions = {
       ...this._tlsOptions,
-      ...selectedContext?.__secureExecTlsContext ?? {},
+      ...selectedContext?.__agentOsTlsContext ?? {},
       isServer: true
     };
     if (this._alpnCallback) {
@@ -345,6 +351,31 @@ function TLSServerCallable(optionsOrListener, maybeListener) {
   return new TLSServer(optionsOrListener, maybeListener);
 }
 
+function checkServerIdentity(hostname, cert) {
+  const host = String(hostname);
+  const altNames = String(cert?.subjectaltname ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const matchesAltName = altNames.some((entry) => {
+    const separator = entry.indexOf(":");
+    if (separator < 0) return false;
+    const kind = entry.slice(0, separator).trim().toUpperCase();
+    const value = entry.slice(separator + 1).trim();
+    return kind === "DNS" ? matchesServername(value, host) : kind === "IP ADDRESS" && value === host;
+  });
+  const commonName = cert?.subject?.CN;
+  if (matchesAltName || (altNames.length === 0 && typeof commonName === "string" && matchesServername(commonName, host))) {
+    return undefined;
+  }
+  const error = new Error(`Hostname/IP does not match certificate's altnames: Host: ${host}`);
+  error.code = "ERR_TLS_CERT_ALTNAME_INVALID";
+  error.reason = "Host does not match certificate subject or alternative names";
+  error.host = host;
+  error.cert = cert;
+  return error;
+}
+
 var tlsModule = {
   connect: tlsConnect,
   TLSSocket,
@@ -355,6 +386,7 @@ var tlsModule = {
   createSecureContext(options) {
     return createSecureContextWrapper(options);
   },
+  checkServerIdentity,
   getCiphers() {
     if (typeof _tlsGetCiphersRaw === "undefined") {
       throw new Error("tls.getCiphers is not supported in sandbox");
@@ -366,7 +398,8 @@ var tlsModule = {
     }
   },
   DEFAULT_MIN_VERSION: "TLSv1.2",
-  DEFAULT_MAX_VERSION: "TLSv1.3"
+  DEFAULT_MAX_VERSION: "TLSv1.3",
+  rootCertificates: Object.freeze([])
 };
 
 exposeCustomGlobal("_netModule", netModule);

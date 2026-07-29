@@ -1,7 +1,7 @@
 {
 	"name": "@rivet-dev/agentos",
 	"version": "0.0.1",
-	"description": "A native TypeScript RivetKit actor backed by the AgentOS core SDK and sidecar.",
+	"description": "The AgentOS actor and orchestration SDK.",
 	"license": "Apache-2.0",
 	"keywords": [
 		"rivetkit",
@@ -36,6 +36,12 @@
 				"default": "./dist/client.js"
 			}
 		},
+		"./node": {
+			"import": {
+				"types": "./dist/node.d.ts",
+				"default": "./dist/node.js"
+			}
+		},
 		"./react": {
 			"import": {
 				"types": "./dist/react.d.ts",
@@ -48,12 +54,14 @@
 	},
 	"scripts": {
 		"build": "pnpm build:actor && pnpm build:tabs",
-		"build:actor": "tsup src/index.ts src/client.ts src/react.ts",
+		"build:actor": "tsup src/index.ts src/client.ts src/node.ts src/react.ts",
 		"build:tabs": "vite build --config vite.tabs.config.ts",
 		"check-types": "tsc --noEmit",
-		"test": "vitest run",
+		"test": "vitest run --exclude '**/*.nightly.test.ts'",
+		"test:pr": "AGENTOS_ACTOR_E2E=1 vitest run tests/actor.test.ts tests/client.test.ts tests/agent-os-conformance.e2e.test.ts --fileParallelism=false",
+		"test:nightly": "AGENTOS_ACTOR_E2E=1 vitest run tests/*.nightly.test.ts tests/agent-os-conformance.e2e.test.ts --fileParallelism=false --passWithNoTests",
 		"test:e2e": "cargo build --manifest-path ../../Cargo.toml -p agentos-sidecar && pnpm --filter @rivet-dev/agentos-runtime-core build && pnpm --filter @agentos-software/manifest build && pnpm --filter @agentos-software/common... build && pnpm --filter @agentos-software/coreutils build:runtime && pnpm --filter @rivet-dev/agentos-test-harness build && pnpm --filter @rivet-dev/agentos-core build && pnpm build && pnpm test:e2e:run",
-		"test:e2e:run": "AGENTOS_ACTOR_E2E=1 vitest run tests/actor.e2e.test.ts tests/agent-os-conformance.e2e.test.ts --fileParallelism=false"
+		"test:e2e:run": "AGENTOS_ACTOR_E2E=1 vitest run tests/actor-lifecycle.nightly.test.ts tests/agent-os-conformance.e2e.test.ts --fileParallelism=false"
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "0.16.1",
@@ -76,6 +84,7 @@
 		}
 	},
 	"devDependencies": {
+		"@agentos-software/coreutils": "workspace:*",
 		"@rivet-dev/agentos-test-harness": "workspace:*",
 		"@radix-ui/react-collapsible": "^1.1.2",
 		"@radix-ui/react-scroll-area": "^1.2.2",

@@ -6,22 +6,22 @@ const client = createClient<typeof registry>({ endpoint: "http://localhost:6420"
 const agent = client.vm.getOrCreate("my-agent");
 
 // Write a file (string or Uint8Array)
-await agent.writeFile("/home/agentos/hello.txt", "Hello, world!");
+await agent.filesystem.writeFile("/home/agentos/hello.txt", "Hello, world!");
 
 // Read a file (returns Uint8Array)
-const content = await agent.readFile("/home/agentos/hello.txt");
+const content = await agent.filesystem.readFile("/home/agentos/hello.txt");
 console.log(new TextDecoder().decode(content));
 // docs:end read-write
 
 // docs:start batch
 // Batch write (creates parent directories automatically)
-const writeResults = await agent.writeFiles([
+const writeResults = await agent.filesystem.writeFiles([
   { path: "/home/agentos/src/index.ts", content: "console.log('hello');" },
   { path: "/home/agentos/src/utils.ts", content: "export function add(a: number, b: number) { return a + b; }" },
 ]);
 
 // Batch read
-const readResults = await agent.readFiles([
+const readResults = await agent.filesystem.readFiles([
   "/home/agentos/src/index.ts",
   "/home/agentos/src/utils.ts",
 ]);
@@ -32,13 +32,13 @@ for (const result of readResults) {
 
 // docs:start directories
 // Create a directory
-await agent.mkdir("/home/agentos/projects");
+await agent.filesystem.mkdir("/home/agentos/projects");
 
 // List directory contents
-const entries = await agent.readdir("/home/agentos/projects");
+const entries = await agent.filesystem.readdir("/home/agentos/projects");
 
 // Recursive listing (entries carry path, type, and size)
-const tree = await agent.readdirRecursive("/home/agentos");
+const tree = await agent.filesystem.readdirRecursive("/home/agentos");
 for (const entry of tree) {
   const name = entry.path.split("/").pop() ?? entry.path;
   console.log(entry.type, entry.path, name);
@@ -47,22 +47,22 @@ for (const entry of tree) {
 
 // docs:start metadata
 // Check if a path exists
-const fileExists = await agent.exists("/home/agentos/hello.txt");
+const fileExists = await agent.filesystem.exists("/home/agentos/hello.txt");
 
 // Get file metadata
-const info = await agent.stat("/home/agentos/hello.txt");
+const info = await agent.filesystem.stat("/home/agentos/hello.txt");
 console.log(info.size, info.isDirectory, info.mtimeMs);
 // docs:end metadata
 
 // docs:start move-delete
 // Move/rename
-await agent.move("/home/agentos/old.txt", "/home/agentos/new.txt");
+await agent.filesystem.move("/home/agentos/old.txt", "/home/agentos/new.txt");
 
 // Delete a file
-await agent.remove("/home/agentos/new.txt");
+await agent.filesystem.remove("/home/agentos/new.txt");
 
 // Delete a directory recursively
-await agent.remove("/home/agentos/temp", { recursive: true });
+await agent.filesystem.remove("/home/agentos/temp", { recursive: true });
 // docs:end move-delete
 
 // Keep batch + directory results referenced for the type-check.

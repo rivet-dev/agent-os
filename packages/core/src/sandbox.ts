@@ -439,31 +439,44 @@ export async function resolveSandboxOptions<
 	}
 
 	const normalizedSandbox = await normalizeSandboxInput(sandbox);
-	const sandboxOptions = normalizedSandbox.options;
-	const expanded = rest as Omit<T, "sandbox"> & {
-		mounts?: MountConfig[];
-		bindings?: Bindings[];
-	};
-	const mountPath = sandboxOptions.mountPath ?? "/mnt/sandbox";
-	const mounts = [
-		...(expanded.mounts ?? []),
-		{
-			path: mountPath,
-			plugin: createSandboxFs(sandboxOptions),
-			readOnly: sandboxOptions.readOnly,
-		},
-	];
-	const bindings = [
-		...(expanded.bindings ?? []),
-		createSandboxBindings(sandboxOptions),
-	];
+	try {
+		const sandboxOptions = normalizedSandbox.options;
+		const expanded = rest as Omit<T, "sandbox"> & {
+			mounts?: MountConfig[];
+			bindings?: Bindings[];
+		};
+		const mountPath = sandboxOptions.mountPath ?? "/mnt/sandbox";
+		const mounts = [
+			...(expanded.mounts ?? []),
+			{
+				path: mountPath,
+				plugin: createSandboxFs(sandboxOptions),
+				readOnly: sandboxOptions.readOnly,
+			},
+		];
+		const bindings = [
+			...(expanded.bindings ?? []),
+			createSandboxBindings(sandboxOptions),
+		];
 
-	return attachSandboxDisposeHooks(
-		{
-			...expanded,
-			mounts,
-			bindings,
-		},
-		normalizedSandbox.dispose ? [normalizedSandbox.dispose] : [],
-	);
+		return attachSandboxDisposeHooks(
+			{
+				...expanded,
+				mounts,
+				bindings,
+			},
+			normalizedSandbox.dispose ? [normalizedSandbox.dispose] : [],
+		);
+	} catch (error) {
+		if (!normalizedSandbox.dispose) throw error;
+		try {
+			await normalizedSandbox.dispose();
+		} catch (disposeError) {
+			throw new AggregateError(
+				[error, disposeError],
+				"Sandbox configuration and cleanup failed",
+			);
+		}
+		throw error;
+	}
 }

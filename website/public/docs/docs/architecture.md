@@ -91,7 +91,7 @@ The kernel is the single chokepoint. Each kind of guest operation is serviced by
 
 The executor is the untrusted half of the VM. It runs the guest code and reaches the kernel for everything else.
 
-- **JavaScript Acceleration.** Guest JavaScript runs on a native V8 runtime (the same engine in Chrome and Node.js, with the full JIT compiler) inside an isolate. This is what we call **JavaScript Acceleration**: the guest's JavaScript executes at native speed, not through an interpreter or a translation shim. It is genuinely fast, and it presents normal Node.js semantics. See [JavaScript Runtime](/docs/nodejs-runtime).
+- **JavaScript Acceleration.** Guest JavaScript runs on a native V8 runtime (the same engine in Chrome and Node.js, with the full JIT compiler) inside an isolate. This is what we call **JavaScript Acceleration**: the guest's JavaScript executes at native speed, not through an interpreter or a translation shim. It is genuinely fast, and it presents normal Node.js semantics. See [JavaScript](/docs/javascript).
 - **WASM alongside it.** The shell (`sh`) and the coreutils behind process execution ship as WebAssembly modules, and you can run your own WASM too. See [POSIX Syscalls](/docs/architecture/posix-syscalls) and the [Compiler Toolchain](/docs/architecture/compiler-toolchain).
 - **Native binaries.** Tools mounted into the VM run inside the same boundary as everything else.
 - **No host fallthrough.** The executor holds no capability of its own. For every file read, process spawn, or socket open, it issues a syscall and blocks for the kernel's reply.
@@ -197,13 +197,13 @@ The `agentOS()` actor (from `@rivet-dev/agentos`) wraps the raw VM in a [Rivet A
 
 - **Recurring work.** Schedule a shell command or an agent session on a cron expression.
 - **Overlap control.** Choose what happens when a run is still going when the next is due (`allow`, `skip`, or `queue`).
-- **Observable.** Stream `cronEvent`s to watch executions. See [Cron Jobs](/docs/cron).
+- **Observable.** Stream `cronEvent`s to watch executions. See [Crons & Loops](/docs/cron).
 
 ### Workflows
 
 - **Durable multi-step tasks.** A workflow is the actor's `run` handler wrapped in `workflow()`, where each `ctx.step()` is recorded, retried, and resumed independently.
 - **Crash-proof.** If the process dies mid-run, replay skips completed steps and continues where it left off.
-- **Composable.** The output of one step feeds the next: clone a repo, let an agent fix a bug, run the tests. See [Workflow Automation](/docs/workflows).
+- **Composable.** The output of one step feeds the next: clone a repo, let an agent fix a bug, run the tests. See [Workflows & Graphs](/docs/workflows).
 
 ### Persistence & sleep/wake
 

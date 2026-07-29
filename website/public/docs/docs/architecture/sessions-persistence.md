@@ -29,13 +29,13 @@ Each version table is a `STRICT` singleton table. Its owner alone validates and 
 
 ## Session event log
 
-`agentos_core_events` keeps the durable envelope in scalar columns: public session ID, sequence, timestamp, negotiated ACP version, event kind, correlation ID, payload byte length, and permission outcome fields. `payload_json` contains only the exact native ACP payload:
+`agentos_core_events` keeps the durable envelope in scalar columns: public session ID, sequence, timestamp, negotiated ACP version, internal storage kind, correlation ID, payload byte length, and permission outcome fields. `payload_json` contains only the exact native ACP payload:
 
 - `session_update` stores an ACP `SessionUpdate`, including its `sessionUpdate` discriminator, optional fields, and `_meta`.
 - `permission_request` stores the ACP `RequestPermissionRequest` selected for public delivery.
 - `permission_response` stores the ACP `RequestPermissionResponse`.
 
-The public AgentOS envelope is reconstructed from those scalar columns. It is not duplicated inside `payload_json`, and the row is not a raw JSON-RPC frame. This keeps event data ACP-native while giving AgentOS a stable sequence, timestamp, and public request correlation.
+The internal `session_update` storage kind is not a public event discriminator. On read, AgentOS exposes `SessionUpdate.sessionUpdate` as the event's top-level `type` and places that ACP variant's native fields directly beside it. Permission request and response fields are flattened the same way. The public AgentOS durability envelope is reconstructed from the scalar columns; it is not duplicated inside `payload_json`, and the row is not a raw JSON-RPC frame. This keeps event data ACP-native while giving AgentOS a stable sequence, timestamp, and public request correlation.
 
 Complete user content is committed before prompt dispatch. Agent message and thought deltas are live and ephemeral; they receive no durable sequence and are coalesced into native ACP chunk updates only at a completed-message boundary. Other ACP updates are stored unchanged. Events are published only after their SQLite transaction commits. If an adapter emitted an event that never committed, SQLite wins, and AgentOS never automatically resends a prompt whose delivery is uncertain.
 

@@ -249,7 +249,7 @@ pub fn pack_aospkg_from_tar_bytes(source_tar: &[u8]) -> VfsResult<(Vec<u8>, Pack
         )
     })?;
     // Peek at the agent block for the snapshot decision; the authoritative
-    // JSON-to-v1 conversion is the shared `manifest_json_to_v1`.
+    // JSON-to-v1 conversion is shared with transition-directory projection.
     let source: SourceManifestJson = serde_json::from_slice(&manifest_json)
         .map_err(|e| VfsError::new("EINVAL", format!("invalid {MANIFEST_JSON_NAME}: {e}")))?;
     let commands = command_targets(&entries, package_json.as_deref());

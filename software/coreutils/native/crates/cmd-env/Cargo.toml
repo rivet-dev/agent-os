@@ -4,11 +4,11 @@ name = "cmd-env"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "env standalone binary for secure-exec VM"
+description = "env standalone binary for agentos VM"
 
 [[bin]]
 name = "env"
 path = "src/main.rs"
 
 [dependencies]
-shims = { package = "secureexec-shims", path = "../../../../../toolchain/crates/libs/shims" }
+shims = { package = "agentos-shims", path = "../../../../../toolchain/crates/libs/shims" }

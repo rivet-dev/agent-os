@@ -29,6 +29,13 @@ Set caps on the `limits` object in the `agentOS` config. Limits are grouped by s
 | `process.pendingStdinBytes` | Stdin accepted by the sidecar but not yet written into kernel pipes | Default is `64 MiB` per process and across the VM. Sibling processes share the same aggregate envelope, so this is a tighter bound for multi-process workloads. A non-draining process rejects further writes with an error naming `limits.process.pendingStdinBytes`. |
 | `process.pendingEventCount` | Event count at each bounded VM/process delivery-queue stage | Default is `10000`. The crossing event is rejected with an error naming `limits.process.pendingEventCount`; it is never silently dropped. |
 | `process.pendingEventBytes` | Retained process-event bytes at each bounded delivery-queue stage | Default is `64 MiB` per process and across all process queues in the VM. Sibling processes share the VM-wide envelope. Large stdout/stderr bursts are rejected with an error naming `limits.process.pendingEventBytes`, independently of event count. |
+| `acp.maxSessionsPerVm` | Durable sessions retained in one VM SQLite database | Default is `10000`. Opening another session fails with a typed error naming this field. |
+| `acp.maxPromptsPerSession` | Prompt and idempotency records retained for one durable session | Default is `100000`; it must not exceed `acp.maxPromptsPerVm`. |
+| `acp.maxPromptsPerVm` | Prompt and idempotency records retained across one VM | Default is `1000000`. |
+| `acp.maxPendingPermissionsPerSession` | Actionable ACP permission requests for one session | Default is `1000`; it must not exceed `acp.maxPendingPermissionsPerVm`. |
+| `acp.maxPendingPermissionsPerVm` | Actionable ACP permission requests across one VM | Default is `10000`. |
+| `acp.maxPermissionOutcomesPerSession` | Terminal ACP permission outcomes retained for one session | Default is `10000`; it must not exceed `acp.maxPermissionOutcomesPerVm`. |
+| `acp.maxPermissionOutcomesPerVm` | Terminal ACP permission outcomes retained across one VM | Default is `100000`. Old outcomes are bounded independently from pending requests. |
 | `jsRuntime.v8HeapLimitMb` | Guest JavaScript V8 heap, in MiB | Default is `128`. |
 | `jsRuntime.cpuTimeLimitMs` | Active JavaScript CPU time | Default is `30000`; `0` disables the CPU watchdog. |
 | `jsRuntime.wallClockLimitMs` | JavaScript elapsed wall-clock backstop | Default is `0`, disabled. Use this for finite commands, not long-lived adapters. |
@@ -38,6 +45,7 @@ Set caps on the `limits` object in the `agentOS` config. Limits are grouped by s
 | `python.maxOldSpaceMb` | Pyodide runner V8 old-space heap, in MiB | Default is `0`, which keeps the engine default. |
 | `wasm.prewarmTimeoutMs` | WASM compile-cache warmup timeout | Default is `30000`. |
 | `wasm.runnerHeapLimitMb` | Trusted WASI/WASM runner V8 heap, in MiB | Default is `2048`; this is not guest linear memory. |
+| `wasm.runnerCpuTimeLimitMs` | Trusted WASI/WASM runner active-CPU budget | Default is `30000`; `0` disables this budget for trusted configurations. |
 | `process.maxSpawnFileActions` | File actions decoded for one `posix_spawn` call | Default is `4096`; excess actions fail with `E2BIG`. |
 | `process.maxSpawnFileActionBytes` | Serialized file-action bytes for one `posix_spawn` call | Default is `1 MiB`; excess input fails with `E2BIG`. |
 
@@ -48,6 +56,7 @@ Set caps on the `limits` object in the `agentOS` config. Limits are grouped by s
 - **JavaScript wall time**: awaiting or blocked JS terminates only when you set `jsRuntime.wallClockLimitMs`; the default is disabled for long-lived adapters.
 - **Filesystem bytes**: writing past the VFS budget fails with a no-space error to the guest.
 - **Counts (fds / processes / sockets)**: hitting a table cap returns the standard POSIX errno appropriate to that cap (`EMFILE`/`ENFILE`, `EAGAIN`, etc.).
+- **Durable ACP collections**: session, prompt, pending-permission, and terminal-outcome caps fail atomically with typed errors naming the exact `limits.acp.*` field to raise. Per-session caps are validated not to exceed their corresponding per-VM cap.
 
 ### WASM memory residency calls
 

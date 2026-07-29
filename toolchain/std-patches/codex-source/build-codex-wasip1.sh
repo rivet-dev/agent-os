@@ -4,13 +4,13 @@
 # Captures every fix discovered while driving `cargo build -p codex-core
 # --target wasm32-wasip1` to its current frontier. Run from the codex-rs checkout.
 # This is the DIAGNOSTIC harness (builds codex IN its own workspace to find the
-# frontier). The SHIPPING build vendors codex into secure-exec and swaps the same
+# frontier). The SHIPPING build vendors codex into agentos and swaps the same
 # crates via [patch.crates-io]; the fixes are identical.
 #
-# Usage: CODEX=/path/to/codex-rs SECEXEC=/path/to/secure-exec ./build-codex-wasip1.sh
+# Usage: CODEX=/path/to/codex-rs SECEXEC=/path/to/agentos ./build-codex-wasip1.sh
 set -uo pipefail
 CODEX="${CODEX:-/home/nathan/agent-e2e/codex-rs/codex-rs}"
-SECEXEC="${SECEXEC:-/home/nathan/agent-e2e/secure-exec}"
+SECEXEC="${SECEXEC:-/home/nathan/agent-e2e/agentos}"
 STUBS="$SECEXEC/toolchain/stubs"
 WSDK="$SECEXEC/toolchain/c/vendor/wasi-sdk"
 TOOLCHAIN="nightly-2026-03-01"

@@ -6,23 +6,24 @@ import * as path from "node:path";
 import * as posixPath from "node:path/posix";
 import { fileURLToPath } from "node:url";
 import "./native-client.js";
+import { resolvePublishedSidecarBinary } from "./binary.js";
+import { findCargoBinary, resolveCargoBinary } from "./cargo.js";
+import type { JsRuntimeConfig } from "./generated/JsRuntimeConfig.js";
+import type { PermissionsPolicy } from "./generated/PermissionsPolicy.js";
+import type { VmLimitsConfig } from "./generated/VmLimitsConfig.js";
+import type { VmUserConfig } from "./generated/VmUserConfig.js";
 import {
 	type AuthenticatedSession,
 	type CreatedVm,
 	type LocalCompatMount,
 	NativeSidecarKernelProxy,
-	SidecarProcess,
 	type RootFilesystemEntry,
+	SidecarProcess,
 	type SidecarRegisteredHostCallbackDefinition,
 	type SidecarRequestFrame,
 	type SidecarResponsePayload,
 	serializeMountConfigForSidecar,
 } from "./kernel-proxy.js";
-import { resolvePublishedSidecarBinary } from "./binary.js";
-import { findCargoBinary, resolveCargoBinary } from "./cargo.js";
-import type { PermissionsPolicy } from "./generated/PermissionsPolicy.js";
-import type { JsRuntimeConfig } from "./generated/JsRuntimeConfig.js";
-import type { VmUserConfig } from "./generated/VmUserConfig.js";
 
 export const AF_INET = 2;
 export const AF_UNIX = 1;
@@ -507,6 +508,10 @@ export interface Kernel extends KernelInterface {
 		path: string;
 		headersJson: string;
 		body?: string;
+		bodyBase64?: string;
+		streamOperation?: "start" | "read" | "cancel";
+		streamId?: string;
+		maxBytes?: number;
 	}): Promise<string>;
 	registerBindings(bindings: Record<string, BindingDefinition>): Promise<void>;
 	getResourceSnapshot(): Promise<{
@@ -928,9 +933,10 @@ export class InMemoryFileSystem implements VirtualFileSystem {
 		gid: number,
 		options?: { followSymlinks?: boolean },
 	): Promise<void> {
-		const entry = options?.followSymlinks === false
-			? this.entries.get(normalizePath(targetPath))
-			: this.resolveEntry(targetPath);
+		const entry =
+			options?.followSymlinks === false
+				? this.entries.get(normalizePath(targetPath))
+				: this.resolveEntry(targetPath);
 		if (!entry) throw errnoError("ENOENT", `chown '${targetPath}'`);
 		entry.uid = uid;
 		entry.gid = gid;
@@ -1936,7 +1942,7 @@ class WasmVmRuntimeDescriptor implements KernelRuntimeDriver {
 			}
 			guestPaths.set(
 				name,
-				`/__secure_exec/commands/${startIndex + dirOffset}/${name}`,
+				`/__agentos/commands/${startIndex + dirOffset}/${name}`,
 			);
 		}
 		return guestPaths;
@@ -2009,6 +2015,7 @@ function ensureNativeSidecarBinary(): string {
 	// A published install has no in-repo Cargo workspace to build from: resolve
 	// the prebuilt platform binary (or an explicit sidecar override).
 	if (
+		process.env.AGENTOS_NATIVE_SIDECAR_BIN ||
 		process.env.AGENTOS_SIDECAR_BIN ||
 		!fsSync.existsSync(path.join(REPO_ROOT, "Cargo.toml"))
 	) {
@@ -2063,9 +2070,16 @@ function createBootstrapEntries(commandNames: string[]): RootFilesystemEntry[] {
 		...KERNEL_POSIX_BOOTSTRAP_DIRS.map((entryPath) => ({
 			path: entryPath,
 			kind: "directory" as const,
-			mode: entryPath === "/tmp" || entryPath === "/var/tmp" ? 0o1777 : 0o755,
-			uid: 0,
-			gid: 0,
+			mode:
+				entryPath === "/tmp" || entryPath === "/var/tmp"
+					? 0o1777
+					: entryPath === "/home/agentos"
+						? 0o2755
+						: 0o755,
+			uid:
+				entryPath === "/home/agentos" || entryPath === "/workspace" ? 1000 : 0,
+			gid:
+				entryPath === "/home/agentos" || entryPath === "/workspace" ? 1000 : 0,
 		})),
 		{
 			path: "/usr/bin/env",
@@ -2253,12 +2267,92 @@ function planNodeFilesystemPassthroughMounts(
 			fs: new NodeFileSystem({ root: hostPath }),
 			readOnly: true,
 		});
+		if (directoryName === "node_modules") {
+			appendNodeModulesSymlinkTargetMounts(
+				mounts,
+				existingGuestPaths,
+				guestPath,
+				hostPath,
+			);
+		}
 	}
 
 	return {
 		mounts,
 		passthroughDirectories,
 	};
+}
+
+function appendNodeModulesSymlinkTargetMounts(
+	mounts: LocalCompatMount[],
+	existingGuestPaths: Set<string>,
+	guestRoot: string,
+	hostRoot: string,
+): void {
+	let canonicalHostRoot: string;
+	try {
+		canonicalHostRoot = fsSync.realpathSync(hostRoot);
+	} catch {
+		return;
+	}
+	const appendTarget = (guestPath: string, symlinkPath: string): void => {
+		if (existingGuestPaths.has(guestPath)) return;
+		try {
+			const target = fsSync.realpathSync(symlinkPath);
+			if (!fsSync.statSync(target).isDirectory()) return;
+			const relativeTarget = path.relative(canonicalHostRoot, target);
+			if (
+				relativeTarget === "" ||
+				(!relativeTarget.startsWith(`..${path.sep}`) &&
+					relativeTarget !== ".." &&
+					!path.isAbsolute(relativeTarget))
+			) {
+				// pnpm and similar stores deliberately use links that remain inside
+				// node_modules. Keeping those on the root mount preserves the realpath
+				// ancestry needed to resolve their nested dependency links.
+				return;
+			}
+			mounts.push({
+				path: guestPath,
+				fs: new NodeFileSystem({ root: target }),
+				readOnly: true,
+			});
+			existingGuestPaths.add(guestPath);
+		} catch {
+			// Broken or concurrently-removed links remain unavailable, matching Node.
+		}
+	};
+
+	let entries: fsSync.Dirent[];
+	try {
+		entries = fsSync.readdirSync(hostRoot, { withFileTypes: true });
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		if (entry.name.startsWith(".")) continue;
+		const entryPath = path.join(hostRoot, entry.name);
+		if (entry.isSymbolicLink()) {
+			appendTarget(`${guestRoot}/${entry.name}`, entryPath);
+			continue;
+		}
+		if (!entry.isDirectory() || !entry.name.startsWith("@")) continue;
+		let scopedEntries: fsSync.Dirent[];
+		try {
+			scopedEntries = fsSync.readdirSync(entryPath, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const scopedEntry of scopedEntries) {
+			if (scopedEntry.name.startsWith(".") || !scopedEntry.isSymbolicLink()) {
+				continue;
+			}
+			appendTarget(
+				`${guestRoot}/${entry.name}/${scopedEntry.name}`,
+				path.join(entryPath, scopedEntry.name),
+			);
+		}
+	}
 }
 
 function collectGuestCommandPaths(
@@ -2270,7 +2364,7 @@ function collectGuestCommandPaths(
 		if (!guestPaths.has(entry.name)) {
 			guestPaths.set(
 				entry.name,
-				`/__secure_exec/commands/${startIndex + entry.dirOffset}/${entry.name}`,
+				`/__agentos/commands/${startIndex + entry.dirOffset}/${entry.name}`,
 			);
 		}
 	}
@@ -2286,10 +2380,7 @@ async function ensureCommandStubs(
 		// `/bin` supports PATH-based test commands. `/opt/agentos/bin` mirrors
 		// the package projection used by production VMs and is required by
 		// upstream tools that exec private helpers via an absolute libexec path.
-		for (const stubPath of [
-			`/bin/${command}`,
-			`/opt/agentos/bin/${command}`,
-		]) {
+		for (const stubPath of [`/bin/${command}`, `/opt/agentos/bin/${command}`]) {
 			await rootView.writeFile(stubPath, KERNEL_COMMAND_STUB);
 			await rootView.chmod(stubPath, 0o755);
 		}
@@ -2490,7 +2581,13 @@ async function syncLiveFilesystemToBoundMethods(
 		if (!(await live.exists(targetPath).catch(() => false))) {
 			continue;
 		}
-		await snapshotLiveFilesystemPath(live, targetPath, snapshot, usage, maxBytes);
+		await snapshotLiveFilesystemPath(
+			live,
+			targetPath,
+			snapshot,
+			usage,
+			maxBytes,
+		);
 	}
 	if (usage.bytes >= maxBytes * 0.8) {
 		process.emitWarning(
@@ -2512,10 +2609,17 @@ async function snapshotLiveFilesystemPath(
 	maxBytes: number,
 	knownEntry?: Pick<VirtualDirEntry, "isDirectory" | "isSymbolicLink">,
 ): Promise<void> {
-	const stat = knownEntry ??
-		(targetPath === "/" ? await live.stat(targetPath) : await live.lstat(targetPath));
+	const stat =
+		knownEntry ??
+		(targetPath === "/"
+			? await live.stat(targetPath)
+			: await live.lstat(targetPath));
 	if (stat.isSymbolicLink) {
-		snapshot.push({ kind: "symlink", path: targetPath, target: await live.readlink(targetPath) });
+		snapshot.push({
+			kind: "symlink",
+			path: targetPath,
+			target: await live.readlink(targetPath),
+		});
 		return;
 	}
 	if (stat.isDirectory) {
@@ -2564,16 +2668,30 @@ async function applyLiveFilesystemSnapshotEntry(
 	entry: LiveFilesystemSnapshotEntry,
 ): Promise<void> {
 	if (entry.kind === "directory") {
-		await callBoundFilesystemMethod(methods, "mkdir", entry.path, { recursive: true });
+		await callBoundFilesystemMethod(methods, "mkdir", entry.path, {
+			recursive: true,
+		});
 		return;
 	}
 	await ensureBoundParentDirectory(methods, entry.path);
 	if (entry.kind === "symlink") {
-		await callBoundFilesystemMethod(methods, "removeFile", entry.path).catch(() => {});
-		await callBoundFilesystemMethod(methods, "symlink", entry.target, entry.path);
+		await callBoundFilesystemMethod(methods, "removeFile", entry.path).catch(
+			() => {},
+		);
+		await callBoundFilesystemMethod(
+			methods,
+			"symlink",
+			entry.target,
+			entry.path,
+		);
 		return;
 	}
-	await callBoundFilesystemMethod(methods, "writeFile", entry.path, entry.content);
+	await callBoundFilesystemMethod(
+		methods,
+		"writeFile",
+		entry.path,
+		entry.content,
+	);
 }
 
 function bindLiveFilesystem(
@@ -2614,7 +2732,12 @@ function bindLiveFilesystem(
 			if (!filesystem) {
 				return;
 			}
-			await syncLiveFilesystemToBoundMethods(filesystem, fallback, paths, maxBytes);
+			await syncLiveFilesystemToBoundMethods(
+				filesystem,
+				fallback,
+				paths,
+				maxBytes,
+			);
 		},
 		restore(): void {
 			for (const [method, delegate] of Object.entries(fallback)) {
@@ -2671,6 +2794,7 @@ class NativeKernel implements Kernel {
 			hostNetworkAdapter?: unknown;
 			loopbackExemptPorts?: number[];
 			jsRuntime?: Partial<JsRuntimeConfig>;
+			limits?: VmLimitsConfig;
 			mounts?: Array<{
 				path: string;
 				fs: VirtualFileSystem;
@@ -2770,7 +2894,7 @@ class NativeKernel implements Kernel {
 		const allCommandDirs = [...this.mountedCommandDirs, ...commandDirs];
 		const sidecarMounts = allCommandDirs.map((commandDir, index) =>
 			serializeMountConfigForSidecar({
-				path: `/__secure_exec/commands/${index}`,
+				path: `/__agentos/commands/${index}`,
 				readOnly: true,
 				plugin: {
 					id: "host_dir",
@@ -2951,6 +3075,10 @@ class NativeKernel implements Kernel {
 		path: string;
 		headersJson: string;
 		body?: string;
+		bodyBase64?: string;
+		streamOperation?: "start" | "read" | "cancel";
+		streamId?: string;
+		maxBytes?: number;
 	}): Promise<string> {
 		await this.ensureReady();
 		return this.proxy!.vmFetch(request);
@@ -3206,6 +3334,7 @@ class NativeKernel implements Kernel {
 						? { permissions: bootstrapPermissions }
 						: {}),
 					loopbackExemptPorts: this.loopbackExemptPorts,
+					...(this.options.limits ? { limits: this.options.limits } : {}),
 					...(this.options.jsRuntime
 						? { jsRuntime: this.options.jsRuntime as JsRuntimeConfig }
 						: {}),
@@ -3332,6 +3461,7 @@ export function createKernel(options: {
 	hostNetworkAdapter?: unknown;
 	loopbackExemptPorts?: number[];
 	jsRuntime?: Partial<JsRuntimeConfig>;
+	limits?: VmLimitsConfig;
 	logger?: unknown;
 	mounts?: Array<{ path: string; fs: VirtualFileSystem; readOnly?: boolean }>;
 	syncFilesystemOnDispose?: boolean;

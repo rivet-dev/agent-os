@@ -1,5 +1,5 @@
 [package]
-name = "secureexec-wasi-spawn"
+name = "agentos-wasi-spawn"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

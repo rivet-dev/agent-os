@@ -4,7 +4,7 @@ name = "cmd-sh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "sh standalone binary for secure-exec VM"
+description = "sh standalone binary for agentos VM"
 
 [[bin]]
 name = "sh"

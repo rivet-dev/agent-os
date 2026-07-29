@@ -21,13 +21,13 @@ const NODE_IMPORT_CACHE_SCHEMA_VERSION: &str = "1";
 const NODE_IMPORT_CACHE_LOADER_VERSION: &str = "8";
 // Upstream reached 104 while the reactor branch independently changed bundled
 // assets; use a new generation so no stale materialization survives the merge.
-const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "105";
+const NODE_IMPORT_CACHE_ASSET_VERSION: &str = "106";
 const NODE_IMPORT_CACHE_DIR_PREFIX: &str = "agentos-node-import-cache";
 const DEFAULT_NODE_IMPORT_CACHE_MATERIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const NODE_IMPORT_CACHE_BLOCKING_JOB_RESERVATION_BYTES: usize = 64 * 1024;
 const PYODIDE_DIST_DIR: &str = "pyodide-dist";
-const AGENTOS_BUILTIN_SPECIFIER_PREFIX: &str = "secure-exec:builtin/";
-const AGENTOS_POLYFILL_SPECIFIER_PREFIX: &str = "secure-exec:polyfill/";
+const AGENTOS_BUILTIN_SPECIFIER_PREFIX: &str = "agentos:builtin/";
+const AGENTOS_POLYFILL_SPECIFIER_PREFIX: &str = "agentos:polyfill/";
 const BUNDLED_PYODIDE_MJS: &[u8] = include_bytes!("../assets/pyodide/pyodide.mjs");
 // Large Pyodide assets are excluded from the published crate and staged into
 // OUT_DIR by build.rs (copied from `assets/pyodide/` in-tree, or downloaded
@@ -56,6 +56,14 @@ const BUNDLED_MICROPIP_WHL: &[u8] =
     include_bytes!("../assets/pyodide/micropip-0.11.0-py3-none-any.whl");
 const BUNDLED_CLICK_WHL: &[u8] = include_bytes!("../assets/pyodide/click-8.3.1-py3-none-any.whl");
 const NODE_PYTHON_RUNNER_SOURCE: &str = include_str!("../assets/runners/python-runner.mjs");
+
+const BUNDLED_TYPESCRIPT_ASSETS: &[(&str, &[u8])] =
+    include!(concat!(env!("OUT_DIR"), "/typescript_assets.rs"));
+
+#[doc(hidden)]
+pub fn bundled_typescript_assets() -> &'static [(&'static str, &'static [u8])] {
+    BUNDLED_TYPESCRIPT_ASSETS
+}
 
 static CLEANED_NODE_IMPORT_CACHE_ROOTS: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
 #[cfg(test)]
@@ -215,7 +223,7 @@ export async function resolve(specifier, context, nextResolve) {
 
   metrics.resolveMisses += 1;
 
-  const asset = resolveSecureExecAsset(specifier);
+  const asset = resolveAgentOsAsset(specifier);
   if (asset) {
     cacheState.resolutions[key] = {
       kind: 'explicit-file',
@@ -640,7 +648,7 @@ function loadProjectedPackageSource(url, filePath, format) {
   return source;
 }
 
-function resolveSecureExecAsset(specifier) {
+function resolveAgentOsAsset(specifier) {
   if (typeof specifier !== 'string' || !ASSET_ROOT) {
     return null;
   }
@@ -2900,7 +2908,7 @@ fn render_fs_builtin_asset_source(init_counter_key: &str) -> String {
 globalThis[{init_counter_key}] = initCount;\n\
 const mod = globalThis.__agentOSBuiltinFs ?? globalThis.__agentOSGuestFs ?? process.getBuiltinModule?.(\"node:fs\");\n\
 if (!mod) {{\n\
-  throw new Error('secure-exec guest fs polyfill was not initialized');\n\
+  throw new Error('agentos guest fs polyfill was not initialized');\n\
 }}\n\n\
 export const __agentOSInitCount = initCount;\n\
 export default mod;\n\
@@ -2989,7 +2997,7 @@ fn render_fs_promises_builtin_asset_source(init_counter_key: &str) -> String {
     let init_counter_key = format!("{init_counter_key:?}");
 
     format!(
-        "import fsModule from \"secure-exec:builtin/fs\";\n\n\
+        "import fsModule from \"agentos:builtin/fs\";\n\n\
 const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
 globalThis[{init_counter_key}] = initCount;\n\
 const mod = fsModule.promises;\n\n\
@@ -3065,7 +3073,7 @@ class AsyncLocalStorage {{\n\
 }}\n\
 \n\
 class AsyncResource {{\n\
-  constructor(type = 'SecureExecAsyncResource') {{\n\
+  constructor(type = 'AgentOsAsyncResource') {{\n\
     this.type = type;\n\
   }}\n\
   emitBefore() {{}}\n\
@@ -3123,7 +3131,7 @@ fn render_child_process_builtin_asset_source(init_counter_key: &str) -> String {
 const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
 globalThis[{init_counter_key}] = initCount;\n\
 if (!globalThis.__agentOSBuiltinChildProcess) {{\n\
-  const error = new Error(\"node:child_process is not available in the secure-exec guest runtime\");\n\
+  const error = new Error(\"node:child_process is not available in the agentos guest runtime\");\n\
   error.code = ACCESS_DENIED_CODE;\n\
   throw error;\n\
 }}\n\n\
@@ -3150,7 +3158,7 @@ fn render_net_builtin_asset_source(init_counter_key: &str) -> String {
 const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
 globalThis[{init_counter_key}] = initCount;\n\
 if (!globalThis.__agentOSBuiltinNet) {{\n\
-  const error = new Error(\"node:net is not available in the secure-exec guest runtime\");\n\
+  const error = new Error(\"node:net is not available in the agentos guest runtime\");\n\
   error.code = ACCESS_DENIED_CODE;\n\
   throw error;\n\
 }}\n\n\
@@ -3183,7 +3191,7 @@ fn render_dgram_builtin_asset_source(init_counter_key: &str) -> String {
 const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
 globalThis[{init_counter_key}] = initCount;\n\
 if (!globalThis.__agentOSBuiltinDgram) {{\n\
-  const error = new Error(\"node:dgram is not available in the secure-exec guest runtime\");\n\
+  const error = new Error(\"node:dgram is not available in the agentos guest runtime\");\n\
   error.code = ACCESS_DENIED_CODE;\n\
   throw error;\n\
 }}\n\n\
@@ -3324,7 +3332,7 @@ fn render_dns_builtin_asset_source(init_counter_key: &str) -> String {
 const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
 globalThis[{init_counter_key}] = initCount;\n\
 if (!globalThis.__agentOSBuiltinDns) {{\n\
-  const error = new Error(\"node:dns is not available in the secure-exec guest runtime\");\n\
+  const error = new Error(\"node:dns is not available in the agentos guest runtime\");\n\
   error.code = ACCESS_DENIED_CODE;\n\
   throw error;\n\
 }}\n\n\
@@ -3358,7 +3366,7 @@ fn render_dns_promises_builtin_asset_source(init_counter_key: &str) -> String {
 const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
 globalThis[{init_counter_key}] = initCount;\n\
 if (!globalThis.__agentOSBuiltinDns) {{\n\
-  const error = new Error(\"node:dns/promises is not available in the secure-exec guest runtime\");\n\
+  const error = new Error(\"node:dns/promises is not available in the agentos guest runtime\");\n\
   error.code = ACCESS_DENIED_CODE;\n\
   throw error;\n\
 }}\n\n\
@@ -3391,7 +3399,7 @@ fn render_http_builtin_asset_source(init_counter_key: &str) -> String {
 const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
 globalThis[{init_counter_key}] = initCount;\n\
 if (!globalThis.__agentOSBuiltinHttp) {{\n\
-  const error = new Error(\"node:http is not available in the secure-exec guest runtime\");\n\
+  const error = new Error(\"node:http is not available in the agentos guest runtime\");\n\
   error.code = ACCESS_DENIED_CODE;\n\
   throw error;\n\
 }}\n\n\
@@ -3425,7 +3433,7 @@ fn render_http2_builtin_asset_source(init_counter_key: &str) -> String {
 const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
 globalThis[{init_counter_key}] = initCount;\n\
 if (!globalThis.__agentOSBuiltinHttp2) {{\n\
-  const error = new Error(\"node:http2 is not available in the secure-exec guest runtime\");\n\
+  const error = new Error(\"node:http2 is not available in the agentos guest runtime\");\n\
   error.code = ACCESS_DENIED_CODE;\n\
   throw error;\n\
 }}\n\n\
@@ -3455,7 +3463,7 @@ fn render_https_builtin_asset_source(init_counter_key: &str) -> String {
 const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
 globalThis[{init_counter_key}] = initCount;\n\
 if (!globalThis.__agentOSBuiltinHttps) {{\n\
-  const error = new Error(\"node:https is not available in the secure-exec guest runtime\");\n\
+  const error = new Error(\"node:https is not available in the agentos guest runtime\");\n\
   error.code = ACCESS_DENIED_CODE;\n\
   throw error;\n\
 }}\n\n\
@@ -3479,7 +3487,7 @@ fn render_tls_builtin_asset_source(init_counter_key: &str) -> String {
 const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
 globalThis[{init_counter_key}] = initCount;\n\
 if (!globalThis.__agentOSBuiltinTls) {{\n\
-  const error = new Error(\"node:tls is not available in the secure-exec guest runtime\");\n\
+  const error = new Error(\"node:tls is not available in the agentos guest runtime\");\n\
   error.code = ACCESS_DENIED_CODE;\n\
   throw error;\n\
 }}\n\n\
@@ -3514,7 +3522,7 @@ fn render_os_builtin_asset_source(init_counter_key: &str) -> String {
 const initCount = (globalThis[{init_counter_key}] ?? 0) + 1;\n\
 globalThis[{init_counter_key}] = initCount;\n\
 if (!globalThis.__agentOSBuiltinOs) {{\n\
-  const error = new Error(\"node:os is not available in the secure-exec guest runtime\");\n\
+  const error = new Error(\"node:os is not available in the agentos guest runtime\");\n\
   error.code = ACCESS_DENIED_CODE;\n\
   throw error;\n\
 }}\n\n\
@@ -3555,7 +3563,7 @@ fn render_v8_builtin_asset_source(init_counter_key: &str) -> String {
 globalThis[{init_counter_key}] = initCount;\n\
 const mod = process.getBuiltinModule?.(\"node:v8\");\n\
 if (!mod) {{\n\
-  throw new Error(\"secure-exec guest v8 compatibility module was not initialized\");\n\
+  throw new Error(\"agentos guest v8 compatibility module was not initialized\");\n\
 }}\n\n\
 export const __agentOSInitCount = initCount;\n\
 export default mod;\n\
@@ -3591,7 +3599,7 @@ fn render_vm_builtin_asset_source(init_counter_key: &str) -> String {
 globalThis[{init_counter_key}] = initCount;\n\
 const mod = process.getBuiltinModule?.(\"node:vm\");\n\
 if (!mod) {{\n\
-  throw new Error(\"secure-exec guest vm compatibility module was not initialized\");\n\
+  throw new Error(\"agentos guest vm compatibility module was not initialized\");\n\
 }}\n\n\
 export const __agentOSInitCount = initCount;\n\
 export default mod;\n\
@@ -3611,7 +3619,7 @@ fn render_worker_threads_builtin_asset_source(init_counter_key: &str) -> String 
 globalThis[{init_counter_key}] = initCount;\n\
 \n\
 function createNotImplementedError(feature) {{\n\
-  const error = new Error(`node:worker_threads ${{feature}} is not available in the secure-exec guest runtime`);\n\
+  const error = new Error(`node:worker_threads ${{feature}} is not available in the agentos guest runtime`);\n\
   error.code = \"ERR_NOT_IMPLEMENTED\";\n\
   return error;\n\
 }}\n\
@@ -3667,7 +3675,7 @@ const mod = {{\n\
   BroadcastChannel: globalThis.BroadcastChannel,\n\
   MessageChannel,\n\
   MessagePort,\n\
-  SHARE_ENV: Symbol.for(\"secure-exec.worker_threads.SHARE_ENV\"),\n\
+  SHARE_ENV: Symbol.for(\"agentos.worker_threads.SHARE_ENV\"),\n\
   Worker,\n\
   getEnvironmentData,\n\
   isMainThread: true,\n\
@@ -3706,7 +3714,7 @@ export const workerData = mod.workerData;\n"
 }
 
 fn render_denied_asset_source(module_specifier: &str) -> String {
-    let message = format!("{module_specifier} is not available in the secure-exec guest runtime");
+    let message = format!("{module_specifier} is not available in the agentos guest runtime");
     format!(
         "const error = new Error({message:?});\nerror.code = \"ERR_ACCESS_DENIED\";\nthrow error;\n"
     )

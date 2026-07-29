@@ -15,13 +15,52 @@ import config from "virtual:rivet-docs/config";
 
 export async function getStaticPaths() {
   const docs = await getCollection("docs");
-  return docs.map((entry) => ({
-    params: { slug: entry.id },
-    props: { entry },
-  }));
+  const legacyRedirects = {
+    "docs/exec": "/docs/javascript",
+    "docs/exec/crash-course": "/docs/crash-course",
+    "docs/exec/architecture": "/docs/architecture",
+    "docs/exec/security-model": "/docs/security-model",
+    "docs/exec/benchmarks": "/docs/performance",
+    "docs/exec/getting-started/javascript": "/docs/javascript",
+    "docs/exec/getting-started/nodejs": "/docs/javascript",
+    "docs/exec/getting-started/python": "/docs/python",
+    "docs/exec/nodejs-compatibility": "/docs/javascript-compatibility",
+    "docs/exec/python": "/docs/python",
+    "docs/exec/python/packages": "/docs/python",
+    "docs/exec/features/typescript": "/docs/javascript",
+    "docs/exec/features/module-loading": "/docs/javascript",
+    "docs/exec/features/runtime-platform": "/docs/javascript",
+    "docs/exec/features/executing-code": "/docs/javascript",
+    "docs/exec/features/output-capture": "/docs/processes",
+    "docs/exec/features/long-running-processes": "/docs/processes",
+    "docs/exec/features/child-processes": "/docs/processes",
+    "docs/exec/features/bindings": "/docs/bindings",
+    "docs/exec/features/permissions": "/docs/permissions",
+    "docs/exec/features/filesystem": "/docs/filesystem",
+    "docs/exec/features/networking": "/docs/networking",
+    "docs/exec/features/resource-limits": "/docs/resource-limits",
+    "docs/js-runtime": "/docs/javascript",
+    "docs/nodejs-runtime": "/docs/javascript",
+    "docs/python-runtime": "/docs/python",
+    "docs/sandbox": "/docs/sandboxes",
+    "docs/llm-credentials": "/docs/models-and-credentials",
+    "docs/benchmarks": "/docs/performance",
+    "docs/cost-evaluation": "/docs/performance",
+  } as const;
+  return [
+    ...docs.map((entry) => ({
+      params: { slug: entry.id },
+      props: { entry },
+    })),
+    ...Object.entries(legacyRedirects).map(([slug, redirectTo]) => ({
+      params: { slug },
+      props: { redirectTo },
+    })),
+  ];
 }
 
-const { entry } = Astro.props;
+const { entry, redirectTo } = Astro.props;
+if (redirectTo) return Astro.redirect(redirectTo, 301);
 const { Content, headings } = await render(entry);
 
 const { title, description } = entry.data as { title: string; description?: string };
@@ -51,7 +90,7 @@ const tableOfContents = headings
 ---
 
 <DocsLayout title={title} description={description} sidebar={sidebar}>
-  <aside class="hidden md:block border-r border-ink/10">
+  <aside class="docs-sidebar hidden md:block border-r border-ink/10">
     {sidebar.length > 0 && (
       <DocsNavigation sidebar={sidebar} tabKey={foundTab?.tab?.title} currentPath={fullPath} client:load transition:persist="docs-sidebar" />
     )}

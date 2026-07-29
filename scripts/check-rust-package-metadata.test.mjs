@@ -37,10 +37,10 @@ test("accepts expected Rust package metadata", () => {
 	assert.deepEqual(checkRustPackageMetadata({ root, metadata: validMetadata }), []);
 });
 
-test("rejects stale agentos-client lib target names", () => {
+test("rejects noncanonical agentos-client lib target names", () => {
 	const metadata = structuredClone(validMetadata);
 	const client = metadata.packages.find((item) => item.name === "agentos-client");
-	client.targets[0].name = "secure_exec_client";
+	client.targets[0].name = "agent_os_client";
 
 	assert.deepEqual(checkRustPackageMetadata({ root, metadata }), [
 		"agentos-client must expose a lib target named agentos_client",

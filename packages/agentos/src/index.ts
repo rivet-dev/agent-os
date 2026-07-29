@@ -1,5 +1,7 @@
 import { setup as rivetkitSetup } from "rivetkit";
 
+export type { Registry } from "rivetkit";
+
 const AGENTOS_REGISTRY_MESSAGE_SIZE_DEFAULT = 512 * 1024 * 1024;
 
 /**
@@ -16,26 +18,7 @@ export const setup: typeof rivetkitSetup = ((
 		experimentalActorUds: true,
 	} as Parameters<typeof rivetkitSetup>[0])) as typeof rivetkitSetup;
 
-export type {
-	AgentOsOptions,
-	DirEntry,
-	DynamicMountDescriptor,
-	ExportRootFilesystemOptions,
-	HttpRequest,
-	HttpResponse,
-	MountInfo,
-	NodeModulesMountConfig,
-	PackageDescriptor,
-	ProcessExit,
-	ProcessOutput,
-	PromptResult,
-	ReaddirEntry,
-	RootSnapshotExport,
-	SessionInfo,
-	ShellData,
-	ShellExit,
-} from "@rivet-dev/agentos-core";
-export { defineSoftware, nodeModulesMount } from "@rivet-dev/agentos-core";
+export * from "@rivet-dev/agentos-core";
 export type {
 	AgentOsActorConfigInput as AgentOSActorConfigInput,
 	AgentOsActorConfigInput as AgentOSConfigInput,
@@ -48,8 +31,15 @@ export {
 	createAgentOS,
 	createAgentOS as agentOS,
 	createAgentOsActions,
+	type VmFetchOptions,
+	type VmFetchResponse,
+	type VmFetchStreamChunk,
+	type VmFetchStreamHead,
 } from "./actor.js";
 export type {
+	ActorData,
+	ActorLanguageSpawnOptions,
+	ActorSpawnOptions,
 	AgentOsEvents,
 	ProcessExitPayload,
 	ProcessOutputPayload,

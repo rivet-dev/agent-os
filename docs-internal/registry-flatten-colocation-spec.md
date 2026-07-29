@@ -127,7 +127,7 @@ test-program fixtures stay in `toolchain/test-programs/` (not scattered into
    stub, or a hand-rolled CLI over a library. The only exception is a tool whose
    canonical upstream *is* the Rust project (`ripgrep`, `fd`). Several current
    commands violate this (coreutils=uutils, grep, curl driver, and the
-   `secureexec-*` rewrites) — tracked in `registry-parity-worklist.md`
+   `agentos-*` rewrites) — tracked in `registry-parity-worklist.md`
    Cross-cutting #0; new packages must not add more.
 
 ## What moves where
@@ -325,7 +325,7 @@ Repo recipes orchestrate; they must not reimplement what the CLI does:
 | per-package `test` script + external authors | `agentos-toolchain test` |
 
 **Stays repo-specific** (not CLI, not overfit): `copy-wasm-commands` (vendor into
-runtime-core), `verify-fixed-versions` (the 0.0.1 pin), `generate-secure-exec-mirror`,
+runtime-core), `verify-fixed-versions` (the 0.0.1 pin), `generate-agentos-mirror`,
 registry-wide release orchestration, cross-repo dispatch, and the status
 reporter / coverage gate scoped to *our* registry.
 

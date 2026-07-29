@@ -1,0 +1,39 @@
+--- a/exec/src/session_turn_wasi.rs
++++ b/exec/src/session_turn_wasi.rs
+@@ -189,5 +189,5 @@ async fn session_turn() -> anyhow::Result<()> {
+     loop {
+-        let Event { id, msg } = thread.next_event().await.context("next_event")?;
++        let Event { id: _, msg } = thread.next_event().await.context("next_event")?;
+         match msg {
+             EventMsg::AgentMessageDelta(d) => {
+                 emit(json!({ "type": "text_delta", "delta": d.delta }));
+@@ -237,4 +237,5 @@ async fn session_turn() -> anyhow::Result<()> {
+             }
+             EventMsg::ExecApprovalRequest(e) => {
++                let approval_id = e.effective_approval_id();
+                 emit(json!({
+                     "type": "permission_request",
+@@ -253,7 +254,7 @@ async fn session_turn() -> anyhow::Result<()> {
+                 };
+                 let _ = thread
+                     .submit(Op::ExecApproval {
+-                        id: id.clone(),
++                        id: approval_id,
+                         turn_id: None,
+                         decision,
+                     })
+@@ -261,4 +262,5 @@ async fn session_turn() -> anyhow::Result<()> {
+                     .await;
+             }
+             EventMsg::ApplyPatchApprovalRequest(e) => {
++                let approval_id = e.call_id.clone();
+                 emit(json!({
+@@ -278,7 +280,7 @@ async fn session_turn() -> anyhow::Result<()> {
+                 };
+                 let _ = thread
+                     .submit(Op::PatchApproval {
+-                        id: id.clone(),
++                        id: approval_id,
+                         decision,
+                     })
+                     .await;

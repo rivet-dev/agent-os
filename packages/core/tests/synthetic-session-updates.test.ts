@@ -8,6 +8,16 @@ let buffer = "";
 const sessionState = {
   modeId: "default",
   configOptions: [
+	{
+	  id: "mode",
+	  category: "mode",
+	  label: "Mode",
+	  currentValue: "default",
+	  options: [
+		{ value: "default", name: "Default" },
+		{ value: "plan", name: "Plan" },
+	  ],
+	},
     {
       id: "mode",
       category: "mode",
@@ -141,7 +151,7 @@ process.stdin.on("data", (chunk) => {
 `;
 
 describe("synthetic session/update compatibility", () => {
-	test("surfaces synthetic mode and config updates when the ACP adapter omits notifications", async () => {
+	test("surfaces synthetic config updates when the ACP adapter omits notifications", async () => {
 		const agentPackage = createProjectedAgentPackage({
 			name: "synthetic",
 			adapterScript: MOCK_ACP_ADAPTER,

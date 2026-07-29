@@ -1,10 +1,15 @@
 {
 	"name": "@agentos-software/codex",
-	"version": "0.2.0-rc.3",
+	"version": "0.0.1",
 	"type": "module",
 	"license": "Apache-2.0",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
+	"bin": {
+		"codex": "./dist/codex.wasm",
+		"codex-exec": "./dist/codex-exec.wasm",
+		"codex-acp": "./dist/adapter.js"
+	},
 	"exports": {
 		".": {
 			"types": "./dist/index.d.ts",
@@ -12,19 +17,27 @@
 			"default": "./dist/index.js"
 		}
 	},
+	"files": [
+		"dist",
+		"!dist/package",
+		"!dist/package.tar",
+		"!dist/package.aospkg",
+		"agentos-package.json"
+	],
 	"scripts": {
-		"prepare-deps": "pnpm --filter @agentos-software/codex-cli exec tsc",
-		"build": "pnpm prepare-deps && tsc",
+		"build": "rm -rf dist && tsc && node ./scripts/stage-codex-wasm.mjs && agentos-toolchain pack . --out dist/package --agent codex-acp --prune-native --omit-optional",
+		"build:types": "rm -rf dist && tsc --emitDeclarationOnly",
 		"check-types": "tsc --noEmit",
-		"test": "pnpm build && node --test tests/*.test.mjs"
+		"test": "pnpm build && node --test --test-force-exit tests/*.test.mjs"
 	},
 	"dependencies": {
-		"@agentos-software/codex-cli": "workspace:*"
+		"@agentclientprotocol/sdk": "1.2.1"
 	},
 	"devDependencies": {
+		"@agentclientprotocol/sdk": "1.2.1",
 		"@agentos-software/manifest": "workspace:*",
+		"@rivet-dev/agentos-toolchain": "workspace:*",
 		"@types/node": "^22.10.2",
-		"typescript": "^5.7.2",
-		"@rivet-dev/agentos-test-harness": "workspace:*"
+		"typescript": "^5.7.2"
 	}
 }

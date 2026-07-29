@@ -1,0 +1,6 @@
+services:
+  frontend:
+    command: public_host="$(node -p 'new URL(process.env.PUBLIC_URL).hostname')"; pnpm --dir website run gen:registry && __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS="$public_host" pnpm --dir website exec astro dev --host 0.0.0.0 --port "$PORT"
+    portal:
+      title: agentOS Docs
+      description: Frontend development server with hot reload.

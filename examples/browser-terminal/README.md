@@ -22,12 +22,13 @@ Agent OS actor (`agentOS()` from `@rivet-dev/agentos`) over its live
 ```
 Browser (React + xterm.js)                Node (server.ts)
   ├─ useActor({ name:"shellVm", key })      ├─ agentOS({ software:[…] })
-  ├─ openShell / writeShell / resize ──────▶│    setup({ use:{ shellVm } })
-  ├─ closeShell                             │    registry.start()
-  └─ conn.on("shellData"|"shellExit") ◀────┘  openShell ─▶ broadcast events
+  ├─ terminal.open/write/resize ───────────▶│    setup({ use:{ shellVm } })
+  ├─ terminal.close                         │    registry.start()
+  └─ conn.on("shellData"|"shellExit") ◀────┘  terminal.open ─▶ broadcast events
 ```
 
-The browser opens a shell with `openShell`, sends keystrokes with `writeShell`,
+The browser opens a shell with `terminal.open`, sends keystrokes with
+`terminal.write`,
 and renders the ordered stdout/stderr bytes delivered by the `shellData` broadcast
 **event** (routed to the right tab by `shellId`, with a small buffer for output
 that arrives before a tab subscribes). `shellStderr` remains available as an

@@ -25,6 +25,7 @@ mod bridge_support;
 
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -76,7 +77,10 @@ fn adapter_stderr_and_exit_surface_to_caller() {
             additional_instructions: None,
         }),
     );
-    assert!(matches!(opened, AcpResponse::AcpOpenSessionResponse(_)));
+    assert!(
+        matches!(opened, AcpResponse::AcpOpenSessionResponse(_)),
+        "expected the mock ACP adapter to open a session, got: {opened:?}"
+    );
 
     // Now send the prompt: the adapter writes to stderr and exits(1) without a
     // JSON-RPC response. The exchange loop must observe the exit and surface it
@@ -118,7 +122,7 @@ fn adapter_stderr_and_exit_surface_to_caller() {
 /// Adapter that handshakes correctly, then on `session/prompt` writes a
 /// diagnostic to stderr and exits without responding.
 fn crashing_adapter_script() -> &'static str {
-    r#"
+    r#"#!/usr/bin/env node
 import readline from "node:readline";
 
 const lines = readline.createInterface({ input: process.stdin });
@@ -329,7 +333,10 @@ fn configure_mock_agent_package(
     .to_string();
     fs::write(package_dir.join("agentos-package.json"), manifest)
         .expect("write mock agent manifest");
-    fs::write(bin_dir.join("pi"), script).expect("write mock agent command");
+    let command = bin_dir.join("pi");
+    fs::write(&command, script).expect("write mock agent command");
+    fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+        .expect("make mock agent command executable");
     let result = sidecar
         .dispatch_wire_blocking(RequestFrame {
             schema: agentos_native_sidecar::wire::protocol_schema(),

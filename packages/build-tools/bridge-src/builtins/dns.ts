@@ -27,7 +27,7 @@ function normalizeDnsLookupInvocation(hostname, options, callback) {
 }
 
 function createUnsupportedDnsError(subject) {
-  const error = new Error(`${subject} is not supported by the secure-exec dns polyfill`);
+  const error = new Error(`${subject} is not supported by the agentos dns polyfill`);
   error.code = "ERR_NOT_IMPLEMENTED";
   return error;
 }
@@ -159,7 +159,7 @@ function resolveDnsRecords(methodName, hostname, rrtype, callback) {
 // Resolver instances keep guest-owned server lists for API compatibility.
 // Queries still use the VM-wide kernel resolver until the sync RPC grows
 // per-request nameserver overrides.
-class SecureExecResolver {
+class AgentOsResolver {
   constructor() {
     this._servers = [];
   }
@@ -215,7 +215,7 @@ class SecureExecResolver {
   }
 }
 
-class SecureExecPromisesResolver {
+class AgentOsPromisesResolver {
   constructor() {
     this._servers = [];
   }
@@ -272,6 +272,9 @@ class SecureExecPromisesResolver {
 }
 
 var dns = {
+  ADDRCONFIG: 32,
+  ALL: 16,
+  V4MAPPED: 8,
   lookup(hostname, options, callback) {
     lookupDnsRecords(hostname, options, callback).catch((err) => {
       const done = typeof options === "function" ? options : callback;
@@ -331,7 +334,7 @@ var dns = {
     });
   },
   promises: {
-    Resolver: SecureExecPromisesResolver,
+    Resolver: AgentOsPromisesResolver,
     lookup(hostname, _options) {
       return lookupDnsRecords(hostname, _options);
     },
@@ -375,7 +378,7 @@ var dns = {
       return resolveDnsRecords("dns.resolveCaa", hostname, "CAA");
     }
   },
-  Resolver: SecureExecResolver,
+  Resolver: AgentOsResolver,
   getServers() {
     return [];
   },
@@ -391,4 +394,4 @@ var dns = {
 };
 
 exposeCustomGlobal("_http2Module", http2);
-export { SecureExecPromisesResolver, SecureExecResolver, createInvalidDnsServersError, createUnsupportedDnsError, dns, lookupDnsRecords, normalizeDnsLookupInvocation, normalizeDnsResolveInvocation, normalizeDnsServers, parseDnsLookupRecords, parseDnsResolveRecords, resolveDnsRecords };
+export { AgentOsPromisesResolver, AgentOsResolver, createInvalidDnsServersError, createUnsupportedDnsError, dns, lookupDnsRecords, normalizeDnsLookupInvocation, normalizeDnsResolveInvocation, normalizeDnsServers, parseDnsLookupRecords, parseDnsResolveRecords, resolveDnsRecords };

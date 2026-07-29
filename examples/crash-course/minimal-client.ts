@@ -13,11 +13,11 @@ conn.on("sessionEvent", (event) => {
 });
 
 // Create a session and send a prompt
-await agent.openSession({
+await agent.sessions.open({
 	agent: "pi",
 	env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
-const response = await agent.prompt({
+const response = await agent.sessions.prompt({
 	content: [
 		{ type: "text", text: "Write a hello world script to /workspace/hello.js" },
 	],
@@ -25,5 +25,5 @@ const response = await agent.prompt({
 console.log(response.message?.content ?? []);
 
 // Read the file the agent created
-const content = await agent.readFile("/workspace/hello.js");
+const content = await agent.filesystem.readFile("/workspace/hello.js");
 console.log(new TextDecoder().decode(content));

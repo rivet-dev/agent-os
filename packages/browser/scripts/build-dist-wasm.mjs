@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Builds the Agent OS browser wasm sidecar (web target) into dist/sidecar-wasm-web/
 // so the shipped package's `createAgentOsConvergedSidecar` loader can resolve the
-// wasm glue + binary relative to dist/converged-sidecar.js. Mirrors secure-exec's
+// wasm glue + binary relative to dist/converged-sidecar.js. Mirrors agentos's
 // build-dist-wasm.mjs (which ships @rivet-dev/agentos-runtime-browser's dist/sidecar-wasm-web).
 //
 // Requires `wasm-pack` on PATH. Run as part of the package build (`pnpm build`).

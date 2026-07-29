@@ -484,6 +484,21 @@
   animation: none;
 }
 
+/* Keep the Frameworks group visible so its guides remain reachable before the
+   shared docs navigation hydrates. */
+.docs-sidebar li > div:has(a[href="/docs/frameworks/rivet"]) > .overflow-hidden {
+  height: auto !important;
+  opacity: 1 !important;
+}
+
+.docs-sidebar
+  li
+  > div:has(a[href="/docs/frameworks/rivet"])
+  > button
+  > span:last-child {
+  transform: rotateZ(0deg) !important;
+}
+
 /* ── Porcelain editorial marketing surfaces (agentOS) ─────────────────── */
 
 @layer utilities {

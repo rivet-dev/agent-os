@@ -7,5 +7,5 @@ const client = createClient<typeof registry>({
 const vm = client.vm.getOrCreate("persistent-agent");
 
 // Files written before sleep are restored when the actor wakes.
-const contents = await vm.readFile("/home/agentos/notes.md");
+const contents = await vm.filesystem.readFile("/home/agentos/notes.md");
 console.log(new TextDecoder().decode(contents));

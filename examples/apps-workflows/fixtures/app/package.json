@@ -1,0 +1,13 @@
+{
+	"name": "durable-workflow-app",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"main": "src/index.ts",
+	"scripts": {
+		"check-types": "node --check src/index.mjs"
+	},
+	"dependencies": {
+		"rivetkit": "2.3.9"
+	}
+}

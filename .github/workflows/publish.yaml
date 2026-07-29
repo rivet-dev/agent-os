@@ -42,7 +42,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile --filter=publish
@@ -58,7 +58,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@nightly
@@ -76,6 +76,29 @@ jobs:
         with:
           name: wasm-commands
           path: packages/runtime-core/commands
+          if-no-files-found: error
+
+  codex-wasm:
+    name: Codex WASI
+    runs-on: [self-hosted, agentos-builder]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-03-01
+          components: rust-src
+          targets: wasm32-wasip1
+      - name: Install toolchain build prerequisites
+        run: |
+          if ! command -v cmake >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes cmake
+          fi
+      - run: make -C toolchain codex
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-wasm
+          path: software/codex/wasm
           if-no-files-found: error
 
   build-sidecar:
@@ -221,16 +244,16 @@ jobs:
           if-no-files-found: error
 
   publish-npm:
-    needs: [context, wasm-commands, build-sidecar, build-sidecar-darwin]
+    needs: [context, wasm-commands, codex-wasm, build-sidecar, build-sidecar-darwin]
     name: Publish npm
-    if: ${{ !cancelled() && needs.wasm-commands.result == 'success' && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' }}
+    if: ${{ !cancelled() && needs.wasm-commands.result == 'success' && needs.codex-wasm.result == 'success' && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
           registry-url: https://registry.npmjs.org
@@ -239,6 +262,17 @@ jobs:
         with:
           name: wasm-commands
           path: packages/runtime-core/commands
+      - name: Restore canonical WASM command staging
+        run: |
+          set -euo pipefail
+          commands_dir="toolchain/target/wasm32-wasip1/release/commands"
+          mkdir -p "$commands_dir"
+          cp -a packages/runtime-core/commands/. "$commands_dir/"
+          test -s "$commands_dir/sh"
+      - uses: actions/download-artifact@v4
+        with:
+          name: codex-wasm
+          path: software/codex/wasm
       - uses: actions/download-artifact@v4
         with:
           pattern: sidecar-*
@@ -273,6 +307,7 @@ jobs:
           # Browser support is retained in-tree but intentionally disabled until
           # it has a reactor/security design independent of the native sidecar.
           npx turbo build \
+            --filter='!@rivet-dev/agentos-website' \
             --filter='!@rivet-dev/agentos-browser' \
             --filter='!@rivet-dev/agentos-runtime-browser' \
             --filter='!@rivet-dev/agentos-playground' \
@@ -306,7 +341,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile --filter=publish
@@ -385,7 +420,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable

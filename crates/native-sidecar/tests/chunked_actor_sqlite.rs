@@ -189,11 +189,8 @@ fn execute_query(connection: &mut Connection, request: wire::SqliteQuery) -> wir
 }
 
 async fn serve_connection(mut stream: UnixStream, database: Arc<Mutex<Connection>>) {
-    let hello = wire::versioned::ClientHello::deserialize_with_embedded_version(
-        &read_frame(&mut stream).await,
-    )
-    .unwrap();
-    assert_eq!(hello.token, "secret");
+    wire::versioned::ClientHello::deserialize_with_embedded_version(&read_frame(&mut stream).await)
+        .unwrap();
     let response =
         wire::versioned::ServerHello::wrap_latest(wire::ServerHello::HelloOk(wire::HelloOk {
             max_frame_bytes: 32 * 1024 * 1024,
@@ -221,6 +218,18 @@ async fn serve_connection(mut stream: UnixStream, database: Arc<Mutex<Connection
                     wire::ResponsePayload::SqliteExecOk
                 }
                 wire::RequestPayload::SqliteQuery(query) => execute_query(&mut connection, query),
+                wire::RequestPayload::SqliteBegin(_) => {
+                    connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+                    wire::ResponsePayload::SqliteBeginOk
+                }
+                wire::RequestPayload::SqliteCommit(_) => {
+                    connection.execute_batch("COMMIT").unwrap();
+                    wire::ResponsePayload::SqliteCommitOk
+                }
+                wire::RequestPayload::SqliteRollback(_) => {
+                    connection.execute_batch("ROLLBACK").unwrap();
+                    wire::ResponsePayload::SqliteRollbackOk
+                }
             }
         };
         let response = wire::versioned::ServerFrame::wrap_latest(wire::ServerFrame::Response(
@@ -255,7 +264,6 @@ async fn metadata_and_blocks_persist_directly_over_actor_sqlite_uds() {
     let client = vm_sqlite::resolve_vm_sqlite(
         &agentos_vm_config::VmSqliteDescriptor::ActorUds {
             path: path.display().to_string(),
-            token: "secret".to_owned(),
         },
         runtime.context(),
         128 * 1024 * 1024,
@@ -304,7 +312,6 @@ async fn migrations_are_independent_strict_and_atomic_over_actor_sqlite_uds() {
     let client = vm_sqlite::resolve_vm_sqlite(
         &agentos_vm_config::VmSqliteDescriptor::ActorUds {
             path: path.display().to_string(),
-            token: "secret".to_owned(),
         },
         runtime.context(),
         128 * 1024 * 1024,

@@ -2,7 +2,7 @@
  * Cold-start and warm-start latency benchmark for WASM shell echo.
  *
  * Measures:
- *   - Cold start: time to create a Secure Exec VM + complete first exec("echo hello")
+ *   - Cold start: time to create a AgentOS language execution VM + complete first exec("echo hello")
  *   - Warm start: time for a second exec("echo hello") on an already-initialized VM
  *   - Both sequential and concurrent modes at various batch sizes
  *

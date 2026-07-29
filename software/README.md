@@ -1,6 +1,6 @@
 # agentOS Software Catalog
 
-Software packages for secure-exec VMs: WASM command binaries
+Software packages for agentos VMs: WASM command binaries
 and JavaScript agent adapters live together under `software/*`. Everything in
 this catalog publishes under the `@agentos-software/*` npm scope.
 

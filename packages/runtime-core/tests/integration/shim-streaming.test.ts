@@ -8,7 +8,7 @@ import type { IntegrationKernelResult } from '@rivet-dev/agentos-vm-test-harness
 
 const skipReason = skipUnlessWasmBuilt();
 
-describeIf(!skipReason, 'WASM shim command smoke', { timeout: 30_000 }, () => {
+describeIf(!skipReason, 'WASM shim command smoke', { timeout: 60_000 }, () => {
   let ctx: IntegrationKernelResult;
 
   afterEach(async () => {

@@ -3465,9 +3465,16 @@ where
             };
             let resolved = match resolved {
                 Some(resolved) => resolved,
-                None => {
-                    resolve_tcp_connect_addr(bridge, kernel, vm_id, dns, host, port, socket_paths)?
-                }
+                None => resolve_tcp_connect_addr(
+                    bridge,
+                    kernel,
+                    vm_id,
+                    dns,
+                    host,
+                    port,
+                    None,
+                    socket_paths,
+                )?,
             };
             let (command_tx, command_rx) = tokio_channel(process.limits.http2.max_pending_commands);
             let snapshot = Arc::new(Mutex::new(Http2SessionSnapshot {

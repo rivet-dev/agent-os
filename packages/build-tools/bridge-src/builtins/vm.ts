@@ -1,9 +1,9 @@
-var VM_CONTEXT_TAG = typeof Symbol === "function" ? Symbol.for("secure-exec.vm.context") : "__secure_exec_vm_context__";
+var VM_CONTEXT_TAG = typeof Symbol === "function" ? Symbol.for("agentos.vm.context") : "__agentos_vm_context__";
 
-var VM_CONTEXT_ID = typeof Symbol === "function" ? Symbol.for("secure-exec.vm.context.id") : "__secure_exec_vm_context_id__";
+var VM_CONTEXT_ID = typeof Symbol === "function" ? Symbol.for("agentos.vm.context.id") : "__agentos_vm_context_id__";
 
 function createVmNotImplementedError(feature) {
-  const error = new Error(`node:vm ${feature} is not implemented in the secure-exec guest runtime`);
+  const error = new Error(`node:vm ${feature} is not implemented in the agentos guest runtime`);
   error.code = "ERR_NOT_IMPLEMENTED";
   return error;
 }

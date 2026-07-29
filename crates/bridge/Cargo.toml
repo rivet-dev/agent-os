@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared bridge contracts between the secure-exec kernel and execution planes"
+description = "Shared bridge contracts between the agentos kernel and execution planes"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

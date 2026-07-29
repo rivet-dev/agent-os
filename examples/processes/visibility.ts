@@ -8,7 +8,7 @@ const processStatus = (process: { running: boolean; exitCode?: number | null }) 
   process.running ? "running" : `exited ${process.exitCode ?? ""}`.trim();
 
 // All processes spawned in the VM
-const all = await agent.listProcesses();
+const all = await agent.process.list();
 for (const p of all) {
   console.log(p.pid, p.command, p.args.join(" "), processStatus(p));
 }
@@ -16,6 +16,6 @@ for (const p of all) {
 // Inspect a single process by pid
 const first = all[0];
 if (first) {
-  const info = await agent.getProcess(first.pid);
+  const info = await agent.process.get(first.pid);
   console.log(info.pid, info.command, "status:", processStatus(info));
 }

@@ -4,7 +4,7 @@ name = "cmd-realpath"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "realpath standalone binary for secure-exec VM"
+description = "realpath standalone binary for agentos VM"
 
 [[bin]]
 name = "realpath"

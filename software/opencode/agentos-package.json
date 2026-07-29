@@ -1,19 +1,21 @@
 {
-	"name": "opencode",
-	"agent": {
-		"acpEntrypoint": "agentos-opencode-acp",
-		"env": {
-			"OPENCODE_DISABLE_CONFIG_DEP_INSTALL": "1",
-			"OPENCODE_DISABLE_EMBEDDED_WEB_UI": "1"
-		}
-	},
-	"registry": {
-		"title": "OpenCode",
-		"description": "Run OpenCode, an open-source coding agent, inside agentOS.",
-		"docsHref": "/docs/agents/opencode",
-		"image": "/images/registry/opencode.svg",
-		"priority": 70,
-		"category": "agents"
-	},
-	"kind": "agent"
+  "name": "opencode",
+  "agent": {
+    "acpEntrypoint": "agentos-opencode-acp",
+    "env": {
+      "OPENCODE_DISABLE_CONFIG_DEP_INSTALL": "1",
+      "OPENCODE_DISABLE_EMBEDDED_WEB_UI": "1",
+      "OPENCODE_DISABLE_MODELS_FETCH": "1",
+      "OPENCODE_LOG_LEVEL": "ERROR",
+      "OPENCODE_PRINT_LOGS": "1"
+    }
+  },
+  "registry": {
+    "title": "OpenCode",
+    "description": "Run OpenCode, an open-source coding agent, inside agentOS.",
+    "docsHref": "/docs/agents/opencode",
+    "image": "/images/registry/opencode.svg",
+    "category": "agents",
+    "priority": 70
+  }
 }

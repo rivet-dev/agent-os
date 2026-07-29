@@ -4,7 +4,7 @@ import type { registry } from "./server";
 const client = createClient<typeof registry>({ endpoint: "http://localhost:6420" });
 
 // Queue overlapping executions
-await client.vm.getOrCreate("my-agent").scheduleCron({
+await client.vm.getOrCreate("my-agent").cron.schedule({
   schedule: "*/5 * * * *",
   overlap: "queue",
   action: {

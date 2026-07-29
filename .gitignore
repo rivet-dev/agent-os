@@ -6,6 +6,8 @@ node_modules/
 npm-debug.log*
 pnpm-debug.log*
 .pnpm-store/
+**/.next/
+website/.astro/
 
 # Rust
 target/
@@ -15,6 +17,7 @@ target/
 # TypeScript
 *.tsbuildinfo
 dist/
+*.aospkg
 packages/agentos/src/generated/*
 !packages/agentos/src/generated/actor-actions.generated.ts
 
@@ -48,6 +51,7 @@ toolchain/c/sysroot/
 toolchain/c/.cache/
 toolchain/std-patches/wasi-libc-overrides/*.o
 software/*/bin/
+software/vim/share/
 
 # Legacy registry build paths retained for old worktrees.
 registry/native/target/
@@ -79,14 +83,19 @@ scripts/ralph/.codex-last-msg-*
 # Agent working files live user-scoped in ~/.agents/; ignore any in-repo .agent/ as a safety net
 .agent/
 .claude/scheduled_tasks.lock
+.amp/portals/
 
 # Local caches and stray outputs
+.agentos/
 crates/execution/assets/v8-bridge.js
 crates/execution/assets/v8-bridge-zlib.js
 crates/execution/.agentos-pyodide-cache/
 crates/execution/async-out.txt
 crates/sidecar/.tmp-sidecar-tests/
 packages/browser/.cache/
+packages/runtime-core/.cache/
+registry/agent/pi/.cache/
+scripts/benchmarks/results/
 
 # Vendored V8 bridge bundles staged at release time for crates.io publishing
 crates/execution/assets/generated/

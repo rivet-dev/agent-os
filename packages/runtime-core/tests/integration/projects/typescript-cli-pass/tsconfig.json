@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "module": "CommonJS",
+    "outDir": "dist",
+    "rootDir": "src",
+    "skipLibCheck": true,
+    "target": "ES2022"
+  },
+  "files": ["src/input.ts"]
+}

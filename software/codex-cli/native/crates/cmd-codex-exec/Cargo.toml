@@ -4,14 +4,14 @@ name = "cmd-codex-exec"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "codex-exec command binary for secure-exec VM"
+description = "codex-exec command binary for agentos VM"
 
 [[bin]]
 name = "codex-exec"
 path = "src/main.rs"
 
 [dependencies]
-wasi-http = { package = "secureexec-wasi-http", path = "../../../../../toolchain/crates/libs/wasi-http" }
+wasi-http = { package = "agentos-wasi-http", path = "../../../../../toolchain/crates/libs/wasi-http" }
 
 # WASI stub crates for future codex-core dependencies that don't support wasm32-wasip1.
 codex-network-proxy = "0.0.0"

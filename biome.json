@@ -8,7 +8,7 @@
 			"!packages/runtime-browser",
 			"!packages/playground",
 			"!packages/core/src/sidecar/generated-protocol.ts",
-			"!_secure-exec-sibling",
+			"!_agentos-sibling",
 			"!/**/node_modules"
 		],
 		"ignoreUnknown": true

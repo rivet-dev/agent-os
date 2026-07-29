@@ -52,6 +52,7 @@ export const BROWSER_SYNC_BRIDGE_OPERATIONS = [
 	"child_process.write_stdin",
 	"child_process.close_stdin",
 	"child_process.kill",
+	"child_process.resize_pty",
 	"child_process.spawn_sync",
 	"process.signal_state",
 	"network.fetch",

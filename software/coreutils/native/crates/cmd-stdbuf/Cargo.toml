@@ -4,11 +4,11 @@ name = "cmd-stdbuf"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "stdbuf standalone binary for secure-exec VM"
+description = "stdbuf standalone binary for agentos VM"
 
 [[bin]]
 name = "stdbuf"
 path = "src/main.rs"
 
 [dependencies]
-shims = { package = "secureexec-shims", path = "../../../../../toolchain/crates/libs/shims" }
+shims = { package = "agentos-shims", path = "../../../../../toolchain/crates/libs/shims" }

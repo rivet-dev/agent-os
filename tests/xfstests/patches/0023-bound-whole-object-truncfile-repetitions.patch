@@ -1,5 +1,5 @@
 From 2bda91b2d63f31ce4ed1700e9872a94d74f8ce23 Mon Sep 17 00:00:00 2001
-From: AgentOS <dev@agentos.dev>
+From: AgentOS <dev@agentos-sdk.dev>
 Date: Tue, 14 Jul 2026 23:00:00 -0700
 Subject: [PATCH] generic/014: accept exact whole-object iteration reduction
 

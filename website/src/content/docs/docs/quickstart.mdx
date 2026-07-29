@@ -114,7 +114,7 @@ import { AGENT_PROMPT } from '../../../components/marketing/agentPrompt';
 
    <DeployTargets />
 
-   See [Deployment](/docs/deployment) for managed, self-hosted, and agentOS Core options.
+   See [Deployment](/docs/deployment) for managed, self-hosted, and direct VM options.
 
 </Steps>
 
@@ -122,8 +122,9 @@ import { AGENT_PROMPT } from '../../../components/marketing/agentPrompt';
 agentOS is in preview and the API is subject to change. If you run into issues, please [report them on GitHub](https://github.com/rivet-dev/rivet/issues) or [join our Discord](https://rivet.dev/discord).
 </Note>
 
-## agentOS Core
+## Direct VM API
 
-The quickstart above uses `@rivet-dev/agentos`, which includes statefulness, multiplayer, and orchestration out of the box. If you only need direct VM control without those features, you can use the core package (`@rivet-dev/agentos-core`) standalone.
+The same `@rivet-dev/agentos` package also exports `AgentOs.create()` for direct
+VM control without the actor lifecycle, multiplayer, or orchestration layer.
 
-See [agentOS core documentation](/docs/core) for reference.
+See the [direct VM API documentation](/docs/core) for reference.

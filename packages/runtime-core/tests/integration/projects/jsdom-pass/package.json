@@ -1,0 +1,8 @@
+{
+  "name": "project-matrix-jsdom-pass",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "jsdom": "29.1.1"
+  }
+}

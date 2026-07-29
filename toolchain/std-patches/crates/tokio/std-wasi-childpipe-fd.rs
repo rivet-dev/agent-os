@@ -1,6 +1,6 @@
 //! std patch artifact (pipeline-only codex port) — wasi public child-pipe fd traits.
 //!
-//! PROBLEM (real secure-exec bug, found 2026-06-23): the patched wasi std provides
+//! PROBLEM (real agentos bug, found 2026-06-23): the patched wasi std provides
 //! the SEOS process impl (`sys/process/wasi.rs`, `ChildPipe(FileDesc)`) but NOT the
 //! public `process::{ChildStdin,ChildStdout,ChildStderr}` fd traits — `os/unix/process.rs`
 //! has them (AsRawFd/IntoRawFd/AsFd/From<_> for OwnedFd) but there is no `os/wasi`

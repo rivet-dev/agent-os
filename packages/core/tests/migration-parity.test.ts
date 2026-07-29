@@ -1,7 +1,6 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { resolve } from "node:path";
 import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
-import common from "@agentos-software/common";
 import { afterEach, describe, expect, test } from "vitest";
 import { z } from "zod";
 import { AgentOs, binding, bindings } from "../src/index.js";
@@ -86,7 +85,11 @@ process.stdin.on("data", (chunk) => {
             },
           },
         });
-        writeMessage({
+        writeResponse(msg.id, { stopReason: "end_turn" });
+        // OpenCode can resolve session/prompt just before its final tool update.
+        // The transport must keep the completed turn attached long enough to
+        // stream and durably record that trailing notification.
+        setTimeout(() => writeMessage({
           jsonrpc: "2.0",
           method: "session/update",
           params: {
@@ -99,8 +102,7 @@ process.stdin.on("data", (chunk) => {
               status: "completed",
             },
           },
-        });
-        writeResponse(msg.id, { stopReason: "end_turn" });
+        }), 20);
         break;
       case "session/cancel":
         writeResponse(msg.id, {});
@@ -170,7 +172,7 @@ describe("native sidecar migration parity gate", () => {
 
 	test("covers filesystem, process execution, and reusable layer snapshots on the Rust sidecar path", async () => {
 		const vm = await AgentOs.create({
-			software: [common],
+			defaultSoftware: false,
 			permissions: {
 				fs: "allow",
 				childProcess: "allow",
@@ -208,6 +210,7 @@ describe("native sidecar migration parity gate", () => {
 			maxBytes: 64 * 1024 * 1024,
 		});
 		const clonedVm = await AgentOs.create({
+			defaultSoftware: false,
 			rootFilesystem: {
 				disableDefaultBaseLayer: true,
 				lowers: [snapshot],
@@ -231,7 +234,7 @@ describe("native sidecar migration parity gate", () => {
 
 	test("covers registered bindings through guest command dispatch on the Rust sidecar path", async () => {
 		const vm = await AgentOs.create({
-			software: [common],
+			defaultSoftware: false,
 			bindings: [mathBindings],
 			permissions: {
 				fs: "allow",
@@ -266,7 +269,7 @@ describe("native sidecar migration parity gate", () => {
 			"--b",
 			"13",
 		]);
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode, result.stderr).toBe(0);
 		expect(JSON.parse(result.stdout)).toEqual({
 			ok: true,
 			result: { sum: 21 },
@@ -305,6 +308,7 @@ describe("native sidecar migration parity gate", () => {
 		}
 
 		const vm = await AgentOs.create({
+			defaultSoftware: false,
 			loopbackExemptPorts: [address.port],
 			permissions: {
 				fs: "allow",
@@ -332,7 +336,7 @@ describe("native sidecar migration parity gate", () => {
 			].join("\n"),
 		]);
 
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode, result.stderr).toBe(0);
 		expect(result.stderr).toBe("");
 		expect(JSON.parse(result.stdout.trim())).toEqual({
 			ok: true,
@@ -383,6 +387,14 @@ describe("native sidecar migration parity gate", () => {
 		expect(promptResultText(result)).toContain("mock-parity-flow-ok");
 
 		expect(events.some((event) => event.type === "tool_call")).toBe(true);
+		const history = await vm.readHistory({
+			sessionId,
+			after: 0,
+			limit: 100,
+		});
+		expect(history.events.some((event) => event.type === "tool_call")).toBe(
+			true,
+		);
 
 		await vm.deleteSession({ sessionId });
 	}, 120_000);

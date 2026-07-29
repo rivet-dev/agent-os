@@ -350,6 +350,7 @@ where
                         &vm.dns,
                         &host,
                         port,
+                        None,
                         &socket_paths,
                     )?
                 };

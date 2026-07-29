@@ -45,7 +45,7 @@ async function cloneRepo(
 	repo: string,
 ): Promise<void> {
 	const agent = step.client<typeof registry>().vm.getOrCreate("bug-fixer");
-	await agent.exec(`git clone ${repo} /home/agentos/repo`);
+	await agent.process.exec(`git clone ${repo} /home/agentos/repo`);
 }
 
 async function fixBugWithAgent(
@@ -53,11 +53,11 @@ async function fixBugWithAgent(
 	issue: string,
 ): Promise<void> {
 	const agent = step.client<typeof registry>().vm.getOrCreate("bug-fixer");
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
-	await agent.prompt({
+	await agent.sessions.prompt({
 		content: [{ type: "text", text: `Fix the bug described in issue: ${issue}` }],
 	});
 }
@@ -66,7 +66,7 @@ async function runTests(
 	step: WorkflowStepContextOf<typeof bugFixer>,
 ): Promise<number> {
 	const agent = step.client<typeof registry>().vm.getOrCreate("bug-fixer");
-	const tests = await agent.exec("cd /home/agentos/repo && npm test");
+	const tests = await agent.process.exec("cd /home/agentos/repo && npm test");
 	return tests.exitCode;
 }
 // docs:end basic
@@ -104,11 +104,11 @@ async function reviewCode(
 	filePath: string,
 ): Promise<void> {
 	const agent = step.client<typeof registry>().vm.getOrCreate("reviewer");
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "pi",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
-	await agent.prompt({
+	await agent.sessions.prompt({
 		content: [
 			{
 				type: "text",
@@ -123,7 +123,7 @@ async function readReview(
 ): Promise<string> {
 	const agent = step.client<typeof registry>().vm.getOrCreate("reviewer");
 	return new TextDecoder().decode(
-		await agent.readFile("/home/agentos/review.md"),
+		await agent.filesystem.readFile("/home/agentos/review.md"),
 	);
 }
 
@@ -132,7 +132,7 @@ async function applyReview(
 	review: string,
 ): Promise<void> {
 	const agent = step.client<typeof registry>().vm.getOrCreate("reviewer");
-	await agent.prompt({
+	await agent.sessions.prompt({
 		content: [
 			{ type: "text", text: `Apply the following review feedback:\n\n${review}` },
 		],

@@ -505,6 +505,99 @@ fn to_generated_request_payload(
         RequestPayload::ProvidedCommands(_) => {
             generated_protocol::RequestPayload::ProvidedCommandsRequest
         }
+        RequestPayload::ShellExecution(inner) => {
+            generated_protocol::RequestPayload::ShellExecutionRequest(inner.clone())
+        }
+        RequestPayload::ArgvExecution(inner) => {
+            generated_protocol::RequestPayload::ArgvExecutionRequest(inner.clone())
+        }
+        RequestPayload::JavaScriptExecution(inner) => {
+            generated_protocol::RequestPayload::JavaScriptExecutionRequest(inner.clone())
+        }
+        RequestPayload::JavaScriptEvaluation(inner) => {
+            generated_protocol::RequestPayload::JavaScriptEvaluationRequest(inner.clone())
+        }
+        RequestPayload::JavaScriptFileExecution(inner) => {
+            generated_protocol::RequestPayload::JavaScriptFileExecutionRequest(inner.clone())
+        }
+        RequestPayload::TypeScriptExecution(inner) => {
+            generated_protocol::RequestPayload::TypeScriptExecutionRequest(inner.clone())
+        }
+        RequestPayload::TypeScriptEvaluation(inner) => {
+            generated_protocol::RequestPayload::TypeScriptEvaluationRequest(inner.clone())
+        }
+        RequestPayload::TypeScriptFileExecution(inner) => {
+            generated_protocol::RequestPayload::TypeScriptFileExecutionRequest(inner.clone())
+        }
+        RequestPayload::TypeScriptCheck(inner) => {
+            generated_protocol::RequestPayload::TypeScriptCheckRequest(inner.clone())
+        }
+        RequestPayload::TypeScriptProjectCheck(inner) => {
+            generated_protocol::RequestPayload::TypeScriptProjectCheckRequest(inner.clone())
+        }
+        RequestPayload::NpmProjectInstall(inner) => {
+            generated_protocol::RequestPayload::NpmProjectInstallRequest(inner.clone())
+        }
+        RequestPayload::NpmPackageInstall(inner) => {
+            generated_protocol::RequestPayload::NpmPackageInstallRequest(inner.clone())
+        }
+        RequestPayload::NpmScriptExecution(inner) => {
+            generated_protocol::RequestPayload::NpmScriptExecutionRequest(inner.clone())
+        }
+        RequestPayload::NpmPackageExecution(inner) => {
+            generated_protocol::RequestPayload::NpmPackageExecutionRequest(inner.clone())
+        }
+        RequestPayload::PythonExecution(inner) => {
+            generated_protocol::RequestPayload::PythonExecutionRequest(inner.clone())
+        }
+        RequestPayload::PythonEvaluation(inner) => {
+            generated_protocol::RequestPayload::PythonEvaluationRequest(inner.clone())
+        }
+        RequestPayload::PythonFileExecution(inner) => {
+            generated_protocol::RequestPayload::PythonFileExecutionRequest(inner.clone())
+        }
+        RequestPayload::PythonModuleExecution(inner) => {
+            generated_protocol::RequestPayload::PythonModuleExecutionRequest(inner.clone())
+        }
+        RequestPayload::PythonInstall(inner) => {
+            generated_protocol::RequestPayload::PythonInstallRequest(inner.clone())
+        }
+        RequestPayload::CreateContext(inner) => {
+            generated_protocol::RequestPayload::CreateContextRequest(inner.clone())
+        }
+        RequestPayload::GetExecution(inner) => {
+            generated_protocol::RequestPayload::GetExecutionRequest(inner.clone())
+        }
+        RequestPayload::ListExecutions(_) => {
+            generated_protocol::RequestPayload::ListExecutionsRequest
+        }
+        RequestPayload::WaitExecution(inner) => {
+            generated_protocol::RequestPayload::WaitExecutionRequest(inner.clone())
+        }
+        RequestPayload::CancelExecution(inner) => {
+            generated_protocol::RequestPayload::CancelExecutionRequest(inner.clone())
+        }
+        RequestPayload::SignalExecution(inner) => {
+            generated_protocol::RequestPayload::SignalExecutionRequest(inner.clone())
+        }
+        RequestPayload::ResetExecution(inner) => {
+            generated_protocol::RequestPayload::ResetExecutionRequest(inner.clone())
+        }
+        RequestPayload::DeleteExecution(inner) => {
+            generated_protocol::RequestPayload::DeleteExecutionRequest(inner.clone())
+        }
+        RequestPayload::WriteExecutionStdin(inner) => {
+            generated_protocol::RequestPayload::WriteExecutionStdinRequest(inner.clone())
+        }
+        RequestPayload::CloseExecutionStdin(inner) => {
+            generated_protocol::RequestPayload::CloseExecutionStdinRequest(inner.clone())
+        }
+        RequestPayload::ResizeExecutionPty(inner) => {
+            generated_protocol::RequestPayload::ResizeExecutionPtyRequest(inner.clone())
+        }
+        RequestPayload::ReadExecutionOutput(inner) => {
+            generated_protocol::RequestPayload::ReadExecutionOutputRequest(inner.clone())
+        }
     })
 }
 
@@ -615,6 +708,99 @@ fn from_generated_request_payload(
         }
         generated_protocol::RequestPayload::ProvidedCommandsRequest => {
             RequestPayload::ProvidedCommands(ProvidedCommandsRequest {})
+        }
+        generated_protocol::RequestPayload::ShellExecutionRequest(inner) => {
+            RequestPayload::ShellExecution(inner)
+        }
+        generated_protocol::RequestPayload::ArgvExecutionRequest(inner) => {
+            RequestPayload::ArgvExecution(inner)
+        }
+        generated_protocol::RequestPayload::JavaScriptExecutionRequest(inner) => {
+            RequestPayload::JavaScriptExecution(inner)
+        }
+        generated_protocol::RequestPayload::JavaScriptEvaluationRequest(inner) => {
+            RequestPayload::JavaScriptEvaluation(inner)
+        }
+        generated_protocol::RequestPayload::JavaScriptFileExecutionRequest(inner) => {
+            RequestPayload::JavaScriptFileExecution(inner)
+        }
+        generated_protocol::RequestPayload::TypeScriptExecutionRequest(inner) => {
+            RequestPayload::TypeScriptExecution(inner)
+        }
+        generated_protocol::RequestPayload::TypeScriptEvaluationRequest(inner) => {
+            RequestPayload::TypeScriptEvaluation(inner)
+        }
+        generated_protocol::RequestPayload::TypeScriptFileExecutionRequest(inner) => {
+            RequestPayload::TypeScriptFileExecution(inner)
+        }
+        generated_protocol::RequestPayload::TypeScriptCheckRequest(inner) => {
+            RequestPayload::TypeScriptCheck(inner)
+        }
+        generated_protocol::RequestPayload::TypeScriptProjectCheckRequest(inner) => {
+            RequestPayload::TypeScriptProjectCheck(inner)
+        }
+        generated_protocol::RequestPayload::NpmProjectInstallRequest(inner) => {
+            RequestPayload::NpmProjectInstall(inner)
+        }
+        generated_protocol::RequestPayload::NpmPackageInstallRequest(inner) => {
+            RequestPayload::NpmPackageInstall(inner)
+        }
+        generated_protocol::RequestPayload::NpmScriptExecutionRequest(inner) => {
+            RequestPayload::NpmScriptExecution(inner)
+        }
+        generated_protocol::RequestPayload::NpmPackageExecutionRequest(inner) => {
+            RequestPayload::NpmPackageExecution(inner)
+        }
+        generated_protocol::RequestPayload::PythonExecutionRequest(inner) => {
+            RequestPayload::PythonExecution(inner)
+        }
+        generated_protocol::RequestPayload::PythonEvaluationRequest(inner) => {
+            RequestPayload::PythonEvaluation(inner)
+        }
+        generated_protocol::RequestPayload::PythonFileExecutionRequest(inner) => {
+            RequestPayload::PythonFileExecution(inner)
+        }
+        generated_protocol::RequestPayload::PythonModuleExecutionRequest(inner) => {
+            RequestPayload::PythonModuleExecution(inner)
+        }
+        generated_protocol::RequestPayload::PythonInstallRequest(inner) => {
+            RequestPayload::PythonInstall(inner)
+        }
+        generated_protocol::RequestPayload::CreateContextRequest(inner) => {
+            RequestPayload::CreateContext(inner)
+        }
+        generated_protocol::RequestPayload::GetExecutionRequest(inner) => {
+            RequestPayload::GetExecution(inner)
+        }
+        generated_protocol::RequestPayload::ListExecutionsRequest => {
+            RequestPayload::ListExecutions(ListExecutionsRequest {})
+        }
+        generated_protocol::RequestPayload::WaitExecutionRequest(inner) => {
+            RequestPayload::WaitExecution(inner)
+        }
+        generated_protocol::RequestPayload::CancelExecutionRequest(inner) => {
+            RequestPayload::CancelExecution(inner)
+        }
+        generated_protocol::RequestPayload::SignalExecutionRequest(inner) => {
+            RequestPayload::SignalExecution(inner)
+        }
+        generated_protocol::RequestPayload::ResetExecutionRequest(inner) => {
+            RequestPayload::ResetExecution(inner)
+        }
+        generated_protocol::RequestPayload::DeleteExecutionRequest(inner) => {
+            RequestPayload::DeleteExecution(inner)
+        }
+        generated_protocol::RequestPayload::WriteExecutionStdinRequest(inner) => {
+            RequestPayload::WriteExecutionStdin(inner)
+        }
+        generated_protocol::RequestPayload::CloseExecutionStdinRequest(inner) => {
+            RequestPayload::CloseExecutionStdin(inner)
+        }
+        generated_protocol::RequestPayload::ResizeExecutionPtyRequest(inner) => {
+            RequestPayload::ResizeExecutionPty(inner)
+        }
+        generated_protocol::RequestPayload::ReadExecutionOutputRequest(inner) => {
+            RequestPayload::ReadExecutionOutput(inner)
         }
     })
 }
@@ -773,6 +959,33 @@ fn to_generated_response_payload(
         ResponsePayload::ProvidedCommands(inner) => {
             generated_protocol::ResponsePayload::ProvidedCommandsResponse(inner.clone())
         }
+        ResponsePayload::ExecutionAccepted(inner) => {
+            generated_protocol::ResponsePayload::ExecutionAcceptedResponse(inner.clone())
+        }
+        ResponsePayload::ExecutionCompleted(inner) => {
+            generated_protocol::ResponsePayload::ExecutionCompletedResponse(inner.clone())
+        }
+        ResponsePayload::ExecutionEvaluation(inner) => {
+            generated_protocol::ResponsePayload::ExecutionEvaluationResponse(inner.clone())
+        }
+        ResponsePayload::TypeScriptCheck(inner) => {
+            generated_protocol::ResponsePayload::TypeScriptCheckResponse(inner.clone())
+        }
+        ResponsePayload::ExecutionDescriptor(inner) => {
+            generated_protocol::ResponsePayload::ExecutionDescriptorResponse(inner.clone())
+        }
+        ResponsePayload::ExecutionList(inner) => {
+            generated_protocol::ResponsePayload::ExecutionListResponse(inner.clone())
+        }
+        ResponsePayload::ExecutionDeleted(inner) => {
+            generated_protocol::ResponsePayload::ExecutionDeletedResponse(inner.clone())
+        }
+        ResponsePayload::ExecutionIo(inner) => {
+            generated_protocol::ResponsePayload::ExecutionIoResponse(inner.clone())
+        }
+        ResponsePayload::ExecutionOutputPage(inner) => {
+            generated_protocol::ResponsePayload::ExecutionOutputPageResponse(inner.clone())
+        }
     })
 }
 
@@ -917,6 +1130,33 @@ fn from_generated_response_payload(
         generated_protocol::ResponsePayload::ProvidedCommandsResponse(inner) => {
             ResponsePayload::ProvidedCommands(inner)
         }
+        generated_protocol::ResponsePayload::ExecutionAcceptedResponse(inner) => {
+            ResponsePayload::ExecutionAccepted(inner)
+        }
+        generated_protocol::ResponsePayload::ExecutionCompletedResponse(inner) => {
+            ResponsePayload::ExecutionCompleted(inner)
+        }
+        generated_protocol::ResponsePayload::ExecutionEvaluationResponse(inner) => {
+            ResponsePayload::ExecutionEvaluation(inner)
+        }
+        generated_protocol::ResponsePayload::TypeScriptCheckResponse(inner) => {
+            ResponsePayload::TypeScriptCheck(inner)
+        }
+        generated_protocol::ResponsePayload::ExecutionDescriptorResponse(inner) => {
+            ResponsePayload::ExecutionDescriptor(inner)
+        }
+        generated_protocol::ResponsePayload::ExecutionListResponse(inner) => {
+            ResponsePayload::ExecutionList(inner)
+        }
+        generated_protocol::ResponsePayload::ExecutionDeletedResponse(inner) => {
+            ResponsePayload::ExecutionDeleted(inner)
+        }
+        generated_protocol::ResponsePayload::ExecutionIoResponse(inner) => {
+            ResponsePayload::ExecutionIo(inner)
+        }
+        generated_protocol::ResponsePayload::ExecutionOutputPageResponse(inner) => {
+            ResponsePayload::ExecutionOutputPage(inner)
+        }
     })
 }
 
@@ -943,6 +1183,12 @@ fn to_generated_event_payload(payload: &EventPayload) -> generated_protocol::Eve
         EventPayload::Ext(inner) => {
             generated_protocol::EventPayload::ExtEnvelope(to_generated_ext_envelope(inner))
         }
+        EventPayload::ExecutionOutput(inner) => {
+            generated_protocol::EventPayload::ExecutionOutputEvent(inner.clone())
+        }
+        EventPayload::ExecutionCompleted(inner) => {
+            generated_protocol::EventPayload::ExecutionCompletedEvent(inner.clone())
+        }
     }
 }
 
@@ -966,6 +1212,12 @@ fn from_generated_event_payload(payload: generated_protocol::EventPayload) -> Ev
         generated_protocol::EventPayload::StructuredEvent(inner) => EventPayload::Structured(inner),
         generated_protocol::EventPayload::ExtEnvelope(inner) => {
             EventPayload::Ext(from_generated_ext_envelope(inner))
+        }
+        generated_protocol::EventPayload::ExecutionOutputEvent(inner) => {
+            EventPayload::ExecutionOutput(inner)
+        }
+        generated_protocol::EventPayload::ExecutionCompletedEvent(inner) => {
+            EventPayload::ExecutionCompleted(inner)
         }
     }
 }
@@ -1290,6 +1542,37 @@ pub enum RequestPayload {
     GetResourceSnapshot(GetResourceSnapshotRequest),
     LinkPackage(LinkPackageRequest),
     ProvidedCommands(ProvidedCommandsRequest),
+    ShellExecution(ShellExecutionRequest),
+    ArgvExecution(ArgvExecutionRequest),
+    JavaScriptExecution(JavaScriptExecutionRequest),
+    JavaScriptEvaluation(JavaScriptEvaluationRequest),
+    JavaScriptFileExecution(JavaScriptFileExecutionRequest),
+    TypeScriptExecution(TypeScriptExecutionRequest),
+    TypeScriptEvaluation(TypeScriptEvaluationRequest),
+    TypeScriptFileExecution(TypeScriptFileExecutionRequest),
+    TypeScriptCheck(TypeScriptCheckRequest),
+    TypeScriptProjectCheck(TypeScriptProjectCheckRequest),
+    NpmProjectInstall(NpmProjectInstallRequest),
+    NpmPackageInstall(NpmPackageInstallRequest),
+    NpmScriptExecution(NpmScriptExecutionRequest),
+    NpmPackageExecution(NpmPackageExecutionRequest),
+    PythonExecution(PythonExecutionRequest),
+    PythonEvaluation(PythonEvaluationRequest),
+    PythonFileExecution(PythonFileExecutionRequest),
+    PythonModuleExecution(PythonModuleExecutionRequest),
+    PythonInstall(PythonInstallRequest),
+    CreateContext(CreateContextRequest),
+    GetExecution(GetExecutionRequest),
+    ListExecutions(ListExecutionsRequest),
+    WaitExecution(WaitExecutionRequest),
+    CancelExecution(CancelExecutionRequest),
+    SignalExecution(SignalExecutionRequest),
+    ResetExecution(ResetExecutionRequest),
+    DeleteExecution(DeleteExecutionRequest),
+    WriteExecutionStdin(WriteExecutionStdinRequest),
+    CloseExecutionStdin(CloseExecutionStdinRequest),
+    ResizeExecutionPty(ResizeExecutionPtyRequest),
+    ReadExecutionOutput(ReadExecutionOutputRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1330,6 +1613,15 @@ pub enum ResponsePayload {
     ResourceSnapshot(ResourceSnapshotResponse),
     PackageLinked(PackageLinkedResponse),
     ProvidedCommands(ProvidedCommandsResponse),
+    ExecutionAccepted(ExecutionAcceptedResponse),
+    ExecutionCompleted(ExecutionCompletedResponse),
+    ExecutionEvaluation(ExecutionEvaluationResponse),
+    TypeScriptCheck(TypeScriptCheckResponse),
+    ExecutionDescriptor(ExecutionDescriptorResponse),
+    ExecutionList(ExecutionListResponse),
+    ExecutionDeleted(ExecutionDeletedResponse),
+    ExecutionIo(ExecutionIoResponse),
+    ExecutionOutputPage(ExecutionOutputPageResponse),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1353,6 +1645,8 @@ pub enum EventPayload {
     ProcessExited(ProcessExitedEvent),
     Structured(StructuredEvent),
     Ext(ExtEnvelope),
+    ExecutionOutput(ExecutionOutputEvent),
+    ExecutionCompleted(ExecutionCompletedEvent),
 }
 
 pub type SidecarPlacement = crate::wire::SidecarPlacement;
@@ -1466,6 +1760,49 @@ pub type WasmPermissionTier = crate::wire::WasmPermissionTier;
 
 pub type ExecuteRequest = crate::wire::ExecuteRequest;
 
+pub type ExecutionState = crate::wire::ExecutionState;
+pub type ExecutionOutcome = crate::wire::ExecutionOutcome;
+pub type RetainedExecutionLanguage = crate::wire::RetainedExecutionLanguage;
+pub type ExecutionStreamChannel = crate::wire::ExecutionStreamChannel;
+pub type JavaScriptModuleFormat = crate::wire::JavaScriptModuleFormat;
+pub type ExecutionIdentityOptions = crate::wire::ExecutionIdentityOptions;
+pub type ExecutionPtyOptions = crate::wire::ExecutionPtyOptions;
+pub type ExecutionOutputCapture = crate::wire::ExecutionOutputCapture;
+pub type ExecutionOutputOptions = crate::wire::ExecutionOutputOptions;
+pub type ProcessExecutionOptions = crate::wire::ProcessExecutionOptions;
+pub type ShellExecutionRequest = crate::wire::ShellExecutionRequest;
+pub type ArgvExecutionRequest = crate::wire::ArgvExecutionRequest;
+pub type JavaScriptExecutionRequest = crate::wire::JavaScriptExecutionRequest;
+pub type JavaScriptEvaluationRequest = crate::wire::JavaScriptEvaluationRequest;
+pub type JavaScriptFileExecutionRequest = crate::wire::JavaScriptFileExecutionRequest;
+pub type TypeScriptExecutionRequest = crate::wire::TypeScriptExecutionRequest;
+pub type TypeScriptEvaluationRequest = crate::wire::TypeScriptEvaluationRequest;
+pub type TypeScriptFileExecutionRequest = crate::wire::TypeScriptFileExecutionRequest;
+pub type TypeScriptCheckRequest = crate::wire::TypeScriptCheckRequest;
+pub type TypeScriptProjectCheckRequest = crate::wire::TypeScriptProjectCheckRequest;
+pub type NpmProjectInstallRequest = crate::wire::NpmProjectInstallRequest;
+pub type NpmPackageInstallRequest = crate::wire::NpmPackageInstallRequest;
+pub type NpmScriptExecutionRequest = crate::wire::NpmScriptExecutionRequest;
+pub type NpmPackageExecutionRequest = crate::wire::NpmPackageExecutionRequest;
+pub type PythonExecutionRequest = crate::wire::PythonExecutionRequest;
+pub type PythonEvaluationRequest = crate::wire::PythonEvaluationRequest;
+pub type PythonFileExecutionRequest = crate::wire::PythonFileExecutionRequest;
+pub type PythonModuleExecutionRequest = crate::wire::PythonModuleExecutionRequest;
+pub type PythonInstallRequest = crate::wire::PythonInstallRequest;
+pub type CreateContextRequest = crate::wire::CreateContextRequest;
+pub type GetExecutionRequest = crate::wire::GetExecutionRequest;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ListExecutionsRequest {}
+pub type WaitExecutionRequest = crate::wire::WaitExecutionRequest;
+pub type CancelExecutionRequest = crate::wire::CancelExecutionRequest;
+pub type SignalExecutionRequest = crate::wire::SignalExecutionRequest;
+pub type ResetExecutionRequest = crate::wire::ResetExecutionRequest;
+pub type DeleteExecutionRequest = crate::wire::DeleteExecutionRequest;
+pub type WriteExecutionStdinRequest = crate::wire::WriteExecutionStdinRequest;
+pub type CloseExecutionStdinRequest = crate::wire::CloseExecutionStdinRequest;
+pub type ResizeExecutionPtyRequest = crate::wire::ResizeExecutionPtyRequest;
+pub type ReadExecutionOutputRequest = crate::wire::ReadExecutionOutputRequest;
+
 pub type WriteStdinRequest = crate::wire::WriteStdinRequest;
 
 pub type CloseStdinRequest = crate::wire::CloseStdinRequest;
@@ -1564,6 +1901,20 @@ pub type ListenerSnapshotResponse = crate::wire::ListenerSnapshotResponse;
 pub type BoundUdpSnapshotResponse = crate::wire::BoundUdpSnapshotResponse;
 
 pub type VmFetchResponse = crate::wire::VmFetchResponse;
+pub type ExecutionDescriptor = crate::wire::ExecutionDescriptor;
+pub type ExecutionErrorData = crate::wire::ExecutionErrorData;
+pub type ExecutionAcceptedResponse = crate::wire::ExecutionAcceptedResponse;
+pub type ExecutionCompletedResponse = crate::wire::ExecutionCompletedResponse;
+pub type ExecutionEvaluationResponse = crate::wire::ExecutionEvaluationResponse;
+pub type TypeScriptDiagnostic = crate::wire::TypeScriptDiagnostic;
+pub type TypeScriptCheckResponse = crate::wire::TypeScriptCheckResponse;
+pub type ExecutionDescriptorResponse = crate::wire::ExecutionDescriptorResponse;
+pub type ExecutionListResponse = crate::wire::ExecutionListResponse;
+pub type ExecutionDeletedResponse = crate::wire::ExecutionDeletedResponse;
+pub type ExecutionIoResponse = crate::wire::ExecutionIoResponse;
+pub type ExecutionOutputEvent = crate::wire::ExecutionOutputEvent;
+pub type ExecutionOutputPageResponse = crate::wire::ExecutionOutputPageResponse;
+pub type ExecutionCompletedEvent = crate::wire::ExecutionCompletedEvent;
 
 pub type SignalDispositionAction = crate::wire::SignalDispositionAction;
 
@@ -1648,6 +1999,37 @@ impl_bare_newtype_union_enum!(
         LinkPackage(LinkPackageRequest) = 31,
         ProvidedCommands(ProvidedCommandsRequest) = 32,
         ListMounts(ListMountsRequest) = 33,
+        ShellExecution(ShellExecutionRequest) = 34,
+        ArgvExecution(ArgvExecutionRequest) = 35,
+        JavaScriptExecution(JavaScriptExecutionRequest) = 36,
+        JavaScriptEvaluation(JavaScriptEvaluationRequest) = 37,
+        JavaScriptFileExecution(JavaScriptFileExecutionRequest) = 38,
+        TypeScriptExecution(TypeScriptExecutionRequest) = 39,
+        TypeScriptEvaluation(TypeScriptEvaluationRequest) = 40,
+        TypeScriptFileExecution(TypeScriptFileExecutionRequest) = 41,
+        TypeScriptCheck(TypeScriptCheckRequest) = 42,
+        TypeScriptProjectCheck(TypeScriptProjectCheckRequest) = 43,
+        NpmProjectInstall(NpmProjectInstallRequest) = 44,
+        NpmPackageInstall(NpmPackageInstallRequest) = 45,
+        NpmScriptExecution(NpmScriptExecutionRequest) = 46,
+        NpmPackageExecution(NpmPackageExecutionRequest) = 47,
+        PythonExecution(PythonExecutionRequest) = 48,
+        PythonEvaluation(PythonEvaluationRequest) = 49,
+        PythonFileExecution(PythonFileExecutionRequest) = 50,
+        PythonModuleExecution(PythonModuleExecutionRequest) = 51,
+        PythonInstall(PythonInstallRequest) = 52,
+        CreateContext(CreateContextRequest) = 53,
+        GetExecution(GetExecutionRequest) = 54,
+        ListExecutions(ListExecutionsRequest) = 55,
+        WaitExecution(WaitExecutionRequest) = 56,
+        CancelExecution(CancelExecutionRequest) = 57,
+        SignalExecution(SignalExecutionRequest) = 58,
+        ResetExecution(ResetExecutionRequest) = 59,
+        DeleteExecution(DeleteExecutionRequest) = 60,
+        WriteExecutionStdin(WriteExecutionStdinRequest) = 61,
+        CloseExecutionStdin(CloseExecutionStdinRequest) = 62,
+        ResizeExecutionPty(ResizeExecutionPtyRequest) = 63,
+        ReadExecutionOutput(ReadExecutionOutputRequest) = 64,
     }
 );
 
@@ -1692,6 +2074,15 @@ impl_bare_newtype_union_enum!(
         PackageLinked(PackageLinkedResponse) = 33,
         ProvidedCommands(ProvidedCommandsResponse) = 34,
         MountsListed(ListMountsResponse) = 35,
+        ExecutionAccepted(ExecutionAcceptedResponse) = 36,
+        ExecutionCompleted(ExecutionCompletedResponse) = 37,
+        ExecutionEvaluation(ExecutionEvaluationResponse) = 38,
+        TypeScriptCheck(TypeScriptCheckResponse) = 39,
+        ExecutionDescriptor(ExecutionDescriptorResponse) = 40,
+        ExecutionList(ExecutionListResponse) = 41,
+        ExecutionDeleted(ExecutionDeletedResponse) = 42,
+        ExecutionIo(ExecutionIoResponse) = 43,
+        ExecutionOutputPage(ExecutionOutputPageResponse) = 44,
     }
 );
 
@@ -1728,6 +2119,8 @@ impl_bare_newtype_union_enum!(
         ProcessExited(ProcessExitedEvent) = 2,
         Structured(StructuredEvent) = 3,
         Ext(ExtEnvelope) = 4,
+        ExecutionOutput(ExecutionOutputEvent) = 5,
+        ExecutionCompleted(ExecutionCompletedEvent) = 6,
     }
 );
 
@@ -2274,6 +2667,15 @@ enum ExpectedResponseKind {
     PackageLinked,
     ProvidedCommands,
     MountsListed,
+    ExecutionOperation,
+    ExecutionCompleted,
+    ExecutionEvaluation,
+    TypeScriptCheck,
+    ExecutionDescriptor,
+    ExecutionList,
+    ExecutionDeleted,
+    ExecutionIo,
+    ExecutionOutputPage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2321,12 +2723,26 @@ impl ExpectedResponseKind {
             Self::PackageLinked => "package_linked",
             Self::ProvidedCommands => "provided_commands_response",
             Self::MountsListed => "mounts_listed",
+            Self::ExecutionOperation => "execution_operation",
+            Self::ExecutionCompleted => "execution_completed",
+            Self::ExecutionEvaluation => "execution_evaluation",
+            Self::TypeScriptCheck => "type_script_check",
+            Self::ExecutionDescriptor => "execution_descriptor",
+            Self::ExecutionList => "execution_list",
+            Self::ExecutionDeleted => "execution_deleted",
+            Self::ExecutionIo => "execution_io",
+            Self::ExecutionOutputPage => "execution_output_page",
         }
     }
 
     fn matches(self, payload: &ResponsePayload) -> bool {
         match payload {
             ResponsePayload::Rejected(_) => true,
+            ResponsePayload::ExecutionAccepted(_) | ResponsePayload::ExecutionCompleted(_)
+                if self == Self::ExecutionOperation =>
+            {
+                true
+            }
             _ => payload.kind_name() == self.as_str(),
         }
     }
@@ -2380,6 +2796,37 @@ impl RequestPayload {
             | Self::ResizePty(_)
             | Self::LinkPackage(_)
             | Self::ProvidedCommands(_)
+            | Self::ShellExecution(_)
+            | Self::ArgvExecution(_)
+            | Self::JavaScriptExecution(_)
+            | Self::JavaScriptEvaluation(_)
+            | Self::JavaScriptFileExecution(_)
+            | Self::TypeScriptExecution(_)
+            | Self::TypeScriptEvaluation(_)
+            | Self::TypeScriptFileExecution(_)
+            | Self::TypeScriptCheck(_)
+            | Self::TypeScriptProjectCheck(_)
+            | Self::NpmProjectInstall(_)
+            | Self::NpmPackageInstall(_)
+            | Self::NpmScriptExecution(_)
+            | Self::NpmPackageExecution(_)
+            | Self::PythonExecution(_)
+            | Self::PythonEvaluation(_)
+            | Self::PythonFileExecution(_)
+            | Self::PythonModuleExecution(_)
+            | Self::PythonInstall(_)
+            | Self::CreateContext(_)
+            | Self::GetExecution(_)
+            | Self::ListExecutions(_)
+            | Self::WaitExecution(_)
+            | Self::CancelExecution(_)
+            | Self::SignalExecution(_)
+            | Self::ResetExecution(_)
+            | Self::DeleteExecution(_)
+            | Self::WriteExecutionStdin(_)
+            | Self::CloseExecutionStdin(_)
+            | Self::ResizeExecutionPty(_)
+            | Self::ReadExecutionOutput(_)
             | Self::HostFilesystemCall(_) => OwnershipRequirement::Vm,
             Self::Ext(_) => OwnershipRequirement::Any,
         }
@@ -2421,6 +2868,38 @@ impl RequestPayload {
             Self::ResizePty(_) => ExpectedResponseKind::PtyResized,
             Self::LinkPackage(_) => ExpectedResponseKind::PackageLinked,
             Self::ProvidedCommands(_) => ExpectedResponseKind::ProvidedCommands,
+            Self::ShellExecution(_)
+            | Self::ArgvExecution(_)
+            | Self::JavaScriptExecution(_)
+            | Self::JavaScriptFileExecution(_)
+            | Self::TypeScriptExecution(_)
+            | Self::TypeScriptFileExecution(_)
+            | Self::NpmProjectInstall(_)
+            | Self::NpmPackageInstall(_)
+            | Self::NpmScriptExecution(_)
+            | Self::NpmPackageExecution(_)
+            | Self::PythonExecution(_)
+            | Self::PythonFileExecution(_)
+            | Self::PythonModuleExecution(_)
+            | Self::PythonInstall(_) => ExpectedResponseKind::ExecutionOperation,
+            Self::JavaScriptEvaluation(_)
+            | Self::TypeScriptEvaluation(_)
+            | Self::PythonEvaluation(_) => ExpectedResponseKind::ExecutionEvaluation,
+            Self::TypeScriptCheck(_) | Self::TypeScriptProjectCheck(_) => {
+                ExpectedResponseKind::TypeScriptCheck
+            }
+            Self::CreateContext(_)
+            | Self::GetExecution(_)
+            | Self::CancelExecution(_)
+            | Self::SignalExecution(_)
+            | Self::ResetExecution(_) => ExpectedResponseKind::ExecutionDescriptor,
+            Self::ListExecutions(_) => ExpectedResponseKind::ExecutionList,
+            Self::WaitExecution(_) => ExpectedResponseKind::ExecutionCompleted,
+            Self::DeleteExecution(_) => ExpectedResponseKind::ExecutionDeleted,
+            Self::WriteExecutionStdin(_)
+            | Self::CloseExecutionStdin(_)
+            | Self::ResizeExecutionPty(_) => ExpectedResponseKind::ExecutionIo,
+            Self::ReadExecutionOutput(_) => ExpectedResponseKind::ExecutionOutputPage,
         }
     }
 }
@@ -2475,7 +2954,16 @@ impl ResponsePayload {
             | Self::GuestKernelResult(_)
             | Self::PtyResized(_)
             | Self::PackageLinked(_)
-            | Self::ProvidedCommands(_) => OwnershipRequirement::Vm,
+            | Self::ProvidedCommands(_)
+            | Self::ExecutionAccepted(_)
+            | Self::ExecutionCompleted(_)
+            | Self::ExecutionEvaluation(_)
+            | Self::TypeScriptCheck(_)
+            | Self::ExecutionDescriptor(_)
+            | Self::ExecutionList(_)
+            | Self::ExecutionDeleted(_)
+            | Self::ExecutionIo(_)
+            | Self::ExecutionOutputPage(_) => OwnershipRequirement::Vm,
             Self::ExtResult(_) => OwnershipRequirement::Any,
         }
     }
@@ -2518,6 +3006,15 @@ impl ResponsePayload {
             Self::PtyResized(_) => "pty_resized",
             Self::PackageLinked(_) => "package_linked",
             Self::ProvidedCommands(_) => "provided_commands_response",
+            Self::ExecutionAccepted(_) => "execution_accepted",
+            Self::ExecutionCompleted(_) => "execution_completed",
+            Self::ExecutionEvaluation(_) => "execution_evaluation",
+            Self::TypeScriptCheck(_) => "type_script_check",
+            Self::ExecutionDescriptor(_) => "execution_descriptor",
+            Self::ExecutionList(_) => "execution_list",
+            Self::ExecutionDeleted(_) => "execution_deleted",
+            Self::ExecutionIo(_) => "execution_io",
+            Self::ExecutionOutputPage(_) => "execution_output_page",
         }
     }
 }
@@ -2540,9 +3037,11 @@ impl EventPayload {
     fn ownership_requirement(&self) -> OwnershipRequirement {
         match self {
             Self::Structured(_) => OwnershipRequirement::SessionOrVm,
-            Self::VmLifecycle(_) | Self::ProcessOutput(_) | Self::ProcessExited(_) => {
-                OwnershipRequirement::Vm
-            }
+            Self::VmLifecycle(_)
+            | Self::ProcessOutput(_)
+            | Self::ProcessExited(_)
+            | Self::ExecutionOutput(_)
+            | Self::ExecutionCompleted(_) => OwnershipRequirement::Vm,
             Self::Ext(_) => OwnershipRequirement::Any,
         }
     }
@@ -2746,6 +3245,14 @@ pub struct JavascriptSpawnHostNetFd {
 }
 
 #[derive(Debug, Deserialize, Default)]
+pub struct JavascriptChildProcessPtyOptions {
+    #[serde(default)]
+    pub cols: Option<u16>,
+    #[serde(default)]
+    pub rows: Option<u16>,
+}
+
+#[derive(Debug, Deserialize, Default)]
 pub struct JavascriptChildProcessSpawnOptions {
     #[serde(default)]
     pub argv0: Option<String>,
@@ -2817,6 +3324,8 @@ pub struct JavascriptChildProcessSpawnOptions {
     pub timeout: Option<u64>,
     #[serde(rename = "killSignal", default)]
     pub kill_signal: Option<String>,
+    #[serde(default)]
+    pub pty: Option<JavascriptChildProcessPtyOptions>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2834,6 +3343,8 @@ pub struct JavascriptNetConnectRequest {
     pub host: Option<String>,
     #[serde(default)]
     pub port: Option<u16>,
+    #[serde(default)]
+    pub family: Option<u8>,
     #[serde(default)]
     pub path: Option<String>,
     #[serde(rename = "abstractPathHex", default)]

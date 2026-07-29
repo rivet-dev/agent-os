@@ -32,6 +32,7 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
       : undefined);
   const __agentOSWasiErrnoSuccess = 0;
   const __agentOSWasiErrnoAcces = 2;
+  const __agentOSWasiErrnoAgain = 6;
   const __agentOSWasiErrnoBadf = 8;
   const __agentOSWasiErrnoExist = 20;
   const __agentOSWasiErrnoFault = 21;
@@ -57,6 +58,7 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
   const __agentOSWasiOpenExclusive = 4;
   const __agentOSWasiOpenTruncate = 8;
   const __agentOSWasiFdflagsAppend = 1;
+  const __agentOSWasiFdflagsNonblock = 4;
   const __agentOSWasiRightFdRead = 1n << 1n;
   const __agentOSWasiRightFdWrite = 1n << 6n;
   const __agentOSWasiDefaultRightsBase = 0xffffffffffffffffn;
@@ -83,7 +85,7 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
       return;
     }
     try {
-      process.stderr.write(`[secure-exec-wasi] ${message}\n`);
+      process.stderr.write(`[agentos-wasi] ${message}\n`);
     } catch {
       // Ignore debug logging failures.
     }
@@ -1727,9 +1729,15 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
             process.env.AGENTOS_SANDBOX_ROOT.length > 0;
           if (syncRpc && (sidecarManagedProcess || __agentOSKernelStdioSyncRpcEnabled())) {
             try {
+              const nonblocking =
+                ((Number(entry.fdFlags) >>> 0) & __agentOSWasiFdflagsNonblock) !== 0;
+              const waitMs = nonblocking ? 0 : 10;
               let chunk = null;
               while (true) {
-                const response = syncRpc.callSync("__kernel_stdin_read", [totalLength, 10]);
+                const response = syncRpc.callSync("__kernel_stdin_read", [
+                  totalLength,
+                  waitMs,
+                ]);
                 if (
                   response &&
                   typeof response === "object" &&
@@ -1741,6 +1749,9 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
                 if (response && typeof response === "object" && response.done === true) {
                   chunk = Buffer.alloc(0);
                   break;
+                }
+                if (nonblocking) {
+                  return __agentOSWasiErrnoAgain;
                 }
                 if (
                   typeof Atomics?.wait === "function" &&
@@ -2287,6 +2298,9 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
           (requestedRightsBase & ~allowedRightsInheriting) !== 0n ||
           (requestedRightsInheriting & ~allowedRightsInheriting) !== 0n
         ) {
+          __agentOSWasiDebug(
+            `path_open denied descriptor rights requestedBase=${requestedRightsBase} requestedInheriting=${requestedRightsInheriting} allowedBase=${allowedRightsBase} allowedInheriting=${allowedRightsInheriting}`,
+          );
           return __agentOSWasiErrnoAcces;
         }
         const requestedWriteAccess =
@@ -2296,6 +2310,9 @@ if (typeof globalThis !== "undefined" && typeof globalThis.__agentOSWasiModule =
           requestedWriteAccess &&
           !this._hasWriteRights(allowedRightsBase)
         ) {
+          __agentOSWasiDebug(
+            `path_open denied write rights requestedBase=${requestedRightsBase} allowedBase=${allowedRightsBase}`,
+          );
           return __agentOSWasiErrnoAcces;
         }
         if (requestedWriteAccess && resolved.readOnly) {

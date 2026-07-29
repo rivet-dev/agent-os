@@ -527,7 +527,7 @@ mod tests {
     fn aes_256_cbc_roundtrip() {
         let key = [7_u8; 32];
         let iv = [9_u8; 16];
-        let plaintext = b"secure-exec-crypto-surface";
+        let plaintext = b"agentos-crypto-surface";
         let (ciphertext, _) = encrypt_all("aes-256-cbc", &key, &iv, plaintext);
         let recovered = decrypt_all("aes-256-cbc", &key, &iv, &ciphertext, None);
         assert_eq!(recovered, plaintext);

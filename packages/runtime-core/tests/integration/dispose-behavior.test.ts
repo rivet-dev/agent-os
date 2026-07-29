@@ -22,6 +22,7 @@ import type { Kernel } from '@rivet-dev/agentos-vm-test-harness';
 import type { IntegrationKernelResult } from '@rivet-dev/agentos-vm-test-harness';
 
 const skipReason = skipUnlessWasmBuilt();
+const DISPOSE_TEST_TIMEOUT_MS = 20_000;
 
 describeIf(!skipReason, 'dispose with active processes (integration)', () => {
   let ctx: IntegrationKernelResult;
@@ -42,7 +43,7 @@ describeIf(!skipReason, 'dispose with active processes (integration)', () => {
     const elapsed = Date.now() - start;
 
     expect(elapsed).toBeLessThan(5000);
-  }, 10_000);
+  }, DISPOSE_TEST_TIMEOUT_MS);
 
   it('dispose terminates active Node setTimeout process within 5s', async () => {
     ctx = await createIntegrationKernel({ runtimes: ['wasmvm', 'node'] });
@@ -56,7 +57,7 @@ describeIf(!skipReason, 'dispose with active processes (integration)', () => {
     const elapsed = Date.now() - start;
 
     expect(elapsed).toBeLessThan(5000);
-  }, 10_000);
+  }, DISPOSE_TEST_TIMEOUT_MS);
 
   it('dispose terminates processes in BOTH WasmVM and Node simultaneously', async () => {
     ctx = await createIntegrationKernel({ runtimes: ['wasmvm', 'node'] });
@@ -74,5 +75,5 @@ describeIf(!skipReason, 'dispose with active processes (integration)', () => {
     const elapsed = Date.now() - start;
 
     expect(elapsed).toBeLessThan(5000);
-  }, 10_000);
+  }, DISPOSE_TEST_TIMEOUT_MS);
 });

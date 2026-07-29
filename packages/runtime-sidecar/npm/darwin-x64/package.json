@@ -1,11 +1,11 @@
 {
 	"name": "@rivet-dev/agentos-runtime-sidecar-darwin-x64",
 	"version": "0.0.1",
-	"description": "Secure Exec native sidecar binary for macOS x64",
+	"description": "AgentOS language execution native sidecar binary for macOS x64",
 	"license": "Apache-2.0",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/rivet-dev/secure-exec.git",
+		"url": "https://github.com/rivet-dev/agentos.git",
 		"directory": "packages/sidecar/npm/darwin-x64"
 	},
 	"os": [

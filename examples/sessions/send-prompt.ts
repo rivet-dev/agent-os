@@ -6,11 +6,11 @@ const client = createClient<typeof registry>({
 });
 const agent = client.vm.getOrCreate("my-agent");
 
-await agent.openSession({
+await agent.sessions.open({
 	agent: "pi",
 	env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
-const response = await agent.prompt({
+const response = await agent.sessions.prompt({
 	content: [
 		{
 			type: "text",

@@ -43,6 +43,45 @@ fn session_events_use_the_flat_public_json_shape() {
             "outcome": { "outcome": "selected", "optionId": "allow" },
             "status": "accepted"
         }),
+        json!({
+            "durability": "durable",
+            "sessionId": "main",
+            "sequence": 4,
+            "timestamp": "2026-07-18T00:00:03.000Z",
+            "type": "tool_call",
+            "toolCallId": "tool-media-1",
+            "title": "Read media",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "content",
+                    "content": {
+                        "type": "image",
+                        "data": "iVBORw0KGgo=",
+                        "mimeType": "image/png"
+                    }
+                },
+                {
+                    "type": "content",
+                    "content": {
+                        "type": "audio",
+                        "data": "UklGRg==",
+                        "mimeType": "audio/wav"
+                    }
+                },
+                {
+                    "type": "content",
+                    "content": {
+                        "type": "resource",
+                        "resource": {
+                            "uri": "file:///workspace/context.txt",
+                            "mimeType": "text/plain",
+                            "text": "context"
+                        }
+                    }
+                }
+            ]
+        }),
     ];
 
     for expected in cases {

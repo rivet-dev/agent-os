@@ -1,0 +1,13 @@
+{
+  "name": "project-matrix-bcrypt-native-blocked",
+  "private": true,
+  "type": "module",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "bcrypt"
+    ]
+  },
+  "dependencies": {
+    "bcrypt": "6.0.0"
+  }
+}

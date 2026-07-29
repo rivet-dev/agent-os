@@ -12,11 +12,13 @@ export interface StdioSidecarProcessSpawnOptions {
 	command: string;
 	args?: string[];
 	cwd?: string;
+	combinedStdio?: boolean;
 }
 
 export class StdioSidecarProcess {
 	readonly child: ChildProcessWithoutNullStreams;
-	readonly control: Duplex;
+	readonly control: Duplex | null;
+	readonly combinedStdio: boolean;
 	private readonly stderrChunks: Buffer[] = [];
 	private readonly exitListeners = new Set<
 		(error: SidecarProcessExited) => void
@@ -25,9 +27,13 @@ export class StdioSidecarProcess {
 		(error: SidecarProcessError) => void
 	>();
 
-	private constructor(child: ChildProcessWithoutNullStreams, control: Duplex) {
+	private constructor(
+		child: ChildProcessWithoutNullStreams,
+		control: Duplex | null,
+	) {
 		this.child = child;
 		this.control = control;
+		this.combinedStdio = control === null;
 		this.child.stderr.on("data", (chunk: Buffer | string) => {
 			this.stderrChunks.push(
 				typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk),
@@ -57,12 +63,21 @@ export class StdioSidecarProcess {
 	}
 
 	static spawn(options: StdioSidecarProcessSpawnOptions): StdioSidecarProcess {
+		const combinedStdio = options.combinedStdio === true;
 		const child = spawn(options.command, options.args ?? [], {
 			cwd: options.cwd,
-			stdio: ["pipe", "pipe", "pipe", "pipe"],
+			env: combinedStdio
+				? { ...process.env, AGENTOS_SIDECAR_COMBINED_STDIO: "1" }
+				: process.env,
+			stdio: combinedStdio
+				? ["pipe", "pipe", "pipe"]
+				: ["pipe", "pipe", "pipe", "pipe"],
 		}) as unknown as ChildProcessWithoutNullStreams;
 		try {
-			return new StdioSidecarProcess(child, requireControlStream(child));
+			return new StdioSidecarProcess(
+				child,
+				combinedStdio ? null : requireControlStream(child),
+			);
 		} catch (error) {
 			child.kill("SIGKILL");
 			throw error;
@@ -71,11 +86,11 @@ export class StdioSidecarProcess {
 
 	static fromChild(
 		child: ChildProcessWithoutNullStreams,
-		control?: Duplex,
+		control?: Duplex | null,
 	): StdioSidecarProcess {
 		return new StdioSidecarProcess(
 			child,
-			control ?? requireControlStream(child),
+			control === null ? null : (control ?? requireControlStream(child)),
 		);
 	}
 

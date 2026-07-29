@@ -1,15 +1,17 @@
 {
-	"name": "pi",
-	"agent": {
-		"acpEntrypoint": "pi-sdk-acp",
-		"snapshot": true
-	},
-	"registry": {
-		"title": "PI",
-		"description": "Run the PI coding agent with lightweight, fast execution.",
-		"image": "/images/registry/pi.svg",
-		"priority": 100,
-		"category": "agents"
-	},
-	"kind": "agent"
+  "name": "pi",
+  "agent": {
+    "acpEntrypoint": "pi-acp",
+    "env": {
+      "PI_ACP_PI_COMMAND": "/opt/agentos/bin/pi",
+      "PI_ACP_PI_ENTRYPOINT": "/opt/agentos/pkgs/pi/0.0.1/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+    }
+  },
+  "registry": {
+    "title": "PI",
+    "description": "Run the PI coding agent with lightweight, fast execution.",
+    "image": "/images/registry/pi.svg",
+    "category": "agents",
+    "priority": 100
+  }
 }

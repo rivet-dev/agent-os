@@ -6,7 +6,7 @@ const agent = client.vm.getOrCreate("my-agent");
 const conn = agent.connect();
 
 // Spawn a dev server
-const { pid } = await agent.spawn("node", ["/home/agentos/server.js"]);
+const { pid } = await agent.process.spawn("node", ["/home/agentos/server.js"]);
 
 // Subscribe to process output
 conn.on("processOutput", (data) => {

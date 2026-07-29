@@ -637,7 +637,7 @@ mod tests {
                 .expect("system time")
                 .as_nanos();
             let root = std::env::temp_dir().join(format!(
-                "secureexec-builtins-test-{}-{}",
+                "agentos-builtins-test-{}-{}",
                 std::process::id(),
                 unique
             ));

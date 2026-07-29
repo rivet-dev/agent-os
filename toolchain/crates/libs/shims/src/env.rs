@@ -63,7 +63,7 @@ pub fn env(args: Vec<OsString>) -> i32 {
     let program = &str_args[cmd_idx];
     let child_args = &str_args[cmd_idx + 1..];
 
-    let mut cmd = std::process::Command::new(program);
+    let mut cmd = std::process::Command::new(crate::which::resolve_program(program));
     cmd.args(child_args);
 
     if ignore_env {

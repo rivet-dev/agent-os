@@ -58,6 +58,8 @@ export interface SidecarProtocolClientOptions {
 	stdin?: Writable;
 	stdout?: Readable;
 	control?: Readable & Writable;
+	/** Use one bidirectional stdin/stdout transport when the host cannot inherit fd 3. */
+	combinedStdio?: boolean;
 	eventBufferCapacity: number;
 	payloadCodec?: ProtocolFramePayloadCodec;
 	stderrText?: () => string;
@@ -319,6 +321,23 @@ export class SidecarProtocolClient {
 	private async dispatchSidecarRequest(
 		request: LiveSidecarRequestFrame,
 	): Promise<void> {
+		// A callback can arrive immediately before the response that acknowledges
+		// the command which created it. Let the inbound decoder finish that turn
+		// before writing a callback response; otherwise a very fast host callback
+		// can complete and reap the guest process while its execute request is
+		// still being admitted, leaving the host waiting for an exit it missed.
+		await new Promise<void>((resolve) => {
+			const scheduleImmediate = (
+				globalThis as typeof globalThis & {
+					setImmediate?: (callback: () => void) => unknown;
+				}
+			).setImmediate;
+			if (scheduleImmediate) {
+				scheduleImmediate(resolve);
+			} else {
+				setTimeout(resolve, 0);
+			}
+		});
 		const payload = await resolveSidecarRequestFramePayload(
 			request,
 			this.sidecarRequestHandler,
@@ -396,6 +415,29 @@ function resolveProtocolFrameTransport(
 		options.stdin !== undefined ||
 		options.stdout !== undefined ||
 		options.control !== undefined;
+	if (options.combinedStdio) {
+		if (
+			options.frameTransport ||
+			hasSplitTransport ||
+			options.control !== undefined ||
+			!options.stdin ||
+			!options.stdout
+		) {
+			throw new Error(
+				"SidecarProtocolClient combinedStdio requires only stdin and stdout streams",
+			);
+		}
+		return new StdioFrameTransport({
+			stdin: options.stdin,
+			stdout: options.stdout,
+			encodeFrame: (frame) => encodeProtocolFramePayload(frame, payloadCodec),
+			decodeFrame: (payload) =>
+				decodeProtocolFramePayload(payload, payloadCodec) as
+					| LiveResponseFrame
+					| LiveEventFrame
+					| LiveSidecarRequestFrame,
+		});
+	}
 	if (options.frameTransport) {
 		if (hasSplitTransport || hasStdio) {
 			throw new Error(

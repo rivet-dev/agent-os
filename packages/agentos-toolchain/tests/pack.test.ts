@@ -189,3 +189,25 @@ describe.skip("pack (offline, local fixture, needs npm)", () => {
 		);
 	});
 });
+
+describe("pack optional dependency policy", () => {
+	test("omitOptional excludes optional packages from the emitted closure", () => {
+		const optional = mkTmp("agentos-optional-dep-");
+		writeFileSync(
+			join(optional, "package.json"),
+			JSON.stringify({ name: "optional-fixture", version: "1.0.0" }),
+		);
+		writeFileSync(join(optional, "index.js"), "export default 'optional';\n");
+
+		const source = makeFixture("omit-optional-fixture", "1.0.0");
+		const packageJson = JSON.parse(readFileSync(join(source, "package.json"), "utf8"));
+		packageJson.optionalDependencies = { "optional-fixture": `file:${optional}` };
+		writeFileSync(join(source, "package.json"), JSON.stringify(packageJson));
+
+		const out = join(mkTmp("agentos-omit-optional-out-"), "package");
+		pack({ source, out, omitOptional: true });
+
+		expect(existsSync(join(out, "node_modules", "omit-optional-fixture"))).toBe(true);
+		expect(existsSync(join(out, "node_modules", "optional-fixture"))).toBe(false);
+	});
+});

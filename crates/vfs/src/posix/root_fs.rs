@@ -12,12 +12,12 @@ use serde::Deserialize;
 use std::collections::BTreeSet;
 
 // The base filesystem fixture is staged into OUT_DIR by build.rs: copied from
-// the canonical `packages/secure-exec-core/fixtures/base-filesystem.json`
+// the canonical `packages/agentos-core/fixtures/base-filesystem.json`
 // during in-tree builds, or from the vendored `assets/base-filesystem.json`
 // copy bundled in the published crate.
 const BUNDLED_BASE_FILESYSTEM_JSON: &str =
     include_str!(concat!(env!("OUT_DIR"), "/base-filesystem.json"));
-pub const ROOT_FILESYSTEM_SNAPSHOT_FORMAT: &str = "secure_exec_filesystem_snapshot_v1";
+pub const ROOT_FILESYSTEM_SNAPSHOT_FORMAT: &str = "agentos_filesystem_snapshot_v1";
 const LEGACY_AGENTOS_ROOT_FILESYSTEM_SNAPSHOT_FORMAT: &str = "agentos_filesystem_snapshot_v1";
 const ROOT_FILESYSTEM_SNAPSHOT_FIXED_OVERHEAD_BYTES: usize = 4 * 1024;
 const ROOT_FILESYSTEM_SNAPSHOT_ENTRY_OVERHEAD_BYTES: usize = MAX_PATH_LENGTH + 1024;

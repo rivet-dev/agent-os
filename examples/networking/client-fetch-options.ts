@@ -3,7 +3,7 @@ import type { registry } from "./server";
 
 const client = createClient<typeof registry>({ endpoint: "http://localhost:6420" });
 
-const response = await client.vm.getOrCreate("my-agent").httpRequest({
+const response = await client.vm.getOrCreate("my-agent").network.httpRequest({
   port: 3000,
   path: "/api/data",
   method: "POST",

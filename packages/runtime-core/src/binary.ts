@@ -9,11 +9,13 @@ interface SidecarBinaryModule {
  * Resolves the published AgentOS runtime sidecar binary for Node.js clients.
  */
 export function resolvePublishedSidecarBinary(): string {
-	const override = process.env.AGENTOS_SIDECAR_BIN;
+	const override =
+		process.env.AGENTOS_NATIVE_SIDECAR_BIN ??
+		process.env.AGENTOS_SIDECAR_BIN;
 	if (override) {
 		if (!existsSync(override)) {
 			throw new Error(
-				`AGENTOS_SIDECAR_BIN is set to ${override} but the file does not exist`,
+				`AgentOS native sidecar override is set to ${override} but the file does not exist`,
 			);
 		}
 		return override;
@@ -26,7 +28,7 @@ export function resolvePublishedSidecarBinary(): string {
 	} catch (error) {
 		throw new Error(
 			"failed to resolve the AgentOS runtime sidecar binary: the @rivet-dev/agentos-runtime-sidecar " +
-				"package is not installed. Install it, or set AGENTOS_SIDECAR_BIN to a local " +
+				"package is not installed. Install it, or set AGENTOS_NATIVE_SIDECAR_BIN to a local " +
 				`agentos-native-sidecar binary. (${(error as Error).message})`,
 		);
 	}

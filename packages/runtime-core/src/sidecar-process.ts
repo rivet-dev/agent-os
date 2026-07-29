@@ -38,7 +38,10 @@ import {
 	type ProtocolFramePayloadCodec,
 } from "./protocol-frames.js";
 import { type LiveRequestPayload } from "./request-payloads.js";
-import type { LiveGuestDirEntry } from "./response-payloads.js";
+import type {
+	LiveGuestDirEntry,
+	LiveResponsePayload,
+} from "./response-payloads.js";
 import {
 	type LiveGuestFilesystemStat,
 	type LiveProcessSnapshotEntry,
@@ -370,7 +373,8 @@ export class SidecarProcess {
 			silenceTimeoutMs: options.silenceTimeoutMs,
 			eventBufferCapacity:
 				options.eventBufferCapacity ?? DEFAULT_SIDECAR_EVENT_BUFFER_CAPACITY,
-			gracefulExitMs: options.gracefulExitMs ?? DEFAULT_SIDECAR_GRACEFUL_EXIT_MS,
+			gracefulExitMs:
+				options.gracefulExitMs ?? DEFAULT_SIDECAR_GRACEFUL_EXIT_MS,
 			forceExitMs: options.forceExitMs ?? DEFAULT_SIDECAR_FORCE_EXIT_MS,
 			disposedErrorMessage: "native sidecar disposed",
 			payloadCodec: options.payloadCodec ?? "bare",
@@ -396,8 +400,8 @@ export class SidecarProcess {
 			},
 			payload: {
 				type: "authenticate",
-				client_name: "secure-exec-core-client",
-				auth_token: "secure-exec-core-client-token",
+				client_name: "agentos-core-client",
+				auth_token: "agentos-core-client-token",
 				protocol_version: SIDECAR_PROTOCOL_SCHEMA.version,
 				bridge_version: BRIDGE_CONTRACT_VERSION,
 			},
@@ -865,7 +869,9 @@ export class SidecarProcess {
 			payload: { type: "list_mounts" },
 		});
 		if (response.payload.type !== "mounts_listed") {
-			throw new Error(`unexpected list_mounts response: ${response.payload.type}`);
+			throw new Error(
+				`unexpected list_mounts response: ${response.payload.type}`,
+			);
 		}
 		return response.payload.mounts.map((mount) => ({
 			path: mount.path,
@@ -1501,6 +1507,10 @@ export class SidecarProcess {
 			path: string;
 			headersJson: string;
 			body?: string;
+			bodyBase64?: string;
+			streamOperation?: "start" | "read" | "cancel";
+			streamId?: string;
+			maxBytes?: number;
 		},
 	): Promise<string> {
 		const response = await this.sendRequest({
@@ -1517,6 +1527,18 @@ export class SidecarProcess {
 				path: request.path,
 				headers_json: request.headersJson,
 				...(request.body !== undefined ? { body: request.body } : {}),
+				...(request.bodyBase64 !== undefined
+					? { body_base64: request.bodyBase64 }
+					: {}),
+				...(request.streamOperation !== undefined
+					? { stream_operation: request.streamOperation }
+					: {}),
+				...(request.streamId !== undefined
+					? { stream_id: request.streamId }
+					: {}),
+				...(request.maxBytes !== undefined
+					? { max_bytes: request.maxBytes }
+					: {}),
 			},
 		});
 		if (response.payload.type !== "vm_fetch_result") {
@@ -1683,6 +1705,24 @@ export class SidecarProcess {
 		},
 	): Promise<EventFrame> {
 		return await this.protocolClient.waitForEvent(matcher, timeoutMs, options);
+	}
+
+	/** Internal semantic request entrypoint used by the AgentOS client surface. */
+	async sendVmRequest(
+		session: AuthenticatedSession,
+		vm: CreatedVm,
+		payload: LiveRequestPayload,
+	): Promise<LiveResponsePayload> {
+		const response = await this.sendRequest({
+			ownership: {
+				scope: "vm",
+				connection_id: session.connectionId,
+				session_id: session.sessionId,
+				vm_id: vm.vmId,
+			},
+			payload,
+		});
+		return response.payload;
 	}
 
 	async dispose(): Promise<void> {

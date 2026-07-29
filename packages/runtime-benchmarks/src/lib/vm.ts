@@ -16,7 +16,7 @@ import { hasNativeBaselineWasm, supportsWasmLayer } from "./layers.js";
 import type { BenchmarkOp, CommandBenchmarkOp } from "./layers.js";
 
 const NATIVE_BASELINE_WASM_COMMAND = "native-baseline";
-const NATIVE_BASELINE_WASM_PREWARM_DIR = "/mnt/native-baseline-wasm/prewarm";
+const NATIVE_BASELINE_WASM_PREWARM_DIR = "/tmp/native-baseline-wasm";
 
 export interface BenchVmOptions {
 	commandsDir?: string;
@@ -242,6 +242,7 @@ export async function prewarmBenchVm(
 		supportsWasmLayer(op.nativeOp) &&
 		hasNativeBaselineWasm()
 	) {
+		await vm.mkdir(NATIVE_BASELINE_WASM_PREWARM_DIR, { recursive: true });
 		const wasmResult = await vm.execWasmCommand(NATIVE_BASELINE_WASM_COMMAND, [
 			"--op",
 			"cpu_loop",

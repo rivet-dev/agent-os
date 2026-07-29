@@ -1,5 +1,14 @@
 --- a/src/dd.rs
 +++ b/src/dd.rs
+@@ -44,7 +44,7 @@ use std::os::unix::{
+     fs::FileTypeExt,
+     io::{AsRawFd, FromRawFd},
+ };
+-#[cfg(windows)]
++#[cfg(target_os = "windows")]
+ use std::os::windows::{fs::MetadataExt, io::AsHandle};
+ use std::path::Path;
+ use std::sync::atomic::AtomicU8;
 @@ -113,11 +113,13 @@ impl Alarm {
      pub fn with_interval(interval: Duration) -> Self {
          let trigger = Arc::new(AtomicU8::default());
@@ -14,23 +23,24 @@
              }
          });
  
-@@ -358,6 +360,6 @@ impl<'a> Input<'a> {
+@@ -360,6 +362,6 @@ impl<'a> Input<'a> {
      /// Instantiate this struct with stdin as a source.
      fn new_stdin(settings: &'a Settings) -> UResult<Self> {
 -        #[cfg(not(unix))]
-+        #[cfg(windows)]
++        #[cfg(target_os = "windows")]
          let mut src = {
              let f = File::from(io::stdin().as_handle().try_clone_to_owned()?);
              let is_file = if let Ok(metadata) = f.metadata() {
-@@ -379,6 +381,8 @@ impl<'a> Input<'a> {
+@@ -376,7 +378,9 @@ impl<'a> Input<'a> {
+             } else {
+                 Source::Stdin(io::stdin())
+             }
          };
-         #[cfg(unix)]
-         let mut src = Source::stdin_as_file();
 +        #[cfg(target_os = "wasi")]
 +        let mut src = Source::Stdin(io::stdin());
          #[cfg(unix)]
-         if let Source::StdinFile(f) = &src {
-             if settings.iflags.directory && !f.metadata()?.is_dir() {
+         let mut src = Source::stdin_as_file();
+         #[cfg(unix)]
 @@ -597,6 +601,9 @@ enum Dest {
  enum Dest {
      /// Output to stdout.

@@ -39,6 +39,7 @@ function emitListeners(listeners, onceListeners, event, args) {
 function createStdioWriteStream(options) {
   const listeners = {};
   const onceListeners = {};
+  let maxListeners = 10;
   const remove = (event, listener) => {
     if (listeners[event]) {
       const idx = listeners[event].indexOf(listener);
@@ -106,6 +107,47 @@ function createStdioWriteStream(options) {
     addListener(event, listener) {
       return stream.on(event, listener);
     },
+    prependListener(event, listener) {
+      if (!listeners[event]) listeners[event] = [];
+      listeners[event].unshift(listener);
+      return stream;
+    },
+    prependOnceListener(event, listener) {
+      if (!onceListeners[event]) onceListeners[event] = [];
+      onceListeners[event].unshift(listener);
+      return stream;
+    },
+    removeAllListeners(event) {
+      if (event === undefined) {
+        for (const name of Object.keys(listeners)) delete listeners[name];
+        for (const name of Object.keys(onceListeners)) delete onceListeners[name];
+      } else {
+        delete listeners[event];
+        delete onceListeners[event];
+      }
+      return stream;
+    },
+    listeners(event) {
+      return [...listeners[event] || [], ...onceListeners[event] || []];
+    },
+    listenerCount(event) {
+      return (listeners[event]?.length || 0) + (onceListeners[event]?.length || 0);
+    },
+    setMaxListeners(value) {
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+        const error = new RangeError(`The value of "n" is out of range. It must be a non-negative number. Received ${value}.`);
+        error.code = "ERR_OUT_OF_RANGE";
+        throw error;
+      }
+      maxListeners = value;
+      return stream;
+    },
+    getMaxListeners() {
+      return maxListeners;
+    },
+    eventNames() {
+      return [...new Set([...Object.keys(listeners), ...Object.keys(onceListeners)])];
+    },
     emit(event, ...args) {
       return emitListeners(listeners, onceListeners, event, args);
     },
@@ -118,7 +160,15 @@ function createStdioWriteStream(options) {
     },
     get rows() {
       return _resolveRuntimeTtyConfig().rows;
-    }
+    },
+    getColorDepth() {
+      return options.isTTY() ? 8 : 1;
+    },
+    hasColors(count = 16) {
+      if (!options.isTTY()) return false;
+      const normalized = Number(count);
+      return Number.isFinite(normalized) && normalized <= 2 ** 8;
+    },
   };
   return stream;
 }
@@ -162,7 +212,7 @@ function formatConsoleValue(value) {
 
 function formatConsoleArgs(args) {
   const builtinUtilModule = installBuiltinUtilFormatWithOptions(
-    globalThis.__secureExecBuiltinUtilModule
+    globalThis.__agentOsBuiltinUtilModule
   );
   if (typeof builtinUtilModule !== "undefined" && typeof builtinUtilModule?.formatWithOptions === "function") {
     return builtinUtilModule.formatWithOptions({ colors: false }, ...args);
@@ -326,7 +376,110 @@ var builtinConsoleModule = {
 };
 
 function installBuiltinUtilFormatWithOptions(builtinUtilModule) {
-  if (!builtinUtilModule || typeof builtinUtilModule.formatWithOptions === "function") {
+  if (!builtinUtilModule) {
+    return builtinUtilModule;
+  }
+  if (typeof builtinUtilModule.aborted !== "function") {
+    builtinUtilModule.aborted = function aborted(signal) {
+      if (!signal || typeof signal.addEventListener !== "function") {
+        const error = new TypeError('The "signal" argument must be an AbortSignal');
+        error.code = "ERR_INVALID_ARG_TYPE";
+        throw error;
+      }
+      if (signal.aborted) return Promise.resolve();
+      return new Promise((resolve) => {
+        signal.addEventListener("abort", resolve, { once: true });
+      });
+    };
+  }
+  const customPromisifySymbol = Symbol.for("nodejs.util.promisify.custom");
+  if (
+    typeof builtinUtilModule.promisify === "function" &&
+    builtinUtilModule.promisify.custom !== customPromisifySymbol
+  ) {
+    const fallbackPromisify = builtinUtilModule.promisify;
+    const nodeCompatiblePromisify = function promisify(original) {
+      const custom = original?.[customPromisifySymbol];
+      if (custom !== undefined) {
+        if (typeof custom !== "function") {
+          throw new TypeError('The "util.promisify.custom" property must be of type Function');
+        }
+        return custom;
+      }
+      return fallbackPromisify(original);
+    };
+    nodeCompatiblePromisify.custom = customPromisifySymbol;
+    builtinUtilModule.promisify = nodeCompatiblePromisify;
+  }
+  if (typeof builtinUtilModule.styleText !== "function") {
+    const styleCodes: Record<string, readonly [number, number]> = {
+      reset: [0, 0], bold: [1, 22], dim: [2, 22], italic: [3, 23], underline: [4, 24],
+      blink: [5, 25], inverse: [7, 27], hidden: [8, 28], strikethrough: [9, 29],
+      black: [30, 39], red: [31, 39], green: [32, 39], yellow: [33, 39], blue: [34, 39],
+      magenta: [35, 39], cyan: [36, 39], white: [37, 39], gray: [90, 39], grey: [90, 39],
+      bgBlack: [40, 49], bgRed: [41, 49], bgGreen: [42, 49], bgYellow: [43, 49],
+      bgBlue: [44, 49], bgMagenta: [45, 49], bgCyan: [46, 49], bgWhite: [47, 49],
+    };
+    builtinUtilModule.styleText = function styleText(format, text) {
+      const value = String(text);
+      const formats = Array.isArray(format) ? format : [format];
+      for (const name of formats) {
+        if (!Object.prototype.hasOwnProperty.call(styleCodes, name)) {
+          throw new TypeError(`Unknown style format: ${name}`);
+        }
+      }
+      if (process?.env?.NO_COLOR || process?.env?.FORCE_COLOR === "0") {
+        return value;
+      }
+      return formats.reduceRight((result, name) => {
+        const [open, close] = styleCodes[name];
+        return `\u001b[${open}m${result}\u001b[${close}m`;
+      }, value);
+    };
+  }
+  if (typeof builtinUtilModule.stripVTControlCharacters !== "function") {
+    const ansiEscapePattern = /(?:\u001B\][\s\S]*?(?:\u0007|\u001B\u005C|\u009C))|(?:[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~])))/g;
+    builtinUtilModule.stripVTControlCharacters = function stripVTControlCharacters(value) {
+      if (typeof value !== "string") {
+        const error = new TypeError(`The "str" argument must be of type string. Received ${value === null ? "null" : typeof value}`);
+        error.code = "ERR_INVALID_ARG_TYPE";
+        throw error;
+      }
+      return value.replace(ansiEscapePattern, "");
+    };
+  }
+  if (typeof builtinUtilModule.parseEnv !== "function") {
+    const envLinePattern = /(?:^|\n)\s*(?:export\s+)?([\w.-]+)\s*=\s*(?:'((?:\\'|[^'])*)'|"((?:\\"|[^\"])*)"|`((?:\\`|[^`])*)`|([^#\r\n]*?))\s*(?:#[^\r\n]*)?(?=\r?\n|$)/g;
+    builtinUtilModule.parseEnv = function parseEnv(content) {
+      if (typeof content !== "string") {
+        const received = content === null ? "null" : `type ${typeof content} (${String(content)})`;
+        const error = new TypeError(`The "content" argument must be of type string. Received ${received}`);
+        error.code = "ERR_INVALID_ARG_TYPE";
+        throw error;
+      }
+      const result = {};
+      envLinePattern.lastIndex = 0;
+      for (let match; (match = envLinePattern.exec(content)) !== null;) {
+        let value;
+        if (match[2] !== undefined) {
+          value = match[2];
+        } else if (match[3] !== undefined) {
+          value = match[3]
+            .replace(/\\n/g, "\n")
+            .replace(/\\r/g, "\r")
+            .replace(/\\t/g, "\t")
+            .replace(/\\"/g, '"');
+        } else if (match[4] !== undefined) {
+          value = match[4];
+        } else {
+          value = (match[5] ?? "").trim();
+        }
+        result[match[1]] = value;
+      }
+      return result;
+    };
+  }
+  if (typeof builtinUtilModule.formatWithOptions === "function") {
     return builtinUtilModule;
   }
   builtinUtilModule.formatWithOptions = function formatWithOptions(inspectOptions, format, ...args) {

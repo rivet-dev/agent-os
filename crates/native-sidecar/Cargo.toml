@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Native Secure Exec sidecar runtime"
+description = "Native AgentOS language execution sidecar runtime"
 
 [lib]
 name = "agentos_native_sidecar"
@@ -45,11 +45,19 @@ nix = { version = "0.29", features = ["fs", "net", "poll", "process", "signal", 
 # system-openssl discovery on any runner (ubuntu/macOS). openssl backs the
 # guest crypto runtime (RSA/EC/DH/AES), so it cannot be a TLS-only stack.
 openssl = { version = "0.10", features = ["vendored"] }
+oxc_allocator = "0.75.0"
+oxc_ast = "0.75.0"
+oxc-browserslist = "=2.0.0"
+oxc_codegen = "0.75.0"
+oxc_parser = "0.75.0"
+oxc_semantic = "0.75.0"
+oxc_span = "0.75.0"
+oxc_transformer = "0.75.0"
 pbkdf2 = "0.12"
 rustls = { version = "0.23.37", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-pemfile = "2.2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["backup", "bundled"] }
 # `rustix` provides the safe (owned-fd, no `unsafe`) `openat(2)`/`statat`/
 # `readlinkat`/`Dir` primitives used by the universal resolve-beneath
 # implementation in the `confine` module of `src/plugins/host_dir.rs`. Plain

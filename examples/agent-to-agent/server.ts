@@ -15,14 +15,14 @@ async function reviewCode(code: string): Promise<string> {
 	const reviewerHandle = client.reviewer.getOrCreate("my-project");
 
 	// Write the submitted contents into the reviewer's VM.
-	await reviewerHandle.writeFile("/home/agentos/review.ts", code);
+	await reviewerHandle.filesystem.writeFile("/home/agentos/review.ts", code);
 
 	// Ask the reviewer to review.
-	await reviewerHandle.openSession({
+	await reviewerHandle.sessions.open({
 		agent: "claude",
 		env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 	});
-	const result = await reviewerHandle.prompt({
+	const result = await reviewerHandle.sessions.prompt({
 		content: [
 			{
 				type: "text",
@@ -30,7 +30,7 @@ async function reviewCode(code: string): Promise<string> {
 			},
 		],
 	});
-	await reviewerHandle.deleteSession();
+	await reviewerHandle.sessions.delete();
 
 	return (
 		result.message?.content

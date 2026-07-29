@@ -9,7 +9,7 @@ Run real `git` inside a VM: initialize a repo, branch, commit, and clone it — 
 
 ## How it works
 
-The VM is created with the `@agentos-software/git` package mounted as software and filesystem, child-process, and env permissions enabled. From there it drives ordinary git commands through `vm.exec`, mixing in `vm.writeFile`/`vm.readFile` to stage files and inspect results. It commits on a `feature` branch so that `git clone` resolves HEAD to `feature`, then reads the clone's `.git/HEAD` and the feature file to confirm the branch carried over.
+The VM is created with the `@agentos-software/git` package mounted as software and filesystem, child-process, and env permissions enabled. From there it drives ordinary git commands through `vm.process.exec`, mixing in `vm.filesystem.writeFile`/`vm.filesystem.readFile` to stage files and inspect results. It commits on a `feature` branch so that `git clone` resolves HEAD to `feature`, then reads the clone's `.git/HEAD` and the feature file to confirm the branch carried over.
 
 ## Run it
 

@@ -40,7 +40,6 @@ export const EXCLUDED = new Set<string>([
 	// unified sidecar reactor/security contract and must not be published.
 	"@rivet-dev/agentos-browser",
 	"@rivet-dev/agentos-runtime-browser",
-	"secure-exec",
 	"publish",
 ]);
 
@@ -75,6 +74,16 @@ const SIDECAR_BINARY_PACKAGE_DIRS = [
 	"packages/runtime-sidecar/npm",
 	"packages/sidecar/npm",
 ] as const;
+
+/**
+ * Runtime packages consumed directly by lockstep AgentOS packages. Ordinary
+ * registry software keeps its independent release flow.
+ */
+export const LOCKSTEP_SOFTWARE_PACKAGES = new Set([
+	"@agentos-software/common",
+	"@agentos-software/apps-builder",
+	"@agentos-software/sh",
+]);
 
 /**
  * Platforms whose sidecar binary package is built and published. Kept in sync
@@ -152,9 +161,9 @@ export function discoverPackages(
 		}
 	}
 
-	// 2. pnpm workspace packages. Skip the software/* WASM command
-	//    packages. They are built and shipped separately, never published to npm
-	//    from this flow.
+	// 2. pnpm workspace packages. Skip independently-versioned software/* WASM
+	//    packages, but include the small runtime packages consumed directly by
+	//    lockstep AgentOS packages.
 	const pnpmList = execSync("pnpm -r list --json --depth -1", {
 		cwd: repoRoot,
 		encoding: "utf8",
@@ -174,12 +183,9 @@ export function discoverPackages(
 		) {
 			continue;
 		}
-		// software packages version independently and publish from
-		// local via the toolchain — EXCEPT `common`, which core hard-depends on
-		// and therefore ships on the main release track in lockstep.
 		if (
 			p.path.includes("/software/") &&
-			p.name !== "@agentos-software/common"
+			!LOCKSTEP_SOFTWARE_PACKAGES.has(p.name)
 		) {
 			continue;
 		}
@@ -220,9 +226,16 @@ export function assertDiscoverySanity(packages: Package[]): void {
 	const required: string[] = [];
 	if (hasAgentOsPackages) {
 		required.push(
+			"@rivet-dev/agentos",
 			"@rivet-dev/agentos-core",
 			"@rivet-dev/agentos-sidecar",
 			"@rivet-dev/agentos-runtime-sidecar",
+		);
+	}
+	if (byName.has("@rivet-dev/agentos-apps")) {
+		required.push(
+			"@agentos-software/apps-builder",
+			"@agentos-software/sh",
 		);
 	}
 	const missing = required.filter((r) => !byName.has(r));

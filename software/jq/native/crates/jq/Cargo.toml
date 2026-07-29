@@ -1,10 +1,10 @@
 [package]
 workspace = "../../../../../toolchain"
-name = "secureexec-jq"
+name = "agentos-jq"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "jq implementation for secure-exec standalone binaries"
+description = "jq implementation for agentos standalone binaries"
 
 [dependencies]
 jaq-core = "2.2"

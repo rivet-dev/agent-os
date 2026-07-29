@@ -12,10 +12,10 @@ conn.on("sessionEvent", (event) => {
 	console.log(`[${event.sessionId}]`, event.durability, event);
 });
 
-await agent.openSession({
+await agent.sessions.open({
 	agent: "pi",
 	env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
-await agent.prompt({
+await agent.sessions.prompt({
 	content: [{ type: "text", text: "Explain how async/await works" }],
 });

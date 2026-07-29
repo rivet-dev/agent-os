@@ -18,7 +18,7 @@ pub fn fgrep(args: Vec<OsString>) -> i32 {
 fn run_alias(args: Vec<OsString>, name: &str, option: &str) -> i32 {
     eprintln!("{name}: warning: {name} is obsolescent; using grep {option}");
 
-    let mut command = std::process::Command::new("grep");
+    let mut command = std::process::Command::new(crate::which::resolve_program("grep"));
     command
         .arg(option)
         .args(args.into_iter().skip(1))

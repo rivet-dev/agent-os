@@ -80,22 +80,50 @@ function createRequireEsmError(filename) {
 }
 function createModuleFormatBridgeMissingError(filename) {
   const error = new Error(
-    `secure-exec module format bridge is not registered; cannot require ${filename}.`
+    `agentos module format bridge is not registered; cannot require ${filename}.`
   );
   error.code = "ERR_AGENTOS_MODULE_FORMAT_BRIDGE_MISSING";
   return error;
 }
-function assertCommonjsLoadable(filename) {
+function moduleFormat(filename) {
   if (
     typeof _moduleFormat === "undefined" ||
     typeof _moduleFormat.applySyncPromise !== "function"
   ) {
     throw createModuleFormatBridgeMissingError(filename);
   }
-  const format = _moduleFormat.applySyncPromise(void 0, [filename]);
-  if (format === "module") {
+  return _moduleFormat.applySyncPromise(void 0, [filename]);
+}
+function assertCommonjsLoadable(filename) {
+  if (moduleFormat(filename) === "module") throw createRequireEsmError(filename);
+}
+function requireEsmSync(filename, parentPath) {
+  if (typeof globalThis.__agentOsRequireEsmSync !== "function") {
     throw createRequireEsmError(filename);
   }
+  const namespace = globalThis.__agentOsRequireEsmSync(filename, parentPath);
+  if (
+    namespace != null &&
+    (typeof namespace === "object" || typeof namespace === "function") &&
+    Object.prototype.hasOwnProperty.call(namespace, "default") &&
+    namespace.__esModule !== true
+  ) {
+    const compatibleNamespace = Object.create(null);
+    for (const key of Reflect.ownKeys(namespace)) {
+      Object.defineProperty(compatibleNamespace, key, {
+        configurable: false,
+        enumerable: Object.prototype.propertyIsEnumerable.call(namespace, key),
+        get: () => namespace[key],
+      });
+    }
+    Object.defineProperty(compatibleNamespace, "__esModule", {
+      configurable: false,
+      enumerable: true,
+      value: true,
+    });
+    return compatibleNamespace;
+  }
+  return namespace;
 }
 function createRequire(filename) {
   if (typeof filename !== "string" && !(filename instanceof URL)) {
@@ -120,7 +148,7 @@ function createRequire(filename) {
 // module wrapper, and resolution still flows through _requireFrom with the same
 // permission checks — and the namespaced name avoids changing `typeof require` for
 // guest code that branches on CJS-vs-ESM.
-defineGlobal("__secureExecGuestCreateRequire", createRequire);
+defineGlobal("__agentOsGuestCreateRequire", createRequire);
 var Module = class _Module {
   id;
   path;
@@ -240,7 +268,7 @@ var Module = class _Module {
   }
   static _load(request, parent, _isMain) {
     const parentDir = parent && parent.path ? parent.path : "/";
-    return _requireFrom(request, parentDir);
+    return _requireFrom(request, parentDir, _isMain === true);
   }
   static runMain() {
   }
@@ -282,7 +310,14 @@ var moduleModule = Object.assign(Module, {
   SourceMap
 });
 exposeCustomGlobal("_moduleModule", moduleModule);
-function requireFrom(request, parentDir) {
+function markMainModule(module) {
+  module.id = ".";
+  module.parent = null;
+  if (globalThis.process) {
+    globalThis.process.mainModule = module;
+  }
+}
+function requireFrom(request, parentDir, isMain = false) {
   const parentPath = typeof parentDir === "string" ? parentDir : "/";
   if (Module.isBuiltin(request)) {
     try {
@@ -304,10 +339,24 @@ function requireFrom(request, parentDir) {
     throw error;
   }
   if (Object.prototype.hasOwnProperty.call(_moduleCache, resolved)) {
+    if (isMain) markMainModule(_moduleCache[resolved]);
     return _moduleCache[resolved].exports;
   }
-  assertCommonjsLoadable(resolved);
-  const module = new Module(resolved, { path: parentPath });
+  if (moduleFormat(resolved) === "module") {
+    const module = new Module(resolved, isMain ? null : { path: parentPath });
+    if (isMain) markMainModule(module);
+    _moduleCache[resolved] = module;
+    try {
+      module.exports = requireEsmSync(resolved, parentPath);
+      module.loaded = true;
+      return module.exports;
+    } catch (error) {
+      delete _moduleCache[resolved];
+      throw error;
+    }
+  }
+  const module = new Module(resolved, isMain ? null : { path: parentPath });
+  if (isMain) markMainModule(module);
   _moduleCache[resolved] = module;
   try {
     const extension = resolved.endsWith(".json") ? ".json" : resolved.endsWith(".node") ? ".node" : ".js";
@@ -322,4 +371,4 @@ function requireFrom(request, parentDir) {
 }
 exposeCustomGlobal("_requireFrom", requireFrom);
 var module_default = moduleModule;
-export { initialModuleCache, initialPendingModules, initialCurrentModule, _pathDirname, _parseFileUrl, computeRequireResolvePaths, createRequireResolve, defaultRequireExtensions, attachRequireMetadata, createRequireEsmError, createModuleFormatBridgeMissingError, assertCommonjsLoadable, createRequire, Module, SourceMap, moduleModule, requireFrom, module_default };
+export { initialModuleCache, initialPendingModules, initialCurrentModule, _pathDirname, _parseFileUrl, computeRequireResolvePaths, createRequireResolve, defaultRequireExtensions, attachRequireMetadata, createRequireEsmError, createModuleFormatBridgeMissingError, moduleFormat, assertCommonjsLoadable, requireEsmSync, createRequire, Module, SourceMap, moduleModule, requireFrom, module_default };

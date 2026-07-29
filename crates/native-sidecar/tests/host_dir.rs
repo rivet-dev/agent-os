@@ -8,7 +8,7 @@ mod host_dir {
     mod tests {
         use super::{HostDirFilesystem, HostDirMountPlugin, MAX_HOST_DIR_READ_BYTES};
         use agentos_kernel::mount_plugin::{FileSystemPluginFactory, OpenFileSystemPluginRequest};
-        use agentos_kernel::mount_table::MountedFileSystem;
+        use agentos_kernel::mount_table::{MountOptions, MountTable, MountedFileSystem};
         use agentos_kernel::vfs::VirtualFileSystem;
         use serde_json::json;
         use std::fs;
@@ -28,8 +28,8 @@ mod host_dir {
 
         #[test]
         fn filesystem_rejects_symlink_escapes_and_round_trips_writes() {
-            let host_dir = temp_dir("secure-exec-host-dir-plugin");
-            let outside_dir = temp_dir("secure-exec-host-dir-plugin-outside");
+            let host_dir = temp_dir("agentos-host-dir-plugin");
+            let outside_dir = temp_dir("agentos-host-dir-plugin-outside");
             fs::write(host_dir.join("hello.txt"), "hello from host").expect("seed host file");
             std::os::unix::fs::symlink(&outside_dir, host_dir.join("escape"))
                 .expect("seed escape symlink");
@@ -75,7 +75,7 @@ mod host_dir {
 
         #[test]
         fn filesystem_pwrite_updates_in_place_and_zero_fills_gaps() {
-            let host_dir = temp_dir("secure-exec-host-dir-plugin-pwrite");
+            let host_dir = temp_dir("agentos-host-dir-plugin-pwrite");
             fs::write(host_dir.join("data.txt"), b"abcdef").expect("seed host file");
 
             let mut filesystem = HostDirFilesystem::new(&host_dir).expect("create host dir fs");
@@ -95,9 +95,31 @@ mod host_dir {
         }
 
         #[test]
+        fn mount_table_pwrite_delegates_without_reading_the_whole_host_file() {
+            let host_dir = temp_dir("secure-exec-host-dir-mounted-pwrite");
+            fs::write(host_dir.join("large.bin"), vec![b'a'; 32]).expect("seed host file");
+
+            let mounted = HostDirFilesystem::new_with_read_limit(&host_dir, Some(4))
+                .expect("create bounded host dir fs");
+            let mut table = MountTable::new(agentos_kernel::vfs::MemoryFileSystem::new());
+            table
+                .mount("/output", mounted, MountOptions::new("host_dir"))
+                .expect("mount host directory");
+
+            table
+                .pwrite("/output/large.bin", b"Z".to_vec(), 16)
+                .expect("positioned write must not require a full-file read");
+            let bytes = fs::read(host_dir.join("large.bin")).expect("read host file");
+            assert_eq!(bytes.len(), 32);
+            assert_eq!(bytes[16], b'Z');
+
+            fs::remove_dir_all(host_dir).expect("remove temp dir");
+        }
+
+        #[test]
         fn filesystem_pwrite_rejects_symlink_escape_targets() {
-            let host_dir = temp_dir("secure-exec-host-dir-plugin-pwrite-escape");
-            let outside_dir = temp_dir("secure-exec-host-dir-plugin-pwrite-escape-outside");
+            let host_dir = temp_dir("agentos-host-dir-plugin-pwrite-escape");
+            let outside_dir = temp_dir("agentos-host-dir-plugin-pwrite-escape-outside");
             fs::write(outside_dir.join("outside.txt"), b"outside").expect("seed outside file");
             std::os::unix::fs::symlink(&outside_dir, host_dir.join("escape"))
                 .expect("seed escape symlink");
@@ -118,7 +140,7 @@ mod host_dir {
 
         #[test]
         fn filesystem_rejects_full_reads_above_host_dir_limit() {
-            let host_dir = temp_dir("secure-exec-host-dir-plugin-full-read-limit");
+            let host_dir = temp_dir("agentos-host-dir-plugin-full-read-limit");
             let huge_file = fs::File::create(host_dir.join("huge.bin")).expect("create huge file");
             huge_file
                 .set_len(MAX_HOST_DIR_READ_BYTES as u64 + 1)
@@ -135,7 +157,7 @@ mod host_dir {
 
         #[test]
         fn filesystem_pread_rejects_lengths_above_host_dir_limit() {
-            let host_dir = temp_dir("secure-exec-host-dir-plugin-pread-limit");
+            let host_dir = temp_dir("agentos-host-dir-plugin-pread-limit");
             fs::write(host_dir.join("small.txt"), b"small").expect("seed host file");
 
             let mut filesystem = HostDirFilesystem::new(&host_dir).expect("create host dir fs");
@@ -149,8 +171,8 @@ mod host_dir {
 
         #[test]
         fn filesystem_metadata_ops_reject_symlink_targets() {
-            let host_dir = temp_dir("secure-exec-host-dir-plugin-metadata");
-            let outside_dir = temp_dir("secure-exec-host-dir-plugin-metadata-outside");
+            let host_dir = temp_dir("agentos-host-dir-plugin-metadata");
+            let outside_dir = temp_dir("agentos-host-dir-plugin-metadata-outside");
             let outside_file = outside_dir.join("outside.txt");
             fs::write(&outside_file, b"outside").expect("seed outside file");
             std::os::unix::fs::symlink(&outside_file, host_dir.join("link"))
@@ -293,7 +315,7 @@ mod host_dir {
 
         #[test]
         fn plugin_config_can_enforce_read_only_mounts() {
-            let host_dir = temp_dir("secure-exec-host-dir-plugin-readonly");
+            let host_dir = temp_dir("agentos-host-dir-plugin-readonly");
             fs::write(host_dir.join("hello.txt"), "hello from host").expect("seed host file");
 
             let plugin = HostDirMountPlugin;

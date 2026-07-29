@@ -19,7 +19,7 @@ you are done, `dispose()` tears the VM down and releases its resources.
 ## Run it
 
 ```sh
-npm install @rivet-dev/agentos-core
+npm install @rivet-dev/agentos
 npx tsx index.ts
 ```
 

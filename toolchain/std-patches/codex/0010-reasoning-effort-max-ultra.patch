@@ -1,0 +1,20 @@
+--- a/protocol/src/openai_models.rs
++++ b/protocol/src/openai_models.rs
+@@ -50,6 +50,8 @@ pub enum ReasoningEffort {
+     Medium,
+     High,
+     XHigh,
++    Max,
++    Ultra,
+ }
+ 
+ impl FromStr for ReasoningEffort {
+@@ -501,6 +503,8 @@ fn effort_rank(effort: ReasoningEffort) -> i32 {
+         ReasoningEffort::Medium => 3,
+         ReasoningEffort::High => 4,
+         ReasoningEffort::XHigh => 5,
++        ReasoningEffort::Max => 6,
++        ReasoningEffort::Ultra => 7,
+     }
+ }
+ 

@@ -30,8 +30,13 @@ const ignoredDirs = new Set([
 
 const walk = (dir, visit) => {
 	for (const entry of readdirSync(dir, { withFileTypes: true })) {
-		if (entry.isDirectory() && ignoredDirs.has(entry.name)) continue;
 		const path = join(dir, entry.name);
+		if (
+			entry.isDirectory() &&
+			(ignoredDirs.has(entry.name) || rel(path) === ".claude/worktrees")
+		) {
+			continue;
+		}
 		if (entry.isDirectory()) {
 			walk(path, visit);
 		} else {
@@ -44,6 +49,7 @@ const allowedTestHomes = [
 	/^software\/[^/]+\/test\/.+\.test\.ts$/,
 	/^toolchain\/conformance\/.+\.test\.ts$/,
 	/^packages\/[^/]+\/tests\/.+\.test\.ts$/,
+	/^experiments\/[^/]+\/.+\.test\.ts$/,
 	/^scripts\/.+\.test\.ts$/,
 ];
 

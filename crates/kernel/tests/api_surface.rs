@@ -1118,6 +1118,53 @@ fn trusted_nonblocking_pipe_write_does_not_change_guest_flags() {
 }
 
 #[test]
+fn nonblocking_pipe_write_probe_preserves_descriptor_flags() {
+    let mut config = KernelVmConfig::new("vm-api-pipe-write-probe");
+    config.permissions = Permissions::allow_all();
+    let mut kernel = KernelVm::new(MemoryFileSystem::new(), config);
+    kernel
+        .register_driver(CommandDriver::new("shell", ["sh"]))
+        .expect("register shell");
+    let process = spawn_shell(&mut kernel);
+    let (read_fd, write_fd) = kernel.open_pipe("shell", process.pid()).expect("open pipe");
+    let payload = vec![0x5a; MAX_PIPE_BUFFER_BYTES];
+
+    assert_eq!(
+        kernel
+            .fd_write_nonblocking_pipe("shell", process.pid(), write_fd, &payload)
+            .expect("fill pipe without blocking"),
+        payload.len()
+    );
+    assert_kernel_error_code(
+        kernel.fd_write_nonblocking_pipe("shell", process.pid(), write_fd, b"x"),
+        "EAGAIN",
+    );
+    assert_eq!(
+        kernel
+            .fd_stat("shell", process.pid(), write_fd)
+            .expect("stat pipe writer")
+            .flags
+            & O_NONBLOCK,
+        0,
+        "the internal probe must not change guest-visible descriptor flags"
+    );
+
+    assert_eq!(
+        kernel
+            .fd_read("shell", process.pid(), read_fd, 1024)
+            .expect("drain pipe")
+            .len(),
+        1024
+    );
+    assert_eq!(
+        kernel
+            .fd_write_nonblocking_pipe("shell", process.pid(), write_fd, &payload[..1024])
+            .expect("write after reader frees capacity"),
+        1024
+    );
+}
+
+#[test]
 fn kernel_fd_surface_supports_fcntl_status_and_descriptor_flags() {
     let mut config = KernelVmConfig::new("vm-api-fcntl");
     config.permissions = Permissions::allow_all();

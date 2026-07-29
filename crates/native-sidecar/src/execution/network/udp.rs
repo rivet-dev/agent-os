@@ -252,10 +252,12 @@ fn ipv4_interface(interface: Option<&str>) -> Result<Ipv4Addr, std::io::Error> {
         .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))
 }
 
-fn ipv6_interface_index(
-    socket: &tokio::net::UdpSocket,
-    interface: Option<&str>,
-) -> Result<u32, std::io::Error> {
+fn interface_name_to_index(interface: &str) -> Result<u32, std::io::Error> {
+    nix::net::if_::if_nametoindex(interface)
+        .map_err(|error| std::io::Error::from_raw_os_error(error as i32))
+}
+
+fn ipv6_interface_index(interface: Option<&str>) -> Result<u32, std::io::Error> {
     let Some(interface) = interface.filter(|value| !value.is_empty()) else {
         return Ok(0);
     };
@@ -274,8 +276,7 @@ fn ipv6_interface_index(
                     .map(|_| interface.interface_name)
             })
             .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EADDRNOTAVAIL))?;
-        return rustix::net::netdevice::name_to_index(socket, interface_name.as_str())
-            .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()));
+        return interface_name_to_index(interface_name.as_str());
     }
     let scope = interface
         .rsplit_once('%')
@@ -283,8 +284,7 @@ fn ipv6_interface_index(
     if let Ok(index) = scope.parse::<u32>() {
         return Ok(index);
     }
-    rustix::net::netdevice::name_to_index(socket, scope)
-        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))
+    interface_name_to_index(scope)
 }
 
 fn set_udp_multicast_interface(
@@ -299,7 +299,7 @@ fn set_udp_multicast_interface(
             socket_ref.set_multicast_if_v4(&address)
         }
         JavascriptUdpFamily::Ipv6 => {
-            let index = ipv6_interface_index(socket, Some(interface))?;
+            let index = ipv6_interface_index(Some(interface))?;
             socket_ref.set_multicast_if_v6(index)
         }
     }
@@ -386,7 +386,7 @@ fn apply_native_udp_option(
                     }
                 }
                 IpAddr::V6(group) if family == JavascriptUdpFamily::Ipv6 => {
-                    let index = ipv6_interface_index(socket, interface.as_deref())?;
+                    let index = ipv6_interface_index(interface.as_deref())?;
                     if join {
                         socket_ref.join_multicast_v6(&group, index)?;
                     } else {
@@ -1207,7 +1207,7 @@ impl ActiveUdpSocket {
     ) -> Result<SocketAddr, SidecarError> {
         if self.native_commands.is_some() || self.guest_local_addr.is_some() {
             return Err(SidecarError::Execution(String::from(
-                "EINVAL: secure-exec dgram socket is already bound",
+                "EINVAL: agentos dgram socket is already bound",
             )));
         }
 

@@ -199,6 +199,7 @@ fn acp_core_runs_a_real_session_round_trip_against_the_echo_agent() {
         env: BTreeMap::new().into_iter().collect(),
         client_capabilities: "{}".into(),
         mcp_servers: "[]".into(),
+        additional_directories: Vec::new(),
         additional_instructions: None,
         skip_os_instructions: false,
     };

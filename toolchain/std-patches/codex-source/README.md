@@ -3,7 +3,7 @@
 These are minimal, upstreamable additions to codex's own source where it has a
 hard `compile_error!`/missing-platform arm that NO toolchain patch can bypass
 (first-party compile-time gates). Each adds REAL wasi support (wasi has the API),
-not a hack. Applied to the vendored codex source during the secure-exec build.
+not a hack. Applied to the vendored codex source during the agentos build.
 
 1. utils/git/src/platform.rs — add `#[cfg(target_os = "wasi")] create_symlink`
    using `std::os::wasi::fs::symlink_path`, and widen the fallback
@@ -28,7 +28,7 @@ NOT gate the SOURCE usage — an incomplete author wasi port. Breakdown:
   build_config_state, host_and_port_from_network_addr, normalize_host,
   validate_policy_against_constraints, NetworkProxyConstraints/Error, NetworkProtocol,
   NetworkProxyState, NetworkProxyAuditMetadata, NetworkPolicyRequest, …). The real crate
-  can't compile on wasi (rama proxy stack); EXPAND the secure-exec codex-network-proxy
+  can't compile on wasi (rama proxy stack); EXPAND the agentos codex-network-proxy
   stub to this full API (no-op/inert — the VM kernel brokers network policy host-side).
 - ~6: codex_otel SessionTelemetry methods the stub lacks → expand codex-otel stub.
 - tokio::signal (no signals on wasi) → gate/stub codex-core's signal usage.
@@ -87,7 +87,7 @@ git symlink, rmcp-client resolver. Plus std ExitStatusExt patch (std-patches/
 0008-wasi-exit-status-ext.md). `cargo build -p codex-core -p codex-exec
 --target wasm32-wasip1 -Z build-std` → Finished, EXIT 0.
 
-REMAINING to e2e: (1) the secure-exec command crate crates/commands/codex-exec
+REMAINING to e2e: (1) the agentos command crate crates/commands/codex-exec
 un-stub --session-turn to delegate to the real codex-core/codex-exec engine and emit
 the EE newline-JSON protocol (start/text_delta/tool_call_update/permission_request/
 done) — the real functional integration; (2) build via `make -C toolchain wasm`
@@ -98,7 +98,7 @@ agent-os matrix + un-skip the codex session test.
 codex-exec/src/lib.rs `wasi_stub_main()` is a placeholder ("WASI runtime support is
 under development"). codex-core compiles now, so replace it with the real engine
 (mirror lib_native.rs::run_exec_session, ~200-300 lines, in codex's workspace so it has
-codex-core access). The built codex-exec.wasm IS the secure-exec `codex-exec` command.
+codex-core access). The built codex-exec.wasm IS the agentos `codex-exec` command.
 
 PROTOCOL (newline-JSON, the EE adapter @rivet-ee/agent-os-codex-agent drives it):
 - stdin: first line {type:"start", cwd, mode, model, thought_level,
@@ -146,7 +146,7 @@ agent and emits the EE protocol. `cargo build -p codex-exec --target wasm32-wasi
 1. Produce optimized wasm artifacts from the fork (branch wasi-port-codex-core):
    `cargo build -p codex-exec -p codex --release --target wasm32-wasip1 -Z build-std`
    (+ wasm-opt) → copy to software/codex/wasm/{codex-exec,codex}. NOTE: the
-   secure-exec `make wasm` currently builds the STUB crates/commands/{codex,codex-exec};
+   agentos `make wasm` currently builds the STUB crates/commands/{codex,codex-exec};
    to ship the real engine, either build from the fork directly (above) or vendor the
    fork into toolchain and point cmd-codex-exec at the real codex-exec.
 2. ACP adapter: the codex ACP bridge (spawns `codex-exec --session-turn`, newline-JSON↔ACP)
@@ -164,7 +164,7 @@ Built the real codex-exec from the fork (release, wasm-opt'd to 28MB) and placed
 software/codex/wasm/{codex-exec,codex}. Smoke test (vm.exec("... | codex-exec
 --session-turn")) shows it SPAWNS and attempts WebAssembly instantiation in the VM —
 44 imports, of which 43 (wasi_snapshot_preview1×30, host_net×6, host_process×5,
-host_fs×2) are provided by the secure-exec runtime. The ONLY unprovided one was
+host_fs×2) are provided by the agentos runtime. The ONLY unprovided one was
 `env.sqlite3_load_extension` (sqlx's sqlite). Fixed by defining a #[no_mangle] no-op
 stub in the engine (fork commit). Rebuild + re-place → instantiation should succeed.
 Then the smoke test ({"type":"start"} before the model call) and the full EE
@@ -174,7 +174,7 @@ codex-session.test.ts (with the responses mock) verify the e2e turn.
 Smoke test (packages/core/tests/codex-smoke.test.ts) PASSES:
   vm.exec("printf '<start json>' | codex-exec --session-turn")  →  stdout: {"type":"start"}
 The real codex agent (codex-rs → wasip1, session-turn engine driving codex-core) BOOTS
-in the secure-exec VM, instantiates all 44 imports (after adding host
+in the agentos VM, instantiates all 44 imports (after adding host
 path_filestat_set_times), runs the engine, and emits the EE protocol's start event.
 (exit 1 only because the smoke test provides no model mock/auth, so the turn errors
 AFTER start — proving the boot + protocol path works.)
@@ -187,7 +187,7 @@ complete agent turn. The boot+protocol path is now VERIFIED end-to-end in the VM
 DBG markers (engine) confirm the real codex agent runs the entire lifecycle in the VM:
 load config → AuthManager::shared → ThreadManager::new → start_thread → submit
 Op::UserInput → LIVE next_event loop (received a Warning event, processing). 8 runtime
-blockers fixed and committed (host imports, secure-exec host wasi shim
+blockers fixed and committed (host imports, agentos host wasi shim
 path_filestat_set_times, tokio fs-asyncify + spawn_blocking inline on wasi, std
 split_paths, now_local→UTC). FINAL GAP: the model HTTP POST to the OpenAI Responses
 mock does not reach it (mock requests=0, then hang). codex honors OPENAI_BASE_URL
@@ -209,7 +209,7 @@ single-threaded (no OS threads); the spawn_blocking-as-current-thread-task worka
 task that can't run. This is an architectural mismatch (codex's threading model vs
 single-thread wasi), the genuinely hard core of running codex on wasi. Resolving it needs
 codex-internal tracing to find the exact blocking construct and make it cooperative, or a
-different runtime strategy. (Sidecar instrumentation reverted; secure-exec is clean.)
+different runtime strategy. (Sidecar instrumentation reverted; agentos is clean.)
 STATUS: codex compiles + runs the full session lifecycle in the VM (boot → EE protocol →
 config → auth → ThreadManager → start_thread → submit → live event loop) but hangs in the
 agent loop before the model call on the single-threaded runtime.
@@ -259,7 +259,7 @@ Because `-Z build-std` injects `panic_unwind` via `--extern` while the wasm targ
     bin's `-Cpanic=abort` resolves a `panic_abort` that is ABI-matched to build-std's core),
   - builds with `--config 'profile.release.panic="abort"'`.
 See `/tmp/relink-codex.sh` for the exact invocation. (This sysroot massaging should be folded
-into the secure-exec wasm toolchain so it is not a manual step.)
+into the agentos wasm toolchain so it is not a manual step.)
 
 KNOWN REMAINING (non-blocking; turn works e2e):
 - Rollout recorder logs `failed to queue rollout items: channel closed` (the writer task exits

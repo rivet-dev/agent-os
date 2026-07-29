@@ -126,6 +126,10 @@ impl AgentOs {
                     path,
                     headers_json,
                     body: wire_body,
+                    body_base64: None,
+                    stream_operation: None,
+                    stream_id: None,
+                    max_bytes: None,
                 }),
                 buffer_limit,
             )

@@ -1,9 +1,14 @@
-import { getSecureExecUndiciDispatcher, undiciFetch } from "./undici.js";
-import { exposeCustomGlobal } from "../global-exposure.js";
-import { undiciHeadersModule, undiciRequestModule, undiciResponseModule } from "../prelude.js";
+import { getAgentOsUndiciDispatcher, undiciFetch } from "./undici.js";
+import { exposeCustomGlobal, exposeInstallCompatibleHardenedGlobal } from "../global-exposure.js";
+import { undiciFormDataModule, undiciHeadersModule, undiciRequestModule, undiciResponseModule } from "../prelude.js";
 import { isFlatHeaderList, onUpgradeSocketEnd } from "./http.js";
+import { resolveObjectURL } from "./whatwg-url.js";
 
-var MAX_HTTP_BODY_BYTES = 50 * 1024 * 1024;
+// npm 11 requests full registry metadata while resolving manifests. Large,
+// long-lived packages such as drizzle-orm can exceed 50 MiB even though their
+// install tarball is much smaller. Keep buffering bounded while allowing those
+// package-manager responses to pass through the Node compatibility layer.
+var MAX_HTTP_BODY_BYTES = 128 * 1024 * 1024;
 
 var MAX_HTTP_REQUEST_HEADER_BYTES = 64 * 1024;
 
@@ -16,6 +21,64 @@ var UndiciHeaders = undiciHeadersModule?.Headers ?? undiciHeadersModule?.default
 var UndiciRequest = undiciRequestModule?.Request ?? undiciRequestModule?.default ?? undiciRequestModule;
 
 var UndiciResponse = undiciResponseModule?.Response ?? undiciResponseModule?.default ?? undiciResponseModule;
+
+var UndiciFormData = undiciFormDataModule?.FormData ?? undiciFormDataModule?.default ?? undiciFormDataModule;
+
+var MAX_FORM_DATA_ENTRIES = 1024;
+var MAX_FORM_DATA_VALUE_BYTES = 64 * 1024 * 1024;
+var kBoundedFormData = Symbol.for("agentOS.boundedFormData");
+
+function formDataEntryCount(formData) {
+  let count = 0;
+  for (const _entry of formData) {
+    count += 1;
+    if (count > MAX_FORM_DATA_ENTRIES) break;
+  }
+  return count;
+}
+
+function assertFormDataValueBound(value) {
+  const bytes = typeof Blob === "function" && value instanceof Blob
+    ? value.size
+    : new TextEncoder().encode(`${value}`).byteLength;
+  if (bytes > MAX_FORM_DATA_VALUE_BYTES) {
+    const error = new RangeError(`FormData value byte limit ${MAX_FORM_DATA_VALUE_BYTES} exceeded; this runtime limit cannot be raised by guest code`);
+    error.code = "ERR_FORM_DATA_VALUE_SIZE_LIMIT";
+    throw error;
+  }
+}
+
+function installBoundedFormData(FormDataCtor) {
+  if (typeof FormDataCtor !== "function" || FormDataCtor.prototype[kBoundedFormData]) return;
+  const originalAppend = FormDataCtor.prototype.append;
+  const originalSet = FormDataCtor.prototype.set;
+  const originalHas = FormDataCtor.prototype.has;
+  FormDataCtor.prototype.append = function append(name, value, filename) {
+    if (formDataEntryCount(this) >= MAX_FORM_DATA_ENTRIES) {
+      const error = new RangeError(`FormData entry limit ${MAX_FORM_DATA_ENTRIES} exceeded; this runtime limit cannot be raised by guest code`);
+      error.code = "ERR_FORM_DATA_ENTRIES_LIMIT";
+      throw error;
+    }
+    assertFormDataValueBound(value);
+    return arguments.length >= 3
+      ? originalAppend.call(this, name, value, filename)
+      : originalAppend.call(this, name, value);
+  };
+  FormDataCtor.prototype.set = function set(name, value, filename) {
+    if (!originalHas.call(this, name) && formDataEntryCount(this) >= MAX_FORM_DATA_ENTRIES) {
+      const error = new RangeError(`FormData entry limit ${MAX_FORM_DATA_ENTRIES} exceeded; this runtime limit cannot be raised by guest code`);
+      error.code = "ERR_FORM_DATA_ENTRIES_LIMIT";
+      throw error;
+    }
+    assertFormDataValueBound(value);
+    return arguments.length >= 3
+      ? originalSet.call(this, name, value, filename)
+      : originalSet.call(this, name, value);
+  };
+  Object.defineProperty(FormDataCtor.prototype, kBoundedFormData, { value: true });
+}
+
+installBoundedFormData(UndiciFormData);
 
 function serializeFetchHeaders(headers) {
   if (!headers) {
@@ -55,7 +118,7 @@ function normalizeFetchRequestInit(options = {}) {
   const normalized = { ...options };
   // Some bundled Node SDKs pass node-fetch style `agent` options into fetch().
   // Undici doesn't accept that field, and the default global dispatcher already
-  // routes through the secure-exec virtual network stack.
+  // routes through the agentos virtual network stack.
   if (Object.prototype.hasOwnProperty.call(normalized, "agent")) {
     delete normalized.agent;
   }
@@ -84,24 +147,67 @@ function ensureFetchAcceptEncoding(options) {
   return { ...(options || {}), headers };
 }
 
+function blobUrlResponse(url, options) {
+  const parsed = new URL(url);
+  if (parsed.search) throw new TypeError("fetch failed");
+  parsed.hash = "";
+  const method = String(options.method ?? "GET").toUpperCase();
+  const blob = resolveObjectURL(parsed.href);
+  if (method !== "GET" || !(blob instanceof Blob)) throw new TypeError("fetch failed");
+  if (options.signal?.aborted) throw options.signal.reason;
+
+  const headers = serializeFetchHeaders(options.headers);
+  const rangeEntry = Object.entries(headers).find(([name]) => name.toLowerCase() === "range");
+  let body = blob;
+  let status = 200;
+  let statusText = "OK";
+  const responseHeaders = {
+    "content-length": String(blob.size),
+    ...(blob.type ? { "content-type": blob.type } : {})
+  };
+  if (rangeEntry) {
+    const match = /^bytes=(\d+)-(\d*)$/.exec(String(rangeEntry[1]).trim());
+    if (!match) throw new TypeError("fetch failed");
+    const start = Number(match[1]);
+    const requestedEnd = match[2] ? Number(match[2]) : blob.size - 1;
+    if (start >= blob.size || requestedEnd < start) throw new TypeError("fetch failed");
+    const end = Math.min(requestedEnd, blob.size - 1);
+    body = blob.slice(start, end + 1, blob.type);
+    status = 206;
+    statusText = "Partial Content";
+    responseHeaders["content-length"] = String(end - start + 1);
+    responseHeaders["content-range"] = `bytes ${start}-${end}/${blob.size}`;
+  }
+  const response = new UndiciResponse(body, { status, statusText, headers: responseHeaders });
+  Object.defineProperties(response, {
+    url: { configurable: true, value: parsed.href },
+    type: { configurable: true, value: "basic" }
+  });
+  return response;
+}
+
 async function fetch(input, options = {}) {
   if (typeof undiciFetch !== "function") {
     throw new Error("fetch requires undici to be configured");
   }
   let resolvedInput = input;
   let normalizedOptions = options;
-  if (input instanceof Request) {
+  if (input instanceof Request || typeof UndiciRequest === "function" && input instanceof UndiciRequest) {
     resolvedInput = input.url;
     normalizedOptions = {
       method: input.method,
       headers: serializeFetchHeaders(input.headers),
       body: input.body,
+      signal: input.signal,
       ...options
     };
   }
   normalizedOptions = normalizeFetchRequestInit(normalizedOptions);
   normalizedOptions = ensureFetchAcceptEncoding(normalizedOptions);
   const requestLabel = typeof resolvedInput === "string" ? resolvedInput : resolvedInput?.url ? String(resolvedInput.url) : String(resolvedInput);
+  if (requestLabel.startsWith("blob:nodedata:")) {
+    return blobUrlResponse(requestLabel, normalizedOptions);
+  }
   const handleId = typeof _registerHandle === "function" ? `fetch:${++_fetchHandleCounter}` : null;
   if (handleId) {
     _registerHandle?.(handleId, `fetch ${requestLabel}`);
@@ -110,7 +216,7 @@ async function fetch(input, options = {}) {
   // calls. Per-call dispatchers (the 4f470c61 workaround for pooled clients
   // going stale against released sockets) are no longer needed now that
   // host->guest socket event push keeps pooled connections live.
-  const fetchDispatcher = normalizedOptions.dispatcher == null && typeof getSecureExecUndiciDispatcher === "function" ? getSecureExecUndiciDispatcher() : null;
+  const fetchDispatcher = normalizedOptions.dispatcher == null && typeof getAgentOsUndiciDispatcher === "function" ? getAgentOsUndiciDispatcher() : null;
   try {
     return await undiciFetch(
       resolvedInput,
@@ -262,65 +368,20 @@ var Response = class _Response {
 
 exposeCustomGlobal("_upgradeSocketEnd", onUpgradeSocketEnd);
 
-exposeCustomGlobal("fetch", fetch);
+exposeInstallCompatibleHardenedGlobal("fetch", fetch);
 
-exposeCustomGlobal("Headers", UndiciHeaders);
+exposeInstallCompatibleHardenedGlobal("Headers", UndiciHeaders);
 
-exposeCustomGlobal("Request", UndiciRequest);
+exposeInstallCompatibleHardenedGlobal("Request", UndiciRequest);
 
-exposeCustomGlobal("Response", UndiciResponse);
+exposeInstallCompatibleHardenedGlobal("Response", UndiciResponse);
 
 var Blob = globalThis.Blob;
-
-if (typeof Blob === "undefined") {
-  Blob = class BlobStub {
-  };
-  exposeCustomGlobal("Blob", Blob);
-}
+exposeInstallCompatibleHardenedGlobal("Blob", Blob);
 
 var File = globalThis.File;
+exposeInstallCompatibleHardenedGlobal("File", File);
 
-if (typeof File === "undefined") {
-  File = class FileStub extends Blob {
-    name;
-    lastModified;
-    webkitRelativePath;
-    constructor(parts = [], name = "", options = {}) {
-      super(parts, options);
-      this.name = String(name);
-      this.lastModified = typeof options.lastModified === "number" ? options.lastModified : Date.now();
-      this.webkitRelativePath = "";
-    }
-  };
-  exposeCustomGlobal("File", File);
-}
-
-if (typeof globalThis.FormData === "undefined") {
-  class FormDataStub {
-    _entries = [];
-    append(name, value) {
-      this._entries.push([name, value]);
-    }
-    get(name) {
-      const entry = this._entries.find(([k]) => k === name);
-      return entry ? entry[1] : null;
-    }
-    getAll(name) {
-      return this._entries.filter(([k]) => k === name).map(([, v]) => v);
-    }
-    has(name) {
-      return this._entries.some(([k]) => k === name);
-    }
-    delete(name) {
-      this._entries = this._entries.filter(([k]) => k !== name);
-    }
-    entries() {
-      return this._entries[Symbol.iterator]();
-    }
-    [Symbol.iterator]() {
-      return this.entries();
-    }
-  }
-  exposeCustomGlobal("FormData", FormDataStub);
-}
-export { Blob, File, Headers, MAX_HTTP_BODY_BYTES, MAX_HTTP_REQUEST_HEADERS, MAX_HTTP_REQUEST_HEADER_BYTES, Request, Response, UndiciHeaders, UndiciRequest, UndiciResponse, _fetchHandleCounter, createFetchHeaders, ensureFetchAcceptEncoding, fetch, normalizeFetchRequestInit, serializeFetchHeaders };
+var FormData = UndiciFormData;
+exposeInstallCompatibleHardenedGlobal("FormData", FormData);
+export { Blob, File, FormData, Headers, MAX_FORM_DATA_ENTRIES, MAX_FORM_DATA_VALUE_BYTES, MAX_HTTP_BODY_BYTES, MAX_HTTP_REQUEST_HEADERS, MAX_HTTP_REQUEST_HEADER_BYTES, Request, Response, UndiciFormData, UndiciHeaders, UndiciRequest, UndiciResponse, _fetchHandleCounter, blobUrlResponse, createFetchHeaders, ensureFetchAcceptEncoding, fetch, formDataEntryCount, installBoundedFormData, normalizeFetchRequestInit, serializeFetchHeaders };

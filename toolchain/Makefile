@@ -7,6 +7,7 @@ WASI_C_LIBDIR := $(WASI_C_SYSROOT)/lib/wasm32-wasi
 
 # Standalone binary output directory (configurable)
 COMMANDS_DIR ?= $(RELEASE_DIR)/commands
+WASM_OPT_JOBS ?= 4
 
 # Detect patched std: if std-patches/ has .patch files and patch-std.sh exists, use patched sysroot
 PATCHES := $(wildcard std-patches/*.patch)
@@ -37,6 +38,9 @@ TOOLCHAIN_COMMAND_CRATES := $(wildcard crates/commands/*)
 SKIPPED_BULK_COMMANDS := git codex codex-exec
 COMMAND_NAMES := $(filter-out $(SKIPPED_BULK_COMMANDS),$(patsubst cmd-%,%,$(notdir $(SOFTWARE_COMMAND_CRATES))) $(notdir $(TOOLCHAIN_COMMAND_CRATES)))
 COMMAND_PACKAGES := $(foreach command,$(COMMAND_NAMES),-p $(call cargo_package_for_command,$(command)))
+COREUTILS_COMMAND_CRATES := $(wildcard ../software/coreutils/native/crates/cmd-*)
+PR_COMMAND_NAMES := $(patsubst cmd-%,%,$(notdir $(COREUTILS_COMMAND_CRATES))) _stubs
+PR_COMMAND_PACKAGES := $(foreach command,$(PR_COMMAND_NAMES),-p $(call cargo_package_for_command,$(command)))
 
 # Alias symlinks: link_name:target_binary
 ALIAS_SYMLINKS := \
@@ -56,7 +60,7 @@ STUB_COMMANDS := \
 	pinky who users uptime \
 	stty sync tty
 
-.PHONY: all commands wasm wasm-opt-check host test clean patch-std patch-check vendor patch-vendor vendor-patch-check size-report install c-wasm codex fd-mapping-contract-wasm fd-mapping-contract-native
+.PHONY: all commands pr-commands wasm wasm-opt-check host test clean patch-std patch-check vendor patch-vendor vendor-patch-check size-report install c-wasm codex fd-mapping-contract-wasm fd-mapping-contract-native
 
 all: wasm
 
@@ -67,6 +71,17 @@ all: wasm
 # the generated stub aliases and is built with the default command set.
 commands: wasm
 	$(MAKE) -C c programs install
+
+# PR validation only needs the default coreutils package. Keep the complete
+# registry command build in `commands` for nightly and publish workflows.
+pr-commands:
+	@test "$(abspath $(COMMANDS_DIR))" = "$(abspath $(RELEASE_DIR)/commands)" || \
+		{ echo "refusing to clean unexpected PR command directory: $(COMMANDS_DIR)"; exit 1; }
+	rm -rf "$(COMMANDS_DIR)"
+	$(MAKE) wasm \
+		COMMAND_NAMES="$(PR_COMMAND_NAMES)" \
+		COMMAND_PACKAGES="$(PR_COMMAND_PACKAGES)"
+	$(MAKE) -C c build/mknod install COMMANDS="mknod"
 
 # Build the real wasm32-wasip1 `codex-exec` agent engine and install it where
 # @agentos-software/codex-cli stages commands from.
@@ -82,7 +97,7 @@ AGENTOS_ROOT := $(abspath $(CURDIR)/..)
 CODEX_REF := $(shell cat $(CURDIR)/codex-ref 2>/dev/null)
 CODEX_REPO ?=
 CODEX_WASI_SDK_DIR := $(abspath $(CURDIR)/c/vendor/wasi-sdk)
-codex: c/vendor/wasi-sdk/bin/clang
+codex: c/vendor/wasi-sdk/bin/clang c/sysroot/lib/wasm32-wasi/libc.a
 ifeq ($(strip $(CODEX_REPO)),)
 	@echo "codex: reproducible build from pin $(CODEX_REF)"
 	@WASI_SDK_DIR="$(CODEX_WASI_SDK_DIR)" \
@@ -200,6 +215,7 @@ wasm: c/sysroot/lib/wasm32-wasi/libc.a vendor patch-vendor patch-std wasm-opt-ch
 	@set -e; \
 	for spec in "fd:vendor/fd-find/Cargo.toml" "rg:vendor/ripgrep/Cargo.toml"; do \
 		bin=$${spec%%:*}; manifest=$${spec#*:}; \
+		case " $(COMMAND_NAMES) " in *" $$bin "*) ;; *) continue ;; esac; \
 		rm -f "$${manifest%/*}/Cargo.lock"; \
 		CC_wasm32_wasip1="$(WASI_C_CC)" \
 		AR_wasm32_wasip1="$(WASI_C_AR)" \
@@ -214,20 +230,35 @@ wasm: c/sysroot/lib/wasm32-wasi/libc.a vendor patch-vendor patch-std wasm-opt-ch
 			--bin "$$bin"; \
 	done
 	@mkdir -p $(COMMANDS_DIR)
-	@TOTAL=0; SKIPPED=0; \
+	@set -e; \
 	HAS_OPT=$$(command -v wasm-opt >/dev/null 2>&1 && echo 1 || echo 0); \
+	if [ "$$HAS_OPT" = "1" ]; then \
+		printf '%s\n' $(COMMAND_NAMES) | \
+			xargs -P $(WASM_OPT_JOBS) -n 1 sh -c ' \
+				wasm="$(RELEASE_DIR)/$$1.wasm"; \
+				if [ -f "$$wasm" ]; then \
+					wasm-opt -O3 --strip-debug --all-features "$$wasm" -o "$(COMMANDS_DIR)/$$1"; \
+				else \
+					echo "Warning: $$wasm not found — skipping $$1"; \
+				fi \
+			' _; \
+	else \
+		for cmd in $(COMMAND_NAMES); do \
+			wasm="$(RELEASE_DIR)/$$cmd.wasm"; \
+			if [ -f "$$wasm" ]; then \
+				cp "$$wasm" "$(COMMANDS_DIR)/$$cmd"; \
+			else \
+				echo "Warning: $$wasm not found — skipping $$cmd"; \
+			fi; \
+		done; \
+	fi; \
+	TOTAL=0; SKIPPED=0; \
 	for cmd in $(COMMAND_NAMES); do \
 		wasm="$(RELEASE_DIR)/$$cmd.wasm"; \
 		if [ -f "$$wasm" ]; then \
 			TOTAL=$$((TOTAL + 1)); \
-			if [ "$$HAS_OPT" = "1" ]; then \
-				wasm-opt -O3 --strip-debug --all-features "$$wasm" -o "$(COMMANDS_DIR)/$$cmd"; \
-			else \
-				cp "$$wasm" "$(COMMANDS_DIR)/$$cmd"; \
-			fi; \
 		else \
 			SKIPPED=$$((SKIPPED + 1)); \
-			echo "Warning: $$wasm not found — skipping $$cmd"; \
 		fi; \
 	done; \
 	echo ""; \

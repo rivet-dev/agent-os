@@ -88,7 +88,7 @@ The same path is open to your own programs. A program you compile for
 `wasm32-wasip1` runs as a guest command exactly like the bundled ones; link the
 `wasi-ext` bindings if it needs processes, users, or sockets, and leave them out
 for a pure-compute tool. Heavy native binaries that are not yet available as
-WASM belong in a [mounted sandbox](/docs/sandbox) instead.
+WASM belong in an [external sandbox](/docs/sandboxes) instead.
 
 ## Recommendations
 

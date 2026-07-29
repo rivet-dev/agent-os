@@ -1,4 +1,4 @@
-From: AgentOS <dev@agentos.dev>
+From: AgentOS <dev@agentos-sdk.dev>
 Subject: [PATCH] wasi-libc: grant read rights for O_RDONLY openat
 
 Linux callers also commonly pass literal zero for O_RDONLY, while wasi-libc's

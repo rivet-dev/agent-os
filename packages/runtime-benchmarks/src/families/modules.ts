@@ -111,7 +111,7 @@ if (!mod.z || typeof mod.z.object !== "function") {
 function runHostNpmPackageImport(iters: number, warmup: number): number[] {
 	const entryUrl = pathToFileURL(join(ZOD_PACKAGE_HOST_DIR, "index.js")).href;
 	const samples: number[] = [];
-	const dir = mkdtempSync(join(tmpdir(), "secure-exec-modules-npm-"));
+	const dir = mkdtempSync(join(tmpdir(), "agentos-modules-npm-"));
 	const runner = join(dir, "import-zod.mjs");
 	try {
 		writeFileSync(runner, npmPackageImportRunnerSource());

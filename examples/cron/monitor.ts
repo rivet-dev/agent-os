@@ -11,7 +11,7 @@ conn.on("cronEvent", (event) => {
 });
 // docs:end subscribe
 
-await handle.scheduleCron({
+await handle.cron.schedule({
   schedule: "*/1 * * * *",
   action: { type: "exec", command: "echo", args: ["heartbeat"] },
 });

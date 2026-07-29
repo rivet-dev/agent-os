@@ -1,0 +1,36 @@
+{
+	"name": "@rivet-dev/agentos-experiment-gigacode",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"bin": {
+		"gigacode": "./gigacode.ts",
+		"giga": "./gigacode.ts"
+	},
+	"scripts": {
+		"check-types": "tsc --noEmit",
+		"gigacode": "tsx gigacode.ts",
+		"install-global": "bash ./install-global.sh",
+		"test:unit": "vitest run gigacode.gate.test.ts --reporter=verbose",
+		"test:e2e": "vitest run gigacode.e2e.test.ts --reporter=verbose --pool=threads --maxWorkers=1 --minWorkers=1"
+	},
+	"dependencies": {
+		"@agentos-software/claude-code": "workspace:*",
+		"@agentos-software/codex": "workspace:*",
+		"@agentos-software/opencode": "workspace:*",
+		"@agentos-software/pi": "workspace:*",
+		"@agentos-software/ripgrep": "workspace:*",
+		"@rivet-dev/agentos": "workspace:*",
+		"opencode-ai": "1.17.20",
+		"pino": "9.14.0",
+		"rivetkit": "catalog:rivetkit",
+		"tsx": "^4.19.0"
+	},
+	"devDependencies": {
+		"@copilotkit/llmock": "^1.6.0",
+		"@opencode-ai/sdk": "^1.1.21",
+		"@types/node": "^22.19.15",
+		"typescript": "^5.9.2",
+		"vitest": "^2.1.8"
+	}
+}

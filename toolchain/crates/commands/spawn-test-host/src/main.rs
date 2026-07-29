@@ -2,6 +2,7 @@
 ///
 /// Subcommands:
 ///   echo       — spawn "echo hello" and print captured stdout
+///   tokio-bash — run the exact shell/stdio/cwd shape used by Codex
 ///   fail       — spawn a command that exits non-zero and print exit code
 ///   kill-test  — spawn "sleep 60", kill it, verify termination
 ///   env-test   — spawn "env" with custom env vars and print captured stdout
@@ -12,6 +13,7 @@ fn main() {
 
     let code = match subcommand {
         "echo" => test_echo(),
+        "tokio-bash" => test_tokio_bash(),
         "fail" => test_fail(),
         "kill-test" => test_kill(),
         "env-test" => test_env(),
@@ -24,9 +26,47 @@ fn main() {
     std::process::exit(code);
 }
 
+fn test_tokio_bash() -> i32 {
+    let runtime = match tokio::runtime::Builder::new_current_thread().build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("tokio-bash:runtime-error:{error}");
+            return 1;
+        }
+    };
+    runtime.block_on(async {
+        let mut command = tokio::process::Command::new("/opt/agentos/bin/bash");
+        command
+            .args(["-lc", "printf agentos-codex-shell-ok"])
+            .current_dir("/workspace")
+            .env_clear()
+            .env("PATH", "/opt/agentos/bin")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        match command.output().await {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if output.status.success() && stdout == "agentos-codex-shell-ok" {
+                    println!("PASS");
+                    0
+                } else {
+                    eprintln!("tokio-bash:unexpected-output:{}:{stdout}", output.status);
+                    1
+                }
+            }
+            Err(error) => {
+                eprintln!("tokio-bash:output-error:{error}");
+                1
+            }
+        }
+    })
+}
+
 /// Test 1: spawn "echo hello", capture stdout, verify content
 fn test_echo() -> i32 {
-    let mut child = match wasi_spawn::spawn_child(&["echo", "hello"], &[], "/") {
+    let mut child = match wasi_spawn::spawn_child(&["/opt/agentos/bin/echo", "hello"], &[], "/") {
         Ok(c) => c,
         Err(e) => {
             eprintln!("FAIL spawn: {}", e);
@@ -56,13 +96,14 @@ fn test_echo() -> i32 {
 
 /// Test 2: spawn a command that exits non-zero, verify exit code
 fn test_fail() -> i32 {
-    let mut child = match wasi_spawn::spawn_child(&["sh", "-c", "exit 42"], &[], "/") {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("FAIL spawn: {}", e);
-            return 1;
-        }
-    };
+    let mut child =
+        match wasi_spawn::spawn_child(&["/opt/agentos/bin/sh", "-c", "exit 42"], &[], "/") {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("FAIL spawn: {}", e);
+                return 1;
+            }
+        };
 
     match child.consume_output() {
         Ok(output) => {
@@ -84,7 +125,7 @@ fn test_fail() -> i32 {
 
 /// Test 3: spawn sleep, kill it, verify termination
 fn test_kill() -> i32 {
-    let mut child = match wasi_spawn::spawn_child(&["sleep", "60"], &[], "/") {
+    let mut child = match wasi_spawn::spawn_child(&["/opt/agentos/bin/sleep", "60"], &[], "/") {
         Ok(c) => c,
         Err(e) => {
             eprintln!("FAIL spawn: {}", e);
@@ -120,7 +161,7 @@ fn test_kill() -> i32 {
 /// Test 4: spawn env with custom variables, verify they appear
 fn test_env() -> i32 {
     let mut child = match wasi_spawn::spawn_child(
-        &["env"],
+        &["/opt/agentos/bin/env"],
         &[("TEST_VAR", "hello_world"), ("FOO", "bar")],
         "/",
     ) {

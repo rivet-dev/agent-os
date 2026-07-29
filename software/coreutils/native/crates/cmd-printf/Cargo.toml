@@ -4,7 +4,7 @@ name = "cmd-printf"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "printf standalone binary for secure-exec VM"
+description = "printf standalone binary for agentos VM"
 
 [[bin]]
 name = "printf"

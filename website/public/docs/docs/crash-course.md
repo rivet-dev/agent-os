@@ -42,13 +42,13 @@ Let one agent call another through a [binding](/docs/bindings). The coder gets a
 
 *See [Full Example](https://github.com/rivet-dev/agentos/tree/main/examples/crash-course) or [Documentation](/docs/agent-to-agent)*
 
-### Multiplayer & Realtime
+### Multiplayer
 
 Connect multiple clients to the same agent VM. All subscribers see session output, process logs, and shell data in realtime.
 
 *See [Full Example](https://github.com/rivet-dev/agentos/tree/main/examples/crash-course) or [Documentation](/docs/multiplayer)*
 
-### Workflows
+### Workflows & Graphs
 
 Orchestrate multi-step agent tasks with durable workflows that survive crashes and restarts.
 
@@ -74,14 +74,14 @@ Proxy HTTP requests into VMs with `httpRequest`. Create actor-namespaced preview
 
 *See [Full Example](https://github.com/rivet-dev/agentos/tree/main/examples/crash-course) or [Documentation](/docs/networking)*
 
-### Cron Jobs
+### Crons & Loops
 
 Schedule recurring commands and agent sessions with cron expressions.
 
 *See [Full Example](https://github.com/rivet-dev/agentos/tree/main/examples/crash-course) or [Documentation](/docs/cron)*
 
-### Sandbox Mounting
+### External Sandboxes
 
 agentOS uses a hybrid model: agents run in a lightweight VM by default and mount a full sandbox on demand for heavy workloads like browsers, compilation, and desktop automation. Sandboxes are powered by [Sandbox Agent](https://sandboxagent.dev), so you can swap providers without changing agent code. Mount the sandbox as a filesystem and expose its process management as bindings.
 
-[Documentation](/docs/sandbox)
+[Documentation](/docs/sandboxes)

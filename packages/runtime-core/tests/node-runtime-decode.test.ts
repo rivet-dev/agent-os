@@ -4,7 +4,7 @@ import { describe, expect, test } from "vitest";
 
 // Regression guard for #11 and #59.
 //
-// Both issues were caused by the removed `@secure-exec/v8` runtime.js
+// Both issues were caused by the removed legacy V8 runtime.js
 // (a stdout/socket-path handshake plus a TDZ bug) together with a host-side
 // `node:v8.deserialize()` decode of `run()` results. That host-side V8
 // serialization made result decoding sensitive to the host Node version /

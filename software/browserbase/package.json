@@ -3,7 +3,7 @@
 	"version": "0.3.3",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "Browserbase browse CLI for secure-exec VMs (cloud browser automation)",
+	"description": "Browserbase browse CLI for agentos VMs (cloud browser automation)",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"bin": {

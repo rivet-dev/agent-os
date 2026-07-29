@@ -1,27 +1,29 @@
 # agentOS
 
-AgentOS owns the runtime, kernel, VFS, language execution, registry packages,
-ACP/session layer, AgentOS client APIs, docs, and publish machinery. The
-`secure-exec` repository is now a generated compatibility mirror only.
+Always spell the product name `agentOS`, never `AgentOS`; do not alter type
+identifiers such as `AgentOSActorConfig`.
+
+agentOS owns the runtime, kernel, VFS, language execution, registry packages,
+ACP/session layer, agentOS client APIs, docs, and publish machinery. agentOS
+Exec is the JavaScript, TypeScript, and Python execution surface of agentOS.
 
 ## Boundaries
 
-- Keep AgentOS product versions pinned at `0.0.1` in committed files. Release
+- Keep agentOS product versions pinned at `0.0.1` in committed files. Release
   workflows apply real versions transiently with `scripts/publish`; never commit
   release-version rewrites.
-- AgentOS-owned npm packages must use the `@rivet-dev/agentos-*` namespace.
+- agentOS-owned npm packages must use the `@rivet-dev/agentos-*` namespace.
   Registry software packages must use `@agentos-software/*`. Never introduce
   packages under `@agentos/*`.
 - Call guest environments VMs, not sandboxes, except when referring to a package
   or public API that already uses the word.
 - The protocol has no backward compatibility guarantee. Client, sidecar, and
   protocol crates ship in same-version lockstep; update both sides together.
-- Generic runtime work belongs here, not in `../secure-exec`. Regenerate that
-  mirror with `node scripts/generate-secure-exec-mirror.mjs` after changing a
-  shimmed public surface.
+- Generic runtime and language-execution work belongs here. Do not add a
+  compatibility mirror or a second package namespace for AgentOS language execution.
 - Keep root `package.json` scripts limited to Turbo orchestration; repo-specific
   commands belong in `justfile` recipes or scoped package scripts.
-- AgentOS targets native Linux/container execution. Browser support is not
+- agentOS targets native Linux/container execution. Browser support is not
   needed or supported here: browser sources may remain as dormant reference
   code, but their entrypoints must stay disabled and they must not enter default
   builds, CI, publication, or behavioral-parity requirements without a
@@ -66,13 +68,13 @@ migrate, or delete another owner's schema:
 - Sidecar/core durable state owns `agentos_core_*`, including
   `agentos_core_schema_version`. This namespace is intentionally generic; do
   not name it after sessions, ACP, or another current consumer.
-- The AgentOS TypeScript actor layer owns `agentos_actor_*`, including
+- The agentOS TypeScript actor layer owns `agentos_actor_*`, including
   `agentos_actor_schema_version`.
 
 Do not use a shared schema-version table, a `component` discriminator, or a
 global migration sequence across these owners. Each migration must update its
 owner's version in the same SQLite transaction or savepoint as its schema
-changes. AgentOS-owned tables must be `STRICT`.
+changes. agentOS-owned tables must be `STRICT`.
 
 There is no compatibility requirement for the previous SQLite layout. Remove
 the shared component-version mechanism and rename or replace legacy
@@ -117,6 +119,11 @@ add compatibility views, aliases, legacy adoption paths, or dual writes.
   only when the caller explicitly supplied them.
 - Agent adapters must use real upstream SDKs. Do not replace SDK adapters with
   direct API-call stubs.
+- `rivet-dev/pi-acp` is an agentOS-maintained fork. When Pi ACP behavior needs
+  to change, fix and test the fork directly, push the fork commit, then update
+  the pinned commit and verified source-archive checksum in
+  `software/pi/scripts/build-pi-acp.mjs`; do not work around fork bugs in the
+  agentOS package wrapper or resolve `pi-acp` from npm.
 - WASM command binaries and every toolchain build output are generated
   artifacts. Never commit `packages/runtime-core/commands/`, `software/*/bin/`,
   `toolchain/vendor/`, `toolchain/c/{build,vendor,libs,sysroot,.cache}/`, or
@@ -213,9 +220,9 @@ custom host-syscall imports. Treat that target as **native POSIX**;
 
 - `scripts/publish` is the source of truth for npm/crates discovery, version
   rewriting, npm publish, crates publish, release assets, and R2 upload.
-- Publishable npm packages and Rust crates are AgentOS-owned. Compatibility
-  `@secure-exec/*`, `secure-exec`, and `secure-exec-*` artifacts are emitted
-  from the generated mirror.
+- Publishable npm packages and Rust crates are agentOS-owned. agentOS language
+  execution is exposed through `@rivet-dev/agentos`; do not publish separate
+  language packages, compatibility artifacts, or language subpaths.
 - The release workflow must build and stage the native sidecar binaries,
   runtime-sidecar binaries, registry WASM commands, and pyodide assets before
   publish.
@@ -223,16 +230,35 @@ custom host-syscall imports. Treat that target as **native POSIX**;
 
 ## Docs
 
-- The AgentOS website lives in `website/` and deploys to `agentos-sdk.dev`.
+- The agentOS website lives in `website/`. Its canonical public domain is
+  `agentos-sdk.dev`. This is the only accepted AgentOS domain for URLs, schema
+  IDs, email addresses, package metadata, and documentation.
 - Keep docs current in the same change as user-facing behavior: public APIs,
   runtime options, env knobs, limits, architecture, and package names.
 - Runnable docs code must come from real checked example files via the docs
   theme `<CodeSnippet>` mechanism. Inline code is fine only for shell commands,
   config fragments, or non-runnable examples.
 - Validate docs changes with `pnpm --dir website build` when the site changes.
+- Run `just docs-check-links` when changing documentation paths, routes,
+  redirects, headings used as link anchors, or shared navigation links. It
+  builds and crawls the rendered Astro site. Pass `true` to include external
+  URLs (`just docs-check-links true`).
 
 ## Tests
 
+- Required PR CI should target under 10 minutes of wall-clock time and must stay
+  under 15 minutes. Budget the complete critical path, including checkout and
+  dependency setup, cache restore/save, artifact compression, upload, download,
+  extraction, job fan-in, and tests; moving work between jobs does not make that
+  work free. Transfer only the smallest required outputs, never Cargo `target/`,
+  `node_modules/`, duplicated software staging trees, or unstripped debug
+  binaries. Balance total transferred bytes against critical-path latency:
+  parallel consumers may repeat a small, measured setup or download tailored
+  artifacts when that materially reduces wall time and runner capacity is real;
+  do not consolidate them into a slower serial gate merely to minimize bytes. If
+  CI misses the 10-minute target, warn the user promptly, identify the slow job,
+  transfer, or setup step, and compare the workflow diff and recent baseline run
+  times; do not silently normalize slow CI.
 - Cheap gates for normal changes: `cargo check --workspace`, `pnpm build`,
   `pnpm check-types`, publish helper checks, changed script syntax checks, and
   workflow YAML parsing.
@@ -243,6 +269,29 @@ custom host-syscall imports. Treat that target as **native POSIX**;
   limits, or watchdog timeouts must be ignored/skipped by default with a clear
   reason. Fast tests where the configured safeguard fires should stay in the
   default suite.
+
+## Gigacode Performance Investigations
+
+- For cold-start latency, run `gigacode` directly and use the plain
+  `[gigacode]` phase lines and durations mirrored from `daemon.log` while the
+  client waits for provider bootstrap. These startup lines are intentionally
+  human-readable and separate from Pino session logs.
+- Investigate Gigacode latency from its per-session Pino JSONL logs, not by
+  inferring timing from the OpenCode screen or the aggregate `daemon.log`.
+- Logs live at
+  `~/.local/state/gigacode/session-logs/<open-code-session-id>.jsonl` by default,
+  or under `$GIGACODE_STATE_DIR/session-logs/` when that override is set.
+- Reproduce one turn in a fresh session, identify the newest log with
+  `ls -lt ~/.local/state/gigacode/session-logs`, then inspect its ordered
+  `event` and `durationMs` fields with `jq`.
+- Compare `rivet.actor.resolved`, `agentos.session.created`,
+  `agentos.prompt.completed`, `prompt.completed`, `session.idle`, and
+  `agentos.connection.disposed` before optimizing. The actor event measures
+  resolution of the shared per-cwd workspace actor; the ACP event measures the
+  distinct harness session created inside it.
+- Preserve the raw JSONL file when reporting a regression. Use
+  `GIGACODE_LOG_LEVEL` to change the Pino level; performance phase records are
+  emitted at `info`.
 
 ## Version Control
 

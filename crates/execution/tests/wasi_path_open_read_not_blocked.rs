@@ -97,7 +97,6 @@ fn wasm_runner_path_open_gates_write_access_on_write_rights() {
         "read-only EROFS must be gated behind requestedWriteAccess so reads succeed"
     );
 }
-
 #[test]
 fn wasm_runner_fd_close_releases_directory_backing_fd() {
     let wasm_src = read_source("assets/runners/wasi-module.js");
@@ -117,5 +116,32 @@ fn wasm_runner_fd_close_releases_directory_backing_fd() {
     assert!(
         close_body.contains("__agentOSFs().closeSync(entry.realFd);"),
         "fd_close must close the kernel-backed descriptor before deleting its WASI entry"
+    );
+}
+
+#[test]
+fn writable_wasm_preopens_include_create_file_right() {
+    let runner = read_source("assets/runners/wasm-runner.mjs");
+
+    assert!(
+        runner.contains("const WASI_RIGHT_PATH_CREATE_FILE = 1n << 12n;"),
+        "WASI PATH_CREATE_FILE must use preview1 bit 12"
+    );
+    let rights_start = runner
+        .find("const READ_WRITE_PREOPEN_RIGHTS_BASE =")
+        .expect("read-write preopen rights declaration");
+    let rights_end = runner[rights_start..]
+        .find("const READ_WRITE_PREOPEN_RIGHTS_INHERITING =")
+        .map(|offset| rights_start + offset)
+        .expect("read-write inheriting rights declaration");
+    assert!(
+        runner[rights_start..rights_end].contains("WASI_RIGHT_PATH_CREATE_FILE"),
+        "writable WASI preopens must grant PATH_CREATE_FILE or std::fs::write fails with EACCES"
+    );
+    assert!(
+        runner.contains(
+            "const READ_WRITE_PREOPEN_RIGHTS_INHERITING = READ_WRITE_PREOPEN_RIGHTS_BASE;"
+        ),
+        "Rust std requests directory path rights in path_open's inheriting set; writable preopens must allow their tier's path rights"
     );
 }

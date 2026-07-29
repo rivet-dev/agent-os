@@ -6,13 +6,13 @@ const client = createClient<typeof registry>({
 });
 const agent = client.vm.getOrCreate("my-agent");
 
-await agent.openSession({
+await agent.sessions.open({
 	agent: "pi",
 	env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
 
 // Start a long-running prompt
-const promptPromise = agent.prompt({
+const promptPromise = agent.sessions.prompt({
 	content: [
 		{
 			type: "text",
@@ -23,7 +23,7 @@ const promptPromise = agent.prompt({
 
 // Cancellation is cooperative and does not delete durable history.
 setTimeout(async () => {
-	await agent.cancelPrompt();
+	await agent.sessions.cancelPrompt();
 }, 10_000);
 
 const response = await promptPromise;

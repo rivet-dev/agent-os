@@ -1,11 +1,5 @@
 import { resolve } from "node:path";
-import { configDefaults, defineConfig } from "vitest/config";
-
-// The in-VM TypeScript compilation integration test is a pre-existing failure on
-// main (the guest tsc returns success:false / "Error: null"); this package is
-// unchanged on this branch. Gate it behind AGENTOS_E2E_FULL=1 to keep PR CI
-// green; `passWithNoTests` because it is currently the package's only test file.
-const runFullE2e = process.env.AGENTOS_E2E_FULL === "1";
+import { defineConfig } from "vitest/config";
 
 export default defineConfig({
 	resolve: {
@@ -15,7 +9,7 @@ export default defineConfig({
 				replacement: resolve(__dirname, "../core/dist/runtime-compat.js"),
 			},
 			{
-				find: "@rivet-dev/agentos-typescript",
+				find: "@rivet-dev/agentos-internal-typescript",
 				replacement: resolve(__dirname, "./src/index.ts"),
 			},
 		],
@@ -23,11 +17,5 @@ export default defineConfig({
 	test: {
 		testTimeout: 60_000,
 		passWithNoTests: true,
-		exclude: [
-			...configDefaults.exclude,
-			...(runFullE2e
-				? []
-				: ["tests/typescript-tools.integration.test.ts"]),
-		],
 	},
 });

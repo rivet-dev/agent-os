@@ -121,6 +121,7 @@ export type AcpCreateSessionRequest = {
     readonly agentType: string
     readonly runtime: AcpRuntimeKind
     readonly cwd: string
+    readonly additionalDirectories: readonly string[]
     readonly args: readonly string[]
     readonly env: ReadonlyMap<string, string>
     readonly protocolVersion: i32
@@ -135,6 +136,7 @@ export function readAcpCreateSessionRequest(bc: bare.ByteCursor): AcpCreateSessi
         agentType: bare.readString(bc),
         runtime: readAcpRuntimeKind(bc),
         cwd: bare.readString(bc),
+        additionalDirectories: read0(bc),
         args: read0(bc),
         env: read1(bc),
         protocolVersion: bare.readI32(bc),
@@ -149,6 +151,7 @@ export function writeAcpCreateSessionRequest(bc: bare.ByteCursor, x: AcpCreateSe
     bare.writeString(bc, x.agentType)
     writeAcpRuntimeKind(bc, x.runtime)
     bare.writeString(bc, x.cwd)
+    write0(bc, x.additionalDirectories)
     write0(bc, x.args)
     write1(bc, x.env)
     bare.writeI32(bc, x.protocolVersion)
@@ -638,15 +641,19 @@ export function writeAcpCloseSessionRequest(bc: bare.ByteCursor, x: AcpCloseSess
  * Resume a session that exists in durable storage but is not live in the current
  * VM (e.g. after a Rivet actor slept and woke with a fresh VM). The sidecar runs
  * the stateless resume state machine (native session/load when the agent supports
- * it, else a fresh session/new + transcript continuation preamble). `cwd`/`env`
- * describe the fresh adapter launch used by the fallback tier. `transcriptPath`,
- * when present, is a guest-readable path the fallback preamble points the agent at.
+ * it, else a fresh session/new + transcript continuation preamble). `runtime`,
+ * `cwd`, and `env` describe the fresh adapter launch used by the fallback tier.
+ * `transcriptPath`, when present, is a guest-readable path the fallback preamble
+ * points the agent at.
  */
 export type AcpResumeSessionRequest = {
     readonly sessionId: string
     readonly agentType: string
+    readonly runtime: AcpRuntimeKind
     readonly transcriptPath: string | null
     readonly cwd: string
+    readonly additionalDirectories: readonly string[]
+    readonly mcpServers: JsonUtf8
     readonly env: ReadonlyMap<string, string>
 }
 
@@ -654,8 +661,11 @@ export function readAcpResumeSessionRequest(bc: bare.ByteCursor): AcpResumeSessi
     return {
         sessionId: bare.readString(bc),
         agentType: bare.readString(bc),
+        runtime: readAcpRuntimeKind(bc),
         transcriptPath: read2(bc),
         cwd: bare.readString(bc),
+        additionalDirectories: read0(bc),
+        mcpServers: readJsonUtf8(bc),
         env: read1(bc),
     }
 }
@@ -663,8 +673,11 @@ export function readAcpResumeSessionRequest(bc: bare.ByteCursor): AcpResumeSessi
 export function writeAcpResumeSessionRequest(bc: bare.ByteCursor, x: AcpResumeSessionRequest): void {
     bare.writeString(bc, x.sessionId)
     bare.writeString(bc, x.agentType)
+    writeAcpRuntimeKind(bc, x.runtime)
     write2(bc, x.transcriptPath)
     bare.writeString(bc, x.cwd)
+    write0(bc, x.additionalDirectories)
+    writeJsonUtf8(bc, x.mcpServers)
     write1(bc, x.env)
 }
 
@@ -1343,18 +1356,26 @@ export function writeAcpSessionCreatedResponse(bc: bare.ByteCursor, x: AcpSessio
 export type AcpSessionRpcResponse = {
     readonly sessionId: string
     readonly response: JsonUtf8
+    /**
+     * Number of request-scoped AcpSessionEvent frames emitted before this
+     * terminal response. Clients use this as an event-delivery barrier because
+     * response and event frames travel on separate priority lanes.
+     */
+    readonly eventCount: u32
 }
 
 export function readAcpSessionRpcResponse(bc: bare.ByteCursor): AcpSessionRpcResponse {
     return {
         sessionId: bare.readString(bc),
         response: readJsonUtf8(bc),
+        eventCount: bare.readU32(bc),
     }
 }
 
 export function writeAcpSessionRpcResponse(bc: bare.ByteCursor, x: AcpSessionRpcResponse): void {
     bare.writeString(bc, x.sessionId)
     writeJsonUtf8(bc, x.response)
+    bare.writeU32(bc, x.eventCount)
 }
 
 function read11(bc: bare.ByteCursor): i32 | null {

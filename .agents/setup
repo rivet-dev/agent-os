@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly pnpm_version="10.13.1"
+readonly docs_theme_revision="450c498555135098c6a927adfdf13458be9be22a"
+readonly docs_theme_icons_revision="71c3e482fe43e4cbc4f4327a26c8899b6bd4aaa7"
+readonly docs_theme_dir="website/vendor/theme"
+
+if [[ "$(node --version | cut -d. -f1)" != "v24" ]]; then
+	echo "Installing Node.js 24..."
+	npm install --global n@10.2.0
+	n 24
+	hash -r
+fi
+
+echo "Installing pnpm ${pnpm_version}..."
+if ! command -v pnpm >/dev/null 2>&1 || [[ "$(pnpm --version)" != "$pnpm_version" ]]; then
+	npm install --global "pnpm@${pnpm_version}"
+fi
+
+if [[ ! -f "${docs_theme_dir}/package.json" || ! -f "${docs_theme_dir}/vendor/icons/dist/index.js" ]]; then
+	tmp_dir="$(mktemp -d)"
+	trap 'rm -rf "$tmp_dir"' EXIT
+	git clone --quiet https://github.com/rivet-dev/docs-theme.git "$tmp_dir/docs-theme"
+
+	if [[ ! -f "${docs_theme_dir}/package.json" ]]; then
+		echo "Vendoring the docs theme..."
+		git -C "$tmp_dir/docs-theme" checkout --quiet "$docs_theme_revision"
+		mkdir -p "$(dirname "$docs_theme_dir")"
+		cp -R "$tmp_dir/docs-theme/packages/theme" "$docs_theme_dir"
+	fi
+
+	if [[ ! -f "${docs_theme_dir}/vendor/icons/dist/index.js" ]]; then
+		echo "Vendoring the generated icon bundle..."
+		git -C "$tmp_dir/docs-theme" checkout --quiet "$docs_theme_icons_revision"
+		rm -rf "${docs_theme_dir}/vendor/icons/dist"
+		cp -R "$tmp_dir/docs-theme/packages/theme/vendor/icons/dist" \
+			"${docs_theme_dir}/vendor/icons/dist"
+	fi
+fi
+
+echo "Installing frontend dependencies..."
+pnpm install --frozen-lockfile --filter '@rivet-dev/agentos-website...'
+
+if [[ ! -f "${docs_theme_dir}/dist/mdx/remark.js" ]]; then
+	echo "Building the docs theme..."
+	pnpm --filter @rivet-dev/docs-theme build
+fi
+
+echo "Frontend setup complete."

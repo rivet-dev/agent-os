@@ -1,5 +1,5 @@
 import { agentOS, setup } from "@rivet-dev/agentos";
-import type { Permissions } from "@rivet-dev/agentos-core";
+import type { Permissions } from "@rivet-dev/agentos";
 
 // docs:start deny-vault
 // Allow the filesystem everywhere, but deny anything under /home/agentos/vault.

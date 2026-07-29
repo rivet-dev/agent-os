@@ -1,0 +1,13 @@
+{
+  "name": "project-matrix-sqlite3-native-blocked",
+  "private": true,
+  "type": "module",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "sqlite3"
+    ]
+  },
+  "dependencies": {
+    "sqlite3": "5.1.7"
+  }
+}

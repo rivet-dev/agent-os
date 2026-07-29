@@ -51,7 +51,10 @@ pub fn timeout(args: Vec<OsString>) -> i32 {
     let program = &str_args[1];
     let child_args = &str_args[2..];
 
-    let mut child = match std::process::Command::new(program).args(child_args).spawn() {
+    let mut child = match std::process::Command::new(crate::which::resolve_program(program))
+        .args(child_args)
+        .spawn()
+    {
         Ok(c) => c,
         Err(e) => {
             eprintln!("timeout: failed to run command '{}': {}", program, e);

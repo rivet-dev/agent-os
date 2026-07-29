@@ -139,12 +139,16 @@ export const agentOsLimitsSchema = z
 			.object({ maxFetchResponseBytes: positiveInteger.optional() })
 			.strict()
 			.optional(),
+		tls: z
+			.object({ maxBufferedBytes: positiveInteger.optional() })
+			.strict()
+			.optional(),
 		bindings: z
 			.object({
 				defaultBindingTimeoutMs: nonNegativeInteger.optional(),
 				maxBindingTimeoutMs: nonNegativeInteger.optional(),
 				maxRegisteredCollections: positiveInteger.optional(),
-				maxRegisteredCollectionsPerVm: positiveInteger.optional(),
+				maxRegisteredBindingsPerVm: positiveInteger.optional(),
 				maxBindingsPerCollection: positiveInteger.optional(),
 				maxBindingSchemaBytes: positiveInteger.optional(),
 				maxExamplesPerBinding: nonNegativeInteger.optional(),
@@ -217,6 +221,14 @@ export const agentOsLimitsSchema = z
 				prewarmTimeoutMs: positiveInteger.optional(),
 				runnerHeapLimitMb: positiveInteger.optional(),
 				runnerCpuTimeLimitMs: nonNegativeInteger.optional(),
+			})
+			.strict()
+			.optional(),
+		execution: z
+			.object({
+				completedTtlMs: positiveInteger.optional(),
+				maxCompletedExecutions: positiveInteger.optional(),
+				liveExecutionWarningThreshold: positiveInteger.optional(),
 			})
 			.strict()
 			.optional(),
@@ -379,7 +391,6 @@ export const agentOsOptionFieldSchemas = {
 				.object({
 					type: z.literal("actor_uds"),
 					path: z.string().min(1),
-					token: z.string().min(1).max(4096),
 				})
 				.strict(),
 			z
@@ -392,6 +403,14 @@ export const agentOsOptionFieldSchemas = {
 		.optional(),
 	rootFilesystem: rootFilesystemConfigSchema.optional(),
 	mounts: z.array(mountConfigSchema).optional(),
+	sandbox: z
+		.custom(
+			(value) =>
+				value === undefined ||
+				(typeof value === "object" && value !== null && !Array.isArray(value)),
+			{ message: "Expected sandbox options object" },
+		)
+		.optional(),
 	scheduleDriver: z
 		.custom((value) => typeof value === "object" && value !== null, {
 			message: "Expected schedule driver object",

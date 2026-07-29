@@ -1,0 +1,11 @@
+{
+	"commands": [
+		"sh"
+	],
+	"registry": {
+		"title": "Shell",
+		"description": "POSIX-compatible shell for running command scripts.",
+		"priority": 45,
+		"category": "core"
+	}
+}

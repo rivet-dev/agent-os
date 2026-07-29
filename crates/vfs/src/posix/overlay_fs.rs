@@ -6,9 +6,9 @@ use base64::Engine;
 use std::collections::BTreeSet;
 
 const MAX_SNAPSHOT_DEPTH: usize = 1024;
-const OVERLAY_METADATA_ROOT: &str = "/.secure-exec-overlay";
-const OVERLAY_WHITEOUT_DIR: &str = "/.secure-exec-overlay/whiteouts";
-const OVERLAY_OPAQUE_DIR: &str = "/.secure-exec-overlay/opaque";
+const OVERLAY_METADATA_ROOT: &str = "/.agentos-overlay";
+const OVERLAY_WHITEOUT_DIR: &str = "/.agentos-overlay/whiteouts";
+const OVERLAY_OPAQUE_DIR: &str = "/.agentos-overlay/opaque";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayMode {
@@ -304,7 +304,7 @@ impl OverlayFileSystem {
     ///
     /// The lexical [`is_internal_metadata_path`] check alone is bypassable: the
     /// underlying `MemoryFileSystem` follows symlinks, so a guest-created symlink
-    /// whose resolved target enters `/.secure-exec-overlay` (directly, or via a
+    /// whose resolved target enters `/.agentos-overlay` (directly, or via a
     /// symlink to an ancestor such as `/`) would slip past a purely lexical guard
     /// and let the guest read or tamper with whiteout/opaque markers (e.g.
     /// resurrecting a deleted lower-layer file). Resolving before the check
@@ -334,7 +334,7 @@ impl OverlayFileSystem {
     }
 
     fn hidden_root_entry_name() -> &'static str {
-        ".secure-exec-overlay"
+        ".agentos-overlay"
     }
 
     fn should_hide_directory_entry(path: &str, entry: &str) -> bool {
@@ -2165,7 +2165,7 @@ mod tests {
         // A guest symlink whose target is the metadata root must not become a
         // window into the reserved namespace.
         overlay
-            .symlink("/.secure-exec-overlay/whiteouts", "/escape")
+            .symlink("/.agentos-overlay/whiteouts", "/escape")
             .expect("creating the symlink itself is allowed");
 
         // Listing through the symlink must be denied, not disclose markers.
@@ -2191,7 +2191,7 @@ mod tests {
             .expect("symlink to root is allowed");
         assert!(
             overlay
-                .read_dir("/rootlink/.secure-exec-overlay/whiteouts")
+                .read_dir("/rootlink/.agentos-overlay/whiteouts")
                 .is_err(),
             "metadata must be unreachable via an ancestor symlink too"
         );
@@ -2257,9 +2257,7 @@ mod tests {
             Vec::<String>::new()
         );
         let root_entries = overlay.read_dir("/").expect("read root");
-        assert!(!root_entries
-            .iter()
-            .any(|entry| entry == ".secure-exec-overlay"));
+        assert!(!root_entries.iter().any(|entry| entry == ".agentos-overlay"));
     }
 
     #[test]

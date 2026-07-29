@@ -773,6 +773,18 @@ impl DurableUpdateSink {
             ))
         })?;
 
+        // Cancellation can win just before the adapter asks for permission. In
+        // that ordering there is no waiter for `cancel_pending_permissions` to
+        // remove, and `watch::Receiver::changed` will not wake for a value that was
+        // already observed before the waiter starts. Reject the late request
+        // immediately so a cancelled prompt cannot become stuck on permission.
+        if cancellation
+            .as_ref()
+            .is_some_and(|receiver| *receiver.borrow())
+        {
+            return Ok(json!({ "outcome": { "outcome": "cancelled" } }));
+        }
+
         let automatic = automatic_permission_option(&self.permission_policy, params)?;
         if self.permission_policy != "ask" {
             if let Some(option_id) = automatic {
@@ -1186,7 +1198,38 @@ async fn wait_for_permission_signal(
     mut cancellation: Option<&mut tokio::sync::watch::Receiver<bool>>,
     events: &mut Vec<agentos_native_sidecar::wire::EventFrame>,
 ) -> Result<PendingPermissionSignal, SidecarError> {
+    let mut inactivity = InactivityWarnings::new(format!(
+        "emitted permission request {request_id} to the host"
+    ));
     loop {
+        if let Some(warning) = inactivity.take_due(Instant::now()) {
+            tracing::warn!(
+                target: "agentos_sidecar::acp_extension",
+                request_id,
+                process_id,
+                elapsed_ms = warning.elapsed.as_millis() as u64,
+                inactive_ms = warning.inactive.as_millis() as u64,
+                last_activity_elapsed_ms = warning.last_activity_elapsed.as_millis() as u64,
+                last_activity = %warning.last_activity,
+                "ACP permission request is still waiting for a human response; no timeout was applied",
+            );
+        }
+        if cancellation
+            .as_ref()
+            .is_some_and(|receiver| *receiver.borrow())
+        {
+            pending
+                .lock()
+                .map_err(|_| {
+                    SidecarError::InvalidState(String::from(
+                        "permission response registry is poisoned",
+                    ))
+                })?
+                .remove(key);
+            return Ok(PendingPermissionSignal::Terminal(String::from(
+                "prompt_cancelled",
+            )));
+        }
         let polled = async { ctx.poll_event_wire(Duration::from_secs(1)).await };
         let signal = if let Some(cancellation) = cancellation.as_deref_mut() {
             tokio::select! {

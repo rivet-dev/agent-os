@@ -1,71 +1,51 @@
 "use strict";
 
-var fs = require("fs");
 var path = require("path");
 
 var projectDir = path.resolve(__dirname, "..");
-var distDir = path.join(projectDir, "dist");
 
-function ensureBuild() {
-	try {
-		fs.statSync(path.join(distDir, "index.html"));
-		return;
-	} catch (e) {
-		// Build output missing — run build
-	}
-	var execSync = require("child_process").execSync;
-	var viteBin = path.join(projectDir, "node_modules", ".bin", "vite");
-	var buildEnv = Object.assign({}, process.env);
-	if (!buildEnv.PATH) {
-		buildEnv.PATH =
-			"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-	}
-	execSync(viteBin + " build", {
-		cwd: projectDir,
-		stdio: "pipe",
-		timeout: 30000,
-		env: buildEnv,
+async function runBuild() {
+	var vite = await import("vite");
+	return vite.build({
+		root: projectDir,
+		configFile: false,
+		esbuild: false,
+		logLevel: "silent",
+		build: { minify: false, write: false },
 	});
 }
 
-function main() {
-	ensureBuild();
-
-	var results = [];
-
-	// Check index.html was generated
-	var indexHtml = fs.readFileSync(path.join(distDir, "index.html"), "utf8");
-	results.push({
-		check: "index-html",
-		exists: true,
-		hasReactRoot: indexHtml.indexOf('id="root"') !== -1,
-		hasScript: indexHtml.indexOf(".js") !== -1,
+async function main() {
+	var build = await runBuild();
+	var builds = Array.isArray(build) ? build : [build];
+	var output = builds.flatMap(function (result) {
+		return result.output;
 	});
-
-	// Check assets directory
-	var assetsDir = path.join(distDir, "assets");
-	var assets = fs.readdirSync(assetsDir).sort();
-	var hasJs = assets.some(function (f) {
-		return f.endsWith(".js");
+	var html = output.find(function (entry) {
+		return entry.fileName === "index.html";
 	});
-	results.push({
-		check: "assets",
-		hasJs: hasJs,
+	var chunks = output.filter(function (entry) {
+		return entry.type === "chunk";
 	});
-
-	// Check compiled JS contains React component
-	var jsContent = "";
-	assets.forEach(function (f) {
-		if (f.endsWith(".js")) {
-			jsContent += fs.readFileSync(path.join(assetsDir, f), "utf8");
-		}
-	});
-	results.push({
-		check: "react-compiled",
-		hasComponent: jsContent.indexOf("Hello from Vite") !== -1,
-	});
+	var results = [
+		{
+			check: "index-html",
+			hasRoot: String(html && html.source).indexOf('id="root"') !== -1,
+			hasScript: String(html && html.source).indexOf(".js") !== -1,
+		},
+		{
+			check: "bundle",
+			hasJs: chunks.length > 0,
+			hasContent: chunks.some(function (entry) {
+				return entry.code.indexOf("Hello from Vite") !== -1;
+			}),
+		},
+	];
 
 	console.log(JSON.stringify(results));
 }
 
-main();
+main().catch(function (error) {
+	console.error(error);
+	process.exitCode = 1;
+});

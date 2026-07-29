@@ -11,11 +11,11 @@ function throwUnsupportedCryptoApi(api) {
   throw createUnsupportedCryptoApiError(`crypto.${api}`);
 }
 
-var kCryptoKeyToken = /* @__PURE__ */ Symbol("secureExecCryptoKey");
+var kCryptoKeyToken = /* @__PURE__ */ Symbol("agentOsCryptoKey");
 
-var kCryptoToken = /* @__PURE__ */ Symbol("secureExecCrypto");
+var kCryptoToken = /* @__PURE__ */ Symbol("agentOsCrypto");
 
-var kSubtleToken = /* @__PURE__ */ Symbol("secureExecSubtle");
+var kSubtleToken = /* @__PURE__ */ Symbol("agentOsSubtle");
 
 var ERR_INVALID_THIS2 = "ERR_INVALID_THIS";
 
@@ -464,6 +464,8 @@ var cryptoPolyfillInstance = new SandboxCrypto(kCryptoToken);
 
 var cryptoPolyfill = cryptoPolyfillInstance;
 
+var MAX_CRYPTO_HASH_UPDATE_BYTES = 1024 * 1024;
+
 function createBuiltinHash(algorithm) {
   const chunks = [];
   return {
@@ -477,6 +479,31 @@ function createBuiltinHash(algorithm) {
         throwUnsupportedCryptoApi("createHash");
       }
       const input = chunks.length === 1 ? chunks[0] : import_buffer2.Buffer.concat(chunks);
+      if (typeof _cryptoHashCreate !== "undefined" && typeof _cryptoHashUpdate !== "undefined" && typeof _cryptoHashFinal !== "undefined") {
+        const sessionId = _cryptoHashCreate.applySync(void 0, [String(algorithm)]);
+        try {
+          for (let offset = 0; offset < input.length; offset += MAX_CRYPTO_HASH_UPDATE_BYTES) {
+            _cryptoHashUpdate.applySync(void 0, [
+              sessionId,
+              input.subarray(offset, offset + MAX_CRYPTO_HASH_UPDATE_BYTES)
+            ]);
+          }
+          const resultBase64 = _cryptoHashFinal.applySync(void 0, [sessionId]);
+          const result = import_buffer2.Buffer.from(String(resultBase64 || ""), "base64");
+          return encoding ? result.toString(encoding) : result;
+        } catch (error) {
+          if (typeof _cryptoHashDestroy !== "undefined") {
+            try {
+              _cryptoHashDestroy.applySync(void 0, [sessionId]);
+            } catch (cleanupError) {
+              if (error && typeof error === "object" && !("cause" in error)) {
+                error.cause = cleanupError;
+              }
+            }
+          }
+          throw error;
+        }
+      }
       const resultBase64 = _cryptoHashDigest.applySync(void 0, [
         String(algorithm),
         input.toString("base64")
@@ -525,7 +552,7 @@ function createBuiltinHmac(algorithm, key) {
   };
 }
 
-var kBuiltinCryptoKeyObjectToken = /* @__PURE__ */ Symbol("secureExecBuiltinKeyObject");
+var kBuiltinCryptoKeyObjectToken = /* @__PURE__ */ Symbol("agentOsBuiltinKeyObject");
 
 function isBufferLikeValue(value) {
   return import_buffer2.Buffer.isBuffer(value) || value instanceof ArrayBuffer || ArrayBuffer.isView(value);

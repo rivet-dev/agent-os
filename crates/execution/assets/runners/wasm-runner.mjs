@@ -491,7 +491,6 @@ function __agentOSWasiEmitSyscallPhaseMetrics() {
 
 if (__agentOSWasiSyscallPhasesEnabled && typeof process?.on === 'function') {
   process.on('exit', () => {
-    __agentOSWasiEmitSyscallPhaseMetrics();
   });
 }
 
@@ -799,7 +798,7 @@ function isProjectedCommandGuestPath(subject) {
     ? path.posix.normalize(raw)
     : path.posix.resolve(HOST_FS_GUEST_CWD, raw);
   return (
-    /^\/__secure_exec\/commands\/\d+(?:\/|$)/u.test(guestPath) ||
+    /^\/__agentos\/commands\/\d+(?:\/|$)/u.test(guestPath) ||
     /^\/opt\/agentos\/bin\/[^/]+$/u.test(guestPath)
   );
 }
@@ -861,7 +860,7 @@ function projectedCommandImageBytes(command) {
   if (!name || name === '.' || name === '/') return null;
   for (const mapping of GUEST_PATH_MAPPINGS) {
     if (
-      !/^\/__secure_exec\/commands\/\d+$/u.test(mapping?.guestPath ?? '') &&
+      !/^\/__agentos\/commands\/\d+$/u.test(mapping?.guestPath ?? '') &&
       mapping?.guestPath !== '/opt/agentos/bin'
     ) continue;
     const guestCandidate = path.posix.join(mapping.guestPath, name);
@@ -1036,6 +1035,7 @@ const WASI_RIGHT_FD_ALLOCATE = 1n << 8n;
 const WASI_RIGHT_PATH_CREATE_DIRECTORY = 1n << 9n;
 const WASI_RIGHT_PATH_LINK_SOURCE = 1n << 10n;
 const WASI_RIGHT_PATH_LINK_TARGET = 1n << 11n;
+const WASI_RIGHT_PATH_CREATE_FILE = 1n << 12n;
 const WASI_RIGHT_PATH_OPEN = 1n << 13n;
 const WASI_RIGHT_FD_READDIR = 1n << 14n;
 const WASI_RIGHT_PATH_READLINK = 1n << 15n;
@@ -1078,19 +1078,12 @@ const READ_WRITE_PREOPEN_RIGHTS_BASE =
   WASI_RIGHT_FD_ADVISE |
   WASI_RIGHT_FD_ALLOCATE |
   WASI_RIGHT_PATH_CREATE_DIRECTORY |
+  WASI_RIGHT_PATH_CREATE_FILE |
   WASI_RIGHT_PATH_FILESTAT_SET_SIZE |
   WASI_RIGHT_PATH_FILESTAT_SET_TIMES |
   WASI_RIGHT_FD_FILESTAT_SET_SIZE |
   WASI_RIGHT_FD_FILESTAT_SET_TIMES;
-const READ_WRITE_PREOPEN_RIGHTS_INHERITING =
-  READ_ONLY_PREOPEN_RIGHTS_INHERITING |
-  WASI_RIGHT_FD_DATASYNC |
-  WASI_RIGHT_FD_SYNC |
-  WASI_RIGHT_FD_WRITE |
-  WASI_RIGHT_FD_ADVISE |
-  WASI_RIGHT_FD_ALLOCATE |
-  WASI_RIGHT_FD_FILESTAT_SET_SIZE |
-  WASI_RIGHT_FD_FILESTAT_SET_TIMES;
+const READ_WRITE_PREOPEN_RIGHTS_INHERITING = READ_WRITE_PREOPEN_RIGHTS_BASE;
 const FULL_PREOPEN_RIGHTS_BASE =
   READ_WRITE_PREOPEN_RIGHTS_BASE |
   WASI_RIGHT_PATH_LINK_SOURCE |
@@ -1408,6 +1401,7 @@ function stdioFdIsKernelTty(fd) {
 // CPU (the guest thread blocks in Atomics.wait inside callSync). Keep each
 // slice under the 30s guest sync-RPC deadline.
 const KERNEL_WAIT_SLICE_MS = 10_000;
+const KERNEL_STDIN_WOULD_BLOCK = Symbol('kernel-stdin-would-block');
 // A WASM descendant shares this runner's synchronous sidecar dispatch path.
 // While one is active, return to the child event pump frequently enough to
 // preserve the concurrent progress Linux gives separately scheduled processes.
@@ -1422,18 +1416,21 @@ function hasActiveSpawnedChildren() {
   return false;
 }
 
-function readKernelStdinChunk(maxBytes) {
+function readKernelStdinChunk(maxBytes, nonblocking = false) {
   const requestedLength = Math.max(1, Number(maxBytes) >>> 0);
   while (true) {
     const response = callSyncRpc('__kernel_stdin_read', [
       requestedLength,
-      KERNEL_WAIT_SLICE_MS,
+      nonblocking ? 0 : KERNEL_WAIT_SLICE_MS,
     ]);
     if (response && typeof response.dataBase64 === 'string') {
       return Buffer.from(response.dataBase64, 'base64');
     }
     if (response && response.done === true) {
       return null;
+    }
+    if (nonblocking) {
+      return KERNEL_STDIN_WOULD_BLOCK;
     }
   }
 }
@@ -4504,7 +4501,7 @@ function readSyncRpcLine() {
     const chunk = Buffer.alloc(4096);
     const bytesRead = readSync(NODE_SYNC_RPC_RESPONSE_FD, chunk, 0, chunk.length, null);
     if (bytesRead === 0) {
-      throw new Error('secure-exec WASM sync RPC response channel closed unexpectedly');
+      throw new Error('agentos WASM sync RPC response channel closed unexpectedly');
     }
     syncRpcResponseBuffer += chunk.subarray(0, bytesRead).toString('utf8');
   }
@@ -4532,7 +4529,7 @@ function callSyncRpc(method, args = []) {
   }
 
   if (!NODE_SYNC_RPC_ENABLE || NODE_SYNC_RPC_REQUEST_FD == null || NODE_SYNC_RPC_RESPONSE_FD == null) {
-    const error = new Error(`secure-exec WASM sync RPC is unavailable for ${method}`);
+    const error = new Error(`agentos WASM sync RPC is unavailable for ${method}`);
     error.code = 'ERR_AGENTOS_WASM_SYNC_RPC_UNAVAILABLE';
     throw error;
   }
@@ -4552,7 +4549,7 @@ function callSyncRpc(method, args = []) {
     }
 
     const error = new Error(
-      response?.error?.message || `secure-exec WASM sync RPC ${method} failed`,
+      response?.error?.message || `agentos WASM sync RPC ${method} failed`,
     );
     if (typeof response?.error?.code === 'string') {
       error.code = response.error.code;
@@ -4995,6 +4992,8 @@ const HOST_NET_AF_UNIX = 3;
 const HOST_NET_SOCK_DGRAM = 5;
 const HOST_NET_SOCK_STREAM = 6;
 const HOST_NET_SOCKET_TYPE_MASK = 0xf;
+const POSIX_SOCK_STREAM = 1;
+const POSIX_SOCK_DGRAM = 2;
 // wasi-libc <sys/socket.h>: SOCK_NONBLOCK / SOCK_CLOEXEC bits OR'd into the
 // socket(2) type argument (Linux-style socket(..., SOCK_STREAM | SOCK_NONBLOCK)).
 const HOST_NET_SOCK_NONBLOCK = 0x4000;
@@ -5022,6 +5021,19 @@ const HOST_NET_IPV6_TCLASS = 67; // ipv6(7)
 
 function hostNetSocketBaseType(socket) {
   return Number(socket?.sockType ?? 0) & HOST_NET_SOCKET_TYPE_MASK;
+}
+
+function normalizeHostNetSocketType(sockType) {
+  const numericType = Number(sockType) >>> 0;
+  const flags = numericType & ~HOST_NET_SOCKET_TYPE_MASK;
+  switch (numericType & HOST_NET_SOCKET_TYPE_MASK) {
+    case POSIX_SOCK_STREAM:
+      return flags | HOST_NET_SOCK_STREAM;
+    case POSIX_SOCK_DGRAM:
+      return flags | HOST_NET_SOCK_DGRAM;
+    default:
+      return numericType;
+  }
 }
 
 function hostNetSockoptKind(level, optname, optvalLen) {
@@ -5598,7 +5610,11 @@ const hostNetImport = {
   net_socket(domain, sockType, protocol, retFdPtr) {
     try {
       const numericDomain = Number(domain) >>> 0;
-      const numericType = Number(sockType) >>> 0;
+      // Rust's WASI networking compatibility path uses POSIX socket type
+      // values (1/2), while the owned wasi-libc ABI and sidecar transfer
+      // metadata use WASI filetypes (6/5). Store one canonical form so a live
+      // socket can be inherited by a subsequently spawned child.
+      const numericType = normalizeHostNetSocketType(sockType);
       const numericProtocol = Number(protocol) >>> 0;
       if (
         numericDomain === HOST_NET_AF_UNIX &&
@@ -5740,7 +5756,11 @@ const hostNetImport = {
         return WASI_ERRNO_FAULT;
       }
 
-      const request = { host, port };
+      const request = {
+        host,
+        port,
+        family: Number(socket.domain) === HOST_NET_AF_INET6 ? 6 : 4,
+      };
       if (socket.bindOptions?.host != null) {
         request.localAddress = socket.bindOptions.host;
       }
@@ -6672,6 +6692,11 @@ const hostProcessImport = {
                 AGENTOS_WASM_INITIAL_SIGNAL_IGNORES: JSON.stringify(inheritedIgnores),
               },
               attrFlags: flags,
+              // v3 implements posix_spawn, not posix_spawnp. Preserve the
+              // caller's executable path and argv exactly instead of routing
+              // through Node-style package/PATH resolution.
+              exactExecPath: true,
+              searchPath: null,
               pgroup: Number(pgroup) | 0,
               signalDefaults: defaultSignals,
               signalMask,
@@ -6994,6 +7019,11 @@ const hostProcessImport = {
             const stderrPipe = directPosixStderr
               ? null
               : registerPipeProducer(stderrTarget, result.childId, 'stderr');
+            // A POSIX spawn action that controls fd 1/2 installs the target in
+            // the child's kernel fd table. Keeping a parent-side routing
+            // reference in that case suppresses EOF after the child closes its
+            // descriptor and can deadlock protocols that use close(2) as a
+            // message boundary. Only event-routed output needs retention.
             const retainedSpawnOutputHandles = [
               directPosixStdout ? null : stdoutTarget,
               directPosixStderr ? null : stderrTarget,
@@ -8778,6 +8808,11 @@ function hostUserNameLookup(rpcMethod, namePtr, nameLen, bufPtr, bufLen, retLenP
   }
 }
 
+function hostUserOptionalId(value) {
+  const id = Number(value) >>> 0;
+  return id === 0xffffffff ? null : id;
+}
+
 const hostUserImport = {
   getuid(retUidPtr) {
     try {
@@ -9775,18 +9810,13 @@ const hostFsImport = {
       if (typeof target !== 'string') {
         return 0;
       }
-      const hostPath = resolveHostFsPath(target);
-      if (typeof hostPath !== 'string') {
-        return 0;
-      }
-      const stat =
-        Number(followSymlinks) === 0
-          ? fsModule.lstatSync(hostPath)
-          : fsModule.statSync(hostPath);
+      const stat = callSyncRpc(
+        Number(followSymlinks) === 0 ? 'fs.lstatSync' : 'fs.statSync',
+        [target],
+      );
       const mode = hostFsModeFromStat(stat);
       traceHostProcess('host-fs-path-mode', {
         target,
-        hostPath,
         followSymlinks: Number(followSymlinks) >>> 0,
         mode,
       });
@@ -10088,6 +10118,19 @@ if (delegatePathOpen) {
     const guestPath = __agentOSWasiMeasurePhase('path_open', 'path_resolution', () =>
       resolvePathOpenGuestPath(fd, pathPtr, pathLen)
     );
+    if (hasMutationOpenFlags(oflags) || hasWriteRights(rightsBase)) {
+      traceHostProcess('path-open-mutation', {
+        fd: Number(fd) >>> 0,
+        guestPath,
+        permissionTier,
+        handleKind: passthroughDirHandle?.kind ?? null,
+        workspaceReadOnly: isWorkspaceReadOnly(),
+        guestReadOnly: guestPathIsReadOnly(guestPath),
+        oflags: Number(oflags) >>> 0,
+        rightsBase: String(rightsBase),
+        fdflags: Number(fdflags) >>> 0,
+      });
+    }
     const guestReadOnlyDenied = __agentOSWasiMeasurePhase('path_open', 'readonly_policy', () =>
       guestPathIsReadOnly(guestPath) &&
       (hasMutationOpenFlags(oflags) || hasWriteRights(rightsBase))
@@ -10162,6 +10205,14 @@ if (delegatePathOpen) {
         }
         return writeResult;
       } catch (error) {
+        traceHostProcess('path-open-error', {
+          guestPath,
+          oflags: Number(oflags) >>> 0,
+          rightsBase: String(rightsBase),
+          fdflags: Number(fdflags) >>> 0,
+          code: error?.code,
+          message: String(error?.message ?? error),
+        });
         return mapHostProcessError(error);
       }
     }
@@ -10399,6 +10450,11 @@ function wrapPathDirFds(name, fdIndexes) {
       try {
         return kernelPathOperationHandlers[name](delegateArgs);
       } catch (error) {
+        traceHostProcess('path-operation-error', {
+          operation: name,
+          code: error?.code,
+          message: String(error?.message ?? error),
+        });
         return mapHostProcessError(error);
       }
     }
@@ -10561,6 +10617,11 @@ const delegateManagedFdPrestatDirName =
   typeof wasiImport.fd_prestat_dir_name === 'function'
     ? wasiImport.fd_prestat_dir_name.bind(wasiImport)
     : null;
+const delegatedWasiFdFlags = new Map([
+  [0, 0],
+  [1, 0],
+  [2, 0],
+]);
 const delegateManagedPollOneoff =
   typeof wasiImport.poll_oneoff === 'function'
     ? wasiImport.poll_oneoff.bind(wasiImport)
@@ -10789,9 +10850,14 @@ wasiImport.fd_read = (fd, iovs, iovsLen, nreadPtr) => {
           }
           return total >>> 0;
         });
+        const nonblocking =
+          ((delegatedWasiFdFlags.get(numericFd) ?? 0) & WASI_FDFLAGS_NONBLOCK) !== 0;
         const chunk = __agentOSWasiMeasurePhase('fd_read', 'kernel_stdin_read', () =>
-          readKernelStdinChunk(requestedLength)
+          readKernelStdinChunk(requestedLength, nonblocking)
         );
+        if (chunk === KERNEL_STDIN_WOULD_BLOCK) {
+          return WASI_ERRNO_AGAIN;
+        }
         if (!chunk || chunk.length === 0) {
           return __agentOSWasiMeasurePhase('fd_read', 'result_marshal', () =>
             writeGuestUint32(nreadPtr, 0)
@@ -11427,18 +11493,26 @@ wasiImport.fd_fdstat_set_flags = (fd, flags) => {
   }
 
   if (handle?.kind === 'passthrough') {
-    return delegateManagedFdFdstatSetFlags
+    const result = delegateManagedFdFdstatSetFlags
       ? delegateManagedFdFdstatSetFlags(handle.targetFd, flags)
       : WASI_ERRNO_BADF;
+    if (result === WASI_ERRNO_SUCCESS) {
+      delegatedWasiFdFlags.set(Number(fd) >>> 0, Number(flags) >>> 0);
+    }
+    return result;
   }
 
   if (rejectClosedPassthroughFd(fd)) {
     return WASI_ERRNO_BADF;
   }
 
-  return delegateManagedFdFdstatSetFlags
+  const result = delegateManagedFdFdstatSetFlags
     ? delegateManagedFdFdstatSetFlags(fd, flags)
     : WASI_ERRNO_BADF;
+  if (result === WASI_ERRNO_SUCCESS) {
+    delegatedWasiFdFlags.set(Number(fd) >>> 0, Number(flags) >>> 0);
+  }
+  return result;
 };
 
 wasiImport.fd_filestat_get = (fd, statPtr) => {
@@ -11657,8 +11731,8 @@ wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {
     try {
       const bytes = collectGuestIovBytes(iovs, iovsLen);
       const written = writeKernelFdCooperatively(
-        Number(handle.targetFd) >>> 0,
-        bytes,
+         Number(handle.targetFd) >>> 0,
+         bytes,
       );
       if (!Number.isSafeInteger(written) || written < 0 || written > bytes.length) {
         return WASI_ERRNO_FAULT;
@@ -12494,7 +12568,7 @@ function resetCaughtWasmSignalDispositionsForExec(sidecarCommitted) {
   }
 }
 
-Object.defineProperty(globalThis, '__secureExecWasmSignalDispatch', {
+Object.defineProperty(globalThis, '__agentOsWasmSignalDispatch', {
   configurable: true,
   writable: true,
   value: (_eventType, payload) => {
@@ -12558,6 +12632,7 @@ while (typeof instance.exports._start === 'function') {
     __agentOSWasmEmitPhaseMetrics('wasi.start.error', {
       error: error && typeof error === 'object' && 'message' in error ? String(error.message) : String(error),
     });
+    __agentOSWasiEmitSyscallPhaseMetrics();
     if (maxStackBytes !== null && isWasmStackExhaustionTrap(error)) {
       reportConfiguredStackLimitExceeded(error);
       process.exit(1);

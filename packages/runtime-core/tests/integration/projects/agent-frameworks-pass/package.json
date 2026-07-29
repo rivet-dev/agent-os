@@ -1,0 +1,14 @@
+{
+  "name": "project-matrix-agent-frameworks-pass",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@e2b/code-interpreter": "2.6.1",
+    "@mastra/core": "1.51.0",
+    "@slack/bolt": "5.0.0",
+    "@slack/web-api": "8.0.0",
+    "e2b": "2.35.0",
+    "effect": "3.22.0",
+    "zod": "4.3.6"
+  }
+}

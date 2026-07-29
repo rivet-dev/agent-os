@@ -1,0 +1,10 @@
+{
+  "name": "project-matrix-archives-agent-pass",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "jszip": "3.10.1",
+    "archiver": "8.0.0",
+    "fflate": "0.8.3"
+  }
+}

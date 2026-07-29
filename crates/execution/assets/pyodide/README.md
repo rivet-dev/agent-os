@@ -1,4 +1,4 @@
-Pyodide runtime bundle for the secure-exec Python sidecar.
+Pyodide runtime bundle for the agentos Python sidecar.
 
 Bundled runtime files:
 - `pyodide.mjs`
@@ -26,7 +26,7 @@ Bundle size as vendored in this directory:
 Dynamic package installs:
 - `AGENTOS_PYODIDE_PACKAGE_BASE_URL` can override the package base used by Pyodide package resolution when a Python execution needs to install additional wheels from a network-visible host.
 - The bundled `micropip` wheel is still loaded from the local asset directory first so package-manager bootstrap does not depend on external network access.
-- `await micropip.install("https://.../package.whl")` goes through the Python runner's bridge-backed fetch path, which means network permissions are enforced by the secure-exec kernel rather than bypassing it.
+- `await micropip.install("https://.../package.whl")` goes through the Python runner's bridge-backed fetch path, which means network permissions are enforced by the agentos kernel rather than bypassing it.
 
 Debug timing output:
 - Set `AGENTOS_PYTHON_WARMUP_DEBUG=1` on a Python execution request to emit `__AGENTOS_PYTHON_WARMUP_METRICS__:` JSON lines on stderr.

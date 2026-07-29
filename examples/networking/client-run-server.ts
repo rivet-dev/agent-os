@@ -6,7 +6,7 @@ const agent = client.vm.getOrCreate("my-agent");
 
 // Write a simple Node HTTP server and run it inside the VM. It binds a loopback
 // port (3000) exactly like any normal Node process.
-await agent.writeFile(
+await agent.filesystem.writeFile(
   "/home/agentos/server.js",
   `const http = require("http");
 http.createServer((req, res) => {
@@ -14,5 +14,5 @@ http.createServer((req, res) => {
   res.end("Hello from inside the VM");
 }).listen(3000, () => console.log("listening on http://127.0.0.1:3000"));`,
 );
-const { pid } = await agent.spawn("node", ["/home/agentos/server.js"]);
+const { pid } = await agent.process.spawn("node", ["/home/agentos/server.js"]);
 console.log("server pid:", pid);

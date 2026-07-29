@@ -1,4 +1,4 @@
-/* termios_bridge.c — termios for the secure-exec full-OS libc.
+/* termios_bridge.c — termios for the agentos full-OS libc.
  *
  * The kernel owns the PTY line discipline (canonical/echo/signals) and exposes
  * a raw-mode toggle + window size to guests via the `host_tty` WASM imports.

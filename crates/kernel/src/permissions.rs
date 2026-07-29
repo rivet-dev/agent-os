@@ -166,6 +166,12 @@ pub struct EnvAccessRequest {
 #[derive(Clone, Default)]
 pub struct Permissions {
     pub filesystem: Option<FsPermissionCheck>,
+    /// Whether filesystem permission checks are unconditionally permissive.
+    ///
+    /// This avoids resolving every path solely to evaluate an already-known
+    /// allow decision. Rule-based policies must leave this disabled so their
+    /// checks continue to receive symlink-resolved paths.
+    pub filesystem_unrestricted: bool,
     pub network: Option<NetworkPermissionCheck>,
     pub child_process: Option<CommandPermissionCheck>,
     pub environment: Option<EnvironmentPermissionCheck>,
@@ -175,6 +181,7 @@ impl Permissions {
     pub fn allow_all() -> Self {
         Self {
             filesystem: Some(Arc::new(|_: &FsAccessRequest| PermissionDecision::allow())),
+            filesystem_unrestricted: true,
             network: Some(Arc::new(|_: &NetworkAccessRequest| {
                 PermissionDecision::allow()
             })),
@@ -428,10 +435,18 @@ impl<F: VirtualFileSystem> PermissionedFileSystem<F> {
     }
 
     fn resolved_existing_path(&self, path: &str) -> VfsResult<String> {
+        if self.permissions.filesystem_unrestricted {
+            validate_path(path)?;
+            return Ok(crate::vfs::normalize_path(path));
+        }
         self.inner.realpath(path)
     }
 
     fn resolved_destination_path(&self, path: &str) -> VfsResult<String> {
+        if self.permissions.filesystem_unrestricted {
+            validate_path(path)?;
+            return Ok(crate::vfs::normalize_path(path));
+        }
         let normalized = crate::vfs::normalize_path(path);
         if normalized == "/" {
             return Ok(normalized);

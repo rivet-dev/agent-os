@@ -1,0 +1,19 @@
+--- a/exec/src/session_turn_wasi.rs
++++ b/exec/src/session_turn_wasi.rs
+@@ -121,9 +121,13 @@ async fn session_turn() -> anyhow::Result<()> {
+             toml::Value::String("on-request".to_string()),
+         ),
+     ];
+-    let mut config = Config::load_with_cli_overrides(overrides)
+-        .await
+-        .context("load config")?;
++    // This harness supplies its model, approval policy, filesystem, network, and
++    // credential environment explicitly. Loading arbitrary host CLI settings can
++    // make the pinned runtime reject values written by a newer Codex release (for
++    // example service_tier = "default"). Keep CODEX_HOME for auth storage, but
++    // start from this revision's defaults.
++    let mut config = Config::load_default_with_cli_overrides(overrides)
++        .context("load config")?;
+     config.cwd = std::path::PathBuf::from(cwd);
+     // wasm32-wasip1 has no tokio::net readiness reactor, so the WebSocket transport
+     // (tokio-tungstenite → tokio::net::TcpStream) can't connect. Force the HTTP

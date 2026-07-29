@@ -216,12 +216,12 @@ impl AgentOs {
     /// process id immediately; stdout/stderr are accumulated and the call resolves once the matching
     /// `ProcessExited` event arrives. This mirrors the TS pass-through to `kernel.exec` semantically:
     /// the result is the full captured stdout/stderr plus exit code.
-    pub async fn exec(&self, command: &str, options: ExecOptions) -> Result<ExecResult> {
+    pub async fn exec_process(&self, command: &str, options: ExecOptions) -> Result<ExecResult> {
         // Parse the command line into a `(command, args)` pair the same way the sidecar's
         // child_process path does: shell-free argv lists spawn directly (preserving the command's
         // real exit code), while shell syntax or a builtin head runs under `sh -c <line>`.
         let (resolved_command, resolved_args) = resolve_exec_command(command)?;
-        self.exec_argv(&resolved_command, &resolved_args, options)
+        self.exec_argv_process(&resolved_command, &resolved_args, options)
             .await
     }
 
@@ -230,7 +230,7 @@ impl AgentOs {
     /// no whitespace re-splitting, no shell metacharacter detection, and no routing through
     /// `sh -c`. Callers that already hold a structured argv (for example the cron `Exec` action)
     /// must use this so the structured-argv contract is preserved end to end.
-    pub async fn exec_argv(
+    pub async fn exec_argv_process(
         &self,
         command: &str,
         args: &[String],
@@ -377,6 +377,8 @@ impl AgentOs {
                 }
                 EventPayload::ProcessOutputEvent(_)
                 | EventPayload::ProcessExitedEvent(_)
+                | EventPayload::ExecutionOutputEvent(_)
+                | EventPayload::ExecutionCompletedEvent(_)
                 | EventPayload::VmLifecycleEvent(_)
                 | EventPayload::StructuredEvent(_)
                 | EventPayload::ExtEnvelope(_) => {}
@@ -397,7 +399,7 @@ impl AgentOs {
     /// Spawn a process. SYNC; returns `{ pid }` only. Installs stdout/stderr fan-out over broadcast
     /// channels and wires exit via a background event-pump task. The user-facing `pid` is the
     /// SDK-allocated map key (the wire `process_id` is held inside the [`ProcessEntry`]).
-    pub fn spawn(
+    pub fn spawn_process(
         &self,
         command: &str,
         args: Vec<String>,
@@ -1118,6 +1120,8 @@ impl AgentOs {
                 }
                 EventPayload::ProcessOutputEvent(_)
                 | EventPayload::ProcessExitedEvent(_)
+                | EventPayload::ExecutionOutputEvent(_)
+                | EventPayload::ExecutionCompletedEvent(_)
                 | EventPayload::VmLifecycleEvent(_)
                 | EventPayload::StructuredEvent(_)
                 | EventPayload::ExtEnvelope(_) => {}

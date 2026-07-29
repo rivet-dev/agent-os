@@ -4,7 +4,7 @@ name = "cmd-join"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "join standalone binary for secure-exec VM"
+description = "join standalone binary for agentos VM"
 
 [[bin]]
 name = "join"

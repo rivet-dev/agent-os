@@ -90,5 +90,5 @@
 		"typescript": "^5.7.2",
 		"vitest": "^2.1.8"
 	},
-	"description": "Browser driver primitives for secure-exec."
+	"description": "Browser driver primitives for agentos."
 }

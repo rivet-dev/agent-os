@@ -1,5 +1,13 @@
 import { guestEncodingBootstrapCode } from "./encoding.js";
 import { BROWSER_BUFFER_POLYFILL_CODE } from "./generated/buffer-polyfill.js";
+import {
+	BROWSER_ASSERT_POLYFILL_CODE,
+	BROWSER_EVENTS_POLYFILL_CODE,
+	BROWSER_QUERYSTRING_POLYFILL_CODE,
+	BROWSER_STREAM_POLYFILL_CODE,
+	BROWSER_STRING_DECODER_POLYFILL_CODE,
+	BROWSER_URL_POLYFILL_CODE,
+} from "./generated/node-polyfills.js";
 import { BROWSER_PATH_POLYFILL_CODE } from "./generated/path-polyfill.js";
 import { BROWSER_UTIL_POLYFILL_CODE } from "./generated/util-polyfill.js";
 import {
@@ -1176,67 +1184,7 @@ export const POLYFILL_CODE_MAP: Record<string, string> = {
 		module.exports.default = module.exports;
 	`,
 	"node:module": "module.exports = require('module');",
-	// node:stream — a minimal but functional stream set. The ACP connection itself
-	// uses WHATWG Readable/WritableStream (worker globals); guest programs use these
-	// node streams for buffering (e.g. pi's bufferedStdin PassThrough). Readable.toWeb
-	// / Writable.toWeb bridge to the WHATWG streams the ACP codec consumes.
-	stream: `
-		class EventEmitterLike {
-			constructor() { this._listeners = Object.create(null); }
-			on(event, fn) { (this._listeners[event] = this._listeners[event] || []).push(fn); if (event === "data" && typeof this.resume === "function") this.resume(); return this; }
-			addListener(event, fn) { return this.on(event, fn); }
-			once(event, fn) { const w = (...a) => { this.off(event, w); fn(...a); }; w._origin = fn; return this.on(event, w); }
-			off(event, fn) { if (this._listeners[event]) this._listeners[event] = this._listeners[event].filter((x) => x !== fn && x._origin !== fn); return this; }
-			removeListener(event, fn) { return this.off(event, fn); }
-			removeAllListeners(event) { if (event) delete this._listeners[event]; else this._listeners = Object.create(null); return this; }
-			emit(event, ...args) { const ls = (this._listeners[event] || []).slice(); if (ls.length === 0 && event === "error") throw (args[0] instanceof Error ? args[0] : new Error(String(args[0]))); for (const fn of ls) fn(...args); return ls.length > 0; }
-			listenerCount(event) { return (this._listeners[event] || []).length; }
-		}
-		const chunkLength = (chunk) => typeof chunk === "string" ? new TextEncoder().encode(chunk).length : Number(chunk && chunk.byteLength) || 1;
-		const streamError = (code, message) => { const error = new Error(message); error.code = code; return error; };
-		class Readable extends EventEmitterLike {
-			constructor(options) { super(); this.readable = true; this.readableEnded = false; this.destroyed = false; this.paused = true; this._buffer = []; this._bufferedBytes = 0; this._highWaterMark = Number(options && options.highWaterMark) || 16384; this._readableOptions = options || {}; this._readableAutoDestroy = this._readableOptions.autoDestroy !== false; if (this._readableOptions.read) this._read = this._readableOptions.read; }
-			_finishReadable() { if (this.readableEnded) return; this.readableEnded = true; this.readable = false; this.emit("end"); if (this._readableAutoDestroy && !this._closeScheduled) { this._closeScheduled = true; queueMicrotask(() => this.destroy()); } }
-			_flush() { while (!this.paused && this._buffer.length > 0) { const chunk = this._buffer.shift(); this._bufferedBytes -= chunkLength(chunk); this.emit("data", chunk); } if (!this.paused && this._ended && this._buffer.length === 0) this._finishReadable(); }
-			resume() { if (this.destroyed) return this; const changed = this.paused; this.paused = false; if (changed) this.emit("resume"); this._flush(); return this; }
-			pause() { this.paused = true; this.emit("pause"); return this; }
-			setEncoding() { return this; }
-			read() { const chunk = this._buffer.shift() ?? null; if (chunk != null) this._bufferedBytes -= chunkLength(chunk); if (chunk == null && this._ended) this._finishReadable(); return chunk; }
-			push(chunk) { if (this.destroyed || this._ended) return false; if (chunk == null) { this._ended = true; this._flush(); return false; } this._buffer.push(chunk); this._bufferedBytes += chunkLength(chunk); this._flush(); return this._bufferedBytes < this._highWaterMark; }
-			pipe(dest) { this.on("data", (chunk) => { if (dest.write && dest.write(chunk) === false) { this.pause(); dest.once && dest.once("drain", () => this.resume()); } }); this.once("end", () => dest.end && dest.end()); this.once("error", (error) => dest.destroy ? dest.destroy(error) : dest.emit && dest.emit("error", error)); return dest; }
-			destroy(error) { if (this.destroyed) return this; this.destroyed = true; this.readable = false; this._buffer.length = 0; this._bufferedBytes = 0; if (error) this.emit("error", error); this.emit("close"); return this; }
-		}
-		Readable.toWeb = (stream) => new ReadableStream({ start(controller) { stream.once("end", () => controller.close()); stream.once("error", (error) => controller.error(error)); stream.on("data", (chunk) => { controller.enqueue(chunk); if ((controller.desiredSize ?? 1) <= 0) stream.pause && stream.pause(); }); }, pull() { stream.resume && stream.resume(); }, cancel(reason) { stream.destroy && stream.destroy(reason instanceof Error ? reason : undefined); } });
-		class Writable extends EventEmitterLike {
-			constructor(options) { super(); this.writable = true; this.writableEnded = false; this.writableFinished = false; this.destroyed = false; this._pendingWrites = 0; this._writableBufferedBytes = 0; this._writableNeedDrain = false; this._writableHighWaterMark = Number(options && options.highWaterMark) || 16384; this._writableOptions = options || {}; this._writableAutoDestroy = this._writableOptions.autoDestroy !== false; if (this._writableOptions.write) this._writeImpl = this._writableOptions.write; }
-			_finishIfReady() { if (this.writableEnded && this._pendingWrites === 0 && !this.writableFinished && !this.destroyed) { this.writableFinished = true; this.writable = false; this.emit("finish"); if (this._endCallback) { const callback = this._endCallback; this._endCallback = null; callback(); } if (this._writableAutoDestroy && !this._closeScheduled) { this._closeScheduled = true; queueMicrotask(() => this.destroy()); } } }
-			write(chunk, encoding, cb) { if (typeof encoding === "function") { cb = encoding; encoding = undefined; } if (this.destroyed || this.writableEnded) { const error = streamError("ERR_STREAM_WRITE_AFTER_END", "write after end"); queueMicrotask(() => { if (cb) cb(error); else this.emit("error", error); }); return false; } const size = chunkLength(chunk); this._pendingWrites += 1; this._writableBufferedBytes += size; const accepted = this._writableBufferedBytes < this._writableHighWaterMark; if (!accepted) this._writableNeedDrain = true; let completed = false; const done = (error) => { if (completed) return; completed = true; queueMicrotask(() => { this._pendingWrites -= 1; this._writableBufferedBytes = Math.max(0, this._writableBufferedBytes - size); if (error) { if (cb) cb(error); this.destroy(error); return; } if (cb) cb(); if (this._writableNeedDrain && this._writableBufferedBytes < this._writableHighWaterMark) { this._writableNeedDrain = false; this.emit("drain"); } this._finishIfReady(); }); }; try { if (this._writeImpl) this._writeImpl(chunk, encoding, done); else { this.emit("data", chunk); done(); } } catch (error) { done(error); } return accepted; }
-			end(chunk, encoding, cb) { const done = typeof chunk === "function" ? chunk : typeof encoding === "function" ? encoding : cb; if (this.writableEnded) { const error = streamError("ERR_STREAM_ALREADY_FINISHED", "end called after stream finished"); queueMicrotask(() => done ? done(error) : this.emit("error", error)); return this; } if (chunk != null && typeof chunk !== "function") this.write(chunk, typeof encoding === "string" ? encoding : undefined); this.writableEnded = true; this._endCallback = done || null; this._finishIfReady(); return this; }
-			destroy(error) { if (this.destroyed) return this; this.destroyed = true; this.writable = false; if (error) this.emit("error", error); this.emit("close"); return this; }
-		}
-		Writable.toWeb = (stream) => new WritableStream({ start(controller) { stream.on("error", (error) => controller.error(error)); }, write(chunk) { return new Promise((resolve, reject) => stream.write(chunk, undefined, (error) => error ? reject(error) : resolve())); }, close() { return new Promise((resolve, reject) => stream.end((error) => error ? reject(error) : resolve())); }, abort(reason) { stream.destroy && stream.destroy(reason instanceof Error ? reason : new Error(String(reason))); } });
-		class Duplex extends Readable { constructor(options) { super(options); this.writable = true; this.writableEnded = false; this.writableFinished = false; this._pendingWrites = 0; this._writableBufferedBytes = 0; this._writableNeedDrain = false; this._writableHighWaterMark = Number(options && options.highWaterMark) || 16384; this._writableOptions = options || {}; this._writableAutoDestroy = this._writableOptions.autoDestroy !== false; this._writeImpl = options && options.write; } write(...args) { return Writable.prototype.write.apply(this, args); } end(...args) { return Writable.prototype.end.apply(this, args); } _finishIfReady() { return Writable.prototype._finishIfReady.call(this); } destroy(error) { if (this.destroyed) return this; this.writable = false; return Readable.prototype.destroy.call(this, error); } }
-		class Transform extends Duplex {}
-		class PassThrough extends Transform { constructor(options) { super(options); this._writeImpl = (chunk, _encoding, callback) => { this.push(chunk); callback(); }; } end(chunk, encoding, cb) { const done = typeof chunk === "function" ? chunk : typeof encoding === "function" ? encoding : cb; if (chunk != null && typeof chunk !== "function") this.write(chunk, typeof encoding === "string" ? encoding : undefined); this.push(null); return Writable.prototype.end.call(this, done); } }
-		function finished(stream, optsOrCb, maybeCb) {
-			const cb = typeof optsOrCb === "function" ? optsOrCb : maybeCb;
-			if (stream && stream.on) { let done = false; const fire = (e) => { if (done) return; done = true; if (cb) cb(e || null); }; stream.on("end", () => fire()); stream.on("finish", () => fire()); stream.on("close", () => fire()); stream.on("error", (e) => fire(e)); }
-			return () => {};
-		}
-		function pipeline(...args) {
-			const cb = typeof args[args.length - 1] === "function" ? args.pop() : null;
-			const streams = args.flat();
-			for (let i = 0; i < streams.length - 1; i++) { if (streams[i] && streams[i].pipe) streams[i].pipe(streams[i + 1]); }
-			const last = streams[streams.length - 1];
-			if (last && last.on) { last.on("finish", () => cb && cb(null)); last.on("end", () => cb && cb(null)); last.on("error", (e) => cb && cb(e)); }
-			return last;
-		}
-		const Stream = EventEmitterLike;
-		Stream.Readable = Readable; Stream.Writable = Writable; Stream.Duplex = Duplex; Stream.Transform = Transform; Stream.PassThrough = PassThrough;
-		module.exports = { Stream, Readable, Writable, Duplex, Transform, PassThrough, finished, pipeline };
-		module.exports.promises = { finished: (s) => new Promise((res, rej) => finished(s, (e) => (e ? rej(e) : res()))), pipeline: (...a) => new Promise((res, rej) => pipeline(...a, (e) => (e ? rej(e) : res()))) };
-		module.exports.default = module.exports;
-	`,
+	stream: BROWSER_STREAM_POLYFILL_CODE,
 	"node:stream": "module.exports = require('stream');",
 	"stream/promises": "module.exports = require('stream').promises;",
 	"node:stream/promises": "module.exports = require('stream').promises;",
@@ -1255,91 +1203,18 @@ export const POLYFILL_CODE_MAP: Record<string, string> = {
 		module.exports.default = module.exports;
 	`,
 	"node:constants": "module.exports = require('constants');",
-	// node:events — EventEmitter (a complete-enough implementation for guest libraries).
-	events: `
-		class EventEmitter {
-			constructor() { this._events = Object.create(null); this._max = 10; }
-			setMaxListeners(n) { this._max = n; return this; }
-			getMaxListeners() { return this._max; }
-			on(type, fn) { (this._events[type] = this._events[type] || []).push(fn); this.emit("newListener", type, fn); return this; }
-			addListener(type, fn) { return this.on(type, fn); }
-			prependListener(type, fn) { (this._events[type] = this._events[type] || []).unshift(fn); return this; }
-			once(type, fn) { const w = (...a) => { this.off(type, w); fn(...a); }; w.listener = fn; return this.on(type, w); }
-			prependOnceListener(type, fn) { const w = (...a) => { this.off(type, w); fn(...a); }; w.listener = fn; return this.prependListener(type, w); }
-			off(type, fn) { const l = this._events[type]; if (l) { this._events[type] = l.filter((x) => x !== fn && x.listener !== fn); if (this._events[type].length === 0) delete this._events[type]; } return this; }
-			removeListener(type, fn) { return this.off(type, fn); }
-			removeAllListeners(type) { if (type) delete this._events[type]; else this._events = Object.create(null); return this; }
-			emit(type, ...args) { const l = this._events[type]; if (!l || l.length === 0) { if (type === "error") throw args[0] instanceof Error ? args[0] : new Error("Unhandled error"); return false; } for (const fn of l.slice()) fn.apply(this, args); return true; }
-			listeners(type) { return (this._events[type] || []).slice(); }
-			rawListeners(type) { return (this._events[type] || []).slice(); }
-			listenerCount(type) { return (this._events[type] || []).length; }
-			eventNames() { return Object.keys(this._events); }
-		}
-		EventEmitter.EventEmitter = EventEmitter;
-		EventEmitter.once = (emitter, name) => new Promise((resolve, reject) => {
-			const ok = (...a) => { emitter.off("error", err); resolve(a); };
-			const err = (e) => { emitter.off(name, ok); reject(e); };
-			emitter.once(name, ok); emitter.once("error", err);
-		});
-		EventEmitter.defaultMaxListeners = 10;
-		module.exports = EventEmitter;
-		module.exports.default = EventEmitter;
-	`,
+	events: BROWSER_EVENTS_POLYFILL_CODE,
 	"node:events": "module.exports = require('events');",
-	// node:assert — the common assertion surface.
-	assert: `
-		function AssertionError(message) { const e = new Error(message); e.name = "AssertionError"; return e; }
-		function assert(value, message) { if (!value) throw AssertionError(message || "assertion failed"); }
-		assert.ok = assert;
-		assert.equal = (a, b, m) => { if (a != b) throw AssertionError(m || (a + " != " + b)); };
-		assert.strictEqual = (a, b, m) => { if (a !== b) throw AssertionError(m || (a + " !== " + b)); };
-		assert.notEqual = (a, b, m) => { if (a == b) throw AssertionError(m); };
-		assert.notStrictEqual = (a, b, m) => { if (a === b) throw AssertionError(m); };
-		assert.deepEqual = (a, b, m) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw AssertionError(m); };
-		assert.deepStrictEqual = assert.deepEqual;
-		assert.fail = (m) => { throw AssertionError(m || "failed"); };
-		assert.throws = (fn, m) => { try { fn(); } catch (e) { return; } throw AssertionError(m || "missing expected exception"); };
-		assert.AssertionError = AssertionError;
-		module.exports = assert;
-		module.exports.default = assert;
-	`,
+	assert: BROWSER_ASSERT_POLYFILL_CODE,
 	"node:assert": "module.exports = require('assert');",
-	// node:url — WHATWG URL globals + the legacy parse/format surface.
-	url: `
-		module.exports = {
-			URL: globalThis.URL,
-			URLSearchParams: globalThis.URLSearchParams,
-			parse(input) { try { const u = new URL(input); return { href: u.href, protocol: u.protocol, host: u.host, hostname: u.hostname, port: u.port, pathname: u.pathname, search: u.search, hash: u.hash, query: u.search.replace(/^\\?/, ""), path: u.pathname + u.search }; } catch (e) { return { href: input, pathname: input }; } },
-			format(u) { if (typeof u === "string") return u; const proto = u.protocol ? (u.protocol.endsWith(":") ? u.protocol : u.protocol + ":") : ""; return proto + "//" + (u.host || u.hostname || "") + (u.pathname || "") + (u.search || (u.query ? "?" + u.query : "")) + (u.hash || ""); },
-			resolve(from, to) { try { return new URL(to, from).href; } catch (e) { return to; } },
-			fileURLToPath(u) { const s = typeof u === "string" ? u : u.href; return s.replace(/^file:\\/\\//, ""); },
-			pathToFileURL(p) { return new URL("file://" + (p.startsWith("/") ? p : "/" + p)); },
-			domainToASCII: (d) => d,
-			domainToUnicode: (d) => d,
-		};
-		module.exports.default = module.exports;
-	`,
+	"assert/strict":
+		"module.exports = require('assert').strict || require('assert');",
+	"node:assert/strict": "module.exports = require('assert/strict');",
+	url: BROWSER_URL_POLYFILL_CODE,
 	"node:url": "module.exports = require('url');",
-	// node:string_decoder — UTF-8 incremental decoder (TextDecoder-backed).
-	string_decoder: `
-		class StringDecoder {
-			constructor(encoding) { this.encoding = encoding || "utf8"; this._decoder = new TextDecoder(this.encoding === "utf8" ? "utf-8" : this.encoding); }
-			write(buf) { const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf); return this._decoder.decode(bytes, { stream: true }); }
-			end(buf) { const head = buf ? this.write(buf) : ""; return head + this._decoder.decode(); }
-		}
-		module.exports = { StringDecoder };
-		module.exports.default = module.exports;
-	`,
+	string_decoder: BROWSER_STRING_DECODER_POLYFILL_CODE,
 	"node:string_decoder": "module.exports = require('string_decoder');",
-	// node:querystring — legacy query parsing/serialization.
-	querystring: `
-		module.exports = {
-			parse(str) { const out = Object.create(null); if (!str) return out; for (const pair of String(str).split("&")) { if (!pair) continue; const i = pair.indexOf("="); const k = decodeURIComponent(i < 0 ? pair : pair.slice(0, i)); const v = i < 0 ? "" : decodeURIComponent(pair.slice(i + 1)); if (k in out) { if (Array.isArray(out[k])) out[k].push(v); else out[k] = [out[k], v]; } else out[k] = v; } return out; },
-			stringify(obj) { if (!obj) return ""; const parts = []; for (const k of Object.keys(obj)) { const v = obj[k]; if (Array.isArray(v)) for (const item of v) parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(item)); else parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(v)); } return parts.join("&"); },
-			escape: encodeURIComponent, unescape: decodeURIComponent,
-		};
-		module.exports.default = module.exports;
-	`,
+	querystring: BROWSER_QUERYSTRING_POLYFILL_CODE,
 	"node:querystring": "module.exports = require('querystring');",
 	// node:tty — reflects ExecOptions.stdioPty for stdio fds.
 	tty: `
@@ -3027,7 +2902,7 @@ export const POLYFILL_CODE_MAP: Record<string, string> = {
 	"node:crypto": "module.exports = require('crypto');",
 	wasi: BROWSER_WASI_POLYFILL_CODE,
 	"node:wasi": "module.exports = require('wasi');",
-	"secure-exec:wasi-command-host": `
+	"agentos:wasi-command-host": `
 		const callSync = (ref, ...args) => {
 			if (typeof ref === "function") return ref(...args);
 			if (ref && typeof ref.applySync === "function") return ref.applySync(undefined, args);
@@ -4795,7 +4670,7 @@ export const POLYFILL_CODE_MAP: Record<string, string> = {
 		const uid = nonNegativeInteger(virtualOs.uid, 1000);
 		const gid = nonNegativeInteger(virtualOs.gid, 1000);
 		const cpuInfo = () => ({
-			model: stringValue(virtualOs.cpuModel, "secure-exec virtual CPU"),
+			model: stringValue(virtualOs.cpuModel, "agentos virtual CPU"),
 			speed: 0,
 			times: { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 },
 		});
@@ -4807,18 +4682,18 @@ export const POLYFILL_CODE_MAP: Record<string, string> = {
 			freemem: () => freemem,
 			getPriority: () => 0,
 			homedir: () => homedir,
-			hostname: () => stringValue(virtualOs.hostname, "secure-exec"),
+			hostname: () => stringValue(virtualOs.hostname, "agentos"),
 			loadavg: () => [0, 0, 0],
 			machine: () => stringValue(virtualOs.machine, "x86_64"),
 			networkInterfaces: () => ({}),
 			platform: () => platform,
-			release: () => stringValue(virtualOs.release, "6.8.0-secure-exec"),
+			release: () => stringValue(virtualOs.release, "6.8.0-agentos"),
 			tmpdir: () => tmpdir,
 			totalmem: () => totalmem,
 			type: () => stringValue(virtualOs.type, platform === "win32" ? "Windows_NT" : "Linux"),
 			uptime: () => 0,
 			userInfo: () => ({ username, uid, gid, shell, homedir }),
-			version: () => stringValue(virtualOs.version, "#1 SMP PREEMPT_DYNAMIC secure-exec"),
+			version: () => stringValue(virtualOs.version, "#1 SMP PREEMPT_DYNAMIC agentos"),
 		};
 	`,
 	"node:os": "module.exports = require('os');",
@@ -4842,7 +4717,7 @@ export function getRuntimePolyfillCode(
 ): string | null {
 	const name = moduleName.replace(/^node:/, "");
 	const source = POLYFILL_CODE_MAP[name];
-	if (!source || name !== "secure-exec:wasi-command-host") {
+	if (!source || name !== "agentos:wasi-command-host") {
 		return source ?? null;
 	}
 	const maxSpawnFileActions = positiveIntegerOrDefault(

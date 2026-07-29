@@ -44,7 +44,7 @@ function lines(stdout: string): string[] {
 
 const textDecoder = new TextDecoder();
 
-describeIf(hasTarPackageBinary, "tar command", { timeout: 10_000 }, () => {
+describeIf(hasTarPackageBinary, "tar command", { timeout: 30_000 }, () => {
 	let kernel: Kernel | undefined;
 
 	afterEach(async () => {
@@ -89,6 +89,11 @@ describeIf(hasTarPackageBinary, "tar command", { timeout: 10_000 }, () => {
 		return textDecoder.decode(await kernel.readFile(path));
 	}
 
+	async function readGuestBytes(path: string): Promise<Uint8Array> {
+		if (!kernel) throw new Error("kernel not mounted");
+		return await kernel.readFile(path);
+	}
+
 	it("creates and lists file-backed archives", async () => {
 		await mountFixture();
 		await createArchive();
@@ -103,6 +108,37 @@ describeIf(hasTarPackageBinary, "tar command", { timeout: 10_000 }, () => {
 				"src/data/",
 				"src/data/values.csv",
 			]),
+		);
+	});
+
+	it("creates byte-identical archives with reproducible GNU options", async () => {
+		await mountFixture();
+		const args = [
+			"--sort=name",
+			"--mtime=@0",
+			"--owner=0",
+			"--group=0",
+			"--numeric-owner",
+			"-cf",
+		];
+		const first = await runTar([
+			...args,
+			"/project/first.tar",
+			"-C",
+			"/project",
+			"src",
+		]);
+		expect(first.exitCode, first.stderr || first.stdout).toBe(0);
+		const second = await runTar([
+			...args,
+			"/project/second.tar",
+			"-C",
+			"/project",
+			"src",
+		]);
+		expect(second.exitCode, second.stderr || second.stdout).toBe(0);
+		expect(Buffer.from(await readGuestBytes("/project/second.tar"))).toEqual(
+			Buffer.from(await readGuestBytes("/project/first.tar")),
 		);
 	});
 

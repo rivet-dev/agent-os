@@ -1,0 +1,9 @@
+{
+  "name": "vitest-default-rolldown-native-blocked",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "vitest": "4.1.10"
+  }
+}

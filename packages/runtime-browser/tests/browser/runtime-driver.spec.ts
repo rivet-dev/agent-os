@@ -36,7 +36,7 @@ test("preserves sync filesystem and module loading parity in a real Chromium wor
 		await createRuntime(page);
 
 	expect(crossOriginIsolated).toBe(true);
-	expect(workerUrl).toContain("/secure-exec-worker.js");
+	expect(workerUrl).toContain("/agentos-worker.js");
 
 	const filesystemRoundTrip = await execRuntime(
 		page,
@@ -185,7 +185,7 @@ test("honors string open flags and positional writeSync without losing data", as
 test("persists browser filesystem data across OPFS-backed runtimes", async ({
 	page,
 }) => {
-	const path = `/secure-exec-opfs-${Date.now()}-${Math.random()
+	const path = `/agentos-opfs-${Date.now()}-${Math.random()
 		.toString(16)
 		.slice(2)}.txt`;
 	const first = await createRuntime(page, { filesystem: "opfs" });
@@ -1150,7 +1150,7 @@ test("exposes configured virtual process and OS identity in the browser worker",
 			tmpdir: "/browser-tmp",
 			type: "BrowserLinux",
 			release: "9.9.9-browser",
-			version: "Browser secure-exec build",
+			version: "Browser agentos build",
 			machine: "browser64",
 		},
 	});
@@ -1200,7 +1200,7 @@ test("exposes configured virtual process and OS identity in the browser worker",
 		osTmpdir: "/browser-tmp",
 		osType: "BrowserLinux",
 		osRelease: "9.9.9-browser",
-		osVersion: "Browser secure-exec build",
+		osVersion: "Browser agentos build",
 		osMachine: "browser64",
 		userInfo: {
 			username: "runner",
@@ -1881,11 +1881,11 @@ test("provides browser node:crypto RSA sign and verify parity", async ({
 					});
 				});
 			});
-			const oaepCiphertext = crypto.publicEncrypt(publicKeyObject, encodeText("secure-exec-rsa-oaep"));
+			const oaepCiphertext = crypto.publicEncrypt(publicKeyObject, encodeText("agentos-rsa-oaep"));
 			const oaepPlaintext = crypto.privateDecrypt(privateKeyObject, oaepCiphertext).toString("utf8");
 			const pkcs1Ciphertext = crypto.publicEncrypt(
 				{ key: publicKeyObject, padding: crypto.constants.RSA_PKCS1_PADDING },
-				encodeText("secure-exec-rsa-pkcs1"),
+				encodeText("agentos-rsa-pkcs1"),
 			);
 			const pkcs1Plaintext = crypto.privateDecrypt(
 				{ key: privateKeyObject, padding: crypto.constants.RSA_PKCS1_PADDING },
@@ -1945,8 +1945,8 @@ test("provides browser node:crypto RSA sign and verify parity", async ({
 			publicAsymmetricKeyType: "rsa",
 			privateAsymmetricKeyType: "rsa",
 		},
-		oaepPlaintext: "secure-exec-rsa-oaep",
-		pkcs1Plaintext: "secure-exec-rsa-pkcs1",
+		oaepPlaintext: "agentos-rsa-oaep",
+		pkcs1Plaintext: "agentos-rsa-pkcs1",
 		keyTypes: ["private", "public"],
 		constants: [1, 4],
 	});

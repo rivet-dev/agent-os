@@ -199,7 +199,7 @@ impl Drop for SyntheticTargets {
 fn write_repeated_file(path: &Path, len: usize) {
     let mut file = fs::File::create(path)
         .unwrap_or_else(|e| panic!("create synthetic payload {} failed: {e}", path.display()));
-    let chunk = b"secure-exec projection bench payload\n";
+    let chunk = b"agentos projection bench payload\n";
     let mut remaining = len;
     while remaining > 0 {
         let n = remaining.min(chunk.len());
@@ -257,7 +257,7 @@ fn create_package_tar(label: &str, dest: &Path, commands: &[&str], payload_bytes
 
 fn create_synthetic_targets() -> SyntheticTargets {
     let unique = format!(
-        "secure-exec-projection-bench-{}-{}",
+        "agentos-projection-bench-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -304,7 +304,7 @@ fn create_synthetic_targets() -> SyntheticTargets {
 
 fn create_repacked_real_targets(sources: &[(&'static str, &Path)]) -> RealTargets {
     let unique = format!(
-        "secure-exec-projection-real-{}-{}",
+        "agentos-projection-real-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

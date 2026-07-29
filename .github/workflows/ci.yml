@@ -6,17 +6,26 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   checks:
     name: Checks
     if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'aggregate-ci')
     runs-on: ubuntu-latest
+    env:
+      AGENTOS_SKIP_NATIVE_META_BUILD: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
@@ -32,22 +41,29 @@ jobs:
       - run: |
           # Browser runtime sources remain in-tree, but are intentionally disabled
           # until their sidecar/reactor architecture has a separate approved design.
-          # Software package builds create temporary npm install trees; cap Turbo
-          # concurrency so their aggregate peak cannot exhaust hosted-runner disk.
+          # Native sidecars are built by the parallel Rust job, never by this graph.
           if grep -qE '^[[:space:]]*-[[:space:]]*website[[:space:]]*$' pnpm-workspace.yaml; then
             npx turbo build \
+              --only \
               --concurrency=4 \
               --filter='!@rivet-dev/agentos-website' \
+              --filter='!@agentos-software/codex' \
               --filter='!@rivet-dev/agentos-browser' \
               --filter='!@rivet-dev/agentos-runtime-browser' \
               --filter='!@rivet-dev/agentos-playground'
           else
             npx turbo build \
+              --only \
               --concurrency=4 \
+              --filter='!@agentos-software/codex' \
               --filter='!@rivet-dev/agentos-browser' \
               --filter='!@rivet-dev/agentos-runtime-browser' \
               --filter='!@rivet-dev/agentos-playground'
           fi
+      # The Codex adapter is ordinary TypeScript, while its executable is a
+      # reproducibly built 56 MB WASI artifact. Keep the cheap PR lane source-only;
+      # nightly and publish workflows build the pinned executable explicitly.
+      - run: pnpm --dir software/codex check-types
       - run: pnpm --dir scripts/publish run check-types
       - run: pnpm --dir scripts/publish test
       - run: node --test scripts/check-rust-package-metadata.test.mjs
@@ -56,15 +72,34 @@ jobs:
       - run: node scripts/check-agentos-client-protocol-compat.mjs
       - run: node --test scripts/verify-fixed-versions.test.mjs
       - run: node scripts/verify-fixed-versions.mjs
+      - run: node --test scripts/check-layout.test.mjs
       - run: pnpm check-layout
-      - run: node --test scripts/generate-secure-exec-mirror.test.mjs
-      # cargo-fmt ignores workspace.default-members at a virtual workspace root;
-      # keep retained browser crates outside the native runtime CI gate.
       - run: node --test scripts/check-rustfmt.test.mjs
       - run: node scripts/check-rustfmt.mjs
       - run: pnpm check-types
+      - name: Run fast package unit tests
+        run: |
+          pnpm --parallel --aggregate-output \
+            --filter '@rivet-dev/agentos-build-tools' \
+            --filter '@rivet-dev/agentos-toolchain' \
+            --filter '@rivet-dev/agentos-runtime-sidecar' \
+            test
       - run: pnpm lint
         continue-on-error: true
+      - name: Pack JavaScript build outputs
+        run: |
+          tar \
+            --exclude='software/*/dist/package' \
+            --exclude='software/*/dist/package.tar' \
+            --exclude='software/*/dist/package.aospkg' \
+            -czf /tmp/agentos-js-dist.tar.gz \
+            packages/*/dist software/*/dist test-harness/dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: js-dist
+          path: /tmp/agentos-js-dist.tar.gz
+          retention-days: 1
+          if-no-files-found: error
 
   wasm-commands:
     name: WASM Commands
@@ -75,7 +110,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@nightly
@@ -83,96 +118,216 @@ jobs:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: toolchain -> toolchain/target
-          cache-workspace-crates: true
+          workspaces: toolchain -> target
           key: wasm-commands-${{ hashFiles('toolchain/Cargo.lock') }}
       - run: pnpm install --frozen-lockfile --filter '@rivet-dev/agentos-runtime-core...'
-      - run: make -C toolchain commands
-      # DuckDB is intentionally outside the default command set because it is a
-      # heavy build, but the core integration suite requires its real package.
-      - name: Build required heavy integration commands
-        run: make -C toolchain cmd/duckdb
-      - run: node packages/runtime-core/scripts/copy-wasm-commands.mjs --require
+      - run: make -C toolchain pr-commands
+      - run: node packages/runtime-core/scripts/copy-wasm-commands.mjs --require-coreutils
       - uses: actions/upload-artifact@v4
         with:
           name: wasm-commands
           path: packages/runtime-core/commands
+          retention-days: 1
           if-no-files-found: error
 
   rust:
     name: Rust
     if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'aggregate-ci')
-    needs: [wasm-commands]
-    runs-on: [self-hosted, agentos-builder]
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Install wasm-pack
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native-pr-${{ hashFiles('Cargo.lock') }}
+      - name: Install V8 bridge build dependencies
+        run: pnpm install --frozen-lockfile --filter '@rivet-dev/agentos-build-tools...'
+      - name: Verify generated VM config bindings
         run: |
-          rustup target add wasm32-unknown-unknown
-          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-      - run: |
-          rm -rf /tmp/docs-theme
-          git clone https://github.com/rivet-dev/docs-theme.git /tmp/docs-theme
-          git -C /tmp/docs-theme checkout 450c498555135098c6a927adfdf13458be9be22a
-          rm -rf website/vendor/theme && mkdir -p website/vendor
-          cp -r /tmp/docs-theme/packages/theme website/vendor/theme
-      - run: pnpm install --frozen-lockfile
+          cargo test -p agentos-vm-config --quiet
+          git diff --exit-code -- packages/runtime-core/src/generated
+      - name: Build PR sidecar binaries
+        run: cargo build -p agentos-sidecar -p agentos-native-sidecar
+      - run: cargo clippy --workspace --exclude agentos-sidecar-browser --exclude agentos-native-sidecar-browser --all-targets -- -D warnings
+      - run: cargo test -p agentos-protocol -p agentos-sidecar -- --test-threads=1
+      - name: Test Rust client contracts
+        env:
+          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-sidecar
+        run: |
+          cargo test -p agentos-client \
+            --lib \
+            --test scaffold \
+            --test session_event_types \
+            --test e2e_smoke \
+            --test fs_e2e \
+            --test lifecycle_e2e \
+            --test mount_e2e \
+            --test sidecar_pool_e2e \
+            --test cron_e2e \
+            --test cron_grammar_e2e \
+            -- --test-threads=1
+      - name: Stage stripped sidecar artifacts
+        run: |
+          mkdir -p ci-artifacts/agentos-sidecar ci-artifacts/agentos-native-sidecar
+          cp target/debug/agentos-sidecar ci-artifacts/agentos-sidecar/agentos-sidecar
+          cp target/debug/agentos-native-sidecar ci-artifacts/agentos-native-sidecar/agentos-native-sidecar
+          strip --strip-all ci-artifacts/agentos-sidecar/agentos-sidecar
+          strip --strip-all ci-artifacts/agentos-native-sidecar/agentos-native-sidecar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentos-sidecar
+          path: ci-artifacts/agentos-sidecar/agentos-sidecar
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentos-native-sidecar
+          path: ci-artifacts/agentos-native-sidecar/agentos-native-sidecar
+          retention-days: 1
+          if-no-files-found: error
+
+  core-pr:
+    name: Core PR
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'aggregate-ci')
+    needs: [checks, rust]
+    runs-on: ubuntu-latest
+    env:
+      AGENTOS_SKIP_NATIVE_META_BUILD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile --filter '@rivet-dev/agentos-core...'
+      - uses: actions/download-artifact@v4
+        with:
+          name: js-dist
+          path: ci-artifacts/js
+      - uses: actions/download-artifact@v4
+        with:
+          name: agentos-sidecar
+          path: ci-artifacts/agentos-sidecar
+      - name: Restore runtime inputs
+        run: |
+          tar -xzf ci-artifacts/js/agentos-js-dist.tar.gz
+          chmod +x ci-artifacts/agentos-sidecar/agentos-sidecar
+      - run: pnpm --dir packages/core test:pr
+        env:
+          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/ci-artifacts/agentos-sidecar/agentos-sidecar
+
+  runtime-core-pr:
+    name: Runtime Core PR
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'aggregate-ci')
+    needs: [checks, rust, wasm-commands]
+    runs-on: ubuntu-latest
+    env:
+      AGENTOS_SKIP_NATIVE_META_BUILD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile --filter '@rivet-dev/agentos-runtime-core...'
+      - uses: actions/download-artifact@v4
+        with:
+          name: js-dist
+          path: ci-artifacts/js
+      - uses: actions/download-artifact@v4
+        with:
+          name: agentos-native-sidecar
+          path: ci-artifacts/agentos-native-sidecar
       - uses: actions/download-artifact@v4
         with:
           name: wasm-commands
           path: packages/runtime-core/commands
-      - run: node packages/runtime-core/scripts/copy-wasm-commands.mjs --require
-      - name: Restore canonical command staging directory
+      - name: Restore runtime inputs
         run: |
-          # Software package builds stage from the canonical toolchain output,
-          # while CI downloads the validated artifact into runtime-core.
-          mkdir -p toolchain/target/wasm32-wasip1/release/commands
-          cp -a packages/runtime-core/commands/. toolchain/target/wasm32-wasip1/release/commands/
-      - run: |
-          # Browser runtime sources remain in-tree, but are intentionally disabled
-          # until their sidecar/reactor architecture has a separate approved design.
-          if grep -qE '^[[:space:]]*-[[:space:]]*website[[:space:]]*$' pnpm-workspace.yaml; then
-            npx turbo build \
-              --filter='!@rivet-dev/agentos-website' \
-              --filter='!@rivet-dev/agentos-browser' \
-              --filter='!@rivet-dev/agentos-runtime-browser' \
-              --filter='!@rivet-dev/agentos-playground'
-          else
-            npx turbo build \
-              --filter='!@rivet-dev/agentos-browser' \
-              --filter='!@rivet-dev/agentos-runtime-browser' \
-              --filter='!@rivet-dev/agentos-playground'
-          fi
-      - name: Verify complete coreutils runtime package
-        run: pnpm --filter @agentos-software/coreutils build:runtime
-      - name: Run real AgentOS actor conformance
+          tar -xzf ci-artifacts/js/agentos-js-dist.tar.gz
+          chmod +x ci-artifacts/agentos-native-sidecar/agentos-native-sidecar
+          node packages/runtime-core/scripts/copy-wasm-commands.mjs --require-coreutils
+      - run: pnpm --dir packages/runtime-core test:pr
+        env:
+          AGENTOS_NATIVE_SIDECAR_BIN: ${{ github.workspace }}/ci-artifacts/agentos-native-sidecar/agentos-native-sidecar
+
+  actor-pr:
+    name: Actor Conformance
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'aggregate-ci')
+    needs: [checks, rust, wasm-commands]
+    runs-on: ubuntu-latest
+    env:
+      AGENTOS_SKIP_NATIVE_META_BUILD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile --filter '@rivet-dev/agentos...'
+      - uses: actions/download-artifact@v4
+        with:
+          name: js-dist
+          path: ci-artifacts/js
+      - uses: actions/download-artifact@v4
+        with:
+          name: agentos-sidecar
+          path: ci-artifacts/agentos-sidecar
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-commands
+          path: packages/runtime-core/commands
+      - name: Restore runtime inputs
         run: |
-          cargo build -p agentos-sidecar
-          pnpm --filter @rivet-dev/agentos-test-harness build
-          pnpm --filter @rivet-dev/agentos test:e2e:run
+          tar -xzf ci-artifacts/js/agentos-js-dist.tar.gz
+          chmod +x ci-artifacts/agentos-sidecar/agentos-sidecar
+          node packages/runtime-core/scripts/copy-wasm-commands.mjs --require-coreutils
+          pnpm --filter @agentos-software/coreutils build:runtime
+      - run: pnpm --dir packages/agentos test:pr
         env:
-          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-sidecar
-      - run: cargo clippy --workspace --exclude agentos-sidecar-browser --exclude agentos-native-sidecar-browser --all-targets -- -D warnings
-      - run: cargo test -p agentos-protocol -- --test-threads=1
-      - run: cargo test -p agentos-sidecar -- --test-threads=1
-      - run: cargo test -p agentos-client -- --test-threads=1
+          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/ci-artifacts/agentos-sidecar/agentos-sidecar
+
+  required:
+    name: CI / Required
+    if: ${{ always() && (github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'aggregate-ci')) }}
+    needs: [checks, wasm-commands, rust, core-pr, runtime-core-pr, actor-pr]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every PR gate
         env:
-          AGENT_OS_CLIENT_ALLOW_E2E_SKIPS: '1'
-      - name: Reclaim Cargo target space before package tests
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          WASM_RESULT: ${{ needs.wasm-commands.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          CORE_RESULT: ${{ needs.core-pr.result }}
+          RUNTIME_CORE_RESULT: ${{ needs.runtime-core-pr.result }}
+          ACTOR_RESULT: ${{ needs.actor-pr.result }}
         run: |
-          df -h .
-          cargo clean
-          df -h .
-      - if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-        run: pnpm test
-        env:
-          AGENTOS_E2E_NETWORK: '1'
-      - if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
-        run: pnpm test
+          for result in \
+            "$CHECKS_RESULT" \
+            "$WASM_RESULT" \
+            "$RUST_RESULT" \
+            "$CORE_RESULT" \
+            "$RUNTIME_CORE_RESULT" \
+            "$ACTOR_RESULT"; do
+            if [ "$result" != success ]; then
+              echo "required CI job did not succeed: $result" >&2
+              exit 1
+            fi
+          done

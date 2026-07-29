@@ -48,7 +48,7 @@ class AsyncLocalStorage {
 }
 
 class AsyncResource {
-	constructor(type = "SecureExecAsyncResource") {
+	constructor(type = "AgentOsAsyncResource") {
 		this.type = type;
 	}
 

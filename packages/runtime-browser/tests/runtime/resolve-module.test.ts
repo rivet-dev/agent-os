@@ -85,7 +85,7 @@ describe("browser module resolution", () => {
 		expect(loadPolyfill("node:dns/promises")).toContain("promises");
 		expect(loadPolyfill("dgram")).toContain("_dgramSocketCreateRaw");
 		expect(loadPolyfill("node:dgram")).toContain("_dgramSocketCreateRaw");
-		expect(loadPolyfill("secure-exec:wasi-command-host")).toContain(
+		expect(loadPolyfill("agentos:wasi-command-host")).toContain(
 			"createWasiCommandHost",
 		);
 	});

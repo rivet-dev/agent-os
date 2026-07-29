@@ -1,7 +1,4 @@
-import {
-	fromGeneratedExtEnvelope,
-	type LiveExtEnvelope,
-} from "./ext.js";
+import { fromGeneratedExtEnvelope, type LiveExtEnvelope } from "./ext.js";
 import type * as protocol from "./generated-protocol.js";
 import {
 	ownershipMatchesSelector,
@@ -38,6 +35,8 @@ export type LiveSidecarEventPayload =
 			name: string;
 			detail: Record<string, string>;
 	  }
+	| { type: "execution_output"; event: protocol.ExecutionOutputEvent }
+	| { type: "execution_completed"; event: protocol.ExecutionCompletedEvent }
 	| {
 			type: "ext";
 			envelope: LiveExtEnvelope;
@@ -79,6 +78,16 @@ export type LiveSidecarEventSelector =
 			ownership?: LiveOwnershipScope;
 			name?: string;
 			detail?: Record<string, string>;
+	  }
+	| {
+			type: "execution_output";
+			ownership?: LiveOwnershipScope;
+			executionId?: string;
+	  }
+	| {
+			type: "execution_completed";
+			ownership?: LiveOwnershipScope;
+			executionId?: string;
 	  };
 
 export type LiveSidecarBufferedEventRecord<
@@ -216,6 +225,7 @@ function buildBufferKey(
 		ownership?: LiveOwnershipScope;
 		state?: string;
 		processId?: string;
+		executionId?: string;
 		channel?: string;
 		name?: string;
 	},
@@ -230,6 +240,9 @@ function buildBufferKey(
 	if (options?.processId) {
 		parts.push(`process:${options.processId}`);
 	}
+	if (options?.executionId) {
+		parts.push(`execution:${options.executionId}`);
+	}
 	if (options?.channel) {
 		parts.push(`channel:${options.channel}`);
 	}
@@ -239,10 +252,9 @@ function buildBufferKey(
 	return parts.join("|");
 }
 
-export function sidecarSelectorMatchesEvent<TEvent extends LiveSidecarEventFrame>(
-	selector: LiveSidecarEventSelector,
-	event: TEvent,
-): boolean {
+export function sidecarSelectorMatchesEvent<
+	TEvent extends LiveSidecarEventFrame,
+>(selector: LiveSidecarEventSelector, event: TEvent): boolean {
 	if ("any" in selector) {
 		return true;
 	}
@@ -299,6 +311,17 @@ export function sidecarSelectorMatchesEvent<TEvent extends LiveSidecarEventFrame
 			}
 			return true;
 		}
+		case "execution_output":
+		case "execution_completed": {
+			const payload = event.payload as Extract<
+				LiveSidecarEventPayload,
+				{ type: "execution_output" | "execution_completed" }
+			>;
+			return (
+				selector.executionId === undefined ||
+				payload.event.executionId === selector.executionId
+			);
+		}
 	}
 }
 
@@ -332,6 +355,12 @@ export function sidecarSelectorBufferKey(
 			return buildBufferKey(selector.type, {
 				ownership: selector.ownership,
 				name: selector.name,
+			});
+		case "execution_output":
+		case "execution_completed":
+			return buildBufferKey(selector.type, {
+				ownership: selector.ownership,
+				executionId: selector.executionId,
 			});
 	}
 }
@@ -385,7 +414,11 @@ export function fromGeneratedEventPayload(
 			return {
 				type: "ext",
 				envelope: fromGeneratedExtEnvelope(payload.val),
-		};
+			};
+		case "ExecutionOutputEvent":
+			return { type: "execution_output", event: payload.val };
+		case "ExecutionCompletedEvent":
+			return { type: "execution_completed", event: payload.val };
 	}
 }
 
@@ -478,6 +511,20 @@ export function sidecarEventBufferKeys<TEvent extends LiveSidecarEventFrame>(
 				buildBufferKey(event.payload.type, {
 					ownership: owner,
 					name: event.payload.name,
+				}),
+			);
+			break;
+		case "execution_output":
+		case "execution_completed":
+			keys.add(
+				buildBufferKey(event.payload.type, {
+					executionId: event.payload.event.executionId,
+				}),
+			);
+			keys.add(
+				buildBufferKey(event.payload.type, {
+					ownership: owner,
+					executionId: event.payload.event.executionId,
 				}),
 			);
 			break;

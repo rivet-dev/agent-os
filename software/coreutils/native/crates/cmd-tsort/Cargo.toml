@@ -4,7 +4,7 @@ name = "cmd-tsort"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "tsort standalone binary for secure-exec VM"
+description = "tsort standalone binary for agentos VM"
 
 [[bin]]
 name = "tsort"

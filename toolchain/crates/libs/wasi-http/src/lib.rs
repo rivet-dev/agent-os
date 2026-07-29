@@ -15,9 +15,9 @@
 use std::fmt;
 use std::io;
 
-// AF_INET, SOCK_STREAM for TCP
-const AF_INET: u32 = 2;
-const SOCK_STREAM: u32 = 1;
+// AgentOS's owned wasi-libc p1 ABI values for AF_INET and SOCK_STREAM.
+const AF_INET: u32 = 1;
+const SOCK_STREAM: u32 = 6;
 const MAX_URL_BYTES: usize = 8 * 1024;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HEADER_COUNT: usize = 1_024;

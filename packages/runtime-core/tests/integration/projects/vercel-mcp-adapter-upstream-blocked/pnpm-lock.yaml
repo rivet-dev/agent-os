@@ -1,0 +1,22 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      '@vercel/mcp-adapter':
+        specifier: 0.3.2
+        version: 0.3.2
+
+packages:
+
+  '@vercel/mcp-adapter@0.3.2':
+    resolution: {integrity: sha512-FmAy0LIxMuA03H8wsYCs0dwrfrvdV9eFHaVDMaG1pQuy+2upbT0Be+mzMIxhYfXVWrFzylYkqyvTaDTyFCt8Eg==}
+
+snapshots:
+
+  '@vercel/mcp-adapter@0.3.2': {}

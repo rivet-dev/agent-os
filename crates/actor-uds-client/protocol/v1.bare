@@ -1,23 +1,16 @@
-# This schema is the client-side copy of Rivet's actor UDS protocol v1.
-# The actor and sidecar intentionally ship in lockstep with no compatibility shim.
+# Client-side copy of RivetKit 2.3.5's Actor Runtime Socket protocol v1.
+# AgentOS and RivetKit intentionally ship this boundary in lockstep.
 
-type ClientHello struct {
-	token: str
-}
+type ClientHello void
 
 type HelloOk struct {
 	maxFrameBytes: u32
 }
 
-type HelloRejectUnauthorized void
-type HelloRejectUnsupportedVersion struct {
-	minVersion: u16
-	maxVersion: u16
-}
+type HelloRejectUnsupportedVersion void
 
 type ServerHello union {
 	HelloOk |
-	HelloRejectUnauthorized |
 	HelloRejectUnsupportedVersion
 }
 
@@ -46,9 +39,25 @@ type SqliteQuery struct {
 	params: list<SqlValue>
 }
 
+type SqliteBegin struct {
+	leaseKey: str
+	timeoutMs: optional<u64>
+}
+
+type SqliteCommit struct {
+	leaseKey: str
+}
+
+type SqliteRollback struct {
+	leaseKey: str
+}
+
 type RequestPayload union {
 	SqliteExec |
-	SqliteQuery
+	SqliteQuery |
+	SqliteBegin |
+	SqliteCommit |
+	SqliteRollback
 }
 
 type Request struct {
@@ -62,6 +71,10 @@ type ClientFrame union {
 }
 
 type SqliteExecOk void
+type SqliteBeginOk void
+type SqliteCommitOk void
+type SqliteRollbackOk void
+
 type SqliteQueryOk struct {
 	columns: list<str>
 	rows: list<SqlRow>
@@ -76,22 +89,33 @@ type SqlError struct {
 }
 
 type EndpointClosed void
+
 type QueueFull struct {
 	limit: str
 	capacity: u32
 }
 
-type TxnOpenAtEnd void
-type LeaseExpired void
+type InvalidLeaseKey struct {
+	message: str
+}
+
+type LeaseExpired struct {
+	timeoutMs: u64
+	message: str
+}
+
 type ResponseTooLarge void
 
 type ResponsePayload union {
 	SqliteExecOk |
 	SqliteQueryOk |
+	SqliteBeginOk |
+	SqliteCommitOk |
+	SqliteRollbackOk |
 	SqlError |
 	EndpointClosed |
 	QueueFull |
-	TxnOpenAtEnd |
+	InvalidLeaseKey |
 	LeaseExpired |
 	ResponseTooLarge
 }
@@ -103,6 +127,7 @@ type Response struct {
 
 type FrameTooLarge void
 type MalformedFrame void
+
 type GoAwayReason union {
 	FrameTooLarge |
 	MalformedFrame

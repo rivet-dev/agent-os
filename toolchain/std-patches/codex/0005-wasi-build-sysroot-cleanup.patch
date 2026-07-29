@@ -1,0 +1,56 @@
+--- a/scripts/build-wasi-codex-exec.sh
++++ b/scripts/build-wasi-codex-exec.sh
+@@ -34,6 +34,7 @@
+ SYSROOT="$(rustc "+$TOOLCHAIN" --print sysroot)"
+ LIBDIR="$SYSROOT/lib/rustlib/wasm32-wasip1/lib"
+ STASH="$LIBDIR/.prebuilt-stash"
++GENERATED_STASH="$REPO_DIR/target/wasm32-wasip1/release/.sysroot-generated"
+ 
+ echo "== ensure toolchain + target =="
+ rustup toolchain list | grep -q "$TOOLCHAIN" || rustup toolchain install "$TOOLCHAIN"
+@@ -44,7 +45,16 @@ rustup toolchain list | grep -q "$TOOLCHAIN" || rustup toolchain install "$TOOLC
+ # the way (keeping self-contained/ CRT) so build-std's core is the only one. Idempotent.
+ echo "== stash prebuilt std rlibs (keep self-contained CRT) =="
+ mkdir -p "$STASH"
++mkdir -p "$GENERATED_STASH"
+ shopt -s nullglob
++# A previously interrupted build may have left its build-std panic runtime in
++# the global rustup sysroot. Quarantine artifacts that also exist in target/deps
++# before stashing the actual prebuilt target libraries.
++for generated in "$REPO_DIR"/target/wasm32-wasip1/release/deps/libpanic_abort-*.rlib \
++	"$REPO_DIR"/target/wasm32-wasip1/release/deps/libpanic_abort-*.rmeta; do
++	sysroot_file="$LIBDIR/$(basename "$generated")"
++	[ ! -e "$sysroot_file" ] || mv "$sysroot_file" "$GENERATED_STASH/"
++done
+ for f in "$LIBDIR"/*.rlib "$LIBDIR"/*.rmeta; do mv "$f" "$STASH/"; done
+ shopt -u nullglob
+ 
+@@ -56,6 +66,11 @@ export CFLAGS_wasm32_wasip1="--sysroot=$WSDK/share/wasi-sysroot -D_WASI_EMULATED
+ restore_sysroot() {
+ 	[ "${KEEP_SYSROOT:-0}" = "1" ] && return 0
+ 	shopt -s nullglob
++	for generated in "$REPO_DIR"/target/wasm32-wasip1/release/deps/libpanic_abort-*.rlib \
++		"$REPO_DIR"/target/wasm32-wasip1/release/deps/libpanic_abort-*.rmeta; do
++		sysroot_file="$LIBDIR/$(basename "$generated")"
++		[ ! -e "$sysroot_file" ] || mv "$sysroot_file" "$GENERATED_STASH/"
++	done
+ 	for f in "$STASH"/*; do mv "$f" "$LIBDIR/"; done
+ 	shopt -u nullglob
+ 	rmdir "$STASH" 2>/dev/null || true
+@@ -67,6 +82,8 @@ cd "$REPO_DIR"
+ # First pass builds build-std's panic_abort into target deps. The bin resolves -Cpanic=abort's
+ # panic runtime from the *sysroot*, so we then copy build-std's ABI-matched panic_abort there.
+ echo "== build (build-std, panic=abort) =="
++RAW="target/wasm32-wasip1/release/codex-exec.wasm"
++[ ! -f "$RAW" ] || mv "$RAW" "$RAW.previous"
+ cargo "+$TOOLCHAIN" build -p codex-exec --release --target wasm32-wasip1 \
+ 	-Z build-std --config 'profile.release.panic="abort"' 2>&1 | tail -20 || true
+ 
+@@ -79,7 +96,6 @@ if [ -n "$PA" ] && [ ! -e "$LIBDIR/$(basename "$PA")" ]; then
+ 		-Z build-std --config 'profile.release.panic="abort"' 2>&1 | tail -20
+ fi
+ 
+-RAW="target/wasm32-wasip1/release/codex-exec.wasm"
+ [ -f "$RAW" ] || { echo "ERROR: no codex-exec.wasm artifact"; exit 1; }
+ echo "== built: $(stat -c%s "$RAW") bytes =="
+ 

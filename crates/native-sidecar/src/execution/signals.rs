@@ -16,6 +16,14 @@ pub(super) fn terminate_tracked_child_process_for_signal(
             .map_err(kernel_error);
     }
 
+    // The runtime may have published its terminal event before the parent has
+    // polled and reaped it. Keep that queued exit authoritative and make a
+    // cleanup kill idempotent instead of sending a late terminate command to a
+    // completed V8 session.
+    if child.execution.has_exited() {
+        return Ok(());
+    }
+
     if signal == libc::SIGCONT {
         apply_active_process_default_signal(kernel, child, signal)?;
         match registration.map(|registration| &registration.action) {

@@ -204,6 +204,53 @@ fn permission_wrapped_filesystem_resolves_symlinks_before_permission_checks() {
 }
 
 #[test]
+fn unrestricted_filesystem_skips_permission_only_symlink_resolution() {
+    let mut inner = MemoryFileSystem::new();
+    inner.mkdir("/workspace", true).expect("seed workspace dir");
+    inner.mkdir("/private", true).expect("seed private dir");
+    inner
+        .write_file("/private/secret.txt", b"secret".to_vec())
+        .expect("seed secret file");
+    inner
+        .symlink("/private/secret.txt", "/workspace/alias.txt")
+        .expect("seed symlink");
+
+    let checked_paths = Arc::new(Mutex::new(Vec::new()));
+    let checked_paths_for_permission = Arc::clone(&checked_paths);
+    let permissions = Permissions {
+        filesystem: Some(Arc::new(move |request: &FsAccessRequest| {
+            checked_paths_for_permission
+                .lock()
+                .expect("permission path lock poisoned")
+                .push(request.path.clone());
+            PermissionDecision::allow()
+        })),
+        filesystem_unrestricted: true,
+        ..Permissions::default()
+    };
+    let mut filesystem = PermissionedFileSystem::new(inner, "vm-permissions", permissions);
+
+    assert_eq!(
+        filesystem
+            .read_file("/workspace/./alias.txt")
+            .expect("unrestricted read should retain filesystem symlink semantics"),
+        b"secret".to_vec()
+    );
+    assert_eq!(
+        checked_paths
+            .lock()
+            .expect("permission path lock poisoned")
+            .as_slice(),
+        [String::from("/workspace/alias.txt")].as_slice()
+    );
+
+    let error = filesystem
+        .read_file("/workspace/missing.txt")
+        .expect_err("the underlying filesystem must still reject missing paths");
+    assert_eq!(error.code(), "ENOENT");
+}
+
+#[test]
 fn permission_wrapped_lchown_does_not_follow_the_final_symlink() {
     let mut inner = MemoryFileSystem::new();
     inner.mkdir("/allowed", true).expect("seed allowed dir");

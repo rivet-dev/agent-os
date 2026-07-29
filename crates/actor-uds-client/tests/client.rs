@@ -21,17 +21,16 @@ async fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> io::Result<()> 
 }
 
 #[tokio::test]
-async fn authenticates_and_reuses_a_connection_for_query_and_exec() {
+async fn handshakes_and_reuses_a_connection_for_query_and_exec() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("actor.sock");
     let listener = UnixListener::bind(&path).unwrap();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let hello = wire::versioned::ClientHello::deserialize_with_embedded_version(
+        wire::versioned::ClientHello::deserialize_with_embedded_version(
             &read_frame(&mut stream).await.unwrap(),
         )
         .unwrap();
-        assert_eq!(hello.token, "secret");
         let response =
             wire::versioned::ServerHello::wrap_latest(wire::ServerHello::HelloOk(wire::HelloOk {
                 max_frame_bytes: 32 * 1024 * 1024,
@@ -84,7 +83,7 @@ async fn authenticates_and_reuses_a_connection_for_query_and_exec() {
         write_frame(&mut stream, &response).await.unwrap();
     });
 
-    let client = ActorUdsClient::new(&path, "secret");
+    let client = ActorUdsClient::new(&path);
     let result = client
         .query("SELECT ?", vec![SqlValue::SqlInteger(42)])
         .await
@@ -96,24 +95,25 @@ async fn authenticates_and_reuses_a_connection_for_query_and_exec() {
 }
 
 #[tokio::test]
-async fn reports_authentication_rejection_as_a_typed_error() {
+async fn reports_version_rejection_as_a_typed_error() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("actor.sock");
     let listener = UnixListener::bind(&path).unwrap();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         read_frame(&mut stream).await.unwrap();
-        let response =
-            wire::versioned::ServerHello::wrap_latest(wire::ServerHello::HelloRejectUnauthorized)
-                .serialize_with_embedded_version(1)
-                .unwrap();
+        let response = wire::versioned::ServerHello::wrap_latest(
+            wire::ServerHello::HelloRejectUnsupportedVersion,
+        )
+        .serialize_with_embedded_version(1)
+        .unwrap();
         write_frame(&mut stream, &response).await.unwrap();
     });
 
-    let error = ActorUdsClient::new(&path, "wrong")
+    let error = ActorUdsClient::new(&path)
         .query("SELECT 1", Vec::new())
         .await
         .unwrap_err();
-    assert!(matches!(error, ActorUdsError::Unauthorized));
+    assert!(matches!(error, ActorUdsError::VersionMismatch));
     server.await.unwrap();
 }

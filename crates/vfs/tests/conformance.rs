@@ -957,6 +957,29 @@ async fn cache_invalidates_on_mutation() {
     );
 }
 
+#[tokio::test]
+async fn cache_does_not_turn_non_enoent_errors_into_missing_paths() {
+    let inner = InMemoryMetadataStore::new();
+    let root = inner.resolve("/").await.unwrap();
+    inner
+        .create(
+            root.ino,
+            "loop",
+            CreateInodeAttrs::symlink(String::from("/loop"), 0, 0),
+        )
+        .await
+        .unwrap();
+    let metadata = CachedMetadataStore::new(inner, 16);
+
+    for _ in 0..2 {
+        assert_eq!(metadata.resolve("/loop").await.unwrap_err().code(), "ELOOP");
+        assert_eq!(
+            metadata.lstat("/loop/child").await.unwrap_err().code(),
+            "ELOOP"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cache_does_not_store_stale_read_when_mutation_wins_race() {
     let inner = InMemoryMetadataStore::new();

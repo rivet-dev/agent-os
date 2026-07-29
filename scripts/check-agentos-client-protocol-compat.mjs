@@ -11,12 +11,12 @@ const defaultRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const allowedCompatFiles = new Set([]);
 
-const compatPattern = /\bsecure_exec_client::protocol\b/g;
+const compatPattern = /\bagentos_client::protocol\b/g;
 const legacyWireConstantPattern =
-	/\bsecure_exec_client::protocol::DEFAULT_MAX_FRAME_BYTES\b/g;
+	/\bagentos_client::protocol::DEFAULT_MAX_FRAME_BYTES\b/g;
 const staleCompatibilityDocPattern =
 	/\blive transport still uses the compatibility protocol surface\b/g;
-const sidecarCompatPattern = /\bsecure_exec_sidecar::protocol\b/g;
+const sidecarCompatPattern = /\bagentos_sidecar::protocol\b/g;
 
 function isDir(path) {
 	return existsSync(path) && statSync(path).isDirectory();
@@ -56,7 +56,7 @@ function formatPath(root, path) {
 function reportSidecarProtocolUse(errors, source, rel, index) {
 	const location = lineAndColumn(source, index);
 	errors.push(
-		`${rel}:${location.line}:${location.column} imports the secure-exec sidecar compatibility protocol surface; use secure_exec_sidecar::wire for generated wire types`,
+		`${rel}:${location.line}:${location.column} imports the agentos sidecar compatibility protocol surface; use agentos_sidecar::wire for generated wire types`,
 	);
 }
 
@@ -80,14 +80,14 @@ export function checkAgentOsClientProtocolCompat(options = {}) {
 		for (const match of source.matchAll(legacyWireConstantPattern)) {
 			const location = lineAndColumn(source, match.index ?? 0);
 			errors.push(
-				`${rel}:${location.line}:${location.column} reads the default frame limit through the compatibility protocol surface; use secure_exec_client::wire::DEFAULT_MAX_FRAME_BYTES`,
+				`${rel}:${location.line}:${location.column} reads the default frame limit through the compatibility protocol surface; use agentos_client::wire::DEFAULT_MAX_FRAME_BYTES`,
 			);
 		}
 		staleCompatibilityDocPattern.lastIndex = 0;
 		for (const match of source.matchAll(staleCompatibilityDocPattern)) {
 			const location = lineAndColumn(source, match.index ?? 0);
 			errors.push(
-				`${rel}:${location.line}:${location.column} documents stale generated-wire migration state; describe secure_exec_client::wire as the active transport surface`,
+				`${rel}:${location.line}:${location.column} documents stale generated-wire migration state; describe agentos_client::wire as the active transport surface`,
 			);
 		}
 		compatPattern.lastIndex = 0;
@@ -95,7 +95,7 @@ export function checkAgentOsClientProtocolCompat(options = {}) {
 			if (!allowedCompatFiles.has(rel)) {
 				const location = lineAndColumn(source, match.index ?? 0);
 				errors.push(
-					`${rel}:${location.line}:${location.column} imports the live protocol compatibility surface; use secure_exec_client::wire for generated wire types or add this file to the migration inventory with justification`,
+					`${rel}:${location.line}:${location.column} imports the live protocol compatibility surface; use agentos_client::wire for generated wire types or add this file to the migration inventory with justification`,
 				);
 			}
 		}

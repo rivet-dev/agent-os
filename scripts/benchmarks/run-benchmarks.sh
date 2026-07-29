@@ -14,6 +14,9 @@ LANES=(
   "memory-sleep"
   "memory-pi-session"
   "session"
+  "agent-session"
+  "gigacode-session"
+  "gigacode-agent-session"
 )
 
 should_run() {
@@ -81,6 +84,21 @@ run "memory-pi-session" \
 run "session" \
   scripts/benchmarks/session.bench.ts --iterations=5 \
     ${BENCH_GATE:+--gate} ${BENCH_UPDATE_BASELINE:+--update-baseline}
+
+# Cross-agent ACP process spawn and first mocked message. Failures are recorded
+# per agent so one broken adapter does not hide timings for the others.
+run "agent-session" \
+  scripts/benchmarks/agent-session.bench.ts --iterations=3 --warmup=1
+
+# Direct AgentOS ACP versus the GigaCode HTTP + Rivet actor path. Both lanes
+# reuse a warm VM/actor and talk to the same local mock model server.
+run "gigacode-session" \
+  scripts/benchmarks/gigacode-session.bench.ts --iterations=3 --warmup=1
+
+# Cross-agent GigaCode startup using the same LLMock prompt as agent-session.
+# Compare sessionCreate and firstPrompt against the raw ACP benchmark output.
+run "gigacode-agent-session" \
+  scripts/benchmarks/gigacode-agent-session.bench.ts --iterations=3 --warmup=1
 
 echo "" >&2
 echo "=== Done. Results in $RESULTS_DIR ===" >&2

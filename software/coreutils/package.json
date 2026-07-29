@@ -1,9 +1,9 @@
 {
 	"name": "@agentos-software/coreutils",
-	"version": "0.3.3",
+	"version": "0.3.4",
 	"type": "module",
 	"license": "Apache-2.0",
-	"description": "GNU coreutils for secure-exec VMs (sh, cat, ls, cp, sort, and 80+ commands)",
+	"description": "GNU coreutils for agentos VMs (sh, cat, ls, cp, sort, and 80+ commands)",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [
@@ -21,7 +21,8 @@
 		"build": "agentos-toolchain stage --commands-dir ../../toolchain/target/wasm32-wasip1/release/commands --if-missing skip && tsc && agentos-toolchain build",
 		"build:runtime": "node scripts/stage-runtime.mjs && tsc && agentos-toolchain build",
 		"check-types": "tsc --noEmit",
-		"test": "vitest run test/ --passWithNoTests"
+		"test": "vitest run test/ --exclude '**/*.nightly.test.ts' --passWithNoTests",
+		"test:nightly": "vitest run test/*.nightly.test.ts --fileParallelism=false --testTimeout=10000 --passWithNoTests"
 	},
 	"devDependencies": {
 		"@agentos-software/manifest": "workspace:*",

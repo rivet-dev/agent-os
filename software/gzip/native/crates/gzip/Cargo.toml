@@ -1,10 +1,10 @@
 [package]
 workspace = "../../../../../toolchain"
-name = "secureexec-gzip"
+name = "agentos-gzip"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "gzip/gunzip/zcat implementations for secure-exec standalone binaries"
+description = "gzip/gunzip/zcat implementations for agentos standalone binaries"
 
 [dependencies]
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }

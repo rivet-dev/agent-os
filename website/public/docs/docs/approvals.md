@@ -18,9 +18,9 @@ With `ask`, respond using the AgentOS `requestId` plus one of the exact `optionI
 
 The `permission_request` session-event variant contains:
 
-- `sessionId`: stable public AgentOS session ID, including inside the native request payload.
+- `sessionId`: stable public AgentOS session ID from the durable event envelope.
 - `requestId`: globally unique AgentOS correlation ID; the adapter JSON-RPC ID is private.
-- `request`: exact native ACP request params, including `toolCall` and `options`.
+- `toolCall`, `options`, and optional `_meta`: exact native ACP request fields exposed directly, without a nested `request` object.
 
 `respondPermission` requires an explicit `sessionId` and returns `accepted` or `not_pending` with a specific terminal reason. The first valid response wins atomically. Invalid options fail with `invalid_permission_option` and list the offered IDs. `accepted` means the decision reached the active ACP waiter; it does not mean the tool operation succeeded.
 

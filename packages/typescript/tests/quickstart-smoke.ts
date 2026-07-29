@@ -3,7 +3,7 @@ import {
 	type ProjectCompileResult,
 	type TypeCheckResult,
 	type TypeScriptTools,
-} from "@rivet-dev/agentos-typescript";
+} from "@rivet-dev/agentos-internal-typescript";
 import {
 	createNodeDriver,
 	createNodeRuntimeDriverFactory,

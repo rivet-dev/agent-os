@@ -76,7 +76,7 @@ export type HarnessSmokeResponse = HarnessExecResponse & {
 	workerUrl: string;
 };
 
-type SecureExecBrowserHarness = {
+type AgentOsBrowserHarness = {
 	createRuntime(
 		options?: HarnessCreateRuntimeOptions,
 	): Promise<HarnessCreateRuntimeResponse>;
@@ -109,7 +109,7 @@ type SecureExecBrowserHarness = {
 
 declare global {
 	interface Window {
-		__secureExecBrowserHarness?: SecureExecBrowserHarness;
+		__agentOsBrowserHarness?: AgentOsBrowserHarness;
 	}
 }
 
@@ -125,7 +125,7 @@ export async function createRuntime(
 	options?: HarnessCreateRuntimeOptions,
 ): Promise<HarnessCreateRuntimeResponse> {
 	return page.evaluate(async (optionsArg) => {
-		const harness = window.__secureExecBrowserHarness;
+		const harness = window.__agentOsBrowserHarness;
 		if (!harness) {
 			throw new Error("Browser harness is unavailable on window");
 		}
@@ -141,7 +141,7 @@ export async function execRuntime(
 ): Promise<HarnessExecResponse> {
 	return page.evaluate(
 		async ({ runtimeId: runtimeIdArg, code: codeArg, options: optionsArg }) => {
-			const harness = window.__secureExecBrowserHarness;
+			const harness = window.__agentOsBrowserHarness;
 			if (!harness) {
 				throw new Error("Browser harness is unavailable on window");
 			}
@@ -156,7 +156,7 @@ export async function disposeRuntime(
 	runtimeId: string,
 ): Promise<void> {
 	await page.evaluate(async (runtimeIdArg) => {
-		const harness = window.__secureExecBrowserHarness;
+		const harness = window.__agentOsBrowserHarness;
 		if (!harness) {
 			return;
 		}
@@ -166,7 +166,7 @@ export async function disposeRuntime(
 
 export async function disposeAllRuntimes(page: Page): Promise<void> {
 	await page.evaluate(async () => {
-		const harness = window.__secureExecBrowserHarness;
+		const harness = window.__agentOsBrowserHarness;
 		if (!harness) {
 			return;
 		}
@@ -182,7 +182,7 @@ export async function terminatePendingExec(
 ): Promise<HarnessTerminatePendingResponse> {
 	return page.evaluate(
 		async ({ runtimeId: runtimeIdArg, code: codeArg, delayMs: delayMsArg }) => {
-			const harness = window.__secureExecBrowserHarness;
+			const harness = window.__agentOsBrowserHarness;
 			if (!harness) {
 				throw new Error("Browser harness is unavailable on window");
 			}
@@ -206,7 +206,7 @@ export async function signalPendingExec(
 			signal: signalArg,
 			delayMs: delayMsArg,
 		}) => {
-			const harness = window.__secureExecBrowserHarness;
+			const harness = window.__agentOsBrowserHarness;
 			if (!harness) {
 				throw new Error("Browser harness is unavailable on window");
 			}
@@ -229,7 +229,7 @@ export async function debugPendingExec(
 ): Promise<HarnessTerminatePendingResponse> {
 	return page.evaluate(
 		async ({ runtimeId: runtimeIdArg, code: codeArg, delayMs: delayMsArg }) => {
-			const harness = window.__secureExecBrowserHarness;
+			const harness = window.__agentOsBrowserHarness;
 			if (!harness) {
 				throw new Error("Browser harness is unavailable on window");
 			}
@@ -244,7 +244,7 @@ export async function runtimeDebug(
 	runtimeId: string,
 ): Promise<HarnessRuntimeDebugResponse> {
 	return page.evaluate(async (runtimeIdArg) => {
-		const harness = window.__secureExecBrowserHarness;
+		const harness = window.__agentOsBrowserHarness;
 		if (!harness) {
 			throw new Error("Browser harness is unavailable on window");
 		}
@@ -254,7 +254,7 @@ export async function runtimeDebug(
 
 export async function smokeHarness(page: Page): Promise<HarnessSmokeResponse> {
 	return page.evaluate(async () => {
-		const harness = window.__secureExecBrowserHarness;
+		const harness = window.__agentOsBrowserHarness;
 		if (!harness) {
 			throw new Error("Browser harness is unavailable on window");
 		}

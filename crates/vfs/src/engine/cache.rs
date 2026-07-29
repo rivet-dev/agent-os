@@ -100,8 +100,15 @@ impl<M: MetadataStore> MetadataStore for CachedMetadataStore<M> {
         let result = self.inner.resolve(path).await;
         let mut cache = self.cache.lock().expect("cache mutex poisoned");
         if cache.generation == generation {
-            cache.resolve.insert(path.to_string(), result.clone().ok());
-            cache.remember(CacheKey::Resolve(path.to_string()));
+            let cached = match &result {
+                Ok(meta) => Some(Some(meta.clone())),
+                Err(error) if error.code() == "ENOENT" => Some(None),
+                Err(_) => None,
+            };
+            if let Some(cached) = cached {
+                cache.resolve.insert(path.to_string(), cached);
+                cache.remember(CacheKey::Resolve(path.to_string()));
+            }
         }
         result
     }
@@ -121,8 +128,15 @@ impl<M: MetadataStore> MetadataStore for CachedMetadataStore<M> {
         let result = self.inner.lstat(path).await;
         let mut cache = self.cache.lock().expect("cache mutex poisoned");
         if cache.generation == generation {
-            cache.lstat.insert(path.to_string(), result.clone().ok());
-            cache.remember(CacheKey::Lstat(path.to_string()));
+            let cached = match &result {
+                Ok(meta) => Some(Some(meta.clone())),
+                Err(error) if error.code() == "ENOENT" => Some(None),
+                Err(_) => None,
+            };
+            if let Some(cached) = cached {
+                cache.lstat.insert(path.to_string(), cached);
+                cache.remember(CacheKey::Lstat(path.to_string()));
+            }
         }
         result
     }

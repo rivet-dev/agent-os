@@ -1,4 +1,4 @@
-// .agent/recovery/secure-exec/shared/global-exposure.ts
+// .agent/recovery/agentos/shared/global-exposure.ts
 var NODE_CUSTOM_GLOBAL_INVENTORY = [
 	{
 		name: "_processConfig",
@@ -7,10 +7,15 @@ var NODE_CUSTOM_GLOBAL_INVENTORY = [
 			"Bridge bootstrap configuration must not be replaced by sandbox code.",
 	},
 	{
-		name: "__secureExecHrNowUs",
+		name: "__agentOsHrNowUs",
 		classification: "hardened",
 		rationale:
 			"High-resolution monotonic clock, only installed when high_resolution_time opt-in is set.",
+	},
+	{
+		name: "__agentOsRequireEsmSync",
+		classification: "hardened",
+		rationale: "V8-owned synchronous ESM loader used by Node-compatible require().",
 	},
 	{
 		name: "process.cpuUsage",
@@ -551,6 +556,26 @@ var NODE_CUSTOM_GLOBAL_INVENTORY = [
 		rationale: "Host crypto digest bridge reference.",
 	},
 	{
+		name: "_cryptoHashCreate",
+		classification: "hardened",
+		rationale: "Host incremental crypto digest creation bridge reference.",
+	},
+	{
+		name: "_cryptoHashUpdate",
+		classification: "hardened",
+		rationale: "Host incremental crypto digest update bridge reference.",
+	},
+	{
+		name: "_cryptoHashFinal",
+		classification: "hardened",
+		rationale: "Host incremental crypto digest completion bridge reference.",
+	},
+	{
+		name: "_cryptoHashDestroy",
+		classification: "hardened",
+		rationale: "Host incremental crypto digest cleanup bridge reference.",
+	},
+	{
 		name: "_cryptoHmacDigest",
 		classification: "hardened",
 		rationale: "Host crypto HMAC bridge reference.",
@@ -881,6 +906,11 @@ var NODE_CUSTOM_GLOBAL_INVENTORY = [
 		rationale: "Host file-descriptor close bridge reference.",
 	},
 	{
+		name: "fs._getPathSync",
+		classification: "hardened",
+		rationale: "Host file-descriptor guest-path bridge reference.",
+	},
+	{
 		name: "fs.readSync",
 		classification: "hardened",
 		rationale: "Host file-descriptor read bridge reference.",
@@ -889,6 +919,11 @@ var NODE_CUSTOM_GLOBAL_INVENTORY = [
 		name: "_fsReadRaw",
 		classification: "hardened",
 		rationale: "Raw-byte host file-descriptor read bridge reference.",
+	},
+	{
+		name: "_fsReadFileRangeRaw",
+		classification: "hardened",
+		rationale: "Bounded raw-byte host pathname read bridge reference.",
 	},
 	{
 		name: "fs.writeSync",
@@ -929,6 +964,11 @@ var NODE_CUSTOM_GLOBAL_INVENTORY = [
 		name: "_childProcessStdinWrite",
 		classification: "hardened",
 		rationale: "Host child_process bridge reference.",
+	},
+	{
+		name: "_childProcessPtyResize",
+		classification: "hardened",
+		rationale: "Host child_process PTY resize bridge reference.",
 	},
 	{
 		name: "_childProcessStdinClose",
@@ -1172,7 +1212,7 @@ var NODE_CUSTOM_GLOBAL_INVENTORY = [
 	{
 		name: "_netSocketWriteSyncRaw",
 		classification: "hardened",
-		rationale: "Host synchronous net socket write bridge reference for WASM.",
+		rationale: "Host synchronous net socket write bridge reference for WASM guests.",
 	},
 	{
 		name: "_netSocketEndRaw",
@@ -1419,6 +1459,11 @@ var NODE_CUSTOM_GLOBAL_INVENTORY = [
 			"Host kernel TTY detection bridge reference for WASM terminal commands.",
 	},
 	{
+		name: "_kernelFlockRaw",
+		classification: "hardened",
+		rationale: "Host kernel file-lock bridge reference.",
+	},
+	{
 		name: "_kernelTtySizeRaw",
 		classification: "hardened",
 		rationale:
@@ -1546,6 +1591,12 @@ var NODE_CUSTOM_GLOBAL_INVENTORY = [
 			"Network Response API global \u2014 must not be replaceable by sandbox code.",
 	},
 	{
+		name: "WebSocket",
+		classification: "hardened",
+		rationale:
+			"Node WebSocket API global backed by the bounded kernel network stack.",
+	},
+	{
 		name: "DOMException",
 		classification: "hardened",
 		rationale: "DOMException global stub for undici/bootstrap compatibility.",
@@ -1598,6 +1649,16 @@ function exposeGlobalBinding(target, name, value, options = {}) {
 function exposeCustomGlobal(name, value) {
 	exposeGlobalBinding(globalThis, name, value);
 }
+function exposeInstallCompatibleHardenedGlobal(name, value) {
+	Object.defineProperty(globalThis, name, {
+		get: () => value,
+		// Some Node packages install web globals by assignment. Accept the write
+		// without replacing AgentOS's policy-enforcing implementation.
+		set: () => {},
+		configurable: true,
+		enumerable: true,
+	});
+}
 function exposeMutableRuntimeStateGlobal(name, value) {
 	exposeGlobalBinding(globalThis, name, value, {
 		mutable: true,
@@ -1607,6 +1668,7 @@ function exposeMutableRuntimeStateGlobal(name, value) {
 export {
 	exposeCustomGlobal,
 	exposeGlobalBinding,
+	exposeInstallCompatibleHardenedGlobal,
 	exposeMutableRuntimeStateGlobal,
 	HARDENED_NODE_CUSTOM_GLOBALS,
 	MUTABLE_NODE_CUSTOM_GLOBALS,

@@ -71,7 +71,7 @@ use agentos_native_sidecar_core::{
     AuthenticateVersionError, RequestRoute,
 };
 use agentos_runtime::metrics::ResourceMetricClass;
-use agentos_vm_config::PermissionsPolicy;
+use agentos_vm_config::{FsPermissionScope, PermissionMode, PermissionsPolicy};
 // root_fs types moved to crate::vm
 use agentos_kernel::vfs::VfsError;
 use serde::Deserialize;
@@ -582,6 +582,16 @@ where
         })?;
         stored.remove(vm_id);
         Ok(())
+    }
+
+    pub(crate) fn filesystem_unrestricted(&self, vm_id: &str) -> bool {
+        let Ok(stored) = self.permissions.lock() else {
+            return false;
+        };
+        matches!(
+            stored.get(vm_id).and_then(|policy| policy.fs.as_ref()),
+            Some(FsPermissionScope::Mode(PermissionMode::Allow))
+        )
     }
 
     pub(crate) fn static_permission_decision(
@@ -1530,6 +1540,12 @@ where
                 self.snapshot_root_filesystem(&request, payload).await
             }
             RequestRoute::ListMounts(payload) => self.list_mounts(&request, payload).await,
+            RequestRoute::ExecutionOperation(payload) => {
+                self.execute_language_operation(&request, payload).await
+            }
+            RequestRoute::ExecutionLifecycle(payload) => {
+                self.handle_execution_lifecycle(&request, payload).await
+            }
             RequestRoute::Execute(payload) => self.execute(&request, payload).await,
             RequestRoute::WriteStdin(payload) => self.write_stdin(&request, payload).await,
             RequestRoute::ResizePty(payload) => self.resize_pty(&request, payload).await,
@@ -2289,7 +2305,7 @@ where
                 .active_processes
                 .get(process_id)
                 .expect("process existence checked above");
-            deferred_kernel_wait_request_for_process(&request, &vm.kernel, process.kernel_pid)?
+            deferred_kernel_wait_request_for_process(&request, &vm.kernel, process)?
                 .filter(|request| request.method == "process.fd_write")
         };
 
@@ -2368,8 +2384,8 @@ where
                         process_id,
                         child_process_id,
                         &chunk,
-                    )?;
-                    Ok(Value::Null.into())
+                    )
+                    .map(|()| Value::Null.into())
                 }
                 "child_process.close_stdin" => {
                     let child_process_id = javascript_sync_rpc_arg_str(
@@ -2377,8 +2393,8 @@ where
                         0,
                         "child_process.close_stdin child id",
                     )?;
-                    self.close_javascript_child_process_stdin(vm_id, process_id, child_process_id)?;
-                    Ok(Value::Null.into())
+                    self.close_javascript_child_process_stdin(vm_id, process_id, child_process_id)
+                        .map(|()| Value::Null.into())
                 }
                 "child_process.kill" => {
                     let child_process_id = javascript_sync_rpc_arg_str(
@@ -2388,13 +2404,8 @@ where
                     )?;
                     let signal =
                         javascript_sync_rpc_arg_str(&request.args, 1, "child_process.kill signal")?;
-                    self.kill_javascript_child_process(
-                        vm_id,
-                        process_id,
-                        child_process_id,
-                        signal,
-                    )?;
-                    Ok(Value::Null.into())
+                    self.kill_javascript_child_process(vm_id, process_id, child_process_id, signal)
+                        .map(|()| Value::Null.into())
                 }
                 "process.exec_fd_image_commit" => {
                     let Some(vm) = self.vms.get(vm_id) else {
@@ -2876,14 +2887,21 @@ where
                 .execution
                 .respond_javascript_sync_rpc_response(request.id, result)
                 .or_else(ignore_stale_javascript_sync_rpc_response),
-            Err(error) => process
-                .execution
-                .respond_javascript_sync_rpc_error(
-                    request.id,
-                    javascript_sync_rpc_error_code(&error),
-                    error.to_string(),
-                )
-                .or_else(ignore_stale_javascript_sync_rpc_response),
+            Err(error) => {
+                tracing::warn!(
+                    method = %request.method,
+                    error = %error,
+                    "JavaScript sync RPC failed"
+                );
+                process
+                    .execution
+                    .respond_javascript_sync_rpc_error(
+                        request.id,
+                        javascript_sync_rpc_error_code(&error),
+                        error.to_string(),
+                    )
+                    .or_else(ignore_stale_javascript_sync_rpc_response)
+            }
         }
     }
 
@@ -3157,7 +3175,12 @@ where
         shared_respond(request, payload)
     }
 
-    fn reject(&self, request: &RequestFrame, code: &str, message: &str) -> ResponseFrame {
+    pub(crate) fn reject(
+        &self,
+        request: &RequestFrame,
+        code: &str,
+        message: &str,
+    ) -> ResponseFrame {
         shared_reject(request, code, message)
     }
 
@@ -4002,7 +4025,7 @@ pub(crate) fn vfs_error(error: VfsError) -> SidecarError {
 /// required. The empirically-supported package managers are captured in
 /// `crates/sidecar/tests/module_layout_e2e.rs`.
 #[allow(dead_code)]
-const HOISTED_NODE_MODULES_GUIDANCE: &str = "secure-exec can't load mounted node_modules: the directory uses a non-flat layout (pnpm / bun / yarn workspaces store, or yarn Plug'n'Play) whose package store isn't visible inside the VM. A flat (hoisted) node_modules is required.\n  - pnpm        -> add `node-linker=hoisted` to .npmrc, then reinstall\n  - yarn berry  -> set `nodeLinker: node-modules` in .yarnrc.yml (not pnp/pnpm)\n  - bun         -> install dependencies outside a workspace (workspaces use a .bun store)\n  - npm / yarn classic -> already flat, no change needed";
+const HOISTED_NODE_MODULES_GUIDANCE: &str = "agentos can't load mounted node_modules: the directory uses a non-flat layout (pnpm / bun / yarn workspaces store, or yarn Plug'n'Play) whose package store isn't visible inside the VM. A flat (hoisted) node_modules is required.\n  - pnpm        -> add `node-linker=hoisted` to .npmrc, then reinstall\n  - yarn berry  -> set `nodeLinker: node-modules` in .yarnrc.yml (not pnp/pnpm)\n  - bun         -> install dependencies outside a workspace (workspaces use a .bun store)\n  - npm / yarn classic -> already flat, no change needed";
 
 /// Detect, from an adapter's captured stderr, a non-flat-`node_modules` failure
 /// signature. Returns the actionable guidance to fold into the surfaced error,
@@ -4173,7 +4196,7 @@ mod symlinked_node_modules_hint_tests {
         // dist/package.json inside the unreachable .pnpm store.
         let stderr = "Error: ENOENT: no such file or directory, open '/root/node_modules/.pnpm/@mariozechner+pi-coding-agent@0.60.0_x/node_modules/@mariozechner/pi-coding-agent/dist/package.json'";
         let hint = symlinked_node_modules_hint(stderr).expect("expected hoisted guidance");
-        assert!(hint.contains("secure-exec can't load mounted node_modules"));
+        assert!(hint.contains("agentos can't load mounted node_modules"));
         assert!(!hint.contains("agentos"));
     }
 

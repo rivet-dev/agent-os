@@ -1,0 +1,10 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"moduleResolution": "bundler",
+		"noEmit": true,
+		"lib": ["ESNext", "DOM"],
+		"types": ["node"]
+	},
+	"include": ["actors.ts", "agent/**/*.ts", "core.ts", "world.ts"]
+}

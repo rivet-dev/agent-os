@@ -575,6 +575,15 @@ fn access_acl_enforces_named_entries_mask_and_chmod_synchronization() {
     let bob = process_as(&mut kernel, 1001);
     let carol = process_as(&mut kernel, 1002);
 
+    assert_eq!(
+        kernel
+            .read_file_for_process(DRIVER, bob, "/work/file")
+            .unwrap_err()
+            .code(),
+        "EACCES",
+        "a cached negative ACL lookup must be invalidated when an ACL is added",
+    );
+
     kernel
         .set_xattr_for_process(
             DRIVER,

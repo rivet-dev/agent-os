@@ -13,13 +13,13 @@ conn.on("sessionEvent", (event) => {
 });
 
 // Create a session
-await agent.openSession({
+await agent.sessions.open({
 	agent: "pi",
 	env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
 
 // Send a prompt and wait for the response
-const response = await agent.prompt({
+const response = await agent.sessions.prompt({
 	content: [{ type: "text", text: "List all files in the home directory" }],
 });
 console.log(response.message?.content ?? []);

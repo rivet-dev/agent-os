@@ -1,0 +1,8 @@
+{
+  "name": "yarn-modern-cli-pass",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@yarnpkg/cli-dist": "4.17.1"
+  }
+}

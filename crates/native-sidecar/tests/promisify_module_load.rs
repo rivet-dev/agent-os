@@ -1,6 +1,6 @@
 //! Regression guard for issue #11: `util.promisify()` throws at module load.
 //!
-//! Original failure mode: a hand-rolled `@secure-exec/core` `util` polyfill exposed many
+//! Original failure mode: a hand-rolled legacy `util` polyfill exposed many
 //! builtin functions as `undefined`. Adapter dependencies (extract-zip, get-stream) called
 //! `promisify(undefined)` at module-load time, and the polyfill's `promisify` threw a
 //! `TypeError` synchronously, crashing the whole module load before any application code ran.

@@ -18,6 +18,10 @@ export default defineConfig({
 		sitemap(),
 	],
 	vite: {
+		server: {
+			// Amp orbs can expose the dev server through an E2B portal hostname.
+			allowedHosts: [".e2b.app"],
+		},
 		resolve: {
 			dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime"],
 		},

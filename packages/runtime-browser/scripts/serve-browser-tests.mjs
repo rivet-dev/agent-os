@@ -10,8 +10,8 @@ const port = Number.parseInt(process.env.PORT ?? "43173", 10);
 
 const routes = new Map([
 	[
-		"/secure-exec-worker.js",
-		path.join(packageDir, ".cache/browser-tests/secure-exec-worker.js"),
+		"/agentos-worker.js",
+		path.join(packageDir, ".cache/browser-tests/agentos-worker.js"),
 	],
 	[
 		"/frontend/converged-harness.html",
@@ -21,10 +21,10 @@ const routes = new Map([
 		),
 	],
 	[
-		"/secure-exec-converged-harness.js",
+		"/agentos-converged-harness.js",
 		path.join(
 			packageDir,
-			".cache/browser-tests/secure-exec-converged-harness.js",
+			".cache/browser-tests/agentos-converged-harness.js",
 		),
 	],
 	[
@@ -35,10 +35,10 @@ const routes = new Map([
 		),
 	],
 	[
-		"/secure-exec-converged-runtime-harness.js",
+		"/agentos-converged-runtime-harness.js",
 		path.join(
 			packageDir,
-			".cache/browser-tests/secure-exec-converged-runtime-harness.js",
+			".cache/browser-tests/agentos-converged-runtime-harness.js",
 		),
 	],
 	[
@@ -49,10 +49,10 @@ const routes = new Map([
 		),
 	],
 	[
-		"/secure-exec-converged-conformance-harness.js",
+		"/agentos-converged-conformance-harness.js",
 		path.join(
 			packageDir,
-			".cache/browser-tests/secure-exec-converged-conformance-harness.js",
+			".cache/browser-tests/agentos-converged-conformance-harness.js",
 		),
 	],
 ]);
@@ -107,5 +107,5 @@ const server = createServer((request, response) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
-	console.log(`secure-exec browser test server listening on http://127.0.0.1:${port}`);
+	console.log(`agentos browser test server listening on http://127.0.0.1:${port}`);
 });

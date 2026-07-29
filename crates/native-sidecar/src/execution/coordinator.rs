@@ -165,9 +165,10 @@ pub(super) fn is_javascript_child_process_gone_error(error: &SidecarError) -> bo
     )
 }
 
-pub(super) fn missing_javascript_child_kill_result(
+pub(super) fn missing_javascript_child_cleanup_result(
     next_child_process_id: usize,
     child_process_id: &str,
+    operation: &str,
 ) -> Result<(), SidecarError> {
     let previously_allocated = child_process_id
         .strip_prefix("child-")
@@ -181,27 +182,33 @@ pub(super) fn missing_javascript_child_kill_result(
         return Ok(());
     }
     Err(SidecarError::InvalidState(format!(
-        "unknown child process {child_process_id} during kill"
+        "unknown child process {child_process_id} during {operation}"
     )))
 }
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod child_kill_result_tests {
-    use super::missing_javascript_child_kill_result;
+    use super::missing_javascript_child_cleanup_result;
 
     #[test]
     fn cleanup_kill_ignores_reaped_child_but_rejects_unknown_id() {
-        missing_javascript_child_kill_result(1, "child-1")
+        missing_javascript_child_cleanup_result(1, "child-1", "kill")
             .expect("a previously allocated child is confirmed gone");
-        assert!(missing_javascript_child_kill_result(1, "child-2")
-            .expect_err("a never-allocated child must remain an error")
-            .to_string()
-            .contains("unknown child process child-2"));
-        assert!(missing_javascript_child_kill_result(1, "child-01")
-            .expect_err("a non-canonical child id must remain an error")
-            .to_string()
-            .contains("unknown child process child-01"));
+        missing_javascript_child_cleanup_result(1, "child-1", "stdin close")
+            .expect("closing stdin after a child exits is idempotent");
+        assert!(
+            missing_javascript_child_cleanup_result(1, "child-2", "kill")
+                .expect_err("a never-allocated child must remain an error")
+                .to_string()
+                .contains("unknown child process child-2")
+        );
+        assert!(
+            missing_javascript_child_cleanup_result(1, "child-01", "stdin close")
+                .expect_err("a non-canonical child id must remain an error")
+                .to_string()
+                .contains("unknown child process child-01")
+        );
     }
 }
 
@@ -611,15 +618,55 @@ where
         let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
         self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
 
+        let stream_operation = payload.stream_operation.clone();
+        if matches!(stream_operation.as_deref(), Some("read" | "cancel")) {
+            let stream_id = payload.stream_id.as_deref().ok_or_else(|| {
+                SidecarError::InvalidState(String::from(
+                    "vm.fetch stream read/cancel requires stream_id",
+                ))
+            })?;
+            let vm = self
+                .vms
+                .get_mut(&vm_id)
+                .ok_or_else(|| SidecarError::InvalidState(String::from("unknown sidecar VM")))?;
+            let response_json = if stream_operation.as_deref() == Some("read") {
+                read_kernel_http_fetch_stream(
+                    &self.bridge,
+                    &vm_id,
+                    vm,
+                    stream_id,
+                    payload.max_bytes.unwrap_or(64 * 1024) as usize,
+                )
+                .await?
+            } else {
+                cancel_kernel_http_fetch_stream(&self.bridge, &vm_id, vm, stream_id).await?
+            };
+            let response = self.respond(
+                request,
+                ResponsePayload::VmFetchResult(VmFetchResponse { response_json }),
+            );
+            ensure_vm_fetch_response_frame_within_limit(&response, self.config.max_frame_bytes)?;
+            return Ok(DispatchResult {
+                response,
+                events: Vec::new(),
+            });
+        }
+        if let Some(operation) = stream_operation.as_deref() {
+            if operation != "start" {
+                return Err(SidecarError::InvalidState(format!(
+                    "unknown vm.fetch stream operation {operation:?}; expected start, read, or cancel"
+                )));
+            }
+        }
+
         let vm = self
             .vms
             .get_mut(&vm_id)
             .ok_or_else(|| SidecarError::InvalidState(String::from("unknown sidecar VM")))?;
-        let target_path = if payload.path.starts_with('/') {
-            payload.path.clone()
-        } else {
-            format!("/{}", payload.path)
-        };
+        // HTTP origin-form has exactly one leading slash. Normalizing at the
+        // sidecar boundary keeps VM fetch behavior stable even when an
+        // upstream router hands us a network-path-style `//foo` URL.
+        let target_path = format!("/{}", payload.path.trim_start_matches('/'));
         let request_url = Url::parse(&format!("http://127.0.0.1:{}{target_path}", payload.port))
             .map_err(|error| {
                 SidecarError::InvalidState(format!(
@@ -632,6 +679,24 @@ where
                     "vm.fetch headers_json must be valid JSON: {error}"
                 ))
             })?;
+        if payload.body.is_some() && payload.body_base64.is_some() {
+            return Err(SidecarError::InvalidState(String::from(
+                "vm.fetch accepts either body or body_base64, not both",
+            )));
+        }
+        let body_bytes = payload
+            .body_base64
+            .as_deref()
+            .map(|body| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(body)
+                    .map_err(|error| {
+                        SidecarError::InvalidState(format!(
+                            "vm.fetch body_base64 must be valid base64: {error}"
+                        ))
+                    })
+            })
+            .transpose()?;
         let options = JavascriptHttpRequestOptions {
             method: Some(payload.method),
             headers: header_values,
@@ -642,19 +707,36 @@ where
         let target_process_id = find_kernel_http_listener_process(vm, payload.port);
         if let Some(target_process_id) = target_process_id {
             let max_fetch_response_bytes = vm.limits.http.max_fetch_response_bytes;
-            let response_json = match dispatch_kernel_http_fetch(
-                &self.bridge,
-                &vm_id,
-                vm,
-                &target_process_id,
-                payload.port,
-                &target_path,
-                &options,
-                &headers,
-                max_fetch_response_bytes,
-            )
-            .await
-            {
+            let fetch_result = if stream_operation.as_deref() == Some("start") {
+                start_kernel_http_fetch_stream(
+                    &self.bridge,
+                    &vm_id,
+                    vm,
+                    &target_process_id,
+                    payload.port,
+                    &target_path,
+                    &options,
+                    &headers,
+                    body_bytes.as_deref(),
+                    max_fetch_response_bytes,
+                )
+                .await
+            } else {
+                dispatch_kernel_http_fetch(
+                    &self.bridge,
+                    &vm_id,
+                    vm,
+                    &target_process_id,
+                    payload.port,
+                    &target_path,
+                    &options,
+                    &headers,
+                    body_bytes.as_deref(),
+                    max_fetch_response_bytes,
+                )
+                .await
+            };
+            let response_json = match fetch_result {
                 Ok(response_json) => response_json,
                 Err(error) => {
                     if let Some(exit_code) = kernel_http_fetch_target_exit_code(&error) {
@@ -692,6 +774,16 @@ where
                 payload.port
             )));
         };
+        if stream_operation.as_deref() == Some("start") {
+            return Err(SidecarError::InvalidState(String::from(
+                "vm.fetch streaming requires a kernel-backed HTTP listener",
+            )));
+        }
+        if body_bytes.is_some() {
+            return Err(SidecarError::InvalidState(String::from(
+                "binary vm.fetch bodies require a kernel-backed HTTP listener",
+            )));
+        }
         let socket_paths = build_javascript_socket_path_context(vm)?;
         let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
         let capabilities = vm.capabilities.clone();

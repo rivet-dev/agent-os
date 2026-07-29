@@ -121,11 +121,31 @@ var _sqliteStatementSetAllowUnknownNamedParameters = createBridgeSyncFacade("_sq
 
 var _sqliteStatementFinalize = createBridgeSyncFacade("_sqliteStatementFinalizeRaw");
 
+var sqliteStatementFinalizer = typeof FinalizationRegistry === "function"
+  ? new FinalizationRegistry((statementId) => {
+      try {
+        sqliteBridgeCall(
+          _sqliteStatementFinalize,
+          [statementId],
+          "statement garbage collection"
+        );
+      } catch {
+        // Database close and process teardown also release statement handles.
+      }
+    })
+  : null;
+
 var StatementSync = class {
-  constructor(database, statementId) {
+  constructor(database, sql, statementId) {
     this._database = database;
+    this._sql = sql;
     this._statementId = statementId;
     this._finalized = false;
+    this._returnArrays = false;
+    this._readBigInts = false;
+    this._allowBareNamedParameters = false;
+    this._allowUnknownNamedParameters = false;
+    sqliteStatementFinalizer?.register(this, statementId, this);
   }
   _assertOpen() {
     this._database._assertOpen();
@@ -133,27 +153,75 @@ var StatementSync = class {
       throw new Error("SQLite statement is already finalized");
     }
   }
-  run(...params) {
+  _ensureStatement() {
     this._assertOpen();
-    return sqliteBridgeCall(
+    if (this._statementId !== null) return this._statementId;
+    const statementId = sqliteBridgeCall(
+      _sqliteDatabasePrepare,
+      [this._database._databaseId, this._sql],
+      "database.prepare"
+    );
+    this._statementId = statementId;
+    sqliteStatementFinalizer?.register(this, statementId, this);
+    if (this._returnArrays) {
+      sqliteBridgeCall(_sqliteStatementSetReturnArrays, [statementId, true], "statement.setReturnArrays");
+    }
+    if (this._readBigInts) {
+      sqliteBridgeCall(_sqliteStatementSetReadBigInts, [statementId, true], "statement.setReadBigInts");
+    }
+    if (this._allowBareNamedParameters) {
+      sqliteBridgeCall(_sqliteStatementSetAllowBareNamedParameters, [statementId, true], "statement.setAllowBareNamedParameters");
+    }
+    if (this._allowUnknownNamedParameters) {
+      sqliteBridgeCall(_sqliteStatementSetAllowUnknownNamedParameters, [statementId, true], "statement.setAllowUnknownNamedParameters");
+    }
+    return statementId;
+  }
+  _releaseStatement(suppressErrors = false) {
+    if (this._statementId === null) return;
+    const statementId = this._statementId;
+    this._statementId = null;
+    sqliteStatementFinalizer?.unregister(this);
+    try {
+      sqliteBridgeCall(
+        _sqliteStatementFinalize,
+        [statementId],
+        "statement.finalize"
+      );
+    } catch (error) {
+      if (!suppressErrors) throw error;
+    }
+  }
+  _execute(bridgeFn, args, label) {
+    const statementId = this._ensureStatement();
+    let failed = false;
+    try {
+      return sqliteBridgeCall(bridgeFn, [statementId, ...args], label);
+    } catch (error) {
+      failed = true;
+      throw error;
+    } finally {
+      this._releaseStatement(failed);
+    }
+  }
+  run(...params) {
+    return this._execute(
       _sqliteStatementRun,
-      [this._statementId, normalizeSqliteParams(params)],
+      [normalizeSqliteParams(params)],
       "statement.run"
     );
   }
   get(...params) {
-    this._assertOpen();
-    return sqliteBridgeCall(
+    return this._execute(
       _sqliteStatementGet,
-      [this._statementId, normalizeSqliteParams(params)],
+      [normalizeSqliteParams(params)],
       "statement.get"
     );
   }
   all(...params) {
-    this._assertOpen();
-    return sqliteBridgeCall(
+    return this._execute(
       _sqliteStatementAll,
-      [this._statementId, normalizeSqliteParams(params)],
+      [normalizeSqliteParams(params)],
       "statement.all"
     );
   }
@@ -162,55 +230,62 @@ var StatementSync = class {
     return rows[Symbol.iterator]();
   }
   columns() {
-    this._assertOpen();
-    return sqliteBridgeCall(
+    return this._execute(
       _sqliteStatementColumns,
-      [this._statementId],
+      [],
       "statement.columns"
     );
   }
   setReturnArrays(enabled) {
     this._assertOpen();
-    sqliteBridgeCall(
-      _sqliteStatementSetReturnArrays,
-      [this._statementId, Boolean(enabled)],
-      "statement.setReturnArrays"
-    );
+    this._returnArrays = Boolean(enabled);
+    if (this._statementId !== null) {
+      sqliteBridgeCall(
+        _sqliteStatementSetReturnArrays,
+        [this._statementId, this._returnArrays],
+        "statement.setReturnArrays"
+      );
+    }
   }
   setReadBigInts(enabled) {
     this._assertOpen();
-    sqliteBridgeCall(
-      _sqliteStatementSetReadBigInts,
-      [this._statementId, Boolean(enabled)],
-      "statement.setReadBigInts"
-    );
+    this._readBigInts = Boolean(enabled);
+    if (this._statementId !== null) {
+      sqliteBridgeCall(
+        _sqliteStatementSetReadBigInts,
+        [this._statementId, this._readBigInts],
+        "statement.setReadBigInts"
+      );
+    }
   }
   setAllowBareNamedParameters(enabled) {
     this._assertOpen();
-    sqliteBridgeCall(
-      _sqliteStatementSetAllowBareNamedParameters,
-      [this._statementId, Boolean(enabled)],
-      "statement.setAllowBareNamedParameters"
-    );
+    this._allowBareNamedParameters = Boolean(enabled);
+    if (this._statementId !== null) {
+      sqliteBridgeCall(
+        _sqliteStatementSetAllowBareNamedParameters,
+        [this._statementId, this._allowBareNamedParameters],
+        "statement.setAllowBareNamedParameters"
+      );
+    }
   }
   setAllowUnknownNamedParameters(enabled) {
     this._assertOpen();
-    sqliteBridgeCall(
-      _sqliteStatementSetAllowUnknownNamedParameters,
-      [this._statementId, Boolean(enabled)],
-      "statement.setAllowUnknownNamedParameters"
-    );
+    this._allowUnknownNamedParameters = Boolean(enabled);
+    if (this._statementId !== null) {
+      sqliteBridgeCall(
+        _sqliteStatementSetAllowUnknownNamedParameters,
+        [this._statementId, this._allowUnknownNamedParameters],
+        "statement.setAllowUnknownNamedParameters"
+      );
+    }
   }
   finalize() {
     if (this._finalized) {
       return null;
     }
     this._database._assertOpen();
-    sqliteBridgeCall(
-      _sqliteStatementFinalize,
-      [this._statementId],
-      "statement.finalize"
-    );
+    this._releaseStatement();
     this._finalized = true;
     return null;
   }
@@ -261,12 +336,13 @@ var DatabaseSync = class {
   }
   prepare(sql) {
     this._assertOpen();
+    const normalizedSql = String(sql ?? "");
     const statementId = sqliteBridgeCall(
       _sqliteDatabasePrepare,
-      [this._databaseId, String(sql ?? "")],
+      [this._databaseId, normalizedSql],
       "database.prepare"
     );
-    return new StatementSync(this, statementId);
+    return new StatementSync(this, normalizedSql, statementId);
   }
   location() {
     this._assertOpen();

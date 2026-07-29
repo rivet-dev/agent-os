@@ -63,10 +63,19 @@ export class StdioSidecarProtocolClient implements SidecarProcessTransport {
 		this.gracefulExitMs = options.gracefulExitMs;
 		this.forceExitMs = options.forceExitMs;
 		this.disposedErrorMessage = options.disposedErrorMessage;
+		const transportOptions = this.sidecarProcess.combinedStdio
+			? {
+					stdin: this.child.stdin,
+					stdout: this.child.stdout,
+					combinedStdio: true as const,
+				}
+			: {
+					stdin: this.child.stdin,
+					stdout: this.child.stdout,
+					control: this.sidecarProcess.control!,
+				};
 		this.protocolClient = new SidecarProtocolClient({
-			stdin: this.child.stdin,
-			stdout: this.child.stdout,
-			control: this.sidecarProcess.control,
+			...transportOptions,
 			eventBufferCapacity: options.eventBufferCapacity,
 			payloadCodec: options.payloadCodec,
 			silenceTimeoutMs: options.silenceTimeoutMs,
@@ -101,11 +110,18 @@ export class StdioSidecarProtocolClient implements SidecarProcessTransport {
 	static spawn(
 		options: StdioSidecarProtocolClientSpawnOptions = {},
 	): StdioSidecarProtocolClient {
+		const combinedStdio =
+			typeof (
+				globalThis as typeof globalThis & {
+					_childProcessSpawnStart?: unknown;
+				}
+			)._childProcessSpawnStart !== "undefined";
 		return new StdioSidecarProtocolClient(
 			StdioSidecarProcess.spawn({
 				command: options.command ?? resolvePublishedSidecarBinary(),
 				args: options.args ?? [],
 				cwd: options.cwd,
+				combinedStdio,
 			}),
 			{
 				silenceTimeoutMs: options.silenceTimeoutMs,
@@ -162,7 +178,7 @@ export class StdioSidecarProtocolClient implements SidecarProcessTransport {
 				// Stdin may already be closing. The child exit watcher will catch up.
 			}
 		}
-		if (!this.sidecarProcess.control.destroyed) {
+		if (this.sidecarProcess.control && !this.sidecarProcess.control.destroyed) {
 			try {
 				this.sidecarProcess.control.end();
 			} catch {
@@ -196,10 +212,12 @@ export class StdioSidecarProtocolClient implements SidecarProcessTransport {
 		} catch {
 			// Best effort. The child is gone so the descriptor will close on its own.
 		}
-		try {
-			this.sidecarProcess.control.destroy();
-		} catch {
-			// Best effort. The child is gone so the descriptor will close on its own.
+		if (this.sidecarProcess.control) {
+			try {
+				this.sidecarProcess.control.destroy();
+			} catch {
+				// Best effort. The child is gone so the descriptor will close on its own.
+			}
 		}
 
 		if (exitCode !== null && exitCode !== 0 && this.child.signalCode === null) {

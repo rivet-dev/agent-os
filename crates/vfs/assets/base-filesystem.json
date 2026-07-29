@@ -5,8 +5,8 @@
     "snapshotCreatedAt": "2026-06-22T19:45:20.529Z",
     "builtAt": "2026-06-23T03:47:12.644Z",
     "transforms": [
-      "Normalize HOSTNAME to secure-exec",
-      "Preserve the captured user-level environment and filesystem layout as the secure-exec base layer",
+      "Normalize HOSTNAME to agentos",
+      "Preserve the captured user-level environment and filesystem layout as the agentos base layer",
       "Add the non-Alpine /workspace directory (default agent working directory) owned by the base user",
       "Restore Alpine 3.22's /etc/services database and add the VM's Docker-style /etc/hosts entries for libc lookup parity"
     ]
@@ -15,7 +15,7 @@
     "env": {
       "CHARSET": "UTF-8",
       "HOME": "/home/agentos",
-      "HOSTNAME": "secure-exec",
+      "HOSTNAME": "agentos",
       "LANG": "C.UTF-8",
       "LC_COLLATE": "C",
       "LOGNAME": "agentos",
@@ -92,7 +92,7 @@
         "mode": "644",
         "uid": 0,
         "gid": 0,
-        "content": "secure-exec\n"
+        "content": "agentos\n"
       },
       {
         "path": "/etc/hosts",
@@ -100,7 +100,7 @@
         "mode": "644",
         "uid": 0,
         "gid": 0,
-        "content": "127.0.0.1 localhost localhost.localdomain\n::1 localhost localhost.localdomain ip6-localhost ip6-loopback\nfe00:: ip6-localnet\nff00:: ip6-mcastprefix\nff02::1 ip6-allnodes\nff02::2 ip6-allrouters\n127.0.1.1 secure-exec\n"
+        "content": "127.0.0.1 localhost localhost.localdomain\n::1 localhost localhost.localdomain ip6-localhost ip6-loopback\nfe00:: ip6-localnet\nff00:: ip6-mcastprefix\nff02::1 ip6-allnodes\nff02::2 ip6-allrouters\n127.0.1.1 agentos\n"
       },
       {
         "path": "/etc/logrotate.d",

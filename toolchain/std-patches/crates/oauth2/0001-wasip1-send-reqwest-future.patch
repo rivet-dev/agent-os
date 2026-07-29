@@ -1,0 +1,18 @@
+# oauth2 5.0.0 treats every wasm32 target as browser WebAssembly and erases
+# Send/Sync from the reqwest client future. wasm32-wasip1 is a server-style,
+# cooperatively scheduled runtime and rmcp requires its HTTP transport futures
+# to remain Send. Keep the browser exception for target_os="unknown", while
+# using the native Send + Sync contract for WASI.
+--- a/src/reqwest_client.rs
++++ b/src/reqwest_client.rs
+@@ -6,9 +6,9 @@ impl<'c> AsyncHttpClient<'c> for reqwest::Client {
+     type Error = HttpClientError<reqwest::Error>;
+ 
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+     type Future = Pin<Box<dyn Future<Output = Result<HttpResponse, Self::Error>> + 'c>>;
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+     type Future =
+         Pin<Box<dyn Future<Output = Result<HttpResponse, Self::Error>> + Send + Sync + 'c>>;
+ 

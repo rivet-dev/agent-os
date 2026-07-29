@@ -24,8 +24,8 @@ import {
 } from "./converged-sync-bridge-handler.js";
 
 // Mirror `SidecarProcess`'s client identity so the sidecar handshake succeeds.
-const CLIENT_NAME = "secure-exec-core-client";
-const AUTH_TOKEN = "secure-exec-core-client-token";
+const CLIENT_NAME = "agentos-core-client";
+const AUTH_TOKEN = "agentos-core-client-token";
 const BRIDGE_CONTRACT_VERSION = 1;
 
 type GuestRuntimeKind = Extract<

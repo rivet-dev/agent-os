@@ -1,7 +1,7 @@
 # @rivet-dev/agentos-runtime-core
 
-Raw Secure Exec protocol types and codecs.
+Raw AgentOS language execution protocol types and codecs.
 
 - `@rivet-dev/agentos-runtime-core/protocol` exports the generated sidecar protocol.
-- `@rivet-dev/agentos-runtime-core/binary` resolves the published `agentos-native-sidecar` binary and honors `AGENTOS_SIDECAR_BIN`.
+- `@rivet-dev/agentos-runtime-core/binary` resolves the published `agentos-native-sidecar` binary. `AGENTOS_NATIVE_SIDECAR_BIN` overrides only this native runtime; the legacy `AGENTOS_SIDECAR_BIN` override remains the fallback.
 - `@rivet-dev/agentos-runtime-core/framing`, `@rivet-dev/agentos-runtime-core/frame-stream`, `@rivet-dev/agentos-runtime-core/frame-rpc`, `@rivet-dev/agentos-runtime-core/frame-payload-codec`, `@rivet-dev/agentos-runtime-core/correlation`, `@rivet-dev/agentos-runtime-core/event-buffer`, `@rivet-dev/agentos-runtime-core/ownership`, `@rivet-dev/agentos-runtime-core/permissions`, `@rivet-dev/agentos-runtime-core/state`, `@rivet-dev/agentos-runtime-core/request-payloads`, `@rivet-dev/agentos-runtime-core/response-payloads`, `@rivet-dev/agentos-runtime-core/protocol-frames`, `@rivet-dev/agentos-runtime-core/protocol-client`, `@rivet-dev/agentos-runtime-core/native-client`, `@rivet-dev/agentos-runtime-core/descriptors`, `@rivet-dev/agentos-runtime-core/process`, `@rivet-dev/agentos-runtime-core/protocol-schema`, `@rivet-dev/agentos-runtime-core/protocol-maps`, `@rivet-dev/agentos-runtime-core/callbacks`, `@rivet-dev/agentos-runtime-core/filesystem`, `@rivet-dev/agentos-runtime-core/json`, `@rivet-dev/agentos-runtime-core/numbers`, `@rivet-dev/agentos-runtime-core/bytes`, and `@rivet-dev/agentos-runtime-core/ext` expose generic Node transport primitives.

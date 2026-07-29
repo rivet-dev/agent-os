@@ -459,6 +459,7 @@ pub struct KernelVm<F> {
     users: UserManager,
     resources: ResourceAccountant,
     filesystem_usage_cache: Option<FileSystemUsage>,
+    no_posix_acl_cache: BTreeSet<(u64, u64, u64, u32, u32, u32, u32)>,
     anonymous_file_usage: Arc<AnonymousFileUsage>,
     file_locks: FileLockManager,
     unnamed_files: BTreeMap<u64, UnnamedFile>,
@@ -744,6 +745,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
             users,
             resources: ResourceAccountant::new(config.resources),
             filesystem_usage_cache,
+            no_posix_acl_cache: BTreeSet::new(),
             anonymous_file_usage,
             file_locks,
             unnamed_files: BTreeMap::new(),
@@ -1197,6 +1199,27 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
 
     pub fn pread_file(&mut self, path: &str, offset: u64, length: usize) -> KernelResult<Vec<u8>> {
         self.assert_not_terminated()?;
+        self.reject_unix_socket_data_path(path, "ENXIO")?;
+        self.resources.check_pread_length(length)?;
+        Ok(VirtualFileSystem::pread(
+            &mut self.filesystem,
+            path,
+            offset,
+            length,
+        )?)
+    }
+
+    pub fn pread_file_for_process(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        path: &str,
+        offset: u64,
+        length: usize,
+    ) -> KernelResult<Vec<u8>> {
+        self.assert_not_terminated()?;
+        self.assert_driver_owns(requester_driver, pid)?;
+        self.check_dac_access(pid, path, DAC_READ)?;
         self.reject_unix_socket_data_path(path, "ENXIO")?;
         self.resources.check_pread_length(length)?;
         Ok(VirtualFileSystem::pread(
@@ -2087,7 +2110,9 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.assert_not_terminated()?;
         self.reject_read_only_resolved_write_path(path)?;
         self.filesystem.chmod(path, mode)?;
-        self.sync_access_acl_mode(path, mode)
+        self.sync_access_acl_mode(path, mode)?;
+        self.no_posix_acl_cache.clear();
+        Ok(())
     }
 
     pub fn chmod_for_process(
@@ -2147,7 +2172,9 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
     pub fn chown(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
         self.assert_not_terminated()?;
         self.reject_read_only_resolved_write_path(path)?;
-        Ok(self.filesystem.chown(path, uid, gid)?)
+        self.filesystem.chown(path, uid, gid)?;
+        self.no_posix_acl_cache.clear();
+        Ok(())
     }
 
     pub fn chown_for_process(
@@ -2279,9 +2306,10 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         } else {
             self.reject_read_only_entry_write_path(path)?;
         }
-        Ok(self
-            .filesystem
-            .set_xattr(path, name, value, flags, follow_symlinks)?)
+        self.filesystem
+            .set_xattr(path, name, value, flags, follow_symlinks)?;
+        self.no_posix_acl_cache.clear();
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2346,7 +2374,9 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         } else {
             self.reject_read_only_entry_write_path(path)?;
         }
-        Ok(self.filesystem.remove_xattr(path, name, follow_symlinks)?)
+        self.filesystem.remove_xattr(path, name, follow_symlinks)?;
+        self.no_posix_acl_cache.clear();
+        Ok(())
     }
 
     pub fn remove_xattr_for_process(
@@ -3320,6 +3350,31 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         self.pipes
             .set_owner(read_description_id, identity.euid, identity.egid)?;
         Ok((read_fd, write_fd))
+    }
+
+    pub fn fd_pipe_has_reader_in_other_process(
+        &self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+    ) -> KernelResult<bool> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        let tables = lock_or_recover(&self.fd_tables);
+        let write_description_id = tables
+            .get(pid)
+            .and_then(|table| table.get(fd))
+            .ok_or_else(|| KernelError::bad_file_descriptor(fd))?
+            .description
+            .id();
+        Ok(tables.pids().into_iter().any(|other_pid| {
+            other_pid != pid
+                && tables.get(other_pid).is_some_and(|table| {
+                    table.values().any(|entry| {
+                        self.pipes
+                            .is_write_to_read_pair(write_description_id, entry.description.id())
+                    })
+                })
+        }))
     }
 
     pub fn fd_snapshot(
@@ -5109,6 +5164,42 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         Ok(data.len())
     }
 
+    /// Probe a pipe write without parking the caller when the pipe is full.
+    /// Other descriptor kinds retain the regular `fd_write` behavior.
+    pub fn fd_write_nonblocking_pipe(
+        &mut self,
+        requester_driver: &str,
+        pid: u32,
+        fd: u32,
+        data: &[u8],
+    ) -> KernelResult<usize> {
+        self.assert_driver_owns(requester_driver, pid)?;
+        self.resources.check_fd_write_size(data.len())?;
+        let entry = {
+            let tables = lock_or_recover(&self.fd_tables);
+            tables
+                .get(pid)
+                .and_then(|table| table.get(fd))
+                .cloned()
+                .ok_or_else(|| KernelError::bad_file_descriptor(fd))?
+        };
+        if !self.pipes.is_pipe(entry.description.id()) {
+            return self.fd_write(requester_driver, pid, fd, data);
+        }
+        match self
+            .pipes
+            .write_with_mode(entry.description.id(), data, true)
+        {
+            Ok(bytes) => Ok(bytes),
+            Err(error) => {
+                if error.code() == "EPIPE" {
+                    self.processes.kill(pid as i32, SIGPIPE)?;
+                }
+                Err(error.into())
+            }
+        }
+    }
+
     pub fn poll_fds(
         &self,
         requester_driver: &str,
@@ -6879,7 +6970,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         interpreter_depth: usize,
     ) -> KernelResult<()> {
         let resolved = self.validate_executable_path(path, cwd)?;
-        // `/bin/<name>` and `/__secure_exec/commands/.../<name>` may be
+        // `/bin/<name>` and `/__agentos/commands/.../<name>` may be
         // kernel-owned command stubs whose backing bytes are a self-referential
         // launcher rather than the projected WASM blob the runner loads. Once
         // the exact path has resolved to a registered command, its trusted
@@ -6923,7 +7014,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         }
 
         if let Some(name) = normalized
-            .strip_prefix("/__secure_exec/commands/")
+            .strip_prefix("/__agentos/commands/")
             .and_then(|suffix| suffix.rsplit('/').next())
         {
             if !name.is_empty() && !name.contains('/') && self.commands.resolve(name).is_some() {
@@ -7636,7 +7727,7 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         let mut body = String::new();
         for processor in 0..self.proc_cpu_count() {
             body.push_str(&format!(
-                "processor\t: {processor}\nmodel name\t: secure-exec Virtual CPU\ncpu MHz\t\t: 1000.000\nsiblings\t: 1\ncpu cores\t: 1\n\n"
+                "processor\t: {processor}\nmodel name\t: agentos Virtual CPU\ncpu MHz\t\t: 1000.000\nsiblings\t: 1\ncpu cores\t: 1\n\n"
             ));
         }
         body.into_bytes()
@@ -7934,12 +8025,40 @@ impl<F: VirtualFileSystem + 'static> KernelVm<F> {
         access: u32,
         path: &str,
     ) -> KernelResult<()> {
-        if identity.euid == 0 {
+        // POSIX ACL USER_OBJ permissions are mirrored in the inode's owner mode
+        // bits. Named ACL entries and the ACL mask never override the file
+        // owner's class, so reading the ACL xattr for the owner is redundant.
+        // Avoiding that second filesystem walk matters for host-mounted trees,
+        // where runtimes perform thousands of metadata probes during startup.
+        if identity.euid == 0 || identity.euid == stat.uid {
+            return check_dac_mode(identity, stat, access, path);
+        }
+        let cache_key = (
+            stat.dev,
+            stat.ino,
+            stat.ctime_ms,
+            stat.ctime_nsec,
+            stat.mode,
+            stat.uid,
+            stat.gid,
+        );
+        if self.no_posix_acl_cache.contains(&cache_key) {
             return check_dac_mode(identity, stat, access, path);
         }
         match self.read_posix_acl(path, POSIX_ACL_ACCESS)? {
             Some(acl) => acl.check_access(identity, stat, access, path),
-            None => check_dac_mode(identity, stat, access, path),
+            None => {
+                // Most executable/package trees have no POSIX ACL. Cache that
+                // negative lookup by inode metadata so repeated traversal does
+                // not turn every stat into a second filesystem/database query.
+                // Mutating xattr/ownership/mode operations clear the cache, and
+                // externally changed inodes naturally produce a different key.
+                if self.no_posix_acl_cache.len() >= 4_096 {
+                    self.no_posix_acl_cache.clear();
+                }
+                self.no_posix_acl_cache.insert(cache_key);
+                check_dac_mode(identity, stat, access, path)
+            }
         }
     }
 

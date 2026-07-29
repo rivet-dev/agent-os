@@ -1,12 +1,18 @@
 {
+	"name": "codex",
+	"agent": {
+		"acpEntrypoint": "codex-acp",
+		"env": {
+			"CODEX_EXEC_COMMAND": "/opt/agentos/bin/codex-exec"
+		}
+	},
 	"registry": {
 		"title": "Codex",
 		"description": "Run OpenAI's Codex coding agent inside agentOS with programmatic API access.",
 		"beta": true,
 		"docsHref": "/docs/agents/codex",
 		"image": "/images/registry/codex.svg",
-		"priority": 80,
-		"category": "agents"
-	},
-	"kind": "agent"
+		"category": "agents",
+		"priority": 80
+	}
 }

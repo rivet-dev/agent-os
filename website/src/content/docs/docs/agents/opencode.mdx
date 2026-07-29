@@ -14,7 +14,7 @@ skill: false
 
 Read [Sessions](/docs/sessions) first for session options, streaming events, prompts, and lifecycle management.
 
-## LLM Credentials
+## Model & credentials
 
 OpenCode auto-detects a provider when its key is present on the session's `env`, sourced from your server's environment. Common variables:
 
@@ -25,7 +25,7 @@ OpenCode auto-detects a provider when its key is present on the session's `env`,
 - `GROQ_API_KEY` — Groq.
 - …plus Amazon Bedrock, Azure, Google Vertex, and 70+ providers via [models.dev](https://models.dev).
 
-See [LLM Credentials](/docs/llm-credentials), and OpenCode's [providers docs](https://opencode.ai/docs/providers/) for the full list.
+See [Models & Credentials](/docs/models-and-credentials), and OpenCode's [providers docs](https://opencode.ai/docs/providers/) for the full list.
 
 ## Model configuration
 
@@ -39,8 +39,8 @@ Two settings will silently produce an **empty response** if wrong:
 
 ```ts
 // Write the config before creating the session
-await agent.mkdir("/home/agentos/.config/opencode", { recursive: true });
-await agent.writeFile(
+await agent.filesystem.mkdir("/home/agentos/.config/opencode", { recursive: true });
+await agent.filesystem.writeFile(
   "/home/agentos/.config/opencode/opencode.json",
   JSON.stringify({
     $schema: "https://opencode.ai/config.json",
@@ -52,7 +52,7 @@ await agent.writeFile(
   }),
 );
 
-await agent.openSession({
+await agent.sessions.open({
   agent: "opencode",
   env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
@@ -71,7 +71,7 @@ Expose extra tools to the agent by passing `mcpServers` to `openSession`. Both l
 <CodeSnippet file="examples/opencode/client.ts" region="mcp" />
 
 <Note>
-**Pre-install `npx`-launched servers.** A local server started with `npx -y …` writes install progress to **stdout** on its first run, which corrupts the MCP stdio handshake (you'll see `Connection closed`). Pre-install it in the VM so `npx` is silent — `await agent.exec("npm install -g @modelcontextprotocol/server-filesystem")` before the session — or pin the package and point `command` at the installed binary.
+**Pre-install `npx`-launched servers.** A local server started with `npx -y …` writes install progress to **stdout** on its first run, which corrupts the MCP stdio handshake (you'll see `Connection closed`). Pre-install it in the VM so `npx` is silent — `await agent.process.exec("npm install -g @modelcontextprotocol/server-filesystem")` before the session — or pin the package and point `command` at the installed binary.
 </Note>
 
 ## Customizing the agent

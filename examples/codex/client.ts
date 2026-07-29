@@ -9,12 +9,12 @@ const agent = client.vm.getOrCreate("my-agent");
 
 // ── Quick start ───────────────────────────────────────────────────
 async function quickStart() {
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "codex",
 		env: { OPENAI_API_KEY: process.env.OPENAI_API_KEY! },
 	});
 
-	const result = await agent.prompt({
+	const result = await agent.sessions.prompt({
 		content: [
 			{ type: "text", text: "What files are in the current directory?" },
 		],
@@ -37,13 +37,13 @@ description: How to write commit messages in this project.
 Write commit messages in the imperative mood and keep the subject under 50 characters.
 `;
 
-	await agent.mkdir("/home/agentos/.codex/skills/commit-style");
-	await agent.writeFile(
+	await agent.filesystem.mkdir("/home/agentos/.codex/skills/commit-style");
+	await agent.filesystem.writeFile(
 		"/home/agentos/.codex/skills/commit-style/SKILL.md",
 		skill,
 	);
 
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "codex",
 		env: { OPENAI_API_KEY: process.env.OPENAI_API_KEY! },
 	});
@@ -59,7 +59,7 @@ Write commit messages in the imperative mood and keep the subject under 50 chara
 async function withMcp() {
 	// Pre-install the MCP server so `npx` is silent — first-run install output
 	// would otherwise corrupt the MCP stdio handshake ("Connection closed").
-	await agent.exec("npm install -g @modelcontextprotocol/server-filesystem");
+	await agent.process.exec("npm install -g @modelcontextprotocol/server-filesystem");
 
 	const config = `[mcp_servers.filesystem]
 command = "npx"
@@ -70,9 +70,9 @@ url = "https://mcp.example.com/sse"
 http_headers = { Authorization = "Bearer my-token" }
 `;
 
-	await agent.writeFile("/home/agentos/.codex/config.toml", config);
+	await agent.filesystem.writeFile("/home/agentos/.codex/config.toml", config);
 
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "codex",
 		env: { OPENAI_API_KEY: process.env.OPENAI_API_KEY! },
 	});
@@ -89,29 +89,29 @@ description: How to write commit messages in this project.
 Write commit messages in the imperative mood and keep the subject under 50 characters.
 `;
 
-	await agent.mkdir("/home/agentos/.codex/skills/commit-style");
-	await agent.writeFile(
+	await agent.filesystem.mkdir("/home/agentos/.codex/skills/commit-style");
+	await agent.filesystem.writeFile(
 		"/home/agentos/.codex/skills/commit-style/SKILL.md",
 		skill,
 	);
 
 	// Pre-install the MCP server so `npx` is silent — first-run install output
 	// would otherwise corrupt the MCP stdio handshake ("Connection closed").
-	await agent.exec("npm install -g @modelcontextprotocol/server-filesystem");
+	await agent.process.exec("npm install -g @modelcontextprotocol/server-filesystem");
 
 	const config = `[mcp_servers.filesystem]
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/agentos"]
 `;
 
-	await agent.writeFile("/home/agentos/.codex/config.toml", config);
+	await agent.filesystem.writeFile("/home/agentos/.codex/config.toml", config);
 
-	await agent.openSession({
+	await agent.sessions.open({
 		agent: "codex",
 		env: { OPENAI_API_KEY: process.env.OPENAI_API_KEY! },
 	});
 
-	const result = await agent.prompt({
+	const result = await agent.sessions.prompt({
 		content: [
 			{
 				type: "text",

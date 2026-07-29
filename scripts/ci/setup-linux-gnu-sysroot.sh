@@ -28,6 +28,8 @@ sudo apt-get install -y --no-install-recommends \
   scripts/ci/deno-memfd-create-shim.c -fPIC
 "clang-${llvm_version}" -c -o /tmp/agentos_gettid_shim.o \
   scripts/ci/agentos-gettid-shim.c -fPIC
+"clang-${llvm_version}" -c -o /tmp/agentos_renameat2_shim.o \
+  scripts/ci/agentos-renameat2-shim.c -fPIC
 
 sysroot_arch="$(uname -m)"
 sysroot_url="https://github.com/denoland/deno_sysroot_build/releases/download/${sysroot_tag}/sysroot-${sysroot_arch}.tar.xz"
@@ -49,6 +51,7 @@ rustflags_extra="-C linker-plugin-lto=true \
 -C link-arg=-Wl,--thinlto-cache-policy,cache_size_bytes=700m \
 -C link-arg=/tmp/agentos_memfd_create_shim.o \
 -C link-arg=/tmp/agentos_gettid_shim.o \
+-C link-arg=/tmp/agentos_renameat2_shim.o \
 ${RUSTFLAGS:-}"
 
 {

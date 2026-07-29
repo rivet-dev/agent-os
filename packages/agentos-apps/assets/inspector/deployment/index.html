@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AgentOS App deployment</title>
+  <link rel="stylesheet" href="/inspector/tab.css">
+  <style>
+    body{font:14px system-ui;margin:0;padding:20px;color:CanvasText;background:Canvas}
+    header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    h1{font-size:18px;margin:0}.actions{display:flex;gap:8px}
+    button{padding:7px 11px;border:1px solid #7776;border-radius:6px;background:#7771;color:inherit;cursor:pointer}
+    pre{margin-top:16px;padding:14px;border:1px solid #7774;border-radius:8px;overflow:auto;max-height:70vh;white-space:pre-wrap}
+    #error{color:#d44;white-space:pre-wrap}.muted{opacity:.65}
+  </style>
+</head>
+<body>
+  <header><div><h1>AgentOS App deployment</h1><div class="muted" id="actor"></div></div><div class="actions"><button onclick="runAction('inspect')">Refresh</button></div></header>
+  <div id="error"></div><pre id="state">Waiting for inspector…</pre>
+  <script type="module">
+    let token = "";
+    const headers = () => ({ authorization: `Bearer ${token}`, "content-type": "application/json" });
+    const showError = (error) => { document.querySelector("#error").textContent = String(error?.message ?? error); };
+    async function refresh() {
+      const response = await fetch("/inspector/state", { headers: headers() });
+      if (response.status === 401) { parent.postMessage({ type: "token-refresh-needed", v: 1 }, "*"); return; }
+      if (!response.ok) throw new Error(`State request failed: HTTP ${response.status}`);
+      const body = await response.json();
+      document.querySelector("#state").textContent = JSON.stringify(body.state, null, 2);
+    }
+    async function action(name, args = []) {
+      if (!confirm(`Run ${name}?`)) return;
+      const response = await fetch(`/inspector/action/${encodeURIComponent(name)}`, {
+        method: "POST", headers: headers(), body: JSON.stringify({ args }),
+      });
+      const text = await response.text();
+      if (!response.ok) throw new Error(text || `Action failed: HTTP ${response.status}`);
+      await refresh();
+    }
+    window.runAction = (...args) => action(...args).catch(showError);
+    addEventListener("message", (event) => {
+      if (event.data?.type !== "init" || event.data?.v !== 1) return;
+      token = event.data.authToken;
+      document.documentElement.classList.toggle("dark", (event.data.theme ?? "dark") === "dark");
+      document.querySelector("#actor").textContent = event.data.actorId;
+      refresh().then(() => parent.postMessage({ type: "ready", v: 1 }, "*"), showError);
+    });
+  </script>
+</body>
+</html>

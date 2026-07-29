@@ -4,11 +4,11 @@ name = "cmd-gzip"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "gzip standalone binary for secure-exec VM"
+description = "gzip standalone binary for agentos VM"
 
 [[bin]]
 name = "gzip"
 path = "src/main.rs"
 
 [dependencies]
-secureexec-gzip = { path = "../gzip" }
+agentos-gzip = { path = "../gzip" }

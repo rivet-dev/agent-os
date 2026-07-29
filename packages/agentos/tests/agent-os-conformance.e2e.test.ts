@@ -21,7 +21,7 @@ async function waitForActorReady(
 	const deadline = Date.now() + timeoutMs;
 	let lastError: unknown;
 	while (Date.now() < deadline) {
-		if (runtime.child.exitCode !== null) {
+		if (runtime.child && runtime.child.exitCode !== null) {
 			throw new Error(`actor runtime exited during startup\n${runtime.logs()}`);
 		}
 		try {
@@ -71,11 +71,14 @@ defineAgentOsConformanceSuite({
 				action: AgentOsConformanceAction,
 				...args: unknown[]
 			): Promise<T> {
-				const method = handle[action];
+				const path = action.split(".");
+				let owner = handle;
+				for (const segment of path.slice(0, -1)) owner = owner[segment];
+				const method = owner[path.at(-1)!];
 				if (typeof method !== "function") {
 					throw new Error(`Actor backend does not implement ${action}`);
 				}
-				return (await method.apply(handle, args)) as T;
+				return (await method.apply(owner, args)) as T;
 			},
 			on(
 				event: AgentOsConformanceEvent,

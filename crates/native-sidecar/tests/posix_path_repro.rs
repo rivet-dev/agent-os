@@ -2,6 +2,7 @@ mod support;
 
 use agentos_native_sidecar::wire::{
     ConfigureVmRequest, GuestRuntimeKind, MountDescriptor, MountPluginDescriptor, RequestPayload,
+    WasmPermissionTier,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -72,7 +73,7 @@ fn configure_mounts(
         mounts.insert(
             0,
             MountDescriptor {
-                guest_path: String::from("/__secure_exec/commands/0"),
+                guest_path: String::from("/__agentos/commands/0"),
                 guest_source: String::from("host_dir"),
                 guest_fstype: String::from("host_dir"),
                 read_only: true,
@@ -99,7 +100,10 @@ fn configure_mounts(
                 module_access_cwd: None,
                 instructions: Vec::new(),
                 projected_modules: Vec::new(),
-                command_permissions: HashMap::new(),
+                command_permissions: HashMap::from([
+                    (String::from("bash"), WasmPermissionTier::Full),
+                    (String::from("spawn-test-host"), WasmPermissionTier::Full),
+                ]),
                 loopback_exempt_ports: Vec::new(),
                 packages: Vec::new(),
                 packages_mount_at: String::new(),
@@ -389,6 +393,7 @@ const worktree = process.env.WORKTREE;
 if (!worktree) {
   throw new Error("WORKTREE env missing");
 }
+
 const notePath = path.join(worktree, "note.txt");
 const writtenPath = path.join(worktree, "written.txt");
 fs.writeFileSync(notePath, "hello from repro\n");
@@ -501,6 +506,98 @@ console.log(JSON.stringify({
     );
 }
 
+fn nested_wasm_tokio_shell_accepts_workspace_cwd() {
+    assert_node_available();
+
+    let (cwd, entrypoint) = write_probe(
+        "nested-wasm-tokio-shell",
+        r#"
+import childProcess from "node:child_process";
+
+const result = childProcess.spawnSync(
+  "spawn-test-host",
+  ["tokio-bash"],
+  { cwd: "/workspace", encoding: "utf8" },
+);
+
+console.log(JSON.stringify({
+  status: result.status,
+  signal: result.signal,
+  stdout: Buffer.from(result.stdout ?? []).toString("utf8"),
+  stderr: Buffer.from(result.stderr ?? []).toString("utf8"),
+  error: result.error ? String(result.error) : null,
+}));
+"#,
+    );
+    let guest = run_guest_probe(
+        "nested-wasm-tokio-shell",
+        &cwd,
+        &entrypoint,
+        true,
+        HashMap::new(),
+        vec![
+            MountDescriptor {
+                guest_path: String::from("/workspace"),
+                guest_source: String::from("host_dir"),
+                guest_fstype: String::from("host_dir"),
+                read_only: false,
+                plugin: MountPluginDescriptor {
+                    id: String::from("host_dir"),
+                    config: serde_json::to_string(&json!({
+                        "hostPath": cwd,
+                        "readOnly": false,
+                    }))
+                    .expect("serialize nested WASM workspace mount config"),
+                },
+            },
+            MountDescriptor {
+                guest_path: String::from("/opt/agentos/bin"),
+                guest_source: String::from("host_dir"),
+                guest_fstype: String::from("host_dir"),
+                read_only: true,
+                plugin: MountPluginDescriptor {
+                    id: String::from("host_dir"),
+                    config: serde_json::to_string(&json!({
+                        "hostPath": registry_command_root(),
+                        "readOnly": true,
+                    }))
+                    .expect("serialize nested WASM command mount config"),
+                },
+            },
+        ],
+    );
+
+    assert_eq!(
+        guest["status"],
+        json!(0),
+        "nested WASM shell failed: {guest}"
+    );
+    assert_eq!(
+        guest["signal"],
+        Value::Null,
+        "nested WASM shell was signaled: {guest}"
+    );
+    assert_eq!(
+        guest["error"],
+        Value::Null,
+        "nested WASM spawn errored: {guest}"
+    );
+    assert_eq!(
+        guest["stdout"],
+        json!("PASS\n"),
+        "nested WASM shell output differed: {guest}"
+    );
+    assert_eq!(
+        strip_benign_child_pid_warnings(
+            guest["stderr"]
+                .as_str()
+                .expect("nested WASM stderr should be a string")
+        ),
+        "",
+        "nested WASM shell emitted unexpected stderr: {guest}"
+    );
+}
+
 fn node_path_posix_edge_cases_match_host_node() {
     assert_guest_matches_host(
         "path-builtins",
@@ -562,5 +659,6 @@ fn posix_path_repro_suite() {
     filesystem_path_edge_cases_match_host_node();
     guest_shell_absolute_paths_still_work_after_cd();
     guest_shell_relative_paths_follow_cwd_after_cd();
+    nested_wasm_tokio_shell_accepts_workspace_cwd();
     node_path_posix_edge_cases_match_host_node();
 }

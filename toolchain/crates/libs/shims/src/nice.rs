@@ -42,7 +42,7 @@ pub fn nice(args: Vec<OsString>) -> i32 {
     let program = &str_args[cmd_start];
     let child_args = &str_args[cmd_start + 1..];
 
-    let mut cmd = std::process::Command::new(program);
+    let mut cmd = std::process::Command::new(crate::which::resolve_program(program));
     cmd.args(child_args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())

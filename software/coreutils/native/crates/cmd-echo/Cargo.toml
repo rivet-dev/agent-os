@@ -4,7 +4,7 @@ name = "cmd-echo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "echo standalone binary for secure-exec VM"
+description = "echo standalone binary for agentos VM"
 
 [[bin]]
 name = "echo"

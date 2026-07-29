@@ -1,0 +1,25 @@
+{
+	"name": "@rivet-dev/agentos-example-flue",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"build": "flue build",
+		"check-types": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@flue/cli": "npm:@rivet-dev/labs-flue-cli@1.0.0-beta.9-rivet.2",
+		"@flue/runtime": "npm:@rivet-dev/labs-flue-runtime@1.0.0-beta.9-rivet.2",
+		"@rivet-dev/agentos": "workspace:*",
+		"@rivet-dev/agentos-flue": "workspace:*",
+		"@rivet-dev/flue": "2.3.9",
+		"rivetkit": "2.3.9"
+	},
+	"devDependencies": {
+		"@types/node": "^24.0.0",
+		"typescript": "^5.7.2"
+	},
+	"engines": {
+		"node": ">=24"
+	}
+}

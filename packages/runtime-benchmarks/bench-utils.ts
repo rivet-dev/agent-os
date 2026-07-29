@@ -1,5 +1,5 @@
 /**
- * Shared utilities for the Secure Exec cold-start, warm-start, and memory
+ * Shared utilities for the AgentOS language execution cold-start, warm-start, and memory
  * benchmarks.
  */
 

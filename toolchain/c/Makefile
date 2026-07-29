@@ -1003,7 +1003,10 @@ VIM_WCC := $(VIM_BRIDGE_BUILD)/wcc
 .PHONY: fetch-vim
 fetch-vim: $(VIM_SRC)/src/vim.h
 $(VIM_SRC)/src/vim.h:
-	git clone --depth 1 --branch $(VIM_VERSION) https://github.com/vim/vim $(VIM_SRC)
+	rm -rf $(VIM_SRC).tmp
+	git clone --depth 1 --branch $(VIM_VERSION) https://github.com/vim/vim $(VIM_SRC).tmp
+	rm -rf $(VIM_SRC)
+	mv $(VIM_SRC).tmp $(VIM_SRC)
 
 $(VIM_BRIDGE_BUILD)/%.o: $(VIM_BRIDGE_SRC)/%.c $(WASI_SDK_DIR)/bin/clang sysroot
 	@mkdir -p $(VIM_BRIDGE_BUILD)

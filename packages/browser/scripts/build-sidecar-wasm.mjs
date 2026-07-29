@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Builds the Agent OS browser sidecar (crates/agentos-sidecar-browser) to a
 // wasm-bindgen package under .cache/agentos-sidecar-wasm. This is the converged
-// wasm kernel (from secure-exec) plus the Agent OS ACP BrowserExtension, driven by
+// wasm kernel (from agentos) plus the Agent OS ACP BrowserExtension, driven by
 // the browser harness / integration tests over pushFrame/pollEvent.
 //
 // Requires `wasm-pack` on PATH. Targets nodejs by default so the bindings load

@@ -101,7 +101,7 @@ fn tar_filesystem_cache_uses_file_identity_and_stable_guest_device() {
     assert_ne!(stat_a.dev, other_stat.dev);
 
     let same_bytes = std::fs::read(&tar_path).expect("read fixture tar");
-    let copied_tar = unique_tar_path("secure-exec-tar-fs-copy");
+    let copied_tar = unique_tar_path("agentos-tar-fs-copy");
     std::fs::write(&copied_tar, same_bytes).expect("copy fixture tar bytes");
     let fs_copy = TarFileSystem::open(&copied_tar).expect("open copied tar filesystem");
     assert_ne!(fs_a.archive_ptr(), fs_copy.archive_ptr());
@@ -114,7 +114,7 @@ fn tar_filesystem_cache_uses_file_identity_and_stable_guest_device() {
 }
 
 fn write_fixture_tar() -> PathBuf {
-    let path = unique_tar_path("secure-exec-tar-fs-fixture");
+    let path = unique_tar_path("agentos-tar-fs-fixture");
     write_fixture_tar_at(path)
 }
 

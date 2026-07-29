@@ -1,0 +1,11 @@
+{
+  "name": "project-matrix-crypto-agent-pass",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "jose": "6.2.3",
+    "openpgp": "6.3.1",
+    "libsodium-wrappers": "0.8.4",
+    "tweetnacl": "1.0.3"
+  }
+}

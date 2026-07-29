@@ -19,7 +19,7 @@ use support::{
     temp_dir, wire_request, wire_vm, RecordingBridge,
 };
 
-const TEST_NAMESPACE: &str = "dev.rivet.secure-exec.extension-test";
+const TEST_NAMESPACE: &str = "dev.rivet.agentos.extension-test";
 
 struct EchoExtension;
 struct VmLifetimeExtension;
@@ -191,7 +191,7 @@ impl Extension for EchoExtension {
 
 impl Extension for VmLifetimeExtension {
     fn namespace(&self) -> &str {
-        "dev.rivet.secure-exec.extension-vm-lifetime-test"
+        "dev.rivet.agentos.extension-vm-lifetime-test"
     }
 
     fn handle_request<'a>(
@@ -318,7 +318,7 @@ fn extension_session_resources_can_dispose_bound_vm() {
             4,
             wire_vm(&connection_id, &session_id, &vm_id),
             RequestPayload::ExtEnvelope(ExtEnvelope {
-                namespace: String::from("dev.rivet.secure-exec.extension-vm-lifetime-test"),
+                namespace: String::from("dev.rivet.agentos.extension-vm-lifetime-test"),
                 payload: Vec::new(),
             }),
         ))
@@ -328,7 +328,7 @@ fn extension_session_resources_can_dispose_bound_vm() {
         ResponsePayload::ExtEnvelope(envelope) => {
             assert_eq!(
                 envelope.namespace,
-                "dev.rivet.secure-exec.extension-vm-lifetime-test"
+                "dev.rivet.agentos.extension-vm-lifetime-test"
             );
             assert_eq!(envelope.payload, b"vm-disposed");
         }

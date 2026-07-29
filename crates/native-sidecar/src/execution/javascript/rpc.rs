@@ -1,5 +1,7 @@
 use super::super::*;
-use crate::filesystem::{remove_process_shadow_path, rename_process_shadow_path};
+use crate::filesystem::{
+    javascript_sync_rpc_path_arg, remove_process_shadow_path, rename_process_shadow_path,
+};
 use agentos_kernel::vfs::{VirtualTimeSpec, VirtualUtimeSpec};
 
 const ALLOWED_WASM_PROCESS_SYNC_RPCS: &[&str] = &[
@@ -209,7 +211,7 @@ pub(crate) fn deferred_child_kernel_wait_request(
 pub(crate) fn deferred_kernel_wait_request_for_process(
     request: &JavascriptSyncRpcRequest,
     kernel: &SidecarKernel,
-    kernel_pid: u32,
+    process: &ActiveProcess,
 ) -> Result<Option<JavascriptSyncRpcRequest>, SidecarError> {
     if let Some(request) = deferred_child_kernel_wait_request(request)? {
         return Ok(Some(request));
@@ -223,8 +225,14 @@ pub(crate) fn deferred_kernel_wait_request_for_process(
         return Ok(None);
     }
     let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem write fd")?;
+    // Projected host files live in the process-local mapped-fd table rather
+    // than the kernel fd table. They are regular files and can never require
+    // the nonblocking pipe-write path below.
+    if process.mapped_host_fd(fd).is_some() {
+        return Ok(None);
+    }
     let stat = kernel
-        .fd_stat(EXECUTION_DRIVER_NAME, kernel_pid, fd)
+        .fd_stat(EXECUTION_DRIVER_NAME, process.kernel_pid, fd)
         .map_err(kernel_error)?;
     if stat.filetype != agentos_kernel::fd_table::FILETYPE_PIPE {
         return Ok(None);
@@ -628,6 +636,33 @@ where
         let bytes = service_javascript_fs_read_sync_rpc(kernel, process, kernel_pid, request)?;
         return Ok(JavascriptSyncRpcServiceResponse::Raw(bytes));
     }
+    if request.raw_bytes_args.contains_key(&usize::MAX) && request.method == "fs.readFileRangeSync"
+    {
+        let path =
+            javascript_sync_rpc_path_arg(process, &request.args, 0, "filesystem ranged read path")?;
+        let offset =
+            javascript_sync_rpc_arg_u64(&request.args, 1, "filesystem ranged read offset")?;
+        let length = usize::try_from(javascript_sync_rpc_arg_u64(
+            &request.args,
+            2,
+            "filesystem ranged read length",
+        )?)
+        .map_err(|_| {
+            SidecarError::InvalidState(
+                "filesystem ranged read length must fit within usize".to_string(),
+            )
+        })?;
+        let bytes = kernel
+            .pread_file_for_process(
+                EXECUTION_DRIVER_NAME,
+                process.kernel_pid,
+                path.as_str(),
+                offset,
+                length,
+            )
+            .map_err(kernel_error)?;
+        return Ok(JavascriptSyncRpcServiceResponse::Raw(bytes));
+    }
     if request.method == "fs.readdirSync" {
         let kernel_pid = process.kernel_pid;
         let bytes =
@@ -689,6 +724,10 @@ where
             service_javascript_pty_set_raw_mode_sync_rpc(kernel, process, request)
         }
         "crypto.hashDigest"
+        | "crypto.hashCreate"
+        | "crypto.hashUpdate"
+        | "crypto.hashFinal"
+        | "crypto.hashDestroy"
         | "crypto.hmacDigest"
         | "crypto.pbkdf2"
         | "crypto.scrypt"
@@ -2670,6 +2709,16 @@ where
             && [JavascriptSocketFamily::Ipv4, JavascriptSocketFamily::Ipv6]
                 .iter()
                 .any(|family| {
+                    let family_number = match family {
+                        JavascriptSocketFamily::Ipv4 => 4,
+                        JavascriptSocketFamily::Ipv6 => 6,
+                    };
+                    if payload
+                        .family
+                        .is_some_and(|requested| requested != family_number)
+                    {
+                        return false;
+                    }
                     request
                         .socket_paths
                         .http_loopback_target(*family, port)
@@ -2688,6 +2737,7 @@ where
                 request.dns,
                 host,
                 port,
+                payload.family,
                 request.socket_paths,
             )?;
             if !resolved.use_kernel_loopback {
@@ -2761,6 +2811,13 @@ where
     } = request;
     let trace_enabled = net_tcp_trace_enabled(&process.env);
     let socket_id = javascript_sync_rpc_arg_str(&request.args, 0, "net.socket_read socket id")?;
+    let max_bytes = javascript_sync_rpc_arg_u64_optional(
+        &request.args,
+        1,
+        "net.socket_read maximum byte count",
+    )?
+    .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
+    .unwrap_or(64 * 1024);
     if trace_enabled {
         NET_TCP_TRACE_COUNTERS
             .socket_read_calls
@@ -2772,14 +2829,20 @@ where
 
     let event = if let Some(socket) = process.tcp_sockets.get_mut(socket_id) {
         socket.set_application_read_interest(true)?;
-        socket.poll(kernel, process.kernel_pid, Duration::ZERO, trace_enabled)?
+        socket.poll_limited(
+            kernel,
+            process.kernel_pid,
+            Duration::ZERO,
+            trace_enabled,
+            max_bytes,
+        )?
     } else {
         let socket = process
             .unix_sockets
             .get_mut(socket_id)
             .ok_or_else(|| SidecarError::InvalidState(format!("unknown net socket {socket_id}")))?;
         socket.set_application_read_interest(true)?;
-        socket.poll(Duration::ZERO)?
+        socket.poll_limited(Duration::ZERO, max_bytes)?
     };
 
     match event {
@@ -3532,6 +3595,16 @@ where
                 if is_loopback_socket_host(host) {
                     let families = [JavascriptSocketFamily::Ipv4, JavascriptSocketFamily::Ipv6];
                     if let Some((family, target)) = families.iter().find_map(|family| {
+                        let family_number = match family {
+                            JavascriptSocketFamily::Ipv4 => 4,
+                            JavascriptSocketFamily::Ipv6 => 6,
+                        };
+                        if payload
+                            .family
+                            .is_some_and(|requested| requested != family_number)
+                        {
+                            return None;
+                        }
                         socket_paths
                             .http_loopback_target(*family, port)
                             .map(|target| (*family, target))
@@ -3574,6 +3647,7 @@ where
                     dns,
                     host,
                     port,
+                    family: payload.family,
                     local_address: payload.local_address.as_deref(),
                     local_port: payload.local_port,
                     local_reservation: local_reservation
@@ -4026,7 +4100,6 @@ where
                     "unknown net socket {socket_id}"
                 )));
             };
-
             match event {
                 Some(JavascriptTcpSocketEvent::Data { bytes: chunk, .. }) => Ok(json!({
                     "type": "data",
@@ -5006,7 +5079,7 @@ mod error_code_tests {
     }
 
     #[test]
-    fn guest_errno_code_accepts_trusted_secure_exec_prefixes() {
+    fn guest_errno_code_accepts_trusted_agentos_prefixes() {
         assert_eq!(
             guest_errno_code("ERR_AGENTOS_NODE_SYNC_RPC: EACCES: permission denied on /foo"),
             Some("EACCES")

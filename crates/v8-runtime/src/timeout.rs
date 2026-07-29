@@ -15,7 +15,7 @@
 //     EXCLUDES idle/await. V8 has no native budget primitive, so this poll +
 //     `terminate_execution()` approach is the standard embedder pattern. Armed
 //     when the caller passes a nonzero `limits.jsRuntime.cpuTimeLimitMs`.
-//     secure-exec sidecar VM executions supply a bounded default; lower-level
+//     agentos sidecar VM executions supply a bounded default; lower-level
 //     embedders may pass `None`/`0` to leave the guard disabled.
 //
 // The two guards are independent: setting one typed limit arms only that guard,

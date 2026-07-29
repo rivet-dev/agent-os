@@ -299,7 +299,7 @@ async function loadPiSoftware(): Promise<unknown> {
 	// non-snapshot fallback path and hides the optimization entirely.
 		const local = join(
 			import.meta.dirname,
-			"../../../secure-exec/software/pi/dist/index.js",
+			"../../../agentos/software/pi/dist/index.js",
 		);
 	if (existsSync(local)) return (await import(local)).default;
 	// Fallback: the published/installed software package. Variable specifier so
@@ -309,7 +309,7 @@ async function loadPiSoftware(): Promise<unknown> {
 		return (await import(piPkg)).default;
 	} catch {
 		throw new Error(
-				"Could not resolve the pi software package (../secure-exec/software/pi/dist or @agentos-software/pi). Build it first.",
+				"Could not resolve the pi software package (../agentos/software/pi/dist or @agentos-software/pi). Build it first.",
 		);
 	}
 }
@@ -323,7 +323,7 @@ function findPiSdkRoot(): string | null {
 			createRequire(
 				join(
 					import.meta.dirname,
-					"../../../secure-exec/software/pi/package.json",
+					"../../../agentos/software/pi/package.json",
 				),
 			),
 	];
@@ -373,7 +373,7 @@ function resolvePiSdkRootOrThrow(): string {
  * The bare-node session-creation script, run in a FRESH node process per sample
  * so each pays the full cold SDK load (the VM lane reloads the SDK in a fresh V8
  * isolate every session, so this is the apples-to-apples "Node.js equivalent").
-	 * Mirrors secure-exec software/pi/src/adapter.ts `newSession`, with no VM. It times the
+	 * Mirrors agentos software/pi/src/adapter.ts `newSession`, with no VM. It times the
  * SDK load + session construction internally and prints `__MS__=<ms>`.
  */
 function bareNodeScript(root: string): string {

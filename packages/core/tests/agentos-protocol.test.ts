@@ -14,6 +14,7 @@ describe("agent-os ACP protocol", () => {
 				agentType: "codex",
 				runtime: AcpRuntimeKind.JavaScript,
 				cwd: "/home/agentos",
+				additionalDirectories: ["/tmp/reference"],
 				args: ["--model", "gpt-5"],
 				env: new Map([["AGENTOS_KEEP_STDIN_OPEN", "1"]]),
 				protocolVersion: 1,

@@ -25,7 +25,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /build
 
-COPY scripts/ci/deno-memfd-create-shim.c scripts/ci/agentos-gettid-shim.c /tmp/agentos-ci/
+COPY scripts/ci/deno-memfd-create-shim.c scripts/ci/agentos-gettid-shim.c scripts/ci/agentos-renameat2-shim.c /tmp/agentos-ci/
 
 RUN set -eux; \
     . /etc/os-release; \
@@ -49,6 +49,8 @@ RUN set -eux; \
       /tmp/agentos-ci/deno-memfd-create-shim.c -fPIC; \
     "clang-${LINUX_GNU_LLVM_VERSION}" -c -o /tmp/agentos_gettid_shim.o \
       /tmp/agentos-ci/agentos-gettid-shim.c -fPIC; \
+    "clang-${LINUX_GNU_LLVM_VERSION}" -c -o /tmp/agentos_renameat2_shim.o \
+      /tmp/agentos-ci/agentos-renameat2-shim.c -fPIC; \
     if [ ! -x /usr/local/cargo/bin/rustup ]; then \
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" --profile minimal --no-modify-path; \
@@ -94,6 +96,7 @@ RUN --mount=type=cache,id=cargo-registry-agentos-${CACHE_PLATFORM},target=/usr/l
       -C link-arg=-Wl,--thinlto-cache-policy,cache_size_bytes=700m \
       -C link-arg=/tmp/agentos_memfd_create_shim.o \
       -C link-arg=/tmp/agentos_gettid_shim.o \
+      -C link-arg=/tmp/agentos_renameat2_shim.o \
       ${RUSTFLAGS:-}"; \
     if [ "$BUILD_PROFILE" = "release" ]; then FLAG="--release"; PROF=release; else FLAG=""; PROF=debug; fi; \
     cargo build $FLAG -p agentos-sidecar -p agentos-native-sidecar --target "$TARGET"; \

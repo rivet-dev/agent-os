@@ -9,7 +9,7 @@ Run shell commands and manage long-lived processes from inside a VM. Reach for t
 
 ## How it works
 
-Create a VM with `AgentOs.create()`, then drive it two ways. Use `vm.exec()` for one-shot shell commands — it runs pipelines, `grep`, `sed`, and the like, returning `stdout` and an `exitCode`. For longer-running work, `vm.spawn()` starts a process and hands back a `pid`; subscribe with `vm.onProcessOutput(pid, handler)`. Wait for completion with `vm.waitProcess(pid)`, and inspect what is running with `vm.listProcesses()`.
+Create a VM with `AgentOs.create()`, then drive it two ways. Use `vm.process.exec()` for one-shot shell commands — it runs pipelines, `grep`, `sed`, and the like, returning `stdout` and an `exitCode`. For longer-running work, `vm.process.spawn()` starts a process and hands back a `pid`; subscribe with `vm.onProcessOutput(pid, handler)`. Wait for completion with `vm.process.wait(pid)`, and inspect what is running with `vm.process.list()`.
 
 ## Run it
 

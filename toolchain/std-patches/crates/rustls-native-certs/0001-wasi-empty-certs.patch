@@ -2,7 +2,7 @@
 # for `load_native_certs()` and has NO wasm/wasi arm -> on wasm32-wasip1 the
 # `platform` module is undefined and the crate fails to compile (unresolved import
 # in the top-level `load_native_certs`). wasm32-wasip1 has no native OS cert store;
-# TLS is brokered host-side by the secure-exec VM (host CAs), so the in-guest rustls
+# TLS is brokered host-side by the agentos VM (host CAs), so the in-guest rustls
 # never validates certificates. Add a `target_os = "wasi"` platform arm that returns
 # an empty CertificateResult so the crate compiles (compile/link-only for codex; the
 # guest never performs cert validation). Pipeline-only codex WASI port.
@@ -13,7 +13,7 @@
  use macos as platform;
 
 +// wasm32-wasip1: no native OS cert store. TLS is brokered host-side by the
-+// secure-exec VM (host CAs), so the in-guest rustls never validates certificates.
++// agentos VM (host CAs), so the in-guest rustls never validates certificates.
 +// Provide an empty native-cert loader so the crate compiles.
 +#[cfg(target_os = "wasi")]
 +mod platform {

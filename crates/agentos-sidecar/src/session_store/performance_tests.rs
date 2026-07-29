@@ -89,7 +89,6 @@ impl ActorUdsFixture {
         agentos_native_sidecar::vm_sqlite::resolve_vm_sqlite(
             &VmSqliteDescriptor::ActorUds {
                 path: self.path.clone(),
-                token: "secret".to_owned(),
             },
             runtime().context(),
             DEFAULT_SQLITE_MAX_RESULT_BYTES,
@@ -195,9 +194,8 @@ async fn serve_actor_connection(
     let Ok(hello_frame) = read_frame(&mut stream).await else {
         return;
     };
-    let hello = wire::versioned::ClientHello::deserialize_with_embedded_version(&hello_frame)
+    wire::versioned::ClientHello::deserialize_with_embedded_version(&hello_frame)
         .expect("actor client hello");
-    assert_eq!(hello.token, "secret");
     let response =
         wire::versioned::ServerHello::wrap_latest(wire::ServerHello::HelloOk(wire::HelloOk {
             max_frame_bytes: 32 * 1024 * 1024,
@@ -228,6 +226,24 @@ async fn serve_actor_connection(
                 wire::RequestPayload::SqliteQuery(query) => {
                     metrics.query_count.fetch_add(1, Ordering::Relaxed);
                     execute_query(&mut connection, query)
+                }
+                wire::RequestPayload::SqliteBegin(_) => {
+                    connection
+                        .execute_batch("BEGIN IMMEDIATE")
+                        .expect("begin actor transaction");
+                    wire::ResponsePayload::SqliteBeginOk
+                }
+                wire::RequestPayload::SqliteCommit(_) => {
+                    connection
+                        .execute_batch("COMMIT")
+                        .expect("commit actor transaction");
+                    wire::ResponsePayload::SqliteCommitOk
+                }
+                wire::RequestPayload::SqliteRollback(_) => {
+                    connection
+                        .execute_batch("ROLLBACK")
+                        .expect("rollback actor transaction");
+                    wire::ResponsePayload::SqliteRollbackOk
                 }
             }
         };
@@ -482,8 +498,8 @@ async fn exercise_near_limit_append(
     if let Some(metrics) = wire_metrics {
         let (query_count, response_bytes) = metrics.snapshot();
         assert_eq!(
-            query_count, 7,
-            "actor append must be BEGIN + four statements + COMMIT + one retention read"
+            query_count, 5,
+            "actor append must be four statements plus one retention read; transaction control uses dedicated frames"
         );
         assert!(
             response_bytes <= APPEND_WIRE_BYTE_LIMIT,

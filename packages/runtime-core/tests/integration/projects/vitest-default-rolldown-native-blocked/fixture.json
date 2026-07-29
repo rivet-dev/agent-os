@@ -1,0 +1,17 @@
+{
+  "entry": "node_modules/vitest/vitest.mjs",
+  "args": [
+    "run",
+    "--config=vitest.config.mjs",
+    "--pool=forks",
+    "--maxWorkers=1",
+    "--no-file-parallelism",
+    "--reporter=json",
+    "--outputFile=vitest-report.json"
+  ],
+  "expectation": "fail",
+  "fail": {
+    "code": 1,
+    "stderrIncludes": "rolldown-binding.linux-x64-gnu.node"
+  }
+}

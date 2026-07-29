@@ -1,5 +1,5 @@
 [package]
-name = "secureexec-wasi-pty"
+name = "agentos-wasi-pty"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,4 +7,4 @@ description = "WASI PTY-based process management via host_process FFI for intera
 
 [dependencies]
 wasi-ext = { path = "../../wasi-ext" }
-wasi-spawn = { package = "secureexec-wasi-spawn", path = "../wasi-spawn" }
+wasi-spawn = { package = "agentos-wasi-spawn", path = "../wasi-spawn" }

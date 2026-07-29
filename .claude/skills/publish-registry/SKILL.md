@@ -29,7 +29,7 @@ just registry-publish-all [tag]
 
 ## Rules
 
-- Do not publish registry packages from secure-exec.
+- Do not publish registry packages from agentos.
 - Do not move `latest` unless the user explicitly asks for a release.
 - Prefer AgentOS workspace builds while iterating; published pins are for
   consumers and release validation.

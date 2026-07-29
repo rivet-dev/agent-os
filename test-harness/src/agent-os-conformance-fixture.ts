@@ -53,7 +53,7 @@ async function handle(msg) {
       result(msg.id, {
         protocolVersion: 1,
         agentInfo: { name: "conformance-agent", version: "1.0.0" },
-        agentCapabilities: { loadSession: true, promptCapabilities: { image: false, audio: false, embeddedContext: false } },
+        agentCapabilities: { loadSession: true, promptCapabilities: { image: true, audio: true, embeddedContext: true } },
         modes: modes(),
         configOptions: configOptions(),
       });
@@ -71,8 +71,27 @@ async function handle(msg) {
       return;
     case "session/prompt": {
       const sessionId = msg.params.sessionId;
-      const text = (msg.params.prompt || []).map((part) => part.text || "").join("");
+      const prompt = msg.params.prompt || [];
+      const text = prompt.map((part) => part.type === "text" ? part.text : "").join("");
       if (text.includes("crash-adapter")) process.exit(23);
+      if (text.includes("rich-media")) {
+        notify("session/update", {
+          sessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "rich-media-tool-1",
+            title: "Read rich media",
+            kind: "read",
+            status: "completed",
+            content: prompt.slice(1).map((content) => ({ type: "content", content })),
+          },
+        });
+        for (const content of prompt) {
+          notify("session/update", { sessionId, update: { sessionUpdate: "agent_message_chunk", content } });
+        }
+        result(msg.id, { stopReason: "end_turn" });
+        return;
+      }
       notify("session/update", { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "echo:" + text } } });
       if (text.includes("permission")) {
         const reply = await request("session/request_permission", {

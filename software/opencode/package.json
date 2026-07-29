@@ -1,6 +1,6 @@
 {
 	"name": "@agentos-software/opencode",
-	"version": "0.2.1",
+	"version": "0.0.1",
 	"type": "module",
 	"license": "Apache-2.0",
 	"main": "./dist/index.js",
@@ -19,20 +19,24 @@
 		"dist",
 		"!dist/package",
 		"!dist/package.tar",
+		"!dist/package.aospkg",
 		"agentos-package.json"
 	],
 	"scripts": {
 		"build": "node ./scripts/build-opencode-acp.mjs && tsc && rm -rf dist/package dist/package.tar && agentos-toolchain pack . --out dist/package --agent agentos-opencode-acp",
 		"check-types": "tsc --noEmit",
-		"test": "vitest run test/ --passWithNoTests"
+		"test": "pnpm build && node --test tests/*.test.mjs"
+	},
+	"dependencies": {
+		"jsonc-parser": "3.3.1"
 	},
 	"devDependencies": {
+		"@agentclientprotocol/sdk": "0.21.0",
 		"@agentos-software/manifest": "workspace:*",
 		"@rivet-dev/agentos-toolchain": "workspace:*",
+		"@rivet-dev/agentos-node-pty": "workspace:*",
 		"@types/node": "^22.10.2",
 		"bun": "1.3.11",
-		"typescript": "^5.7.2",
-		"@rivet-dev/agentos-test-harness": "workspace:*",
-		"vitest": "^2.1.9"
+		"typescript": "^5.7.2"
 	}
 }

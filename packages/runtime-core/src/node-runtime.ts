@@ -76,7 +76,7 @@ const REPO_COMMANDS_DIR = path.join(
 /**
  * Commands vendored into the published `@rivet-dev/agentos-runtime-core` package by
  * `scripts/copy-wasm-commands.mjs` (listed in `files` as `commands`). This is
- * the directory a real `npm install secure-exec` resolves: from the compiled
+ * the directory a real `npm install agentos` resolves: from the compiled
  * `dist/node-runtime.js` it sits at `<package>/commands`. This is the analogue
  * of how the sidecar binary ships inside `@rivet-dev/agentos-runtime-sidecar`.
  */
@@ -708,7 +708,7 @@ export class NodeRuntime {
 		code: string,
 		options: NodeRuntimeExecOptions = {},
 	): Promise<NodeRuntimeExecResult> {
-		const programPath = `/tmp/secure-exec-program-${nextProgramId++}.mjs`;
+		const programPath = `/tmp/agentos-program-${nextProgramId++}.mjs`;
 		await this.kernel.writeFile(programPath, withBindingPreamble(code));
 		return this.runProgram(programPath, options);
 	}
@@ -827,7 +827,7 @@ export class NodeRuntime {
 		code: string,
 		options: NodeRuntimeSpawnOptions = {},
 	): Promise<NodeRuntimeProcess> {
-		const programPath = `/tmp/secure-exec-program-${nextProgramId++}.mjs`;
+		const programPath = `/tmp/agentos-program-${nextProgramId++}.mjs`;
 		await this.kernel.writeFile(programPath, withBindingPreamble(code));
 		const proc = this.kernel.spawn("node", [programPath], {
 			env: options.env,
@@ -955,8 +955,8 @@ export class NodeRuntime {
 		options: NodeRuntimeExecOptions = {},
 	): Promise<NodeRuntimeRunResult<T>> {
 		const id = nextProgramId++;
-		const resultPath = `/tmp/secure-exec-result-${id}.json`;
-		const programPath = `/tmp/secure-exec-program-${id}.mjs`;
+		const resultPath = `/tmp/agentos-result-${id}.json`;
+		const programPath = `/tmp/agentos-program-${id}.mjs`;
 		// Inject the __return helper as a module-level preamble, then the user
 		// code at module top level. Import declarations (preamble's and the
 		// user's) are hoisted, so __return is defined before the user's

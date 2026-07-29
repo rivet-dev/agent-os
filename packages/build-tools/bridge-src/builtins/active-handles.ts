@@ -9,6 +9,25 @@ var HANDLE_DISPATCH = {
 };
 var _activeHandles = /* @__PURE__ */ new Map();
 var _waitResolvers = [];
+
+var _activeHandleDrainScheduled = false;
+
+function scheduleActiveHandleDrain() {
+  if (_activeHandleDrainScheduled) return;
+  _activeHandleDrainScheduled = true;
+  const defer =
+    typeof globalThis.setImmediate === "function"
+      ? globalThis.setImmediate
+      : queueMicrotask;
+  defer(() => {
+    _activeHandleDrainScheduled = false;
+    if (_activeHandles.size !== 0 || _waitResolvers.length === 0) return;
+    const resolvers = _waitResolvers;
+    _waitResolvers = [];
+    for (const resolve of resolvers) resolve();
+  });
+}
+
 function _registerHandle2(id, description) {
   try {
     bridgeDispatchSync(HANDLE_DISPATCH.register, id, description);
@@ -24,16 +43,12 @@ function _registerHandle2(id, description) {
 }
 function _unregisterHandle2(id) {
   _activeHandles.delete(id);
-  let remaining = _activeHandles.size;
+  const remaining = _activeHandles.size;
   try {
     bridgeDispatchSync(HANDLE_DISPATCH.unregister, id);
   } catch {
   }
-  if (remaining === 0 && _waitResolvers.length > 0) {
-    const resolvers = _waitResolvers;
-    _waitResolvers = [];
-    resolvers.forEach((r) => r());
-  }
+  if (remaining === 0 && _waitResolvers.length > 0) scheduleActiveHandleDrain();
 }
 function _waitForActiveHandles() {
   if (typeof _exited !== "undefined" && _exited) {
@@ -42,7 +57,8 @@ function _waitForActiveHandles() {
   const getPendingTimerCount = globalThis._getPendingTimerCount;
   const waitForTimerDrain = globalThis._waitForTimerDrain;
   const hasHandles = _getActiveHandles().length > 0;
-  const hasTimers = typeof getPendingTimerCount === "function" && getPendingTimerCount() > 0;
+  const hasTimers =
+    typeof getPendingTimerCount === "function" && getPendingTimerCount() > 0;
   if (!hasHandles && !hasTimers) {
     return Promise.resolve();
   }
@@ -67,6 +83,11 @@ function _waitForActiveHandles() {
     promises.push(waitForTimerDrain());
   }
   return Promise.all(promises).then(() => {
+    const timersRemain =
+      typeof getPendingTimerCount === "function" && getPendingTimerCount() > 0;
+    if (_getActiveHandles().length > 0 || timersRemain) {
+      return _waitForActiveHandles();
+    }
   });
 }
 function _getActiveHandles() {

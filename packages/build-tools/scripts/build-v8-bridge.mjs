@@ -79,14 +79,61 @@ const undiciRuntimeFeaturesPath = require.resolve(
 	"undici/lib/util/runtime-features.js",
 );
 const nodeStdlibUrlPackageEntry = createRequire(stdLibBrowser.url).resolve("url/");
+const wsNodeEntry = require.resolve("ws");
+const exodusBytesRoot = path.dirname(
+	require.resolve("@exodus/bytes/encoding-lite.js"),
+);
+const fetchBlobEntry = require.resolve("fetch-blob");
+const fetchBlobFileEntry = require.resolve("fetch-blob/file.js");
 
 const alias = {};
 const customAlias = {
-	url: nodeStdlibUrlPackageEntry,
-	"node:url": nodeStdlibUrlPackageEntry,
+	"@exodus/bytes/encoding-lite.js": require.resolve(
+		"@exodus/bytes/encoding-lite.js",
+	),
+	"fetch-blob": fetchBlobEntry,
+	"fetch-blob/file.js": fetchBlobFileEntry,
+	crypto: path.join(undiciShimDir, "crypto.cjs"),
+	"node:crypto": path.join(undiciShimDir, "crypto.cjs"),
+	"agentos-legacy-crypto-polyfill": stdLibBrowser.crypto,
+	url: path.join(undiciShimDir, "url.js"),
+	"node:url": path.join(undiciShimDir, "url.js"),
+	"agentos-legacy-url-polyfill": nodeStdlibUrlPackageEntry,
+	"agentos-node-url-polyfill": stdLibBrowser.url,
+	"agentos-text-encoding-polyfill": path.join(
+		packageRoot,
+		"bridge-src",
+		"polyfills",
+		"text-encoding.ts",
+	),
+	"agentos-blob-file-polyfill": path.join(
+		packageRoot,
+		"bridge-src",
+		"polyfills",
+		"blob-file.ts",
+	),
+	"agentos-whatwg-url-polyfill": path.join(
+		packageRoot,
+		"bridge-src",
+		"polyfills",
+		"whatwg-url.ts",
+	),
+	"agentos-dom-events-polyfill": path.join(
+		packageRoot,
+		"bridge-src",
+		"polyfills",
+		"dom-events.ts",
+	),
+	"agentos-abort-polyfill": path.join(
+		packageRoot,
+		"bridge-src",
+		"polyfills",
+		"abort.ts",
+	),
+	"whatwg-url": require.resolve("whatwg-url"),
 	stream: path.join(undiciShimDir, "stream.js"),
 	"node:stream": path.join(undiciShimDir, "stream.js"),
-	"secure-exec-stream-stdlib": require.resolve("readable-stream"),
+	"agentos-stream-stdlib": require.resolve("readable-stream"),
 	net: path.join(undiciShimDir, "net.js"),
 	"node:net": path.join(undiciShimDir, "net.js"),
 	tls: path.join(undiciShimDir, "tls.js"),
@@ -116,6 +163,8 @@ const customAlias = {
 	worker_threads: path.join(undiciShimDir, "worker_threads.js"),
 	"node:sqlite": path.join(undiciShimDir, "sqlite.js"),
 	sqlite: path.join(undiciShimDir, "sqlite.js"),
+	randombytes: path.join(undiciShimDir, "randombytes.js"),
+	ws: require.resolve("ws"),
 };
 Object.assign(alias, customAlias);
 for (const [name, modulePath] of Object.entries(stdLibBrowser)) {
@@ -131,6 +180,11 @@ const mainBundleAlias = {
 	...alias,
 	zlib: path.join(undiciShimDir, "zlib.js"),
 	"node:zlib": path.join(undiciShimDir, "zlib.js"),
+};
+const zlibBundleAlias = {
+	...alias,
+	url: stdLibBrowser.url,
+	"node:url": stdLibBrowser.url,
 };
 
 await mkdir(path.dirname(bridgeOutput), { recursive: true });
@@ -168,7 +222,7 @@ async function generateBridgeSeamText() {
 		packages: "external",
 		plugins: [
 			{
-				name: "secure-exec-bridge-source-externals",
+				name: "agentos-bridge-source-externals",
 				setup(pluginBuild) {
 					// node: builtins stay as import specifiers.
 					pluginBuild.onResolve({ filter: /^node:/ }, () => ({
@@ -193,7 +247,8 @@ async function validateBridgeContractGlobals(sourceText) {
 	const contract = JSON.parse(await readFile(bridgeContract, "utf8"));
 	const runtimeOnlyInventoryNames = new Set([
 		"_processConfig",
-		"__secureExecHrNowUs",
+		"__agentOsHrNowUs",
+		"__agentOsRequireEsmSync",
 		"_osConfig",
 		"bridge",
 		"_registerHandle",
@@ -244,6 +299,7 @@ async function validateBridgeContractGlobals(sourceText) {
 		"Headers",
 		"Request",
 		"Response",
+		"WebSocket",
 		"DOMException",
 		"__importMetaResolve",
 		"Blob",
@@ -387,7 +443,15 @@ async function buildWebStreamsPrelude() {
 				'  ReadableStream,',
 				'  WritableStream,',
 				'  TransformStream,',
-				'} from "web-streams-polyfill/ponyfill/es2018";',
+				'} from "web-streams-polyfill";',
+				'import { TextDecoder as AgentOSTextDecoder, TextDecoderStream as AgentOSTextDecoderStream, TextEncoder2 as AgentOSTextEncoder, TextEncoderStream as AgentOSTextEncoderStream } from "agentos-text-encoding-polyfill";',
+				'import { Blob as AgentOSBlob, File as AgentOSFile } from "agentos-blob-file-polyfill";',
+				'if (typeof globalThis.TextEncoder === "undefined") {',
+				"  globalThis.TextEncoder = AgentOSTextEncoder;",
+				"}",
+				'if (typeof globalThis.TextDecoder === "undefined") {',
+				"  globalThis.TextDecoder = AgentOSTextDecoder;",
+				"}",
 				'if (typeof globalThis.ReadableStream === "undefined") {',
 				"  globalThis.ReadableStream = ReadableStream;",
 				"}",
@@ -397,199 +461,10 @@ async function buildWebStreamsPrelude() {
 				'if (typeof globalThis.TransformStream === "undefined") {',
 				"  globalThis.TransformStream = TransformStream;",
 				"}",
-				'if (typeof globalThis.URLSearchParams === "undefined") {',
-				"  globalThis.URLSearchParams = class URLSearchParamsStub {",
-				"    _entries = [];",
-				"    constructor(init = undefined) {",
-				'      if (typeof init === "string") {',
-				'        const source = init.startsWith("?") ? init.slice(1) : init;',
-				'        if (source.length > 0) {',
-				'          for (const pair of source.split("&")) {',
-				'            if (!pair) continue;',
-				'            const [rawKey, rawValue = ""] = pair.split("=");',
-				"            this.append(decodeURIComponent(rawKey), decodeURIComponent(rawValue));",
-				"          }",
-				"        }",
-				"      } else if (Array.isArray(init)) {",
-				"        for (const [key, value] of init) {",
-				"          this.append(key, value);",
-				"        }",
-				'      } else if (init && typeof init === "object") {',
-				"        for (const [key, value] of Object.entries(init)) {",
-				"          this.append(key, value);",
-				"        }",
-				"      }",
-				"    }",
-				"    append(name, value) {",
-				"      this._entries.push([String(name), String(value)]);",
-				"    }",
-				"    delete(name) {",
-				"      const key = String(name);",
-				"      this._entries = this._entries.filter(([entryKey]) => entryKey !== key);",
-				"    }",
-				"    get(name) {",
-				"      const key = String(name);",
-				"      const entry = this._entries.find(([entryKey]) => entryKey === key);",
-				"      return entry ? entry[1] : null;",
-				"    }",
-				"    getAll(name) {",
-				"      const key = String(name);",
-				"      return this._entries.filter(([entryKey]) => entryKey === key).map(([, value]) => value);",
-				"    }",
-				"    has(name) {",
-				"      const key = String(name);",
-				"      return this._entries.some(([entryKey]) => entryKey === key);",
-				"    }",
-				"    set(name, value) {",
-				"      this.delete(name);",
-				"      this.append(name, value);",
-				"    }",
-				"    entries() {",
-				"      return this._entries[Symbol.iterator]();",
-				"    }",
-				"    keys() {",
-				"      return this._entries.map(([key]) => key)[Symbol.iterator]();",
-				"    }",
-				"    values() {",
-				"      return this._entries.map(([, value]) => value)[Symbol.iterator]();",
-				"    }",
-				"    forEach(callback, thisArg = undefined) {",
-				"      for (const [key, value] of this._entries) {",
-				"        callback.call(thisArg, value, key, this);",
-				"      }",
-				"    }",
-				"    toString() {",
-				'      return this._entries.map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&");',
-				"    }",
-				"    [Symbol.iterator]() {",
-				"      return this.entries();",
-				"    }",
-				"  };",
-				"  globalThis.URLSearchParams.__secureExecBootstrapStub = true;",
-				"}",
-				'if (typeof globalThis.URL === "undefined") {',
-				"  globalThis.URL = class URLStub {",
-				"    constructor(url, base = undefined) {",
-				"      const raw = String(url ?? \"\");",
-				"      const hasScheme = /^[a-zA-Z][a-zA-Z\\d+\\-.]*:/.test(raw);",
-				"      const baseHref = hasScheme || typeof base === \"undefined\"",
-				"        ? \"\"",
-				"        : String(new globalThis.URL(base).href);",
-				"      const resolved = hasScheme",
-				"        ? raw",
-				"        : baseHref.replace(/\\/[^/]*$/, \"/\") + raw;",
-				"      const match = resolved.match(/^(\\w+:)\\/\\/([^/:?#]+)(:\\d+)?(.*)$/);",
-				"      if (!match) {",
-				"        throw new TypeError(`Invalid URL: ${raw}`);",
-				"      }",
-				"      this.protocol = match[1];",
-				"      this.hostname = match[2];",
-				"      this.port = (match[3] || \"\").slice(1);",
-				"      const remainder = match[4] || \"/\";",
-				"      const searchIndex = remainder.indexOf(\"?\");",
-				"      const hashIndex = remainder.indexOf(\"#\");",
-				"      const pathEnd = [searchIndex, hashIndex].filter((index) => index >= 0).sort((a, b) => a - b)[0] ?? remainder.length;",
-				"      this.pathname = remainder.slice(0, pathEnd) || \"/\";",
-				"      this.search = searchIndex >= 0",
-				"        ? remainder.slice(searchIndex, hashIndex >= 0 && hashIndex > searchIndex ? hashIndex : remainder.length)",
-				"        : \"\";",
-				"      this.hash = hashIndex >= 0 ? remainder.slice(hashIndex) : \"\";",
-				"      this.host = this.hostname + (this.port ? `:${this.port}` : \"\");",
-				"      this.origin = `${this.protocol}//${this.host}`;",
-				"      this.href = `${this.origin}${this.pathname}${this.search}${this.hash}`;",
-				"      this.searchParams = new globalThis.URLSearchParams(this.search);",
-				"    }",
-				"    toString() {",
-				"      return this.href;",
-				"    }",
-				"    toJSON() {",
-				"      return this.href;",
-				"    }",
-				"  };",
-				"  globalThis.URL.__secureExecBootstrapStub = true;",
-				"}",
-				'if (typeof globalThis.Blob === "undefined") {',
-				"  globalThis.Blob = class BlobStub {};",
-				"}",
-				'if (typeof globalThis.AbortSignal === "undefined") {',
-				"  globalThis.AbortSignal = class AbortSignalStub {",
-				"    aborted = false;",
-				"    reason = undefined;",
-				"    _listeners = new Set();",
-				"    addEventListener(type, listener) {",
-				'      if (type !== "abort" || typeof listener !== "function") return;',
-				"      this._listeners.add(listener);",
-				"    }",
-				"    removeEventListener(type, listener) {",
-				'      if (type !== "abort") return;',
-				"      this._listeners.delete(listener);",
-				"    }",
-				"    dispatchEvent(event) {",
-				"      for (const listener of this._listeners) {",
-				"        listener.call(this, event);",
-				"      }",
-				"      return true;",
-				"    }",
-				"    throwIfAborted() {",
-				"      if (this.aborted) {",
-				'        throw this.reason instanceof Error ? this.reason : new Error(String(this.reason ?? "AbortError"));',
-				"      }",
-				"    }",
-				"  };",
-				"}",
-				'if (typeof globalThis.AbortController === "undefined") {',
-				"  globalThis.AbortController = class AbortControllerStub {",
-				"    constructor() {",
-				"      this.signal = new globalThis.AbortSignal();",
-				"    }",
-				"    abort(reason = undefined) {",
-				"      if (this.signal.aborted) return;",
-				"      this.signal.aborted = true;",
-				"      this.signal.reason = reason;",
-				'      this.signal.dispatchEvent({ type: "abort" });',
-				"    }",
-				"  };",
-				"}",
-				'if (typeof globalThis.File === "undefined") {',
-				"  globalThis.File = class FileStub extends Blob {",
-				"    name;",
-				"    lastModified;",
-				"    webkitRelativePath;",
-				'    constructor(parts = [], name = "", options = {}) {',
-				"      super(parts, options);",
-				"      this.name = String(name);",
-				'      this.lastModified = typeof options.lastModified === "number" ? options.lastModified : Date.now();',
-				'      this.webkitRelativePath = "";',
-				"    }",
-				"  };",
-				"}",
-				'if (typeof globalThis.FormData === "undefined") {',
-				"  globalThis.FormData = class FormDataStub {",
-				"    _entries = [];",
-				"    append(name, value) {",
-				"      this._entries.push([name, value]);",
-				"    }",
-				"    get(name) {",
-				"      const entry = this._entries.find(([key]) => key === name);",
-				"      return entry ? entry[1] : null;",
-				"    }",
-				"    getAll(name) {",
-				"      return this._entries.filter(([key]) => key === name).map(([, value]) => value);",
-				"    }",
-				"    has(name) {",
-				"      return this._entries.some(([key]) => key === name);",
-				"    }",
-				"    delete(name) {",
-				"      this._entries = this._entries.filter(([key]) => key !== name);",
-				"    }",
-				"    entries() {",
-				"      return this._entries[Symbol.iterator]();",
-				"    }",
-				"    [Symbol.iterator]() {",
-				"      return this.entries();",
-				"    }",
-				"  };",
-				"}",
+				"globalThis.TextEncoderStream = AgentOSTextEncoderStream;",
+				"globalThis.TextDecoderStream = AgentOSTextDecoderStream;",
+				"globalThis.Blob = AgentOSBlob;",
+				"globalThis.File = AgentOSFile;",
 				'if (typeof globalThis.MessagePort === "undefined") {',
 				"  globalThis.MessagePort = class MessagePortStub {",
 				"    onmessage = null;",
@@ -612,8 +487,8 @@ async function buildWebStreamsPrelude() {
 				"  const performanceStart = Date.now();",
 				"  globalThis.performance = {",
 				"    now() {",
-				'      if (typeof globalThis.__secureExecHrNowUs === "function") {',
-				"        return globalThis.__secureExecHrNowUs() / 1000;",
+				'      if (typeof globalThis.__agentOsHrNowUs === "function") {',
+				"        return globalThis.__agentOsHrNowUs() / 1000;",
 				"      }",
 				"      return Date.now() - performanceStart;",
 				"    },",
@@ -643,6 +518,7 @@ async function buildWebStreamsPrelude() {
 			js: [
 				'if(typeof globalThis.global==="undefined"){globalThis.global=globalThis;}',
 				'if(typeof globalThis.process==="undefined"){globalThis.process={env:{},argv:["node"],browser:false,version:"v22.0.0",versions:{node:"22.0.0"},nextTick(callback,...args){return Promise.resolve().then(()=>callback(...args));}};}',
+				'if(typeof globalThis.SharedArrayBuffer==="undefined"){class SharedArrayBufferBootstrapStub{}Object.defineProperties(SharedArrayBufferBootstrapStub.prototype,{byteLength:{configurable:true,get(){if(!(this instanceof SharedArrayBufferBootstrapStub))throw new TypeError("incompatible receiver");return 0;}},growable:{configurable:true,get(){if(!(this instanceof SharedArrayBufferBootstrapStub))throw new TypeError("incompatible receiver");return false;}}});SharedArrayBufferBootstrapStub.__agentOSBootstrapStub=true;globalThis.SharedArrayBuffer=SharedArrayBufferBootstrapStub;}',
 			].join(""),
 		},
 	});
@@ -650,6 +526,78 @@ async function buildWebStreamsPrelude() {
 		throw new Error(`Failed to build web streams prelude: ${preludeResult.errors[0].text}`);
 	}
 	return `${preludeResult.outputFiles[0].text}\n`;
+}
+
+async function buildUrlPrelude() {
+	const urlPreludeResult = await build({
+		stdin: {
+			contents: [
+				'import { installWhatwgUrlGlobals } from "agentos-whatwg-url-polyfill";',
+				"installWhatwgUrlGlobals(globalThis);",
+				'if (globalThis.SharedArrayBuffer?.__agentOSBootstrapStub === true) {',
+				"  delete globalThis.SharedArrayBuffer;",
+				"}",
+			].join("\n"),
+			resolveDir: bridgeAssetsDir,
+			sourcefile: "v8-bridge-url.entry.js",
+			loader: "js",
+		},
+		bundle: true,
+		write: false,
+		format: "iife",
+		platform: "browser",
+		target: "es2020",
+		minify: true,
+		alias,
+		plugins: createUndiciBuildPlugins(),
+		define: {
+			"process.env.NODE_ENV": '"production"',
+			global: "globalThis",
+		},
+	});
+	if (urlPreludeResult.errors.length > 0) {
+		throw new Error(
+			`Failed to build URL prelude: ${urlPreludeResult.errors[0].text}`,
+		);
+	}
+	return `${urlPreludeResult.outputFiles[0].text}\n`;
+}
+
+async function buildEventAbortPrelude() {
+	const eventAbortPreludeResult = await build({
+		stdin: {
+			contents: [
+				'import { Event, CustomEvent, EventTarget } from "agentos-dom-events-polyfill";',
+				'import { AbortController, AbortSignal } from "agentos-abort-polyfill";',
+				"globalThis.Event = Event;",
+				"globalThis.CustomEvent = CustomEvent;",
+				"globalThis.EventTarget = EventTarget;",
+				"globalThis.AbortSignal = AbortSignal;",
+				"globalThis.AbortController = AbortController;",
+			].join("\n"),
+			resolveDir: bridgeAssetsDir,
+			sourcefile: "v8-bridge-event-abort.entry.js",
+			loader: "js",
+		},
+		bundle: true,
+		write: false,
+		format: "iife",
+		platform: "browser",
+		target: "es2020",
+		minify: true,
+		alias,
+		plugins: createUndiciBuildPlugins(),
+		define: {
+			"process.env.NODE_ENV": '"production"',
+			global: "globalThis",
+		},
+	});
+	if (eventAbortPreludeResult.errors.length > 0) {
+		throw new Error(
+			`Failed to build event/abort prelude: ${eventAbortPreludeResult.errors[0].text}`,
+		);
+	}
+	return `${eventAbortPreludeResult.outputFiles[0].text}\n`;
 }
 
 async function prependBundlePrelude(bundlePath, preludeSource) {
@@ -663,7 +611,86 @@ async function prependBundlePrelude(bundlePath, preludeSource) {
 function createUndiciBuildPlugins() {
 	return [
 		{
-			name: "secure-exec-undici-runtime-features-shim",
+			name: "agentos-exodus-bytes-pure-js",
+			setup(build) {
+				build.onLoad(
+					{
+						filter:
+							/[\\/]@exodus[\\/]bytes[\\/]fallback[\\/]platform\.browser\.js$/,
+					},
+					async () => ({
+						contents: await readFile(
+							path.join(
+								exodusBytesRoot,
+								"fallback",
+								"platform.native.js",
+							),
+							"utf8",
+						),
+						loader: "js",
+						resolveDir: path.join(exodusBytesRoot, "fallback"),
+					}),
+				);
+				build.onLoad(
+					{
+						filter:
+							/[\\/]@exodus[\\/]bytes[\\/]fallback[\\/]utf8\.auto\.browser\.js$/,
+					},
+					async () => ({
+						contents: await readFile(
+							path.join(
+								exodusBytesRoot,
+								"fallback",
+								"utf8.auto.js",
+							),
+							"utf8",
+						),
+						loader: "js",
+						resolveDir: path.join(exodusBytesRoot, "fallback"),
+					}),
+				);
+				build.onLoad(
+					{ filter: /[\\/]@exodus[\\/]bytes[\\/]utf16\.browser\.js$/ },
+					async () => ({
+						contents: await readFile(
+							path.join(exodusBytesRoot, "utf16.native.js"),
+							"utf8",
+						),
+						loader: "js",
+						resolveDir: exodusBytesRoot,
+					}),
+				);
+			},
+		},
+		{
+			name: "agentos-fetch-blob-preinstalled-streams",
+			setup(build) {
+				build.onLoad(
+					{ filter: /[\\/]fetch-blob[\\/]index\.js$/ },
+					async (args) => {
+						const source = await readFile(args.path, "utf8");
+						const bootstrapStart = source.indexOf(
+							"if (!globalThis.ReadableStream)",
+						);
+						const implementationStart = source.indexOf("// 64 KiB");
+						if (bootstrapStart < 0 || implementationStart < bootstrapStart) {
+							throw new Error(
+								`fetch-blob bootstrap shape changed in ${args.path}`,
+							);
+						}
+						return {
+							contents:
+								source.slice(0, bootstrapStart) +
+								source.slice(implementationStart),
+							loader: "js",
+							resolveDir: path.dirname(args.path),
+						};
+					},
+				);
+			},
+		},
+		{
+			name: "agentos-undici-runtime-features-shim",
 			setup(build) {
 				// readable-stream deliberately imports the trailing-slash package
 				// specifier. esbuild aliases reject trailing-slash names, so resolve
@@ -673,8 +700,7 @@ function createUndiciBuildPlugins() {
 				}));
 				build.onResolve(
 					{
-						filter:
-							/^(undici\/lib\/.+|web-streams-polyfill\/ponyfill\/es2018)$/,
+						filter: /^(undici\/lib\/.+|web-streams-polyfill)$/,
 					},
 					(args) => {
 						const resolvedPath = require.resolve(args.path, {
@@ -725,8 +751,9 @@ const result = await build({
 				'if(typeof globalThis.process==="undefined"){globalThis.process={env:{},argv:["node"],browser:false,version:"v22.0.0",versions:{node:"22.0.0"},nextTick(callback,...args){return Promise.resolve().then(()=>callback(...args));}};}',
 				`if(typeof globalThis.TextEncoder==="undefined"){globalThis.TextEncoder=class{encode(value=""){const input=String(value??"");const encoded=unescape(encodeURIComponent(input));const out=new Uint8Array(encoded.length);for(let i=0;i<encoded.length;i++){out[i]=encoded.charCodeAt(i);}return out;}};}`,
 				`if(typeof globalThis.TextDecoder==="undefined"){globalThis.TextDecoder=class{decode(value=new Uint8Array()){const view=value instanceof Uint8Array?value:ArrayBuffer.isView(value)?new Uint8Array(value.buffer,value.byteOffset,value.byteLength):value instanceof ArrayBuffer?new Uint8Array(value):new Uint8Array(0);let binary="";for(let i=0;i<view.length;i++){binary+=String.fromCharCode(view[i]);}return decodeURIComponent(escape(binary));}};}`,
-				`if(typeof globalThis.Buffer==="undefined"){const __secureExecTe=typeof TextEncoder==="function"?new TextEncoder():null;const __secureExecTd=typeof TextDecoder==="function"?new TextDecoder():null;class __SecureExecEarlyBuffer extends Uint8Array{static from(value,encoding="utf8"){if(value instanceof ArrayBuffer){return new __SecureExecEarlyBuffer(value);}if(ArrayBuffer.isView(value)){return new __SecureExecEarlyBuffer(value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength));}if(Array.isArray(value)){return new __SecureExecEarlyBuffer(value);}const stringValue=String(value??"");if(encoding==="base64"&&typeof atob==="function"){const binary=atob(stringValue);const out=new __SecureExecEarlyBuffer(binary.length);for(let i=0;i<binary.length;i++){out[i]=binary.charCodeAt(i);}return out;}if(encoding==="binary"||encoding==="latin1"){const out=new __SecureExecEarlyBuffer(stringValue.length);for(let i=0;i<stringValue.length;i++){out[i]=stringValue.charCodeAt(i)&255;}return out;}if(__secureExecTe){return new __SecureExecEarlyBuffer(__secureExecTe.encode(stringValue));}const out=new __SecureExecEarlyBuffer(stringValue.length);for(let i=0;i<stringValue.length;i++){out[i]=stringValue.charCodeAt(i)&255;}return out;}static alloc(size){return new __SecureExecEarlyBuffer(Number(size)||0);}static concat(list,totalLength){const length=totalLength??list.reduce((sum,item)=>sum+(item?.length??0),0);const out=new __SecureExecEarlyBuffer(length);let offset=0;for(const item of list){const chunk=item instanceof Uint8Array?item:__SecureExecEarlyBuffer.from(item);out.set(chunk,offset);offset+=chunk.length;}return out;}static isBuffer(value){return value instanceof Uint8Array;}static byteLength(value,encoding="utf8"){return __SecureExecEarlyBuffer.from(value,encoding).byteLength;}toString(encoding="utf8"){if(encoding==="base64"&&typeof btoa==="function"){let binary="";for(const byte of this){binary+=String.fromCharCode(byte);}return btoa(binary);}if(encoding==="binary"||encoding==="latin1"){let binary="";for(const byte of this){binary+=String.fromCharCode(byte);}return binary;}if(__secureExecTd){return __secureExecTd.decode(this);}return Array.from(this,byte=>String.fromCharCode(byte)).join("");}}globalThis.Buffer=__SecureExecEarlyBuffer;}`,
-				'if(typeof globalThis.performance==="undefined"){const __secureExecPerformanceStart=Date.now();globalThis.performance={now(){if(typeof globalThis.__secureExecHrNowUs==="function"){return globalThis.__secureExecHrNowUs()/1000;}return Date.now()-__secureExecPerformanceStart;}};}if(typeof globalThis.performance.markResourceTiming!=="function"){globalThis.performance.markResourceTiming=()=>{};}',
+				`if(typeof globalThis.Buffer==="undefined"){const __agentOsTe=typeof TextEncoder==="function"?new TextEncoder():null;const __agentOsTd=typeof TextDecoder==="function"?new TextDecoder():null;class __AgentOsEarlyBuffer extends Uint8Array{static from(value,encoding="utf8"){if(value instanceof ArrayBuffer){return new __AgentOsEarlyBuffer(value);}if(ArrayBuffer.isView(value)){return new __AgentOsEarlyBuffer(value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength));}if(Array.isArray(value)){return new __AgentOsEarlyBuffer(value);}const stringValue=String(value??"");if(encoding==="base64"&&typeof atob==="function"){const binary=atob(stringValue);const out=new __AgentOsEarlyBuffer(binary.length);for(let i=0;i<binary.length;i++){out[i]=binary.charCodeAt(i);}return out;}if(encoding==="binary"||encoding==="latin1"){const out=new __AgentOsEarlyBuffer(stringValue.length);for(let i=0;i<stringValue.length;i++){out[i]=stringValue.charCodeAt(i)&255;}return out;}if(__agentOsTe){return new __AgentOsEarlyBuffer(__agentOsTe.encode(stringValue));}const out=new __AgentOsEarlyBuffer(stringValue.length);for(let i=0;i<stringValue.length;i++){out[i]=stringValue.charCodeAt(i)&255;}return out;}static alloc(size){return new __AgentOsEarlyBuffer(Number(size)||0);}static concat(list,totalLength){const length=totalLength??list.reduce((sum,item)=>sum+(item?.length??0),0);const out=new __AgentOsEarlyBuffer(length);let offset=0;for(const item of list){const chunk=item instanceof Uint8Array?item:__AgentOsEarlyBuffer.from(item);out.set(chunk,offset);offset+=chunk.length;}return out;}static isBuffer(value){return value instanceof Uint8Array;}static byteLength(value,encoding="utf8"){return __AgentOsEarlyBuffer.from(value,encoding).byteLength;}toString(encoding="utf8"){if(encoding==="base64"&&typeof btoa==="function"){let binary="";for(const byte of this){binary+=String.fromCharCode(byte);}return btoa(binary);}if(encoding==="binary"||encoding==="latin1"){let binary="";for(const byte of this){binary+=String.fromCharCode(byte);}return binary;}if(__agentOsTd){return __agentOsTd.decode(this);}return Array.from(this,byte=>String.fromCharCode(byte)).join("");}}globalThis.Buffer=__AgentOsEarlyBuffer;}`,
+				'if(typeof globalThis.Buffer.allocUnsafe!=="function"){globalThis.Buffer.allocUnsafe=globalThis.Buffer.alloc;}if(typeof globalThis.Buffer.allocUnsafeSlow!=="function"){globalThis.Buffer.allocUnsafeSlow=globalThis.Buffer.alloc;}',
+				'if(typeof globalThis.performance==="undefined"){const __agentOsPerformanceStart=Date.now();globalThis.performance={now(){if(typeof globalThis.__agentOsHrNowUs==="function"){return globalThis.__agentOsHrNowUs()/1000;}return Date.now()-__agentOsPerformanceStart;}};}if(typeof globalThis.performance.markResourceTiming!=="function"){globalThis.performance.markResourceTiming=()=>{};}',
 				'if(typeof TextEncoder==="undefined"&&typeof globalThis.TextEncoder!=="undefined"){var TextEncoder=globalThis.TextEncoder;}if(typeof TextDecoder==="undefined"&&typeof globalThis.TextDecoder!=="undefined"){var TextDecoder=globalThis.TextDecoder;}if(typeof Buffer==="undefined"&&typeof globalThis.Buffer!=="undefined"){var Buffer=globalThis.Buffer;}',
 			].join(""),
 	},
@@ -737,18 +764,24 @@ const zlibResult = await build({
 	stdin: {
 		contents: [
 			'import * as assertStdlibModuleNs from "node:assert";',
+			'import { Buffer as zlibBuffer } from "node:buffer";',
 			'import * as utilStdlibModuleNs from "node:util";',
 			'import * as zlibStdlibModuleNs from "node:zlib";',
+			`import wsModule from ${JSON.stringify(wsNodeEntry)};`,
 			"const assertModule = assertStdlibModuleNs.default ?? assertStdlibModuleNs;",
 			"const utilModule = utilStdlibModuleNs.default ?? utilStdlibModuleNs;",
 			"const zlibModule = zlibStdlibModuleNs.default ?? zlibStdlibModuleNs;",
 			'const zlibConstants = typeof zlibModule.constants === "object" && zlibModule.constants !== null ? zlibModule.constants : Object.fromEntries(Object.entries(zlibModule).filter(([key, value]) => /^[A-Z0-9_]+$/.test(key) && typeof value === "number"));',
 			'if(typeof zlibModule.constants === "undefined"){zlibModule.constants = zlibConstants;}',
+			'const normalizeZlibInput = (value) => { if (typeof value === "string" || zlibBuffer.isBuffer(value)) return value; if (value instanceof ArrayBuffer) return zlibBuffer.from(value); if (ArrayBuffer.isView(value)) return zlibBuffer.from(value.buffer, value.byteOffset, value.byteLength); return value; };',
+			'for (const name of ["deflate", "deflateSync", "gzip", "gzipSync", "deflateRaw", "deflateRawSync", "unzip", "unzipSync", "inflate", "inflateSync", "gunzip", "gunzipSync", "inflateRaw", "inflateRawSync"]) { const original = zlibModule[name]; if (typeof original === "function") zlibModule[name] = function(input, ...args) { return original.call(this, normalizeZlibInput(input), ...args); }; }',
 			'if(typeof utilModule.TextEncoder==="undefined"&&typeof globalThis.TextEncoder==="function"){utilModule.TextEncoder=globalThis.TextEncoder;}',
 			'if(typeof utilModule.TextDecoder==="undefined"&&typeof globalThis.TextDecoder==="function"){utilModule.TextDecoder=globalThis.TextDecoder;}',
-			"globalThis.__secureExecBuiltinAssertModule = assertModule;",
-			"globalThis.__secureExecBuiltinUtilModule = utilModule;",
-			"globalThis.__secureExecBuiltinZlibModule = zlibModule;",
+			"globalThis.__agentOsBuiltinAssertModule = assertModule;",
+			"globalThis.__agentOsBuiltinUtilModule = utilModule;",
+			"globalThis.__agentOsBuiltinZlibModule = zlibModule;",
+			"const AgentOSWebSocket = wsModule?.WebSocket ?? wsModule?.default?.WebSocket ?? wsModule?.default ?? wsModule;",
+			'if(typeof AgentOSWebSocket === "function"){Object.defineProperty(globalThis,"WebSocket",{value:AgentOSWebSocket,writable:false,configurable:false,enumerable:true});}',
 		].join("\n"),
 		resolveDir: bridgeAssetsDir,
 		sourcefile: "v8-bridge-zlib.entry.js",
@@ -762,21 +795,21 @@ const zlibResult = await build({
 	target: "es2020",
 	minify: true,
 	metafile: true,
-	alias,
+	alias: zlibBundleAlias,
 	define: {
 		"process.env.NODE_ENV": '"production"',
 		global: "globalThis",
 	},
 	plugins: createUndiciBuildPlugins(),
-	alias,
 	banner: {
 			js: [
 				'if(typeof globalThis.global==="undefined"){globalThis.global=globalThis;}',
 				'if(typeof globalThis.process==="undefined"){globalThis.process={env:{},argv:["node"],browser:false,version:"v22.0.0",versions:{node:"22.0.0"},nextTick(callback,...args){return Promise.resolve().then(()=>callback(...args));}};}',
 				`if(typeof globalThis.TextEncoder==="undefined"){globalThis.TextEncoder=class{encode(value=""){const input=String(value??"");const encoded=unescape(encodeURIComponent(input));const out=new Uint8Array(encoded.length);for(let i=0;i<encoded.length;i++){out[i]=encoded.charCodeAt(i);}return out;}};}`,
 				`if(typeof globalThis.TextDecoder==="undefined"){globalThis.TextDecoder=class{decode(value=new Uint8Array()){const view=value instanceof Uint8Array?value:ArrayBuffer.isView(value)?new Uint8Array(value.buffer,value.byteOffset,value.byteLength):value instanceof ArrayBuffer?new Uint8Array(value):new Uint8Array(0);let binary="";for(let i=0;i<view.length;i++){binary+=String.fromCharCode(view[i]);}return decodeURIComponent(escape(binary));}};}`,
-				`if(typeof globalThis.Buffer==="undefined"){const __secureExecTe=typeof TextEncoder==="function"?new TextEncoder():null;const __secureExecTd=typeof TextDecoder==="function"?new TextDecoder():null;class __SecureExecEarlyBuffer extends Uint8Array{static from(value,encoding="utf8"){if(value instanceof ArrayBuffer){return new __SecureExecEarlyBuffer(value);}if(ArrayBuffer.isView(value)){return new __SecureExecEarlyBuffer(value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength));}if(Array.isArray(value)){return new __SecureExecEarlyBuffer(value);}const stringValue=String(value??"");if(encoding==="base64"&&typeof atob==="function"){const binary=atob(stringValue);const out=new __SecureExecEarlyBuffer(binary.length);for(let i=0;i<binary.length;i++){out[i]=binary.charCodeAt(i);}return out;}if(encoding==="binary"||encoding==="latin1"){const out=new __SecureExecEarlyBuffer(stringValue.length);for(let i=0;i<stringValue.length;i++){out[i]=stringValue.charCodeAt(i)&255;}return out;}if(__secureExecTe){return new __SecureExecEarlyBuffer(__secureExecTe.encode(stringValue));}const out=new __SecureExecEarlyBuffer(stringValue.length);for(let i=0;i<stringValue.length;i++){out[i]=stringValue.charCodeAt(i)&255;}return out;}static alloc(size){return new __SecureExecEarlyBuffer(Number(size)||0);}static concat(list,totalLength){const length=totalLength??list.reduce((sum,item)=>sum+(item?.length??0),0);const out=new __SecureExecEarlyBuffer(length);let offset=0;for(const item of list){const chunk=item instanceof Uint8Array?item:__SecureExecEarlyBuffer.from(item);out.set(chunk,offset);offset+=chunk.length;}return out;}static isBuffer(value){return value instanceof Uint8Array;}static byteLength(value,encoding="utf8"){return __SecureExecEarlyBuffer.from(value,encoding).byteLength;}toString(encoding="utf8"){if(encoding==="base64"&&typeof btoa==="function"){let binary="";for(const byte of this){binary+=String.fromCharCode(byte);}return btoa(binary);}if(encoding==="binary"||encoding==="latin1"){let binary="";for(const byte of this){binary+=String.fromCharCode(byte);}return binary;}if(__secureExecTd){return __secureExecTd.decode(this);}return Array.from(this,byte=>String.fromCharCode(byte)).join("");}}globalThis.Buffer=__SecureExecEarlyBuffer;}`,
-				'if(typeof globalThis.performance==="undefined"){const __secureExecPerformanceStart=Date.now();globalThis.performance={now(){if(typeof globalThis.__secureExecHrNowUs==="function"){return globalThis.__secureExecHrNowUs()/1000;}return Date.now()-__secureExecPerformanceStart;}};}if(typeof globalThis.performance.markResourceTiming!=="function"){globalThis.performance.markResourceTiming=()=>{};}',
+				`if(typeof globalThis.Buffer==="undefined"){const __agentOsTe=typeof TextEncoder==="function"?new TextEncoder():null;const __agentOsTd=typeof TextDecoder==="function"?new TextDecoder():null;class __AgentOsEarlyBuffer extends Uint8Array{static from(value,encoding="utf8"){if(value instanceof ArrayBuffer){return new __AgentOsEarlyBuffer(value);}if(ArrayBuffer.isView(value)){return new __AgentOsEarlyBuffer(value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength));}if(Array.isArray(value)){return new __AgentOsEarlyBuffer(value);}const stringValue=String(value??"");if(encoding==="base64"&&typeof atob==="function"){const binary=atob(stringValue);const out=new __AgentOsEarlyBuffer(binary.length);for(let i=0;i<binary.length;i++){out[i]=binary.charCodeAt(i);}return out;}if(encoding==="binary"||encoding==="latin1"){const out=new __AgentOsEarlyBuffer(stringValue.length);for(let i=0;i<stringValue.length;i++){out[i]=stringValue.charCodeAt(i)&255;}return out;}if(__agentOsTe){return new __AgentOsEarlyBuffer(__agentOsTe.encode(stringValue));}const out=new __AgentOsEarlyBuffer(stringValue.length);for(let i=0;i<stringValue.length;i++){out[i]=stringValue.charCodeAt(i)&255;}return out;}static alloc(size){return new __AgentOsEarlyBuffer(Number(size)||0);}static concat(list,totalLength){const length=totalLength??list.reduce((sum,item)=>sum+(item?.length??0),0);const out=new __AgentOsEarlyBuffer(length);let offset=0;for(const item of list){const chunk=item instanceof Uint8Array?item:__AgentOsEarlyBuffer.from(item);out.set(chunk,offset);offset+=chunk.length;}return out;}static isBuffer(value){return value instanceof Uint8Array;}static byteLength(value,encoding="utf8"){return __AgentOsEarlyBuffer.from(value,encoding).byteLength;}toString(encoding="utf8"){if(encoding==="base64"&&typeof btoa==="function"){let binary="";for(const byte of this){binary+=String.fromCharCode(byte);}return btoa(binary);}if(encoding==="binary"||encoding==="latin1"){let binary="";for(const byte of this){binary+=String.fromCharCode(byte);}return binary;}if(__agentOsTd){return __agentOsTd.decode(this);}return Array.from(this,byte=>String.fromCharCode(byte)).join("");}}globalThis.Buffer=__AgentOsEarlyBuffer;}`,
+				'if(typeof globalThis.Buffer.allocUnsafe!=="function"){globalThis.Buffer.allocUnsafe=globalThis.Buffer.alloc;}if(typeof globalThis.Buffer.allocUnsafeSlow!=="function"){globalThis.Buffer.allocUnsafeSlow=globalThis.Buffer.alloc;}',
+				'if(typeof globalThis.performance==="undefined"){const __agentOsPerformanceStart=Date.now();globalThis.performance={now(){if(typeof globalThis.__agentOsHrNowUs==="function"){return globalThis.__agentOsHrNowUs()/1000;}return Date.now()-__agentOsPerformanceStart;}};}if(typeof globalThis.performance.markResourceTiming!=="function"){globalThis.performance.markResourceTiming=()=>{};}',
 				'if(typeof TextEncoder==="undefined"&&typeof globalThis.TextEncoder!=="undefined"){var TextEncoder=globalThis.TextEncoder;}if(typeof TextDecoder==="undefined"&&typeof globalThis.TextDecoder!=="undefined"){var TextDecoder=globalThis.TextDecoder;}if(typeof Buffer==="undefined"&&typeof globalThis.Buffer!=="undefined"){var Buffer=globalThis.Buffer;}',
 			].join(""),
 	},
@@ -805,7 +838,12 @@ for (const [name, buildResult] of [
 }
 
 const webStreamsPrelude = await buildWebStreamsPrelude();
-await prependBundlePrelude(bridgeTempOutput, webStreamsPrelude);
+const urlPrelude = await buildUrlPrelude();
+const eventAbortPrelude = await buildEventAbortPrelude();
+await prependBundlePrelude(
+	bridgeTempOutput,
+	`${webStreamsPrelude}${urlPrelude}${eventAbortPrelude}`,
+);
 await rewriteUndiciRuntimeFeaturesBundle(bridgeTempOutput, { required: true });
 await rewriteUnsupportedUtilTypesBundle(bridgeTempOutput, { required: true });
 await rewriteUndiciRuntimeFeaturesBundle(zlibBridgeTempOutput);

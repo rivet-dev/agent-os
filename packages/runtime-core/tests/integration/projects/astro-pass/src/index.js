@@ -6,31 +6,36 @@ var path = require("path");
 var projectDir = path.resolve(__dirname, "..");
 var distDir = path.join(projectDir, "dist");
 
-function ensureBuild() {
+async function ensureBuild() {
 	try {
 		fs.statSync(path.join(distDir, "index.html"));
 		return;
 	} catch (e) {
 		// Build output missing — run build
 	}
-	var execFileSync = require("child_process").execFileSync;
-	var astroBin = path.join(projectDir, "node_modules", "astro", "astro.js");
-	var buildEnv = Object.assign({}, process.env);
-	if (!buildEnv.PATH) {
-		buildEnv.PATH =
-			"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+	process.env.ASTRO_TELEMETRY_DISABLED = "1";
+	var astro = await import("astro");
+	var pathToFileURL = require("url").pathToFileURL;
+	var timeout;
+	try {
+		await Promise.race([
+			astro.build({
+				root: pathToFileURL(projectDir + path.sep),
+				logLevel: "silent",
+			}),
+			new Promise(function (_resolve, reject) {
+				timeout = setTimeout(function () {
+					reject(new Error("Astro React build did not settle"));
+				}, 20000);
+			}),
+		]);
+	} finally {
+		clearTimeout(timeout);
 	}
-	buildEnv.ASTRO_TELEMETRY_DISABLED = "1";
-	execFileSync(process.execPath, [astroBin, "build"], {
-		cwd: projectDir,
-		stdio: "pipe",
-		timeout: 60000,
-		env: buildEnv,
-	});
 }
 
-function main() {
-	ensureBuild();
+async function main() {
+	await ensureBuild();
 
 	var results = [];
 
@@ -68,4 +73,7 @@ function main() {
 	console.log(JSON.stringify(results));
 }
 
-main();
+main().catch(function (error) {
+	console.error(error);
+	process.exit(1);
+});

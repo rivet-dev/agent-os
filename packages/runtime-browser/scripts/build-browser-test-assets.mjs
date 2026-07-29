@@ -59,13 +59,13 @@ function bundleEntry(entryPath, outputFile, external = []) {
 	}
 }
 
-buildWorker("worker.js", "secure-exec-worker.js");
+buildWorker("worker.js", "agentos-worker.js");
 bundleEntry(
 	path.join(
 		packageDir,
 		"tests/browser/fixtures/frontend/converged-harness.entry.ts",
 	),
-	"secure-exec-converged-harness.js",
+	"agentos-converged-harness.js",
 	["/sidecar-wasm-web/*"],
 );
 bundleEntry(
@@ -73,7 +73,7 @@ bundleEntry(
 		packageDir,
 		"tests/browser/fixtures/frontend/converged-runtime-harness.entry.ts",
 	),
-	"secure-exec-converged-runtime-harness.js",
+	"agentos-converged-runtime-harness.js",
 	["/sidecar-wasm-web/*"],
 );
 bundleEntry(
@@ -81,11 +81,11 @@ bundleEntry(
 		packageDir,
 		"tests/browser/fixtures/frontend/converged-conformance-harness.entry.ts",
 	),
-	"secure-exec-converged-conformance-harness.js",
+	"agentos-converged-conformance-harness.js",
 	["/sidecar-wasm-web/*"],
 );
-console.log("Built .cache/browser-tests/secure-exec-worker.js");
-console.log("Built .cache/browser-tests/secure-exec-converged-harness.js");
+console.log("Built .cache/browser-tests/agentos-worker.js");
+console.log("Built .cache/browser-tests/agentos-converged-harness.js");
 
 // Build the converged sidecar kernel to a web-target wasm package, served
 // alongside the worker bundles so the converged in-browser test can load the

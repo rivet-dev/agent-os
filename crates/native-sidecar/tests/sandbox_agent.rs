@@ -16,7 +16,7 @@ mod sandbox_agent {
 
         #[test]
         fn filesystem_round_trips_small_files_and_uses_http_range_for_large_pread() {
-            let server = MockSandboxAgentServer::start("secure-exec-sandbox-plugin", None);
+            let server = MockSandboxAgentServer::start("agentos-sandbox-plugin", None);
             fs::write(server.root().join("hello.txt"), "hello from sandbox").expect("seed file");
             let large_file = (0..100 * 1024)
                 .map(|index| (index % 251) as u8)
@@ -73,10 +73,8 @@ mod sandbox_agent {
 
         #[test]
         fn filesystem_pread_falls_back_to_full_fetch_when_remote_ignores_range() {
-            let server = MockSandboxAgentServer::start_without_range_support(
-                "secure-exec-sandbox-plugin",
-                None,
-            );
+            let server =
+                MockSandboxAgentServer::start_without_range_support("agentos-sandbox-plugin", None);
             let large_file = (0..100 * 1024)
                 .map(|index| (index % 251) as u8)
                 .collect::<Vec<_>>();
@@ -117,7 +115,7 @@ mod sandbox_agent {
         #[test]
         fn filesystem_pread_rejects_full_fetch_fallback_above_limit() {
             let server = MockSandboxAgentServer::start_without_range_support(
-                "secure-exec-sandbox-plugin-limit",
+                "agentos-sandbox-plugin-limit",
                 None,
             );
             fs::write(server.root().join("large.bin"), vec![b'x'; 4096]).expect("seed large file");
@@ -145,7 +143,7 @@ mod sandbox_agent {
         #[test]
         fn filesystem_pread_rejects_streamed_full_fetch_fallback_above_limit() {
             let server = MockSandboxAgentServer::start_without_range_support(
-                "secure-exec-sandbox-plugin-stream-limit",
+                "agentos-sandbox-plugin-stream-limit",
                 None,
             );
             fs::write(server.root().join("stream-over-limit"), vec![b'x'; 4096])
@@ -185,7 +183,7 @@ mod sandbox_agent {
 
         #[test]
         fn sandbox_agent_client_does_not_follow_redirects() {
-            let server = MockSandboxAgentServer::start("secure-exec-sandbox-plugin-redirect", None);
+            let server = MockSandboxAgentServer::start("agentos-sandbox-plugin-redirect", None);
 
             let mut filesystem = SandboxAgentFilesystem::from_config(SandboxAgentMountConfig {
                 base_url: server.base_url().to_owned(),
@@ -274,7 +272,7 @@ mod sandbox_agent {
 
         #[test]
         fn filesystem_truncate_uses_process_api_without_full_file_buffering() {
-            let server = MockSandboxAgentServer::start("secure-exec-sandbox-plugin-truncate", None);
+            let server = MockSandboxAgentServer::start("agentos-sandbox-plugin-truncate", None);
             fs::write(server.root().join("large.bin"), vec![b'x'; 512]).expect("seed large file");
 
             let mut filesystem = SandboxAgentFilesystem::from_config(SandboxAgentMountConfig {
@@ -340,10 +338,8 @@ mod sandbox_agent {
 
         #[test]
         fn plugin_scopes_base_path_and_preserves_auth_headers() {
-            let server = MockSandboxAgentServer::start(
-                "secure-exec-sandbox-plugin-auth",
-                Some("secret-token"),
-            );
+            let server =
+                MockSandboxAgentServer::start("agentos-sandbox-plugin-auth", Some("secret-token"));
             fs::create_dir_all(server.root().join("scoped")).expect("create scoped root");
             fs::write(server.root().join("scoped/hello.txt"), "scoped hello")
                 .expect("seed scoped file");
@@ -387,8 +383,7 @@ mod sandbox_agent {
 
         #[test]
         fn plugin_normalizes_relative_base_path_before_scoping_requests() {
-            let server =
-                MockSandboxAgentServer::start("secure-exec-sandbox-plugin-base-path", None);
+            let server = MockSandboxAgentServer::start("agentos-sandbox-plugin-base-path", None);
             fs::create_dir_all(server.root().join("scoped")).expect("create scoped root");
             fs::write(
                 server.root().join("scoped/hello.txt"),
@@ -427,7 +422,7 @@ mod sandbox_agent {
         #[test]
         fn plugin_unscopes_process_helper_targets_for_relative_base_path() {
             let server =
-                MockSandboxAgentServer::start("secure-exec-sandbox-plugin-relative-process", None);
+                MockSandboxAgentServer::start("agentos-sandbox-plugin-relative-process", None);
             fs::create_dir_all(server.root().join("scoped")).expect("create scoped root");
             fs::write(
                 server.root().join("scoped/original.txt"),
@@ -470,7 +465,7 @@ mod sandbox_agent {
 
         #[test]
         fn filesystem_uses_process_api_for_symlink_and_metadata_operations() {
-            let server = MockSandboxAgentServer::start("secure-exec-sandbox-plugin-process", None);
+            let server = MockSandboxAgentServer::start("agentos-sandbox-plugin-process", None);
             fs::write(server.root().join("original.txt"), "hello from sandbox")
                 .expect("seed original file");
 
@@ -563,7 +558,7 @@ mod sandbox_agent {
         #[test]
         fn filesystem_reports_clear_error_when_process_api_is_unavailable() {
             let server = MockSandboxAgentServer::start_without_process_api(
-                "secure-exec-sandbox-plugin-no-proc",
+                "agentos-sandbox-plugin-no-proc",
                 None,
             );
             fs::write(server.root().join("original.txt"), "hello from sandbox")

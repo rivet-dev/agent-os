@@ -1,0 +1,44 @@
+--- a/exec/Cargo.toml
++++ b/exec/Cargo.toml
+@@ -20,6 +20,7 @@ anyhow = { workspace = true }
+ # All codex deps are gated out on WASI — the WASI target provides stubs
+ # wasm32-wasip1: codex-core compiles here now, so the session-turn engine drives it.
+ [target.'cfg(target_os = "wasi")'.dependencies]
++codex-apply-patch = { workspace = true }
+ codex-core = { workspace = true }
+ codex-protocol = { workspace = true }
+ serde_json = { workspace = true }
+--- a/core/src/tools/runtimes/apply_patch.rs
++++ b/core/src/tools/runtimes/apply_patch.rs
+@@ -71,6 +71,9 @@ impl ApplyPatchRuntime {
+         req: &ApplyPatchRequest,
+         _codex_home: &std::path::Path,
+     ) -> Result<CommandSpec, ToolError> {
++        #[cfg(target_os = "wasi")]
++        let exe = PathBuf::from("/opt/agentos/bin/codex-exec");
++        #[cfg(not(target_os = "wasi"))]
+         let exe = if let Some(path) = &req.codex_exe {
+             path.clone()
+         } else {
+--- a/exec/src/lib.rs
++++ b/exec/src/lib.rs
+@@ -15,8 +15,18 @@ pub fn wasi_stub_main() -> anyhow::Result<()> {
+     let args: Vec<String> = std::env::args().collect();
+     if args.get(1).map(String::as_str) == Some("--session-turn") {
+         session_turn_wasi::run()
++    } else if args.get(1).map(String::as_str)
++        == Some(codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1)
++    {
++        let patch = args.get(2).map(String::as_str).unwrap_or_default();
++        let mut stdout = std::io::stdout();
++        let mut stderr = std::io::stderr();
++        codex_apply_patch::apply_patch(patch, &mut stdout, &mut stderr)
++            .map_err(anyhow::Error::from)
+     } else {
+-        eprintln!("codex-exec: only --session-turn is supported on wasm32-wasip1");
++        eprintln!(
++            "codex-exec: only --session-turn and --codex-run-as-apply-patch are supported on wasm32-wasip1"
++        );
+         Ok(())
+     }
+ }

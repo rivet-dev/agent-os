@@ -4,7 +4,7 @@ name = "cmd-codex"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "codex standalone binary for secure-exec VM"
+description = "codex standalone binary for agentos VM"
 
 [[bin]]
 name = "codex"
@@ -21,8 +21,8 @@ path = "src/main.rs"
 # tokio::process::Command in codex-core when compiled for WASI.
 
 [dependencies]
-wasi-spawn = { package = "secureexec-wasi-spawn", path = "../../../../../toolchain/crates/libs/wasi-spawn" }
-wasi-http = { package = "secureexec-wasi-http", path = "../../../../../toolchain/crates/libs/wasi-http" }
+wasi-spawn = { package = "agentos-wasi-spawn", path = "../../../../../toolchain/crates/libs/wasi-spawn" }
+wasi-http = { package = "agentos-wasi-http", path = "../../../../../toolchain/crates/libs/wasi-http" }
 
 # TUI dependencies — ratatui for rendering, crossterm for terminal backend
 # crossterm is patched for WASI support (see std-patches/crates/crossterm/)

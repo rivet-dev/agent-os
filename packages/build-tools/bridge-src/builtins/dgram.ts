@@ -1144,7 +1144,7 @@ var DgramSocket = class {
 					const error = new Error(
 						typeof payload.message === "string"
 							? payload.message
-							: "secure-exec dgram socket error",
+							: "agentos dgram socket error",
 					);
 					if (typeof payload.code === "string" && payload.code.length > 0) {
 						error.code = payload.code;

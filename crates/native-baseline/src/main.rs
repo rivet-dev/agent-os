@@ -410,13 +410,13 @@ fn run_once(op: Op, iter: usize, base_dir: &Path, config: &BenchConfig) {
             assert!(out.status.success(), "pipe chain failed: {out:?}");
         }
         Op::FsStat => {
-            let path = base_dir.join("secure-exec-native-fs-stat.txt");
+            let path = base_dir.join("agentos-native-fs-stat.txt");
             std::fs::write(&path, b"hi").expect("write stat fixture");
             let meta = std::fs::metadata(&path).expect("stat fixture");
             assert!(meta.len() >= 2);
         }
         Op::FsStatX32 => {
-            let path = base_dir.join("secure-exec-native-fs-stat-x32.txt");
+            let path = base_dir.join("agentos-native-fs-stat-x32.txt");
             if !path.exists() {
                 std::fs::write(&path, b"hi").expect("write stat fixture");
             }
@@ -433,7 +433,7 @@ fn run_once(op: Op, iter: usize, base_dir: &Path, config: &BenchConfig) {
             }
         }
         Op::FsWrite => {
-            let path = base_dir.join("secure-exec-native-fs-write.txt");
+            let path = base_dir.join("agentos-native-fs-write.txt");
             if let Some(size_bytes) = config.size_bytes {
                 std::fs::write(path, vec![(iter & 255) as u8; size_bytes]).expect("write fixture");
             } else {
@@ -442,7 +442,7 @@ fn run_once(op: Op, iter: usize, base_dir: &Path, config: &BenchConfig) {
         }
         Op::FsRead => {
             let size_bytes = config.size_bytes.unwrap_or(64 * 1024);
-            let path = base_dir.join("secure-exec-native-fs-read.bin");
+            let path = base_dir.join("agentos-native-fs-read.bin");
             let rewrite = std::fs::metadata(&path)
                 .map(|meta| meta.len() != size_bytes as u64)
                 .unwrap_or(true);
@@ -454,11 +454,9 @@ fn run_once(op: Op, iter: usize, base_dir: &Path, config: &BenchConfig) {
         }
         Op::StreamCopy => {
             let size_bytes = config.size_bytes.unwrap_or(64 * 1024);
-            let src = base_dir.join(format!(
-                "secure-exec-native-stream-copy-src-{size_bytes}.bin"
-            ));
+            let src = base_dir.join(format!("agentos-native-stream-copy-src-{size_bytes}.bin"));
             let dst = base_dir.join(format!(
-                "secure-exec-native-stream-copy-dst-{size_bytes}-{iter}.bin"
+                "agentos-native-stream-copy-dst-{size_bytes}-{iter}.bin"
             ));
             let rewrite = std::fs::metadata(&src)
                 .map(|meta| meta.len() != size_bytes as u64)
@@ -487,26 +485,26 @@ fn run_once(op: Op, iter: usize, base_dir: &Path, config: &BenchConfig) {
             assert_eq!(meta.len(), size_bytes as u64);
         }
         Op::FsOpenClose => {
-            let path = base_dir.join("secure-exec-native-fs-open-close.txt");
+            let path = base_dir.join("agentos-native-fs-open-close.txt");
             std::fs::write(&path, b"hi").expect("write open fixture");
             let file = File::open(path).expect("open fixture");
             drop(file);
         }
         Op::FsMkdirRmdir => {
-            let path = base_dir.join(format!("secure-exec-native-dir-{iter}"));
+            let path = base_dir.join(format!("agentos-native-dir-{iter}"));
             std::fs::create_dir(&path).expect("create dir");
             std::fs::remove_dir(&path).expect("remove dir");
         }
         Op::FsRename => {
-            let from = base_dir.join(format!("secure-exec-native-rename-{iter}.a"));
-            let to = base_dir.join(format!("secure-exec-native-rename-{iter}.b"));
+            let from = base_dir.join(format!("agentos-native-rename-{iter}.a"));
+            let to = base_dir.join(format!("agentos-native-rename-{iter}.b"));
             std::fs::write(&from, b"hi").expect("write rename fixture");
             std::fs::rename(&from, &to).expect("rename fixture");
             std::fs::remove_file(&to).expect("remove rename fixture");
         }
         Op::FsReaddir => {
             let entry_count = config.entry_count.unwrap_or(32);
-            let dir = base_dir.join("secure-exec-native-readdir");
+            let dir = base_dir.join("agentos-native-readdir");
             std::fs::create_dir_all(&dir).expect("create readdir dir");
             let marker = dir.join(format!(".fixture-ready-{entry_count}"));
             if !marker.exists() {
@@ -522,7 +520,7 @@ fn run_once(op: Op, iter: usize, base_dir: &Path, config: &BenchConfig) {
             assert!(count > entry_count);
         }
         Op::FsFsync => {
-            let path = base_dir.join("secure-exec-native-fsync.txt");
+            let path = base_dir.join("agentos-native-fsync.txt");
             let mut file = File::create(path).expect("create fsync fixture");
             file.write_all(b"hello").expect("write fsync fixture");
             file.sync_all().expect("fsync fixture");
@@ -593,7 +591,7 @@ fn run_once(op: Op, iter: usize, base_dir: &Path, config: &BenchConfig) {
         }
         #[cfg(all(unix, not(target_family = "wasm")))]
         Op::UnixConnect => {
-            let sock = base_dir.join(format!("secure-exec-native-unix-connect-{iter}.sock"));
+            let sock = base_dir.join(format!("agentos-native-unix-connect-{iter}.sock"));
             let _ = std::fs::remove_file(&sock);
             let listener = UnixListener::bind(&sock).expect("bind unix listener");
             let server = thread::spawn(move || {
@@ -607,7 +605,7 @@ fn run_once(op: Op, iter: usize, base_dir: &Path, config: &BenchConfig) {
         #[cfg(all(unix, not(target_family = "wasm")))]
         Op::UnixEcho => {
             let payload = vec![7_u8; config.size_bytes.unwrap_or(16)];
-            let sock = base_dir.join(format!("secure-exec-native-unix-echo-{iter}.sock"));
+            let sock = base_dir.join(format!("agentos-native-unix-echo-{iter}.sock"));
             let _ = std::fs::remove_file(&sock);
             let listener = UnixListener::bind(&sock).expect("bind unix listener");
             let expected_len = payload.len();

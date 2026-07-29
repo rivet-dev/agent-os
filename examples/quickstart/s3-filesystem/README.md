@@ -9,7 +9,7 @@ Reach for this when you want a VM to read and write files that live in an S3-com
 
 ## How it works
 
-A `chunked_s3` mount descriptor (built into `@rivet-dev/agentos-core`) configures an S3 plugin from a bucket, prefix, region, and credentials. Passing it as a mount at `/mnt/data` makes the VM treat the bucket as a normal directory, so `writeFile`, `readFile`, and `readdir` operate transparently against S3. Configure the real bucket through the `S3_*` environment variables; when they are absent the example boots a strict local S3 harness so the same flow still runs against signed requests.
+A `chunked_s3` mount descriptor (built into `@rivet-dev/agentos`) configures an S3 plugin from a bucket, prefix, region, and credentials. Passing it as a mount at `/mnt/data` makes the VM treat the bucket as a normal directory, so `writeFile`, `readFile`, and `readdir` operate transparently against S3. Configure the real bucket through the `S3_*` environment variables; when they are absent the example boots a strict local S3 harness so the same flow still runs against signed requests.
 
 ## Run it
 

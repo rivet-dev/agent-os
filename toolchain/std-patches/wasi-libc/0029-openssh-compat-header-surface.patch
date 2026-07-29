@@ -179,5 +179,5 @@ index 8813360..9a740ad 100755
 +# sshbuf-misc.c) include <resolv.h> unconditionally. No resolver code is
 +# built; linking res_* still fails, which is the honest surface.
  # Exclude `netdb.h` from all of the p1 targets.
- # NOTE: commented out by the secure-exec 0008-sockets patch — we provide getaddrinfo via host_net
+ # NOTE: commented out by the agentos 0008-sockets patch — we provide getaddrinfo via host_net
  #if [[ $TARGET_TRIPLE == *"wasi" || $TARGET_TRIPLE == *"wasi-threads" || \

@@ -1,0 +1,8 @@
+{
+  "entry": "src/index.cjs",
+  "expectation": "fail",
+  "fail": {
+    "code": 1,
+    "stderrIncludes": "TSUP_ESBUILD_NATIVE_UNSUPPORTED:"
+  }
+}

@@ -16,6 +16,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import {
+	decodePackageManifest,
 	encodeMountIndex,
 	encodePackageManifest,
 	TarEntryKind,
@@ -48,6 +49,28 @@ export interface AospkgSummary {
 	name: string;
 	version: string;
 	commands: string[];
+}
+
+export type DecodedAospkgManifest = PackageManifest;
+
+/** Decode the chunk1 manifest from a package container. */
+export function decodeAospkgManifest(source: Uint8Array): DecodedAospkgManifest {
+	const bytes = Buffer.from(source.buffer, source.byteOffset, source.byteLength);
+	if (bytes.length < 16 || !bytes.subarray(0, 4).equals(Buffer.from(AOSPKG_MAGIC))) {
+		throw new Error("invalid .aospkg header");
+	}
+	if (bytes.readUInt16LE(4) !== AOSPKG_FORMAT_VERSION) {
+		throw new Error(`unsupported .aospkg format version: ${bytes.readUInt16LE(4)}`);
+	}
+	const manifestLength = bytes.readUInt32LE(8);
+	const manifestEnd = 16 + manifestLength;
+	if (manifestLength < 2 || manifestEnd > bytes.length) {
+		throw new Error("invalid .aospkg manifest range");
+	}
+	const version = bytes.readUInt16LE(16);
+	const payload = bytes.subarray(18, manifestEnd);
+	if (version === PACKAGE_MANIFEST_VERSION) return decodePackageManifest(payload);
+	throw new Error(`unsupported package manifest version: ${version}`);
 }
 
 interface SourceManifestJson {

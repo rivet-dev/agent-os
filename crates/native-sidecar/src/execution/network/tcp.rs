@@ -84,6 +84,7 @@ pub(in crate::execution) struct ActiveTcpConnectRequest<'a, B> {
     pub(in crate::execution) dns: &'a VmDnsConfig,
     pub(in crate::execution) host: &'a str,
     pub(in crate::execution) port: u16,
+    pub(in crate::execution) family: Option<u8>,
     pub(in crate::execution) local_address: Option<&'a str>,
     pub(in crate::execution) local_port: Option<u16>,
     pub(in crate::execution) local_reservation: Option<(JavascriptSocketFamily, u16)>,
@@ -127,6 +128,7 @@ impl ActiveTcpSocket {
             dns,
             host,
             port,
+            family,
             local_address,
             local_port,
             local_reservation,
@@ -135,7 +137,8 @@ impl ActiveTcpSocket {
             runtime_context,
             reactor_limits,
         } = request;
-        let resolved = resolve_tcp_connect_addr(bridge, kernel, vm_id, dns, host, port, context)?;
+        let resolved =
+            resolve_tcp_connect_addr(bridge, kernel, vm_id, dns, host, port, family, context)?;
         if resolved.use_kernel_loopback {
             return Self::connect_kernel_loopback(
                 kernel,
@@ -329,6 +332,7 @@ impl ActiveTcpSocket {
             saw_local_shutdown,
             saw_remote_end,
             close_notified,
+            pending_read_event: Arc::new(Mutex::new(None)),
             read_buffer: Arc::new(Mutex::new(VecDeque::new())),
             description_handles: Arc::new(()),
             listener_connection_retirement: None,
@@ -392,6 +396,7 @@ impl ActiveTcpSocket {
             saw_local_shutdown: Arc::new(AtomicBool::new(false)),
             saw_remote_end: Arc::new(AtomicBool::new(false)),
             close_notified: Arc::new(AtomicBool::new(false)),
+            pending_read_event: Arc::new(Mutex::new(None)),
             read_buffer: Arc::new(Mutex::new(VecDeque::new())),
             description_handles: Arc::new(()),
             listener_connection_retirement: None,
@@ -437,6 +442,7 @@ impl ActiveTcpSocket {
             saw_local_shutdown: Arc::clone(&self.saw_local_shutdown),
             saw_remote_end: Arc::clone(&self.saw_remote_end),
             close_notified: Arc::clone(&self.close_notified),
+            pending_read_event: Arc::clone(&self.pending_read_event),
             read_buffer: Arc::clone(&self.read_buffer),
             description_handles: Arc::clone(&self.description_handles),
             listener_connection_retirement: self.listener_connection_retirement.clone(),
@@ -495,6 +501,16 @@ impl ActiveTcpSocket {
         _wait: Duration,
         trace_enabled: bool,
     ) -> Result<Option<JavascriptTcpSocketEvent>, SidecarError> {
+        if let Some(event) = self
+            .pending_read_event
+            .lock()
+            .map_err(|_| {
+                SidecarError::InvalidState(String::from("TCP pending read event lock poisoned"))
+            })?
+            .take()
+        {
+            return Ok(Some(event));
+        }
         if self.tls_mode.load(Ordering::SeqCst) {
             self.ensure_tcp_reader()?;
             return match self
@@ -1323,6 +1339,76 @@ impl ActiveTcpSocket {
             Err(error) => Err(sidecar_net_error(error)),
         }
     }
+
+    pub(in crate::execution) fn poll_limited(
+        &mut self,
+        kernel: &mut SidecarKernel,
+        kernel_pid: u32,
+        wait: Duration,
+        trace_enabled: bool,
+        max_bytes: usize,
+    ) -> Result<Option<JavascriptTcpSocketEvent>, SidecarError> {
+        let pending = self
+            .pending_read_event
+            .lock()
+            .map_err(|_| {
+                SidecarError::InvalidState(String::from("TCP pending read event lock poisoned"))
+            })?
+            .take();
+        let event = match pending {
+            Some(event) => Some(event),
+            None => self.poll(kernel, kernel_pid, wait, trace_enabled)?,
+        };
+        let (event, remainder) = limit_tcp_socket_event(event, max_bytes);
+        if let Some(remainder) = remainder {
+            *self.pending_read_event.lock().map_err(|_| {
+                SidecarError::InvalidState(String::from("TCP pending read event lock poisoned"))
+            })? = Some(remainder);
+        }
+        Ok(event)
+    }
+}
+
+pub(in crate::execution) fn limit_tcp_socket_event(
+    event: Option<JavascriptTcpSocketEvent>,
+    max_bytes: usize,
+) -> (
+    Option<JavascriptTcpSocketEvent>,
+    Option<JavascriptTcpSocketEvent>,
+) {
+    let Some(JavascriptTcpSocketEvent::Data {
+        mut bytes,
+        reservation,
+        source_reservations,
+    }) = event
+    else {
+        return (event, None);
+    };
+    if bytes.len() <= max_bytes {
+        return (
+            Some(JavascriptTcpSocketEvent::Data {
+                bytes,
+                reservation,
+                source_reservations,
+            }),
+            None,
+        );
+    }
+
+    let remainder_bytes = bytes.split_off(max_bytes);
+    let remainder = JavascriptTcpSocketEvent::Data {
+        bytes: remainder_bytes,
+        reservation: reservation.clone(),
+        source_reservations: source_reservations.clone(),
+    };
+    (
+        Some(JavascriptTcpSocketEvent::Data {
+            bytes,
+            reservation,
+            source_reservations,
+        }),
+        Some(remainder),
+    )
 }
 
 pub(in crate::execution) fn close_kernel_socket_idempotent(
@@ -2651,6 +2737,7 @@ fn filter_tcp_connect_ip_addrs(
     Ok(allowed)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::execution) fn resolve_tcp_connect_addr<B>(
     bridge: &SharedBridge<B>,
     kernel: &SidecarKernel,
@@ -2658,6 +2745,7 @@ pub(in crate::execution) fn resolve_tcp_connect_addr<B>(
     dns: &VmDnsConfig,
     host: &str,
     port: u16,
+    family: Option<u8>,
     context: &JavascriptSocketPathContext,
 ) -> Result<ResolvedTcpConnectAddr, SidecarError>
 where
@@ -2665,13 +2753,16 @@ where
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
     let allowed = filter_tcp_connect_ip_addrs(
-        resolve_dns_ip_addrs(
-            bridge,
-            kernel,
-            vm_id,
-            dns,
-            host,
-            DnsLookupPolicy::SkipPermissions,
+        filter_dns_ip_addrs(
+            resolve_dns_ip_addrs(
+                bridge,
+                kernel,
+                vm_id,
+                dns,
+                host,
+                DnsLookupPolicy::SkipPermissions,
+            )?,
+            family,
         )?,
         host,
         port,
@@ -3403,6 +3494,49 @@ fn record_net_tcp_kernel_poll(
 }
 
 #[cfg(test)]
+mod socket_read_limit_tests {
+    use super::*;
+
+    fn data_event(bytes: &[u8]) -> JavascriptTcpSocketEvent {
+        let resources = ResourceLedger::root(
+            "tcp-partial-read-test",
+            [(
+                ResourceClass::BufferedBytes,
+                ResourceLimit::new(1024, "test.maxBufferedBytes"),
+            )],
+        );
+        let reservation = resources
+            .reserve(ResourceClass::BufferedBytes, bytes.len())
+            .expect("reserve test socket bytes");
+        JavascriptTcpSocketEvent::Data {
+            bytes: bytes.to_vec(),
+            reservation: SharedReservation::new(reservation),
+            source_reservations: Vec::new(),
+        }
+    }
+
+    fn event_bytes(event: Option<JavascriptTcpSocketEvent>) -> Vec<u8> {
+        match event.expect("expected socket data event") {
+            JavascriptTcpSocketEvent::Data { bytes, .. } => bytes,
+            other => panic!("expected socket data, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partial_socket_reads_preserve_the_unread_suffix() {
+        let (first, remainder) = limit_tcp_socket_event(Some(data_event(b"abcdefgh")), 3);
+        assert_eq!(event_bytes(first), b"abc");
+
+        let (second, remainder) = limit_tcp_socket_event(remainder, 3);
+        assert_eq!(event_bytes(second), b"def");
+
+        let (third, remainder) = limit_tcp_socket_event(remainder, 3);
+        assert_eq!(event_bytes(third), b"gh");
+        assert!(remainder.is_none());
+    }
+}
+
+#[cfg(test)]
 mod plain_socket_fairness_tests {
     use super::*;
 
@@ -3639,7 +3773,7 @@ mod ssrf_egress_classifier_tests {
     // egress filter directly (no network I/O, no Node), so they run fast and
     // deterministically. See FAILURES.md#F-005, #F-006, #F-007.
     use super::{
-        filter_dns_safe_ip_addrs, filter_tcp_connect_ip_addrs, is_loopback_ip,
+        filter_dns_ip_addrs, filter_dns_safe_ip_addrs, filter_tcp_connect_ip_addrs, is_loopback_ip,
         restricted_non_loopback_ip_range, JavascriptSocketFamily, JavascriptSocketPathContext,
         SidecarError, VmListenPolicy,
     };
@@ -3703,6 +3837,21 @@ mod ssrf_egress_classifier_tests {
         let error = filter_tcp_connect_ip_addrs(vec![private], "rebound.example", 53, &context)
             .expect_err("a DNS answer that rebinds entirely into private space is denied");
         assert!(error.to_string().starts_with("EACCES:"));
+    }
+
+    #[test]
+    fn tcp_socket_family_filters_mixed_dns_answers_before_connect() {
+        let ipv4 = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        let ipv6 = IpAddr::V6("2606:2800:220:1:248:1893:25c8:1946".parse().unwrap());
+
+        assert_eq!(
+            filter_dns_ip_addrs(vec![ipv6, ipv4], Some(4)).unwrap(),
+            vec![ipv4]
+        );
+        assert_eq!(
+            filter_dns_ip_addrs(vec![ipv4, ipv6], Some(6)).unwrap(),
+            vec![ipv6]
+        );
     }
 
     #[test]

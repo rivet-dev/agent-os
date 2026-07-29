@@ -166,21 +166,21 @@ fn mounted_agentos_command_paths_resolve_to_registered_drivers() {
         .expect("register drivers");
 
     kernel
-        .mkdir("/__secure_exec/commands/0", true)
+        .mkdir("/__agentos/commands/0", true)
         .expect("create mounted command root");
     kernel
         .write_file(
-            "/__secure_exec/commands/0/xu",
+            "/__agentos/commands/0/xu",
             b"#!/bin/sh\n# kernel command stub\n".to_vec(),
         )
         .expect("write mounted command stub");
     kernel
-        .chmod("/__secure_exec/commands/0/xu", 0o755)
+        .chmod("/__agentos/commands/0/xu", 0o755)
         .expect("chmod mounted command stub");
 
     let process = kernel
         .spawn_process(
-            "/__secure_exec/commands/0/xu",
+            "/__agentos/commands/0/xu",
             vec![String::from("hello-agentos")],
             SpawnOptions::default(),
         )

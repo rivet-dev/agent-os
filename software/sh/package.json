@@ -1,0 +1,33 @@
+{
+	"name": "@agentos-software/sh",
+	"version": "0.0.1",
+	"type": "module",
+	"license": "Apache-2.0",
+	"description": "POSIX-compatible shell for AgentOS VMs",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"files": [
+		"dist",
+		"!dist/package",
+		"!dist/package.tar"
+	],
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"scripts": {
+		"build": "agentos-toolchain stage --commands-dir ../../toolchain/target/wasm32-wasip1/release/commands --if-missing skip && tsc && agentos-toolchain build",
+		"check-types": "tsc --noEmit",
+		"test": "vitest run test/ --passWithNoTests"
+	},
+	"devDependencies": {
+		"@agentos-software/manifest": "workspace:*",
+		"@rivet-dev/agentos-toolchain": "workspace:*",
+		"@types/node": "^22.10.2",
+		"@rivet-dev/agentos-test-harness": "workspace:*",
+		"typescript": "^5.9.2",
+		"vitest": "^2.1.9"
+	}
+}

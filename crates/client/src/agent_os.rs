@@ -289,7 +289,16 @@ impl AgentOs {
             | wire::ResponsePayload::ResourceSnapshotResponse(_)
             | wire::ResponsePayload::PackageLinkedResponse(_)
             | wire::ResponsePayload::ProvidedCommandsResponse(_)
-            | wire::ResponsePayload::ListMountsResponse(_) => {
+            | wire::ResponsePayload::ListMountsResponse(_)
+            | wire::ResponsePayload::ExecutionAcceptedResponse(_)
+            | wire::ResponsePayload::ExecutionCompletedResponse(_)
+            | wire::ResponsePayload::ExecutionEvaluationResponse(_)
+            | wire::ResponsePayload::TypeScriptCheckResponse(_)
+            | wire::ResponsePayload::ExecutionDescriptorResponse(_)
+            | wire::ResponsePayload::ExecutionListResponse(_)
+            | wire::ResponsePayload::ExecutionDeletedResponse(_)
+            | wire::ResponsePayload::ExecutionIoResponse(_)
+            | wire::ResponsePayload::ExecutionOutputPageResponse(_) => {
                 return Err(ClientError::Sidecar(
                     "unexpected open_session response".to_string(),
                 ));
@@ -359,7 +368,16 @@ impl AgentOs {
             | wire::ResponsePayload::ResourceSnapshotResponse(_)
             | wire::ResponsePayload::PackageLinkedResponse(_)
             | wire::ResponsePayload::ProvidedCommandsResponse(_)
-            | wire::ResponsePayload::ListMountsResponse(_) => {
+            | wire::ResponsePayload::ListMountsResponse(_)
+            | wire::ResponsePayload::ExecutionAcceptedResponse(_)
+            | wire::ResponsePayload::ExecutionCompletedResponse(_)
+            | wire::ResponsePayload::ExecutionEvaluationResponse(_)
+            | wire::ResponsePayload::TypeScriptCheckResponse(_)
+            | wire::ResponsePayload::ExecutionDescriptorResponse(_)
+            | wire::ResponsePayload::ExecutionListResponse(_)
+            | wire::ResponsePayload::ExecutionDeletedResponse(_)
+            | wire::ResponsePayload::ExecutionIoResponse(_)
+            | wire::ResponsePayload::ExecutionOutputPageResponse(_) => {
                 return Err(ClientError::Sidecar(
                     "unexpected create_vm response".to_string(),
                 ));
@@ -392,7 +410,7 @@ impl AgentOs {
                     permissions: Some(permissions),
                     // Client-side `moduleAccessCwd` was removed in favor of an
                     // explicit `nodeModulesMount(...)` entry in `mounts`; the
-                    // secure-exec wire field is left unset.
+                    // agentos wire field is left unset.
                     module_access_cwd: None,
                     instructions: config.additional_instructions.clone().into_iter().collect(),
                     projected_modules: Vec::new(),
@@ -450,7 +468,16 @@ impl AgentOs {
             | wire::ResponsePayload::ResourceSnapshotResponse(_)
             | wire::ResponsePayload::PackageLinkedResponse(_)
             | wire::ResponsePayload::ProvidedCommandsResponse(_)
-            | wire::ResponsePayload::ListMountsResponse(_) => {
+            | wire::ResponsePayload::ListMountsResponse(_)
+            | wire::ResponsePayload::ExecutionAcceptedResponse(_)
+            | wire::ResponsePayload::ExecutionCompletedResponse(_)
+            | wire::ResponsePayload::ExecutionEvaluationResponse(_)
+            | wire::ResponsePayload::TypeScriptCheckResponse(_)
+            | wire::ResponsePayload::ExecutionDescriptorResponse(_)
+            | wire::ResponsePayload::ExecutionListResponse(_)
+            | wire::ResponsePayload::ExecutionDeletedResponse(_)
+            | wire::ResponsePayload::ExecutionIoResponse(_)
+            | wire::ResponsePayload::ExecutionOutputPageResponse(_) => {
                 return Err(ClientError::Sidecar(
                     "unexpected configure_vm response".to_string(),
                 ));
@@ -534,7 +561,16 @@ impl AgentOs {
                     | wire::ResponsePayload::ResourceSnapshotResponse(_)
                     | wire::ResponsePayload::PackageLinkedResponse(_)
                     | wire::ResponsePayload::ProvidedCommandsResponse(_)
-                    | wire::ResponsePayload::ListMountsResponse(_) => {
+                    | wire::ResponsePayload::ListMountsResponse(_)
+                    | wire::ResponsePayload::ExecutionAcceptedResponse(_)
+                    | wire::ResponsePayload::ExecutionCompletedResponse(_)
+                    | wire::ResponsePayload::ExecutionEvaluationResponse(_)
+                    | wire::ResponsePayload::TypeScriptCheckResponse(_)
+                    | wire::ResponsePayload::ExecutionDescriptorResponse(_)
+                    | wire::ResponsePayload::ExecutionListResponse(_)
+                    | wire::ResponsePayload::ExecutionDeletedResponse(_)
+                    | wire::ResponsePayload::ExecutionIoResponse(_)
+                    | wire::ResponsePayload::ExecutionOutputPageResponse(_) => {
                         return Err(ClientError::Sidecar(
                             "unexpected register_host_callbacks response".to_string(),
                         ));
@@ -887,6 +923,8 @@ fn spawn_acp_event_pump(client: &AgentOs) {
                     wire::EventPayload::VmLifecycleEvent(_)
                     | wire::EventPayload::ProcessOutputEvent(_)
                     | wire::EventPayload::ProcessExitedEvent(_)
+                    | wire::EventPayload::ExecutionOutputEvent(_)
+                    | wire::EventPayload::ExecutionCompletedEvent(_)
                     | wire::EventPayload::StructuredEvent(_),
                 )) => {}
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -1410,6 +1448,8 @@ async fn wait_for_vm_ready(
                     }
                     wire::EventPayload::ProcessOutputEvent(_)
                     | wire::EventPayload::ProcessExitedEvent(_)
+                    | wire::EventPayload::ExecutionOutputEvent(_)
+                    | wire::EventPayload::ExecutionCompletedEvent(_)
                     | wire::EventPayload::StructuredEvent(_)
                     | wire::EventPayload::ExtEnvelope(_) => {}
                 },

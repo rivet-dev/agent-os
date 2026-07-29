@@ -7,6 +7,7 @@
 # source, which lives outside website/. Include just that package's src + config
 # (not node_modules/dist) so the API reference can be generated in the image.
 *
+!tsconfig.base.json
 !website
 !packages
 packages/*

@@ -1,9 +1,29 @@
 "use strict";
 
-import streamDefault, * as streamNs from "secure-exec-stream-stdlib";
+import streamDefault, * as streamNs from "agentos-stream-stdlib";
+import { Buffer } from "node:buffer";
 
 const baseStreamModule = streamNs.default ?? streamDefault ?? {};
 const baseFinished = streamNs.finished ?? baseStreamModule.finished;
+const baseReadable = streamNs.Readable ?? baseStreamModule.Readable;
+
+if (
+	typeof baseReadable?.prototype?.push === "function" &&
+	!baseReadable.prototype.push.__agentOSUint8ArrayPatched
+) {
+	const originalPush = baseReadable.prototype.push;
+	baseReadable.prototype.push = function pushNodeCompatibleChunk(chunk, encoding) {
+		if (
+			!this?._readableState?.objectMode &&
+			chunk instanceof Uint8Array &&
+			!Buffer.isBuffer(chunk)
+		) {
+			chunk = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+		}
+		return originalPush.call(this, chunk, encoding);
+	};
+	baseReadable.prototype.push.__agentOSUint8ArrayPatched = true;
+}
 
 const isWebReadableStream = (stream) =>
 	Boolean(stream) &&
@@ -110,7 +130,7 @@ export const isDisturbed = (stream) => {
 	);
 };
 
-export * from "secure-exec-stream-stdlib";
+export * from "agentos-stream-stdlib";
 
 export default {
 	...baseStreamModule,

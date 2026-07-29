@@ -338,7 +338,7 @@ fn procfs_exposes_linux_like_identity_and_system_files() {
 
     let cpuinfo = read_utf8(&mut kernel, "/proc/cpuinfo");
     assert!(cpuinfo.contains("processor\t: 0"));
-    assert!(cpuinfo.contains("model name\t: secure-exec Virtual CPU"));
+    assert!(cpuinfo.contains("model name\t: agentos Virtual CPU"));
 
     let meminfo = read_utf8(&mut kernel, "/proc/meminfo");
     assert!(meminfo.contains("MemTotal:  262144 kB"));

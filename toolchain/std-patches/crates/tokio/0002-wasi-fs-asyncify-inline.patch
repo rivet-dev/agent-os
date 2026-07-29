@@ -1,0 +1,20 @@
+--- a/src/fs/mod.rs
++++ b/src/fs/mod.rs
+@@ -309,7 +309,17 @@
+ #[cfg(test)]
+ use mocks::spawn_blocking;
+ 
++#[cfg(target_os = "wasi")]
++pub(crate) async fn asyncify<F, T>(f: F) -> io::Result<T>
++where
++    F: FnOnce() -> io::Result<T> + Send + 'static,
++    T: Send + 'static,
++{
++    f()
++}
++
++#[cfg(not(target_os = "wasi"))]
+ pub(crate) async fn asyncify<F, T>(f: F) -> io::Result<T>
+ where
+     F: FnOnce() -> io::Result<T> + Send + 'static,
+     T: Send + 'static,

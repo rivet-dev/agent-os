@@ -4,10 +4,11 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as posixPath from "node:path/posix";
 import { fileURLToPath } from "node:url";
-import {
-	type CreateVmConfig,
-	type RootFilesystemEntry as VmConfigRootFilesystemEntry,
+import type {
+	CreateVmConfig,
+	RootFilesystemEntry as VmConfigRootFilesystemEntry,
 } from "@rivet-dev/agentos-runtime-core/vm-config";
+import type { NodeModulesMountConfig } from "./host-dir-mount.js";
 import { resolvePublishedSidecarBinary } from "./sidecar/binary.js";
 import { findCargoBinary, resolveCargoBinary } from "./sidecar/cargo.js";
 import { serializePermissionsForSidecar } from "./sidecar/permissions.js";
@@ -16,12 +17,11 @@ import {
 	type CreatedVm,
 	type LocalCompatMount,
 	NativeSidecarKernelProxy,
-	SidecarProcess,
 	type RootFilesystemEntry,
 	type SidecarMountDescriptor,
+	SidecarProcess,
 	serializeMountConfigForSidecar,
 } from "./sidecar/rpc-client.js";
-import type { NodeModulesMountConfig } from "./host-dir-mount.js";
 
 export const AF_INET = 2;
 export const AF_UNIX = 1;
@@ -1474,9 +1474,16 @@ function createBootstrapEntries(): RootFilesystemEntry[] {
 		...KERNEL_POSIX_BOOTSTRAP_DIRS.map((entryPath) => ({
 			path: entryPath,
 			kind: "directory" as const,
-			mode: entryPath === "/tmp" || entryPath === "/var/tmp" ? 0o1777 : 0o755,
-			uid: 0,
-			gid: 0,
+			mode:
+				entryPath === "/tmp" || entryPath === "/var/tmp"
+					? 0o1777
+					: entryPath === "/home/agentos"
+						? 0o2755
+						: 0o755,
+			uid:
+				entryPath === "/home/agentos" || entryPath === "/workspace" ? 1000 : 0,
+			gid:
+				entryPath === "/home/agentos" || entryPath === "/workspace" ? 1000 : 0,
 			executable: false,
 		})),
 		{
@@ -1861,7 +1868,13 @@ async function syncLiveFilesystemToBoundMethods(
 		if (!(await live.exists(targetPath).catch(() => false))) {
 			continue;
 		}
-		await snapshotLiveFilesystemPath(live, targetPath, snapshot, usage, maxBytes);
+		await snapshotLiveFilesystemPath(
+			live,
+			targetPath,
+			snapshot,
+			usage,
+			maxBytes,
+		);
 	}
 	if (usage.bytes >= maxBytes * 0.8) {
 		process.emitWarning(
@@ -1885,9 +1898,15 @@ async function snapshotLiveFilesystemPath(
 ): Promise<void> {
 	const stat =
 		knownEntry ??
-		(targetPath === "/" ? await live.stat(targetPath) : await live.lstat(targetPath));
+		(targetPath === "/"
+			? await live.stat(targetPath)
+			: await live.lstat(targetPath));
 	if (stat.isSymbolicLink) {
-		snapshot.push({ kind: "symlink", path: targetPath, target: await live.readlink(targetPath) });
+		snapshot.push({
+			kind: "symlink",
+			path: targetPath,
+			target: await live.readlink(targetPath),
+		});
 		return;
 	}
 	if (stat.isDirectory) {
@@ -1936,16 +1955,30 @@ async function applyLiveFilesystemSnapshotEntry(
 	entry: LiveFilesystemSnapshotEntry,
 ): Promise<void> {
 	if (entry.kind === "directory") {
-		await callBoundFilesystemMethod(methods, "mkdir", entry.path, { recursive: true });
+		await callBoundFilesystemMethod(methods, "mkdir", entry.path, {
+			recursive: true,
+		});
 		return;
 	}
 	await ensureBoundParentDirectory(methods, entry.path);
 	if (entry.kind === "symlink") {
-		await callBoundFilesystemMethod(methods, "removeFile", entry.path).catch(() => {});
-		await callBoundFilesystemMethod(methods, "symlink", entry.target, entry.path);
+		await callBoundFilesystemMethod(methods, "removeFile", entry.path).catch(
+			() => {},
+		);
+		await callBoundFilesystemMethod(
+			methods,
+			"symlink",
+			entry.target,
+			entry.path,
+		);
 		return;
 	}
-	await callBoundFilesystemMethod(methods, "writeFile", entry.path, entry.content);
+	await callBoundFilesystemMethod(
+		methods,
+		"writeFile",
+		entry.path,
+		entry.content,
+	);
 }
 
 function bindLiveFilesystem(
@@ -1986,7 +2019,12 @@ function bindLiveFilesystem(
 			if (!filesystem) {
 				return;
 			}
-			await syncLiveFilesystemToBoundMethods(filesystem, fallback, paths, maxBytes);
+			await syncLiveFilesystemToBoundMethods(
+				filesystem,
+				fallback,
+				paths,
+				maxBytes,
+			);
 		},
 		restore(): void {
 			for (const [method, delegate] of Object.entries(fallback)) {
@@ -2124,7 +2162,7 @@ class NativeKernel implements Kernel {
 		}
 		const sidecarMounts = commandDirs.map((commandDir, index) =>
 			serializeMountConfigForSidecar({
-				path: `/__secure_exec/commands/${index}`,
+				path: `/__agentos/commands/${index}`,
 				readOnly: true,
 				plugin: {
 					id: "host_dir",

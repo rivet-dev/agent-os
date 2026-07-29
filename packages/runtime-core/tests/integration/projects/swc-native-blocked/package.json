@@ -1,0 +1,9 @@
+{
+  "name": "swc-native-blocked",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@swc/core": "1.15.46"
+  }
+}

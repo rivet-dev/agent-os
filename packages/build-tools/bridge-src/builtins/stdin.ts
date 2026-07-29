@@ -1,5 +1,5 @@
 import { once } from "./events.js";
-import { exposeMutableRuntimeStateGlobal } from "../global-exposure.js";
+import { exposeCustomGlobal, exposeMutableRuntimeStateGlobal } from "../global-exposure.js";
 import { TextDecoder } from "../polyfills/index.js";
 import { import_buffer2 } from "./buffer-runtime.js";
 import { _getStdinIsTTY, isProcessExitError, routeAsyncCallbackError, scheduleAsyncRethrow } from "./process.js";
@@ -137,6 +137,13 @@ function syncLiveStdinHandle(active) {
     _stdinLiveHandleRegistered = false;
   }
 }
+
+function configureLiveStdin(active, eager = false) {
+  globalThis.__runtimeStreamStdin = !!active;
+  syncLiveStdinHandle(!!active && !!eager && !getStdinEnded());
+}
+
+exposeCustomGlobal("__runtimeConfigureStreamStdin", configureLiveStdin);
 
 function flushLiveStdinBuffer() {
   if (!getStdinFlowMode() || _stdinLiveBuffer.length === 0) return;
@@ -440,4 +447,4 @@ var _stdin = {
     };
   }
 };
-export { STDIN_HANDLE_ID, _emitStdinData, _getKernelStdin, _getStreamStdin, _stdin, _stdinListeners, _stdinLiveBuffer, _stdinLiveDecoder, _stdinLiveHandleRegistered, _stdinLiveStarted, _stdinLiveTerminalEventsEmitted, _stdinLiveTerminalEventsScheduled, _stdinOnceListeners, emitStdinListeners, ensureLiveStdinStarted, finishLiveStdin, flushLiveStdinBuffer, getStdinData, getStdinEnded, getStdinFlowMode, getStdinPosition, maybeEmitLiveStdinTerminalEvents, resetLiveStdinState, setStdinDataValue, setStdinEnded, setStdinFlowMode, setStdinPosition, stdinDispatch, syncLiveStdinHandle };
+export { STDIN_HANDLE_ID, _emitStdinData, _getKernelStdin, _getStreamStdin, _stdin, _stdinListeners, _stdinLiveBuffer, _stdinLiveDecoder, _stdinLiveHandleRegistered, _stdinLiveStarted, _stdinLiveTerminalEventsEmitted, _stdinLiveTerminalEventsScheduled, _stdinOnceListeners, configureLiveStdin, emitStdinListeners, ensureLiveStdinStarted, finishLiveStdin, flushLiveStdinBuffer, getStdinData, getStdinEnded, getStdinFlowMode, getStdinPosition, maybeEmitLiveStdinTerminalEvents, resetLiveStdinState, setStdinDataValue, setStdinEnded, setStdinFlowMode, setStdinPosition, stdinDispatch, syncLiveStdinHandle };

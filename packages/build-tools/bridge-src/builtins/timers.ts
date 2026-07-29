@@ -192,7 +192,7 @@ var builtinAsyncHooksModule = {
     }
   },
   AsyncResource: class {
-    constructor(type = "SecureExecAsyncResource") {
+    constructor(type = "AgentOsAsyncResource") {
       this.type = type;
       this._asyncLocalStorageSnapshot = snapshotAsyncLocalStorageStores();
     }

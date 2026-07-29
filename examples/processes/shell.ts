@@ -6,7 +6,7 @@ const agent = client.vm.getOrCreate("my-agent");
 const conn = agent.connect();
 
 // Spawn an interactive shell process
-const { pid } = await agent.spawn("sh", []);
+const { pid } = await agent.process.spawn("sh", []);
 
 // Stream this process's output as it is produced
 conn.on("processOutput", (data) => {
@@ -16,8 +16,8 @@ conn.on("processOutput", (data) => {
 });
 
 // Drive it by writing commands to stdin
-await agent.writeProcessStdin(pid, "ls -la /home/agentos\n");
+await agent.process.writeStdin(pid, "ls -la /home/agentos\n");
 
 // Close stdin to let the shell exit, then wait for it
-await agent.closeProcessStdin(pid);
-await agent.waitProcess(pid);
+await agent.process.closeStdin(pid);
+await agent.process.wait(pid);

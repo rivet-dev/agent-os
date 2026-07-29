@@ -17,14 +17,22 @@ import { installSafeIntlFormatters } from "./misc-stubs.js";
 import { _stdin, _stdinListeners, _stdinOnceListeners, resetLiveStdinState, setStdinDataValue, setStdinEnded, setStdinFlowMode, setStdinPosition, stdinDispatch, syncLiveStdinHandle } from "./stdin.js";
 import { _nextTickQueue, _queueMicrotask, clearImmediate, clearInterval, clearTimeout2, runWithAsyncLocalStorageSnapshot, scheduleNextTickFlush, setImmediate, setInterval, setTimeout2, snapshotAsyncLocalStorageStores, wrapAsyncLocalStorageCallback } from "./timers.js";
 import { _resolveRuntimeTtyConfig } from "./tty-config.js";
+import { loadWebSocketModule } from "../prelude.js";
 
 function readProcessConfig() {
+  const env = typeof _processConfig !== "undefined" && _processConfig.env || {};
+  let execArgv = [];
+  try {
+    const parsed = JSON.parse(env.AGENTOS_NODE_EXEC_ARGV || "[]");
+    if (Array.isArray(parsed)) execArgv = parsed.map(String);
+  } catch {}
   return {
     platform: typeof _processConfig !== "undefined" && _processConfig.platform || "linux",
     arch: typeof _processConfig !== "undefined" && _processConfig.arch || "x64",
     version: typeof _processConfig !== "undefined" && _processConfig.version || "v22.0.0",
     cwd: typeof _processConfig !== "undefined" && _processConfig.cwd || "/root",
-    env: typeof _processConfig !== "undefined" && _processConfig.env || {},
+    env,
+    execArgv,
     argv: typeof _processConfig !== "undefined" && _processConfig.argv || [
       "node",
       "script.js"
@@ -49,8 +57,8 @@ var config2 = readProcessConfig();
 var processClockFallbackNow = typeof performance !== "undefined" && performance && typeof performance.now === "function" ? performance.now.bind(performance) : Date.now;
 
 var processClockNow = () => {
-  if (typeof __secureExecHrNowUs === "function") {
-    return __secureExecHrNowUs() / 1000;
+  if (typeof __agentOsHrNowUs === "function") {
+    return __agentOsHrNowUs() / 1000;
   }
   return processClockFallbackNow();
 };
@@ -67,6 +75,8 @@ var _processStartTime = getNowMs();
 var _exitCode = void 0;
 
 var _exited = false;
+
+var _sourceMapsEnabled = false;
 
 var ProcessExitError = class extends Error {
   code;
@@ -175,8 +185,62 @@ var _processMaxListeners = 10;
 
 var _processMaxListenersWarned = /* @__PURE__ */ new Set();
 
+var _processIpcQueuedMessages = [];
+
+var _processIpcQueuedBytes = 0;
+
+var _processIpcFlushScheduled = false;
+
+var MAX_PROCESS_IPC_QUEUED_MESSAGES = 1024;
+
+var MAX_PROCESS_IPC_QUEUED_BYTES = 8 * 1024 * 1024;
+
 function _listenerCountForEvent(event) {
   return (_processListeners[event] || []).length + (_processOnceListeners[event] || []).length;
+}
+
+function _syncProcessIpcHandleLiveness() {
+  if (!process2._agentOSIpcInstalled || typeof _registerHandle !== "function" || typeof _unregisterHandle !== "function") {
+    return;
+  }
+  const shouldRef = process2.connected && (_listenerCountForEvent("message") > 0 || _listenerCountForEvent("disconnect") > 0);
+  if (shouldRef && !process2._agentOSIpcHandleId) {
+    process2._agentOSIpcHandleId = `process-ipc:${process2.pid}`;
+    _registerHandle(process2._agentOSIpcHandleId, "child_process IPC channel");
+  } else if (!shouldRef && process2._agentOSIpcHandleId) {
+    _unregisterHandle(process2._agentOSIpcHandleId);
+    process2._agentOSIpcHandleId = null;
+  }
+}
+
+function _scheduleProcessIpcMessageFlush() {
+  if (_processIpcFlushScheduled || _processIpcQueuedMessages.length === 0 || _listenerCountForEvent("message") === 0) {
+    return;
+  }
+  _processIpcFlushScheduled = true;
+  queueMicrotask(() => {
+    _processIpcFlushScheduled = false;
+    while (_processIpcQueuedMessages.length > 0 && _listenerCountForEvent("message") > 0) {
+      const queued = _processIpcQueuedMessages.shift();
+      _processIpcQueuedBytes -= queued.bytes;
+      _emit("message", queued.message, void 0);
+    }
+  });
+}
+
+function _emitOrQueueProcessIpcMessage(message) {
+  if (_listenerCountForEvent("message") > 0) {
+    _emit("message", message, void 0);
+    return;
+  }
+  const bytes = JSON.stringify(message).length;
+  if (_processIpcQueuedMessages.length >= MAX_PROCESS_IPC_QUEUED_MESSAGES || _processIpcQueuedBytes + bytes > MAX_PROCESS_IPC_QUEUED_BYTES) {
+    const error = new Error(`ERR_RESOURCE_BUDGET_EXCEEDED: pre-listener child_process IPC queue exceeds ${MAX_PROCESS_IPC_QUEUED_MESSAGES} messages or ${MAX_PROCESS_IPC_QUEUED_BYTES} bytes; install a process message listener before sending more IPC data`);
+    error.code = "ERR_RESOURCE_BUDGET_EXCEEDED";
+    throw error;
+  }
+  _processIpcQueuedMessages.push({ message, bytes });
+  _processIpcQueuedBytes += bytes;
 }
 
 function _syncGuestProcessSignalState(eventName) {
@@ -244,6 +308,12 @@ function _addListener(event, listener, once = false) {
     }
   }
   _syncGuestProcessSignalState(event);
+  if (event === "message" || event === "disconnect") {
+    _syncProcessIpcHandleLiveness();
+  }
+  if (event === "message") {
+    _scheduleProcessIpcMessageFlush();
+  }
   return process2;
 }
 
@@ -257,6 +327,9 @@ function _removeListener(event, listener) {
     if (idx !== -1) _processOnceListeners[event].splice(idx, 1);
   }
   _syncGuestProcessSignalState(event);
+      if (event === "message" || event === "disconnect") {
+        _syncProcessIpcHandleLiveness();
+      }
   return process2;
 }
 
@@ -275,6 +348,9 @@ function _emit(event, ...args) {
       listener.call(process2, ...args);
       handled = true;
     }
+  }
+  if (event === "message" || event === "disconnect") {
+      _syncProcessIpcHandleLiveness();
   }
   return handled;
 }
@@ -493,7 +569,7 @@ var process2 = {
   pid: config2.pid,
   ppid: config2.ppid,
   execPath: config2.execPath,
-  execArgv: [],
+  execArgv: config2.execArgv,
   argv: config2.argv,
   argv0: config2.argv0,
   title: "node",
@@ -688,12 +764,16 @@ var process2 = {
       delete _processListeners[event];
       delete _processOnceListeners[event];
       _syncGuestProcessSignalState(event);
+      if (event === "message" || event === "disconnect") {
+        _syncProcessIpcHandleLiveness();
+      }
     } else {
       Object.keys(_processListeners).forEach((k) => delete _processListeners[k]);
       Object.keys(_processOnceListeners).forEach(
         (k) => delete _processOnceListeners[k]
       );
       _syncAllGuestProcessSignalStates();
+      _syncProcessIpcHandleLiveness();
     }
     return process2;
   },
@@ -789,13 +869,20 @@ var process2 = {
   },
   setUncaughtExceptionCaptureCallback() {
   },
+  get sourceMapsEnabled() {
+    return _sourceMapsEnabled;
+  },
+  setSourceMapsEnabled(value) {
+    _sourceMapsEnabled = Boolean(value);
+  },
   send(message, sendHandleOrOptions, optionsOrCallback, maybeCallback) {
     const callback = typeof sendHandleOrOptions === "function" ? sendHandleOrOptions : typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback;
     if (!process2.connected) {
       return false;
     }
     try {
-      process2.stdout.write(encodeChildProcessIpcFrame(message));
+      const frame = encodeChildProcessIpcFrame(message);
+      process2.stdout.write(frame);
       if (callback) {
         queueMicrotask(() => callback(null));
       }
@@ -849,18 +936,19 @@ function installProcessIpcBridge() {
   }
   process2._agentOSIpcInstalled = true;
   process2.connected = true;
-  if (!process2._agentOSIpcHandleId && typeof _registerHandle === "function") {
-    process2._agentOSIpcHandleId = `process-ipc:${process2.pid}`;
-    _registerHandle(process2._agentOSIpcHandleId, "child_process IPC channel");
-  }
+  _syncProcessIpcHandleLiveness();
   let ipcInputBuffer = "";
   process2.stdin.on("data", (chunk) => {
     const parsed = splitChildProcessIpcFrames(ipcInputBuffer, chunk);
     ipcInputBuffer = parsed.buffer;
     for (const message of parsed.messages) {
-      _emit("message", message, void 0);
+      _emitOrQueueProcessIpcMessage(message);
     }
   });
+  process2.stdout.write(encodeChildProcessIpcFrame({
+    __agentOSControl: "ipc-ready",
+    version: 1
+  }));
 }
 
 function applyProcessConfig(nextConfig) {
@@ -876,6 +964,9 @@ function applyProcessConfig(nextConfig) {
   setStdinPosition(0);
   setStdinEnded(false);
   setStdinFlowMode(false);
+  _processIpcQueuedMessages = [];
+  _processIpcQueuedBytes = 0;
+  _processIpcFlushScheduled = false;
   config2 = nextConfig;
   _cwd = nextConfig.cwd;
   process2.platform = nextConfig.platform;
@@ -884,10 +975,12 @@ function applyProcessConfig(nextConfig) {
   process2.pid = nextConfig.pid;
   process2.ppid = nextConfig.ppid;
   process2.execPath = nextConfig.execPath;
+  process2.execArgv = nextConfig.execArgv;
   process2.argv = nextConfig.argv;
   process2.argv0 = nextConfig.argv0;
   process2.env = nextConfig.env;
   process2.connected = nextConfig.env?.AGENTOS_NODE_IPC === "1";
+  process2.mainModule = void 0;
   process2._cwd = nextConfig.cwd;
   process2.stdin.paused = true;
   process2.stdin.encoding = null;
@@ -918,32 +1011,107 @@ Object.defineProperty(process2, Symbol.toStringTag, {
 
 var process_default = process2;
 
-function encodeFilePathSegment(value) {
-  return encodeURIComponent(String(value)).replace(/%2F/g, "/");
-}
+class NodeGlobalWebSocket {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
 
-function pathToFileURL2(filePath) {
-  const normalized = builtinPathStdlibModule.posix.resolve(String(filePath || "/"));
-  const pathname = encodeFilePathSegment(normalized);
-  return new URL2(`file://${pathname.startsWith("/") ? pathname : `/${pathname}`}`);
-}
+  constructor(url, protocols) {
+    this.url = String(url);
+    this.protocol = "";
+    this.extensions = "";
+    this.onopen = null;
+    this.onmessage = null;
+    this.onerror = null;
+    this.onclose = null;
+    this._binaryType = "blob";
+    this._listeners = new Map();
+    const WebSocketConstructor = loadWebSocketModule().WebSocket;
+    this._socket = protocols === undefined
+      ? new WebSocketConstructor(url)
+      : new WebSocketConstructor(url, protocols);
+    this._socket.on("open", () => {
+      this.protocol = this._socket.protocol || "";
+      this.extensions = this._socket.extensions || "";
+      this._dispatch("open");
+    });
+    this._socket.on("message", (data, isBinary) => {
+      let value;
+      if (!isBinary) {
+        value = data.toString();
+      } else if (this._binaryType === "arraybuffer") {
+        value = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+      } else {
+        value = new Blob([data]);
+      }
+      this._dispatch("message", { data: value });
+    });
+    this._socket.on("error", (error) => {
+      this._dispatch("error", { error, message: error?.message || "WebSocket error" });
+    });
+    this._socket.on("close", (code, reason) => {
+      this._dispatch("close", {
+        code: Number(code),
+        reason: reason?.toString?.() || "",
+        wasClean: Number(code) === 1000,
+      });
+    });
+  }
 
-function fileURLToPath2(input) {
-  const href = input instanceof URL2 ? input.href : String(input ?? "");
-  if (!href.startsWith("file:")) {
-    throw new TypeError("The URL must be of scheme file");
+  _dispatch(type, properties = {}) {
+    const event = new Event(type);
+    for (const [name, value] of Object.entries(properties)) {
+      Object.defineProperty(event, name, { configurable: true, enumerable: true, value });
+    }
+    for (const entry of [...(this._listeners.get(type) || [])]) {
+      const listener = entry.listener;
+      if (typeof listener === "function") listener.call(this, event);
+      else listener?.handleEvent?.(event);
+      if (entry.once) this.removeEventListener(type, listener);
+    }
+    const handler = this[`on${type}`];
+    if (typeof handler === "function") handler.call(this, event);
   }
-  let pathname = href.slice("file:".length);
-  if (pathname.startsWith("//")) {
-    const authorityMatch = /^\/\/[^/]*(.*)$/.exec(pathname);
-    pathname = authorityMatch?.[1] || "/";
+
+  addEventListener(type, listener, options = {}) {
+    if (listener == null) return;
+    const listeners = this._listeners.get(type) || [];
+    if (!listeners.some(entry => entry.listener === listener)) {
+      listeners.push({ listener, once: options === true || options?.once === true });
+      this._listeners.set(type, listeners);
+    }
   }
-  pathname = pathname.split(/[?#]/, 1)[0] || "/";
-  pathname = decodeURIComponent(pathname);
-  if (!pathname.startsWith("/")) {
-    pathname = `/${pathname}`;
+
+  removeEventListener(type, listener) {
+    const listeners = this._listeners.get(type);
+    if (!listeners) return;
+    this._listeners.set(type, listeners.filter(entry => entry.listener !== listener));
   }
-  return pathname;
+
+  send(data) {
+    this._socket.send(data);
+  }
+
+  close(code, reason) {
+    this._socket.close(code, reason);
+  }
+
+  get binaryType() {
+    return this._binaryType;
+  }
+
+  set binaryType(value) {
+    if (value === "blob" || value === "arraybuffer") this._binaryType = value;
+  }
+
+  get bufferedAmount() {
+    return this._socket.bufferedAmount || 0;
+  }
+
+  get readyState() {
+    return this._socket.readyState;
+  }
 }
 
 function setupGlobals() {
@@ -986,7 +1154,7 @@ function setupGlobals() {
   if (typeof globalBuffer.constants !== "object" || globalBuffer.constants === null) {
     globalBuffer.constants = BUFFER_CONSTANTS;
   }
-  const builtinUtilModule = globalThis.__secureExecBuiltinUtilModule;
+  const builtinUtilModule = globalThis.__agentOsBuiltinUtilModule;
   if (builtinUtilModule?.types) {
     builtinUtilModule.types.isProxy = () => false;
   }
@@ -1044,6 +1212,9 @@ function setupGlobals() {
   g.Headers = UndiciHeaders;
   g.Request = UndiciRequest;
   g.Response = UndiciResponse;
+  if (typeof g.WebSocket === "undefined") {
+    g.WebSocket = NodeGlobalWebSocket;
+  }
   installSafeIntlFormatters(g);
 }
-export { ProcessExitError, _addListener, _createProcessKillError, _cwd, _deliverProcessSignal, _emit, _exitCode, _exited, _getStdinIsTTY, _ignoredSelfSignals, _isTrackedProcessSignalEventName, _listenerCountForEvent, _processKillErrnoByCode, _processListeners, _processMaxListeners, _processMaxListenersWarned, _processOnceListeners, _processStartTime, _processVersionsCache, _removeListener, _resolveSignal, _signalNamesByNumber, _signalNumbers, _syncAllGuestProcessSignalStates, _syncGuestProcessSignalState, _trackedProcessSignalEvents, _umask, applyProcessConfig, config2, defaultProcessMemoryUsage, defaultProcessResourceUsage, dispatchCustomEmitterListeners, encodeFilePathSegment, fileURLToPath2, getNowMs, hrtime, installProcessIpcBridge, isProcessExitError, normalizeAsyncError, pathToFileURL2, process2, processClockNow, process_default, readLiveProcessCpuUsage, readLiveProcessMemoryUsage, readLiveProcessResourceUsage, readLiveProcessVersions, readProcessConfig, routeAsyncCallbackError, scheduleAsyncRethrow, setupGlobals, signalDispatch };
+export { ProcessExitError, _addListener, _createProcessKillError, _cwd, _deliverProcessSignal, _emit, _exitCode, _exited, _getStdinIsTTY, _ignoredSelfSignals, _isTrackedProcessSignalEventName, _listenerCountForEvent, _processKillErrnoByCode, _processListeners, _processMaxListeners, _processMaxListenersWarned, _processOnceListeners, _processStartTime, _processVersionsCache, _removeListener, _resolveSignal, _signalNamesByNumber, _signalNumbers, _syncAllGuestProcessSignalStates, _syncGuestProcessSignalState, _trackedProcessSignalEvents, _umask, applyProcessConfig, config2, defaultProcessMemoryUsage, defaultProcessResourceUsage, dispatchCustomEmitterListeners, getNowMs, hrtime, installProcessIpcBridge, isProcessExitError, normalizeAsyncError, process2, processClockNow, process_default, readLiveProcessCpuUsage, readLiveProcessMemoryUsage, readLiveProcessResourceUsage, readLiveProcessVersions, readProcessConfig, routeAsyncCallbackError, scheduleAsyncRethrow, setupGlobals, signalDispatch };

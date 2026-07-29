@@ -2,7 +2,7 @@
  * Type-checking example for `@rivet-dev/agentos`.
  *
  * This file exercises the public actor package surface. It is not meant to
- * run: the actor delegates VM operations to the AgentOS core SDK and sidecar.
+ * run: the actor delegates VM operations to the AgentOS runtime and sidecar.
  */
 
 import pi from "@agentos-software/pi";
@@ -98,18 +98,18 @@ async function main(): Promise<void> {
 	void createdHandle.createPreviewUrl;
 
 	const sessionId = "session-1";
-	await handle.openSession({
+	await handle.sessions.open({
 		sessionId,
 		agent: "pi",
 		cwd: "/work",
 		permissionPolicy: "ask",
 	});
-	const session = await handle.getSession({ sessionId });
-	await handle.prompt({
+	const session = await handle.sessions.get({ sessionId });
+	await handle.sessions.prompt({
 		sessionId: "session-1",
 		content: [{ type: "text", text: "List the files in /work." }],
 	});
-	await handle.scheduleCron(cron);
+	await handle.cron.schedule(cron);
 	await handle.createPreviewUrl(3000, 300);
 
 	acceptEvent("sessionEvent", {

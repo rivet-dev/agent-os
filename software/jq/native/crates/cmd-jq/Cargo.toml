@@ -4,11 +4,11 @@ name = "cmd-jq"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "jq standalone binary for secure-exec VM"
+description = "jq standalone binary for agentos VM"
 
 [[bin]]
 name = "jq"
 path = "src/main.rs"
 
 [dependencies]
-secureexec-jq = { path = "../jq" }
+agentos-jq = { path = "../jq" }

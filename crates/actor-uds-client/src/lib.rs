@@ -36,18 +36,16 @@ pub enum ActorUdsError {
     Io(#[from] io::Error),
     #[error("actor SQLite UDS protocol failed: {0}")]
     Protocol(String),
-    #[error("actor SQLite UDS authentication failed")]
-    Unauthorized,
-    #[error("actor SQLite UDS version mismatch (server {min_version}..={max_version}, client {PROTOCOL_VERSION})")]
-    VersionMismatch { min_version: u16, max_version: u16 },
+    #[error("actor SQLite UDS protocol version is unsupported")]
+    VersionMismatch,
     #[error("actor SQLite UDS endpoint closed")]
     EndpointClosed,
     #[error("actor SQLite UDS queue limit {limit} reached (capacity {capacity})")]
     QueueFull { limit: String, capacity: u32 },
-    #[error("actor SQLite UDS request left a transaction open without a lease")]
-    TransactionOpen,
-    #[error("actor SQLite UDS transaction lease expired")]
-    LeaseExpired,
+    #[error("actor SQLite UDS transaction lease is invalid: {message}")]
+    InvalidLeaseKey { message: String },
+    #[error("actor SQLite UDS transaction lease expired after {timeout_ms}ms: {message}")]
+    LeaseExpired { timeout_ms: u64, message: String },
     #[error("actor SQLite UDS response exceeded the negotiated frame limit")]
     ResponseTooLarge,
     #[error("actor SQLite error {code} at statement {statement_index}: {message}")]
@@ -78,7 +76,6 @@ pub struct ActorUdsClient {
 
 struct Inner {
     path: PathBuf,
-    token: String,
     request_timeout: Duration,
     next_request_id: AtomicU32,
     connection: Mutex<Option<Connection>>,
@@ -90,19 +87,14 @@ struct Connection {
 }
 
 impl ActorUdsClient {
-    pub fn new(path: impl Into<PathBuf>, token: impl Into<String>) -> Self {
-        Self::with_request_timeout(path, token, DEFAULT_REQUEST_TIMEOUT)
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self::with_request_timeout(path, DEFAULT_REQUEST_TIMEOUT)
     }
 
-    pub fn with_request_timeout(
-        path: impl Into<PathBuf>,
-        token: impl Into<String>,
-        request_timeout: Duration,
-    ) -> Self {
+    pub fn with_request_timeout(path: impl Into<PathBuf>, request_timeout: Duration) -> Self {
         Self {
             inner: Arc::new(Inner {
                 path: path.into(),
-                token: token.into(),
                 request_timeout,
                 next_request_id: AtomicU32::new(1),
                 connection: Mutex::new(None),
@@ -159,6 +151,56 @@ impl ActorUdsClient {
         }
     }
 
+    pub async fn begin(
+        &self,
+        lease_key: impl Into<String>,
+        timeout_ms: Option<u64>,
+    ) -> Result<(), ActorUdsError> {
+        match self
+            .request(
+                wire::RequestPayload::SqliteBegin(wire::SqliteBegin {
+                    lease_key: lease_key.into(),
+                    timeout_ms,
+                }),
+                None,
+            )
+            .await?
+        {
+            wire::ResponsePayload::SqliteBeginOk => Ok(()),
+            other => Err(unexpected_response("begin", &other)),
+        }
+    }
+
+    pub async fn commit(&self, lease_key: impl Into<String>) -> Result<(), ActorUdsError> {
+        match self
+            .request(
+                wire::RequestPayload::SqliteCommit(wire::SqliteCommit {
+                    lease_key: lease_key.into(),
+                }),
+                None,
+            )
+            .await?
+        {
+            wire::ResponsePayload::SqliteCommitOk => Ok(()),
+            other => Err(unexpected_response("commit", &other)),
+        }
+    }
+
+    pub async fn rollback(&self, lease_key: impl Into<String>) -> Result<(), ActorUdsError> {
+        match self
+            .request(
+                wire::RequestPayload::SqliteRollback(wire::SqliteRollback {
+                    lease_key: lease_key.into(),
+                }),
+                None,
+            )
+            .await?
+        {
+            wire::ResponsePayload::SqliteRollbackOk => Ok(()),
+            other => Err(unexpected_response("rollback", &other)),
+        }
+    }
+
     async fn request(
         &self,
         payload: wire::RequestPayload,
@@ -186,7 +228,7 @@ impl ActorUdsClient {
     ) -> Result<wire::ResponsePayload, ActorUdsError> {
         let mut slot = self.inner.connection.lock().await;
         if slot.is_none() {
-            *slot = Some(connect(&self.inner.path, &self.inner.token).await?);
+            *slot = Some(connect(&self.inner.path).await?);
         }
         let connection = slot.as_mut().expect("connection initialized");
         let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
@@ -242,18 +284,16 @@ impl ActorUdsClient {
     }
 }
 
-async fn connect(path: &Path, token_value: &str) -> Result<Connection, ActorUdsError> {
+async fn connect(path: &Path) -> Result<Connection, ActorUdsError> {
     let mut stream = timeout(DEFAULT_CONNECT_TIMEOUT, UnixStream::connect(path))
         .await
         .map_err(|_| ActorUdsError::Timeout {
             operation: "connect",
             timeout_ms: DEFAULT_CONNECT_TIMEOUT.as_millis() as u64,
         })??;
-    let hello = versioned::ClientHello::wrap_latest(wire::ClientHello {
-        token: token_value.to_owned(),
-    })
-    .serialize_with_embedded_version(PROTOCOL_VERSION)
-    .map_err(|error| ActorUdsError::Protocol(error.to_string()))?;
+    let hello = versioned::ClientHello::wrap_latest(())
+        .serialize_with_embedded_version(PROTOCOL_VERSION)
+        .map_err(|error| ActorUdsError::Protocol(error.to_string()))?;
     write_frame(&mut stream, &hello).await?;
     let response = read_frame(&mut stream, MAX_FRAME_BYTES).await?;
     match versioned::ServerHello::deserialize_with_embedded_version(&response)
@@ -263,13 +303,7 @@ async fn connect(path: &Path, token_value: &str) -> Result<Connection, ActorUdsE
             stream,
             max_frame_bytes: ok.max_frame_bytes.min(MAX_FRAME_BYTES),
         }),
-        wire::ServerHello::HelloRejectUnauthorized => Err(ActorUdsError::Unauthorized),
-        wire::ServerHello::HelloRejectUnsupportedVersion(version) => {
-            Err(ActorUdsError::VersionMismatch {
-                min_version: version.min_version,
-                max_version: version.max_version,
-            })
-        }
+        wire::ServerHello::HelloRejectUnsupportedVersion => Err(ActorUdsError::VersionMismatch),
     }
 }
 
@@ -309,8 +343,13 @@ fn map_response(payload: wire::ResponsePayload) -> Result<wire::ResponsePayload,
             limit: error.limit,
             capacity: error.capacity,
         }),
-        wire::ResponsePayload::TxnOpenAtEnd => Err(ActorUdsError::TransactionOpen),
-        wire::ResponsePayload::LeaseExpired => Err(ActorUdsError::LeaseExpired),
+        wire::ResponsePayload::InvalidLeaseKey(error) => Err(ActorUdsError::InvalidLeaseKey {
+            message: error.message,
+        }),
+        wire::ResponsePayload::LeaseExpired(error) => Err(ActorUdsError::LeaseExpired {
+            timeout_ms: error.timeout_ms,
+            message: error.message,
+        }),
         wire::ResponsePayload::ResponseTooLarge => Err(ActorUdsError::ResponseTooLarge),
         response => Ok(response),
     }

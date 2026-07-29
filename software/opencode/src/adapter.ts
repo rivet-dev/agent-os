@@ -1,8 +1,15 @@
 #!/usr/bin/env node
 import { writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { installOpenCodeNodeCompatibility } from "./node-compat.js";
 
 process.env.OPENCODE_DISABLE_CONFIG_DEP_INSTALL ??= "1";
 process.env.OPENCODE_DISABLE_EMBEDDED_WEB_UI ??= "1";
+process.env.OPENCODE_DISABLE_MODELS_FETCH ??= "1";
+process.env.OPENCODE_MODELS_PATH ??= fileURLToPath(
+	new URL("./opencode-acp/models.json", import.meta.url),
+);
+installOpenCodeNodeCompatibility();
 
 const agentOsPrompt = process.env.ACP_APPEND_SYSTEM_PROMPT;
 if (agentOsPrompt && !process.env.OPENCODE_CONTEXTPATHS) {

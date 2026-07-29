@@ -58,13 +58,13 @@ test("allows agentos-sidecar generated wire imports", () => {
 			root,
 			"crates/agentos-sidecar/src/acp_extension.rs",
 			[
-				"use secure_exec_sidecar::wire::{",
+				"use agentos_sidecar::wire::{",
 				"\tCloseStdinRequest, EventPayload, ExecuteRequest, GuestFilesystemCallRequest,",
 				"\tGuestFilesystemOperation, GuestRuntimeKind, KillProcessRequest, StreamChannel,",
 				"\tWriteStdinRequest,",
 				"};",
 				"",
-				"fn accepts(events: &[secure_exec_sidecar::wire::EventFrame]) {",
+				"fn accepts(events: &[agentos_sidecar::wire::EventFrame]) {",
 				"\tlet _ = events;",
 				"}",
 				"",
@@ -82,13 +82,13 @@ test("rejects agentos-sidecar primitive protocol imports", () => {
 			root,
 			"crates/agentos-sidecar/src/acp_extension.rs",
 			[
-				"use secure_exec_sidecar::protocol::{",
+				"use agentos_sidecar::protocol::{",
 				"\tCloseStdinRequest, EventPayload, ExecuteRequest, GuestFilesystemCallRequest,",
 				"\tGuestFilesystemOperation, GuestRuntimeKind, KillProcessRequest, StreamChannel,",
 				"\tWriteStdinRequest,",
 				"};",
 				"",
-				"fn accepts(events: &[secure_exec_sidecar::protocol::EventFrame]) {",
+				"fn accepts(events: &[agentos_sidecar::protocol::EventFrame]) {",
 				"\tlet _ = events;",
 				"}",
 				"",
@@ -96,8 +96,8 @@ test("rejects agentos-sidecar primitive protocol imports", () => {
 		);
 
 		assert.deepEqual(checkAgentOsClientProtocolCompat({ root }), [
-			"crates/agentos-sidecar/src/acp_extension.rs:1:5 imports the secure-exec sidecar compatibility protocol surface; use secure_exec_sidecar::wire for generated wire types",
-			"crates/agentos-sidecar/src/acp_extension.rs:7:22 imports the secure-exec sidecar compatibility protocol surface; use secure_exec_sidecar::wire for generated wire types",
+			"crates/agentos-sidecar/src/acp_extension.rs:1:5 imports the agentos sidecar compatibility protocol surface; use agentos_sidecar::wire for generated wire types",
+			"crates/agentos-sidecar/src/acp_extension.rs:7:22 imports the agentos sidecar compatibility protocol surface; use agentos_sidecar::wire for generated wire types",
 		]);
 	});
 });
@@ -108,11 +108,11 @@ test("rejects new agentos-client live protocol imports outside the inventory", (
 		write(
 			root,
 			"crates/client/src/new_feature.rs",
-			"use secure_exec_client::protocol::RequestPayload;\n",
+			"use agentos_client::protocol::RequestPayload;\n",
 		);
 
 		assert.deepEqual(checkAgentOsClientProtocolCompat({ root }), [
-			"crates/client/src/new_feature.rs:1:5 imports the live protocol compatibility surface; use secure_exec_client::wire for generated wire types or add this file to the migration inventory with justification",
+			"crates/client/src/new_feature.rs:1:5 imports the live protocol compatibility surface; use agentos_client::wire for generated wire types or add this file to the migration inventory with justification",
 		]);
 	});
 });
@@ -123,11 +123,11 @@ test("rejects agentos-client test protocol imports", () => {
 		write(
 			root,
 			"crates/client/tests/session_e2e.rs",
-			"use secure_exec_client::protocol::RequestPayload;\n",
+			"use agentos_client::protocol::RequestPayload;\n",
 		);
 
 		assert.deepEqual(checkAgentOsClientProtocolCompat({ root }), [
-			"crates/client/tests/session_e2e.rs:1:5 imports the live protocol compatibility surface; use secure_exec_client::wire for generated wire types or add this file to the migration inventory with justification",
+			"crates/client/tests/session_e2e.rs:1:5 imports the live protocol compatibility surface; use agentos_client::wire for generated wire types or add this file to the migration inventory with justification",
 		]);
 	});
 });
@@ -138,11 +138,11 @@ test("rejects production agentos-sidecar dispatch protocol imports", () => {
 		write(
 			root,
 			"crates/agentos-sidecar/src/acp_extension.rs",
-			"use secure_exec_sidecar::protocol::{EventPayload, RequestFrame, SidecarRequestPayload};\n",
+			"use agentos_sidecar::protocol::{EventPayload, RequestFrame, SidecarRequestPayload};\n",
 		);
 
 		assert.deepEqual(checkAgentOsClientProtocolCompat({ root }), [
-			"crates/agentos-sidecar/src/acp_extension.rs:1:5 imports the secure-exec sidecar compatibility protocol surface; use secure_exec_sidecar::wire for generated wire types",
+			"crates/agentos-sidecar/src/acp_extension.rs:1:5 imports the agentos sidecar compatibility protocol surface; use agentos_sidecar::wire for generated wire types",
 		]);
 	});
 });
@@ -153,11 +153,11 @@ test("rejects agentos-sidecar test protocol imports", () => {
 		write(
 			root,
 			"crates/agentos-sidecar/tests/acp_extension.rs",
-			"use secure_exec_sidecar::protocol::EventPayload;\n",
+			"use agentos_sidecar::protocol::EventPayload;\n",
 		);
 
 		assert.deepEqual(checkAgentOsClientProtocolCompat({ root }), [
-			"crates/agentos-sidecar/tests/acp_extension.rs:1:5 imports the secure-exec sidecar compatibility protocol surface; use secure_exec_sidecar::wire for generated wire types",
+			"crates/agentos-sidecar/tests/acp_extension.rs:1:5 imports the agentos sidecar compatibility protocol surface; use agentos_sidecar::wire for generated wire types",
 		]);
 	});
 });
@@ -168,11 +168,11 @@ test("rejects production agentos-sidecar qualified dispatch protocol paths", () 
 		write(
 			root,
 			"crates/agentos-sidecar/src/acp_extension.rs",
-			"fn dispatch() { let _ = secure_exec_sidecar::protocol::RequestFrame::new; }\n",
+			"fn dispatch() { let _ = agentos_sidecar::protocol::RequestFrame::new; }\n",
 		);
 
 		assert.deepEqual(checkAgentOsClientProtocolCompat({ root }), [
-			"crates/agentos-sidecar/src/acp_extension.rs:1:25 imports the secure-exec sidecar compatibility protocol surface; use secure_exec_sidecar::wire for generated wire types",
+			"crates/agentos-sidecar/src/acp_extension.rs:1:25 imports the agentos sidecar compatibility protocol surface; use agentos_sidecar::wire for generated wire types",
 		]);
 	});
 });
@@ -183,11 +183,11 @@ test("rejects error taxonomy regressions to the compatibility protocol surface",
 		write(
 			root,
 			"crates/client/src/error.rs",
-			"use secure_exec_client::protocol::ProtocolCodecError;\n",
+			"use agentos_client::protocol::ProtocolCodecError;\n",
 		);
 
 		assert.deepEqual(checkAgentOsClientProtocolCompat({ root }), [
-			"crates/client/src/error.rs:1:5 imports the live protocol compatibility surface; use secure_exec_client::wire for generated wire types or add this file to the migration inventory with justification",
+			"crates/client/src/error.rs:1:5 imports the live protocol compatibility surface; use agentos_client::wire for generated wire types or add this file to the migration inventory with justification",
 		]);
 	});
 });
@@ -198,11 +198,11 @@ test("rejects docs regressions to naming the compatibility protocol surface", ()
 		write(
 			root,
 			"crates/client/src/lib.rs",
-			"//! The generated schema surface is secure_exec_client::wire, not secure_exec_client::protocol.\n",
+			"//! The generated schema surface is agentos_client::wire, not agentos_client::protocol.\n",
 		);
 
 		assert.deepEqual(checkAgentOsClientProtocolCompat({ root }), [
-			"crates/client/src/lib.rs:1:67 imports the live protocol compatibility surface; use secure_exec_client::wire for generated wire types or add this file to the migration inventory with justification",
+			"crates/client/src/lib.rs:1:63 imports the live protocol compatibility surface; use agentos_client::wire for generated wire types or add this file to the migration inventory with justification",
 		]);
 	});
 });
@@ -213,11 +213,11 @@ test("rejects docs regressions to stale generated-wire migration wording", () =>
 		write(
 			root,
 			"crates/client/src/lib.rs",
-			"//! secure_exec_client::wire; the live transport still uses the compatibility protocol surface while migration continues.\n",
+			"//! agentos_client::wire; the live transport still uses the compatibility protocol surface while migration continues.\n",
 		);
 
 		assert.deepEqual(checkAgentOsClientProtocolCompat({ root }), [
-			"crates/client/src/lib.rs:1:35 documents stale generated-wire migration state; describe secure_exec_client::wire as the active transport surface",
+			"crates/client/src/lib.rs:1:31 documents stale generated-wire migration state; describe agentos_client::wire as the active transport surface",
 		]);
 	});
 });
@@ -228,11 +228,11 @@ test("rejects auth version regressions to the compatibility protocol surface", (
 			root,
 			"crates/client/src/sidecar.rs",
 			[
-				"use secure_exec_client::protocol::{AuthenticateRequest, RequestPayload};",
+				"use agentos_client::protocol::{AuthenticateRequest, RequestPayload};",
 				"",
 				"fn authenticate() {",
 				"\tlet _ = RequestPayload::Authenticate(AuthenticateRequest {",
-				"\t\tprotocol_version: secure_exec_client::protocol::PROTOCOL_VERSION,",
+				"\t\tprotocol_version: agentos_client::protocol::PROTOCOL_VERSION,",
 				"\t});",
 				"}",
 				"",
@@ -240,8 +240,8 @@ test("rejects auth version regressions to the compatibility protocol surface", (
 		);
 
 		assert.deepEqual(checkAgentOsClientProtocolCompat({ root }), [
-			"crates/client/src/sidecar.rs:1:5 imports the live protocol compatibility surface; use secure_exec_client::wire for generated wire types or add this file to the migration inventory with justification",
-			"crates/client/src/sidecar.rs:5:21 imports the live protocol compatibility surface; use secure_exec_client::wire for generated wire types or add this file to the migration inventory with justification",
+			"crates/client/src/sidecar.rs:1:5 imports the live protocol compatibility surface; use agentos_client::wire for generated wire types or add this file to the migration inventory with justification",
+			"crates/client/src/sidecar.rs:5:21 imports the live protocol compatibility surface; use agentos_client::wire for generated wire types or add this file to the migration inventory with justification",
 			"crates/client/src/sidecar.rs must import agentos_sidecar_client::wire",
 			"crates/client/src/sidecar.rs authenticate request must use wire::PROTOCOL_VERSION",
 		]);
@@ -255,14 +255,14 @@ test("rejects default frame limit regressions to the compatibility protocol surf
 			root,
 			"crates/client/src/net.rs",
 			[
-				"const LIMIT: usize = secure_exec_client::protocol::DEFAULT_MAX_FRAME_BYTES;",
+				"const LIMIT: usize = agentos_client::protocol::DEFAULT_MAX_FRAME_BYTES;",
 				"",
 			].join("\n"),
 		);
 
 		assert.deepEqual(checkAgentOsClientProtocolCompat({ root }), [
-			"crates/client/src/net.rs:1:22 reads the default frame limit through the compatibility protocol surface; use secure_exec_client::wire::DEFAULT_MAX_FRAME_BYTES",
-			"crates/client/src/net.rs:1:22 imports the live protocol compatibility surface; use secure_exec_client::wire for generated wire types or add this file to the migration inventory with justification",
+			"crates/client/src/net.rs:1:22 reads the default frame limit through the compatibility protocol surface; use agentos_client::wire::DEFAULT_MAX_FRAME_BYTES",
+			"crates/client/src/net.rs:1:22 imports the live protocol compatibility surface; use agentos_client::wire for generated wire types or add this file to the migration inventory with justification",
 		]);
 	});
 });

@@ -1,0 +1,8 @@
+{
+  "name": "yarn-classic-cli-pass",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "yarn": "1.22.22"
+  }
+}

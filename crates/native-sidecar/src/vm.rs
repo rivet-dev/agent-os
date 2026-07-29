@@ -8,6 +8,7 @@ use crate::bootstrap::{
     root_snapshot_entry, root_snapshot_from_entries,
 };
 use crate::bridge::{bridge_permissions, MountPluginContext};
+use crate::execution::{sync_process_host_writes_to_kernel, terminate_child_process_tree};
 use crate::protocol::{
     AgentosProjectedAgent, ConfigureVmRequest, CreateLayerRequest, CreateOverlayRequest,
     DisposeReason, EventFrame, ExportSnapshotRequest, ImportSnapshotRequest, LinkPackageRequest,
@@ -80,15 +81,15 @@ const SHADOW_ROOT_BOOTSTRAP_DIRS: &[(&str, u32)] = &[
     ("/sbin", 0o755),
     ("/boot", 0o755),
     ("/etc", 0o755),
-    ("/root", 0o755),
+    ("/root", 0o700),
     ("/run", 0o755),
     ("/srv", 0o755),
-    ("/sys", 0o755),
+    ("/sys", 0o555),
     ("/opt", 0o755),
     ("/mnt", 0o755),
     ("/media", 0o755),
     ("/home", 0o755),
-    ("/home/agentos", 0o755),
+    ("/home/agentos", 0o2755),
     ("/usr", 0o755),
     ("/usr/bin", 0o755),
     ("/usr/games", 0o755),
@@ -103,11 +104,11 @@ const SHADOW_ROOT_BOOTSTRAP_DIRS: &[(&str, u32)] = &[
     ("/usr/share/man", 0o755),
     ("/var", 0o755),
     ("/var/cache", 0o755),
-    ("/var/empty", 0o755),
+    ("/var/empty", 0o555),
     ("/var/lib", 0o755),
-    ("/var/lock", 0o755),
+    ("/var/lock", 0o777),
     ("/var/log", 0o755),
-    ("/var/run", 0o755),
+    ("/var/run", 0o777),
     ("/var/spool", 0o755),
     ("/var/tmp", 0o1777),
     ("/etc/agentos", 0o755),
@@ -545,6 +546,15 @@ where
                 command_permissions: BTreeMap::new(),
                 bindings: BTreeMap::new(),
                 active_processes: BTreeMap::new(),
+                vm_fetch_streams: BTreeMap::new(),
+                next_vm_fetch_stream_id: 0,
+                executions: BTreeMap::new(),
+                execution_processes: BTreeMap::new(),
+                next_public_execution_id: 0,
+                execution_retention_wake_deadline_ms: None,
+                execution_retention_wake_task: None,
+                package_mutation_execution_id: None,
+                typescript_compiler_staged: false,
                 exited_process_snapshots: VecDeque::new(),
                 detached_child_processes: BTreeSet::new(),
                 attached_child_event_cursor: 0,
@@ -679,7 +689,7 @@ where
             vm.command_guest_paths = discover_command_guest_paths(&mut vm.kernel);
             // The `{ packageDir }` projection lands each package's `bin/<cmd>` at
             // `/opt/agentos/bin/<cmd>` (on `$PATH`) but does NOT populate
-            // `/__secure_exec/commands`, so `discover_command_guest_paths` alone misses
+            // `/__agentos/commands`, so `discover_command_guest_paths` alone misses
             // projected commands and every projected wasm/js command resolves to
             // ENOEXEC (absolute path) / ENOENT (bare name). Register each projected
             // command by name -> its `/opt/agentos/bin/<cmd>` entrypoint so both the
@@ -1108,9 +1118,36 @@ where
     ) -> Result<Vec<EventFrame>, SidecarError> {
         self.require_owned_vm(connection_id, session_id, vm_id)?;
 
-        // This is the first teardown transition. Pending admissions can still
-        // roll back, but stale VM clones cannot commit new capabilities, tasks,
-        // or blocking-executor work after this point.
+        let mut events = vec![self.vm_lifecycle_event(
+            connection_id,
+            session_id,
+            vm_id,
+            VmLifecycleState::Disposing,
+        )];
+        // Process termination needs the VM live in `self.vms` (it looks up and
+        // signals the VM's active processes). Capture its result but keep tearing
+        // down: a process that refuses to die must not strand the VM's tracking
+        // entries for the process lifetime.
+        let terminate_result = self.terminate_vm_processes(vm_id, &mut events).await;
+        if let Some(vm) = self.vms.get_mut(vm_id) {
+            if let Some(task) = vm.execution_retention_wake_task.take() {
+                task.abort();
+            }
+            vm.execution_retention_wake_deadline_ms = None;
+            for execution in vm.executions.values_mut() {
+                if let Some(task) = execution.deadline_task.take() {
+                    task.abort();
+                }
+            }
+        }
+
+        // Process teardown can require the VM blocking executor to flush
+        // host-materialized state into a persistent filesystem plugin (for
+        // example, a WAL-backed node:sqlite database copied into the actor
+        // SQLite VFS). Closing runtime admission before termination makes that
+        // mandatory final write fail with ERR_AGENTOS_BLOCKING_EXECUTOR_SHUTDOWN.
+        // Dispose requests are serialized by the sidecar, so retire admission
+        // after the process drain but before detaching the VM from its registry.
         let vm_before_disposal = self
             .vms
             .get(vm_id)
@@ -1130,18 +1167,6 @@ where
         if let Err(error) = fairness_retirement_result.as_ref() {
             eprintln!("ERR_AGENTOS_VM_FAIRNESS_RETIRE: vm_id={vm_id} error={error}");
         }
-
-        let mut events = vec![self.vm_lifecycle_event(
-            connection_id,
-            session_id,
-            vm_id,
-            VmLifecycleState::Disposing,
-        )];
-        // Process termination needs the VM live in `self.vms` (it looks up and
-        // signals the VM's active processes). Capture its result but keep tearing
-        // down: a process that refuses to die must not strand the VM's tracking
-        // entries for the process lifetime.
-        let terminate_result = self.terminate_vm_processes(vm_id, &mut events).await;
 
         // Detach the VM from `self.vms` BEFORE the remaining fallible teardown so
         // no `?` below can leave the registry entry (or any per-VM map) behind.
@@ -1371,9 +1396,38 @@ where
             .await?;
 
         if self.vm_has_active_processes(vm_id) {
-            return Err(SidecarError::Execution(format!(
-                "failed to terminate active guest executions for VM {vm_id}"
-            )));
+            // A shared V8 execution can take longer than the bounded event-pump
+            // grace to report its exit after SIGKILL. VM teardown must still
+            // finalize process-owned bridge state before snapshotting the root
+            // filesystem; dropping ActiveProcess after the snapshot loses
+            // committed host-materialized SQLite/WAL pages.
+            let vm = self
+                .vms
+                .get_mut(vm_id)
+                .expect("active VM should exist during process teardown");
+            let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
+            let unix_address_registry = Arc::clone(&vm.unix_address_registry);
+            let remaining = std::mem::take(&mut vm.active_processes);
+            eprintln!(
+                "ERR_AGENTOS_VM_FORCED_PROCESS_FINALIZE: vm_id={vm_id} process_count={}",
+                remaining.len()
+            );
+            for (process_id, mut process) in remaining {
+                let should_sync_host_writes = process.host_write_dirty_recursive()
+                    || !process.clean_host_writes_are_observable_recursive();
+                if should_sync_host_writes {
+                    sync_process_host_writes_to_kernel(vm, &process)?;
+                }
+                terminate_child_process_tree(
+                    &mut vm.kernel,
+                    &mut process,
+                    &kernel_readiness,
+                    &unix_address_registry,
+                );
+                process.kernel_handle.finish(137);
+                let _ = vm.kernel.wait_and_reap(process.kernel_pid);
+                vm.signal_states.remove(&process_id);
+            }
         }
 
         Ok(())
@@ -1913,6 +1967,11 @@ fn bootstrap_native_root_filesystem(
 ) -> Result<(), SidecarError> {
     for (guest_path, mode) in SHADOW_ROOT_BOOTSTRAP_DIRS {
         filesystem.mkdir(guest_path, true).map_err(vfs_error)?;
+        let (uid, gid) = match *guest_path {
+            "/home/agentos" | "/workspace" => (1000, 1000),
+            _ => (0, 0),
+        };
+        filesystem.chown(guest_path, uid, gid).map_err(vfs_error)?;
         filesystem.chmod(guest_path, *mode).map_err(vfs_error)?;
     }
 
@@ -2078,7 +2137,12 @@ where
 {
     let max_filesystem_bytes = vm.kernel.resource_limits().max_filesystem_bytes;
     let max_inode_count = vm.kernel.resource_limits().max_inode_count;
-    for mount in mounts {
+    // Mount parents before nested leaves. Configure payload order is not a
+    // filesystem invariant, and mounting a parent after one of its children is
+    // rejected by the kernel mount table.
+    let mut ordered_mounts = mounts.iter().collect::<Vec<_>>();
+    ordered_mounts.sort_by_key(|mount| mount_path_depth(&mount.guest_path));
+    for mount in ordered_mounts {
         let config_value: serde_json::Value =
             serde_json::from_str(&mount.plugin.config).map_err(|error| {
                 SidecarError::InvalidState(format!(
@@ -2136,7 +2200,11 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    for existing in vm.configuration.mounts.clone() {
+    // Nested leaves must be detached before their parents. In particular, npm
+    // workspace packages are explicit child mounts below `/node_modules`.
+    let mut existing_mounts = vm.configuration.mounts.clone();
+    existing_mounts.sort_by_key(|mount| std::cmp::Reverse(mount_path_depth(&mount.guest_path)));
+    for existing in existing_mounts {
         match vm.kernel.unmount_filesystem(&existing.guest_path) {
             Ok(()) => emit_security_audit_event(
                 &context.bridge,
@@ -2172,6 +2240,12 @@ where
     }
 
     Ok(())
+}
+
+fn mount_path_depth(path: &str) -> usize {
+    path.split('/')
+        .filter(|component| !component.is_empty())
+        .count()
 }
 
 /// Build the `/opt/agentos` package projection for `configure_vm`.
@@ -3616,9 +3690,8 @@ mod tests {
             .expect("clock should be monotonic")
             .as_nanos();
         let database_path =
-            std::env::temp_dir().join(format!("secure-exec-native-root-{unique}.sqlite"));
-        let block_root =
-            std::env::temp_dir().join(format!("secure-exec-native-root-blocks-{unique}"));
+            std::env::temp_dir().join(format!("agentos-native-root-{unique}.sqlite"));
+        let block_root = std::env::temp_dir().join(format!("agentos-native-root-blocks-{unique}"));
         let native_root =
             native_root_plugin_from_config(Some(&agentos_vm_config::NativeRootFilesystemConfig {
                 plugin: agentos_vm_config::MountPluginDescriptor {
@@ -3685,6 +3758,16 @@ mod tests {
             MountOptions::new(native_root.plugin.id.clone()),
         );
         assert!(mount_table.exists("/home/agentos"));
+        let home = mount_table
+            .stat("/home/agentos")
+            .expect("native AgentOS home metadata should be readable");
+        assert_eq!((home.uid, home.gid), (1000, 1000));
+        assert_eq!(home.mode & 0o7777, 0o2755);
+        let workspace = mount_table
+            .stat("/workspace")
+            .expect("native workspace metadata should be readable");
+        assert_eq!((workspace.uid, workspace.gid), (1000, 1000));
+        assert_eq!(workspace.mode & 0o7777, 0o755);
         assert_eq!(
             mount_table
                 .read_file("/etc/agentos/boot.txt")

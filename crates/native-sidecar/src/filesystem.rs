@@ -436,6 +436,40 @@ fn apply_host_path_utimens(
     })
 }
 
+fn apply_host_file_utimens(
+    file: &fs::File,
+    atime: VirtualUtimeSpec,
+    mtime: VirtualUtimeSpec,
+    context: &str,
+) -> Result<(), SidecarError> {
+    let existing = match (atime, mtime) {
+        (VirtualUtimeSpec::Omit, _) | (_, VirtualUtimeSpec::Omit) => {
+            let metadata = file
+                .metadata()
+                .map_err(|error| SidecarError::Io(format!("{context}: failed to stat: {error}")))?;
+            Some((
+                metadata_timespec(&metadata, true)?,
+                metadata_timespec(&metadata, false)?,
+            ))
+        }
+        _ => None,
+    };
+    let existing_atime = existing
+        .as_ref()
+        .map(|(atime, _)| *atime)
+        .unwrap_or(VirtualTimeSpec { sec: 0, nsec: 0 });
+    let existing_mtime = existing
+        .as_ref()
+        .map(|(_, mtime)| *mtime)
+        .unwrap_or(VirtualTimeSpec { sec: 0, nsec: 0 });
+    nix::sys::stat::futimens(
+        file.as_raw_fd(),
+        &resolve_host_utime(atime, existing_atime),
+        &resolve_host_utime(mtime, existing_mtime),
+    )
+    .map_err(|error| SidecarError::Io(format!("{context}: failed to set times: {error}")))
+}
+
 pub(crate) async fn guest_filesystem_call<B>(
     sidecar: &mut NativeSidecar<B>,
     request: &RequestFrame,
@@ -1008,7 +1042,6 @@ where
         log_stale_process_event(&sidecar.bridge, vm_id, process_id, "python VFS RPC");
         return Ok(());
     };
-
     match response {
         Ok(payload) => process
             .execution
@@ -1674,6 +1707,25 @@ pub(crate) fn service_javascript_fs_sync_rpc(
             }
             Ok(json!(total_written))
         }
+        "fs.dupSync" => {
+            let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem dup fd")?;
+            if let Some(mapped) = process.mapped_host_fd(fd) {
+                let duplicate = crate::state::ActiveMappedHostFd {
+                    file: mapped.file.try_clone().map_err(|error| {
+                        SidecarError::Io(format!(
+                            "failed to duplicate mapped guest fd {fd}: {error}"
+                        ))
+                    })?,
+                    path: mapped.path.clone(),
+                    guest_path: mapped.guest_path.clone(),
+                };
+                return Ok(json!(process.allocate_mapped_host_fd(duplicate)));
+            }
+            kernel
+                .fd_dup(EXECUTION_DRIVER_NAME, kernel_pid, fd)
+                .map(Value::from)
+                .map_err(kernel_error)
+        }
         "fs.close" | "fs.closeSync" => {
             let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem close fd")?;
             if process.close_mapped_host_fd(fd) {
@@ -1714,6 +1766,21 @@ pub(crate) fn service_javascript_fs_sync_rpc(
             kernel
                 .fd_link_tmpfile_for_process(EXECUTION_DRIVER_NAME, kernel_pid, fd, &destination)
                 .map(|()| Value::Null)
+                .map_err(kernel_error)
+        }
+        "fs._getPathSync" => {
+            let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem path fd")?;
+            if let Some(mapped) = process.mapped_host_fd(fd) {
+                return Ok(Value::String(
+                    mapped
+                        .guest_path
+                        .clone()
+                        .unwrap_or_else(|| mapped.path.to_string_lossy().into_owned()),
+                ));
+            }
+            kernel
+                .fd_path(EXECUTION_DRIVER_NAME, kernel_pid, fd)
+                .map(Value::String)
                 .map_err(kernel_error)
         }
         "fs.fstat" | "fs.fstatSync" => {
@@ -2884,6 +2951,30 @@ pub(crate) fn service_javascript_fs_sync_rpc(
             let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "filesystem futimes fd")?;
             let atime = parse_utime_arg(&request.args, 1, "filesystem futimes atime")?;
             let mtime = parse_utime_arg(&request.args, 2, "filesystem futimes mtime")?;
+            if let Some(mapped) = process.mapped_host_fd(fd) {
+                if let Some(guest_path) = mapped.guest_path.as_deref() {
+                    let result = kernel.utimes_spec_for_process(
+                        EXECUTION_DRIVER_NAME,
+                        kernel_pid,
+                        guest_path,
+                        atime,
+                        mtime,
+                        true,
+                    );
+                    if let Err(error) = result {
+                        if error.code() != "ENOENT" {
+                            return Err(kernel_error(error));
+                        }
+                    }
+                }
+                return apply_host_file_utimens(
+                    &mapped.file,
+                    atime,
+                    mtime,
+                    &format!("failed to update mapped guest fd {fd} times"),
+                )
+                .map(|()| Value::Null);
+            }
             kernel
                 .futimes(EXECUTION_DRIVER_NAME, kernel_pid, fd, atime, mtime)
                 .map(|()| Value::Null)
@@ -2913,7 +3004,7 @@ fn kernel_fd_surfaces_stdio_event(
     ))
 }
 
-fn javascript_sync_rpc_path_arg(
+pub(crate) fn javascript_sync_rpc_path_arg(
     process: &ActiveProcess,
     args: &[Value],
     index: usize,
@@ -3010,15 +3101,32 @@ fn mirror_kernel_path_to_process_shadow(
     process: &ActiveProcess,
     guest_path: &str,
 ) -> Result<(), SidecarError> {
-    let Some(shadow_path) = process_shadow_host_path(process, guest_path) else {
+    // WASM processes deliberately route filesystem calls through the kernel
+    // sync RPC path. The kernel VFS (including non-root mounts) is therefore
+    // their source of truth; they never read the JavaScript process shadow.
+    // Mirroring here is both redundant and harmful for streamed writes because
+    // it rereads the entire growing file after every bounded chunk.
+    if process_prefers_kernel_fs_sync_rpc(process) {
+        return Ok(());
+    }
+    let normalized_guest_path = normalize_path(guest_path);
+    // Mounted host paths are already updated by the mapped-runtime write path.
+    // Mirroring them would read the complete kernel file after each chunk,
+    // making sequential writes quadratic.
+    if host_path_from_runtime_guest_mappings(&process.env, &normalized_guest_path).is_some() {
+        return Ok(());
+    }
+    let Some(shadow_path) = process_shadow_host_path(process, &normalized_guest_path) else {
         return Ok(());
     };
     // This is internal reconciliation after the guest has already completed a
     // permitted write. Reading the resulting bytes as the guest would wrongly
     // reject write-only files even though no contents are returned to guest
     // code; the trusted sidecar only mirrors them into this VM's own shadow.
-    let bytes = kernel.read_file(guest_path).map_err(kernel_error)?;
-    write_process_shadow_file(&shadow_path, guest_path, &bytes)
+    let bytes = kernel
+        .read_file(&normalized_guest_path)
+        .map_err(kernel_error)?;
+    write_process_shadow_file(&shadow_path, &normalized_guest_path, &bytes)
 }
 
 fn mirror_process_mode_to_shadow(
@@ -3197,6 +3305,11 @@ fn mapped_runtime_host_path(
         .unwrap_or_default();
 
     for (guest_root, host_root) in sorted_mappings {
+        let normalized_host_root = if host_root.is_absolute() {
+            normalize_host_path(&host_root)
+        } else {
+            normalize_host_path(&std::env::current_dir().ok()?.join(host_root))
+        };
         if guest_root != "/"
             && normalized != guest_root
             && !normalized.starts_with(&format!("{guest_root}/"))
@@ -3204,6 +3317,22 @@ fn mapped_runtime_host_path(
             continue;
         }
         if guest_root == "/" && !normalized.starts_with('/') {
+            continue;
+        }
+        if process.runtime == GuestRuntimeKind::JavaScript
+            && process.shadow_root.as_ref().is_some_and(|shadow_root| {
+                guest_root == "/"
+                    || normalized_host_root.starts_with(normalize_host_path(shadow_root))
+            })
+        {
+            // Embedded JavaScript is kernel-backed. The root host mapping is a
+            // staging shadow for runtimes that execute against host paths, not
+            // an independent filesystem namespace. Child cwd mappings inside
+            // that shadow are staging paths too. Let JavaScript read and write
+            // the shared kernel VFS so a file created after fork is immediately
+            // visible to every process in the VM. More-specific mappings to
+            // explicit host_dir/module_access roots outside the shadow remain
+            // host-backed.
             continue;
         }
         if guest_root == "/"
@@ -3219,11 +3348,6 @@ fn mapped_runtime_host_path(
             continue;
         }
 
-        let normalized_host_root = if host_root.is_absolute() {
-            normalize_host_path(&host_root)
-        } else {
-            normalize_host_path(&std::env::current_dir().ok()?.join(host_root))
-        };
         let suffix = if guest_root == "/" {
             normalized.trim_start_matches('/')
         } else {
@@ -3369,7 +3493,12 @@ fn normalized_process_guest_path(process: &ActiveProcess, guest_path: &str) -> S
 }
 
 fn process_prefers_kernel_fs_sync_rpc(process: &ActiveProcess) -> bool {
-    process.runtime == GuestRuntimeKind::WebAssembly && process.shadow_root.is_some()
+    (process.runtime == GuestRuntimeKind::WebAssembly
+        // A WASM command executes inside the JavaScript WASI runner, so the
+        // process record is JavaScript even though its filesystem is still the
+        // kernel-authoritative WASM path.
+        || process.env.contains_key("AGENTOS_WASM_MODULE_PATH"))
+        && process.shadow_root.is_some()
 }
 
 fn runtime_host_access_roots(process: &ActiveProcess, key: &str) -> Option<Vec<PathBuf>> {
@@ -5761,7 +5890,7 @@ mod tests {
             (
                 Some(writable_mapping(
                     "/mapped/file.txt",
-                    "/tmp/secure-exec-mapped-source",
+                    "/tmp/agentos-mapped-source",
                 )),
                 None,
             ),
@@ -5769,7 +5898,7 @@ mod tests {
                 None,
                 Some(writable_mapping(
                     "/mapped-dst/file.txt",
-                    "/tmp/secure-exec-mapped-destination",
+                    "/tmp/agentos-mapped-destination",
                 )),
             ),
         ] {

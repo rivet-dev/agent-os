@@ -1,0 +1,107 @@
+--- a/exec/src/session_turn_wasi.rs
++++ b/exec/src/session_turn_wasi.rs
+@@ -192,20 +192,51 @@ async fn session_turn() -> anyhow::Result<()> {
+                 emit(json!({
+                     "type": "tool_call_update",
+                     "tool_call_id": e.call_id,
++                    "kind": "execute",
++                    "title": "Shell",
++                    "command": e.command.join(" "),
++                    "status": "in_progress",
++                }));
++            }
++            EventMsg::ExecCommandOutputDelta(e) => {
++                let (stdout, stderr) = match e.stream {
++                    codex_protocol::protocol::ExecOutputStream::Stdout => {
++                        (String::from_utf8_lossy(&e.chunk).into_owned(), String::new())
++                    }
++                    codex_protocol::protocol::ExecOutputStream::Stderr => {
++                        (String::new(), String::from_utf8_lossy(&e.chunk).into_owned())
++                    }
++                };
++                emit(json!({
++                    "type": "tool_call_update",
++                    "tool_call_id": e.call_id,
++                    "kind": "execute",
++                    "title": "Shell",
+                     "status": "in_progress",
++                    "stdout": stdout,
++                    "stderr": stderr,
+                 }));
+             }
+             EventMsg::ExecCommandEnd(e) => {
+                 emit(json!({
+                     "type": "tool_call_update",
+                     "tool_call_id": e.call_id,
+-                    "status": "completed",
++                    "kind": "execute",
++                    "title": "Shell",
++                    "command": e.command.join(" "),
++                    "status": if e.exit_code == 0 { "completed" } else { "failed" },
++                    "exit_code": e.exit_code,
++                    "stdout": e.stdout,
++                    "stderr": e.stderr,
+                 }));
+             }
+             EventMsg::ExecApprovalRequest(e) => {
+                 emit(json!({
+                     "type": "permission_request",
+                     "tool_call_id": e.call_id,
++                    "kind": "execute",
++                    "title": "Shell",
++                    "command": e.command.join(" "),
+                 }));
+                 let resp = read_line().unwrap_or_default();
+                 let resp: Value = serde_json::from_str(resp.trim()).unwrap_or_else(|_| json!({}));
+@@ -223,6 +254,51 @@ async fn session_turn() -> anyhow::Result<()> {
+                     })
+                     .await;
+             }
++            EventMsg::ApplyPatchApprovalRequest(e) => {
++                emit(json!({
++                    "type": "permission_request",
++                    "tool_call_id": e.call_id,
++                    "kind": "edit",
++                    "title": "Apply patch",
++                    "locations": e.changes.keys().map(|path| json!({ "path": path })).collect::<Vec<_>>(),
++                }));
++                let resp = read_line().unwrap_or_default();
++                let resp: Value = serde_json::from_str(resp.trim()).unwrap_or_else(|_| json!({}));
++                let decision = match resp["decision"].as_str() {
++                    Some("allow") | Some("approve") | Some("allow_always") => {
++                        ReviewDecision::Approved
++                    }
++                    _ => ReviewDecision::Denied,
++                };
++                let _ = thread
++                    .submit(Op::PatchApproval {
++                        id: id.clone(),
++                        decision,
++                    })
++                    .await;
++            }
++            EventMsg::PatchApplyBegin(e) => {
++                emit(json!({
++                    "type": "tool_call_update",
++                    "tool_call_id": e.call_id,
++                    "kind": "edit",
++                    "title": "Apply patch",
++                    "status": "in_progress",
++                    "locations": e.changes.keys().map(|path| json!({ "path": path })).collect::<Vec<_>>(),
++                }));
++            }
++            EventMsg::PatchApplyEnd(e) => {
++                emit(json!({
++                    "type": "tool_call_update",
++                    "tool_call_id": e.call_id,
++                    "kind": "edit",
++                    "title": "Apply patch",
++                    "status": if e.success { "completed" } else { "failed" },
++                    "stdout": e.stdout,
++                    "stderr": e.stderr,
++                    "locations": e.changes.keys().map(|path| json!({ "path": path })).collect::<Vec<_>>(),
++                }));
++            }
+             EventMsg::TurnComplete(_) => {
+                 emit(json!({ "type": "done" }));
+                 break;

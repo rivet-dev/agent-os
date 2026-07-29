@@ -71,6 +71,8 @@ const BUILTIN_CONFORMANCE_CASES: &[&str] = &[
     "buffer",
     "url",
     "stdlib_polyfill",
+    "web_streams",
+    "regexp",
     "extended_builtin_polyfills",
 ];
 
@@ -579,7 +581,7 @@ fn fixture_dns_answers(query: &Query) -> Vec<Record> {
             ),
             fixture_dns_record(
                 "bundle.example.test.",
-                RData::TXT(TXT::new(vec![String::from("secure-exec")])),
+                RData::TXT(TXT::new(vec![String::from("agentos")])),
             ),
         ],
         ("bundle.example.test.", RecordType::ANY) => vec![
@@ -2273,6 +2275,27 @@ console.log(JSON.stringify({
     );
 }
 
+fn write_file_sync_numeric_fd_matches_host_node_impl() {
+    assert_conformance(
+        "fs-write-file-numeric-fd",
+        r#"
+import fs from "node:fs";
+
+const path = "numeric-fd.txt";
+const fd = fs.openSync(path, "wx");
+fs.writeFileSync(fd, "first");
+fs.closeSync(fd);
+fs.appendFileSync(path, "-second");
+console.log(JSON.stringify({ content: fs.readFileSync(path, "utf8") }));
+"#,
+    );
+}
+
+#[test]
+fn write_file_sync_numeric_fd_matches_host_node() {
+    run_isolated_builtin_conformance_test("fs-write-file-numeric-fd");
+}
+
 fn console_conformance_matches_host_node() {
     assert_conformance(
         "console",
@@ -2895,8 +2918,8 @@ console.log(JSON.stringify({
   curvesIncludePrime256v1: curves.includes("prime256v1"),
   curvesIncludeSecp384r1: curves.includes("secp384r1"),
   curvesSorted: curves.join(",") === [...curves].sort().join(","),
-  sha256: crypto.createHash("sha256").update("secure-exec").digest("hex"),
-  hmacSha256: crypto.createHmac("sha256", "shared-secret").update("secure-exec").digest("hex"),
+  sha256: crypto.createHash("sha256").update("agentos").digest("hex"),
+  hmacSha256: crypto.createHmac("sha256", "shared-secret").update("agentos").digest("hex"),
   randomBytesLength: random.length,
   randomBytesHexLength: random.toString("hex").length,
   randomBytesAllZero: Array.from(random).every((value) => value === 0),
@@ -2914,7 +2937,7 @@ import crypto from "node:crypto";
 
 const cipherKey = Buffer.alloc(32, 7);
 const cipherIv = Buffer.alloc(16, 9);
-const cipherPlaintext = Buffer.from("secure-exec-crypto-surface", "utf8");
+const cipherPlaintext = Buffer.from("agentos-crypto-surface", "utf8");
 const cipher = crypto.createCipheriv("aes-256-cbc", cipherKey, cipherIv);
 const encrypted = Buffer.concat([cipher.update(cipherPlaintext), cipher.final()]);
 const decipher = crypto.createDecipheriv("aes-256-cbc", cipherKey, cipherIv);
@@ -2947,24 +2970,24 @@ const importedPrivateKey = crypto.createPrivateKey(privatePem);
 const importedPublicKey = crypto.createPublicKey(publicPem);
 
 const signer = crypto.createSign("sha256");
-signer.update("secure-exec-signature");
+signer.update("agentos-signature");
 const signature = signer.sign(importedPrivateKey);
 
 const verifier = crypto.createVerify("sha256");
-verifier.update("secure-exec-signature");
+verifier.update("agentos-signature");
 const signatureVerified = verifier.verify(importedPublicKey, signature);
 
-const oneShotSignature = crypto.sign("sha256", Buffer.from("secure-exec-signature"), importedPrivateKey);
+const oneShotSignature = crypto.sign("sha256", Buffer.from("agentos-signature"), importedPrivateKey);
 const oneShotVerified = crypto.verify(
   "sha256",
-  Buffer.from("secure-exec-signature"),
+  Buffer.from("agentos-signature"),
   importedPublicKey,
   oneShotSignature,
 );
 
 const rsaCiphertext = crypto.publicEncrypt(
   { key: importedPublicKey, padding: crypto.constants.RSA_PKCS1_PADDING },
-  Buffer.from("secure-exec-rsa", "utf8"),
+  Buffer.from("agentos-rsa", "utf8"),
 );
 const rsaPlaintext = crypto.privateDecrypt(
   { key: importedPrivateKey, padding: crypto.constants.RSA_PKCS1_PADDING },
@@ -3317,16 +3340,23 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const events = require("events");
 const nodeEvents = require("node:events");
+const util = require("node:util");
 
 const emitter = new EventEmitter();
 class DerivedEmitter extends require("events") {}
 const derived = new DerivedEmitter();
 const constructed = new (require("events"))();
+function LegacyEmitter() {
+  events.call(this);
+}
+util.inherits(LegacyEmitter, events);
+const legacy = new LegacyEmitter();
 const seen = [];
 const metaNew = [];
 const metaRemove = [];
 const constructedSeen = [];
 const derivedSeen = [];
+const legacySeen = [];
 const warningEvents = [];
 
 function persistent(value) {
@@ -3401,6 +3431,11 @@ derived.on("tick", (value) => {
 });
 const derivedEmitHandled = derived.emit("tick", "delta");
 
+legacy.on("tick", (value) => {
+  legacySeen.push(`legacy:${value}`);
+});
+const legacyEmitHandled = legacy.emit("tick", "epsilon");
+
 process.on("warning", (warning) => {
   warningEvents.push({
     name: warning.name,
@@ -3424,21 +3459,181 @@ for (let index = 0; index < 12; index += 1) {
   zeroMaxListenersEmitter.on("disabled-warning-check", () => {});
 }
 
+const domTarget = new EventTarget();
+events.setMaxListeners(23, domTarget);
+const domMaxListeners = events.getMaxListeners(domTarget);
+const domSeen = [];
+const coercedType = { toString: () => "coerced" };
+domTarget.addEventListener(coercedType, () => domSeen.push("coerced"));
+domTarget.dispatchEvent(new Event("coerced"));
+domTarget.addEventListener("propagation", (event) => {
+  domSeen.push("stop");
+  event.stopPropagation();
+});
+domTarget.addEventListener("propagation", () => domSeen.push("after-stop"));
+domTarget.dispatchEvent(new Event("propagation"));
+domTarget.addEventListener("immediate", (event) => {
+  domSeen.push("immediate");
+  event.stopImmediatePropagation();
+});
+domTarget.addEventListener("immediate", () => domSeen.push("after-immediate"));
+domTarget.dispatchEvent(new Event("immediate"));
+const onceReentrant = () => {
+  domSeen.push("once");
+  domTarget.dispatchEvent(new Event("reentrant"));
+};
+domTarget.addEventListener("reentrant", onceReentrant, { once: true });
+domTarget.dispatchEvent(new Event("reentrant"));
+const objectListener = {
+  handleEvent() {
+    domSeen.push(this === objectListener ? "object-this" : "object-wrong-this");
+  },
+};
+domTarget.addEventListener("object", objectListener);
+domTarget.dispatchEvent(new Event("object"));
+const passiveEvent = new Event("passive", { cancelable: true });
+domTarget.addEventListener("passive", (event) => event.preventDefault(), {
+  passive: true,
+});
+const passiveDispatchResult = domTarget.dispatchEvent(passiveEvent);
+const canceledEvent = new Event("cancel", { cancelable: true });
+domTarget.addEventListener("cancel", (event) => event.preventDefault());
+const canceledDispatchResult = domTarget.dispatchEvent(canceledEvent);
+const signalController = new AbortController();
+domTarget.addEventListener("signaled", () => domSeen.push("signaled"), {
+  signal: signalController.signal,
+});
+signalController.abort();
+domTarget.dispatchEvent(new Event("signaled"));
+let eventSymbolErrorName = null;
+try {
+  new Event(Symbol("event"));
+} catch (error) {
+  eventSymbolErrorName = error?.name ?? null;
+}
+let listenerSymbolErrorName = null;
+try {
+  domTarget.addEventListener(Symbol("event"), () => {});
+} catch (error) {
+  listenerSymbolErrorName = error?.name ?? null;
+}
+let eventTypeReadonly = false;
+const readonlyEvent = new Event("readonly");
+try {
+  readonlyEvent.type = "changed";
+} catch (error) {
+  eventTypeReadonly = error instanceof TypeError;
+}
+
+const defaultAbortController = new AbortController();
+let defaultAbortEvents = 0;
+defaultAbortController.signal.addEventListener("abort", () => {
+  defaultAbortEvents += 1;
+});
+defaultAbortController.abort();
+defaultAbortController.abort(new Error("ignored"));
+
+const onabortController = new AbortController();
+let onabortCount = 0;
+onabortController.signal.onabort = () => {
+  onabortCount += 1;
+};
+onabortController.signal.onabort = () => {
+  onabortCount += 10;
+};
+onabortController.abort();
+
+const primitiveAbortController = new AbortController();
+primitiveAbortController.abort(17);
+let primitiveThrowExact = false;
+try {
+  primitiveAbortController.signal.throwIfAborted();
+} catch (error) {
+  primitiveThrowExact = error === 17;
+}
+
+const timeoutSignal = AbortSignal.timeout(0);
+await new Promise((resolve) => {
+  const keepAlive = setTimeout(resolve, 50);
+  timeoutSignal.addEventListener("abort", () => {
+    clearTimeout(keepAlive);
+    resolve();
+  }, { once: true });
+});
+
+const anyFirst = new AbortController();
+const anySecond = new AbortController();
+const anySignal = AbortSignal.any([anyFirst.signal, anySecond.signal]);
+anySecond.abort("second-reason");
+let invalidAnyRejected = false;
+try {
+  AbortSignal.any([anyFirst.signal, {
+    aborted: false,
+    addEventListener() {},
+    removeEventListener() {},
+  }]);
+} catch (error) {
+  invalidAnyRejected = error instanceof TypeError;
+}
+const emptyAnySignal = AbortSignal.any([]);
+let illegalAbortSignalCode = null;
+try {
+  new AbortSignal();
+} catch (error) {
+  illegalAbortSignalCode = error?.code ?? null;
+}
+let abortStateReadonly = false;
+try {
+  defaultAbortController.signal.aborted = false;
+} catch (error) {
+  abortStateReadonly = error instanceof TypeError;
+}
+let fractionalTimeoutCode = null;
+try {
+  AbortSignal.timeout(1.5);
+} catch (error) {
+  fractionalTimeoutCode = error?.code ?? null;
+}
+
 await new Promise((resolve) => setTimeout(resolve, 0));
 
 console.log(JSON.stringify({
+  abortStateReadonly,
+  anyReason: anySignal.reason,
+  defaultAbortEvents,
+  defaultAbortReasonName: defaultAbortController.signal.reason.name,
+  emptyAnyAborted: emptyAnySignal.aborted,
+  eventSymbolErrorName,
+  eventTypeReadonly,
+  fractionalTimeoutCode,
+  illegalAbortSignalCode,
+  invalidAnyRejected,
+  listenerSymbolErrorName,
+  onabortCount,
+  primitiveThrowExact,
+  staticAbortReasonName: AbortSignal.abort().reason.name,
+  timeoutReasonName: timeoutSignal.reason.name,
   bareEqualsNode: events === nodeEvents,
   cjsEqualsEventEmitter: events === EventEmitter,
   bareType: typeof events,
   nodeType: typeof nodeEvents,
   eventEmitterPropEqualsSelf: events.EventEmitter === events,
   nodeEventEmitterPropEqualsSelf: nodeEvents.EventEmitter === nodeEvents,
+  canceledDefaultPrevented: canceledEvent.defaultPrevented,
+  canceledDispatchResult,
   constructedInstanceWorks: constructed instanceof EventEmitter,
   constructedEmitHandled,
   constructedSeen,
   derivedInstanceWorks: derived instanceof EventEmitter,
   derivedEmitHandled,
   derivedSeen,
+  domMaxListeners,
+  legacyInstanceWorks: legacy instanceof EventEmitter,
+  legacyEmitHandled,
+  legacySeen,
+  domSeen,
+  passiveDefaultPrevented: passiveEvent.defaultPrevented,
+  passiveDispatchResult,
   visibleListenersIsArray: Array.isArray(visibleListeners),
   visibleRawListenersIsArray: Array.isArray(visibleRawListeners),
   listenersUnwrapOnce: visibleListeners?.[0] === onceVisible,
@@ -3693,6 +3888,9 @@ const url = new urlModule.URL("https://example.com/a/b?x=1&y=two#frag");
 url.searchParams.append("z", "3");
 const fileRelative = new urlModule.URL("file:.", "file:///tmp/base/entry.mjs");
 const fileRelativeNoBase = new urlModule.URL("file:./child");
+const dataUrl = new urlModule.URL("data:image/png;base64,aGVsbG8=");
+const dataUrlWithQuery = new urlModule.URL("data:text/plain,hello?x=1#frag");
+const mailto = new urlModule.URL("mailto:dev@example.com");
 const plusDecoded = new URLSearchParamsCtor("?a=foo+bar");
 const invalidPercentDecoded = new URLSearchParamsCtor("?a=%&b=%2&c=%GG&d=%E0%A4%A");
 const sortable = new URLSearchParamsCtor([
@@ -3707,6 +3905,29 @@ const setSemantics = new URLSearchParamsCtor("a=1&b=2&a=3&a=4&c=5");
 setSemantics.set("a", "z");
 
 const parsed = urlModule.parse("https://example.com/a/b?x=1&y=two#frag", true);
+const describeFileUrlError = (callback) => {
+  try {
+    callback();
+    return null;
+  } catch (error) {
+    return { name: error.name, code: error.code ?? null };
+  }
+};
+const encodedFileUrl = urlModule.pathToFileURL("/tmp/a #?%/ü/");
+const decodedFilePath = urlModule.fileURLToPath(encodedFileUrl);
+const localhostFilePath = urlModule.fileURLToPath("file://localhost/tmp/a%20b");
+const windowsFilePath = urlModule.fileURLToPath(
+  "file:///C:/Users/a%20b",
+  { windows: true },
+);
+const windowsUncPath = urlModule.fileURLToPath(
+  "file://server/share/a",
+  { windows: true },
+);
+const windowsFileUrl = urlModule.pathToFileURL(
+  "C:\\Users\\a #?b",
+  { windows: true },
+);
 
 console.log(JSON.stringify({
   href: url.href,
@@ -3720,6 +3941,42 @@ console.log(JSON.stringify({
   setSearchParamsSize: setSemantics.size,
   fileRelativeHref: fileRelative.href,
   fileRelativeNoBaseHref: fileRelativeNoBase.href,
+  encodedFileUrl: encodedFileUrl.href,
+  decodedFilePath,
+  localhostFilePath,
+  windowsFilePath,
+  windowsFileUrl: windowsFileUrl.href,
+  windowsUncPath,
+  encodedSlashError: describeFileUrlError(() =>
+    urlModule.fileURLToPath("file:///tmp/a%2Fb")
+  ),
+  invalidFileUrlHostError: describeFileUrlError(() =>
+    urlModule.fileURLToPath("file://example.com/tmp/a")
+  ),
+  invalidFileUrlTypeError: describeFileUrlError(() =>
+    urlModule.fileURLToPath({})
+  ),
+  invalidUrlError: describeFileUrlError(() =>
+    urlModule.fileURLToPath("not a url")
+  ),
+  invalidSchemeError: describeFileUrlError(() =>
+    urlModule.fileURLToPath("https://example.com/a")
+  ),
+  malformedPercentError: describeFileUrlError(() =>
+    urlModule.fileURLToPath("file:///tmp/%")
+  ),
+  dataUrlHref: dataUrl.href,
+  dataUrlProtocol: dataUrl.protocol,
+  dataUrlPathname: dataUrl.pathname,
+  dataUrlOrigin: dataUrl.origin,
+  dataUrlToString: dataUrl.toString(),
+  dataUrlWithQueryHref: dataUrlWithQuery.href,
+  dataUrlWithQueryPathname: dataUrlWithQuery.pathname,
+  dataUrlWithQuerySearch: dataUrlWithQuery.search,
+  dataUrlWithQueryHash: dataUrlWithQuery.hash,
+  mailtoHref: mailto.href,
+  mailtoProtocol: mailto.protocol,
+  mailtoPathname: mailto.pathname,
   formatted: urlModule.format(parsed),
   parsedPathname: parsed.pathname,
   parsedQuery: parsed.query,
@@ -3733,6 +3990,16 @@ fn stdlib_polyfill_conformance_matches_host_node() {
         "stdlib-polyfills",
         r#"
 import { createRequire } from "node:module";
+import assertDefault, * as assertModule from "node:assert";
+import strictAssertDefault from "node:assert/strict";
+import pathDefault, * as pathModule from "node:path";
+import pathPosixDefault from "node:path/posix";
+import pathWin32Default from "node:path/win32";
+import stringDecoderDefault, { StringDecoder } from "node:string_decoder";
+import urlDefault, {
+  URL as ImportedURL,
+  URLSearchParams as ImportedURLSearchParams,
+} from "node:url";
 
 const require = createRequire(import.meta.url);
 const assert = require("node:assert");
@@ -3744,6 +4011,22 @@ const stringDecoder = require("node:string_decoder");
 const util = require("node:util");
 const utilTypes = require("node:util/types");
 const zlib = require("node:zlib");
+
+assert.strictEqual(assertDefault, assert);
+assert.strictEqual(assertModule.default, assert);
+assert.strictEqual(strictAssertDefault, require("node:assert/strict"));
+assert.strictEqual(pathDefault, path);
+assert.strictEqual(pathModule.default, path);
+assert.strictEqual(pathPosixDefault, require("node:path/posix"));
+assert.strictEqual(pathWin32Default, require("node:path/win32"));
+assert.strictEqual(stringDecoderDefault, stringDecoder);
+assert.strictEqual(StringDecoder, stringDecoder.StringDecoder);
+assert.strictEqual(urlDefault, require("node:url"));
+assert.strictEqual(ImportedURL, require("node:url").URL);
+assert.strictEqual(
+  ImportedURLSearchParams,
+  require("node:url").URLSearchParams,
+);
 
 assert.deepStrictEqual(path.normalize?.("/alpha/../beta"), "/beta");
 assert.notStrictEqual(1, 2);
@@ -3781,8 +4064,61 @@ const formatted = util.format("value:%s count:%d json:%j", "alpha", 7, { ok: tru
 const promisified = await util.promisify((value, callback) => callback(null, value.toUpperCase()))("beta");
 const encodedLength = new util.TextEncoder().encode("Grüße").length;
 const decodedText = new util.TextDecoder().decode(textBytes);
+const malformedSurrogateBytes = Array.from(new TextEncoder().encode("\ud800A"));
+const encodeIntoDestination = new Uint8Array(4);
+const encodeIntoResult = new TextEncoder().encodeInto(
+  "A\u{1f600}",
+  encodeIntoDestination,
+);
+const streamingDecoder = new TextDecoder();
+const streamingDecoded =
+  streamingDecoder.decode(new Uint8Array([0xe2, 0x82]), { stream: true }) +
+  streamingDecoder.decode(new Uint8Array([0xac]));
+const maximalSubpartDecoded = new TextDecoder().decode(
+  new Uint8Array([0xe1, 0x80, 0x41]),
+);
+const utf16BeDecoded = new TextDecoder("utf-16be").decode(
+  new Uint8Array([0xfe, 0xff, 0x00, 0x41]),
+);
+const utf16LeStreamDecoder = new TextDecoder("utf-16le");
+const utf16LeStreamDecoded =
+  utf16LeStreamDecoder.decode(new Uint8Array([0x3d, 0xd8, 0x00]), {
+    stream: true,
+  }) +
+  utf16LeStreamDecoder.decode(new Uint8Array([0xde]));
+let fatalDecodeCode = null;
+try {
+  new TextDecoder("utf-8", { fatal: true }).decode(
+    new Uint8Array([0xc0]),
+  );
+} catch (error) {
+  fatalDecodeCode = error?.code ?? null;
+}
+let unsupportedEncodingCode = null;
+try {
+  new TextDecoder("not-an-encoding");
+} catch (error) {
+  unsupportedEncodingCode = error?.code ?? null;
+}
+let symbolEncodingErrorName = null;
+try {
+  new TextDecoder(Symbol("utf-8"));
+} catch (error) {
+  symbolEncodingErrorName = error?.name ?? null;
+}
+const streamGetterError = new TypeError("stream getter");
+let streamGetterPreserved = false;
+try {
+  new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(), {
+    get stream() {
+      throw streamGetterError;
+    },
+  });
+} catch (error) {
+  streamGetterPreserved = error === streamGetterError;
+}
 
-const deflated = zlib.deflateSync(Buffer.from("secure-exec", "utf8"));
+const deflated = zlib.deflateSync(Buffer.from("agentos", "utf8"));
 const inflated = zlib.inflateSync(deflated).toString("utf8");
 
 console.log(JSON.stringify({
@@ -3794,20 +4130,335 @@ console.log(JSON.stringify({
   decoded,
   decodedText,
   deflatedBase64: deflated.toString("base64"),
+  encodeIntoBytes: Array.from(encodeIntoDestination),
+  encodeIntoResult,
   encodedLength,
+  fatalDecodeCode,
   formatted,
   inflated,
   isArrayBufferView: util.types.isArrayBufferView(textBytes),
   isDateViaUtilTypes: utilTypes.isDate(new Date("2024-01-01T00:00:00Z")),
   isMapViaUtilTypes: utilTypes.isMap(new Map([["alpha", 1]])),
+  isTextDecoderShared: util.TextDecoder === TextDecoder,
+  isTextEncoderShared: util.TextEncoder === TextEncoder,
   isUint8ArrayViaUtilTypes: utilTypes.isUint8Array(textBytes),
+  malformedSurrogateBytes,
+  maximalSubpartDecoded,
   promisified,
   punycodeAscii: punycode.toASCII("mañana.com"),
   punycodeUnicode: punycode.toUnicode("xn--maana-pta.com"),
   querystringParsed: querystring.parse("a=1&b=x&b=y"),
   querystringStringified: querystring.stringify({ a: 1, b: ["x", "y"] }),
   rejectsCode,
+  streamingDecoded,
+  streamGetterPreserved,
+  symbolEncodingErrorName,
   throwsCode,
+  unsupportedEncodingCode,
+  utf16BeDecoded,
+  utf16LeStreamDecoded,
+}));
+"#,
+    );
+}
+
+fn web_streams_conformance_matches_host_node() {
+    assert_conformance(
+        "web-streams",
+        r#"
+import {
+  ReadableStream as ImportedReadableStream,
+  TextDecoderStream as ImportedTextDecoderStream,
+  TextEncoderStream as ImportedTextEncoderStream,
+  WritableStream as ImportedWritableStream,
+  TransformStream as ImportedTransformStream,
+} from "node:stream/web";
+import {
+  Blob as BufferBlob,
+  File as BufferFile,
+  resolveObjectURL,
+} from "node:buffer";
+
+const readAll = async (stream) => {
+  const values = [];
+  for await (const value of stream) values.push(value);
+  return values;
+};
+
+let byobPullCount = 0;
+const byteStream = new ReadableStream({
+  type: "bytes",
+  pull(controller) {
+    byobPullCount += 1;
+    const view = controller.byobRequest.view;
+    view[0] = 0x41;
+    view[1] = 0x42;
+    controller.byobRequest.respond(2);
+    controller.close();
+  },
+});
+const byobReader = byteStream.getReader({ mode: "byob" });
+const byobResult = await byobReader.read(new Uint8Array(4));
+byobReader.releaseLock();
+
+const pipedValues = [];
+await new ReadableStream({
+  start(controller) {
+    controller.enqueue(2);
+    controller.enqueue(3);
+    controller.close();
+  },
+})
+  .pipeThrough(new TransformStream({
+    transform(value, controller) {
+      controller.enqueue(value * 10);
+    },
+  }))
+  .pipeTo(new WritableStream({
+    write(value) {
+      pipedValues.push(value);
+    },
+  }));
+
+const [teeLeft, teeRight] = new ReadableStream({
+  start(controller) {
+    controller.enqueue("alpha");
+    controller.enqueue("beta");
+    controller.close();
+  },
+}).tee();
+const [teeLeftValues, teeRightValues] = await Promise.all([
+  readAll(teeLeft),
+  readAll(teeRight),
+]);
+
+let cancellationReason = null;
+const cancellable = new ReadableStream({
+  cancel(reason) {
+    cancellationReason = reason;
+  },
+});
+await cancellable.cancel("stop");
+
+let releaseWrite;
+const pendingWrite = new Promise((resolve) => {
+  releaseWrite = resolve;
+});
+const backpressureStream = new WritableStream({
+  write() {
+    return pendingWrite;
+  },
+}, { highWaterMark: 1 });
+const writer = backpressureStream.getWriter();
+const initialDesiredSize = writer.desiredSize;
+const writePromise = writer.write("chunk");
+const queuedDesiredSize = writer.desiredSize;
+releaseWrite();
+await writePromise;
+const drainedDesiredSize = writer.desiredSize;
+writer.releaseLock();
+
+let pipeError = null;
+try {
+  await new ReadableStream({
+    start(controller) {
+      controller.error(new Error("stream-failure"));
+    },
+  }).pipeTo(new WritableStream());
+} catch (error) {
+  pipeError = error.message;
+}
+
+const lockStream = new ReadableStream();
+const lockReader = lockStream.getReader();
+const lockedWithReader = lockStream.locked;
+lockReader.releaseLock();
+
+const encoderStream = new TextEncoderStream();
+const encodedChunksPromise = readAll(encoderStream.readable);
+const encoderWriter = encoderStream.writable.getWriter();
+await encoderWriter.write("\ud83d");
+await encoderWriter.write("\ude00");
+await encoderWriter.close();
+const encodedStreamBytes = Array.from(
+  (await encodedChunksPromise).flatMap((chunk) => Array.from(chunk)),
+);
+
+const decoderStream = new TextDecoderStream();
+const decodedChunksPromise = readAll(decoderStream.readable);
+const decoderWriter = decoderStream.writable.getWriter();
+await decoderWriter.write(new Uint8Array([0xe2, 0x82]));
+await decoderWriter.write(new Uint8Array([0xac]));
+await decoderWriter.close();
+const decodedStreamText = (await decodedChunksPromise).join("");
+
+const richBlob = new Blob(
+  ["A", new Uint8Array([0, 255]), "\u{1f600}"],
+  { type: "IMAGE/PNG" },
+);
+const richBlobStreamChunks = await readAll(richBlob.stream());
+const richBlobSlice = richBlob.slice(0, 2, "IMAGE/PNG");
+const richFile = new File(
+  [richBlob],
+  "pixel-\u{1f600}.png",
+  { type: "image/png", lastModified: 1700000000123 },
+);
+const responseBlob = await new Response(richBlob).blob();
+const responseSliceBlob = await new Response(richBlobSlice).blob();
+const richFormData = new FormData();
+richFormData.append("caption", "pixel");
+richFormData.append("asset", richFile);
+richFormData.append("slice", richBlobSlice);
+const formDataFile = richFormData.get("asset");
+const multipartRequest = new Request("https://example.com/upload", {
+  method: "POST",
+  body: richFormData,
+});
+const multipartContentType = multipartRequest.headers.get("content-type");
+const multipartText = await multipartRequest.text();
+const blobUrl = URL.createObjectURL(richBlob);
+const resolvedBlob = resolveObjectURL(blobUrl);
+const fetchedBlobUrlResponse = await fetch(blobUrl);
+const fetchedBlobUrlBytes = Array.from(
+  new Uint8Array(await fetchedBlobUrlResponse.arrayBuffer()),
+);
+const rangedBlobUrlResponse = await fetch(blobUrl, {
+  headers: { Range: "bytes=1-3" },
+});
+const rangedBlobUrlText = await rangedBlobUrlResponse.text();
+const resolvedBlobFromUrl = resolveObjectURL(new URL(blobUrl));
+let blobHeadRejected = false;
+try {
+  await fetch(blobUrl, { method: "HEAD" });
+} catch {
+  blobHeadRejected = true;
+}
+const abortedBlobFetchController = new AbortController();
+abortedBlobFetchController.abort();
+let abortedBlobFetchRejected = false;
+try {
+  await fetch(blobUrl, { signal: abortedBlobFetchController.signal });
+} catch {
+  abortedBlobFetchRejected = true;
+}
+const coercionBlobUrl = URL.createObjectURL(richBlob);
+URL.revokeObjectURL(new URL(coercionBlobUrl));
+URL.revokeObjectURL(blobUrl);
+let revokedBlobUrlRejected = false;
+try {
+  await fetch(blobUrl);
+} catch {
+  revokedBlobUrlRejected = true;
+}
+
+console.log(JSON.stringify({
+  bufferBlobShared: BufferBlob === Blob,
+  bufferFileShared: BufferFile === File,
+  byobBytes: Array.from(byobResult.value),
+  byobDone: byobResult.done,
+  byobPullCount,
+  cancellationReason,
+  abortedBlobFetchRejected,
+  blobHeadRejected,
+  constructorsShared:
+    ImportedReadableStream === ReadableStream &&
+    ImportedWritableStream === WritableStream &&
+    ImportedTransformStream === TransformStream &&
+    ImportedTextEncoderStream === TextEncoderStream &&
+    ImportedTextDecoderStream === TextDecoderStream,
+  decodedStreamText,
+  drainedDesiredSize,
+  initialDesiredSize,
+  lockedAfterRelease: lockStream.locked,
+  lockedWithReader,
+  pipeError,
+  pipedValues,
+  queuedDesiredSize,
+  richBlobBytes: Array.from(new Uint8Array(await richBlob.arrayBuffer())),
+  richBlobSize: richBlob.size,
+  richBlobSliceText: await richBlob.slice(1, 3).text(),
+  richBlobSliceShared: richBlobSlice instanceof Blob,
+  richBlobSliceType: richBlobSlice.type,
+  richBlobStreamBytes: richBlobStreamChunks.flatMap((chunk) => Array.from(chunk)),
+  richBlobStreamShared: richBlob.stream() instanceof ReadableStream,
+  richBlobType: richBlob.type,
+  richFileLastModified: richFile.lastModified,
+  richFileName: richFile.name,
+  richFileSize: richFile.size,
+  richFileType: richFile.type,
+  resolvedBlobBytes: Array.from(new Uint8Array(await resolvedBlob.arrayBuffer())),
+  resolvedBlobFromUrl:
+    resolvedBlobFromUrl?.size === richBlob.size &&
+    resolvedBlobFromUrl?.type === richBlob.type,
+  revokedCoercionBlobUrl:
+    resolveObjectURL(coercionBlobUrl) === undefined,
+  resolvedBlobType: resolvedBlob.type,
+  revokedBlobUrlRejected,
+  revokedBlobUrlResolvesUndefined: resolveObjectURL(blobUrl) === undefined,
+  fetchedBlobUrlBytes,
+  fetchedBlobUrlContentType:
+    fetchedBlobUrlResponse.headers.get("content-type"),
+  fetchedBlobUrlLength:
+    fetchedBlobUrlResponse.headers.get("content-length"),
+  fetchedBlobUrlStatusText: fetchedBlobUrlResponse.statusText,
+  fetchedBlobUrlType: fetchedBlobUrlResponse.type,
+  fetchedBlobUrlUrlMatches: fetchedBlobUrlResponse.url === blobUrl,
+  rangedBlobUrlContentRange:
+    rangedBlobUrlResponse.headers.get("content-range"),
+  rangedBlobUrlStatus: rangedBlobUrlResponse.status,
+  rangedBlobUrlText,
+  responseBodyShared: new Response("ok").body instanceof ReadableStream,
+  responseBlobBytes: Array.from(new Uint8Array(await responseBlob.arrayBuffer())),
+  responseBlobInstance: responseBlob instanceof Blob,
+  responseBlobType: responseBlob.type,
+  responseSliceBlobType: responseSliceBlob.type,
+  encodedStreamBytes,
+  formDataEntries: Array.from(richFormData, ([name, value]) => [
+    name,
+    typeof value === "string" ? value : value.name,
+  ]),
+  formDataFileShared: formDataFile instanceof File,
+  multipartHasCaption: multipartText.includes('name="caption"') &&
+    multipartText.includes("pixel"),
+  multipartHasFile: multipartText.includes('name="asset"') &&
+    multipartText.includes('filename="pixel-😀.png"') &&
+    multipartText.includes("Content-Type: image/png"),
+  multipartHeaderHasBoundary:
+    multipartContentType.startsWith("multipart/form-data; boundary="),
+  teeLeftValues,
+  teeRightValues,
+}));
+"#,
+    );
+}
+
+fn regexp_conformance_matches_host_node() {
+    assert_conformance(
+        "regexp",
+        r#"
+const rgiEmoji = new RegExp("^\\p{RGI_Emoji}$", "v");
+class DerivedRegExp extends RegExp {}
+const derived = new DerivedRegExp("^[a-z]$", "v");
+const asciiLetter = new RegExp("^[\\p{ASCII}&&\\p{Letter}]+$", "v");
+
+console.log(JSON.stringify({
+  asciiLetterMatches: asciiLetter.test("AgentOS"),
+  asciiLetterRejectsDigit: !asciiLetter.test("Agent0S"),
+  constructorLength: RegExp.length,
+  constructorName: RegExp.name,
+  derivedMatches: derived.test("a"),
+  derivedPrototype: Object.getPrototypeOf(derived) === DerivedRegExp.prototype,
+  hasCompatibilityWrapper: "__secureExecRgiEmojiCompat" in RegExp,
+  malformedZwjRejected: !rgiEmoji.test("👨‍"),
+  plainTextRejected: !rgiEmoji.test("hello"),
+  rgiCases: [
+    "⚽",
+    "👨🏾‍⚕️",
+    "🇧🇪",
+    "1️⃣",
+    "🏴\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}",
+  ].map((value) => rgiEmoji.test(value)),
+  standaloneModifierRejected: !rgiEmoji.test("🏾"),
 }));
 "#,
     );
@@ -3917,7 +4568,7 @@ const bufferValue = await streamConsumers.buffer(
   makeAsyncStream([Buffer.from("buf")]),
 );
 
-const deflated = zlib.deflateSync(Buffer.from("secure-exec", "utf8"));
+const deflated = zlib.deflateSync(Buffer.from("agentos", "utf8"));
 const inflated = zlib.inflateSync(deflated).toString("utf8");
 
 process.stdout.write(`${JSON.stringify({
@@ -4039,7 +4690,7 @@ process.exit(0);
     assert_eq!(result["zlib"]["importConstantsHasSyncFlush"], true);
     assert_eq!(result["zlib"]["createDeflateType"], "function");
     assert_eq!(result["zlib"]["createInflateType"], "function");
-    assert_eq!(result["zlib"]["inflated"], "secure-exec");
+    assert_eq!(result["zlib"]["inflated"], "agentos");
 }
 
 fn timer_handle_ref_refresh_matches_host_node_impl() {
@@ -4225,6 +4876,8 @@ fn run_named_case(case_name: &str) {
         "buffer" => buffer_conformance_matches_host_node(),
         "url" => url_conformance_matches_host_node(),
         "stdlib_polyfill" => stdlib_polyfill_conformance_matches_host_node(),
+        "web_streams" => web_streams_conformance_matches_host_node(),
+        "regexp" => regexp_conformance_matches_host_node(),
         "extended_builtin_polyfills" => extended_builtin_polyfills_work_in_guest_v8(),
         other => panic!("unknown builtin conformance case: {other}"),
     }
@@ -4302,6 +4955,7 @@ fn __builtin_conformance_extra_test_runner() {
         "os-resource-limits" => os_resource_limits_are_vm_scoped_impl(),
         "timer-handle-ref-refresh" => timer_handle_ref_refresh_matches_host_node_impl(),
         "timer-unref-exit" => unrefd_timeout_does_not_keep_guest_process_alive_impl(),
+        "fs-write-file-numeric-fd" => write_file_sync_numeric_fd_matches_host_node_impl(),
         other => panic!("unknown builtin conformance extra test: {other}"),
     }
 }

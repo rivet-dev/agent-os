@@ -520,6 +520,22 @@ impl PythonExecution {
         self.inner.uses_shared_v8_runtime()
     }
 
+    /// Run another sidecar-managed operation in the retained Pyodide
+    /// interpreter owned by this execution.
+    pub fn execute_retained(&mut self, source: String) -> Result<(), PythonExecutionError> {
+        let source = serde_json::to_string(&source).map_err(|error| {
+            PythonExecutionError::Control(std::io::Error::other(format!(
+                "failed to encode retained Python source: {error}"
+            )))
+        })?;
+        let runner = format!(
+            "process.exitCode = 0; (async () => {{ const pyodide = globalThis.__agentOSRetainedPyodide; if (!pyodide) throw new Error('retained Python interpreter is unavailable'); await pyodide.runPythonAsync({source}); }})()"
+        );
+        self.inner
+            .execute_retained(runner, String::from("/[agentos-python-retained]"), false)
+            .map_err(map_javascript_error)
+    }
+
     pub fn start_prepared(&mut self) -> Result<(), PythonExecutionError> {
         self.inner.start_prepared().map_err(map_javascript_error)
     }
@@ -2776,7 +2792,7 @@ fn warmup_marker_contents(
         env!("CARGO_PKG_NAME").to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
         PYTHON_WARMUP_MARKER_VERSION.to_string(),
-        String::from("secure-exec-v8"),
+        String::from("agentos-v8"),
         python_max_old_space_mb(request).to_string(),
         compile_cache_dir.display().to_string(),
         pyodide_dist_path.display().to_string(),

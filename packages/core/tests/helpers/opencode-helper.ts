@@ -18,6 +18,8 @@ type CreateVmOpenCodeHomeOptions = {
 	providers?: Record<string, OpenCodeProviderConfig>;
 };
 
+const openCodeConfigs = new WeakMap<AgentOs, string>();
+
 async function mkdirpVm(vm: AgentOs, targetPath: string): Promise<void> {
 	const parts = targetPath.split("/").filter(Boolean);
 	let current = "";
@@ -65,28 +67,33 @@ export async function createVmOpenCodeHome(
 			},
 		},
 	};
-	await vm.writeFile(
-		configPath,
-		JSON.stringify(
-			{
-				$schema: "https://opencode.ai/config.json",
-				autoupdate: false,
-				share: "disabled",
-				snapshot: false,
-				model: options.model ?? "anthropic/claude-sonnet-4-20250514",
-				...(options.permission ? { permission: options.permission } : {}),
-				provider: providers,
-			},
-			null,
-			2,
-		),
+	const config = JSON.stringify(
+		{
+			$schema: "https://opencode.ai/config.json",
+			autoupdate: false,
+			share: "disabled",
+			snapshot: false,
+			model: options.model ?? "anthropic/claude-sonnet-4-6",
+			...(options.permission ? { permission: options.permission } : {}),
+			provider: providers,
+		},
+		null,
+		2,
 	);
+	await vm.writeFile(configPath, config);
+	openCodeConfigs.set(vm, config);
 	return homeDir;
 }
 
 export async function createVmWorkspace(vm: AgentOs): Promise<string> {
 	const workspaceDir = `/tmp/opencode-workspace-${randomUUID()}`;
 	await mkdirpVm(vm, workspaceDir);
+	const config = openCodeConfigs.get(vm);
+	if (config) {
+		// A project config is independent of process-global HOME resolution and
+		// matches how OpenCode selects providers/models for the session cwd.
+		await vm.writeFile(`${workspaceDir}/opencode.json`, config);
+	}
 	return workspaceDir;
 }
 

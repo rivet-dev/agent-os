@@ -742,6 +742,7 @@ pub(in crate::execution) fn build_client_tls_config(
             .map(|protocol| protocol.as_bytes().to_vec())
             .collect();
     }
+    config.enable_sni = options.servername.as_deref() != Some("");
     Ok(config)
 }
 
@@ -962,7 +963,10 @@ pub(in crate::execution) fn native_tls_role(
 
     let server_name = options
         .servername
-        .clone()
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or(options.host.as_deref())
+        .map(str::to_owned)
         .unwrap_or_else(|| String::from("localhost"));
     let server_name = ServerName::try_from(server_name)
         .map_err(|_| SidecarError::InvalidState(String::from("invalid TLS servername")))?;
@@ -1780,8 +1784,9 @@ pub(in crate::execution) fn spawn_loopback_tls_transport(
 mod loopback_tls_registry_tests {
     use super::{
         loopback_tls_endpoint, loopback_tls_registry_contains, loopback_tls_transport_key,
-        tls_transport_is_already_closed,
+        native_tls_role, tls_transport_is_already_closed, NativeTlsRole,
     };
+    use crate::state::JavascriptTlsBridgeOptions;
     use agentos_runtime::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
     use std::sync::Arc;
 
@@ -1793,6 +1798,26 @@ mod loopback_tls_registry_tests {
                 ResourceLimit::new(1024 * 1024, "limits.resources.maxSocketBufferedBytes"),
             )],
         ))
+    }
+
+    #[test]
+    fn empty_servername_uses_ip_host_without_sni() {
+        let options = JavascriptTlsBridgeOptions {
+            host: Some(String::from("127.0.0.1")),
+            servername: Some(String::new()),
+            reject_unauthorized: Some(false),
+            ..JavascriptTlsBridgeOptions::default()
+        };
+        let NativeTlsRole::Client {
+            config,
+            server_name,
+        } = native_tls_role(&options, &[]).expect("build IP TLS client role")
+        else {
+            panic!("expected client TLS role");
+        };
+
+        assert_eq!(server_name.to_str(), "127.0.0.1");
+        assert!(!config.enable_sni);
     }
 
     #[test]

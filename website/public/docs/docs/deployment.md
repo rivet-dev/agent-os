@@ -6,7 +6,7 @@ agentOS is powered by [Rivet](https://rivet.dev), an open-source actor platform,
 
 - **[Rivet Cloud](https://rivet.dev/cloud)**: fully managed (Rivet Compute, or bring your own cloud). Zero-ops.
 - **Self-hosted**: run the open-source Rivet platform on your own infrastructure (Kubernetes, Hetzner, VMs, and more) for full control.
-- **[agentOS Core](/docs/core)**: embed `@rivet-dev/agentos-core` directly in any Node.js backend, no platform required.
+- **[Direct VM API](/docs/core)**: embed `@rivet-dev/agentos` directly in any Node.js backend, no platform required.
 
 Pick a deploy target below, or see [Rivet's deployment guides](https://rivet.dev/docs/deploy/).
 

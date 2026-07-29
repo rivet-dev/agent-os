@@ -5,3 +5,7 @@ function Home() {
 }
 
 module.exports = Home;
+
+module.exports.getServerSideProps = async function getServerSideProps() {
+	return { props: {} };
+};

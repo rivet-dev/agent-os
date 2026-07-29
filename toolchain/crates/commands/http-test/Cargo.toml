@@ -16,4 +16,4 @@ test = false
 required-features = ["bin"]
 
 [dependencies]
-wasi-http = { package = "secureexec-wasi-http", path = "../../libs/wasi-http" }
+wasi-http = { package = "agentos-wasi-http", path = "../../libs/wasi-http" }

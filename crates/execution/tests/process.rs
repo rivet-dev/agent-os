@@ -57,7 +57,7 @@ fn embedded_runtime_process_keeps_host_pid_internal_for_javascript() {
             env: BTreeMap::new(),
             cwd: temp.path().to_path_buf(),
             wasm_module_bytes: None,
-            inline_code: Some(String::from("globalThis.__secureExecRanInV8 = true;")),
+            inline_code: Some(String::from("globalThis.__agentOsRanInV8 = true;")),
         })
         .expect("start JavaScript execution");
 

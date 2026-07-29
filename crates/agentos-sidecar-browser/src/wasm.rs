@@ -1,10 +1,10 @@
 //! wasm-bindgen entry point for the Agent OS browser sidecar.
 //!
-//! Mirrors secure-exec's `BrowserSidecarWasm` (pushFrame/pollEvent over the shared
+//! Mirrors agentos's `BrowserSidecarWasm` (pushFrame/pollEvent over the shared
 //! `BrowserWireDispatcher` + `BrowserJsBridge`) but registers the Agent OS ACP
 //! `BrowserExtension` into the dispatcher's sidecar, so guest ACP/session traffic
 //! is handled by the Agent OS wrapper while every kernel syscall still routes
-//! through the converged secure-exec wasm kernel (the sole enforcement point).
+//! through the converged agentos wasm kernel (the sole enforcement point).
 
 use agentos_native_sidecar_browser::wire_dispatch::{BrowserWireDispatcher, BROWSER_SIDECAR_ID};
 use agentos_native_sidecar_browser::BrowserJsBridge;

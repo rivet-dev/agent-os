@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -31,8 +32,73 @@ fn main() {
     // Declare the cfg used to gate Python availability so `cargo` does not warn
     // about an unexpected cfg name.
     println!("cargo:rustc-check-cfg=cfg(agentos_pyodide_unavailable)");
+    println!("cargo:rustc-check-cfg=cfg(agentos_typescript_unavailable)");
     agentos_build_support::build_v8_bridge(&manifest_dir, &out_dir);
     stage_pyodide_assets(&manifest_dir, &out_dir);
+    stage_typescript_assets(&manifest_dir, &out_dir);
+}
+
+fn stage_typescript_assets(manifest_dir: &Path, out_dir: &Path) {
+    let source_dir = manifest_dir.join("../../node_modules/typescript/lib");
+    let staged_dir = out_dir.join("typescript");
+    let generated_path = out_dir.join("typescript_assets.rs");
+    println!("cargo:rerun-if-changed={}", source_dir.display());
+    fs::create_dir_all(&staged_dir).unwrap_or_else(|error| {
+        panic!(
+            "failed to create TypeScript staging dir {}: {error}",
+            staged_dir.display()
+        )
+    });
+
+    let mut assets = Vec::new();
+    if let Ok(entries) = fs::read_dir(&source_dir) {
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|error| {
+                panic!("failed to read TypeScript compiler asset entry: {error}")
+            });
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if file_name != "typescript.js"
+                && !(file_name.starts_with("lib.") && file_name.ends_with(".d.ts"))
+            {
+                continue;
+            }
+            let destination = staged_dir.join(file_name);
+            fs::copy(&path, &destination).unwrap_or_else(|error| {
+                panic!(
+                    "failed to stage TypeScript compiler asset {}: {error}",
+                    path.display()
+                )
+            });
+            assets.push(file_name.to_owned());
+        }
+    }
+    assets.sort();
+
+    if !assets.iter().any(|asset| asset == "typescript.js") {
+        println!("cargo:rustc-cfg=agentos_typescript_unavailable");
+        println!(
+            "cargo:warning=agentos-execution: building without the bundled TypeScript compiler; guest TypeScript checking will be unavailable in this build."
+        );
+    }
+
+    let mut generated = String::from("&[\n");
+    for asset in assets {
+        writeln!(
+            generated,
+            "    ({asset:?}, include_bytes!(concat!(env!(\"OUT_DIR\"), \"/typescript/{asset}\")) as &'static [u8]),"
+        )
+        .expect("writing generated TypeScript asset table cannot fail");
+    }
+    generated.push_str("]\n");
+    fs::write(&generated_path, generated).unwrap_or_else(|error| {
+        panic!(
+            "failed to write TypeScript asset table {}: {error}",
+            generated_path.display()
+        )
+    });
 }
 
 fn stage_pyodide_assets(manifest_dir: &Path, out_dir: &Path) {

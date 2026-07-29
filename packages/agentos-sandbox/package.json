@@ -13,6 +13,51 @@
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js",
 			"default": "./dist/index.js"
+		},
+		"./local": {
+			"types": "./dist/local.d.ts",
+			"import": "./dist/local.js",
+			"default": "./dist/local.js"
+		},
+		"./e2b": {
+			"types": "./dist/e2b.d.ts",
+			"import": "./dist/e2b.js",
+			"default": "./dist/e2b.js"
+		},
+		"./daytona": {
+			"types": "./dist/daytona.d.ts",
+			"import": "./dist/daytona.js",
+			"default": "./dist/daytona.js"
+		},
+		"./docker": {
+			"types": "./dist/docker.d.ts",
+			"import": "./dist/docker.js",
+			"default": "./dist/docker.js"
+		},
+		"./vercel": {
+			"types": "./dist/vercel.d.ts",
+			"import": "./dist/vercel.js",
+			"default": "./dist/vercel.js"
+		},
+		"./cloudflare": {
+			"types": "./dist/cloudflare.d.ts",
+			"import": "./dist/cloudflare.js",
+			"default": "./dist/cloudflare.js"
+		},
+		"./modal": {
+			"types": "./dist/modal.d.ts",
+			"import": "./dist/modal.js",
+			"default": "./dist/modal.js"
+		},
+		"./computesdk": {
+			"types": "./dist/computesdk.d.ts",
+			"import": "./dist/computesdk.js",
+			"default": "./dist/computesdk.js"
+		},
+		"./sprites": {
+			"types": "./dist/sprites.d.ts",
+			"import": "./dist/sprites.js",
+			"default": "./dist/sprites.js"
 		}
 	},
 	"scripts": {
@@ -22,9 +67,9 @@
 	},
 	"dependencies": {
 		"@rivet-dev/agentos-core": "workspace:*",
-		"@rivet-dev/agentos-runtime-core": "workspace:*",
-		"sandbox-agent": "^0.4.2",
-		"zod": "^4.1.11"
+		"dockerode": "^4.0.9",
+		"get-port": "^7.1.0",
+		"sandbox-agent": "^0.4.2"
 	},
 	"devDependencies": {
 		"@agentos-software/common": "workspace:*",

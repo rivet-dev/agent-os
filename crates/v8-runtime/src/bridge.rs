@@ -1750,6 +1750,7 @@ fn read_response_length_argument(
 ) -> Option<usize> {
     let index = match method {
         "fs.readSync" | "_fsReadRaw" => 1,
+        "_fsReadFileRangeRaw" => 2,
         "_pythonStdinRead" | "_kernelStdinReadRaw" | "_kernelStdinRead" => 0,
         _ => return None,
     };
@@ -2318,7 +2319,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_error_code_accepts_trusted_secure_exec_prefixes() {
+    fn bridge_error_code_accepts_trusted_agentos_prefixes() {
         assert_eq!(
             bridge_error_code("ERR_AGENTOS_NODE_SYNC_RPC: EACCES: permission denied on /foo"),
             Some("EACCES")

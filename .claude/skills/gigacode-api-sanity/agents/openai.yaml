@@ -1,0 +1,4 @@
+interface:
+  display_name: "GigaCode API Sanity"
+  short_description: "Compare native OpenCode and GigaCode streaming"
+  default_prompt: "Use $gigacode-api-sanity to compare native OpenCode and GigaCode HTTP/SSE behavior."

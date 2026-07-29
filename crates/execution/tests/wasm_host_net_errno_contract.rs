@@ -114,8 +114,16 @@ fn host_net_socket_families_match_the_owned_wasi_libc_abi() {
     let socket_import = between(&source, "  net_socket(", "  net_set_nonblock(");
     assert!(
         socket_import.contains("numericDomain === HOST_NET_AF_UNIX")
-            && socket_import.contains("localUnixAddress: numericDomain === HOST_NET_AF_UNIX"),
+            && socket_import.contains("localUnixAddress: numericDomain === HOST_NET_AF_UNIX")
+            && socket_import.contains("normalizeHostNetSocketType(sockType)"),
         "net_socket must classify AF_UNIX by the owned libc ABI constant"
+    );
+    assert!(
+        source.contains("case POSIX_SOCK_STREAM:")
+            && source.contains("return flags | HOST_NET_SOCK_STREAM;")
+            && source.contains("case POSIX_SOCK_DGRAM:")
+            && source.contains("return flags | HOST_NET_SOCK_DGRAM;"),
+        "net_socket must canonicalize POSIX socket types before descriptor transfer"
     );
     assert!(
         !socket_import.contains("numericDomain === 1"),
@@ -151,5 +159,23 @@ fn host_net_empty_read_invalidates_cached_poll_readiness() {
     assert!(
         invalidate < end_branch,
         "EAGAIN/timeout and EOF must clear a stale POLLIN hint before the next poll"
+    );
+}
+
+#[test]
+fn blocking_kernel_pipe_writes_pump_wasm_children_on_backpressure() {
+    let source = runner_source();
+    let start = source
+        .rfind("wasiImport.fd_write = (fd, iovs, iovsLen, nwrittenPtr) => {")
+        .expect("missing final WASM fd_write override");
+    let end = source[start..]
+        .find("wasiImport.poll_oneoff =")
+        .expect("missing poll_oneoff after final fd_write");
+    let fd_write = &source[start..start + end];
+    assert!(
+        fd_write.contains("error?.code !== 'EAGAIN'")
+            && fd_write.contains("process.fd_stat")
+            && fd_write.contains("pumpSpawnedChildrenOrWait(SPAWNED_CHILD_WAIT_SLICE_MS)"),
+        "blocking kernel-pipe writes must schedule the child that can free pipe capacity"
     );
 }

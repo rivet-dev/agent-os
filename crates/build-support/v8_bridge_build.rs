@@ -301,7 +301,7 @@ mod tests {
     fn temp_test_dir(name: &str) -> io::Result<PathBuf> {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "secure-exec-v8-bridge-build-{name}-{}",
+            "agentos-v8-bridge-build-{name}-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&path);

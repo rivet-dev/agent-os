@@ -88,6 +88,10 @@
 				"_cryptoRandomFill",
 				"_cryptoRandomUUID",
 				"_cryptoHashDigest",
+				"_cryptoHashCreate",
+				"_cryptoHashUpdate",
+				"_cryptoHashFinal",
+				"_cryptoHashDestroy",
 				"_cryptoHmacDigest",
 				"_cryptoPbkdf2",
 				"_cryptoScrypt",
@@ -163,8 +167,10 @@
 				"_fsLutimes",
 				"fs.openSync",
 				"fs.closeSync",
+				"fs._getPathSync",
 				"fs.readSync",
 				"_fsReadRaw",
+				"_fsReadFileRangeRaw",
 				"fs.writeSync",
 				"_fsWriteRaw",
 				"_fsWritevRaw",
@@ -211,6 +217,7 @@
 				"_childProcessSpawnStart",
 				"_childProcessPoll",
 				"_childProcessStdinWrite",
+					"_childProcessPtyResize",
 					"_childProcessStdinClose",
 					"_childProcessKill",
 					"_processKill",
@@ -349,6 +356,7 @@
 				"_kernelDescendantStdinWaitingRaw",
 				"_kernelPollRaw",
 				"_kernelIsattyRaw",
+				"_kernelFlockRaw",
 				"_kernelTtySizeRaw",
 				"_ptySetRawMode"
 			]
@@ -505,6 +513,10 @@
 			"method": "child_process.poll",
 			"translateArgs": false
 		},
+		"_childProcessPtyResize": {
+			"method": "child_process.resize_pty",
+			"translateArgs": false
+		},
 		"_childProcessSpawnStart": {
 			"method": "child_process.spawn",
 			"translateArgs": false
@@ -583,6 +595,22 @@
 		},
 		"_cryptoHashDigest": {
 			"method": "crypto.hashDigest",
+			"translateArgs": false
+		},
+		"_cryptoHashCreate": {
+			"method": "crypto.hashCreate",
+			"translateArgs": false
+		},
+		"_cryptoHashUpdate": {
+			"method": "crypto.hashUpdate",
+			"translateArgs": false
+		},
+		"_cryptoHashFinal": {
+			"method": "crypto.hashFinal",
+			"translateArgs": false
+		},
+		"_cryptoHashDestroy": {
+			"method": "crypto.hashDestroy",
 			"translateArgs": false
 		},
 		"_cryptoHmacDigest": {
@@ -927,6 +955,10 @@
 		},
 		"_kernelDescendantStdinWaitingRaw": {
 			"method": "__kernel_descendant_stdin_waiting",
+			"translateArgs": false
+		},
+		"_kernelFlockRaw": {
+			"method": "__kernel_flock_path",
 			"translateArgs": false
 		},
 		"_kernelPollRaw": {
@@ -1317,6 +1349,10 @@
 			"method": "fs.closeSync",
 			"translateArgs": false
 		},
+		"fs._getPathSync": {
+			"method": "fs._getPathSync",
+			"translateArgs": false
+		},
 		"fs.fstatSync": {
 			"method": "fs.fstatSync",
 			"translateArgs": false
@@ -1335,6 +1371,10 @@
 		},
 		"_fsReadRaw": {
 			"method": "fs.readSync",
+			"translateArgs": false
+		},
+		"_fsReadFileRangeRaw": {
+			"method": "fs.readFileRangeSync",
 			"translateArgs": false
 		},
 		"fs.writeSync": {

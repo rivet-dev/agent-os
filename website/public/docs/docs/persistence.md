@@ -47,7 +47,7 @@ RivetKit's default idle sleep timeout is 30 seconds. agentOS sets the graceful s
 
 ## VM lifecycle events
 
-Use `connection.actor.lifecycle.onBooted()` and `.onShutdown()` to observe actor-owned VM lifecycle changes. These are hosting events and are intentionally absent from Core.
+Use native RivetKit subscriptions, `connection.on("vmBooted", ...)` and `connection.on("vmShutdown", ...)`, to observe actor-owned VM lifecycle changes. These are hosting events and are intentionally absent from Core.
 
 ## Reading durable state after sleep
 

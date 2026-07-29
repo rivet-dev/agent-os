@@ -68,7 +68,7 @@ const npmHref = packageName
 // fall back to the relevant documentation page for their type.
 const docsHref =
 	entry.docsHref ??
-	(isSoftware ? "/docs/software" : isSandboxExt ? "/docs/sandbox" : null);
+	(isSoftware ? "/docs/software" : isSandboxExt ? "/docs/sandboxes" : null);
 
 const configId = entry.status === "config" ? entry.configId : null;
 const agentId = entry.status === "docs" ? (entry.agentId ?? null) : null;

@@ -30,11 +30,11 @@ pub struct AgentOsConfig {
     /// Software packages to install (flattened). Default `[]`.
     pub software: Vec<SoftwareInput>,
     /// Package directories to project into the VM's `/opt/agentos` tree (the
-    /// secure-exec package projection). Each entry is a host dir containing an
+    /// agentos package projection). Each entry is a host dir containing an
     /// `agentos-package.json` manifest + the package payload. Default `[]`.
     pub packages: Vec<PackageRef>,
     /// Guest mount point for the package projection. Default `/opt/agentos`
-    /// (secure-exec's `OPT_AGENTOS_ROOT`) when `None`.
+    /// (agentos's `OPT_AGENTOS_ROOT`) when `None`.
     pub packages_mount_at: Option<String>,
     /// Loopback ports exempt from the default outbound-to-host block.
     pub loopback_exempt_ports: Vec<u16>,
@@ -166,7 +166,7 @@ impl AgentOsConfigBuilder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SoftwareKind {
-    /// A directory of wasm command binaries. Mounted at `/__secure_exec/commands/{index}/` so the
+    /// A directory of wasm command binaries. Mounted at `/__agentos/commands/{index}/` so the
     /// sidecar's command discovery can resolve guest commands (`echo`, `sh`, `grep`, ...).
     #[default]
     WasmCommands,
@@ -221,7 +221,7 @@ pub struct SidecarJsBridgeCall {
 /// Host-side handler for sidecar `JsBridgeCallRequest` payloads.
 ///
 /// This is Rust-only and intentionally not JSON-serializable. RivetKit uses it to bind a native
-/// sidecar root filesystem to actor-owned SQLite (`ctx.db_*`) without teaching secure-exec about
+/// sidecar root filesystem to actor-owned SQLite (`ctx.db_*`) without teaching agentos about
 /// Rivet actors.
 pub type SidecarJsBridgeCallback = Arc<
     dyn Fn(

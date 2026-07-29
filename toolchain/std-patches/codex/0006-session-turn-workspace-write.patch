@@ -1,0 +1,13 @@
+--- a/exec/src/session_turn_wasi.rs
++++ b/exec/src/session_turn_wasi.rs
+@@ -119,6 +119,10 @@ async fn session_turn() -> anyhow::Result<()> {
+             "approval_policy".to_string(),
+             toml::Value::String("on-request".to_string()),
+         ),
++        (
++            "sandbox_mode".to_string(),
++            toml::Value::String("workspace-write".to_string()),
++        ),
+     ];
+     // This harness supplies its model, approval policy, filesystem, network, and
+     // credential environment explicitly. Loading arbitrary host CLI settings can

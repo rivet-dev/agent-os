@@ -9,12 +9,18 @@ jobs:
   nightly:
     name: Nightly runtime validation
     runs-on: [self-hosted, agentos-builder]
+    env:
+      # Cargo validation and the shared sidecar build are explicit below.
+      # Do not let TypeScript dependency builds compile a second Rust copy.
+      AGENTOS_SKIP_NATIVE_META_BUILD: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+      - run: corepack enable yarn
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -22,23 +28,53 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: wasm32-wasip1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-03-01
+          components: rust-src
+          targets: wasm32-wasip1
+      - name: Install toolchain build prerequisites
+        run: |
+          if ! command -v cmake >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes cmake
+          fi
       - run: pnpm install --frozen-lockfile
-      - run: node --test scripts/generate-secure-exec-mirror.test.mjs
       - run: make -C toolchain commands
+      - run: make -C toolchain cmd/duckdb
+      - run: make -C toolchain codex
       - run: node packages/runtime-core/scripts/copy-wasm-commands.mjs --require
+      - name: Use stable Rust for repository validation
+        run: echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
       # Browser support is retained in-tree but disabled during the unified
       # native sidecar reactor migration, so it must not gate native CI.
       - run: cargo check --workspace --exclude agentos-sidecar-browser --exclude agentos-native-sidecar-browser
       - run: cargo clippy --workspace --exclude agentos-sidecar-browser --exclude agentos-native-sidecar-browser --all-targets -- -D warnings
       - run: pnpm check-types
+      - name: Build sidecars once for all TypeScript runtime suites
+        run: cargo build -p agentos-sidecar -p agentos-native-sidecar
       - run: pnpm test
         env:
           AGENTOS_E2E_NETWORK: '1'
-      # This opt-in gate cold-installs pinned ecosystem fixtures and exercises
-      # real servers inside embedded V8, so keep it off the cheap PR path.
+          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-sidecar
+          AGENTOS_NATIVE_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-native-sidecar
+      - run: pnpm test:nightly
+        env:
+          AGENTOS_E2E_NETWORK: '1'
+          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-sidecar
+          AGENTOS_NATIVE_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-native-sidecar
+      # These opt-in gates cold-install pinned ecosystem fixtures and exercise
+      # package-manager workflows inside the VM, so keep them off the cheap PR path.
       - run: pnpm --dir packages/runtime-core test:ecosystem
         env:
           AGENTOS_ECOSYSTEM_E2E: '1'
+          AGENTOS_NATIVE_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-native-sidecar
+      - run: pnpm --dir packages/runtime-core test:ecosystem:full
+        env:
+          AGENTOS_NATIVE_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-native-sidecar
+      - run: pnpm --dir packages/runtime-core test:npm-workflows
+        env:
+          AGENTOS_NATIVE_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-native-sidecar
       - run: cargo test --workspace --exclude agentos-sidecar-browser --exclude agentos-native-sidecar-browser -- --test-threads=1
       - name: Explicit ignored runtime churn gate
         run: cargo test -p agentos-runtime multi_vm_generation_soak_has_no_accounting_or_scheduler_drift --lib -- --ignored --test-threads=1

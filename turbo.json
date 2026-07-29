@@ -3,6 +3,7 @@
 	"globalEnv": [
 		"AGENTOS_PLUGIN_BIN",
 		"AGENTOS_SIDECAR_BIN",
+		"AGENTOS_NATIVE_SIDECAR_BIN",
 		"AGENTOS_SKIP_NATIVE_META_BUILD"
 	],
 	"globalPassThroughEnv": ["CARGO_TARGET_DIR"],
@@ -34,6 +35,17 @@
 			]
 		},
 		"test": {
+			"inputs": [
+				"src/**",
+				"tests/**",
+				"software/**/test/**",
+				"native/tests/**",
+				"scripts/**",
+				"package.json"
+			],
+			"dependsOn": ["^build", "check-types"]
+		},
+		"test:nightly": {
 			"inputs": [
 				"src/**",
 				"tests/**",

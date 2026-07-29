@@ -128,6 +128,19 @@ mod host_dir {
         }
 
         #[test]
+        fn filesystem_host_dir_mkdir_existing_mount_root_returns_eexist() {
+            let host_dir = temp_dir("agentos-native-sidecar-filesystem-host-dir-mkdir-root");
+
+            let mut filesystem = HostDirFilesystem::new(&host_dir).expect("create host dir fs");
+            let error = filesystem
+                .mkdir_with_mode("/", false, None)
+                .expect_err("the mounted root already exists");
+
+            assert_eq!(error.code(), "EEXIST");
+            fs::remove_dir_all(host_dir).expect("remove temp dir");
+        }
+
+        #[test]
         fn filesystem_host_dir_stat_preserves_nanosecond_timestamp_precision() {
             let host_dir = temp_dir("agentos-native-sidecar-filesystem-host-dir-stat");
             let tracked_file = host_dir.join("tracked.txt");
@@ -385,7 +398,7 @@ mod shadow_root {
         let command_root = registry_command_root()
             .expect("registry WASM commands are required before mounting command root");
         let mut mounts = vec![MountDescriptor {
-            guest_path: String::from("/__secure_exec/commands/0"),
+            guest_path: String::from("/__agentos/commands/0"),
             guest_source: String::from("host_dir"),
             guest_fstype: String::from("host_dir"),
             read_only: true,

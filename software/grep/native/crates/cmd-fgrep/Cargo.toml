@@ -11,4 +11,4 @@ name = "fgrep"
 path = "src/main.rs"
 
 [dependencies]
-shims = { package = "secureexec-shims", path = "../../../../../toolchain/crates/libs/shims" }
+shims = { package = "agentos-shims", path = "../../../../../toolchain/crates/libs/shims" }

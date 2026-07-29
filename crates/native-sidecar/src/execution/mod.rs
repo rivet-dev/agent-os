@@ -10,9 +10,10 @@ pub(crate) use self::launch::{
     host_path_from_runtime_guest_mappings, initial_shadow_sync_inventory,
     is_protected_agentos_shadow_sync_path,
     sanitize_javascript_child_process_internal_bootstrap_env,
-    sync_active_process_host_writes_to_kernel,
+    sync_active_process_host_writes_to_kernel, sync_process_host_writes_to_kernel,
 };
 mod process;
+pub(crate) use self::process::terminate_child_process_tree;
 use self::process::*;
 mod process_events;
 #[cfg(test)]
@@ -33,15 +34,16 @@ pub(crate) use self::signals::{
     signal_runtime_process,
 };
 mod stdio;
-use self::stdio::*;
-pub(crate) use self::stdio::{
-    close_kernel_process_stdin, flush_pending_kernel_stdin, kernel_poll_response,
-    kernel_stdin_read_response, parse_kernel_poll_args, parse_kernel_stdin_read_args,
-    service_javascript_kernel_fd_write_sync_rpc, write_kernel_process_stdin,
-};
 #[cfg(test)]
 #[allow(unused_imports)]
-pub(crate) use self::stdio::{drain_tty_master_output, install_kernel_stdin_pipe};
+pub(crate) use self::stdio::drain_tty_master_output;
+use self::stdio::*;
+pub(crate) use self::stdio::{
+    close_kernel_process_stdin, flush_pending_kernel_stdin, install_kernel_stdin_pipe,
+    kernel_poll_response, kernel_stdin_read_response, parse_kernel_poll_args,
+    parse_kernel_stdin_read_args, service_javascript_kernel_fd_write_sync_rpc,
+    write_kernel_process_stdin,
+};
 mod network;
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -98,9 +100,9 @@ use crate::protocol::{
     JavascriptPosixSpawnFileAction, JavascriptSpawnHostNetFd, KillProcessRequest, OwnershipScope,
     ProcessExitedEvent, ProcessOutputEvent, ProcessSnapshotEntry, ProcessSnapshotStatus,
     PtyResizedResponse, QueueSnapshotEntry, RequestFrame, ResizePtyRequest,
-    ResourceSnapshotResponse, ResponseFrame, ResponsePayload, SidecarRequestPayload,
-    SignalDispositionAction, SignalHandlerRegistration, SocketStateEntry, StreamChannel,
-    VmFetchRequest, VmFetchResponse, WasmPermissionTier, WriteStdinRequest,
+    ResourceSnapshotResponse, ResponseFrame, ResponsePayload, RetainedExecutionLanguage,
+    SidecarRequestPayload, SignalDispositionAction, SignalHandlerRegistration, SocketStateEntry,
+    StreamChannel, VmFetchRequest, VmFetchResponse, WasmPermissionTier, WriteStdinRequest,
 };
 use crate::service::{
     audit_fields, dirname, emit_security_audit_event, emit_structured_event_or_stderr,
@@ -110,7 +112,7 @@ use crate::service::{
 };
 use crate::state::{
     async_completion_channel, ActiveCipherSession, ActiveDhSession, ActiveDiffieHellmanSession,
-    ActiveEcdhSession, ActiveExecution, ActiveExecutionEvent, ActiveHttp2Server,
+    ActiveEcdhSession, ActiveExecution, ActiveExecutionEvent, ActiveHashSession, ActiveHttp2Server,
     ActiveHttp2Session, ActiveHttp2Stream, ActiveHttpServer, ActiveMappedHostFd, ActiveProcess,
     ActiveRealIntervalTimer, ActiveSqliteDatabase, ActiveSqliteStatement, ActiveTcpListener,
     ActiveTcpSocket, ActiveTlsState, ActiveUdpSocket, ActiveUnixListener, ActiveUnixSocket,
@@ -134,11 +136,12 @@ use crate::state::{
     ResolvedChildProcessExecution, ResolvedTcpConnectAddr, ShadowNodeType,
     ShadowSyncInventoryEntry, SharedBridge, SharedSidecarRequestClient, SidecarKernel,
     SocketDescriptionLease, SocketQueryKind, SocketReadinessRegistration,
-    SocketReadinessSubscribers, TlsWritePayload, VmDnsConfig, VmListenPolicy, VmPendingByteBudget,
-    VmState, BINDING_DRIVER_NAME, DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME,
-    EXECUTION_SANDBOX_ROOT_ENV, JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV,
-    MAPPED_HOST_FD_START, PYTHON_COMMAND, VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, WASM_COMMAND,
-    WASM_EXEC_COMMIT_RPC_ENV, WASM_STDIO_SYNC_RPC_ENV,
+    SocketReadinessSubscribers, TlsWritePayload, VmDnsConfig, VmFetchBodyMode, VmFetchStreamState,
+    VmListenPolicy, VmPendingByteBudget, VmState, BINDING_DRIVER_NAME,
+    DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
+    JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, MAPPED_HOST_FD_START, PYTHON_COMMAND,
+    VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, WASM_COMMAND, WASM_EXEC_COMMIT_RPC_ENV,
+    WASM_STDIO_SYNC_RPC_ENV,
 };
 use crate::wire::{ProtocolFrame as WireProtocolFrame, WireFrameCodec};
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
@@ -153,7 +156,9 @@ use md5::Md5;
 use nix::libc;
 use nix::poll::{poll, PollFd as NixPollFd, PollFlags, PollTimeout};
 use nix::sys::signal::{kill as send_signal, Signal};
-use nix::sys::socket::{bind as bind_socket, connect as connect_socket, UnixAddr};
+#[cfg(target_os = "linux")]
+use nix::sys::socket::connect as connect_socket;
+use nix::sys::socket::{bind as bind_socket, UnixAddr};
 use nix::sys::wait::WaitStatus;
 #[cfg(not(target_os = "macos"))]
 use nix::sys::wait::{waitid as wait_on_child, Id as WaitId, WaitPidFlag};
@@ -230,7 +235,8 @@ use agentos_runtime::capability::{
 use agentos_runtime::fairness::{FairBudget, FairWorkTurn};
 use rusqlite::types::ValueRef as SqliteValueRef;
 use rusqlite::{
-    Connection as SqliteConnection, OpenFlags as SqliteOpenFlags, Statement as SqliteStatement,
+    backup::Backup as SqliteBackup, Connection as SqliteConnection, OpenFlags as SqliteOpenFlags,
+    Statement as SqliteStatement,
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::aws_lc_rs;

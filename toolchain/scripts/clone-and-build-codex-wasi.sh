@@ -43,6 +43,7 @@ AGENTOS_ROOT="$(cd "$TOOLCHAIN_DIR/.." && pwd)"
 
 STUBS="$TOOLCHAIN_DIR/stubs"
 CODEX_REF_FILE="$TOOLCHAIN_DIR/codex-ref"
+CODEX_PATCH_DIR="$TOOLCHAIN_DIR/std-patches/codex"
 
 BUILD_ROOT="${CODEX_BUILD_DIR:-$TOOLCHAIN_DIR/.codex-build}"
 CHECKOUT="$BUILD_ROOT/checkout"            # git repo root (rivet-dev/codex)
@@ -69,6 +70,8 @@ SHA="${REF#*@}"       # commit sha
 [ -n "$REPO" ] && [ -n "$SHA" ] && [ "$REPO" != "$SHA" ] || {
 	echo "ERROR: malformed codex-ref '$REF' (expected '<owner>/<repo>@<sha>')" >&2; exit 1; }
 URL="$CODEX_GIT_BASE/$REPO.git"
+PATCH_DIGEST="$({ find "$CODEX_PATCH_DIR" -maxdepth 1 -type f -name '*.patch' -print0 | sort -z | xargs -0 sha256sum; } | sha256sum | cut -d ' ' -f1)"
+EXPECTED_STAMP="$SHA:$PATCH_DIGEST"
 
 echo "== codex-ref: $REPO @ $SHA =="
 echo "== clone url: $URL =="
@@ -76,7 +79,11 @@ echo "== scratch:   $BUILD_ROOT =="
 
 # --- 2. shallow clone at the exact SHA (idempotent by SHA) -------------------
 STAMP="$CHECKOUT/.codex-built-sha"
-if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$SHA" ]; then
+PATCHES_ALREADY_STAMPED=0
+if [ -f "$STAMP" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$EXPECTED_STAMP" ]; then
+	PATCHES_ALREADY_STAMPED=1
+	echo "== reusing existing patched clone at $SHA =="
+else
 	echo "== fetching fork at $SHA =="
 	rm -rf "$CHECKOUT"
 	mkdir -p "$CHECKOUT"
@@ -89,12 +96,25 @@ if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$SHA" ]; then
 		git -C "$CHECKOUT" fetch origin
 	fi
 	git -C "$CHECKOUT" checkout -q "$SHA"
-	echo "$SHA" > "$STAMP"
-else
-	echo "== reusing existing clone at $SHA =="
 fi
 [ -f "$WORKSPACE/Cargo.toml" ] || {
 	echo "ERROR: expected cargo workspace at $WORKSPACE/Cargo.toml" >&2; exit 1; }
+
+echo "== applying Codex session-turn source patches =="
+if [ "$PATCHES_ALREADY_STAMPED" = "1" ]; then
+	echo "   source patch digest already applied: $PATCH_DIGEST"
+else
+	for patch_file in "$CODEX_PATCH_DIR"/*.patch; do
+		[ -e "$patch_file" ] || continue
+		patch -p1 -d "$WORKSPACE" < "$patch_file"
+	done
+fi
+grep -q 'Config::load_default_with_cli_overrides' \
+	"$WORKSPACE/exec/src/session_turn_wasi.rs" || {
+	echo "ERROR: Codex session-turn config isolation patch is missing" >&2
+	exit 1
+}
+printf '%s\n' "$EXPECTED_STAMP" > "$STAMP"
 
 # --- 3. rewrite [patch.crates-io] -> reproducible toolchain stubs ------------
 echo "== rewriting [patch.crates-io] -> toolchain/stubs/* =="
@@ -200,6 +220,10 @@ assert_patched "$WORKSPACE/vendor/tokio/src/process/mod.rs" \
 [ -f "$WORKSPACE/vendor/tokio/src/process/wasi.rs" ] || {
 	echo "ERROR: tokio companion src/process/wasi.rs not installed" >&2; exit 1; }
 echo "   OK: tokio wasi.rs companion installed"
+assert_patched "$WORKSPACE/vendor/tokio/src/fs/mod.rs" \
+	'cfg(not(target_os = "wasi"))' 'tokio wasi filesystem operations run inline'
+assert_patched "$WORKSPACE/vendor/tokio/src/runtime/blocking/pool.rs" \
+	'let result = func();' 'tokio wasi spawn_blocking runs inline'
 
 if [ "$STOP_AFTER" = "vendor" ]; then
 	echo ""
@@ -219,7 +243,13 @@ fi
 
 # --- 6. build via the fork's own reproducible build script -------------------
 echo "== building codex-exec (fork scripts/build-wasi-codex-exec.sh) =="
-SELF_CONTAINED="$(rustc "+$TOOLCHAIN" --print sysroot)/lib/rustlib/wasm32-wasip1/lib/self-contained"
+AGENTOS_WASI_LIBDIR="$TOOLCHAIN_DIR/c/sysroot/lib/wasm32-wasi"
+[ -f "$AGENTOS_WASI_LIBDIR/libc.a" ] || {
+	echo "ERROR: patched AgentOS wasi-libc is missing: $AGENTOS_WASI_LIBDIR/libc.a" >&2
+	echo "       Run: make -C $TOOLCHAIN_DIR c/sysroot/lib/wasm32-wasi/libc.a" >&2
+	exit 1
+}
+LIBC_DIGEST="$(sha256sum "$AGENTOS_WASI_LIBDIR/libc.a" | cut -d ' ' -f1 | cut -c1-16)"
 BUILD_SCRIPT="$WORKSPACE/scripts/build-wasi-codex-exec.sh"
 [ -x "$BUILD_SCRIPT" ] || { echo "ERROR: fork build script missing: $BUILD_SCRIPT" >&2; exit 1; }
 
@@ -227,7 +257,7 @@ INSTALL=0 \
 TOOLCHAIN="$TOOLCHAIN" \
 KEEP_SYSROOT="${KEEP_SYSROOT:-0}" \
 WASI_SDK_DIR="$WASI_SDK_DIR" \
-RUSTFLAGS="-C link-arg=-L$SELF_CONTAINED --cfg tokio_unstable" \
+RUSTFLAGS="-C link-self-contained=no -C link-arg=$AGENTOS_WASI_LIBDIR/crt1-command.o -C link-arg=$AGENTOS_WASI_LIBDIR/libc.a -C link-arg=$AGENTOS_WASI_LIBDIR/libwasi-emulated-pthread.a -C link-arg=-L$AGENTOS_WASI_LIBDIR -C metadata=agentos-libc-$LIBC_DIGEST --cfg tokio_unstable" \
 	"$BUILD_SCRIPT"
 
 # --- 7. install optimized artifact ------------------------------------------

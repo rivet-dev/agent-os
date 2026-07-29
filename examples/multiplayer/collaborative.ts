@@ -7,7 +7,7 @@ const driver = createClient<typeof registry>({
 });
 const driverAgent = driver.vm.getOrCreate("shared-agent");
 
-await driverAgent.openSession({
+await driverAgent.sessions.open({
 	agent: "pi",
 	env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
@@ -23,6 +23,6 @@ observerConn.on("sessionEvent", (event) => {
 });
 
 // Driver sends a prompt. Observer sees the streaming response.
-await driverAgent.prompt({
+await driverAgent.sessions.prompt({
 	content: [{ type: "text", text: "Refactor the auth module" }],
 });

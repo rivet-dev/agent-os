@@ -1,4 +1,4 @@
-import { _fdClose, encodeBridgeBytes, fs } from "./fs.js";
+import { _fdClose, _fdGetPath, encodeBridgeBytes, fs } from "./fs.js";
 import { normalizeChildProcessSignal } from "./os.js";
 import { exposeCustomGlobal } from "../global-exposure.js";
 import { __export } from "../vendor/esbuild-runtime.js";
@@ -16,6 +16,10 @@ __export(child_process_exports, {
   spawnSync: () => spawnSync
 });
 var childProcessInstances = /* @__PURE__ */ new Map();
+var earlyChildProcessEvents = /* @__PURE__ */ new Map();
+const MAX_EARLY_CHILD_PROCESS_IDS = 64;
+const MAX_EARLY_CHILD_PROCESS_EVENTS = 256;
+const CHILD_PROCESS_EXIT_DRAIN_MAX_MS = 1_000;
 const CHILD_PROCESS_EVENT_ROUTES = Symbol.for("agentos.childProcessEventRoutes");
 const childProcessEventRoutes = (() => {
   const existing = globalThis[CHILD_PROCESS_EVENT_ROUTES];
@@ -47,11 +51,15 @@ function publishChildProcessEvent(eventType, payload) {
 // output can still be written to the fd. Per fd we track the number of live
 // children holding it and whether the parent already requested a close.
 var _childInheritedFds = /* @__PURE__ */ new Map();
-function retainChildInheritedFd(fd) {
+function retainChildInheritedFd(fd, closeOnRelease = false) {
   if (typeof fd !== "number") return;
   const entry = _childInheritedFds.get(fd);
-  if (entry) entry.holders += 1;
-  else _childInheritedFds.set(fd, { holders: 1, closePending: false });
+  if (entry) {
+    entry.holders += 1;
+    entry.closePending ||= closeOnRelease;
+  } else {
+    _childInheritedFds.set(fd, { holders: 1, closePending: closeOnRelease });
+  }
 }
 function deferCloseIfChildInheritedFd(fd) {
   const entry = _childInheritedFds.get(fd);
@@ -70,6 +78,15 @@ function releaseChildInheritedFd(fd) {
       _fdClose.applySyncPromise(void 0, [fd]);
     } catch {
     }
+  }
+}
+function childInheritedFdPath(fd) {
+  if (typeof fd !== "number") return null;
+  try {
+    const path = _fdGetPath.applySyncPromise(void 0, [fd]);
+    return typeof path === "string" && path.startsWith("/") ? path : null;
+  } catch {
+    return null;
   }
 }
 function normalizeChildProcessSessionId(payload) {
@@ -98,14 +115,163 @@ function normalizeChildProcessBridgePayload(payload) {
   return payload;
 }
 const CHILD_PROCESS_IPC_FRAME_PREFIX = "\x1EAGENTOS_IPC:";
-function encodeChildProcessIpcFrame(message) {
-  const json = JSON.stringify(message);
+const CHILD_PROCESS_IPC_MAX_GRAPH_NODES = 65536;
+const CHILD_PROCESS_IPC_MAX_GRAPH_DEPTH = 512;
+function createIpcSerializationLimitError(limit) {
+  const error = new Error(`ERR_RESOURCE_BUDGET_EXCEEDED: advanced child_process IPC message exceeds ${limit}`);
+  error.code = "ERR_RESOURCE_BUDGET_EXCEEDED";
+  return error;
+}
+function encodeAdvancedIpcMessage(message) {
+  const seen = /* @__PURE__ */ new Map();
+  const nodes = [];
+  function encode(value, depth) {
+    if (depth > CHILD_PROCESS_IPC_MAX_GRAPH_DEPTH) {
+      throw createIpcSerializationLimitError(`maximum graph depth ${CHILD_PROCESS_IPC_MAX_GRAPH_DEPTH}`);
+    }
+    if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+    if (typeof value === "number") {
+      if (Number.isNaN(value)) return { $t: "nan" };
+      if (value === Infinity) return { $t: "+inf" };
+      if (value === -Infinity) return { $t: "-inf" };
+      if (Object.is(value, -0)) return { $t: "-0" };
+      return value;
+    }
+    if (typeof value === "undefined") return { $t: "undefined" };
+    if (typeof value === "bigint") return { $t: "bigint", value: String(value) };
+    if (typeof value === "function" || typeof value === "symbol") {
+      const error = new TypeError(`${typeof value} could not be cloned by advanced child_process IPC`);
+      error.code = "ERR_IPC_MESSAGE_SERIALIZATION";
+      throw error;
+    }
+    const existing = seen.get(value);
+    if (existing !== undefined) return { $r: existing };
+    if (nodes.length >= CHILD_PROCESS_IPC_MAX_GRAPH_NODES) {
+      throw createIpcSerializationLimitError(`maximum graph nodes ${CHILD_PROCESS_IPC_MAX_GRAPH_NODES}`);
+    }
+    const index = nodes.length;
+    seen.set(value, index);
+    nodes.push(null);
+    let node;
+    if (Array.isArray(value)) {
+      node = { type: "array", values: value.map((entry) => encode(entry, depth + 1)) };
+    } else if (value instanceof Date) {
+      node = { type: "date", value: value.toISOString() };
+    } else if (value instanceof RegExp) {
+      node = { type: "regexp", source: value.source, flags: value.flags, lastIndex: value.lastIndex };
+    } else if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) {
+      node = { type: "buffer", value: value.toString("base64") };
+    } else if (value instanceof ArrayBuffer) {
+      const bytes = new Uint8Array(value);
+      node = { type: "arraybuffer", value: typeof Buffer !== "undefined" ? Buffer.from(bytes).toString("base64") : btoa(String.fromCharCode(...bytes)) };
+    } else if (ArrayBuffer.isView(value)) {
+      const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      node = {
+        type: "typedarray",
+        name: value.constructor?.name || "Uint8Array",
+        value: typeof Buffer !== "undefined" ? Buffer.from(bytes).toString("base64") : btoa(String.fromCharCode(...bytes))
+      };
+    } else if (value instanceof Map) {
+      node = { type: "map", values: Array.from(value, ([key, entry]) => [encode(key, depth + 1), encode(entry, depth + 1)]) };
+    } else if (value instanceof Set) {
+      node = { type: "set", values: Array.from(value, (entry) => encode(entry, depth + 1)) };
+    } else if (value instanceof Error) {
+      node = {
+        type: "error",
+        name: value.name,
+        message: value.message,
+        stack: value.stack,
+        values: Object.keys(value).map((key) => [key, encode(value[key], depth + 1)])
+      };
+    } else {
+      node = { type: "object", values: Object.keys(value).map((key) => [key, encode(value[key], depth + 1)]) };
+    }
+    nodes[index] = node;
+    return { $r: index };
+  }
+  return JSON.stringify({ __agentOSAdvancedIpc: 1, root: encode(message, 0), nodes });
+}
+function decodeAdvancedIpcMessage(envelope) {
+  if (!Array.isArray(envelope.nodes) || envelope.nodes.length > CHILD_PROCESS_IPC_MAX_GRAPH_NODES) {
+    throw createIpcSerializationLimitError(`maximum graph nodes ${CHILD_PROCESS_IPC_MAX_GRAPH_NODES}`);
+  }
+  const shells = envelope.nodes.map((node) => {
+    switch (node?.type) {
+      case "array": return [];
+      case "date": return new Date(node.value);
+      case "regexp": {
+        const value = new RegExp(node.source, node.flags);
+        value.lastIndex = node.lastIndex || 0;
+        return value;
+      }
+      case "buffer": return typeof Buffer !== "undefined" ? Buffer.from(node.value, "base64") : Uint8Array.from(atob(node.value), (character) => character.charCodeAt(0));
+      case "arraybuffer": {
+        const bytes = typeof Buffer !== "undefined" ? Buffer.from(node.value, "base64") : Uint8Array.from(atob(node.value), (character) => character.charCodeAt(0));
+        return Uint8Array.from(bytes).buffer;
+      }
+      case "typedarray": {
+        const bytes = typeof Buffer !== "undefined" ? Buffer.from(node.value, "base64") : Uint8Array.from(atob(node.value), (character) => character.charCodeAt(0));
+        const ctor = globalThis[node.name];
+        const buffer = Uint8Array.from(bytes).buffer;
+        return typeof ctor === "function" && ctor.BYTES_PER_ELEMENT ? new ctor(buffer) : new Uint8Array(buffer);
+      }
+      case "map": return /* @__PURE__ */ new Map();
+      case "set": return /* @__PURE__ */ new Set();
+      case "error": {
+        const value = new Error(node.message);
+        value.name = node.name || "Error";
+        if (node.stack !== undefined) value.stack = node.stack;
+        return value;
+      }
+      default: return {};
+    }
+  });
+  function decode(token, depth) {
+    if (depth > CHILD_PROCESS_IPC_MAX_GRAPH_DEPTH) {
+      throw createIpcSerializationLimitError(`maximum graph depth ${CHILD_PROCESS_IPC_MAX_GRAPH_DEPTH}`);
+    }
+    if (token === null || typeof token !== "object") return token;
+    if (Object.prototype.hasOwnProperty.call(token, "$r")) {
+      if (!Number.isInteger(token.$r) || token.$r < 0 || token.$r >= shells.length) {
+        throw new TypeError("invalid advanced child_process IPC reference");
+      }
+      return shells[token.$r];
+    }
+    switch (token.$t) {
+      case "undefined": return undefined;
+      case "nan": return NaN;
+      case "+inf": return Infinity;
+      case "-inf": return -Infinity;
+      case "-0": return -0;
+      case "bigint": return BigInt(token.value);
+      default: return token;
+    }
+  }
+  for (let index = 0; index < envelope.nodes.length; index += 1) {
+    const node = envelope.nodes[index];
+    const shell = shells[index];
+    if (node.type === "array") {
+      for (const value of node.values) shell.push(decode(value, 1));
+    } else if (node.type === "object" || node.type === "error") {
+      for (const [key, value] of node.values || []) shell[key] = decode(value, 1);
+    } else if (node.type === "map") {
+      for (const [key, value] of node.values) shell.set(decode(key, 1), decode(value, 1));
+    } else if (node.type === "set") {
+      for (const value of node.values) shell.add(decode(value, 1));
+    }
+  }
+  return decode(envelope.root, 0);
+}
+function encodeChildProcessIpcFrame(message, serialization) {
+  const mode = serialization ?? globalThis.__agentOSProcessConfigEnv?.AGENTOS_NODE_IPC_SERIALIZATION;
+  const json = mode === "advanced" ? encodeAdvancedIpcMessage(message) : JSON.stringify(message);
   const encoded = typeof Buffer !== "undefined" ? Buffer.from(json, "utf8").toString("base64") : btoa(json);
   return `${CHILD_PROCESS_IPC_FRAME_PREFIX}${encoded}\n`;
 }
 function decodeChildProcessIpcFramePayload(payload) {
   const json = typeof Buffer !== "undefined" ? Buffer.from(payload, "base64").toString("utf8") : atob(payload);
-  return JSON.parse(json);
+  const parsed = JSON.parse(json);
+  return parsed?.__agentOSAdvancedIpc === 1 ? decodeAdvancedIpcMessage(parsed) : parsed;
 }
 function splitChildProcessIpcFrames(buffer, chunk) {
   const text = `${buffer}${typeof Buffer !== "undefined" ? Buffer.from(chunk).toString("utf8") : String(chunk)}`;
@@ -136,12 +302,20 @@ function splitChildProcessIpcFrames(buffer, chunk) {
 // bytes straight to that descriptor (matching native node, where the child's
 // output lands in the inherited file/pipe rather than on child.stdout). Returns
 // true when the data was consumed by the fd so the caller skips stream emission.
-function writeChildOutputToInheritedFd(fd, buf) {
+function writeChildOutputToInheritedFd(fd, buf, path = null) {
+  const bytes = typeof Buffer !== "undefined" && Buffer.isBuffer(buf) ? buf : typeof Buffer !== "undefined" ? Buffer.from(buf) : buf;
+  if (typeof path === "string") {
+    try {
+      fs.appendFileSync(path, bytes);
+      return true;
+    } catch {
+    }
+  }
   if (typeof fd !== "number") return false;
   try {
-    const bytes = typeof Buffer !== "undefined" && Buffer.isBuffer(buf) ? buf : typeof Buffer !== "undefined" ? Buffer.from(buf) : buf;
     fs.writeSync(fd, bytes, 0, bytes.length, null);
   } catch {
+    return false;
   }
   return true;
 }
@@ -158,54 +332,133 @@ function redirectSyncOutputToInheritedFd(fd, output) {
 }
 function routeChildProcessEvent(sessionId, type, data) {
   const child = childProcessInstances.get(sessionId);
-  if (!child) return;
+  if (!child) {
+    let events = earlyChildProcessEvents.get(sessionId);
+    if (!events) {
+      if (earlyChildProcessEvents.size >= MAX_EARLY_CHILD_PROCESS_IDS) {
+        earlyChildProcessEvents.delete(earlyChildProcessEvents.keys().next().value);
+      }
+      events = [];
+      earlyChildProcessEvents.set(sessionId, events);
+    }
+    if (events.length < MAX_EARLY_CHILD_PROCESS_EVENTS) {
+      events.push({ type, data });
+    }
+    return;
+  }
   if (type === "stdout") {
     const buf = typeof Buffer !== "undefined" ? Buffer.from(data) : data;
     if (child._ipcEnabled) {
       const parsed = splitChildProcessIpcFrames(child._ipcStdoutBuffer, buf);
       child._ipcStdoutBuffer = parsed.buffer;
       for (const message of parsed.messages) {
+        if (message?.__agentOSControl === "ipc-ready") {
+          child._ipcReady = true;
+          child._flushIpcOutboundQueue();
+          continue;
+        }
         child._emitOrQueueIpcMessage(message);
       }
       if (parsed.output.length === 0) {
         return;
       }
       const outBuf = typeof Buffer !== "undefined" ? Buffer.from(parsed.output, "utf8") : parsed.output;
-      if (writeChildOutputToInheritedFd(child._stdoutFd, outBuf)) return;
+      if (writeChildOutputToInheritedFd(child._stdoutFd, outBuf, child._stdoutPath)) return;
       child.stdout.emit("data", outBuf);
       return;
     }
-    if (writeChildOutputToInheritedFd(child._stdoutFd, buf)) return;
+    if (writeChildOutputToInheritedFd(child._stdoutFd, buf, child._stdoutPath)) return;
     child.stdout.emit("data", buf);
   } else if (type === "stderr") {
     const buf = typeof Buffer !== "undefined" ? Buffer.from(data) : data;
-    if (writeChildOutputToInheritedFd(child._stderrFd, buf)) return;
+    if (writeChildOutputToInheritedFd(child._stderrFd, buf, child._stderrPath)) return;
     child.stderr.emit("data", buf);
   } else if (type === "exit") {
-    const wasConnected = child.connected;
-    child.connected = false;
     const signalCode = data && typeof data === "object" ? data.signal ?? null : null;
     const exitCode = data && typeof data === "object" ? data.code : data;
-    child._pendingSignalCode = null;
-    child.signalCode = signalCode;
-    child.exitCode = signalCode == null ? exitCode : null;
-    if (wasConnected) {
-      child.emit("disconnect");
-    }
-    child.emit("exit", child.exitCode, child.signalCode);
-    child.stdout.emit("end");
-    child.stderr.emit("end");
-    queueMicrotask(() => {
-      child.emit("close", child.exitCode, child.signalCode);
+    if (child._exitScheduled) return;
+    child._exitScheduled = true;
+    const drainDeadline = Date.now() + CHILD_PROCESS_EXIT_DRAIN_MAX_MS;
+    const finalizeExit = () => {
+      // Effect's Node stream adapter consumes child output through the paused
+      // `readable`/`read()` contract. Let that registered consumer drain bytes
+      // already delivered before publishing exit: otherwise the process scope
+      // can close its stream fiber while those bytes are still buffered. This
+      // normally completes on the next turn and adds no fixed exit delay.
+      const waitingForReadableConsumer = [child.stdout, child.stderr].some(
+        (stream) =>
+          stream._bufferedChunks.length > 0 &&
+          hasOutputListeners(stream, "readable"),
+      );
+      if (waitingForReadableConsumer && Date.now() < drainDeadline) {
+        scheduleOutputFlush(child.stdout);
+        scheduleOutputFlush(child.stderr);
+        setTimeout(finalizeExit, 0);
+        return;
+      }
+      if (waitingForReadableConsumer && typeof console !== "undefined") {
+        console.error(
+          `ERR_AGENTOS_CHILD_STDIO_DRAIN_TIMEOUT: child ${sessionId} output was not consumed within ${CHILD_PROCESS_EXIT_DRAIN_MAX_MS}ms`,
+        );
+      }
+      const wasConnected = child.connected;
+      child.connected = false;
+      child._pendingSignalCode = null;
+      child.signalCode = signalCode;
+      child.exitCode = signalCode == null ? exitCode : null;
+      child.stdin.writable = false;
+      child.stdin.destroyed = true;
+      if (wasConnected) child.emit("disconnect");
       if (Array.isArray(child._inheritedFds)) {
         for (const fd of child._inheritedFds) releaseChildInheritedFd(fd);
         child._inheritedFds = [];
       }
-      childProcessInstances.delete(sessionId);
-      if (typeof _unregisterHandle === "function") {
-        _unregisterHandle(`child:${sessionId}`);
-      }
-    });
+      // Native stdout/stderr reach EOF before `close`, and consumers such as
+      // Effect finish their stream fiber from that EOF. Publish it before the
+      // process exit callback and yield one turn so exit cannot close the
+      // consumer's scope while its final chunk is still being reduced.
+      child.stdout.emit("end");
+      child.stderr.emit("end");
+      const publishExit = () => {
+        // A consumer can attach after finalizeExit's first drain check (Effect
+        // does this while resuming the spawn fiber). Recheck immediately before
+        // close so that attaching during this window cannot strand buffered
+        // output and complete the command with an empty result.
+        const waitingForLateReadableConsumer = [child.stdout, child.stderr].some(
+          (stream) =>
+            stream._bufferedChunks.length > 0 &&
+            hasOutputListeners(stream, "readable"),
+        );
+        if (waitingForLateReadableConsumer && Date.now() < drainDeadline) {
+          scheduleOutputFlush(child.stdout);
+          scheduleOutputFlush(child.stderr);
+          setTimeout(publishExit, 0);
+          return;
+        }
+        if (waitingForLateReadableConsumer && typeof console !== "undefined") {
+          console.error(
+            `ERR_AGENTOS_CHILD_STDIO_DRAIN_TIMEOUT: child ${sessionId} output was not consumed within ${CHILD_PROCESS_EXIT_DRAIN_MAX_MS}ms`,
+          );
+        }
+        child.emit("exit", child.exitCode, child.signalCode);
+        child.emit("close", child.exitCode, child.signalCode);
+        childProcessInstances.delete(sessionId);
+        if (typeof _unregisterHandle === "function") {
+          _unregisterHandle(`child:${sessionId}`);
+        }
+      };
+      // EOF listeners may resume their consumer through a task (Effect's Node
+      // stream adapter does this). A microtask can still publish exit first and
+      // close that consumer's scope before it commits the final chunk/result.
+      setTimeout(publishExit, 0);
+    };
+    // Stream callbacks can hand a chunk to an async consumer (notably Effect's
+    // Node stream adapter) without leaving it in `_bufferedChunks`. Give that
+    // consumer one event-loop turn before EOF/exit closes its scope. A
+    // microtask is too early because the consumer resumes through the runtime's
+    // task queue; this zero-delay turn preserves Node's stdout-before-close
+    // contract without imposing a fixed drain delay on every subprocess.
+    setTimeout(finalizeExit, 0);
   }
 }
 var childProcessDispatch = (eventTypeOrSessionId, payloadOrType, data) => {
@@ -303,11 +556,27 @@ function scheduleOutputFlush(stream) {
       for (const chunk of chunks) {
         stream.emit("data", chunk);
       }
+    } else if (stream._bufferedChunks.length > 0 && hasOutputListeners(stream, "readable")) {
+      stream.emit("readable");
     }
-    if (stream._ended && stream._bufferedChunks.length === 0 && hasOutputListeners(stream, "end")) {
+    if (stream._ended && !stream._endEmitted && stream._bufferedChunks.length === 0) {
       stream.emit("end");
     }
   });
+}
+function readBufferedOutputChunk(stream, size) {
+  const chunk = stream._bufferedChunks.shift();
+  if (chunk === void 0) {
+    return null;
+  }
+  if (Number.isInteger(size) && size > 0 && chunk.length > size) {
+    const head = typeof chunk === "string" ? chunk.slice(0, size) : chunk.subarray(0, size);
+    const tail = typeof chunk === "string" ? chunk.slice(size) : chunk.subarray(size);
+    stream._bufferedChunks.unshift(tail);
+    return head;
+  }
+  if (stream._ended && stream._bufferedChunks.length === 0) scheduleOutputFlush(stream);
+  return chunk;
 }
 function checkStreamMaxListeners(stream, event) {
   if (!(stream._maxListenersWarned instanceof Set)) {
@@ -412,8 +681,12 @@ var ChildProcess = class {
   _handleDescription = "";
   _handleRefed = false;
   _ipcEnabled = false;
+  _ipcSerialization = "json";
+  _ipcReady = false;
   _ipcStdoutBuffer = "";
   _ipcQueuedMessages = [];
+  _ipcOutboundQueue = [];
+  _ipcOutboundBytes = 0;
   spawnfile = "";
   spawnargs = [];
   stdin;
@@ -450,6 +723,9 @@ var ChildProcess = class {
         if (!this._listeners[event]) this._listeners[event] = [];
         this._listeners[event].push(listener);
         return this;
+      },
+      addListener(event, listener) {
+        return this.on(event, listener);
       },
       once(event, listener) {
         if (!this._onceListeners[event]) this._onceListeners[event] = [];
@@ -490,29 +766,35 @@ var ChildProcess = class {
     };
     this.stdout = {
       readable: true,
+      readableEnded: false,
       isTTY: false,
       destroyed: false,
       _listeners: {},
       _onceListeners: {},
       _bufferedChunks: [],
       _ended: false,
+      _endEmitted: false,
       _flushScheduled: false,
       _maxListeners: 10,
       _maxListenersWarned: /* @__PURE__ */ new Set(),
+      _pipeListeners: /* @__PURE__ */ new Map(),
       on(event, listener) {
         if (!this._listeners[event]) this._listeners[event] = [];
         this._listeners[event].push(listener);
         checkStreamMaxListeners(this, event);
-        if (event === "data" || event === "end") {
+        if (event === "data" || event === "readable" || event === "end") {
           scheduleOutputFlush(this);
         }
         return this;
+      },
+      addListener(event, listener) {
+        return this.on(event, listener);
       },
       once(event, listener) {
         if (!this._onceListeners[event]) this._onceListeners[event] = [];
         this._onceListeners[event].push(listener);
         checkStreamMaxListeners(this, event);
-        if (event === "data" || event === "end") {
+        if (event === "data" || event === "readable" || event === "end") {
           scheduleOutputFlush(this);
         }
         return this;
@@ -536,11 +818,22 @@ var ChildProcess = class {
           args[0] = decodeOutputChunk(this, args[0]);
           if (!hasOutputListeners(this, "data")) {
             this._bufferedChunks.push(args[0]);
+            if (hasOutputListeners(this, "readable")) {
+              scheduleOutputFlush(this);
+            }
             return false;
           }
         }
         if (event === "end") {
           this._ended = true;
+          if (this._bufferedChunks.length > 0) {
+            scheduleOutputFlush(this);
+            return false;
+          }
+          if (this._endEmitted) return false;
+          this._endEmitted = true;
+          this.readableEnded = true;
+          this.readable = false;
           if (!hasOutputListeners(this, "end")) {
             return false;
           }
@@ -554,8 +847,8 @@ var ChildProcess = class {
         }
         return true;
       },
-      read() {
-        return null;
+      read(size) {
+        return readBufferedOutputChunk(this, size);
       },
       setEncoding(encoding) {
         this._readableEncoding = encoding == null || encoding === "buffer" ? null : String(encoding);
@@ -569,7 +862,29 @@ var ChildProcess = class {
         return this._maxListeners;
       },
       pipe(dest) {
+        if (!this._pipeListeners.has(dest)) {
+          const onData = (chunk) => dest?.write?.(chunk);
+          this._pipeListeners.set(dest, onData);
+          this.on("data", onData);
+        }
         return dest;
+      },
+      unpipe(dest) {
+        if (dest === undefined) {
+          for (const [target, listener] of this._pipeListeners) {
+            this.off("data", listener);
+            target?.emit?.("unpipe", this);
+          }
+          this._pipeListeners.clear();
+          return this;
+        }
+        const listener = this._pipeListeners.get(dest);
+        if (listener) {
+          this.off("data", listener);
+          this._pipeListeners.delete(dest);
+          dest?.emit?.("unpipe", this);
+        }
+        return this;
       },
       pause() {
         return this;
@@ -590,29 +905,35 @@ var ChildProcess = class {
     };
     this.stderr = {
       readable: true,
+      readableEnded: false,
       isTTY: false,
       destroyed: false,
       _listeners: {},
       _onceListeners: {},
       _bufferedChunks: [],
       _ended: false,
+      _endEmitted: false,
       _flushScheduled: false,
       _maxListeners: 10,
       _maxListenersWarned: /* @__PURE__ */ new Set(),
+      _pipeListeners: /* @__PURE__ */ new Map(),
       on(event, listener) {
         if (!this._listeners[event]) this._listeners[event] = [];
         this._listeners[event].push(listener);
         checkStreamMaxListeners(this, event);
-        if (event === "data" || event === "end") {
+        if (event === "data" || event === "readable" || event === "end") {
           scheduleOutputFlush(this);
         }
         return this;
+      },
+      addListener(event, listener) {
+        return this.on(event, listener);
       },
       once(event, listener) {
         if (!this._onceListeners[event]) this._onceListeners[event] = [];
         this._onceListeners[event].push(listener);
         checkStreamMaxListeners(this, event);
-        if (event === "data" || event === "end") {
+        if (event === "data" || event === "readable" || event === "end") {
           scheduleOutputFlush(this);
         }
         return this;
@@ -636,11 +957,22 @@ var ChildProcess = class {
           args[0] = decodeOutputChunk(this, args[0]);
           if (!hasOutputListeners(this, "data")) {
             this._bufferedChunks.push(args[0]);
+            if (hasOutputListeners(this, "readable")) {
+              scheduleOutputFlush(this);
+            }
             return false;
           }
         }
         if (event === "end") {
           this._ended = true;
+          if (this._bufferedChunks.length > 0) {
+            scheduleOutputFlush(this);
+            return false;
+          }
+          if (this._endEmitted) return false;
+          this._endEmitted = true;
+          this.readableEnded = true;
+          this.readable = false;
           if (!hasOutputListeners(this, "end")) {
             return false;
           }
@@ -654,8 +986,8 @@ var ChildProcess = class {
         }
         return true;
       },
-      read() {
-        return null;
+      read(size) {
+        return readBufferedOutputChunk(this, size);
       },
       setEncoding(encoding) {
         this._readableEncoding = encoding == null || encoding === "buffer" ? null : String(encoding);
@@ -669,7 +1001,29 @@ var ChildProcess = class {
         return this._maxListeners;
       },
       pipe(dest) {
+        if (!this._pipeListeners.has(dest)) {
+          const onData = (chunk) => dest?.write?.(chunk);
+          this._pipeListeners.set(dest, onData);
+          this.on("data", onData);
+        }
         return dest;
+      },
+      unpipe(dest) {
+        if (dest === undefined) {
+          for (const [target, listener] of this._pipeListeners) {
+            this.off("data", listener);
+            target?.emit?.("unpipe", this);
+          }
+          this._pipeListeners.clear();
+          return this;
+        }
+        const listener = this._pipeListeners.get(dest);
+        if (listener) {
+          this.off("data", listener);
+          this._pipeListeners.delete(dest);
+          dest?.emit?.("unpipe", this);
+        }
+        return this;
       },
       pause() {
         return this;
@@ -698,6 +1052,9 @@ var ChildProcess = class {
       this._flushQueuedIpcMessages();
     }
     return this;
+  }
+  addListener(event, listener) {
+    return this.on(event, listener);
   }
   once(event, listener) {
     if (!this._onceListeners[event]) this._onceListeners[event] = [];
@@ -760,6 +1117,13 @@ var ChildProcess = class {
       }
     });
   }
+  _flushIpcOutboundQueue() {
+    while (this._ipcReady && this._ipcOutboundQueue.length > 0) {
+      const queued = this._ipcOutboundQueue.shift();
+      this._ipcOutboundBytes -= queued.frame.length;
+      this.stdin.write(queued.frame, "utf8", queued.callback);
+    }
+  }
   emit(event, ...args) {
     let handled = false;
     if (this._listeners[event]) {
@@ -807,7 +1171,19 @@ var ChildProcess = class {
     }
     const callback = typeof sendHandleOrOptions === "function" ? sendHandleOrOptions : typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback;
     try {
-      const frame = encodeChildProcessIpcFrame(message);
+      const frame = encodeChildProcessIpcFrame(message, this._ipcSerialization);
+      if (!this._ipcReady) {
+        if (this._ipcOutboundQueue.length >= 1024 || this._ipcOutboundBytes + frame.length > 8 * 1024 * 1024) {
+          const error = new Error("ERR_RESOURCE_BUDGET_EXCEEDED: pre-ready child_process IPC queue exceeds 1024 messages or 8388608 bytes; wait for the child spawn/IPC channel before sending more data");
+          error.code = "ERR_RESOURCE_BUDGET_EXCEEDED";
+          if (callback) queueMicrotask(() => callback(error));
+          else queueMicrotask(() => this.emit("error", error));
+          return false;
+        }
+        this._ipcOutboundQueue.push({ frame, callback });
+        this._ipcOutboundBytes += frame.length;
+        return true;
+      }
       this.stdin.write(frame, "utf8", callback);
       return true;
     } catch (error) {
@@ -992,6 +1368,10 @@ function spawn(command, args, options) {
     opts = options || {};
   }
   const child = new ChildProcess();
+  if (opts.__agentOSForkIpc === true) {
+    child._ipcEnabled = true;
+    child.connected = true;
+  }
   child.spawnfile = command;
   child.spawnargs = [command, ...argsArray];
   child.detached = opts.detached === true;
@@ -1002,6 +1382,8 @@ function spawn(command, args, options) {
   // (which native node leaves null in that mode).
   child._stdoutFd = typeof stdio[1] === "number" ? stdio[1] : null;
   child._stderrFd = typeof stdio[2] === "number" ? stdio[2] : null;
+  child._stdoutPath = childInheritedFdPath(child._stdoutFd);
+  child._stderrPath = childInheritedFdPath(child._stderrFd);
   child._inheritedFds = [];
   for (const fd of [child._stdoutFd, child._stderrFd]) {
     if (typeof fd === "number") {
@@ -1021,7 +1403,11 @@ function spawn(command, args, options) {
           env: opts.env,
           argv0: opts.argv0 == null ? void 0 : String(opts.argv0),
           shell: opts.shell === true || typeof opts.shell === "string",
-          detached: opts.detached === true
+          detached: opts.detached === true,
+          pty: opts.agentosPty && typeof opts.agentosPty === "object" ? {
+            cols: Number.isInteger(opts.agentosPty.cols) && opts.agentosPty.cols > 0 ? opts.agentosPty.cols : 80,
+            rows: Number.isInteger(opts.agentosPty.rows) && opts.agentosPty.rows > 0 ? opts.agentosPty.rows : 24
+          } : opts.agentosPty === true ? { cols: 80, rows: 24 } : null
         })
       ]));
     } catch (error) {
@@ -1048,8 +1434,25 @@ function spawn(command, args, options) {
       _registerHandle(child._handleId, child._handleDescription);
       child._handleRefed = true;
     }
+    queueMicrotask(() => {
+      const events = earlyChildProcessEvents.get(sessionId);
+      if (!events) return;
+      earlyChildProcessEvents.delete(sessionId);
+      for (const event of events) {
+        routeChildProcessEvent(sessionId, event.type, event.data);
+      }
+    });
     child.stdin.write = (data, encodingOrCallback, callback) => {
       const done = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+      if (!child.stdin.writable || child.stdin.destroyed) {
+        const error = new Error("Cannot call write after a stream was destroyed");
+        error.code = "ERR_STREAM_DESTROYED";
+        queueMicrotask(() => {
+          if (done) done(error);
+          else child.stdin.emit("error", error);
+        });
+        return false;
+      }
       if (typeof _childProcessStdinWrite === "undefined") return false;
       const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
       try {
@@ -1102,6 +1505,13 @@ function spawn(command, args, options) {
       child.killed = true;
       child._pendingSignalCode = normalizedSignal.signalCode;
       return true;
+    };
+    child.resizePty = (cols, rows) => {
+      if (typeof _childProcessPtyResize === "undefined") {
+        throw new Error("child_process PTY resize bridge is unavailable");
+      }
+      _childProcessPtyResize.applySync(void 0, [sessionId, cols, rows]);
+      return child;
     };
     child.pid = typeof spawnResult === "object" && spawnResult !== null ? Number(spawnResult.pid) || -1 : Number(sessionId) || -1;
     if (stdio[1] === "inherit" || stdio[1] === 1) {
@@ -1300,6 +1710,20 @@ function execFile(file, args, options, callback) {
   });
   return child;
 }
+Object.defineProperty(execFile, Symbol.for("nodejs.util.promisify.custom"), {
+  configurable: true,
+  value(file, args, options) {
+    return new Promise((resolve, reject) => {
+      execFile(file, args, options, (error, stdout, stderr) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve({ stdout, stderr });
+      });
+    });
+  },
+});
 function execFileSync(file, args, options) {
   let argsArray = [];
   let opts = {};
@@ -1340,22 +1764,35 @@ function fork(modulePath, args, options) {
   }
   const effectiveCwd = opts.cwd ?? (typeof process !== "undefined" ? process.cwd() : "/");
   const execArgv = Array.isArray(opts.execArgv) ? opts.execArgv : typeof process !== "undefined" && Array.isArray(process.execArgv) ? process.execArgv : [];
+  const preloadModules = [];
+  for (let index = 0; index < execArgv.length; index += 1) {
+    const argument = String(execArgv[index]);
+    if (argument === "--require" || argument === "-r") {
+      if (index + 1 < execArgv.length) preloadModules.push(String(execArgv[++index]));
+    } else if (argument.startsWith("--require=")) {
+      preloadModules.push(argument.slice("--require=".length));
+    }
+  }
   const env = {
     ...(typeof process !== "undefined" ? process.env : {}),
     ...(opts.env || {}),
-    AGENTOS_NODE_IPC: "1"
+    AGENTOS_NODE_IPC: "1",
+    AGENTOS_NODE_IPC_SERIALIZATION: opts.serialization === "advanced" ? "advanced" : "json",
+    AGENTOS_NODE_EXEC_ARGV: JSON.stringify(execArgv.map(String)),
+    AGENTOS_NODE_PRELOAD_MODULES: JSON.stringify(preloadModules)
   };
   const child = spawn(opts.execPath || (typeof process !== "undefined" ? process.execPath : "node"), [
-    ...execArgv,
     modulePath,
     ...argsArray
   ], {
     ...opts,
+    __agentOSForkIpc: true,
     cwd: effectiveCwd,
     env,
     shell: false
   });
   child._ipcEnabled = true;
+  child._ipcSerialization = opts.serialization === "advanced" ? "advanced" : "json";
   child.connected = true;
   return child;
 }

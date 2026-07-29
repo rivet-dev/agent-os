@@ -9,7 +9,7 @@ Back a VM with a real Sandbox Agent container: the sandbox's filesystem appears 
 
 ## How it works
 
-The server starts a sandbox through `SandboxAgent.start({ sandbox: docker() })`, then wires it into `agentOS` two ways. `createSandboxFs({ client })` returns a mount-plugin descriptor that projects the sandbox filesystem under `/home/agentos/sandbox`, so `vm.writeFile` and `vm.exec` operate on real container files. `createSandboxBindings({ client })` exposes the sandbox's process management as bindings, surfaced inside the VM as the `agentos-sandbox` CLI command. From the client you write a file to the mount, `exec` it, invoke a binding like `run-command`, and `spawn` a long-running process whose stdout/stderr stream back over `vm.connect()`.
+The server passes `docker()` as the sandbox provider. Each actor VM gets its own Docker sandbox, mounted under `/home/agentos/sandbox`, plus a `sandbox` binding collection surfaced as the `agentos-sandbox` CLI command. Disposing the VM destroys its sandbox.
 
 ## Run it
 
@@ -19,7 +19,7 @@ npm run server   # starts the VM with the sandbox mount + bindings
 npm run client   # writes a file, runs it, and streams process output
 ```
 
-You should see `hello` printed from a file executed inside the Docker sandbox, followed by streamed output from the spawned dev process.
+You should see `hello` printed from a file executed inside the Docker sandbox.
 
 ## Source
 

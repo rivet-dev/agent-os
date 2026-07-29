@@ -10,6 +10,7 @@ fn acp_protocol_round_trips_create_session() {
         agent_type: String::from("codex"),
         runtime: AcpRuntimeKind::JavaScript,
         cwd: String::from("/home/agentos"),
+        additional_directories: vec![String::from("/tmp/reference")],
         args: vec![String::from("--model"), String::from("gpt-5")],
         env: [(String::from("AGENTOS_KEEP_STDIN_OPEN"), String::from("1"))]
             .into_iter()

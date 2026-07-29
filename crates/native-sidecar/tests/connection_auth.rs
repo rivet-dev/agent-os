@@ -149,7 +149,7 @@ fn ext_requests_fail_closed_when_namespace_is_unregistered() {
             2,
             wire_connection(&connection_id),
             RequestPayload::ExtEnvelope(ExtEnvelope {
-                namespace: "dev.rivet.secure-exec.test".to_string(),
+                namespace: "dev.rivet.agentos.test".to_string(),
                 payload: b"hello-ext".to_vec(),
             }),
         ))
@@ -158,7 +158,7 @@ fn ext_requests_fail_closed_when_namespace_is_unregistered() {
     match result.response.payload {
         ResponsePayload::RejectedResponse(response) => {
             assert_eq!(response.code, "unknown_extension");
-            assert!(response.message.contains("dev.rivet.secure-exec.test"));
+            assert!(response.message.contains("dev.rivet.agentos.test"));
         }
         other => panic!("unexpected ext response: {other:?}"),
     }

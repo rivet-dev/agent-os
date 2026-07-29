@@ -11,7 +11,7 @@ import {
 	expect,
 	it,
 } from "vitest";
-import { createSandboxFs, createSandboxBindings } from "../src/index.js";
+import { createSandboxBindings } from "../src/index.js";
 
 let sandbox: MockSandboxAgentHandle;
 
@@ -32,24 +32,42 @@ afterAll(async () => {
 });
 
 describe("VM integration", () => {
-	let vm: AgentOs;
+	let vm!: AgentOs;
+	let providerStarts: number;
+	let providerDisposals: number;
 
 	beforeEach(async () => {
+		providerStarts = 0;
+		providerDisposals = 0;
 		vm = await AgentOs.create({
 			permissions: SANDBOX_TEST_PERMISSIONS,
 			software: [common],
-			mounts: [
-				{
-					path: "/sandbox",
-					plugin: createSandboxFs({ client: sandbox.client }),
+			sandbox: {
+				mountPath: "/sandbox",
+				provider: {
+					start: async () => {
+						providerStarts += 1;
+						return new Proxy(sandbox.client, {
+							get(target, property) {
+								if (property === "dispose") {
+									return () => {
+										providerDisposals += 1;
+									};
+								}
+								const value = Reflect.get(target, property, target);
+								return typeof value === "function" ? value.bind(target) : value;
+							},
+						}) as never;
+					},
 				},
-			],
-			bindings: [createSandboxBindings({ client: sandbox.client })],
+			},
 		});
-	});
+		expect(providerStarts).toBe(1);
+	}, 150_000);
 
 	afterEach(async () => {
-		await vm.dispose();
+		if (vm) await vm.dispose();
+		expect(providerDisposals).toBe(1);
 	});
 
 	// -- Filesystem mount tests --

@@ -115,7 +115,7 @@ if [[ ! -d "$SRC_DIR" ]]; then
   exit 1
 fi
 
-echo "Applying secure-exec overlay..."
+echo "Applying agentos overlay..."
 while IFS= read -r -d '' file; do
   rel="${file#$OVERLAY_DIR/}"
   mkdir -p "$SRC_DIR/$(dirname "$rel")"

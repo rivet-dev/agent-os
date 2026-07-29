@@ -4,11 +4,11 @@ name = "cmd-curl"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Minimal curl-compatible HTTP client for secure-exec"
+description = "Minimal curl-compatible HTTP client for agentos"
 
 [[bin]]
 name = "curl"
 path = "src/main.rs"
 
 [dependencies]
-wasi-http = { package = "secureexec-wasi-http", path = "../../../../../toolchain/crates/libs/wasi-http" }
+wasi-http = { package = "agentos-wasi-http", path = "../../../../../toolchain/crates/libs/wasi-http" }

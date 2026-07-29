@@ -114,8 +114,8 @@ pub async fn resolve_vm_sqlite(
     max_result_bytes: usize,
 ) -> Result<SharedVmSqliteDatabase, VmSqliteError> {
     match descriptor {
-        VmSqliteDescriptor::ActorUds { path, token } => Ok(Arc::new(
-            ActorUdsVmSqliteDatabase::open(path.clone(), token.clone(), max_result_bytes).await?,
+        VmSqliteDescriptor::ActorUds { path } => Ok(Arc::new(
+            ActorUdsVmSqliteDatabase::open(path.clone(), max_result_bytes).await?,
         )),
         VmSqliteDescriptor::SqliteFile { path } => Ok(Arc::new(
             LocalVmSqliteDatabase::open(PathBuf::from(path), runtime, max_result_bytes).await?,
@@ -130,13 +130,9 @@ struct ActorUdsVmSqliteDatabase {
 }
 
 impl ActorUdsVmSqliteDatabase {
-    async fn open(
-        path: String,
-        token: String,
-        max_result_bytes: usize,
-    ) -> Result<Self, VmSqliteError> {
+    async fn open(path: String, max_result_bytes: usize) -> Result<Self, VmSqliteError> {
         let database = Self {
-            client: ActorUdsClient::new(path, token),
+            client: ActorUdsClient::new(path),
             max_result_bytes,
         };
         database.enable_and_verify_foreign_keys().await?;
@@ -165,9 +161,7 @@ impl VmSqliteDatabase for ActorUdsVmSqliteDatabase {
         statements: Vec<SqlStatement>,
     ) -> Result<Vec<QueryResult>, VmSqliteError> {
         let key = Uuid::new_v4().to_string();
-        self.client
-            .query_with_lease("BEGIN IMMEDIATE", Vec::new(), Some(&key))
-            .await?;
+        self.client.begin(&key, None).await?;
         let mut results = Vec::with_capacity(statements.len());
         for statement in statements {
             let expected_changes = statement.expected_changes;
@@ -178,11 +172,7 @@ impl VmSqliteDatabase for ActorUdsVmSqliteDatabase {
             {
                 Ok(result) => {
                     if let Err(error) = validate_expected_changes(expected_changes, &result) {
-                        if let Err(rollback_error) = self
-                            .client
-                            .query_with_lease("ROLLBACK", Vec::new(), Some(&key))
-                            .await
-                        {
+                        if let Err(rollback_error) = self.client.rollback(&key).await {
                             eprintln!(
                                 "ERR_AGENTOS_SQLITE_ROLLBACK: actor transaction {key} rollback failed after {error}: {rollback_error}"
                             );
@@ -190,11 +180,7 @@ impl VmSqliteDatabase for ActorUdsVmSqliteDatabase {
                         return Err(error);
                     }
                     if let Err(error) = validate_result_size(&result, self.max_result_bytes) {
-                        if let Err(rollback_error) = self
-                            .client
-                            .query_with_lease("ROLLBACK", Vec::new(), Some(&key))
-                            .await
-                        {
+                        if let Err(rollback_error) = self.client.rollback(&key).await {
                             eprintln!(
                                 "ERR_AGENTOS_SQLITE_ROLLBACK: actor transaction {key} rollback failed after {error}: {rollback_error}"
                             );
@@ -204,11 +190,7 @@ impl VmSqliteDatabase for ActorUdsVmSqliteDatabase {
                     results.push(result)
                 }
                 Err(error) => {
-                    if let Err(rollback_error) = self
-                        .client
-                        .query_with_lease("ROLLBACK", Vec::new(), Some(&key))
-                        .await
-                    {
+                    if let Err(rollback_error) = self.client.rollback(&key).await {
                         eprintln!(
                             "ERR_AGENTOS_SQLITE_ROLLBACK: actor transaction {key} rollback failed after {error}: {rollback_error}"
                         );
@@ -217,16 +199,8 @@ impl VmSqliteDatabase for ActorUdsVmSqliteDatabase {
                 }
             }
         }
-        if let Err(error) = self
-            .client
-            .query_with_lease("COMMIT", Vec::new(), Some(&key))
-            .await
-        {
-            if let Err(rollback_error) = self
-                .client
-                .query_with_lease("ROLLBACK", Vec::new(), Some(&key))
-                .await
-            {
+        if let Err(error) = self.client.commit(&key).await {
+            if let Err(rollback_error) = self.client.rollback(&key).await {
                 eprintln!(
                     "ERR_AGENTOS_SQLITE_ROLLBACK: actor transaction {key} rollback failed after commit error {error}: {rollback_error}"
                 );

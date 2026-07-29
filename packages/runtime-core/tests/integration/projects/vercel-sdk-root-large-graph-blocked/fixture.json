@@ -1,0 +1,5 @@
+{
+  "entry": "src/index.js",
+  "expectation": "skip",
+  "reason": "@vercel/sdk 1.28.8 root import expands a 43 MB, 4,117-file generated ESM graph and exceeds the bounded AgentOS import window"
+}

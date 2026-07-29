@@ -72,7 +72,7 @@ type HarnessExtensionDispatchResponse =
 			errorCode?: string;
 	  };
 
-interface SecureExecBrowserHarness {
+interface AgentOsBrowserHarness {
 	createRuntime(
 		options?: HarnessCreateRuntimeOptions,
 	): Promise<HarnessCreateRuntimeResponse>;
@@ -98,7 +98,7 @@ interface SecureExecBrowserHarness {
 
 declare global {
 	interface Window {
-		__secureExecBrowserHarness?: SecureExecBrowserHarness;
+		__agentOsBrowserHarness?: AgentOsBrowserHarness;
 	}
 }
 
@@ -153,7 +153,7 @@ function getRuntimeDebugState(
 	};
 }
 
-const harness: SecureExecBrowserHarness = {
+const harness: AgentOsBrowserHarness = {
 	async createRuntime(options) {
 		const system = await createBrowserDriver({
 			filesystem: options?.filesystem ?? "memory",
@@ -301,5 +301,5 @@ const harness: SecureExecBrowserHarness = {
 	},
 };
 
-window.__secureExecBrowserHarness = harness;
+window.__agentOsBrowserHarness = harness;
 setStatus("ready", "ready");

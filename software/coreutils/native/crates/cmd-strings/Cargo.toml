@@ -4,11 +4,11 @@ name = "cmd-strings"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "strings standalone binary for secure-exec VM"
+description = "strings standalone binary for agentos VM"
 
 [[bin]]
 name = "strings"
 path = "src/main.rs"
 
 [dependencies]
-secureexec-strings-cmd = { path = "../strings-cmd" }
+agentos-strings-cmd = { path = "../strings-cmd" }

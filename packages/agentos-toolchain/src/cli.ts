@@ -16,6 +16,7 @@ Usage:
         --agent <command>   mark a bin command as the package's ACP entrypoint
         --out <tar>         output tar (default: ./<input-name>-package.tar)
         --prune-native      delete unreachable native .node addons
+        --omit-optional     omit optional npm dependencies from the closure
 
   agentos-toolchain stage [<packageDir>] --commands-dir <dir> [--if-missing skip|error]
       Populate <packageDir>/bin/ from a compiled commands directory, per the
@@ -113,7 +114,12 @@ function main(): void {
 			return;
 		}
 		case "pack": {
-			requireKnownFlags(args, ["--agent", "--out", "--prune-native"]);
+			requireKnownFlags(args, [
+				"--agent",
+				"--out",
+				"--prune-native",
+				"--omit-optional",
+			]);
 			const source = args.positional[0];
 			if (!source) {
 				throw new Error("pack requires a <npm-pkg | ./local-dir> argument");
@@ -126,6 +132,7 @@ function main(): void {
 				),
 				agent: args.flags.get("--agent") as string | undefined,
 				pruneNative: args.flags.get("--prune-native") === true,
+				omitOptional: args.flags.get("--omit-optional") === true,
 			});
 			process.stdout.write(
 				`packed ${result.name}@${result.version} → ${result.packageTar}\n` +

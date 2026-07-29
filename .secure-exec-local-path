@@ -1,9 +1,0 @@
-# Local secure-exec checkout that carries the converged browser/wasm build.
-# Agent OS depends on secure-exec; the web/wasm work links against this checkout
-# via `just secure-exec-local` (which repoints crates to `path = "../secure-exec/..."`
-# and npm to `link:`). The converged web architecture (the template for this work)
-# currently lives on a branch, NOT yet on secure-exec main.
-
-SECURE_EXEC_CANONICAL=/home/nathan/secure-exec
-SECURE_EXEC_CONVERGED_WEB_WORKSPACE=/home/nathan/secure-exec-convwasi
-SECURE_EXEC_CONVERGED_WEB_BRANCH=browser-convergence-item-c

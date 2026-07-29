@@ -1,0 +1,15 @@
+{
+  "name": "project-matrix-parsing-agent-pass",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "cheerio": "1.2.0",
+    "linkedom": "0.18.13",
+    "marked": "18.0.6",
+    "markdown-it": "14.3.0",
+    "csv-parse": "7.0.1",
+    "fast-xml-parser": "5.10.1",
+    "protobufjs": "8.7.1",
+    "ajv": "8.20.0"
+  }
+}

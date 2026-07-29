@@ -2,74 +2,35 @@
 import Layout from "../layouts/Layout.astro";
 import { Navigation } from "../components/Navigation";
 import { Footer } from "../components/Footer";
-import AgentOSPage from "../components/marketing/solutions/AgentOSPage";
+import AgentOSPage, { APPS_CODE, FILESYSTEM_CODE } from "../components/marketing/solutions/AgentOSPage";
 import { highlightCodeHtml } from "../lib/highlight-code";
 
 const heroTabSnippets = [
-	{ key: 'agents', fileName: 'agents.ts', code: `import { createClient } from "@rivet-dev/agentos/client";
+	{ key: 'cron', fileName: 'agent-loop.ts', code: `import { createClient } from "@rivet-dev/agentos/client";
 import type { registry } from "./server";
 
 const client = createClient<typeof registry>({ endpoint: "http://localhost:6420" });
 const agent = client.vm.getOrCreate("my-agent");
-const connection = agent.connect();
 
-// Stream events (tool calls, text output, etc.)
-connection.on("sessionEvent", (event) => console.log(event));
-
-// Create a session and send a prompt
-await agent.openSession({ agent: "pi", env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! } });
-await agent.prompt({
-  content: [{ type: "text", text: "Write a Python script that calculates pi" }],
-});` },
-
-	{ key: 'bindings', fileName: 'bindings.ts', code: `// server.ts
-import { agentOS, setup } from "@rivet-dev/agentos";
-import common from "@agentos-software/common";
-import { z } from "zod";
-
-// A bindings group becomes CLI commands inside the VM:
-// $ agentos-weather get --city London
-const weather = {
-  name: "weather",
-  description: "Look up weather information for cities.",
-  bindings: {
-    get: {
-      description: "Get the current weather for a city.",
-      inputSchema: z.object({ city: z.string().describe("City name (e.g. 'London').") }),
-      execute: async ({ city }: { city: string }) => ({
-        city,
-        temperature: 18,
-        conditions: "partly cloudy",
-      }),
-    },
+// Wake the agent every five minutes, run one turn, then sleep again.
+await agent.scheduleCron({
+  schedule: "*/5 * * * *",
+  overlap: "skip",
+  action: {
+    type: "session",
+    agentType: "pi",
+    prompt: "Check for new work and process the next task",
   },
-};
-
-const vm = agentOS({ software: [common], bindings: [weather] });
-export const registry = setup({ use: { vm } });
-registry.start();
-
-// client.ts
-import { createClient } from "@rivet-dev/agentos/client";
-import type { registry } from "./server";
-
-const client = createClient<typeof registry>({ endpoint: "http://localhost:6420" });
-const agent = client.vm.getOrCreate("my-agent");
-
-// Bindings are injected into the agent's system prompt automatically
-await agent.openSession({ agent: "pi" });
-await agent.prompt({
-  content: [{ type: "text", text: "What's the weather in London?" }],
-});
-// The agent will call: agentos-weather get --city London` },
+});` },
 
 	{ key: 'agent-agent', fileName: 'agent-agent.ts', code: `// server.ts
 import { agentOS, setup } from "@rivet-dev/agentos";
 import { createClient } from "@rivet-dev/agentos/client";
+import pi from "@agentos-software/pi";
 import { z } from "zod";
 
 // The reviewer is its own isolated agent VM
-const reviewer = agentOS({});
+const reviewer = agentOS({ software: [pi] });
 
 // Bridge: copy a file from the writer's VM to the reviewer's, then review it
 async function reviewFile(path: string) {
@@ -80,15 +41,26 @@ async function reviewFile(path: string) {
   const code = await writer.readFile(path);
   await reviewerHandle.writeFile(path, code);
 
-  await reviewerHandle.openSession({ agent: "pi" });
-  const result = await reviewerHandle.prompt({
-    content: [{ type: "text", text: \`Review \${path}\` }],
+  await reviewerHandle.openSession({
+    agent: "pi",
+    env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
   });
-  return result.message?.content ?? [];
+  try {
+    const result = await reviewerHandle.prompt({
+      content: [{ type: "text", text: \`Review \${path}\` }],
+    });
+    return result.message?.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("") ?? "";
+  } finally {
+    await reviewerHandle.deleteSession();
+  }
 }
 
 // The writer gets a "review" binding -> agentos-review submit --path ...
 const writer = agentOS({
+  software: [pi],
   bindings: [{
     name: "review",
     description: "Send code to the reviewer agent",
@@ -112,7 +84,10 @@ import type { registry } from "./server";
 const client = createClient<typeof registry>({ endpoint: "http://localhost:6420" });
 const writer = client.writer.getOrCreate("my-project");
 
-await writer.openSession({ agent: "pi" });
+await writer.openSession({
+  agent: "pi",
+  env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
+});
 await writer.prompt({
   content: [{ type: "text", text: "Write a REST API at /home/agentos/api.ts, then run agentos-review submit --path /home/agentos/api.ts" }],
 });` },
@@ -120,28 +95,81 @@ await writer.prompt({
 	{ key: 'multiplayer', fileName: 'multiplayer.ts', code: `import { createClient } from "@rivet-dev/agentos/client";
 import type { registry } from "./server";
 
-const client = createClient<typeof registry>({ endpoint: "http://localhost:6420" });
+const aliceClient = createClient<typeof registry>({ endpoint: "http://localhost:6420" });
+const bobClient = createClient<typeof registry>({ endpoint: "http://localhost:6420" });
 
-// Both clients connect to the same agent by key
-const a = client.vm.getOrCreate("shared-agent").connect();
-const b = client.vm.getOrCreate("shared-agent").connect();
+// Two clients connect to the same agent by key.
+const alice = aliceClient.vm.getOrCreate("shared-agent").connect();
+const bob = bobClient.vm.getOrCreate("shared-agent").connect();
 
-// Both receive the same session events
-a.on("sessionEvent", (event) => console.log("[A]", event));
-b.on("sessionEvent", (event) => console.log("[B]", event));
+// Both receive the same session events.
+alice.on("sessionEvent", (event) => console.log("[Alice]", event));
+bob.on("sessionEvent", (event) => console.log("[Bob]", event));
 
-// Either client can send prompts to the shared session
-await a.openSession({ agent: "pi" });
-await a.prompt({
+// Either client can act on the shared session.
+await alice.openSession({
+  agent: "pi",
+  env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
+});
+await bob.prompt({
   content: [{ type: "text", text: "Build a REST API" }],
 });` },
 
-	{ key: 'workflows', fileName: 'automation.ts', code: `// server.ts
+	{ key: 'workflows', fileName: 'workflow.ts', code: `// server.ts
 import { agentOS, setup } from "@rivet-dev/agentos";
 import pi from "@agentos-software/pi";
+import { actor, queue } from "rivetkit";
+import { workflow } from "rivetkit/workflow";
 
 const vm = agentOS({ software: [pi] });
-export const registry = setup({ use: { vm } });
+
+const codeReview = actor({
+  state: { status: "pending" },
+  queues: {
+    review: queue<{ approved: boolean; feedback?: string }>(),
+  },
+  run: workflow(async (ctx) => {
+    let feedback = "";
+
+    for (let revision = 1; revision <= 3; revision++) {
+      await ctx.step({
+        name: \`write-code-\${revision}\`,
+        maxRetries: 3,
+        run: async (step) => {
+          const agent = step.client<typeof registry>().vm.getOrCreate("writer");
+          const sessionId = \`revision-\${revision}\`;
+          await agent.openSession({
+            sessionId,
+            agent: "pi",
+            env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
+          });
+          try {
+            await agent.prompt({
+              sessionId,
+              content: [{ type: "text", text: \`Write the change. Review feedback: \${feedback}\` }],
+            });
+          } finally {
+            await agent.deleteSession({ sessionId });
+          }
+        },
+      });
+
+      // The workflow sleeps durably until your app approves or rejects it.
+      const review = await ctx.queue.next(\`review-\${revision}\`);
+      if (review.body.approved) {
+        await ctx.step("approve", async (step) => {
+          step.state.status = "approved";
+        });
+        return;
+      }
+      feedback = review.body.feedback ?? "Revise and retry";
+    }
+
+    throw new Error("Review rejected after 3 revisions");
+  }),
+});
+
+export const registry = setup({ use: { vm, codeReview } });
 registry.start();
 
 // client.ts
@@ -149,47 +177,53 @@ import { createClient } from "@rivet-dev/agentos/client";
 import type { registry } from "./server";
 
 const client = createClient<typeof registry>({ endpoint: "http://localhost:6420" });
-const agent = client.vm.getOrCreate("bug-fixer");
+const review = client.codeReview.getOrCreate("change-42");
+await review.send("review", { approved: true });` },
 
-await agent.openSession({ agent: "pi" });
-// Prompt calls targeting one session are queued automatically.
-await Promise.all([
-  agent.prompt({ content: [{ type: "text", text: "Fix the login redirect bug" }] }),
-  agent.prompt({ content: [{ type: "text", text: "Then run the tests and summarize failures" }] }),
-]);` },
-
-	{ key: 'permissions', fileName: 'permissions.ts', code: `import { createClient } from "@rivet-dev/agentos/client";
+	{ key: 'human-in-the-loop', fileName: 'approvals.ts', code: `import { createInterface } from "node:readline/promises";
+import { createClient } from "@rivet-dev/agentos/client";
 import type { registry } from "./server";
 
 const client = createClient<typeof registry>({ endpoint: "http://localhost:6420" });
-const handle = client.vm.getOrCreate("my-agent");
-const agent = handle.connect();
+const agent = client.vm.getOrCreate("my-agent");
+const terminal = createInterface({ input: process.stdin, output: process.stdout });
 
-// Human-in-the-loop: respond to permission requests on the session stream
-agent.on("sessionEvent", async (event) => {
+// Permission requests arrive on the durable session event stream.
+const connection = agent.connect();
+connection.on("sessionEvent", (event) => {
   if (event.type !== "permission_request") return;
-  const description = JSON.stringify(event.toolCall).toLowerCase();
 
-  // Allow read-only operations automatically
-  if (description.includes("read")) {
-    const option = event.options.find((item) => item.kind === "allow_always");
-    if (option) await handle.respondPermission({ sessionId: event.sessionId, requestId: event.requestId, optionId: option.optionId });
-    return;
-  }
+  // Replace this terminal prompt with your application's approval UI.
+  void (async () => {
+    console.log("Tool call:", event.toolCall);
+    const answer = await terminal.question("Approve once? [y/N] ");
+    const accepted = answer.trim().toLowerCase() === "y";
+    const kinds = accepted
+      ? ["allow_once", "allow_always"]
+      : ["reject_once", "reject_always"];
+    const option = event.options.find((candidate) => kinds.includes(candidate.kind));
+    if (!option) throw new Error("The agent did not offer a compatible decision");
 
-  // Deny dangerous operations
-  if (description.includes("rm -rf")) {
-    const option = event.options.find((item) => item.kind === "reject_once" || item.kind === "reject_always");
-    if (option) await handle.respondPermission({ sessionId: event.sessionId, requestId: event.requestId, optionId: option.optionId });
-    return;
-  }
-
-  // Approve everything else once — "once" | "always" | "reject"
-  const option = event.options.find((item) => item.kind === "allow_once");
-  if (option) await handle.respondPermission({ sessionId: event.sessionId, requestId: event.requestId, optionId: option.optionId });
+    await agent.respondPermission({
+      sessionId: event.sessionId,
+      requestId: event.requestId,
+      optionId: option.optionId,
+    });
+  })().catch((error) => console.error("Permission response failed:", error));
 });
 
-await handle.openSession({ agent: "pi", permissionPolicy: "ask" });` },
+await agent.openSession({
+  agent: "pi",
+  permissionPolicy: "ask",
+  env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
+});
+try {
+  await agent.prompt({
+    content: [{ type: "text", text: "Create /workspace/output.txt" }],
+  });
+} finally {
+  terminal.close();
+}` },
 ];
 
 const heroTabs = await Promise.all(
@@ -198,14 +232,16 @@ const heroTabs = await Promise.all(
 		highlightedCode: await highlightCodeHtml(tab.code, 'ts'),
 	})),
 );
+const filesystemHighlightedCode = await highlightCodeHtml(FILESYSTEM_CODE, 'ts');
+const appsHighlightedCode = await highlightCodeHtml(APPS_CODE, 'ts');
 ---
 
 <Layout
-  title="agentOS — Secure operating system without a sandbox"
-  description="A lightweight library for giving your agents an OS. No containers, no VMs — just file system, networking, bash, Python, and Node."
+  title="agentOS — Virtual operating system for agents"
+  description="A virtual operating system for agents, with execution, filesystem, orchestration, and apps in one lightweight library."
   ogImage="https://agentos-sdk.dev/og.png"
 >
   <Navigation revealLogoOnScroll client:load />
-  <AgentOSPage heroTabs={heroTabs} client:load />
+  <AgentOSPage heroTabs={heroTabs} filesystemHighlightedCode={filesystemHighlightedCode} appsHighlightedCode={appsHighlightedCode} client:load />
   <Footer client:visible />
 </Layout>

@@ -95,7 +95,7 @@ async fn process_surface_exec_spawn_and_snapshot() {
     // `exec` forwards only the `command` field (no args), so to get deterministic stdout we use a
     // command that echoes its stdin: `cat` round-trips its input to stdout and exits 0 on EOF.
     let echoed = os
-        .exec(
+        .exec_process(
             "cat",
             ExecOptions {
                 stdin: Some(StdinInput::Text("hello-stdout".to_string())),
@@ -115,7 +115,7 @@ async fn process_surface_exec_spawn_and_snapshot() {
     let streamed = Arc::new(Mutex::new(Vec::<u8>::new()));
     let streamed_cb = Arc::clone(&streamed);
     let res = os
-        .exec(
+        .exec_process(
             "cat",
             ExecOptions {
                 stdin: Some(StdinInput::Text("stream-me".to_string())),
@@ -142,7 +142,7 @@ async fn process_surface_exec_spawn_and_snapshot() {
     let captured_cb = Arc::clone(&captured);
     let bin_input = binary.clone();
     let res = os
-        .exec(
+        .exec_process(
             "cat",
             ExecOptions {
                 stdin: Some(StdinInput::Bytes(bin_input)),
@@ -163,7 +163,7 @@ async fn process_surface_exec_spawn_and_snapshot() {
 
     // --- spawn: pid + stdin write + stdout stream + exit wait -------------------------------------
     let handle = os
-        .spawn("cat", Vec::new(), SpawnOptions::default())
+        .spawn_process("cat", Vec::new(), SpawnOptions::default())
         .expect("spawn cat");
     assert!(
         handle.pid >= 1_000_000,

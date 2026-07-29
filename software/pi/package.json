@@ -1,13 +1,13 @@
 {
 	"name": "@agentos-software/pi",
-	"version": "0.2.1",
+	"version": "0.0.1",
 	"type": "module",
 	"license": "Apache-2.0",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"bin": {
-		"pi": "./node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
-		"pi-sdk-acp": "./dist/adapter.js"
+		"pi": "./node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+		"pi-acp": "./dist/pi-acp/index.js"
 	},
 	"exports": {
 		".": {
@@ -20,25 +20,24 @@
 		"dist",
 		"!dist/package",
 		"!dist/package.tar",
+		"!dist/package.aospkg",
 		"agentos-package.json"
 	],
 	"scripts": {
-		"build": "tsc && node scripts/build-snapshot-bundle.mjs && rm -rf dist/package dist/package.tar && agentos-toolchain pack . --out dist/package --agent pi-sdk-acp --prune-native && node scripts/copy-snapshot-into-package.mjs",
-		"build:snapshot": "node scripts/build-snapshot-bundle.mjs",
+		"build": "rm -rf dist && node scripts/build-pi-acp.mjs && tsc && agentos-toolchain pack . --out dist/package --agent pi-acp --prune-native --omit-optional",
 		"check-types": "tsc --noEmit",
 		"test": "pnpm build && node --test --test-force-exit tests/*.test.mjs"
 	},
 	"dependencies": {
-		"@agentclientprotocol/sdk": "^0.16.1",
-		"@mariozechner/pi-coding-agent": "0.60.0",
-		"@mariozechner/pi-ai": "0.60.0"
+		"@agentclientprotocol/sdk": "1.2.1",
+		"@earendil-works/pi-coding-agent": "0.80.6",
+		"pi-mcp-adapter": "2.11.0",
+		"zod": "3.25.76"
 	},
 	"devDependencies": {
 		"@agentos-software/manifest": "workspace:*",
 		"@rivet-dev/agentos-toolchain": "workspace:*",
 		"@types/node": "^22.10.2",
-		"esbuild": "^0.27.4",
-		"typescript": "^5.7.2",
-		"@rivet-dev/agentos-test-harness": "workspace:*"
+		"typescript": "^5.7.2"
 	}
 }

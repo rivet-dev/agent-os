@@ -1,0 +1,14 @@
+{
+  "name": "project-matrix-nextjs-turbopack-blocked",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "postinstall": "node prepare-next-wasm.cjs"
+  },
+  "dependencies": {
+    "@next/swc-wasm-nodejs": "16.2.10",
+    "next": "16.2.10",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  }
+}

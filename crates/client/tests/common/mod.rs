@@ -147,7 +147,7 @@ fn wasm_command_mounts() -> Vec<MountConfig> {
     };
 
     vec![MountConfig::Native {
-        path: "/__secure_exec/commands/0".to_string(),
+        path: "/__agentos/commands/0".to_string(),
         plugin: MountPlugin {
             id: "host_dir".to_string(),
             config: Some(serde_json::json!({
@@ -243,7 +243,7 @@ pub async fn new_vm_with_commands() -> Option<AgentOs> {
 /// registry WASM command packages are absent (the common case in unbuilt trees), so the
 /// process/shell/fetch suites can gate cleanly without each re-implementing the probe.
 pub async fn wasm_commands_available(os: &AgentOs) -> bool {
-    os.exec("sh", agentos_client::ExecOptions::default())
+    os.exec_process("sh", agentos_client::ExecOptions::default())
         .await
         .is_ok()
 }

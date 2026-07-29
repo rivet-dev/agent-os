@@ -87,9 +87,9 @@ const SNAPSHOT_USERLAND_PREP: &str = r#"
     // snapshot eval; it also works post-restore (resolution flows through the real
     // bridge fns swapped in after restore).
     if (typeof globalThis.require === "undefined" &&
-        typeof globalThis.__secureExecGuestCreateRequire === "function") {
+        typeof globalThis.__agentOsGuestCreateRequire === "function") {
         try {
-            globalThis.require = globalThis.__secureExecGuestCreateRequire("/root/index.js");
+            globalThis.require = globalThis.__agentOsGuestCreateRequire("/root/index.js");
         } catch (e) {}
     }
     // `process.versions` is a bridge-backed lazy getter: it derives `.node` from the

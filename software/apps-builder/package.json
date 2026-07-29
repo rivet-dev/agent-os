@@ -1,0 +1,41 @@
+{
+	"name": "@agentos-software/apps-builder",
+	"version": "0.0.1",
+	"type": "module",
+	"license": "Apache-2.0",
+	"description": "Platform-owned AgentOS Apps release bundler",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"bin": {
+		"apps-builder": "./cli/apps-builder.mjs"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"default": "./dist/index.js"
+		}
+	},
+	"files": [
+		"cli",
+		"dist",
+		"agentos-package.json",
+		"!dist/package",
+		"!dist/package.tar"
+	],
+	"scripts": {
+		"build": "tsc && rm -f dist/package.aospkg && agentos-toolchain pack . --out dist/package --prune-native",
+		"check-types": "tsc --noEmit",
+		"test": "vitest run test/ --passWithNoTests"
+	},
+	"dependencies": {
+		"esbuild-wasm": "0.27.4"
+	},
+	"devDependencies": {
+		"@agentos-software/manifest": "workspace:*",
+		"@rivet-dev/agentos-toolchain": "workspace:*",
+		"@types/node": "^22.19.15",
+		"typescript": "^5.7.3",
+		"vitest": "^2.1.9"
+	}
+}

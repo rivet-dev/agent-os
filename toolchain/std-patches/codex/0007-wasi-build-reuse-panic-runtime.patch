@@ -1,0 +1,13 @@
+--- a/scripts/build-wasi-codex-exec.sh
++++ b/scripts/build-wasi-codex-exec.sh
+@@ -84,6 +84,11 @@ echo "== build (build-std, panic=abort) =="
+ RAW="target/wasm32-wasip1/release/codex-exec.wasm"
+ [ ! -f "$RAW" ] || mv "$RAW" "$RAW.previous"
++PA="$(ls target/wasm32-wasip1/release/deps/libpanic_abort-*.rlib 2>/dev/null | head -1 || true)"
++if [ -n "$PA" ] && [ ! -e "$LIBDIR/$(basename "$PA")" ]; then
++	cp "$PA" "$LIBDIR/"
++	cp "${PA%.rlib}.rmeta" "$LIBDIR/" 2>/dev/null || true
++fi
+ cargo "+$TOOLCHAIN" build -p codex-exec --release --target wasm32-wasip1 \
+ 	-Z build-std --config 'profile.release.panic="abort"' 2>&1 | tail -20 || true
+ 

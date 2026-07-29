@@ -27,7 +27,7 @@ use std::os::fd::OwnedFd;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc::{self, Receiver, SyncSender, TrySendError},
     Arc, Condvar, Mutex, OnceLock,
 };
@@ -46,6 +46,10 @@ const NODE_IMPORT_CACHE_PATH_ENV: &str = "AGENTOS_NODE_IMPORT_CACHE_PATH";
 const NODE_KEEP_STDIN_OPEN_ENV: &str = "AGENTOS_KEEP_STDIN_OPEN";
 const NODE_GUEST_ENTRYPOINT_ENV: &str = "AGENTOS_GUEST_ENTRYPOINT";
 const NODE_GUEST_ENTRYPOINT_MODULE_MODE_ENV: &str = "AGENTOS_GUEST_ENTRYPOINT_MODULE_MODE";
+const NODE_RETAIN_CONTEXT_ENV: &str = "AGENTOS_RETAIN_LANGUAGE_CONTEXT";
+const NODE_INLINE_FILE_PATH_ENV: &str = "AGENTOS_INLINE_FILE_PATH";
+const NODE_USE_BUNDLED_TYPESCRIPT_ENV: &str = "AGENTOS_USE_BUNDLED_TYPESCRIPT";
+const NODE_TYPESCRIPT_COMPILER_PATH_ENV: &str = "AGENTOS_TYPESCRIPT_COMPILER_PATH";
 const NODE_GUEST_PATH_MAPPINGS_ENV: &str = "AGENTOS_GUEST_PATH_MAPPINGS";
 const NODE_VIRTUAL_PROCESS_EXEC_PATH_ENV: &str = "AGENTOS_VIRTUAL_PROCESS_EXEC_PATH";
 const NODE_VIRTUAL_PROCESS_PID_ENV: &str = "AGENTOS_VIRTUAL_PROCESS_PID";
@@ -161,10 +165,10 @@ const JAVASCRIPT_CAPTURED_OUTPUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 const KERNEL_STDIN_BUFFER_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 const NODE_WARMUP_MARKER_VERSION: &str = "1";
 const NODE_WARMUP_SPECIFIERS: &[&str] = &[
-    "secure-exec:builtin/path",
-    "secure-exec:builtin/url",
-    "secure-exec:builtin/fs-promises",
-    "secure-exec:polyfill/path",
+    "agentos:builtin/path",
+    "agentos:builtin/url",
+    "agentos:builtin/fs-promises",
+    "agentos:polyfill/path",
 ];
 
 #[derive(Debug, Default, Clone)]
@@ -261,6 +265,7 @@ const RESERVED_NODE_ENV_KEYS: &[&str] = &[
     NODE_FROZEN_TIME_ENV,
     NODE_GUEST_ENTRYPOINT_ENV,
     NODE_GUEST_ENTRYPOINT_MODULE_MODE_ENV,
+    NODE_INLINE_FILE_PATH_ENV,
     NODE_GUEST_ARGV_ENV,
     NODE_GUEST_PATH_MAPPINGS_ENV,
     NODE_VIRTUAL_PROCESS_EXEC_PATH_ENV,
@@ -274,6 +279,9 @@ const RESERVED_NODE_ENV_KEYS: &[&str] = &[
     NODE_IMPORT_CACHE_LOADER_PATH_ENV,
     NODE_IMPORT_CACHE_PATH_ENV,
     NODE_KEEP_STDIN_OPEN_ENV,
+    NODE_RETAIN_CONTEXT_ENV,
+    NODE_USE_BUNDLED_TYPESCRIPT_ENV,
+    NODE_TYPESCRIPT_COMPILER_PATH_ENV,
     NODE_ALLOWED_BUILTINS_ENV,
     NODE_LOOPBACK_EXEMPT_PORTS_ENV,
     NODE_SYNC_RPC_ENABLE_ENV,
@@ -1798,6 +1806,7 @@ pub struct JavascriptExecution {
     // panicked whenever those paths were reached from the unified runtime.
     events: EventReceiver<JavascriptExecutionEvent>,
     pending_sync_rpc: Arc<Mutex<Option<PendingSyncRpcState>>>,
+    exited: Arc<AtomicBool>,
     kernel_stdin: Arc<LocalKernelStdinBridge>,
     _import_cache_guard: Arc<NodeImportCacheCleanup>,
     v8_session: V8SessionHandle,
@@ -1841,6 +1850,35 @@ impl JavascriptExecution {
 
     pub fn uses_shared_v8_runtime(&self) -> bool {
         true
+    }
+
+    pub fn has_exited(&self) -> bool {
+        self.exited.load(Ordering::Acquire)
+    }
+
+    /// Run another sidecar-managed operation in this execution's retained V8
+    /// context. Public clients submit semantic language requests; only the
+    /// sidecar calls this executor primitive.
+    pub fn execute_retained(
+        &mut self,
+        user_code: String,
+        file_path: String,
+        module: bool,
+    ) -> Result<(), JavascriptExecutionError> {
+        self.exited.store(false, Ordering::Release);
+        self.kernel_stdin.reset();
+        self.v8_session
+            .execute(
+                2 | u8::from(module),
+                file_path,
+                String::new(),
+                String::new(),
+                String::new(),
+                false,
+                user_code,
+                None,
+            )
+            .map_err(JavascriptExecutionError::Spawn)
     }
 
     /// Enqueue a replacement image that was fully prepared without running
@@ -1926,6 +1964,12 @@ impl JavascriptExecution {
     }
 
     pub fn terminate(&self) -> Result<(), JavascriptExecutionError> {
+        // Completion may race an idempotent child-process cleanup kill. Once
+        // the terminal frame is published, preserve that result and avoid
+        // enqueueing TerminateExecution into an already-completed V8 session.
+        if self.has_exited() {
+            return Ok(());
+        }
         self.v8_session
             .terminate()
             .map_err(JavascriptExecutionError::Terminate)
@@ -2676,7 +2720,6 @@ impl JavascriptExecutionEngine {
 
         self.next_execution_id += 1;
         let execution_id = format!("exec-{}", self.next_execution_id);
-        let sync_rpc_timeout = javascript_sync_rpc_timeout(&request);
 
         let phase_start = Instant::now();
         self.ensure_v8_host()?;
@@ -2762,6 +2805,26 @@ impl JavascriptExecutionEngine {
                 .chain(request.argv.iter().skip(1).cloned())
                 .collect::<Vec<_>>()
         };
+        // Node resolves relative imports from `node -e` against process.cwd().
+        // Keep the guest-visible argv entry as `-e`, but give V8 an absolute
+        // synthetic resource name so its dynamic-import callback has the same
+        // resolution base instead of trying to resolve from the literal `-e`.
+        let execution_file_path = if matches!(guest_entrypoint.as_str(), "-e" | "--eval") {
+            request
+                .env
+                .get(NODE_INLINE_FILE_PATH_ENV)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let cwd = translator.guest_cwd().trim_end_matches('/');
+                    if cwd.is_empty() {
+                        String::from("/[eval]")
+                    } else {
+                        format!("{cwd}/[eval]")
+                    }
+                })
+        } else {
+            guest_entrypoint.clone()
+        };
         let inline_code = request
             .inline_code
             .clone()
@@ -2825,6 +2888,7 @@ impl JavascriptExecutionEngine {
         // made during module instantiation/evaluation cannot deadlock waiting
         // for a response while no host thread is draining session frames yet.
         let pending_sync_rpc = Arc::new(Mutex::new(None));
+        let exited = Arc::new(AtomicBool::new(false));
         let kernel_stdin = Arc::new(LocalKernelStdinBridge::default());
         let standalone_translator = translator.clone();
         // default + in-place assign: LocalBridgeState is Drop, so `..Default::default()`
@@ -2846,7 +2910,7 @@ impl JavascriptExecutionEngine {
             &runtime,
             frame_receiver,
             pending_sync_rpc.clone(),
-            sync_rpc_timeout,
+            exited.clone(),
             v8_session.clone(),
             local_bridge,
             self.event_notify.clone(),
@@ -2866,9 +2930,13 @@ impl JavascriptExecutionEngine {
         record_js_start_phase("js_start_install_module_reader", phase_start.elapsed());
 
         let phase_start = Instant::now();
+        let retain_context = request
+            .env
+            .get(NODE_RETAIN_CONTEXT_ENV)
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
         let prepared_execute = PreparedJavascriptExecute {
-            mode: if use_module_mode { 1 } else { 0 },
-            file_path: guest_entrypoint.clone(),
+            mode: u8::from(use_module_mode) | if retain_context { 2 } else { 0 },
+            file_path: execution_file_path,
             bridge_code: V8RuntimeHost::bridge_code().to_owned(),
             post_restore_script: String::new(),
             userland_code: snapshot_userland_code,
@@ -2901,6 +2969,7 @@ impl JavascriptExecutionEngine {
             child_pid: v8_host.child_pid(),
             events,
             pending_sync_rpc,
+            exited,
             kernel_stdin,
             _import_cache_guard: import_cache_guard,
             v8_session,
@@ -3196,9 +3265,10 @@ fn build_v8_user_code(entrypoint: &str, env: &BTreeMap<String, String>) -> Strin
         // Inline code from NODE_EVAL or similar
         env.get("AGENTOS_NODE_EVAL").cloned().unwrap_or_default()
     } else {
-        // Module entrypoint - use require to load it
+        // Module entrypoint - load it as Node's main CommonJS module so
+        // require.main, module.parent, and process.mainModule are coherent.
         format!(
-            "require({});\n//# sourceURL={}",
+            "_moduleModule._load({}, null, true);\n//# sourceURL={}",
             serde_json::to_string(entrypoint).unwrap_or_else(|_| format!("\"{}\"", entrypoint)),
             entrypoint
         )
@@ -3555,6 +3625,9 @@ fn prepend_v8_runtime_shim(
       writable: false,
     }});
   }} catch (_e) {{}}
+  if (typeof globalThis.__runtimeRefreshProcessConfig === "function") {{
+    globalThis.__runtimeRefreshProcessConfig();
+  }}
   Object.defineProperty(globalThis, "__agentOSProcessConfigEnv", {{
     configurable: true,
     enumerable: false,
@@ -3564,6 +3637,13 @@ fn prepend_v8_runtime_shim(
   const visibleEnv = Object.fromEntries(
     Object.entries(nextEnv).filter(([key]) => !key.startsWith("AGENTOS_"))
   );
+
+  // Refresh the process module's closure-backed state before user modules run.
+  // Updating only globalThis.process leaves named ESM imports such as
+  // `import {{ cwd }} from "process"` reading the warm snapshot's stale cwd.
+  if (typeof globalThis.__runtimeRefreshProcessConfig === "function") {{
+    globalThis.__runtimeRefreshProcessConfig();
+  }}
 
   if (typeof process !== "undefined") {{
     process.argv = nextArgv;
@@ -3645,8 +3725,6 @@ fn prepend_v8_runtime_shim(
       process.connected = true;
       __runtimeInstallProcessIpcBridge();
     }}
-    process.cwd = () => nextCwd;
-    process._cwd = nextCwd;
     if (typeof process.getBuiltinModule !== "function") {{
       process.getBuiltinModule = function(specifier) {{
         return globalThis.require ? globalThis.require(specifier) : undefined;
@@ -3654,7 +3732,15 @@ fn prepend_v8_runtime_shim(
     }}
   }}
 
-  globalThis.__runtimeStreamStdin = nextEnv.AGENTOS_KEEP_STDIN_OPEN === "1";
+  const streamStdin = nextEnv.AGENTOS_KEEP_STDIN_OPEN === "1";
+  if (typeof globalThis.__runtimeConfigureStreamStdin === "function") {{
+    globalThis.__runtimeConfigureStreamStdin(
+      streamStdin,
+      nextEnv.AGENTOS_EAGER_STDIN_HANDLE === "1",
+    );
+  }} else {{
+    globalThis.__runtimeStreamStdin = streamStdin;
+  }}
   globalThis.__runtimeKernelStdin =
     nextEnv.AGENTOS_FORWARD_KERNEL_STDIN_RPC === "1";
 
@@ -3687,6 +3773,25 @@ fn prepend_v8_runtime_shim(
         : entryFile;
     globalThis.require =
       globalThis._moduleModule.createRequire(requireEntryFile);
+  }}
+
+  if (typeof globalThis.require === "function") {{
+    let preloadModules = [];
+    try {{
+      const parsed = JSON.parse(nextEnv.AGENTOS_NODE_PRELOAD_MODULES || "[]");
+      if (Array.isArray(parsed)) preloadModules = parsed.map(String);
+    }} catch (_e) {{}}
+    const preloadBase =
+      nextCwd === "/"
+        ? "/__agentos_preload__.js"
+        : `${{nextCwd.replace(/\/+$/, "")}}/__agentos_preload__.js`;
+    const preloadRequire =
+      typeof globalThis._moduleModule?.createRequire === "function"
+        ? globalThis._moduleModule.createRequire(preloadBase)
+        : globalThis.require;
+    for (const preloadModule of preloadModules) {{
+      preloadRequire(preloadModule);
+    }}
   }}
 
   // jsRuntime platform tiering: the guest JS host surface is baked into the
@@ -3775,7 +3880,7 @@ fn spawn_v8_event_bridge(
     runtime: &RuntimeContext,
     frame_receiver: V8SessionFrameReceiver,
     pending_sync_rpc: Arc<Mutex<Option<PendingSyncRpcState>>>,
-    _sync_rpc_timeout: Duration,
+    exited: Arc<AtomicBool>,
     v8_session: V8SessionHandle,
     mut local_bridge: LocalBridgeState,
     event_notify: Option<Arc<Notify>>,
@@ -3929,6 +4034,7 @@ fn spawn_v8_event_bridge(
                             || sidecar_method == "fs.writeSync"
                             || sidecar_method == "fs.writevSync"
                             || sidecar_method == "fs.writeFileSync"
+                            || sidecar_method == "crypto.hashUpdate"
                         {
                             if let Ok(Some(bytes)) =
                                 v8_runtime::cbor_payload_raw_byte_arg(&payload, 1)
@@ -3936,7 +4042,7 @@ fn spawn_v8_event_bridge(
                                 raw_bytes_args.insert(1, bytes);
                             }
                         }
-                        if method == "_fsReadRaw" {
+                        if method == "_fsReadRaw" || method == "_fsReadFileRangeRaw" {
                             raw_bytes_args.insert(usize::MAX, Vec::new());
                         }
                         record_sync_bridge_phase(
@@ -3965,6 +4071,7 @@ fn spawn_v8_event_bridge(
                     BinaryFrame::ExecutionResult {
                         exit_code, error, ..
                     } => {
+                        exited.store(true, Ordering::Release);
                         let phase_start = Instant::now();
                         exit_frame_start = Some(phase_start);
                         record_js_event_phase("js_exit_frame_recv_wait", frame_recv_wait);
@@ -4051,6 +4158,7 @@ fn spawn_v8_event_bridge(
             }
 
             if !emitted_exit {
+                exited.store(true, Ordering::Release);
                 let phase_start = Instant::now();
                 let sent = send_javascript_event_async(
                     &sender,
@@ -4855,7 +4963,12 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
             if let Some(package_json) = self.read_package_json(&package_json_path) {
                 return package_json.package_type;
             }
-            if dir == "/" {
+            // Node package scopes do not inherit `type` across a node_modules
+            // boundary. This also matters for pnpm's nested symlink layout: if
+            // a package.json read is unavailable at the symlinked package root,
+            // climbing into the fixture's `type: module` package would
+            // incorrectly classify a dependency's CommonJS `.js` files as ESM.
+            if dir == "/" || dir.rsplit('/').next() == Some("node_modules") {
                 break;
             }
             dir = dirname_guest_path(&dir);
@@ -5153,6 +5266,12 @@ fn hex_digit(byte: u8) -> Option<u8> {
 }
 
 impl LocalKernelStdinBridge {
+    fn reset(&self) {
+        let mut state = self.state.lock().expect("kernel stdin state poisoned");
+        state.bytes.clear();
+        state.closed = false;
+    }
+
     fn write(&self, chunk: &[u8]) -> Result<(), JavascriptExecutionError> {
         let mut state = self.state.lock().expect("kernel stdin state poisoned");
         if state.closed {
@@ -5267,7 +5386,9 @@ impl LocalKernelStdinBridge {
 
 fn normalize_module_resolve_context(path: &str) -> String {
     let normalized = normalize_guest_path(path);
-    if normalized.ends_with(".js")
+    if normalized == "/[eval]"
+        || normalized.ends_with("/[eval]")
+        || normalized.ends_with(".js")
         || normalized.ends_with(".mjs")
         || normalized.ends_with(".cjs")
         || normalized.ends_with(".json")
@@ -5318,6 +5439,7 @@ fn normalize_builtin_specifier(specifier: &str) -> Option<String> {
     let bare = specifier.trim_start_matches("node:");
     match bare {
         "assert"
+        | "assert/strict"
         | "async_hooks"
         | "buffer"
         | "child_process"
@@ -5358,6 +5480,8 @@ fn normalize_builtin_specifier(specifier: &str) -> Option<String> {
         | "timers"
         | "tls"
         | "timers/promises"
+        | "test"
+        | "test/reporters"
         | "trace_events"
         | "tty"
         | "url"
@@ -5395,10 +5519,10 @@ fn polyfill_expression(request: &str) -> Option<String> {
             format!(
                 "(() => {{ const error = new Error({message}); error.code = {code}; throw error; }})()",
                 message = serde_json::to_string(&format!(
-                    "node:{normalized} is not available in the secure-exec guest runtime"
+                    "node:{normalized} is not available in the agentos guest runtime"
                 ))
                 .unwrap_or_else(|_| format!(
-                    "\"node:{normalized} is not available in the secure-exec guest runtime\""
+                    "\"node:{normalized} is not available in the agentos guest runtime\""
                 )),
                 code = serde_json::to_string(error_code)
                     .unwrap_or_else(|_| "\"ERR_ACCESS_DENIED\"".to_owned())
@@ -5408,468 +5532,140 @@ fn polyfill_expression(request: &str) -> Option<String> {
 }
 
 fn build_builtin_module_wrapper(module_name: &str) -> String {
-    if module_name == "assert" {
+    if matches!(
+        module_name,
+        "assert"
+            | "assert/strict"
+            | "path"
+            | "path/posix"
+            | "path/win32"
+            | "string_decoder"
+            | "url"
+    ) {
+        return build_delegating_builtin_module_wrapper(module_name);
+    }
+
+    if module_name == "test" {
         return String::from(
-            r#"class AssertionError extends Error {
-  constructor(message = "Assertion failed") {
-    super(message);
-    this.name = "AssertionError";
-  }
-}
-
-function fail(message) {
-  throw new AssertionError(message);
-}
-
-function ok(value, message) {
-  if (!value) fail(message);
-}
-
-function equal(actual, expected, message) {
-  if (actual != expected) fail(message ?? `Expected ${actual} == ${expected}`);
-}
-
-function notEqual(actual, expected, message) {
-  if (actual == expected) fail(message ?? `Expected ${actual} != ${expected}`);
-}
-
-function strictEqual(actual, expected, message) {
-  if (actual !== expected) fail(message ?? `Expected ${actual} === ${expected}`);
-}
-
-function notStrictEqual(actual, expected, message) {
-  if (actual === expected) fail(message ?? `Expected ${actual} !== ${expected}`);
-}
-
-function serialize(value) {
-  return JSON.stringify(value);
-}
-
-function deepEqual(actual, expected, message) {
-  if (serialize(actual) !== serialize(expected)) {
-    fail(message ?? "Expected values to be deeply equal");
-  }
-}
-
-function deepStrictEqual(actual, expected, message) {
-  return deepEqual(actual, expected, message);
-}
-
-function match(actual, expected, message) {
-  if (!(expected instanceof RegExp) || !expected.test(String(actual))) {
-    fail(message ?? `Expected ${actual} to match ${expected}`);
-  }
-}
-
-function matchesExpectedError(error, expected) {
-  if (expected == null) return true;
-  if (expected instanceof RegExp) {
-    return expected.test(String(error?.message ?? error));
-  }
-  if (typeof expected === "function") {
-    if (error instanceof expected) return true;
-    return expected(error) === true;
-  }
-  if (typeof expected === "object") {
-    return Object.entries(expected).every(([key, value]) => serialize(error?.[key]) === serialize(value));
-  }
-  return false;
-}
-
-function throws(fn, expected, message) {
-  if (typeof fn !== "function") {
-    fail(message ?? "assert.throws requires a function");
-  }
-
-  try {
-    fn();
-  } catch (error) {
-    if (!matchesExpectedError(error, expected)) {
-      throw error;
-    }
-    return error;
-  }
-
-  fail(message ?? "Missing expected exception");
-}
-
-async function rejects(promiseOrFn, expected, message) {
-  let promise;
-  if (typeof promiseOrFn === "function") {
-    promise = promiseOrFn();
-  } else {
-    promise = promiseOrFn;
-  }
-
-  try {
-    await promise;
-  } catch (error) {
-    if (!matchesExpectedError(error, expected)) {
-      throw error;
-    }
-    return error;
-  }
-
-  fail(message ?? "Missing expected rejection");
-}
-
-function ifError(error) {
-  if (error != null) {
-    throw error;
-  }
-}
-
-function assert(value, message) {
-  ok(value, message);
-}
-
-Object.assign(assert, {
-  AssertionError,
-  deepEqual,
-  deepStrictEqual,
-  equal,
-  fail,
-  ifError,
-  match,
-  notEqual,
-  notStrictEqual,
-  ok,
-  rejects,
-  strict: assert,
-  strictEqual,
-  throws,
-});
-
-export {
-  AssertionError,
-  assert as default,
-  deepEqual,
-  deepStrictEqual,
-  equal,
-  fail,
-  ifError,
-  match,
-  notEqual,
-  notStrictEqual,
-  ok,
-  rejects,
-  assert as strict,
-  strictEqual,
-  throws,
+            r#"const state = globalThis.__agentOSNodeTestState ??= {
+  tests: [],
+  suite: [],
+  before: [],
+  after: [],
+  beforeEach: [],
+  afterEach: [],
+  ran: false,
 };
-"#,
-        );
-    }
 
-    if module_name == "path" || module_name == "path/posix" || module_name == "path/win32" {
-        return String::from(
-            r#"const sep = "/";
-const delimiter = ":";
+function normalizeTest(name, optionsOrFn, maybeFn) {
+  const options = typeof optionsOrFn === "object" && optionsOrFn !== null ? optionsOrFn : {};
+  const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+  return { name: String(name), options, fn };
+}
 
-function normalizeSegments(parts) {
-  const output = [];
-  for (const part of parts) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (output.length > 0) output.pop();
+function test(name, optionsOrFn, maybeFn) {
+  const record = normalizeTest(name, optionsOrFn, maybeFn);
+  state.tests.push({
+    ...record,
+    name: [...state.suite, record.name].join(" > "),
+  });
+}
+test.skip = (name, optionsOrFn, maybeFn) => {
+  const record = normalizeTest(name, optionsOrFn, maybeFn);
+  test(record.name, { ...record.options, skip: true }, record.fn);
+};
+test.todo = (name, optionsOrFn, maybeFn) => {
+  const record = normalizeTest(name, optionsOrFn, maybeFn);
+  test(record.name, { ...record.options, todo: true }, record.fn);
+};
+test.only = test;
+
+function describe(name, optionsOrFn, maybeFn) {
+  const record = normalizeTest(name, optionsOrFn, maybeFn);
+  state.suite.push(record.name);
+  try {
+    record.fn?.();
+  } finally {
+    state.suite.pop();
+  }
+}
+describe.skip = (_name, _optionsOrFn, _maybeFn) => {};
+describe.only = describe;
+
+function before(fn) { state.before.push(fn); }
+function after(fn) { state.after.push(fn); }
+function beforeEach(fn) { state.beforeEach.push(fn); }
+function afterEach(fn) { state.afterEach.push(fn); }
+
+async function __agentOSRunTests(namePattern) {
+  if (state.ran) throw new Error("node:test runner was already consumed");
+  state.ran = true;
+  const pattern = namePattern ? new RegExp(namePattern) : null;
+  const records = pattern ? state.tests.filter((record) => pattern.test(record.name)) : state.tests;
+  let passed = 0;
+  let failed = 0;
+  let skipped = 0;
+  console.log("TAP version 13");
+  for (const hook of state.before) await hook();
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (record.options.skip || record.options.todo || typeof record.fn !== "function") {
+      skipped += 1;
+      console.log(`ok ${index + 1} - ${record.name} # SKIP`);
       continue;
     }
-    output.push(part);
+    try {
+      for (const hook of state.beforeEach) await hook();
+      const context = { test, skip() { throw Object.assign(new Error("skip"), { __agentOSTestSkip: true }); } };
+      await record.fn(context);
+      passed += 1;
+      console.log(`ok ${index + 1} - ${record.name}`);
+    } catch (error) {
+      if (error?.__agentOSTestSkip) {
+        skipped += 1;
+        console.log(`ok ${index + 1} - ${record.name} # SKIP`);
+      } else {
+        failed += 1;
+        console.log(`not ok ${index + 1} - ${record.name}`);
+        console.log(`  error: ${JSON.stringify(String(error?.stack ?? error))}`);
+      }
+    } finally {
+      for (const hook of state.afterEach) await hook();
+    }
   }
-  return output;
+  for (const hook of state.after) await hook();
+  console.log(`1..${records.length}`);
+  console.log(`# tests ${records.length}`);
+  console.log(`# pass ${passed}`);
+  console.log(`# fail ${failed}`);
+  console.log(`# skipped ${skipped}`);
+  return { total: records.length, passed, failed, skipped };
 }
 
-function isAbsolute(path) {
-  return String(path || "").startsWith(sep);
-}
-
-function join(...parts) {
-  const absolute = parts.some((part, index) => index === 0 && isAbsolute(part));
-  const normalized = normalizeSegments(parts.flatMap((part) => String(part || "").split(sep)));
-  const joined = normalized.join(sep);
-  if (!joined) return absolute ? sep : ".";
-  return absolute ? `${sep}${joined}` : joined;
-}
-
-function dirname(path) {
-  const normalized = String(path || "");
-  if (!normalized || normalized === sep) return sep;
-  const parts = normalizeSegments(normalized.split(sep));
-  if (parts.length <= 1) return isAbsolute(normalized) ? sep : ".";
-  const dir = parts.slice(0, -1).join(sep);
-  return isAbsolute(normalized) ? `${sep}${dir}` : dir;
-}
-
-function basename(path) {
-  const normalized = normalizeSegments(String(path || "").split(sep));
-  return normalized.length === 0 ? "" : normalized[normalized.length - 1];
-}
-
-function extname(path) {
-  const base = basename(path);
-  const index = base.lastIndexOf(".");
-  if (index <= 0) return "";
-  return base.slice(index);
-}
-
-function resolve(...parts) {
-  const absoluteParts = [];
-  for (let index = parts.length - 1; index >= 0; index -= 1) {
-    const part = String(parts[index] || "");
-    if (!part) continue;
-    absoluteParts.unshift(part);
-    if (isAbsolute(part)) break;
-  }
-  if (absoluteParts.length === 0 || !isAbsolute(absoluteParts[0])) {
-    absoluteParts.unshift(typeof process?.cwd === "function" ? process.cwd() : sep);
-  }
-  return join(...absoluteParts);
-}
-
-function relative(from, to) {
-  const fromResolved = resolve(from);
-  const toResolved = resolve(to);
-  if (fromResolved === toResolved) return "";
-
-  const fromParts = normalizeSegments(fromResolved.split(sep));
-  const toParts = normalizeSegments(toResolved.split(sep));
-  let shared = 0;
-  while (
-    shared < fromParts.length &&
-    shared < toParts.length &&
-    fromParts[shared] === toParts[shared]
-  ) {
-    shared += 1;
-  }
-
-  const up = new Array(fromParts.length - shared).fill("..");
-  const down = toParts.slice(shared);
-  const result = [...up, ...down].join(sep);
-  return result || ".";
-}
-
-function parse(path) {
-  const root = isAbsolute(path) ? sep : "";
-  const dir = dirname(path);
-  const base = basename(path);
-  const ext = extname(path);
-  const name = ext ? base.slice(0, -ext.length) : base;
-  return { root, dir, base, ext, name };
-}
-
-function format(pathObject = {}) {
-  const dir = pathObject.dir || pathObject.root || "";
-  const base =
-    pathObject.base ||
-    `${pathObject.name || ""}${pathObject.ext || ""}`;
-  if (!dir) return base;
-  if (!base) return dir;
-  return dir.endsWith(sep) ? `${dir}${base}` : `${dir}${sep}${base}`;
-}
-
-function normalize(path) {
-  return join(String(path || ""));
-}
-
-const pathModule = {
-  basename,
-  delimiter,
-  dirname,
-  extname,
-  format,
-  isAbsolute,
-  join,
-  normalize,
-  parse,
-  relative,
-  resolve,
-  sep,
+const it = test;
+const suite = describe;
+const mock = {};
+export {
+  __agentOSRunTests,
+  after,
+  afterEach,
+  before,
+  beforeEach,
+  describe,
+  it,
+  mock,
+  suite,
+  test as default,
+  test,
 };
-const posix = pathModule;
-const win32 = pathModule;
-pathModule.posix = posix;
-pathModule.win32 = win32;
-
-export { basename, delimiter, dirname, extname, format, isAbsolute, join, normalize, parse, posix, relative, resolve, sep, win32 };
-export default pathModule;
 "#,
         );
     }
 
-    if module_name == "url" {
+    if module_name == "test/reporters" {
         return String::from(
-            r#"const NativeURL = globalThis.URL;
-
-function normalizeFilePath(value) {
-  const path = String(value ?? "");
-  if (path.length === 0) {
-    return "/";
-  }
-  return path.startsWith("/") ? path : `/${path}`;
-}
-
-function encodeFilePath(path) {
-  return path
-    .split("/")
-    .map((segment, index) =>
-      index === 0
-        ? ""
-        : encodeURIComponent(segment).replace(/[!'()*]/g, (char) =>
-            `%${char.charCodeAt(0).toString(16).toUpperCase()}`
-          )
-    )
-    .join("/");
-}
-
-function buildFileUrlRecord(href, pathname) {
-  const searchParams = new URLSearchParams();
-  return {
-    href,
-    origin: "null",
-    protocol: "file:",
-    username: "",
-    password: "",
-    host: "",
-    hostname: "",
-    port: "",
-    pathname,
-    search: "",
-    searchParams,
-    hash: "",
-    toString() {
-      return href;
-    },
-    toJSON() {
-      return href;
-    },
-    valueOf() {
-      return href;
-    },
-    [Symbol.toPrimitive]() {
-      return href;
-    },
-  };
-}
-
-function fileURLToPath(value) {
-  const raw =
-    typeof value === "string"
-      ? value
-      : value && typeof value.href === "string"
-        ? value.href
-        : String(value ?? "");
-  if (raw.startsWith("/")) {
-    return raw;
-  }
-  if (raw.startsWith("file:")) {
-    let pathname = raw.startsWith("file://")
-      ? raw.slice("file://".length)
-      : raw.slice("file:".length);
-    const terminatorIndex = pathname.search(/[?#]/);
-    if (terminatorIndex >= 0) {
-      pathname = pathname.slice(0, terminatorIndex);
-    }
-    if (!pathname.startsWith("/")) {
-      const slashIndex = pathname.indexOf("/");
-      if (slashIndex === -1) {
-        return "/";
-      }
-      const host = pathname.slice(0, slashIndex);
-      if (host && host !== "localhost") {
-        throw new Error(`Expected file URL with an empty host, received ${host}`);
-      }
-      pathname = pathname.slice(slashIndex);
-    }
-    return decodeURIComponent(pathname || "/");
-  }
-  const url = value instanceof NativeURL ? value : new NativeURL(raw);
-  if (url.protocol !== "file:") {
-    throw new Error(`Expected file URL, received ${url.protocol}`);
-  }
-  return decodeURIComponent(url.pathname);
-}
-
-function pathToFileURL(path) {
-  const absolute = normalizeFilePath(path);
-  const pathname = encodeFilePath(absolute);
-  const href = `file://${pathname}`;
-
-  try {
-    return new NativeURL(href);
-  } catch {}
-
-  return buildFileUrlRecord(href, pathname);
-}
-
-function parse(input, parseQueryString = false) {
-  const parsed = new NativeURL(String(input ?? ""));
-  const queryString = parsed.search.length > 0 ? parsed.search.slice(1) : null;
-  const auth =
-    parsed.username || parsed.password
-      ? `${decodeURIComponent(parsed.username)}${parsed.password ? `:${decodeURIComponent(parsed.password)}` : ""}`
-      : null;
-  return {
-    href: parsed.href,
-    protocol: parsed.protocol,
-    slashes: true,
-    auth,
-    host: parsed.host,
-    port: parsed.port || null,
-    hostname: parsed.hostname,
-    hash: parsed.hash || null,
-    search: parsed.search || null,
-    query: parseQueryString ? Object.fromEntries(parsed.searchParams.entries()) : queryString,
-    pathname: parsed.pathname,
-    path: `${parsed.pathname}${parsed.search}`,
-  };
-}
-
-function format(value) {
-  if (value == null) return "";
-  if (typeof value === "string") return value;
-  if (typeof value.href === "string") return value.href;
-
-  const protocol = typeof value.protocol === "string" ? value.protocol : "http:";
-  const slashes = value.slashes === false ? "" : "//";
-  const auth =
-    typeof value.auth === "string" && value.auth.length > 0 ? `${value.auth}@` : "";
-  const host =
-    typeof value.host === "string" && value.host.length > 0
-      ? value.host
-      : `${value.hostname || ""}${value.port ? `:${value.port}` : ""}`;
-  const pathname =
-    typeof value.pathname === "string"
-      ? value.pathname
-      : typeof value.path === "string"
-        ? value.path
-        : "";
-
-  let search = "";
-  if (typeof value.search === "string") {
-    search = value.search;
-  } else if (typeof value.query === "string" && value.query.length > 0) {
-    search = value.query.startsWith("?") ? value.query : `?${value.query}`;
-  } else if (value.query && typeof value.query === "object") {
-    const params = new URLSearchParams();
-    for (const [key, entry] of Object.entries(value.query)) {
-      if (Array.isArray(entry)) {
-        for (const item of entry) {
-          params.append(key, String(item));
-        }
-      } else if (entry != null) {
-        params.append(key, String(entry));
-      }
-    }
-    const encoded = params.toString();
-    search = encoded ? `?${encoded}` : "";
-  }
-
-  const hash = typeof value.hash === "string" ? value.hash : "";
-  return `${protocol}${slashes}${auth}${host}${pathname}${search}${hash}`;
-}
-
-export { NativeURL as URL, fileURLToPath, format, parse, pathToFileURL };
-export default { URL: NativeURL, fileURLToPath, format, parse, pathToFileURL };
+            r#"const empty = async function* (source) { for await (const event of source) yield event; };
+export { empty as dot, empty as junit, empty as spec, empty as tap };
 "#,
         );
     }
@@ -6069,483 +5865,6 @@ export default { createInterface };
     // for compatibility archaeology. The active `node:stream` wrapper must
     // fall through to the runtime builtin so ESM and CommonJS share constructor
     // identity (including the Duplex used by node:net.Socket).
-    if module_name == "__legacy_embedded_stream" {
-        return String::from(
-            r#"class MiniEmitter {
-  constructor() {
-    this._listeners = new Map();
-    this._onceListeners = new Map();
-  }
-
-  on(event, listener) {
-    const listeners = this._listeners.get(event) ?? [];
-    listeners.push(listener);
-    this._listeners.set(event, listeners);
-    return this;
-  }
-
-  once(event, listener) {
-    const listeners = this._onceListeners.get(event) ?? [];
-    listeners.push(listener);
-    this._onceListeners.set(event, listeners);
-    return this;
-  }
-
-  off(event, listener) {
-    for (const map of [this._listeners, this._onceListeners]) {
-      const listeners = map.get(event) ?? [];
-      map.set(
-        event,
-        listeners.filter((candidate) => candidate !== listener),
-      );
-    }
-    return this;
-  }
-
-  removeListener(event, listener) {
-    return this.off(event, listener);
-  }
-
-  emit(event, ...args) {
-    const persistent = [...(this._listeners.get(event) ?? [])];
-    const once = [...(this._onceListeners.get(event) ?? [])];
-    this._onceListeners.delete(event);
-    for (const listener of persistent) {
-      listener(...args);
-    }
-    for (const listener of once) {
-      listener(...args);
-    }
-    return persistent.length + once.length > 0;
-  }
-}
-
-function getCallback(encodingOrCallback, callback) {
-  if (typeof encodingOrCallback === "function") return encodingOrCallback;
-  if (typeof callback === "function") return callback;
-  return null;
-}
-
-function queueResult(callback, error = null) {
-  if (typeof callback !== "function") return;
-  queueMicrotask(() => callback(error));
-}
-
-function createReadableAsyncIterator(stream) {
-  const queuedChunks = [];
-  let pendingResolve = null;
-  let pendingReject = null;
-  let done = stream?.readableEnded === true;
-  let error = stream?.errored ?? null;
-
-  const cleanup = () => {
-    stream?.off?.("data", onData);
-    stream?.off?.("end", onEnd);
-    stream?.off?.("close", onEnd);
-    stream?.off?.("error", onError);
-  };
-
-  const settlePending = (result) => {
-    if (pendingResolve) {
-      const resolve = pendingResolve;
-      pendingResolve = null;
-      pendingReject = null;
-      resolve(result);
-    }
-  };
-
-  const rejectPending = (reason) => {
-    if (pendingReject) {
-      const reject = pendingReject;
-      pendingResolve = null;
-      pendingReject = null;
-      reject(reason);
-    }
-  };
-
-  const onData = (chunk) => {
-    if (pendingResolve) {
-      settlePending({ done: false, value: chunk });
-      return;
-    }
-    queuedChunks.push(chunk);
-  };
-
-  const onEnd = () => {
-    if (done) return;
-    done = true;
-    cleanup();
-    settlePending({ done: true, value: void 0 });
-  };
-
-  const onError = (reason) => {
-    error = reason;
-    done = true;
-    cleanup();
-    rejectPending(reason);
-  };
-
-  const pull = () => {
-    if (done || typeof stream?._read !== "function") {
-      return;
-    }
-    try {
-      stream._read();
-    } catch (reason) {
-      stream.errored = reason;
-      onError(reason);
-    }
-  };
-
-  stream?.on?.("data", onData);
-  stream?.on?.("end", onEnd);
-  stream?.on?.("close", onEnd);
-  stream?.on?.("error", onError);
-
-  return {
-    next() {
-      if (error) {
-        return Promise.reject(error);
-      }
-      if (queuedChunks.length > 0) {
-        return Promise.resolve({ done: false, value: queuedChunks.shift() });
-      }
-      if (done) {
-        return Promise.resolve({ done: true, value: void 0 });
-      }
-      pull();
-      if (queuedChunks.length > 0) {
-        return Promise.resolve({ done: false, value: queuedChunks.shift() });
-      }
-      if (done) {
-        return Promise.resolve({ done: true, value: void 0 });
-      }
-      return new Promise((resolve, reject) => {
-        pendingResolve = resolve;
-        pendingReject = reject;
-      });
-    },
-    return() {
-      done = true;
-      cleanup();
-      stream?.destroy?.();
-      return Promise.resolve({ done: true, value: void 0 });
-    },
-    [Symbol.asyncIterator]() {
-      return this;
-    },
-  };
-}
-
-class Stream extends MiniEmitter {
-  pipe(destination) {
-    this.on("data", (chunk) => destination.write(chunk));
-    this.once("end", () => destination.end());
-    return destination;
-  }
-
-  destroy(error) {
-    if (this.destroyed) return this;
-    this.destroyed = true;
-    if (error) {
-      this.errored = error;
-      queueMicrotask(() => this.emit("error", error));
-    }
-    queueMicrotask(() => this.emit("close"));
-    return this;
-  }
-}
-
-class Readable extends Stream {
-  constructor() {
-    super();
-    this.readable = true;
-    this.readableEnded = false;
-    this.destroyed = false;
-  }
-
-  push(chunk) {
-    if (chunk === null) {
-      if (!this.readableEnded) {
-        this.readableEnded = true;
-        queueMicrotask(() => {
-          this.emit("end");
-          this.emit("close");
-        });
-      }
-      return false;
-    }
-    this.emit("data", Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk ?? []));
-    return true;
-  }
-
-  static fromWeb(stream) {
-    if (!stream || typeof stream.getReader !== "function") {
-      throw new TypeError("Readable.fromWeb expects a WHATWG ReadableStream");
-    }
-    return {
-      async *[Symbol.asyncIterator]() {
-        const reader = stream.getReader();
-        try {
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            yield Buffer.from(value ?? []);
-          }
-        } finally {
-          reader.releaseLock?.();
-        }
-      },
-    };
-  }
-
-  [Symbol.asyncIterator]() {
-    return createReadableAsyncIterator(this);
-  }
-}
-
-class Writable extends Stream {
-  constructor(options = undefined) {
-    super();
-    this.writable = true;
-    this.writableEnded = false;
-    this.destroyed = false;
-    this._writeOption =
-      options && typeof options.write === "function" ? options.write : null;
-    this._destroyOption =
-      options && typeof options.destroy === "function" ? options.destroy : null;
-  }
-
-  write(chunk, encodingOrCallback, callback) {
-    if (this.writableEnded) {
-      const error = new Error("write after end");
-      queueResult(getCallback(encodingOrCallback, callback), error);
-      this.emit("error", error);
-      return false;
-    }
-    const done = getCallback(encodingOrCallback, callback);
-    this._write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk ?? []), done);
-    return true;
-  }
-
-  _write(_chunk, callback) {
-    if (!this._writeOption) {
-      queueResult(callback);
-      return;
-    }
-    try {
-      this._writeOption.call(this, _chunk, "buffer", callback);
-    } catch (error) {
-      queueResult(callback, error);
-    }
-  }
-
-  _destroy(error, callback) {
-    if (!this._destroyOption) {
-      queueResult(callback, error);
-      return;
-    }
-    try {
-      this._destroyOption.call(this, error ?? null, callback);
-    } catch (destroyError) {
-      queueResult(callback, destroyError);
-    }
-  }
-
-  destroy(error) {
-    if (this.destroyed) return this;
-    this.destroyed = true;
-    this._destroy(error ?? null, (destroyError) => {
-      const finalError = destroyError ?? error;
-      if (finalError) {
-        this.errored = finalError;
-        this.emit("error", finalError);
-      }
-      this.emit("close");
-    });
-    return this;
-  }
-
-  end(chunk, encodingOrCallback, callback) {
-    if (chunk !== undefined && chunk !== null) {
-      this.write(chunk, encodingOrCallback);
-    }
-    if (this.writableEnded) {
-      queueResult(getCallback(encodingOrCallback, callback));
-      return this;
-    }
-    this.writableEnded = true;
-    const done = getCallback(encodingOrCallback, callback);
-    queueMicrotask(() => {
-      queueResult(done);
-      this.emit("finish");
-      this.destroy();
-    });
-    return this;
-  }
-}
-
-class Duplex extends Readable {
-  constructor() {
-    super();
-    this.writable = true;
-    this.writableEnded = false;
-  }
-
-  write(chunk, encodingOrCallback, callback) {
-    return Writable.prototype.write.call(this, chunk, encodingOrCallback, callback);
-  }
-
-  _write(chunk, callback) {
-    queueResult(callback);
-  }
-
-  end(chunk, encodingOrCallback, callback) {
-    return Writable.prototype.end.call(this, chunk, encodingOrCallback, callback);
-  }
-}
-
-class Transform extends Duplex {
-  _write(chunk, callback) {
-    try {
-      this._transform(chunk, "buffer", (error, output) => {
-        if (!error && output !== undefined && output !== null) {
-          this.push(output);
-        }
-        queueResult(callback, error ?? null);
-      });
-    } catch (error) {
-      queueResult(callback, error);
-      this.emit("error", error);
-    }
-  }
-
-  _transform(chunk, _encoding, callback) {
-    callback(null, chunk);
-  }
-
-  end(chunk, encodingOrCallback, callback) {
-    Writable.prototype.end.call(this, chunk, encodingOrCallback, callback);
-    this.push(null);
-    return this;
-  }
-}
-
-class PassThrough extends Transform {}
-
-function finished(stream, callback) {
-  const done = (error = null) => {
-    cleanup();
-    if (typeof callback === "function") callback(error);
-  };
-  const onFinish = () => done();
-  const onEnd = () => done();
-  const onClose = () => done();
-  const onError = (error) => done(error);
-  const cleanup = () => {
-    stream?.off?.("finish", onFinish);
-    stream?.off?.("end", onEnd);
-    stream?.off?.("close", onClose);
-    stream?.off?.("error", onError);
-  };
-  stream?.once?.("finish", onFinish);
-  stream?.once?.("end", onEnd);
-  stream?.once?.("close", onClose);
-  stream?.once?.("error", onError);
-  return cleanup;
-}
-
-function pipeline(...streams) {
-  const callback =
-    streams.length > 0 && typeof streams[streams.length - 1] === "function"
-      ? streams.pop()
-      : null;
-  if (streams.length < 2) {
-    const error = new TypeError("pipeline requires at least two streams");
-    callback?.(error);
-    throw error;
-  }
-  for (let index = 0; index < streams.length - 1; index += 1) {
-    streams[index].pipe(streams[index + 1]);
-  }
-  if (callback) {
-    finished(streams[streams.length - 1], callback);
-  }
-  return streams[streams.length - 1];
-}
-
-function compose(...streams) {
-  return pipeline(...streams);
-}
-
-function addAbortSignal(signal, stream) {
-  if (signal?.aborted) {
-    stream?.destroy?.(signal.reason);
-    return stream;
-  }
-  signal?.addEventListener?.("abort", () => stream?.destroy?.(signal.reason), {
-    once: true,
-  });
-  return stream;
-}
-
-function isReadable(stream) {
-  return Boolean(stream && stream.readable && !stream.destroyed);
-}
-
-function isWritable(stream) {
-  return Boolean(stream && stream.writable && !stream.destroyed);
-}
-
-function isErrored(stream) {
-  return Boolean(stream && stream.errored);
-}
-
-function isDisturbed(stream) {
-  return Boolean(
-    stream && (stream.disturbed === true || stream.locked || stream.readableDidRead === true),
-  );
-}
-
-const streamModule = Stream;
-Object.assign(streamModule, {
-  Duplex,
-  PassThrough,
-  Readable,
-  Stream,
-  Transform,
-  Writable,
-  addAbortSignal,
-  compose,
-  finished,
-  isDisturbed,
-  isErrored,
-  isReadable,
-  isWritable,
-  pipeline,
-});
-
-export {
-  Duplex,
-  PassThrough,
-  Readable,
-  Stream,
-  Transform,
-  Writable,
-  addAbortSignal,
-  compose,
-  finished,
-  isDisturbed,
-  isErrored,
-  isReadable,
-  isWritable,
-  pipeline,
-};
-export default streamModule;
-"#,
-        );
-    }
-
     if module_name == "stream/promises" {
         return String::from(
             r#"const _m = globalThis._requireFrom("node:stream/promises", "/");
@@ -6804,40 +6123,6 @@ export { createInterface };
         );
     }
 
-    if module_name == "string_decoder" {
-        return String::from(
-            r#"class StringDecoder {
-  constructor(encoding = "utf8") {
-    this.encoding = encoding;
-    this.decoder = new TextDecoder(encoding, { fatal: false });
-  }
-
-  write(input) {
-    const buffer =
-      typeof input === "string"
-        ? Buffer.from(input, this.encoding)
-        : Buffer.isBuffer(input)
-          ? input
-          : Buffer.from(input ?? []);
-    return this.decoder.decode(buffer, { stream: true });
-  }
-
-  end(input) {
-    let output = "";
-    if (input !== undefined) {
-      output += this.write(input);
-    }
-    output += this.decoder.decode();
-    return output;
-  }
-}
-
-export { StringDecoder };
-export default { StringDecoder };
-"#,
-        );
-    }
-
     if module_name == "v8" {
         return String::from(
             r#"function serialize(value) {
@@ -7049,11 +6334,11 @@ export default {
 
     if module_name == "vm" {
         return String::from(
-            r#"const VM_CONTEXT_TAG = typeof Symbol === "function" ? Symbol.for("secure-exec.vm.context") : "__secure_exec_vm_context__";
-const VM_CONTEXT_ID = typeof Symbol === "function" ? Symbol.for("secure-exec.vm.context.id") : "__secure_exec_vm_context_id__";
+            r#"const VM_CONTEXT_TAG = typeof Symbol === "function" ? Symbol.for("agentos.vm.context") : "__agentos_vm_context__";
+const VM_CONTEXT_ID = typeof Symbol === "function" ? Symbol.for("agentos.vm.context.id") : "__agentos_vm_context_id__";
 
 function createVmNotImplementedError(feature) {
-  const error = new Error(`node:vm ${feature} is not implemented in the secure-exec guest runtime`);
+  const error = new Error(`node:vm ${feature} is not implemented in the agentos guest runtime`);
   error.code = "ERR_NOT_IMPLEMENTED";
   return error;
 }
@@ -7191,7 +6476,7 @@ export default { Script, compileFunction, createContext, isContext, measureMemor
     if module_name == "worker_threads" {
         return String::from(
             r#"function createNotImplementedError(feature) {
-  const error = new Error(`node:worker_threads ${feature} is not available in the secure-exec guest runtime`);
+  const error = new Error(`node:worker_threads ${feature} is not available in the agentos guest runtime`);
   error.code = "ERR_NOT_IMPLEMENTED";
   return error;
 }
@@ -7245,7 +6530,7 @@ function setEnvironmentData() {}
 
 export const BroadcastChannel = globalThis.BroadcastChannel;
 export { MessageChannel, MessagePort, Worker, getEnvironmentData, markAsUncloneable, markAsUntransferable, moveMessagePortToContext, postMessageToThread, receiveMessageOnPort, setEnvironmentData };
-export const SHARE_ENV = Symbol.for("secure-exec.worker_threads.SHARE_ENV");
+export const SHARE_ENV = Symbol.for("agentos.worker_threads.SHARE_ENV");
 export const isMainThread = true;
 export const parentPort = null;
 export const resourceLimits = {};
@@ -7274,6 +6559,10 @@ export default {
         );
     }
 
+    build_delegating_builtin_module_wrapper(module_name)
+}
+
+fn build_delegating_builtin_module_wrapper(module_name: &str) -> String {
     let default_target = format!(
         "globalThis._requireFrom({}, \"/\")",
         serde_json::to_string(&format!("node:{module_name}"))
@@ -7295,6 +6584,29 @@ export default {
 
 fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
     match module_name {
+        "assert" | "assert/strict" => &[
+            "AssertionError",
+            "CallTracker",
+            "deepEqual",
+            "deepStrictEqual",
+            "doesNotMatch",
+            "doesNotReject",
+            "doesNotThrow",
+            "equal",
+            "fail",
+            "ifError",
+            "match",
+            "notDeepEqual",
+            "notDeepStrictEqual",
+            "notEqual",
+            "notStrictEqual",
+            "ok",
+            "partialDeepStrictEqual",
+            "rejects",
+            "strict",
+            "strictEqual",
+            "throws",
+        ],
         "async_hooks" => &[
             "AsyncLocalStorage",
             "AsyncResource",
@@ -7308,7 +6620,9 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "File",
             "INSPECT_MAX_BYTES",
             "SlowBuffer",
+            "isAscii",
             "isUtf8",
+            "resolveObjectURL",
         ],
         "child_process" => &[
             "ChildProcess",
@@ -7347,15 +6661,80 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "trace",
             "warn",
         ],
+        "constants" => &[
+            "COPYFILE_EXCL",
+            "COPYFILE_FICLONE",
+            "COPYFILE_FICLONE_FORCE",
+            "F_OK",
+            "R_OK",
+            "W_OK",
+            "X_OK",
+            "O_RDONLY",
+            "O_WRONLY",
+            "O_RDWR",
+            "O_CREAT",
+            "O_EXCL",
+            "O_TRUNC",
+            "O_APPEND",
+            "O_DIRECTORY",
+            "O_NOFOLLOW",
+            "O_SYNC",
+            "O_DSYNC",
+            "O_NONBLOCK",
+            "S_IFMT",
+            "S_IFREG",
+            "S_IFDIR",
+            "S_IFCHR",
+            "S_IFBLK",
+            "S_IFIFO",
+            "S_IFLNK",
+            "S_IFSOCK",
+        ],
         "crypto" => &[
+            "DiffieHellman",
+            "ECDH",
+            "KeyObject",
+            "constants",
+            "createCipheriv",
+            "createDecipheriv",
+            "createDiffieHellman",
+            "createECDH",
             "createHash",
+            "createHmac",
             "createPrivateKey",
+            "createPublicKey",
+            "createSecretKey",
+            "createSign",
+            "createVerify",
+            "diffieHellman",
+            "generateKeyPair",
+            "generateKeyPairSync",
+            "generateKeySync",
+            "generatePrime",
+            "generatePrimeSync",
+            "getCiphers",
+            "getCurves",
+            "getDiffieHellman",
+            "getFips",
             "getHashes",
             "getRandomValues",
+            "pbkdf2",
+            "pbkdf2Sync",
+            "privateDecrypt",
+            "privateEncrypt",
+            "publicDecrypt",
+            "publicEncrypt",
             "randomBytes",
+            "randomFill",
             "randomFillSync",
             "randomUUID",
+            "scrypt",
+            "scryptSync",
+            "sign",
             "subtle",
+            "timingSafeEqual",
+            "verify",
+            "webcrypto",
         ],
         "diagnostics_channel" => &[
             "Channel",
@@ -7377,7 +6756,10 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "setMaxListeners",
         ],
         "dns" => &[
+            "ADDRCONFIG",
+            "ALL",
             "Resolver",
+            "V4MAPPED",
             "getServers",
             "lookup",
             "promises",
@@ -7404,25 +6786,52 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "resolveCaa",
         ],
         "fs" => &[
+            "Dir",
+            "Dirent",
+            "ReadStream",
+            "Stats",
+            "WriteStream",
             "access",
             "accessSync",
             "appendFile",
             "appendFileSync",
             "chmod",
             "chmodSync",
+            "chown",
+            "chownSync",
+            "close",
             "closeSync",
             "constants",
+            "copyFile",
+            "copyFileSync",
+            "cp",
+            "cpSync",
             "createReadStream",
             "createWriteStream",
+            "exists",
             "existsSync",
+            "lchmod",
+            "lchmodSync",
+            "lchown",
+            "lchownSync",
+            "link",
+            "linkSync",
             "fstat",
             "fstatSync",
             "fsyncSync",
             "lstat",
             "lstatSync",
+            "lutimes",
+            "lutimesSync",
             "mkdir",
             "mkdirSync",
+            "mkdtemp",
+            "mkdtempSync",
+            "open",
             "openSync",
+            "opendir",
+            "opendirSync",
+            "read",
             "readFile",
             "promises",
             "readFileSync",
@@ -7430,19 +6839,33 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "readSync",
             "readdirSync",
             "readlink",
+            "readlinkSync",
+            "realpath",
             "realpathSync",
             "rename",
-            "readlinkSync",
             "renameSync",
+            "rmdir",
+            "rmdirSync",
             "rm",
             "rmSync",
+            "rmdir",
+            "rmdirSync",
             "stat",
             "statSync",
+            "statfs",
+            "statfsSync",
+            "symlink",
+            "symlinkSync",
+            "truncate",
+            "truncateSync",
             "unlink",
             "unlinkSync",
+            "utimes",
+            "utimesSync",
             "watch",
             "watchFile",
             "unwatchFile",
+            "write",
             "writeFile",
             "writeFileSync",
             "writeSync",
@@ -7575,11 +6998,74 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "relative",
             "resolve",
             "sep",
+            "toNamespacedPath",
             "win32",
         ],
         "process" => &[
-            "arch", "argv", "argv0", "cwd", "env", "execPath", "exit", "pid", "platform", "ppid",
-            "stderr", "stdin", "stdout", "umask", "version", "versions",
+            "abort",
+            "allowedNodeEnvironmentFlags",
+            "arch",
+            "argv",
+            "argv0",
+            "availableMemory",
+            "chdir",
+            "config",
+            "constrainedMemory",
+            "cpuUsage",
+            "cwd",
+            "debugPort",
+            "dlopen",
+            "emitWarning",
+            "env",
+            "execArgv",
+            "execPath",
+            "execve",
+            "exit",
+            "exitCode",
+            "features",
+            "finalization",
+            "getActiveResourcesInfo",
+            "getBuiltinModule",
+            "getegid",
+            "geteuid",
+            "getgid",
+            "getgroups",
+            "getuid",
+            "hasUncaughtExceptionCaptureCallback",
+            "hrtime",
+            "initgroups",
+            "kill",
+            "loadEnvFile",
+            "memoryUsage",
+            "moduleLoadList",
+            "nextTick",
+            "openStdin",
+            "pid",
+            "platform",
+            "ppid",
+            "reallyExit",
+            "ref",
+            "release",
+            "report",
+            "resourceUsage",
+            "setSourceMapsEnabled",
+            "setUncaughtExceptionCaptureCallback",
+            "setegid",
+            "seteuid",
+            "setgid",
+            "setgroups",
+            "setuid",
+            "sourceMapsEnabled",
+            "stderr",
+            "stdin",
+            "stdout",
+            "threadCpuUsage",
+            "title",
+            "umask",
+            "unref",
+            "uptime",
+            "version",
+            "versions",
         ],
         "perf_hooks" => &[
             "PerformanceObserver",
@@ -7599,11 +7085,13 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "addAbortSignal",
             "compose",
             "finished",
+            "getDefaultHighWaterMark",
             "isDisturbed",
             "isErrored",
             "isReadable",
             "isWritable",
             "pipeline",
+            "setDefaultHighWaterMark",
         ],
         "stream/consumers" => &["arrayBuffer", "blob", "buffer", "json", "text"],
         "sys" => &[
@@ -7611,6 +7099,7 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "MIMEParams",
             "TextDecoder",
             "TextEncoder",
+            "aborted",
             "callbackify",
             "debug",
             "debuglog",
@@ -7619,8 +7108,10 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "formatWithOptions",
             "inherits",
             "inspect",
+            "parseEnv",
             "parseArgs",
             "promisify",
+            "styleText",
             "stripVTControlCharacters",
             "types",
         ],
@@ -7634,21 +7125,40 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
         ],
         "tty" => &["ReadStream", "WriteStream", "isatty"],
         "tls" => &[
+            "DEFAULT_MAX_VERSION",
+            "DEFAULT_MIN_VERSION",
             "TLSSocket",
             "Server",
+            "checkServerIdentity",
             "connect",
             "createSecureContext",
             "createServer",
             "getCiphers",
+            "rootCertificates",
         ],
         "stream/promises" => &["finished", "pipeline"],
+        "string_decoder" => &["StringDecoder"],
         "timers/promises" => &["scheduler", "setImmediate", "setInterval", "setTimeout"],
-        "url" => &["URL", "fileURLToPath", "format", "parse", "pathToFileURL"],
+        "url" => &[
+            "URL",
+            "URLSearchParams",
+            "Url",
+            "domainToASCII",
+            "domainToUnicode",
+            "fileURLToPath",
+            "format",
+            "parse",
+            "pathToFileURL",
+            "resolve",
+            "resolveObject",
+            "urlToHttpOptions",
+        ],
         "util" => &[
             "MIMEType",
             "MIMEParams",
             "TextDecoder",
             "TextEncoder",
+            "aborted",
             "callbackify",
             "debug",
             "debuglog",
@@ -7658,8 +7168,10 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "inherits",
             "inspect",
             "isDeepStrictEqual",
+            "parseEnv",
             "parseArgs",
             "promisify",
+            "styleText",
             "stripVTControlCharacters",
             "types",
         ],
@@ -7841,14 +7353,24 @@ fn resolve_exports_target(
             if let Some(value) = record.get(subpath) {
                 return resolve_exports_target(value, ".", mode);
             }
+            let mut best_match = None;
             for (key, value) in record {
                 if let Some((prefix, suffix)) = key.split_once('*') {
                     if subpath.starts_with(prefix) && subpath.ends_with(suffix) {
                         let wildcard = &subpath[prefix.len()..subpath.len() - suffix.len()];
-                        let resolved = resolve_exports_target(value, ".", mode)?;
-                        return Some(resolved.replace('*', wildcard));
+                        let specificity = (prefix.len(), suffix.len());
+                        if best_match
+                            .as_ref()
+                            .is_none_or(|(_, _, current)| specificity > *current)
+                        {
+                            best_match = Some((value, wildcard, specificity));
+                        }
                     }
                 }
+            }
+            if let Some((value, wildcard, _)) = best_match {
+                let resolved = resolve_exports_target(value, ".", mode)?;
+                return Some(resolved.replace('*', wildcard));
             }
             if subpath == "." {
                 record
@@ -7894,16 +7416,25 @@ fn resolve_imports_target(
             if let Some(value) = record.get(specifier) {
                 return resolve_exports_target(value, ".", mode);
             }
+            let mut best_match = None;
             for (key, value) in record {
                 if let Some((prefix, suffix)) = key.split_once('*') {
                     if specifier.starts_with(prefix) && specifier.ends_with(suffix) {
                         let wildcard = &specifier[prefix.len()..specifier.len() - suffix.len()];
-                        let resolved = resolve_exports_target(value, ".", mode)?;
-                        return Some(resolved.replace('*', wildcard));
+                        let specificity = (prefix.len(), suffix.len());
+                        if best_match
+                            .as_ref()
+                            .is_none_or(|(_, _, current)| specificity > *current)
+                        {
+                            best_match = Some((value, wildcard, specificity));
+                        }
                     }
                 }
             }
-            None
+            best_match.and_then(|(value, wildcard, _)| {
+                resolve_exports_target(value, ".", mode)
+                    .map(|resolved| resolved.replace('*', wildcard))
+            })
         }
         _ => None,
     }
@@ -8342,7 +7873,7 @@ mod tests {
             .expect("system time")
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "secure-exec-module-bridge-{}-{unique}",
+            "agentos-module-bridge-{}-{unique}",
             std::process::id()
         ));
         let bin_dir = root.join("node_modules/next/dist/bin");

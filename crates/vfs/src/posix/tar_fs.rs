@@ -9,7 +9,7 @@ use crate::package_format::{
     parse_aospkg_header, validate_mount_range, AospkgHeader,
 };
 use memmap2::Mmap;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 const MAX_TAR_INDEX_ENTRIES: usize = 200_000;
 const MAX_TAR_CACHE_ARCHIVES: usize = 64;
 const MAX_TAR_SYMLINKS: usize = 40;
+const MAX_TAR_REALPATH_CACHE_ENTRIES: usize = 32_768;
 
 /// Read-only filesystem backed by the mount chunk of a `.aospkg` package.
 ///
@@ -132,8 +133,43 @@ impl TarFileSystem {
         if normalized == "/" {
             return Ok(normalized);
         }
+        if let Some(result) = self
+            .archive
+            .realpath_cache
+            .lock()
+            .expect("tar realpath cache poisoned")
+            .get(&(normalized.clone(), follow_final_symlink))
+            .cloned()
+        {
+            let resolved = result?;
+            self.ensure_within_root(&resolved)?;
+            return Ok(resolved);
+        }
 
-        let mut pending = path_components(&normalized);
+        let result = self.resolve_archive_path_uncached(&normalized, path, follow_final_symlink);
+        let mut cache = self
+            .archive
+            .realpath_cache
+            .lock()
+            .expect("tar realpath cache poisoned");
+        if cache.len() >= MAX_TAR_REALPATH_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert((normalized, follow_final_symlink), result.clone());
+        drop(cache);
+
+        let resolved = result?;
+        self.ensure_within_root(&resolved)?;
+        Ok(resolved)
+    }
+
+    fn resolve_archive_path_uncached(
+        &self,
+        normalized: &str,
+        path: &str,
+        follow_final_symlink: bool,
+    ) -> VfsResult<String> {
+        let mut pending = path_components(normalized);
         let mut current = String::from("/");
         let mut followed = 0usize;
 
@@ -175,7 +211,6 @@ impl TarFileSystem {
             current = candidate;
         }
 
-        self.ensure_within_root(&current)?;
         Ok(current)
     }
 
@@ -381,8 +416,9 @@ struct CachedTarArchive {
     mmap: Mmap,
     container: AospkgHeader,
     identity: FileIdentity,
-    nodes: BTreeMap<String, TarNode>,
+    nodes: HashMap<String, TarNode>,
     children: BTreeMap<String, BTreeSet<String>>,
+    realpath_cache: Mutex<HashMap<(String, bool), VfsResult<String>>>,
 }
 
 impl CachedTarArchive {
@@ -589,7 +625,7 @@ fn load_archive(path: PathBuf, file: File, identity: FileIdentity) -> VfsResult<
             })?;
     validate_sorted_entries(&index.tar_entries)?;
 
-    let mut nodes = BTreeMap::new();
+    let mut nodes = HashMap::new();
     let mut children = BTreeMap::<String, BTreeSet<String>>::new();
     let dev = identity_device(&identity);
     for (next_ino, entry) in (1u64..).zip(index.tar_entries) {
@@ -644,6 +680,7 @@ fn load_archive(path: PathBuf, file: File, identity: FileIdentity) -> VfsResult<
         identity,
         nodes,
         children,
+        realpath_cache: Mutex::new(HashMap::new()),
     })
 }
 

@@ -953,9 +953,10 @@ fn assert_isolate_churn_recreates_embedded_sessions_without_segv() -> io::Result
             session_id: session_id.clone(),
         })?;
         runtime.unregister_session(&session_id);
-        wait_until(
-            "expected each churned executor permit to reconcile before its successor",
-            || runtime.session_count() == 0 && runtime.active_slot_count() == 0,
+        assert_eq!(
+            (runtime.session_count(), runtime.active_slot_count()),
+            (0, 0),
+            "explicit destruction must join each executor before its successor starts",
         );
     }
 
@@ -976,6 +977,36 @@ fn assert_isolate_churn_recreates_embedded_sessions_without_segv() -> io::Result
     wait_until("expected isolate churn sessions to drain", || {
         runtime.session_count() == 0 && runtime.active_slot_count() == 0
     });
+    Ok(())
+}
+
+fn assert_destroy_joins_active_handle_executor() -> io::Result<()> {
+    let runtime = Arc::new(embedded_runtime(1)?);
+    let session_id = next_session_id();
+    let _receiver = register_and_create_session(&runtime, &session_id)?;
+    dispatch_execute(
+        runtime.as_ref(),
+        &session_id,
+        0,
+        "",
+        "setInterval(() => {}, 1_000);",
+    )?;
+    thread::sleep(Duration::from_millis(20));
+
+    let started = Instant::now();
+    runtime.dispatch(RuntimeCommand::DestroySession {
+        session_id: session_id.clone(),
+    })?;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "active-handle destruction must observe abort before re-entering V8"
+    );
+    runtime.unregister_session(&session_id);
+    assert_eq!(
+        (runtime.session_count(), runtime.active_slot_count()),
+        (0, 0),
+        "active-handle destruction must be quiescent on return"
+    );
     Ok(())
 }
 
@@ -1001,5 +1032,6 @@ fn embedded_runtime_session_consolidated_behaviors() -> io::Result<()> {
     assert_pause_preserves_synchronous_execution_stack()?;
     assert_cpu_terminated_session_can_execute_again()?;
     assert_isolate_churn_recreates_embedded_sessions_without_segv()?;
+    assert_destroy_joins_active_handle_executor()?;
     Ok(())
 }

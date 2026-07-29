@@ -4,7 +4,7 @@ name = "cmd-stat"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "stat standalone binary for secure-exec VM"
+description = "stat standalone binary for agentos VM"
 
 [[bin]]
 name = "stat"

@@ -4,7 +4,7 @@ name = "cmd-cp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "cp standalone binary for secure-exec VM"
+description = "cp standalone binary for agentos VM"
 
 [[bin]]
 name = "cp"

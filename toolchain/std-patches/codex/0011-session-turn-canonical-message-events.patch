@@ -1,0 +1,107 @@
+diff --git a/codex-rs/exec/src/session_turn_wasi.rs b/codex-rs/exec/src/session_turn_wasi.rs
+--- a/exec/src/session_turn_wasi.rs
++++ b/exec/src/session_turn_wasi.rs
+@@ -16,7 +16,10 @@ use anyhow::Context as _;
+ use codex_core::AuthManager;
+ use codex_core::ThreadManager;
+ use codex_core::config::Config;
++use codex_protocol::items::AgentMessageContent;
++use codex_protocol::items::TurnItem;
+ use codex_protocol::models::ContentItem;
++use codex_protocol::models::MessagePhase;
+ use codex_protocol::models::ResponseItem;
+ use codex_protocol::protocol::Event;
+ use codex_protocol::protocol::EventMsg;
+@@ -210,25 +213,66 @@ async fn session_turn() -> anyhow::Result<()> {
+         .await
+         .context("submit prompt")?;
+ 
+-    // Whether the current assistant message streamed any deltas. Codex streams
+-    // text via AgentMessageDelta when the model streams; when it does not (the
+-    // model returns a complete message), only the final AgentMessage event
+-    // carries the text. Emit the final message as a text_delta in that case so
+-    // the EE stream always carries the assistant text, without double-emitting
+-    // when deltas were already streamed.
+-    let mut saw_delta = false;
++    // Consume Codex's canonical item lifecycle, not its mirrored legacy events.
++    // A completed modern AgentMessage is followed by a legacy AgentMessage, and
++    // newer models can produce several phased message items in one turn. Treating
++    // every legacy completion as an append-only delta repeats the answer. Stream
++    // final-answer items, project commentary as reasoning, and retain only the
++    // last unphased item as the compatibility fallback.
++    let mut message_phases = std::collections::HashMap::new();
++    let mut streamed_items = std::collections::HashSet::new();
++    let mut emitted_final_answer = false;
++    let mut fallback_message: Option<String> = None;
+     loop {
+         let Event { id: _, msg } = thread.next_event().await.context("next_event")?;
+         match msg {
+-            EventMsg::AgentMessageDelta(d) => {
+-                saw_delta = true;
+-                emit(json!({ "type": "text_delta", "delta": d.delta }));
++            EventMsg::ItemStarted(e) => {
++                if let TurnItem::AgentMessage(item) = e.item {
++                    message_phases.insert(item.id, item.phase);
++                }
+             }
+-            EventMsg::AgentMessage(m) => {
+-                if !saw_delta && !m.message.is_empty() {
+-                    emit(json!({ "type": "text_delta", "delta": m.message }));
++            EventMsg::AgentMessageContentDelta(e) => {
++                match message_phases.get(&e.item_id).and_then(Clone::clone) {
++                    Some(MessagePhase::Commentary) => {
++                        emit(json!({ "type": "reasoning_delta", "delta": e.delta }));
++                        streamed_items.insert(e.item_id);
++                    }
++                    Some(MessagePhase::FinalAnswer) => {
++                        emit(json!({ "type": "text_delta", "delta": e.delta }));
++                        streamed_items.insert(e.item_id);
++                        emitted_final_answer = true;
++                    }
++                    None => {
++                        // An unphased item may be superseded by another unphased
++                        // snapshot. Wait for ItemCompleted and keep only the last.
++                    }
++                }
++            }
++            EventMsg::ItemCompleted(e) => {
++                if let TurnItem::AgentMessage(item) = e.item {
++                    let text = item
++                        .content
++                        .iter()
++                        .map(|content| match content {
++                            AgentMessageContent::Text { text } => text.as_str(),
++                        })
++                        .collect::<String>();
++                    let streamed = streamed_items.remove(&item.id);
++                    match item.phase {
++                        Some(MessagePhase::Commentary) if !streamed && !text.is_empty() => {
++                            emit(json!({ "type": "reasoning_delta", "delta": text }));
++                        }
++                        Some(MessagePhase::FinalAnswer) => {
++                            if !streamed && !text.is_empty() {
++                                emit(json!({ "type": "text_delta", "delta": text }));
++                            }
++                            emitted_final_answer = true;
++                        }
++                        None => fallback_message = Some(text),
++                        _ => {}
++                    }
++                    message_phases.remove(&item.id);
+                 }
+-                saw_delta = false;
+             }
+             EventMsg::ExecCommandBegin(e) => {
+                 emit(json!({
+@@ -344,6 +388,11 @@ async fn session_turn() -> anyhow::Result<()> {
+                 }));
+             }
+             EventMsg::TurnComplete(_) => {
++                if !emitted_final_answer {
++                    if let Some(message) = fallback_message.take().filter(|text| !text.is_empty()) {
++                        emit(json!({ "type": "text_delta", "delta": message }));
++                    }
++                }
+                 emit(json!({ "type": "done" }));
+                 break;
+             }

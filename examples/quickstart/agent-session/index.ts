@@ -4,8 +4,8 @@
 // agent runtime. It may not complete in all environments.
 
 import claude from "@agentos-software/claude-code";
-import type { SoftwareInput } from "@rivet-dev/agentos-core";
-import { AgentOs } from "@rivet-dev/agentos-core";
+import type { SoftwareInput } from "@rivet-dev/agentos";
+import { AgentOs } from "@rivet-dev/agentos";
 import opencode from "@agentos-software/opencode";
 import pi from "@agentos-software/pi";
 
@@ -23,7 +23,7 @@ const agent = "pi";
 const env: Record<string, string> = {};
 if (ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = ANTHROPIC_API_KEY;
 
-await vm.openSession({ agent, env });
+await vm.sessions.open({ agent, env });
 
 // Listen for session events (streamed text, tool use, etc.)
 vm.onSessionEvent((event) => {
@@ -31,7 +31,7 @@ vm.onSessionEvent((event) => {
 });
 
 // Send a prompt and wait for the response
-const result = await vm.prompt({
+const result = await vm.sessions.prompt({
 	content: [
 		{ type: "text", text: "What is 2 + 2? Reply with just the number." },
 	],
@@ -39,5 +39,5 @@ const result = await vm.prompt({
 console.log("Response:", result.message?.content ?? []);
 
 // Close the session
-await vm.deleteSession();
+await vm.sessions.delete();
 await vm.dispose();

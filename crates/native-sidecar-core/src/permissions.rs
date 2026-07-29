@@ -298,6 +298,12 @@ pub fn permission_mode_to_kernel_decision(
 }
 
 pub fn permissions_from_policy(policy: vm_config::PermissionsPolicy) -> Permissions {
+    let filesystem_unrestricted = matches!(
+        policy.fs.as_ref(),
+        Some(vm_config::FsPermissionScope::Mode(
+            vm_config::PermissionMode::Allow
+        ))
+    );
     let fs_policy = Arc::new(policy.clone());
     let network_policy = Arc::new(policy.clone());
     let child_process_policy = Arc::new(policy.clone());
@@ -311,6 +317,7 @@ pub fn permissions_from_policy(policy: vm_config::PermissionsPolicy) -> Permissi
                 capability,
             )
         })),
+        filesystem_unrestricted,
         network: Some(Arc::new(move |request: &NetworkAccessRequest| {
             let capability = network_permission_capability(request.op);
             permission_mode_to_kernel_decision(
@@ -645,6 +652,37 @@ mod tests {
             })
             .allow
         );
+        assert!(!permissions.filesystem_unrestricted);
+    }
+
+    #[test]
+    fn only_unconditional_allow_marks_filesystem_unrestricted() {
+        let unrestricted = permissions_from_policy(vm_config::PermissionsPolicy {
+            fs: Some(vm_config::FsPermissionScope::Mode(
+                vm_config::PermissionMode::Allow,
+            )),
+            network: None,
+            child_process: None,
+            process: None,
+            env: None,
+            binding: None,
+        });
+        assert!(unrestricted.filesystem_unrestricted);
+
+        let rule_based = permissions_from_policy(vm_config::PermissionsPolicy {
+            fs: Some(vm_config::FsPermissionScope::Rules(
+                vm_config::FsPermissionRuleSet {
+                    default: Some(vm_config::PermissionMode::Allow),
+                    rules: Vec::new(),
+                },
+            )),
+            network: None,
+            child_process: None,
+            process: None,
+            env: None,
+            binding: None,
+        });
+        assert!(!rule_based.filesystem_unrestricted);
     }
 
     #[test]

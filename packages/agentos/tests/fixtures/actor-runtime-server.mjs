@@ -6,7 +6,7 @@ import {
 } from "@rivet-dev/agentos-test-harness/agent-os-conformance-fixture";
 import { createProjectedAgentPackage } from "@rivet-dev/agentos-test-harness/projected-agent-package";
 import { event } from "rivetkit";
-import { coreutils } from "@agentos-software/common";
+import coreutils from "@agentos-software/coreutils";
 
 const conformanceAgent = createProjectedAgentPackage({
 	name: CONFORMANCE_AGENT_NAME,

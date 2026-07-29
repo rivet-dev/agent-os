@@ -17,7 +17,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
@@ -30,8 +30,8 @@ jobs:
       - run: cargo build --release -p agentos-native-sidecar
       - run: cargo build --release -p agentos-native-baseline
       - run: cargo build --release --target wasm32-wasip1 -p agentos-native-baseline
-      - run: make -C toolchain commands
-      - run: node packages/runtime-core/scripts/copy-wasm-commands.mjs --require
+      - run: make -C toolchain pr-commands
+      - run: node packages/runtime-core/scripts/copy-wasm-commands.mjs --require-coreutils
       - run: pnpm --dir packages/runtime-core build
       - run: pnpm --dir packages/runtime-benchmarks bench:check
       - run: pnpm --dir packages/runtime-benchmarks bench:gate

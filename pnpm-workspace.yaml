@@ -1,39 +1,43 @@
 packages:
   - packages/agentos-sandbox
+  - packages/agentos-apps
   - packages/agentos
   - packages/agentos-toolchain
+  - packages/eve
+  - packages/flue
   - packages/browser
   - packages/build-tools
   - packages/core
   - packages/manifest
+  - packages/node-pty
   - packages/playground
   - packages/posix
-  - packages/python
   - packages/runtime-benchmarks
   - packages/runtime-browser
   - packages/runtime-core
   - packages/runtime-sidecar
   - packages/runtime-sidecar/npm/*
   - packages/vm-test-harness
-  - packages/secure-exec
-  - packages/secure-exec-example-ai-agent-type-check
   - packages/typescript
   - packages/shell
   - packages/sidecar-binary
   - software/*
   - test-harness
   - examples/*
+  - benchmarks/agentos-apps
+  - tests/e2e/agentos-apps
   # Nested example packages (e.g. examples/quickstart/hello-world) so every
   # embeddable example is a workspace member that `turbo check-types` covers.
   - examples/*/*
+  - experiments/gigacode
   - scripts/publish
   # LOCAL WORKAROUND (do not commit): `website` needs @rivet-dev/docs-theme
   # symlinked into website/vendor/theme, which isn't set up here and blocks
   # `pnpm install` workspace-wide. Excluded to build/run the demo locally.
-  # - website
-  # - website/vendor/theme
-  # - website/vendor/theme/vendor/components
-  # - website/vendor/theme/vendor/icons
+  - website
+  - website/vendor/theme
+  - website/vendor/theme/vendor/components
+  - website/vendor/theme/vendor/icons
 
 ignoredBuiltDependencies:
   - '@clerk/shared'
@@ -48,17 +52,16 @@ onlyBuiltDependencies:
   - cbor-extract
   - esbuild
   - lefthook
+  - opencode-ai
   - sharp
 
 # rivetkit runtime + react bindings. Same-version lockstep with the sidecar;
 # pinned once here and referenced everywhere via `catalog:rivetkit`.
 catalogs:
   rivetkit:
-    rivetkit: 0.0.0-sqlite-uds.4e59a38
-    '@rivetkit/react': 0.0.0-sqlite-uds.4e59a38
+    rivetkit: 2.3.9
+    '@rivetkit/react': 2.3.9
 
 overrides:
-  '@rivetkit/rivetkit-wasm': 2.3.2
-  '@mariozechner/pi-tui': 0.60.0
-  '@mariozechner/pi-agent-core': 0.60.0
+  '@rivetkit/rivetkit-wasm': 2.3.9
   web-streams-polyfill: 3.3.3

@@ -7,7 +7,7 @@ use vfs::engine::{
     MetadataStore, SnapshotId, VfsError, VfsResult,
 };
 
-pub const VFS_METADATA_EXT_NAMESPACE: &str = "secure-exec.vfs.metadata.v1";
+pub const VFS_METADATA_EXT_NAMESPACE: &str = "agentos.vfs.metadata.v1";
 const CALLBACK_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub trait CallbackMetadataClient: Clone + Send + Sync + 'static {

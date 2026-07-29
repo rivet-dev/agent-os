@@ -1,6 +1,6 @@
 // S3 File System: mount an S3 bucket and use it like a local filesystem.
 //
-// S3 mounting is built into @rivet-dev/agentos-core: pass a `chunked_s3`
+// S3 mounting is built into @rivet-dev/agentos: pass a `chunked_s3`
 // mount descriptor to AgentOs.create({ mounts }) and the VM treats the bucket
 // as a normal directory, so writeFile/readFile/readdir operate transparently
 // against S3.
@@ -16,8 +16,8 @@
 //   S3 harness so `pnpm --dir examples/quickstart/s3-filesystem start`
 //   still exercises the real quickstart flow against signed S3 requests.
 
-import { AgentOs } from "@rivet-dev/agentos-core";
-import type { MountConfigJsonObject } from "@rivet-dev/agentos-core";
+import { AgentOs } from "@rivet-dev/agentos";
+import type { MountConfigJsonObject } from "@rivet-dev/agentos";
 import type { MockS3ServerHandle } from "../../../packages/core/src/test/mock-s3.js";
 import { startMockS3Server } from "../../../packages/core/src/test/mock-s3.js";
 
@@ -72,16 +72,16 @@ const vm = await AgentOs.create({
 
 try {
 	// Write a file into the S3-backed mount
-	await vm.writeFile("/mnt/data/notes.txt", "Hello from agentOS!");
+	await vm.filesystem.writeFile("/mnt/data/notes.txt", "Hello from agentOS!");
 	console.log("Wrote /mnt/data/notes.txt");
 	console.log("S3 prefix:", prefix);
 
 	// Read it back
-	const content = await vm.readFile("/mnt/data/notes.txt");
+	const content = await vm.filesystem.readFile("/mnt/data/notes.txt");
 	console.log("Read:", new TextDecoder().decode(content));
 
 	// List the directory
-	const files = await vm.readdir("/mnt/data");
+	const files = await vm.filesystem.readdir("/mnt/data");
 	console.log(
 		"Files:",
 		files.filter((f) => f !== "." && f !== ".."),

@@ -13,11 +13,11 @@ pub(in crate::execution) fn service_javascript_sqlite_sync_rpc(
         "sqlite.close" => {
             let database_id =
                 javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.close database id")?;
-            close_sqlite_database(kernel, process, database_id)?;
+            close_sqlite_database(kernel, process, database_id, false)?;
             Ok(Value::Null)
         }
         "sqlite.exec" => sqlite_exec_database(kernel, process, request),
-        "sqlite.query" => sqlite_query_database(process, request),
+        "sqlite.query" => sqlite_query_database(kernel, process, request),
         "sqlite.prepare" => sqlite_prepare_statement(process, request),
         "sqlite.location" => {
             let database_id =
@@ -34,13 +34,13 @@ pub(in crate::execution) fn service_javascript_sqlite_sync_rpc(
                 javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.checkpoint database id")?;
             let kernel_pid = process.kernel_pid;
             let database = sqlite_database_mut(process, database_id)?;
-            sqlite_sync_database(kernel, kernel_pid, database)?;
+            sqlite_sync_database(kernel, kernel_pid, database, false)?;
             Ok(Value::Null)
         }
         "sqlite.statement.run" => sqlite_run_statement(kernel, process, request),
-        "sqlite.statement.get" => sqlite_get_statement(process, request),
+        "sqlite.statement.get" => sqlite_get_statement(kernel, process, request),
         "sqlite.statement.all" | "sqlite.statement.iterate" => {
-            sqlite_all_statement(process, request)
+            sqlite_all_statement(kernel, process, request)
         }
         "sqlite.statement.columns" => sqlite_statement_columns(process, request),
         "sqlite.statement.setReturnArrays" => {
@@ -137,18 +137,22 @@ fn sqlite_open_database(
     process.next_sqlite_database_id += 1;
     let database_id = process.next_sqlite_database_id;
 
-    let host_path = if vm_path.is_some() {
-        Some(
-            std::env::temp_dir()
-                .join(format!(
-                    "agentos-native-sidecar-sqlite-{}-{database_id}",
-                    process.kernel_pid
-                ))
-                .join("database.sqlite"),
-        )
-    } else {
-        None
-    };
+    let host_path = vm_path.map(|vm_path| {
+        let digest = Sha256::digest(vm_path.as_bytes());
+        let path_key = digest
+            .iter()
+            .take(16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        std::env::temp_dir()
+            .join(format!(
+                "agentos-native-sidecar-sqlite-{}",
+                process.sqlite_host_namespace
+            ))
+            .join(path_key)
+            .join("database.sqlite")
+    });
+    let host_database_exists = host_path.as_ref().is_some_and(|path| path.exists());
 
     if let Some(host_path) = host_path.as_ref() {
         if let Some(parent) = host_path.parent() {
@@ -161,24 +165,26 @@ fn sqlite_open_database(
         }
     }
 
-    if let (Some(vm_path), Some(host_path)) = (vm_path, host_path.as_ref()) {
-        if kernel
-            .exists_for_process(EXECUTION_DRIVER_NAME, process.kernel_pid, vm_path)
-            .map_err(kernel_error)?
-        {
-            let contents = kernel
-                .read_file_for_process(EXECUTION_DRIVER_NAME, process.kernel_pid, vm_path)
-                .map_err(kernel_error)?;
-            fs::write(host_path, contents).map_err(|error| {
-                SidecarError::Io(format!(
-                    "failed to materialize sqlite database {}: {error}",
-                    host_path.display()
-                ))
-            })?;
-        } else if read_only && !create {
-            return Err(SidecarError::InvalidState(format!(
-                "sqlite database does not exist: {vm_path}"
-            )));
+    if !host_database_exists {
+        if let (Some(vm_path), Some(host_path)) = (vm_path, host_path.as_ref()) {
+            if kernel
+                .exists_for_process(EXECUTION_DRIVER_NAME, process.kernel_pid, vm_path)
+                .map_err(kernel_error)?
+            {
+                let contents = kernel
+                    .read_file_for_process(EXECUTION_DRIVER_NAME, process.kernel_pid, vm_path)
+                    .map_err(kernel_error)?;
+                fs::write(host_path, contents).map_err(|error| {
+                    SidecarError::Io(format!(
+                        "failed to materialize sqlite database {}: {error}",
+                        host_path.display()
+                    ))
+                })?;
+            } else if read_only && !create {
+                return Err(SidecarError::InvalidState(format!(
+                    "sqlite database does not exist: {vm_path}"
+                )));
+            }
         }
     }
 
@@ -221,18 +227,16 @@ fn sqlite_open_database(
             read_only,
         },
     );
-
     Ok(json!(database_id))
 }
 
 fn sqlite_exec_database(
-    kernel: &mut SidecarKernel,
+    _kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
 ) -> Result<Value, SidecarError> {
     let database_id = javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.exec database id")?;
     let sql = javascript_sync_rpc_arg_str(&request.args, 1, "sqlite.exec sql")?;
-    let kernel_pid = process.kernel_pid;
     let database = sqlite_database_mut(process, database_id)?;
     let before = database.connection.total_changes();
     database
@@ -240,7 +244,6 @@ fn sqlite_exec_database(
         .execute_batch(sql)
         .map_err(sqlite_error)?;
     mark_sqlite_mutation(database, sql);
-    sqlite_sync_database(kernel, kernel_pid, database)?;
     Ok(json!(database
         .connection
         .total_changes()
@@ -248,6 +251,7 @@ fn sqlite_exec_database(
 }
 
 fn sqlite_query_database(
+    _kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
 ) -> Result<Value, SidecarError> {
@@ -258,7 +262,7 @@ fn sqlite_query_database(
     let return_arrays = sqlite_option_bool(options, "returnArrays").unwrap_or(false);
     let read_bigints = sqlite_option_bool(options, "readBigInts").unwrap_or(false);
     let database = sqlite_database_mut(process, database_id)?;
-    sqlite_query_rows(
+    let rows = sqlite_query_rows(
         &mut database.connection,
         sql,
         params,
@@ -266,7 +270,9 @@ fn sqlite_query_database(
         read_bigints,
         true,
         false,
-    )
+    )?;
+    mark_sqlite_mutation(database, sql);
+    Ok(rows)
 }
 
 fn sqlite_prepare_statement(
@@ -294,7 +300,7 @@ fn sqlite_prepare_statement(
 }
 
 fn sqlite_run_statement(
-    kernel: &mut SidecarKernel,
+    _kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
 ) -> Result<Value, SidecarError> {
@@ -302,7 +308,6 @@ fn sqlite_run_statement(
         javascript_sync_rpc_arg_u64(&request.args, 0, "sqlite.statement.run statement id")?;
     let params = request.args.get(1);
     let statement_state = sqlite_statement(process, statement_id)?.clone();
-    let kernel_pid = process.kernel_pid;
     let database = sqlite_database_mut(process, statement_state.database_id)?;
     let before = database.connection.total_changes();
     {
@@ -321,7 +326,6 @@ fn sqlite_run_statement(
     let changes = database.connection.total_changes().saturating_sub(before);
     let last_insert_rowid = database.connection.last_insert_rowid();
     mark_sqlite_mutation(database, &statement_state.sql);
-    sqlite_sync_database(kernel, kernel_pid, database)?;
     let result = json!({
         "changes": changes,
         "lastInsertRowid": encode_sqlite_integer(last_insert_rowid, true),
@@ -330,6 +334,7 @@ fn sqlite_run_statement(
 }
 
 fn sqlite_get_statement(
+    _kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
 ) -> Result<Value, SidecarError> {
@@ -347,6 +352,7 @@ fn sqlite_get_statement(
         statement_state.allow_bare_named_parameters,
         statement_state.allow_unknown_named_parameters,
     )?;
+    mark_sqlite_mutation(database, &statement_state.sql);
     Ok(rows
         .as_array()
         .and_then(|rows| rows.first().cloned())
@@ -354,6 +360,7 @@ fn sqlite_get_statement(
 }
 
 fn sqlite_all_statement(
+    _kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
     request: &JavascriptSyncRpcRequest,
 ) -> Result<Value, SidecarError> {
@@ -362,7 +369,7 @@ fn sqlite_all_statement(
     let params = request.args.get(1);
     let statement_state = sqlite_statement(process, statement_id)?.clone();
     let database = sqlite_database_mut(process, statement_state.database_id)?;
-    sqlite_query_rows(
+    let rows = sqlite_query_rows(
         &mut database.connection,
         &statement_state.sql,
         params,
@@ -370,7 +377,9 @@ fn sqlite_all_statement(
         statement_state.read_bigints,
         statement_state.allow_bare_named_parameters,
         statement_state.allow_unknown_named_parameters,
-    )
+    )?;
+    mark_sqlite_mutation(database, &statement_state.sql);
+    Ok(rows)
 }
 
 fn sqlite_statement_columns(
@@ -625,6 +634,7 @@ pub(in crate::execution) fn close_sqlite_database(
     kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
     database_id: u64,
+    process_exited: bool,
 ) -> Result<(), SidecarError> {
     let mut database = process
         .sqlite_databases
@@ -635,10 +645,53 @@ pub(in crate::execution) fn close_sqlite_database(
     process
         .sqlite_statements
         .retain(|_, statement| statement.database_id != database_id);
-    sqlite_sync_database(kernel, process.kernel_pid, &mut database)?;
     let host_path = database.host_path.clone();
+    let writable_sibling_database_id = host_path.as_ref().and_then(|closed_path| {
+        process
+            .sqlite_databases
+            .iter()
+            .find(|(_, database)| {
+                database.host_path.as_ref() == Some(closed_path) && !database.read_only
+            })
+            .map(|(database_id, _)| *database_id)
+    });
+    let host_path_still_open = host_path.as_ref().is_some_and(|closed_path| {
+        process
+            .sqlite_databases
+            .values()
+            .any(|database| database.host_path.as_ref() == Some(closed_path))
+    });
+    let sync_result = if database.dirty && database.transaction_depth == 0 {
+        if let Some(sibling_database_id) = writable_sibling_database_id {
+            process
+                .sqlite_databases
+                .get_mut(&sibling_database_id)
+                .expect("writable sqlite sibling")
+                .dirty = true;
+            Ok(())
+        } else {
+            // A read-only sibling cannot own a later snapshot. Persist committed
+            // changes from this writable handle before dropping it, even though
+            // the shared host database remains open for readers.
+            sqlite_sync_database(kernel, process.kernel_pid, &mut database, process_exited)
+        }
+    } else if !host_path_still_open {
+        sqlite_sync_database(kernel, process.kernel_pid, &mut database, process_exited)
+    } else {
+        Ok(())
+    };
+    if let Err(error) = sync_result {
+        // A DatabaseSync.close() can race process exit: the process identity is
+        // no longer valid for the live per-process VFS write even though its
+        // bridge RPC is still draining. Retain the handle so process teardown
+        // can retry copy-back with its already-authorized VM teardown path.
+        process.sqlite_databases.insert(database_id, database);
+        return Err(error);
+    }
     drop(database);
-    cleanup_sqlite_host_artifacts(host_path.as_deref())?;
+    if !host_path_still_open {
+        cleanup_sqlite_host_artifacts(host_path.as_deref())?;
+    }
     Ok(())
 }
 
@@ -658,6 +711,7 @@ fn sqlite_sync_database(
     kernel: &mut SidecarKernel,
     kernel_pid: u32,
     database: &mut ActiveSqliteDatabase,
+    process_exited: bool,
 ) -> Result<(), SidecarError> {
     if !database.dirty
         || database.transaction_depth > 0
@@ -668,33 +722,62 @@ fn sqlite_sync_database(
         return Ok(());
     }
 
-    let _ = database
-        .connection
-        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
     let host_path = database.host_path.as_ref().expect("sqlite host path");
     if !host_path.exists() {
         return Ok(());
     }
-    ensure_vm_parent_dir(
-        kernel,
-        kernel_pid,
-        database.vm_path.as_deref().expect("sqlite vm path"),
-    )?;
-    let contents = fs::read(host_path).map_err(|error| {
+    // The main file alone is not a consistent snapshot when the guest selected
+    // WAL mode. A checkpoint can remain busy while OpenCode keeps prepared read
+    // statements alive, so persisting only the main file silently loses schema
+    // and session rows from the WAL. SQLite's online backup API includes committed
+    // WAL pages without invalidating live statements.
+    let snapshot_path = PathBuf::from(format!("{}.snapshot", host_path.display()));
+    if snapshot_path.exists() {
+        fs::remove_file(&snapshot_path).map_err(|error| {
+            SidecarError::Io(format!(
+                "failed to remove stale sqlite snapshot {}: {error}",
+                snapshot_path.display()
+            ))
+        })?;
+    }
+    let mut snapshot = SqliteConnection::open(&snapshot_path).map_err(sqlite_error)?;
+    {
+        let backup =
+            SqliteBackup::new(&database.connection, &mut snapshot).map_err(sqlite_error)?;
+        backup
+            .run_to_completion(256, Duration::from_millis(1), None)
+            .map_err(sqlite_error)?;
+    }
+    drop(snapshot);
+    let vm_path = database.vm_path.as_deref().expect("sqlite vm path");
+    if process_exited {
+        ensure_vm_parent_dir_unchecked(kernel, vm_path)?;
+    } else {
+        ensure_vm_parent_dir(kernel, kernel_pid, vm_path)?;
+    }
+    let contents = fs::read(&snapshot_path).map_err(|error| {
         SidecarError::Io(format!(
-            "failed to read sqlite temp database {}: {error}",
-            host_path.display()
+            "failed to read sqlite snapshot {}: {error}",
+            snapshot_path.display()
         ))
     })?;
-    kernel
-        .write_file_for_process(
-            EXECUTION_DRIVER_NAME,
-            kernel_pid,
-            database.vm_path.as_deref().expect("sqlite vm path"),
-            contents,
-            None,
-        )
-        .map_err(kernel_error)?;
+    if process_exited {
+        // The process already opened this database for write while its DAC and
+        // mount permissions were live. Exit cleanup runs after that process is
+        // no longer a valid kernel authorization subject, so copy the completed
+        // online-backup snapshot through the VM root before the VM snapshot.
+        kernel.write_file(vm_path, contents).map_err(kernel_error)?;
+    } else {
+        kernel
+            .write_file_for_process(EXECUTION_DRIVER_NAME, kernel_pid, vm_path, contents, None)
+            .map_err(kernel_error)?;
+    }
+    fs::remove_file(&snapshot_path).map_err(|error| {
+        SidecarError::Io(format!(
+            "failed to remove sqlite snapshot {}: {error}",
+            snapshot_path.display()
+        ))
+    })?;
     database.dirty = false;
     Ok(())
 }
@@ -704,7 +787,7 @@ fn cleanup_sqlite_host_artifacts(host_path: Option<&Path>) -> Result<(), Sidecar
         return Ok(());
     };
     let parent = host_path.parent().map(PathBuf::from);
-    for suffix in ["", "-wal", "-shm"] {
+    for suffix in ["", "-wal", "-shm", ".snapshot"] {
         let path = PathBuf::from(format!("{}{}", host_path.display(), suffix));
         if path.exists() {
             fs::remove_file(&path).map_err(|error| {
@@ -741,6 +824,25 @@ fn ensure_vm_parent_dir(
             kernel
                 .mkdir_for_process(EXECUTION_DRIVER_NAME, kernel_pid, &current, false, None)
                 .map_err(kernel_error)?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_vm_parent_dir_unchecked(
+    kernel: &mut SidecarKernel,
+    path: &str,
+) -> Result<(), SidecarError> {
+    let parent = dirname(path);
+    if parent == "/" || parent == "." {
+        return Ok(());
+    }
+    let mut current = String::new();
+    for segment in parent.split('/').filter(|segment| !segment.is_empty()) {
+        current.push('/');
+        current.push_str(segment);
+        if !kernel.exists(&current).map_err(kernel_error)? {
+            kernel.create_dir(&current).map_err(kernel_error)?;
         }
     }
     Ok(())

@@ -466,15 +466,11 @@ fn configure_verification_mounts(
         session_id,
         vm_id,
         vec![
-            host_dir_mount(
-                "/__secure_exec/commands/0",
-                &command_root("coreutils"),
-                true,
-            ),
-            host_dir_mount("/__secure_exec/commands/1", &c_probe_root(), true),
-            host_dir_mount("/__secure_exec/commands/2", &command_root("attr"), true),
-            host_dir_mount("/__secure_exec/commands/3", &command_root("acl"), true),
-            host_dir_mount("/__secure_exec/commands/4", &command_root("sed"), true),
+            host_dir_mount("/__agentos/commands/0", &command_root("coreutils"), true),
+            host_dir_mount("/__agentos/commands/1", &c_probe_root(), true),
+            host_dir_mount("/__agentos/commands/2", &command_root("attr"), true),
+            host_dir_mount("/__agentos/commands/3", &command_root("acl"), true),
+            host_dir_mount("/__agentos/commands/4", &command_root("sed"), true),
             xfstests_backend_mount(
                 backend,
                 "/mnt/test",
@@ -3726,7 +3722,7 @@ fn xfstests_wasi_fifo_open_routes_to_kernel_pipe() {
     let vm_id = create_xfstests_vm_wire(&mut sidecar, 3, &connection_id, &session_id, &cwd);
     let mut mounts = xfstests_mounts(&source, root.path(), XFSTESTS_BACKEND, None);
     mounts.push(host_dir_mount(
-        &format!("/__secure_exec/commands/{}", COMMAND_PACKAGES.len()),
+        &format!("/__agentos/commands/{}", COMMAND_PACKAGES.len()),
         &c_probe_root(),
         true,
     ));
@@ -3855,7 +3851,7 @@ fn xfstests_mknod_creates_a_working_null_device() {
     let vm_id = create_xfstests_vm_wire(&mut sidecar, 3, &connection_id, &session_id, &cwd);
     let mut mounts = xfstests_mounts(&source, root.path(), XFSTESTS_BACKEND, None);
     mounts.push(host_dir_mount(
-        &format!("/__secure_exec/commands/{}", COMMAND_PACKAGES.len()),
+        &format!("/__agentos/commands/{}", COMMAND_PACKAGES.len()),
         &c_probe_root(),
         true,
     ));
@@ -4500,7 +4496,7 @@ fn xfstests_mounts(
         .enumerate()
         .map(|(index, package)| {
             host_dir_mount(
-                &format!("/__secure_exec/commands/{index}"),
+                &format!("/__agentos/commands/{index}"),
                 &command_root(package),
                 true,
             )
@@ -4887,10 +4883,7 @@ printf 'parent-commands-ok\\n'"
         &connection_id,
         &session_id,
         &vm_id,
-        filesystem_request(
-            GuestFilesystemOperation::Exists,
-            "/__secure_exec/commands/2/rm",
-        ),
+        filesystem_request(GuestFilesystemOperation::Exists, "/__agentos/commands/2/rm"),
     )
     .exists;
     let (fresh_stdout, fresh_stderr, fresh_exit_code) = execute_command(
@@ -5048,7 +5041,7 @@ fn xfstests_wasi_waitpid_options_and_status() {
     let vm_id = create_xfstests_vm_wire(&mut sidecar, 3, &connection_id, &session_id, &cwd);
     let mut mounts = xfstests_mounts(&source, root.path(), XFSTESTS_BACKEND, None);
     mounts.push(host_dir_mount(
-        &format!("/__secure_exec/commands/{}", COMMAND_PACKAGES.len()),
+        &format!("/__agentos/commands/{}", COMMAND_PACKAGES.len()),
         &c_probe_root(),
         true,
     ));
@@ -5107,7 +5100,7 @@ fn xfstests_wasi_self_stop_and_parent_continue() {
     let vm_id = create_xfstests_vm_wire(&mut sidecar, 3, &connection_id, &session_id, &cwd);
     let mut mounts = xfstests_mounts(&source, root.path(), XFSTESTS_BACKEND, None);
     mounts.push(host_dir_mount(
-        &format!("/__secure_exec/commands/{}", COMMAND_PACKAGES.len()),
+        &format!("/__agentos/commands/{}", COMMAND_PACKAGES.len()),
         &c_probe_root(),
         true,
     ));
@@ -5422,7 +5415,7 @@ fn xfstests_truncfile_scaled_throughput_regression() {
     let vm_id = create_xfstests_vm_wire(&mut sidecar, 3, &connection_id, &session_id, &cwd);
     let mut mounts = xfstests_mounts(&source, root.path(), &backend, s3_endpoint);
     mounts.push(host_dir_mount(
-        &format!("/__secure_exec/commands/{}", COMMAND_PACKAGES.len()),
+        &format!("/__agentos/commands/{}", COMMAND_PACKAGES.len()),
         &source.join("src"),
         true,
     ));
@@ -5507,7 +5500,7 @@ fn xfstests_wasi_helper_ports() {
     let vm_id = create_xfstests_vm_wire(&mut sidecar, 3, &connection_id, &session_id, &cwd);
     let mut mounts = xfstests_mounts(&source, root.path(), XFSTESTS_BACKEND, None);
     mounts.push(host_dir_mount(
-        &format!("/__secure_exec/commands/{}", COMMAND_PACKAGES.len()),
+        &format!("/__agentos/commands/{}", COMMAND_PACKAGES.len()),
         &c_probe_root(),
         true,
     ));

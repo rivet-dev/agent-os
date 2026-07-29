@@ -127,7 +127,7 @@ fn live_bare_codec_matches_generated_request_bytes() {
         11,
         live_protocol::OwnershipScope::connection("conn-1"),
         live_protocol::RequestPayload::Ext(live_protocol::ExtEnvelope {
-            namespace: "dev.rivet.secure-exec.test".to_string(),
+            namespace: "dev.rivet.agentos.test".to_string(),
             payload: b"extension-bytes".to_vec(),
         }),
     ));
@@ -305,7 +305,7 @@ fn generated_ext_frame() -> ProtocolFrame {
             connection_id: "conn-1".to_string(),
         }),
         payload: RequestPayload::ExtEnvelope(ExtEnvelope {
-            namespace: "dev.rivet.secure-exec.test".to_string(),
+            namespace: "dev.rivet.agentos.test".to_string(),
             payload: b"extension-bytes".to_vec(),
         }),
     })

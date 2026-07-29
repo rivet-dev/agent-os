@@ -10,7 +10,7 @@ Use `exec` to run a command and wait for completion. Returns stdout, stderr, and
 
 ## Spawn a long-running process
 
-Use `spawn` for processes that run in the background. Call `connect()` and subscribe directly with `onProcessOutput(pid, handler)` and `onProcessExit(pid, handler)`.
+Use `spawn` for processes that run in the background. Call `connect()` and subscribe to native `processOutput` and `processExit` events, filtering their `pid` in application code.
 
 ## Write to stdin
 
@@ -20,4 +20,4 @@ Send input to a running process.
 
 ## Interactive shells
 
-Open an interactive shell with PTY support. The same wrapper exposes `onShellData`, `onShellStderr`, and `onShellExit`, each filtered by shell ID.
+Open an interactive shell with PTY support. Subscribe to native `shellData`, `shellStderr`, and `shellExit` events, filtering their `shellId` in application code.

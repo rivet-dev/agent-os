@@ -24,6 +24,9 @@ mod filesystem;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/json_rpc.rs"]
 mod json_rpc;
+#[allow(dead_code)]
+#[path = "../src/language_execution.rs"]
+mod language_execution;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/limits.rs"]
 mod limits;
@@ -2209,7 +2212,7 @@ ykAheWCsAteSEWVc0w==\n\
                     OwnershipScope::vm(connection_id, session_id, vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
                         mounts: vec![MountDescriptor {
-                            guest_path: String::from("/__secure_exec/commands/0"),
+                            guest_path: String::from("/__agentos/commands/0"),
                             guest_source: String::from("agentos"),
                             guest_fstype: String::from("agentos"),
                             read_only: true,
@@ -3338,7 +3341,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     ),
                     fixture_dns_record(
                         "bundle.example.test.",
-                        RData::TXT(TXT::new(vec![String::from("secure-exec")])),
+                        RData::TXT(TXT::new(vec![String::from("agentos")])),
                     ),
                 ],
                 ("bundle.example.test.", RecordType::ANY) => vec![
@@ -9556,7 +9559,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                 .expect("clock should be monotonic")
                 .as_nanos();
             let metadata_path =
-                std::env::temp_dir().join(format!("secure-exec-service-s3-{unique}.sqlite"));
+                std::env::temp_dir().join(format!("agentos-service-s3-{unique}.sqlite"));
 
             let mut sidecar = create_test_sidecar();
             let (connection_id, session_id) =
@@ -11304,7 +11307,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
                         mounts: vec![MountDescriptor {
-                            guest_path: String::from("/__secure_exec/commands/0"),
+                            guest_path: String::from("/__agentos/commands/0"),
                             guest_source: String::from("agentos"),
                             guest_fstype: String::from("agentos"),
                             read_only: true,
@@ -11406,7 +11409,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
                         mounts: vec![MountDescriptor {
-                            guest_path: String::from("/__secure_exec/commands/0"),
+                            guest_path: String::from("/__agentos/commands/0"),
                             guest_source: String::from("agentos"),
                             guest_fstype: String::from("agentos"),
                             read_only: true,
@@ -11804,7 +11807,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     OwnershipScope::vm(&connection_id, &session_id, &vm_id),
                     RequestPayload::ConfigureVm(ConfigureVmRequest {
                         mounts: vec![MountDescriptor {
-                            guest_path: String::from("/__secure_exec/commands/0"),
+                            guest_path: String::from("/__agentos/commands/0"),
                             guest_source: String::from("agentos"),
                             guest_fstype: String::from("agentos"),
                             read_only: true,
@@ -11841,11 +11844,11 @@ console.log(JSON.stringify({ status: "ok", summary }));
             assert!(
                 path_entries
                     .first()
-                    .is_some_and(|entry| *entry == "/__secure_exec/commands/0"),
+                    .is_some_and(|entry| *entry == "/__agentos/commands/0"),
                 "PATH should prioritize mounted command root: {path}"
             );
             assert!(
-                path_entries.contains(&"/__secure_exec/commands/0"),
+                path_entries.contains(&"/__agentos/commands/0"),
                 "PATH should include mounted command root: {path}"
             );
 
@@ -12787,6 +12790,40 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
             fs::set_permissions(&host_path, permissions).expect("chmod host fixture");
         }
 
+        fn write_posix_spawnp_symlink(
+            sidecar: &mut NativeSidecar<RecordingBridge>,
+            vm_id: &str,
+            target: &str,
+            link_path: &str,
+        ) {
+            let (host_path, host_target) = {
+                let vm = sidecar.vms.get_mut(vm_id).expect("created vm");
+                let parent = Path::new(link_path)
+                    .parent()
+                    .and_then(Path::to_str)
+                    .expect("symlink fixture parent path");
+                if parent != "/" {
+                    vm.kernel
+                        .mkdir(parent, true)
+                        .expect("create symlink fixture guest parent");
+                }
+                vm.kernel
+                    .symlink(target, link_path)
+                    .expect("create guest symlink fixture");
+                let host_target = if target.starts_with('/') {
+                    vm.cwd.join(target.trim_start_matches('/'))
+                } else {
+                    PathBuf::from(target)
+                };
+                (vm.cwd.join(link_path.trim_start_matches('/')), host_target)
+            };
+
+            fs::create_dir_all(host_path.parent().expect("symlink fixture host parent"))
+                .expect("create symlink fixture host parent");
+            std::os::unix::fs::symlink(host_target, host_path)
+                .expect("create host symlink fixture");
+        }
+
         fn posix_spawnp_request(
             command: &str,
             search_path: &str,
@@ -12913,10 +12950,23 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                     b"#!/interpreter.wasm --inner\n".as_slice(),
                 ),
                 ("/scripts/nested", b"#!/scripts/inner --outer\n".as_slice()),
+                ("/scripts/env", b"#!/usr/bin/env node\n".as_slice()),
+                ("/scripts/env-target", b"#!/usr/bin/env node\n".as_slice()),
+                (
+                    "/scripts/env-s",
+                    b"#!/usr/bin/env -S node --flag\n".as_slice(),
+                ),
                 ("/scripts/missing", b"#!/missing-interpreter\n".as_slice()),
             ] {
                 write_posix_spawnp_fixture(&mut sidecar, &vm_id, path, contents, 0o755);
             }
+            write_posix_spawnp_symlink(&mut sidecar, &vm_id, "env-target", "/scripts/env-link");
+            write_posix_spawnp_symlink(
+                &mut sidecar,
+                &vm_id,
+                "/interpreter.wasm",
+                "/opt/agentos/bin/node",
+            );
 
             sidecar
                 .vms
@@ -12927,6 +12977,12 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                     String::from("registered-only"),
                     String::from("/registered-only"),
                 );
+            sidecar
+                .vms
+                .get_mut(&vm_id)
+                .expect("created vm")
+                .command_guest_paths
+                .insert(String::from("node"), String::from("/interpreter.wasm"));
 
             for nested in [false, true] {
                 let scope = if nested { "nested" } else { "top-level" };
@@ -13039,6 +13095,56 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                         "/scripts/nested",
                         "tail"
                     ])
+                );
+
+                let mut env_request = posix_spawnp_request("env", "/scripts", &["tail"]);
+                env_request
+                    .options
+                    .env
+                    .insert(String::from("PATH"), String::from("/opt/agentos/bin"));
+                let env = spawn_posix_spawnp_fixture(&mut sidecar, &vm_id, nested, env_request)
+                    .unwrap_or_else(|error| panic!("{scope} env shebang failed: {error}"));
+                assert_eq!(env["args"], json!(["node", "/scripts/env", "tail"]));
+
+                let mut env_link_request = posix_spawnp_request("env-link", "/scripts", &["tail"]);
+                env_link_request
+                    .options
+                    .env
+                    .insert(String::from("PATH"), String::from("/opt/agentos/bin"));
+                let env_link =
+                    spawn_posix_spawnp_fixture(&mut sidecar, &vm_id, nested, env_link_request)
+                        .unwrap_or_else(|error| {
+                            panic!("{scope} symlinked env shebang failed: {error}")
+                        });
+                assert_eq!(
+                    env_link["args"],
+                    json!(["node", "/scripts/env-link", "tail"])
+                );
+
+                let mut env_split_request = posix_spawnp_request("env-s", "/scripts", &["tail"]);
+                env_split_request
+                    .options
+                    .env
+                    .insert(String::from("PATH"), String::from("/opt/agentos/bin"));
+                let env_split =
+                    spawn_posix_spawnp_fixture(&mut sidecar, &vm_id, nested, env_split_request)
+                        .unwrap_or_else(|error| panic!("{scope} env -S shebang failed: {error}"));
+                assert_eq!(
+                    env_split["args"],
+                    json!(["node", "--flag", "/scripts/env-s", "tail"])
+                );
+
+                let mut excluded_env_request = posix_spawnp_request("env", "/scripts", &[]);
+                excluded_env_request
+                    .options
+                    .env
+                    .insert(String::from("PATH"), String::from("/nowhere"));
+                let error =
+                    spawn_posix_spawnp_fixture(&mut sidecar, &vm_id, nested, excluded_env_request)
+                        .expect_err("env shebang must honor its explicit PATH");
+                assert!(
+                    error.to_string().contains("ENOENT"),
+                    "{scope} excluded env interpreter returned {error}"
                 );
 
                 let error = spawn_posix_spawnp_fixture(
@@ -13512,7 +13618,7 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                 &vm_id,
                 "proc-js-binding-rpc",
                 crate::protocol::JavascriptChildProcessSpawnRequest {
-                    command: String::from("/__secure_exec/commands/0/agentos-math"),
+                    command: String::from("/__agentos/commands/0/agentos-math"),
                     args: vec![
                         String::from("add"),
                         String::from("--a"),
@@ -13566,7 +13672,7 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                     &vm.guest_cwd,
                     &vm.host_cwd,
                     &crate::protocol::JavascriptChildProcessSpawnRequest {
-                        command: String::from("/__secure_exec/commands/0/agentos-math"),
+                        command: String::from("/__agentos/commands/0/agentos-math"),
                         args: vec![
                             String::from("add"),
                             String::from("--a"),
@@ -13697,7 +13803,7 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                 ResponsePayload::Rejected(rejected) => {
                     assert_eq!(rejected.code, "invalid_state");
                     assert!(
-                        rejected.message.contains("registered bindings"),
+                        rejected.message.contains("registered binding collections"),
                         "unexpected rejection: {rejected:?}"
                     );
                 }
@@ -15533,6 +15639,7 @@ console.log(
             }
         }
 
+        #[test]
         fn javascript_mapped_tmp_open_wx_uses_exclusive_create_once() {
             assert_node_available();
 
@@ -15562,6 +15669,8 @@ try {
 
 const fd = fs.openSync(target, "wx", 0o600);
 fs.writeSync(fd, "lock");
+fs.futimesSync(fd, new Date("2024-01-02T03:04:05.000Z"), new Date("2024-01-02T03:04:05.000Z"));
+const mtimeMs = fs.fstatSync(fd).mtimeMs;
 fs.closeSync(fd);
 
 let secondOpenCode = "";
@@ -15578,6 +15687,7 @@ console.log(
     text: fs.readFileSync(target, "utf8"),
     secondOpenCode,
     exists: fs.existsSync(target),
+    mtimeMs,
   }),
 );
 "#,
@@ -15621,6 +15731,10 @@ console.log(
                 "stdout: {stdout}"
             );
             assert!(stdout.contains("\"exists\":true"), "stdout: {stdout}");
+            assert!(
+                stdout.contains("\"mtimeMs\":1704164645000"),
+                "stdout: {stdout}"
+            );
             assert_eq!(
                 fs::read_to_string(mapped_tmp.join("exclusive-mapped.lock"))
                     .expect("read mapped host lock file"),
@@ -17505,7 +17619,7 @@ await new Promise(() => {});
                         json!("aes-256-gcm"),
                         json!(base64::engine::general_purpose::STANDARD.encode([7_u8; 32])),
                         json!(base64::engine::general_purpose::STANDARD.encode([3_u8; 12])),
-                        json!(base64::engine::general_purpose::STANDARD.encode(b"secure-exec")),
+                        json!(base64::engine::general_purpose::STANDARD.encode(b"agentos")),
                         json!(r#"{"aad":"YWR2YW5jZWQ=","authTagLength":16}"#),
                     ],
                 },
@@ -17535,7 +17649,7 @@ await new Promise(() => {});
             .expect("decipheriv response");
             assert_eq!(
                 decode_base64(decipher_response.as_str().expect("decipher response")),
-                b"secure-exec"
+                b"agentos"
             );
 
             let mut streaming_process = create_crypto_test_process();
@@ -18191,6 +18305,8 @@ if (journalModeRows[0]?.journal_mode !== "wal") {
 }
 
 db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, payload BLOB NOT NULL, quantity INTEGER NOT NULL)");
+const peer = new DatabaseSync(dbPath);
+const observer = new DatabaseSync(dbPath, { readOnly: true });
 const insert = db.prepare("INSERT INTO items(id, payload, quantity) VALUES (:id, :payload, :quantity)");
 insert.setAllowBareNamedParameters(true);
 const insertResult = insert.run({
@@ -18203,6 +18319,11 @@ if (insertResult.changes !== 1) {
 }
 if (typeof insertResult.lastInsertRowid !== "bigint" || insertResult.lastInsertRowid !== 9007199254740993n) {
   throw new Error(`unexpected lastInsertRowid: ${String(insertResult.lastInsertRowid)}`);
+}
+const allInsert = peer.prepare("INSERT INTO items(id, payload, quantity) VALUES (?, ?, ?)");
+const allRows = allInsert.all(9007199254740994n, new Uint8Array([10, 11]), 7);
+if (allRows.length !== 0) {
+  throw new Error(`unexpected INSERT all rows: ${JSON.stringify(allRows)}`);
 }
 
 const select = db.prepare("SELECT id, payload, quantity FROM items WHERE id = ?");
@@ -18236,16 +18357,26 @@ if (!fileHeader.startsWith("SQLite format 3")) {
   throw new Error(`unexpected sqlite file header: ${JSON.stringify(fileHeader)}`);
 }
 
+// Mutate after the explicit checkpoint, then close the read-only handle last.
+// Process teardown must not transfer dirty snapshot ownership to that observer.
+peer.prepare("INSERT INTO items(id, payload, quantity) VALUES (?, ?, ?)").all(
+  9007199254740995n,
+  new Uint8Array([12]),
+  1,
+);
+
 db.close();
+peer.close();
+observer.close();
 
 const reopened = new DatabaseSync(dbPath);
 const verify = reopened.prepare("SELECT COUNT(*) AS count, SUM(quantity) AS totalQuantity FROM items");
 verify.setReadBigInts(true);
 const count = verify.get();
-if (count.count !== 1n) {
+if (count.count !== 3n) {
   throw new Error(`unexpected persisted count: count=${String(count.count)} totalQuantity=${String(count.totalQuantity)}`);
 }
-if (count.totalQuantity !== 42n) {
+if (count.totalQuantity !== 50n) {
   throw new Error(`unexpected persisted quantity total: count=${String(count.count)} totalQuantity=${String(count.totalQuantity)}`);
 }
 reopened.close();
@@ -18969,7 +19100,7 @@ console.log(JSON.stringify({ membershipAddress, sourceAddress, reboundAddress, d
                 r#"
 import net from "node:net";
 
-const path = "/tmp/secure-exec-unix-echo.sock";
+const path = "/tmp/agentos-unix-echo.sock";
 const summary = await new Promise((resolve, reject) => {
   const server = net.createServer((socket) => {
     socket.setEncoding("utf8");
@@ -20631,6 +20762,19 @@ import { createRequire } from "module";
 
 const require = createRequire(import.meta.url);
 const http2 = require("node:http2");
+const requiredConstants = {
+  HTTP2_HEADER_EXPECT: "expect",
+  HTTP2_HEADER_LOCATION: "location",
+  HTTP2_HEADER_USER_AGENT: "user-agent",
+  HTTP_STATUS_REQUEST_TIMEOUT: 408,
+  HTTP_STATUS_TOO_MANY_REQUESTS: 429,
+  HTTP_STATUS_INTERNAL_SERVER_ERROR: 500,
+};
+for (const [name, expected] of Object.entries(requiredConstants)) {
+  if (http2.constants[name] !== expected) {
+    throw new Error(`unexpected http2.constants.${name}: ${http2.constants[name]}`);
+  }
+}
 const server = http2.createServer();
 
 server.on("stream", (stream, headers) => {
@@ -21776,6 +21920,10 @@ console.log(JSON.stringify({
                     path: String::from(path),
                     headers_json: String::from(r#"{"content-type":"text/plain"}"#),
                     body: body.map(String::from),
+                    body_base64: None,
+                    stream_operation: None,
+                    stream_id: None,
+                    max_bytes: None,
                 }),
             ))
         }
@@ -21889,6 +22037,10 @@ await new Promise(() => {});
                         path: String::from("/from-host"),
                         headers_json: String::from(r#"{"content-type":"text/plain"}"#),
                         body: Some(String::from("hello")),
+                        body_base64: None,
+                        stream_operation: None,
+                        stream_id: None,
+                        max_bytes: None,
                     }),
                 ))
                 .expect("host fetch reaches guest HTTP server");
@@ -21990,6 +22142,139 @@ await new Promise(() => {});
                 }
                 other => panic!("unexpected vm_fetch response payload: {other:?}"),
             }
+        }
+
+        fn vm_fetch_stream_flushes_chunks_and_cancel_releases_socket() {
+            assert_node_available();
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            let server_cwd = temp_dir("agentos-native-sidecar-host-fetch-js-stream-cwd");
+            write_fixture(
+                &server_cwd.join("entry.mjs"),
+                r#"
+import http from "node:http";
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "content-type": "text/event-stream" });
+  res.flushHeaders();
+  if (req.url === "/hold") return;
+  setTimeout(() => res.write("first\n"), 5);
+  setTimeout(() => {
+    res.write("second\n");
+    res.end();
+  }, 10);
+});
+
+server.listen(3000, "127.0.0.1", () => console.log("READY"));
+await new Promise(() => {});
+"#,
+            );
+            start_fake_javascript_process(&mut sidecar, &vm_id, &server_cwd, "proc-js-server");
+            wait_for_process_stdout_contains(&mut sidecar, &vm_id, "proc-js-server", "READY");
+            let baseline = vm_network_resources(&sidecar, &vm_id);
+
+            let dispatch_stream = |sidecar: &mut NativeSidecar<RecordingBridge>,
+                                   request_id,
+                                   operation: &str,
+                                   stream_id: Option<&str>,
+                                   path: &str,
+                                   max_bytes: Option<u32>| {
+                sidecar.dispatch_blocking(request(
+                    request_id,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::VmFetch(crate::protocol::VmFetchRequest {
+                        port: 3000,
+                        method: String::from("GET"),
+                        path: String::from(path),
+                        headers_json: String::from("{}"),
+                        body: None,
+                        body_base64: None,
+                        stream_operation: Some(String::from(operation)),
+                        stream_id: stream_id.map(String::from),
+                        max_bytes,
+                    }),
+                ))
+            };
+            let response_json = |result: DispatchResult| match result.response.payload {
+                ResponsePayload::VmFetchResult(result) => result.response_json,
+                other => panic!("unexpected vm_fetch stream response: {other:?}"),
+            };
+
+            let head: Value = serde_json::from_str(&response_json(
+                dispatch_stream(&mut sidecar, 920, "start", None, "/events", None)
+                    .expect("start streaming fetch"),
+            ))
+            .expect("parse stream head");
+            assert_eq!(head["status"], Value::from(200));
+            let stream_id = head["streamId"].as_str().expect("stream id").to_owned();
+            assert_eq!(
+                sidecar.vms.get(&vm_id).expect("vm").vm_fetch_streams.len(),
+                1
+            );
+
+            let mut body = Vec::new();
+            for request_id in 921..940 {
+                let chunk: Value = serde_json::from_str(&response_json(
+                    dispatch_stream(
+                        &mut sidecar,
+                        request_id,
+                        "read",
+                        Some(&stream_id),
+                        "/",
+                        Some(3),
+                    )
+                    .expect("read streaming fetch"),
+                ))
+                .expect("parse stream chunk");
+                body.extend(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(chunk["body"].as_str().expect("chunk body"))
+                        .expect("decode stream chunk"),
+                );
+                if chunk["done"] == Value::Bool(true) {
+                    break;
+                }
+            }
+            assert_eq!(body, b"first\nsecond\n");
+            assert!(sidecar
+                .vms
+                .get(&vm_id)
+                .expect("vm")
+                .vm_fetch_streams
+                .is_empty());
+            assert_network_resources_unchanged(
+                baseline.clone(),
+                vm_network_resources(&sidecar, &vm_id),
+            );
+
+            let held_head: Value = serde_json::from_str(&response_json(
+                dispatch_stream(&mut sidecar, 940, "start", None, "/hold", None)
+                    .expect("start held stream"),
+            ))
+            .expect("parse held stream head");
+            let held_stream_id = held_head["streamId"].as_str().expect("held stream id");
+            dispatch_stream(&mut sidecar, 941, "cancel", Some(held_stream_id), "/", None)
+                .expect("cancel held stream");
+            assert!(sidecar
+                .vms
+                .get(&vm_id)
+                .expect("vm")
+                .vm_fetch_streams
+                .is_empty());
+            assert_network_resources_unchanged(baseline, vm_network_resources(&sidecar, &vm_id));
+
+            sidecar
+                .kill_process_internal(&vm_id, "proc-js-server", "SIGKILL")
+                .expect("kill javascript server process");
         }
 
         fn vm_fetch_kernel_tcp_rejects_chunked_with_content_length() {
@@ -23738,7 +24023,7 @@ console.log(`BODY:${{body}}`);
                 sidecar.vms.get(&vm_id).expect("javascript vm"),
             )
             .expect("build Unix socket path context");
-            let socket_path = "/tmp/secure-exec.sock";
+            let socket_path = "/tmp/agentos.sock";
 
             let listen = {
                 let vm = sidecar.vms.get_mut(&vm_id).expect("javascript vm");
@@ -24140,7 +24425,7 @@ console.log(`BODY:${{body}}`);
                     19_u64,
                     "net.connect",
                     vec![json!({ "path": socket_path })],
-                    "unix:/tmp/secure-exec.sock",
+                    "unix:/tmp/agentos.sock",
                 ),
                 (
                     20_u64,
@@ -24951,7 +25236,7 @@ try {
                     ),
                     (
                         String::from("AGENTOS_VIRTUAL_OS_HOSTNAME"),
-                        String::from("secure-exec-test"),
+                        String::from("agentos-test"),
                     ),
                     (
                         String::from("AGENTOS_PARENT_NODE_ALLOW_CHILD_PROCESS"),
@@ -24981,7 +25266,7 @@ try {
             );
             assert_eq!(
                 filtered.get("AGENTOS_VIRTUAL_OS_HOSTNAME"),
-                Some(&String::from("secure-exec-test"))
+                Some(&String::from("agentos-test"))
             );
             assert!(!filtered.contains_key("AGENTOS_PARENT_NODE_ALLOW_CHILD_PROCESS"));
             assert!(!filtered.contains_key("VISIBLE_MARKER"));
@@ -25234,6 +25519,12 @@ try {
         }
 
         #[test]
+        fn service_javascript_sqlite_persists_multiple_handles_and_wal() {
+            javascript_sqlite_sync_rpcs_round_trip_and_persist_vm_files();
+            javascript_sqlite_builtin_round_trips_through_sidecar_sync_rpc();
+        }
+
+        #[test]
         fn aad_javascript_network_dns_javascript_net_poll_suite() {
             run_service_suite();
         }
@@ -25420,6 +25711,11 @@ try {
         }
 
         #[test]
+        fn aaf_vm_fetch_stream_flushes_chunks_and_cancel_releases_socket() {
+            run_isolated_service_test("vm-fetch-kernel-tcp-stream");
+        }
+
+        #[test]
         fn aag_vm_fetch_kernel_tcp_rejects_chunked_with_content_length() {
             run_isolated_service_test("vm-fetch-kernel-tcp-chunked-content-length");
         }
@@ -25595,6 +25891,9 @@ try {
                 }
                 "vm-fetch-kernel-tcp-chunked" => {
                     vm_fetch_kernel_tcp_decodes_chunked_response_body();
+                }
+                "vm-fetch-kernel-tcp-stream" => {
+                    vm_fetch_stream_flushes_chunks_and_cancel_releases_socket();
                 }
                 "vm-fetch-kernel-tcp-chunked-content-length" => {
                     vm_fetch_kernel_tcp_rejects_chunked_with_content_length();

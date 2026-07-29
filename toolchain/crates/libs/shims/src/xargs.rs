@@ -219,7 +219,7 @@ fn run_command(program: &str, args: &[String], trace: bool) -> i32 {
         return 0;
     }
 
-    let mut cmd = std::process::Command::new(program);
+    let mut cmd = std::process::Command::new(crate::which::resolve_program(program));
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())

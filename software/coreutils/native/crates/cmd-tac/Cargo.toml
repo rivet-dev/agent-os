@@ -4,7 +4,7 @@ name = "cmd-tac"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "tac standalone binary for secure-exec VM"
+description = "tac standalone binary for agentos VM"
 
 [[bin]]
 name = "tac"

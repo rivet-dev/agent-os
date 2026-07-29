@@ -43,6 +43,15 @@ export interface PackOptions {
 	 * IS reached at runtime it fails then — so this is opt-in.
 	 */
 	pruneNative?: boolean;
+	/**
+	 * Do not install optional npm dependencies into the runtime closure.
+	 *
+	 * Use this when an upstream package exposes a documented executable override
+	 * and its optional dependencies are only platform-native fallback binaries.
+	 * The selected replacement must be packaged as a normal command and covered
+	 * by an entrypoint smoke test.
+	 */
+	omitOptional?: boolean;
 }
 
 export interface PackResult {
@@ -76,7 +85,11 @@ function readHead(file: string): Buffer {
 	}
 }
 
-function npmInstallFlat(source: string, into: string): void {
+function npmInstallFlat(
+	source: string,
+	into: string,
+	omitOptional: boolean,
+): void {
 	mkdirSync(join(into, "node_modules"), { recursive: true });
 	// `source` here is already a copy-forcing install spec (a tarball for local
 	// dirs, via `resolveInstallSpec`) — never a bare directory, which npm would
@@ -88,6 +101,7 @@ function npmInstallFlat(source: string, into: string): void {
 			"install",
 			source,
 			"--omit=dev",
+			...(omitOptional ? ["--omit=optional"] : []),
 			"--ignore-scripts",
 			"--no-audit",
 			"--no-fund",
@@ -270,7 +284,7 @@ function createPackageTar(packageDir: string, packageTar: string): void {
  * closure. A bin path like `./node_modules/<dep>/<sub>` is written RELATIVE to the
  * declaring package's root, but a flat (`npm install`) install HOISTS shared deps
  * to the top-level `node_modules`, so the literal nested path may not exist. A
- * wrapper package (e.g. `pi-cli`) whose `bin` points into its dependencies is the
+	 * wrapper package whose `bin` points into its dependencies is the
  * common case. Try the nested path first, then the hoisted top-level copy.
  */
 function resolveBinTarget(
@@ -297,7 +311,7 @@ export function pack(options: PackOptions): PackResult {
 	const { source, out, agent, pruneNative } = options;
 	const tmp = mkdtempSync(join(tmpdir(), "agentos-pack-"));
 	try {
-		npmInstallFlat(resolveInstallSpec(source, tmp), tmp);
+		npmInstallFlat(resolveInstallSpec(source, tmp), tmp, options.omitOptional ?? false);
 
 		const name = installedPackageName(source);
 		const installedDir = join(tmp, "node_modules", name);

@@ -97,7 +97,7 @@ where
             match sidecar.bridge.restore_vm_permissions_fail_closed(
                 &vm_id,
                 &original_permissions,
-                "collection registration rollback",
+                "binding collection registration rollback",
                 &error,
             ) {
                 Ok(()) => return Err(error),
@@ -199,7 +199,7 @@ fn binding_command_name_from_specifier(command: &str) -> Option<&str> {
     let file_name = Path::new(command).file_name()?.to_str()?;
     let normalized = normalize_path(command);
     let registered_internal_path = normalized
-        .strip_prefix("/__secure_exec/commands/")
+        .strip_prefix("/__agentos/commands/")
         .and_then(|suffix| suffix.rsplit('/').next())
         .is_some_and(|name| name == file_name);
     if !matches!(

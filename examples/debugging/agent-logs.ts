@@ -1,7 +1,7 @@
 // Capture the coding agent's stderr at the VM level to diagnose tool calls,
 // model errors, and crashes mid-turn.
 
-import { AgentOs } from "@rivet-dev/agentos-core";
+import { AgentOs } from "@rivet-dev/agentos";
 import pi from "@agentos-software/pi";
 
 const agentOs = await AgentOs.create({

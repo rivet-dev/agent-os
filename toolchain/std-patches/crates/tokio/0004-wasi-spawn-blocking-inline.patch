@@ -1,0 +1,17 @@
+--- a/src/runtime/blocking/pool.rs
++++ b/src/runtime/blocking/pool.rs
+@@ -180,8 +180,15 @@
+ where
+     F: FnOnce() -> R + Send + 'static,
+     R: Send + 'static,
+ {
++    #[cfg(target_os = "wasi")]
++    {
++        let result = func();
++        return crate::task::spawn(async move { result });
++    }
++    #[cfg(not(target_os = "wasi"))]
+     let rt = Handle::current();
++    #[cfg(not(target_os = "wasi"))]
+     rt.spawn_blocking(func)
+ }

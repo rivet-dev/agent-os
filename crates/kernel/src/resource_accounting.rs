@@ -465,7 +465,7 @@ impl ResourceAccountant {
         if let Some(limit) = self.limits.max_pread_bytes {
             if length > limit {
                 return Err(ResourceError::invalid_input(format!(
-                    "pread length {length} exceeds configured limit {limit}"
+                    "pread length {length} exceeds limits.resources.maxPreadBytes {limit}; raise limits.resources.maxPreadBytes to permit a larger single read"
                 )));
             }
         }
@@ -477,7 +477,7 @@ impl ResourceAccountant {
         if let Some(limit) = self.limits.max_fd_write_bytes {
             if size > limit {
                 return Err(ResourceError::invalid_input(format!(
-                    "write size {size} exceeds configured limit {limit}"
+                    "write size {size} exceeds limits.resources.maxFdWriteBytes {limit}; raise limits.resources.maxFdWriteBytes to permit a larger single write"
                 )));
             }
         }

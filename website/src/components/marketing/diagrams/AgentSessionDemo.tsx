@@ -1,19 +1,16 @@
 'use client';
 
 import { useEffect, useId, useMemo, useLayoutEffect, useRef, useState } from 'react';
-import { FileCode2, FileText, Play, RotateCcw, SquarePen } from 'lucide-react';
-import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
+import { Code2, Play, RotateCcw, SquarePen } from 'lucide-react';
+import { motion, useReducedMotion } from 'framer-motion';
 import { InkPanel } from '../editorial/InkPanel';
 
 // ---------------------------------------------------------------------------
 // Recorded agent coding sessions, played back line by line inside an ink
 // terminal. A segmented control picks the runtime and replays the same task
 // with the agent writing that language; the active runtime's description and
-// docs link sit under the control and swap with it. A filesystem rail on the
-// right shows /home/agentos changing as the session runs, so the script
-// visibly works against a whole OS rather than a chat box. The Python session
-// runs the interpreter natively (no shell lines); Node and bash keep their
-// commands.
+// docs link sit under the control and swap with it. The Python session runs
+// the interpreter natively (no shell lines); Node and bash keep their commands.
 // ---------------------------------------------------------------------------
 
 type SessionLineKind = 'user' | 'agent' | 'cmd' | 'run' | 'out' | 'script';
@@ -25,15 +22,6 @@ interface SessionLine {
 
 type ScriptLang = 'js' | 'python' | 'bash';
 
-interface SessionFile {
-	name: string;
-	size: string;
-	kind: 'code' | 'data';
-	// Session line index that creates this file; it appears in the rail once
-	// that line has finished playing.
-	afterIndex: number;
-}
-
 interface SessionTab {
 	key: string;
 	title: string;
@@ -42,16 +30,14 @@ interface SessionTab {
 	docsLabel: string;
 	iconSrc: string;
 	script: { fileName: string; lang: ScriptLang; code: string };
+	codeView: { fileName: string; code: string };
 	session: SessionLine[];
-	files: SessionFile[];
 }
 
-// One task, three languages: fetch last week's issues, roll them up, write
-// report.md. The label counts sum to the reported total (9+6+5+3 = 23), and
-// the bash tab lists them alphabetically because its jq pipeline sorts.
-const REPORT_JS = `import { writeFileSync } from "node:fs";
-
-const since = new Date(Date.now() - 7 * 864e5).toISOString();
+// One task, three languages: fetch last week's issues and roll them up. The
+// label counts sum to the reported total (9+6+5+3 = 23), and the bash tab
+// lists them alphabetically because its jq pipeline sorts.
+const REPORT_JS = `const since = new Date(Date.now() - 7 * 864e5).toISOString();
 const url = \`https://api.github.com/repos/acme/shop/issues?since=\${since}\`;
 const issues = await (await fetch(url)).json();
 
@@ -64,7 +50,6 @@ const report = [
   \`# Issues, last 7 days: \${issues.length}\`,
   ...rows.map(([label, n]) => \`- \${label}: \${n}\`),
 ].join("\\n");
-writeFileSync("report.md", report);
 console.log(report);`;
 
 const REPORT_PY = `import json, datetime, urllib.request
@@ -79,7 +64,6 @@ counts = Counter(l["name"] for i in issues for l in i["labels"])
 lines = [f"# Issues, last 7 days: {len(issues)}"]
 lines += [f"- {label}: {n}" for label, n in counts.most_common()]
 report = "\\n".join(lines)
-open("report.md", "w").write(report)
 print(report)`;
 
 const REPORT_SH = `#!/bin/bash
@@ -87,22 +71,114 @@ set -euo pipefail
 
 since=$(date -u -d '7 days ago' +%Y-%m-%d)
 url="https://api.github.com/repos/acme/shop/issues?since=$since"
-curl -s "$url" > issues.json
-
-{
-  echo "# Issues, last 7 days: $(jq length issues.json)"
-  jq -r '[.[].labels[].name] | sort | group_by(.)
-         | .[] | "- \\(.[0]): \\(length)"' issues.json
-} > report.md`;
+curl -s "$url" | jq -r '
+  "# Issues, last 7 days: \\(length)",
+  ([.[].labels[].name] | sort | group_by(.)
+   | .[] | "- \\(.[0]): \\(length)")'`;
 
 const REPORT_OUT = ['- bug: 9', '- api: 6', '- ui: 5', '- docs: 3'];
+
+const GITHUB_BINDING_SOURCE = `import { AgentOs, binding, bindings } from "@rivet-dev/agentos-core";
+import { z } from "zod";
+
+const github = bindings({
+  name: "github",
+  description: "Read GitHub data with credentials held by the host.",
+  bindings: {
+    "list-issues": binding({
+      description: "List issues updated in the last number of days.",
+      inputSchema: z.object({ days: z.number().int().min(1) }),
+      execute: async ({ days }) => {
+        const since = new Date(Date.now() - days * 864e5).toISOString();
+        const response = await fetch(
+          \`https://api.github.com/repos/acme/shop/issues?since=\${since}\`,
+          {
+            headers: {
+              Accept: "application/vnd.github+json",
+              Authorization: \`Bearer \${process.env.GITHUB_TOKEN}\`,
+            },
+          },
+        );
+        if (!response.ok) throw new Error(\`GitHub returned \${response.status}\`);
+        const issues = await response.json();
+        return { total: Array.isArray(issues) ? issues.length : 0, issues };
+      },
+    }),
+  },
+});`;
+
+const EXECUTE_JS = `${GITHUB_BINDING_SOURCE}
+
+const vm = await AgentOs.create({
+  bindings: [github],
+  permissions: { fs: "allow", childProcess: "allow", binding: "allow" },
+});
+try {
+  await vm.writeFile("/tmp/report.mjs", \`
+import { execFileSync } from "node:child_process";
+
+const { result } = JSON.parse(execFileSync(
+  "agentos-github",
+  ["list-issues", "--days", "7"],
+  { encoding: "utf8" },
+));
+console.log("# Issues, last 7 days: " + result.total);
+\`);
+  const result = await vm.exec("node /tmp/report.mjs");
+  console.log(result.stdout);
+} finally {
+  await vm.dispose();
+}`;
+
+const EXECUTE_PYTHON = `${GITHUB_BINDING_SOURCE}
+
+const vm = await AgentOs.create({
+  bindings: [github],
+  permissions: { fs: "allow", childProcess: "allow", binding: "allow" },
+});
+try {
+  await vm.writeFile("/tmp/report.py", \`
+import json
+import subprocess
+
+payload = subprocess.check_output(
+    ["agentos-github", "list-issues", "--days", "7"],
+    text=True,
+)
+result = json.loads(payload)["result"]
+print(f"# Issues, last 7 days: {result['total']}")
+\`);
+  const result = await vm.exec("python /tmp/report.py");
+  console.log(result.stdout);
+} finally {
+  await vm.dispose();
+}`;
+
+const EXECUTE_BASH = `${GITHUB_BINDING_SOURCE}
+
+const vm = await AgentOs.create({
+  bindings: [github],
+  permissions: { fs: "allow", childProcess: "allow", binding: "allow" },
+});
+try {
+  await vm.writeFile("/tmp/report.sh", \`#!/bin/bash
+set -euo pipefail
+
+payload="$(agentos-github list-issues --days 7)"
+total="$(printf '%s' "$payload" | grep -o '"total":[0-9]*' | cut -d: -f2)"
+printf '# Issues, last 7 days: %s\\n' "$total"
+\`);
+  const result = await vm.exec("bash /tmp/report.sh");
+  console.log(result.stdout);
+} finally {
+  await vm.dispose();
+}`;
 
 const shellSession = (runCmd: string, reportLines: string[]): SessionLine[] => [
 	{ kind: 'user', text: "generate a report of last week's issues" },
 	{ kind: 'agent', text: 'Writing a script to fetch them and build the report.' },
 	{ kind: 'script', text: '' },
 	{ kind: 'cmd', text: runCmd },
-	{ kind: 'cmd', text: 'cat report.md' },
 	{ kind: 'out', text: '# Issues, last 7 days: 23' },
 	...reportLines.map((text): SessionLine => ({ kind: 'out', text })),
 	{ kind: 'agent', text: '23 issues last week; bug reports lead with 9.' },
@@ -124,51 +200,42 @@ const runSession = (runLabel: string): SessionLine[] => [
 const TABS: SessionTab[] = [
 	{
 		key: 'nodejs',
-		title: 'JavaScript & TypeScript',
+		title: 'Node.js',
 		description: 'Node v22 compatible, running on WASM. node, npm, and npx on the PATH.',
-		docsHref: '/docs/nodejs-runtime',
+		docsHref: '/docs/javascript',
 		docsLabel: 'Node.js runtime docs',
 		iconSrc: '/images/registry/nodejs.svg',
 		script: { fileName: 'report.mjs', lang: 'js', code: REPORT_JS },
+		codeView: { fileName: 'execute-javascript.ts', code: EXECUTE_JS },
 		session: runSession('Run report.mjs'),
-		files: [
-			{ name: 'report.mjs', size: '486 B', kind: 'code', afterIndex: 2 },
-			{ name: 'report.md', size: '96 B', kind: 'data', afterIndex: 3 },
-		],
 	},
 	{
 		key: 'python',
 		title: 'Python',
 		description: 'CPython 3.13 with pip. Native wheels like numpy and pandas work.',
-		docsHref: '/docs/python-runtime',
+		docsHref: '/docs/python',
 		docsLabel: 'Python runtime docs',
-		iconSrc: '/images/registry/python.svg',
+		iconSrc: 'https://upload.wikimedia.org/wikipedia/commons/thumb/3/31/Python-logo.png/120px-Python-logo.png',
 		script: { fileName: 'report.py', lang: 'python', code: REPORT_PY },
+		codeView: { fileName: 'execute-python.ts', code: EXECUTE_PYTHON },
 		session: runSession('Run report.py'),
-		files: [
-			{ name: 'report.py', size: '451 B', kind: 'code', afterIndex: 2 },
-			{ name: 'report.md', size: '96 B', kind: 'data', afterIndex: 3 },
-		],
 	},
 	{
 		key: 'bash',
-		title: 'bash',
+		title: 'Bash',
 		description: 'A POSIX userland with a process table, PTYs, TCP and UDP with DNS, and deny-by-default permissions.',
-		docsHref: '/docs/architecture',
-		docsLabel: 'Kernel & shell docs',
-		iconSrc: '/images/registry/linux.svg',
+		docsHref: '/docs/processes',
+		docsLabel: 'Processes & shell docs',
+		iconSrc: '/images/registry/bash.svg',
 		script: { fileName: 'report.sh', lang: 'bash', code: REPORT_SH },
+		codeView: { fileName: 'execute-bash.ts', code: EXECUTE_BASH },
 		session: shellSession('bash report.sh', ['- api: 6', '- bug: 9', '- docs: 3', '- ui: 5']),
-		files: [
-			{ name: 'report.sh', size: '338 B', kind: 'code', afterIndex: 2 },
-			{ name: 'issues.json', size: '18 KB', kind: 'data', afterIndex: 3 },
-			{ name: 'report.md', size: '96 B', kind: 'data', afterIndex: 3 },
-		],
 	},
 ];
 
-const WINDOW_TITLE = 'agentos vm · /home/agentos';
+const WINDOW_TITLE = 'agentOS VM Execution';
 const CAPTION = 'The agent writes one program instead of a chain of tool calls.';
+const CODE_CAPTION = 'Run Bash, Node.js, and Python through the same agentOS API.';
 
 // --- Tiny dark-palette tokenizer for the script block ---------------------
 // The site's highlightCodeHtml is tuned for light panels and JS only; the
@@ -315,6 +382,31 @@ const ScriptBlock = ({ fileName, tokenLines }: { fileName: string; tokenLines: T
 	</div>
 );
 
+const FullCodeView = ({ tokenLines }: { tokenLines: Token[][] }) => (
+	<div className='h-[440px] overflow-auto p-6 font-code text-[13px] leading-[1.75] [font-variant-ligatures:none] md:h-[560px]'>
+		<div>
+			{tokenLines.map((tokens, i) => (
+				<div key={i} className='grid grid-cols-[2rem_1fr] gap-3'>
+					<span aria-hidden='true' className='select-none text-right text-cream/20'>{i + 1}</span>
+					<code className='whitespace-pre text-cream/85'>
+						{tokens.length === 0
+							? ' '
+							: tokens.map((token, j) =>
+									token.type === 'text' ? (
+										token.value
+									) : (
+										<span key={j} className={TOKEN_CLASS[token.type]}>
+											{token.value}
+										</span>
+									),
+							)}
+					</code>
+				</div>
+			))}
+		</div>
+	</div>
+);
+
 // A native tool step ("Run report.py"): the interpreter runs in the VM
 // directly, so there is no shell line to type.
 const RunBlock = ({ text }: { text: string }) => (
@@ -391,56 +483,16 @@ const SessionRow = ({
 	);
 };
 
-// The filesystem rail: /home/agentos, updated as the session writes files.
-// Files created this session carry a sage dot, the way an editor marks fresh
-// changes.
-const FileRail = ({ files, schedule, clock }: { files: SessionFile[]; schedule: ScheduledLine[]; clock: number }) => {
-	const visibleFiles = files.filter((file) => {
-		const line = schedule[file.afterIndex];
-		return line ? clock >= line.start + line.dur + 120 : false;
-	});
-	return (
-		<aside className='hidden border-l border-cream/10 md:block'>
-			<div className='border-b border-cream/10 px-4 py-2.5 font-mono text-[11px] text-cream/45'>/home/agentos</div>
-			<div className='flex flex-col gap-0.5 p-3'>
-				{visibleFiles.map((file) => (
-					<motion.div
-						key={file.name}
-						initial={{ opacity: 0, x: 6 }}
-						animate={{ opacity: 1, x: 0 }}
-						transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-						className='flex items-center gap-2 rounded-md bg-cream/[0.04] px-2 py-1.5 text-[12px] text-cream/80'
-					>
-						{file.kind === 'code' ? (
-							<FileCode2 aria-hidden='true' className='h-3.5 w-3.5 shrink-0 text-sage' />
-						) : (
-							<FileText aria-hidden='true' className='h-3.5 w-3.5 shrink-0 text-cream/50' />
-						)}
-						<span className='truncate font-mono'>{file.name}</span>
-						<span className='ml-auto shrink-0 font-mono text-[10px] text-cream/40'>{file.size}</span>
-						<span aria-hidden='true' className='h-1.5 w-1.5 shrink-0 rounded-full bg-sage/80' />
-					</motion.div>
-				))}
-			</div>
-		</aside>
-	);
-};
-
-// The runtime cards are the tabs: real buttons with no interactive content
-// nested inside them. The active runtime's docs link lives in the terminal's
-// caption instead, so a card is one target that does one thing.
-// A segmented control (same vocabulary as the benchmark workload toggle, so
-// it unambiguously reads as a switch) plus the active runtime's one-line
-// description with its docs link inline, swapping with the selection.
+// The runtime cards are tabs: real buttons with no interactive content nested
+// inside them. The active runtime's docs link sits below the demo window.
 const RuntimeTabs = ({ active, onChange }: { active: number; onChange: (idx: number) => void }) => {
 	const indicatorId = useId();
-	const tab = TABS[active];
 	return (
-		<div className='mb-5 flex flex-wrap items-center justify-between gap-3'>
+		<div className='mb-5'>
 			<div
 				role='tablist'
 				aria-label='Execution runtimes'
-				className='flex w-fit flex-wrap gap-1 rounded-lg border border-ink/10 bg-white/55 p-1'
+				className='scrollbar-hide flex w-full min-w-0 flex-nowrap gap-1 overflow-x-auto rounded-full border border-ink/15 bg-ink/[0.025] p-1.5'
 			>
 				{TABS.map((t, idx) => {
 					const selected = active === idx;
@@ -451,14 +503,14 @@ const RuntimeTabs = ({ active, onChange }: { active: number; onChange: (idx: num
 							role='tab'
 							aria-selected={selected}
 							onClick={() => onChange(idx)}
-							className={`relative flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-								selected ? 'text-cream' : 'text-ink-soft hover:text-ink'
+							className={`relative flex min-w-max flex-1 shrink-0 items-center justify-center gap-2 rounded-full px-4 py-2.5 text-sm transition-colors ${
+								selected ? 'font-medium text-ink' : 'text-ink-faint hover:text-ink'
 							}`}
 						>
 							{selected && (
 								<motion.span
 									layoutId={`runtime-tab-${indicatorId}`}
-									className='absolute inset-0 rounded-md bg-ink'
+									className='absolute inset-0 rounded-full bg-white shadow-sm ring-1 ring-inset ring-ink/15'
 									transition={{ type: 'spring', stiffness: 480, damping: 38 }}
 								/>
 							)}
@@ -467,7 +519,7 @@ const RuntimeTabs = ({ active, onChange }: { active: number; onChange: (idx: num
 									src={t.iconSrc}
 									alt=''
 									aria-hidden='true'
-									className={`h-4 w-4 object-contain transition-[filter] ${selected ? 'brightness-0 invert' : ''}`}
+									className='h-4 w-4 object-contain'
 								/>
 								{t.title}
 							</span>
@@ -475,23 +527,6 @@ const RuntimeTabs = ({ active, onChange }: { active: number; onChange: (idx: num
 					);
 				})}
 			</div>
-			<AnimatePresence mode='wait' initial={false}>
-				<motion.p
-					key={tab.key}
-					initial={{ opacity: 0, y: 4 }}
-					animate={{ opacity: 1, y: 0 }}
-					exit={{ opacity: 0, y: -4 }}
-					transition={{ duration: 0.18, ease: 'easeOut' }}
-					className='text-sm leading-relaxed'
-				>
-					<a
-						href={tab.docsHref}
-						className='whitespace-nowrap text-accent-deep underline underline-offset-2 transition-colors hover:text-accent'
-					>
-						{tab.docsLabel} <span aria-hidden='true'>→</span>
-					</a>
-				</motion.p>
-			</AnimatePresence>
 		</div>
 	);
 };
@@ -501,11 +536,13 @@ export const AgentSessionDemo = () => {
 	const [active, setActive] = useState(0);
 	const [started, setStarted] = useState(false);
 	const [playKey, setPlayKey] = useState(0);
+	const [showCode, setShowCode] = useState(false);
 	const scrollRef = useRef<HTMLDivElement>(null);
 
 	const tab = TABS[active];
 	const { schedule, total } = useMemo(() => buildSchedule(tab.session), [tab]);
 	const tokenLines = useMemo(() => tokenizeScript(tab.script.code, tab.script.lang), [tab]);
+	const codeViewTokenLines = useMemo(() => tokenizeScript(tab.codeView.code, 'js'), [tab]);
 	const clock = usePlaybackClock(total, started, playKey, reduced);
 
 	const visible = schedule.filter((line) => clock >= line.start);
@@ -521,12 +558,17 @@ export const AgentSessionDemo = () => {
 		replay();
 	};
 
+	const toggleCodeView = () => {
+		if (showCode) replay();
+		setShowCode((visible) => !visible);
+	};
+
 	// Keep the newest line in view while the session plays. Instant, not
 	// smooth: smooth scrolling lags behind per-frame typing updates.
 	useEffect(() => {
 		const el = scrollRef.current;
-		if (el) el.scrollTop = el.scrollHeight;
-	}, [visible.length, clock, done]);
+		if (!showCode && el) el.scrollTop = el.scrollHeight;
+	}, [visible.length, clock, done, showCode]);
 
 	return (
 		<motion.div
@@ -535,32 +577,45 @@ export const AgentSessionDemo = () => {
 		>
 			<RuntimeTabs active={active} onChange={handleTabChange} />
 
-			<InkPanel caption={CAPTION}>
+			<InkPanel caption={showCode ? CODE_CAPTION : CAPTION}>
 				<div className='flex items-center gap-2 border-b border-cream/10 px-4 py-3'>
 					<div className='h-3 w-3 rounded-full bg-cream/15' />
 					<div className='h-3 w-3 rounded-full bg-cream/15' />
 					<div className='h-3 w-3 rounded-full bg-cream/15' />
-					<span className='ml-2 font-mono text-xs text-cream/45'>{WINDOW_TITLE}</span>
-					{!reduced && (
+					<span className={`ml-2 hidden text-xs text-cream/65 sm:inline ${showCode ? 'font-code' : 'font-medium'}`}>{showCode ? tab.codeView.fileName : WINDOW_TITLE}</span>
+					<div className='ml-auto flex items-center gap-1'>
+						{!showCode && !reduced && (
+							<button
+								type='button'
+								onClick={replay}
+								aria-label='Replay session'
+								className='flex h-7 w-7 items-center justify-center rounded-md text-cream/40 transition-colors hover:bg-cream/[0.06] hover:text-cream/80'
+							>
+								<RotateCcw className='h-3.5 w-3.5' />
+							</button>
+						)}
 						<button
 							type='button'
-							onClick={replay}
-							aria-label='Replay session'
-							className='ml-auto flex h-7 w-7 items-center justify-center rounded-md text-cream/40 transition-colors hover:bg-cream/[0.06] hover:text-cream/80'
+							onClick={toggleCodeView}
+							aria-pressed={showCode}
+							className='inline-flex h-7 items-center gap-1.5 rounded-md border border-cream/25 bg-cream/[0.1] px-2.5 text-[11px] font-medium text-cream/90 transition-colors hover:border-cream/35 hover:bg-cream/[0.16] hover:text-cream'
 						>
-							<RotateCcw className='h-3.5 w-3.5' />
+							<Code2 className='h-3.5 w-3.5' />
+							{showCode ? 'Show agent run' : 'Show me the code'}
 						</button>
-					)}
+					</div>
 				</div>
 
-				<div className='md:grid md:grid-cols-[minmax(0,1fr),240px]'>
-					{/* Tall enough on desktop to hold a whole session, script and all; if
-					    wrapped lines overflow on small screens the auto-scroll keeps the
-					    newest line in view. Ligatures off: a terminal shows `--` and
-					    `->` as raw ASCII. */}
+				{/* Tall enough on desktop to hold a whole session, script and all; if
+				    wrapped lines overflow on small screens the auto-scroll keeps the
+				    newest line in view. Ligatures off: a terminal shows `--` and
+				    `->` as raw ASCII. */}
+				{showCode ? (
+					<FullCodeView tokenLines={codeViewTokenLines} />
+				) : (
 					<div
 						ref={scrollRef}
-						className='h-[480px] overflow-y-auto p-6 font-code text-[13px] leading-[1.75] [font-variant-ligatures:none] md:h-[640px]'
+						className='h-[440px] overflow-y-auto p-6 font-code text-[13px] leading-[1.75] [font-variant-ligatures:none] md:h-[560px]'
 					>
 						<div className='flex flex-col gap-0.5'>
 							{visible.map((line, i) => {
@@ -588,10 +643,13 @@ export const AgentSessionDemo = () => {
 							)}
 						</div>
 					</div>
-
-					<FileRail files={tab.files} schedule={schedule} clock={clock} />
-				</div>
+				)}
 			</InkPanel>
+			<div className='mt-4 flex justify-end'>
+				<a href={tab.docsHref} className='whitespace-nowrap text-sm text-accent-deep underline underline-offset-2 transition-colors hover:text-accent'>
+					{tab.docsLabel} <span aria-hidden='true'>→</span>
+				</a>
+			</div>
 		</motion.div>
 	);
 };

@@ -3,6 +3,7 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,17 +35,65 @@ describe("agentos package projection (VM)", () => {
 			join(pkgDir, "agentos-package.json"),
 			JSON.stringify({ name: "hello-cmd", version: "1.0.0" }, null, 2),
 		);
-		const binPath = join(pkgDir, "bin", "hello-cmd");
 		writeFileSync(
-			binPath,
-			"#!/usr/bin/env node\nprocess.stdout.write('hello from agentos package\\n');\n",
+			join(pkgDir, "package.json"),
+			JSON.stringify({ name: "hello-cmd", version: "1.0.0", type: "module" }),
+		);
+		const commandDir = join(pkgDir, "node_modules", "hello-cmd");
+		mkdirSync(commandDir, { recursive: true });
+		const commandPath = join(commandDir, "index.js");
+		writeFileSync(
+			commandPath,
+			"#!/usr/bin/env node\nimport { realpathSync } from 'fs';\nimport { cwd as importedCwd } from 'process';\nprocess.stdout.write(`hello from agentos package\\ncwd=${process.cwd()}\\nimportedCwd=${importedCwd()}\\nrealCwd=${realpathSync(importedCwd())}\\n`);\n",
 		);
 		// Commands must be executable (Linux x-bit) — a non-executable PATH match
 		// is skipped (ENOENT) and a direct non-executable path is denied (EACCES).
-		chmodSync(binPath, 0o755);
+		chmodSync(commandPath, 0o755);
+		const binPath = join(pkgDir, "bin", "hello-cmd");
+		symlinkSync("../node_modules/hello-cmd/index.js", binPath);
+		const parentBinPath = join(pkgDir, "bin", "hello-parent");
+		writeFileSync(
+			parentBinPath,
+			"#!/usr/bin/env node\nimport { spawnSync } from 'child_process';\nconst child = spawnSync('/opt/agentos/bin/hello-cmd', [], { cwd: '/workspace', encoding: 'utf8' });\nprocess.stdout.write(JSON.stringify({ status: child.status, stdout: child.stdout, stderr: child.stderr }));\n",
+		);
+		chmodSync(parentBinPath, 0o755);
+		const asyncParentBinPath = join(pkgDir, "bin", "hello-parent-async");
+		writeFileSync(
+			asyncParentBinPath,
+			"#!/usr/bin/env node\nimport { spawn } from 'child_process';\nconst child = spawn('/opt/agentos/bin/hello-cmd', [], { cwd: '/workspace', stdio: 'pipe' });\nlet stdout = '';\nlet stderr = '';\nchild.stdout.on('data', chunk => { stdout += chunk; });\nchild.stderr.on('data', chunk => { stderr += chunk; });\nchild.on('error', error => { throw error; });\nchild.on('close', status => { process.stdout.write(JSON.stringify({ status, stdout, stderr })); });\n",
+		);
+		chmodSync(asyncParentBinPath, 0o755);
+		const nodeParentBinPath = join(pkgDir, "bin", "hello-parent-node");
+		writeFileSync(
+			nodeParentBinPath,
+			"#!/usr/bin/env node\nimport { spawn } from 'child_process';\nconst child = spawn(process.execPath, ['/opt/agentos/bin/hello-cmd'], { cwd: '/workspace', stdio: 'pipe' });\nlet stdout = '';\nlet stderr = '';\nchild.stdout.on('data', chunk => { stdout += chunk; });\nchild.stderr.on('data', chunk => { stderr += chunk; });\nchild.on('error', error => { throw error; });\nchild.on('close', status => { process.stdout.write(JSON.stringify({ execPath: process.execPath, status, stdout, stderr })); });\n",
+		);
+		chmodSync(nodeParentBinPath, 0o755);
+		const packageNodeParentBinPath = join(
+			pkgDir,
+			"bin",
+			"hello-parent-node-package-path",
+		);
+		writeFileSync(
+			packageNodeParentBinPath,
+			"#!/usr/bin/env node\nimport { spawn } from 'child_process';\nconst child = spawn(process.execPath, ['/opt/agentos/pkgs/hello-cmd/1.0.0/node_modules/hello-cmd/index.js'], { cwd: '/workspace', stdio: 'pipe' });\nlet stdout = '';\nlet stderr = '';\nchild.stdout.on('data', chunk => { stdout += chunk; });\nchild.stderr.on('data', chunk => { stderr += chunk; });\nchild.on('error', error => { throw error; });\nchild.on('close', status => { process.stdout.write(JSON.stringify({ status, stdout, stderr })); });\n",
+		);
+		chmodSync(packageNodeParentBinPath, 0o755);
+		const workspaceDir = join(root, "workspace");
+		mkdirSync(workspaceDir, { recursive: true });
 		vm = await AgentOs.create({
 			defaultSoftware: false,
 			software: [pkgDir],
+			mounts: [
+				{
+					path: "/workspace",
+					plugin: {
+						id: "host_dir",
+						config: { hostPath: workspaceDir, readOnly: false },
+					},
+					readOnly: false,
+				},
+			],
 		});
 	}, 60_000);
 
@@ -64,10 +113,12 @@ describe("agentos package projection (VM)", () => {
 	// isolates the package's $PATH resolution + header dispatch (no shell needed).
 	async function runCommand(
 		command: string,
+		cwd?: string,
 	): Promise<{ code: number; out: string; err: string }> {
 		let out = "";
 		let err = "";
 		const { pid } = vm.spawn(command, [], {
+			cwd,
 			onStdout: (data) => {
 				out += new TextDecoder().decode(data);
 			},
@@ -97,6 +148,57 @@ describe("agentos package projection (VM)", () => {
 		expect(err, `stderr: ${err}`).not.toContain("Error");
 		expect(out).toContain("hello from agentos package");
 		expect(code).toBe(0);
+	});
+
+	test("starts JavaScript package commands in the requested cwd", async () => {
+		const { code, out, err } = await runCommand("hello-cmd", "/workspace");
+		expect({ code, err }).toEqual({ code: 0, err: "" });
+		expect(out).toContain("cwd=/workspace");
+		expect(out).toContain("importedCwd=/workspace");
+		expect(out).toContain("realCwd=/workspace");
+	});
+
+	test("starts nested JavaScript package commands in the requested cwd", async () => {
+		const { code, out, err } = await runCommand("hello-parent");
+		expect({ code, err }).toEqual({ code: 0, err: "" });
+		expect(JSON.parse(out)).toMatchObject({
+			status: 0,
+			stderr: "",
+			stdout: expect.stringContaining("cwd=/workspace"),
+		});
+	});
+
+	test("starts asynchronously nested JavaScript package commands in the requested cwd", async () => {
+		const { code, out, err } = await runCommand("hello-parent-async");
+		expect({ code, err }).toEqual({ code: 0, err: "" });
+		expect(JSON.parse(out)).toMatchObject({
+			status: 0,
+			stderr: "",
+			stdout: expect.stringContaining("cwd=/workspace"),
+		});
+	});
+
+	test("starts Node CLI entrypoints in the requested cwd", async () => {
+		const { code, out, err } = await runCommand("hello-parent-node");
+		expect({ code, err }).toEqual({ code: 0, err: "" });
+		expect(JSON.parse(out)).toMatchObject({
+			execPath: "/usr/bin/node",
+			status: 0,
+			stderr: "",
+			stdout: expect.stringContaining("cwd=/workspace"),
+		});
+	});
+
+	test("starts package-path Node CLI entrypoints in the requested cwd", async () => {
+		const { code, out, err } = await runCommand(
+			"hello-parent-node-package-path",
+		);
+		expect({ code, err }).toEqual({ code: 0, err: "" });
+		expect(JSON.parse(out)).toMatchObject({
+			status: 0,
+			stderr: "",
+			stdout: expect.stringContaining("cwd=/workspace"),
+		});
 	});
 
 	test("runs repeatedly (no shebang corruption across executions)", async () => {

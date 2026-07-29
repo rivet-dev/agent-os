@@ -1,219 +1,35 @@
 ---
 title: TypeScript
-description: Sandboxed type checking and compilation via @rivet-dev/agentos-typescript.
+description: Execute and type-check TypeScript through the AgentOS JavaScript API.
 icon: "code"
 ---
 
-The AgentOS runtime includes a companion package
-for sandboxed TypeScript tooling. `@rivet-dev/agentos-typescript` runs the TypeScript
-compiler inside the sandbox runtime instead of the host process, so untrusted
-compile and typecheck work stays inside the same execution boundary.
+TypeScript is built into JavaScript execution.
 
-## Runnable example
-
-```ts Type-Checked Execution
-import { join } from "node:path";
-import { anthropic } from "@ai-sdk/anthropic";
-import { createTypeScriptTools } from "@rivet-dev/agentos-typescript";
-import { generateText, stepCountIs, tool } from "ai";
-import {
-	allowAll,
-	createInMemoryFileSystem,
-	createKernel,
-	createNodeDriver,
-	createNodeRuntime,
-	createNodeRuntimeDriverFactory,
-	nodeModulesMount,
-} from "@rivet-dev/agentos-core";
-import { z } from "zod";
-
-const filesystem = createInMemoryFileSystem();
-const systemDriver = createNodeDriver({
-	filesystem,
-	mounts: [nodeModulesMount(join(process.cwd(), "node_modules"))],
-	permissions: allowAll,
-});
-const runtimeDriverFactory = createNodeRuntimeDriverFactory();
-const ts = createTypeScriptTools({
-	systemDriver,
-	runtimeDriverFactory,
-	memoryLimit: 256,
-	cpuTimeLimitMs: 5000,
-});
-
-const { text } = await generateText({
-	model: anthropic("claude-sonnet-4-6"),
-	prompt:
-		"Write TypeScript that calculates the first 20 fibonacci numbers. Assign the result to module.exports.",
-	stopWhen: stepCountIs(5),
-	tools: {
-		execute_typescript: tool({
-			description:
-				"Type-check TypeScript in a sandbox, compile it, then run the emitted JavaScript in a sandbox. Return diagnostics when validation fails.",
-			inputSchema: z.object({ code: z.string() }),
-			execute: async ({ code }) => {
-				const typecheck = await ts.typecheckSource({
-					sourceText: code,
-					filePath: "/root/generated.ts",
-					compilerOptions: {
-						module: "commonjs",
-						target: "es2022",
-					},
-				});
-
-				if (!typecheck.success) {
-					return {
-						ok: false,
-						stage: "typecheck",
-						diagnostics: typecheck.diagnostics,
-					};
-				}
-
-				const compiled = await ts.compileSource({
-					sourceText: code,
-					filePath: "/root/generated.ts",
-					compilerOptions: {
-						module: "commonjs",
-						target: "es2022",
-					},
-				});
-
-				if (!compiled.success || !compiled.outputText) {
-					return {
-						ok: false,
-						stage: "compile",
-						diagnostics: compiled.diagnostics,
-					};
-				}
-
-				try {
-					await filesystem.mkdir("/root", { recursive: true });
-					await filesystem.writeFile("/root/generated.js", compiled.outputText);
-					const kernel = createKernel({
-						filesystem,
-						permissions: allowAll,
-						syncFilesystemOnDispose: false,
-					});
-					let stdout = "";
-					let stderr = "";
-					try {
-						await kernel.mount(createNodeRuntime());
-						const child = kernel.spawn(
-							"node",
-							[
-								"-e",
-								"const exportsValue = require('/root/generated.js'); console.log(JSON.stringify(exportsValue));",
-							],
-							{
-								onStdout: (chunk) => {
-									stdout += Buffer.from(chunk).toString("utf8");
-								},
-								onStderr: (chunk) => {
-									stderr += Buffer.from(chunk).toString("utf8");
-								},
-							},
-						);
-						const exitCode = await child.wait();
-						if (exitCode !== 0) {
-							throw new Error(
-								stderr.trim() || `sandboxed JavaScript exited ${exitCode}`,
-							);
-						}
-					} finally {
-						await kernel.dispose();
-					}
-
-					return {
-						ok: true,
-						stage: "run",
-						exports: JSON.parse(stdout),
-					};
-				} catch (error) {
-					return {
-						ok: false,
-						stage: "run",
-						errorMessage:
-							error instanceof Error ? error.message : String(error),
-					};
-				}
-			},
-		}),
-	},
-});
-
-console.log(text);
-```
-
-Source: [`packages/secure-exec-example-ai-agent-type-check/src/index.ts`](../../packages/secure-exec-example-ai-agent-type-check/src/index.ts)
+- No standalone TypeScript package or `/typescript` subpath.
+- Create an `AgentOs` VM and use its top-level `typescript` methods.
 
 ## Install
 
 ```bash
-pnpm add @rivet-dev/agentos-core @rivet-dev/agentos-typescript typescript
+pnpm add @rivet-dev/agentos
 ```
 
-## Setup
+## Runnable example
 
-```ts
-import { join } from "node:path";
-import { createNodeDriver, createNodeRuntimeDriverFactory, nodeModulesMount } from "@rivet-dev/agentos-core";
-import { createTypeScriptTools } from "@rivet-dev/agentos-typescript";
+<CodeSnippet file="examples/js-typescript/src/index.ts" />
 
-const ts = createTypeScriptTools({
-  systemDriver: createNodeDriver({
-    mounts: [nodeModulesMount(join(process.cwd(), "node_modules"))],
-  }),
-  runtimeDriverFactory: createNodeRuntimeDriverFactory(),
-});
-```
+## API
 
-`nodeModulesMount` exposes the host package's `node_modules/` to the sandbox as
-a read-only module tree, which lets the compiler runtime import packages like
-`typescript` without copying them into the sandbox filesystem first.
+`typescript` exposes:
 
-## Type-check a source string
+- `execute()` / `evaluate()` — run source / return a value. **Transpiles
+  without semantic type checking.**
+- `executeFile()` — run an existing file.
+- `check()` / `checkProject()` — explicit type checking; returns structured
+  diagnostics.
 
-```ts
-const result = await ts.typecheckSource({
-  sourceText: "const value: string = 1;",
-  filePath: "/root/input.ts",
-});
+Inline JavaScript and TypeScript share retained state when passed the same
+explicitly created `contextId`.
 
-console.log(result.success); // false
-console.log(result.diagnostics[0]?.message);
-```
-
-## Compile a source string
-
-```ts
-const result = await ts.compileSource({
-  sourceText: "export const value: number = 3;",
-  filePath: "/root/input.ts",
-  compilerOptions: {
-    module: "commonjs",
-    target: "es2022",
-  },
-});
-
-console.log(result.outputText);
-```
-
-## Type-check or compile a project
-
-```ts
-await ts.typecheckProject({ cwd: "/root/project" });
-await ts.compileProject({ cwd: "/root/project" });
-```
-
-## Diagnostic shape
-
-```ts
-type TypeScriptDiagnostic = {
-  code: number;
-  category: "error" | "warning" | "suggestion" | "message";
-  message: string;
-  filePath?: string;
-  line?: number;
-  column?: number;
-};
-```
+See the [JavaScript execution guide](/docs/javascript).

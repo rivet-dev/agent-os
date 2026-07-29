@@ -3,7 +3,7 @@
 //! Host-free core for the Agent OS ACP sidecar extension.
 //!
 //! This crate holds the parts of the ACP extension that do NOT depend on the host
-//! runtime (tokio, std::fs, the native secure-exec sidecar): the request/response
+//! runtime (tokio, std::fs, the native agentos sidecar): the request/response
 //! wire codec and the per-session data model. It compiles to wasm32 so the browser
 //! sidecar (`agentos-sidecar-browser`) can run the same ACP logic the native sidecar
 //! (`agentos-sidecar`) runs, with each backend supplying the host operations

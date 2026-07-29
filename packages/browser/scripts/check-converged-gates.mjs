@@ -22,7 +22,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 // Resolve the linked @rivet-dev/agentos-runtime-browser package root via an exported subpath
 // (its package.json is not itself exported). dist/worker.js -> package root.
 const workerEntry = require.resolve("@rivet-dev/agentos-runtime-browser/internal/worker");
-const secureExecBrowserRoot = path.resolve(path.dirname(workerEntry), "..");
+const agentOsBrowserRoot = path.resolve(path.dirname(workerEntry), "..");
 const gateScripts = [
 	"check-bridge-contract.mjs",
 	"check-signal-table.mjs",
@@ -31,7 +31,7 @@ const gateScripts = [
 
 let failed = false;
 for (const script of gateScripts) {
-	const scriptPath = path.join(secureExecBrowserRoot, "scripts", script);
+	const scriptPath = path.join(agentOsBrowserRoot, "scripts", script);
 	process.stdout.write(`▶ @rivet-dev/agentos-runtime-browser ${script}\n`);
 	const result = spawnSync("node", [scriptPath], { stdio: "inherit" });
 	if (result.status !== 0) {

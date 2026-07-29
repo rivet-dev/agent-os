@@ -391,6 +391,25 @@ pub(crate) mod confine {
 
             let parent = dirs.last().expect("dirs is never empty");
 
+            // Ordinary intermediate directories are overwhelmingly the hot
+            // path (module loading and project metadata scans). Opening with
+            // O_NOFOLLOW already proves the component was not swapped to a
+            // symlink, so avoid a redundant lstat before that open. On the
+            // exceptional symlink/non-directory path, fall through to the
+            // classifier below to preserve the existing expansion and error
+            // semantics.
+            if !is_last {
+                match open_dir_anchor(parent, name.as_os_str()) {
+                    Ok(child) => {
+                        dirs.push(child);
+                        real_path.push(&name);
+                        continue;
+                    }
+                    Err(Errno::ELOOP | Errno::ENOTDIR) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+
             match rfs::statat(parent, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(stat) => {
                     let is_symlink = FileType::from_raw_mode(stat.st_mode) == FileType::Symlink;
@@ -1173,6 +1192,13 @@ impl HostDirFilesystem {
     }
 
     fn create_dir_with_creation_mode(&mut self, path: &str, mode: u32) -> VfsResult<()> {
+        let (normalized, relative) = self.relative_virtual_path(path);
+        if relative.file_name().is_none() {
+            return Err(VfsError::new(
+                "EEXIST",
+                format!("mkdir '{normalized}': File exists"),
+            ));
+        }
         let (parent_dir, _, name, normalized) = self.split_parent(path, false)?;
         mkdirat(
             Some(parent_dir.as_raw_fd()),

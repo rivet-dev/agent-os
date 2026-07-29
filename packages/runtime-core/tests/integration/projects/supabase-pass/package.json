@@ -1,0 +1,8 @@
+{
+  "name": "project-matrix-supabase-pass",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@supabase/supabase-js": "2.110.7"
+  }
+}

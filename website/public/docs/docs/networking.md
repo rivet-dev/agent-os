@@ -14,7 +14,7 @@ With the HTTP server running in the VM (above), send requests to it with `httpRe
 
 ## Preview URLs
 
-Preview URLs are port forwarding for VM services: a time-limited, public URL that proxies HTTP to a port inside the VM, for browser or external access (use `httpRequest` for server-to-server). Preview creation is intentionally actor-only under `agent.actor.preview`; tokens survive sleep/wake and CORS is enabled. See [Security](/docs/security-model) for details.
+Preview URLs are port forwarding for VM services: a time-limited, public URL that proxies HTTP to a port inside the VM, for browser or external access (use `httpRequest` for server-to-server). Preview creation is intentionally actor-only through the native `createPreviewUrl` and `expirePreviewUrl` actions; tokens survive sleep/wake and CORS is enabled. See [Security](/docs/security-model) for details.
 
 ### Create a preview URL
 

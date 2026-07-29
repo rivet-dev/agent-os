@@ -4,7 +4,7 @@ name = "cmd-fd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "fd standalone binary for secure-exec VM"
+description = "fd standalone binary for agentos VM"
 publish = false
 
 [dependencies]

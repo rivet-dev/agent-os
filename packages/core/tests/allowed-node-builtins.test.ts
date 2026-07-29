@@ -110,7 +110,7 @@ describe("NativeSidecarKernelProxy execute payloads", () => {
 			cwd: "/workspace",
 			localMounts: [],
 			sidecarMounts: [],
-			commandGuestPaths: new Map([["sh", "/__secure_exec/commands/000/sh"]]),
+			commandGuestPaths: new Map([["sh", "/__agentos/commands/000/sh"]]),
 		});
 
 		await expect(

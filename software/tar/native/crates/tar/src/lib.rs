@@ -2,11 +2,13 @@
 //!
 //! Supports -c create, -x extract, -t list.
 //! Options: -f archive, -z gzip, -v verbose, -C directory, --strip-components=N.
+//! Create mode also supports the reproducible-archive options used by package
+//! builders: --sort=name, --mtime, --owner, --group, and --numeric-owner.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use flate2::read::GzDecoder;
@@ -16,6 +18,77 @@ use flate2::Compression;
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 const MAX_CREATE_DEPTH: usize = 256;
 const MAX_DIRECTORY_ENTRIES: usize = 100_000;
+const MAX_FILE_READ_BYTES: usize = 256 * 1024;
+
+/// Prevent readers such as `tar::Builder` from turning one large guest file
+/// into a single WASI bridge operation. The runtime accepts larger transfers,
+/// but bounded streaming keeps archive creation independent of file size.
+struct BoundedReader<R> {
+    inner: R,
+    path: PathBuf,
+    offset: u64,
+}
+
+impl<R> BoundedReader<R> {
+    fn new(inner: R, path: PathBuf) -> Self {
+        Self {
+            inner,
+            path,
+            offset: 0,
+        }
+    }
+}
+
+impl<R: Read> Read for BoundedReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let length = buffer.len().min(MAX_FILE_READ_BYTES);
+        let bytes_read = self.inner.read(&mut buffer[..length]).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "read input {} at offset {}: {error}",
+                    self.path.display(),
+                    self.offset
+                ),
+            )
+        })?;
+        self.offset = self.offset.saturating_add(bytes_read as u64);
+        Ok(bytes_read)
+    }
+}
+
+struct ArchiveWriter<W> {
+    inner: W,
+    offset: u64,
+}
+
+impl<W> ArchiveWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, offset: 0 }
+    }
+}
+
+impl<W: Write> Write for ArchiveWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let bytes_written = self.inner.write(buffer).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("write archive at offset {}: {error}", self.offset),
+            )
+        })?;
+        self.offset = self.offset.saturating_add(bytes_written as u64);
+        Ok(bytes_written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush().map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("flush archive at offset {}: {error}", self.offset),
+            )
+        })
+    }
+}
 
 #[derive(PartialEq)]
 enum Mode {
@@ -23,6 +96,14 @@ enum Mode {
     Create,
     Extract,
     List,
+}
+
+#[derive(Clone, Copy, Default)]
+struct CreateOptions {
+    sort_by_name: bool,
+    mtime: Option<u64>,
+    owner: Option<u64>,
+    group: Option<u64>,
 }
 
 /// Unified tar entry point.
@@ -44,6 +125,7 @@ pub fn main(args: Vec<OsString>) -> i32 {
     let mut verbose = false;
     let mut directory: Option<String> = None;
     let mut strip_components: usize = 0;
+    let mut create_options = CreateOptions::default();
     let mut paths: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -52,7 +134,46 @@ pub fn main(args: Vec<OsString>) -> i32 {
     while i < str_args.len() {
         let arg = &str_args[i];
 
-        if arg.starts_with("--strip-components=") {
+        if arg == "--sort=name" {
+            create_options.sort_by_name = true;
+            first_arg = false;
+        } else if arg.starts_with("--sort=") {
+            eprintln!("tar: unsupported sort order: {}", &arg["--sort=".len()..]);
+            return 1;
+        } else if let Some(value) = arg.strip_prefix("--mtime=") {
+            create_options.mtime = match parse_numeric_option("mtime", value) {
+                Ok(value) => Some(value),
+                Err(()) => return 1,
+            };
+            first_arg = false;
+        } else if arg == "--mtime" {
+            i += 1;
+            if i >= str_args.len() {
+                eprintln!("tar: option --mtime requires a value");
+                return 1;
+            }
+            create_options.mtime = match parse_numeric_option("mtime", &str_args[i]) {
+                Ok(value) => Some(value),
+                Err(()) => return 1,
+            };
+            first_arg = false;
+        } else if let Some(value) = arg.strip_prefix("--owner=") {
+            create_options.owner = match parse_numeric_option("owner", value) {
+                Ok(value) => Some(value),
+                Err(()) => return 1,
+            };
+            first_arg = false;
+        } else if let Some(value) = arg.strip_prefix("--group=") {
+            create_options.group = match parse_numeric_option("group", value) {
+                Ok(value) => Some(value),
+                Err(()) => return 1,
+            };
+            first_arg = false;
+        } else if arg == "--numeric-owner" {
+            // Headers are always written with numeric uid/gid fields. Accept the
+            // GNU flag so reproducible build commands are portable to AgentOS.
+            first_arg = false;
+        } else if arg.starts_with("--strip-components=") {
             if let Ok(n) = arg["--strip-components=".len()..].parse() {
                 strip_components = n;
             }
@@ -142,6 +263,7 @@ pub fn main(args: Vec<OsString>) -> i32 {
             verbose,
             directory.as_deref(),
             &paths,
+            create_options,
         ),
         Mode::Extract => do_extract(
             archive_file.as_deref(),
@@ -166,12 +288,20 @@ pub fn main(args: Vec<OsString>) -> i32 {
     }
 }
 
+fn parse_numeric_option(name: &str, raw: &str) -> Result<u64, ()> {
+    let value = raw.strip_prefix('@').unwrap_or(raw);
+    value.parse().map_err(|_| {
+        eprintln!("tar: invalid numeric value for --{}: {}", name, raw);
+    })
+}
+
 fn do_create(
     archive_file: Option<&str>,
     gzip: bool,
     verbose: bool,
     directory: Option<&str>,
     paths: &[String],
+    options: CreateOptions,
 ) -> io::Result<()> {
     if paths.is_empty() {
         return Err(io::Error::new(
@@ -181,53 +311,20 @@ fn do_create(
     }
 
     match archive_file {
-        Some("-") | None => create_to_writer(io::stdout(), gzip, verbose, directory, paths),
+        Some("-") | None => {
+            create_to_writer(io::stdout(), gzip, verbose, directory, paths, options)
+        }
         Some(path) => {
-            let mut archive = BoundedVecWriter::new(512 * 1024 * 1024);
-            create_to_writer(&mut archive, gzip, verbose, directory, paths)?;
-            fs::write(path, archive.into_inner())
+            let archive = File::create(path)?;
+            create_to_writer(
+                BufWriter::with_capacity(1024 * 1024, archive),
+                gzip,
+                verbose,
+                directory,
+                paths,
+                options,
+            )
         }
-    }
-}
-
-struct BoundedVecWriter {
-    bytes: Vec<u8>,
-    capacity: usize,
-}
-
-impl BoundedVecWriter {
-    fn new(capacity: usize) -> Self {
-        Self {
-            bytes: Vec::new(),
-            capacity,
-        }
-    }
-
-    fn into_inner(self) -> Vec<u8> {
-        self.bytes
-    }
-}
-
-impl Write for BoundedVecWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let Some(new_len) = self.bytes.len().checked_add(buf.len()) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "archive is too large to buffer",
-            ));
-        };
-        if new_len > self.capacity {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "archive is too large to buffer",
-            ));
-        }
-        self.bytes.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
     }
 }
 
@@ -237,19 +334,31 @@ fn create_to_writer<W: Write>(
     verbose: bool,
     directory: Option<&str>,
     paths: &[String],
+    options: CreateOptions,
 ) -> io::Result<()> {
+    let writer = ArchiveWriter::new(writer);
     if gzip {
         let encoder = GzEncoder::new(writer, Compression::default());
         let mut builder = tar::Builder::new(encoder);
-        append_paths(&mut builder, directory, paths, verbose)?;
-        let encoder = builder.into_inner()?;
-        let mut writer = encoder.finish()?;
-        writer.flush()
+        append_paths(&mut builder, directory, paths, verbose, options)?;
+        let encoder = builder
+            .into_inner()
+            .map_err(|error| io::Error::new(error.kind(), format!("finish tar: {error}")))?;
+        let mut writer = encoder
+            .finish()
+            .map_err(|error| io::Error::new(error.kind(), format!("finish gzip: {error}")))?;
+        writer
+            .flush()
+            .map_err(|error| io::Error::new(error.kind(), format!("flush archive: {error}")))
     } else {
         let mut builder = tar::Builder::new(writer);
-        append_paths(&mut builder, directory, paths, verbose)?;
-        let mut writer = builder.into_inner()?;
-        writer.flush()
+        append_paths(&mut builder, directory, paths, verbose, options)?;
+        let mut writer = builder
+            .into_inner()
+            .map_err(|error| io::Error::new(error.kind(), format!("finish tar: {error}")))?;
+        writer
+            .flush()
+            .map_err(|error| io::Error::new(error.kind(), format!("flush archive: {error}")))
     }
 }
 
@@ -258,6 +367,7 @@ fn append_paths<W: Write>(
     directory: Option<&str>,
     paths: &[String],
     verbose: bool,
+    options: CreateOptions,
 ) -> io::Result<()> {
     let mut entry_count = 0;
     for path in paths {
@@ -268,6 +378,7 @@ fn append_paths<W: Write>(
             verbose,
             0,
             &mut entry_count,
+            options,
         )?;
     }
     Ok(())
@@ -280,6 +391,7 @@ fn append_path<W: Write>(
     verbose: bool,
     depth: usize,
     entry_count: &mut usize,
+    options: CreateOptions,
 ) -> io::Result<()> {
     if depth > MAX_CREATE_DEPTH {
         return Err(io::Error::new(
@@ -304,6 +416,7 @@ fn append_path<W: Write>(
             verbose,
             depth,
             entry_count,
+            options,
         )?;
     } else if meta.is_file() {
         if verbose {
@@ -313,9 +426,27 @@ fn append_path<W: Write>(
         header.set_entry_type(tar::EntryType::Regular);
         header.set_size(meta.len());
         header.set_mode(0o644);
+        apply_create_metadata(&mut header, options);
         header.set_cksum();
-        let mut file = File::open(&disk_path)?;
-        builder.append_data(&mut header, archive_path, &mut file)?;
+        let file = File::open(&disk_path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("open input {}: {error}", disk_path.display()),
+            )
+        })?;
+        let mut file = BoundedReader::new(file, disk_path.clone());
+        builder
+            .append_data(&mut header, archive_path, &mut file)
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "append file {} as {}: {error}",
+                        disk_path.display(),
+                        archive_path.display()
+                    ),
+                )
+            })?;
     } else if meta.file_type().is_symlink() {
         if verbose {
             eprintln!("{}", archive_path.display());
@@ -325,8 +456,21 @@ fn append_path<W: Write>(
         header.set_entry_type(tar::EntryType::Symlink);
         header.set_size(0);
         header.set_mode(0o777);
+        apply_create_metadata(&mut header, options);
         header.set_cksum();
-        builder.append_link(&mut header, archive_path, &target)?;
+        builder
+            .append_link(&mut header, archive_path, &target)
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "append symlink {} as {} -> {}: {error}",
+                        disk_path.display(),
+                        archive_path.display(),
+                        target.display()
+                    ),
+                )
+            })?;
     }
 
     Ok(())
@@ -339,6 +483,7 @@ fn append_dir<W: Write>(
     verbose: bool,
     depth: usize,
     entry_count: &mut usize,
+    options: CreateOptions,
 ) -> io::Result<()> {
     if verbose {
         eprintln!("{}/", archive_dir.display());
@@ -348,12 +493,27 @@ fn append_dir<W: Write>(
     header.set_entry_type(tar::EntryType::Directory);
     header.set_size(0);
     header.set_mode(0o755);
+    apply_create_metadata(&mut header, options);
     header.set_cksum();
-    builder.append_data(&mut header, archive_dir, io::empty())?;
+    builder
+        .append_data(&mut header, archive_dir, io::empty())
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "append directory {} as {}: {error}",
+                    disk_dir.display(),
+                    archive_dir.display()
+                ),
+            )
+        })?;
 
     let mut dir_entries = 0;
-    for entry_result in fs::read_dir(disk_dir)? {
-        let entry = entry_result?;
+    let mut entries = fs::read_dir(disk_dir)?.collect::<Result<Vec<_>, _>>()?;
+    if options.sort_by_name {
+        entries.sort_by_key(|entry| entry.file_name());
+    }
+    for entry in entries {
         dir_entries += 1;
         if dir_entries > MAX_DIRECTORY_ENTRIES {
             return Err(io::Error::new(
@@ -369,10 +529,23 @@ fn append_dir<W: Write>(
             verbose,
             depth + 1,
             entry_count,
+            options,
         )?;
     }
 
     Ok(())
+}
+
+fn apply_create_metadata(header: &mut tar::Header, options: CreateOptions) {
+    if let Some(mtime) = options.mtime {
+        header.set_mtime(mtime);
+    }
+    if let Some(owner) = options.owner {
+        header.set_uid(owner);
+    }
+    if let Some(group) = options.group {
+        header.set_gid(group);
+    }
 }
 
 fn do_extract(
@@ -750,4 +923,38 @@ fn print_usage() {
     eprintln!("  -C DIR          change directory");
     eprintln!("  --strip-components=N");
     eprintln!("                  strip N leading components on extract");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ObservedReader {
+        remaining: usize,
+        largest_request: usize,
+    }
+
+    impl Read for ObservedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.largest_request = self.largest_request.max(buffer.len());
+            let length = self.remaining.min(buffer.len());
+            buffer[..length].fill(1);
+            self.remaining -= length;
+            Ok(length)
+        }
+    }
+
+    #[test]
+    fn bounded_reader_caps_each_underlying_read() {
+        let input = ObservedReader {
+            remaining: MAX_FILE_READ_BYTES * 3 + 7,
+            largest_request: 0,
+        };
+        let mut reader = BoundedReader::new(input, PathBuf::from("fixture"));
+        let mut output = Vec::new();
+        io::copy(&mut reader, &mut output).unwrap();
+
+        assert_eq!(output.len(), MAX_FILE_READ_BYTES * 3 + 7);
+        assert!(reader.inner.largest_request <= MAX_FILE_READ_BYTES);
+    }
 }

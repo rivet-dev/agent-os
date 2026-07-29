@@ -341,20 +341,10 @@ pub(crate) fn service_javascript_kernel_fd_write_sync_rpc(
     let written = kernel
         .fd_write_nonblocking(EXECUTION_DRIVER_NAME, process.kernel_pid, fd, &chunk)
         .map_err(kernel_error)?;
-    if written > 0
-        && kernel
-            .fd_stat(EXECUTION_DRIVER_NAME, process.kernel_pid, fd)
-            .map_err(kernel_error)?
-            .filetype
-            == agentos_kernel::fd_table::FILETYPE_REGULAR_FILE
-    {
-        crate::filesystem::mirror_kernel_fd_contents_to_process_shadow(
-            kernel,
-            process,
-            process.kernel_pid,
-            fd,
-        )?;
-    }
+    // `process.fd_write` is the WASM runner's kernel-fd path. The kernel VFS is
+    // authoritative here, including host-backed mounts; mirroring the whole
+    // regular file after each chunk makes streamed writes quadratic and fails
+    // once the growing file exceeds the configured single-read bound.
     Ok(Value::from(written))
 }
 

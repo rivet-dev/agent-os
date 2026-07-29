@@ -14,10 +14,10 @@ const agent = client.vm.getOrCreate("my-agent", {
 
 // Actions on the handle run against the authenticated connection.
 // `openSession` resolves with no value; the caller keeps the chosen session ID.
-await agent.openSession({
+await agent.sessions.open({
 	agent: "claude",
 	env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 });
-await agent.prompt({
+await agent.sessions.prompt({
 	content: [{ type: "text", text: "List the files in the working directory." }],
 });

@@ -23,6 +23,12 @@ impl AcpExtension {
         args.extend(request.args.iter().cloned());
         let mut env = hash_to_btree(request.env.clone());
         env.insert(String::from("AGENTOS_KEEP_STDIN_OPEN"), String::from("1"));
+        // ACP adapters are long-lived stdin servers. Register stdin before guest
+        // code starts so a slow module graph cannot be mistaken for quiescence.
+        env.insert(
+            String::from("AGENTOS_EAGER_STDIN_HANDLE"),
+            String::from("1"),
+        );
         // Manifest env applies as DEFAULTS; caller/base env wins on conflicts.
         for (key, value) in &resolved.env {
             env.entry(key.clone()).or_insert_with(|| value.clone());
@@ -33,9 +39,9 @@ impl AcpExtension {
         let started = match ctx
             .spawn_process_wire(ExecuteRequest {
                 process_id: process_id.clone(),
-                command: None,
-                runtime: Some(convert_runtime(request.runtime.clone())),
-                entrypoint: Some(resolved.entrypoint.clone()),
+                command: Some(resolved.entrypoint.clone()),
+                runtime: None,
+                entrypoint: None,
                 args,
                 env: env.into_iter().collect(),
                 cwd: Some(request.cwd.clone()),
@@ -609,6 +615,14 @@ impl AcpExtension {
             }
         }
 
+        let event_count = match u32::try_from(exchange.events.len()) {
+            Ok(event_count) => event_count,
+            Err(_) => {
+                return AcpHandlerOutput::response(Err(SidecarError::InvalidState(String::from(
+                    "ACP request emitted more events than the protocol can represent",
+                ))));
+            }
+        };
         AcpHandlerOutput {
             response: Ok(AcpResponse::AcpSessionRpcResponse(
                 agentos_protocol::generated::v1::AcpSessionRpcResponse {
@@ -621,6 +635,7 @@ impl AcpExtension {
                             )));
                         }
                     },
+                    event_count,
                 },
             )),
             events: exchange.events,
@@ -929,9 +944,37 @@ pub(super) async fn send_json_rpc_request(
         &mut recent_activity,
         format!("sent request {method} id={response_id}"),
     );
+    let mut inactivity = (method == "session/prompt")
+        .then(|| InactivityWarnings::new(format!("sent request {method} id={response_id}")));
+    let mut response = None;
+    let mut response_drain_deadline = None;
     loop {
         let now = Instant::now();
-        if deadline.is_some_and(|deadline| now >= deadline) {
+        if let Some(warning) = inactivity
+            .as_mut()
+            .and_then(|inactivity| inactivity.take_due(now))
+        {
+            tracing::warn!(
+                target: "agentos_sidecar::acp_extension",
+                method,
+                response_id,
+                process_id,
+                elapsed_ms = warning.elapsed.as_millis() as u64,
+                inactive_ms = warning.inactive.as_millis() as u64,
+                last_activity_elapsed_ms = warning.last_activity_elapsed.as_millis() as u64,
+                last_activity = %warning.last_activity,
+                "ACP prompt remains pending after sustained inactivity; no timeout was applied",
+            );
+        }
+        if let Some(drain_deadline) = response_drain_deadline {
+            if now >= drain_deadline {
+                return Ok(JsonRpcExchange {
+                    response: response.expect("a response arms the drain deadline"),
+                    events,
+                    notifications,
+                });
+            }
+        } else if deadline.is_some_and(|deadline| now >= deadline) {
             let timeout = timeout.expect("a deadline always has a timeout");
             let cancel_status = if let Some(session_id) = event_session_id {
                 match write_session_cancel_notification(ctx, process_id, session_id).await {
@@ -971,9 +1014,13 @@ pub(super) async fn send_json_rpc_request(
         // explicit `session/cancel` operation, and legitimate tool-heavy turns
         // or human permission waits may run for hours. The long poll slice is a
         // transport wakeup interval only; expiration never cancels the turn.
-        let remaining = deadline
+        let mut remaining = response_drain_deadline
+            .or(deadline)
             .map(|deadline| deadline.saturating_duration_since(now))
             .unwrap_or(Duration::from_secs(24 * 60 * 60));
+        if let Some(inactivity) = inactivity.as_ref() {
+            remaining = remaining.min(inactivity.wait_duration(now));
+        }
         // `poll_event_wire` already waits on the execution event receiver. Use
         // the real request deadline so output/exit wakes this task directly;
         // a sub-millisecond timeout loop only burns runtime turns while idle.
@@ -995,6 +1042,13 @@ pub(super) async fn send_json_rpc_request(
             ctx.poll_event_wire(remaining).await?
         };
         let Some(event) = event else {
+            if response_drain_deadline.is_some() {
+                return Ok(JsonRpcExchange {
+                    response: response.expect("a response arms the drain deadline"),
+                    events,
+                    notifications,
+                });
+            }
             continue;
         };
 
@@ -1002,6 +1056,9 @@ pub(super) async fn send_json_rpc_request(
             EventPayload::ProcessOutputEvent(output)
                 if output.process_id == process_id && output.channel == StreamChannel::Stdout =>
             {
+                if let Some(inactivity) = inactivity.as_mut() {
+                    inactivity.record("received adapter stdout");
+                }
                 for line in append_stdout_chunk(stdout, &output.chunk, max_read_line_bytes)? {
                     let Ok(message) = serde_json::from_str::<Value>(&line) else {
                         record_recent_activity(
@@ -1015,6 +1072,12 @@ pub(super) async fn send_json_rpc_request(
                     {
                         if let Some(inbound_method) = message.get("method").and_then(Value::as_str)
                         {
+                            if let Some(inactivity) = inactivity.as_mut() {
+                                inactivity.record(format!(
+                                    "received request {inbound_method} id={}",
+                                    json_rpc_id_label(message.get("id"))
+                                ));
+                            }
                             record_recent_activity(
                                 &mut recent_activity,
                                 format!(
@@ -1038,16 +1101,28 @@ pub(super) async fn send_json_rpc_request(
                         continue;
                     }
                     if message.get("id").and_then(Value::as_i64) == Some(response_id) {
-                        return Ok(JsonRpcExchange {
-                            response: message,
-                            events,
-                            notifications,
-                        });
+                        if let Some(inactivity) = inactivity.as_mut() {
+                            inactivity.record(format!("received response id={response_id}"));
+                        }
+                        response = Some(message);
+                        if method == "session/prompt" {
+                            response_drain_deadline =
+                                Some(Instant::now() + PROMPT_RESPONSE_DRAIN_QUIET);
+                            continue;
+                        }
+                        // Still process the rest of this stdout chunk before
+                        // returning; a notification can follow the response in
+                        // the same process write/read batch.
+                        continue;
                     }
                     if message.get("method").and_then(Value::as_str).is_some() {
                         if let Some(notification_method) =
                             message.get("method").and_then(Value::as_str)
                         {
+                            if let Some(inactivity) = inactivity.as_mut() {
+                                inactivity
+                                    .record(format!("received notification {notification_method}"));
+                            }
                             record_recent_activity(
                                 &mut recent_activity,
                                 format!("received notification {notification_method}"),
@@ -1083,10 +1158,27 @@ pub(super) async fn send_json_rpc_request(
                         }
                     }
                 }
+                if method == "session/prompt" {
+                    if response.is_some() {
+                        // Require a complete quiet window after the most recent
+                        // adapter stdout, not merely after the response line.
+                        response_drain_deadline =
+                            Some(Instant::now() + PROMPT_RESPONSE_DRAIN_QUIET);
+                    }
+                } else if let Some(response) = response.take() {
+                    return Ok(JsonRpcExchange {
+                        response,
+                        events,
+                        notifications,
+                    });
+                }
             }
             EventPayload::ProcessOutputEvent(output)
                 if output.process_id == process_id && output.channel == StreamChannel::Stderr =>
             {
+                if let Some(inactivity) = inactivity.as_mut() {
+                    inactivity.record("received adapter stderr");
+                }
                 // Accumulate stderr (borrow before the chunk is moved into the
                 // frame) so a non-zero adapter exit can fold the tail into its
                 // error for diagnostics.
@@ -1137,6 +1229,8 @@ pub(super) async fn send_json_rpc_request(
             }
             EventPayload::ProcessOutputEvent(_)
             | EventPayload::ProcessExitedEvent(_)
+            | EventPayload::ExecutionOutputEvent(_)
+            | EventPayload::ExecutionCompletedEvent(_)
             | EventPayload::VmLifecycleEvent(_)
             | EventPayload::StructuredEvent(_)
             | EventPayload::ExtEnvelope(_) => {}
@@ -1315,7 +1409,13 @@ pub(super) fn forward_inbound_host_request(
             SidecarError::InvalidState(format!("failed to serialize ACP host request: {error}"))
         })?,
     });
-    let response = ctx.invoke_callback(encode_callback(callback)?, Duration::from_secs(120))?;
+    // This path contains only noninteractive filesystem/terminal/internal host
+    // RPCs. Human permission requests are handled durably above and deliberately
+    // have no deadline.
+    let response = ctx.invoke_callback(
+        encode_callback(callback)?,
+        ACP_MACHINE_HOST_CALLBACK_TIMEOUT,
+    )?;
     let response: AcpCallbackResponse = serde_bare::from_slice(&response).map_err(|error| {
         SidecarError::InvalidState(format!("invalid ACP host request response: {error}"))
     })?;
@@ -1414,14 +1514,6 @@ pub(super) fn assemble_system_prompt(skip_base: bool, additional: Option<&str>) 
     format!("{}\n\n---", parts.join("\n\n"))
 }
 
-pub(super) fn convert_runtime(runtime: AcpRuntimeKind) -> GuestRuntimeKind {
-    match runtime {
-        AcpRuntimeKind::JavaScript => GuestRuntimeKind::JavaScript,
-        AcpRuntimeKind::Python => GuestRuntimeKind::Python,
-        AcpRuntimeKind::WebAssembly => GuestRuntimeKind::WebAssembly,
-    }
-}
-
 pub(super) fn hash_to_btree(map: HashMap<String, String>) -> BTreeMap<String, String> {
     map.into_iter().collect()
 }
@@ -1486,7 +1578,7 @@ pub(super) async fn resolve_agent(
 }
 
 /// Extract the owning connection id from an ownership scope. Every scope carries
-/// a connection id, which is the tenant boundary secure-exec enforces; ACP
+/// a connection id, which is the tenant boundary AgentOS enforces; ACP
 /// session ownership is keyed off this same connection id.
 /// Remove every session in `sessions` owned by `connection_id`, returning the
 /// adapter process ids of the dropped records. Split out from
@@ -1534,7 +1626,7 @@ pub(super) fn is_adapter_exited_error(error: &SidecarError) -> bool {
 }
 
 /// True when `error` means the adapter process is gone: either the in-pump exit
-/// observation (`is_adapter_exited_error`) or a secure-exec process-table
+/// observation (`is_adapter_exited_error`) or an AgentOS process-table
 /// lookup failure from operating on an adapter that already exited — the lazy
 /// observation of an idle-time crash (`ADAPTER_NO_ACTIVE_PROCESS_MARKER`).
 pub(super) fn is_adapter_gone_error(error: &SidecarError) -> bool {

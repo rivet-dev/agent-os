@@ -10,8 +10,8 @@ The publish flow lives in `scripts/publish` and is driven by
 
 AgentOS is the source of truth. It publishes npm packages, crates, runtime
 sidecars, Pyodide/R2 assets, and `@agentos-software/*` registry packages from
-this repository. secure-exec releases are generated compatibility shims that
-follow the AgentOS version; never release secure-exec first.
+this repository. agentos releases are generated compatibility shims that
+follow the AgentOS version; never release agentos first.
 
 ## Procedure
 
@@ -37,6 +37,6 @@ gh run watch -R rivet-dev/agentos "$run" --exit-status
 - `scripts/publish/src/local/cut-release.ts` is a pure trigger; version changes
   happen in the ephemeral CI checkout.
 - `workspace:*` deps are rewritten to literal versions by the publish bump pass.
-- Generated secure-exec shims are dispatched after AgentOS publishes and must
+- Generated agentos shims are dispatched after AgentOS publishes and must
   use the same version.
 - If anything fails, stop and report — do not retry automatically.

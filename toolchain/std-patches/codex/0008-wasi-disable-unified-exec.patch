@@ -1,0 +1,17 @@
+--- a/exec/src/session_turn_wasi.rs
++++ b/exec/src/session_turn_wasi.rs
+@@ -124,6 +124,14 @@ async fn session_turn() -> anyhow::Result<()> {
+             "sandbox_mode".to_string(),
+             toml::Value::String("workspace-write".to_string()),
+         ),
++        // Unified exec requires process-management primitives that the AgentOS
++        // WASI bridge does not expose. Keep Codex on its standard shell tool,
++        // whose child process path is supported by the bridge. This must change
++        // the canonical feature map because tool selection reads config.features.
++        (
++            "features.unified_exec".to_string(),
++            toml::Value::Boolean(false),
++        ),
+     ];
+     // This harness supplies its model, approval policy, filesystem, network, and
+     // credential environment explicitly. Loading arbitrary host CLI settings can

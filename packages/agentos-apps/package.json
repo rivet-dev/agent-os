@@ -1,0 +1,52 @@
+{
+	"name": "@rivet-dev/agentos-apps",
+	"version": "0.0.1",
+	"description": "Run and scale user-generated HTTP applications with agentOS and Rivet actors.",
+	"license": "Apache-2.0",
+	"type": "module",
+	"sideEffects": false,
+	"files": [
+		"dist",
+		"assets",
+		"README.md",
+		"package.json"
+	],
+	"exports": {
+		".": {
+			"import": {
+				"types": "./dist/index.d.ts",
+				"default": "./dist/index.js"
+			}
+		},
+		"./advanced": {
+			"import": {
+				"types": "./dist/advanced.d.ts",
+				"default": "./dist/advanced.js"
+			}
+		}
+	},
+	"engines": {
+		"node": ">=22.0.0"
+	},
+	"scripts": {
+		"build": "tsup src/index.ts src/advanced.ts --format esm --dts --sourcemap --clean --external rivetkit --external @rivet-dev/agentos --external @rivet-dev/agentos-core --external @rivet-dev/agentos-toolchain --external @agentos-software/apps-builder --external @agentos-software/sh --external @agentos-software/tar",
+		"check-types": "tsc --noEmit",
+		"test": "vitest run"
+	},
+	"dependencies": {
+		"@agentos-software/apps-builder": "workspace:*",
+		"@agentos-software/sh": "workspace:*",
+		"@agentos-software/tar": "workspace:*",
+		"@rivet-dev/agentos": "workspace:*",
+		"@rivet-dev/agentos-core": "workspace:*",
+		"@rivet-dev/agentos-toolchain": "workspace:*",
+		"hono": "^4.7.0",
+		"rivetkit": "catalog:rivetkit"
+	},
+	"devDependencies": {
+		"@types/node": "^22.19.15",
+		"tsup": "^8.4.0",
+		"typescript": "^5.7.3",
+		"vitest": "^2.1.8"
+	}
+}

@@ -1,0 +1,13 @@
+{
+  "name": "project-matrix-sharp-native-blocked",
+  "private": true,
+  "type": "module",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "sharp"
+    ]
+  },
+  "dependencies": {
+    "sharp": "0.35.3"
+  }
+}

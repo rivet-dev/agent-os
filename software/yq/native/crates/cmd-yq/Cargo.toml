@@ -4,11 +4,11 @@ name = "cmd-yq"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "yq standalone binary for secure-exec VM"
+description = "yq standalone binary for agentos VM"
 
 [[bin]]
 name = "yq"
 path = "src/main.rs"
 
 [dependencies]
-secureexec-yq = { path = "../yq" }
+agentos-yq = { path = "../yq" }

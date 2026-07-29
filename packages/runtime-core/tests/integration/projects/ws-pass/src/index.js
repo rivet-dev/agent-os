@@ -94,9 +94,44 @@ async function main() {
 
 		await serverCloseEvents[1];
 
+		if (typeof globalThis.WebSocket !== "function") {
+			throw new Error("Node global WebSocket is unavailable");
+		}
+		const globalEcho = await new Promise((resolve, reject) => {
+			const socket = new globalThis.WebSocket(`ws://127.0.0.1:${port}`);
+			let echo;
+			socket.addEventListener("open", () => {
+				clientEvents.push("global-open");
+				socket.send("hello-global-ws");
+			});
+			socket.addEventListener("message", (event) => {
+				clientEvents.push("global-message");
+				echo = String(event.data);
+				socket.close();
+			});
+			socket.addEventListener("close", () => {
+				clientEvents.push("global-close");
+				if (echo === undefined) {
+					reject(new Error("global socket closed before echo"));
+					return;
+				}
+				resolve(echo);
+			});
+			socket.addEventListener("error", (event) => {
+				reject(
+					event.error instanceof Error
+						? event.error
+						: new Error(`global websocket error: ${event.message || event.type || "unknown"}`),
+				);
+			});
+		});
+
+		await serverCloseEvents[2];
+
 		const result = {
 			textEcho,
 			binaryEcho,
+			globalEcho,
 			serverEvents: serverEvents.sort(),
 			clientEvents: clientEvents.sort(),
 		};
@@ -108,6 +143,6 @@ async function main() {
 }
 
 main().catch((err) => {
-	console.error(err.message);
+	console.error(err?.stack || err?.message || JSON.stringify(err));
 	process.exit(1);
 });

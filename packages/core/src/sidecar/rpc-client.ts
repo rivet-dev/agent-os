@@ -581,15 +581,15 @@ export class NativeSidecarKernelProxy {
 			readExitCode?: () => Promise<number>,
 		): Promise<KernelExecResult> => {
 			if (stdinOverride !== undefined) {
-				proc.writeStdin(stdinOverride);
+				await proc.writeStdin(stdinOverride);
 			} else if (options?.stdin !== undefined) {
-				proc.writeStdin(options.stdin);
+				await proc.writeStdin(options.stdin);
 			}
 			// `kernel.exec()` is a non-interactive run-to-completion API: when the
 			// caller does not opt into a streaming stdin handle, the guest process
 			// should observe EOF after any provided input so commands like
 			// `node -e ...` do not linger behind an inherited open stdin pipe.
-			proc.closeStdin();
+			await proc.closeStdin();
 
 			const waitPromise = proc.wait();
 			const shellExitCode =
@@ -678,9 +678,9 @@ export class NativeSidecarKernelProxy {
 			proc: ManagedProcess,
 		): Promise<KernelExecResult> => {
 			if (options?.stdin !== undefined) {
-				proc.writeStdin(options.stdin);
+				await proc.writeStdin(options.stdin);
 			}
-			proc.closeStdin();
+			await proc.closeStdin();
 
 			const waitPromise = proc.wait();
 			const exitCode =
@@ -787,9 +787,9 @@ export class NativeSidecarKernelProxy {
 			rejectWait,
 			onStdout: new Set(options?.onStdout ? [options.onStdout] : []),
 			onStderr: new Set(options?.onStderr ? [options.onStderr] : []),
-			pendingStdin: [],
+			pendingStdin: options?.stdin === undefined ? [] : [options.stdin],
 			stdinFlushPromise: null,
-			pendingCloseStdin: false,
+			pendingCloseStdin: !options?.streamStdin,
 			pendingKillSignal: null,
 			waitWithFallbackPromise: null,
 			hostExitObservedAt: null,
@@ -1321,7 +1321,9 @@ export class NativeSidecarKernelProxy {
 		const restoreRawMode =
 			stdin.isTTY && typeof stdin.setRawMode === "function";
 		const onStdinData = (data: Uint8Array | string) => {
-			shell.write(data);
+			void shell.write(data).catch((error) => {
+				console.error("[agentos] failed to forward terminal stdin:", error);
+			});
 		};
 		const onResize = () => {
 			shell.resize(stdout.columns, stdout.rows);
@@ -1705,10 +1707,15 @@ export class NativeSidecarKernelProxy {
 
 	getSignalState(pid: number): KernelSignalState {
 		const entry = this.trackedProcesses.get(pid);
-		if (entry && !this.signalRefreshes.has(pid)) {
-			this.signalRefreshes.set(pid, this.refreshSignalState(entry));
-		}
+		if (entry) this.scheduleSignalStateRefresh(entry);
 		return this.signalStates.get(pid) ?? { handlers: new Map() };
+	}
+
+	private scheduleSignalStateRefresh(entry: TrackedProcessEntry): void {
+		if (this.signalRefreshes.has(entry.pid)) return;
+		const refresh = this.refreshSignalState(entry);
+		this.signalRefreshes.set(entry.pid, refresh);
+		void refresh.catch(() => {});
 	}
 
 	private async refreshSocketLookup(
@@ -1827,7 +1834,11 @@ export class NativeSidecarKernelProxy {
 		entry.started = true;
 		this.updateTrackedProcessSnapshot(entry);
 		void this.refreshProcessSnapshot().catch(() => {});
-		await this.refreshSignalState(entry);
+		// Signal metadata is advisory and must not hold process startup behind a
+		// second sidecar RPC. Very short binding commands can finish while the
+		// original execute response is still in flight; synchronously refreshing
+		// here creates a circular wait with their output/exit delivery.
+		this.scheduleSignalStateRefresh(entry);
 
 		void this.flushPendingStdin(entry).catch((error) => {
 			this.handleBackgroundProcessError(entry, error);
@@ -1863,10 +1874,7 @@ export class NativeSidecarKernelProxy {
 					}
 					entry.outputGeneration += 1;
 					void this.refreshProcessSnapshot().catch(() => {});
-					if (!this.signalRefreshes.has(entry.pid)) {
-						this.signalRefreshes.set(entry.pid, this.refreshSignalState(entry));
-						await this.signalRefreshes.get(entry.pid);
-					}
+					this.scheduleSignalStateRefresh(entry);
 					const chunk = event.payload.chunk;
 					const listeners =
 						event.payload.channel === "stdout"

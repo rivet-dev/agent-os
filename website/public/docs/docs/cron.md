@@ -1,8 +1,12 @@
-# Cron Jobs
+# Crons & Loops
 
 Schedule recurring commands and agent sessions in agentOS VMs.
 
-Schedule recurring work with cron expressions, running either a shell command (`exec`) or an agent session (`session`), with overlap modes (`allow`, `skip`, `queue`) and `onCronEvent` streaming to monitor execution. Cron jobs keep the actor alive while a job runs; the actor can sleep between executions.
+Schedule recurring work and long-running agent loops with cron expressions,
+running either a shell command (`exec`) or an agent session (`session`), with
+overlap modes (`allow`, `skip`, `queue`) and native `cronEvent` streaming to
+monitor execution. Cron jobs keep the actor alive while a job runs; the actor
+can sleep between executions.
 
 ## Schedule a command
 
@@ -26,9 +30,7 @@ Prefer `"skip"` for most jobs to avoid unbounded concurrency if a run takes long
 
 ## Monitor cron events
 
-Call `onCronEvent` directly on the actor connection to track job execution. Event and job timestamps are ISO strings:
-
-- **`data.event`**: A `CronEvent` describing the run.
+Subscribe with `connection.on("cronEvent", ...)` to track job execution. Event and job timestamps are ISO strings. The callback receives a `CronEvent` directly, with no `{ event }` wrapper.
 
 Subscribe before scheduling so you do not miss early runs.
 

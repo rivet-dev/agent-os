@@ -37,7 +37,14 @@ function isExcluded(relPath) {
 	if (relPath === "scripts/publish" || relPath.startsWith("scripts/publish/")) return true;
 	return relPath
 		.split("/")
-		.some((part) => part === "fixtures" || part === "vendor" || part === "tests");
+		.some(
+			(part) =>
+				part === ".cache" ||
+				part === ".output" ||
+				part === "fixtures" ||
+				part === "vendor" ||
+				part === "tests",
+		);
 }
 
 function isIncludedPackageJson(relPath) {

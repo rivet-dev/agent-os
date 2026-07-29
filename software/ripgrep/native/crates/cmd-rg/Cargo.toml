@@ -4,7 +4,7 @@ name = "cmd-rg"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "rg (ripgrep) standalone binary for secure-exec VM"
+description = "rg (ripgrep) standalone binary for agentos VM"
 publish = false
 
 [dependencies]

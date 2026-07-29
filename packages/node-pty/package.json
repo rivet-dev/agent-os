@@ -1,0 +1,32 @@
+{
+	"name": "@rivet-dev/agentos-node-pty",
+	"version": "0.0.1",
+	"description": "AgentOS-backed node-pty compatibility layer",
+	"type": "module",
+	"license": "Apache-2.0",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"default": "./dist/index.js"
+		}
+	},
+	"scripts": {
+		"build": "tsc",
+		"check-types": "tsc --noEmit",
+		"test": "pnpm build && node --test tests/*.test.mjs"
+	},
+	"engines": {
+		"node": ">=20"
+	},
+	"devDependencies": {
+		"@types/node": "^22.10.2",
+		"typescript": "^5.7.2"
+	}
+}

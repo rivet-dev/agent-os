@@ -58,7 +58,7 @@ export function Footer() {
             <a href="/" className="inline-block">
               <img src="/images/agent-os/agentos-hero-logo.svg" alt="agentOS" className="h-7 w-auto" />
             </a>
-            <p className="text-sm leading-6 text-ink-soft">A portable open-source operating system for agents.</p>
+            <p className="text-sm leading-6 text-ink-soft">The open-source virtual operating system for agents.</p>
             <div className="flex space-x-4">
               {footer.social.map((item) => (
                 <a

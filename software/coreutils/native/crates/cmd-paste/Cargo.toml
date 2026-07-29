@@ -4,7 +4,7 @@ name = "cmd-paste"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "paste standalone binary for secure-exec VM"
+description = "paste standalone binary for agentos VM"
 
 [[bin]]
 name = "paste"

@@ -13,7 +13,7 @@
 -pub fn split_paths(_unparsed: &OsStr) -> SplitPaths<'_> {
 -    panic!("unsupported")
 +pub fn split_paths(unparsed: &OsStr) -> SplitPaths<'_> {
-+    // wasm32-wasip1 uses ':'-separated PATH-like lists, like Unix. (secure-exec
++    // wasm32-wasip1 uses ':'-separated PATH-like lists, like Unix. (agentos
 +    // pipeline-only codex port — codex parses PATH via env::split_paths.)
 +    use crate::os::wasi::ffi::OsStrExt;
 +    let bytes = unparsed.as_bytes();

@@ -326,6 +326,12 @@ async function handleSyncBridgeOperation(
 				argv0: options.argv0,
 				cwd: options.cwd,
 				env: options.env,
+				pty:
+					options.pty &&
+					Number.isInteger(options.pty.cols) &&
+					Number.isInteger(options.pty.rows)
+						? { cols: options.pty.cols!, rows: options.pty.rows! }
+						: undefined,
 				onStdout: (data) => {
 					events.push({
 						type: "stdout",
@@ -407,6 +413,28 @@ async function handleSyncBridgeOperation(
 				kind: SYNC_BRIDGE_KIND_JSON,
 				value: accepted !== false,
 			};
+		}
+		case "child_process.resize_pty": {
+			const sessionId = Number(message.args[0]);
+			const cols = Number(message.args[1]);
+			const rows = Number(message.args[2]);
+			const session = host.childProcessSessions.get(sessionId);
+			if (!session || session.executionId !== message.executionId) {
+				throw new Error(`unknown child_process session ${sessionId}`);
+			}
+			if (
+				!Number.isInteger(cols) ||
+				cols <= 0 ||
+				!Number.isInteger(rows) ||
+				rows <= 0
+			) {
+				throw new Error("EINVAL: PTY dimensions must be greater than zero");
+			}
+			if (typeof session.process.resizePty !== "function") {
+				throw new Error("ENOTTY: child process was not spawned with a PTY");
+			}
+			session.process.resizePty(cols, rows);
+			return { kind: SYNC_BRIDGE_KIND_NONE };
 		}
 		case "child_process.spawn_sync": {
 			const request = parseChildProcessSpawnRequest(

@@ -2,7 +2,7 @@
 //!
 //! Mirrors `os/unix/process.rs`' child-pipe fd traits for wasm32-wasip1 so that
 //! `tokio::process` (and other fd-extracting code) can reach the parent-side
-//! pipe ends of a spawned child. (secure-exec pipeline-only codex port.)
+//! pipe ends of a spawned child. (agentos pipeline-only codex port.)
 //!
 //! [`std::process`]: crate::process
 
@@ -84,7 +84,7 @@ impl_child_pipe_fd!(process::ChildStdout);
 impl_child_pipe_fd!(process::ChildStderr);
 
 /// WASI-specific extension to construct an [`ExitStatus`] from a raw code,
-/// mirroring `std::os::unix::process::ExitStatusExt::from_raw`. (secure-exec
+/// mirroring `std::os::unix::process::ExitStatusExt::from_raw`. (agentos
 /// pipeline-only codex port — codex's synthetic exit statuses need this.)
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait ExitStatusExt {

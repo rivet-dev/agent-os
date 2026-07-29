@@ -1,7 +1,7 @@
 function encodeDispatchArgs(args) {
   return JSON.stringify(
     args,
-    (_key, value) => value === void 0 ? { __secureExecDispatchType: "undefined" } : value
+    (_key, value) => value === void 0 ? { __agentOsDispatchType: "undefined" } : value
   );
 }
 function encodeDispatch(method, args) {

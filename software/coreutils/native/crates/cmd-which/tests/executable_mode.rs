@@ -13,7 +13,7 @@ struct TempDir {
 impl TempDir {
     fn new() -> Self {
         let unique = format!(
-            "secure-exec-which-test-{}-{}",
+            "agentos-which-test-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

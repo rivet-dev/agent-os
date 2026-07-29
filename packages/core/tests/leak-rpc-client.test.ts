@@ -23,6 +23,8 @@ interface PumpEvent {
 
 function createStubClient() {
 	const queue: PumpEvent[] = [];
+	const stdinWrites: unknown[] = [];
+	let stdinCloseCount = 0;
 	let notify: (() => void) | null = null;
 
 	const client = {
@@ -36,8 +38,17 @@ function createStubClient() {
 			return { handlers: new Map() };
 		},
 		async killProcess() {},
-		async writeStdin() {},
-		async closeStdin() {},
+		async writeStdin(
+			_session: unknown,
+			_vm: unknown,
+			_processId: unknown,
+			data: unknown,
+		) {
+			stdinWrites.push(data);
+		},
+		async closeStdin() {
+			stdinCloseCount += 1;
+		},
 		async disposeVm() {},
 		async dispose() {},
 		waitForEvent(
@@ -74,7 +85,12 @@ function createStubClient() {
 		notify?.();
 	};
 
-	return { client, pushEvent };
+	return {
+		client,
+		pushEvent,
+		stdinWrites,
+		stdinCloseCount: () => stdinCloseCount,
+	};
 }
 
 function createProxy(client: unknown, localMounts: LocalCompatMount[] = []) {
@@ -105,6 +121,21 @@ async function waitFor(predicate: () => boolean, timeoutMs = 500) {
 }
 
 describe("NativeSidecarKernelProxy tracking-collection cleanup", () => {
+	it("forwards initial stdin and closes non-streaming process input", async () => {
+		const stub = createStubClient();
+		const proxy = createProxy(stub.client);
+
+		proxy.spawn("node", ["script.js"], {
+			stdin: "initial input",
+			streamStdin: false,
+		});
+
+		await waitFor(() => stub.stdinCloseCount() === 1);
+		expect(stub.stdinWrites).toEqual(["initial input"]);
+		expect(stub.stdinCloseCount()).toBe(1);
+		await proxy.dispose();
+	});
+
 	it("releases tracked process + signal state + listeners when a process exits", async () => {
 		const { client, pushEvent } = createStubClient();
 		const proxy = createProxy(client);

@@ -108,8 +108,8 @@ impl CreateVmConfig {
 #[ts(tag = "type", rename_all = "snake_case")]
 #[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
 pub enum VmSqliteDescriptor {
-    /// Rivet actor SQLite reached through the actor's authenticated UDS.
-    ActorUds { path: String, token: String },
+    /// Rivet actor SQLite reached through the actor's local runtime socket.
+    ActorUds { path: String },
     /// A SQLite database file owned by the native sidecar host.
     SqliteFile { path: String },
 }
@@ -117,13 +117,8 @@ pub enum VmSqliteDescriptor {
 impl VmSqliteDescriptor {
     fn validate(&self) -> Result<(), VmConfigError> {
         match self {
-            Self::ActorUds { path, token } => {
+            Self::ActorUds { path } => {
                 validate_absolute_host_path("database.path", path)?;
-                if token.is_empty() || token.len() > 4096 {
-                    return Err(VmConfigError::new(
-                        "database.token must contain 1..=4096 bytes",
-                    ));
-                }
             }
             Self::SqliteFile { path } => validate_absolute_host_path("database.path", path)?,
         }
@@ -798,6 +793,9 @@ pub struct VmLimitsConfig {
     pub wasm: Option<WasmLimitsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub execution: Option<ExecutionLimitsConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub process: Option<ProcessLimitsConfig>,
 }
 
@@ -1059,6 +1057,41 @@ impl VmLimitsConfig {
         if let Some(js_runtime) = &self.js_runtime {
             validate_nonzero_options([("limits.jsRuntime.maxTimers", js_runtime.max_timers)])?;
         }
+        if let Some(execution) = &self.execution {
+            validate_nonzero_options([
+                (
+                    "limits.execution.completedTtlMs",
+                    execution.completed_ttl_ms,
+                ),
+                (
+                    "limits.execution.maxCompletedExecutions",
+                    execution.max_completed_executions,
+                ),
+                (
+                    "limits.execution.liveExecutionWarningThreshold",
+                    execution.live_execution_warning_threshold,
+                ),
+            ])?;
+            const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+            for (path, value) in [
+                (
+                    "limits.execution.completedTtlMs",
+                    execution.completed_ttl_ms,
+                ),
+                (
+                    "limits.execution.maxCompletedExecutions",
+                    execution.max_completed_executions,
+                ),
+                (
+                    "limits.execution.liveExecutionWarningThreshold",
+                    execution.live_execution_warning_threshold,
+                ),
+            ] {
+                if value.is_some_and(|value| value > MAX_SAFE_INTEGER) {
+                    return Err(VmConfigError::new(format!("{path} must be a safe integer")));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -1247,6 +1280,12 @@ limits_struct!(WasmLimitsConfig {
     prewarm_timeout_ms,
     runner_heap_limit_mb,
     runner_cpu_time_limit_ms,
+});
+
+limits_struct!(ExecutionLimitsConfig {
+    completed_ttl_ms,
+    max_completed_executions,
+    live_execution_warning_threshold,
 });
 
 limits_struct!(ProcessLimitsConfig {
