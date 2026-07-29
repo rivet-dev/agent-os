@@ -29,6 +29,20 @@ Exec is the JavaScript, TypeScript, and Python execution surface of agentOS.
   builds, CI, publication, or behavioral-parity requirements without a
   separately approved design.
 
+## Platform And Executor Crate Boundaries
+
+- The locked crate renames are `agentos-runtime` to
+  `agentos-runtime-tokio` and `agentos-execution` to
+  `agentos-executor-contract`.
+- Keep the kernel and executor contract independent of Tokio and concrete
+  engines. Keep each engine in a separate feature-gated crate.
+- The native sidecar composes the kernel, Tokio runtime, contract, and enabled
+  native executors. A greenfield browser sidecar could instead compose a
+  browser runtime and Web Worker executors without changing native crates.
+- Browser implementation remains out of scope. See
+  [Package Architecture](website/src/content/docs/docs/architecture/package-structure.mdx)
+  for the package graph, responsibilities, and rationale.
+
 ## Security Model
 
 Trust model:

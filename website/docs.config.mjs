@@ -198,6 +198,7 @@ export const siteConfig = {
 										{ title: "Networking", href: "/docs/architecture/networking" },
 										{ title: "TLS & SSL", href: "/docs/architecture/tls-ssl" },
 										{ title: "JavaScript Executor & Reactor", href: "/docs/architecture/javascript-executor" },
+										{ title: "Package Architecture", href: "/docs/architecture/package-structure" },
 										{ title: "POSIX Syscalls", href: "/docs/architecture/posix-syscalls" },
 										{ title: "Packages & Command Resolution", href: "/docs/architecture/packages-and-command-resolution" },
 										{ title: "Compiler Toolchain", href: "/docs/architecture/compiler-toolchain" },

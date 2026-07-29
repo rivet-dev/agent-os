@@ -1,0 +1,230 @@
+---
+title: "Package Architecture"
+description: "How the kernel, platform runtime, executor contract, sidecar, and independently feature-gated execution engines fit together."
+skill: true
+---
+
+<Note>These internal architecture docs are mostly generated and maintained by LLMs, then reviewed by humans. They are intentionally verbose; use your preferred LLM to ask focused questions about the architecture as needed.</Note>
+
+This document defines the target Rust package structure for native execution and
+tests whether its boundaries could support a future greenfield browser
+implementation. Existing browser code is not a migration source, compatibility
+target, or design constraint. Browser support is not part of this migration: no
+browser entrypoints, dependencies, features, builds, tests, publication, or
+parity requirements are added.
+
+## Decisions
+
+- Rename `agentos-runtime` to **`agentos-runtime-tokio`**.
+- Rename `agentos-execution` to **`agentos-executor-contract`**.
+- Keep every execution engine in its own crate so it can be independently
+  feature-gated.
+- Keep guest Linux/POSIX semantics in the kernel, not in executors.
+- Keep the kernel separate from the platform runtime so a future browser
+  composition does not depend on Tokio.
+- Use different native and browser composition roots instead of spreading
+  `cfg(browser)` branches through shared crates.
+
+## Native package graph
+
+```text
+agentos-native-sidecar
+├── agentos-kernel
+├── agentos-runtime-tokio
+├── agentos-executor-contract
+└── optional executor crates
+    ├── agentos-executor-node-v8
+    │   └── agentos-v8-runtime
+    ├── agentos-executor-python-v8-pyodide
+    │   └── agentos-v8-runtime
+    ├── agentos-executor-wasm-v8
+    │   ├── agentos-v8-runtime
+    │   └── agentos-wasm-common
+    └── agentos-executor-wasm-wasmtime
+        └── agentos-wasm-common
+```
+
+Dependencies point downward. In particular:
+
+- the kernel does not depend on a sidecar, platform runtime, or executor;
+- the executor contract does not depend on the kernel, Tokio, V8, or Wasmtime;
+- engine crates do not depend on the sidecar; and
+- the sidecar is the only crate that selects and composes executors.
+
+## Responsibilities
+
+| Crate | Owns | Does not own |
+| --- | --- | --- |
+| `agentos-kernel` | Process, fd, VFS, socket, signal, PTY, permission, and Linux/POSIX semantics | Tokio scheduling, guest ABI adaptation, engine selection |
+| `agentos-runtime-tokio` | The native Tokio runtime, timers, cancellation, bounded blocking admission, and native async I/O readiness | Guest OS state, policy semantics, executor selection |
+| `agentos-executor-contract` | Engine-neutral lifecycle, control, events, direct replies, wakes, limits, identities, bounded operation values, and typed errors | Kernel implementation, Tokio, browser APIs, V8, Wasmtime |
+| Executor crates | Engine state, guest ABI and memory adaptation, guest scheduling, and engine-specific interruption | Parallel filesystem, network, process, signal, or TTY implementations |
+| `agentos-v8-runtime` | Process-global V8 platform ownership and reusable isolate/session mechanics | Node, Python, or standalone-WASM policy |
+| `agentos-wasm-common` | Shared agentOS WASM ABI definitions, validation, permission tiers, and stable WASM errors | A concrete V8 or Wasmtime engine |
+| `agentos-native-sidecar` | VM/session lifecycle, runtime dispatch, authorization, executor registry, and mapping executor operations to kernel and native runtime services | Guest ABI details or duplicate kernel state |
+
+`agentos-executor-contract` is more than a DTO crate, but it should remain
+small. It may enforce invariants such as generation binding, exactly-once direct
+replies, bounded event admission, and payload validation. It must not become a
+second kernel or a generic collection of unrelated utilities.
+
+The kernel exposes process-scoped services directly. Trusted sidecar code can
+read or write guest files and invoke other kernel operations without pretending
+to be an executor. An untrusted executor reaches those same operations through
+the contract and a sidecar-owned capability adapter. Both paths therefore use
+one authoritative kernel implementation and one set of state.
+
+## Dispatch
+
+The sidecar remains the execution manager:
+
+1. Resolve a command and determine its runtime from the explicit request or
+   executable format.
+2. Ask the kernel to allocate the process and authoritative process state.
+3. Select a compiled executor from the sidecar registry.
+4. Construct that executor with process-scoped contract capabilities.
+5. Map its host operations to the kernel and, where external asynchronous I/O is
+   required, to `agentos-runtime-tokio`.
+6. Commit exit and signal state back through the kernel lifecycle.
+
+Disabling an executor at compile time must not silently select another engine.
+The wire runtime kind remains understood and dispatch returns the typed
+`ERR_AGENTOS_EXECUTOR_NOT_COMPILED` error.
+
+The native composition root should expose these features:
+
+- `node-v8`
+- `python-v8-pyodide`
+- `wasm-v8`
+- `wasm-wasmtime`
+- `wasm-wasmtime-threads`
+- `all-executors`
+
+Executor crates are optional dependencies activated by those features. Shared
+contract and kernel types must not change based on the enabled executor set.
+
+## Future browser composition
+
+The portability test is deliberately simple: a browser implementation should be
+possible by retaining the kernel and executor contract, then replacing the
+native composition root, platform runtime, and executor set.
+
+```text
+agentos-browser-sidecar
+├── agentos-kernel
+├── agentos-runtime-browser
+├── agentos-executor-contract
+└── browser Web Worker executors
+    ├── JavaScript worker
+    ├── WebAssembly worker
+    └── Python/Pyodide worker
+```
+
+These are architectural roles, not packages to create or names to lock during
+the native migration. The browser implementation would be designed from
+scratch; dormant browser code in this repository would not be reused or
+preserved for compatibility.
+
+### What stays and what changes
+
+| Native architecture | Greenfield browser equivalent |
+| --- | --- |
+| `agentos-kernel` | The same authoritative Linux/POSIX state and operations, compiled or hosted in a browser-compatible form |
+| `agentos-executor-contract` | The same semantic lifecycle and operation contract, with browser message bindings |
+| `agentos-native-sidecar` | A browser sidecar composition root with the same orchestration responsibilities |
+| `agentos-runtime-tokio` | Browser event loop, timers, cancellation, storage/network adapters, and worker transport |
+| Native engine crates | Web Worker executors using browser JavaScript, WebAssembly, or Pyodide |
+| Cargo executor features | Browser build entrypoints or bundler features that include only selected workers |
+
+The kernel and executor contract remain shared. The sidecar still owns
+composition and dispatch, while the browser runtime owns browser scheduling and
+transport. Browser-specific worker messages must not leak into the kernel or
+the executor contract.
+
+### Constraints the native design must preserve
+
+The native refactor should satisfy these constraints now:
+
+1. **No Tokio types below the platform boundary.** Kernel and executor-contract
+   APIs cannot expose Tokio tasks, channels, timers, sockets, readiness types, or
+   runtime handles.
+2. **No concrete-engine types in shared orchestration.** Sidecar dispatch works
+   through executor factories and contract handles, not V8 or Wasmtime enums
+   outside the native executor registry.
+3. **Owned, bounded operation values.** Requests cannot depend on borrowed guest
+   memory or thread-local engine state. This lets a future browser adapter copy
+   them into a worker message and complete them later.
+4. **Transport-neutral completion and cancellation.** The semantic contract
+   defines replies, wakes, cancellation, and exactly-once terminal state without
+   requiring an in-process call or blocking thread.
+5. **Platform-specific thread bounds stay at the edge.** Native executor
+   adapters may require `Send` or thread-affine handles, but those requirements
+   must not become universal contract semantics that browser worker handles
+   could not represent.
+6. **One kernel source of truth.** A future browser runtime may buffer transport
+   data, but it must not create parallel filesystem, process, signal, fd, or
+   socket semantic state.
+7. **Stable serialized contract shapes.** If browser executors are implemented
+   in TypeScript, generated bindings or an explicit wire adapter represent the
+   same contract. Browser code is not expected to consume Rust traits directly.
+
+These rules are sufficient to preserve the extension point. They do not justify
+creating a generic `PlatformRuntime` mega-trait now. The browser design should
+later prove the smallest common interface and extract it only if two real
+implementations benefit.
+
+### Browser-specific responsibilities
+
+A future `agentos-runtime-browser` would own only browser platform mechanics:
+
+- Web Worker creation, termination, and message routing;
+- browser timers and event-loop scheduling;
+- bounded `postMessage`, `MessagePort`, transferable-buffer, or
+  `SharedArrayBuffer` transport;
+- completion of asynchronous browser APIs; and
+- browser-specific host storage and network adapters.
+
+Each Web Worker executor would own its guest engine, ABI/memory adaptation,
+worker-local scheduling, and interruption. The browser sidecar would retain
+runtime selection, VM/process lifecycle, authorization, capability issuance,
+and mapping executor operations to the kernel and browser runtime.
+
+### Questions deferred to a browser design
+
+The package structure does not answer whether browser execution can reach native
+feature parity. A separately approved design must resolve:
+
+- whether the browser security boundary can prevent direct guest access to
+  `fetch`, storage, imports, and other origin capabilities;
+- whether synchronous guest APIs require cross-origin isolation,
+  `SharedArrayBuffer`, or a fully asynchronous ABI;
+- how CPU and memory limits are enforced when the browser engine exposes fewer
+  embedder controls;
+- which POSIX network and filesystem operations browser APIs can implement; and
+- how WebAssembly threads and worker termination interact with process and
+  signal semantics.
+
+Those are browser implementation questions, not reasons to couple the native
+kernel, runtime, or executors today.
+
+## Why these boundaries
+
+The engine crates are separate for a concrete operational reason: feature flags
+must be able to remove V8, Pyodide, or Wasmtime and their transitive build and
+binary costs.
+
+The other boundaries protect ownership:
+
+- separating the kernel from `agentos-runtime-tokio` keeps Linux/POSIX state
+  independent of a threaded native scheduler;
+- separating `agentos-executor-contract` gives all engines one bounded security
+  boundary without granting them direct kernel ownership;
+- keeping the sidecar as the composition root prevents engine selection and
+  lifecycle policy from spreading across lower-level crates; and
+- shared V8 and WASM libraries remove genuine engine-family duplication without
+  merging the four public execution layers back into one package.
+
+Do not create additional crates merely to mirror source-code modules. Reactor
+implementation can remain inside the platform runtime, and conformance helpers
+can remain test support, until an independent dependency or feature boundary
+justifies extracting them.
