@@ -41,7 +41,7 @@ class ErrorBoundary extends Component<
 		}
 		return (
 			<div className="flex h-full flex-1 flex-col items-center justify-center p-8">
-				<div className="flex w-full max-w-md flex-col items-center gap-3 rounded-xl border bg-card p-6 text-center">
+				<div className="flex w-full max-w-md flex-col items-center gap-3 rounded-xl border bg-secondary p-6 text-center">
 					<ActionErrorNote error={error} className="items-center p-0 text-center" />
 					<button
 						type="button"

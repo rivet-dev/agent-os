@@ -2,7 +2,7 @@
 // installed software, configured mounts, preview links, and the actor id in
 // one scroll view, keeping the tab bar to the high-traffic surfaces
 // (transcript, filesystem).
-import { useSuspenseQueries } from "@tanstack/react-query";
+import { useMutation, useSuspenseQueries } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { ActionErrorNote, ChevronRight, CopyButton } from "../common";
 import { cn } from "../lib/cn";
@@ -139,35 +139,26 @@ function MountsTable({ mounts }: { mounts: MountInfo[] }) {
 function PreviewLinks() {
 	const [portDraft, setPortDraft] = useState("3000");
 	const [links, setLinks] = useState<SignedPreviewUrl[]>([]);
-	const [busy, setBusy] = useState(false);
-	const [error, setError] = useState<unknown>(null);
 
-	const create = async () => {
-		const port = Number.parseInt(portDraft, 10);
-		if (!Number.isInteger(port) || port < 1 || port > 65535) {
-			setError(new Error(`Not a valid port: ${portDraft}`));
-			return;
-		}
-		setBusy(true);
-		setError(null);
-		try {
-			const link = await agentOsSource.createSignedPreviewUrl(port, 900);
-			setLinks((prev) => [...prev.filter((l) => l.token !== link.token), link]);
-		} catch (err) {
-			setError(err);
-		} finally {
-			setBusy(false);
-		}
-	};
-	const revoke = async (link: SignedPreviewUrl) => {
-		setError(null);
-		try {
+	const create = useMutation({
+		mutationFn: async (draft: string) => {
+			const port = Number.parseInt(draft, 10);
+			if (!Number.isInteger(port) || port < 1 || port > 65535) {
+				throw new Error(`Not a valid port: ${draft}`);
+			}
+			return agentOsSource.createSignedPreviewUrl(port, 900);
+		},
+		onSuccess: (link) =>
+			setLinks((prev) => [...prev.filter((l) => l.token !== link.token), link]),
+	});
+	const revoke = useMutation({
+		mutationFn: async (link: SignedPreviewUrl) => {
 			await agentOsSource.expireSignedPreviewUrl(link.token);
-			setLinks((prev) => prev.filter((l) => l.token !== link.token));
-		} catch (err) {
-			setError(err);
-		}
-	};
+			return link;
+		},
+		onSuccess: (link) => setLinks((prev) => prev.filter((l) => l.token !== link.token)),
+	});
+	const error = create.error ?? revoke.error;
 
 	return (
 		<div className="text-xs">
@@ -179,17 +170,17 @@ function PreviewLinks() {
 					id="agentos-preview-port"
 					value={portDraft}
 					onChange={(e) => setPortDraft(e.target.value)}
-					onKeyDown={(e) => e.key === "Enter" && void create()}
+					onKeyDown={(e) => e.key === "Enter" && create.mutate(portDraft)}
 					inputMode="numeric"
 					className="w-20 rounded border bg-background px-2 py-1 font-mono focus:outline-none"
 				/>
 				<button
 					type="button"
-					disabled={busy}
-					onClick={() => void create()}
+					disabled={create.isPending}
+					onClick={() => create.mutate(portDraft)}
 					className="rounded-md border px-2.5 py-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
 				>
-					{busy ? "Creating…" : "Create preview link"}
+					{create.isPending ? "Creating…" : "Create preview link"}
 				</button>
 				<span className="text-muted-foreground/60">
 					Signed URL to an HTTP server on that port, valid 15 minutes. Boots the VM if asleep.
@@ -213,7 +204,7 @@ function PreviewLinks() {
 							</span>
 							<button
 								type="button"
-								onClick={() => void revoke(link)}
+								onClick={() => revoke.mutate(link)}
 								className="rounded border px-1.5 py-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 							>
 								Revoke
@@ -238,7 +229,7 @@ function Card({
 	children: ReactNode;
 }) {
 	return (
-		<section className="rounded-xl border bg-card p-4">
+		<section className="rounded-xl border bg-secondary p-4">
 			<div className="mb-3 flex items-center gap-2">
 				<span className="text-sm font-semibold">{title}</span>
 				<span className="ml-auto" />
