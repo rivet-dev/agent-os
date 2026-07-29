@@ -1,5 +1,5 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useReducer, useRef, useState } from "react";
 import {
 	ActionErrorNote,
 	AgentOsEmpty,
@@ -19,6 +19,7 @@ import {
 	UploadIcon,
 } from "../common";
 import { cn } from "../lib/cn";
+import { useArmedConfirm, useObjectUrl, useSettledValue } from "../lib/hooks";
 import { agentOsSource } from "../lib/source";
 import type { FsEntry } from "../lib/types";
 import { ScrollArea } from "../ui/scroll-area";
@@ -127,6 +128,22 @@ function downloadBytes(bytes: Uint8Array, filename: string): void {
 	URL.revokeObjectURL(url);
 }
 
+/** Per-file view state, one object so switching files resets it in a single
+ * transition instead of a setState pile in an effect. */
+interface FileView {
+	path: string | null;
+	force: boolean;
+	renameDraft: string | null;
+	error: unknown;
+}
+
+const freshFileView = (path: string | null): FileView => ({
+	path,
+	force: false,
+	renameDraft: null,
+	error: null,
+});
+
 function FileViewer({
 	actorId,
 	path,
@@ -140,30 +157,20 @@ function FileViewer({
 	onDeleted: () => void;
 	onRenamed: (to: string) => void;
 }) {
-	const [force, setForce] = useState(false);
-	const [renameDraft, setRenameDraft] = useState<string | null>(null);
-	const [confirmingDelete, setConfirmingDelete] = useState(false);
-	const [mutationError, setMutationError] = useState<unknown>(null);
-	// Per-file view state resets when the selection changes.
-	// biome-ignore lint/correctness/useExhaustiveDependencies: intentional reset on path change
-	useEffect(() => {
-		setForce(false);
-		setRenameDraft(null);
-		setConfirmingDelete(false);
-		setMutationError(null);
-	}, [path]);
+	const [stored, setStored] = useState<FileView>(() => freshFileView(path));
+	// Reset during render, not in an effect: no intermediate paint of the
+	// previous file's rename draft against the new selection.
+	if (stored.path !== path) setStored(freshFileView(path));
+	const view = stored.path === path ? stored : freshFileView(path);
+	const patch = (changes: Partial<FileView>) =>
+		setStored((prev) => ({ ...prev, ...changes }));
 	const { data, error } = useQuery(
-		agentOsSource.fileContentQueryOptions(actorId, path, force),
+		agentOsSource.fileContentQueryOptions(actorId, path, view.force),
 	);
-	const imageUrl = useMemo(() => {
-		if (!data?.bytes || data.text !== null || !IMAGE_EXTENSIONS.test(data.path)) return null;
-		return URL.createObjectURL(new Blob([data.bytes as BlobPart]));
-	}, [data]);
-	useEffect(() => {
-		return () => {
-			if (imageUrl) URL.revokeObjectURL(imageUrl);
-		};
-	}, [imageUrl]);
+	const isImage = !!data?.bytes && data.text === null && IMAGE_EXTENSIONS.test(data.path);
+	const imageUrl = useObjectUrl(isImage ? data?.bytes : null);
+	// Arming is per-file: selecting another file must not inherit it.
+	const { armed, confirm } = useArmedConfirm<"delete">({ resetKey: path });
 
 	if (!path)
 		return (
@@ -181,47 +188,42 @@ function FileViewer({
 
 	const filename = data.path.split("/").pop() ?? data.path;
 	const rename = async () => {
-		const to = renameDraft?.trim();
+		const to = view.renameDraft?.trim();
 		if (!to || to === data.path) {
-			setRenameDraft(null);
+			patch({ renameDraft: null });
 			return;
 		}
-		setMutationError(null);
+		patch({ error: null });
 		try {
 			await agentOsSource.moveEntry(data.path, to);
-			setRenameDraft(null);
+			patch({ renameDraft: null });
 			onRenamed(to);
 			onMutated();
 		} catch (err) {
-			setMutationError(err);
+			patch({ error: err });
 		}
 	};
 	const remove = async () => {
-		if (!confirmingDelete) {
-			setConfirmingDelete(true);
-			setTimeout(() => setConfirmingDelete(false), 3_000);
-			return;
-		}
-		setMutationError(null);
+		patch({ error: null });
 		try {
 			await agentOsSource.deleteFile(data.path, {});
 			onDeleted();
 			onMutated();
 		} catch (err) {
-			setMutationError(err);
+			patch({ error: err });
 		}
 	};
 
 	return (
 		<div className="flex h-full flex-col">
 			<div className="flex items-center gap-2 border-b px-4 py-2.5">
-				{renameDraft !== null ? (
+				{view.renameDraft !== null ? (
 					<input
-						value={renameDraft}
-						onChange={(e) => setRenameDraft(e.target.value)}
+						value={view.renameDraft}
+						onChange={(e) => patch({ renameDraft: e.target.value })}
 						onKeyDown={(e) => {
 							if (e.key === "Enter") void rename();
-							if (e.key === "Escape") setRenameDraft(null);
+							if (e.key === "Escape") patch({ renameDraft: null });
 						}}
 						spellCheck={false}
 						autoFocus
@@ -241,10 +243,12 @@ function FileViewer({
 					<DownloadIcon className="size-3.5" />
 				</IconButton>
 				<IconButton
-					title={renameDraft !== null ? "Save new name" : "Rename this file"}
-					onClick={() => (renameDraft !== null ? void rename() : setRenameDraft(data.path))}
+					title={view.renameDraft !== null ? "Save new name" : "Rename this file"}
+					onClick={() =>
+						view.renameDraft !== null ? void rename() : patch({ renameDraft: data.path })
+					}
 				>
-					{renameDraft !== null ? (
+					{view.renameDraft !== null ? (
 						<CheckIcon className="size-3.5" />
 					) : (
 						<PencilIcon className="size-3.5" />
@@ -252,21 +256,25 @@ function FileViewer({
 				</IconButton>
 				{/* Delete keeps a two-step confirm: the icon arms it, the explicit
 				    text disarms accidental clicks on an irreversible action. */}
-				{confirmingDelete ? (
+				{armed === "delete" ? (
 					<button
 						type="button"
-						onClick={() => void remove()}
+						onClick={() => confirm("delete", () => void remove())}
 						className="shrink-0 rounded border border-destructive/50 px-2 py-1 text-xs text-destructive transition-colors hover:bg-destructive/10"
 					>
 						Confirm delete?
 					</button>
 				) : (
-					<IconButton title="Delete this file" destructive onClick={() => void remove()}>
+					<IconButton
+						title="Delete this file"
+						destructive
+						onClick={() => confirm("delete", () => void remove())}
+					>
 						<TrashIcon className="size-3.5" />
 					</IconButton>
 				)}
 			</div>
-			{mutationError ? <ActionErrorNote error={mutationError} className="border-b py-2" /> : null}
+			{view.error ? <ActionErrorNote error={view.error} className="border-b py-2" /> : null}
 			<ScrollArea className="min-h-0 flex-1">
 				{data.special ? (
 					<div className="flex h-full items-center justify-center p-8 text-center text-sm text-muted-foreground">
@@ -280,7 +288,7 @@ function FileViewer({
 						</span>
 						<button
 							type="button"
-							onClick={() => setForce(true)}
+							onClick={() => patch({ force: true })}
 							className="rounded border px-2.5 py-1 text-xs transition-colors hover:bg-muted hover:text-foreground"
 						>
 							Load anyway
@@ -374,30 +382,83 @@ function loadFsState(actorId: string): {
 	return { root: "/", selectedPath: null, openPaths: [] };
 }
 
-function FilesystemLoaded({ actorId }: { actorId: string }) {
-	// `root` drives the listing/refetch; `draft` tracks keystrokes locally so
-	// typing never refetches. `root` is committed 500ms after typing stops (or
-	// immediately on Enter) so we don't refetch on every keystroke.
-	const initial = useRef(loadFsState(actorId)).current;
-	const [root, setRoot] = useState(initial.root);
-	const [draft, setDraft] = useState(initial.root);
-	const [selectedPath, setSelectedPath] = useState<string | null>(initial.selectedPath);
-	const [openPaths, setOpenPaths] = useState<ReadonlySet<string>>(
-		() => new Set(initial.openPaths),
-	);
-	const toggleOpen = (path: string) =>
-		setOpenPaths((prev) => {
-			const next = new Set(prev);
-			if (next.has(path)) next.delete(path);
+/** `root` drives the listing/refetch; `draft` tracks keystrokes locally so
+ * typing never refetches. The four fields move together (a tree click retargets
+ * the path bar, Enter commits it), so they are one reducer, not four setStates. */
+interface BrowseState {
+	root: string;
+	draft: string;
+	selectedPath: string | null;
+	openPaths: ReadonlySet<string>;
+}
+
+type BrowseAction =
+	| { type: "type"; value: string }
+	/** Enter: normalize what was typed and commit it. */
+	| { type: "commitDraft" }
+	/** Debounce fired: commit the normalized draft as the root, leave it as typed. */
+	| { type: "commitDebounced" }
+	| { type: "goUp" }
+	| { type: "openDir"; path: string }
+	| { type: "selectFile"; path: string }
+	| { type: "reselect"; path: string | null }
+	| { type: "toggleOpen"; path: string };
+
+function browseReducer(state: BrowseState, action: BrowseAction): BrowseState {
+	switch (action.type) {
+		case "type":
+			return { ...state, draft: action.value };
+		case "commitDraft": {
+			const next = normalizeRoot(state.draft);
+			return next === state.root && next === state.draft
+				? state
+				: { ...state, root: next, draft: next };
+		}
+		case "commitDebounced": {
+			const next = normalizeRoot(state.draft);
+			return next === state.root ? state : { ...state, root: next };
+		}
+		case "goUp": {
+			const up = parentDir(normalizeRoot(state.draft));
+			return { ...state, root: up, draft: up };
+		}
+		case "openDir":
+			return { ...state, draft: action.path };
+		case "selectFile":
+			return { ...state, selectedPath: action.path, draft: parentDir(action.path) };
+		case "reselect":
+			return { ...state, selectedPath: action.path };
+		case "toggleOpen": {
+			const openPaths = new Set(state.openPaths);
+			if (openPaths.has(action.path)) openPaths.delete(action.path);
 			else {
-				next.add(path);
-				if (next.size > MAX_PERSISTED_OPEN_DIRS) {
-					const oldest = next.values().next().value;
-					if (oldest !== undefined) next.delete(oldest);
+				openPaths.add(action.path);
+				if (openPaths.size > MAX_PERSISTED_OPEN_DIRS) {
+					const oldest = openPaths.values().next().value;
+					if (oldest !== undefined) openPaths.delete(oldest);
 				}
 			}
-			return next;
-		});
+			return { ...state, openPaths };
+		}
+	}
+}
+
+function FilesystemLoaded({ actorId }: { actorId: string }) {
+	// The root is committed 500ms after typing stops (or immediately on Enter)
+	// so we don't refetch on every keystroke.
+	const [{ root, draft, selectedPath, openPaths }, dispatch] = useReducer(
+		browseReducer,
+		actorId,
+		(id): BrowseState => {
+			const stored = loadFsState(id);
+			return {
+				root: stored.root,
+				draft: stored.root,
+				selectedPath: stored.selectedPath,
+				openPaths: new Set(stored.openPaths),
+			};
+		},
+	);
 	useEffect(() => {
 		try {
 			sessionStorage.setItem(
@@ -409,7 +470,6 @@ function FilesystemLoaded({ actorId }: { actorId: string }) {
 		}
 	}, [actorId, root, selectedPath, openPaths]);
 	const [newFolderDraft, setNewFolderDraft] = useState<string | null>(null);
-	const [treeError, setTreeError] = useState<unknown>(null);
 	const uploadInputRef = useRef<HTMLInputElement>(null);
 	const queryClient = useQueryClient();
 
@@ -419,14 +479,8 @@ function FilesystemLoaded({ actorId }: { actorId: string }) {
 	const notADir = rootsQuery.data === null;
 	const roots = rootsQuery.data ?? [];
 
-	// Debounce: commit the normalized draft once the user pauses for 500ms.
-	useEffect(() => {
-		const id = setTimeout(() => {
-			const next = normalizeRoot(draft);
-			setRoot((cur) => (next !== cur ? next : cur));
-		}, 500);
-		return () => clearTimeout(id);
-	}, [draft]);
+	// Commit the normalized draft once the user pauses typing.
+	useSettledValue(draft, 500, () => dispatch({ type: "commitDebounced" }));
 
 	// Every directory listing under this actor (the tree fetches per-level).
 	const refreshTree = () =>
@@ -436,32 +490,31 @@ function FilesystemLoaded({ actorId }: { actorId: string }) {
 	// tree clicks (a folder moves it there; a file moves it to its parent).
 	const currentDir = normalizeRoot(draft);
 
-	const createFolder = async () => {
+	const createFolder = useMutation({
+		mutationFn: (name: string) =>
+			agentOsSource.mkdir(name.startsWith("/") ? name : joinRoot(currentDir, name)),
+		onSuccess: async () => {
+			setNewFolderDraft(null);
+			await refreshTree();
+		},
+	});
+	const submitNewFolder = () => {
 		const name = newFolderDraft?.trim();
 		if (!name) {
 			setNewFolderDraft(null);
 			return;
 		}
-		setTreeError(null);
-		try {
-			await agentOsSource.mkdir(name.startsWith("/") ? name : joinRoot(currentDir, name));
-			setNewFolderDraft(null);
-			await refreshTree();
-		} catch (error) {
-			setTreeError(error);
-		}
+		createFolder.mutate(name);
 	};
 
-	const upload = async (file: File) => {
-		setTreeError(null);
-		try {
+	const upload = useMutation({
+		mutationFn: async (file: File) => {
 			const bytes = new Uint8Array(await file.arrayBuffer());
 			await agentOsSource.writeFile(joinRoot(currentDir, file.name), bytes);
-			await refreshTree();
-		} catch (error) {
-			setTreeError(error);
-		}
-	};
+		},
+		onSuccess: () => refreshTree(),
+	});
+	const treeError = createFolder.error ?? upload.error;
 
 	return (
 		<div className="flex h-full min-h-0">
@@ -491,7 +544,7 @@ function FilesystemLoaded({ actorId }: { actorId: string }) {
 						onChange={(e) => {
 							const file = e.target.files?.[0];
 							e.target.value = "";
-							if (file) void upload(file);
+							if (file) upload.mutate(file);
 						}}
 					/>
 				</div>
@@ -502,24 +555,16 @@ function FilesystemLoaded({ actorId }: { actorId: string }) {
 					<IconButton
 						title={currentDir === "/" ? "Already at the root" : `Up to ${parentDir(currentDir)}`}
 						disabled={currentDir === "/"}
-						onClick={() => {
-							const up = parentDir(currentDir);
-							setDraft(up);
-							setRoot((cur) => (up !== cur ? up : cur));
-						}}
+						onClick={() => dispatch({ type: "goUp" })}
 						className="size-5"
 					>
 						<ArrowLeftIcon className="size-3.5" />
 					</IconButton>
 					<input
 						value={draft}
-						onChange={(e) => setDraft(e.target.value)}
+						onChange={(e) => dispatch({ type: "type", value: e.target.value })}
 						onKeyDown={(e) => {
-							if (e.key === "Enter") {
-								const next = normalizeRoot(draft);
-								setDraft(next);
-								setRoot((cur) => (next !== cur ? next : cur));
-							}
+							if (e.key === "Enter") dispatch({ type: "commitDraft" });
 						}}
 						spellCheck={false}
 						autoComplete="off"
@@ -534,7 +579,7 @@ function FilesystemLoaded({ actorId }: { actorId: string }) {
 							value={newFolderDraft}
 							onChange={(e) => setNewFolderDraft(e.target.value)}
 							onKeyDown={(e) => {
-								if (e.key === "Enter") void createFolder();
+								if (e.key === "Enter") submitNewFolder();
 								if (e.key === "Escape") setNewFolderDraft(null);
 							}}
 							spellCheck={false}
@@ -568,16 +613,15 @@ function FilesystemLoaded({ actorId }: { actorId: string }) {
 								entry={entry}
 								depth={0}
 								selectedPath={selectedPath}
-								onSelect={(e) => {
-									if (e.dir) {
-										setDraft(e.path);
-									} else {
-										setSelectedPath(e.path);
-										setDraft(parentDir(e.path));
-									}
-								}}
+								onSelect={(e) =>
+									dispatch(
+										e.dir
+											? { type: "openDir", path: e.path }
+											: { type: "selectFile", path: e.path },
+									)
+								}
 								openPaths={openPaths}
-								onToggle={toggleOpen}
+								onToggle={(path) => dispatch({ type: "toggleOpen", path })}
 							/>
 						))
 					)}
@@ -594,8 +638,8 @@ function FilesystemLoaded({ actorId }: { actorId: string }) {
 					actorId={actorId}
 					path={selectedPath}
 					onMutated={() => void refreshTree()}
-					onDeleted={() => setSelectedPath(null)}
-					onRenamed={(to) => setSelectedPath(to)}
+					onDeleted={() => dispatch({ type: "reselect", path: null })}
+					onRenamed={(to) => dispatch({ type: "reselect", path: to })}
 				/>
 			</div>
 		</div>

@@ -5,6 +5,7 @@ import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { ActionErrorNote, ChevronRight, relativeTime, StatusDot } from "../common";
 import { cn } from "../lib/cn";
+import { useArmedConfirm } from "../lib/hooks";
 import { useAgentOsActor } from "../lib/rivet";
 import { agentOsSource, decodeActionBytes } from "../lib/source";
 import type { KernelProcessInfo, ProcessExitPayload, ProcessOutputPayload, ProcessTreeNode } from "../lib/types";
@@ -87,19 +88,8 @@ function ExpandedDetail({
 	onKill: () => void;
 	actionError: unknown;
 }) {
-	const [confirming, setConfirming] = useState<"stop" | "kill" | null>(null);
-	const confirmTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-	const arm = (which: "stop" | "kill", run: () => void) => {
-		if (confirming === which) {
-			clearTimeout(confirmTimer.current);
-			setConfirming(null);
-			run();
-			return;
-		}
-		setConfirming(which);
-		clearTimeout(confirmTimer.current);
-		confirmTimer.current = setTimeout(() => setConfirming(null), 3_000);
-	};
+	// Arming is per-process: expanding another row must not inherit it.
+	const { armed, confirm } = useArmedConfirm<"stop" | "kill">({ resetKey: p.pid });
 	return (
 		<div className="flex flex-col gap-3 px-4 py-3 text-xs">
 			<div className="grid grid-cols-2 gap-x-8 gap-y-2 sm:grid-cols-4">
@@ -116,17 +106,17 @@ function ExpandedDetail({
 				<div className="flex items-center gap-2">
 					<button
 						type="button"
-						onClick={() => arm("stop", onStop)}
+						onClick={() => confirm("stop", onStop)}
 						className="rounded border px-2 py-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 					>
-						{confirming === "stop" ? "Confirm stop?" : "Stop"}
+						{armed === "stop" ? "Confirm stop?" : "Stop"}
 					</button>
 					<button
 						type="button"
-						onClick={() => arm("kill", onKill)}
+						onClick={() => confirm("kill", onKill)}
 						className="rounded border border-destructive/40 px-2 py-0.5 text-destructive transition-colors hover:bg-destructive/10"
 					>
-						{confirming === "kill" ? "Confirm kill?" : "Kill"}
+						{armed === "kill" ? "Confirm kill?" : "Kill"}
 					</button>
 				</div>
 			) : null}
@@ -211,7 +201,7 @@ export function ProcessTable({ actorId }: { actorId: string }) {
 	return (
 		<div className="max-h-96 overflow-y-auto">
 			<table className="w-full text-sm">
-				<thead className="sticky top-0 bg-background text-[11px] text-muted-foreground">
+				<thead className="sticky top-0 bg-secondary text-[11px] text-muted-foreground">
 					<tr className="border-b">
 						<th className="w-8 px-3 py-2" aria-label="Expand" />
 						<th className="w-16 px-2 py-2 text-left font-medium">PID</th>
