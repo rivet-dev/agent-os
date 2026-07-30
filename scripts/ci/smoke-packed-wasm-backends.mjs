@@ -16,8 +16,8 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const runtimeCoreDir = join(repositoryRoot, "packages/runtime-core");
-const runtimeSidecarDir = join(repositoryRoot, "packages/runtime-sidecar");
+const coreDir = join(repositoryRoot, "packages/core");
+const sidecarDir = join(repositoryRoot, "packages/sidecar");
 
 let platformPackageDir;
 let sidecarBin;
@@ -38,9 +38,12 @@ if (Boolean(platformPackageDir) === Boolean(sidecarBin)) {
 if (sidecarBin && !existsSync(sidecarBin)) {
 	throw new Error(`sidecar binary does not exist: ${sidecarBin}`);
 }
-if (platformPackageDir && !existsSync(join(platformPackageDir, "agentos-native-sidecar"))) {
+if (
+	platformPackageDir &&
+	!existsSync(join(platformPackageDir, "agentos-sidecar"))
+) {
 	throw new Error(
-		`platform package is missing agentos-native-sidecar: ${platformPackageDir}`,
+		`platform package is missing agentos-sidecar: ${platformPackageDir}`,
 	);
 }
 if (!threadFixture || !existsSync(threadFixture)) {
@@ -49,9 +52,9 @@ if (!threadFixture || !existsSync(threadFixture)) {
 
 const scratch = mkdtempSync(join(tmpdir(), "agentos-packed-wasm-"));
 try {
-	const packedPackages = [pack(runtimeSidecarDir)];
+	const packedPackages = [pack(sidecarDir)];
 	if (platformPackageDir) packedPackages.push(pack(platformPackageDir));
-	packedPackages.push(pack(runtimeCoreDir));
+	packedPackages.push(pack(coreDir));
 
 	const installDir = join(scratch, "install");
 	mkdirSync(installDir, { recursive: true });
@@ -87,8 +90,8 @@ try {
 	writeFileSync(
 		runnerPath,
 		`import { fileURLToPath } from "node:url";
-import { NodeRuntime } from "@rivet-dev/agentos-runtime-core";
-import { createInMemoryFileSystem } from "@rivet-dev/agentos-runtime-core/test-runtime";
+import { NodeRuntime } from "@rivet-dev/agentos-core";
+import { createInMemoryFileSystem } from "@rivet-dev/agentos-core/test-runtime";
 
 const backends = ["v8", "wasmtime", "wasmtime-threads"];
 for (const backend of backends) {

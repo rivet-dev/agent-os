@@ -20,14 +20,14 @@ This document closes Phase 0 of the Wasmtime executor project. It records:
 
 The inventory was checked against:
 
-- `crates/wasm-common/assets/agentos-wasm-abi.json`;
-- `crates/v8-runtime/assets/runners/wasm-runner.mjs`;
-- `crates/v8-runtime/assets/runners/wasi-module.js`;
+- `crates/executor-wasm-abi/assets/agentos-wasm-abi.json`;
+- `crates/executor-v8-runtime/assets/runners/wasm-runner.mjs`;
+- `crates/executor-v8-runtime/assets/runners/wasi-module.js`;
 - `toolchain/crates/wasi-ext/src/lib.rs`;
 - `toolchain/std-patches/` and `toolchain/std-patches/wasi-libc-overrides/`;
 - kernel process, VFS, fd, socket, PTY, identity, and resource-accounting APIs;
   and
-- native-sidecar execution, filesystem, and network services.
+- sidecar execution, filesystem, and network services.
 
 No import below permits Wasmtime to use ambient host resources. `wasmtime-wasi`
 does not own the context. Both engines call the same agentOS host services.
@@ -377,7 +377,7 @@ and package outputs are ignored build evidence and are not committed.
 Two current measurements serve different purposes.
 
 The committed warm resource matrix at
-`packages/runtime-benchmarks/results/baseline-local.json` was captured on a
+`packages/benchmarks/results/baseline-local.json` was captured on a
 12th-generation Intel i7-12700KF, 20 logical cores, 62.6 GiB RAM, Node 24.17.0,
 Linux 6.1 x86-64, with 20 iterations after five warmups. Across ordinary
 V8-WASM lanes the incremental sidecar VmHWM range is 11.2-20.0 MiB, the median
@@ -411,7 +411,7 @@ BENCH_WASM_COMMAND_FLOOR_ITERATIONS=5 \
 BENCH_WASM_COMMAND_FLOOR_WARMUP=0 \
 BENCH_WASM_COMMAND_FLOOR_SERIAL_RUNS=3 \
 BENCH_WASM_COMMAND_FLOOR_WARMUP_DEBUG=1 \
-pnpm --dir packages/runtime-benchmarks bench
+pnpm --dir packages/benchmarks bench
 ```
 
 Run it with a fresh sidecar cache root for each measured cold sample. Generated
@@ -430,12 +430,12 @@ by `just tools-rebuild` before a release-quality capture.
    calls, function references, components, custom page
    sizes, and other proposals until an explicit profile revision. Engine
    defaults never silently expand the accepted language.
-2. **Code placement.** Kernel semantic APIs stay in `agentos-kernel`. Shared
+2. **Code placement.** Kernel semantic APIs stay in `agentos-vm-kernel`. Shared
    request/reply types and capability-sized host traits live under
-   `crates/executor-contract/src/host/`; native-sidecar implements them using kernel and
+   `crates/executor-contract/src/host/`; sidecar implements them using kernel and
    process-lifecycle context. Wasmtime lives in the independently feature-gated
    `agentos-executor-wasm-wasmtime` crate; shared ABI/profile types live in
-   `agentos-wasm-common`, and only the native sidecar composes concrete engines.
+   `agentos-executor-wasm-abi`, and only the sidecar composes concrete engines.
 3. **ABI generation.** Generate Preview1 layouts/types from a checked-in pinned
    Preview1 WITX description; generated glue implements agentOS host traits and
    does not construct a `wasmtime-wasi` context. Generate custom-import
@@ -462,7 +462,7 @@ by `just tools-rebuild` before a release-quality capture.
    metrics. Phase 3 may tune defaults from measured evidence without changing
    ownership.
 7. **Platforms.** Linux x86-64, Linux arm64, macOS x86-64, and macOS arm64 are
-   initial release blockers because all four native sidecars are published.
+   initial release blockers because all four sidecars are published.
    Full conformance and performance gates run on canonical Linux x86-64;
    cross-compile plus smoke/conformance subsets run on the other three. No
    browser build or browser compile repair is in scope.

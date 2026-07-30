@@ -41,40 +41,45 @@ function assertBefore(crate: string, dependent: string) {
 test("Rust crate publish order satisfies internal dependencies", () => {
 	assert.equal(new Set(RUST_CRATES).size, RUST_CRATES.length);
 	assert(!RUST_CRATES.includes("agentos-sidecar-browser" as never));
-	assert(!RUST_CRATES.includes("agentos-native-sidecar-browser" as never));
+	assert(!RUST_CRATES.includes("agentos-vm-browser" as never));
 	assert(!RUST_CRATES.includes("agentos-sidecar-core" as never));
+	assert(!RUST_CRATES.includes("agentos-build-support" as never));
+	assert(!RUST_CRATES.includes("agentos-vm-core" as never));
 
-	assertBefore("agentos-build-support", "agentos-v8-runtime");
-	assertBefore("agentos-actor-uds-client", "agentos-native-sidecar");
-	assertBefore("agentos-bridge", "agentos-v8-runtime");
-	assertBefore("agentos-executor-contract", "agentos-v8-runtime");
+	assertBefore("agentos-rivetkit-ars-client", "agentos-vm");
+	assertBefore("agentos-vm-host-interface", "agentos-executor-v8-runtime");
+	assertBefore("agentos-executor-contract", "agentos-executor-v8-runtime");
 	assertBefore("agentos-executor-contract", "agentos-executor-wasm-wasmtime");
-	assertBefore("agentos-wasm-common", "agentos-executor-wasm-v8");
-	assertBefore("agentos-wasm-common", "agentos-executor-wasm-wasmtime");
-	assertBefore("agentos-runtime-tokio", "agentos-kernel");
-	assertBefore("agentos-runtime-tokio", "agentos-v8-runtime");
-	assertBefore("agentos-runtime-tokio", "agentos-executor-wasm-wasmtime");
-	assertBefore("agentos-runtime-tokio", "agentos-native-sidecar");
-	assertBefore("agentos-vfs-core", "agentos-vfs");
-	assertBefore("agentos-v8-runtime", "agentos-executor-node-v8");
-	assertBefore("agentos-v8-runtime", "agentos-executor-python-v8-pyodide");
-	assertBefore("agentos-v8-runtime", "agentos-executor-wasm-v8");
+	assertBefore("agentos-resource-accounting", "agentos-driver-tokio");
+	assertBefore("agentos-resource-accounting", "agentos-vm-kernel");
+	assertBefore("agentos-resource-accounting", "agentos-executor-v8-runtime");
+	assertBefore("agentos-resource-accounting", "agentos-executor-wasm-v8");
+	assertBefore("agentos-resource-accounting", "agentos-executor-wasm-wasmtime");
+	assertBefore("agentos-executor-wasm-abi", "agentos-executor-wasm-v8");
+	assertBefore("agentos-executor-wasm-abi", "agentos-executor-wasm-wasmtime");
+	assertBefore("agentos-driver-tokio", "agentos-vm-kernel");
+	assertBefore("agentos-driver-tokio", "agentos-executor-v8-runtime");
+	assertBefore("agentos-driver-tokio", "agentos-executor-wasm-wasmtime");
+	assertBefore("agentos-driver-tokio", "agentos-vm");
+	assertBefore("agentos-vfs-core", "agentos-vfs-storage");
+	assertBefore("agentos-executor-v8-runtime", "agentos-executor-node-v8");
+	assertBefore("agentos-executor-v8-runtime", "agentos-executor-python-v8-pyodide");
+	assertBefore("agentos-executor-v8-runtime", "agentos-executor-wasm-v8");
 	assertBefore("agentos-sidecar-protocol", "agentos-sidecar-client");
-	assertBefore("agentos-executor-node-v8", "agentos-native-sidecar");
-	assertBefore("agentos-executor-python-v8-pyodide", "agentos-native-sidecar");
-	assertBefore("agentos-executor-wasm-v8", "agentos-native-sidecar");
-	assertBefore("agentos-executor-wasm-wasmtime", "agentos-native-sidecar");
-	assertBefore("agentos-native-sidecar-core", "agentos-native-sidecar");
-	assertBefore("agentos-sidecar-client", "agentos-native-sidecar");
-	assertBefore("agentos-protocol", "agentos-client");
+	assertBefore("agentos-executor-node-v8", "agentos-vm");
+	assertBefore("agentos-executor-python-v8-pyodide", "agentos-vm");
+	assertBefore("agentos-executor-wasm-v8", "agentos-vm");
+	assertBefore("agentos-executor-wasm-wasmtime", "agentos-vm");
+	assertBefore("agentos-sidecar-client", "agentos-vm");
+	assertBefore("agentos-acp-protocol", "agentos-client");
 	assertBefore("agentos-client", "agentos-sidecar");
 });
 
-test("browser migration crates stay excluded from real publish discovery", () => {
+test("archived browser crates stay excluded from real publish discovery", () => {
 	const repoRoot = join(import.meta.dirname, "../../../..");
 	const crates = discoverRustCrates(repoRoot);
 	assert(!crates.includes("agentos-sidecar-browser" as never));
-	assert(!crates.includes("agentos-native-sidecar-browser" as never));
+	assert(!crates.includes("agentos-vm-browser" as never));
 });
 
 test("discovers the publishable Rust crate subset from a workspace", () => {
@@ -85,26 +90,26 @@ test("discovers the publishable Rust crate subset from a workspace", () => {
 			[
 				"[workspace]",
 				"members = [",
-				'  "crates/agentos-protocol",',
-				'  "crates/agentos-sidecar",',
-				'  "crates/native-sidecar",',
+				'  "crates/acp-protocol",',
+				'  "crates/sidecar",',
+				'  "crates/vm",',
 				'  "crates/client",',
 				"]",
 				"",
 			].join("\n"),
 		);
 		for (const [member, name] of [
-			["crates/agentos-protocol", "agentos-protocol"],
-			["crates/agentos-sidecar", "agentos-sidecar"],
-			["crates/native-sidecar", "agentos-native-sidecar"],
+			["crates/acp-protocol", "agentos-acp-protocol"],
+			["crates/sidecar", "agentos-sidecar"],
+			["crates/vm", "agentos-vm"],
 			["crates/client", "agentos-client"],
 		]) {
 			write(root, join(member, "Cargo.toml"), `[package]\nname = "${name}"\n`);
 		}
 
 		assert.deepEqual(discoverRustCrates(root), [
-			"agentos-native-sidecar",
-			"agentos-protocol",
+			"agentos-vm",
+			"agentos-acp-protocol",
 			"agentos-client",
 			"agentos-sidecar",
 		]);

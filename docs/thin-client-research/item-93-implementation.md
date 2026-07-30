@@ -15,7 +15,7 @@ Make only the atomic `InitializeVm` request presence-aware:
    `optional<JsonUtf8>` in the lockstep BARE schema;
 2. TypeScript and Rust omit those fields when the caller supplied no runtime or
    VM configuration;
-3. one helper in `agentos-native-sidecar-core` resolves omission to
+3. one helper in the `agentos-vm` core module resolves omission to
    `GuestRuntimeKind::JavaScript` and the JSON text `{}`; and
 4. native and browser `initialize_vm` call that helper before invoking their
    existing `create_vm` implementation.
@@ -27,7 +27,7 @@ lower-level `CreateVmRequest` optional in this item: it is already the concrete
 sidecar-internal creation operation, while `InitializeVm` is the high-level
 AgentOS transaction whose omitted values require normalization.
 
-No compatibility branch is needed. The protocol, clients, native sidecar, and
+No compatibility branch is needed. The protocol, clients, sidecar, and
 browser sidecar release in lockstep.
 
 ## Current issue, with exact code
@@ -50,16 +50,16 @@ With ordinary omitted VM options, `createVmConfig` serializes as `{}`. Its
 JSON serialization drops, but the client still authored and forwarded the
 empty object.
 
-`packages/runtime-core/src/sidecar-process.ts`,
+`packages/core/src/sidecar-process.ts`,
 `SidecarProcess.initializeVm`, requires both fields in its options type and
-copies them into the live request. `packages/runtime-core/src/request-payloads.ts`,
+copies them into the live request. `packages/core/src/request-payloads.ts`,
 `toGeneratedRequestPayload`, then always converts the runtime and stringifies
 the config.
 
 The existing characterization is visible in
-`packages/runtime-core/tests/sidecar-process.test.ts`: the initialization
+`packages/core/tests/sidecar-process.test.ts`: the initialization
 request is expected to contain `runtime: "java_script"` and `config: {}`.
-`packages/runtime-core/tests/request-payloads.test.ts` similarly expects the
+`packages/core/tests/request-payloads.test.ts` similarly expects the
 generated values `GuestRuntimeKind.JavaScript` and `"{}"`.
 
 ### Rust manufactures the same defaults
@@ -94,21 +94,21 @@ type InitializeVmRequest struct {
 ```
 
 Consequently the generated Rust fields are concrete and
-`packages/runtime-core/src/generated-protocol.ts` exposes concrete
+`packages/core/src/generated-protocol.ts` exposes concrete
 `GuestRuntimeKind` and `JsonUtf8` values. This is why merely changing the two
 high-level clients is insufficient.
 
 ### Native and browser currently consume concrete values independently
 
-`crates/native-sidecar/src/service.rs`, `NativeSidecar::initialize_vm`, and
-`crates/native-sidecar-browser/src/wire_dispatch.rs`,
+`crates/vm/src/service.rs`, `VmManager::initialize_vm`, and
+`archive/browser/crates/vm-browser/src/wire_dispatch.rs`,
 `BrowserWireDispatcher::initialize_vm`, each construct a `CreateVmRequest`
 directly from `payload.runtime` and `payload.config`. There is no shared
 normalization point today.
 
 The concrete `create_vm` implementations in
-`crates/native-sidecar/src/vm.rs` and
-`crates/native-sidecar-browser/src/wire_dispatch.rs` already parse and validate
+`crates/vm/src/vm.rs` and
+`archive/browser/crates/vm-browser/src/wire_dispatch.rs` already parse and validate
 the config and apply shared environment, permission, filesystem, and limit
 defaults. They should remain unchanged. Item 93 only supplies their concrete
 runtime/config inputs from one shared omission normalizer.
@@ -138,7 +138,7 @@ pnpm --dir packages/build-tools build:protocol
 ```
 
 Expected generated changes in
-`packages/runtime-core/src/generated-protocol.ts` are `GuestRuntimeKind | null`
+`packages/core/src/generated-protocol.ts` are `GuestRuntimeKind | null`
 and `JsonUtf8 | null`, using the generated optional readers/writers. Rust code
 is generated at build time from the same schema and becomes
 `Option<GuestRuntimeKind>` / `Option<JsonUtf8>` automatically. Do not hand-edit
@@ -146,7 +146,7 @@ generated Rust output under `target/`.
 
 ### 2. Add the one shared normalizer
 
-Add `crates/native-sidecar-core/src/vm_initialization.rs` with a pure helper:
+Add `crates/vm/src/core/vm_initialization.rs` with a pure helper:
 
 ```rust
 use agentos_sidecar_protocol::wire::{
@@ -168,7 +168,7 @@ pub fn initialize_vm_create_request(payload: &InitializeVmRequest) -> CreateVmRe
 ```
 
 Declare the module and re-export `initialize_vm_create_request` from
-`crates/native-sidecar-core/src/lib.rs`.
+`crates/vm/src/core/mod.rs`.
 
 Keep this helper deliberately small. It chooses only the two values that the
 concrete `CreateVmRequest` requires; it must not parse config, add environment,
@@ -187,21 +187,22 @@ normalizer.
 
 ### 3. Use the helper in both sidecars
 
-In `crates/native-sidecar/src/service.rs`, replace the inline create request in
-`NativeSidecar::initialize_vm`:
+In `crates/vm/src/service.rs`, replace the inline create request in
+`VmManager::initialize_vm`:
 
 ```rust
 let create_payload =
-    agentos_native_sidecar_core::initialize_vm_create_request(&payload);
+    agentos_vm::core::initialize_vm_create_request(&payload);
 let created_dispatch = self.create_vm(request, create_payload).await?;
 ```
 
-In `crates/native-sidecar-browser/src/wire_dispatch.rs`, make the corresponding
+In the historical
+`archive/browser/crates/vm-browser/src/wire_dispatch.rs`, make the corresponding
 replacement in `BrowserWireDispatcher::initialize_vm`:
 
 ```rust
 let create_payload =
-    agentos_native_sidecar_core::initialize_vm_create_request(&payload);
+    agentos_vm::core::initialize_vm_create_request(&payload);
 let created_dispatch = self.create_vm(request, create_payload);
 ```
 
@@ -209,9 +210,9 @@ The rest of each atomic configure/register/rollback transaction stays exactly
 as it is. Borrow the full payload for normalization before moving its mounts,
 packages, or callbacks.
 
-### 4. Preserve omission in runtime-core
+### 4. Preserve omission in core
 
-In `packages/runtime-core/src/request-payloads.ts`, make the live payload fields
+In `packages/core/src/request-payloads.ts`, make the live payload fields
 optional:
 
 ```ts
@@ -239,7 +240,7 @@ config:
 Do not use truthiness: explicit empty configuration `{}` is a present caller
 value and must still serialize as `Some("{}")`/`"{}"`.
 
-In `packages/runtime-core/src/sidecar-process.ts`, make `runtime` and `config`
+In `packages/core/src/sidecar-process.ts`, make `runtime` and `config`
 optional in `SidecarProcess.initializeVm` and conditionally spread only fields
 that are not `undefined` into the live request. The transport must not choose a
 fallback.
@@ -335,13 +336,13 @@ coverage.
 
 ### Protocol tests
 
-Update `packages/runtime-core/tests/request-payloads.test.ts`:
+Update `packages/core/tests/request-payloads.test.ts`:
 
 - `{ type: "initialize_vm" }` maps to generated `runtime: null`, `config: null`;
 - explicit JavaScript plus `{}` maps to JavaScript plus `"{}"`; and
 - explicit non-empty config survives JSON serialization unchanged.
 
-Update `packages/runtime-core/tests/sidecar-process.test.ts` so
+Update `packages/core/tests/sidecar-process.test.ts` so
 `initializeVm(session, {})` records an `initialize_vm` payload with neither
 field. Add an explicit call retaining both values.
 
@@ -352,7 +353,7 @@ codec decode equality. This catches either generated endpoint losing presence.
 
 ### Authoritative sidecar tests
 
-Update `crates/native-sidecar/tests/initialize_vm.rs` helpers to accept optional
+Update `crates/vm/tests/initialize_vm.rs` helpers to accept optional
 runtime/config, then add focused tests:
 
 - omission initializes successfully and returns the ordinary default resolved
@@ -362,7 +363,7 @@ runtime/config, then add focused tests:
 - the existing atomic rollback/host-callback behavior remains unchanged.
 
 Update
-`crates/native-sidecar-browser/tests/wire_dispatch.rs::browser_wire_dispatcher_initializes_vm_atomically`
+`archive/browser/crates/vm-browser/tests/wire_dispatch.rs::browser_wire_dispatcher_initializes_vm_atomically`
 to send both values as `None`. Keep/add an explicit-config case proving browser
 config still reaches `create_vm`. The pure shared-core tests own exact runtime
 selection parity because the browser execution shell does not need to invent a
@@ -377,16 +378,15 @@ resolved JavaScript/empty-config behavior.
 ### Focused before/after commands
 
 ```sh
-pnpm --dir packages/runtime-core exec vitest run \
+pnpm --dir packages/core exec vitest run \
   tests/request-payloads.test.ts tests/sidecar-process.test.ts
 pnpm --dir packages/core exec vitest run \
   tests/initialize-vm-omission.test.ts
 cargo test -p agentos-client create_vm_config_omits_client_owned_defaults
 cargo test -p agentos-sidecar-protocol initialize_vm
-cargo test -p agentos-native-sidecar-core initialize_vm
-cargo test -p agentos-native-sidecar --test initialize_vm -- --nocapture
-cargo test -p agentos-native-sidecar-browser \
-  browser_wire_dispatcher_initializes_vm_atomically -- --nocapture
+cargo test -p agentos-vm initialize_vm
+cargo test -p agentos-vm --test initialize_vm -- --nocapture
+# Browser reference code is archived and has no active Cargo test gate.
 ```
 
 Use the actual Core test path if the capture case is added to
@@ -397,16 +397,14 @@ Use the actual Core test path if the capture case is added to
 ```sh
 pnpm --dir packages/build-tools build:protocol
 node scripts/check-generated-artifacts.mjs
-pnpm --dir packages/runtime-core check-types
-pnpm --dir packages/runtime-core build
+pnpm --dir packages/core check-types
+pnpm --dir packages/core build
 pnpm --dir packages/core check-types
 pnpm --dir packages/core build
 cargo fmt --all -- --check
 cargo check -p agentos-sidecar-protocol
 cargo check -p agentos-client
-cargo check -p agentos-native-sidecar-core
-cargo check -p agentos-native-sidecar
-cargo check -p agentos-native-sidecar-browser
+cargo check -p agentos-vm
 cargo check --workspace
 git diff --check
 ```
@@ -438,7 +436,7 @@ Item 93.
 - [ ] Parent TypeScript and Rust characterization records show JavaScript plus
       `{}` were client-authored.
 - [ ] BARE schema and generated TypeScript preserve optional runtime/config.
-- [ ] TypeScript high-level and runtime-core requests omit absent values and
+- [ ] TypeScript high-level and core requests omit absent values and
       preserve every explicit value.
 - [ ] Rust sends `None`/`None` for default AgentOS creation and preserves an
       explicit non-default config.

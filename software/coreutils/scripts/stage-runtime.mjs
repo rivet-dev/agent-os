@@ -11,7 +11,7 @@ const localBuild = resolve(
 );
 const validatedArtifact = resolve(
 	repositoryRoot,
-	"packages/runtime-core/commands",
+	"packages/core/commands",
 );
 const commandsDir = process.env.AGENTOS_SOFTWARE_COMMANDS_DIR
 	? resolve(repositoryRoot, process.env.AGENTOS_SOFTWARE_COMMANDS_DIR)

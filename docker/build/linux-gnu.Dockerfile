@@ -100,10 +100,9 @@ RUN --mount=type=cache,id=cargo-registry-agentos-${CACHE_PLATFORM},target=/usr/l
       ${RUSTFLAGS:-}"; \
     cargo test -p agentos-executor-wasm-wasmtime --features threads --lib --target "$TARGET"; \
     if [ "$BUILD_PROFILE" = "release" ]; then FLAG="--release"; PROF=release; else FLAG=""; PROF=debug; fi; \
-    cargo build $FLAG -p agentos-sidecar -p agentos-native-sidecar --target "$TARGET"; \
+    cargo build $FLAG -p agentos-sidecar --target "$TARGET"; \
     mkdir -p /artifacts; \
     cp "target/$TARGET/$PROF/agentos-sidecar" /artifacts/agentos-sidecar; \
-    cp "target/$TARGET/$PROF/agentos-native-sidecar" /artifacts/agentos-native-sidecar; \
     (sccache --show-stats 2>/dev/null || true)
 
 CMD ["ls", "-la", "/artifacts"]

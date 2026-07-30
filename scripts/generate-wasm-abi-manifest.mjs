@@ -7,15 +7,15 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const outputPath = resolve(root, 'crates/wasm-common/assets/agentos-wasm-abi.json');
-const registryOutputPath = resolve(root, 'crates/wasm-common/src/abi/generated.rs');
+const outputPath = resolve(root, 'crates/executor-wasm-abi/assets/agentos-wasm-abi.json');
+const registryOutputPath = resolve(root, 'crates/executor-wasm-abi/src/abi/generated.rs');
 const preview1WitxPath = resolve(
   root,
-  'crates/wasm-common/abi/wasi_snapshot_preview1/wasi_snapshot_preview1.witx',
+  'crates/executor-wasm-abi/abi/wasi_snapshot_preview1/wasi_snapshot_preview1.witx',
 );
 const preview1TypesPath = resolve(
   root,
-  'crates/wasm-common/abi/wasi_snapshot_preview1/typenames.witx',
+  'crates/executor-wasm-abi/abi/wasi_snapshot_preview1/typenames.witx',
 );
 
 const definitions = [];
@@ -87,7 +87,7 @@ const loweredPreview1 = JSON.parse(
       'run',
       '--quiet',
       '-p',
-      'agentos-wasm-abi-generator',
+      'agentos-executor-wasm-abi-generator',
       '--',
       preview1WitxPath,
     ],
@@ -800,15 +800,15 @@ const manifest = {
     preview1WitxCommit: 'd4d3df3072b65ce43cb01c1add72b402d69a79d1',
     preview1Witx: [
       {
-        path: 'crates/wasm-common/abi/wasi_snapshot_preview1/typenames.witx',
+        path: 'crates/executor-wasm-abi/abi/wasi_snapshot_preview1/typenames.witx',
         sha256: createHash('sha256').update(readFileSync(preview1TypesPath)).digest('hex'),
       },
       {
-        path: 'crates/wasm-common/abi/wasi_snapshot_preview1/wasi_snapshot_preview1.witx',
+        path: 'crates/executor-wasm-abi/abi/wasi_snapshot_preview1/wasi_snapshot_preview1.witx',
         sha256: createHash('sha256').update(readFileSync(preview1WitxPath)).digest('hex'),
       },
     ],
-    preview1Generator: 'agentos-wasm-abi-generator@0.0.1 (witx=0.9.1)',
+    preview1Generator: 'agentos-executor-wasm-abi-generator@0.0.1 (witx=0.9.1)',
     wasiLibcCommit: '574b88da481569b65a237cb80daf9a2d5aeaf82d',
     customAbiInventory: 'docs/design/wasmtime-phase-0.md',
   },
@@ -829,7 +829,7 @@ const manifest = {
 const output = `${JSON.stringify(manifest, null, 2)}\n`;
 const rawRegistryOutput = execFileSync(
   'cargo',
-  ['run', '--quiet', '-p', 'agentos-wasm-abi-generator', '--', '--render-registry'],
+  ['run', '--quiet', '-p', 'agentos-executor-wasm-abi-generator', '--', '--render-registry'],
   { cwd: root, encoding: 'utf8', input: output, maxBuffer: 32 * 1024 * 1024 },
 );
 const registryOutput = execFileSync(

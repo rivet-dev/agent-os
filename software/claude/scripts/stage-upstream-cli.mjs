@@ -18,7 +18,7 @@ const manifestPath = resolvePath(distDir, "claude-cli-upstream.json");
 // Claude Agent SDK 0.2.112 / Claude Code 2.1.112 is the final release that
 // ships its CLI as JavaScript. Later SDKs ship only closed platform-native
 // executables, which cannot run inside an AgentOS VM. Stage it byte-for-byte;
-// Node compatibility belongs in AgentOS runtime core, not in this bundle.
+// Node compatibility belongs in agentOS core, not in this bundle.
 mkdirSync(distDir, { recursive: true });
 copyFileSync(cliPath, outputPath);
 chmodSync(outputPath, 0o755);

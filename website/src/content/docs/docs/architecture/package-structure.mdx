@@ -1,6 +1,6 @@
 ---
 title: "Package Architecture"
-description: "How the kernel, platform runtime, executor contract, sidecar, and independently feature-gated execution engines fit together."
+description: "How the VM, kernel, Tokio driver, sidecar, and independently feature-gated execution engines fit together."
 skill: true
 ---
 
@@ -15,65 +15,132 @@ parity requirements are added.
 
 ## Decisions
 
-- Rename `agentos-runtime` to **`agentos-runtime-tokio`**.
-- Rename `agentos-execution` to **`agentos-executor-contract`**.
+- Use **`agentos-driver-tokio`** for the process-owned native async driver.
+- Use **`agentos-executor-contract`** for engine-neutral execution contracts.
 - Keep every execution engine in its own crate so it can be independently
   feature-gated.
 - Keep guest Linux/POSIX semantics in the kernel, not in executors.
-- Keep the kernel separate from the platform runtime so a future browser
+- Keep the kernel separate from the async driver so a future browser
   composition does not depend on Tokio.
 - Use different native and browser composition roots instead of spreading
   `cfg(browser)` branches through shared crates.
 
+## Layout contract
+
+Active Rust crates use one flat directory convention:
+
+```text
+crates/<role>/Cargo.toml  →  package agentos-<role>  →  Rust crate agentos_<role>
+```
+
+For example, `crates/rivetkit-ars-client` is
+`agentos-rivetkit-ars-client`, while `crates/executor-wasm-wasmtime` is
+`agentos-executor-wasm-wasmtime`. A repository check enforces this mapping.
+The `agentos-` namespace belongs in Cargo package names, not directory names.
+Crates are not nested into `tools/`, `runtime/`, or `executors/` categories;
+their role-prefixed names provide grouping without creating a second layout
+scheme.
+
+Historical browser Rust crates live under `archive/browser/crates/`. They are
+reference code only and are not Cargo workspace members, dependencies, build
+inputs, tests, or publish candidates.
+
 ## Native package graph
 
 ```text
-agentos-native-sidecar
-├── agentos-kernel
-├── agentos-runtime-tokio
-├── agentos-executor-contract
-├── shared engine-family support
-│   ├── agentos-v8-runtime (optional with any V8 executor)
-│   └── agentos-wasm-common
-└── optional executor crates
+agentos-sidecar                         binary and composition root
+├── agentos-sidecar-protocol
+├── agentos-driver-tokio
+├── agentos-vm
+│   ├── agentos-driver-tokio
+│   ├── agentos-vm-config
+│   ├── agentos-vm-kernel
+│   │   ├── agentos-vm-host-interface
+│   │   ├── agentos-resource-accounting
+│   │   └── agentos-vfs-core
+│   ├── agentos-vfs-storage
+│   │   └── agentos-vfs-core
+│   ├── agentos-rivetkit-ars-client
+│   ├── agentos-executor-contract
+│   └── generic extension lifecycle/capability adapter
+├── optional executor crates
     ├── agentos-executor-node-v8
-    │   └── agentos-v8-runtime
+    │   ├── agentos-executor-contract
+    │   └── agentos-executor-v8-runtime
     ├── agentos-executor-python-v8-pyodide
-    │   └── agentos-v8-runtime
+    │   ├── agentos-executor-contract
+    │   └── agentos-executor-v8-runtime
     ├── agentos-executor-wasm-v8
-    │   ├── agentos-v8-runtime
-    │   └── agentos-wasm-common
+    │   ├── agentos-executor-contract
+    │   ├── agentos-executor-v8-runtime
+    │   └── agentos-executor-wasm-abi
     └── agentos-executor-wasm-wasmtime
-        └── agentos-wasm-common
+        ├── agentos-executor-contract
+        └── agentos-executor-wasm-abi
+├── agentos-acp-protocol
+└── stdio, fd 3, framing, and connection routing
 ```
 
 Dependencies point downward. In particular:
 
-- the kernel does not depend on a sidecar, platform runtime, or executor;
+- the kernel does not depend on a sidecar, async driver, or executor;
 - the executor contract does not depend on the kernel, Tokio, V8, or Wasmtime;
 - engine crates do not depend on the sidecar; and
-- the sidecar is the only crate that selects and composes executors.
+- `agentos-vm` always depends on the executor contract; optional VM adapter
+  features add conditional edges to separately packaged engines, and a
+  no-feature VM build links none of them;
+- the sidecar selects concrete engines and injects their availability registry.
 
-The sidecar also names the shared support crates directly where composition
-requires their types. `agentos-v8-runtime` is optional and enters the binary only
-with a V8 executor; the sidecar uses it for process-global platform ownership,
-snapshot prewarm, and V8 session adaptation. The lightweight
-`agentos-wasm-common` edge supplies format detection, selector, limits, and
-stable error types even when a requested WASM executor was compiled out. These
-edges do not move Node, Python, or standalone-WASM execution policy back into
-the sidecar.
+`agentos-sidecar` is the product-facing process and native composition root.
+`agentos-vm` is the embeddable VM orchestration library. It defaults to no
+executors, so Rust consumers can use VM lifecycle, storage, mounts, snapshots,
+and virtual-OS operations without linking V8, Pyodide, or Wasmtime.
+`agentos-executor-v8-runtime` is optional and enters the binary only with a V8 executor;
+it owns process-global platform setup, snapshot prewarm, and reusable V8 session
+mechanics. The lightweight `agentos-executor-wasm-abi` edge supplies format
+detection, selector, limits, and stable error types even when a requested WASM
+executor was compiled out.
+
+## Direct embedded use
+
+Rust applications may embed the virtual OS without starting a sidecar or
+constructing a client. Disable `agentos-vm`'s default features, inject the
+process driver, and use an empty executor registry:
+
+```toml
+[dependencies]
+agentos-vm = { version = "0.0.1", default-features = false }
+```
+
+The checked [`crates/vm/examples/embedded_os.rs`](https://github.com/rivet-dev/agent-os/blob/main/crates/vm/examples/embedded_os.rs)
+example creates a VM, writes and reads a file, inspects the process table,
+snapshots the filesystem, and
+explicitly disposes the VM without starting a sidecar or client. The embedded
+handle exposes the VM's authoritative kernel for direct process, descriptor,
+signal, mount, socket, and snapshot operations. CI compiles and runs the
+example with `--no-default-features`. VM and filesystem operations remain
+available with an empty registry; only language execution fails, using the
+typed `ERR_AGENTOS_EXECUTOR_UNAVAILABLE` error.
 
 ## Responsibilities
 
 | Crate | Owns | Does not own |
 | --- | --- | --- |
-| `agentos-kernel` | Process, fd, VFS, socket, signal, PTY, permission, and Linux/POSIX semantics | Tokio scheduling, guest ABI adaptation, engine selection |
-| `agentos-runtime-tokio` | The native Tokio runtime, timers, cancellation, bounded blocking admission, and native async I/O readiness | Guest OS state, policy semantics, executor selection |
+| `agentos-vm-kernel` | Process, fd, VFS, socket, signal, PTY, permission, and Linux/POSIX semantics | Tokio scheduling, guest ABI adaptation, engine selection |
+| `agentos-driver-tokio` | The native Tokio runtime, timers, cancellation, bounded blocking admission, and native async I/O readiness | Guest OS state, policy semantics, executor selection |
 | `agentos-executor-contract` | Engine-neutral lifecycle, control, events, direct replies, wakes, limits, identities, bounded operation values, and typed errors | Kernel implementation, Tokio, browser APIs, V8, Wasmtime |
+| `agentos-resource-accounting` | Runtime-neutral bounded counters, admission, queue limits, and queue telemetry | Tokio, kernel semantics, engine APIs |
+| `agentos-vm-host-interface` | Trusted host request/response and bridge value contracts shared across clients, kernel adapters, and executors | Queue policy, engine state, kernel state |
+| `agentos-vfs-core` | Filesystem abstractions, mount composition, POSIX VFS behavior, and package format | Concrete local, SQLite, S3, or actor storage |
+| `agentos-vfs-storage` | Concrete VFS persistence backends | POSIX process semantics or executor adaptation |
 | Executor crates | Engine state, guest ABI and memory adaptation, guest scheduling, and engine-specific interruption | Parallel filesystem, network, process, signal, or TTY implementations |
-| `agentos-v8-runtime` | Process-global V8 platform ownership and reusable isolate/session mechanics | Node, Python, or standalone-WASM policy |
-| `agentos-wasm-common` | Shared agentOS WASM ABI definitions, validation, permission tiers, and stable WASM errors | A concrete V8 or Wasmtime engine |
-| `agentos-native-sidecar` | VM/session lifecycle, runtime dispatch, authorization, executor registry, and mapping executor operations to kernel and native runtime services | Guest ABI details or duplicate kernel state |
+| `agentos-executor-v8-runtime` | Process-global V8 platform ownership and reusable isolate/session mechanics | Node, Python, or standalone-WASM policy |
+| `agentos-executor-wasm-abi` | Shared agentOS WASM ABI definitions, validation, permission tiers, and stable WASM errors | A concrete V8 or Wasmtime engine |
+| `agentos-vm` | VM lifecycle, kernel/VFS/storage composition, executor dispatch through injected contracts, mounts, snapshots, direct embedded operations, and the engine-neutral extension lifecycle/capability adapter | Sidecar transport, ACP or other concrete extensions, or concrete engine implementation |
+| `agentos-sidecar` | The executable, wire transport, connection/session authentication, concrete extension selection including ACP, Tokio-driver construction, and concrete executor registration | Guest Linux semantics or engine internals |
+| `agentos-sidecar-protocol` / `agentos-sidecar-client` | Execution-sidecar wire schema and client transport | VM policy or engine dispatch |
+| `agentos-acp-protocol` | ACP extension wire schema | Runtime implementation |
+| `agentos-rivetkit-ars-client` | RivetKit Actor Runtime Socket transport used for actor-owned durable state | General kernel sockets or VFS semantics |
 
 `agentos-executor-contract` is more than a DTO crate, but it should remain
 small. It may enforce invariants such as generation binding, exactly-once direct
@@ -88,22 +155,23 @@ one authoritative kernel implementation and one set of state.
 
 ## Dispatch
 
-The sidecar remains the execution manager:
+The sidecar composes execution while the VM manager coordinates it:
 
 1. Resolve a command and determine its runtime from the explicit request or
    executable format.
 2. Ask the kernel to allocate the process and authoritative process state.
-3. Select a compiled executor from the sidecar registry.
+3. Ask the injected registry for the requested executor; an absent engine
+   returns `ERR_AGENTOS_EXECUTOR_UNAVAILABLE`.
 4. Construct that executor with process-scoped contract capabilities.
 5. Map its host operations to the kernel and, where external asynchronous I/O is
-   required, to `agentos-runtime-tokio`.
+   required, to `agentos-driver-tokio`.
 6. Commit exit and signal state back through the kernel lifecycle.
 
 Disabling an executor at compile time must not silently select another engine.
 The wire runtime kind remains understood and dispatch returns the typed
 `ERR_AGENTOS_EXECUTOR_NOT_COMPILED` error.
 
-The native composition root should expose these features:
+The sidecar composition root exposes these features:
 
 - `node-v8`
 - `python-v8-pyodide`
@@ -119,12 +187,12 @@ contract and kernel types must not change based on the enabled executor set.
 
 The portability test is deliberately simple: a browser implementation should be
 possible by retaining the kernel and executor contract, then replacing the
-native composition root, platform runtime, and executor set.
+native composition root, async driver, and executor set.
 
 ```text
-agentos-browser-sidecar
-├── agentos-kernel
-├── agentos-runtime-browser
+future browser composition root
+├── agentos-vm-kernel
+├── browser async driver
 ├── agentos-executor-contract
 └── browser Web Worker executors
     ├── JavaScript worker
@@ -141,10 +209,10 @@ preserved for compatibility.
 
 | Native architecture | Greenfield browser equivalent |
 | --- | --- |
-| `agentos-kernel` | The same authoritative Linux/POSIX state and operations, compiled or hosted in a browser-compatible form |
+| `agentos-vm-kernel` | The same authoritative Linux/POSIX state and operations, compiled or hosted in a browser-compatible form |
 | `agentos-executor-contract` | The same semantic lifecycle and operation contract, with browser message bindings |
-| `agentos-native-sidecar` | A browser sidecar composition root with the same orchestration responsibilities |
-| `agentos-runtime-tokio` | Browser event loop, timers, cancellation, storage/network adapters, and worker transport |
+| `agentos-vm` | The same VM orchestration library if its dependencies can be compiled for the browser target |
+| `agentos-driver-tokio` | Browser event loop, timers, cancellation, storage/network adapters, and worker transport |
 | Native engine crates | Web Worker executors using browser JavaScript, WebAssembly, or Pyodide |
 | Cargo executor features | Browser build entrypoints or bundler features that include only selected workers |
 
@@ -187,7 +255,7 @@ implementations benefit.
 
 ### Browser-specific responsibilities
 
-A future `agentos-runtime-browser` would own only browser platform mechanics:
+A future browser driver would own only browser platform mechanics:
 
 - Web Worker creation, termination, and message routing;
 - browser timers and event-loop scheduling;
@@ -227,7 +295,7 @@ binary costs.
 
 The other boundaries protect ownership:
 
-- separating the kernel from `agentos-runtime-tokio` keeps Linux/POSIX state
+- separating the kernel from `agentos-driver-tokio` keeps Linux/POSIX state
   independent of a threaded native scheduler;
 - separating `agentos-executor-contract` gives all engines one bounded security
   boundary without granting them direct kernel ownership;
@@ -237,6 +305,6 @@ The other boundaries protect ownership:
   merging the four public execution layers back into one package.
 
 Do not create additional crates merely to mirror source-code modules. Reactor
-implementation can remain inside the platform runtime, and conformance helpers
+implementation can remain inside the async driver, and conformance helpers
 can remain test support, until an independent dependency or feature boundary
 justifies extracting them.

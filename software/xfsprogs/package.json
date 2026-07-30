@@ -6,7 +6,11 @@
 	"description": "Low-level filesystem inspection commands for AgentOS VMs",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
-	"files": ["dist", "!dist/package", "!dist/package.tar"],
+	"files": [
+		"dist",
+		"!dist/package",
+		"!dist/package.tar"
+	],
 	"exports": {
 		".": {
 			"types": "./dist/index.d.ts",
@@ -20,7 +24,6 @@
 	},
 	"devDependencies": {
 		"@agentos-software/manifest": "workspace:*",
-		"@rivet-dev/agentos-test-harness": "workspace:*",
 		"@rivet-dev/agentos-toolchain": "workspace:*",
 		"@types/node": "^22.10.2",
 		"typescript": "^5.9.2",

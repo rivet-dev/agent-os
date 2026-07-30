@@ -33,14 +33,14 @@ A request passes through four layers. Only the top and bottom understand HTTP; t
 
 | Layer | Role | Trust | Lives in |
 | --- | --- | --- | --- |
-| 4 · Guest bridge | `node:http` / `node:net` / `fetch` / undici shim | untrusted (V8 isolate) | `crates/v8-runtime/assets/v8-bridge.source.js` |
+| 4 · Guest bridge | `node:http` / `node:net` / `fetch` / undici shim | untrusted (V8 isolate) | `crates/executor-v8-runtime/assets/v8-bridge.source.js` |
 | 3 · Sync-RPC dispatch | routes `net.connect`, `net.http_request`, `net.listen`, … | trusted | `crates/sidecar/src/service.rs` |
 | 2 · Execution & enforcement | listener state, host fetch client, permission checks | trusted (TCB) | `crates/sidecar/src/execution.rs` |
-| 1 · Kernel socket table | `bind` / `listen` / `connect` / `read` / `write`, loopback routing | trusted (TCB floor) | `crates/kernel/src/socket_table.rs`, `kernel.rs` |
+| 1 · Kernel socket table | `bind` / `listen` / `connect` / `read` / `write`, loopback routing | trusted (TCB floor) | `crates/vm-kernel/src/socket_table.rs`, `kernel.rs` |
 
 ### Layer 1: kernel socket table
 
-`crates/kernel/src/kernel.rs` exposes the primitives above. Loopback routing is the heart of VM-local networking: `socket_connect_inet_loopback` only succeeds against a socket that is actually bound and listening in the same VM's table; otherwise it returns `ECONNREFUSED`. Resource-limit checks run before the two sockets are paired.
+`crates/vm-kernel/src/kernel.rs` exposes the primitives above. Loopback routing is the heart of VM-local networking: `socket_connect_inet_loopback` only succeeds against a socket that is actually bound and listening in the same VM's table; otherwise it returns `ECONNREFUSED`. Resource-limit checks run before the two sockets are paired.
 
 ### Layer 2: sidecar execution (enforcement point / TCB)
 
@@ -61,7 +61,7 @@ That last check stops a guest from forging a target to reach a process it should
 
 ### Layer 4: guest bridge
 
-`crates/v8-runtime/assets/v8-bridge.source.js` is the Node-compatibility shim inside the untrusted V8 isolate. It presents `node:http`, `node:net`, `fetch`, and undici to guest code and translates them into Layer 3 bridge calls. `http.createServer()` is implemented on top of `net.Server`: each accepted byte socket is parsed as HTTP and dispatched to the guest's request handler.
+`crates/executor-v8-runtime/assets/v8-bridge.source.js` is the Node-compatibility shim inside the untrusted V8 isolate. It presents `node:http`, `node:net`, `fetch`, and undici to guest code and translates them into Layer 3 bridge calls. `http.createServer()` is implemented on top of `net.Server`: each accepted byte socket is parsed as HTTP and dispatched to the guest's request handler.
 
 ## How fetch, net, and dns route through it
 

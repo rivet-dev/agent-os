@@ -14,7 +14,7 @@
  * `pi-prompt-turn` benchmarks the native PI CLI path through
  * `openSession({ sessionId: "main", agent: "pi-cli" })`, which uses `pi-acp` to drive the real PI CLI in
  * RPC mode. The same PI headless test file documents that raw `spawn("pi", ...)`
- * is still not exposed on the native sidecar PATH.
+ * is still not exposed on the sidecar PATH.
  *
  * Pass --iterations=N to override default (5). The reported p95/p99 are only
  * meaningful with enough samples (~200 for p95, ~1000 for p99); the marketing

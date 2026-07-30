@@ -95,8 +95,8 @@ test("fails when an internal crate dep requirement drifts off 0.0.1", () => {
 		writeFileSync(
 			join(root, "Cargo.toml"),
 			'[workspace.package]\nversion = "0.0.1"\n\n[workspace.dependencies]\n' +
-				'agentos-protocol = { path = "crates/agentos-protocol", version = "0.2.0-rc.3" }\n' +
-				'agentos-kernel = { path = "crates/kernel", version = "0.3.4-rc.1" }\n',
+				'agentos-acp-protocol = { path = "crates/acp-protocol", version = "0.2.0-rc.3" }\n' +
+				'agentos-vm-kernel = { path = "crates/vm-kernel", version = "0.3.4-rc.1" }\n',
 		);
 		const exitCode = gateExitCode(root);
 		if (exitCode !== 1) {

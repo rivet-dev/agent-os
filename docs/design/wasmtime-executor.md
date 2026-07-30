@@ -18,7 +18,7 @@ registry-software owners
 - **Keep each concrete executor independently feature-gated.** Wasmtime lives
   in `agentos-executor-wasm-wasmtime`; V8-WASM lives in
   `agentos-executor-wasm-v8`; engine-neutral ABI/profile code lives in
-  `agentos-wasm-common`.
+  `agentos-executor-wasm-abi`.
 - **Do not rewrite filesystem, network, process, TTY, signal, or identity
   semantics.** Most already live in the kernel/sidecar. Consolidate the pieces
   still duplicated in the JavaScript runner through the prerequisite
@@ -59,7 +59,7 @@ protocol surface carries an optional sealed `wasmtime`/`v8` override; omission
 uses the sidecar-owned default, so clients do not independently choose or drift
 that default.
 
-The native sidecar is the composition root. It depends optionally on the two
+The sidecar is the composition root. It depends optionally on the two
 standalone-WASM executor crates and is the only crate that selects between
 them. This keeps Wasmtime and V8 independently removable from native builds
 without moving Linux semantics out of the kernel.
@@ -121,7 +121,7 @@ The Phase 2 single-threaded Wasmtime parity milestone did not:
 - enable every proposal supported by the selected Wasmtime release;
 - build a provisional Wasmtime spike before the shared executor/kernel
   prerequisite is complete;
-- move the process-wide Tokio reactor into `crates/kernel` or create another
+- move the process-wide Tokio reactor into `crates/vm-kernel` or create another
   Tokio runtime.
 
 ## 4. Baseline architecture before migration
@@ -130,7 +130,7 @@ Before this project, standalone WASM was implemented as a JavaScript execution:
 
 ```text
 standalone WASM request
-  -> native sidecar process lifecycle
+  -> sidecar process lifecycle
   -> WasmExecutionEngine
   -> JavascriptExecutionEngine
   -> V8 isolate
@@ -167,7 +167,7 @@ ceiling rather than immediate resident memory, but guest-driven compilation can
 approach it.
 
 The committed local warm benchmark in
-`packages/runtime-benchmarks/results/baseline-local.json` reports incremental
+`packages/benchmarks/results/baseline-local.json` reports incremental
 sidecar high-water memory above a prewarmed baseline for 19 current WASM lanes:
 
 - 11.2 MiB minimum;
@@ -190,7 +190,7 @@ descriptor, poller, resource policy, or permission decision.
 ```text
 clients / ACP
       |
-native sidecar
+sidecar
       |
       +-- process lifecycle and runtime selection
       +-- process-wide Tokio runtime and native I/O owners
@@ -224,7 +224,7 @@ model as every other child.
 The implemented organization is:
 
 ```text
-crates/wasm-common/
+crates/executor-wasm-abi/
   abi/                      pinned Preview1 WITX source
   assets/                   generated agentOS ABI manifest
   src/abi/                  generated registry and stable ABI types
@@ -247,12 +247,12 @@ crates/executor-wasm-wasmtime/
   src/linker/               Preview1 plus agentOS POSIX host imports
   src/threads.rs             separately gated shared-memory/thread support
 
-crates/native-sidecar/src/executor.rs
+crates/vm/src/executor.rs
                             feature-gated executor composition and dispatch
 ```
 
 The two standalone-WASM engines are separate feature-gated crates. Shared ABI,
-profile, and stable-error code lives in `agentos-wasm-common`; engine-specific
+profile, and stable-error code lives in `agentos-executor-wasm-abi`; engine-specific
 memory, lifecycle, and scheduling code remains in its executor crate. The
 sidecar is the only composition and backend-selection owner.
 
@@ -285,7 +285,7 @@ The implementation:
 - treat the patched sysroot and `toolchain/crates/wasi-ext` imports as the
   guest ABI source of truth;
 - link exactly the Preview1 and custom-import surface generated in
-  `crates/wasm-common/assets/agentos-wasm-abi.json` and required by built
+  `crates/executor-wasm-abi/assets/agentos-wasm-abi.json` and required by built
   software;
 - route every resource-bearing operation to an agentOS kernel or sidecar
   service;
@@ -933,7 +933,7 @@ workspace, 2026-07-20 Pacific):
   former 30-second lost-wake failure. The canonical nine-workload result then
   completed with zero validation failures.
 - Raw samples and environment/module provenance are committed in
-  `packages/runtime-benchmarks/results/wasm-backend-comparison.json`; operator
+  `packages/benchmarks/results/wasm-backend-comparison.json`; operator
   interpretation, override, rollback, metrics, cold-start, memory, and snapshot
   guidance is in `docs/wasmvm/executors.md`.
 
@@ -983,7 +983,7 @@ canonical workspace, 2026-07-21 Pacific):
   single-threaded and continue rejecting shared memory, atomics, and
   `wasi.thread-spawn`. JavaScript remains on V8 and there is no V8/Wasmtime
   memory bridge.
-- Each configured threaded group starts in its own native-sidecar worker
+- Each configured threaded group starts in its own sidecar worker
   process. The child owns only Wasmtime Engine/Store/Instance/shared-memory and
   guest-thread state; the parent retains the kernel, VFS, descriptors, sockets,
   permissions, processes, and signal dispositions. Bounded CBOR frames carry
@@ -1019,7 +1019,7 @@ canonical workspace, 2026-07-21 Pacific):
   `256,995,328` Wasmtime), and retained PSS (`162,531,328` versus `257,593,344`)
   failed. V8 therefore remains the omission/default and rollback backend. Raw
   evidence is committed in
-  `packages/runtime-benchmarks/results/wasm-backend-comparison-phase4.json`.
+  `packages/benchmarks/results/wasm-backend-comparison-phase4.json`.
 - Browser entrypoints remain dormant and excluded. AOT/serialized artifacts,
   Wizer, components, pooling, and live process snapshots/fork remain disabled.
   The repository-wide package-layout and fixed-version checks pass.
@@ -1035,7 +1035,7 @@ canonical workspace, 2026-07-21 Pacific):
 - [x] Run the complete shared Rust workspace test suite serially against the
       release-equivalent native configuration, including execution, sidecar,
       client, VFS, Python, raw ABI, Wasmtime safety, and xfstests coverage.
-- [x] Run every common native runtime-core integration suite under both `v8`
+- [x] Run every common native core integration suite under both `v8`
       and `wasmtime`; keep engine-specific tests separately named and require
       the common matrix mechanically in CI.
 - [x] Run the complete registry software suite under both backends, including
@@ -1102,13 +1102,13 @@ Phase 5 evidence (Rust 1.94.0, Linux x86-64 canonical workspace,
   bounded retries, a browser-download fallback, and the existing per-platform
   SHA-256 checks.
 - The exact serialized Rust workspace run passed end to end. Representative
-  aggregate results were execution 244/244, Python 38/38, native-sidecar service
+  aggregate results were execution 244/244, Python 38/38, sidecar service
   389 passed with 2 explicit ignores, raw ABI 9/9, Wasmtime safety 20 runnable
   tests with the generated pthread fixture reserved for its explicit gate, and
   xfstests 42 passed with 27 documented host-kernel, endurance, or
   storage-policy exclusions. All VFS, client, protocol, and doc tests also
   passed.
-- The complete native runtime-core suite ran under each standalone-WASM backend:
+- The complete native core suite ran under each standalone-WASM backend:
   V8 and Wasmtime each passed 516 tests with 41 deliberate skips across 100 test
   files. The PTY default suite passed 20/20 and its C matrix passed 40/40 under
   each backend. The release/nightly registry matrix passed 94/94 under each
@@ -1135,7 +1135,7 @@ Phase 5 evidence (Rust 1.94.0, Linux x86-64 canonical workspace,
   for deferred managed networking before response headers and during body
   reads, two simultaneous kernel-assigned client ports, exact one-slash request
   targets, and binary body preservation. Those cases pass, along with the
-  buffered, streaming, and one-shot-exit loopback tests. The native-sidecar
+  buffered, streaming, and one-shot-exit loopback tests. The sidecar
   library passes 280 tests with one intentional performance ignore; the rerun
   also corrected stale `/__secure_exec` command-path expectations to the live
   `/__agentos` projection and restored typed-error tests after removal of
@@ -1176,13 +1176,13 @@ Phase 5 evidence (Rust 1.94.0, Linux x86-64 canonical workspace,
   threaded isolation/termination tests, multigeneration/protocol soaks, and a
   200-cycle mixed V8/Wasmtime run with zero residual process or thread growth.
   The mixed result is in
-  `packages/runtime-benchmarks/results/wasm-mixed-soak.json`.
+  `packages/benchmarks/results/wasm-mixed-soak.json`.
 - The threaded benchmark completed 8 groups/24 guest threads. Its cold p50 was
   39.07 ms, cold p95 was 46.77 ms, warm throughput was 18.60 executions/s,
   one-group PSS was 17.68 MiB, maximum eight-worker PSS was 18.90 MiB,
   incremental guest-thread memory was 173,787 bytes/thread, and fixed-deadline
   termination was 44.16 ms. Raw results are in
-  `packages/runtime-benchmarks/results/wasmtime-threads.json`.
+  `packages/benchmarks/results/wasmtime-threads.json`.
 - The exact-head PR benchmark reproduced an inherited tiny-row gate
   discontinuity: `fs_read_small` failed at 1.07 ms and 1.25 ms, while
   pre-change heads had failed at 1.22 ms/1.29 ms and passed at 0.88 ms. Tiny
@@ -1280,18 +1280,18 @@ owners:
 
 - standalone WASM adapter and runner:
   `crates/executor-wasm-v8/src/lib.rs`,
-  `crates/v8-runtime/assets/runners/wasm-runner.mjs`, and
-  `crates/v8-runtime/assets/runners/wasi-module.js`;
+  `crates/executor-v8-runtime/assets/runners/wasm-runner.mjs`, and
+  `crates/executor-v8-runtime/assets/runners/wasi-module.js`;
 - ABI declarations and libc behavior:
   `toolchain/crates/wasi-ext/src/lib.rs`, `toolchain/std-patches/`, and
   `toolchain/std-patches/wasi-libc-overrides/`;
-- kernel semantics: `crates/kernel/src/kernel.rs`, `process_table.rs`,
+- kernel semantics: `crates/vm-kernel/src/kernel.rs`, `process_table.rs`,
   `pty.rs`, `user.rs`, `device_layer.rs`, and socket/VFS modules;
 - runtime lifecycle and external I/O:
-  `crates/native-sidecar/src/execution/`, `state.rs`, `filesystem.rs`, and
+  `crates/vm/src/execution/`, `state.rs`, `filesystem.rs`, and
   `service.rs`; and
 - current performance evidence:
-  `packages/runtime-benchmarks/results/baseline-local.json`.
+  `packages/benchmarks/results/baseline-local.json`.
 
 The Wasmtime API conclusions were checked against the current upstream API:
 

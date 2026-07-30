@@ -28,9 +28,8 @@
 		"@rivet-dev/agentos-toolchain": "workspace:*",
 		"@types/node": "^22.10.2",
 		"@types/ssh2": "^1.15.1",
-		"typescript": "^5.9.2",
-		"@rivet-dev/agentos-test-harness": "workspace:*",
 		"ssh2": "^1.16.0",
+		"typescript": "^5.9.2",
 		"vitest": "^2.1.9"
 	}
 }

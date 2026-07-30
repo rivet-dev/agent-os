@@ -40,7 +40,7 @@ pass**.
 - [x] Point it at the byte-identical upstream JavaScript Claude executable
   through its supported `CLAUDE_CODE_EXECUTABLE` override.
 - [x] Inventory every minified Claude CLI/SDK rewrite and classify it as ACP
-  semantics, AgentOS runtime compatibility, upstream defect, observability, or
+  semantics, agentOS runtime compatibility, upstream defect, observability, or
   packaging.
 - [x] Remove custom ACP translation and trace-only/minified patches.
 - [x] Reproduce every still-needed Node/POSIX workaround as a focused AgentOS

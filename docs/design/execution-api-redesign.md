@@ -363,7 +363,7 @@ There is no `vm.executions.*` after this change.
   controls; delete the detached-execution admission branch and `executions.*`;
   rewrite the `execute`/`evaluate` overload signatures (the `detached?: false`
   overload blocks go away).
-- `packages/runtime-core/src/generated-protocol.ts` — **generated**; regenerate
+- `packages/core/src/generated-protocol.ts` — **generated**; regenerate
   from the `.bare` schema after the wire fields change (drop `createIfMissing` /
   `detached`, rename `executionId → contextId`, add process/context messages).
 - `packages/core/type-tests/nested-api.ts` — update to the new nesting.
@@ -372,7 +372,7 @@ There is no `vm.executions.*` after this change.
   events; drop the removed ones.
 
 **Rust (sidecar, same-version lockstep):**
-- `crates/native-sidecar/*` and `crates/agentos-sidecar/*` — wire fields,
+- `crates/vm/*` and `crates/sidecar/*` — wire fields,
   context/process state machines, error variants (`context_not_found`,
   `context_conflict`, `context_language_mismatch`). Rust owns the state; the TS
   client forwards.

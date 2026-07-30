@@ -1,6 +1,6 @@
 # VM, Driver, and Sidecar Package Refactor
 
-Status: draft; initial naming and dependency decisions locked
+Status: implemented; naming and dependency decisions locked
 
 Audience: agentOS VM, sidecar, kernel, executor, client, build, and publishing
 owners
@@ -88,7 +88,8 @@ sidecar process
     │   ├── agentos-vfs-storage
     │   │   └── agentos-vfs-core
     │   ├── agentos-rivetkit-ars-client
-    │   └── agentos-executor-contract
+    │   ├── agentos-executor-contract
+    │   └── generic extension lifecycle/capability adapter
     ├── optional concrete executors
     │   ├── agentos-executor-node-v8
     │   │   ├── agentos-executor-contract
@@ -103,16 +104,24 @@ sidecar process
     │   └── agentos-executor-wasm-wasmtime
     │       ├── agentos-executor-contract
     │       └── agentos-executor-wasm-abi
-    ├── extension registry
     ├── ACP extension
     │   └── agentos-acp-protocol
     └── stdio, fd 3, framing, and connection routing
 ```
 
 `agentos-sidecar` selects the concrete executor packages through Cargo
-features, constructs their registry, and passes that registry into
-`agentos-vm`. `agentos-vm` consumes `agentos-executor-contract`; it does not
-contain V8, Wasmtime, Pyodide, or Node implementation code.
+features, constructs their availability registry, and passes that registry
+into `agentos-vm`. `agentos-vm` always consumes
+`agentos-executor-contract`. Its optional adapter features create conditional
+Cargo edges to the separately packaged engines, but a no-feature VM build
+links none of them and `agentos-vm` contains no V8, Wasmtime, Pyodide, or Node
+implementation code.
+
+The sidecar selects concrete extensions, including ACP. `agentos-vm` retains
+only the engine-neutral extension lifecycle and capability adapter because an
+extension must operate on the same authoritative VM/process state as every
+other host operation. This does not pull ACP, agents, prompts, or session
+implementations into the VM crate.
 
 ## 3. Package responsibilities
 
@@ -157,7 +166,7 @@ Its primary public vocabulary should be `VmManager`, `Vm`, `VmHandle`,
 - sidecar framing or transports;
 - host connection/session authentication;
 - ACP, agents, prompts, or durable agent sessions;
-- the extension registry;
+- concrete extension selection or implementation;
 - construction of a Tokio runtime;
 - guest syscall implementations;
 - V8, Wasmtime, Pyodide, or Node engine internals; or
@@ -188,20 +197,25 @@ agentos-vm = {
 ```
 
 ```rust
-use agentos_vm::{ExecutorRegistry, VmManager};
+use agentos_vm::{ExecutorRegistry, VmConfig, VmManager};
 
-let vms = VmManager::builder()
-    .driver(driver_handle)
+let mut vms = VmManager::builder()
     .executors(ExecutorRegistry::empty())
     .build()?;
 
-let vm = vms.create(vm_config).await?;
+let mut vm = vms.create(VmConfig::default().allow_all()).await?;
 vm.write_file("/workspace/hello.txt", b"hello").await?;
 assert_eq!(vm.read_file("/workspace/hello.txt").await?, b"hello");
+assert!(vm.kernel()?.list_processes().is_empty());
+let snapshot = vm.kernel_mut()?.snapshot_root_filesystem()?;
+assert!(!snapshot.entries.is_empty());
+vm.dispose().await?;
 ```
 
 The checked `embedded_os` example must compile against the public API and run
-with `agentos-vm`'s default feature set disabled.
+with `agentos-vm`'s default feature set disabled. It must demonstrate direct
+file access, process-table inspection, filesystem snapshotting, and explicit VM
+disposal through the embedded handle's authoritative kernel accessors.
 With an empty executor registry, filesystem, process-table, mount, snapshot,
 permission, and other OS operations continue to work. A request that actually
 needs a language engine fails with a stable typed
@@ -209,9 +223,11 @@ needs a language engine fails with a stable typed
 not panic, silently select an engine, or require a sidecar connection.
 
 `agentos-vm` therefore defaults to no executors and accepts an injected
-executor registry instead of depending on concrete engines. The
-`agentos-sidecar` default feature set enables the standard engines, while each
-individual sidecar feature selects exactly its corresponding executor crate.
+executor availability registry. The `agentos-sidecar` default feature set
+enables the standard engines, while each individual sidecar feature selects
+exactly its corresponding executor crate and VM adapter feature. A
+no-default-feature `agentos-vm` build has no concrete executor in its Cargo
+dependency graph.
 TypeScript remains native-backed through `@rivet-dev/agentos-core`; this
 requirement does not add an in-process TypeScript virtual OS implementation.
 
@@ -333,8 +349,10 @@ Keep:
 - one set of sidecar build, smoke-test, CI, benchmark, and publish paths.
 
 Low-level VM clients and high-level ACP clients use the same sidecar binary.
-The extension registry permits the sidecar to expose ACP without introducing
-ACP or agent dependencies into `agentos-vm`.
+The engine-neutral extension lifecycle/capability adapter permits the sidecar
+to expose ACP without introducing ACP or agent dependencies into
+`agentos-vm`. The sidecar chooses and constructs the registered extension set;
+the VM adapter binds those extensions to authoritative VM resources.
 
 This repository has no protocol backward-compatibility requirement. Remove the
 old names outright; do not add binary aliases, environment-variable fallbacks,
@@ -588,57 +606,87 @@ into a VFS behavior rewrite.
 
 ## 9. Implementation checklist
 
-- [ ] Rename `runtime-tokio` to `driver-tokio` and update its public types.
-- [ ] Move sidecar protocol configuration out of `driver-tokio`.
-- [ ] Rename `kernel` to `vm-kernel`.
-- [ ] Move sidecar transport, connection, protocol, and extension ownership out
-      of the current `sidecar` crate.
-- [ ] Rename the remaining VM orchestration library to `agentos-vm`.
-- [ ] Make `agentos-vm` library-only.
-- [ ] Make `agentos-sidecar` the only sidecar executable and native composition
+- [x] Rename `runtime-tokio` to `driver-tokio` and update its public types.
+- [x] Move sidecar protocol configuration out of `driver-tokio`.
+- [x] Rename `kernel` to `vm-kernel`.
+- [x] Move sidecar transport, connection authentication, concrete extension
+      selection, and protocol routing into `agentos-sidecar`; retain only the
+      engine-neutral extension lifecycle/capability adapter in `agentos-vm`.
+- [x] Rename the remaining VM orchestration library to `agentos-vm`.
+- [x] Make `agentos-vm` library-only.
+- [x] Make `agentos-sidecar` the only sidecar executable and native composition
       root.
-- [ ] Preserve the extension mechanism and keep ACP out of `agentos-vm`.
-- [ ] Move executor feature selection to the `agentos-sidecar` composition
+- [x] Preserve the extension mechanism and keep ACP out of `agentos-vm`.
+- [x] Move executor feature selection to the `agentos-sidecar` composition
       root.
-- [ ] Make `agentos-vm` default to no executors and accept an injected,
+- [x] Make `agentos-vm` default to no executors and accept an injected,
       possibly empty executor registry.
-- [ ] Return typed `ERR_AGENTOS_EXECUTOR_UNAVAILABLE` errors for execution
+- [x] Return typed `ERR_AGENTOS_EXECUTOR_UNAVAILABLE` errors for execution
       requests against an empty or incomplete registry.
-- [ ] Add a checked Rust example that uses `agentos-vm` directly as an
+- [x] Add a checked Rust example that uses `agentos-vm` directly as an
       embeddable OS with no sidecar, client, or executors.
-- [ ] Keep `agentos-vm-kernel` free of Tokio and concrete executor
+- [x] Keep `agentos-vm-kernel` free of Tokio and concrete executor
       dependencies.
-- [ ] Rename `v8-runtime` to `executor-v8-runtime`.
-- [ ] Rename `executor-wasm-common` to `executor-wasm-abi`.
-- [ ] Rename `wasm-abi-generator` to `executor-wasm-abi-generator`.
-- [ ] Rename `host-bridge` to `vm-host-interface` and update its public traits.
-- [ ] Rename `native-baseline` to `benchmark-baseline`.
-- [ ] Keep `resource-accounting` runtime-neutral and unchanged in name.
-- [ ] Remove `agentos-native-sidecar`, `AGENTOS_NATIVE_SIDECAR_BIN`, and the
+- [x] Rename `v8-runtime` to `executor-v8-runtime`.
+- [x] Rename `executor-wasm-common` to `executor-wasm-abi`.
+- [x] Rename `wasm-abi-generator` to `executor-wasm-abi-generator`.
+- [x] Rename `host-bridge` to `vm-host-interface` and update its public traits.
+- [x] Rename `native-baseline` to `benchmark-baseline`.
+- [x] Keep `resource-accounting` runtime-neutral and unchanged in name.
+- [x] Remove `agentos-native-sidecar`, `AGENTOS_NATIVE_SIDECAR_BIN`, and the
       duplicate sidecar resolver/artifacts.
-- [ ] Merge all production `agentos-runtime-core` functionality, generated
+- [x] Merge all production `agentos-runtime-core` functionality, generated
       code, assets, scripts, and tests into `agentos-core`.
-- [ ] Remove the `@rivet-dev/agentos-runtime-core` package without a
+- [x] Remove the `@rivet-dev/agentos-runtime-core` package without a
       compatibility re-export.
-- [ ] Merge the private TypeScript VM/compiler helpers into `agentos-core`.
-- [ ] Merge `agentos-vm-test-harness` and the root test harness into
+- [x] Merge the private TypeScript VM/compiler helpers into `agentos-core`.
+- [x] Merge `agentos-vm-test-harness` and the root test harness into
       `packages/test-harness`.
-- [ ] Remove the empty `agentos-posix` package.
-- [ ] Rename `packages/sidecar-binary` to `packages/sidecar` and remove the
+- [x] Remove the empty `agentos-posix` package.
+- [x] Rename `packages/sidecar-binary` to `packages/sidecar` and remove the
       duplicate `agentos-sidecar` package family.
-- [ ] Rename `packages/runtime-benchmarks` to `packages/benchmarks`.
-- [ ] Archive browser TypeScript packages under `archive/browser/packages/`
+- [x] Rename `packages/runtime-benchmarks` to `packages/benchmarks`.
+- [x] Archive browser TypeScript packages under `archive/browser/packages/`
       and remove them from the active pnpm/Turbo/publish graph.
-- [ ] Update all TypeScript imports to the flattened `agentos-core`,
+- [x] Update all TypeScript imports to the flattened `agentos-core`,
       `agentos-sidecar`, and test-harness surfaces.
-- [ ] Ensure `agentos-core` has one protocol generator, one VM-config generator,
+- [x] Ensure `agentos-core` has one protocol generator, one VM-config generator,
       and no duplicate generated type trees.
-- [ ] Update Cargo metadata, lockfile, publish order, CI, scripts, generated
+- [x] Update Cargo metadata, lockfile, publish order, CI, scripts, generated
       paths, documentation, and architecture guards.
-- [ ] Update Rust and TypeScript protocol schema names to
+- [x] Update Rust and TypeScript protocol schema names to
       `agentos-sidecar`.
-- [ ] Run the complete workspace, feature-matrix, executor-conformance,
+- [x] Run the complete workspace, feature-matrix, executor-conformance,
       sidecar, VM, protocol, publish, smoke, parity, and benchmark validation
       suites.
-- [ ] Run `cargo check -p agentos-vm --no-default-features` and compile/run the
+- [x] Run `cargo check -p agentos-vm --no-default-features` and compile/run the
       direct embedded-VM example in CI.
+
+## 10. Implementation validation record
+
+The refactor was closed on 2026-07-30 with layered validation rather than one
+unbounded local test command:
+
+- Rust formatting, workspace checking, all-feature clippy, the sidecar executor
+  feature matrix, the no-executor VM build, sidecar/VM/kernel/protocol tests,
+  executor conformance, smoke/security/parity suites, and release builds pass.
+- The direct `embedded_os` example runs with
+  `agentos-vm --no-default-features`, and the sidecar registry test passes both
+  with no executor features and with all executor features.
+- The Wasmtime safety suite passes 20 tests. Its one ignored pthread test is
+  intentionally exercised by the artifact-backed CI job after building the
+  generated C fixture.
+- The flattened TypeScript packages pass type checking and the active
+  non-website package suite: 226 Turbo tasks, 394 runnable `agentos-core`
+  tests, the VM-backed shell tests, publish checks, and package-specific tests.
+- The renamed release binaries build, the benchmark harness advertises all 40
+  baseline operations, and the checked benchmark reports cover cold/warm
+  latency, memory, concurrency, threads, and a 200-cycle mixed-runtime soak.
+- CI retains the generated-artifact parity, pthread, software, nightly soak,
+  and benchmark gates. Browser reference code and website dependency
+  generation are outside this native package-refactor acceptance surface.
+
+Source-included VM integration targets can cause Cargo to link the same large
+engine graph into many binaries at once. Local validation therefore runs the
+constituent suites in bounded groups; CI remains the authoritative clean
+artifact-backed run.

@@ -34,7 +34,7 @@ toolchain-preflight:
 	make programs
 
 toolchain-copy-commands:
-	node packages/runtime-core/scripts/copy-wasm-commands.mjs --require
+	node packages/core/scripts/copy-wasm-commands.mjs --require
 
 toolchain-check-abi:
 	node scripts/generate-wasm-abi-manifest.mjs
@@ -127,10 +127,10 @@ shell *args:
 	if [[ ! -e software/common/dist/index.js ]]; then
 		pnpm --filter @agentos-software/common build
 	fi
-	if [[ ! -e packages/runtime-core/dist/index.js \
+	if [[ ! -e packages/core/dist/index.js \
 		|| ! -e packages/core/dist/index.js \
 		|| ! -e packages/agentos/dist/index.js ]]; then
-		pnpm --filter @rivet-dev/agentos-runtime-core build
+		pnpm --filter @rivet-dev/agentos-core build
 		pnpm --filter @rivet-dev/agentos-core build
 		pnpm --filter @rivet-dev/agentos build
 	fi

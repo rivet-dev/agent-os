@@ -42,9 +42,12 @@ secrets/**/*
 
 # Generated WASM toolchain and software artifacts. These are rebuilt for tests
 # and releases and must never be committed.
-packages/runtime-core/commands/
-packages/runtime-sidecar/npm/*/agentos-native-sidecar
-packages/sidecar-binary/npm/*/agentos-sidecar
+packages/core/commands/
+packages/sidecar/npm/*/agentos-sidecar
+# Removed package trees can remain on disk after local builds. Never snapshot
+# their generated command payloads back into the repository.
+packages/runtime-core/
+archive/browser/packages/playground/vendor/
 toolchain/vendor/
 toolchain/c/build/
 toolchain/c/vendor/
@@ -90,18 +93,18 @@ scripts/ralph/.codex-last-msg-*
 # Local caches and stray outputs
 .agentos/
 .cache/
-crates/v8-runtime/assets/v8-bridge.js
-crates/v8-runtime/assets/v8-bridge-zlib.js
-crates/v8-runtime/.agentos-pyodide-cache/
+crates/executor-v8-runtime/assets/v8-bridge.js
+crates/executor-v8-runtime/assets/v8-bridge-zlib.js
+crates/executor-v8-runtime/.agentos-pyodide-cache/
 crates/executor-conformance/async-out.txt
 crates/sidecar/.tmp-sidecar-tests/
 packages/browser/.cache/
-packages/runtime-core/.cache/
+packages/core/.cache/
 registry/agent/pi/.cache/
 scripts/benchmarks/results/
 
 # Vendored V8 bridge bundles staged at release time for crates.io publishing
-crates/v8-runtime/assets/generated/
+crates/executor-v8-runtime/assets/generated/
 
 # Transient repro scratch files and Vite/Vitest config timestamp artifacts
 .tmp-*

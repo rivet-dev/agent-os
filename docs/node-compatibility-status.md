@@ -32,8 +32,8 @@ Browser runtimes: intentionally excluded
 | Surface | Result | Status | Notes |
 | --- | ---: | --- | --- |
 | Workspace build | 54/54 tasks | `passing` | The full non-browser root build, including OpenCode and agent software packaging, passed. |
-| Workspace typecheck | 76 tasks passed before shared-workspace cleanup | `environmental` | The full check was invalidated when another session removed root/package `node_modules` and `target/debug` during execution. Focused runtime-core and core typechecks pass after restoring dependencies; browser packages remain excluded. |
-| Default runtime-core Vitest | 292 passed, 1 failed, 1 skipped | `environmental` | The sole complete-run failure was the WASM abstract Unix-socket test reaching its 30-second outer timeout under shared-runner load. The exact case passed in 4.02s in isolation; all 25 child-process tests and the remaining networking/runtime cases passed in the complete run. |
+| Workspace typecheck | 76 tasks passed before shared-workspace cleanup | `environmental` | The full check was invalidated when another session removed root/package `node_modules` and `target/debug` during execution. Focused core and core typechecks pass after restoring dependencies; browser packages remain excluded. |
+| Default core Vitest | 292 passed, 1 failed, 1 skipped | `environmental` | The sole complete-run failure was the WASM abstract Unix-socket test reaching its 30-second outer timeout under shared-runner load. The exact case passed in 4.02s in isolation; all 25 child-process tests and the remaining networking/runtime cases passed in the complete run. |
 | Full ecosystem catalog | 87 passed, 6 skipped | `passing` | Final clean rerun completed in 773.69s across 92 fixtures plus discovery. All 86 executable fixture contracts are green, including Vitest/Mocha, Vite/Rollup, npm/pnpm/Yarn, TypeScript and developer CLIs, WebSockets, Vercel and agent SDKs, Prisma, Supabase, Browse CLI, Astro, Next.js, and explicit native-failure contracts. |
 | npm workflows | 27/27 passed | `passing` | Final clean rerun completed in 395.41s. npm install/list/init/scripts/lifecycle, npx package execution, pipes, concurrently, and a clean Next production build all pass. |
 | Secure WebSocket regression | 1/1 passed | `passing` | A guest `ws` client exchanges a message with a host `wss://` endpoint. Empty SNI on an IP target now uses the connection host as the rustls identity without emitting SNI. |
@@ -42,7 +42,7 @@ Browser runtimes: intentionally excluded
 | Native multi-VM fault soak | 0/1 | `open` | Node import-cache materialization exceeded 30 seconds. |
 | Fixed product versions | pass | `passing` | All 20 checked package/Cargo manifests remain pinned to `0.0.1`. |
 | Nightly workflow YAML parse | pass | `passing` | The nightly workflow parses and includes both opt-in Node matrices. |
-| Post-rebase focused validation | all focused checks | `passing` | On current `main`, real Vitest and `ws` parity, four npm workflow cases, npm-bin realpath behavior, runtime-core typechecking, targeted Cargo checking, Rust formatting, fixed versions, mirror generation, JSON, and nightly YAML all pass. |
+| Post-rebase focused validation | all focused checks | `passing` | On current `main`, real Vitest and `ws` parity, four npm workflow cases, npm-bin realpath behavior, core typechecking, targeted Cargo checking, Rust formatting, fixed versions, mirror generation, JSON, and nightly YAML all pass. |
 
 ## Ecosystem catalog
 
@@ -288,23 +288,20 @@ packages remain excluded by the repository's Node-only runtime policy.
 ```bash
 # Default TypeScript/runtime surface (browser packages remain excluded)
 pnpm check-types
-AGENTOS_E2E_NETWORK=1 pnpm --dir packages/runtime-core test
+AGENTOS_E2E_NETWORK=1 pnpm --dir packages/core test
 
 # Full package ecosystem and package-manager workflows
-pnpm --dir packages/runtime-core test:ecosystem:full
-pnpm --dir packages/runtime-core test:npm-workflows
+pnpm --dir packages/core test:ecosystem:full
+pnpm --dir packages/core test:npm-workflows
 
-# Complete non-browser Rust surface
-cargo test --workspace \
-  --exclude agentos-sidecar-browser \
-  --exclude agentos-native-sidecar-browser \
-  --no-fail-fast -- --test-threads=1
+# Complete native Rust surface (browser references are outside the workspace)
+cargo test --workspace --no-fail-fast -- --test-threads=1
 
 # Explicit ignored churn gates
-cargo test -p agentos-runtime-tokio \
+cargo test -p agentos-driver-tokio \
   multi_vm_generation_soak_has_no_accounting_or_scheduler_drift \
   --lib -- --ignored --test-threads=1
-cargo test -p agentos-native-sidecar --test service \
+cargo test -p agentos-vm --test service \
   multi_vm_protocol_faults_reconcile_shared_runtime_soak \
   -- --ignored --test-threads=1
 ```

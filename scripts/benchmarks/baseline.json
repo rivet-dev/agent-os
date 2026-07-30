@@ -14,7 +14,7 @@
   "deps": {
     "@rivet-dev/agentos-core": "0.2.0-rc.3",
     "@rivet-dev/agentos-sidecar": "absent",
-    "@rivet-dev/agentos-runtime-core": "0.3.0-rc.1",
+    "@rivet-dev/agentos-core": "0.3.0-rc.1",
     "@agentos-software/pi": "absent",
     "@mariozechner/pi-coding-agent": "absent"
   },

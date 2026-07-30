@@ -22,7 +22,7 @@ packages/core/src/agent-os.ts        linguist-detectable=true
 packages/core/src/sidecar/**         linguist-detectable=true
 
 # ...and the core binary-resolver shim.
-packages/sidecar-binary/index.js     linguist-detectable=true
+packages/sidecar/index.js     linguist-detectable=true
 
 # Generated, vendored, and documentation content (also covers non-JS/TS files).
 *.d.ts                               linguist-generated

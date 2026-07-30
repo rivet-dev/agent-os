@@ -2,7 +2,7 @@
 
 Status: ready for implementation; prerequisite for the Wasmtime executor
 
-Audience: AgentOS kernel, runtime, execution, native-sidecar, VFS, and language
+Audience: AgentOS kernel, runtime, execution, sidecar, VFS, and language
 executor owners
 
 ## 1. Executive decision
@@ -32,7 +32,7 @@ executors before adding Wasmtime as a second standalone-WASM backend.
   versions.
 - Host operations stay in the existing kernel, execution, and sidecar crates.
   The proven kernel/runtime/VFS accounting cycle is isolated in the small
-  runtime-neutral `agentos-resource` leaf crate described in Section 11.
+  runtime-neutral `agentos-resource-accounting` leaf crate described in Section 11.
 
 This is prerequisite architecture, not Wasmtime adapter work. The Wasmtime
 executor specification depends on the exit gates in this document. All work in
@@ -118,13 +118,13 @@ building a provisional Wasmtime implementation.
 The current code already contains the beginning of the correct abstraction,
 but it is not connected to the real executors.
 
-`agentos-kernel` defines `DriverProcess`, stores an
+`agentos-vm-kernel` defines `DriverProcess`, stores an
 `Arc<dyn DriverProcess>` in every process-table entry, and owns blocked and
 pending signal sets. However, `KernelVm::register_process` always registers a
 `StubDriverProcess`. The stub records signals and synthesizes exits; it is not
 the `ActiveExecution` actually running the guest.
 
-The native sidecar separately stores:
+The sidecar separately stores:
 
 - `ActiveExecution::{Javascript, Python, Wasm, Binding}`;
 - an additional signal-disposition map;
@@ -457,7 +457,7 @@ The kernel fd table is the only authoritative guest descriptor namespace.
 Kernel state owns open descriptions, offsets, flags, rights, cwd/path-at
 resolution, preopen metadata, filesystem permission tier, rlimits, and errno.
 
-The current native sidecar contains a bidirectional mutable shadow filesystem:
+The current sidecar contains a bidirectional mutable shadow filesystem:
 some embedded-Node operations write host paths, sidecar calls copy those paths
 into the kernel, kernel mutations are mirrored back to host paths, and exit-time
 walks reconcile them again. This exists because parts of the V8/Node filesystem
@@ -469,7 +469,7 @@ That mechanism is migration debt. It is not part of the shared host service and
 is not inherited by Wasmtime.
 
 Current evidence is concentrated in
-`crates/native-sidecar/src/filesystem.rs`: `guest_filesystem_call` invokes
+`crates/vm/src/filesystem.rs`: `guest_filesystem_call` invokes
 `sync_guest_filesystem_shadow_before_call` and
 `mirror_guest_filesystem_shadow_after_call`; `ProcessModuleFsReader` reads the
 process shadow before the kernel; and launch/exit paths call
@@ -559,15 +559,15 @@ readiness state rather than a polling timer.
 Implementation exposed one real dependency cycle: the kernel and process
 runtime both need the hierarchical reservation ledger, while VFS already
 depends on the process runtime. The ledger therefore lives in the deliberately
-small `agentos-resource` leaf crate. It contains no Tokio, VFS, executor, or
+small `agentos-resource-accounting` leaf crate. It contains no Tokio, VFS, executor, or
 product dependency; kernel configuration remains the policy authority and the
 runtime can only observe usage for telemetry.
 
 ```text
-crates/resource/src/
+crates/resource-accounting/src/
   lib.rs                    runtime-neutral ledger, reservations, change wakes
 
-crates/kernel/src/
+crates/vm-kernel/src/
   process_table.rs          authoritative process/signal/wait state
   process_runtime.rs        runtime endpoint, control requests, exit reporter
   signal.rs                 dispositions and delivery checkpoints
@@ -588,7 +588,7 @@ crates/executor-contract/src/
     identity.rs
     clock.rs
 
-crates/native-sidecar/src/
+crates/vm/src/
   executor.rs               concrete-engine composition and dispatch
   execution/
     process.rs              PID/generation lifecycle and event routing

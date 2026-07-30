@@ -38,10 +38,10 @@ its parent terminal in raw mode.
 
 **Code:**
 
-- `crates/kernel/src/pty.rs` adds `icrnl` to `LineDisciplineConfig` and merges it
+- `crates/vm-kernel/src/pty.rs` adds `icrnl` to `LineDisciplineConfig` and merges it
   into the live PTY state.
 - `service_javascript_pty_set_raw_mode_sync_rpc` in
-  `crates/native-sidecar/src/execution.rs` acquires/releases the kernel PTY's
+  `crates/vm/src/execution.rs` acquires/releases the kernel PTY's
   raw-mode lease, which changes ICRNL, canonical mode, echo, signal processing,
   and output post-processing together.
 - `resize_pty` reads the PTY foreground process group after resizing and mirrors
@@ -81,7 +81,7 @@ JavaScript stream event.
 
 The kernel PTY tests cover nested/out-of-order owners, stale-generation
 protection, and background processes without recovery ownership. The isolated
-native-sidecar service test asserts that raw mode disables `icrnl` and cooked
+sidecar service test asserts that raw mode disables `icrnl` and cooked
 mode restores it; the signal suite verifies both root and nested foreground V8
 executions observe a live resize.
 
@@ -92,7 +92,7 @@ executions observe a live resize.
 **Problem:** JavaScript `child_process` resolution could identify an executable
 guest file as WASM and fail before honoring its shebang. This prevented normal
 executable shell scripts and `/usr/bin/env` entrypoints from working through the
-native sidecar.
+sidecar.
 
 **Code:** `resolve_javascript_child_process_with_shebang` resolves the initial
 entrypoint, verifies execute permission, reads a bounded shebang from the guest
@@ -228,7 +228,7 @@ native Pi resolves its projected package graph normally.
 The extraction was validated from a fresh JJ workspace based on `main`:
 
 - `cargo fmt --check`
-- targeted `cargo check` for kernel, client, execution, native sidecar, and
+- targeted `cargo check` for kernel, client, execution, sidecar, and
   actor plugin crates
 - kernel PTY suite: 24 passed
 - native raw-mode service regression: passed

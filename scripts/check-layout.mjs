@@ -34,7 +34,9 @@ const walk = (dir, visit) => {
 		const path = join(dir, entry.name);
 		if (
 			entry.isDirectory() &&
-			(ignoredDirs.has(entry.name) || rel(path) === ".claude/worktrees")
+			(ignoredDirs.has(entry.name) ||
+				rel(path) === ".claude/worktrees" ||
+				rel(path) === "archive/browser")
 		) {
 			continue;
 		}

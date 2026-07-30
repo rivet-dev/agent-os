@@ -7,7 +7,7 @@ import vm from "node:vm";
 const require = createRequire(import.meta.url);
 
 const source = readFileSync(
-	new URL("../packages/sidecar-binary/index.js", import.meta.url),
+	new URL("../packages/sidecar/index.js", import.meta.url),
 	"utf8",
 );
 
@@ -20,11 +20,10 @@ function resolveFor(platform, arch) {
 		__dirname: "/tmp/agentos-sidecar-resolver-no-local-binary",
 	};
 	vm.runInNewContext(source, sandbox, {
-		filename: "packages/sidecar-binary/index.js",
+		filename: "packages/sidecar/index.js",
 	});
 	try {
-		sandbox.module.exports.getSidecarPath();
-		return "";
+		return sandbox.module.exports.getSidecarPath();
 	} catch (error) {
 		return error.message;
 	}

@@ -37,11 +37,11 @@ binary, archive, log, database, or generated-result artifacts.
 
 Primary areas:
 
-- `crates/executor-*`, `crates/v8-runtime`, and `crates/wasm-common`
-- `crates/kernel`
-- `crates/native-sidecar` and `crates/native-sidecar-core`
-- `crates/v8-runtime`
-- `crates/vfs`
+- `crates/executor-*`, `crates/executor-v8-runtime`, and `crates/executor-wasm-abi`
+- `crates/vm-kernel`
+- `crates/vm` and `crates/vm/src/core`
+- `crates/executor-v8-runtime`
+- `crates/vfs-core`
 - `packages/build-tools` and the generated V8 bridge contract
 
 This is the broadest risk in the branch. It changes child-process execution,
@@ -67,9 +67,9 @@ not depend on a particular agent.
 
 Primary areas:
 
-- `crates/agentos-sidecar/src/acp`
-- `crates/agentos-sidecar-core`
-- `crates/agentos-protocol`
+- `crates/sidecar/src/acp`
+- `archive/browser/crates/sidecar-core`
+- `crates/acp-protocol`
 - `packages/core/src/sidecar`
 - AgentOS actor actions and session documentation
 

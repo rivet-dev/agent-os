@@ -124,7 +124,7 @@ Memory figures must be kept separate:
 ## Canonical benchmark and rollback criteria
 
 The latest raw release result is
-[`packages/runtime-benchmarks/results/wasm-backend-comparison-phase4.json`](../../packages/runtime-benchmarks/results/wasm-backend-comparison-phase4.json).
+[`packages/benchmarks/results/wasm-backend-comparison-phase4.json`](../../packages/benchmarks/results/wasm-backend-comparison-phase4.json).
 It uses identical hashed source modules and host-service paths on one machine,
 five independent sidecar processes per engine, five samples per workload, and
 warm cache hits. V8 adds its existing two-byte memory-maximum rewrite before
@@ -156,9 +156,9 @@ Run it from the repository root with a release sidecar and rebuilt canonical
 commands:
 
 ```bash
-AGENTOS_SIDECAR_BIN=/absolute/path/to/release/agentos-native-sidecar \
-AGENTOS_WASM_COMMANDS_DIR=/absolute/path/to/packages/runtime-core/commands \
-pnpm --dir packages/runtime-benchmarks bench:wasm-backends
+AGENTOS_SIDECAR_BIN=/absolute/path/to/release/agentos-sidecar \
+AGENTOS_WASM_COMMANDS_DIR=/absolute/path/to/packages/core/commands \
+pnpm --dir packages/benchmarks bench:wasm-backends
 ```
 
 Wasmtime may become the omission default only when the same canonical run has

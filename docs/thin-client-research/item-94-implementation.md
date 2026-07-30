@@ -8,15 +8,15 @@ tracker status.
 
 **Priority: P1. Fix confidence: high.**
 
-Move the Rust compatibility validator to `agentos-native-sidecar-core`, use it
-at the native sidecar's last trusted boundary before a host-tool callback is
+Move the Rust compatibility validator to the `agentos-vm` core module, use it
+at the sidecar's last trusted boundary before a host-tool callback is
 dispatched, and delete both existing copies:
 
 - the complete 404-line validator in the Rust client; and
-- the separate shallow validator in the native sidecar.
+- the separate shallow validator in the sidecar.
 
 The protocol already carries each caller-authored schema in
-`InitializeVmRequest.host_callbacks`, and the native sidecar already retains
+`InitializeVmRequest.host_callbacks`, and the sidecar already retains
 that schema with its VM-owned toolkit registry. No protocol field, default,
 client timer, or new sidecar state is needed.
 
@@ -68,17 +68,17 @@ documentation also promises validated JSON. That promise is why deleting
 validation outright without an authoritative replacement would be a behavior
 regression.
 
-### Native sidecar already owns the dispatch boundary, but only partially
+### Sidecar already owns the dispatch boundary, but only partially
 
-In `crates/native-sidecar/src/tools.rs`:
+In `crates/vm/src/tools.rs`:
 
 - `register_host_callbacks()` validates bounded registration shape through
-  `agentos_native_sidecar_core::tools::validate_toolkit_registration` and stores
+  `agentos_vm::core::tools::validate_toolkit_registration` and stores
   the complete registration in `VmState.toolkits`.
 - `resolve_toolkit_command()` resolves permissions, parses the retained schema,
   parses `--json`, `--json-file`, or schema-derived flags, then calls the local
   `validate_tool_input_schema()` before constructing `ToolCommandResolution::Invoke`.
-- `spawn_tool_process_events()` in `crates/native-sidecar/src/execution.rs`
+- `spawn_tool_process_events()` in `crates/vm/src/execution.rs`
   dispatches that already-resolved request to the host. This is the correct
   authoritative validation point: invalid guest input can fail before a
   reverse request is admitted and before any client callback runs.
@@ -95,7 +95,7 @@ cover the broader subset currently interpreted by the Rust client.
 
 ### Shared core already owns registration policy
 
-`crates/native-sidecar-core/src/tools.rs` already owns toolkit/tool name limits,
+`crates/vm/src/core/tools.rs` already owns toolkit/tool name limits,
 description/schema/example bounds, timeout limits, registry capacity, command
 names, and the host-tool prompt/reference. Both native and browser sidecars
 depend on this crate and use `validate_toolkit_registration()`.
@@ -126,7 +126,7 @@ once at callback execution. Do not move or duplicate this Zod behavior.
 
 ### 1. Put the compatibility validator in shared sidecar core
 
-File: `crates/native-sidecar-core/src/tools.rs`.
+File: `crates/vm/src/core/tools.rs`.
 
 Move `ToolInputSchemaViolation` and the complete helper chain from
 `crates/client/src/agent_os.rs` into this module with behavior and exact error
@@ -155,12 +155,12 @@ Implement `std::error::Error` in shared core so callers can preserve it without
 message parsing.
 
 Export `validate_tool_input` and `ToolInputSchemaViolation` from
-`crates/native-sidecar-core/src/lib.rs` beside the other `tools` exports. Do not
+`crates/vm/src/core/mod.rs` beside the other `tools` exports. Do not
 add the core crate as a client dependency.
 
-### 2. Replace the native sidecar's weaker duplicate
+### 2. Replace the sidecar's weaker duplicate
 
-File: `crates/native-sidecar/src/tools.rs`.
+File: `crates/vm/src/tools.rs`.
 
 Import the shared entrypoint, preferably aliased as
 `core_validate_tool_input`. In `resolve_toolkit_command()`, retain the existing
@@ -240,13 +240,13 @@ cargo test -p agentos-client --lib tool_input_schema_supported_subset_is_charact
 ```
 
 Record the passing command in the Item 94 tracker before moving the test. Then
-move the same case table to `crates/native-sidecar-core/src/tools.rs::tests`
+move the same case table to `crates/vm/src/core/tools.rs::tests`
 rather than maintaining copies in both crates.
 
 Also retain and record the existing authoritative native characterization:
 
 ```sh
-cargo test -p agentos-native-sidecar --test service \
+cargo test -p agentos-vm --test service \
   tools_javascript_child_process_rejects_invalid_json_file_input_before_dispatch \
   -- --nocapture
 ```
@@ -258,7 +258,7 @@ cargo test -p agentos-native-sidecar --test service \
 The moved table test must pass unchanged from shared core:
 
 ```sh
-cargo test -p agentos-native-sidecar-core \
+cargo test -p agentos-vm \
   tool_input_schema_supported_subset_is_characterized -- --nocapture
 ```
 
@@ -272,9 +272,9 @@ native validator missed, such as nested `items` plus `minimum`, and assert:
 Run the native tool slice:
 
 ```sh
-cargo test -p agentos-native-sidecar --test service \
+cargo test -p agentos-vm --test service \
   tools_javascript_child_process -- --nocapture
-cargo test -p agentos-native-sidecar tools::tests -- --nocapture
+cargo test -p agentos-vm tools::tests -- --nocapture
 ```
 
 ### Rust forwards the schema but does not interpret callback input
@@ -304,7 +304,7 @@ for the high-value absence claims:
 
 - `crates/client/src/agent_os.rs` has no `ToolInputSchemaViolation` or
   `validate_tool_input`;
-- `crates/native-sidecar/src/tools.rs` has no private
+- `crates/vm/src/tools.rs` has no private
   `validate_tool_input_schema` or `validate_tool_input_value_type`; and
 - `packages/core/src/agent-os.ts` still has exactly one
   `.safeParseAsync(payload.input)` call.
@@ -323,13 +323,13 @@ pnpm --dir packages/core exec vitest run \
 pnpm --dir packages/core check-types
 ```
 
-`sidecar-tool-dispatch.test.ts` requires the real native sidecar/package
+`sidecar-tool-dispatch.test.ts` requires the real sidecar/package
 fixture and is the important end-to-end proof that structural sidecar
 validation still composes with exactly-once Zod refinement/transform behavior.
 
 ## Risks and non-goals
 
-- **Do not add `agentos-native-sidecar-core` to `agentos-client`.** That would
+- **Do not add `agentos-vm` to `agentos-client`.** That would
   merely relocate the code while preserving client-owned behavior.
 - **Do not use a full JSON Schema crate in this migration.** It would change
   accepted/rejected inputs and possibly error ordering. Preserve the currently
@@ -355,15 +355,15 @@ validation still composes with exactly-once Zod refinement/transform behavior.
 
 Production:
 
-- `crates/native-sidecar-core/src/tools.rs`
-- `crates/native-sidecar-core/src/lib.rs`
-- `crates/native-sidecar/src/tools.rs`
+- `crates/vm/src/core/tools.rs`
+- `crates/vm/src/core/mod.rs`
+- `crates/vm/src/tools.rs`
 - `crates/client/src/agent_os.rs`
 - optionally `crates/client/src/config.rs` for documentation-only wording
 
 Tests/tracking:
 
-- shared-core unit tests in `crates/native-sidecar-core/src/tools.rs`
+- shared-core unit tests in `crates/vm/src/core/tools.rs`
 - focused native service/tool tests
 - Rust client recording-transport/source-absence coverage
 - TypeScript tests run unchanged
