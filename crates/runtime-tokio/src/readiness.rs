@@ -23,6 +23,10 @@ impl ReadyFlags {
     pub const ERROR: Self = Self(1 << 5);
     pub const CLOSE: Self = Self(1 << 6);
 
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }

@@ -10,6 +10,7 @@ members = [
     "crates/bridge",
     "crates/build-support",
     "crates/execution",
+    "crates/executor-contract",
     "crates/kernel",
     "crates/native-baseline",
     "crates/native-sidecar",
@@ -35,6 +36,7 @@ default-members = [
     "crates/bridge",
     "crates/build-support",
     "crates/execution",
+    "crates/executor-contract",
     "crates/kernel",
     "crates/native-baseline",
     "crates/native-sidecar",
@@ -63,6 +65,7 @@ agentos-actor-uds-client = { path = "crates/actor-uds-client", version = "0.0.1"
 agentos-bridge = { path = "crates/bridge", version = "0.0.1" }
 agentos-build-support = { path = "crates/build-support", version = "0.0.1" }
 agentos-execution = { path = "crates/execution", version = "0.0.1" }
+agentos-executor-contract = { path = "crates/executor-contract", version = "0.0.1" }
 agentos-kernel = { path = "crates/kernel", version = "0.0.1" }
 agentos-native-baseline = { path = "crates/native-baseline", version = "0.0.1" }
 agentos-native-sidecar = { path = "crates/native-sidecar", version = "0.0.1" }

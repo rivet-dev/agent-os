@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 const REPLY_OPEN: u8 = 0;
 const REPLY_CLAIMED: u8 = 1;
@@ -31,16 +31,23 @@ type DirectHostReplyResult = Result<HostCallReply, HostServiceError>;
 
 struct DirectHostReplyWaiterTarget {
     identity: HostCallIdentity,
-    sender: Mutex<Option<tokio::sync::oneshot::Sender<DirectHostReplyResult>>>,
+    waiter: Arc<Mutex<DirectHostReplyWaiterState>>,
+}
+
+struct DirectHostReplyWaiterState {
+    result: Option<DirectHostReplyResult>,
+    sender_open: bool,
+    receiver_open: bool,
+    receiver_waker: Option<Waker>,
 }
 
 impl DirectHostReplyTarget for DirectHostReplyWaiterTarget {
     fn claim(&self, call_id: u64) -> Result<bool, HostServiceError> {
         self.validate_call_id(call_id)?;
-        let sender = self.sender.lock().map_err(|_| {
+        let waiter = self.waiter.lock().map_err(|_| {
             HostServiceError::new("EIO", "direct host-reply waiter lock is poisoned")
         })?;
-        Ok(sender.as_ref().is_some_and(|sender| !sender.is_closed()))
+        Ok(waiter.sender_open && waiter.receiver_open && waiter.result.is_none())
     }
 
     fn respond(
@@ -50,15 +57,22 @@ impl DirectHostReplyTarget for DirectHostReplyWaiterTarget {
         result: DirectHostReplyResult,
     ) -> Result<(), HostServiceError> {
         self.validate_call_id(call_id)?;
-        let sender = self
-            .sender
-            .lock()
-            .map_err(|_| HostServiceError::new("EIO", "direct host-reply waiter lock is poisoned"))?
-            .take()
-            .ok_or_else(|| {
-                HostServiceError::new("EALREADY", "direct host-reply waiter is already settled")
-            })?;
-        if sender.send(result).is_err() {
+        let mut waiter = self.waiter.lock().map_err(|_| {
+            HostServiceError::new("EIO", "direct host-reply waiter lock is poisoned")
+        })?;
+        if !waiter.sender_open || waiter.result.is_some() {
+            return Err(HostServiceError::new(
+                "EALREADY",
+                "direct host-reply waiter is already settled",
+            ));
+        }
+        waiter.sender_open = false;
+        if waiter.receiver_open {
+            waiter.result = Some(result);
+            if let Some(waker) = waiter.receiver_waker.take() {
+                waker.wake();
+            }
+        } else {
             // Cancellation can race a claimed destructive call. The response
             // is terminal and must not be replayed; report the lost consumer
             // without escalating an expected guest teardown into a sidecar
@@ -73,21 +87,25 @@ impl DirectHostReplyTarget for DirectHostReplyWaiterTarget {
 
     fn dismiss_claimed(&self, call_id: u64) -> Result<(), HostServiceError> {
         self.validate_call_id(call_id)?;
-        let sender = self
-            .sender
-            .lock()
-            .map_err(|_| HostServiceError::new("EIO", "direct host-reply waiter lock is poisoned"))?
-            .take()
-            .ok_or_else(|| {
-                HostServiceError::new("EALREADY", "direct host-reply waiter is already settled")
-            })?;
-        if sender
-            .send(Err(HostServiceError::new(
+        let mut waiter = self.waiter.lock().map_err(|_| {
+            HostServiceError::new("EIO", "direct host-reply waiter lock is poisoned")
+        })?;
+        if !waiter.sender_open || waiter.result.is_some() {
+            return Err(HostServiceError::new(
+                "EALREADY",
+                "direct host-reply waiter is already settled",
+            ));
+        }
+        waiter.sender_open = false;
+        if waiter.receiver_open {
+            waiter.result = Some(Err(HostServiceError::new(
                 "ERR_AGENTOS_EXEC_REPLACED",
                 "the kernel committed a replacement process image",
-            )))
-            .is_err()
-        {
+            )));
+            if let Some(waker) = waiter.receiver_waker.take() {
+                waker.wake();
+            }
+        } else {
             eprintln!(
                 "WARN_AGENTOS_DIRECT_HOST_REPLY_RECEIVER_CANCELED: generation={} pid={} callId={} execReplacement=true",
                 self.identity.generation, self.identity.pid, self.identity.call_id
@@ -120,7 +138,7 @@ impl DirectHostReplyWaiterTarget {
 /// stream.
 pub struct DirectHostReplyReceiver {
     identity: HostCallIdentity,
-    receiver: tokio::sync::oneshot::Receiver<DirectHostReplyResult>,
+    waiter: Arc<Mutex<DirectHostReplyWaiterState>>,
 }
 
 impl fmt::Debug for DirectHostReplyReceiver {
@@ -135,20 +153,61 @@ impl fmt::Debug for DirectHostReplyReceiver {
 impl Future for DirectHostReplyReceiver {
     type Output = DirectHostReplyResult;
 
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.receiver).poll(context).map(|result| {
-            result.unwrap_or_else(|_| {
-                Err(HostServiceError::new(
-                    "ECANCELED",
-                    "direct host-reply sender was dropped without settlement",
-                )
-                .with_details(serde_json::json!({
-                    "generation": self.identity.generation,
-                    "pid": self.identity.pid,
-                    "callId": self.identity.call_id,
-                })))
-            })
-        })
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut waiter = match self.waiter.lock() {
+            Ok(waiter) => waiter,
+            Err(_) => {
+                return Poll::Ready(Err(HostServiceError::new(
+                    "EIO",
+                    "direct host-reply waiter lock is poisoned",
+                )));
+            }
+        };
+        if let Some(result) = waiter.result.take() {
+            waiter.receiver_open = false;
+            return Poll::Ready(result);
+        }
+        if !waiter.sender_open {
+            waiter.receiver_open = false;
+            return Poll::Ready(Err(HostServiceError::new(
+                "ECANCELED",
+                "direct host-reply sender was dropped without settlement",
+            )
+            .with_details(serde_json::json!({
+                "generation": self.identity.generation,
+                "pid": self.identity.pid,
+                "callId": self.identity.call_id,
+            }))));
+        }
+        if waiter
+            .receiver_waker
+            .as_ref()
+            .is_none_or(|waker| !waker.will_wake(context.waker()))
+        {
+            waiter.receiver_waker = Some(context.waker().clone());
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for DirectHostReplyReceiver {
+    fn drop(&mut self) {
+        match self.waiter.lock() {
+            Ok(mut waiter) => {
+                waiter.receiver_open = false;
+                waiter.result = None;
+                waiter.receiver_waker = None;
+            }
+            Err(poisoned) => {
+                eprintln!(
+                    "ERR_AGENTOS_DIRECT_HOST_REPLY_WAITER_POISONED: recovering waiter during receiver teardown"
+                );
+                let mut waiter = poisoned.into_inner();
+                waiter.receiver_open = false;
+                waiter.result = None;
+                waiter.receiver_waker = None;
+            }
+        }
     }
 }
 
@@ -169,13 +228,18 @@ pub fn direct_host_reply_channel_with_limit(
     identity: HostCallIdentity,
     payload_limit: PayloadLimit,
 ) -> Result<(DirectHostReplyHandle, DirectHostReplyReceiver), HostServiceError> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let waiter = Arc::new(Mutex::new(DirectHostReplyWaiterState {
+        result: None,
+        sender_open: true,
+        receiver_open: true,
+        receiver_waker: None,
+    }));
     let target = Arc::new(DirectHostReplyWaiterTarget {
         identity,
-        sender: Mutex::new(Some(sender)),
+        waiter: Arc::clone(&waiter),
     });
     let reply = DirectHostReplyHandle::new_with_limit(identity, target, payload_limit)?;
-    Ok((reply, DirectHostReplyReceiver { identity, receiver }))
+    Ok((reply, DirectHostReplyReceiver { identity, waiter }))
 }
 
 /// Adapter-owned one-request response lane.

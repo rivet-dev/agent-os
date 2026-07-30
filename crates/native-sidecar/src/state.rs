@@ -2128,7 +2128,11 @@ impl SocketEventPusher {
         }
         self.owner_notify.notify_one();
         if let Some(session) = &self.session {
-            session.publish_readiness(self.capability_id, self.capability_generation, flags)?;
+            session.publish_readiness(
+                self.capability_id,
+                self.capability_generation,
+                agentos_execution::backend::ExecutionReadyFlags::from_bits(flags.bits()),
+            )?;
         }
         Ok(true)
     }
@@ -3714,7 +3718,7 @@ mod socket_readiness_registry_tests {
             &self,
             _capability_id: u64,
             _capability_generation: u64,
-            _flags: agentos_runtime_tokio::readiness::ReadyFlags,
+            _flags: agentos_execution::backend::ExecutionReadyFlags,
         ) -> Result<(), ExecutionWakeError> {
             self.readiness_publishes.fetch_add(1, Ordering::AcqRel);
             Ok(())

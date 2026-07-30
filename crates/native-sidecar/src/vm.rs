@@ -187,9 +187,11 @@ fn send_kernel_socket_readiness_event(
         let Some(session) = &target.session else {
             return;
         };
-        if let Err(error) =
-            session.publish_readiness(target.capability_id, target.capability_generation, flags)
-        {
+        if let Err(error) = session.publish_readiness(
+            target.capability_id,
+            target.capability_generation,
+            agentos_execution::backend::ExecutionReadyFlags::from_bits(flags.bits()),
+        ) {
             eprintln!(
                 "ERR_AGENTOS_KERNEL_READINESS_WAKE: failed to publish capability={} generation={} target={}: {error}",
                 target.capability_id, target.capability_generation, target.target_id

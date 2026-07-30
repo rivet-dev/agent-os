@@ -1480,9 +1480,11 @@ pub(in crate::execution) fn register_kernel_readiness_target(
                 agentos_runtime_tokio::readiness::ReadyFlags::ACCEPT
             }
         };
-        if let Err(error) =
-            session.publish_readiness(target.capability_id, target.capability_generation, flags)
-        {
+        if let Err(error) = session.publish_readiness(
+            target.capability_id,
+            target.capability_generation,
+            agentos_execution::backend::ExecutionReadyFlags::from_bits(flags.bits()),
+        ) {
             eprintln!(
                 "ERR_AGENTOS_KERNEL_READINESS_WAKE: failed registration replay capability={} generation={} target={}: {error}",
                 target.capability_id, target.capability_generation, target.target_id

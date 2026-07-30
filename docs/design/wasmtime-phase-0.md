@@ -283,7 +283,7 @@ of a hard-coded rejection alone does not close it.
   admission, limit-plus-one rejection with structured `{limitName, limit,
   observed}` details, coalesced 80% warning/rearm, and allocation-free JSON
   measurement in
-  `crates/execution/src/backend/payload.rs`. The bounded byte, string, vector,
+  `crates/executor-contract/src/backend/payload.rs`. The bounded byte, string, vector,
   and count constructors are required to receive that named limit and reject
   before operation construction (`bounded_values_reject_before_admission` and
   `common_payload_constructors_require_named_limits`).
@@ -300,7 +300,7 @@ of a hard-coded rejection alone does not close it.
   carries the configured name, and settlement releases the charge. Direct
   reply and common event tests prove bounded raw/JSON replies, stdout/stderr,
   warnings, and runtime faults, including near-limit delivery
-  (`crates/execution/src/backend/{submission,reply,event}.rs` and
+  (`crates/executor-contract/src/backend/{submission,reply,event}.rs` and
   `crates/execution/tests/backend_payload_bounds.rs`).
 - [x] **Spawn file actions.** `wasm_spawn_action_decoder_enforces_typed_limits_with_e2big`
   covers the 4096-action and 1 MiB encoded-byte families with independent
@@ -432,7 +432,7 @@ by `just tools-rebuild` before a release-quality capture.
    defaults never silently expand the accepted language.
 2. **Code placement.** Kernel semantic APIs stay in `agentos-kernel`. Shared
    request/reply types and capability-sized host traits live under
-   `crates/execution/src/host/`; native-sidecar implements them using kernel and
+   `crates/executor-contract/src/host/`; native-sidecar implements them using kernel and
    process-lifecycle context. Wasmtime remains under
    `crates/execution/src/wasm/wasmtime/`. No new crate is created unless the
    actual dependency graph produces a cycle that cannot be removed by moving

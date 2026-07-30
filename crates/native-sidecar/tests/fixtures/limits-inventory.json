@@ -2388,7 +2388,7 @@
 	},
 	{
 		"name": "NEAR_LIMIT_PERCENT",
-		"path": "crates/execution/src/backend/payload.rs",
+		"path": "crates/executor-contract/src/backend/payload.rs",
 		"class": "invariant",
 		"rationale": "Shared 80-percent warning contract required by the runtime safety model."
 	},

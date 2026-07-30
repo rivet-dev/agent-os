@@ -6,21 +6,27 @@ mod common;
 mod host_node;
 mod node_import_cache;
 mod runtime_support;
-mod signal;
+mod signal {
+    pub use agentos_executor_contract::{
+        ExecutionSignalDispositionAction, ExecutionSignalHandlerRegistration,
+    };
+}
 pub mod v8_host;
 pub mod v8_ipc;
 pub mod v8_runtime;
 
 pub mod abi;
-pub mod backend;
 pub mod benchmark;
-pub mod host;
 #[allow(dead_code, unused_imports)]
 pub mod javascript;
 pub mod python;
 pub mod wasm;
 
 pub use agentos_bridge::GuestRuntime;
+pub use agentos_executor_contract::{backend, host};
+pub use agentos_executor_contract::{
+    ExecutionSignalDispositionAction, ExecutionSignalHandlerRegistration,
+};
 pub use agentos_v8_runtime::bridge::EMULATED_OPENSSL_VERSION;
 pub use agentos_v8_runtime::execution::GuestModuleReader;
 pub use javascript::{
@@ -39,7 +45,6 @@ pub use python::{
     PythonVfsRpcMethod, PythonVfsRpcRequest, PythonVfsRpcResponder, PythonVfsRpcResponsePayload,
     PythonVfsRpcStat, StartPythonExecutionRequest,
 };
-pub use signal::{ExecutionSignalDispositionAction, ExecutionSignalHandlerRegistration};
 pub use wasm::wasmtime::{
     run_worker_entry as run_wasmtime_thread_worker, TRUSTED_INITIAL_MODULE_PREFIX,
     WORKER_MODE_ARGUMENT as WASMTIME_THREAD_WORKER_ARGUMENT,

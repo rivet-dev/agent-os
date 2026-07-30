@@ -23,5 +23,6 @@ pub use submission::{
     ExecutionEventSubmitHandle, ExecutionEventWakeTarget,
 };
 pub use wake::{
-    ExecutionWakeError, ExecutionWakeHandle, ExecutionWakeIdentity, ExecutionWakeTarget,
+    ExecutionReadyFlags, ExecutionWakeError, ExecutionWakeHandle, ExecutionWakeIdentity,
+    ExecutionWakeTarget,
 };

@@ -47,6 +47,7 @@ test("Rust crate publish order satisfies internal dependencies", () => {
 	assertBefore("agentos-build-support", "agentos-v8-runtime");
 	assertBefore("agentos-actor-uds-client", "agentos-native-sidecar");
 	assertBefore("agentos-bridge", "agentos-execution");
+	assertBefore("agentos-executor-contract", "agentos-execution");
 	assertBefore("agentos-runtime-tokio", "agentos-kernel");
 	assertBefore("agentos-runtime-tokio", "agentos-v8-runtime");
 	assertBefore("agentos-runtime-tokio", "agentos-execution");

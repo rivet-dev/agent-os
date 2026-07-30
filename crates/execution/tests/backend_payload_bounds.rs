@@ -97,8 +97,12 @@ fn oversized_json_is_settled_as_a_named_limit_error() {
 #[test]
 fn common_payload_constructors_require_named_limits() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let backend = manifest.join("src/backend");
-    let host = fs::read_to_string(manifest.join("src/host/mod.rs")).expect("host source");
+    let contract = manifest
+        .parent()
+        .expect("workspace crates directory")
+        .join("executor-contract");
+    let backend = contract.join("src/backend");
+    let host = fs::read_to_string(contract.join("src/host/mod.rs")).expect("host source");
     let reply = fs::read_to_string(backend.join("reply.rs")).expect("reply source");
     let event = fs::read_to_string(backend.join("event.rs")).expect("event source");
     let v8_host = fs::read_to_string(manifest.join("src/v8_host.rs")).expect("V8 adapter source");

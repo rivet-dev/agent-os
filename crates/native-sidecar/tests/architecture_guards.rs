@@ -1186,7 +1186,7 @@ fn typed_process_dispatch_cannot_reconstruct_javascript_launch_protocol_types() 
         }
     }
 
-    let contract = include_str!("../../execution/src/host/process.rs");
+    let contract = include_str!("../../executor-contract/src/host/process.rs");
     assert!(
         contract.contains("Spawn(BoundedProcessLaunchRequest)")
             && contract.contains("Exec(BoundedProcessLaunchRequest)"),
@@ -1769,8 +1769,9 @@ fn env_reads_confined_to_chokepoints() {
 #[test]
 fn production_execution_lifecycle_is_runtime_neutral_and_delegated() {
     let root = repo_root();
-    let lifecycle = std::fs::read_to_string(root.join("crates/execution/src/backend/lifecycle.rs"))
-        .expect("read runtime-neutral lifecycle contract");
+    let lifecycle =
+        std::fs::read_to_string(root.join("crates/executor-contract/src/backend/lifecycle.rs"))
+            .expect("read runtime-neutral lifecycle contract");
     for engine_type in [
         "JavascriptExecution",
         "PythonExecution",
@@ -2250,8 +2251,8 @@ fn neutral_host_contracts_and_shared_capabilities_have_no_engine_types() {
     let contract_files = production_source_files(&root)
         .into_iter()
         .filter(|path| {
-            path.starts_with("crates/execution/src/backend/")
-                || path.starts_with("crates/execution/src/host/")
+            path.starts_with("crates/executor-contract/src/backend/")
+                || path.starts_with("crates/executor-contract/src/host/")
         })
         .collect::<Vec<_>>();
 
@@ -2596,6 +2597,7 @@ fn generic_runtime_layers_do_not_depend_on_product_or_acp_layers() {
         "vfs",
         "vfs-store",
         "v8-runtime",
+        "executor-contract",
         "execution",
     ];
     let forbidden = [
@@ -2620,6 +2622,24 @@ fn generic_runtime_layers_do_not_depend_on_product_or_acp_layers() {
         "generic runtime layers depend on product/ACP layers:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn executor_contract_has_no_native_runtime_or_engine_dependencies() {
+    let root = repo_root();
+    let dependencies = dependency_keys(&root.join("crates/executor-contract/Cargo.toml"));
+    for forbidden in [
+        "agentos-runtime-tokio",
+        "agentos-v8-runtime",
+        "tokio",
+        "wasmtime",
+        "wasmparser",
+    ] {
+        assert!(
+            !dependencies.contains(forbidden),
+            "runtime-neutral executor contract must not depend on {forbidden}"
+        );
+    }
 }
 
 #[test]
@@ -3340,8 +3360,9 @@ fn common_network_reactor_has_no_executor_specific_control_or_encoding() {
         wake_leaks.join("\n")
     );
 
-    let lifecycle = std::fs::read_to_string(root.join("crates/execution/src/backend/lifecycle.rs"))
-        .expect("read execution backend lifecycle contract");
+    let lifecycle =
+        std::fs::read_to_string(root.join("crates/executor-contract/src/backend/lifecycle.rs"))
+            .expect("read execution backend lifecycle contract");
     assert!(
         lifecycle.contains(
             "fn wake_handle(&self, _identity: ExecutionWakeIdentity) -> Option<ExecutionWakeHandle>"
@@ -3859,11 +3880,11 @@ fn reactor_completion_paths_do_not_silently_drop_settlement() {
             ][..],
         ),
         (
-            "crates/execution/src/backend/submission.rs",
+            "crates/executor-contract/src/backend/submission.rs",
             &["let _ = reply.fail"][..],
         ),
         (
-            "crates/execution/src/host/mod.rs",
+            "crates/executor-contract/src/host/mod.rs",
             &["let _ = reply.fail"][..],
         ),
         (

@@ -135,6 +135,7 @@ version = "0.0.1"
 dependencies = [
  "agentos-bridge",
  "agentos-build-support",
+ "agentos-executor-contract",
  "agentos-runtime-tokio",
  "agentos-v8-runtime",
  "agentos-wasm-abi-generator",
@@ -153,6 +154,15 @@ dependencies = [
  "wasmparser 0.251.0",
  "wasmtime",
  "wat",
+]
+
+[[package]]
+name = "agentos-executor-contract"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_bytes",
+ "serde_json",
 ]
 
 [[package]]

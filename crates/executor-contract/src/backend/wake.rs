@@ -1,8 +1,55 @@
-use agentos_runtime_tokio::readiness::ReadyFlags;
 use serde_json::Value;
 use std::error::Error;
 use std::fmt;
+use std::ops::{BitOr, BitOrAssign};
 use std::sync::Arc;
+
+/// Runtime-neutral readiness state published by sidecar-owned capabilities.
+///
+/// Native runtimes translate these stable semantic bits to their internal
+/// readiness representation at the adapter boundary.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExecutionReadyFlags(u16);
+
+impl ExecutionReadyFlags {
+    pub const READABLE: Self = Self(1 << 0);
+    pub const WRITABLE: Self = Self(1 << 1);
+    pub const ACCEPT: Self = Self(1 << 2);
+    pub const DATAGRAM: Self = Self(1 << 3);
+    pub const END: Self = Self(1 << 4);
+    pub const ERROR: Self = Self(1 << 5);
+    pub const CLOSE: Self = Self(1 << 6);
+
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+}
+
+impl BitOr for ExecutionReadyFlags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl BitOrAssign for ExecutionReadyFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
 
 /// Identifies the one execution generation a wake target may notify.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -64,7 +111,7 @@ pub trait ExecutionWakeTarget: Send + Sync {
         &self,
         capability_id: u64,
         capability_generation: u64,
-        flags: ReadyFlags,
+        flags: ExecutionReadyFlags,
     ) -> Result<(), ExecutionWakeError>;
 
     fn remove_readiness(
@@ -121,7 +168,7 @@ impl ExecutionWakeHandle {
         &self,
         capability_id: u64,
         capability_generation: u64,
-        flags: ReadyFlags,
+        flags: ExecutionReadyFlags,
     ) -> Result<(), ExecutionWakeError> {
         self.target
             .publish_readiness(capability_id, capability_generation, flags)
@@ -173,7 +220,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingTarget {
-        readiness: Mutex<Vec<(u64, u64, ReadyFlags)>>,
+        readiness: Mutex<Vec<(u64, u64, ExecutionReadyFlags)>>,
         signals: Mutex<Vec<(i32, u64)>>,
     }
 
@@ -182,7 +229,7 @@ mod tests {
             &self,
             capability_id: u64,
             capability_generation: u64,
-            flags: ReadyFlags,
+            flags: ExecutionReadyFlags,
         ) -> Result<(), ExecutionWakeError> {
             self.readiness.lock().expect("readiness lock").push((
                 capability_id,
@@ -239,7 +286,7 @@ mod tests {
             target.clone(),
         );
         handle
-            .publish_readiness(9, 3, ReadyFlags::READABLE)
+            .publish_readiness(9, 3, ExecutionReadyFlags::READABLE)
             .expect("publish readiness");
         handle
             .publish_signal(15, 29)
@@ -248,7 +295,7 @@ mod tests {
         assert_eq!(handle.identity().generation, 7);
         assert_eq!(
             target.readiness.lock().expect("readiness lock").as_slice(),
-            &[(9, 3, ReadyFlags::READABLE)]
+            &[(9, 3, ExecutionReadyFlags::READABLE)]
         );
         assert_eq!(
             target.signals.lock().expect("signals lock").as_slice(),

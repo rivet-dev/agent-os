@@ -7,6 +7,7 @@ export const RUST_CRATE_ORDER = [
 	"agentos-build-support",
 	"agentos-actor-uds-client",
 	"agentos-bridge",
+	"agentos-executor-contract",
 	"agentos-runtime-tokio",
 	"agentos-vfs-core",
 	"agentos-vfs",

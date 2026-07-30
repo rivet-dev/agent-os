@@ -23,6 +23,7 @@ doctest = false
 
 [dependencies]
 agentos-bridge = { workspace = true }
+agentos-executor-contract = { workspace = true }
 agentos-runtime-tokio = { workspace = true }
 agentos-v8-runtime = { workspace = true }
 base64 = "0.22"

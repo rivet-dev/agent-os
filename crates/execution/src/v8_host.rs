@@ -371,10 +371,15 @@ impl crate::backend::ExecutionWakeTarget for V8SessionHandle {
         &self,
         capability_id: u64,
         capability_generation: u64,
-        flags: agentos_runtime_tokio::readiness::ReadyFlags,
+        flags: crate::backend::ExecutionReadyFlags,
     ) -> Result<(), crate::backend::ExecutionWakeError> {
-        V8SessionHandle::publish_readiness(self, capability_id, capability_generation, flags)
-            .map_err(|error| crate::backend::ExecutionWakeError::new("EIO", error.to_string()))
+        V8SessionHandle::publish_readiness(
+            self,
+            capability_id,
+            capability_generation,
+            agentos_runtime_tokio::readiness::ReadyFlags::from_bits(flags.bits()),
+        )
+        .map_err(|error| crate::backend::ExecutionWakeError::new("EIO", error.to_string()))
     }
 
     fn remove_readiness(
