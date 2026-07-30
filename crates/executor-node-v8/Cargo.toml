@@ -11,8 +11,8 @@ doctest = false
 
 [dependencies]
 agentos-executor-contract = { workspace = true }
-agentos-v8-runtime = { workspace = true }
+agentos-executor-v8-runtime = { workspace = true }
 
 [dev-dependencies]
-agentos-runtime-tokio = { workspace = true }
+agentos-driver-tokio = { workspace = true }
 tempfile = "3"

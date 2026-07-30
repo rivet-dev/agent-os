@@ -1,10 +1,10 @@
 mod support;
 
+use agentos_driver_tokio::metrics::BufferMetricClass;
 use agentos_executor_conformance::{
     GuestRuntimeConfig, JavascriptExecutionEngine, PythonExecutionEngine,
     StartWasmExecutionRequest, WasmExecutionEngine, WasmExecutionLimits, WasmPermissionTier,
 };
-use agentos_runtime_tokio::metrics::BufferMetricClass;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tempfile::tempdir;
@@ -14,7 +14,7 @@ fn execution_subsystems_do_not_lookup_or_build_runtime_topology() {
     let sources = [
         (
             "javascript.rs",
-            include_str!("../../v8-runtime/src/javascript.rs"),
+            include_str!("../../executor-v8-runtime/src/javascript.rs"),
         ),
         (
             "python.rs",
@@ -23,18 +23,18 @@ fn execution_subsystems_do_not_lookup_or_build_runtime_topology() {
         ("wasm.rs", include_str!("../../executor-wasm-v8/src/lib.rs")),
         (
             "node_import_cache.rs",
-            include_str!("../../v8-runtime/src/asset_cache.rs"),
+            include_str!("../../executor-v8-runtime/src/asset_cache.rs"),
         ),
         (
             "v8_host.rs",
-            include_str!("../../v8-runtime/src/adapter_host.rs"),
+            include_str!("../../executor-v8-runtime/src/adapter_host.rs"),
         ),
     ];
 
     for (name, source) in sources {
         assert!(
-            !source.contains("SidecarRuntime::process_context"),
-            "{name} must receive RuntimeContext from its owner"
+            !source.contains("TokioDriver::process_handle"),
+            "{name} must receive DriverHandle from its owner"
         );
         assert!(
             !source.contains("tokio::runtime::Builder")
@@ -49,7 +49,7 @@ fn blocking_execution_adapters_never_enter_the_shared_runtime() {
     for (name, source) in [
         (
             "javascript.rs",
-            include_str!("../../v8-runtime/src/javascript.rs"),
+            include_str!("../../executor-v8-runtime/src/javascript.rs"),
         ),
         (
             "python.rs",
@@ -66,7 +66,7 @@ fn blocking_execution_adapters_never_enter_the_shared_runtime() {
 
 #[test]
 fn supplied_vm_runtime_is_forwarded_to_per_execution_paths() {
-    let javascript = include_str!("../../v8-runtime/src/javascript.rs");
+    let javascript = include_str!("../../executor-v8-runtime/src/javascript.rs");
     assert!(javascript.contains("pub fn start_execution_with_runtime("));
     assert!(javascript.contains("pub fn start_execution_with_module_reader_and_runtime("));
     assert!(javascript.contains("spawn_v8_event_bridge(\n            &runtime,"));

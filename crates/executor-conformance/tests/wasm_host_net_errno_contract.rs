@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 fn runner_source() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../v8-runtime/assets/runners/wasm-runner.mjs");
+        .join("../executor-v8-runtime/assets/runners/wasm-runner.mjs");
     fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }

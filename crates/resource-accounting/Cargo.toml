@@ -1,0 +1,11 @@
+[package]
+name = "agentos-resource-accounting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runtime-neutral bounded resource accounting, limits, and queue telemetry for agentOS"
+
+[dependencies]
+event-listener = "5.4"
+tracing = "0.1"

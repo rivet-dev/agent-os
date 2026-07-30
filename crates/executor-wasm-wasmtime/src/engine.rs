@@ -2,7 +2,7 @@
 
 use super::cache::{WasmtimeModuleCache, WasmtimeModuleCacheMetrics};
 use crate::backend::HostServiceError;
-use agentos_wasm_common::WasmtimeMetricsSnapshot;
+use agentos_executor_wasm_abi::WasmtimeMetricsSnapshot;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;

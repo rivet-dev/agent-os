@@ -15,8 +15,8 @@ doctest = false
 
 [dependencies]
 agentos-executor-contract = { workspace = true }
-agentos-runtime-tokio = { workspace = true }
-agentos-wasm-common = { workspace = true }
+agentos-driver-tokio = { workspace = true }
+agentos-executor-wasm-abi = { workspace = true }
 base64 = "0.22"
 ciborium = "0.2"
 flume = "0.11"

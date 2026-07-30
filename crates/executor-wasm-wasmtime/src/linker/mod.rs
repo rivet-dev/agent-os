@@ -8,7 +8,7 @@ use crate::abi::{
 };
 use crate::backend::{HostCallReply, HostServiceError};
 use crate::host::{HostOperation, SignalMaskHow, SignalOperation, SignalSetValue};
-use agentos_wasm_common::WasmPermissionTier;
+use agentos_executor_wasm_abi::WasmPermissionTier;
 use serde_json::Value;
 use wasmtime::{Caller, Engine, FuncType, Linker, Module, Val, ValType};
 

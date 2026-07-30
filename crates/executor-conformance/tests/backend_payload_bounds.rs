@@ -109,7 +109,7 @@ fn common_payload_constructors_require_named_limits() {
         manifest
             .parent()
             .expect("workspace crates directory")
-            .join("v8-runtime/src/adapter_host.rs"),
+            .join("executor-v8-runtime/src/adapter_host.rs"),
     )
     .expect("V8 adapter source");
 

@@ -8,8 +8,8 @@
 //!
 //! The fix is that write-intent is derived from RIGHT_FD_WRITE
 //! (`1n << 6n` == 64n) instead. The WASI module JS that performs `path_open`
-//! lives in `crates/v8-runtime/assets/runners/wasi-module.js`, and the delegated
-//! runner path lives in `crates/v8-runtime/assets/runners/wasm-runner.mjs`.
+//! lives in `crates/executor-v8-runtime/assets/runners/wasi-module.js`, and the delegated
+//! runner path lives in `crates/executor-v8-runtime/assets/runners/wasm-runner.mjs`.
 //!
 //! `build_wasm_runner_bootstrap` is a private function, so rather than execute
 //! it we pin the source-level invariant: write-intent MUST be checked against
@@ -22,7 +22,7 @@ use std::path::PathBuf;
 
 fn read_source(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../v8-runtime")
+        .join("../executor-v8-runtime")
         .join(rel);
     fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))

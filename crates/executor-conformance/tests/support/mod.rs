@@ -1,14 +1,14 @@
 #![allow(dead_code)]
 
+use agentos_driver_tokio::{DriverConfig, DriverHandle, TokioDriver};
 use agentos_executor_conformance::{
     JavascriptExecutionEngine, PythonExecutionEngine, WasmExecutionEngine,
 };
-use agentos_runtime_tokio::{RuntimeConfig, RuntimeContext, SidecarRuntime};
 
-pub fn runtime_context() -> RuntimeContext {
-    SidecarRuntime::process(&RuntimeConfig::default())
+pub fn runtime_context() -> DriverHandle {
+    TokioDriver::process(&DriverConfig::default())
         .expect("construct execution-test process runtime")
-        .context()
+        .handle()
 }
 
 pub fn javascript_engine() -> JavascriptExecutionEngine {

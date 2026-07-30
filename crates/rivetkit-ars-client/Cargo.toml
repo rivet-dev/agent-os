@@ -1,0 +1,22 @@
+[package]
+name = "agentos-rivetkit-ars-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Internal agentOS client for RivetKit Actor Runtime Socket services"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_bare = "0.5"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "net", "sync", "time"] }
+vbare.workspace = true
+
+[build-dependencies]
+vbare-compiler.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }

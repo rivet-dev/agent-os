@@ -10,9 +10,11 @@ use crate::backend::{
     direct_host_reply_channel, HostCallIdentity, HostCallReply, HostServiceError,
 };
 use crate::host::{HostOperation, HostProcessContext, ProcessHostCapabilitySet};
-use agentos_runtime_tokio::accounting::{Reservation, ResourceClass, ResourceLedger};
-use agentos_runtime_tokio::RuntimeContext;
-use agentos_wasm_common::{guest_visible_wasm_env, StartWasmExecutionRequest, WasmExecutionEvent};
+use agentos_driver_tokio::accounting::{Reservation, ResourceClass, ResourceLedger};
+use agentos_driver_tokio::DriverHandle;
+use agentos_executor_wasm_abi::{
+    guest_visible_wasm_env, StartWasmExecutionRequest, WasmExecutionEvent,
+};
 use flume::Sender;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -365,7 +367,7 @@ impl std::fmt::Debug for WasmtimeStoreState {
 impl WasmtimeStoreState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        runtime: &RuntimeContext,
+        runtime: &DriverHandle,
         host: WasmtimeHostClient,
         engine: Arc<WasmtimeEngineHandle>,
         request: &StartWasmExecutionRequest,
@@ -551,7 +553,7 @@ pub fn max_host_reply_bytes(
 #[allow(clippy::too_many_arguments)]
 pub fn create_store(
     engine: Arc<WasmtimeEngineHandle>,
-    runtime: &RuntimeContext,
+    runtime: &DriverHandle,
     host: WasmtimeHostClient,
     request: &StartWasmExecutionRequest,
     profile: WasmtimeEngineProfile,
@@ -678,15 +680,15 @@ where
 mod tests {
     use super::*;
     use crate::backend::{bounded_execution_event_channel, PayloadLimit};
+    use agentos_driver_tokio::accounting::{ResourceLedger, ResourceLimit};
+    use agentos_driver_tokio::{DriverConfig, TokioDriver};
     use agentos_executor_contract::GuestRuntimeConfig;
-    use agentos_runtime_tokio::accounting::{ResourceLedger, ResourceLimit};
-    use agentos_runtime_tokio::{RuntimeConfig, SidecarRuntime};
-    use agentos_wasm_common::{WasmExecutionLimits, WasmPermissionTier};
+    use agentos_executor_wasm_abi::{WasmExecutionLimits, WasmPermissionTier};
     use std::path::PathBuf;
 
     #[test]
     fn store_reservations_are_released_on_teardown() {
-        let runtime = SidecarRuntime::process(&RuntimeConfig::default()).expect("test runtime");
+        let runtime = TokioDriver::process(&DriverConfig::default()).expect("test runtime");
         let process = crate::host::HostProcessContext {
             generation: 97,
             pid: 41,
@@ -697,10 +699,10 @@ mod tests {
                 ResourceClass::WasmMemoryBytes,
                 ResourceLimit::new(1024 * 1024 * 1024, "runtime.resources.maxWasmMemoryBytes"),
             )],
-            Arc::clone(runtime.context().resources()),
+            Arc::clone(runtime.handle().resources()),
         ));
         let scoped = runtime
-            .context()
+            .handle()
             .scoped_for_vm(Arc::clone(&resources), process.generation);
         let (submission, _host_events) = bounded_execution_event_channel(
             process,

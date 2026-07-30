@@ -1,0 +1,15 @@
+[package]
+name = "agentos-acp-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "agentOS ACP extension protocol types"
+build = "build.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_bare = "0.5"
+
+[build-dependencies]
+vbare-compiler = { workspace = true }

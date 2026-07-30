@@ -224,7 +224,7 @@ type StandaloneWasmBackend enum {
 
 # agentOS package descriptor. `path` is the trusted host path of the package:
 # normally the packed `.aospkg` file (header + vbare manifest + mount index +
-# mount tar; see crates/vfs/package-format/v1.bare). The sidecar reads the
+# mount tar; see crates/vfs-core/package-format/v1.bare). The sidecar reads the
 # vbare chunk1 manifest, projects the package read-only under
 # `<packagesMountAt>/pkgs/<name>/<version>`, and links its `bin/` commands onto
 # $PATH. A directory path is accepted only for local transition fixtures and is

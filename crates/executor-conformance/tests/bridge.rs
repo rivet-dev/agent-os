@@ -1,12 +1,12 @@
-#[path = "../../bridge/tests/support.rs"]
+#[path = "../../vm-host-interface/tests/support.rs"]
 mod bridge_support;
 
-use agentos_bridge::{
-    BridgeTypes, CreateJavascriptContextRequest, CreateWasmContextRequest, ExecutionEvent,
-    ExecutionHandleRequest, ExecutionSignal, GuestKernelCall, GuestRuntime, KillExecutionRequest,
-    PollExecutionEventRequest, StartExecutionRequest, WriteExecutionStdinRequest,
-};
 use agentos_executor_conformance::NativeExecutionBridge;
+use agentos_vm_host_interface::{
+    CreateJavascriptContextRequest, CreateWasmContextRequest, ExecutionEvent,
+    ExecutionHandleRequest, ExecutionSignal, GuestKernelCall, GuestRuntime, KillExecutionRequest,
+    PollExecutionEventRequest, StartExecutionRequest, VmHostTypes, WriteExecutionStdinRequest,
+};
 use bridge_support::RecordingBridge;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -14,7 +14,7 @@ use std::fmt::Debug;
 fn assert_native_execution_bridge<B>(bridge: &mut B)
 where
     B: NativeExecutionBridge,
-    <B as BridgeTypes>::Error: Debug,
+    <B as VmHostTypes>::Error: Debug,
 {
     let js = bridge
         .create_javascript_context(CreateJavascriptContextRequest {

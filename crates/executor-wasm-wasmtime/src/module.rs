@@ -2,7 +2,9 @@
 
 use super::engine::WasmtimeEngineHandle;
 use crate::backend::HostServiceError;
-use agentos_wasm_common::profile::{validate_locked_profile, validate_locked_threaded_profile};
+use agentos_executor_wasm_abi::profile::{
+    validate_locked_profile, validate_locked_threaded_profile,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use wasmtime::Module;

@@ -720,7 +720,7 @@ impl AgentOs {
         out
     }
 
-    /// List ALL kernel processes (native sidecar process snapshot).
+    /// List ALL kernel processes (sidecar process snapshot).
     ///
     /// The kernel snapshot keys processes by their raw kernel pid. SDK-spawned root processes carry a
     /// synthetic display pid (the `spawn` return value); this remaps each snapshot entry's

@@ -1,7 +1,7 @@
+use agentos_driver_tokio::{DriverConfig, TokioDriver};
 use agentos_executor_conformance::benchmark::{
     run_javascript_benchmarks_with_recovery, JavascriptBenchmarkConfig,
 };
-use agentos_runtime_tokio::{RuntimeConfig, SidecarRuntime};
 use std::path::PathBuf;
 
 struct CliConfig {
@@ -10,8 +10,8 @@ struct CliConfig {
 }
 
 fn main() {
-    let runtime = match SidecarRuntime::process(&RuntimeConfig::default()) {
-        Ok(runtime) => runtime.context(),
+    let runtime = match TokioDriver::process(&DriverConfig::default()) {
+        Ok(runtime) => runtime.handle(),
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(1);

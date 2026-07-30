@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf};
 #[test]
 fn pipe_sync_rpc_decoder_preserves_structured_error_details() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../v8-runtime/assets/runners/wasm-runner.mjs");
+        .join("../executor-v8-runtime/assets/runners/wasm-runner.mjs");
     let source = fs::read_to_string(path).expect("read wasm runner");
     let start = source.find("function callSyncRpc(").expect("callSyncRpc");
     let section = &source[start..];

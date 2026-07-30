@@ -1,0 +1,12 @@
+[package]
+name = "agentos-vm-host-interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runtime-neutral trusted host interface used by agentOS VMs"
+
+[dependencies]
+getrandom = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"

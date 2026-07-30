@@ -2,7 +2,7 @@ use crate::{
     CreateJavascriptContextRequest, JavascriptExecutionEngine, JavascriptExecutionError,
     StartJavascriptExecutionRequest,
 };
-use agentos_runtime_tokio::RuntimeContext;
+use agentos_driver_tokio::DriverHandle;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
@@ -1481,7 +1481,7 @@ impl From<JavascriptExecutionError> for JavascriptBenchmarkError {
 }
 
 pub fn run_javascript_benchmarks(
-    runtime: &RuntimeContext,
+    runtime: &DriverHandle,
     config: &JavascriptBenchmarkConfig,
 ) -> Result<JavascriptBenchmarkReport, JavascriptBenchmarkError> {
     validate_benchmark_config(config)?;
@@ -1967,7 +1967,7 @@ impl StoredBenchmarkScenarioReport {
 }
 
 pub fn run_javascript_benchmarks_with_recovery(
-    runtime: &RuntimeContext,
+    runtime: &DriverHandle,
     config: &JavascriptBenchmarkConfig,
     baseline_path: Option<&Path>,
 ) -> Result<JavascriptBenchmarkRunOutput, JavascriptBenchmarkError> {
@@ -2344,7 +2344,7 @@ fn benchmark_scenarios() -> [ScenarioDefinition; 21] {
 }
 
 fn run_scenario(
-    runtime: &RuntimeContext,
+    runtime: &DriverHandle,
     workspace: &BenchmarkWorkspace,
     config: &JavascriptBenchmarkConfig,
     scenario: ScenarioDefinition,
@@ -2482,7 +2482,7 @@ fn compile_cache_root_for_strategy(strategy: CompileCacheStrategy, root: &Path) 
 }
 
 fn run_sample(
-    runtime: &RuntimeContext,
+    runtime: &DriverHandle,
     workspace: &BenchmarkWorkspace,
     scenario: &ScenarioDefinition,
     compile_cache_root: Option<PathBuf>,
@@ -2503,7 +2503,7 @@ fn run_sample(
 }
 
 fn run_native_sample(
-    runtime: &RuntimeContext,
+    runtime: &DriverHandle,
     workspace: &BenchmarkWorkspace,
     scenario: &ScenarioDefinition,
     compile_cache_root: Option<PathBuf>,
@@ -2591,7 +2591,7 @@ fn run_host_node_sample(
     scenario: &ScenarioDefinition,
 ) -> Result<SampleMeasurement, JavascriptBenchmarkError> {
     let started_at = Instant::now();
-    let output = Command::new(agentos_v8_runtime::host_node::node_binary())
+    let output = Command::new(agentos_executor_v8_runtime::host_node::node_binary())
         .arg(scenario.entrypoint)
         .current_dir(&workspace.root)
         .envs(scenario_env(workspace, scenario))
@@ -2657,7 +2657,7 @@ fn scenario_env(
 }
 
 fn measure_transport_rtt(
-    runtime: &RuntimeContext,
+    runtime: &DriverHandle,
     workspace: &BenchmarkWorkspace,
     config: &JavascriptBenchmarkConfig,
 ) -> Result<Vec<BenchmarkTransportRttReport>, JavascriptBenchmarkError> {
@@ -2865,7 +2865,7 @@ fn load_benchmark_artifact(
 }
 
 fn benchmark_host() -> Result<BenchmarkHost, JavascriptBenchmarkError> {
-    let node_binary = agentos_v8_runtime::host_node::node_binary();
+    let node_binary = agentos_executor_v8_runtime::host_node::node_binary();
     let output = Command::new(&node_binary)
         .arg("--version")
         .output()

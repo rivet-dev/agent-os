@@ -8,8 +8,8 @@
 use super::lifecycle::Control;
 use crate::backend::{HostCallReply, HostServiceError};
 use crate::host::{HostOperation, HostProcessContext, ProcessOperation, SignalOperation};
-use agentos_runtime_tokio::{RuntimeConfig, SidecarRuntime};
-use agentos_wasm_common::StartWasmExecutionRequest;
+use agentos_driver_tokio::{DriverConfig, TokioDriver};
+use agentos_executor_wasm_abi::StartWasmExecutionRequest;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -516,10 +516,10 @@ pub fn run_worker_entry() -> Result<(), HostServiceError> {
         startup.request.limits.pending_event_count.unwrap_or(64),
         startup.max_frame_bytes,
     )?;
-    let runtime = SidecarRuntime::process(&RuntimeConfig::default()).map_err(|error| {
+    let runtime = TokioDriver::process(&DriverConfig::default()).map_err(|error| {
         HostServiceError::new("ERR_AGENTOS_WASMTIME_WORKER_RUNTIME", error.to_string())
     })?;
-    let context = runtime.context();
+    let context = runtime.handle();
     let client_for_run = client.clone();
     let result = runtime.block_on(super::lifecycle::run_worker_loaded_module(
         startup.request,
@@ -835,7 +835,7 @@ fn worker_executable() -> Result<PathBuf, HostServiceError> {
     if current
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name == "agentos-native-sidecar")
+        .is_some_and(|name| name == "agentos-sidecar")
     {
         return Ok(current);
     }
@@ -845,7 +845,7 @@ fn worker_executable() -> Result<PathBuf, HostServiceError> {
         .ok_or_else(|| {
             HostServiceError::new(
                 "ERR_AGENTOS_WASMTIME_WORKER_PATH",
-                "cannot locate the agentos-native-sidecar worker executable",
+                "cannot locate the agentos-sidecar worker executable",
             )
         })
 }
@@ -854,9 +854,9 @@ fn worker_executable_candidates(current: &Path) -> Vec<PathBuf> {
     let Some(directory) = current.parent() else {
         return Vec::new();
     };
-    let mut candidates = vec![directory.join("agentos-native-sidecar")];
+    let mut candidates = vec![directory.join("agentos-sidecar")];
     if let Some(parent) = directory.parent() {
-        candidates.push(parent.join("agentos-native-sidecar"));
+        candidates.push(parent.join("agentos-sidecar"));
     }
     candidates
 }
@@ -1040,15 +1040,15 @@ mod tests {
         assert_eq!(
             worker_executable_candidates(Path::new("/repo/target/release/agentos-sidecar")),
             vec![
-                PathBuf::from("/repo/target/release/agentos-native-sidecar"),
-                PathBuf::from("/repo/target/agentos-native-sidecar"),
+                PathBuf::from("/repo/target/release/agentos-sidecar"),
+                PathBuf::from("/repo/target/agentos-sidecar"),
             ]
         );
         assert_eq!(
             worker_executable_candidates(Path::new("/repo/target/release/deps/execution-test")),
             vec![
-                PathBuf::from("/repo/target/release/deps/agentos-native-sidecar"),
-                PathBuf::from("/repo/target/release/agentos-native-sidecar"),
+                PathBuf::from("/repo/target/release/deps/agentos-sidecar"),
+                PathBuf::from("/repo/target/release/agentos-sidecar"),
             ]
         );
     }

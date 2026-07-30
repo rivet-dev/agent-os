@@ -10,11 +10,12 @@ description = "WebAssembly executor hosted by the agentOS V8 runtime"
 doctest = false
 
 [dependencies]
-agentos-bridge = { workspace = true }
+agentos-vm-host-interface = { workspace = true }
 agentos-executor-contract = { workspace = true }
-agentos-runtime-tokio = { workspace = true }
-agentos-v8-runtime = { workspace = true }
-agentos-wasm-common = { workspace = true }
+agentos-resource-accounting = { workspace = true }
+agentos-driver-tokio = { workspace = true }
+agentos-executor-v8-runtime = { workspace = true }
+agentos-executor-wasm-abi = { workspace = true }
 base64 = "0.22"
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }

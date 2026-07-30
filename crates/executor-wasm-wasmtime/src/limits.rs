@@ -1,7 +1,7 @@
 //! Store, memory, table, instance, stack, CPU, and cache limits.
 
 use crate::backend::HostServiceError;
-use agentos_wasm_common::WasmExecutionLimits;
+use agentos_executor_wasm_abi::WasmExecutionLimits;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
 
 pub const DEFAULT_MAX_WASM_MEMORY_BYTES: usize = 128 * 1024 * 1024;

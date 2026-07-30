@@ -11,16 +11,16 @@ publish = false
 doctest = false
 
 [dependencies]
-agentos-bridge = { workspace = true }
+agentos-vm-host-interface = { workspace = true }
 agentos-executor-contract = { workspace = true }
 agentos-executor-node-v8 = { workspace = true }
 agentos-executor-python-v8-pyodide = { workspace = true }
 agentos-executor-wasm-v8 = { workspace = true }
 agentos-executor-wasm-wasmtime = { workspace = true }
-agentos-native-sidecar = { workspace = true }
-agentos-runtime-tokio = { workspace = true }
-agentos-v8-runtime = { workspace = true }
-agentos-wasm-common = { workspace = true }
+agentos-vm = { workspace = true, features = ["all-executors"] }
+agentos-driver-tokio = { workspace = true }
+agentos-executor-v8-runtime = { workspace = true }
+agentos-executor-wasm-abi = { workspace = true }
 base64 = "0.22"
 ciborium = "0.2"
 getrandom = "0.2"
@@ -34,6 +34,6 @@ tokio = { version = "1", features = ["io-util", "process", "rt", "sync", "time"]
 tracing = "0.1"
 
 [dev-dependencies]
-agentos-wasm-abi-generator = { path = "../wasm-abi-generator" }
+agentos-executor-wasm-abi-generator = { path = "../executor-wasm-abi-generator" }
 tempfile = "3"
 wat = "1"

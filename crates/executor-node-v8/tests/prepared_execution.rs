@@ -1,16 +1,16 @@
+use agentos_driver_tokio::{DriverConfig, TokioDriver};
 use agentos_executor_node_v8::{
     CreateJavascriptContextRequest, JavascriptExecutionEngine, StartJavascriptExecutionRequest,
 };
-use agentos_runtime_tokio::{RuntimeConfig, SidecarRuntime};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tempfile::tempdir;
 
 #[test]
 fn prepared_execution_does_not_enqueue_guest_code_until_started() {
-    let runtime = SidecarRuntime::process(&RuntimeConfig::default())
+    let runtime = TokioDriver::process(&DriverConfig::default())
         .expect("construct test process runtime")
-        .context();
+        .handle();
     let temp = tempdir().expect("create temp dir");
     let mut engine = JavascriptExecutionEngine::new(runtime);
     let context = engine.create_context(CreateJavascriptContextRequest {

@@ -9,7 +9,7 @@ use ts_rs::TS;
 /// the owning V8 isolate. Individual process launches may override this value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
 #[serde(rename_all = "kebab-case")]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub enum StandaloneWasmBackend {
     #[default]
     V8,
@@ -23,7 +23,7 @@ pub enum StandaloneWasmBackend {
 /// public `NodeRuntime.create(...)` option changes the generated VM config.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 #[derive(Default)]
 pub struct CreateVmConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,11 +127,11 @@ impl CreateVmConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[ts(tag = "type", rename_all = "snake_case")]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub enum VmSqliteDescriptor {
     /// Rivet actor SQLite reached through the actor's local runtime socket.
     ActorUds { path: String },
-    /// A SQLite database file owned by the native sidecar host.
+    /// A SQLite database file owned by the sidecar host.
     SqliteFile { path: String },
 }
 
@@ -159,7 +159,7 @@ fn validate_absolute_host_path(field: &str, path: &str) -> Result<(), VmConfigEr
 /// Initial Linux-style credentials and account record for processes in a VM.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct VmUserConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -203,7 +203,7 @@ pub struct VmUserConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct VmUserAccountConfig {
     pub uid: u32,
     pub gid: u32,
@@ -221,7 +221,7 @@ pub struct VmUserAccountConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct VmGroupConfig {
     pub gid: u32,
     pub name: String,
@@ -520,7 +520,7 @@ fn validate_materialized_groups(
 /// emulation (`platform = node`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct JsRuntimeConfig {
     /// Which host environment to emulate for guest JS. Default `node`.
     #[serde(default)]
@@ -572,7 +572,7 @@ impl JsRuntimeConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 #[derive(Default)]
 pub enum JsRuntimePlatform {
     /// Full Node.js host surface (process/Buffer/require, `node:*`, npm
@@ -590,7 +590,7 @@ pub enum JsRuntimePlatform {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 #[derive(Default)]
 pub enum JsModuleResolution {
     /// node_modules ancestor-walk + exports/imports/conditions + realpath. Default.
@@ -604,7 +604,7 @@ pub enum JsModuleResolution {
 
 /// Canonical set of recognized Node builtin module names (without the `node:`
 /// prefix), kept in sync with `normalize_builtin_specifier` in
-/// `crates/v8-runtime/src/javascript.rs`. Used to validate
+/// `crates/executor-v8-runtime/src/javascript.rs`. Used to validate
 /// `jsRuntime.allowedBuiltins` entries.
 const KNOWN_NODE_BUILTINS: &[&str] = &[
     "assert",
@@ -668,7 +668,7 @@ fn is_known_node_builtin(name: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct RootFilesystemConfig {
     #[serde(default)]
     pub mode: RootFilesystemMode,
@@ -713,7 +713,7 @@ impl RootFilesystemConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "kebab-case")]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 #[derive(Default)]
 pub enum RootFilesystemMode {
     #[default]
@@ -723,7 +723,7 @@ pub enum RootFilesystemMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub enum RootFilesystemLowerDescriptor {
     Snapshot {
         #[serde(default)]
@@ -734,7 +734,7 @@ pub enum RootFilesystemLowerDescriptor {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct RootFilesystemEntry {
     pub path: String,
     pub kind: RootFilesystemEntryKind,
@@ -801,7 +801,7 @@ impl RootFilesystemEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub enum RootFilesystemEntryKind {
     File,
     Directory,
@@ -810,7 +810,7 @@ pub enum RootFilesystemEntryKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub enum RootFilesystemEntryEncoding {
     Utf8,
     Base64,
@@ -818,7 +818,7 @@ pub enum RootFilesystemEntryEncoding {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct NativeRootFilesystemConfig {
     pub plugin: MountPluginDescriptor,
     #[serde(default, rename = "readOnly")]
@@ -836,17 +836,17 @@ impl NativeRootFilesystemConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct MountPluginDescriptor {
     pub id: String,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
-    #[ts(type = "import(\"@rivet-dev/agentos-runtime-core/descriptors\").MountConfigJsonValue")]
+    #[ts(type = "import(\"../descriptors.js\").MountConfigJsonValue")]
     pub config: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub enum PermissionMode {
     Allow,
     Ask,
@@ -855,7 +855,7 @@ pub enum PermissionMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(untagged)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub enum FsPermissionScope {
     Mode(PermissionMode),
     Rules(FsPermissionRuleSet),
@@ -863,7 +863,7 @@ pub enum FsPermissionScope {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(untagged)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub enum PatternPermissionScope {
     Mode(PermissionMode),
     Rules(PatternPermissionRuleSet),
@@ -871,7 +871,7 @@ pub enum PatternPermissionScope {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct FsPermissionRuleSet {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -882,7 +882,7 @@ pub struct FsPermissionRuleSet {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct PatternPermissionRuleSet {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -893,7 +893,7 @@ pub struct PatternPermissionRuleSet {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct FsPermissionRule {
     pub mode: PermissionMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -904,7 +904,7 @@ pub struct FsPermissionRule {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct PatternPermissionRule {
     pub mode: PermissionMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -915,7 +915,7 @@ pub struct PatternPermissionRule {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct PermissionsPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -943,7 +943,7 @@ pub struct PermissionsPolicy {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct VmLimitsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -1322,7 +1322,7 @@ macro_rules! limits_struct {
     ($name:ident { $($field:ident),* $(,)? }) => {
         #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        #[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+        #[ts(export, export_to = "../../../packages/core/src/generated/")]
         pub struct $name {
             $(
                 #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1496,7 +1496,7 @@ limits_struct!(ProcessLimitsConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct VmDnsConfig {
     #[serde(default, rename = "nameServers", skip_serializing_if = "Vec::is_empty")]
     pub name_servers: Vec<String>,
@@ -1529,7 +1529,7 @@ impl VmDnsConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/runtime-core/src/generated/")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct VmListenPolicyConfig {
     #[serde(default, rename = "portMin", skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

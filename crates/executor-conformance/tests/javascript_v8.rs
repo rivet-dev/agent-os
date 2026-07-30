@@ -1309,7 +1309,7 @@ console.log(formatter.format(1234.5));
 // formatting options, and an explicit IANA time zone used to crash the embedded
 // V8 isolate with SIGTRAP. ICU's `DateTimePatternGeneratorCache::CreateGenerator`
 // hit a fatal abort under the near-heap-limit path; the OOM guard in
-// `crates/v8-runtime/src/isolate.rs` now converts that fatal abort into clean
+// `crates/executor-v8-runtime/src/isolate.rs` now converts that fatal abort into clean
 // termination, and ICU is bundled, so the exact repro runs and returns a string.
 fn javascript_execution_to_locale_date_string_does_not_crash_embedded_v8() {
     let temp = tempdir().expect("create temp dir");

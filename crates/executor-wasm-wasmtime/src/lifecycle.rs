@@ -13,9 +13,9 @@ use crate::host::{
     BoundedString, BoundedUsize, ExecutableImageSource, FilesystemOperation, HostOperation,
     ProcessHostCapabilitySet, ProcessOperation,
 };
-use agentos_runtime_tokio::accounting::{Reservation, ResourceClass, ResourceLedger};
-use agentos_runtime_tokio::RuntimeContext;
-use agentos_wasm_common::{
+use agentos_driver_tokio::accounting::{Reservation, ResourceClass, ResourceLedger};
+use agentos_driver_tokio::DriverHandle;
+use agentos_executor_wasm_abi::{
     StartWasmExecutionRequest, WasmExecutionError, WasmExecutionEvent, WasmtimeMetricsSnapshot,
 };
 use base64::Engine as _;
@@ -277,7 +277,7 @@ impl WasmtimeExecution {
         execution_id: String,
         module_path: String,
         request: StartWasmExecutionRequest,
-        runtime: RuntimeContext,
+        runtime: DriverHandle,
         event_notify: Option<Arc<Notify>>,
         defer_execute: bool,
         threaded: bool,
@@ -373,7 +373,7 @@ impl WasmtimeExecution {
                 // parent can reserve the configured maximum thread count.
                 let _thread_group_reservations = thread_group_reservations;
                 let event_resources = Arc::clone(worker_runtime.resources());
-                let result = worker_runtime.handle().block_on(run_execution(
+                let result = worker_runtime.tokio_handle().block_on(run_execution(
                     module_path,
                     request,
                     worker_runtime.clone(),
@@ -602,7 +602,7 @@ impl WasmtimeExecutionEngine {
 async fn run_execution(
     module_path: String,
     request: StartWasmExecutionRequest,
-    runtime: RuntimeContext,
+    runtime: DriverHandle,
     host_latch: Arc<HostLatch>,
     control: Arc<Control>,
     event_sender: Sender<QueuedWasmtimeEvent>,
@@ -714,7 +714,7 @@ async fn run_execution(
 async fn run_loaded_module(
     module_path: String,
     request: StartWasmExecutionRequest,
-    runtime: RuntimeContext,
+    runtime: DriverHandle,
     host: WasmtimeHostClient,
     engine: Arc<WasmtimeEngineHandle>,
     profile: WasmtimeEngineProfile,
@@ -755,7 +755,7 @@ async fn run_loaded_module_bytes(
     _module_path: String,
     request: StartWasmExecutionRequest,
     bytes: Vec<u8>,
-    runtime: RuntimeContext,
+    runtime: DriverHandle,
     host: WasmtimeHostClient,
     engine: Arc<WasmtimeEngineHandle>,
     profile: WasmtimeEngineProfile,
@@ -965,7 +965,7 @@ fn module_uses_thread_runtime(module: &wasmtime::Module) -> bool {
 pub(super) async fn run_worker_loaded_module(
     request: StartWasmExecutionRequest,
     bytes: Vec<u8>,
-    runtime: RuntimeContext,
+    runtime: DriverHandle,
     worker: super::worker::WorkerIpcClient,
 ) -> Result<i32, HostServiceError> {
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -1315,10 +1315,10 @@ fn publish_worker_event(
 mod tests {
     use super::*;
     use crate::backend::{bounded_execution_event_channel, ExecutionEvent};
+    use agentos_driver_tokio::accounting::{ResourceLedger, ResourceLimit};
+    use agentos_driver_tokio::{DriverConfig, TokioDriver};
     use agentos_executor_contract::GuestRuntimeConfig;
-    use agentos_runtime_tokio::accounting::{ResourceLedger, ResourceLimit};
-    use agentos_runtime_tokio::{RuntimeConfig, SidecarRuntime};
-    use agentos_wasm_common::{WasmExecutionLimits, WasmPermissionTier};
+    use agentos_executor_wasm_abi::{WasmExecutionLimits, WasmPermissionTier};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -1371,9 +1371,9 @@ mod tests {
 
     #[test]
     fn executes_kernel_supplied_module_without_v8_or_ambient_wasi() {
-        let runtime = SidecarRuntime::process(&RuntimeConfig::default())
+        let runtime = TokioDriver::process(&DriverConfig::default())
             .expect("test runtime")
-            .context();
+            .handle();
         let module = wat::parse_str("(module (func (export \"_start\")))").expect("test module");
         let request = StartWasmExecutionRequest {
             vm_id: String::from("vm-test"),
@@ -1470,9 +1470,9 @@ mod tests {
 
     #[test]
     fn threaded_profile_spawns_a_store_sharing_atomic_memory() {
-        let runtime = SidecarRuntime::process(&RuntimeConfig::default())
+        let runtime = TokioDriver::process(&DriverConfig::default())
             .expect("test runtime")
-            .context();
+            .handle();
         let module = wat::parse_str(
             r#"(module
                 (import "env" "memory" (memory 1 2 shared))
@@ -1597,9 +1597,9 @@ mod tests {
 
     #[test]
     fn native_preview1_import_uses_owned_direct_waiter_event() {
-        let runtime = SidecarRuntime::process(&RuntimeConfig::default())
+        let runtime = TokioDriver::process(&DriverConfig::default())
             .expect("test runtime")
-            .context();
+            .handle();
         let module = wat::parse_str(
             r#"(module
                 (import "wasi_snapshot_preview1" "fd_write"
@@ -1718,9 +1718,9 @@ mod tests {
 
     #[test]
     fn native_preview1_blocking_write_waits_for_readiness_after_eagain() {
-        let runtime = SidecarRuntime::process(&RuntimeConfig::default())
+        let runtime = TokioDriver::process(&DriverConfig::default())
             .expect("test runtime")
-            .context();
+            .handle();
         let module = wat::parse_str(
             r#"(module
                 (import "wasi_snapshot_preview1" "fd_write"
@@ -1902,9 +1902,9 @@ mod tests {
 
     #[test]
     fn caught_signal_runs_exact_trampoline_at_async_import_boundary() {
-        let runtime = SidecarRuntime::process(&RuntimeConfig::default())
+        let runtime = TokioDriver::process(&DriverConfig::default())
             .expect("test runtime")
-            .context();
+            .handle();
         let module = wat::parse_str(
             r#"(module
                 (import "wasi_snapshot_preview1" "fd_write"

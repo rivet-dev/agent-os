@@ -4,15 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "High-level Rust client SDK for the Agent OS native sidecar (1:1 port of the TypeScript AgentOs client)"
+description = "High-level Rust client SDK for the agentOS sidecar"
 
 [dependencies]
 # Reuse the agentos BARE wire schema + IPC transport. No new wire types are defined here.
 agent-client-protocol-schema = { workspace = true }
 agentos-sidecar-client = { workspace = true }
 agentos-vm-config = { workspace = true }
-agentos-protocol = { workspace = true }
-agentos-bridge = { workspace = true }
+agentos-acp-protocol = { workspace = true }
+agentos-vm-host-interface = { workspace = true }
 
 anyhow = "1"
 async-trait = "0.1"

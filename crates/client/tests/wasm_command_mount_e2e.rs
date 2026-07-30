@@ -3,7 +3,7 @@
 //! A command package (e.g. `@agentos-software/coreutils`) must be projected into `/opt/agentos`
 //! so the sidecar's command discovery can resolve guest commands. Before package projection was the
 //! sole boot path, stale helpers could create a VM with no usable command package and
-//! `exec("echo hello")` failed with `command not found on native sidecar path: echo hello`.
+//! `exec("echo hello")` failed with `command not found on sidecar path: echo hello`.
 //!
 //! This suite self-gates: it skips (returns early) when the sidecar binary is not built or when the
 //! coreutils package artifacts are absent, so it stays honest in unbuilt trees. When both prerequisites

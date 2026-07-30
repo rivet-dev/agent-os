@@ -12,7 +12,7 @@ use agentos_executor_conformance::{
     CreateWasmContextRequest, StandaloneWasmBackend, StartWasmExecutionRequest, WasmExecutionEvent,
     WasmExecutionResult, WasmPermissionTier,
 };
-use agentos_wasm_abi_generator::{
+use agentos_executor_wasm_abi_generator::{
     imports_module, single_import_module, AbiImport, AbiManifest, CallArguments,
 };
 use std::{
@@ -26,7 +26,7 @@ use std::{
 };
 use tempfile::tempdir;
 
-const ABI_MANIFEST: &str = include_str!("../../wasm-common/assets/agentos-wasm-abi.json");
+const ABI_MANIFEST: &str = include_str!("../../executor-wasm-abi/assets/agentos-wasm-abi.json");
 
 fn run_fixture(
     engine: &mut agentos_executor_conformance::WasmExecutionEngine,

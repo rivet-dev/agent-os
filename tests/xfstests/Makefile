@@ -63,10 +63,10 @@ run: helpers
 		export XFSTESTS_REPORT_DIR="$(REPORT)/$$wasm_backend"; \
 		mkdir -p "$$XFSTESTS_REPORT_DIR"; \
 		cargo test --release --manifest-path "$(CURDIR)/../../Cargo.toml" \
-				-p agentos-native-sidecar --test xfstests_correctness \
+				-p agentos-vm --test xfstests_correctness \
 				xfstests_wasi_helper_ports -- --ignored --exact --nocapture && \
 		cargo test --release --manifest-path "$(CURDIR)/../../Cargo.toml" \
-				-p agentos-native-sidecar --test xfstests_correctness \
+				-p agentos-vm --test xfstests_correctness \
 				xfstests_generic_quick_matrix -- --ignored --exact --nocapture || exit $$?; \
 	done
 

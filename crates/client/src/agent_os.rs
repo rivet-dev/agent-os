@@ -17,10 +17,10 @@ use serde_json::{Map, Value};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 
-use agentos_protocol::generated::v1::{
+use agentos_acp_protocol::generated::v1::{
     AcpCallback, AcpCallbackResponse, AcpEvent, AcpHostRequestCallbackResponse,
 };
-use agentos_protocol::ACP_EXTENSION_NAMESPACE;
+use agentos_acp_protocol::ACP_EXTENSION_NAMESPACE;
 use agentos_sidecar_client::wire;
 use agentos_vm_config as vm_config;
 

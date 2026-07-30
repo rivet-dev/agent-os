@@ -8,7 +8,7 @@
 #![deny(unsafe_code)]
 
 pub mod abi {
-    pub use agentos_wasm_common::abi::*;
+    pub use agentos_executor_wasm_abi::abi::*;
 }
 
 pub mod backend {
@@ -36,7 +36,7 @@ mod store;
 mod threads;
 mod worker;
 
-pub use agentos_wasm_common::WasmtimeMetricsSnapshot;
+pub use agentos_executor_wasm_abi::WasmtimeMetricsSnapshot;
 pub use engine::{
     WasmtimeEngineHandle, WasmtimeEngineProfile, WasmtimeEngineRegistry, WasmtimeFeatureProfile,
     DEFAULT_WASM_STACK_BYTES, HOST_CALL_STACK_HEADROOM_BYTES,

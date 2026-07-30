@@ -106,7 +106,7 @@ pub struct AgentOsSidecarDescription {
     pub active_vm_count: u32,
 }
 
-/// Public transport handle for a (possibly shared) native sidecar process hosting VMs.
+/// Public transport handle for a (possibly shared) sidecar process hosting VMs.
 pub struct AgentOsSidecar {
     pub(crate) sidecar_id: String,
     pub(crate) placement: AgentOsSidecarPlacement,
@@ -168,7 +168,7 @@ impl AgentOsSidecar {
                     client_name: "agentos-client".to_string(),
                     auth_token: "agentos-client".to_string(),
                     protocol_version: wire::PROTOCOL_VERSION,
-                    bridge_version: agentos_bridge::bridge_contract().version,
+                    bridge_version: agentos_vm_host_interface::bridge_contract().version,
                 }),
             )
             .await?

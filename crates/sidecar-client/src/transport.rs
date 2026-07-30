@@ -1,4 +1,4 @@
-//! `SidecarTransport`: spawns a native sidecar binary and speaks the existing framed
+//! `SidecarTransport`: spawns a sidecar binary and speaks the existing framed
 //! BARE protocol over its stdio.
 //!
 //! This mirrors the TypeScript `Sidecar`. Generated wire payloads are the native
@@ -37,7 +37,7 @@ const CONTROL_FRAME_QUEUE_CAPACITY: usize = 1024;
 /// Maximum in-flight host-initiated sidecar requests per transport.
 const PENDING_REQUEST_LIMIT: usize = 4096;
 
-/// Env var that overrides the sidecar binary path. Defaults to `agentos-native-sidecar` on `PATH`.
+/// Env var that overrides the sidecar binary path. Defaults to `agentos-sidecar` on `PATH`.
 /// Product clients can pass an explicit binary path to [`SidecarTransport::spawn`].
 const SIDECAR_BIN_ENV: &str = "AGENTOS_SIDECAR_BIN";
 
@@ -89,7 +89,7 @@ pub struct SidecarTransport {
 }
 
 impl SidecarTransport {
-    /// Spawn the native sidecar binary and start the stdio I/O tasks.
+    /// Spawn the sidecar binary and start the stdio I/O tasks.
     ///
     /// Does NOT run the handshake. Product clients drive Authenticate and any follow-up setup using
     /// [`request_wire`](Self::request_wire) once the transport is live.
@@ -98,7 +98,7 @@ impl SidecarTransport {
         {
             let _ = binary_path;
             return Err(TransportError::Sidecar(
-                "the native sidecar response/control transport is unsupported on this platform"
+                "the sidecar response/control transport is unsupported on this platform"
                     .to_string(),
             ));
         }
@@ -617,7 +617,7 @@ async fn run_silence_watchdog(transport: Weak<SidecarTransport>, timeout: std::t
 fn resolve_sidecar_binary_path(binary_path: Option<String>) -> String {
     binary_path
         .or_else(|| std::env::var(SIDECAR_BIN_ENV).ok())
-        .unwrap_or_else(|| "agentos-native-sidecar".to_string())
+        .unwrap_or_else(|| "agentos-sidecar".to_string())
 }
 
 #[cfg(test)]
@@ -663,23 +663,20 @@ mod tests {
     fn binary_path_uses_agentos_env_fallback() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let previous = std::env::var(SIDECAR_BIN_ENV).ok();
-        std::env::set_var(SIDECAR_BIN_ENV, "/tmp/agentos-native-sidecar");
+        std::env::set_var(SIDECAR_BIN_ENV, "/tmp/agentos-sidecar");
 
-        assert_eq!(
-            resolve_sidecar_binary_path(None),
-            "/tmp/agentos-native-sidecar"
-        );
+        assert_eq!(resolve_sidecar_binary_path(None), "/tmp/agentos-sidecar");
 
         restore_env(SIDECAR_BIN_ENV, previous);
     }
 
     #[test]
-    fn binary_path_defaults_to_agentos_native_sidecar() {
+    fn binary_path_defaults_to_agentos_sidecar() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let previous = std::env::var(SIDECAR_BIN_ENV).ok();
         std::env::remove_var(SIDECAR_BIN_ENV);
 
-        assert_eq!(resolve_sidecar_binary_path(None), "agentos-native-sidecar");
+        assert_eq!(resolve_sidecar_binary_path(None), "agentos-sidecar");
 
         restore_env(SIDECAR_BIN_ENV, previous);
     }

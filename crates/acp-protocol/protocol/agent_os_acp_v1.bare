@@ -1,0 +1,469 @@
+# Agent OS ACP extension protocol schema, version 1.
+# This schema is intentionally standalone. It imports no agentos schema.
+
+type JsonUtf8 str
+
+type AcpRuntimeKind enum {
+  JAVA_SCRIPT
+  PYTHON
+  WEB_ASSEMBLY
+}
+
+# Legacy connection-owned ACP messages below remain encoded only for the
+# dormant browser reference runtime. They are not part of the public AgentOS
+# session API, and the sidecar rejects them. Native durable orchestration
+# uses the same structs internally as a private adapter-process driver until the
+# browser protocol can be split into its own schema.
+type AcpCreateSessionRequest struct {
+  agentType: str
+  runtime: AcpRuntimeKind
+  cwd: str
+  additionalDirectories: list<str>
+  args: list<str>
+  env: map<str><str>
+  protocolVersion: i32
+  clientCapabilities: JsonUtf8
+  mcpServers: JsonUtf8
+  skipOsInstructions: bool
+  additionalInstructions: optional<str>
+}
+
+type AcpSessionRequest struct {
+  sessionId: str
+  method: str
+  params: optional<JsonUtf8>
+}
+
+# Enumerate the agents available in this VM. The sidecar answers from the already
+# projected `/opt/agentos` packages (client parses no manifests).
+type AcpListAgentsRequest struct {
+  reserved: bool
+}
+
+type AcpAgentEntry struct {
+  id: str
+  installed: bool
+  adapterEntrypoint: str
+}
+
+type AcpListAgentsResponse struct {
+  agents: list<AcpAgentEntry>
+}
+
+# Durable AgentOS session API. Omitted session IDs target `main`, including
+# deletion; callers that operate on another public identity provide it.
+#
+# `openSession` is idempotent. Opening an existing durable ID restores its
+# adapter when unloaded; getSession/listSessions remain the storage-only ways to
+# inspect it without starting an adapter. The sidecar owns ACP session/new versus
+# native resume/load selection and returns only after negotiation has populated
+# the cached configuration/capability/agent-info fields. Omitted cwd resolves to
+# `/home/agentos` in the sidecar. Restoration reapplies the original cwd,
+# additionalDirectories, env, exact native ACP McpServer values, instruction
+# settings, and current configuration values. The response is intentionally
+# empty: the caller owns the requested public ID (or the documented `main`
+# default), and getSession is the only API that returns durable metadata.
+# permissionPolicy is an immutable AgentOS-side strategy for resolving native
+# ACP session/request_permission calls: allow_all (the default) selects an
+# adapter-provided allow option, reject_all selects a reject option or returns a
+# typed permission_policy_unsatisfied error when none is offered,
+# and ask durably exposes the adapter's exact options for a caller response. It
+# does not change VM permissions and is not sent to the ACP adapter as config.
+type AcpOpenSessionRequest struct {
+  sessionId: optional<str>
+  agent: str
+  cwd: optional<str>
+  additionalDirectories: optional<JsonUtf8>
+  env: optional<JsonUtf8>
+  mcpServers: optional<JsonUtf8>
+  permissionPolicy: optional<str>
+  skipOsInstructions: optional<bool>
+  additionalInstructions: optional<str>
+}
+
+# This lookup never starts, restores, or queries an ACP adapter.
+type AcpGetDurableSessionRequest struct {
+  sessionId: optional<str>
+}
+
+# Listing is an ordinary updatedAt/sessionId keyset traversal. It never starts,
+# restores, or queries an ACP adapter. It deliberately does not freeze a database
+# snapshot across pages: a session updated between page requests can move in the
+# ordering, which keeps cursors simple and avoids a snapshot registry.
+type AcpListDurableSessionsRequest struct {
+  cursor: optional<str>
+  limit: optional<u32>
+}
+
+# Deletion is naturally idempotent by its target ID. It permanently
+# removes durable metadata and history after orderly runtime teardown.
+type AcpDeleteSessionRequest struct {
+  sessionId: optional<str>
+}
+
+# Unload cancels active work and releases the adapter but preserves the durable
+# session and all history. A later prompt transparently restores it.
+type AcpUnloadSessionRequest struct {
+  sessionId: optional<str>
+}
+
+# Prompt never creates a missing session. It transparently restores an unloaded
+# adapter, durably accepts input before dispatch, blocks through the turn, and
+# never automatically replays a prompt whose delivery became uncertain. The
+# sidecar imposes no absolute session/prompt deadline: long turns and ask-policy
+# permission waits remain active while the actor keep-awake scope is held.
+type AcpPromptRequest struct {
+  sessionId: optional<str>
+  idempotencyKey: optional<str>
+  content: JsonUtf8
+}
+
+# Cancellation is first-writer-wins against prompt completion and returns its
+# typed race outcome.
+type AcpCancelPromptRequest struct {
+  sessionId: optional<str>
+}
+
+# Respond to a pending native ACP session/request_permission. sessionId is
+# always the explicit caller-owned AgentOS identity; it never defaults to main.
+# requestId is globally unique AgentOS-owned correlation and never contains the
+# adapter JSON-RPC ID. optionId is one of the exact adapter-supplied ACP option
+# identifiers. Resolution is first-writer-wins. accepted means the decision won
+# that race and was delivered to the active ACP waiter, not that the tool ran.
+# Invalid options are typed invalid_permission_option errors and do not consume
+# the request. A terminal late response is non-throwing and names its reason.
+type AcpRespondPermissionRequest struct {
+  sessionId: str
+  requestId: str
+  optionId: str
+}
+
+# History is SQLite-only and never starts, restores, or queries an adapter. It
+# stores the generic durable event union below; nested wire payloads retain
+# unknown extension metadata and clients mechanically expose them as one flat
+# top-level type union. Agent message/thought deltas are emitted live as ephemeral entries;
+# they enter durable history only when the message completes. Non-delta ACP
+# updates interleaved during a message remain in native arrival order.
+# before/after are exclusive and mutually exclusive. Cursor expiry is a typed
+# error, never a silent skip. History retention and response pages are bounded
+# by the VM's generous `limits.acp.*` settings; retention prunes oldest events.
+# Durable sequence values can repeat on live delivery because observers
+# deduplicate by (sessionId, sequence).
+type AcpReadHistoryRequest struct {
+  sessionId: optional<str>
+  before: optional<u64>
+  after: optional<u64>
+  limit: optional<u32>
+}
+
+# Cached getters never start, restore, or query an adapter.
+type AcpGetSessionConfigRequest struct { sessionId: optional<str> }
+type AcpGetSessionCapabilitiesRequest struct { sessionId: optional<str> }
+type AcpGetSessionAgentInfoRequest struct { sessionId: optional<str> }
+
+# Setting configuration may transparently restore the adapter; ACP owns
+# validation and the response replaces the complete cached option collection.
+# `value` encodes exactly one native ACP string or boolean config value.
+type AcpSetSessionConfigOptionRequest struct {
+  sessionId: optional<str>
+  configId: str
+  value: JsonUtf8
+}
+
+type AcpGetSessionStateRequest struct {
+  sessionId: str
+}
+
+type AcpCloseSessionRequest struct {
+  sessionId: str
+}
+
+# Resume a session that exists in durable storage but is not live in the current
+# VM (e.g. after a Rivet actor slept and woke with a fresh VM). The sidecar runs
+# the stateless resume state machine (native session/load when the agent supports
+# it, else a fresh session/new + transcript continuation preamble). `runtime`,
+# `cwd`, and `env` describe the fresh adapter launch used by the fallback tier.
+# `transcriptPath`, when present, is a guest-readable path the fallback preamble
+# points the agent at.
+type AcpResumeSessionRequest struct {
+  sessionId: str
+  agentType: str
+  runtime: AcpRuntimeKind
+  transcriptPath: optional<str>
+  cwd: str
+  additionalDirectories: list<str>
+  mcpServers: JsonUtf8
+  env: map<str><str>
+}
+
+# Browser RESUMABLE path only (AGENTOS-WEB-ASYNC-AGENTS.md §3.2.1): the kernel
+# worker feeds a chunk of the agent's stdout into the in-flight create_session /
+# session/prompt handshake. The synchronous sidecar would block inside one
+# pushFrame; the resumable browser path returns between steps so the worker can
+# service the agent's own syscalls (incl. pi's net call for inference) on fresh,
+# non-nested pushFrames. `processId` is the handshake handle returned in the
+# AcpPendingResponse for the originating create/prompt request.
+type AcpDeliverAgentOutputRequest struct {
+  processId: str
+  chunk: data
+}
+
+type AcpRequest union {
+  AcpOpenSessionRequest |
+  AcpGetDurableSessionRequest |
+  AcpListDurableSessionsRequest |
+  AcpDeleteSessionRequest |
+  AcpUnloadSessionRequest |
+  AcpPromptRequest |
+  AcpCancelPromptRequest |
+  AcpRespondPermissionRequest |
+  AcpReadHistoryRequest |
+  AcpGetSessionConfigRequest |
+  AcpSetSessionConfigOptionRequest |
+  AcpGetSessionCapabilitiesRequest |
+  AcpGetSessionAgentInfoRequest |
+  AcpCreateSessionRequest |
+  AcpSessionRequest |
+  AcpGetSessionStateRequest |
+  AcpCloseSessionRequest |
+  AcpResumeSessionRequest |
+  AcpDeliverAgentOutputRequest |
+  AcpListAgentsRequest
+}
+
+type AcpDurableSessionInfo struct {
+  sessionId: str
+  agent: str
+  cwd: str
+  additionalDirectories: JsonUtf8
+  state: JsonUtf8
+  latestSequence: u64
+  title: optional<str>
+  metadata: optional<JsonUtf8>
+  createdAt: str
+  updatedAt: str
+}
+
+type AcpOpenSessionResponse struct { reserved: bool }
+type AcpGetDurableSessionResponse struct { session: AcpDurableSessionInfo }
+type AcpListDurableSessionsResponse struct {
+  sessions: list<AcpDurableSessionInfo>
+  nextCursor: optional<str>
+}
+type AcpDeleteSessionResponse struct { reserved: bool }
+type AcpUnloadSessionResponse struct { reserved: bool }
+type AcpPromptResponse struct {
+  sessionId: str
+  message: optional<JsonUtf8>
+  stopReason: str
+}
+type AcpCancelPromptResponse struct { status: str }
+type AcpRespondPermissionResponse struct {
+  status: str
+  reason: optional<str>
+}
+
+# The generic internal wire/storage union. Native payloads retain their
+# negotiated ACP field names, optional values, and opaque _meta. Public clients
+# flatten SessionUpdate.sessionUpdate into top-level type and flatten permission
+# request/response fields beside the durability envelope; they do not expose
+# these internal update/request/response wrappers. Native adapter request IDs
+# and private ACP session IDs never enter the public union. Automatically
+# resolved permission requests are never persisted or emitted. An ask request
+# has no permission timeout: the active prompt remains awake until a response
+# or explicit adapter/session/VM lifecycle transition wins.
+type AcpDurableSessionUpdate struct { update: JsonUtf8 }
+type AcpDurablePermissionRequest struct {
+  requestId: str
+  request: JsonUtf8
+}
+type AcpDurablePermissionResponse struct {
+  requestId: str
+  response: JsonUtf8
+  status: str
+  reason: optional<str>
+}
+type AcpDurableEvent union {
+  AcpDurableSessionUpdate |
+  AcpDurablePermissionRequest |
+  AcpDurablePermissionResponse
+}
+
+# AgentOS adds only this public identity, sequence, and timestamp envelope.
+type AcpDurableHistoryEntry struct {
+  sessionId: str
+  sequence: u64
+  timestamp: str
+  event: AcpDurableEvent
+}
+type AcpHistoryPageResponse struct {
+  events: list<AcpDurableHistoryEntry>
+  hasMoreBefore: bool
+  hasMoreAfter: bool
+}
+type AcpSessionConfigResponse struct {
+  revision: u64
+  options: JsonUtf8
+}
+type AcpSessionCapabilitiesResponse struct { capabilities: optional<JsonUtf8> }
+type AcpSessionAgentInfoResponse struct { agentInfo: optional<JsonUtf8> }
+
+type AcpSessionCreatedResponse struct {
+  sessionId: str
+  pid: optional<u32>
+  modes: optional<JsonUtf8>
+  configOptions: list<JsonUtf8>
+  agentCapabilities: optional<JsonUtf8>
+  agentInfo: optional<JsonUtf8>
+}
+
+type AcpSessionRpcResponse struct {
+  sessionId: str
+  response: JsonUtf8
+  # Number of request-scoped AcpSessionEvent frames emitted before this
+  # terminal response. Clients use this as an event-delivery barrier because
+  # response and event frames travel on separate priority lanes.
+  eventCount: u32
+}
+
+type AcpSessionStateResponse struct {
+  sessionId: str
+  agentType: str
+  processId: str
+  pid: optional<u32>
+  closed: bool
+  exitCode: optional<i32>
+  modes: optional<JsonUtf8>
+  configOptions: list<JsonUtf8>
+  agentCapabilities: optional<JsonUtf8>
+  agentInfo: optional<JsonUtf8>
+}
+
+type AcpSessionClosedResponse struct {
+  sessionId: str
+}
+
+# Result of AcpResumeSessionRequest. `sessionId` is the live ACP session id after
+# resume: equal to the requested id for native loads, or the freshly assigned id
+# for the fallback tier (the caller remaps external -> live). `mode` is "native"
+# (session/load|resume succeeded) or "fallback" (a new session was created and the
+# transcript-continuation preamble was armed for the next prompt).
+type AcpSessionResumedResponse struct {
+  sessionId: str
+  mode: str
+}
+
+type AcpErrorResponse struct {
+  code: str
+  message: str
+}
+
+# Browser RESUMABLE path: the create_session / session/prompt request (and each
+# AcpDeliverAgentOutputRequest that has not yet completed the handshake) returns
+# this, carrying the `processId` handle the kernel worker drives the interaction
+# with. The real result (AcpSessionCreatedResponse / AcpSessionRpcResponse) is
+# delivered as the response to the AcpDeliverAgentOutputRequest that completes it.
+type AcpPendingResponse struct {
+  processId: str
+}
+
+type AcpResponse union {
+  AcpOpenSessionResponse |
+  AcpGetDurableSessionResponse |
+  AcpListDurableSessionsResponse |
+  AcpDeleteSessionResponse |
+  AcpUnloadSessionResponse |
+  AcpPromptResponse |
+  AcpCancelPromptResponse |
+  AcpRespondPermissionResponse |
+  AcpHistoryPageResponse |
+  AcpSessionConfigResponse |
+  AcpSessionCapabilitiesResponse |
+  AcpSessionAgentInfoResponse |
+  AcpSessionCreatedResponse |
+  AcpSessionRpcResponse |
+  AcpSessionStateResponse |
+  AcpSessionClosedResponse |
+  AcpSessionResumedResponse |
+  AcpErrorResponse |
+  AcpPendingResponse |
+  AcpListAgentsResponse
+}
+
+# Live delivery uses the identical durable union/history envelope. Consumers
+# reconnect by subscribing, fetching after their last sequence, then
+# deduplicating by (sessionId, sequence); there is no second replay protocol.
+type AcpDurableSessionEvent struct {
+  sessionId: str
+  sequence: u64
+  timestamp: str
+  event: AcpDurableEvent
+}
+
+# Ephemeral entries are live-only ACP agent_message_chunk or
+# agent_thought_chunk updates. They are never persisted or sequenced; the
+# durable completed message is authoritative after reconnect.
+type AcpEphemeralSessionUpdateEvent struct {
+  sessionId: str
+  afterSequence: u64
+  update: JsonUtf8
+}
+
+# Legacy browser-reference live event. Native durable clients ignore it and
+# consume AcpDurableSessionEvent/AcpEphemeralSessionUpdateEvent instead.
+type AcpSessionEvent struct {
+  sessionId: str
+  notification: JsonUtf8
+}
+
+type AcpAgentStderrEvent struct {
+  sessionId: str
+  agentType: str
+  processId: str
+  chunk: data
+}
+
+# Emitted when the ACP adapter process exits unexpectedly — a crash from the
+# host's perspective (any spontaneous exit, including code 0).
+# `restart` is "not_attempted": the sidecar never respawns an adapter or
+# replays an interrupted request implicitly. `restartCount` and `maxRestarts`
+# are therefore both zero. Explicit session restoration is a separate caller
+# operation.
+# `exitCode` is absent when the exit was observed indirectly (e.g. a write to
+# the adapter's stdin failed because the process was already gone).
+# `pid` is the host pid reported when the adapter process was launched.
+type AcpAgentExitedEvent struct {
+  sessionId: str
+  agentType: str
+  processId: str
+  pid: optional<u32>
+  exitCode: optional<i32>
+  restart: str
+  restartCount: u32
+  maxRestarts: u32
+}
+
+type AcpEvent union {
+  AcpDurableSessionEvent |
+  AcpEphemeralSessionUpdateEvent |
+  AcpSessionEvent |
+  AcpAgentStderrEvent |
+  AcpAgentExitedEvent
+}
+
+type AcpHostRequestCallback struct {
+  sessionId: str
+  request: JsonUtf8
+}
+
+type AcpCallback union {
+  AcpHostRequestCallback
+}
+
+type AcpHostRequestCallbackResponse struct {
+  response: optional<JsonUtf8>
+}
+
+type AcpCallbackResponse union {
+  AcpHostRequestCallbackResponse
+}

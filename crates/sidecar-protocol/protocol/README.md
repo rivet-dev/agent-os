@@ -8,7 +8,7 @@ frame shape from
 
 ## Framing
 
-The native sidecar transport keeps the current framing boundary during migration:
+The sidecar transport keeps the current framing boundary during migration:
 
 - 4-byte big-endian length prefix
 - one encoded `ProtocolFrame` payload immediately after the prefix
@@ -19,7 +19,7 @@ US-083 and US-084 should replace only the payload codec first. They should not r
 
 The migration keeps the current semantic invariants unchanged across codecs:
 
-- `ProtocolSchema.name` is `agentos-native-sidecar`
+- `ProtocolSchema.name` is `agentos-sidecar`
 - `ProtocolSchema.version` is `8`
 - host-originated `request_id` values stay positive
 - sidecar-originated `request_id` values stay negative
@@ -43,7 +43,7 @@ This applies to fields such as session config blobs, ACP notifications, mount pl
 3. US-083: make the Rust decoder dual-stack by inspecting the first payload byte after the length prefix.
    JSON frames begin with `{` today, while BARE frames begin with a union tag byte/varint, so the decoder can distinguish the two without an extra wrapper frame.
 4. US-083: once a connection's first successfully decoded frame is known, pin the connection to that codec for all later frames on that transport.
-5. US-084: teach the TypeScript native sidecar client and related bridge transports to emit and decode the BARE payload form using the same schema.
+5. US-084: teach the TypeScript sidecar client and related bridge transports to emit and decode the BARE payload form using the same schema.
 6. US-084: keep JSON decode support only for the migration window; once both sides default to BARE and the targeted tests are green, delete JSON encoding and the dual-stack sniffing path.
 
 ## Normalization Notes

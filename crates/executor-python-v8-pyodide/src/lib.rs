@@ -1,4 +1,5 @@
-use agentos_bridge::queue_tracker::{register_queue, QueueGauge, TrackedLimit};
+use agentos_driver_tokio::accounting::ResourceClass;
+use agentos_driver_tokio::DriverHandle;
 use agentos_executor_contract::backend::{
     DirectHostReplyHandle, DirectHostReplyTarget, ExecutionBackend, ExecutionBackendKind,
     ExecutionExit, ExecutionWakeHandle, ExecutionWakeIdentity, HostCallIdentity, HostCallReply,
@@ -11,20 +12,19 @@ use agentos_executor_contract::host::{
     ProcessLaunchRequest, ProcessOperation,
 };
 use agentos_executor_contract::{GuestRuntimeConfig, HostRpcRequest};
-use agentos_runtime_tokio::accounting::ResourceClass;
-use agentos_runtime_tokio::RuntimeContext;
-use agentos_v8_runtime::adapter_common::{encode_json_string, frozen_time_ms};
-use agentos_v8_runtime::adapter_runtime as v8_runtime;
-use agentos_v8_runtime::adapter_support::{
+use agentos_executor_v8_runtime::adapter_common::{encode_json_string, frozen_time_ms};
+use agentos_executor_v8_runtime::adapter_runtime as v8_runtime;
+use agentos_executor_v8_runtime::adapter_support::{
     env_flag_enabled, file_fingerprint, resolve_execution_path, warmup_marker_path,
     NODE_DISABLE_COMPILE_CACHE_ENV, NODE_FROZEN_TIME_ENV,
 };
-use agentos_v8_runtime::asset_cache::{NodeImportCache, NODE_IMPORT_CACHE_ASSET_ROOT_ENV};
-use agentos_v8_runtime::javascript::{
+use agentos_executor_v8_runtime::asset_cache::{NodeImportCache, NODE_IMPORT_CACHE_ASSET_ROOT_ENV};
+use agentos_executor_v8_runtime::javascript::{
     CreateJavascriptContextRequest, JavascriptExecution, JavascriptExecutionEngine,
     JavascriptExecutionError, JavascriptExecutionEvent, JavascriptExecutionLimits,
     JavascriptSyncRpcResponder, StartJavascriptExecutionRequest,
 };
+use agentos_resource_accounting::queue_tracker::{register_queue, QueueGauge, TrackedLimit};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -315,7 +315,7 @@ pub struct PythonExecutionLimits {
     /// Per-call host bridge deadline forwarded unchanged to the Pyodide V8 runner.
     pub bridge_call_timeout_ms: Option<u64>,
     /// Maximum host-direct descriptors retained for managed Pyodide assets.
-    /// `None` keeps the execution engine's bounded fallback. The native sidecar
+    /// `None` keeps the execution engine's bounded fallback. The sidecar
     /// always supplies the VM kernel's configured descriptor limit.
     pub max_open_fds: Option<usize>,
 }
@@ -468,7 +468,7 @@ impl std::error::Error for PythonExecutionError {}
 /// runtime assets (the published crate excludes them; see `build.rs`). In the
 /// workspace build the in-tree assets are present and this is a no-op.
 fn ensure_pyodide_available() -> Result<(), PythonExecutionError> {
-    if agentos_v8_runtime::PYODIDE_AVAILABLE {
+    if agentos_executor_v8_runtime::PYODIDE_AVAILABLE {
         Ok(())
     } else {
         Err(PythonExecutionError::RuntimeUnavailable)
@@ -477,7 +477,7 @@ fn ensure_pyodide_available() -> Result<(), PythonExecutionError> {
 
 #[derive(Debug)]
 pub struct PythonExecution {
-    runtime: RuntimeContext,
+    runtime: DriverHandle,
     execution_id: String,
     child_pid: u32,
     inner: JavascriptExecution,
@@ -485,7 +485,7 @@ pub struct PythonExecution {
     managed_host_files: PythonManagedHostFiles,
     pending_vfs_rpc: Arc<Mutex<PendingVfsRpcRegistry>>,
     managed_network: Arc<Mutex<PythonManagedNetworkState>>,
-    v8_session: agentos_v8_runtime::adapter_host::V8SessionHandle,
+    v8_session: agentos_executor_v8_runtime::adapter_host::V8SessionHandle,
     output_buffer_max_bytes: usize,
     execution_timeout: Option<Duration>,
     vfs_rpc_timeout: Duration,
@@ -775,7 +775,7 @@ impl PythonExecution {
 
     pub fn javascript_sync_rpc_responder(
         &self,
-    ) -> agentos_v8_runtime::javascript::JavascriptSyncRpcResponder {
+    ) -> agentos_executor_v8_runtime::javascript::JavascriptSyncRpcResponder {
         self.inner.sync_rpc_responder()
     }
 
@@ -1859,7 +1859,7 @@ impl DirectHostReplyTarget for PythonHostReplyTarget {
             self.responder
                 .javascript_responder
                 .claim(call_id)
-                .map_err(agentos_v8_runtime::javascript::host_reply_adapter_error)
+                .map_err(agentos_executor_v8_runtime::javascript::host_reply_adapter_error)
         })?;
         if !claimed {
             self.kind.rollback_socket_reservation();
@@ -1923,7 +1923,7 @@ impl DirectHostReplyTarget for PythonHostReplyTarget {
                 .javascript_responder
                 .respond_host_error(call_id, error),
         };
-        agentos_v8_runtime::javascript::map_host_reply_adapter_response(response)
+        agentos_executor_v8_runtime::javascript::map_host_reply_adapter_response(response)
     }
 }
 
@@ -2213,7 +2213,7 @@ impl Drop for PythonExecution {
 
 #[derive(Debug)]
 pub struct PythonExecutionEngine {
-    runtime: Option<RuntimeContext>,
+    runtime: Option<DriverHandle>,
     next_context_id: usize,
     next_execution_id: usize,
     contexts: BTreeMap<String, PythonContext>,
@@ -2243,19 +2243,19 @@ impl Default for PythonExecutionEngine {
 }
 
 #[cfg(test)]
-fn default_python_test_runtime_context() -> Option<RuntimeContext> {
-    agentos_runtime_tokio::SidecarRuntime::process(&agentos_runtime_tokio::RuntimeConfig::default())
+fn default_python_test_runtime_context() -> Option<DriverHandle> {
+    agentos_driver_tokio::TokioDriver::process(&agentos_driver_tokio::DriverConfig::default())
         .ok()
-        .map(agentos_runtime_tokio::SidecarRuntime::context)
+        .map(agentos_driver_tokio::TokioDriver::handle)
 }
 
 #[cfg(not(test))]
-fn default_python_test_runtime_context() -> Option<RuntimeContext> {
+fn default_python_test_runtime_context() -> Option<DriverHandle> {
     None
 }
 
 impl PythonExecutionEngine {
-    pub fn new(runtime: RuntimeContext) -> Self {
+    pub fn new(runtime: DriverHandle) -> Self {
         Self {
             runtime: Some(runtime.clone()),
             next_context_id: 0,
@@ -2267,15 +2267,15 @@ impl PythonExecutionEngine {
         }
     }
 
-    pub fn set_runtime_context(&mut self, runtime: RuntimeContext) {
+    pub fn set_runtime_context(&mut self, runtime: DriverHandle) {
         self.javascript_engine.set_runtime_context(runtime.clone());
         self.runtime = Some(runtime);
     }
 
-    fn runtime_context(&self) -> Result<&RuntimeContext, PythonExecutionError> {
+    fn runtime_context(&self) -> Result<&DriverHandle, PythonExecutionError> {
         self.runtime.as_ref().ok_or_else(|| {
             PythonExecutionError::Spawn(std::io::Error::other(
-                "ERR_AGENTOS_RUNTIME_NOT_INJECTED: PythonExecutionEngine requires a process RuntimeContext; construct it with PythonExecutionEngine::new(runtime)",
+                "ERR_AGENTOS_RUNTIME_NOT_INJECTED: PythonExecutionEngine requires a process DriverHandle; construct it with PythonExecutionEngine::new(runtime)",
             ))
         })
     }
@@ -2300,7 +2300,7 @@ impl PythonExecutionEngine {
     pub async fn bundled_pyodide_dist_path_for_vm_async(
         &mut self,
         vm_id: &str,
-        runtime: &RuntimeContext,
+        runtime: &DriverHandle,
     ) -> Result<PathBuf, PythonExecutionError> {
         ensure_pyodide_available()?;
         let import_cache = self.import_caches.entry(vm_id.to_owned()).or_default();
@@ -2374,7 +2374,7 @@ impl PythonExecutionEngine {
     pub fn start_execution_with_runtime(
         &mut self,
         request: StartPythonExecutionRequest,
-        runtime: RuntimeContext,
+        runtime: DriverHandle,
     ) -> Result<PythonExecution, PythonExecutionError> {
         self.create_execution_with_runtime(request, runtime, false)
     }
@@ -2382,7 +2382,7 @@ impl PythonExecutionEngine {
     fn create_execution_with_runtime(
         &mut self,
         request: StartPythonExecutionRequest,
-        runtime: RuntimeContext,
+        runtime: DriverHandle,
         defer_execute: bool,
     ) -> Result<PythonExecution, PythonExecutionError> {
         ensure_pyodide_available()?;
@@ -2437,7 +2437,7 @@ impl PythonExecutionEngine {
     pub async fn start_execution_with_runtime_async(
         &mut self,
         request: StartPythonExecutionRequest,
-        runtime: RuntimeContext,
+        runtime: DriverHandle,
     ) -> Result<PythonExecution, PythonExecutionError> {
         ensure_pyodide_available()?;
         let context = self
@@ -2500,7 +2500,7 @@ impl PythonExecutionEngine {
     fn finish_start_execution(
         &mut self,
         request: StartPythonExecutionRequest,
-        runtime: RuntimeContext,
+        runtime: DriverHandle,
         context: &PythonContext,
         javascript_context_id: String,
         frozen_time_ms: u128,
@@ -2668,7 +2668,7 @@ struct PythonJavascriptExecutionOptions<'a> {
 
 fn start_python_javascript_execution(
     javascript_engine: &mut JavascriptExecutionEngine,
-    runtime: &RuntimeContext,
+    runtime: &DriverHandle,
     import_cache: &NodeImportCache,
     javascript_context_id: &str,
     context: &PythonContext,
@@ -3037,7 +3037,7 @@ fn python_vfs_rpc_timeout(request: &StartPythonExecutionRequest) -> Duration {
 }
 
 fn spawn_python_vfs_rpc_timeout(
-    runtime: &RuntimeContext,
+    runtime: &DriverHandle,
     id: u64,
     timeout: Duration,
     pending: Arc<Mutex<PendingVfsRpcRegistry>>,
@@ -3046,7 +3046,7 @@ fn spawn_python_vfs_rpc_timeout(
     let cancellation = runtime.clone();
     let pending_for_task = Arc::clone(&pending);
     let handle = runtime
-        .spawn(agentos_runtime_tokio::TaskClass::Timer, async move {
+        .spawn(agentos_driver_tokio::TaskClass::Timer, async move {
             tokio::select! {
                 _ = tokio::time::sleep(timeout) => {}
                 _ = cancellation.admission_closed() => {
@@ -3247,7 +3247,7 @@ fn prewarm_python_path(
     context: &PythonContext,
     request: &StartPythonExecutionRequest,
     frozen_time_ms: u128,
-    runtime: &RuntimeContext,
+    runtime: &DriverHandle,
 ) -> Result<Option<Vec<u8>>, PythonExecutionError> {
     let debug_enabled = python_warmup_metrics_enabled(request);
     let marker_contents = warmup_marker_contents(import_cache, context, request);
@@ -3329,7 +3329,7 @@ async fn prewarm_python_path_async(
     context: &PythonContext,
     request: &StartPythonExecutionRequest,
     frozen_time_ms: u128,
-    runtime: &RuntimeContext,
+    runtime: &DriverHandle,
 ) -> Result<Option<Vec<u8>>, PythonExecutionError> {
     let debug_enabled = python_warmup_metrics_enabled(request);
     let marker_contents = warmup_marker_contents(import_cache, context, request);

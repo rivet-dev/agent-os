@@ -8,8 +8,8 @@ use super::engine::{WasmtimeEngineHandle, WasmtimeEngineProfile};
 use super::linker;
 use super::store::{self, WasmtimeHostClient};
 use crate::backend::HostServiceError;
-use agentos_runtime_tokio::RuntimeContext;
-use agentos_wasm_common::StartWasmExecutionRequest;
+use agentos_driver_tokio::DriverHandle;
+use agentos_executor_wasm_abi::StartWasmExecutionRequest;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use wasmtime::{ExternType, Module, SharedMemory};
@@ -28,7 +28,7 @@ struct ThreadGroupState {
 pub struct ThreadGroup {
     engine: Arc<WasmtimeEngineHandle>,
     module: Arc<Module>,
-    runtime: RuntimeContext,
+    runtime: DriverHandle,
     host: WasmtimeHostClient,
     request: StartWasmExecutionRequest,
     profile: WasmtimeEngineProfile,
@@ -58,7 +58,7 @@ impl ThreadGroup {
     pub fn new(
         engine: Arc<WasmtimeEngineHandle>,
         module: Arc<Module>,
-        runtime: RuntimeContext,
+        runtime: DriverHandle,
         host: WasmtimeHostClient,
         request: StartWasmExecutionRequest,
         profile: WasmtimeEngineProfile,
@@ -189,7 +189,7 @@ impl ThreadGroup {
             .spawn(move || {
                 let result = group
                     .runtime
-                    .handle()
+                    .tokio_handle()
                     .block_on(group.run_secondary(tid, start_arg));
                 group.finish_secondary(result);
             }) {

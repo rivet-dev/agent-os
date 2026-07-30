@@ -2,7 +2,7 @@
 
 //! # agentos-client
 //!
-//! High-level Rust client SDK for the Agent OS native sidecar. This is a 1:1 port of the TypeScript
+//! High-level Rust client SDK for the Agent OS sidecar. This is a 1:1 port of the TypeScript
 //! `AgentOs` client (`packages/core/src/agent-os.ts`): every public method, option type, return
 //! type, event, and error maps across with identical semantics.
 //!
