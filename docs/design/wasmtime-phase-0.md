@@ -20,9 +20,9 @@ This document closes Phase 0 of the Wasmtime executor project. It records:
 
 The inventory was checked against:
 
-- `crates/execution/assets/agentos-wasm-abi.json`;
-- `crates/execution/assets/runners/wasm-runner.mjs`;
-- `crates/execution/assets/runners/wasi-module.js`;
+- `crates/wasm-common/assets/agentos-wasm-abi.json`;
+- `crates/v8-runtime/assets/runners/wasm-runner.mjs`;
+- `crates/v8-runtime/assets/runners/wasi-module.js`;
 - `toolchain/crates/wasi-ext/src/lib.rs`;
 - `toolchain/std-patches/` and `toolchain/std-patches/wasi-libc-overrides/`;
 - kernel process, VFS, fd, socket, PTY, identity, and resource-accounting APIs;
@@ -301,7 +301,7 @@ of a hard-coded rejection alone does not close it.
   reply and common event tests prove bounded raw/JSON replies, stdout/stderr,
   warnings, and runtime faults, including near-limit delivery
   (`crates/executor-contract/src/backend/{submission,reply,event}.rs` and
-  `crates/execution/tests/backend_payload_bounds.rs`).
+  `crates/executor-conformance/tests/backend_payload_bounds.rs`).
 - [x] **Spawn file actions.** `wasm_spawn_action_decoder_enforces_typed_limits_with_e2big`
   covers the 4096-action and 1 MiB encoded-byte families with independent
   count/byte rejection and near-limit warnings. The raw ABI spawn-result
@@ -433,10 +433,9 @@ by `just tools-rebuild` before a release-quality capture.
 2. **Code placement.** Kernel semantic APIs stay in `agentos-kernel`. Shared
    request/reply types and capability-sized host traits live under
    `crates/executor-contract/src/host/`; native-sidecar implements them using kernel and
-   process-lifecycle context. Wasmtime remains under
-   `crates/execution/src/wasm/wasmtime/`. No new crate is created unless the
-   actual dependency graph produces a cycle that cannot be removed by moving
-   transport-neutral types to the existing bridge crate.
+   process-lifecycle context. Wasmtime lives in the independently feature-gated
+   `agentos-executor-wasm-wasmtime` crate; shared ABI/profile types live in
+   `agentos-wasm-common`, and only the native sidecar composes concrete engines.
 3. **ABI generation.** Generate Preview1 layouts/types from a checked-in pinned
    Preview1 WITX description; generated glue implements agentOS host traits and
    does not construct a `wasmtime-wasi` context. Generate custom-import

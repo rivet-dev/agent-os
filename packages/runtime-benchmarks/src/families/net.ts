@@ -423,7 +423,7 @@ export const netFamily: BenchmarkOp[] = [
 			name: "http_loopback_get",
 			nativeOp: "http_loopback_get",
 			wasmUnsupportedReason: "TCP HTTP loopback is not supported in the native-baseline wasm lane",
-			fileLine: "crates/execution/src/node_import_cache.rs:4750",
+			fileLine: "crates/v8-runtime/src/asset_cache.rs:4750",
 		reproducer: "node:http loopback GET inside VM",
 		program: `async () => {
   const http = await import("node:http");
@@ -523,7 +523,7 @@ export const netFamily: BenchmarkOp[] = [
 			name: "fetch_loopback_get",
 			nativeUnsupportedReason: "fetch is a JS-runtime undici surface",
 			wasmUnsupportedReason: "fetch is a JS-runtime undici surface",
-			fileLine: "crates/execution/src/node_import_cache.rs:4750",
+			fileLine: "crates/v8-runtime/src/asset_cache.rs:4750",
 		reproducer: "global fetch loopback GET inside VM",
 		program: `async () => {
   if (typeof fetch !== "function") throw new Error("fetch is not defined");

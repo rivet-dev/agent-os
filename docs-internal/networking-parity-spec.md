@@ -27,7 +27,7 @@ Sockets are **already real** and are not the problem. The patched wasi-libc
 sysroot implements `socket()/connect()/getaddrinfo()/send()/recv()` over
 `host_net` WASM imports (`toolchain/std-patches/wasi-libc/0008-sockets.patch`,
 `0023-host-net-read-write-sockets.patch`; Rust mirror `toolchain/crates/wasi-ext`).
-The runner forwards them to the sidecar socket table (`crates/execution/assets/
+The runner forwards them to the sidecar socket table (`crates/v8-runtime/assets/
 runners/wasm-runner.mjs`). So curl/wget/git already do their own DNS, TCP and HTTP
 byte-for-byte. **Only TLS and decompression are shimmed or missing.**
 

@@ -13,9 +13,14 @@ use crate::state::{
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
-use agentos_execution::{
-    backend::HostServiceError, HostRpcRequest, LocalResolvedModuleFormat, ModuleFsReader,
-    ModuleResolveMode, ModuleResolver,
+use crate::executor::{backend::HostServiceError, HostRpcRequest};
+#[cfg(any(
+    feature = "node-v8",
+    feature = "python-v8-pyodide",
+    feature = "wasm-v8"
+))]
+use crate::executor::{
+    LocalResolvedModuleFormat, ModuleFsReader, ModuleResolveMode, ModuleResolver,
 };
 use agentos_kernel::kernel::is_internal_unnamed_file_name;
 use agentos_kernel::vfs::{VirtualStat, VirtualTimeSpec, VirtualUtimeSpec};
@@ -214,7 +219,7 @@ fn native_guest_filesystem_core_error(
     error: agentos_native_sidecar_core::SidecarCoreError,
 ) -> SidecarError {
     match error.code() {
-        Some(code) => SidecarError::Host(agentos_execution::backend::HostServiceError::new(
+        Some(code) => SidecarError::Host(crate::executor::backend::HostServiceError::new(
             code,
             error.message(),
         )),
@@ -254,7 +259,14 @@ struct KernelModuleFsReader<'a> {
     kernel: &'a mut SidecarKernel,
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        feature = "node-v8",
+        feature = "python-v8-pyodide",
+        feature = "wasm-v8"
+    )
+))]
 impl ModuleFsReader for KernelModuleFsReader<'_> {
     fn canonical_guest_path(
         &mut self,
@@ -282,17 +294,32 @@ impl ModuleFsReader for KernelModuleFsReader<'_> {
 /// Module reader for live JavaScript processes. Kernel VFS state is the sole
 /// mutable guest filesystem authority, so module resolution observes exactly
 /// the same files and metadata as embedded `fs` and standalone WASM.
+#[cfg(any(
+    feature = "node-v8",
+    feature = "python-v8-pyodide",
+    feature = "wasm-v8"
+))]
 struct ProcessModuleFsReader<'a> {
     kernel: &'a mut SidecarKernel,
     process: &'a ActiveProcess,
 }
 
+#[cfg(any(
+    feature = "node-v8",
+    feature = "python-v8-pyodide",
+    feature = "wasm-v8"
+))]
 impl ProcessModuleFsReader<'_> {
     fn normalize_guest_path(&self, guest_path: &str) -> String {
         normalize_process_filesystem_rpc_path(self.process, guest_path)
     }
 }
 
+#[cfg(any(
+    feature = "node-v8",
+    feature = "python-v8-pyodide",
+    feature = "wasm-v8"
+))]
 impl ModuleFsReader for ProcessModuleFsReader<'_> {
     fn canonical_guest_path(
         &mut self,
@@ -334,6 +361,11 @@ impl ModuleFsReader for ProcessModuleFsReader<'_> {
     }
 }
 
+#[cfg(any(
+    feature = "node-v8",
+    feature = "python-v8-pyodide",
+    feature = "wasm-v8"
+))]
 fn module_kernel_optional<T>(
     result: Result<T, agentos_kernel::kernel::KernelError>,
 ) -> Result<Option<T>, HostServiceError> {
@@ -344,6 +376,11 @@ fn module_kernel_optional<T>(
     }
 }
 
+#[cfg(any(
+    feature = "node-v8",
+    feature = "python-v8-pyodide",
+    feature = "wasm-v8"
+))]
 fn module_utf8(path: &str, bytes: Vec<u8>) -> Result<String, HostServiceError> {
     String::from_utf8(bytes).map_err(|error| {
         HostServiceError::new(
@@ -361,6 +398,11 @@ fn module_utf8(path: &str, bytes: Vec<u8>) -> Result<String, HostServiceError> {
 /// The `/opt/agentos/pkgs/<name>/<version>` root containing `guest_entrypoint`,
 /// when the entrypoint lives inside a projected package. `current` is a valid
 /// version segment here — the resolver canonicalizes it through the kernel.
+#[cfg(any(
+    feature = "node-v8",
+    feature = "python-v8-pyodide",
+    feature = "wasm-v8"
+))]
 fn agentos_package_version_root(guest_entrypoint: &str) -> Option<String> {
     let rest = guest_entrypoint.strip_prefix("/opt/agentos/pkgs/")?;
     let mut parts = rest.split('/');
@@ -369,6 +411,11 @@ fn agentos_package_version_root(guest_entrypoint: &str) -> Option<String> {
     Some(format!("/opt/agentos/pkgs/{name}/{version}"))
 }
 
+#[cfg(any(
+    feature = "node-v8",
+    feature = "python-v8-pyodide",
+    feature = "wasm-v8"
+))]
 fn is_bare_module_specifier(specifier: &str) -> bool {
     !(specifier.starts_with('/')
         || specifier.starts_with("./")
@@ -379,6 +426,11 @@ fn is_bare_module_specifier(specifier: &str) -> bool {
         || specifier.starts_with("file:"))
 }
 
+#[cfg(any(
+    feature = "node-v8",
+    feature = "python-v8-pyodide",
+    feature = "wasm-v8"
+))]
 pub(crate) fn service_javascript_module_sync_rpc(
     kernel: &mut SidecarKernel,
     process: &mut ActiveProcess,
@@ -466,6 +518,22 @@ pub(crate) fn service_javascript_module_sync_rpc(
     })();
     process.module_resolution_cache = cache;
     value
+}
+
+#[cfg(not(any(
+    feature = "node-v8",
+    feature = "python-v8-pyodide",
+    feature = "wasm-v8"
+)))]
+pub(crate) fn service_javascript_module_sync_rpc(
+    _kernel: &mut SidecarKernel,
+    _process: &mut ActiveProcess,
+    _request: &HostRpcRequest,
+) -> Result<Value, SidecarError> {
+    Err(SidecarError::host(
+        "ERR_AGENTOS_EXECUTOR_NOT_COMPILED",
+        "JavaScript module resolution requires a V8-backed executor feature",
+    ))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1609,7 +1677,7 @@ mod tests {
     #[test]
     fn faithful_pnpm_symlink_layout_resolves_through_kernel_vfs() {
         use super::{KernelModuleFsReader, ModuleResolveMode};
-        use agentos_execution::{LocalModuleResolutionCache, ModuleResolver};
+        use crate::executor::{LocalModuleResolutionCache, ModuleResolver};
         use agentos_kernel::mount_table::{MountOptions, MountedVirtualFileSystem};
         use std::os::unix::fs::symlink;
 
@@ -1723,8 +1791,8 @@ mod tests {
     // version winning over the decoy.
     #[test]
     fn faithful_pnpm_symlink_layout_resolves_through_host_dir_module_reader() {
+        use crate::executor::{LocalModuleResolutionCache, ModuleResolveMode, ModuleResolver};
         use crate::plugins::host_dir::HostDirModuleReader;
-        use agentos_execution::{LocalModuleResolutionCache, ModuleResolveMode, ModuleResolver};
         use std::os::unix::fs::symlink;
 
         let node_modules = temp_dir("pnpm-reader-node-modules").join("node_modules");
@@ -1825,8 +1893,8 @@ mod tests {
     #[ignore = "perf microbenchmark; run explicitly with --ignored --nocapture"]
     fn module_resolution_vfs_vs_host_cold_start_perf() {
         use super::KernelModuleFsReader;
-        use agentos_execution::javascript::ModuleResolutionTestHarness;
-        use agentos_execution::{LocalModuleResolutionCache, ModuleResolveMode, ModuleResolver};
+        use crate::executor::javascript::ModuleResolutionTestHarness;
+        use crate::executor::{LocalModuleResolutionCache, ModuleResolveMode, ModuleResolver};
         use agentos_kernel::mount_table::{MountOptions, MountedVirtualFileSystem};
         use std::time::Instant;
 

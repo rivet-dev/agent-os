@@ -2094,7 +2094,7 @@ pub(in crate::execution) fn release_udp_socket_handle(
 
 pub(in crate::execution) fn service_managed_udp_operation<B>(
     request: ManagedUdpServiceRequest<'_, B>,
-    operation: agentos_execution::host::NetworkOperation,
+    operation: crate::executor::host::NetworkOperation,
 ) -> Result<HostServiceResponse, SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,
@@ -2111,11 +2111,11 @@ where
         capabilities,
     } = request;
     match operation {
-        agentos_execution::host::NetworkOperation::ManagedUdpCreate { family } => {
+        crate::executor::host::NetworkOperation::ManagedUdpCreate { family } => {
             let pending = reserve_capability(&capabilities, CapabilityKind::UdpSocket)?;
             let family = match family {
-                agentos_execution::host::ManagedUdpFamily::Inet4 => UdpFamily::Ipv4,
-                agentos_execution::host::ManagedUdpFamily::Inet6 => UdpFamily::Ipv6,
+                crate::executor::host::ManagedUdpFamily::Inet4 => UdpFamily::Ipv4,
+                crate::executor::host::ManagedUdpFamily::Inet6 => UdpFamily::Ipv6,
             };
             let socket_id = process.allocate_udp_socket_id();
             let mut socket = ActiveUdpSocket::new(
@@ -2173,13 +2173,13 @@ where
             })
             .into())
         }
-        agentos_execution::host::NetworkOperation::ManagedUdpBind {
+        crate::executor::host::NetworkOperation::ManagedUdpBind {
             socket_id,
             host,
             port,
         } => {
             let socket_id = socket_id.into_string();
-            let host = host.map(agentos_execution::host::BoundedString::into_string);
+            let host = host.map(crate::executor::host::BoundedString::into_string);
             let socket = process.udp_sockets.get_mut(&socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
             })?;
@@ -2192,14 +2192,14 @@ where
             )?;
             Ok(local_endpoint_value(&local_addr).into())
         }
-        agentos_execution::host::NetworkOperation::ManagedUdpSend {
+        crate::executor::host::NetworkOperation::ManagedUdpSend {
             socket_id,
             bytes,
             host,
             port,
         } => {
             let socket_id = socket_id.into_string();
-            let host = host.map(agentos_execution::host::BoundedString::into_string);
+            let host = host.map(crate::executor::host::BoundedString::into_string);
             let socket = process.udp_sockets.get_mut(&socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))
             })?;
@@ -2224,7 +2224,7 @@ where
             };
             Ok(udp_send_service_response(result))
         }
-        agentos_execution::host::NetworkOperation::ManagedUdpClose { socket_id } => {
+        crate::executor::host::NetworkOperation::ManagedUdpClose { socket_id } => {
             let socket_id = socket_id.into_string();
             let socket = process.udp_sockets.remove(&socket_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!("unknown UDP socket {socket_id}"))

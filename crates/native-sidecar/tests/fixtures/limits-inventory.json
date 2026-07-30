@@ -68,191 +68,191 @@
 	},
 	{
 		"name": "MAX_BENCHMARK_ITERATIONS",
-		"path": "crates/execution/src/benchmark.rs",
+		"path": "crates/executor-conformance/src/benchmark.rs",
 		"class": "invariant",
 		"rationale": "Dev benchmarking harness only."
 	},
 	{
 		"name": "MAX_BENCHMARK_WARMUP_ITERATIONS",
-		"path": "crates/execution/src/benchmark.rs",
+		"path": "crates/executor-conformance/src/benchmark.rs",
 		"class": "invariant",
 		"rationale": "Dev benchmarking harness only."
 	},
 	{
 		"name": "DEFAULT_NODE_IMPORT_CACHE_MATERIALIZE_TIMEOUT_MS",
-		"path": "crates/execution/src/javascript.rs",
+		"path": "crates/v8-runtime/src/javascript.rs",
 		"class": "policy",
 		"rationale": "Execution-layer Node import-cache materialization fallback; normal VM executions receive the wired sidecar value.",
 		"wired": "VmLimits.js_runtime.import_cache_materialize_timeout_ms"
 	},
 	{
 		"name": "DEFAULT_V8_CPU_TIME_LIMIT_MS",
-		"path": "crates/execution/src/javascript.rs",
+		"path": "crates/v8-runtime/src/javascript.rs",
 		"class": "policy",
 		"rationale": "Execution-layer active JavaScript CPU-time fallback; normal VM executions receive the wired sidecar value.",
 		"wired": "VmLimits.js_runtime.cpu_time_limit_ms"
 	},
 	{
 		"name": "DEFAULT_V8_WALL_CLOCK_LIMIT_MS",
-		"path": "crates/execution/src/javascript.rs",
+		"path": "crates/v8-runtime/src/javascript.rs",
 		"class": "policy",
 		"rationale": "Execution-layer JavaScript wall-clock fallback; zero keeps it disabled unless the wired VM limit overrides it.",
 		"wired": "VmLimits.js_runtime.wall_clock_limit_ms"
 	},
 	{
 		"name": "JAVASCRIPT_CAPTURED_OUTPUT_LIMIT_BYTES",
-		"path": "crates/execution/src/javascript.rs",
+		"path": "crates/v8-runtime/src/javascript.rs",
 		"class": "policy",
 		"rationale": "Guest JS stdout/stderr capture cap.",
 		"wired": "VmLimits.js_runtime.captured_output_limit_bytes"
 	},
 	{
 		"name": "JAVASCRIPT_EVENT_CHANNEL_CAPACITY",
-		"path": "crates/execution/src/javascript.rs",
+		"path": "crates/v8-runtime/src/javascript.rs",
 		"class": "invariant",
 		"rationale": "Channel shape required by the sync-RPC protocol; flow control, not policy."
 	},
 	{
 		"name": "JAVASCRIPT_EVENT_PAYLOAD_LIMIT_BYTES",
-		"path": "crates/execution/src/javascript.rs",
+		"path": "crates/v8-runtime/src/javascript.rs",
 		"class": "policy",
 		"rationale": "Per-event payload cap for the JS event channel.",
 		"wired": "VmLimits.js_runtime.event_payload_limit_bytes"
 	},
 	{
 		"name": "KERNEL_STDIN_BUFFER_LIMIT_BYTES",
-		"path": "crates/execution/src/javascript.rs",
+		"path": "crates/v8-runtime/src/javascript.rs",
 		"class": "policy",
 		"rationale": "Guest stdin buffering cap.",
 		"wired": "VmLimits.js_runtime.stdin_buffer_limit_bytes"
 	},
 	{
 		"name": "MAX_TIMER_ACTIONS_PER_TURN",
-		"path": "crates/execution/src/javascript.rs",
+		"path": "crates/v8-runtime/src/javascript.rs",
 		"class": "invariant",
 		"rationale": "Bounded timer work quantum per JavaScript pump turn to preserve fairness."
 	},
 	{
 		"name": "MAX_TIMER_DELAY_MS",
-		"path": "crates/execution/src/javascript.rs",
+		"path": "crates/v8-runtime/src/javascript.rs",
 		"class": "invariant",
 		"rationale": "Clamps a guest timer delay to the JS setTimeout ceiling (2^31-1 ms); a leak guard so a timer thread cannot outlive its session by pinning the session Arc, mirroring the standard setTimeout max rather than operator policy."
 	},
 	{
 		"name": "MAX_TIMERS_PER_EXECUTION",
-		"path": "crates/execution/src/javascript.rs",
+		"path": "crates/v8-runtime/src/javascript.rs",
 		"class": "policy",
 		"rationale": "Fallback for the configured per-execution JavaScript timer limit.",
 		"wired": "VmLimits.js_runtime.max_timers"
 	},
 	{
 		"name": "NODE_SYNC_RPC_RESPONSE_QUEUE_CAPACITY",
-		"path": "crates/execution/src/javascript.rs",
+		"path": "crates/v8-runtime/src/javascript.rs",
 		"class": "invariant",
 		"rationale": "Channel shape required by the sync-RPC protocol; flow control, not policy."
 	},
 	{
 		"name": "DEFAULT_NODE_IMPORT_CACHE_MATERIALIZE_TIMEOUT",
-		"path": "crates/execution/src/node_import_cache.rs",
+		"path": "crates/v8-runtime/src/asset_cache.rs",
 		"class": "invariant",
 		"rationale": "Standalone import-cache materialization fallback; normal VM executions use VmLimits.js_runtime.import_cache_materialize_timeout_ms."
 	},
 	{
 		"name": "DEFAULT_PYTHON_EXECUTION_TIMEOUT_MS",
-		"path": "crates/execution/src/python.rs",
+		"path": "crates/executor-python-v8-pyodide/src/lib.rs",
 		"class": "policy",
 		"rationale": "Python runtime execution timeout.",
 		"wired": "VmLimits.python.execution_timeout_ms"
 	},
 	{
 		"name": "DEFAULT_PYTHON_MAX_OLD_SPACE_MB",
-		"path": "crates/execution/src/python.rs",
+		"path": "crates/executor-python-v8-pyodide/src/lib.rs",
 		"class": "policy",
 		"rationale": "Python host JS old-space heap sizing; engine-side default for the wired limit.",
 		"wired": "VmLimits.python.max_old_space_mb"
 	},
 	{
 		"name": "DEFAULT_PYTHON_OUTPUT_BUFFER_MAX_BYTES",
-		"path": "crates/execution/src/python.rs",
+		"path": "crates/executor-python-v8-pyodide/src/lib.rs",
 		"class": "policy",
 		"rationale": "Python output buffer cap; env knob already exists.",
 		"wired": "VmLimits.python.output_buffer_max_bytes"
 	},
 	{
 		"name": "DEFAULT_PYTHON_VFS_RPC_TIMEOUT_MS",
-		"path": "crates/execution/src/python.rs",
+		"path": "crates/executor-python-v8-pyodide/src/lib.rs",
 		"class": "policy",
 		"rationale": "Python VFS RPC timeout.",
 		"wired": "VmLimits.python.vfs_rpc_timeout_ms"
 	},
 	{
 		"name": "MAX_FRAME_SIZE",
-		"path": "crates/execution/src/v8_ipc.rs",
+		"path": "crates/v8-runtime/src/adapter_ipc.rs",
 		"class": "policy",
 		"rationale": "V8 IPC frame size; single value feeds BOTH codec sides.",
 		"wired": "VmLimits.js_runtime.v8_ipc_max_frame_bytes"
 	},
 	{
 		"name": "DEFAULT_WASM_PREWARM_TIMEOUT_MS",
-		"path": "crates/execution/src/wasm.rs",
+		"path": "crates/executor-wasm-v8/src/lib.rs",
 		"class": "policy",
 		"rationale": "WASM prewarm compile-cache timeout.",
 		"wired": "VmLimits.wasm.prewarm_timeout_ms"
 	},
 	{
 		"name": "DEFAULT_WASM_RUNNER_HEAP_LIMIT_MB",
-		"path": "crates/execution/src/wasm.rs",
+		"path": "crates/executor-wasm-v8/src/lib.rs",
 		"class": "policy",
 		"rationale": "Wasm runner V8 heap default (2 GiB, intentionally above the 128 MiB per-guest budget so warmup stops OOMing); normal VM executions use VmLimits.wasm.runner_heap_limit_mb.",
 		"wired": "VmLimits.wasm.runner_heap_limit_mb"
 	},
 	{
 		"name": "MAX_SYNC_WASM_PREWARM_MODULE_BYTES",
-		"path": "crates/execution/src/wasm.rs",
+		"path": "crates/executor-wasm-v8/src/lib.rs",
 		"class": "invariant",
 		"rationale": "Prewarm compile-cache heuristic bound; not guest-visible behavior."
 	},
 	{
 		"name": "MAX_WASM_IMPORT_SECTION_ENTRIES",
-		"path": "crates/execution/src/wasm.rs",
+		"path": "crates/executor-wasm-v8/src/lib.rs",
 		"class": "invariant",
 		"rationale": "Parser DoS hardening mandated by crates/CLAUDE.md invariant 6."
 	},
 	{
 		"name": "MAX_WASM_MEMORY_SECTION_ENTRIES",
-		"path": "crates/execution/src/wasm.rs",
+		"path": "crates/executor-wasm-v8/src/lib.rs",
 		"class": "invariant",
 		"rationale": "Parser DoS hardening mandated by crates/CLAUDE.md invariant 6."
 	},
 	{
 		"name": "MAX_WASM_MODULE_FILE_BYTES",
-		"path": "crates/execution/src/wasm.rs",
+		"path": "crates/executor-wasm-v8/src/lib.rs",
 		"class": "policy",
 		"rationale": "Guards module load size.",
 		"wired": "VmLimits.wasm.max_module_file_bytes"
 	},
 	{
 		"name": "MAX_WASM_VARUINT_BYTES",
-		"path": "crates/execution/src/wasm.rs",
+		"path": "crates/executor-wasm-v8/src/lib.rs",
 		"class": "invariant",
 		"rationale": "Parser DoS hardening mandated by crates/CLAUDE.md invariant 6."
 	},
 	{
 		"name": "WASM_CAPTURED_OUTPUT_LIMIT_BYTES",
-		"path": "crates/execution/src/wasm.rs",
+		"path": "crates/executor-wasm-v8/src/lib.rs",
 		"class": "policy",
 		"rationale": "WASM stdout/stderr capture cap.",
 		"wired": "VmLimits.wasm.captured_output_limit_bytes"
 	},
 	{
 		"name": "WASM_MODULE_BYTES_CACHE_CAPACITY",
-		"path": "crates/execution/src/wasm.rs",
+		"path": "crates/executor-wasm-v8/src/lib.rs",
 		"class": "invariant",
 		"rationale": "Host-side LRU entry cap for cached wasm module bytes; process-wide cache sizing, not per-VM policy."
 	},
 	{
 		"name": "WASM_SYNC_READ_LIMIT_BYTES",
-		"path": "crates/execution/src/wasm.rs",
+		"path": "crates/executor-wasm-v8/src/lib.rs",
 		"class": "policy",
 		"rationale": "WASM sync read cap; also templated into the JS runner shim.",
 		"wired": "VmLimits.wasm.sync_read_limit_bytes"
@@ -2005,7 +2005,7 @@
 	},
 	{
 		"name": "DEFAULT_PYTHON_MANAGED_HOST_FILE_LIMIT",
-		"path": "crates/execution/src/python.rs",
+		"path": "crates/executor-python-v8-pyodide/src/lib.rs",
 		"class": "invariant",
 		"rationale": "Bounded fallback for standalone Python execution; VM launches use configured kernel fd limits."
 	},
@@ -2116,14 +2116,14 @@
 	},
 	{
 		"name": "DEFAULT_WASM_PENDING_EVENT_BYTES",
-		"path": "crates/execution/src/wasm.rs",
+		"path": "crates/executor-wasm-v8/src/lib.rs",
 		"class": "policy",
 		"rationale": "Standalone WASM pending-event byte fallback; production launches receive the typed process limit.",
 		"wired": "WasmExecutionLimits.pending_event_bytes"
 	},
 	{
 		"name": "DEFAULT_WASM_SYNC_RPC_RESPONSE_LINE_BYTES",
-		"path": "crates/execution/src/wasm.rs",
+		"path": "crates/executor-wasm-v8/src/lib.rs",
 		"class": "policy",
 		"rationale": "Standalone WASM sync-response framing fallback; production launches receive the typed bridge limit.",
 		"wired": "WasmExecutionLimits.max_sync_rpc_response_line_bytes"
@@ -2262,49 +2262,49 @@
 	},
 	{
 		"name": "MAX_DNS_RESULTS",
-		"path": "crates/execution/src/python.rs",
+		"path": "crates/executor-python-v8-pyodide/src/lib.rs",
 		"class": "policy-deferred",
 		"rationale": "Bounded Python DNS result batch; expose through networking limits if operators need to tune it."
 	},
 	{
 		"name": "MAX_HOST_BYTES",
-		"path": "crates/execution/src/python.rs",
+		"path": "crates/executor-python-v8-pyodide/src/lib.rs",
 		"class": "invariant",
 		"rationale": "DNS host-name wire-format ceiling."
 	},
 	{
 		"name": "MAX_HTTP_HEADERS",
-		"path": "crates/execution/src/python.rs",
+		"path": "crates/executor-python-v8-pyodide/src/lib.rs",
 		"class": "policy-deferred",
 		"rationale": "Bounded Python HTTP header count; expose through HTTP limits if tuning is needed."
 	},
 	{
 		"name": "MAX_HTTP_HEADER_BYTES",
-		"path": "crates/execution/src/python.rs",
+		"path": "crates/executor-python-v8-pyodide/src/lib.rs",
 		"class": "policy-deferred",
 		"rationale": "Bounded Python HTTP header bytes; expose through HTTP limits if tuning is needed."
 	},
 	{
 		"name": "MAX_HTTP_METHOD_BYTES",
-		"path": "crates/execution/src/python.rs",
+		"path": "crates/executor-python-v8-pyodide/src/lib.rs",
 		"class": "policy-deferred",
 		"rationale": "Bounded Python HTTP method bytes; expose through HTTP limits if tuning is needed."
 	},
 	{
 		"name": "MAX_HTTP_URL_BYTES",
-		"path": "crates/execution/src/python.rs",
+		"path": "crates/executor-python-v8-pyodide/src/lib.rs",
 		"class": "policy-deferred",
 		"rationale": "Bounded Python HTTP URL bytes; expose through HTTP limits if tuning is needed."
 	},
 	{
 		"name": "MAX_PATH_BYTES",
-		"path": "crates/execution/src/python.rs",
+		"path": "crates/executor-python-v8-pyodide/src/lib.rs",
 		"class": "invariant",
 		"rationale": "Linux PATH_MAX-compatible Python bridge ceiling."
 	},
 	{
 		"name": "PYTHON_SOCKET_MAX_RECV",
-		"path": "crates/execution/src/python.rs",
+		"path": "crates/executor-python-v8-pyodide/src/lib.rs",
 		"class": "policy-deferred",
 		"rationale": "Per-call Python socket receive clamp; expose through Python networking limits if operators need to tune it."
 	},
@@ -2496,154 +2496,154 @@
 	},
 	{
 		"name": "DEFAULT_MODULE_CACHE_CHARGED_BYTES",
-		"path": "crates/execution/src/wasm/wasmtime/cache.rs",
+		"path": "crates/executor-wasm-wasmtime/src/cache.rs",
 		"class": "policy-deferred",
 		"rationale": "Process-wide compiled-module cache byte budget; expose through runtime configuration when cache tuning is supported."
 	},
 	{
 		"name": "DEFAULT_MODULE_CACHE_ENTRIES",
-		"path": "crates/execution/src/wasm/wasmtime/cache.rs",
+		"path": "crates/executor-wasm-wasmtime/src/cache.rs",
 		"class": "policy-deferred",
 		"rationale": "Process-wide compiled-module cache entry budget; expose through runtime configuration when cache tuning is supported."
 	},
 	{
 		"name": "DEFAULT_MAX_ENGINE_PROFILES",
-		"path": "crates/execution/src/wasm/wasmtime/engine.rs",
+		"path": "crates/executor-wasm-wasmtime/src/engine.rs",
 		"class": "policy-deferred",
 		"rationale": "Process-wide Wasmtime Engine profile registry bound; expose through runtime configuration when profile tuning is supported."
 	},
 	{
 		"name": "DEFAULT_WASM_STACK_BYTES",
-		"path": "crates/execution/src/wasm/wasmtime/engine.rs",
+		"path": "crates/executor-wasm-wasmtime/src/engine.rs",
 		"class": "policy",
 		"rationale": "Fallback for the typed per-execution Wasmtime guest stack limit.",
 		"wired": "WasmExecutionLimits.max_stack_bytes"
 	},
 	{
 		"name": "ENGINE_PROFILE_LIMIT_CONFIG_PATH",
-		"path": "crates/execution/src/wasm/wasmtime/engine.rs",
+		"path": "crates/executor-wasm-wasmtime/src/engine.rs",
 		"class": "invariant",
 		"rationale": "Stable typed limit identifier, not the limit value."
 	},
 	{
 		"name": "DEFAULT_MAX_INSTANCES",
-		"path": "crates/execution/src/wasm/wasmtime/limits.rs",
+		"path": "crates/executor-wasm-wasmtime/src/limits.rs",
 		"class": "invariant",
 		"rationale": "The standalone executor instantiates exactly one guest module per Store."
 	},
 	{
 		"name": "DEFAULT_MAX_MEMORIES",
-		"path": "crates/execution/src/wasm/wasmtime/limits.rs",
+		"path": "crates/executor-wasm-wasmtime/src/limits.rs",
 		"class": "policy-deferred",
 		"rationale": "Bounded memories per standalone Store; expose with the Wasm feature-policy surface if multi-memory workloads require it."
 	},
 	{
 		"name": "DEFAULT_MAX_TABLES",
-		"path": "crates/execution/src/wasm/wasmtime/limits.rs",
+		"path": "crates/executor-wasm-wasmtime/src/limits.rs",
 		"class": "policy-deferred",
 		"rationale": "Bounded tables per standalone Store; expose with the Wasm feature-policy surface if multi-table workloads require it."
 	},
 	{
 		"name": "DEFAULT_MAX_TABLE_ELEMENTS",
-		"path": "crates/execution/src/wasm/wasmtime/limits.rs",
+		"path": "crates/executor-wasm-wasmtime/src/limits.rs",
 		"class": "policy-deferred",
 		"rationale": "Bounded guest table elements per Store; expose through Wasm resource configuration if operators need to tune it."
 	},
 	{
 		"name": "DEFAULT_MAX_WASM_MEMORY_BYTES",
-		"path": "crates/execution/src/wasm/wasmtime/limits.rs",
+		"path": "crates/executor-wasm-wasmtime/src/limits.rs",
 		"class": "policy",
 		"rationale": "Fallback for the typed per-execution Wasmtime linear-memory limit.",
 		"wired": "WasmExecutionLimits.max_memory_bytes"
 	},
 	{
 		"name": "DEFAULT_TABLE_ACCOUNTING_BYTES",
-		"path": "crates/execution/src/wasm/wasmtime/limits.rs",
+		"path": "crates/executor-wasm-wasmtime/src/limits.rs",
 		"class": "invariant",
 		"rationale": "Conservative aggregate-ledger charge derived from the fixed table-element representation ceiling."
 	},
 	{
 		"name": "DEFAULT_MAX_MODULE_FILE_BYTES",
-		"path": "crates/execution/src/wasm/wasmtime/lifecycle.rs",
+		"path": "crates/executor-wasm-wasmtime/src/lifecycle.rs",
 		"class": "policy",
 		"rationale": "Fallback for the typed standalone-WASM executable image byte limit.",
 		"wired": "WasmExecutionLimits.max_module_file_bytes"
 	},
 	{
 		"name": "MAX_ACCOUNT_NAME_BYTES",
-		"path": "crates/execution/src/wasm/wasmtime/linker/user.rs",
+		"path": "crates/executor-wasm-wasmtime/src/linker/user.rs",
 		"class": "invariant",
 		"rationale": "Owned account lookup ABI input ceiling shared with the sidecar host dispatch."
 	},
 	{
 		"name": "MAX_GROUPS",
-		"path": "crates/execution/src/wasm/wasmtime/linker/user.rs",
+		"path": "crates/executor-wasm-wasmtime/src/linker/user.rs",
 		"class": "invariant",
 		"rationale": "Owned Linux supplementary-group ABI ceiling."
 	},
 	{
 		"name": "MAX_DNS_PAYLOAD",
-		"path": "crates/execution/src/wasm/wasmtime/linker/network.rs",
+		"path": "crates/executor-wasm-wasmtime/src/linker/network.rs",
 		"class": "invariant",
 		"rationale": "Owned DNS raw-record ABI payload ceiling kept identical to the V8-WASM adapter."
 	},
 	{
 		"name": "MAX_DNS_RECORDS",
-		"path": "crates/execution/src/wasm/wasmtime/linker/network.rs",
+		"path": "crates/executor-wasm-wasmtime/src/linker/network.rs",
 		"class": "invariant",
 		"rationale": "Owned DNS raw-record ABI count ceiling kept identical to the V8-WASM adapter."
 	},
 	{
 		"name": "MAX_POLL_FDS",
-		"path": "crates/execution/src/wasm/wasmtime/linker/network.rs",
+		"path": "crates/executor-wasm-wasmtime/src/linker/network.rs",
 		"class": "invariant",
 		"rationale": "Linux IOV_MAX-compatible poll batch ceiling kept identical to the V8-WASM adapter."
 	},
 	{
 		"name": "MAX_FDS",
-		"path": "crates/execution/src/wasm/wasmtime/linker/process.rs",
+		"path": "crates/executor-wasm-wasmtime/src/linker/process.rs",
 		"class": "invariant",
 		"rationale": "Absolute Linux descriptor-number ceiling for validating exec close lists; the configured RLIMIT_NOFILE is tighter."
 	},
 	{
 		"name": "MAX_RIGHTS",
-		"path": "crates/execution/src/wasm/wasmtime/linker/process.rs",
+		"path": "crates/executor-wasm-wasmtime/src/linker/process.rs",
 		"class": "invariant",
 		"rationale": "Generated host-permission registry width, not a tunable runtime bound."
 	},
 	{
 		"name": "MAX_IOVECS",
-		"path": "crates/execution/src/wasm/wasmtime/linker/preview1.rs",
+		"path": "crates/executor-wasm-wasmtime/src/linker/preview1.rs",
 		"class": "invariant",
 		"rationale": "Linux IOV_MAX-compatible vectored-I/O ceiling kept identical to the V8-WASM adapter."
 	},
 	{
 		"name": "MAX_POLL_SUBSCRIPTIONS",
-		"path": "crates/execution/src/wasm/wasmtime/linker/preview1.rs",
+		"path": "crates/executor-wasm-wasmtime/src/linker/preview1.rs",
 		"class": "invariant",
 		"rationale": "Owned Preview1 poll batch ceiling kept identical to the V8-WASM adapter."
 	},
 	{
 		"name": "MAX_SIGNALS_PER_SAFE_POINT",
-		"path": "crates/execution/src/wasm/wasmtime/linker/mod.rs",
+		"path": "crates/executor-wasm-wasmtime/src/linker/mod.rs",
 		"class": "invariant",
 		"rationale": "Bounded signal-delivery work quantum per guest safe point to preserve scheduler fairness."
 	},
 	{
 		"name": "XATTR_NAME_MAX",
-		"path": "crates/execution/src/wasm/wasmtime/linker/filesystem.rs",
+		"path": "crates/executor-wasm-wasmtime/src/linker/filesystem.rs",
 		"class": "invariant",
 		"rationale": "Linux XATTR_NAME_MAX compatibility constant."
 	},
 	{
 		"name": "XATTR_SIZE_MAX",
-		"path": "crates/execution/src/wasm/wasmtime/linker/filesystem.rs",
+		"path": "crates/executor-wasm-wasmtime/src/linker/filesystem.rs",
 		"class": "invariant",
 		"rationale": "Linux xattr value-size compatibility ceiling."
 	},
 	{
 		"name": "DEFAULT_MAX_HOST_REPLY_BYTES",
-		"path": "crates/execution/src/wasm/wasmtime/store.rs",
+		"path": "crates/executor-wasm-wasmtime/src/store.rs",
 		"class": "policy",
 		"rationale": "Fallback for the typed Wasmtime host-reply transport byte limit.",
 		"wired": "WasmExecutionLimits.max_sync_rpc_response_line_bytes"
@@ -2657,25 +2657,25 @@
 	},
 	{
 		"name": "DEFAULT_MAX_WORKER_FRAME_BYTES",
-		"path": "crates/execution/src/wasm/wasmtime/worker.rs",
+		"path": "crates/executor-wasm-wasmtime/src/worker.rs",
 		"class": "policy-deferred",
 		"rationale": "Bounded default for the private threaded-WASM worker transport; expose through process runtime configuration if larger configured host replies require it."
 	},
 	{
 		"name": "MAX_STARTUP_HEADER_BYTES",
-		"path": "crates/execution/src/wasm/wasmtime/worker.rs",
+		"path": "crates/executor-wasm-wasmtime/src/worker.rs",
 		"class": "invariant",
 		"rationale": "Private worker startup protocol ceiling above the separately bounded argv, environment, and typed request fields."
 	},
 	{
 		"name": "MAX_WORKER_FRAME_BYTES",
-		"path": "crates/execution/src/wasm/wasmtime/worker.rs",
+		"path": "crates/executor-wasm-wasmtime/src/worker.rs",
 		"class": "policy-deferred",
 		"rationale": "Hard safety ceiling for one private threaded-WASM worker frame; expose through process runtime configuration if host-operation budgets grow beyond it."
 	},
 	{
 		"name": "MAX_WASI_THREAD_ID",
-		"path": "crates/execution/src/wasm/wasmtime/threads.rs",
+		"path": "crates/executor-wasm-wasmtime/src/threads.rs",
 		"class": "invariant",
 		"rationale": "Positive signed thread-id range reserved by the owned WASI-threads ABI."
 	},

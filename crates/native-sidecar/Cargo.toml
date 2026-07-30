@@ -6,6 +6,27 @@ license.workspace = true
 repository.workspace = true
 description = "Native AgentOS language execution sidecar runtime"
 
+[features]
+default = ["all-executors"]
+node-v8 = ["dep:agentos-executor-node-v8", "dep:agentos-v8-runtime"]
+python-v8-pyodide = [
+    "dep:agentos-executor-python-v8-pyodide",
+    "dep:agentos-v8-runtime",
+]
+wasm-v8 = ["dep:agentos-executor-wasm-v8", "dep:agentos-v8-runtime"]
+wasm-wasmtime = ["dep:agentos-executor-wasm-wasmtime"]
+wasm-wasmtime-threads = [
+    "wasm-wasmtime",
+    "agentos-executor-wasm-wasmtime/threads",
+]
+all-executors = [
+    "node-v8",
+    "python-v8-pyodide",
+    "wasm-v8",
+    "wasm-wasmtime",
+    "wasm-wasmtime-threads",
+]
+
 [lib]
 name = "agentos_native_sidecar"
 
@@ -16,11 +37,17 @@ path = "src/main.rs"
 [dependencies]
 agentos-actor-uds-client = { workspace = true }
 agentos-bridge = { workspace = true }
+agentos-executor-contract = { workspace = true }
+agentos-executor-node-v8 = { workspace = true, optional = true }
+agentos-executor-python-v8-pyodide = { workspace = true, optional = true }
+agentos-executor-wasm-v8 = { workspace = true, optional = true }
+agentos-executor-wasm-wasmtime = { workspace = true, optional = true }
 agentos-kernel = { workspace = true }
 agentos-sidecar-protocol = { workspace = true }
 agentos-native-sidecar-core = { workspace = true }
 agentos-runtime-tokio = { workspace = true }
-agentos-execution = { workspace = true }
+agentos-v8-runtime = { workspace = true, optional = true }
+agentos-wasm-common = { workspace = true }
 agentos-vm-config = { workspace = true }
 agentos-vfs = { workspace = true }
 async-trait = "0.1"

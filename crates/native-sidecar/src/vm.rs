@@ -190,7 +190,7 @@ fn send_kernel_socket_readiness_event(
         if let Err(error) = session.publish_readiness(
             target.capability_id,
             target.capability_generation,
-            agentos_execution::backend::ExecutionReadyFlags::from_bits(flags.bits()),
+            crate::executor::backend::ExecutionReadyFlags::from_bits(flags.bits()),
         ) {
             eprintln!(
                 "ERR_AGENTOS_KERNEL_READINESS_WAKE: failed to publish capability={} generation={} target={}: {error}",
@@ -549,13 +549,13 @@ where
                 guest_env,
                 standalone_wasm_backend: match create_config.wasm_backend.unwrap_or_default() {
                     vm_config::StandaloneWasmBackend::V8 => {
-                        agentos_execution::StandaloneWasmBackend::V8
+                        crate::executor::StandaloneWasmBackend::V8
                     }
                     vm_config::StandaloneWasmBackend::Wasmtime => {
-                        agentos_execution::StandaloneWasmBackend::Wasmtime
+                        crate::executor::StandaloneWasmBackend::Wasmtime
                     }
                     vm_config::StandaloneWasmBackend::WasmtimeThreads => {
-                        agentos_execution::StandaloneWasmBackend::WasmtimeThreads
+                        crate::executor::StandaloneWasmBackend::WasmtimeThreads
                     }
                 },
                 requested_runtime: payload.runtime,
@@ -797,13 +797,18 @@ where
         // `agent.snapshot`. The sidecar reads the bundle from the host package dir
         // it already projects, so the first session is warm without shipping the
         // source over the client wire.
+        #[cfg(any(
+            feature = "node-v8",
+            feature = "python-v8-pyodide",
+            feature = "wasm-v8"
+        ))]
         if let Some(userland) = snapshot_userland_code {
             let requested_bytes = userland.len();
             let runtime_for_job = snapshot_runtime_context.clone();
             match snapshot_runtime_context
                 .blocking()
                 .run(requested_bytes, move || {
-                    agentos_execution::v8_host::pre_warm_agent_snapshot(&runtime_for_job, &userland)
+                    crate::executor::v8_host::pre_warm_agent_snapshot(&runtime_for_job, &userland)
                 })
                 .await
             {

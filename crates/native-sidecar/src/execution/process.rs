@@ -342,7 +342,17 @@ impl ActiveProcess {
             guest_signal_checkpoint_pending: false,
             deferred_kernel_poll: None,
             deferred_kernel_read: None,
-            module_resolution_cache: agentos_execution::LocalModuleResolutionCache::default(),
+            #[cfg(any(
+                feature = "node-v8",
+                feature = "python-v8-pyodide",
+                feature = "wasm-v8"
+            ))]
+            module_resolution_cache: crate::executor::LocalModuleResolutionCache::default(),
+            #[cfg(any(
+                feature = "node-v8",
+                feature = "python-v8-pyodide",
+                feature = "wasm-v8"
+            ))]
             module_resolution_cache_generation: None,
         }
     }
@@ -1922,7 +1932,7 @@ mod pending_event_reservation_tests {
             .expect("queue adapter exit");
         process
             .queue_pending_execution_event(ActiveExecutionEvent::Common(ExecutionEvent::Exited(
-                agentos_execution::backend::ExecutionExit::Exited(0),
+                crate::executor::backend::ExecutionExit::Exited(0),
             )))
             .expect("queue runtime-control exit");
         assert!(take_notify_permit(&process.process_event_notify));
@@ -2784,15 +2794,19 @@ impl ActiveExecution {
     fn standalone_wasm_backend(&self) -> ExecutionStandaloneWasmBackend {
         match self {
             Self::Wasm(execution) => execution.standalone_backend(),
-            Self::Javascript(_) | Self::Python(_) | Self::Binding(_) => {
-                ExecutionStandaloneWasmBackend::V8
-            }
+            #[cfg(feature = "node-v8")]
+            Self::Javascript(_) => ExecutionStandaloneWasmBackend::V8,
+            #[cfg(feature = "python-v8-pyodide")]
+            Self::Python(_) => ExecutionStandaloneWasmBackend::V8,
+            Self::Binding(_) => ExecutionStandaloneWasmBackend::V8,
         }
     }
 
     fn backend(&self) -> &dyn ExecutionBackend {
         match self {
+            #[cfg(feature = "node-v8")]
             Self::Javascript(execution) => execution,
+            #[cfg(feature = "python-v8-pyodide")]
             Self::Python(execution) => execution,
             Self::Wasm(execution) => execution.as_ref(),
             Self::Binding(execution) => execution,
@@ -2801,7 +2815,9 @@ impl ActiveExecution {
 
     fn backend_mut(&mut self) -> &mut dyn ExecutionBackend {
         match self {
+            #[cfg(feature = "node-v8")]
             Self::Javascript(execution) => execution,
+            #[cfg(feature = "python-v8-pyodide")]
             Self::Python(execution) => execution,
             Self::Wasm(execution) => execution.as_mut(),
             Self::Binding(execution) => execution,
@@ -2817,7 +2833,11 @@ impl ActiveExecution {
     ) -> Option<Result<Option<PolledExecutionEvent>, SidecarError>> {
         match self {
             Self::Binding(execution) => Some(poll_binding_process_event_leased(execution)),
-            Self::Javascript(_) | Self::Python(_) | Self::Wasm(_) => None,
+            #[cfg(feature = "node-v8")]
+            Self::Javascript(_) => None,
+            #[cfg(feature = "python-v8-pyodide")]
+            Self::Python(_) => None,
+            Self::Wasm(_) => None,
         }
     }
 
@@ -2835,7 +2855,11 @@ impl ActiveExecution {
     fn adapter_event_bytes_budget(&self) -> Option<Arc<VmPendingByteBudget>> {
         match self {
             Self::Binding(execution) => Some(Arc::clone(&execution.vm_pending_event_bytes_budget)),
-            Self::Javascript(_) | Self::Python(_) | Self::Wasm(_) => None,
+            #[cfg(feature = "node-v8")]
+            Self::Javascript(_) => None,
+            #[cfg(feature = "python-v8-pyodide")]
+            Self::Python(_) => None,
+            Self::Wasm(_) => None,
         }
     }
 
@@ -2861,7 +2885,11 @@ impl ActiveExecution {
     }
 
     pub(crate) fn has_exited(&self) -> bool {
-        matches!(self, Self::Javascript(execution) if execution.has_exited())
+        #[cfg(feature = "node-v8")]
+        if let Self::Javascript(execution) = self {
+            return execution.has_exited();
+        }
+        false
     }
 
     pub(crate) fn execute_retained_language(
@@ -2872,9 +2900,11 @@ impl ActiveExecution {
         module: bool,
     ) -> Result<(), SidecarError> {
         match (self, language) {
+            #[cfg(feature = "node-v8")]
             (Self::Javascript(execution), RetainedExecutionLanguage::JavaScript) => execution
                 .execute_retained(source, file_path, module)
                 .map_err(|error| SidecarError::Execution(error.to_string())),
+            #[cfg(feature = "python-v8-pyodide")]
             (Self::Python(execution), RetainedExecutionLanguage::Python) => execution
                 .execute_retained(source)
                 .map_err(|error| SidecarError::Execution(error.to_string())),
@@ -2890,6 +2920,7 @@ impl ActiveExecution {
         payload: Value,
     ) -> Result<(), SidecarError> {
         match self {
+            #[cfg(feature = "node-v8")]
             Self::Javascript(execution) => execution
                 .send_stream_event(event_type, payload)
                 .map_err(|error| SidecarError::Execution(error.to_string())),
@@ -2985,6 +3016,7 @@ impl ActiveExecution {
         host: Option<&ProcessHostCapabilitySet>,
     ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
         match self {
+            #[cfg(feature = "node-v8")]
             Self::Javascript(execution) => {
                 let responder = execution.sync_rpc_responder();
                 let event = execution
@@ -3002,6 +3034,7 @@ impl ActiveExecution {
                     None => Ok(None),
                 }
             }
+            #[cfg(feature = "python-v8-pyodide")]
             Self::Python(execution) => {
                 let responder = execution.javascript_sync_rpc_responder();
                 let python_responder = execution.vfs_rpc_responder();
@@ -3057,6 +3090,7 @@ impl ActiveExecution {
         host: Option<&ProcessHostCapabilitySet>,
     ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
         match self {
+            #[cfg(feature = "node-v8")]
             Self::Javascript(execution) => {
                 let responder = execution.sync_rpc_responder();
                 let event = execution.try_poll_event().map_err(javascript_error)?;
@@ -3071,6 +3105,7 @@ impl ActiveExecution {
                     None => Ok(None),
                 }
             }
+            #[cfg(feature = "python-v8-pyodide")]
             Self::Python(execution) => {
                 let responder = execution.javascript_sync_rpc_responder();
                 let python_responder = execution.vfs_rpc_responder();
@@ -3111,7 +3146,7 @@ impl ExecutionBackend for ActiveExecution {
         self.backend().kind()
     }
 
-    fn synchronous_fd_write_policy(&self) -> agentos_execution::backend::SynchronousFdWritePolicy {
+    fn synchronous_fd_write_policy(&self) -> crate::executor::backend::SynchronousFdWritePolicy {
         self.backend().synchronous_fd_write_policy()
     }
 
@@ -3327,7 +3362,7 @@ pub(crate) fn settle_execution_host_call(
 #[cfg(test)]
 mod typed_direct_error_tests {
     use super::*;
-    use agentos_execution::backend::{
+    use crate::executor::backend::{
         DirectHostReplyTarget, HostCallIdentity, HostCallReply, HostServiceError,
     };
     use std::sync::{Arc, Mutex};
@@ -3416,6 +3451,7 @@ mod typed_direct_error_tests {
     }
 }
 
+#[cfg(feature = "node-v8")]
 fn map_javascript_execution_event_with_host(
     event: JavascriptExecutionEvent,
     responder: JavascriptSyncRpcResponder,
@@ -3446,6 +3482,7 @@ fn map_javascript_execution_event_with_host(
     Ok(Some(event))
 }
 
+#[cfg(feature = "python-v8-pyodide")]
 fn map_python_execution_event_with_host(
     event: PythonExecutionEvent,
     responder: JavascriptSyncRpcResponder,

@@ -1,5 +1,9 @@
 mod support;
 
+mod executor {
+    pub use agentos_native_sidecar::executor::*;
+}
+
 mod host_dir {
     #![allow(dead_code)]
     include!("../src/plugins/host_dir.rs");

@@ -15,7 +15,7 @@ use support::{
     new_sidecar, open_session_wire, temp_dir, wire_request, wire_vm, write_fixture,
 };
 
-const ABI_MANIFEST: &str = include_str!("../../execution/assets/agentos-wasm-abi.json");
+const ABI_MANIFEST: &str = include_str!("../../wasm-common/assets/agentos-wasm-abi.json");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum MemoryContractObligation {

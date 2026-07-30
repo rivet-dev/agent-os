@@ -5,7 +5,7 @@ export const controlFamily: BenchmarkOp[] = [
 		family: "control",
 		name: "cpu_loop",
 		nativeOp: "cpu_loop",
-		fileLine: "crates/execution/src/javascript.rs:1741",
+		fileLine: "crates/v8-runtime/src/javascript.rs:1741",
 		reproducer: "bounded integer loop inside one node process",
 		expectedRatio: "control",
 		program: `async () => {
@@ -18,7 +18,7 @@ export const controlFamily: BenchmarkOp[] = [
 		family: "control",
 		name: "alloc_free",
 		nativeOp: "alloc_free",
-		fileLine: "crates/execution/src/javascript.rs:1741",
+		fileLine: "crates/v8-runtime/src/javascript.rs:1741",
 		reproducer: "allocate and drop one 4MiB Uint8Array inside one node process",
 		expectedRatio: "control",
 		program: `async () => {

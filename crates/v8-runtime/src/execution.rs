@@ -2361,7 +2361,7 @@ fn build_cjs_esm_shim(
     // to runtime extraction (require the module and enumerate the real `Object.keys(module.exports)`)
     // and union the two. Only do this when static finds nothing or a dynamic re-export is detected:
     // eagerly requiring every CJS module would add avoidable work and trigger side effects earlier
-    // than intended (see crates/execution/CLAUDE.md). Static still back-fills names that a
+    // than intended (see crates/v8-runtime/CLAUDE.md). Static still back-fills names that a
     // partially-evaluated circular require may not have added to the exports object yet.
     let mut names = extract_cjs_export_names(raw_source)
         .into_iter()

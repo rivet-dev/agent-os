@@ -7,15 +7,15 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const outputPath = resolve(root, 'crates/execution/assets/agentos-wasm-abi.json');
-const registryOutputPath = resolve(root, 'crates/execution/src/abi/generated.rs');
+const outputPath = resolve(root, 'crates/wasm-common/assets/agentos-wasm-abi.json');
+const registryOutputPath = resolve(root, 'crates/wasm-common/src/abi/generated.rs');
 const preview1WitxPath = resolve(
   root,
-  'crates/execution/abi/wasi_snapshot_preview1/wasi_snapshot_preview1.witx',
+  'crates/wasm-common/abi/wasi_snapshot_preview1/wasi_snapshot_preview1.witx',
 );
 const preview1TypesPath = resolve(
   root,
-  'crates/execution/abi/wasi_snapshot_preview1/typenames.witx',
+  'crates/wasm-common/abi/wasi_snapshot_preview1/typenames.witx',
 );
 
 const definitions = [];
@@ -800,11 +800,11 @@ const manifest = {
     preview1WitxCommit: 'd4d3df3072b65ce43cb01c1add72b402d69a79d1',
     preview1Witx: [
       {
-        path: 'crates/execution/abi/wasi_snapshot_preview1/typenames.witx',
+        path: 'crates/wasm-common/abi/wasi_snapshot_preview1/typenames.witx',
         sha256: createHash('sha256').update(readFileSync(preview1TypesPath)).digest('hex'),
       },
       {
-        path: 'crates/execution/abi/wasi_snapshot_preview1/wasi_snapshot_preview1.witx',
+        path: 'crates/wasm-common/abi/wasi_snapshot_preview1/wasi_snapshot_preview1.witx',
         sha256: createHash('sha256').update(readFileSync(preview1WitxPath)).digest('hex'),
       },
     ],

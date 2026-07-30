@@ -8,6 +8,8 @@ pub(crate) mod bridge;
 pub(crate) mod bindings;
 pub(crate) mod crypto_cipher;
 pub(crate) mod execution;
+#[doc(hidden)]
+pub mod executor;
 pub mod extension;
 pub(crate) mod filesystem;
 #[allow(dead_code)]
@@ -51,13 +53,12 @@ pub struct SidecarScaffold {
 
 pub fn scaffold() -> SidecarScaffold {
     let kernel = agentos_kernel::scaffold();
-    let execution = agentos_execution::scaffold();
 
     SidecarScaffold {
         package_name: env!("CARGO_PKG_NAME"),
         binary_name: env!("CARGO_PKG_NAME"),
         kernel_package: kernel.package_name,
-        execution_package: execution.package_name,
+        execution_package: "agentos-executor-contract",
         protocol_name: PROTOCOL_NAME,
         protocol_version: PROTOCOL_VERSION,
         max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,

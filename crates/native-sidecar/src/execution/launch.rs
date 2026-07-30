@@ -2279,6 +2279,7 @@ pub(super) fn prepare_guest_runtime_env(
 /// (sourced from `CreateVmConfig` on the BARE wire). These ride the execution
 /// request, not `AGENTOS_*` env vars — see the env-vs-wire rule in
 /// `crates/sidecar/CLAUDE.md`.
+#[cfg(feature = "node-v8")]
 pub(super) fn javascript_execution_limits(vm: &VmState) -> JavascriptExecutionLimits {
     JavascriptExecutionLimits {
         v8_heap_limit_mb: vm.limits.js_runtime.v8_heap_limit_mb,
@@ -2367,11 +2368,13 @@ pub(super) fn guest_virtual_home(vm: &VmState) -> String {
 }
 
 /// Build the typed per-execution Python limits from the per-VM `VmLimits`.
+#[cfg(feature = "python-v8-pyodide")]
 pub(super) fn python_execution_limits(vm: &VmState) -> PythonExecutionLimits {
     python_execution_limits_with_env(vm, &BTreeMap::new())
 }
 
 /// Build Python limits while honoring a sidecar-owned per-execution timeout.
+#[cfg(feature = "python-v8-pyodide")]
 pub(super) fn python_execution_limits_with_env(
     vm: &VmState,
     env: &BTreeMap<String, String>,
@@ -3187,12 +3190,10 @@ pub(super) fn stage_kernel_wasm_launch_asset(
     }
     .map_err(kernel_error)?;
     let real_entrypoint = normalize_path(&image.canonical_path);
-    if let Some(format) =
-        agentos_execution::wasm::detect_native_binary_format(image.bytes.as_slice())
-    {
+    if let Some(format) = crate::executor::detect_native_binary_format(image.bytes.as_slice()) {
         let header = image.bytes.iter().copied().take(4).collect();
         return Err(wasm_error(
-            agentos_execution::wasm::WasmExecutionError::NativeBinaryNotSupported {
+            crate::executor::WasmExecutionError::NativeBinaryNotSupported {
                 path: PathBuf::from(&real_entrypoint),
                 header,
                 format,
@@ -4569,7 +4570,7 @@ pub(super) fn resolve_guest_socket_host_path(
 }
 
 // ProcessLaunchOptions and ProcessLaunchRequest live in the runtime-neutral
-// agentos-execution host contract.
+// agentos-executor-contract host contract.
 // ResolvedChildProcessExecution moved to crate::state
 
 pub(crate) fn sanitize_javascript_child_process_internal_bootstrap_env(
@@ -4631,7 +4632,9 @@ fn rollback_published_top_level_process_start(vm: &mut VmState, process_id: &str
 }
 
 enum StartedTopLevelAdapterContext {
+    #[cfg(feature = "node-v8")]
     Javascript(String),
+    #[cfg(feature = "python-v8-pyodide")]
     Python(String),
     WebAssembly(String),
 }
@@ -4907,9 +4910,11 @@ where
         macro_rules! dispose_started_context {
             ($context:expr) => {
                 match $context {
+                    #[cfg(feature = "node-v8")]
                     StartedTopLevelAdapterContext::Javascript(context_id) => {
                         self.javascript_engine.dispose_context(context_id);
                     }
+                    #[cfg(feature = "python-v8-pyodide")]
                     StartedTopLevelAdapterContext::Python(context_id) => {
                         self.python_engine.dispose_context(context_id);
                     }
@@ -5009,6 +5014,7 @@ where
         };
 
         let (execution, process_env, started_context) = match resolved.runtime {
+            #[cfg(feature = "node-v8")]
             GuestRuntimeKind::JavaScript => {
                 let phase_start = Instant::now();
                 top_level_start_step!(
@@ -5094,6 +5100,11 @@ where
                     StartedTopLevelAdapterContext::Javascript(context_id),
                 )
             }
+            #[cfg(not(feature = "node-v8"))]
+            GuestRuntimeKind::JavaScript => {
+                return Err(executor_feature_disabled("Node.js/V8", "node-v8"));
+            }
+            #[cfg(feature = "python-v8-pyodide")]
             GuestRuntimeKind::Python => {
                 // The `python` command path (marked by AGENTOS_PYTHON_ARGV) is
                 // explicit about file mode via AGENTOS_PYTHON_FILE, so a `-c` code
@@ -5186,6 +5197,13 @@ where
                     env.clone(),
                     StartedTopLevelAdapterContext::Python(context_id),
                 )
+            }
+            #[cfg(not(feature = "python-v8-pyodide"))]
+            GuestRuntimeKind::Python => {
+                return Err(executor_feature_disabled(
+                    "Python/V8/Pyodide",
+                    "python-v8-pyodide",
+                ));
             }
             GuestRuntimeKind::WebAssembly => {
                 let wasm_limits = wasm_execution_limits(vm);

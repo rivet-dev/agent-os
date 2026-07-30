@@ -478,11 +478,11 @@ pub(crate) struct JavascriptSyncRpcServiceRequest<'a, B> {
 
 pub(in crate::execution) fn descriptor_rights_compat_request(
     id: u64,
-    operation: agentos_execution::host::NetworkOperation,
+    operation: crate::executor::host::NetworkOperation,
 ) -> Result<HostRpcRequest, SidecarError> {
     let mut raw_bytes_args = std::collections::HashMap::new();
     let (method, args) = match operation {
-        agentos_execution::host::NetworkOperation::SendDescriptorRights {
+        crate::executor::host::NetworkOperation::SendDescriptorRights {
             fd,
             bytes,
             rights,
@@ -499,7 +499,7 @@ pub(in crate::execution) fn descriptor_rights_compat_request(
                 ],
             )
         }
-        agentos_execution::host::NetworkOperation::ReceiveDescriptorRights {
+        crate::executor::host::NetworkOperation::ReceiveDescriptorRights {
             fd,
             max_bytes,
             max_rights,
@@ -546,7 +546,7 @@ pub(in crate::execution) async fn service_descriptor_rights_compat_operation<B>(
     capabilities: CapabilityRegistry,
     managed_descriptions: crate::state::ManagedHostNetDescriptionRegistry,
     call_id: u64,
-    operation: agentos_execution::host::NetworkOperation,
+    operation: crate::executor::host::NetworkOperation,
 ) -> Result<HostServiceResponse, SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,
@@ -3374,6 +3374,11 @@ where
     Ok(response.into())
 }
 
+#[cfg(any(
+    feature = "node-v8",
+    feature = "python-v8-pyodide",
+    feature = "wasm-v8"
+))]
 fn service_javascript_internal_bridge_sync_rpc(
     process: &ActiveProcess,
     request: &HostRpcRequest,
@@ -3403,6 +3408,21 @@ fn service_javascript_internal_bridge_sync_rpc(
             "JavaScript internal bridge method {method} returned no value"
         ))
     })
+}
+
+#[cfg(not(any(
+    feature = "node-v8",
+    feature = "python-v8-pyodide",
+    feature = "wasm-v8"
+)))]
+fn service_javascript_internal_bridge_sync_rpc(
+    _process: &ActiveProcess,
+    _request: &HostRpcRequest,
+) -> Result<Value, SidecarError> {
+    Err(executor_feature_disabled(
+        "V8 compatibility bridge",
+        "one of node-v8, python-v8-pyodide, or wasm-v8",
+    ))
 }
 
 const JAVASCRIPT_NET_POLL_MAX_WAIT: Duration = Duration::from_millis(50);
@@ -6176,8 +6196,8 @@ pub(in crate::execution) fn host_service_error_message(error: &SidecarError) -> 
 
 pub(crate) fn host_service_error(
     error: &SidecarError,
-) -> agentos_execution::backend::HostServiceError {
-    use agentos_execution::backend::HostServiceError;
+) -> crate::executor::backend::HostServiceError {
+    use crate::executor::backend::HostServiceError;
 
     match error {
         SidecarError::Host(error) => error.clone(),
@@ -6397,7 +6417,7 @@ mod wasm_sync_rpc_tests {
     use std::collections::{BTreeSet, HashMap};
 
     fn emitted_wasm_wrapped_sync_rpcs() -> BTreeSet<&'static str> {
-        let source = include_str!("../../../../execution/src/wasm.rs");
+        let source = include_str!("../../../../executor-wasm-v8/src/lib.rs");
         let start = source
             .find("case \"process.exec_image_open\":")
             .expect("WASM process sync-RPC switch must exist");

@@ -29,7 +29,7 @@ function parseArgs(argv) {
 
 const options = parseArgs(process.argv.slice(2));
 const bridgeEntry = path.join(packageRoot, "bridge-src", "index.ts");
-const bridgeAssetsDir = path.join(workspaceRoot, "crates", "execution", "assets");
+const bridgeAssetsDir = path.join(workspaceRoot, "crates", "v8-runtime", "assets");
 const bridgeSeamSourcefile = path.join(bridgeAssetsDir, "v8-bridge.generated-seam.js");
 const bridgeContract = path.join(
 	workspaceRoot,
@@ -40,14 +40,14 @@ const bridgeContract = path.join(
 const defaultBridgeOutput = path.join(
 	workspaceRoot,
 	"crates",
-	"execution",
+	"v8-runtime",
 	"assets",
 	"v8-bridge.js",
 );
 const defaultZlibBridgeOutput = path.join(
 	workspaceRoot,
 	"crates",
-	"execution",
+	"v8-runtime",
 	"assets",
 	"v8-bridge-zlib.js",
 );
@@ -67,7 +67,7 @@ const zlibBridgeTempOutput = `${zlibBridgeOutput}${tempSuffix}`;
 const undiciShimDir = path.join(
 	workspaceRoot,
 	"crates",
-	"execution",
+	"v8-runtime",
 	"assets",
 	"undici-shims",
 );

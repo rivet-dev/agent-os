@@ -346,7 +346,7 @@ pub struct JsRuntimeLimits {
     /// Maximum live timers owned by one VM execution. Each timer is also
     /// charged to the process-wide `runtime.resources.maxTimers` ledger.
     pub max_timers: usize,
-    /// V8 IPC codec frame cap. Must feed both codec sides (`crates/execution/src/v8_ipc.rs` and
+    /// V8 IPC codec frame cap. Must feed both codec sides (`crates/v8-runtime/src/adapter_ipc.rs` and
     /// `crates/v8-runtime/src/ipc_binary.rs`).
     pub v8_ipc_max_frame_bytes: u32,
 }

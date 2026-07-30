@@ -10,7 +10,15 @@ use nix::libc;
 // the portable anchor open mode.
 const O_PATH_ANCHOR: OFlag = OFlag::O_RDONLY;
 #[cfg(test)]
-use agentos_execution::ModuleFsReader;
+#[cfg(all(
+    test,
+    any(
+        feature = "node-v8",
+        feature = "python-v8-pyodide",
+        feature = "wasm-v8"
+    )
+))]
+use crate::executor::ModuleFsReader;
 use agentos_kernel::mount_plugin::{
     FileSystemPluginFactory, OpenFileSystemPluginRequest, PluginError,
 };
@@ -1766,7 +1774,7 @@ impl ModuleFsReader for HostDirModuleReader {
     fn canonical_guest_path(
         &mut self,
         guest_path: &str,
-    ) -> Result<Option<String>, agentos_execution::backend::HostServiceError> {
+    ) -> Result<Option<String>, crate::executor::backend::HostServiceError> {
         let Some((index, relative)) = self.mount_index_for(guest_path) else {
             return Ok(None);
         };
@@ -1782,7 +1790,7 @@ impl ModuleFsReader for HostDirModuleReader {
     fn read_to_string(
         &mut self,
         guest_path: &str,
-    ) -> Result<Option<String>, agentos_execution::backend::HostServiceError> {
+    ) -> Result<Option<String>, crate::executor::backend::HostServiceError> {
         let Some((index, relative)) = self.mount_index_for(guest_path) else {
             return Ok(None);
         };
@@ -1791,7 +1799,7 @@ impl ModuleFsReader for HostDirModuleReader {
             return Ok(None);
         };
         String::from_utf8(bytes).map(Some).map_err(|error| {
-            agentos_execution::backend::HostServiceError::new(
+            crate::executor::backend::HostServiceError::new(
                 "EILSEQ",
                 format!("module filesystem file {guest_path} is not valid UTF-8: {error}"),
             )
@@ -1801,7 +1809,7 @@ impl ModuleFsReader for HostDirModuleReader {
     fn path_is_dir(
         &mut self,
         guest_path: &str,
-    ) -> Result<Option<bool>, agentos_execution::backend::HostServiceError> {
+    ) -> Result<Option<bool>, crate::executor::backend::HostServiceError> {
         let Some((index, relative)) = self.mount_index_for(guest_path) else {
             return Ok(None);
         };
@@ -1816,7 +1824,7 @@ impl ModuleFsReader for HostDirModuleReader {
     fn path_exists(
         &mut self,
         guest_path: &str,
-    ) -> Result<bool, agentos_execution::backend::HostServiceError> {
+    ) -> Result<bool, crate::executor::backend::HostServiceError> {
         Ok(self.path_is_dir(guest_path)?.is_some())
     }
 }
@@ -1824,11 +1832,11 @@ impl ModuleFsReader for HostDirModuleReader {
 #[cfg(test)]
 fn module_vfs_optional<T>(
     result: VfsResult<T>,
-) -> Result<Option<T>, agentos_execution::backend::HostServiceError> {
+) -> Result<Option<T>, crate::executor::backend::HostServiceError> {
     match result {
         Ok(value) => Ok(Some(value)),
         Err(error) if matches!(error.code(), "ENOENT" | "ENOTDIR") => Ok(None),
-        Err(error) => Err(agentos_execution::backend::HostServiceError::new(
+        Err(error) => Err(crate::executor::backend::HostServiceError::new(
             error.code(),
             error.to_string(),
         )),
@@ -1937,7 +1945,7 @@ fn virtual_dirname(path: &str) -> String {
 #[cfg(test)]
 mod tar_module_reader_tests {
     use super::*;
-    use agentos_execution::{ModuleResolveMode, ModuleResolver};
+    use crate::executor::{ModuleResolveMode, ModuleResolver};
 
     #[test]
     fn tar_reader_resolves_packed_node_modules() {

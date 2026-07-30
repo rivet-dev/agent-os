@@ -1,5 +1,5 @@
 use super::super::*;
-use agentos_execution::host::{BoundedString, HttpHeader};
+use crate::executor::host::{BoundedString, HttpHeader};
 
 const HTTP_LOOPBACK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const VM_FETCH_STREAM_CHUNK_MAX_BYTES: usize = 64 * 1024;

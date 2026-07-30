@@ -1,8 +1,8 @@
 use super::*;
-use crate::state::ManagedHostNetRoute;
-use agentos_execution::host::{
+use crate::executor::host::{
     FilesystemOperation, SocketDomain as HostSocketDomain, SocketKind as HostSocketKind,
 };
+use crate::state::ManagedHostNetRoute;
 
 const SYNTHETIC_V8_TERMINATION_STDERR: &[u8] = b"Error: Execution terminated\n";
 
@@ -443,7 +443,7 @@ mod descendant_rpc_route_tests {
         for operation in ["SendDescriptorRights", "ReceiveDescriptorRights"] {
             assert!(
                 dispatcher.contains(&format!(
-                    "agentos_execution::host::NetworkOperation::{operation}"
+                    "crate::executor::host::NetworkOperation::{operation}"
                 )),
                 "descendant dispatcher does not classify {operation}"
             );
@@ -453,7 +453,7 @@ mod descendant_rpc_route_tests {
         ] {
             assert!(
                 dispatcher.contains(&format!(
-                    "agentos_execution::host::NetworkOperation::{operation}"
+                    "crate::executor::host::NetworkOperation::{operation}"
                 )),
                 "descendant dispatcher does not classify managed-fd {operation}"
             );
@@ -6177,6 +6177,7 @@ where
             }
 
             let (execution, runtime_control) = match resolved.runtime {
+                #[cfg(feature = "node-v8")]
                 GuestRuntimeKind::JavaScript => {
                     execution_env.extend(sanitize_javascript_child_process_internal_bootstrap_env(
                         &request.options.internal_bootstrap_env,
@@ -6258,6 +6259,10 @@ where
                     };
                     (ActiveExecution::Javascript(execution), runtime_control)
                 }
+                #[cfg(not(feature = "node-v8"))]
+                GuestRuntimeKind::JavaScript => {
+                    return Err(executor_feature_disabled("Node.js/V8", "node-v8"));
+                }
                 GuestRuntimeKind::WebAssembly => {
                     // These values configure the trusted WASM runner, not
                     // the guest-visible Linux environment.
@@ -6325,6 +6330,7 @@ where
                     };
                     (ActiveExecution::Wasm(Box::new(execution)), runtime_control)
                 }
+                #[cfg(feature = "python-v8-pyodide")]
                 GuestRuntimeKind::Python => {
                     // Nested `python` child_process: set up the Pyodide context the
                     // same way the top-level execute path does, so a guest shell or
@@ -6415,6 +6421,13 @@ where
                         }
                     };
                     (ActiveExecution::Python(execution), runtime_control)
+                }
+                #[cfg(not(feature = "python-v8-pyodide"))]
+                GuestRuntimeKind::Python => {
+                    return Err(executor_feature_disabled(
+                        "Python/V8/Pyodide",
+                        "python-v8-pyodide",
+                    ));
                 }
             };
             let kernel_stdin_writer_fd = if posix_spawn_controls_stdin {
@@ -6988,8 +7001,15 @@ where
             process.exit_core_dumped = false;
             process.clear_deferred_kernel_wait_rpc();
             discard_exec_signal_state(process);
-            process.module_resolution_cache = Default::default();
-            process.module_resolution_cache_generation = None;
+            #[cfg(any(
+                feature = "node-v8",
+                feature = "python-v8-pyodide",
+                feature = "wasm-v8"
+            ))]
+            {
+                process.module_resolution_cache = Default::default();
+                process.module_resolution_cache_generation = None;
+            }
             discard_replaced_image_pending_events(process);
             process.configure_current_execution_event_limits();
             rebind_process_runtime_event_targets(process, &kernel_readiness);
@@ -7139,8 +7159,15 @@ where
             process.exit_core_dumped = false;
             process.clear_deferred_kernel_wait_rpc();
             discard_exec_signal_state(process);
-            process.module_resolution_cache = Default::default();
-            process.module_resolution_cache_generation = None;
+            #[cfg(any(
+                feature = "node-v8",
+                feature = "python-v8-pyodide",
+                feature = "wasm-v8"
+            ))]
+            {
+                process.module_resolution_cache = Default::default();
+                process.module_resolution_cache_generation = None;
+            }
             discard_replaced_image_pending_events(process);
 
             return Ok(());
@@ -7159,6 +7186,7 @@ where
                 .into_owned(),
         );
         let mut replacement = match resolved.runtime {
+            #[cfg(feature = "node-v8")]
             GuestRuntimeKind::JavaScript => {
                 execution_env.extend(sanitize_javascript_child_process_internal_bootstrap_env(
                     &request.options.internal_bootstrap_env,
@@ -7229,6 +7257,10 @@ where
                 self.javascript_engine.dispose_context(&context_id);
                 ActiveExecution::Javascript(replacement_result.map_err(javascript_error)?)
             }
+            #[cfg(not(feature = "node-v8"))]
+            GuestRuntimeKind::JavaScript => {
+                return Err(executor_feature_disabled("Node.js/V8", "node-v8"));
+            }
             GuestRuntimeKind::WebAssembly => {
                 execution_env.extend(sanitize_javascript_child_process_internal_bootstrap_env(
                     &request.options.internal_bootstrap_env,
@@ -7279,6 +7311,7 @@ where
                 self.wasm_engine.dispose_context(&context_id);
                 ActiveExecution::Wasm(Box::new(replacement_result.map_err(wasm_error)?))
             }
+            #[cfg(feature = "python-v8-pyodide")]
             GuestRuntimeKind::Python => {
                 let python_file_path = if execution_env.contains_key("AGENTOS_PYTHON_ARGV") {
                     execution_env.get("AGENTOS_PYTHON_FILE").map(PathBuf::from)
@@ -7347,6 +7380,13 @@ where
                         });
                 self.python_engine.dispose_context(&context_id);
                 ActiveExecution::Python(replacement_result.map_err(python_error)?)
+            }
+            #[cfg(not(feature = "python-v8-pyodide"))]
+            GuestRuntimeKind::Python => {
+                return Err(executor_feature_disabled(
+                    "Python/V8/Pyodide",
+                    "python-v8-pyodide",
+                ));
             }
         };
 
@@ -7421,8 +7461,15 @@ where
         process.exit_core_dumped = false;
         process.clear_deferred_kernel_wait_rpc();
         discard_exec_signal_state(process);
-        process.module_resolution_cache = Default::default();
-        process.module_resolution_cache_generation = None;
+        #[cfg(any(
+            feature = "node-v8",
+            feature = "python-v8-pyodide",
+            feature = "wasm-v8"
+        ))]
+        {
+            process.module_resolution_cache = Default::default();
+            process.module_resolution_cache_generation = None;
+        }
         discard_replaced_image_pending_events(process);
         rebind_process_runtime_event_targets(process, &kernel_readiness);
 
@@ -7584,8 +7631,15 @@ where
         process.exit_core_dumped = false;
         process.clear_deferred_kernel_wait_rpc();
         discard_exec_signal_state(process);
-        process.module_resolution_cache = Default::default();
-        process.module_resolution_cache_generation = None;
+        #[cfg(any(
+            feature = "node-v8",
+            feature = "python-v8-pyodide",
+            feature = "wasm-v8"
+        ))]
+        {
+            process.module_resolution_cache = Default::default();
+            process.module_resolution_cache_generation = None;
+        }
         discard_replaced_image_pending_events(process);
         Ok(())
     }
@@ -8051,6 +8105,7 @@ where
                         .into_owned(),
                 );
                 let (execution, runtime_control) = match resolved.runtime {
+                    #[cfg(feature = "node-v8")]
                     GuestRuntimeKind::JavaScript => {
                         execution_env.extend(
                             sanitize_javascript_child_process_internal_bootstrap_env(
@@ -8130,6 +8185,10 @@ where
                         let execution = execution_result.map_err(javascript_error)?;
                         (ActiveExecution::Javascript(execution), runtime_control)
                     }
+                    #[cfg(not(feature = "node-v8"))]
+                    GuestRuntimeKind::JavaScript => {
+                        return Err(executor_feature_disabled("Node.js/V8", "node-v8"));
+                    }
                     GuestRuntimeKind::WebAssembly => {
                         execution_env.extend(
                             sanitize_javascript_child_process_internal_bootstrap_env(
@@ -8192,6 +8251,7 @@ where
                         let execution = execution_result.map_err(wasm_error)?;
                         (ActiveExecution::Wasm(Box::new(execution)), runtime_control)
                     }
+                    #[cfg(feature = "python-v8-pyodide")]
                     GuestRuntimeKind::Python => {
                         // Nested `python` child_process: set up the Pyodide context the
                         // same way the top-level execute path does, so a guest shell or
@@ -8273,6 +8333,13 @@ where
                         self.python_engine.dispose_context(&context_id);
                         let execution = execution_result.map_err(python_error)?;
                         (ActiveExecution::Python(execution), runtime_control)
+                    }
+                    #[cfg(not(feature = "python-v8-pyodide"))]
+                    GuestRuntimeKind::Python => {
+                        return Err(executor_feature_disabled(
+                            "Python/V8/Pyodide",
+                            "python-v8-pyodide",
+                        ));
                     }
                 };
                 let kernel_stdin_writer_fd = if posix_spawn_controls_stdin {
@@ -8884,7 +8951,7 @@ where
         vm_id: &str,
         root_process_id: &str,
         caller_process_path: &[&str],
-        operation: agentos_execution::host::FilesystemOperation,
+        operation: crate::executor::host::FilesystemOperation,
         reply: DirectHostReplyHandle,
     ) -> Result<(), SidecarError> {
         let (generation, caller_pid) = {
@@ -8958,7 +9025,7 @@ where
             .get_mut(vm_id)
             .expect("validated descriptor descendant VM remains registered");
         let result = match operation {
-            agentos_execution::host::FilesystemOperation::Close { fd } => {
+            crate::executor::host::FilesystemOperation::Close { fd } => {
                 host_dispatch::close_with_managed_retirement(
                     &bridge,
                     vm_id,
@@ -8968,7 +9035,7 @@ where
                     fd,
                 )
             }
-            agentos_execution::host::FilesystemOperation::CloseFrom { min_fd, exact_fds } => {
+            crate::executor::host::FilesystemOperation::CloseFrom { min_fd, exact_fds } => {
                 host_dispatch::closefrom_with_managed_retirement(
                     &bridge,
                     vm_id,
@@ -8979,9 +9046,9 @@ where
                     exact_fds,
                 )
             }
-            operation @ (agentos_execution::host::FilesystemOperation::Renumber { .. }
-            | agentos_execution::host::FilesystemOperation::DuplicateTo { .. }
-            | agentos_execution::host::FilesystemOperation::Move { .. }) => {
+            operation @ (crate::executor::host::FilesystemOperation::Renumber { .. }
+            | crate::executor::host::FilesystemOperation::DuplicateTo { .. }
+            | crate::executor::host::FilesystemOperation::Move { .. }) => {
                 host_dispatch::replace_descriptor_with_managed_retirement(
                     &bridge,
                     vm_id,
@@ -9064,7 +9131,7 @@ where
         vm_id: &str,
         root_process_id: &str,
         caller_process_path: &[&str],
-        operation: agentos_execution::host::NetworkOperation,
+        operation: crate::executor::host::NetworkOperation,
         reply: DirectHostReplyHandle,
     ) -> Result<(), SidecarError> {
         let Some(vm) = self.vms.get(vm_id) else {
@@ -9134,7 +9201,7 @@ where
         vm_id: &str,
         root_process_id: &str,
         caller_process_path: &[&str],
-        operation: agentos_execution::host::NetworkOperation,
+        operation: crate::executor::host::NetworkOperation,
         reply: DirectHostReplyHandle,
     ) -> Result<(), SidecarError> {
         let (generation, caller_pid) = {
@@ -9223,7 +9290,7 @@ where
                 .expect("validated managed-network root remains registered");
             let process = Self::active_process_by_path_mut(root, caller_process_path)
                 .expect("validated managed-network descendant remains registered");
-            use agentos_execution::host::NetworkOperation as HostNetworkOperation;
+            use crate::executor::host::NetworkOperation as HostNetworkOperation;
             let (response, label) = match operation {
                 operation @ (HostNetworkOperation::Socket { .. }
                 | HostNetworkOperation::Bind { .. }
@@ -10171,7 +10238,7 @@ where
         process_id: &str,
         child_path: &[&str],
         incoming: Option<(
-            agentos_execution::host::BoundedVec<agentos_execution::host::KernelPollInterest>,
+            crate::executor::host::BoundedVec<crate::executor::host::KernelPollInterest>,
             Option<Instant>,
             DirectHostReplyHandle,
         )>,
@@ -10246,9 +10313,9 @@ where
         process_id: &str,
         child_path: &[&str],
         incoming: (
-            agentos_execution::host::BoundedVec<agentos_execution::host::KernelPollInterest>,
+            crate::executor::host::BoundedVec<crate::executor::host::KernelPollInterest>,
             Option<Instant>,
-            Option<agentos_execution::host::SignalSetValue>,
+            Option<crate::executor::host::SignalSetValue>,
             Option<u32>,
             DirectHostReplyHandle,
         ),
@@ -10305,7 +10372,7 @@ where
         child_path: &[&str],
         incoming: Option<(
             u32,
-            agentos_execution::host::BoundedUsize,
+            crate::executor::host::BoundedUsize,
             Instant,
             DirectHostReplyHandle,
         )>,
@@ -10345,7 +10412,7 @@ where
         process_id: &str,
         child_path: &[&str],
         incoming: Option<(
-            agentos_execution::host::BoundedUsize,
+            crate::executor::host::BoundedUsize,
             Instant,
             DirectHostReplyHandle,
         )>,
@@ -10719,7 +10786,7 @@ where
                     if matches!(
                         operation,
                         HostOperation::Filesystem(
-                            agentos_execution::host::FilesystemOperation::Snapshot
+                            crate::executor::host::FilesystemOperation::Snapshot
                         )
                     ) {
                         self.dispatch_descendant_context_fd_snapshot(
@@ -10739,7 +10806,7 @@ where
                         );
                     let deferred_kernel_read = match &operation {
                         HostOperation::Filesystem(
-                            agentos_execution::host::FilesystemOperation::Read {
+                            crate::executor::host::FilesystemOperation::Read {
                                 fd,
                                 max_bytes,
                                 offset: None,
@@ -10751,7 +10818,7 @@ where
                             deadline_ms.unwrap_or(default_blocking_read_ms),
                         )),
                         HostOperation::Filesystem(
-                            agentos_execution::host::FilesystemOperation::StdinRead {
+                            crate::executor::host::FilesystemOperation::StdinRead {
                                 max_bytes,
                                 timeout_ms,
                             },
@@ -10786,13 +10853,21 @@ where
                     }
                     let descriptor_operation = match &operation {
                         HostOperation::Filesystem(
-                            operation @ (agentos_execution::host::FilesystemOperation::Close {
+                            operation @ (crate::executor::host::FilesystemOperation::Close {
                                 ..
                             }
-                            | agentos_execution::host::FilesystemOperation::CloseFrom { .. }
-                            | agentos_execution::host::FilesystemOperation::Renumber { .. }
-                            | agentos_execution::host::FilesystemOperation::DuplicateTo { .. }
-                            | agentos_execution::host::FilesystemOperation::Move { .. }),
+                            | crate::executor::host::FilesystemOperation::CloseFrom {
+                                ..
+                            }
+                            | crate::executor::host::FilesystemOperation::Renumber {
+                                ..
+                            }
+                            | crate::executor::host::FilesystemOperation::DuplicateTo {
+                                ..
+                            }
+                            | crate::executor::host::FilesystemOperation::Move {
+                                ..
+                            }),
                         ) => Some(operation.clone()),
                         _ => None,
                     };
@@ -10808,7 +10883,7 @@ where
                     }
                     let deferred_posix_poll = match &operation {
                         HostOperation::Network(
-                            agentos_execution::host::NetworkOperation::PosixPoll {
+                            crate::executor::host::NetworkOperation::PosixPoll {
                                 interests,
                                 timeout_ms,
                                 signal_mask,
@@ -10845,7 +10920,7 @@ where
                     }
                     let deferred_kernel_poll = match &operation {
                         HostOperation::Network(
-                            agentos_execution::host::NetworkOperation::KernelPoll {
+                            crate::executor::host::NetworkOperation::KernelPoll {
                                 interests,
                                 timeout_ms,
                             },
@@ -10875,8 +10950,8 @@ where
                         HostOperation::Network(operation)
                             if matches!(
                                 operation,
-                                agentos_execution::host::NetworkOperation::ResolveDns { .. }
-                                    | agentos_execution::host::NetworkOperation::ResolveDnsRecord { .. }
+                                crate::executor::host::NetworkOperation::ResolveDns { .. }
+                                    | crate::executor::host::NetworkOperation::ResolveDnsRecord { .. }
                             ) =>
                         {
                             Some(operation.clone())
@@ -10895,7 +10970,7 @@ where
                     }
                     let descendant_udp_poll = match &operation {
                         HostOperation::Network(
-                            operation @ agentos_execution::host::NetworkOperation::ManagedUdpPoll {
+                            operation @ crate::executor::host::NetworkOperation::ManagedUdpPoll {
                                 ..
                             },
                         ) => Some(operation.clone()),
@@ -10914,7 +10989,7 @@ where
                     }
                     let descendant_stream_read = match &operation {
                         HostOperation::Network(
-                            agentos_execution::host::NetworkOperation::ManagedRead {
+                            crate::executor::host::NetworkOperation::ManagedRead {
                                 socket_id,
                                 max_bytes,
                                 peek,
@@ -10941,40 +11016,40 @@ where
                         HostOperation::Network(operation)
                             if matches!(
                                 operation,
-                                agentos_execution::host::NetworkOperation::Socket { .. }
-                                    | agentos_execution::host::NetworkOperation::Bind { .. }
-                                    | agentos_execution::host::NetworkOperation::Connect { .. }
-                                    | agentos_execution::host::NetworkOperation::Listen { .. }
-                                    | agentos_execution::host::NetworkOperation::Accept { .. }
-                                    | agentos_execution::host::NetworkOperation::Validate { .. }
-                                    | agentos_execution::host::NetworkOperation::Receive { .. }
-                                    | agentos_execution::host::NetworkOperation::Send { .. }
-                                    | agentos_execution::host::NetworkOperation::LocalAddress { .. }
-                                    | agentos_execution::host::NetworkOperation::PeerAddress { .. }
-                                    | agentos_execution::host::NetworkOperation::GetOption { .. }
-                                    | agentos_execution::host::NetworkOperation::SetOption { .. }
-                                    | agentos_execution::host::NetworkOperation::Poll { .. }
-                                    | agentos_execution::host::NetworkOperation::TlsConnect { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedBindUnix { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedBindConnectedUnix { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedReserveTcpPort { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedReleaseTcpPort { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedConnect { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedListen { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedPoll { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedWaitConnect { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedRead { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedWrite { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedDestroy { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedAccept { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedCloseListener { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedTlsUpgrade { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedUdpCreate { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedUdpBind { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedUdpSend { .. }
-                                    | agentos_execution::host::NetworkOperation::ManagedUdpClose { .. }
-                                    | agentos_execution::host::NetworkOperation::SendDescriptorRights { .. }
-                                    | agentos_execution::host::NetworkOperation::ReceiveDescriptorRights { .. }
+                                crate::executor::host::NetworkOperation::Socket { .. }
+                                    | crate::executor::host::NetworkOperation::Bind { .. }
+                                    | crate::executor::host::NetworkOperation::Connect { .. }
+                                    | crate::executor::host::NetworkOperation::Listen { .. }
+                                    | crate::executor::host::NetworkOperation::Accept { .. }
+                                    | crate::executor::host::NetworkOperation::Validate { .. }
+                                    | crate::executor::host::NetworkOperation::Receive { .. }
+                                    | crate::executor::host::NetworkOperation::Send { .. }
+                                    | crate::executor::host::NetworkOperation::LocalAddress { .. }
+                                    | crate::executor::host::NetworkOperation::PeerAddress { .. }
+                                    | crate::executor::host::NetworkOperation::GetOption { .. }
+                                    | crate::executor::host::NetworkOperation::SetOption { .. }
+                                    | crate::executor::host::NetworkOperation::Poll { .. }
+                                    | crate::executor::host::NetworkOperation::TlsConnect { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedBindUnix { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedBindConnectedUnix { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedReserveTcpPort { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedReleaseTcpPort { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedConnect { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedListen { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedPoll { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedWaitConnect { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedRead { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedWrite { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedDestroy { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedAccept { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedCloseListener { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedTlsUpgrade { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedUdpCreate { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedUdpBind { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedUdpSend { .. }
+                                    | crate::executor::host::NetworkOperation::ManagedUdpClose { .. }
+                                    | crate::executor::host::NetworkOperation::SendDescriptorRights { .. }
+                                    | crate::executor::host::NetworkOperation::ReceiveDescriptorRights { .. }
                             ) => Some(operation.clone()),
                         _ => None,
                     };

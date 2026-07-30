@@ -921,7 +921,7 @@ where
                 .get_mut(&vm_id)
                 .ok_or_else(|| SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}")))?;
             if !vm.typescript_compiler_staged {
-                let assets = agentos_execution::bundled_typescript_assets();
+                let assets = crate::executor::bundled_typescript_assets();
                 if assets.is_empty() {
                     return Err(SidecarError::InvalidState(String::from(
                         "bundled TypeScript compiler is unavailable in this build",

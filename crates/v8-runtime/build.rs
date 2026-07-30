@@ -2,6 +2,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod build_assets;
+
 fn cargo_home() -> PathBuf {
     if let Some(home) = env::var_os("CARGO_HOME") {
         return PathBuf::from(home);
@@ -154,6 +156,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     agentos_build_support::build_v8_bridge(&manifest_dir, &out_dir);
+    build_assets::stage_executor_assets();
 
     let v8_version = read_v8_version(&lock_path);
     let v8_crate_root = find_v8_crate_root(&v8_version);

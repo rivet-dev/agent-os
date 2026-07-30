@@ -572,7 +572,7 @@ crates/kernel/src/
   process_runtime.rs        runtime endpoint, control requests, exit reporter
   signal.rs                 dispositions and delivery checkpoints
 
-crates/execution/src/
+crates/executor-contract/src/
   backend/
     mod.rs                  common lifecycle/event contract
     control.rs              engine-side endpoint helpers
@@ -588,9 +588,11 @@ crates/execution/src/
     identity.rs
     clock.rs
 
-crates/native-sidecar/src/execution/
-  registry.rs               PID/generation to backend + wake/control handles
-  host/
+crates/native-sidecar/src/
+  executor.rs               concrete-engine composition and dispatch
+  execution/
+    process.rs              PID/generation lifecycle and event routing
+    host_dispatch/
     filesystem.rs           kernel/mount-backed filesystem operations
     network.rs              kernel/native transport capability operations
     process.rs
@@ -604,10 +606,10 @@ The exact file split can follow the implementation, but these ownership
 boundaries are normative. Do not put every operation in one `executor.rs`, one
 `host.rs`, or one mega-trait.
 
-A later `agentos-executor-host` crate remains unjustified. The resource leaf
-crate exists for the proven kernel/runtime/VFS cycle; creating another crate
-merely to hold executor traits would add packaging and versioning cost without
-improving ownership.
+`agentos-executor-contract` is the proven shared contract boundary. A second
+host-contract crate remains unjustified; implementation adapters stay in the
+sidecar and concrete engine code stays in independently feature-gated executor
+crates.
 
 ## 12. Prerequisite-revision workstream sequence
 

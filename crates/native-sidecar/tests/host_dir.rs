@@ -1,6 +1,10 @@
 // The source is `include!`d wholesale but this test only exercises the
 // filesystem-plugin subset, so items used elsewhere in the crate (e.g. the
 // session-thread `SessionModuleReader`) are legitimately unused here.
+mod executor {
+    pub use agentos_native_sidecar::executor::*;
+}
+
 #[allow(dead_code)]
 mod host_dir {
     include!("../src/plugins/host_dir.rs");

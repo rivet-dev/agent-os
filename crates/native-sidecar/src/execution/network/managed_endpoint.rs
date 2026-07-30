@@ -1,5 +1,5 @@
 use super::super::*;
-use agentos_execution::host::{
+use crate::executor::host::{
     ManagedTcpEndpoint, ManagedUnixAddress, NetworkOperation as HostNetworkOperation,
 };
 
@@ -706,7 +706,7 @@ where
 fn connect_unix_endpoint<B>(
     context: ManagedEndpointServiceContext<'_, B>,
     address: ManagedUnixAddress,
-    bound_server_id: Option<agentos_execution::host::BoundedString>,
+    bound_server_id: Option<crate::executor::host::BoundedString>,
 ) -> Result<HostServiceResponse, SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,

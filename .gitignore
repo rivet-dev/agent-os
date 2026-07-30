@@ -90,10 +90,10 @@ scripts/ralph/.codex-last-msg-*
 # Local caches and stray outputs
 .agentos/
 .cache/
-crates/execution/assets/v8-bridge.js
-crates/execution/assets/v8-bridge-zlib.js
-crates/execution/.agentos-pyodide-cache/
-crates/execution/async-out.txt
+crates/v8-runtime/assets/v8-bridge.js
+crates/v8-runtime/assets/v8-bridge-zlib.js
+crates/v8-runtime/.agentos-pyodide-cache/
+crates/executor-conformance/async-out.txt
 crates/sidecar/.tmp-sidecar-tests/
 packages/browser/.cache/
 packages/runtime-core/.cache/
@@ -101,7 +101,6 @@ registry/agent/pi/.cache/
 scripts/benchmarks/results/
 
 # Vendored V8 bridge bundles staged at release time for crates.io publishing
-crates/execution/assets/generated/
 crates/v8-runtime/assets/generated/
 
 # Transient repro scratch files and Vite/Vitest config timestamp artifacts

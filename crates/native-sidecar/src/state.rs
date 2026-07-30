@@ -3,6 +3,21 @@
 //! Contains VM state, session state, configuration types, active process/socket
 //! types, and other shared data structures extracted from service.rs.
 
+#[cfg(feature = "node-v8")]
+use crate::executor::JavascriptExecution;
+#[cfg(feature = "python-v8-pyodide")]
+use crate::executor::PythonExecution;
+use crate::executor::{
+    backend::{
+        DescendantOutputOwnership, DescendantWaitOwnership, DirectHostReplyHandle,
+        ExecutionBackendKind, ExecutionEvent, ExecutionWakeHandle, HostServiceError,
+    },
+    host::{
+        BoundedUsize, BoundedVec, KernelPollInterest, SocketAddress,
+        SocketDomain as HostSocketDomain, SocketKind as HostSocketKind, WaitTarget,
+    },
+    HostRpcRequest, StandaloneWasmBackend, WasmExecution,
+};
 use crate::protocol::{
     ExecutionCompletedResponse, ExecutionDescriptor, ExecutionOutputCapture, ExecutionOutputEvent,
     GuestRuntimeKind, MountDescriptor, ProjectedModuleDescriptor, RegisterHostCallbacksRequest,
@@ -13,17 +28,6 @@ use crate::wire::DEFAULT_MAX_FRAME_BYTES;
 use agentos_bridge::{
     queue_tracker::{self, QueueGauge, TrackedLimit},
     BridgeTypes, FilesystemSnapshot,
-};
-use agentos_execution::{
-    backend::{
-        DescendantOutputOwnership, DescendantWaitOwnership, DirectHostReplyHandle,
-        ExecutionBackendKind, ExecutionEvent, ExecutionWakeHandle, HostServiceError,
-    },
-    host::{
-        BoundedUsize, BoundedVec, KernelPollInterest, SocketAddress,
-        SocketDomain as HostSocketDomain, SocketKind as HostSocketKind, WaitTarget,
-    },
-    HostRpcRequest, JavascriptExecution, PythonExecution, StandaloneWasmBackend, WasmExecution,
 };
 use agentos_kernel::fd_table::TransferredFd;
 use agentos_kernel::kernel::{KernelProcessHandle, KernelVm};
@@ -874,7 +878,7 @@ impl Default for NativeSidecarConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidecarError {
     ResourceLimit(agentos_runtime_tokio::accounting::LimitError),
-    Host(agentos_execution::backend::HostServiceError),
+    Host(crate::executor::backend::HostServiceError),
     InvalidState(String),
     ProtocolVersionMismatch(String),
     BridgeVersionMismatch(String),
@@ -892,7 +896,7 @@ pub enum SidecarError {
 
 impl SidecarError {
     pub(crate) fn host(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::Host(agentos_execution::backend::HostServiceError::new(
+        Self::Host(crate::executor::backend::HostServiceError::new(
             code, message,
         ))
     }
@@ -912,16 +916,13 @@ impl SidecarError {
         message: impl Into<String>,
     ) -> Self {
         Self::Host(
-            agentos_execution::backend::HostServiceError::new(
-                "ERR_AGENTOS_RESOURCE_LIMIT",
-                message,
-            )
-            .with_details(serde_json::json!({
-                "limitName": limit_name,
-                "limit": limit,
-                "observed": observed,
-                "configPath": limit_name,
-            })),
+            crate::executor::backend::HostServiceError::new("ERR_AGENTOS_RESOURCE_LIMIT", message)
+                .with_details(serde_json::json!({
+                    "limitName": limit_name,
+                    "limit": limit,
+                    "observed": observed,
+                    "configPath": limit_name,
+                })),
         )
     }
 }
@@ -952,8 +953,8 @@ impl fmt::Display for SidecarError {
 
 impl Error for SidecarError {}
 
-impl From<agentos_execution::backend::HostServiceError> for SidecarError {
-    fn from(error: agentos_execution::backend::HostServiceError) -> Self {
+impl From<crate::executor::backend::HostServiceError> for SidecarError {
+    fn from(error: crate::executor::backend::HostServiceError) -> Self {
         Self::Host(error)
     }
 }
@@ -1606,8 +1607,8 @@ pub(crate) struct ActiveProcess {
     pub(crate) common_event_notify: Arc<Mutex<Arc<Notify>>>,
     /// Runtime-neutral host services and their bounded common-event receiver.
     /// Neither side retains an executor-specific object.
-    pub(crate) host_capabilities: agentos_execution::host::ProcessHostCapabilitySet,
-    pub(crate) common_execution_events: agentos_execution::backend::ExecutionEventReceiver,
+    pub(crate) host_capabilities: crate::executor::host::ProcessHostCapabilitySet,
+    pub(crate) common_execution_events: crate::executor::backend::ExecutionEventReceiver,
     /// Durable event backlog bound inherited from
     /// `runtime.protocol.maxProcessEvents` when this process is admitted.
     pub(crate) process_event_capacity: usize,
@@ -1729,8 +1730,18 @@ pub(crate) struct ActiveProcess {
     /// kernel VFS and the cache is invalidated before the next module RPC when
     /// its mutation generation changes, so the kernel remains the source of
     /// truth without rebuilding large immutable package graphs every dispatch.
-    pub(crate) module_resolution_cache: agentos_execution::LocalModuleResolutionCache,
+    #[cfg(any(
+        feature = "node-v8",
+        feature = "python-v8-pyodide",
+        feature = "wasm-v8"
+    ))]
+    pub(crate) module_resolution_cache: crate::executor::LocalModuleResolutionCache,
     /// Kernel VFS generation represented by `module_resolution_cache`.
+    #[cfg(any(
+        feature = "node-v8",
+        feature = "python-v8-pyodide",
+        feature = "wasm-v8"
+    ))]
     pub(crate) module_resolution_cache_generation: Option<u64>,
 }
 
@@ -2122,7 +2133,7 @@ impl SocketEventPusher {
     pub(crate) fn publish_readiness(
         &self,
         flags: agentos_runtime_tokio::readiness::ReadyFlags,
-    ) -> Result<bool, agentos_execution::backend::ExecutionWakeError> {
+    ) -> Result<bool, crate::executor::backend::ExecutionWakeError> {
         if !self.is_live() {
             return Ok(false);
         }
@@ -2131,7 +2142,7 @@ impl SocketEventPusher {
             session.publish_readiness(
                 self.capability_id,
                 self.capability_generation,
-                agentos_execution::backend::ExecutionReadyFlags::from_bits(flags.bits()),
+                crate::executor::backend::ExecutionReadyFlags::from_bits(flags.bits()),
             )?;
         }
         Ok(true)
@@ -3149,7 +3160,9 @@ pub(crate) struct ManagedLanguageExecution {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)] // execution state is process-registry owned and preserves backend drop affinity
 pub(crate) enum ActiveExecution {
+    #[cfg(feature = "node-v8")]
     Javascript(JavascriptExecution),
+    #[cfg(feature = "python-v8-pyodide")]
     Python(PythonExecution),
     Wasm(Box<WasmExecution>),
     Binding(BindingExecution),
@@ -3165,13 +3178,13 @@ pub(crate) struct BindingExecution {
     pub(crate) pause_notify: Arc<Notify>,
     pub(crate) pending_events: Arc<Mutex<VecDeque<ActiveExecutionEvent>>>,
     pub(crate) event_overflow_reason:
-        Arc<Mutex<Option<agentos_execution::backend::HostServiceError>>>,
+        Arc<Mutex<Option<crate::executor::backend::HostServiceError>>>,
     pub(crate) pending_event_bytes: Arc<AtomicUsize>,
     pub(crate) pending_event_count_limit: Arc<AtomicUsize>,
     pub(crate) pending_event_bytes_limit: Arc<AtomicUsize>,
     pub(crate) vm_pending_event_bytes_budget: Arc<VmPendingByteBudget>,
     pub(crate) event_notify: Arc<Notify>,
-    pub(crate) host_capabilities: Option<agentos_execution::host::ProcessHostCapabilitySet>,
+    pub(crate) host_capabilities: Option<crate::executor::host::ProcessHostCapabilitySet>,
     pub(crate) descendant_wait_ownership: DescendantWaitOwnership,
     pub(crate) descendant_output_ownership: DescendantOutputOwnership,
 }
@@ -3316,8 +3329,8 @@ pub(crate) struct DeferredRpcError {
     pub(crate) details: Option<Value>,
 }
 
-impl From<agentos_execution::backend::HostServiceError> for DeferredRpcError {
-    fn from(error: agentos_execution::backend::HostServiceError) -> Self {
+impl From<crate::executor::backend::HostServiceError> for DeferredRpcError {
+    fn from(error: crate::executor::backend::HostServiceError) -> Self {
         Self {
             code: error.code,
             message: error.message,
@@ -3328,7 +3341,7 @@ impl From<agentos_execution::backend::HostServiceError> for DeferredRpcError {
 
 impl From<DeferredRpcError> for SidecarError {
     fn from(error: DeferredRpcError) -> Self {
-        Self::Host(agentos_execution::backend::HostServiceError {
+        Self::Host(crate::executor::backend::HostServiceError {
             code: error.code,
             message: error.message,
             details: error.details,
@@ -3704,8 +3717,8 @@ mod async_completion_tests {
 #[cfg(test)]
 mod socket_readiness_registry_tests {
     use super::*;
-    use agentos_execution::backend::{ExecutionWakeError, ExecutionWakeTarget};
-    use agentos_execution::v8_host::V8RuntimeHost;
+    use crate::executor::backend::{ExecutionWakeError, ExecutionWakeTarget};
+    use crate::executor::v8_host::V8RuntimeHost;
     use agentos_runtime_tokio::accounting::ResourceLimit;
 
     #[derive(Default)]
@@ -3718,7 +3731,7 @@ mod socket_readiness_registry_tests {
             &self,
             _capability_id: u64,
             _capability_generation: u64,
-            _flags: agentos_execution::backend::ExecutionReadyFlags,
+            _flags: crate::executor::backend::ExecutionReadyFlags,
         ) -> Result<(), ExecutionWakeError> {
             self.readiness_publishes.fetch_add(1, Ordering::AcqRel);
             Ok(())
@@ -3832,7 +3845,7 @@ mod socket_readiness_registry_tests {
         );
         let wake_target = Arc::new(RecordingWakeTarget::default());
         let session = ExecutionWakeHandle::new(
-            agentos_execution::backend::ExecutionWakeIdentity {
+            crate::executor::backend::ExecutionWakeIdentity {
                 generation: 1,
                 pid: 1,
             },
@@ -3913,7 +3926,7 @@ mod socket_readiness_registry_tests {
         let host = V8RuntimeHost::spawn(&process_runtime.context())
             .expect("spawn subscriber test V8 host");
         let session = ExecutionWakeHandle::new(
-            agentos_execution::backend::ExecutionWakeIdentity {
+            crate::executor::backend::ExecutionWakeIdentity {
                 generation: 1,
                 pid: 1,
             },

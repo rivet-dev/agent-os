@@ -16,19 +16,19 @@ pub(in crate::execution) struct ManagedNetworkServiceContext<'a> {
 
 pub(in crate::execution) fn service_managed_network_operation(
     context: ManagedNetworkServiceContext<'_>,
-    operation: agentos_execution::host::NetworkOperation,
+    operation: crate::executor::host::NetworkOperation,
 ) -> Result<HostServiceResponse, SidecarError> {
     match operation {
-        agentos_execution::host::NetworkOperation::ManagedPoll { socket_id, wait_ms } => {
+        crate::executor::host::NetworkOperation::ManagedPoll { socket_id, wait_ms } => {
             managed_socket_poll(context, socket_id.as_str(), wait_ms)
         }
-        agentos_execution::host::NetworkOperation::ManagedRead {
+        crate::executor::host::NetworkOperation::ManagedRead {
             socket_id,
             max_bytes,
             peek,
             wait_ms,
         } => managed_socket_read(context, socket_id.as_str(), max_bytes, peek, wait_ms),
-        agentos_execution::host::NetworkOperation::ManagedWaitConnect { socket_id } => {
+        crate::executor::host::NetworkOperation::ManagedWaitConnect { socket_id } => {
             let info = if let Some(socket) = context.process.tcp_sockets.get(socket_id.as_str()) {
                 socket.socket_info()
             } else {
@@ -49,10 +49,10 @@ pub(in crate::execution) fn service_managed_network_operation(
                 .map(HostServiceResponse::Json)
                 .map_err(|error| SidecarError::host("EIO", format!("encode socket info: {error}")))
         }
-        agentos_execution::host::NetworkOperation::ManagedWrite { socket_id, bytes } => {
+        crate::executor::host::NetworkOperation::ManagedWrite { socket_id, bytes } => {
             managed_socket_write(context, socket_id.as_str(), bytes.as_slice())
         }
-        agentos_execution::host::NetworkOperation::ManagedDestroy { socket_id } => {
+        crate::executor::host::NetworkOperation::ManagedDestroy { socket_id } => {
             if let Some(socket) = context.process.tcp_sockets.remove(socket_id.as_str()) {
                 release_tcp_socket_handle(
                     context.process,
@@ -71,14 +71,14 @@ pub(in crate::execution) fn service_managed_network_operation(
             }
             Ok(Value::Null.into())
         }
-        agentos_execution::host::NetworkOperation::ManagedTlsUpgrade {
+        crate::executor::host::NetworkOperation::ManagedTlsUpgrade {
             socket_id,
             options_json,
         } => managed_tls_upgrade(context, socket_id.as_str(), options_json.as_str()),
-        agentos_execution::host::NetworkOperation::ManagedCloseListener { listener_id } => {
+        crate::executor::host::NetworkOperation::ManagedCloseListener { listener_id } => {
             managed_close_listener(context, listener_id.as_str())
         }
-        agentos_execution::host::NetworkOperation::ManagedAccept { listener_id } => {
+        crate::executor::host::NetworkOperation::ManagedAccept { listener_id } => {
             managed_accept(context, listener_id.as_str())
         }
         other => Err(SidecarError::host(

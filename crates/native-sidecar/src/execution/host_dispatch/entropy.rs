@@ -1,5 +1,5 @@
 use super::*;
-use agentos_execution::host::EntropyOperation;
+use crate::executor::host::EntropyOperation;
 
 pub(super) struct EntropyCapability;
 

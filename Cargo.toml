@@ -9,8 +9,12 @@ members = [
     "crates/client",
     "crates/bridge",
     "crates/build-support",
-    "crates/execution",
+    "crates/executor-conformance",
     "crates/executor-contract",
+    "crates/executor-node-v8",
+    "crates/executor-python-v8-pyodide",
+    "crates/executor-wasm-v8",
+    "crates/executor-wasm-wasmtime",
     "crates/kernel",
     "crates/native-baseline",
     "crates/native-sidecar",
@@ -25,6 +29,7 @@ members = [
     "crates/vfs-store",
     "crates/vm-config",
     "crates/wasm-abi-generator",
+    "crates/wasm-common",
 ]
 # Browser support is intentionally retained in-tree but disabled while the
 # unified native sidecar reactor lands. Keep these two crates out of ordinary
@@ -35,8 +40,12 @@ default-members = [
     "crates/client",
     "crates/bridge",
     "crates/build-support",
-    "crates/execution",
+    "crates/executor-conformance",
     "crates/executor-contract",
+    "crates/executor-node-v8",
+    "crates/executor-python-v8-pyodide",
+    "crates/executor-wasm-v8",
+    "crates/executor-wasm-wasmtime",
     "crates/kernel",
     "crates/native-baseline",
     "crates/native-sidecar",
@@ -49,6 +58,7 @@ default-members = [
     "crates/vfs",
     "crates/vfs-store",
     "crates/vm-config",
+    "crates/wasm-common",
 ]
 
 [workspace.package]
@@ -64,8 +74,11 @@ agent-client-protocol-schema = "1.4.0"
 agentos-actor-uds-client = { path = "crates/actor-uds-client", version = "0.0.1" }
 agentos-bridge = { path = "crates/bridge", version = "0.0.1" }
 agentos-build-support = { path = "crates/build-support", version = "0.0.1" }
-agentos-execution = { path = "crates/execution", version = "0.0.1" }
 agentos-executor-contract = { path = "crates/executor-contract", version = "0.0.1" }
+agentos-executor-node-v8 = { path = "crates/executor-node-v8", version = "0.0.1" }
+agentos-executor-python-v8-pyodide = { path = "crates/executor-python-v8-pyodide", version = "0.0.1" }
+agentos-executor-wasm-v8 = { path = "crates/executor-wasm-v8", version = "0.0.1" }
+agentos-executor-wasm-wasmtime = { path = "crates/executor-wasm-wasmtime", version = "0.0.1" }
 agentos-kernel = { path = "crates/kernel", version = "0.0.1" }
 agentos-native-baseline = { path = "crates/native-baseline", version = "0.0.1" }
 agentos-native-sidecar = { path = "crates/native-sidecar", version = "0.0.1" }
@@ -81,6 +94,7 @@ agentos-sidecar-protocol = { path = "crates/sidecar-protocol", version = "0.0.1"
 agentos-v8-runtime = { path = "crates/v8-runtime", version = "0.0.1" }
 agentos-vfs = { path = "crates/vfs-store", version = "0.0.1" }
 agentos-vm-config = { path = "crates/vm-config", version = "0.0.1" }
+agentos-wasm-common = { path = "crates/wasm-common", version = "0.0.1" }
 vfs = { package = "agentos-vfs-core", path = "crates/vfs", version = "0.0.1" }
 vbare = "0.0.4"
 vbare-compiler = { package = "rivet-vbare-compiler", version = "0.0.5" }

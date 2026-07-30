@@ -130,15 +130,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentos-execution"
+name = "agentos-executor-conformance"
 version = "0.0.1"
 dependencies = [
  "agentos-bridge",
- "agentos-build-support",
  "agentos-executor-contract",
+ "agentos-executor-node-v8",
+ "agentos-executor-python-v8-pyodide",
+ "agentos-executor-wasm-v8",
+ "agentos-executor-wasm-wasmtime",
+ "agentos-native-sidecar",
  "agentos-runtime-tokio",
  "agentos-v8-runtime",
  "agentos-wasm-abi-generator",
+ "agentos-wasm-common",
  "base64",
  "ciborium",
  "flume",
@@ -151,8 +156,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "wasmparser 0.251.0",
- "wasmtime",
  "wat",
 ]
 
@@ -163,6 +166,68 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+]
+
+[[package]]
+name = "agentos-executor-node-v8"
+version = "0.0.1"
+dependencies = [
+ "agentos-executor-contract",
+ "agentos-runtime-tokio",
+ "agentos-v8-runtime",
+ "tempfile",
+]
+
+[[package]]
+name = "agentos-executor-python-v8-pyodide"
+version = "0.0.1"
+dependencies = [
+ "agentos-bridge",
+ "agentos-executor-contract",
+ "agentos-runtime-tokio",
+ "agentos-v8-runtime",
+ "base64",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "agentos-executor-wasm-v8"
+version = "0.0.1"
+dependencies = [
+ "agentos-bridge",
+ "agentos-executor-contract",
+ "agentos-runtime-tokio",
+ "agentos-v8-runtime",
+ "agentos-wasm-common",
+ "base64",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "wat",
+]
+
+[[package]]
+name = "agentos-executor-wasm-wasmtime"
+version = "0.0.1"
+dependencies = [
+ "agentos-executor-contract",
+ "agentos-runtime-tokio",
+ "agentos-wasm-common",
+ "base64",
+ "ciborium",
+ "flume",
+ "nix 0.29.0",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "wasmtime",
+ "wat",
 ]
 
 [[package]]
@@ -193,15 +258,21 @@ dependencies = [
  "aes-gcm",
  "agentos-actor-uds-client",
  "agentos-bridge",
- "agentos-execution",
+ "agentos-executor-contract",
+ "agentos-executor-node-v8",
+ "agentos-executor-python-v8-pyodide",
+ "agentos-executor-wasm-v8",
+ "agentos-executor-wasm-wasmtime",
  "agentos-kernel",
  "agentos-native-sidecar-core",
  "agentos-runtime-tokio",
  "agentos-sidecar-protocol",
+ "agentos-v8-runtime",
  "agentos-vfs",
  "agentos-vfs-core",
  "agentos-vm-config",
  "agentos-wasm-abi-generator",
+ "agentos-wasm-common",
  "async-trait",
  "aws-config",
  "aws-credential-types",
@@ -396,16 +467,22 @@ version = "0.0.1"
 dependencies = [
  "agentos-bridge",
  "agentos-build-support",
+ "agentos-executor-contract",
  "agentos-runtime-tokio",
  "cc",
  "ciborium",
  "crossbeam-channel",
  "flume",
+ "getrandom 0.2.17",
  "libc",
+ "nix 0.29.0",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "signal-hook",
+ "tempfile",
  "tokio",
+ "tracing",
  "v8",
 ]
 
@@ -465,6 +542,16 @@ dependencies = [
  "serde_json",
  "wat",
  "witx",
+]
+
+[[package]]
+name = "agentos-wasm-common"
+version = "0.0.1"
+dependencies = [
+ "agentos-executor-contract",
+ "serde",
+ "wasmparser 0.251.0",
+ "wat",
 ]
 
 [[package]]

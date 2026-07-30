@@ -1,6 +1,6 @@
 use super::super::*;
-use agentos_execution::backend::{HostServiceError, PayloadLimit};
-use agentos_execution::host::HttpHeader;
+use crate::executor::backend::{HostServiceError, PayloadLimit};
+use crate::executor::host::HttpHeader;
 
 pub(in crate::execution) struct BoundedHttpRequest {
     pub(in crate::execution) url: Url,
@@ -261,9 +261,9 @@ mod tests {
     fn header(name: &str, value: &str) -> HttpHeader {
         let limit = PayloadLimit::new("test.http.metadata", 1024).expect("metadata limit");
         HttpHeader {
-            name: agentos_execution::host::BoundedString::try_new(name.to_owned(), &limit)
+            name: crate::executor::host::BoundedString::try_new(name.to_owned(), &limit)
                 .expect("header name"),
-            value: agentos_execution::host::BoundedString::try_new(value.to_owned(), &limit)
+            value: crate::executor::host::BoundedString::try_new(value.to_owned(), &limit)
                 .expect("header value"),
         }
     }

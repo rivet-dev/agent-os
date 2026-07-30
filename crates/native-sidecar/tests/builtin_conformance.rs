@@ -2025,7 +2025,7 @@ console.log(JSON.stringify({
     );
     assert_eq!(
         guest["versions"]["openssl"],
-        Value::String(agentos_execution::EMULATED_OPENSSL_VERSION.to_owned())
+        Value::String(agentos_native_sidecar::executor::EMULATED_OPENSSL_VERSION.to_owned())
     );
 }
 

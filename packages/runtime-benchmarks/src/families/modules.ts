@@ -172,7 +172,7 @@ export const modulesFamily: BenchmarkOp[] = [
 		...MODULE_SAMPLE_CAP,
 		nativeUnsupportedReason: JS_RUNTIME_UNSUPPORTED,
 		wasmUnsupportedReason: JS_RUNTIME_UNSUPPORTED,
-		fileLine: "crates/execution/src/node_import_cache.rs:4750",
+		fileLine: "crates/v8-runtime/src/asset_cache.rs:4750",
 		reproducer: "stage 100 unique tiny CJS files per iteration, require them, and verify exported sum",
 		setup: require100SmallSetup(),
 		program: require100SmallProgram(),
@@ -183,7 +183,7 @@ export const modulesFamily: BenchmarkOp[] = [
 		...MODULE_SAMPLE_CAP,
 		nativeUnsupportedReason: JS_RUNTIME_UNSUPPORTED,
 		wasmUnsupportedReason: JS_RUNTIME_UNSUPPORTED,
-		fileLine: "crates/execution/src/node_import_cache.rs:4750",
+		fileLine: "crates/v8-runtime/src/asset_cache.rs:4750",
 		reproducer: "stage 100 unique tiny ESM files per iteration, dynamic-import them, and verify exported sum",
 		setup: import100SmallEsmSetup(),
 		program: import100SmallEsmProgram(),
@@ -194,7 +194,7 @@ export const modulesFamily: BenchmarkOp[] = [
 		...MODULE_SAMPLE_CAP,
 		nativeUnsupportedReason: JS_RUNTIME_UNSUPPORTED,
 		wasmUnsupportedReason: JS_RUNTIME_UNSUPPORTED,
-		fileLine: "crates/execution/src/node_import_cache.rs:4750",
+		fileLine: "crates/v8-runtime/src/asset_cache.rs:4750",
 		reproducer: `dynamic-import zod@4.3.6 from a read-only mounted package tree (${ZOD_TRANSITIVE_MODULE_FILE_COUNT} transitive ESM files) and verify z.object`,
 		runNode: runHostNpmPackageImport,
 		prepareVm: async () => {
@@ -219,7 +219,7 @@ export const modulesFamily: BenchmarkOp[] = [
 		...MODULE_SAMPLE_CAP,
 		nativeUnsupportedReason: JS_RUNTIME_UNSUPPORTED,
 		wasmUnsupportedReason: JS_RUNTIME_UNSUPPORTED,
-		fileLine: "crates/execution/src/javascript.rs:3939",
+		fileLine: "crates/v8-runtime/src/javascript.rs:3939",
 		reproducer: "write a unique /tmp .mjs file, dynamic-import it, and verify the exported value",
 		program: `async (i) => {
   const fs = await import("node:fs");

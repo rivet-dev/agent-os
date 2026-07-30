@@ -97,8 +97,7 @@ pub(super) fn settle_host_call_completion_for_process(
                             "managed connect description disappeared before completion",
                         )
                     })?;
-                    let route = if description.domain == agentos_execution::host::SocketDomain::Unix
-                    {
+                    let route = if description.domain == crate::executor::host::SocketDomain::Unix {
                         crate::state::ManagedHostNetRoute::UnixSocket(socket_id)
                     } else {
                         crate::state::ManagedHostNetRoute::TcpSocket(socket_id)
@@ -1450,8 +1449,8 @@ where
             }
             ActiveExecutionEvent::Common(ExecutionEvent::Exited(exit)) => {
                 let exit_code = match exit {
-                    agentos_execution::backend::ExecutionExit::Exited(code) => code,
-                    agentos_execution::backend::ExecutionExit::Signaled { signal, .. } => {
+                    crate::executor::backend::ExecutionExit::Exited(code) => code,
+                    crate::executor::backend::ExecutionExit::Signaled { signal, .. } => {
                         128_i32.saturating_add(signal)
                     }
                 };
@@ -1543,8 +1542,8 @@ where
             }
             ActiveExecutionEvent::Common(ExecutionEvent::Output { stream, bytes }) => {
                 let channel = match stream {
-                    agentos_execution::backend::OutputStream::Stdout => StreamChannel::Stdout,
-                    agentos_execution::backend::OutputStream::Stderr => StreamChannel::Stderr,
+                    crate::executor::backend::OutputStream::Stdout => StreamChannel::Stdout,
+                    crate::executor::backend::OutputStream::Stderr => StreamChannel::Stderr,
                 };
                 Ok(Some(EventFrame::new(
                     ownership,

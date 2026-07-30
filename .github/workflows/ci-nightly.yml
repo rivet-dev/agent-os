@@ -223,7 +223,7 @@ jobs:
           AGENTOS_NATIVE_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-native-sidecar
       - run: cargo test --workspace --exclude agentos-sidecar-browser --exclude agentos-native-sidecar-browser -- --test-threads=1
       - name: Explicit ignored runtime churn gate
-        run: cargo test -p agentos-runtime multi_vm_generation_soak_has_no_accounting_or_scheduler_drift --lib -- --ignored --test-threads=1
+        run: cargo test -p agentos-runtime-tokio multi_vm_generation_soak_has_no_accounting_or_scheduler_drift --lib -- --ignored --test-threads=1
       - name: Explicit ignored multi-VM protocol soak gate
         run: cargo test -p agentos-native-sidecar --test service multi_vm_protocol_faults_reconcile_shared_runtime_soak -- --ignored --test-threads=1
       - run: cargo build --release -p agentos-native-sidecar

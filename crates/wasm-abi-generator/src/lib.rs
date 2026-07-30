@@ -379,7 +379,7 @@ impl AbiManifest {
         .unwrap();
         writeln!(
             output,
-            "// Source: crates/execution/assets/agentos-wasm-abi.json (schema {}).\n",
+            "// Source: crates/wasm-common/assets/agentos-wasm-abi.json (schema {}).\n",
             self.schema_version
         )
         .unwrap();
@@ -914,7 +914,7 @@ mod tests {
         imports_module, raw_call_assertion_module, AbiManifest, CallArguments, RawCallAssertion,
     };
 
-    const CHECKED_MANIFEST: &str = include_str!("../../execution/assets/agentos-wasm-abi.json");
+    const CHECKED_MANIFEST: &str = include_str!("../../wasm-common/assets/agentos-wasm-abi.json");
 
     #[test]
     fn generated_fixture_calls_each_declared_signature() {

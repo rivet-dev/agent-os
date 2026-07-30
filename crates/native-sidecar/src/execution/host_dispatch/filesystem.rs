@@ -344,7 +344,7 @@ pub(super) fn decode(
     let response_limit = payload_limit("limits.reactor.maxBridgeResponseBytes", max_reply_bytes)?;
     // This second instance only types the configured maximum forwarded to the
     // kernel. Actual reply sizes are admitted through `response_limit` above.
-    let response_bound = agentos_execution::backend::PayloadLimit::with_warning_hook(
+    let response_bound = crate::executor::backend::PayloadLimit::with_warning_hook(
         "limits.reactor.maxBridgeResponseBytes",
         max_reply_bytes,
         None,
@@ -964,8 +964,8 @@ pub(super) fn decode(
 fn payload_limit(
     name: &'static str,
     maximum: usize,
-) -> Result<agentos_execution::backend::PayloadLimit, SidecarError> {
-    agentos_execution::backend::PayloadLimit::new(name, maximum).map_err(SidecarError::Host)
+) -> Result<crate::executor::backend::PayloadLimit, SidecarError> {
+    crate::executor::backend::PayloadLimit::new(name, maximum).map_err(SidecarError::Host)
 }
 
 fn encoded_bytes_reply_size(byte_length: usize) -> Option<usize> {
@@ -1015,7 +1015,7 @@ fn decode_path_operation(
     request: &HostRpcRequest,
     path: &impl Fn(usize, &str) -> Result<BoundedString, SidecarError>,
 ) -> Result<FilesystemOperation, SidecarError> {
-    let path_bound = agentos_execution::backend::PayloadLimit::with_warning_hook(
+    let path_bound = crate::executor::backend::PayloadLimit::with_warning_hook(
         "runtime.filesystem.maxPathBytes",
         MAX_PATH_BYTES,
         None,
@@ -2437,7 +2437,7 @@ mod tests {
     use crate::execution::host_dispatch::inventory::{
         capability_family, semantic_rpc_inventory, HostCapabilityFamily,
     };
-    use agentos_execution::backend::{
+    use crate::executor::backend::{
         DirectHostReplyTarget, HostCallIdentity, HostCallReply, PayloadLimit,
     };
     use agentos_kernel::command_registry::CommandDriver;

@@ -1483,7 +1483,7 @@ pub(in crate::execution) fn register_kernel_readiness_target(
         if let Err(error) = session.publish_readiness(
             target.capability_id,
             target.capability_generation,
-            agentos_execution::backend::ExecutionReadyFlags::from_bits(flags.bits()),
+            crate::executor::backend::ExecutionReadyFlags::from_bits(flags.bits()),
         ) {
             eprintln!(
                 "ERR_AGENTOS_KERNEL_READINESS_WAKE: failed registration replay capability={} generation={} target={}: {error}",
@@ -3103,7 +3103,7 @@ pub(in crate::execution) fn io_error_code(error: &std::io::Error) -> Option<Stri
 
 pub(in crate::execution) fn sidecar_net_error(error: std::io::Error) -> SidecarError {
     let code = io_error_code(&error).unwrap_or_else(|| String::from("EIO"));
-    SidecarError::Host(agentos_execution::backend::HostServiceError::new(
+    SidecarError::Host(crate::executor::backend::HostServiceError::new(
         code,
         error.to_string(),
     ))

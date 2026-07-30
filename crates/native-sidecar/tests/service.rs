@@ -1,6 +1,10 @@
 pub trait NativeSidecarBridge: agentos_bridge::HostBridge {}
 impl<T> NativeSidecarBridge for T where T: agentos_bridge::HostBridge {}
 
+mod executor {
+    pub use agentos_native_sidecar::executor::*;
+}
+
 #[allow(dead_code, unused_imports)]
 #[path = "acp_legacy/mod.rs"]
 mod acp;
@@ -125,11 +129,11 @@ mod service {
             VM_LISTEN_PORT_MIN_METADATA_KEY, WASM_COMMAND, WASM_STDIO_SYNC_RPC_ENV,
         };
         use agentos_bridge::SymlinkRequest;
-        use agentos_execution::backend::{
+        use agentos_kernel::process_runtime::ProcessRuntimeIdentity;
+        use agentos_native_sidecar::executor::backend::{
             DirectHostReplyHandle, DirectHostReplyTarget, HostCallIdentity, HostCallReply,
             HostServiceError,
         };
-        use agentos_kernel::process_runtime::ProcessRuntimeIdentity;
 
         macro_rules! block_on_sidecar {
             ($sidecar:expr, $future:expr) => {{
@@ -197,7 +201,7 @@ mod service {
             vm_id: &str,
             process_id: &str,
             call_id: u64,
-            operation: agentos_execution::host::HostOperation,
+            operation: agentos_native_sidecar::executor::host::HostOperation,
         ) -> Result<(), SidecarError> {
             let (generation, pid) = {
                 let vm = sidecar.vms.get(vm_id).ok_or_else(|| {
@@ -221,7 +225,10 @@ mod service {
             )
             .map_err(SidecarError::from)?;
             let event = ActiveExecutionEvent::Common(
-                agentos_execution::backend::ExecutionEvent::HostCall { operation, reply },
+                agentos_native_sidecar::executor::backend::ExecutionEvent::HostCall {
+                    operation,
+                    reply,
+                },
             );
             block_on_sidecar!(
                 sidecar,
@@ -230,11 +237,16 @@ mod service {
             Ok(())
         }
 
-        fn bounded_test_host_path(path: &str) -> agentos_execution::host::BoundedString {
-            agentos_execution::host::BoundedString::try_new(
+        fn bounded_test_host_path(
+            path: &str,
+        ) -> agentos_native_sidecar::executor::host::BoundedString {
+            agentos_native_sidecar::executor::host::BoundedString::try_new(
                 path.to_owned(),
-                &agentos_execution::backend::PayloadLimit::new("test.maxPathBytes", 4096)
-                    .expect("test path limit"),
+                &agentos_native_sidecar::executor::backend::PayloadLimit::new(
+                    "test.maxPathBytes",
+                    4096,
+                )
+                .expect("test path limit"),
             )
             .expect("bounded test path")
         }
@@ -257,7 +269,7 @@ mod service {
             sidecar: &mut NativeSidecar<RecordingBridge>,
             vm_id: &str,
             process_id: &str,
-            request: agentos_execution::host::ProcessLaunchRequest,
+            request: agentos_native_sidecar::executor::host::ProcessLaunchRequest,
             max_buffer: Option<usize>,
         ) -> Result<Value, SidecarError> {
             let handle = sidecar
@@ -302,7 +314,7 @@ mod service {
             sidecar: &mut NativeSidecar<RecordingBridge>,
             vm_id: &str,
             process_id: &str,
-            request: agentos_execution::host::ProcessLaunchRequest,
+            request: agentos_native_sidecar::executor::host::ProcessLaunchRequest,
         ) -> Result<Value, SidecarError> {
             let handle = sidecar
                 .vms
@@ -358,7 +370,7 @@ mod service {
             vm_id: &str,
             process_id: &str,
             current_process_path: &[&str],
-            request: agentos_execution::host::ProcessLaunchRequest,
+            request: agentos_native_sidecar::executor::host::ProcessLaunchRequest,
         ) -> Result<Value, SidecarError> {
             let handle = sidecar
                 .vms
@@ -415,11 +427,6 @@ mod service {
                 }
             }
         }
-        use agentos_execution::{
-            CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
-            HostRpcRequest, StartJavascriptExecutionRequest, StartPythonExecutionRequest,
-            StartWasmExecutionRequest, WasmPermissionTier,
-        };
         use agentos_kernel::command_registry::CommandDriver;
         use agentos_kernel::kernel::{KernelVmConfig, SpawnOptions, VirtualProcessOptions};
         use agentos_kernel::mount_table::{MountEntry, MountOptions, MountTable};
@@ -431,6 +438,11 @@ mod service {
         use agentos_kernel::process_table::{SIGKILL, SIGTERM};
         use agentos_kernel::vfs::{
             MemoryFileSystem, VirtualDirEntry, VirtualFileSystem, VirtualStat,
+        };
+        use agentos_native_sidecar::executor::{
+            CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
+            HostRpcRequest, StartJavascriptExecutionRequest, StartPythonExecutionRequest,
+            StartWasmExecutionRequest, WasmPermissionTier,
         };
         use agentos_runtime_tokio::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
         use agentos_runtime_tokio::capability::{CapabilityRegistry, CapabilitySnapshot};
@@ -655,10 +667,10 @@ ykAheWCsAteSEWVc0w==\n\
                 ActiveExecution::Binding(
                     BindingExecution::default()
                         .with_descendant_wait_ownership(
-                            agentos_execution::backend::DescendantWaitOwnership::Guest,
+                            agentos_native_sidecar::executor::backend::DescendantWaitOwnership::Guest,
                         )
                         .with_descendant_output_ownership(
-                            agentos_execution::backend::DescendantOutputOwnership::GuestDescriptors,
+                            agentos_native_sidecar::executor::backend::DescendantOutputOwnership::GuestDescriptors,
                         ),
                 ),
             )
@@ -1735,10 +1747,13 @@ ykAheWCsAteSEWVc0w==\n\
                 .active_processes
                 .insert(process_id.clone(), process);
 
-            let fault = agentos_execution::backend::ExecutionEvent::runtime_fault(
+            let fault = agentos_native_sidecar::executor::backend::ExecutionEvent::runtime_fault(
                 HostServiceError::new("ERR_AGENTOS_TEST_RUNTIME_FAULT", "test runtime fault"),
-                &agentos_execution::backend::PayloadLimit::new("test.maxRuntimeFaultBytes", 4096)
-                    .expect("runtime fault limit"),
+                &agentos_native_sidecar::executor::backend::PayloadLimit::new(
+                    "test.maxRuntimeFaultBytes",
+                    4096,
+                )
+                .expect("runtime fault limit"),
             )
             .expect("bounded runtime fault");
             sidecar
@@ -2081,7 +2096,7 @@ ykAheWCsAteSEWVc0w==\n\
             let cwd = temp_dir("agentos-native-sidecar-js-crypto-rpc");
             write_fixture(&cwd.join("entry.mjs"), "export {};\n");
             let context = sidecar.javascript_engine.create_context(
-                agentos_execution::CreateJavascriptContextRequest {
+                agentos_native_sidecar::executor::CreateJavascriptContextRequest {
                     vm_id: vm_id.clone(),
                     bootstrap_module: None,
                     compile_cache_root: None,
@@ -2089,18 +2104,20 @@ ykAheWCsAteSEWVc0w==\n\
             );
             let execution = sidecar
                 .javascript_engine
-                .start_execution(agentos_execution::StartJavascriptExecutionRequest {
-                    guest_runtime: Default::default(),
-                    vm_id,
-                    context_id: context.context_id,
-                    argv: vec![String::from("./entry.mjs")],
-                    argv0: None,
-                    env: BTreeMap::new(),
-                    cwd,
-                    limits: Default::default(),
-                    inline_code: Some(String::from("")),
-                    wasm_module_bytes: None,
-                })
+                .start_execution(
+                    agentos_native_sidecar::executor::StartJavascriptExecutionRequest {
+                        guest_runtime: Default::default(),
+                        vm_id,
+                        context_id: context.context_id,
+                        argv: vec![String::from("./entry.mjs")],
+                        argv0: None,
+                        env: BTreeMap::new(),
+                        cwd,
+                        limits: Default::default(),
+                        inline_code: Some(String::from("")),
+                        wasm_module_bytes: None,
+                    },
+                )
                 .expect("start javascript execution");
             ActiveExecution::Javascript(execution)
         }
@@ -3988,19 +4005,19 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     ActiveExecutionEvent::Common(event) => {
                         common_events += 1;
                         match event {
-                            agentos_execution::backend::ExecutionEvent::HostCall { .. } => {
+                            agentos_native_sidecar::executor::backend::ExecutionEvent::HostCall { .. } => {
                                 common_host_calls += 1;
                             }
-                            agentos_execution::backend::ExecutionEvent::Output { .. } => {
+                            agentos_native_sidecar::executor::backend::ExecutionEvent::Output { .. } => {
                                 common_outputs += 1;
                             }
-                            agentos_execution::backend::ExecutionEvent::Warning(_) => {
+                            agentos_native_sidecar::executor::backend::ExecutionEvent::Warning(_) => {
                                 common_warnings += 1;
                             }
-                            agentos_execution::backend::ExecutionEvent::RuntimeFault(_) => {
+                            agentos_native_sidecar::executor::backend::ExecutionEvent::RuntimeFault(_) => {
                                 common_faults += 1;
                             }
-                            agentos_execution::backend::ExecutionEvent::Exited(_) => {
+                            agentos_native_sidecar::executor::backend::ExecutionEvent::Exited(_) => {
                                 common_exits += 1;
                             }
                             _ => {}
@@ -4080,7 +4097,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     if matches!(
                         event,
                         ActiveExecutionEvent::Common(
-                            agentos_execution::backend::ExecutionEvent::HostCall { .. },
+                            agentos_native_sidecar::executor::backend::ExecutionEvent::HostCall { .. },
                         ) | ActiveExecutionEvent::HostRpcRequest(_)
                             | ActiveExecutionEvent::HostCallCompletion(_)
                             | ActiveExecutionEvent::ManagedStreamReadRecheck(_)
@@ -10713,7 +10730,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     .get(&vm_id)
                     .expect("created VM")
                     .standalone_wasm_backend,
-                agentos_execution::StandaloneWasmBackend::WasmtimeThreads
+                agentos_native_sidecar::executor::StandaloneWasmBackend::WasmtimeThreads
             );
         }
         fn vm_default_and_process_override_select_standalone_wasm_backend() {
@@ -10754,13 +10771,13 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     4,
                     "vm-default",
                     None,
-                    agentos_execution::StandaloneWasmBackend::Wasmtime,
+                    agentos_native_sidecar::executor::StandaloneWasmBackend::Wasmtime,
                 ),
                 (
                     5,
                     "process-override",
                     Some(StandaloneWasmBackend::V8),
-                    agentos_execution::StandaloneWasmBackend::V8,
+                    agentos_native_sidecar::executor::StandaloneWasmBackend::V8,
                 ),
             ] {
                 let started = sidecar
@@ -12312,14 +12329,14 @@ console.log(JSON.stringify({ status: "ok", summary }));
                 &mut sidecar,
                 &vm_id,
                 "managed-wasm-pipe-parent",
-                agentos_execution::host::ProcessLaunchRequest {
+                agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                     command: String::from("/pipe-child.wasm"),
                     args: Vec::new(),
-                    options: agentos_execution::host::ProcessLaunchOptions {
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
                         spawn_exact_path: true,
                         spawn_fd_mappings: vec![[read_fd, read_fd], [write_fd, write_fd]],
                         spawn_file_actions: vec![
-                            agentos_execution::host::ProcessSpawnFileAction {
+                            agentos_native_sidecar::executor::host::ProcessSpawnFileAction {
                                 command: 2,
                                 guest_fd: Some(1),
                                 fd: 1,
@@ -12330,7 +12347,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                                 path: String::new(),
                                 close_from_guest_fds: Vec::new(),
                             },
-                            agentos_execution::host::ProcessSpawnFileAction {
+                            agentos_native_sidecar::executor::host::ProcessSpawnFileAction {
                                 command: 1,
                                 guest_fd: Some(read_fd as i32),
                                 fd: read_fd as i32,
@@ -12341,7 +12358,7 @@ console.log(JSON.stringify({ status: "ok", summary }));
                                 path: String::new(),
                                 close_from_guest_fds: Vec::new(),
                             },
-                            agentos_execution::host::ProcessSpawnFileAction {
+                            agentos_native_sidecar::executor::host::ProcessSpawnFileAction {
                                 command: 1,
                                 guest_fd: Some(write_fd as i32),
                                 fd: write_fd as i32,
@@ -12750,10 +12767,11 @@ console.log(JSON.stringify({ status: "ok", summary }));
             for (command, request, expected_process_args) in [
                 (
                     "sh",
-                    agentos_execution::host::ProcessLaunchRequest {
+                    agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                         command: String::from("sh"),
                         args: vec![String::from("-c"), String::from("echo hello")],
-                        options: agentos_execution::host::ProcessLaunchOptions::default(),
+                        options:
+                            agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(),
                     },
                     vec![
                         String::from("sh"),
@@ -12763,28 +12781,31 @@ console.log(JSON.stringify({ status: "ok", summary }));
                 ),
                 (
                     "ls",
-                    agentos_execution::host::ProcessLaunchRequest {
+                    agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                         command: String::from("ls"),
                         args: vec![String::from("/")],
-                        options: agentos_execution::host::ProcessLaunchOptions::default(),
+                        options:
+                            agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(),
                     },
                     vec![String::from("ls"), String::from("/")],
                 ),
                 (
                     "cat",
-                    agentos_execution::host::ProcessLaunchRequest {
+                    agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                         command: String::from("cat"),
                         args: vec![String::from("/tmp/file")],
-                        options: agentos_execution::host::ProcessLaunchOptions::default(),
+                        options:
+                            agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(),
                     },
                     vec![String::from("cat"), String::from("/tmp/file")],
                 ),
                 (
                     "grep",
-                    agentos_execution::host::ProcessLaunchRequest {
+                    agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                         command: String::from("grep"),
                         args: vec![String::from("pattern"), String::from("/tmp/file")],
-                        options: agentos_execution::host::ProcessLaunchOptions::default(),
+                        options:
+                            agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(),
                     },
                     vec![
                         String::from("grep"),
@@ -12794,19 +12815,21 @@ console.log(JSON.stringify({ status: "ok", summary }));
                 ),
                 (
                     "echo",
-                    agentos_execution::host::ProcessLaunchRequest {
+                    agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                         command: String::from("echo"),
                         args: vec![String::from("hello")],
-                        options: agentos_execution::host::ProcessLaunchOptions::default(),
+                        options:
+                            agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(),
                     },
                     vec![String::from("echo"), String::from("hello")],
                 ),
                 (
                     "sed",
-                    agentos_execution::host::ProcessLaunchRequest {
+                    agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                         command: String::from("sed"),
                         args: vec![String::from("s/a/b/"), String::from("/tmp/file")],
-                        options: agentos_execution::host::ProcessLaunchOptions::default(),
+                        options:
+                            agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(),
                     },
                     vec![
                         String::from("sed"),
@@ -12848,10 +12871,10 @@ console.log(JSON.stringify({ status: "ok", summary }));
                 &parent_env,
                 &parent_guest_cwd,
                 &parent_host_cwd,
-                &agentos_execution::host::ProcessLaunchRequest {
+                &agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                     command: String::from("definitely-not-a-command"),
                     args: Vec::new(),
-                    options: agentos_execution::host::ProcessLaunchOptions::default(),
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(),
                 },
                 false,
                 None,
@@ -12873,10 +12896,10 @@ console.log(JSON.stringify({ status: "ok", summary }));
                 &BTreeMap::new(),
                 &parent_guest_cwd,
                 &parent_host_cwd,
-                &agentos_execution::host::ProcessLaunchRequest {
+                &agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                     command: String::from("/workspace/echo"),
                     args: Vec::new(),
-                    options: agentos_execution::host::ProcessLaunchOptions::default(),
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(),
                 },
                 true,
                 None,
@@ -12982,14 +13005,14 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     &vm_id,
                     "exec-process",
                     &[],
-                    agentos_execution::host::ProcessLaunchRequest {
+                    agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                         command: String::from("/script"),
                         args: vec![
                             String::from("one optional argument"),
                             String::from("/script"),
                             String::from("script-argument"),
                         ],
-                        options: agentos_execution::host::ProcessLaunchOptions {
+                        options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
                             argv0: Some(String::from("/interpreter.wasm")),
                             env: BTreeMap::from([(
                                 String::from("SCRIPT_ONLY"),
@@ -13022,10 +13045,10 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     &vm_id,
                     "exec-process",
                     &[],
-                    agentos_execution::host::ProcessLaunchRequest {
+                    agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                         command: String::from("replacement.wasm"),
                         args: vec![String::from("argument")],
-                        options: agentos_execution::host::ProcessLaunchOptions {
+                        options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
                             argv0: Some(String::new()),
                             env: replacement_env.clone(),
                             local_replacement: true,
@@ -13097,13 +13120,13 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     &vm_id,
                     "exec-process",
                     &[],
-                    agentos_execution::host::ProcessLaunchRequest {
+                    agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                         // This path deliberately does not exist in the VFS.
                         // The trusted runner owns and prevalidates the live FD
                         // image, so commit must never reopen this display path.
                         command: String::from("/proc/self/fd/1048576"),
                         args: vec![String::from("fd-argument")],
-                        options: agentos_execution::host::ProcessLaunchOptions {
+                        options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
                             argv0: Some(String::from("fd-custom-argv0")),
                             executable_fd: Some(1_048_576),
                             env: fd_replacement_env.clone(),
@@ -13249,10 +13272,10 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                     &vm_id,
                     "exec-process",
                     &[],
-                    agentos_execution::host::ProcessLaunchRequest {
+                    agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                         command: String::from("replacement.js"),
                         args: vec![String::from("arg-one")],
-                        options: agentos_execution::host::ProcessLaunchOptions {
+                        options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
                             argv0: Some(String::from("replacement-argv0")),
                             env: replacement_env.clone(),
                             ..Default::default()
@@ -13330,10 +13353,10 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                     &vm_id,
                     "exec-process",
                     &[],
-                    agentos_execution::host::ProcessLaunchRequest {
+                    agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                         command: String::from("replacement.js"),
                         args: vec![String::from("fatal-argument")],
-                        options: agentos_execution::host::ProcessLaunchOptions {
+                        options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
                             argv0: Some(String::from("fatal-argv0")),
                             env: BTreeMap::from([(
                                 String::from("FATAL_ONLY"),
@@ -13407,8 +13430,8 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                     .chmod("/truncated-script", 0o755)
                     .expect("mark exact script executable");
             }
-            let open_action =
-                |guest_fd, path: &str, oflag| agentos_execution::host::ProcessSpawnFileAction {
+            let open_action = |guest_fd, path: &str, oflag| {
+                agentos_native_sidecar::executor::host::ProcessSpawnFileAction {
                     command: 3,
                     guest_fd: Some(guest_fd),
                     fd: guest_fd,
@@ -13418,16 +13441,17 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                     mode: 0o600,
                     path: path.to_owned(),
                     close_from_guest_fds: Vec::new(),
-                };
+                }
+            };
 
             let error = spawn_child_process_for_test(
                 &mut sidecar,
                 &vm_id,
                 "posix-spawn-parent",
-                agentos_execution::host::ProcessLaunchRequest {
+                agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                     command: String::from("/missing-executable"),
                     args: Vec::new(),
-                    options: agentos_execution::host::ProcessLaunchOptions {
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
                         spawn_exact_path: true,
                         spawn_file_actions: vec![open_action(
                             40,
@@ -13455,10 +13479,10 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                 &mut sidecar,
                 &vm_id,
                 "posix-spawn-parent",
-                agentos_execution::host::ProcessLaunchRequest {
+                agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                     command: String::from("/truncated-script"),
                     args: Vec::new(),
-                    options: agentos_execution::host::ProcessLaunchOptions {
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
                         spawn_exact_path: true,
                         spawn_file_actions: vec![open_action(
                             41,
@@ -13586,10 +13610,10 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                 &mut sidecar,
                 &vm_id,
                 "guest-exec-dac-parent",
-                agentos_execution::host::ProcessLaunchRequest {
+                agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                     command: String::from("/non-executable.wasm"),
                     args: Vec::new(),
-                    options: agentos_execution::host::ProcessLaunchOptions {
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
                         spawn_exact_path: true,
                         ..Default::default()
                     },
@@ -13603,11 +13627,11 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
             command: &str,
             search_path: &str,
             args: &[&str],
-        ) -> agentos_execution::host::ProcessLaunchRequest {
-            agentos_execution::host::ProcessLaunchRequest {
+        ) -> agentos_native_sidecar::executor::host::ProcessLaunchRequest {
+            agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                 command: command.to_owned(),
                 args: args.iter().map(|arg| (*arg).to_owned()).collect(),
-                options: agentos_execution::host::ProcessLaunchOptions {
+                options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
                     argv0: Some(String::from("caller-argv0")),
                     spawn_search_path: Some(search_path.to_owned()),
                     ..Default::default()
@@ -13619,7 +13643,7 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
             sidecar: &mut NativeSidecar<RecordingBridge>,
             vm_id: &str,
             nested: bool,
-            request: agentos_execution::host::ProcessLaunchRequest,
+            request: agentos_native_sidecar::executor::host::ProcessLaunchRequest,
         ) -> Result<Value, SidecarError> {
             let current_process_path = if nested {
                 &["posix-spawnp-nested-parent"][..]
@@ -14010,14 +14034,15 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                     .chmod("/success.wasm", 0o755)
                     .expect("mark successful WASM executable");
             }
-            let malformed_request = || agentos_execution::host::ProcessLaunchRequest {
-                command: String::from("/malformed.wasm"),
-                args: Vec::new(),
-                options: agentos_execution::host::ProcessLaunchOptions {
-                    spawn_exact_path: true,
-                    ..Default::default()
-                },
-            };
+            let malformed_request =
+                || agentos_native_sidecar::executor::host::ProcessLaunchRequest {
+                    command: String::from("/malformed.wasm"),
+                    args: Vec::new(),
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
+                        spawn_exact_path: true,
+                        ..Default::default()
+                    },
+                };
 
             let top_level_baseline = sidecar
                 .vms
@@ -14166,14 +14191,15 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                 );
             }
 
-            let successful_request = || agentos_execution::host::ProcessLaunchRequest {
-                command: String::from("/success.wasm"),
-                args: Vec::new(),
-                options: agentos_execution::host::ProcessLaunchOptions {
-                    spawn_exact_path: true,
-                    ..Default::default()
-                },
-            };
+            let successful_request =
+                || agentos_native_sidecar::executor::host::ProcessLaunchRequest {
+                    command: String::from("/success.wasm"),
+                    args: Vec::new(),
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
+                        spawn_exact_path: true,
+                        ..Default::default()
+                    },
+                };
             for iteration in 0..4 {
                 let spawned = spawn_child_process_for_test(
                     &mut sidecar,
@@ -14257,10 +14283,10 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
             let parent_guest_cwd = vm.guest_cwd.clone();
             let parent_host_cwd = vm.host_cwd.clone();
 
-            let request = agentos_execution::host::ProcessLaunchRequest {
+            let request = agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                 command: String::from("printf hi > out.txt"),
                 args: Vec::new(),
-                options: agentos_execution::host::ProcessLaunchOptions {
+                options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
                     shell: true,
                     ..Default::default()
                 },
@@ -14313,7 +14339,7 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                 &mut sidecar,
                 &vm_id,
                 "proc-js-binding-child",
-                agentos_execution::host::ProcessLaunchRequest {
+                agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                     command: String::from("/usr/local/bin/agentos-math"),
                     args: vec![
                         String::from("add"),
@@ -14322,7 +14348,8 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                         String::from("--b"),
                         String::from("3"),
                     ],
-                    options: agentos_execution::host::ProcessLaunchOptions::default(),
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(
+                    ),
                 },
             )
             .expect("spawn binding collection child process");
@@ -14371,7 +14398,7 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                         &parent_env,
                         &parent_guest_cwd,
                         &parent_host_cwd,
-                        &agentos_execution::host::ProcessLaunchRequest {
+                        &agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                             command: String::from("/usr/local/bin/agentos-math"),
                             args: vec![
                                 String::from("add"),
@@ -14380,7 +14407,7 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                                 String::from("--b"),
                                 String::from("3"),
                             ],
-                            options: agentos_execution::host::ProcessLaunchOptions::default(),
+                            options: agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(),
                         },
                         exact_exec_path,
                         None,
@@ -14437,7 +14464,7 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                 &mut sidecar,
                 &vm_id,
                 "proc-js-binding-rpc",
-                agentos_execution::host::ProcessLaunchRequest {
+                agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                     command: String::from("/__agentos/commands/0/agentos-math"),
                     args: vec![
                         String::from("add"),
@@ -14446,7 +14473,8 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                         String::from("--b"),
                         String::from("3"),
                     ],
-                    options: agentos_execution::host::ProcessLaunchOptions::default(),
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(
+                    ),
                 },
             )
             .expect("spawn binding collection child process over internal command path");
@@ -14494,7 +14522,7 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                     &parent_env,
                     &parent_guest_cwd,
                     &parent_host_cwd,
-                    &agentos_execution::host::ProcessLaunchRequest {
+                    &agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                         command: String::from("/__agentos/commands/0/agentos-math"),
                         args: vec![
                             String::from("add"),
@@ -14503,7 +14531,7 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                             String::from("--b"),
                             String::from("3"),
                         ],
-                        options: agentos_execution::host::ProcessLaunchOptions::default(),
+                        options: agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(),
                     },
                     false,
                     None,
@@ -14787,10 +14815,11 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                 &mut sidecar,
                 &vm_id,
                 "proc-js-binding-denied",
-                agentos_execution::host::ProcessLaunchRequest {
+                agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                     command: String::from("/usr/local/bin/agentos-math"),
                     args: vec![String::from("add")],
-                    options: agentos_execution::host::ProcessLaunchOptions::default(),
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(
+                    ),
                 },
                 None,
             )
@@ -14878,10 +14907,11 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                 &mut sidecar,
                 &vm_id,
                 "proc-js-binding-allowed",
-                agentos_execution::host::ProcessLaunchRequest {
+                agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                     command: String::from("/usr/local/bin/agentos-math"),
                     args: vec![String::from("add")],
-                    options: agentos_execution::host::ProcessLaunchOptions::default(),
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(
+                    ),
                 },
                 None,
             )
@@ -14983,14 +15013,15 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                 &mut sidecar,
                 &vm_id,
                 "proc-js-binding-invalid-json-file",
-                agentos_execution::host::ProcessLaunchRequest {
+                agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                     command: String::from("/usr/local/bin/agentos-math"),
                     args: vec![
                         String::from("add"),
                         String::from("--json-file"),
                         String::from("/workspace/invalid-binding-input.json"),
                     ],
-                    options: agentos_execution::host::ProcessLaunchOptions::default(),
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(
+                    ),
                 },
                 None,
             )
@@ -15091,14 +15122,15 @@ process.stdout.write(`${JSON.stringify(snapshot)}\n`);
                 &mut sidecar,
                 &vm_id,
                 "proc-js-binding-valid-json",
-                agentos_execution::host::ProcessLaunchRequest {
+                agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                     command: String::from("/usr/local/bin/agentos-math"),
                     args: vec![
                         String::from("add"),
                         String::from("--json"),
                         String::from(r#"{"count":2,"label":"ok"}"#),
                     ],
-                    options: agentos_execution::host::ProcessLaunchOptions::default(),
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions::default(
+                    ),
                 },
                 None,
             )
@@ -15678,8 +15710,8 @@ export async function loadPyodide() {
                 &vm_id,
                 "proc-python-vfs",
                 1,
-                agentos_execution::host::HostOperation::Filesystem(
-                    agentos_execution::host::FilesystemOperation::CreateDirectoryAt {
+                agentos_native_sidecar::executor::host::HostOperation::Filesystem(
+                    agentos_native_sidecar::executor::host::FilesystemOperation::CreateDirectoryAt {
                         dir_fd: u32::MAX,
                         path: bounded_test_host_path("/workspace"),
                         mode: 0o777,
@@ -15692,13 +15724,13 @@ export async function loadPyodide() {
                 &vm_id,
                 "proc-python-vfs",
                 2,
-                agentos_execution::host::HostOperation::Filesystem(
-                    agentos_execution::host::FilesystemOperation::WriteFileAt {
+                agentos_native_sidecar::executor::host::HostOperation::Filesystem(
+                    agentos_native_sidecar::executor::host::FilesystemOperation::WriteFileAt {
                         dir_fd: u32::MAX,
                         path: bounded_test_host_path("/workspace/note.txt"),
-                        bytes: agentos_execution::host::BoundedBytes::try_new(
+                        bytes: agentos_native_sidecar::executor::host::BoundedBytes::try_new(
                             b"hello from shared host operation".to_vec(),
-                            &agentos_execution::backend::PayloadLimit::new(
+                            &agentos_native_sidecar::executor::backend::PayloadLimit::new(
                                 "test.maxWriteBytes",
                                 1024,
                             )
@@ -17483,7 +17515,7 @@ await new Promise(() => {});
                     other => {
                         let label = match &other {
                             ActiveExecutionEvent::Common(
-                                agentos_execution::backend::ExecutionEvent::HostCall {
+                                agentos_native_sidecar::executor::backend::ExecutionEvent::HostCall {
                                     operation,
                                     ..
                                 },
@@ -25695,10 +25727,10 @@ console.log(JSON.stringify({
                     ActiveExecution::Binding(
                         BindingExecution::default()
                             .with_descendant_wait_ownership(
-                                agentos_execution::backend::DescendantWaitOwnership::Guest,
+                                agentos_native_sidecar::executor::backend::DescendantWaitOwnership::Guest,
                             )
                             .with_descendant_output_ownership(
-                                agentos_execution::backend::DescendantOutputOwnership::GuestDescriptors,
+                                agentos_native_sidecar::executor::backend::DescendantOutputOwnership::GuestDescriptors,
                             ),
                     ),
                 )
@@ -25733,10 +25765,12 @@ console.log(JSON.stringify({
             )
             .expect("create wait reply");
             let event = ActiveExecutionEvent::Common(
-                agentos_execution::backend::ExecutionEvent::HostCall {
-                    operation: agentos_execution::host::HostOperation::Process(
-                        agentos_execution::host::ProcessOperation::Wait {
-                            target: agentos_execution::host::WaitTarget::Pid(child_pid),
+                agentos_native_sidecar::executor::backend::ExecutionEvent::HostCall {
+                    operation: agentos_native_sidecar::executor::host::HostOperation::Process(
+                        agentos_native_sidecar::executor::host::ProcessOperation::Wait {
+                            target: agentos_native_sidecar::executor::host::WaitTarget::Pid(
+                                child_pid,
+                            ),
                             options: 0,
                             deadline_ms: None,
                             temporary_mask: None,
@@ -25875,22 +25909,24 @@ try {
                 &vm_id,
                 "wasm-write-parent",
                 &[],
-                agentos_execution::host::ProcessLaunchRequest {
+                agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                     command: String::from("node"),
                     args: vec![String::from("./writer.mjs")],
-                    options: agentos_execution::host::ProcessLaunchOptions {
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
                         spawn_fd_mappings: vec![[3, read_fd]],
-                        spawn_file_actions: vec![agentos_execution::host::ProcessSpawnFileAction {
-                            command: 2,
-                            guest_fd: Some(3),
-                            fd: 3,
-                            source_fd: write_fd as i32,
-                            guest_source_fd: None,
-                            oflag: 0,
-                            mode: 0,
-                            path: String::new(),
-                            close_from_guest_fds: Vec::new(),
-                        }],
+                        spawn_file_actions: vec![
+                            agentos_native_sidecar::executor::host::ProcessSpawnFileAction {
+                                command: 2,
+                                guest_fd: Some(3),
+                                fd: 3,
+                                source_fd: write_fd as i32,
+                                guest_source_fd: None,
+                                oflag: 0,
+                                mode: 0,
+                                path: String::new(),
+                                close_from_guest_fds: Vec::new(),
+                            },
+                        ],
                         ..Default::default()
                     },
                 },
@@ -26179,11 +26215,13 @@ try {
                 kernel_pid
             }
 
-            fn binding_request(timeout: u64) -> agentos_execution::host::ProcessLaunchRequest {
-                agentos_execution::host::ProcessLaunchRequest {
+            fn binding_request(
+                timeout: u64,
+            ) -> agentos_native_sidecar::executor::host::ProcessLaunchRequest {
+                agentos_native_sidecar::executor::host::ProcessLaunchRequest {
                     command: String::from("/usr/local/bin/agentos-math"),
                     args: vec![String::from("add")],
-                    options: agentos_execution::host::ProcessLaunchOptions {
+                    options: agentos_native_sidecar::executor::host::ProcessLaunchOptions {
                         timeout: Some(timeout),
                         ..Default::default()
                     },

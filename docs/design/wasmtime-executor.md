@@ -15,9 +15,10 @@ registry-software owners
   Wasmtime becomes the preferred backend after its parity, safety, and
   performance gates close, but the V8-WASM executor remains a maintained,
   selectable compatibility backend.
-- **Do not create a crate or one giant Rust file initially.** Use a module tree
-  under `crates/execution/src/wasm/`; extract a crate only for a measured
-  dependency/build/composition benefit.
+- **Keep each concrete executor independently feature-gated.** Wasmtime lives
+  in `agentos-executor-wasm-wasmtime`; V8-WASM lives in
+  `agentos-executor-wasm-v8`; engine-neutral ABI/profile code lives in
+  `agentos-wasm-common`.
 - **Do not rewrite filesystem, network, process, TTY, signal, or identity
   semantics.** Most already live in the kernel/sidecar. Consolidate the pieces
   still duplicated in the JavaScript runner through the prerequisite
@@ -58,10 +59,10 @@ protocol surface carries an optional sealed `wasmtime`/`v8` override; omission
 uses the sidecar-owned default, so clients do not independently choose or drift
 that default.
 
-The first implementation lives under `crates/execution/src/wasm/`. A separate
-crate is not required for the initial implementation. Extraction is allowed
-later only if it produces a measured build, dependency, fuzzing, or binary
-composition benefit.
+The native sidecar is the composition root. It depends optionally on the two
+standalone-WASM executor crates and is the only crate that selects between
+them. This keeps Wasmtime and V8 independently removable from native builds
+without moving Linux semantics out of the kernel.
 
 agentOS continues to use its owned patched `wasm32-wasip1` sysroot and its
 existing Preview1 plus `host_*` imports. Wasmtime is the core WebAssembly
@@ -69,9 +70,8 @@ engine; it does not become the owner of filesystem, network, process, terminal,
 identity, permission, or resource semantics.
 
 Ahead-of-time compilation, serialized Wasmtime artifacts, components, and live
-process snapshots are outside the first implementation. The initial executor
-uses ordinary Wasmtime compilation and a bounded in-process compiled `Module`
-cache.
+process snapshots remain outside the implementation. The executor uses ordinary
+Wasmtime compilation and a bounded in-process compiled `Module` cache.
 
 The kernel/executor boundary, signal ownership, shared host-operation services,
 and runtime-neutral readiness contract are specified normatively in
@@ -108,7 +108,7 @@ The completed migration has these outcomes:
 
 ## 3. Non-goals
 
-The initial single-threaded Wasmtime parity milestone does not:
+The Phase 2 single-threaded Wasmtime parity milestone did not:
 
 - replace V8 for JavaScript;
 - route JavaScript `WebAssembly.*` calls into Wasmtime;
@@ -124,9 +124,9 @@ The initial single-threaded Wasmtime parity milestone does not:
 - move the process-wide Tokio reactor into `crates/kernel` or create another
   Tokio runtime.
 
-## 4. Current architecture
+## 4. Baseline architecture before migration
 
-Standalone WASM is currently implemented as a JavaScript execution:
+Before this project, standalone WASM was implemented as a JavaScript execution:
 
 ```text
 standalone WASM request
@@ -141,9 +141,9 @@ standalone WASM request
   -> agentOS kernel, VFS, and native I/O owners
 ```
 
-`WasmExecution` contains a `JavascriptExecution`, and `WasmExecutionEngine`
-owns a `JavascriptExecutionEngine`. The JavaScript runner currently owns four
-different kinds of code that must be distinguished during migration:
+`WasmExecution` contained a `JavascriptExecution`, and `WasmExecutionEngine`
+owned a `JavascriptExecutionEngine`. The JavaScript runner owned four different
+kinds of code that had to be distinguished during migration:
 
 1. **ABI marshalling**: reading pointers, iovecs, strings, arrays, and structures
    from guest linear memory and writing results back.
@@ -155,9 +155,9 @@ different kinds of code that must be distinguished during migration:
 4. **Actual semantics**: any behavior that still exists only in the runner and
    has not yet moved into the kernel or shared sidecar services.
 
-The first three categories do not justify a second kernel. Category four must
-be inventoried operation by operation and either moved to the shared kernel or
-explicitly retained as a narrow runtime adapter behavior.
+The first three categories did not justify a second kernel. Category four was
+inventoried operation by operation and either moved to the shared kernel or
+retained explicitly as narrow runtime-adapter behavior.
 
 ### 4.1 Current memory evidence
 
@@ -221,48 +221,40 @@ model as every other child.
 
 ## 6. Code organization
 
-The implemented initial organization is:
+The implemented organization is:
 
 ```text
-crates/execution/src/wasm.rs
-                            retained V8-WASM implementation and dual-backend
-                            facade; keeping this working compatibility backend
-                            intact avoids coupling Wasmtime to a wholesale move
+crates/wasm-common/
+  abi/                      pinned Preview1 WITX source
+  assets/                   generated agentOS ABI manifest
+  src/abi/                  generated registry and stable ABI types
+  src/profile.rs            shared wasmparser proposal profiles
+  src/execution.rs          engine-neutral requests, results, and errors
 
-crates/execution/src/wasm/
-  profile.rs                shared wasmparser proposal profile
+crates/executor-wasm-v8/
+  src/lib.rs                maintained V8-WASM compatibility executor
 
-  wasmtime/
-    mod.rs                  execution and engine facade
-    engine.rs               Config and bounded Engine profiles
-    store.rs                per-execution host state
-    module.rs               validation and module loading
-    cache.rs                bounded in-memory Module cache
-    limits.rs               memory, stack, CPU, and cancellation
-    lifecycle.rs            start, exit, traps, signals, teardown
-    memory.rs               checked guest-memory ABI primitives
-    error.rs                stable agentOS outcome normalization
+crates/executor-wasm-wasmtime/
+  src/lib.rs                public executor surface
+  src/engine.rs             Config and bounded Engine profiles
+  src/store.rs              per-execution host state
+  src/module.rs             validation and module loading
+  src/cache.rs              bounded in-memory Module cache
+  src/limits.rs             memory, stack, CPU, and cancellation
+  src/lifecycle.rs          start, exit, traps, signals, teardown
+  src/memory.rs             checked guest-memory ABI primitives
+  src/error.rs              stable agentOS outcome normalization
+  src/linker/               Preview1 plus agentOS POSIX host imports
+  src/threads.rs             separately gated shared-memory/thread support
 
-    linker/
-      mod.rs                generated-registry trampoline and signal checkpoints
-      preview1.rs
-      filesystem.rs
-      network.rs
-      process.rs
-      terminal.rs
-      user.rs
-
-    threads/                Phase 4 only; absent from initial parity
-      mod.rs
-      group.rs
-      admission.rs
+crates/native-sidecar/src/executor.rs
+                            feature-gated executor composition and dispatch
 ```
 
-Rust permits `wasm.rs` and the `wasm/` submodule directory to coexist. Retaining
-the established V8-WASM implementation in `wasm.rs` is deliberate: it keeps the
-compatibility backend independently reviewable while new Wasmtime code is
-split by responsibility. A later mechanical move under `v8_compat/` would not
-change ownership or behavior and is not a prerequisite for this project.
+The two standalone-WASM engines are separate feature-gated crates. Shared ABI,
+profile, and stable-error code lives in `agentos-wasm-common`; engine-specific
+memory, lifecycle, and scheduling code remains in its executor crate. The
+sidecar is the only composition and backend-selection owner.
 
 Runtime-neutral host operations do not belong exclusively under `wasm/`.
 Existing kernel and sidecar operations should be exposed through small
@@ -286,14 +278,14 @@ agentOS-owned WASI/POSIX ABI. The danger is only in accidentally linking a
 second ambient implementation that opens host files or sockets outside the
 agentOS kernel.
 
-### 7.2 Initial integration decision
+### 7.2 Integration decision
 
-The first implementation will:
+The implementation:
 
 - treat the patched sysroot and `toolchain/crates/wasi-ext` imports as the
   guest ABI source of truth;
 - link exactly the Preview1 and custom-import surface generated in
-  `crates/execution/assets/agentos-wasm-abi.json` and required by built
+  `crates/wasm-common/assets/agentos-wasm-abi.json` and required by built
   software;
 - route every resource-bearing operation to an agentOS kernel or sidecar
   service;
@@ -778,9 +770,8 @@ revision has been sealed:
 
 - [x] Pin one reviewed Wasmtime version and revalidate the referenced API
       defaults, safety contracts, supported platforms, and Cargo feature set.
-- [x] Add the multi-file `crates/execution/src/wasm/wasmtime/` Engine, Store,
-      Module cache, Linker, ABI, memory, error, interruption, and execution
-      modules without creating a new crate or giant source file.
+- [x] Add the multi-file `agentos-executor-wasm-wasmtime` Engine, Store, Module
+      cache, Linker, ABI, memory, error, interruption, and execution crate.
 - [x] Configure a bounded process-wide Engine registry keyed by the exact
       agentOS feature profile and stack cap; enforce the eight-profile default
       limit and 80% warning.
@@ -1288,9 +1279,9 @@ The subsystem inventory was performed against these current implementation
 owners:
 
 - standalone WASM adapter and runner:
-  `crates/execution/src/wasm.rs`,
-  `crates/execution/assets/runners/wasm-runner.mjs`, and
-  `crates/execution/assets/runners/wasi-module.js`;
+  `crates/executor-wasm-v8/src/lib.rs`,
+  `crates/v8-runtime/assets/runners/wasm-runner.mjs`, and
+  `crates/v8-runtime/assets/runners/wasi-module.js`;
 - ABI declarations and libc behavior:
   `toolchain/crates/wasi-ext/src/lib.rs`, `toolchain/std-patches/`, and
   `toolchain/std-patches/wasi-libc-overrides/`;

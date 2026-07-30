@@ -141,7 +141,7 @@ jobs:
       - name: Verify native runner architecture
         run: test "$(uname -m)" = "${{ matrix.architecture }}"
       - name: Compile and execute Wasmtime embedding smoke tests
-        run: cargo test -p agentos-execution wasmtime --lib
+        run: cargo test -p agentos-executor-wasm-wasmtime --features threads --lib
 
   build-sidecar:
     needs: [context]
@@ -463,9 +463,9 @@ jobs:
             cp "artifacts/sidecar-${p}/agentos-native-sidecar" "release-assets/agentos-native-sidecar-${target}"
           done
           chmod +x release-assets/agentos-sidecar-* release-assets/agentos-native-sidecar-*
-          if [ -d crates/execution/assets/pyodide ]; then
+          if [ -d crates/v8-runtime/assets/pyodide ]; then
             mkdir -p release-assets/pyodide
-            cp -R crates/execution/assets/pyodide/. release-assets/pyodide/
+            cp -R crates/v8-runtime/assets/pyodide/. release-assets/pyodide/
           fi
       - name: Create GitHub release and upload assets
         if: ${{ needs.context.outputs.trigger == 'release' }}
@@ -538,15 +538,13 @@ jobs:
       - name: Stage vendored V8 bridge bundles and base filesystem
         run: |
           set -euo pipefail
-          # crates/{execution,v8-runtime}/assets/generated is gitignored; the
+          # crates/v8-runtime/assets/generated is gitignored; the
           # published crates fall back to the vendored bundle (build-support
           # copy_vendored_bundle) and panic if it is absent. Stage it here.
-          for crate in execution v8-runtime; do
-            out="crates/${crate}/assets/generated"
-            mkdir -p "$out"
-            node packages/build-tools/scripts/build-v8-bridge.mjs --out-dir "$out"
-          done
-          git add -f crates/execution/assets/generated crates/v8-runtime/assets/generated
+          out="crates/v8-runtime/assets/generated"
+          mkdir -p "$out"
+          node packages/build-tools/scripts/build-v8-bridge.mjs --out-dir "$out"
+          git add -f crates/v8-runtime/assets/generated
           # The single committed base filesystem lives in the vfs crate; the
           # kernel and native-sidecar crates vendor a copy for isolated publish
           # builds (their build.rs falls back to assets/base-filesystem.json).

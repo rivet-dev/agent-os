@@ -35,7 +35,8 @@
 //! * Build scripts (`build.rs`, `*_build_support.rs`, ...), `tests/` and
 //!   `benches/` directories, and inline `#[cfg(test)]` modules are excluded
 //!   from the scan (they are not production host-access surface).
-//! * `crates/execution/src/benchmark.rs`, `crates/execution/src/bin/`, and
+//! * `crates/executor-conformance/src/benchmark.rs`,
+//!   `crates/executor-conformance/src/bin/`, and
 //!   `crates/native-baseline/` hold benchmarking/dev tooling and are excluded
 //!   for the same reason.
 //!
@@ -61,10 +62,11 @@ fn repo_root() -> PathBuf {
 fn managed_v8_filesystem_state_is_kernel_authoritative() {
     let root = repo_root();
     let runner =
-        std::fs::read_to_string(root.join("crates/execution/assets/runners/wasm-runner.mjs"))
+        std::fs::read_to_string(root.join("crates/v8-runtime/assets/runners/wasm-runner.mjs"))
             .expect("read managed WASM runner");
-    let wasi = std::fs::read_to_string(root.join("crates/execution/assets/runners/wasi-module.js"))
-        .expect("read WASI module");
+    let wasi =
+        std::fs::read_to_string(root.join("crates/v8-runtime/assets/runners/wasi-module.js"))
+            .expect("read WASI module");
     let filesystem = std::fs::read_to_string(root.join("crates/native-sidecar/src/filesystem.rs"))
         .expect("read sidecar filesystem service");
     let rpc =
@@ -162,7 +164,7 @@ fn managed_v8_filesystem_state_is_kernel_authoritative() {
 fn managed_wasm_uses_one_sidecar_owned_posix_poll() {
     let root = repo_root();
     let runner =
-        std::fs::read_to_string(root.join("crates/execution/assets/runners/wasm-runner.mjs"))
+        std::fs::read_to_string(root.join("crates/v8-runtime/assets/runners/wasm-runner.mjs"))
             .expect("read managed WASM runner");
     let sidecar = std::fs::read_to_string(
         root.join("crates/native-sidecar/src/execution/host_dispatch/network_compat.rs"),
@@ -222,7 +224,7 @@ fn managed_wasm_uses_one_sidecar_owned_posix_poll() {
 fn managed_blocking_socket_operations_wait_through_posix_poll() {
     let root = repo_root();
     let runner =
-        std::fs::read_to_string(root.join("crates/execution/assets/runners/wasm-runner.mjs"))
+        std::fs::read_to_string(root.join("crates/v8-runtime/assets/runners/wasm-runner.mjs"))
             .expect("read managed WASM runner");
     let helper = runner
         .split("function waitManagedHostNetReadable(")
@@ -272,7 +274,7 @@ fn managed_blocking_socket_operations_wait_through_posix_poll() {
 #[test]
 fn managed_wasm_socket_reads_probe_before_and_after_readiness_waits() {
     let runner = std::fs::read_to_string(
-        repo_root().join("crates/execution/assets/runners/wasm-runner.mjs"),
+        repo_root().join("crates/v8-runtime/assets/runners/wasm-runner.mjs"),
     )
     .expect("read managed WASM runner");
     let read = runner
@@ -336,10 +338,10 @@ fn phase_two_keeps_wasmtime_scoped_to_the_standalone_wasm_adapter() {
         "Phase 2 must pin reviewed Wasmtime without installing ambient wasmtime-wasi"
     );
 
-    let wasm_adapter = std::fs::read_to_string(root.join("crates/execution/src/wasm.rs"))
+    let wasm_adapter = std::fs::read_to_string(root.join("crates/executor-wasm-v8/src/lib.rs"))
         .expect("read standalone WASM adapter");
     let wasmtime_module =
-        std::fs::read_to_string(root.join("crates/execution/src/wasm/wasmtime/module.rs"))
+        std::fs::read_to_string(root.join("crates/executor-wasm-wasmtime/src/module.rs"))
             .expect("read Wasmtime module compiler");
     assert!(
         wasm_adapter
@@ -368,10 +370,10 @@ fn phase_two_keeps_wasmtime_scoped_to_the_standalone_wasm_adapter() {
         );
     }
     assert!(
-        linux.contains("cargo test -p agentos-execution wasmtime --lib --target \"$TARGET\"")
+        linux.contains("cargo test -p agentos-executor-wasm-wasmtime --features threads --lib --target \"$TARGET\"")
             && publish.contains("runner: macos-15-intel")
             && publish.contains("runner: macos-15")
-            && publish.contains("cargo test -p agentos-execution wasmtime --lib")
+            && publish.contains("cargo test -p agentos-executor-wasm-wasmtime --features threads --lib")
             && publish.contains("smoke-sidecar-artifacts:")
             && publish.contains("scripts/ci/smoke-packed-wasm-backends.mjs")
             && publish.contains("needs.smoke-sidecar-artifacts.result == 'success'"),
@@ -400,8 +402,8 @@ fn phase_two_keeps_wasmtime_scoped_to_the_standalone_wasm_adapter() {
         }) {
             assert_eq!(
                 manifest,
-                root.join("crates/execution/Cargo.toml"),
-                "only the execution crate may depend on Wasmtime"
+                root.join("crates/executor-wasm-wasmtime/Cargo.toml"),
+                "only the Wasmtime executor crate may depend on Wasmtime"
             );
         }
     }
@@ -412,7 +414,7 @@ fn phase_two_keeps_wasmtime_scoped_to_the_standalone_wasm_adapter() {
         let production = production_source_text(&source);
         if production.contains("use wasmtime::") || production.contains("extern crate wasmtime") {
             assert!(
-                relative.starts_with("crates/execution/src/wasm/wasmtime"),
+                relative.starts_with("crates/executor-wasm-wasmtime/src"),
                 "external Wasmtime API use escaped the standalone adapter: {}",
                 relative.display()
             );
@@ -682,8 +684,7 @@ fn kernel_process_table_is_the_only_durable_signal_state_owner() {
     let non_kernel_files = production_source_files(&root)
         .into_iter()
         .filter(|path| {
-            path.starts_with("crates/execution/src")
-                || path.starts_with("crates/native-sidecar/src")
+            path.starts_with("crates/executor-") || path.starts_with("crates/native-sidecar/src")
         })
         .collect::<Vec<_>>();
     let duplicated_owner_fields = production_matches(
@@ -949,7 +950,7 @@ fn shared_tcp_connect_has_no_blocking_native_fallback() {
 fn compatibility_wasm_rpc_inventory_matches_runner_literals() {
     let root = repo_root();
     let runner =
-        std::fs::read_to_string(root.join("crates/execution/assets/runners/wasm-runner.mjs"))
+        std::fs::read_to_string(root.join("crates/v8-runtime/assets/runners/wasm-runner.mjs"))
             .expect("read compatibility WASM runner");
     let inventory = std::fs::read_to_string(
         root.join("crates/native-sidecar/src/execution/host_dispatch/inventory.rs"),
@@ -1015,7 +1016,7 @@ fn compatibility_wasm_rpc_inventory_matches_runner_literals() {
     // generic `process.wasm_sync_rpc` method. Freeze both the wrapper switch
     // and its delta from the literal runner inventory; otherwise a Linux call
     // can bypass the typed decoder without changing wasm-runner.mjs.
-    let bootstrap = std::fs::read_to_string(root.join("crates/execution/src/wasm.rs"))
+    let bootstrap = std::fs::read_to_string(root.join("crates/executor-wasm-v8/src/lib.rs"))
         .expect("read compatibility WASM bootstrap");
     let rpc =
         std::fs::read_to_string(root.join("crates/native-sidecar/src/execution/javascript/rpc.rs"))
@@ -1324,7 +1325,7 @@ fn is_excluded_file(rel: &Path) -> bool {
         || s.ends_with("build_support.rs")
         || s.ends_with("v8_bridge_build.rs")
         // Benchmarking / dev tooling, not production host-access surface.
-        || s == "crates/execution/src/benchmark.rs"
+        || s == "crates/executor-conformance/src/benchmark.rs"
         || s.starts_with("crates/native-baseline/")
         // Browser support is intentionally retained but disabled; dormant
         // browser sources must not gate the native reactor migration.
@@ -1523,14 +1524,14 @@ const FS_ALLOW: &[&str] = &[
     // an immutable, content-addressed mount source); reads are SIGBUS-guarded.
     "crates/vfs/src/posix/tar_fs.rs",
     // language-runtime asset / module loaders (read host runtime assets)
-    "crates/execution/src/python.rs",
-    "crates/execution/src/wasm.rs",
-    "crates/execution/src/javascript.rs",
-    "crates/execution/src/node_import_cache.rs",
-    "crates/execution/src/runtime_support.rs",
+    "crates/executor-python-v8-pyodide/src/lib.rs",
+    "crates/executor-wasm-v8/src/lib.rs",
+    "crates/v8-runtime/src/javascript.rs",
+    "crates/v8-runtime/src/asset_cache.rs",
+    "crates/v8-runtime/src/adapter_support.rs",
     // Process RSS is sampled only for operator-visible Wasmtime diagnostics;
     // it is not guest filesystem access or an ambient WASI capability.
-    "crates/execution/src/wasm/wasmtime/engine.rs",
+    "crates/executor-wasm-wasmtime/src/engine.rs",
     // Host-side V8 diagnostics: module-trace and sync-RPC latency profilers
     // write to an operator-provided file path, and snapshot bootstrap reads the
     // userland bundle from PI_SNAPSHOT_BUNDLE_PATH. Host-only, not guest-reachable.
@@ -1574,8 +1575,8 @@ const NET_ALLOW: &[&str] = &[
     "crates/native-sidecar/src/plugins/sandbox_agent.rs",
     // embedded runtime IPC socketpair (not external egress)
     "crates/v8-runtime/src/embedded_runtime.rs",
-    "crates/execution/src/v8_host.rs",
-    "crates/execution/src/v8_runtime.rs",
+    "crates/v8-runtime/src/adapter_host.rs",
+    "crates/v8-runtime/src/adapter_runtime.rs",
     // client spawns + connects to the sidecar helper
     "crates/sidecar-client/src/transport.rs",
     // Authenticated local transport from the sidecar to the owning actor's
@@ -1600,7 +1601,7 @@ const PROCESS_ALLOW: &[&str] = &[
     // Explicitly threaded WASM is isolated in a re-exec of the reviewed
     // native-sidecar binary. The parent keeps every kernel capability and the
     // child receives only bounded typed host-operation IPC.
-    "crates/execution/src/wasm/wasmtime/worker.rs",
+    "crates/executor-wasm-wasmtime/src/worker.rs",
 ];
 
 /// env: process-environment reads.
@@ -1615,16 +1616,16 @@ const ENV_ALLOW: &[&str] = &[
     // Operator-selected ACP trace output path.
     "crates/agentos-sidecar/src/acp/restore.rs",
     "crates/agentos-sidecar/src/main.rs",
-    "crates/execution/src/host_node.rs",
+    "crates/v8-runtime/src/host_node.rs",
     // Node import cache reads an operator timeout knob before materializing
     // host-side runtime assets for VM startup.
-    "crates/execution/src/node_import_cache.rs",
+    "crates/v8-runtime/src/asset_cache.rs",
     // Host-side perf phase diagnostics toggles, read from operator env and not
     // guest-reachable.
-    "crates/execution/src/javascript.rs",
+    "crates/v8-runtime/src/javascript.rs",
     // Operator/test override for the reviewed native-sidecar worker binary;
     // guest input cannot select or mutate this path.
-    "crates/execution/src/wasm/wasmtime/worker.rs",
+    "crates/executor-wasm-wasmtime/src/worker.rs",
     "crates/native-sidecar/src/filesystem.rs",
     "crates/v8-runtime/src/bridge.rs",
     "crates/native-sidecar/src/execution/",
@@ -1641,12 +1642,12 @@ const ENV_ALLOW: &[&str] = &[
     // process-wide test/debug knob, native-only); not VM policy.
     // Warm-isolate pool sizing knob (AGENTOS_V8_WARM_ISOLATES), read at
     // executor init from operator env. Not guest-reachable.
-    "crates/execution/src/v8_host.rs",
+    "crates/v8-runtime/src/adapter_host.rs",
     // Wasm runner mode/cache knobs (AGENTOS_WASM_SNAPSHOT_RUNNER,
     // AGENTOS_WASM_RUNNER_NO_CACHE) + warm-pool sizing, read at executor init
     // from operator env. Not guest-reachable. (wasm.rs is already a sanctioned
     // FS asset-loading boundary above.)
-    "crates/execution/src/wasm.rs",
+    "crates/executor-wasm-v8/src/lib.rs",
     // Session-phase perf diagnostics toggles (AGENTOS_V8_SESSION_PHASES*),
     // read from operator env. Not guest-reachable.
     "crates/v8-runtime/src/session.rs",
@@ -1846,16 +1847,12 @@ fn production_execution_lifecycle_is_runtime_neutral_and_delegated() {
         "every backend, including compatibility WASM, must enter the kernel-owned signal checkpoint path"
     );
 
-    let wasm = std::fs::read_to_string(root.join("crates/execution/src/wasm.rs"))
-        .expect("read standalone WASM adapters");
-    let v8_backend_start = wasm
-        .find("impl ExecutionBackend for V8WasmExecution")
+    let v8_wasm = std::fs::read_to_string(root.join("crates/executor-wasm-v8/src/lib.rs"))
+        .expect("read V8-WASM adapter");
+    let v8_backend_start = v8_wasm
+        .find("impl ExecutionBackend for WasmV8Execution")
         .expect("find V8-WASM backend adapter");
-    let v8_backend_end = wasm[v8_backend_start..]
-        .find("impl WasmExecution")
-        .map(|offset| v8_backend_start + offset)
-        .expect("find end of V8-WASM backend adapter");
-    let v8_backend: String = wasm[v8_backend_start..v8_backend_end]
+    let v8_backend: String = v8_wasm[v8_backend_start..]
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect();
@@ -1865,10 +1862,12 @@ fn production_execution_lifecycle_is_runtime_neutral_and_delegated() {
             && v8_backend.contains("wake.publish_signal(signal,delivery_token)"),
         "compatibility WASM checkpoints must publish through the runtime-neutral kernel wake capability"
     );
-    let wasm_backend_start = wasm
+    let composition = std::fs::read_to_string(root.join("crates/native-sidecar/src/executor.rs"))
+        .expect("read native executor composition");
+    let wasm_backend_start = composition
         .find("impl ExecutionBackend for WasmExecution")
         .expect("find standalone WASM backend adapter");
-    let wasm_backend: String = wasm[wasm_backend_start..]
+    let wasm_backend: String = composition[wasm_backend_start..]
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect();
@@ -1879,7 +1878,7 @@ fn production_execution_lifecycle_is_runtime_neutral_and_delegated() {
             )
             .count()
             >= 2
-            && wasm_backend.contains("WasmExecutionBackend::Wasmtime(execution)"),
+            && wasm_backend.contains("Self::Wasmtime(execution)"),
         "both standalone WASM engines must consume the common signal-checkpoint contract"
     );
 }
@@ -1888,8 +1887,12 @@ fn production_execution_lifecycle_is_runtime_neutral_and_delegated() {
 fn common_execution_lifecycle_has_no_backend_specific_signal_or_process_residence_debt() {
     let root = repo_root();
     let files = [
-        "crates/execution/src",
-        "crates/execution/tests",
+        "crates/executor-contract/src",
+        "crates/executor-node-v8/src",
+        "crates/executor-python-v8-pyodide/src",
+        "crates/executor-wasm-v8/src",
+        "crates/executor-wasm-wasmtime/src",
+        "crates/executor-conformance/tests",
         "crates/native-sidecar/src",
         "crates/native-sidecar/tests",
     ]
@@ -2025,7 +2028,11 @@ fn every_production_active_process_attaches_the_real_kernel_runtime_endpoint() {
     // backend is installed it is wrapped by ActiveProcess below.
     for relative in [
         "crates/kernel/src",
-        "crates/execution/src",
+        "crates/executor-contract/src",
+        "crates/executor-node-v8/src",
+        "crates/executor-python-v8-pyodide/src",
+        "crates/executor-wasm-v8/src",
+        "crates/executor-wasm-wasmtime/src",
         "crates/native-sidecar/src",
     ] {
         let files = production_source_files(&root)
@@ -2598,7 +2605,11 @@ fn generic_runtime_layers_do_not_depend_on_product_or_acp_layers() {
         "vfs-store",
         "v8-runtime",
         "executor-contract",
-        "execution",
+        "wasm-common",
+        "executor-node-v8",
+        "executor-python-v8-pyodide",
+        "executor-wasm-v8",
+        "executor-wasm-wasmtime",
     ];
     let forbidden = [
         "agentos-protocol",
@@ -2638,6 +2649,75 @@ fn executor_contract_has_no_native_runtime_or_engine_dependencies() {
         assert!(
             !dependencies.contains(forbidden),
             "runtime-neutral executor contract must not depend on {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn native_executor_packages_are_independently_feature_gated() {
+    let root = repo_root();
+    let manifest = std::fs::read_to_string(root.join("crates/native-sidecar/Cargo.toml"))
+        .expect("read native sidecar manifest");
+    for feature in [
+        "node-v8",
+        "python-v8-pyodide",
+        "wasm-v8",
+        "wasm-wasmtime",
+        "wasm-wasmtime-threads",
+        "all-executors",
+    ] {
+        assert!(
+            manifest.contains(&format!("{feature} =")),
+            "native sidecar is missing the `{feature}` executor feature"
+        );
+    }
+    for dependency in [
+        "agentos-executor-node-v8",
+        "agentos-executor-python-v8-pyodide",
+        "agentos-executor-wasm-v8",
+        "agentos-executor-wasm-wasmtime",
+    ] {
+        let declaration = manifest
+            .lines()
+            .find(|line| line.trim_start().starts_with(dependency))
+            .unwrap_or_else(|| panic!("missing {dependency} dependency"));
+        assert!(
+            declaration.contains("optional = true"),
+            "{dependency} must remain removable from the native binary"
+        );
+    }
+
+    let composition = std::fs::read_to_string(root.join("crates/native-sidecar/src/executor.rs"))
+        .expect("read executor composition");
+    assert!(
+        composition.contains("ERR_AGENTOS_EXECUTOR_NOT_COMPILED")
+            && composition.contains("executor_not_compiled(\"wasm-v8\", \"wasm-v8\")")
+            && composition.contains("executor_not_compiled(\"wasm-wasmtime\", \"wasm-wasmtime\")"),
+        "compiled-out WASM backends must fail explicitly instead of falling back"
+    );
+    let launch =
+        std::fs::read_to_string(root.join("crates/native-sidecar/src/execution/launch.rs"))
+            .expect("read executor launch dispatch");
+    assert!(
+        launch.contains("executor_feature_disabled(\"Node.js/V8\", \"node-v8\")")
+            && launch.contains("\"python-v8-pyodide\""),
+        "compiled-out JavaScript and Python launch paths must fail explicitly"
+    );
+}
+
+#[test]
+fn wasm_common_has_no_native_runtime_or_engine_dependencies() {
+    let root = repo_root();
+    let dependencies = dependency_keys(&root.join("crates/wasm-common/Cargo.toml"));
+    for forbidden in [
+        "agentos-runtime-tokio",
+        "agentos-v8-runtime",
+        "tokio",
+        "wasmtime",
+    ] {
+        assert!(
+            !dependencies.contains(forbidden),
+            "engine-neutral WebAssembly support must not depend on {forbidden}"
         );
     }
 }
@@ -2828,7 +2908,11 @@ fn native_reactor_source_files(root: &Path) -> Vec<PathBuf> {
             let path = path.to_string_lossy();
             [
                 "crates/bridge/",
-                "crates/execution/",
+                "crates/executor-contract/",
+                "crates/executor-node-v8/",
+                "crates/executor-python-v8-pyodide/",
+                "crates/executor-wasm-v8/",
+                "crates/executor-wasm-wasmtime/",
                 "crates/kernel/",
                 "crates/native-sidecar/",
                 "crates/native-sidecar-core/",
@@ -2902,8 +2986,9 @@ fn native_execution_is_split_by_domain() {
 #[test]
 fn python_filesystem_and_process_calls_use_common_host_operations() {
     let root = repo_root();
-    let adapter = std::fs::read_to_string(root.join("crates/execution/src/python.rs"))
-        .expect("read Python execution adapter");
+    let adapter =
+        std::fs::read_to_string(root.join("crates/executor-python-v8-pyodide/src/lib.rs"))
+            .expect("read Python execution adapter");
     let mapper =
         std::fs::read_to_string(root.join("crates/native-sidecar/src/execution/process.rs"))
             .expect("read common execution event mapper");
@@ -2959,7 +3044,7 @@ fn python_filesystem_and_process_calls_use_common_host_operations() {
 
 #[test]
 fn python_common_host_replies_preserve_typed_error_details() {
-    let adapter = include_str!("../../execution/src/python.rs");
+    let adapter = include_str!("../../executor-python-v8-pyodide/src/lib.rs");
     let target = adapter
         .split_once("impl DirectHostReplyTarget for PythonHostReplyTarget")
         .expect("Python direct host reply target")
@@ -2981,7 +3066,7 @@ fn python_common_host_replies_preserve_typed_error_details() {
 
 #[test]
 fn javascript_timer_and_direct_reply_errors_use_typed_classification() {
-    let javascript = include_str!("../../execution/src/javascript.rs");
+    let javascript = include_str!("../../v8-runtime/src/javascript.rs");
     let timer = javascript
         .split_once("fn timer_dispatch_error(")
         .expect("JavaScript timer error adapter")
@@ -2997,7 +3082,7 @@ fn javascript_timer_and_direct_reply_errors_use_typed_classification() {
     );
 
     let direct_reply = javascript
-        .split_once("pub(crate) fn map_host_reply_adapter_response(")
+        .split_once("pub fn map_host_reply_adapter_response(")
         .expect("JavaScript direct reply adapter")
         .1
         .split_once("fn encode_host_service_error_payload(")
@@ -3223,7 +3308,7 @@ fn reactor_readiness_never_uses_the_ordinary_stream_event_lane() {
     let mut files = native_execution_source_files(&root);
     files.extend([
         PathBuf::from("crates/native-sidecar/src/vm.rs"),
-        PathBuf::from("crates/execution/src/javascript.rs"),
+        PathBuf::from("crates/v8-runtime/src/javascript.rs"),
     ]);
     let violations = production_matches(
         &root,
@@ -3268,7 +3353,7 @@ fn javascript_tcp_receive_path_is_event_driven() {
             &["net-poll-delay-ms", "setPollDelayMs", "pollDelayMs"][..],
         ),
         (
-            "crates/execution/src/node_import_cache.rs",
+            "crates/v8-runtime/src/asset_cache.rs",
             &[
                 "NODE_EXECUTION_RUNNER_SOURCE",
                 "root_dir.join(\"runner.mjs\")",
@@ -3437,7 +3522,7 @@ fn canonical_wasm_exceptions_use_one_finalized_artifact_on_both_engines() {
         "V8 130 must enable the finalized exception encoding used by canonical C++ commands"
     );
 
-    let profile = std::fs::read_to_string(root.join("crates/execution/src/wasm/profile.rs"))
+    let profile = std::fs::read_to_string(root.join("crates/wasm-common/src/profile.rs"))
         .expect("read shared WASM profile");
     assert!(profile.contains("features.set(WasmFeatures::EXCEPTIONS, true)"));
     assert!(profile.contains("features.set(WasmFeatures::LEGACY_EXCEPTIONS, false)"));
@@ -3478,27 +3563,27 @@ fn production_threads_match_the_reviewed_topology_manifest() {
         ),
         (
             "serialized-v8-maintenance",
-            "crates/execution/src/v8_host.rs",
+            "crates/v8-runtime/src/adapter_host.rs",
         ),
         (
             "process-wasmtime-epoch-ticker",
-            "crates/execution/src/wasm/wasmtime/engine.rs",
+            "crates/executor-wasm-wasmtime/src/engine.rs",
         ),
         (
             "admitted-wasmtime-guest-executor",
-            "crates/execution/src/wasm/wasmtime/lifecycle.rs",
+            "crates/executor-wasm-wasmtime/src/lifecycle.rs",
         ),
         (
             "admitted-threaded-wasmtime-guest",
-            "crates/execution/src/wasm/wasmtime/threads.rs",
+            "crates/executor-wasm-wasmtime/src/threads.rs",
         ),
         (
             "threaded-wasmtime-ipc-writer",
-            "crates/execution/src/wasm/wasmtime/worker.rs",
+            "crates/executor-wasm-wasmtime/src/worker.rs",
         ),
         (
             "threaded-wasmtime-ipc-reader",
-            "crates/execution/src/wasm/wasmtime/worker.rs",
+            "crates/executor-wasm-wasmtime/src/worker.rs",
         ),
         (
             "constant-stdio-writer",
@@ -3639,7 +3724,7 @@ fn protocol_and_abort_delivery_have_no_recurring_poll_timer() {
 
 #[test]
 fn standalone_wasm_wait_has_no_recurring_adapter_poll() {
-    let path = repo_root().join("crates/execution/src/wasm.rs");
+    let path = repo_root().join("crates/executor-wasm-v8/src/lib.rs");
     let source =
         std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
     for marker in [
@@ -3831,7 +3916,7 @@ fn javascript_child_process_receive_path_is_event_driven() {
             ][..],
         ),
         (
-            "crates/execution/src/node_import_cache.rs",
+            "crates/v8-runtime/src/asset_cache.rs",
             &["scheduleSyntheticChildPoll", "child_process.poll"][..],
         ),
     ] {
@@ -3868,7 +3953,7 @@ fn reactor_completion_paths_do_not_silently_drop_settlement() {
             ][..],
         ),
         (
-            "crates/execution/src/javascript.rs",
+            "crates/v8-runtime/src/javascript.rs",
             &[
                 "let _ = v8_session.send_bridge_response",
                 "let _ = self.v8_session.send_stream_event",
@@ -3966,7 +4051,7 @@ fn structured_audit_delivery_failures_have_a_non_recursive_stderr_fallback() {
 #[test]
 fn python_native_tcp_connect_uses_the_common_managed_network_operation() {
     let root = repo_root();
-    let source = std::fs::read_to_string(root.join("crates/execution/src/python.rs"))
+    let source = std::fs::read_to_string(root.join("crates/executor-python-v8-pyodide/src/lib.rs"))
         .expect("read Python execution adapter");
     let socket_connect_arm = source
         .split("PythonVfsRpcMethod::SocketConnect =>")
@@ -4109,7 +4194,7 @@ fn native_udp_has_one_descriptor_owner_and_no_readiness_clone() {
 #[test]
 fn python_bridge_error_classification_uses_typed_codes_only() {
     let runner = std::fs::read_to_string(
-        repo_root().join("crates/execution/assets/runners/python-runner.mjs"),
+        repo_root().join("crates/v8-runtime/assets/runners/python-runner.mjs"),
     )
     .expect("read Python runner");
     let classifier = runner

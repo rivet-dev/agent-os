@@ -37,7 +37,7 @@ binary, archive, log, database, or generated-result artifacts.
 
 Primary areas:
 
-- `crates/execution`
+- `crates/executor-*`, `crates/v8-runtime`, and `crates/wasm-common`
 - `crates/kernel`
 - `crates/native-sidecar` and `crates/native-sidecar-core`
 - `crates/v8-runtime`

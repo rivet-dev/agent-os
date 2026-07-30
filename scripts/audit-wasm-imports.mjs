@@ -13,7 +13,7 @@ const defaultCommandsDir = resolve(
 );
 const defaultManifestPath = resolve(
   root,
-  'crates/execution/assets/agentos-wasm-abi.json',
+  'crates/wasm-common/assets/agentos-wasm-abi.json',
 );
 const expectedManifestSchemaVersion = 2;
 const allowedImportStatuses = new Set(['canonical', 'compatibility']);

@@ -1,9 +1,9 @@
 use super::*;
+use crate::executor::host::SocketDomain as HostSocketDomain;
 use crate::state::{
     DeferredRpcError, ManagedHostNetDescription, ManagedHostNetDescriptionRegistry,
     ManagedHostNetRoute, ManagedStreamReadRecheck, ManagedUdpPollRecheck,
 };
-use agentos_execution::host::SocketDomain as HostSocketDomain;
 use agentos_kernel::process_table::SignalSet;
 use agentos_kernel::socket_table::SocketType;
 use std::time::{Duration, Instant};
@@ -4487,7 +4487,7 @@ impl SidecarHostCapability<NetworkOperation> for NetworkCapability {
 mod managed_tests {
     use super::*;
     use crate::execution::host_dispatch::inventory::WASM_RUNNER_RPC_INVENTORY;
-    use agentos_execution::backend::{DirectHostReplyTarget, HostCallIdentity};
+    use crate::executor::backend::{DirectHostReplyTarget, HostCallIdentity};
     use agentos_kernel::command_registry::CommandDriver;
     use agentos_kernel::kernel::{KernelVmConfig, SpawnOptions};
     use agentos_kernel::mount_table::MountTable;

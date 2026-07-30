@@ -176,7 +176,7 @@ fn pyodide_asset_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("sidecar crate parent")
-        .join("execution")
+        .join("v8-runtime")
         .join("assets")
         .join("pyodide")
 }

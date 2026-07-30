@@ -26,7 +26,7 @@ const found = execSync(
 		"\\(",
 		'-name node_modules -o -name dist -o -name .astro -o -name .cache -o -name .turbo -o -name .codex-build -o -name .output -o -name .eve -o -name vendor -o -name target -o -name .git -o -name .jj -o -name .claude',
 		'-o -path "./packages/runtime-core/tests/integration/projects"',
-		'-o -path "./crates/execution/assets/undici-shims"',
+		'-o -path "./crates/v8-runtime/assets/undici-shims"',
 		"\\)",
 		"\\)",
 		"-prune -o -name package.json -print",

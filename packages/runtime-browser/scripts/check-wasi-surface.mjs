@@ -2,7 +2,7 @@
 // Convergence guard for the SINGLE shared WASI preview1 runner.
 //
 // The browser no longer maintains its own WASI runner: `src/wasi-polyfill.ts`
-// is generated from the native runner (`crates/execution/assets/runners/
+// is generated from the native runner (`crates/v8-runtime/assets/runners/
 // wasi-module.js`) by `generate-wasi-polyfill.mjs`. So the only drift that can
 // happen now is (1) the generated browser file being stale vs the native source,
 // or (2) the native runner's import surface drifting from the WASI manifest.

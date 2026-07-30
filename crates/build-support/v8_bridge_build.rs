@@ -264,7 +264,7 @@ fn emit_rerun_inputs(repo_root: &Path, script_path: &Path, package_root: &Path) 
         )
     });
 
-    let shim_dir = repo_root.join("crates/execution/assets/undici-shims");
+    let shim_dir = repo_root.join("crates/v8-runtime/assets/undici-shims");
     emit_rerun_dir(&shim_dir).unwrap_or_else(|error| {
         panic!(
             "failed to enumerate V8 bridge shim inputs under {}: {}",

@@ -3,7 +3,7 @@
 // Runs a vendored subset of the official WebAssembly/wasi-testsuite preview1
 // modules through the SHARED WASI runner on the browser backend, asserting the
 // upstream spec's exit code + stdout. The identical manifest is run on the
-// native backend by `crates/execution/tests/wasm.rs` (wasi_testsuite_subset), so
+// native backend by `crates/executor-conformance/tests/wasm.rs` (wasi_testsuite_subset), so
 // the one shared runner is conformance-checked on both backends.
 
 import { expect, test } from "@playwright/test";

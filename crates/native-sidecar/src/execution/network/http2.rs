@@ -1111,7 +1111,7 @@ fn push_http2_retain_wake(
     if let Err(error) = session.publish_readiness(
         capability_id,
         capability_generation,
-        agentos_execution::backend::ExecutionReadyFlags::READABLE,
+        crate::executor::backend::ExecutionReadyFlags::READABLE,
     ) {
         eprintln!("ERR_AGENTOS_HTTP2_WAKE: failed to queue HTTP/2 wake: {error}");
     }

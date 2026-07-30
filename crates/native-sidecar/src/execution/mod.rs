@@ -72,6 +72,16 @@ pub(crate) use self::javascript::{
 };
 use agentos_vm_config as vm_config;
 
+#[cfg(any(not(feature = "node-v8"), not(feature = "python-v8-pyodide")))]
+fn executor_feature_disabled(executor: &str, feature: &str) -> SidecarError {
+    SidecarError::Host(HostServiceError::new(
+        "ERR_AGENTOS_EXECUTOR_NOT_COMPILED",
+        format!(
+            "the {executor} executor is not compiled into this sidecar; rebuild with the `{feature}` feature"
+        ),
+    ))
+}
+
 use crate::bindings::{
     format_binding_failure_output, is_binding_command, normalized_binding_command_name,
     resolve_binding_command, BindingCommandResolution,
@@ -95,11 +105,15 @@ use crate::protocol::{
     SignalHandlerRegistration, SocketStateEntry, StandaloneWasmBackend, StreamChannel,
     VmFetchRequest, VmFetchResponse, WasmPermissionTier, WriteStdinRequest,
 };
+#[cfg(feature = "node-v8")]
+use crate::service::javascript_error;
+#[cfg(feature = "python-v8-pyodide")]
+use crate::service::python_error;
 use crate::service::{
     audit_fields, dirname, emit_security_audit_event, emit_structured_event_or_stderr,
-    javascript_error, kernel_error, log_stale_process_event, normalize_host_path, normalize_path,
+    kernel_error, log_stale_process_event, normalize_host_path, normalize_path,
     parse_javascript_child_process_spawn_request, path_is_within_root,
-    process_event_queue_overflow_error, python_error, wasm_error,
+    process_event_queue_overflow_error, wasm_error,
 };
 use crate::state::{
     async_completion_channel, tcp_socket_event_retained_bytes, unix_listener_event_retained_bytes,
@@ -167,13 +181,18 @@ use openssl::sign::{Signer, Verifier};
 use pbkdf2::pbkdf2_hmac;
 
 use crate::crypto_cipher::{CipherError as AesCipherError, StreamCipherSession};
-use agentos_bridge::{queue_tracker, LifecycleState};
-use agentos_execution::host::{
+use crate::executor::host::{
     ClockOperation, HostOperation, HostProcessContext, ProcessHostCapabilitySet,
     ProcessLaunchOptions, ProcessLaunchRequest, ProcessOperation, ProcessSpawnFileAction,
     ProcessSpawnHostNetworkDescriptor,
 };
-use agentos_execution::{
+#[cfg(any(
+    feature = "node-v8",
+    feature = "python-v8-pyodide",
+    feature = "wasm-v8"
+))]
+use crate::executor::javascript::handle_internal_bridge_call_from_host_context;
+use crate::executor::{
     backend::{
         bounded_execution_event_channel, DescendantOutputOwnership, DescendantWaitOwnership,
         DirectHostReplyHandle, ExecutionBackend, ExecutionBackendKind, ExecutionEvent,
@@ -181,16 +200,23 @@ use agentos_execution::{
         HostServiceError, PayloadLimit, PublishedSignalCheckpoint, ShutdownOutcome, ShutdownReason,
         SignalCheckpointOutcome, SynchronousFdWritePolicy,
     },
-    javascript::handle_internal_bridge_call_from_host_context,
-    CreateJavascriptContextRequest, CreatePythonContextRequest, CreateWasmContextRequest,
-    ExecutionSignalDispositionAction, ExecutionSignalHandlerRegistration, GuestRuntimeConfig,
-    HostRpcRequest, JavascriptExecutionEvent, JavascriptExecutionLimits,
-    JavascriptSyncRpcResponder, PythonExecutionEvent, PythonExecutionLimits, PythonVfsRpcResponder,
-    StandaloneWasmBackend as ExecutionStandaloneWasmBackend, StartJavascriptExecutionRequest,
-    StartPythonExecutionRequest, StartWasmExecutionRequest, WasmExecutionEvent,
-    WasmExecutionLimits, WasmPermissionTier as ExecutionWasmPermissionTier,
+    CreateWasmContextRequest, ExecutionSignalDispositionAction, ExecutionSignalHandlerRegistration,
+    GuestRuntimeConfig, HostRpcRequest, JavascriptSyncRpcResponder,
+    StandaloneWasmBackend as ExecutionStandaloneWasmBackend, StartWasmExecutionRequest,
+    WasmExecutionEvent, WasmExecutionLimits, WasmPermissionTier as ExecutionWasmPermissionTier,
     TRUSTED_INITIAL_MODULE_PREFIX,
 };
+#[cfg(feature = "node-v8")]
+use crate::executor::{
+    CreateJavascriptContextRequest, JavascriptExecutionEvent, JavascriptExecutionLimits,
+    StartJavascriptExecutionRequest,
+};
+#[cfg(feature = "python-v8-pyodide")]
+use crate::executor::{
+    CreatePythonContextRequest, PythonExecutionEvent, PythonExecutionLimits, PythonVfsRpcResponder,
+    StartPythonExecutionRequest,
+};
+use agentos_bridge::{queue_tracker, LifecycleState};
 use agentos_kernel::dns::{
     DnsLookupPolicy, DnsRecordResolution, DnsResolutionSource as KernelDnsResolutionSource,
 };

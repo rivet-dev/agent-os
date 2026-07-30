@@ -56,7 +56,7 @@ fn process_runtime_is_the_only_vm_executor_admission_owner() {
         "V8 assignment must combine process-global admission with an independent manager-local ceiling"
     );
 
-    let runtime = fs::read_to_string(manifest_root.join("../runtime/src/lib.rs"))
+    let runtime = fs::read_to_string(manifest_root.join("../runtime-tokio/src/lib.rs"))
         .expect("read process runtime source");
     let runtime_compact: String = runtime
         .chars()
@@ -71,7 +71,7 @@ fn process_runtime_is_the_only_vm_executor_admission_owner() {
         "one process-owned admission must be cloned unchanged into every RuntimeContext scope"
     );
 
-    let admission = fs::read_to_string(manifest_root.join("../runtime/src/executor.rs"))
+    let admission = fs::read_to_string(manifest_root.join("../runtime-tokio/src/executor.rs"))
         .expect("read runtime-neutral executor admission");
     for engine_name in ["V8", "Wasmtime", "JavascriptExecution", "WasmExecution"] {
         assert!(

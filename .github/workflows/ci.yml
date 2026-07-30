@@ -209,6 +209,21 @@ jobs:
           git diff --exit-code -- packages/runtime-core/src/generated
       - name: Build PR sidecar binaries
         run: cargo build -p agentos-sidecar -p agentos-native-sidecar
+      - name: Check native executor feature isolation
+        run: |
+          cargo check -p agentos-native-sidecar --no-default-features
+          for feature in \
+            node-v8 \
+            python-v8-pyodide \
+            wasm-v8 \
+            wasm-wasmtime \
+            wasm-wasmtime-threads
+          do
+            cargo check \
+              -p agentos-native-sidecar \
+              --no-default-features \
+              --features "$feature"
+          done
       - run: cargo clippy --workspace --exclude agentos-sidecar-browser --exclude agentos-native-sidecar-browser --all-targets -- -D warnings
       - run: cargo test -p agentos-protocol -p agentos-sidecar -- --test-threads=1
       - name: Test Rust client contracts

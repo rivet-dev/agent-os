@@ -187,17 +187,17 @@ What lives here:
 - Resource limits for process counts, FDs, pipes, PTYs, sockets, filesystem bytes/inodes, read/write sizes, readdir batches, and WASM limits.
 - The default VM user model, passwd rendering, home directory, shell, and UID/GID defaults.
 
-### Execution crate runtime common layer
+### Executor contract and shared runtime layer
 
 This is the shared scaffolding around the runtime-specific implementations.
 
 Relevant files:
-- `crates/execution/src/lib.rs`
-- `crates/execution/src/common.rs`
-- `crates/execution/src/runtime_support.rs`
+- `crates/executor-contract/src/lib.rs`
+- `crates/v8-runtime/src/adapter_common.rs`
+- `crates/v8-runtime/src/adapter_support.rs`
 
 What lives here:
-- Runtime exports and type surface for JavaScript, Python, and WASM execution engines.
+- Runtime-neutral lifecycle/host contracts plus reusable V8 adapter support.
 - Shared JSON/string encoding helpers and stable hashing.
 - Compile-cache setup, import-cache roots, warmup marker paths, sandbox root calculation, and execution-path helpers.
 
@@ -206,8 +206,8 @@ What lives here:
 This is the current Rust-side JavaScript execution manager.
 
 Relevant files:
-- `crates/execution/src/javascript.rs`
-- `crates/execution/src/node_process.rs`
+- `crates/v8-runtime/src/javascript.rs`
+- `crates/v8-runtime/src/host_node.rs`
 
 What lives here:
 - JavaScript execution lifecycle and event stream handling.
@@ -222,10 +222,10 @@ What lives here:
 This subsystem is the loader and asset materialization layer behind the JavaScript and Python runtimes.
 
 Relevant files:
-- `crates/execution/src/node_import_cache.rs`
-- `crates/execution/src/runtime_support.rs`
-- `crates/execution/src/node_process.rs`
-- `crates/execution/assets/runners/python-runner.mjs`
+- `crates/v8-runtime/src/asset_cache.rs`
+- `crates/v8-runtime/src/adapter_support.rs`
+- `crates/v8-runtime/src/host_node.rs`
+- `crates/v8-runtime/assets/runners/python-runner.mjs`
 
 What lives here:
 - Node loader templates for builtin interception and builtin deny/allow behavior.
@@ -240,9 +240,9 @@ What lives here:
 These files are checked-in guest assets that support the runtime surface but are not Rust modules.
 
 Relevant files:
-- `crates/execution/assets/v8-bridge.source.js`
-- `crates/execution/assets/polyfill-registry.json`
-- `crates/execution/assets/undici-shims/*`
+- `crates/v8-runtime/assets/v8-bridge.source.js`
+- `crates/v8-runtime/assets/polyfill-registry.json`
+- `crates/v8-runtime/assets/undici-shims/*`
 - `crates/build-support/v8_bridge_build.rs`
 
 What lives here:
@@ -255,9 +255,9 @@ What lives here:
 This subsystem owns Python guest execution.
 
 Relevant files:
-- `crates/execution/src/python.rs`
-- `crates/execution/assets/runners/python-runner.mjs`
-- `crates/execution/assets/pyodide/*`
+- `crates/executor-python-v8-pyodide/src/lib.rs`
+- `crates/v8-runtime/assets/runners/python-runner.mjs`
+- `crates/v8-runtime/assets/pyodide/*`
 
 What lives here:
 - Python execution lifecycle, stdout/stderr collection, timeout handling, and warmup flow.
@@ -270,7 +270,7 @@ What lives here:
 This subsystem owns WASM guest execution.
 
 Relevant files:
-- `crates/execution/src/wasm.rs`
+- `crates/executor-wasm-v8/src/lib.rs`
 
 What lives here:
 - WASM execution lifecycle and warmup flow.
@@ -284,9 +284,9 @@ What lives here:
 These files are the client-side bridge from the execution crate into the separate V8 daemon.
 
 Relevant files:
-- `crates/execution/src/v8_host.rs`
-- `crates/execution/src/v8_ipc.rs`
-- `crates/execution/src/v8_runtime.rs`
+- `crates/v8-runtime/src/adapter_host.rs`
+- `crates/v8-runtime/src/adapter_ipc.rs`
+- `crates/v8-runtime/src/adapter_runtime.rs`
 
 What lives here:
 - Spawning and authenticating the `agentos-v8` process.
@@ -537,7 +537,7 @@ These files are single physical modules but contain multiple logical subsystems 
   - procfs synthesis.
   - command/shebang resolution.
   - mount and driver integration.
-- `crates/execution/src/node_import_cache.rs`
+- `crates/v8-runtime/src/asset_cache.rs`
   - Node loader templates.
   - builtin/polyfill asset materialization.
   - guest path scrubbing.
@@ -565,6 +565,6 @@ If this map is used as a refactor guide, the most obvious “too many systems in
 
 - `crates/sidecar/src/execution.rs`
 - `crates/sidecar/src/service.rs`
-- `crates/execution/src/node_import_cache.rs`
-- `crates/execution/src/javascript.rs`
+- `crates/v8-runtime/src/asset_cache.rs`
+- `crates/v8-runtime/src/javascript.rs`
 - `crates/kernel/src/kernel.rs`

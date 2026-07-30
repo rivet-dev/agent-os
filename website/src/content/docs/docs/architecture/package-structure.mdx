@@ -32,6 +32,9 @@ agentos-native-sidecar
 ├── agentos-kernel
 ├── agentos-runtime-tokio
 ├── agentos-executor-contract
+├── shared engine-family support
+│   ├── agentos-v8-runtime (optional with any V8 executor)
+│   └── agentos-wasm-common
 └── optional executor crates
     ├── agentos-executor-node-v8
     │   └── agentos-v8-runtime
@@ -50,6 +53,15 @@ Dependencies point downward. In particular:
 - the executor contract does not depend on the kernel, Tokio, V8, or Wasmtime;
 - engine crates do not depend on the sidecar; and
 - the sidecar is the only crate that selects and composes executors.
+
+The sidecar also names the shared support crates directly where composition
+requires their types. `agentos-v8-runtime` is optional and enters the binary only
+with a V8 executor; the sidecar uses it for process-global platform ownership,
+snapshot prewarm, and V8 session adaptation. The lightweight
+`agentos-wasm-common` edge supplies format detection, selector, limits, and
+stable error types even when a requested WASM executor was compiled out. These
+edges do not move Node, Python, or standalone-WASM execution policy back into
+the sidecar.
 
 ## Responsibilities
 

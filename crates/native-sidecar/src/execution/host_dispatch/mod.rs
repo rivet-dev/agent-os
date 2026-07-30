@@ -35,8 +35,8 @@ mod signal;
 mod terminal;
 
 use super::*;
-use agentos_execution::backend::{ExecutionEvent, HostCallReply, PayloadLimit};
-use agentos_execution::host::{
+use crate::executor::backend::{ExecutionEvent, HostCallReply, PayloadLimit};
+use crate::executor::host::{
     BoundedBytes, BoundedExecutableImageResolutionRequest, BoundedProcessLaunchRequest,
     BoundedString, BoundedUsize, BoundedVec, ClockOperation, CommittedProcessImage,
     DescriptorSyncKind, DescriptorWhence, DnsAddressFamily, EntropyOperation,
@@ -3368,7 +3368,7 @@ mod tests {
 
     struct RejectingClaimTarget;
 
-    impl agentos_execution::backend::DirectHostReplyTarget for RejectingClaimTarget {
+    impl crate::executor::backend::DirectHostReplyTarget for RejectingClaimTarget {
         fn claim(&self, _call_id: u64) -> Result<bool, HostServiceError> {
             Ok(false)
         }
@@ -3383,7 +3383,7 @@ mod tests {
         }
     }
 
-    impl agentos_execution::backend::DirectHostReplyTarget for RecordingReplyTarget {
+    impl crate::executor::backend::DirectHostReplyTarget for RecordingReplyTarget {
         fn claim(&self, _call_id: u64) -> Result<bool, HostServiceError> {
             Ok(true)
         }
@@ -3404,9 +3404,9 @@ mod tests {
 
     fn recording_reply(
         target: Arc<RecordingReplyTarget>,
-    ) -> agentos_execution::backend::DirectHostReplyHandle {
-        agentos_execution::backend::DirectHostReplyHandle::new(
-            agentos_execution::backend::HostCallIdentity {
+    ) -> crate::executor::backend::DirectHostReplyHandle {
+        crate::executor::backend::DirectHostReplyHandle::new(
+            crate::executor::backend::HostCallIdentity {
                 generation: 1,
                 pid: 2,
                 call_id: 3,
@@ -3428,8 +3428,8 @@ mod tests {
 
     #[test]
     fn rejected_context_claim_performs_no_dns_or_http_work() {
-        let reply = agentos_execution::backend::DirectHostReplyHandle::new(
-            agentos_execution::backend::HostCallIdentity {
+        let reply = crate::executor::backend::DirectHostReplyHandle::new(
+            crate::executor::backend::HostCallIdentity {
                 generation: 1,
                 pid: 2,
                 call_id: 9,
@@ -4105,7 +4105,7 @@ mod tests {
                 )
                 .expect("host"),
                 port: None,
-                family: agentos_execution::host::DnsAddressFamily::Any,
+                family: crate::executor::host::DnsAddressFamily::Any,
                 max_results: BoundedUsize::try_new(
                     16,
                     &PayloadLimit::new("maxDnsResults", 16).expect("limit"),

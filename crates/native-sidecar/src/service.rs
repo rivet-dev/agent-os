@@ -17,6 +17,14 @@ pub(crate) use crate::execution::{
     settle_execution_host_call, terminate_child_process_tree, HickoryDnsResolver,
     JavascriptSyncRpcServiceRequest, LoopbackHttpDispatchRequest,
 };
+use crate::executor::backend::ExecutionBackendKind;
+use crate::executor::host::{ProcessLaunchOptions, ProcessLaunchRequest};
+use crate::executor::record_sync_bridge_request_observed;
+#[cfg(feature = "node-v8")]
+use crate::executor::{JavascriptExecutionEngine, JavascriptExecutionError};
+#[cfg(feature = "python-v8-pyodide")]
+use crate::executor::{PythonExecutionEngine, PythonExecutionError};
+use crate::executor::{WasmExecutionEngine, WasmExecutionError};
 use crate::extension::{
     Extension, ExtensionBufferedProcessOutput, ExtensionContext, ExtensionFuture, ExtensionHost,
     ExtensionSnapshot,
@@ -44,12 +52,6 @@ use agentos_bridge::{
     CommandPermissionRequest, EnvironmentAccess, EnvironmentPermissionRequest, FilesystemAccess,
     FilesystemPermissionRequest, LifecycleEventRecord, LifecycleState, LogLevel, LogRecord,
     NetworkAccess, NetworkPermissionRequest, StructuredEventRecord,
-};
-use agentos_execution::backend::ExecutionBackendKind;
-use agentos_execution::host::{ProcessLaunchOptions, ProcessLaunchRequest};
-use agentos_execution::{
-    record_sync_bridge_request_observed, JavascriptExecutionEngine, JavascriptExecutionError,
-    PythonExecutionEngine, PythonExecutionError, WasmExecutionEngine, WasmExecutionError,
 };
 use agentos_kernel::kernel::KernelError;
 use agentos_kernel::mount_plugin::{FileSystemPluginRegistry, PluginError};
@@ -789,7 +791,9 @@ pub struct NativeSidecar<B> {
     pub(crate) bridge: SharedBridge<B>,
     pub(crate) mount_plugins: FileSystemPluginRegistry<MountPluginContext<B>>,
     pub(crate) cache_root: PathBuf,
+    #[cfg(feature = "node-v8")]
     pub(crate) javascript_engine: JavascriptExecutionEngine,
+    #[cfg(feature = "python-v8-pyodide")]
     pub(crate) python_engine: PythonExecutionEngine,
     pub(crate) wasm_engine: WasmExecutionEngine,
     pub(crate) next_connection_id: usize,
@@ -937,9 +941,13 @@ where
         let (process_event_sender, process_event_receiver) =
             channel(protocol_limits.max_process_events);
         let process_event_notify = Arc::new(tokio::sync::Notify::new());
+        #[cfg(feature = "node-v8")]
         let mut javascript_engine = JavascriptExecutionEngine::new(runtime_context.clone());
+        #[cfg(feature = "node-v8")]
         javascript_engine.set_event_notify(Some(Arc::clone(&process_event_notify)));
+        #[cfg(feature = "python-v8-pyodide")]
         let mut python_engine = PythonExecutionEngine::new(runtime_context.clone());
+        #[cfg(feature = "python-v8-pyodide")]
         python_engine.set_event_notify(Some(Arc::clone(&process_event_notify)));
         let mut wasm_engine = WasmExecutionEngine::new(runtime_context.clone());
         wasm_engine.set_event_notify(Some(Arc::clone(&process_event_notify)));
@@ -951,7 +959,9 @@ where
             bridge,
             mount_plugins,
             cache_root,
+            #[cfg(feature = "node-v8")]
             javascript_engine,
+            #[cfg(feature = "python-v8-pyodide")]
             python_engine,
             wasm_engine,
             next_connection_id: 0,
@@ -1112,7 +1122,9 @@ where
     /// which was previously removed only on a successful handoff and leaked on VM
     /// or session disposal (M6).
     pub(crate) fn reclaim_vm_tracking(&mut self, session_id: &str, vm_id: &str) {
+        #[cfg(feature = "node-v8")]
         self.javascript_engine.dispose_vm(vm_id);
+        #[cfg(feature = "python-v8-pyodide")]
         self.python_engine.dispose_vm(vm_id);
         self.wasm_engine.dispose_vm(vm_id);
         self.prune_extension_vm_resource(vm_id);
@@ -1201,15 +1213,15 @@ where
             return false;
         };
         match event {
-            ActiveExecutionEvent::Common(agentos_execution::backend::ExecutionEvent::Output {
+            ActiveExecutionEvent::Common(crate::executor::backend::ExecutionEvent::Output {
                 stream,
                 bytes,
             }) => {
                 match stream {
-                    agentos_execution::backend::OutputStream::Stdout => {
+                    crate::executor::backend::OutputStream::Stdout => {
                         buffer.append_stdout(bytes.as_slice(), DEFAULT_ACP_STDOUT_BUFFER_BYTE_LIMIT)
                     }
-                    agentos_execution::backend::OutputStream::Stderr => {
+                    crate::executor::backend::OutputStream::Stderr => {
                         buffer.append_stderr(bytes.as_slice(), DEFAULT_ACP_STDOUT_BUFFER_BYTE_LIMIT)
                     }
                 }
@@ -4128,7 +4140,7 @@ pub(crate) fn dirname(path: &str) -> String {
 }
 
 pub(crate) fn kernel_error(error: KernelError) -> SidecarError {
-    SidecarError::Host(agentos_execution::backend::HostServiceError::new(
+    SidecarError::Host(crate::executor::backend::HostServiceError::new(
         error.code(),
         error.to_string(),
     ))
@@ -4138,6 +4150,7 @@ pub(crate) fn plugin_error(error: PluginError) -> SidecarError {
     SidecarError::Plugin(error.to_string())
 }
 
+#[cfg(feature = "node-v8")]
 pub(crate) fn javascript_error(error: JavascriptExecutionError) -> SidecarError {
     match error {
         JavascriptExecutionError::EventChannelClosed => SidecarError::ExecutionEventChannelClosed {
@@ -4167,7 +4180,7 @@ pub(crate) fn wasm_error(error: WasmExecutionError) -> SidecarError {
 #[cfg(test)]
 mod execution_error_tests {
     use super::*;
-    use agentos_execution::wasm::NativeBinaryFormat;
+    use crate::executor::wasm::NativeBinaryFormat;
 
     #[test]
     fn native_binary_rejection_preserves_its_guest_error_code() {
@@ -4191,7 +4204,7 @@ mod execution_error_tests {
     #[test]
     fn wasmtime_host_errors_preserve_their_typed_code_and_details() {
         let error = wasm_error(WasmExecutionError::Host(
-            agentos_execution::backend::HostServiceError::new(
+            crate::executor::backend::HostServiceError::new(
                 "ERR_AGENTOS_VM_EXECUTOR_LIMIT",
                 "executor saturated",
             )
@@ -4214,6 +4227,7 @@ mod execution_error_tests {
         );
     }
 
+    #[cfg(all(feature = "node-v8", feature = "python-v8-pyodide"))]
     #[test]
     fn closed_execution_channels_preserve_the_backend_kind() {
         assert_eq!(
@@ -4237,6 +4251,7 @@ mod execution_error_tests {
     }
 }
 
+#[cfg(feature = "python-v8-pyodide")]
 pub(crate) fn python_error(error: PythonExecutionError) -> SidecarError {
     match error {
         PythonExecutionError::EventChannelClosed => SidecarError::ExecutionEventChannelClosed {

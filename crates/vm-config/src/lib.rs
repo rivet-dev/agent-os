@@ -604,7 +604,7 @@ pub enum JsModuleResolution {
 
 /// Canonical set of recognized Node builtin module names (without the `node:`
 /// prefix), kept in sync with `normalize_builtin_specifier` in
-/// `crates/execution/src/javascript.rs`. Used to validate
+/// `crates/v8-runtime/src/javascript.rs`. Used to validate
 /// `jsRuntime.allowedBuiltins` entries.
 const KNOWN_NODE_BUILTINS: &[&str] = &[
     "assert",

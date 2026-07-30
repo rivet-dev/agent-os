@@ -2155,10 +2155,10 @@ matches.
 | crates/native-sidecar/src/plugins/s3_common.rs and other plugins | S3 creates a thread and Tokio runtime for setup; blocking plugin work has local ownership | Phase 2 shared runtime/bounded executor |
 | crates/v8-runtime/src/session.rs | Bounded VM/warm-worker threads; mixed 256-entry command channel; deferred sync queues; blocking sends and joins | Phase 1 direct waiters; Phase 3 bounded VM executor/dispatcher |
 | crates/v8-runtime/src/embedded_runtime.rs | Constant dispatch thread; bounded runtime-event/output channels that mix event classes | Phases 1 and 3 direct router/session broker |
-| crates/execution/src/javascript.rs | Per-sync-RPC timeout thread; pipe reader/writer threads; per-execution V8 event bridge; polling and guest stream implementation | Phases 2 and 3 executor, timers, dispatcher, and exact Duplex; pipe exceptions must be explicit |
-| crates/execution/src/python.rs | Current-thread runtime in wait; per-VFS-RPC timeout thread; adapter polling | Phase 2 runtime/timer removal; Phase 7 shared capability adapter |
-| crates/execution/src/node_import_cache.rs | Unbounded channel and a newly spawned materialization thread per attempt | Phase 2 deduplicated bounded blocking job |
-| crates/execution/src/v8_host.rs | Fresh joined thread for snapshot pre-warm because of V8 thread-state sensitivity | Phase 2 admitted maintenance path; accepted decision 2 |
+| crates/v8-runtime/src/javascript.rs | Per-sync-RPC timeout thread; pipe reader/writer threads; per-execution V8 event bridge; polling and guest stream implementation | Phases 2 and 3 executor, timers, dispatcher, and exact Duplex; pipe exceptions must be explicit |
+| crates/executor-python-v8-pyodide/src/lib.rs | Current-thread runtime in wait; per-VFS-RPC timeout thread; adapter polling | Phase 2 runtime/timer removal; Phase 7 shared capability adapter |
+| crates/v8-runtime/src/asset_cache.rs | Unbounded channel and a newly spawned materialization thread per attempt | Phase 2 deduplicated bounded blocking job |
+| crates/v8-runtime/src/adapter_host.rs | Fresh joined thread for snapshot pre-warm because of V8 thread-state sensitivity | Phase 2 admitted maintenance path; accepted decision 2 |
 | crates/kernel/src/dns.rs | Per-resolver OS thread, unbounded std MPSC, and owned multi-thread Tokio runtime | Phase 2 injected sidecar resolver and bounded admission |
 | crates/kernel/src/process_table.rs | Per-ProcessTable zombie-reaper thread; reusable signal mask/pending semantics | Phase 6 sidecar-driven timer plus kernel-neutral API |
 | crates/kernel/src/socket_table.rs | Bounded virtual socket data and empty-to-nonempty readiness callbacks | Phases 3 and 4 unified capability readiness |

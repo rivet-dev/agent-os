@@ -147,7 +147,7 @@ function spawnStdoutCaptureOp(name: string, sizeBytes: number): BenchmarkOp {
 		nativeOp: "node_stdout_capture_2b",
 		nativeArgs: ["--size-bytes", String(sizeBytes)],
 		wasmUnsupportedReason: "process spawning is not supported in the native-baseline wasm lane",
-		fileLine: "crates/execution/src/v8_host.rs:296",
+		fileLine: "crates/v8-runtime/src/adapter_host.rs:296",
 		reproducer: `spawn node child writing ${sizeBytes} stdout bytes, capture and verify byte count`,
 		program: `async () => {
   const { spawn } = await import("node:child_process");

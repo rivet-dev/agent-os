@@ -1,6 +1,6 @@
 use super::super::*;
-use agentos_execution::backend::{HostCallReply, HostServiceError};
-use agentos_execution::host::{DnsAddressFamily, NetworkOperation};
+use crate::executor::backend::{HostCallReply, HostServiceError};
+use crate::executor::host::{DnsAddressFamily, NetworkOperation};
 
 fn enforce_dns_result_limit(maximum: usize, observed: usize) -> Result<(), SidecarError> {
     if observed > maximum {
