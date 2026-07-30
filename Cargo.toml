@@ -26,6 +26,7 @@ members = [
     "crates/vfs-storage",
     "crates/vm-config",
     "crates/executor-wasm-abi-generator",
+    "examples/embedded-vm",
 ]
 [workspace.package]
 version = "0.0.1"
@@ -55,11 +56,12 @@ agentos-sidecar-client = { path = "crates/sidecar-client", version = "0.0.1" }
 agentos-sidecar = { path = "crates/sidecar", version = "0.0.1" }
 agentos-sidecar-protocol = { path = "crates/sidecar-protocol", version = "0.0.1" }
 agentos-executor-v8-runtime = { path = "crates/executor-v8-runtime", version = "0.0.1" }
-agentos-vfs-core = { path = "crates/vfs-core", version = "0.0.1" }
-agentos-vfs-storage = { path = "crates/vfs-storage", version = "0.0.1" }
+agentos-vfs-core = { path = "crates/vfs-core", version = "0.0.1", default-features = false }
+agentos-vfs-storage = { path = "crates/vfs-storage", version = "0.0.1", default-features = false }
 agentos-vm-config = { path = "crates/vm-config", version = "0.0.1" }
 vbare = "0.0.4"
 vbare-compiler = { package = "rivet-vbare-compiler", version = "0.0.5" }
+
 # Keep parallel-compilation disabled: Wasmtime implements it with Rayon's
 # host-sized global pool, outside AgentOS's fixed reviewed thread census.
 wasmtime = { version = "=46.0.0", default-features = false, features = [
@@ -72,3 +74,11 @@ wasmtime = { version = "=46.0.0", default-features = false, features = [
     "threads",
 ] }
 wasmparser = "=0.251.0"
+
+[profile.embedded]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

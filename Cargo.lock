@@ -124,6 +124,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentos-example-embedded-vm"
+version = "0.0.1"
+dependencies = [
+ "agentos-vm",
+]
+
+[[package]]
 name = "agentos-executor-conformance"
 version = "0.0.1"
 dependencies = [
@@ -441,7 +448,6 @@ dependencies = [
  "md-5 0.10.6",
  "nix 0.29.0",
  "openssl",
- "oxc-browserslist",
  "oxc_allocator",
  "oxc_ast",
  "oxc_codegen",

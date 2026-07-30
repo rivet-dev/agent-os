@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
+use crate::executor::StandaloneWasmBackend;
 use agentos_executor_contract::backend::HostServiceError;
-use agentos_executor_wasm_abi::StandaloneWasmBackend;
 use agentos_sidecar_protocol::protocol::GuestRuntimeKind;
 
 /// A concrete execution engine that may be injected into a VM manager.

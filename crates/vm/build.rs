@@ -1,11 +1,23 @@
+#[cfg(feature = "runtime")]
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+#[cfg(feature = "runtime")]
 use std::{env, fmt::Write as _, fs, path::PathBuf};
+#[cfg(feature = "runtime")]
 use webpki_root_certs::TLS_SERVER_ROOT_CERTS;
 
 // Stage the base filesystem fixture into OUT_DIR. In-tree builds use the
 // canonical AgentOS core fixture from the current workspace; the
 // published crate falls back to the vendored `assets/base-filesystem.json` copy.
 fn main() {
+    #[cfg(not(feature = "runtime"))]
+    return;
+
+    #[cfg(feature = "runtime")]
+    stage_runtime_assets();
+}
+
+#[cfg(feature = "runtime")]
+fn stage_runtime_assets() {
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set"));
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));

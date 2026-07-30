@@ -203,6 +203,21 @@ jobs:
         run: |
           cargo check -p agentos-vm --no-default-features
           cargo run -p agentos-vm --no-default-features --example embedded_os
+          cargo check -p agentos-vfs-core --no-default-features
+          cargo test -p agentos-vfs-storage --no-default-features --lib
+          for feature in local mounted s3
+          do
+            cargo check \
+              -p agentos-vfs-storage \
+              --no-default-features \
+              --features "$feature"
+          done
+          node scripts/check-embedded-vm-dependencies.mjs
+          node scripts/check-executor-feature-dependencies.mjs
+          cargo build --profile embedded -p agentos-example-embedded-vm
+          target/embedded/agentos-example-embedded-vm
+          node scripts/check-embedded-vm-size.mjs \
+            target/embedded/agentos-example-embedded-vm
           for feature in \
             node-v8 \
             python-v8-pyodide \

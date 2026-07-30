@@ -228,6 +228,22 @@ enables the standard engines, while each individual sidecar feature selects
 exactly its corresponding executor crate and VM adapter feature. A
 no-default-feature `agentos-vm` build has no concrete executor in its Cargo
 dependency graph.
+
+The no-default-feature build is also the dependency-minimal embedded profile.
+It composes `agentos-vm-kernel` with the in-memory VFS and does not compile the
+sidecar runtime, Tokio driver, protocol adapter, persistent VFS/SQLite/S3
+backends, package/tar filesystems and schema generation, ARS client, JavaScript
+tooling, crypto/TLS services, WASM ABI, or concrete executors. Those
+capabilities are explicit Cargo features.
+`javascript-tooling` is selected by `node-v8`; `wasm-api` is selected only by
+the WASM executor features. The standalone
+`agentos-example-embedded-vm` workspace package and the `embedded` Cargo
+profile provide the reproducible consumer and size gate.
+On the x86-64 Linux validation host, the prior executor-free example was
+36,851,256 bytes after stripping. The standalone `embedded` profile build is
+772,576 bytes (367,555 bytes gzip), a 97.9% reduction. CI enforces a 1 MiB
+ceiling and, separately, rejects any reintroduction of the excluded dependency
+families; the size limit alone is not treated as proof of feature isolation.
 TypeScript remains native-backed through `@rivet-dev/agentos-core`; this
 requirement does not add an in-process TypeScript virtual OS implementation.
 
@@ -625,6 +641,11 @@ into a VFS behavior rewrite.
       requests against an empty or incomplete registry.
 - [x] Add a checked Rust example that uses `agentos-vm` directly as an
       embeddable OS with no sidecar, client, or executors.
+- [x] Add a standalone executor-free consumer package, dependency denylist,
+      and size-optimized build profile.
+- [x] Feature-gate persistent filesystems/SQLite/S3, JavaScript tooling,
+      crypto/TLS, WASM ABI, Tokio, protocol, and executor dependencies out of
+      the embedded VM graph.
 - [x] Keep `agentos-vm-kernel` free of Tokio and concrete executor
       dependencies.
 - [x] Rename `v8-runtime` to `executor-v8-runtime`.
@@ -673,6 +694,10 @@ unbounded local test command:
 - The direct `embedded_os` example runs with
   `agentos-vm --no-default-features`, and the sidecar registry test passes both
   with no executor features and with all executor features.
+- The standalone executor-free VM is 772,576 bytes in the checked `embedded`
+  profile (367,555 bytes gzip), down from the prior 36,851,256-byte stripped
+  build. Its dependency audit rejects Tokio, SQLite, S3/AWS, crypto/TLS, OXC,
+  WASM support, package/tar/schema tooling, protocol, ARS, and every executor.
 - The Wasmtime safety suite passes 20 tests. Its one ignored pthread test is
   intentionally exercised by the artifact-backed CI job after building the
   generated C fixture.

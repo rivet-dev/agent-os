@@ -40,6 +40,19 @@ Exec is the JavaScript, TypeScript, and Python execution surface of agentOS.
   registers enabled executors, creates the VM manager, and owns transport and
   ACP extensions. `agentos-vm` is also supported as an embedded Rust library
   with no sidecar, client, or executors.
+- `agentos-vm` with default features disabled must retain only the kernel and
+  in-memory VFS composition. Persistent filesystems/SQLite/S3, package/tar
+  filesystems and schema generation, Tokio, protocol adapters, ARS, JavaScript
+  tooling, crypto/TLS, WASM ABI support, and concrete executors must be optional
+  and absent from that dependency graph.
+- Keep capability dependencies attached to their owning features:
+  `javascript-tooling` is selected by `node-v8`, and `wasm-api` is selected
+  only by `wasm-v8` or `wasm-wasmtime`. Persistent VFS backends and crypto must
+  never become unconditional dependencies of the embedded VM.
+- New `agentos-vm` dependencies are optional unless the executor-free kernel
+  directly requires them. Validate changes with
+  `node scripts/check-embedded-vm-dependencies.mjs` and keep the checked
+  `agentos-example-embedded-vm` binary under the configured size ceiling.
 - Browser implementation remains out of scope. See
   [Package Architecture](website/src/content/docs/docs/architecture/package-structure.mdx)
   for the package graph, responsibilities, and rationale.

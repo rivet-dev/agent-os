@@ -6,18 +6,24 @@ license.workspace = true
 repository.workspace = true
 description = "agentOS virtual filesystem storage backends"
 
+[features]
+default = ["local", "mounted", "s3"]
+local = ["dep:rusqlite"]
+mounted = ["dep:agentos-driver-tokio", "dep:tokio"]
+s3 = ["dep:aws-sdk-s3"]
+
 [dependencies]
 async-trait = "0.1"
-aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "http-1x", "rt-tokio", "sigv4a"], optional = true }
 base64 = "0.22"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-agentos-vfs-core = { workspace = true }
+agentos-vfs-core = { workspace = true, default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-agentos-driver-tokio = { workspace = true }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync"] }
+agentos-driver-tokio = { workspace = true, optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync"], optional = true }
 
 [dev-dependencies]
 agentos-driver-tokio = { workspace = true }
@@ -25,3 +31,15 @@ aws-config = "1"
 aws-credential-types = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[[test]]
+name = "local"
+required-features = ["local", "mounted"]
+
+[[test]]
+name = "posix_mount_table"
+required-features = ["mounted"]
+
+[[test]]
+name = "s3"
+required-features = ["local", "s3"]

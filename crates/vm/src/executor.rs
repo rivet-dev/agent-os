@@ -54,6 +54,13 @@ pub use agentos_executor_wasm_v8 as wasm;
 pub fn bundled_typescript_assets() -> &'static [(&'static str, &'static [u8])] {
     &[]
 }
+#[cfg(not(feature = "wasm-api"))]
+pub use crate::wasm_disabled::{
+    detect_native_binary_format, CreateWasmContextRequest, NativeBinaryFormat,
+    StandaloneWasmBackend, StartWasmExecutionRequest, WasmContext, WasmExecutionError,
+    WasmExecutionEvent, WasmExecutionLimits, WasmExecutionResult, WasmPermissionTier,
+    WasmtimeMetricsSnapshot,
+};
 #[cfg(any(
     feature = "node-v8",
     feature = "python-v8-pyodide",
@@ -84,7 +91,9 @@ pub use agentos_executor_v8_runtime::javascript::JavascriptSyncRpcResponder;
     feature = "wasm-v8"
 ))]
 pub use agentos_executor_v8_runtime::javascript::*;
+#[cfg(feature = "wasm-api")]
 pub use agentos_executor_wasm_abi::abi;
+#[cfg(feature = "wasm-api")]
 pub use agentos_executor_wasm_abi::{
     detect_native_binary_format, CreateWasmContextRequest, NativeBinaryFormat,
     StandaloneWasmBackend, StartWasmExecutionRequest, WasmContext, WasmExecutionError,

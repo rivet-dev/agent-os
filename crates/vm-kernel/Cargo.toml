@@ -9,7 +9,7 @@ description = "Authoritative Linux/POSIX kernel plane for agentOS VMs"
 [dependencies]
 agentos-vm-host-interface = { workspace = true }
 agentos-resource-accounting = { workspace = true }
-agentos-vfs-core = { workspace = true }
+agentos-vfs-core = { workspace = true, default-features = false }
 base64 = "0.22"
 event-listener = "5.4"
 hickory-proto = { version = "=0.26.1", default-features = false }

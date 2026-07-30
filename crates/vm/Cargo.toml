@@ -8,13 +8,107 @@ description = "agentOS VM orchestration, kernel composition, and execution coord
 
 [features]
 default = []
-node-v8 = ["dep:agentos-executor-node-v8", "dep:agentos-executor-v8-runtime"]
+runtime = [
+    "crypto",
+    "filesystem-persistence",
+    "networking",
+    "storage-s3",
+    "dep:agentos-executor-contract",
+    "dep:agentos-resource-accounting",
+    "dep:agentos-sidecar-protocol",
+    "dep:agentos-driver-tokio",
+    "dep:agentos-vm-config",
+    "dep:agentos-vm-host-interface",
+    "dep:agentos-vfs-core",
+    "dep:async-trait",
+    "dep:base64",
+    "dep:bytes",
+    "dep:filetime",
+    "dep:getrandom",
+    "dep:log",
+    "dep:nix",
+    "dep:rustix",
+    "dep:serde",
+    "dep:serde_bare",
+    "dep:serde_json",
+    "dep:shlex",
+    "dep:thiserror",
+    "dep:tokio",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:uuid",
+    "dep:webpki-root-certs",
+]
+filesystem-persistence = [
+    "dep:agentos-rivetkit-ars-client",
+    "dep:agentos-vfs-storage",
+    "agentos-vfs-storage/local",
+    "agentos-vfs-storage/mounted",
+    "dep:rusqlite",
+]
+storage-s3 = [
+    "filesystem-persistence",
+    "dep:aws-config",
+    "dep:aws-credential-types",
+    "dep:aws-sdk-s3",
+    "agentos-vfs-storage/s3",
+]
+networking = [
+    "dep:h2",
+    "dep:hickory-resolver",
+    "dep:http",
+    "dep:socket2",
+    "dep:ureq",
+    "dep:url",
+]
+crypto = [
+    "dep:aes",
+    "dep:aes-gcm",
+    "dep:ctr",
+    "dep:hmac",
+    "dep:jsonwebtoken",
+    "dep:md-5",
+    "dep:openssl",
+    "dep:pbkdf2",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:scrypt",
+    "dep:sha1",
+    "dep:sha2",
+    "dep:tokio-rustls",
+]
+javascript-tooling = [
+    "dep:oxc_allocator",
+    "dep:oxc_ast",
+    "dep:oxc_codegen",
+    "dep:oxc_parser",
+    "dep:oxc_semantic",
+    "dep:oxc_span",
+    "dep:oxc_transformer",
+]
+wasm-api = ["dep:agentos-executor-wasm-abi"]
+node-v8 = [
+    "runtime",
+    "javascript-tooling",
+    "dep:agentos-executor-node-v8",
+    "dep:agentos-executor-v8-runtime",
+]
 python-v8-pyodide = [
+    "runtime",
     "dep:agentos-executor-python-v8-pyodide",
     "dep:agentos-executor-v8-runtime",
 ]
-wasm-v8 = ["dep:agentos-executor-wasm-v8", "dep:agentos-executor-v8-runtime"]
-wasm-wasmtime = ["dep:agentos-executor-wasm-wasmtime"]
+wasm-v8 = [
+    "runtime",
+    "wasm-api",
+    "dep:agentos-executor-wasm-v8",
+    "dep:agentos-executor-v8-runtime",
+]
+wasm-wasmtime = [
+    "runtime",
+    "wasm-api",
+    "dep:agentos-executor-wasm-wasmtime",
+]
 wasm-wasmtime-threads = [
     "wasm-wasmtime",
     "agentos-executor-wasm-wasmtime/threads",
@@ -31,83 +125,82 @@ all-executors = [
 name = "agentos_vm"
 
 [dependencies]
-agentos-rivetkit-ars-client = { workspace = true }
-agentos-vm-host-interface = { workspace = true }
-agentos-executor-contract = { workspace = true }
+agentos-rivetkit-ars-client = { workspace = true, optional = true }
+agentos-vm-host-interface = { workspace = true, optional = true }
+agentos-executor-contract = { workspace = true, optional = true }
 agentos-executor-node-v8 = { workspace = true, optional = true }
 agentos-executor-python-v8-pyodide = { workspace = true, optional = true }
 agentos-executor-wasm-v8 = { workspace = true, optional = true }
 agentos-executor-wasm-wasmtime = { workspace = true, optional = true }
 agentos-vm-kernel = { workspace = true }
-agentos-resource-accounting = { workspace = true }
-agentos-sidecar-protocol = { workspace = true }
-agentos-driver-tokio = { workspace = true }
+agentos-resource-accounting = { workspace = true, optional = true }
+agentos-sidecar-protocol = { workspace = true, optional = true }
+agentos-driver-tokio = { workspace = true, optional = true }
 agentos-executor-v8-runtime = { workspace = true, optional = true }
-agentos-executor-wasm-abi = { workspace = true }
-agentos-vm-config = { workspace = true }
-agentos-vfs-storage = { workspace = true }
-async-trait = "0.1"
-aes = "0.8"
-aes-gcm = "0.10"
-aws-config = "1"
-aws-credential-types = "1"
-aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
-base64 = "0.22"
-bytes = "1"
-ctr = "0.9"
-filetime = "0.2"
-getrandom = "0.2"
-h2 = "0.4"
-http = "1"
-hmac = "0.12"
-hickory-resolver = "=0.26.1"
-jsonwebtoken = "9.3.1"
-log = "0.4"
-md-5 = "0.10"
-nix = { version = "0.29", features = ["fs", "net", "poll", "process", "signal", "socket", "user"] }
+agentos-executor-wasm-abi = { workspace = true, optional = true }
+agentos-vm-config = { workspace = true, optional = true }
+agentos-vfs-storage = { workspace = true, default-features = false, optional = true }
+async-trait = { version = "0.1", optional = true }
+aes = { version = "0.8", optional = true }
+aes-gcm = { version = "0.10", optional = true }
+aws-config = { version = "1", optional = true }
+aws-credential-types = { version = "1", optional = true }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "http-1x", "rt-tokio", "sigv4a"], optional = true }
+base64 = { version = "0.22", optional = true }
+bytes = { version = "1", optional = true }
+ctr = { version = "0.9", optional = true }
+filetime = { version = "0.2", optional = true }
+getrandom = { version = "0.2", optional = true }
+h2 = { version = "0.4", optional = true }
+http = { version = "1", optional = true }
+hmac = { version = "0.12", optional = true }
+hickory-resolver = { version = "=0.26.1", optional = true }
+jsonwebtoken = { version = "9.3.1", optional = true }
+log = { version = "0.4", optional = true }
+md-5 = { version = "0.10", optional = true }
+nix = { version = "0.29", features = ["fs", "net", "poll", "process", "signal", "socket", "user"], optional = true }
 # `vendored` builds OpenSSL from source → self-contained binary with no
 # system-openssl discovery on any runner (ubuntu/macOS). openssl backs the
 # guest crypto runtime (RSA/EC/DH/AES), so it cannot be a TLS-only stack.
-openssl = { version = "0.10", features = ["vendored"] }
-oxc_allocator = "0.109.0"
-oxc_ast = "0.109.0"
-oxc-browserslist = "=2.3.1"
-oxc_codegen = "0.109.0"
-oxc_parser = "0.109.0"
-oxc_semantic = "0.109.0"
-oxc_span = "0.109.0"
-oxc_transformer = "0.109.0"
-pbkdf2 = "0.12"
-rustls = { version = "0.23.37", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
-rustls-pemfile = "2.2"
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
-rusqlite = { version = "0.32", features = ["backup", "bundled"] }
+openssl = { version = "0.10", features = ["vendored"], optional = true }
+oxc_allocator = { version = "0.109.0", optional = true }
+oxc_ast = { version = "0.109.0", optional = true }
+oxc_codegen = { version = "0.109.0", optional = true }
+oxc_parser = { version = "0.109.0", optional = true }
+oxc_semantic = { version = "0.109.0", optional = true }
+oxc_span = { version = "0.109.0", optional = true }
+oxc_transformer = { version = "0.109.0", optional = true }
+pbkdf2 = { version = "0.12", optional = true }
+rustls = { version = "0.23.37", default-features = false, features = ["aws_lc_rs", "std", "tls12"], optional = true }
+rustls-pemfile = { version = "2.2", optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"], optional = true }
+rusqlite = { version = "0.32", features = ["backup", "bundled"], optional = true }
 # `rustix` provides the safe (owned-fd, no `unsafe`) `openat(2)`/`statat`/
 # `readlinkat`/`Dir` primitives used by the universal resolve-beneath
 # implementation in the `confine` module of `src/plugins/host_dir.rs`. Plain
 # `openat(2)` is portable across Linux, macOS, and gVisor; `openat2` is
 # deliberately NOT used (see that module for why).
-rustix = { version = "1", features = ["fs", "net"] }
-scrypt = "0.11"
-serde = { version = "1.0", features = ["derive"] }
-serde_bare = "0.5"
-serde_json = "1.0"
-sha1 = "0.10"
-sha2 = "0.10"
-shlex = "1.3"
-socket2 = "0.6"
-thiserror = "2"
-tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt"] }
-ureq = { version = "2.10", features = ["json"] }
-url = "2"
-uuid = { version = "1", features = ["v4"] }
-agentos-vfs-core = { workspace = true }
+rustix = { version = "1", features = ["fs", "net"], optional = true }
+scrypt = { version = "0.11", optional = true }
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_bare = { version = "0.5", optional = true }
+serde_json = { version = "1.0", optional = true }
+sha1 = { version = "0.10", optional = true }
+sha2 = { version = "0.10", optional = true }
+shlex = { version = "1.3", optional = true }
+socket2 = { version = "0.6", optional = true }
+thiserror = { version = "2", optional = true }
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["fmt"], optional = true }
+ureq = { version = "2.10", features = ["json"], optional = true }
+url = { version = "2", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+agentos-vfs-core = { workspace = true, features = ["package-filesystem"], optional = true }
 
 [build-dependencies]
-base64 = "=0.22.1"
-webpki-root-certs = "=1.0.8"
+base64 = { version = "=0.22.1", optional = true }
+webpki-root-certs = { version = "=1.0.8", optional = true }
 
 [dev-dependencies]
 agentos-executor-wasm-abi-generator = { path = "../executor-wasm-abi-generator" }

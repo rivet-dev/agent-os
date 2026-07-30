@@ -11,6 +11,7 @@ fn main() {
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set"));
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
 
+    #[cfg(feature = "package-filesystem")]
     stage_package_format_schema(&manifest_dir, &out_dir);
 
     let workspace_fixtures = [
@@ -27,6 +28,7 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", src.display());
+    #[cfg(feature = "package-filesystem")]
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir
@@ -36,6 +38,7 @@ fn main() {
     );
 }
 
+#[cfg(feature = "package-filesystem")]
 fn stage_package_format_schema(manifest_dir: &Path, out_dir: &Path) {
     let source_schema = manifest_dir.join("package-format").join("v1.bare");
     let schema_dir = out_dir.join("package-format-schema");

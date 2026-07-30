@@ -1,0 +1,11 @@
+[package]
+name = "agentos-example-embedded-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Standalone executor-free agentOS embedded VM example"
+
+[dependencies]
+agentos-vm = { workspace = true, default-features = false }

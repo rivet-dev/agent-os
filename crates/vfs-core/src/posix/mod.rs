@@ -3,7 +3,7 @@ pub mod mount_table;
 pub mod overlay_fs;
 pub mod root_fs;
 pub mod single_symlink_fs;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "package-filesystem"))]
 pub mod tar_fs;
 pub mod usage;
 pub mod vfs;
@@ -18,7 +18,7 @@ pub use mount_table::{
 pub use overlay_fs::{OverlayFileSystem, OverlayMode};
 pub use root_fs::*;
 pub use single_symlink_fs::SingleSymlinkFileSystem;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "package-filesystem"))]
 pub use tar_fs::TarFileSystem;
 pub use usage::{
     measure_filesystem_usage, FileSystemStats, FileSystemUsage, RootFilesystemResourceLimits,

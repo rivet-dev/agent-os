@@ -8,15 +8,23 @@ use crate::protocol::*;
 use crate::service::{normalize_path, DispatchResult, VmError, VmManager};
 use crate::state::{BridgeError, ExecutionValueKind, ManagedLanguageExecution};
 use crate::VmManagerHost;
+#[cfg(feature = "javascript-tooling")]
 use oxc_allocator::Allocator;
+#[cfg(feature = "javascript-tooling")]
 use oxc_ast::ast::{ImportDeclarationSpecifier, Statement};
+#[cfg(feature = "javascript-tooling")]
 use oxc_codegen::Codegen;
+#[cfg(feature = "javascript-tooling")]
 use oxc_parser::Parser;
+#[cfg(feature = "javascript-tooling")]
 use oxc_semantic::SemanticBuilder;
+#[cfg(feature = "javascript-tooling")]
 use oxc_span::SourceType;
+#[cfg(feature = "javascript-tooling")]
 use oxc_transformer::{Module, TransformOptions, Transformer};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+#[cfg(feature = "javascript-tooling")]
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -220,6 +228,7 @@ require("node:fs").writeFileSync(
         )
 }
 
+#[cfg(feature = "javascript-tooling")]
 fn transform_source(
     source: &str,
     file_path: &str,
@@ -294,24 +303,60 @@ fn transform_source(
     Ok(Codegen::new().build(&program).code)
 }
 
+#[cfg(feature = "javascript-tooling")]
 fn transpile_typescript(source: &str, file_path: &str, common_js: bool) -> Result<String, VmError> {
     transform_source(source, file_path, true, common_js)
 }
 
+#[cfg(not(feature = "javascript-tooling"))]
+fn transpile_typescript(
+    _source: &str,
+    _file_path: &str,
+    _common_js: bool,
+) -> Result<String, VmError> {
+    Err(javascript_tooling_disabled())
+}
+
+#[cfg(feature = "javascript-tooling")]
 fn transform_retained_javascript_module(source: &str, file_path: &str) -> Result<String, VmError> {
     let source = rewrite_static_imports(source, file_path, false)?;
     transform_source(&source, file_path, false, true)
 }
 
+#[cfg(not(feature = "javascript-tooling"))]
+fn transform_retained_javascript_module(
+    _source: &str,
+    _file_path: &str,
+) -> Result<String, VmError> {
+    Err(javascript_tooling_disabled())
+}
+
+#[cfg(feature = "javascript-tooling")]
 fn transform_retained_typescript_module(source: &str, file_path: &str) -> Result<String, VmError> {
     let source = rewrite_static_imports(source, file_path, true)?;
     transform_source(&source, file_path, true, true)
+}
+
+#[cfg(not(feature = "javascript-tooling"))]
+fn transform_retained_typescript_module(
+    _source: &str,
+    _file_path: &str,
+) -> Result<String, VmError> {
+    Err(javascript_tooling_disabled())
+}
+
+#[cfg(not(feature = "javascript-tooling"))]
+fn javascript_tooling_disabled() -> VmError {
+    VmError::InvalidState(String::from(
+        "ERR_AGENTOS_JAVASCRIPT_TOOLING_UNAVAILABLE: JavaScript/TypeScript source transformation requires the `javascript-tooling` feature",
+    ))
 }
 
 /// Retained cells execute as scripts so their lexical declarations remain in
 /// the context's shared script environment. Rewrite only static imports into
 /// equivalent `require` declarations before the normal OXC transform; this
 /// keeps the caller's local import names as real retained lexical bindings.
+#[cfg(feature = "javascript-tooling")]
 fn rewrite_static_imports(
     source: &str,
     file_path: &str,

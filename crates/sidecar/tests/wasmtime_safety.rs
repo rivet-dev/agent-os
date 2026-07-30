@@ -2,6 +2,7 @@
 mod support;
 
 use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use agentos_vm::wire::{
@@ -43,7 +44,9 @@ fn run_wasm_backend_with_tier(
     permission_tier: WasmPermissionTier,
     backend: StandaloneWasmBackend,
 ) -> (String, String, i32) {
-    if backend == StandaloneWasmBackend::WasmtimeThreads {
+    let _worker_path_guard =
+        (backend == StandaloneWasmBackend::WasmtimeThreads).then(worker_path_guard);
+    if _worker_path_guard.is_some() {
         std::env::set_var(
             "AGENTOS_WASMTIME_WORKER_PATH",
             env!("CARGO_BIN_EXE_agentos-sidecar"),
@@ -94,6 +97,14 @@ fn run_wasm_backend_with_tier(
         &process_id,
         Duration::from_secs(10),
     )
+}
+
+fn worker_path_guard() -> MutexGuard<'static, ()> {
+    static WORKER_PATH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    WORKER_PATH_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("Wasmtime worker-path test lock was poisoned")
 }
 
 fn start_threaded_process(
@@ -344,6 +355,7 @@ fn thread_admission_fails_transactionally_at_the_configured_group_limit() {
 
 #[test]
 fn multiple_thread_groups_run_concurrently_inside_one_vm() {
+    let _worker_path_guard = worker_path_guard();
     std::env::set_var(
         "AGENTOS_WASMTIME_WORKER_PATH",
         env!("CARGO_BIN_EXE_agentos-sidecar"),
@@ -435,6 +447,7 @@ fn multiple_thread_groups_run_concurrently_inside_one_vm() {
 fn malformed_and_crashed_thread_workers_fail_closed_and_release_the_vm() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _worker_path_guard = worker_path_guard();
     let name = "wasmtime-threaded-worker-fault-isolation";
     let mut sidecar = new_sidecar(name);
     let cwd = temp_dir(&format!("{name}-cwd"));
@@ -609,6 +622,7 @@ fn owned_pthread_libc_mutex_cond_tls_join_detach_and_cancel_conform() {
 
 #[test]
 fn secondary_thread_trap_reaps_group_releases_admission_and_preserves_sidecar() {
+    let _worker_path_guard = worker_path_guard();
     std::env::set_var(
         "AGENTOS_WASMTIME_WORKER_PATH",
         env!("CARGO_BIN_EXE_agentos-sidecar"),
@@ -692,6 +706,7 @@ fn secondary_thread_trap_reaps_group_releases_admission_and_preserves_sidecar() 
 
 #[test]
 fn process_exit_and_wall_timeout_reap_threads_parked_in_atomic_wait() {
+    let _worker_path_guard = worker_path_guard();
     std::env::set_var(
         "AGENTOS_WASMTIME_WORKER_PATH",
         env!("CARGO_BIN_EXE_agentos-sidecar"),
@@ -785,6 +800,7 @@ fn process_exit_and_wall_timeout_reap_threads_parked_in_atomic_wait() {
 
 #[test]
 fn vm_teardown_reaps_a_complete_atomic_wait_thread_group() {
+    let _worker_path_guard = worker_path_guard();
     std::env::set_var(
         "AGENTOS_WASMTIME_WORKER_PATH",
         env!("CARGO_BIN_EXE_agentos-sidecar"),
@@ -844,6 +860,7 @@ fn vm_teardown_reaps_a_complete_atomic_wait_thread_group() {
 
 #[test]
 fn concurrent_thread_groups_preserve_memory_isolation_and_process_admission() {
+    let _worker_path_guard = worker_path_guard();
     std::env::set_var(
         "AGENTOS_WASMTIME_WORKER_PATH",
         env!("CARGO_BIN_EXE_agentos-sidecar"),
@@ -1160,6 +1177,7 @@ fn terminal_signal_interrupts_and_reaps_pure_guest_compute() {
 
 #[test]
 fn threaded_atomic_wait_is_killed_and_reaped_before_the_fixed_deadline() {
+    let _worker_path_guard = worker_path_guard();
     std::env::set_var(
         "AGENTOS_WASMTIME_WORKER_PATH",
         env!("CARGO_BIN_EXE_agentos-sidecar"),

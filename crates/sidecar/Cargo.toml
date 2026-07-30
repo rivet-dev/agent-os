@@ -45,7 +45,7 @@ serde_json = "1.0"
 serde_bare = "0.5"
 base64 = "0.22"
 sha2 = "0.10"
-agentos-vm = { workspace = true, default-features = false }
+agentos-vm = { workspace = true, default-features = false, features = ["runtime"] }
 agentos-executor-node-v8 = { workspace = true, optional = true }
 agentos-executor-python-v8-pyodide = { workspace = true, optional = true }
 agentos-executor-wasm-v8 = { workspace = true, optional = true }
@@ -80,3 +80,15 @@ tokio = { version = "1", features = ["io-util", "net"] }
 url = "2"
 vbare.workspace = true
 wat = "1.0"
+
+[[test]]
+name = "acp_adapter_stderr"
+required-features = ["node-v8"]
+
+[[test]]
+name = "stdio_binary"
+required-features = ["node-v8"]
+
+[[test]]
+name = "wasmtime_safety"
+required-features = ["wasm-wasmtime-threads"]

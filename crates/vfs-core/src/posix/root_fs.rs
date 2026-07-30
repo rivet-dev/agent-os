@@ -218,6 +218,21 @@ pub struct RootFileSystem {
 }
 
 impl RootFileSystem {
+    /// Builds the smallest in-memory Linux root supported by the VM kernel.
+    ///
+    /// Unlike [`Self::from_descriptor`], this path never references or parses
+    /// the bundled base-filesystem image. It is intended for embedders that
+    /// need kernel/VFS semantics without software packages or persistent
+    /// storage backends.
+    pub fn minimal_ephemeral() -> Result<Self, RootFilesystemError> {
+        let lower = snapshot_to_memory_filesystem(&minimal_root_snapshot())?;
+        Ok(Self {
+            overlay: OverlayFileSystem::new(vec![lower], OverlayMode::Ephemeral),
+            mode: RootFilesystemMode::Ephemeral,
+            bootstrap_finished: false,
+        })
+    }
+
     pub fn from_descriptor(
         descriptor: RootFilesystemDescriptor,
     ) -> Result<Self, RootFilesystemError> {

@@ -86,26 +86,27 @@ Dependencies point downward. In particular:
 - the kernel does not depend on a sidecar, async driver, or executor;
 - the executor contract does not depend on the kernel, Tokio, V8, or Wasmtime;
 - engine crates do not depend on the sidecar; and
-- `agentos-vm` always depends on the executor contract; optional VM adapter
-  features add conditional edges to separately packaged engines, and a
-  no-feature VM build links none of them;
+- `agentos-vm` with no features depends only on the kernel plane; its
+  sidecar-runtime, protocol, persistence, crypto, JavaScript, WASM, and
+  concrete-engine edges are conditional;
 - the sidecar selects concrete engines and injects their availability registry.
 
 `agentos-sidecar` is the product-facing process and native composition root.
 `agentos-vm` is the embeddable VM orchestration library. It defaults to no
-executors, so Rust consumers can use VM lifecycle, storage, mounts, snapshots,
-and virtual-OS operations without linking V8, Pyodide, or Wasmtime.
+sidecar runtime or executors, so Rust consumers can use VM lifecycle, the
+in-memory VFS, mounts, snapshots, and virtual-OS operations without linking
+Tokio, SQLite, S3, protocol adapters, crypto/TLS services, JavaScript tooling,
+WASM support, package/tar filesystem tooling, V8, Pyodide, or Wasmtime.
 `agentos-executor-v8-runtime` is optional and enters the binary only with a V8 executor;
 it owns process-global platform setup, snapshot prewarm, and reusable V8 session
-mechanics. The lightweight `agentos-executor-wasm-abi` edge supplies format
-detection, selector, limits, and stable error types even when a requested WASM
-executor was compiled out.
+mechanics. `agentos-executor-wasm-abi` enters only when `wasm-v8` or
+`wasm-wasmtime` selects the `wasm-api` feature.
 
 ## Direct embedded use
 
 Rust applications may embed the virtual OS without starting a sidecar or
-constructing a client. Disable `agentos-vm`'s default features, inject the
-process driver, and use an empty executor registry:
+constructing a client. Disable `agentos-vm`'s default features and use an empty
+executor registry:
 
 ```toml
 [dependencies]
@@ -118,9 +119,14 @@ snapshots the filesystem, and
 explicitly disposes the VM without starting a sidecar or client. The embedded
 handle exposes the VM's authoritative kernel for direct process, descriptor,
 signal, mount, socket, and snapshot operations. CI compiles and runs the
-example with `--no-default-features`. VM and filesystem operations remain
-available with an empty registry; only language execution fails, using the
-typed `ERR_AGENTOS_EXECUTOR_UNAVAILABLE` error.
+example with `--no-default-features`.
+
+The standalone `examples/embedded-vm` package is the consumer and size
+baseline. Build it with
+`cargo build --profile embedded -p agentos-example-embedded-vm`; CI verifies
+its dependency denylist and stripped Linux binary ceiling. VM and in-memory
+filesystem operations remain available with an empty registry; requesting an
+engine fails with the typed `ERR_AGENTOS_EXECUTOR_UNAVAILABLE` error.
 
 ## Responsibilities
 

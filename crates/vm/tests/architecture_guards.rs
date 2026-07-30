@@ -452,7 +452,9 @@ fn vm_kernel_and_embedded_vm_keep_their_runtime_boundaries() {
     }
 
     let embedded = std::fs::read_to_string(root.join("crates/vm/src/embedded.rs"))
-        .expect("read embedded VM API");
+        .expect("read full embedded VM API");
+    let minimal = std::fs::read_to_string(root.join("crates/vm/src/embedded_minimal.rs"))
+        .expect("read executor-free embedded VM API");
     for transport_operation in [
         "dispatch_wire(",
         "AuthenticateRequest",
@@ -460,13 +462,15 @@ fn vm_kernel_and_embedded_vm_keep_their_runtime_boundaries() {
         "WireFrameCodec",
     ] {
         assert!(
-            !embedded.contains(transport_operation),
+            !embedded.contains(transport_operation) && !minimal.contains(transport_operation),
             "the direct VM API must not tunnel through sidecar transport operation {transport_operation}"
         );
     }
     assert!(
         embedded.contains(".kernel\n            .write_file(")
-            && embedded.contains(".kernel\n            .read_file("),
+            && embedded.contains(".kernel\n            .read_file(")
+            && minimal.contains("self.kernel\n            .write_file(")
+            && minimal.contains("self.kernel.read_file("),
         "embedded filesystem operations must call the VM kernel directly"
     );
 
@@ -474,8 +478,84 @@ fn vm_kernel_and_embedded_vm_keep_their_runtime_boundaries() {
         std::fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read CI workflow");
     assert!(
         ci.contains("cargo check -p agentos-vm --no-default-features")
-            && ci.contains("cargo run -p agentos-vm --no-default-features --example embedded_os"),
-        "CI must compile and run the executor-free embedded VM example"
+            && ci.contains("cargo run -p agentos-vm --no-default-features --example embedded_os")
+            && ci.contains("cargo build --profile embedded -p agentos-example-embedded-vm")
+            && ci.contains("check-embedded-vm-dependencies.mjs")
+            && ci.contains("check-embedded-vm-size.mjs"),
+        "CI must compile, run, dependency-check, and size-check the executor-free embedded VM example"
+    );
+}
+
+#[test]
+fn executor_free_vm_dependencies_are_feature_gated() {
+    let root = repo_root();
+    let manifest =
+        std::fs::read_to_string(root.join("crates/vm/Cargo.toml")).expect("read VM manifest");
+    for feature in [
+        "runtime",
+        "filesystem-persistence",
+        "storage-s3",
+        "networking",
+        "crypto",
+        "javascript-tooling",
+        "wasm-api",
+    ] {
+        assert!(
+            manifest.contains(&format!("{feature} =")),
+            "agentos-vm is missing capability feature {feature}"
+        );
+    }
+    for dependency in [
+        "agentos-rivetkit-ars-client",
+        "agentos-sidecar-protocol",
+        "agentos-driver-tokio",
+        "agentos-executor-wasm-abi",
+        "agentos-vfs-storage",
+        "aws-sdk-s3",
+        "openssl",
+        "oxc_parser",
+        "rusqlite",
+        "rustls",
+        "tokio",
+    ] {
+        let declaration = manifest
+            .lines()
+            .find(|line| line.trim_start().starts_with(dependency))
+            .unwrap_or_else(|| panic!("missing VM dependency declaration for {dependency}"));
+        assert!(
+            declaration.contains("optional = true"),
+            "{dependency} must remain removable from the executor-free embedded VM"
+        );
+    }
+    assert!(
+        manifest.contains("node-v8 = [\n    \"runtime\",\n    \"javascript-tooling\",")
+            && manifest.contains("wasm-v8 = [\n    \"runtime\",\n    \"wasm-api\",")
+            && manifest.contains("wasm-wasmtime = [\n    \"runtime\",\n    \"wasm-api\","),
+        "JavaScript tooling and the WASM ABI must only enter through their owning executor features"
+    );
+
+    let vfs_manifest = std::fs::read_to_string(root.join("crates/vfs-core/Cargo.toml"))
+        .expect("read VFS core manifest");
+    assert!(
+        vfs_manifest.contains("package-filesystem = [")
+            && vfs_manifest.contains("vbare = { workspace = true, optional = true }")
+            && vfs_manifest.contains("memmap2 = { version = \"0.9\", optional = true }")
+            && vfs_manifest.contains("tar = { version = \"0.4\", optional = true }"),
+        "package schema, tar, and mmap dependencies must remain behind the VFS package-filesystem feature"
+    );
+    let kernel_manifest = std::fs::read_to_string(root.join("crates/vm-kernel/Cargo.toml"))
+        .expect("read VM kernel manifest");
+    assert!(
+        kernel_manifest
+            .contains("agentos-vfs-core = { workspace = true, default-features = false }"),
+        "the kernel-only VM must not enable package filesystem tooling"
+    );
+
+    let example = std::fs::read_to_string(root.join("examples/embedded-vm/Cargo.toml"))
+        .expect("read standalone embedded VM manifest");
+    assert!(
+        example.contains("agentos-vm = { workspace = true, default-features = false }"),
+        "the standalone embedded VM must explicitly disable agentos-vm default features"
     );
 }
 

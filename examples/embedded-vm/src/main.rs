@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut vms = VmManager::builder()
-        .executors(ExecutorRegistry::empty())
-        .build()?;
-
     block_on(async {
-        let mut vm = vms.create(VmConfig::default().allow_all()).await?;
+        let mut manager = VmManager::builder()
+            .executors(ExecutorRegistry::empty())
+            .build()?;
+        let mut vm = manager.create(VmConfig::default().allow_all()).await?;
+
         vm.write_file("/workspace/hello.txt", b"hello").await?;
         assert_eq!(
             vm.read_file("/workspace/hello.txt").await?,
@@ -20,9 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert!(!snapshot.entries.is_empty());
         vm.dispose().await?;
         Ok::<_, Box<dyn std::error::Error>>(())
-    })?;
-
-    Ok(())
+    })
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {
