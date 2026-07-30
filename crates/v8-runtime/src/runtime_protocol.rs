@@ -1,5 +1,5 @@
 use crate::ipc_binary::{BinaryFrame, ExecutionErrorBin};
-use agentos_runtime::readiness::ReadyFlags;
+use agentos_runtime_tokio::readiness::ReadyFlags;
 use std::io;
 use std::sync::Arc;
 
@@ -126,7 +126,7 @@ pub struct BridgeResponse {
     pub payload: Vec<u8>,
     /// In-process byte ownership. IPC-created responses leave this empty;
     /// sidecar-owned direct responses retain it until V8 copies the payload.
-    pub reservation: Option<agentos_runtime::accounting::SharedReservation>,
+    pub reservation: Option<agentos_runtime_tokio::accounting::SharedReservation>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

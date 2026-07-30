@@ -3,7 +3,7 @@
 use agentos_kernel::dns::{
     DnsLookupRequest, DnsRecordLookupRequest, DnsResolver, DnsResolverError,
 };
-use agentos_runtime::{BlockingJobError, RuntimeContext};
+use agentos_runtime_tokio::{BlockingJobError, RuntimeContext};
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::proto::rr::{Record, RecordType};

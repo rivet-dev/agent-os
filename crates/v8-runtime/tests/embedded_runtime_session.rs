@@ -26,13 +26,13 @@ fn next_session_id() -> String {
     )
 }
 
-fn process_runtime_context() -> io::Result<agentos_runtime::RuntimeContext> {
-    let config = agentos_runtime::RuntimeConfig {
+fn process_runtime_context() -> io::Result<agentos_runtime_tokio::RuntimeContext> {
+    let config = agentos_runtime_tokio::RuntimeConfig {
         max_active_vm_executors: TEST_PROCESS_VM_EXECUTOR_LIMIT,
-        ..agentos_runtime::RuntimeConfig::default()
+        ..agentos_runtime_tokio::RuntimeConfig::default()
     };
-    agentos_runtime::SidecarRuntime::process(&config)
-        .map(agentos_runtime::SidecarRuntime::context)
+    agentos_runtime_tokio::SidecarRuntime::process(&config)
+        .map(agentos_runtime_tokio::SidecarRuntime::context)
         .map_err(|error| io::Error::other(error.to_string()))
 }
 
@@ -40,8 +40,8 @@ fn embedded_runtime(max_concurrency: usize) -> io::Result<EmbeddedV8Runtime> {
     EmbeddedV8Runtime::new(Some(max_concurrency), process_runtime_context()?)
 }
 
-fn vm_runtime_context(session_id: &str) -> io::Result<agentos_runtime::RuntimeContext> {
-    use agentos_runtime::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
+fn vm_runtime_context(session_id: &str) -> io::Result<agentos_runtime_tokio::RuntimeContext> {
+    use agentos_runtime_tokio::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
 
     let process = process_runtime_context()?;
     let limits = ResourceClass::ALL

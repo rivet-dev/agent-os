@@ -192,9 +192,9 @@ fn test_sidecar(root: &Path) -> NativeSidecar<RecordingBridge> {
     // children block on pipes at the same time. Give that workload a fixed,
     // bounded executor budget instead of inheriting the host CPU count, which
     // made identical xfstests pass or fail according to runner size.
-    let runtime = agentos_runtime::RuntimeConfig {
+    let runtime = agentos_runtime_tokio::RuntimeConfig {
         max_active_vm_executors: XFSTESTS_MAX_ACTIVE_VM_EXECUTORS,
-        ..agentos_runtime::RuntimeConfig::default()
+        ..agentos_runtime_tokio::RuntimeConfig::default()
     };
     NativeSidecar::with_config(
         RecordingBridge::default(),

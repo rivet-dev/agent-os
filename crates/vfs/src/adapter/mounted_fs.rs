@@ -2,7 +2,7 @@ use crate::posix::{
     FileExtent, MountedFileSystem, VfsError as PosixVfsError, VfsResult as PosixVfsResult,
     VirtualDirEntry, VirtualStat,
 };
-use agentos_runtime::{BlockingJobError, RuntimeContext};
+use agentos_runtime_tokio::{BlockingJobError, RuntimeContext};
 use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -32,7 +32,7 @@ impl<F> MountedEngineFileSystem<F> {
     where
         T: Send + 'static,
     {
-        if agentos_runtime::is_runtime_worker_thread() {
+        if agentos_runtime_tokio::is_runtime_worker_thread() {
             return Err(PosixVfsError::new(
                 "EDEADLK",
                 "ERR_AGENTOS_VFS_RUNTIME_WORKER_WAIT: synchronous mounted filesystem calls must run outside an AgentOS Tokio worker",
@@ -602,9 +602,10 @@ mod tests {
 
     #[test]
     fn mounted_engine_filesystem_bridges_sync_posix_calls() {
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create test runtime");
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create test runtime");
         let fs = ChunkedFs::with_options(
             InMemoryMetadataStore::new(),
             MemoryBlockStore::new(),
@@ -659,13 +660,14 @@ mod tests {
 
     #[test]
     fn mounted_engine_filesystem_rejects_waits_on_agentos_runtime_workers() {
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create test runtime");
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create test runtime");
         let context = runtime.context();
         let task_context = context.clone();
         let task = context
-            .spawn(agentos_runtime::TaskClass::Plugin, async move {
+            .spawn(agentos_runtime_tokio::TaskClass::Plugin, async move {
                 let fs = ChunkedFs::with_options(
                     InMemoryMetadataStore::new(),
                     MemoryBlockStore::new(),

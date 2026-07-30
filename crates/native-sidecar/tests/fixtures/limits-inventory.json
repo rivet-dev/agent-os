@@ -1344,343 +1344,343 @@
 	},
 	{
 		"name": "DEFAULT_BLOCKING_JOB_TIMEOUT_MS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide runtime admission or lifecycle bound.",
 		"wired": "RuntimeConfig.blocking_job_timeout_ms"
 	},
 	{
 		"name": "DEFAULT_FAIRNESS_CAPABILITY_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide fairness scheduler bound.",
 		"wired": "RuntimeConfig.fairness.capability_quantum_bytes"
 	},
 	{
 		"name": "DEFAULT_FAIRNESS_MAX_CAPABILITIES_PER_VM",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide fairness scheduler bound.",
 		"wired": "RuntimeConfig.fairness.max_capabilities_per_vm"
 	},
 	{
 		"name": "DEFAULT_FAIRNESS_MAX_VMS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide fairness scheduler bound.",
 		"wired": "RuntimeConfig.fairness.max_vms"
 	},
 	{
 		"name": "DEFAULT_FAIRNESS_VM_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide fairness scheduler bound.",
 		"wired": "RuntimeConfig.fairness.vm_quantum_bytes"
 	},
 	{
 		"name": "DEFAULT_MAX_BLOCKING_JOB_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide runtime admission or lifecycle bound.",
 		"wired": "RuntimeConfig.max_blocking_job_bytes"
 	},
 	{
 		"name": "DEFAULT_MAX_BLOCKING_JOBS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide runtime admission or lifecycle bound.",
 		"wired": "RuntimeConfig.max_blocking_jobs"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_ASYNC_COMPLETION_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.async_completion_bytes"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_ASYNC_COMPLETIONS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.async_completions"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_BRIDGE_CALLS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.bridge_calls"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_BRIDGE_REQUEST_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.bridge_request_bytes"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_BRIDGE_RESPONSE_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.bridge_response_bytes"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_CAPABILITIES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.capabilities"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_CONNECTIONS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.connections"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_DATAGRAMS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.datagrams"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_HANDLE_COMMAND_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.handle_command_bytes"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_HANDLE_COMMANDS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.handle_commands"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_HTTP2_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.http2_bytes"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_HTTP2_COMMAND_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.http2_command_bytes"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_HTTP2_COMMANDS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.http2_commands"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_HTTP2_CONNECTIONS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.http2_connections"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_HTTP2_DATA_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.http2_data_bytes"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_HTTP2_EVENT_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.http2_event_bytes"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_HTTP2_EVENTS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.http2_events"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_HTTP2_HEADER_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.http2_header_bytes"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_HTTP2_STREAMS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.http2_streams"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_READY_HANDLES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.ready_handles"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_SOCKET_BUFFERED_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.socket_buffered_bytes"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_SOCKETS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.sockets"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_TASKS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.tasks"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_TIMERS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.timers"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_TLS_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.tls_bytes"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_UDP_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.udp_bytes"
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_UDP_DATAGRAMS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured aggregate sidecar-process resource bound.",
 		"wired": "RuntimeConfig.resources.udp_datagrams"
 	},
 	{
 		"name": "DEFAULT_MAX_QUEUED_BLOCKING_JOBS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide runtime admission or lifecycle bound.",
 		"wired": "RuntimeConfig.max_queued_blocking_jobs"
 	},
 	{
 		"name": "DEFAULT_MAX_TERMINAL_TASK_REPORTS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide runtime admission or lifecycle bound.",
 		"wired": "RuntimeConfig.max_terminal_task_reports"
 	},
 	{
 		"name": "DEFAULT_PROTOCOL_MAX_COMPLETED_RESPONSES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide protocol queue bound.",
 		"wired": "RuntimeConfig.protocol.max_completed_responses"
 	},
 	{
 		"name": "DEFAULT_PROTOCOL_MAX_CONTROL_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide protocol queue bound.",
 		"wired": "RuntimeConfig.protocol.max_control_bytes"
 	},
 	{
 		"name": "DEFAULT_PROTOCOL_MAX_CONTROL_FRAMES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide protocol queue bound.",
 		"wired": "RuntimeConfig.protocol.max_control_frames"
 	},
 	{
 		"name": "DEFAULT_PROTOCOL_MAX_EGRESS_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide protocol queue bound.",
 		"wired": "RuntimeConfig.protocol.max_egress_bytes"
 	},
 	{
 		"name": "DEFAULT_PROTOCOL_MAX_EGRESS_FRAMES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide protocol queue bound.",
 		"wired": "RuntimeConfig.protocol.max_egress_frames"
 	},
 	{
 		"name": "DEFAULT_PROTOCOL_MAX_INGRESS_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide protocol queue bound.",
 		"wired": "RuntimeConfig.protocol.max_ingress_bytes"
 	},
 	{
 		"name": "DEFAULT_PROTOCOL_MAX_INGRESS_FRAMES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide protocol queue bound.",
 		"wired": "RuntimeConfig.protocol.max_ingress_frames"
 	},
 	{
 		"name": "DEFAULT_PROTOCOL_MAX_OUTBOUND_REQUESTS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide protocol queue bound.",
 		"wired": "RuntimeConfig.protocol.max_outbound_requests"
 	},
 	{
 		"name": "DEFAULT_PROTOCOL_MAX_PENDING_RESPONSE_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide protocol queue bound.",
 		"wired": "RuntimeConfig.protocol.max_pending_response_bytes"
 	},
 	{
 		"name": "DEFAULT_PROTOCOL_MAX_PENDING_RESPONSES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide protocol queue bound.",
 		"wired": "RuntimeConfig.protocol.max_pending_responses"
 	},
 	{
 		"name": "DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide protocol queue bound.",
 		"wired": "RuntimeConfig.protocol.max_process_events"
 	},
 	{
 		"name": "DEFAULT_VM_EXECUTOR_TEARDOWN_TIMEOUT_MS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide runtime admission or lifecycle bound.",
 		"wired": "RuntimeConfig.vm_executor_teardown_timeout_ms"
 	},
 	{
 		"name": "MAX_FALLBACK_MESSAGE_BYTES",
-		"path": "crates/runtime/src/metrics.rs",
+		"path": "crates/runtime-tokio/src/metrics.rs",
 		"class": "invariant",
 		"rationale": "Bounded stderr fallback message size prevents telemetry failure amplification."
 	},
@@ -2400,7 +2400,7 @@
 	},
 	{
 		"name": "VM_EXECUTOR_LIMIT_CONFIG_PATH",
-		"path": "crates/runtime/src/executor.rs",
+		"path": "crates/runtime-tokio/src/executor.rs",
 		"class": "invariant",
 		"rationale": "Stable configuration-path identifier, not a limit value."
 	},
@@ -2650,7 +2650,7 @@
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_WASM_MEMORY_BYTES",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default aggregate linear-memory envelope for active standalone-WASM Stores.",
 		"wired": "RuntimeConfig.resources.max_wasm_memory_bytes"
@@ -2701,7 +2701,7 @@
 	},
 	{
 		"name": "DEFAULT_MAX_PROCESS_WASM_THREADS",
-		"path": "crates/runtime/src/lib.rs",
+		"path": "crates/runtime-tokio/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default aggregate sidecar-process threaded-WASM admission bound.",
 		"wired": "RuntimeConfig.resources.max_wasm_threads"

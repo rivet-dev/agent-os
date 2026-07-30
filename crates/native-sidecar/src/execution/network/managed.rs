@@ -275,12 +275,12 @@ fn managed_socket_write(
         let receiver = if socket.tls_mode.load(Ordering::SeqCst) {
             Some((
                 socket.begin_tls_write(bytes)?,
-                agentos_runtime::TaskClass::Tls,
+                agentos_runtime_tokio::TaskClass::Tls,
             ))
         } else if socket.kernel_socket_id.is_none() {
             Some((
                 socket.begin_plain_write(bytes)?,
-                agentos_runtime::TaskClass::Socket,
+                agentos_runtime_tokio::TaskClass::Socket,
             ))
         } else {
             None
@@ -288,7 +288,7 @@ fn managed_socket_write(
         if let Some((receiver, task_class)) = receiver {
             return Ok(HostServiceResponse::Deferred {
                 receiver,
-                timeout: (task_class == agentos_runtime::TaskClass::Tls)
+                timeout: (task_class == agentos_runtime_tokio::TaskClass::Tls)
                     .then_some(reactor_io_limits(&context.process.limits).operation_deadline),
                 task_class,
             });
@@ -308,7 +308,7 @@ fn managed_socket_write(
     Ok(HostServiceResponse::Deferred {
         receiver: socket.begin_plain_write(bytes)?,
         timeout: None,
-        task_class: agentos_runtime::TaskClass::Socket,
+        task_class: agentos_runtime_tokio::TaskClass::Socket,
     })
 }
 
@@ -351,7 +351,7 @@ fn managed_tls_upgrade(
     Ok(HostServiceResponse::Deferred {
         receiver,
         timeout: Some(reactor_io_limits(&context.process.limits).operation_deadline),
-        task_class: agentos_runtime::TaskClass::Tls,
+        task_class: agentos_runtime_tokio::TaskClass::Tls,
     })
 }
 
@@ -407,7 +407,7 @@ fn managed_close_listener(
     context
         .process
         .runtime_context
-        .spawn(agentos_runtime::TaskClass::Listener, async move {
+        .spawn(agentos_runtime_tokio::TaskClass::Listener, async move {
             let result = match crate::execution::operation_deadline_timeout(
                 "Unix listener close",
                 deadline,
@@ -442,7 +442,7 @@ fn managed_close_listener(
     Ok(HostServiceResponse::Deferred {
         receiver,
         timeout: None,
-        task_class: agentos_runtime::TaskClass::Listener,
+        task_class: agentos_runtime_tokio::TaskClass::Listener,
     })
 }
 

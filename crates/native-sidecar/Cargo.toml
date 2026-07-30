@@ -19,7 +19,7 @@ agentos-bridge = { workspace = true }
 agentos-kernel = { workspace = true }
 agentos-sidecar-protocol = { workspace = true }
 agentos-native-sidecar-core = { workspace = true }
-agentos-runtime = { workspace = true }
+agentos-runtime-tokio = { workspace = true }
 agentos-execution = { workspace = true }
 agentos-vm-config = { workspace = true }
 agentos-vfs = { workspace = true }

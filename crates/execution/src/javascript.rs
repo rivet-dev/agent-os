@@ -16,8 +16,8 @@ use crate::v8_host::{V8RuntimeHost, V8SessionFrameReceiver, V8SessionHandle};
 use crate::v8_ipc::BinaryFrame;
 use crate::v8_runtime;
 use agentos_bridge::queue_tracker::{register_queue, QueueGauge, TrackedLimit};
-use agentos_runtime::accounting::ResourceClass;
-use agentos_runtime::RuntimeContext;
+use agentos_runtime_tokio::accounting::ResourceClass;
+use agentos_runtime_tokio::RuntimeContext;
 use agentos_v8_runtime::runtime_protocol::{RuntimeCommand, WarmSessionHint};
 use flume::{Receiver as EventReceiver, Sender as EventSender};
 use getrandom::getrandom;
@@ -726,7 +726,7 @@ impl GuestModuleResolution {
 
 struct LocalBridgeState {
     runtime: Option<RuntimeContext>,
-    timer_resources: Option<Arc<agentos_runtime::accounting::ResourceLedger>>,
+    timer_resources: Option<Arc<agentos_runtime_tokio::accounting::ResourceLedger>>,
     max_timers: usize,
     translator: GuestPathTranslator,
     resolution_cache: LocalModuleResolutionCache,
@@ -781,9 +781,9 @@ impl Default for LocalBridgeState {
 
 #[cfg(test)]
 fn default_test_runtime_context() -> Option<RuntimeContext> {
-    agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+    agentos_runtime_tokio::SidecarRuntime::process(&agentos_runtime_tokio::RuntimeConfig::default())
         .ok()
-        .map(agentos_runtime::SidecarRuntime::context)
+        .map(agentos_runtime_tokio::SidecarRuntime::context)
 }
 
 #[cfg(not(test))]
@@ -863,7 +863,7 @@ struct LocalTimerEntry {
     delay_ms: u64,
     generation: u64,
     repeat: bool,
-    _reservation: Option<agentos_runtime::accounting::Reservation>,
+    _reservation: Option<agentos_runtime_tokio::accounting::Reservation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1115,7 +1115,7 @@ impl TimerWheel {
         });
         let worker = Arc::clone(&wheel);
         runtime
-            .spawn(agentos_runtime::TaskClass::Timer, async move {
+            .spawn(agentos_runtime_tokio::TaskClass::Timer, async move {
                 worker.run().await
             })
             .map_err(|error| {
@@ -3808,7 +3808,7 @@ fn javascript_reactor_work_quantum(
         )),
         None => runtime
             .resources()
-            .usage(agentos_runtime::accounting::ResourceClass::ReadyHandles)
+            .usage(agentos_runtime_tokio::accounting::ResourceClass::ReadyHandles)
             .limit
             .ok_or_else(|| {
                 JavascriptExecutionError::InvalidLimit(String::from(
@@ -3874,8 +3874,8 @@ fn spawn_javascript_sync_rpc_timeout(
         return;
     };
 
-    let runtime = match agentos_runtime::SidecarRuntime::process(
-        &agentos_runtime::RuntimeConfig::default(),
+    let runtime = match agentos_runtime_tokio::SidecarRuntime::process(
+        &agentos_runtime_tokio::RuntimeConfig::default(),
     ) {
         Ok(runtime) => runtime.context(),
         Err(error) => {
@@ -3883,7 +3883,7 @@ fn spawn_javascript_sync_rpc_timeout(
             return;
         }
     };
-    if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Timer, async move {
+    if let Err(error) = runtime.spawn(agentos_runtime_tokio::TaskClass::Timer, async move {
         tokio::time::sleep(timeout).await;
 
         let should_timeout = pending_state
@@ -4609,7 +4609,7 @@ fn spawn_v8_event_bridge(
     );
 
     let task = runtime
-        .spawn(agentos_runtime::TaskClass::Vm, async move {
+        .spawn(agentos_runtime_tokio::TaskClass::Vm, async move {
             let mut emitted_exit = false;
             loop {
                 let frame_recv_start = Instant::now();
@@ -5470,7 +5470,7 @@ impl LocalBridgeState {
                     "JavaScript timers require a resource ledger",
                 )
             })?
-            .reserve(agentos_runtime::accounting::ResourceClass::Timers, 1)
+            .reserve(agentos_runtime_tokio::accounting::ResourceClass::Timers, 1)
             .map_err(|error| {
                 javascript_timer_error("ERR_AGENTOS_RESOURCE_LIMIT", error.to_string())
                     .with_details(json!({
@@ -8852,11 +8852,11 @@ mod tests {
     #[test]
     fn vm_scoped_reactor_work_quantum_is_required_and_nonzero() {
         let process = default_test_runtime_context().expect("test runtime context");
-        let resources = Arc::new(agentos_runtime::accounting::ResourceLedger::child(
+        let resources = Arc::new(agentos_runtime_tokio::accounting::ResourceLedger::child(
             "javascript-reactor-work-quantum-test",
             std::iter::empty::<(
-                agentos_runtime::accounting::ResourceClass,
-                agentos_runtime::accounting::ResourceLimit,
+                agentos_runtime_tokio::accounting::ResourceClass,
+                agentos_runtime_tokio::accounting::ResourceLimit,
             )>(),
             Arc::clone(process.resources()),
         ));
@@ -9556,7 +9556,7 @@ mod tests {
 
     #[test]
     fn timer_registration_reserves_before_insert_and_releases_on_remove() {
-        use agentos_runtime::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
+        use agentos_runtime_tokio::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
 
         let ledger = Arc::new(ResourceLedger::root(
             "vm=test",

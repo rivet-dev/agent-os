@@ -1,7 +1,7 @@
 //! V8 runtime host — manages a shared embedded V8 runtime with session multiplexing.
 
 use crate::v8_ipc::{self, BinaryFrame};
-use agentos_runtime::RuntimeContext;
+use agentos_runtime_tokio::RuntimeContext;
 use agentos_v8_runtime::embedded_runtime::{
     shared_embedded_runtime, EmbeddedV8Runtime, EmbeddedV8SessionHandle,
 };
@@ -265,7 +265,7 @@ impl V8SessionHandle {
         &self,
         capability_id: u64,
         capability_generation: u64,
-        flags: agentos_runtime::readiness::ReadyFlags,
+        flags: agentos_runtime_tokio::readiness::ReadyFlags,
     ) -> io::Result<()> {
         self.inner
             .publish_readiness(capability_id, capability_generation, flags)
@@ -371,7 +371,7 @@ impl crate::backend::ExecutionWakeTarget for V8SessionHandle {
         &self,
         capability_id: u64,
         capability_generation: u64,
-        flags: agentos_runtime::readiness::ReadyFlags,
+        flags: agentos_runtime_tokio::readiness::ReadyFlags,
     ) -> Result<(), crate::backend::ExecutionWakeError> {
         V8SessionHandle::publish_readiness(self, capability_id, capability_generation, flags)
             .map_err(|error| crate::backend::ExecutionWakeError::new("EIO", error.to_string()))
@@ -594,9 +594,11 @@ mod tests {
     }
 
     fn test_runtime_context() -> RuntimeContext {
-        agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-            .expect("test process runtime")
-            .context()
+        agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("test process runtime")
+        .context()
     }
 
     #[test]

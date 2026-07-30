@@ -11,7 +11,7 @@ test-support = []
 
 [dependencies]
 agentos-bridge = { workspace = true }
-agentos-runtime = { workspace = true }
+agentos-runtime-tokio = { workspace = true }
 v8 = "130"
 crossbeam-channel = "0.5"
 flume = { version = "0.11", features = ["async"] }

@@ -31,11 +31,11 @@ use agentos_kernel::mount_table::MountTable;
 use agentos_kernel::root_fs::RootFilesystemMode;
 use agentos_kernel::socket_table::SocketId;
 use agentos_native_sidecar_core::VmLayerStore;
-use agentos_runtime::accounting::{
+use agentos_runtime_tokio::accounting::{
     LimitError, Reservation, ResourceClass, ResourceLedger, SharedReservation,
 };
-use agentos_runtime::fairness::FairWorkTurn;
-use agentos_runtime::RuntimeContext;
+use agentos_runtime_tokio::fairness::FairWorkTurn;
+use agentos_runtime_tokio::RuntimeContext;
 use agentos_vm_config as vm_config;
 use agentos_vm_config::PermissionsPolicy;
 use rusqlite::Connection;
@@ -193,11 +193,11 @@ impl ManagedHostNetDescription {
 /// dup/SCM_RIGHTS alias drops.
 #[derive(Debug, Default)]
 pub(crate) struct SocketDescriptionLease {
-    lease: Mutex<Option<Arc<agentos_runtime::capability::CapabilityLease>>>,
+    lease: Mutex<Option<Arc<agentos_runtime_tokio::capability::CapabilityLease>>>,
 }
 
 impl SocketDescriptionLease {
-    pub(crate) fn retain(&self, lease: Arc<agentos_runtime::capability::CapabilityLease>) {
+    pub(crate) fn retain(&self, lease: Arc<agentos_runtime_tokio::capability::CapabilityLease>) {
         let mut retained = self.lease.lock().unwrap_or_else(|error| error.into_inner());
         if retained.is_none() {
             *retained = Some(lease);
@@ -855,7 +855,7 @@ pub struct NativeSidecarConfig {
     pub compile_cache_root: Option<PathBuf>,
     pub expected_auth_token: Option<String>,
     pub acp_termination_grace: Duration,
-    pub runtime: agentos_runtime::RuntimeConfig,
+    pub runtime: agentos_runtime_tokio::RuntimeConfig,
 }
 
 impl Default for NativeSidecarConfig {
@@ -866,14 +866,14 @@ impl Default for NativeSidecarConfig {
             compile_cache_root: None,
             expected_auth_token: None,
             acp_termination_grace: Duration::from_secs(3),
-            runtime: agentos_runtime::RuntimeConfig::default(),
+            runtime: agentos_runtime_tokio::RuntimeConfig::default(),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidecarError {
-    ResourceLimit(agentos_runtime::accounting::LimitError),
+    ResourceLimit(agentos_runtime_tokio::accounting::LimitError),
     Host(agentos_execution::backend::HostServiceError),
     InvalidState(String),
     ProtocolVersionMismatch(String),
@@ -970,7 +970,7 @@ impl From<agentos_native_sidecar_core::SidecarCoreError> for SidecarError {
 /// Format a resource-limit failure for an untrusted guest. VM-local occupancy
 /// is safe to expose to that VM; process occupancy includes other VMs and must
 /// not become a cross-tenant resource oracle.
-pub(crate) fn guest_limit_message(limit: &agentos_runtime::accounting::LimitError) -> String {
+pub(crate) fn guest_limit_message(limit: &agentos_runtime_tokio::accounting::LimitError) -> String {
     if limit.scope.starts_with("vm=") {
         return limit.to_string();
     }
@@ -983,16 +983,16 @@ pub(crate) fn guest_limit_message(limit: &agentos_runtime::accounting::LimitErro
     )
 }
 
-impl From<agentos_runtime::accounting::LimitError> for SidecarError {
-    fn from(error: agentos_runtime::accounting::LimitError) -> Self {
+impl From<agentos_runtime_tokio::accounting::LimitError> for SidecarError {
+    fn from(error: agentos_runtime_tokio::accounting::LimitError) -> Self {
         Self::ResourceLimit(error)
     }
 }
 
-impl From<agentos_runtime::capability::CapabilityError> for SidecarError {
-    fn from(error: agentos_runtime::capability::CapabilityError) -> Self {
+impl From<agentos_runtime_tokio::capability::CapabilityError> for SidecarError {
+    fn from(error: agentos_runtime_tokio::capability::CapabilityError) -> Self {
         match error {
-            agentos_runtime::capability::CapabilityError::Limit(limit) => {
+            agentos_runtime_tokio::capability::CapabilityError::Limit(limit) => {
                 Self::ResourceLimit(limit)
             }
             other => Self::Execution(other.to_string()),
@@ -1000,21 +1000,25 @@ impl From<agentos_runtime::capability::CapabilityError> for SidecarError {
     }
 }
 
-impl From<agentos_runtime::TaskSpawnError> for SidecarError {
-    fn from(error: agentos_runtime::TaskSpawnError) -> Self {
+impl From<agentos_runtime_tokio::TaskSpawnError> for SidecarError {
+    fn from(error: agentos_runtime_tokio::TaskSpawnError) -> Self {
         match error {
-            agentos_runtime::TaskSpawnError::ResourceLimit(limit) => Self::ResourceLimit(limit),
-            agentos_runtime::TaskSpawnError::AdmissionClosed { scope } => Self::Execution(format!(
-                "ERR_AGENTOS_TASK_ADMISSION_CLOSED: scope={scope} is closing"
-            )),
+            agentos_runtime_tokio::TaskSpawnError::ResourceLimit(limit) => {
+                Self::ResourceLimit(limit)
+            }
+            agentos_runtime_tokio::TaskSpawnError::AdmissionClosed { scope } => Self::Execution(
+                format!("ERR_AGENTOS_TASK_ADMISSION_CLOSED: scope={scope} is closing"),
+            ),
         }
     }
 }
 
-impl From<agentos_runtime::BlockingJobError> for SidecarError {
-    fn from(error: agentos_runtime::BlockingJobError) -> Self {
+impl From<agentos_runtime_tokio::BlockingJobError> for SidecarError {
+    fn from(error: agentos_runtime_tokio::BlockingJobError) -> Self {
         match error {
-            agentos_runtime::BlockingJobError::ResourceLimit(limit) => Self::ResourceLimit(limit),
+            agentos_runtime_tokio::BlockingJobError::ResourceLimit(limit) => {
+                Self::ResourceLimit(limit)
+            }
             other => Self::Execution(other.to_string()),
         }
     }
@@ -1214,14 +1218,14 @@ pub(crate) struct VmState {
     pub(crate) pending_child_sync_count_budget: Arc<VmPendingByteBudget>,
     pub(crate) pending_child_sync_bytes_budget: Arc<VmPendingByteBudget>,
     /// Child of the one process ledger owned by RuntimeContext.
-    pub(crate) resources: Arc<agentos_runtime::accounting::ResourceLedger>,
+    pub(crate) resources: Arc<agentos_runtime_tokio::accounting::ResourceLedger>,
     /// VM-scoped admission view over the process's single Tokio runtime and
     /// fixed blocking executor. This owns no runtime or worker of its own.
-    pub(crate) runtime_context: agentos_runtime::RuntimeContext,
+    pub(crate) runtime_context: agentos_runtime_tokio::RuntimeContext,
     /// One resolved SQLite transport shared by every durable VM subsystem.
     pub(crate) database: Option<crate::vm_sqlite::SharedVmSqliteDatabase>,
     /// Common lifecycle/identity registry for native and kernel backends.
-    pub(crate) capabilities: agentos_runtime::capability::CapabilityRegistry,
+    pub(crate) capabilities: agentos_runtime_tokio::capability::CapabilityRegistry,
     pub(crate) dns: VmDnsConfig,
     pub(crate) listen_policy: VmListenPolicy,
     pub(crate) create_loopback_exempt_ports: BTreeSet<u16>,
@@ -1304,7 +1308,7 @@ pub(crate) struct VmFetchStreamState {
     pub(crate) target_process_id: String,
     pub(crate) kernel_pid: u32,
     pub(crate) socket_id: SocketId,
-    pub(crate) _capability: agentos_runtime::capability::CapabilityLease,
+    pub(crate) _capability: agentos_runtime_tokio::capability::CapabilityLease,
     pub(crate) raw_buffer: Vec<u8>,
     pub(crate) decoded_buffer: VecDeque<u8>,
     pub(crate) body_mode: VmFetchBodyMode,
@@ -1323,9 +1327,9 @@ pub(crate) struct QuarantinedVmGeneration {
     pub(crate) session_id: String,
     pub(crate) vm_id: String,
     pub(crate) generation: u64,
-    pub(crate) resources: Arc<agentos_runtime::accounting::ResourceLedger>,
-    pub(crate) runtime_context: agentos_runtime::RuntimeContext,
-    pub(crate) capabilities: agentos_runtime::capability::CapabilityRegistry,
+    pub(crate) resources: Arc<agentos_runtime_tokio::accounting::ResourceLedger>,
+    pub(crate) runtime_context: agentos_runtime_tokio::RuntimeContext,
+    pub(crate) capabilities: agentos_runtime_tokio::capability::CapabilityRegistry,
     pub(crate) reason: VmQuarantineReason,
 }
 
@@ -1554,7 +1558,7 @@ pub(crate) struct ActiveProcess {
     /// VM-scoped admission/accounting view over the process-owned runtime.
     /// Child processes inherit this exact generation-bound context; they must
     /// never rediscover the process context through a global lookup.
-    pub(crate) runtime_context: agentos_runtime::RuntimeContext,
+    pub(crate) runtime_context: agentos_runtime_tokio::RuntimeContext,
     /// Immutable limits for the owning VM generation. Protocol tasks read
     /// their bounds from this snapshot instead of process-wide constants.
     pub(crate) limits: crate::limits::VmLimits,
@@ -1651,7 +1655,7 @@ pub(crate) struct ActiveProcess {
     /// the legacy guest-facing maps below. Dropping a map entry without its
     /// lease is prevented by the typed insert/release helpers.
     pub(crate) capability_leases:
-        BTreeMap<NativeCapabilityKey, Arc<agentos_runtime::capability::CapabilityLease>>,
+        BTreeMap<NativeCapabilityKey, Arc<agentos_runtime_tokio::capability::CapabilityLease>>,
     pub(crate) tcp_listeners: BTreeMap<String, ActiveTcpListener>,
     pub(crate) next_tcp_listener_id: usize,
     pub(crate) tcp_sockets: BTreeMap<String, ActiveTcpSocket>,
@@ -1836,7 +1840,7 @@ pub(crate) struct Http2SharedState {
     pub(crate) sessions: BTreeMap<u64, ActiveHttp2Session>,
     pub(crate) streams: BTreeMap<u64, ActiveHttp2Stream>,
     pub(crate) capability_leases:
-        BTreeMap<NativeCapabilityKey, agentos_runtime::capability::CapabilityLease>,
+        BTreeMap<NativeCapabilityKey, agentos_runtime_tokio::capability::CapabilityLease>,
     pub(crate) server_events: BTreeMap<u64, VecDeque<QueuedHttp2Event>>,
     pub(crate) session_events: BTreeMap<u64, VecDeque<QueuedHttp2Event>>,
     pub(crate) limits: crate::limits::VmLimits,
@@ -1880,7 +1884,7 @@ pub(crate) struct ActiveHttp2Session {
     pub(crate) command_tx: TokioSender<QueuedHttp2Command>,
     pub(crate) capability_id: u64,
     pub(crate) vm_generation: u64,
-    pub(crate) fairness: agentos_runtime::fairness::FairWorkBroker,
+    pub(crate) fairness: agentos_runtime_tokio::fairness::FairWorkBroker,
     pub(crate) command_timeout: Duration,
     pub(crate) close_requested: Arc<AtomicBool>,
     pub(crate) close_abrupt: Arc<AtomicBool>,
@@ -1998,7 +2002,7 @@ pub(crate) enum Http2SessionCommand {
     Request {
         headers_json: String,
         options_json: String,
-        pending_capability: agentos_runtime::capability::PendingCapability,
+        pending_capability: agentos_runtime_tokio::capability::PendingCapability,
         stream_reservations: Vec<Reservation>,
         respond_to: Http2ResponseSender,
     },
@@ -2024,7 +2028,7 @@ pub(crate) enum Http2SessionCommand {
     StreamPush {
         stream_id: u64,
         headers_json: String,
-        pending_capability: agentos_runtime::capability::PendingCapability,
+        pending_capability: agentos_runtime_tokio::capability::PendingCapability,
         stream_reservations: Vec<Reservation>,
         respond_to: Http2ResponseSender,
     },
@@ -2073,10 +2077,10 @@ pub(crate) struct PendingTcpSocket {
 pub(crate) enum TcpSocketEvent {
     Data {
         bytes: Vec<u8>,
-        reservation: agentos_runtime::accounting::SharedReservation,
+        reservation: agentos_runtime_tokio::accounting::SharedReservation,
         /// Protocol-specific ownership that remains live until the payload is
         /// transferred out of the transport/event layer.
-        source_reservations: Vec<agentos_runtime::accounting::SharedReservation>,
+        source_reservations: Vec<agentos_runtime_tokio::accounting::SharedReservation>,
     },
     End,
     Close {
@@ -2102,8 +2106,8 @@ pub(crate) fn tcp_socket_event_retained_bytes(event: &TcpSocketEvent) -> usize {
 #[derive(Clone, Debug)]
 pub(crate) struct SocketEventPusher {
     pub(crate) session: Option<ExecutionWakeHandle>,
-    pub(crate) capability_id: agentos_runtime::capability::CapabilityId,
-    pub(crate) capability_generation: agentos_runtime::capability::CapabilityGeneration,
+    pub(crate) capability_id: agentos_runtime_tokio::capability::CapabilityId,
+    pub(crate) capability_generation: agentos_runtime_tokio::capability::CapabilityGeneration,
     live: Arc<AtomicBool>,
     /// Coalesced sidecar owner wake. Readiness payload remains in the socket
     /// description; this only causes a parked combined poll to re-probe it.
@@ -2117,7 +2121,7 @@ impl SocketEventPusher {
 
     pub(crate) fn publish_readiness(
         &self,
-        flags: agentos_runtime::readiness::ReadyFlags,
+        flags: agentos_runtime_tokio::readiness::ReadyFlags,
     ) -> Result<bool, agentos_execution::backend::ExecutionWakeError> {
         if !self.is_live() {
             return Ok(false);
@@ -2326,7 +2330,7 @@ impl SocketReadinessRegistration {
         session: Option<ExecutionWakeHandle>,
         identity: Option<(u64, u64)>,
         owner_notify: Arc<Notify>,
-        replay_flags: agentos_runtime::readiness::ReadyFlags,
+        replay_flags: agentos_runtime_tokio::readiness::ReadyFlags,
     ) {
         let Some((capability_id, capability_generation)) = identity else {
             return;
@@ -2437,8 +2441,8 @@ pub(crate) enum KernelSocketReadinessEvent {
 pub(crate) struct KernelSocketReadinessTarget {
     pub(crate) session: Option<ExecutionWakeHandle>,
     pub(crate) notify: Option<Arc<Notify>>,
-    pub(crate) capability_id: agentos_runtime::capability::CapabilityId,
-    pub(crate) capability_generation: agentos_runtime::capability::CapabilityGeneration,
+    pub(crate) capability_id: agentos_runtime_tokio::capability::CapabilityId,
+    pub(crate) capability_generation: agentos_runtime_tokio::capability::CapabilityGeneration,
     pub(crate) target_id: String,
     pub(crate) event: KernelSocketReadinessEvent,
     pub(crate) live: Arc<AtomicBool>,
@@ -2565,7 +2569,7 @@ pub(crate) enum SocketReadTerminal {
 
 #[derive(Debug)]
 pub(crate) struct ActiveTcpSocket {
-    pub(crate) runtime_context: agentos_runtime::RuntimeContext,
+    pub(crate) runtime_context: agentos_runtime_tokio::RuntimeContext,
     pub(crate) reactor_limits: ReactorIoLimits,
     pub(crate) fairness_identity: Arc<OnceLock<(u64, u64)>>,
     pub(crate) fairness_identity_committed: Arc<Notify>,
@@ -2616,7 +2620,7 @@ pub(crate) struct ActiveTcpSocket {
     /// SCM_RIGHTS. It keeps owner-0 kernel sockets alive while queued or held
     /// by another process and lets the kernel prune discarded transfers.
     pub(crate) kernel_transfer_guard: Option<TransferredFd>,
-    pub(crate) resources: Arc<agentos_runtime::accounting::ResourceLedger>,
+    pub(crate) resources: Arc<agentos_runtime_tokio::accounting::ResourceLedger>,
 }
 
 #[derive(Debug)]
@@ -2632,11 +2636,11 @@ pub(crate) enum NativeTlsCommand {
         completion: Option<SyncSender<Result<Value, DeferredRpcError>>>,
     },
     Shutdown {
-        _command_reservation: agentos_runtime::accounting::SharedReservation,
+        _command_reservation: agentos_runtime_tokio::accounting::SharedReservation,
         completion: SyncSender<Result<Value, DeferredRpcError>>,
     },
     Close {
-        _command_reservation: agentos_runtime::accounting::SharedReservation,
+        _command_reservation: agentos_runtime_tokio::accounting::SharedReservation,
     },
 }
 
@@ -2647,7 +2651,7 @@ pub(crate) enum NativePlainSocketCommand {
         completion: tokio::sync::oneshot::Sender<Result<Value, DeferredRpcError>>,
     },
     Shutdown {
-        _command_reservation: agentos_runtime::accounting::SharedReservation,
+        _command_reservation: agentos_runtime_tokio::accounting::SharedReservation,
         completion: tokio::sync::oneshot::Sender<Result<Value, DeferredRpcError>>,
     },
 }
@@ -2655,18 +2659,18 @@ pub(crate) enum NativePlainSocketCommand {
 #[derive(Debug)]
 pub(crate) struct PlainSocketWritePayload {
     pub(crate) bytes: Vec<u8>,
-    pub(crate) _command_reservation: agentos_runtime::accounting::SharedReservation,
-    pub(crate) _bytes_reservation: agentos_runtime::accounting::SharedReservation,
-    pub(crate) _buffered_reservation: agentos_runtime::accounting::SharedReservation,
+    pub(crate) _command_reservation: agentos_runtime_tokio::accounting::SharedReservation,
+    pub(crate) _bytes_reservation: agentos_runtime_tokio::accounting::SharedReservation,
+    pub(crate) _buffered_reservation: agentos_runtime_tokio::accounting::SharedReservation,
 }
 
 #[derive(Debug)]
 pub(crate) struct TlsWritePayload {
     pub(crate) bytes: Vec<u8>,
-    pub(crate) _command_reservation: agentos_runtime::accounting::SharedReservation,
-    pub(crate) _command_bytes_reservation: agentos_runtime::accounting::SharedReservation,
-    pub(crate) _buffered_reservation: agentos_runtime::accounting::SharedReservation,
-    pub(crate) _tls_reservation: agentos_runtime::accounting::SharedReservation,
+    pub(crate) _command_reservation: agentos_runtime_tokio::accounting::SharedReservation,
+    pub(crate) _command_bytes_reservation: agentos_runtime_tokio::accounting::SharedReservation,
+    pub(crate) _buffered_reservation: agentos_runtime_tokio::accounting::SharedReservation,
+    pub(crate) _tls_reservation: agentos_runtime_tokio::accounting::SharedReservation,
 }
 
 /// VM-scoped scheduling bounds copied into each native handle owner. Keeping
@@ -2687,17 +2691,21 @@ pub(crate) struct ReactorIoLimits {
 pub(crate) struct LoopbackTlsTransportPair {
     pub(crate) state: Mutex<LoopbackTlsTransportPairState>,
     pub(crate) ready: Condvar,
-    pub(crate) resources: Arc<agentos_runtime::accounting::ResourceLedger>,
+    pub(crate) resources: Arc<agentos_runtime_tokio::accounting::ResourceLedger>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct LoopbackTlsTransportPairState {
     pub(crate) lower_to_higher: VecDeque<u8>,
     pub(crate) higher_to_lower: VecDeque<u8>,
-    pub(crate) lower_to_higher_reservations: VecDeque<agentos_runtime::accounting::Reservation>,
-    pub(crate) higher_to_lower_reservations: VecDeque<agentos_runtime::accounting::Reservation>,
-    pub(crate) lower_to_higher_tls_reservations: VecDeque<agentos_runtime::accounting::Reservation>,
-    pub(crate) higher_to_lower_tls_reservations: VecDeque<agentos_runtime::accounting::Reservation>,
+    pub(crate) lower_to_higher_reservations:
+        VecDeque<agentos_runtime_tokio::accounting::Reservation>,
+    pub(crate) higher_to_lower_reservations:
+        VecDeque<agentos_runtime_tokio::accounting::Reservation>,
+    pub(crate) lower_to_higher_tls_reservations:
+        VecDeque<agentos_runtime_tokio::accounting::Reservation>,
+    pub(crate) higher_to_lower_tls_reservations:
+        VecDeque<agentos_runtime_tokio::accounting::Reservation>,
     pub(crate) lower_write_closed: bool,
     pub(crate) higher_write_closed: bool,
     pub(crate) lower_closed: bool,
@@ -2819,7 +2827,7 @@ pub(crate) struct ActiveTcpListener {
 pub(crate) enum UnixListenerEvent {
     Connection {
         socket: PendingUnixSocket,
-        capability: agentos_runtime::capability::PendingCapability,
+        capability: agentos_runtime_tokio::capability::PendingCapability,
     },
     Error {
         code: Option<String>,
@@ -2903,7 +2911,7 @@ pub(crate) struct ActiveUnixSocket {
     pub(crate) read_state: Arc<Mutex<SocketReadState>>,
     pub(crate) description_handles: Arc<()>,
     pub(crate) listener_connection_retirement: Option<Arc<ListenerConnectionRetirement>>,
-    pub(crate) resources: Arc<agentos_runtime::accounting::ResourceLedger>,
+    pub(crate) resources: Arc<agentos_runtime_tokio::accounting::ResourceLedger>,
 }
 
 #[derive(Debug)]
@@ -2970,10 +2978,10 @@ pub(crate) enum DatagramEvent {
     Message {
         data: Vec<u8>,
         remote_addr: SocketAddr,
-        _byte_reservation: agentos_runtime::accounting::SharedReservation,
-        _datagram_reservation: agentos_runtime::accounting::SharedReservation,
-        _udp_byte_reservation: agentos_runtime::accounting::SharedReservation,
-        _udp_datagram_reservation: agentos_runtime::accounting::SharedReservation,
+        _byte_reservation: agentos_runtime_tokio::accounting::SharedReservation,
+        _datagram_reservation: agentos_runtime_tokio::accounting::SharedReservation,
+        _udp_byte_reservation: agentos_runtime_tokio::accounting::SharedReservation,
+        _udp_datagram_reservation: agentos_runtime_tokio::accounting::SharedReservation,
     },
     Error {
         code: Option<String>,
@@ -3069,8 +3077,8 @@ pub(crate) struct ActiveUdpSocket {
     /// One strong reference per guest-visible datagram socket description.
     pub(crate) description_handles: Arc<()>,
     pub(crate) kernel_transfer_guard: Option<TransferredFd>,
-    pub(crate) resources: Arc<agentos_runtime::accounting::ResourceLedger>,
-    pub(crate) runtime_context: agentos_runtime::RuntimeContext,
+    pub(crate) resources: Arc<agentos_runtime_tokio::accounting::ResourceLedger>,
+    pub(crate) runtime_context: agentos_runtime_tokio::RuntimeContext,
     pub(crate) reactor_limits: ReactorIoLimits,
     pub(crate) fairness_identity: Arc<OnceLock<(u64, u64)>>,
     pub(crate) fairness_identity_committed: Arc<Notify>,
@@ -3168,7 +3176,7 @@ impl Default for BindingExecution {
     fn default() -> Self {
         Self::with_event_notify(
             Arc::new(Notify::new()),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
         )
     }
 }
@@ -3276,13 +3284,13 @@ pub(crate) enum PendingNetConnect {
     Tcp {
         socket_id: String,
         socket: Box<ActiveTcpSocket>,
-        pending_capability: agentos_runtime::capability::PendingCapability,
+        pending_capability: agentos_runtime_tokio::capability::PendingCapability,
         local_reservation_id: Option<String>,
     },
     Unix {
         socket_id: String,
         socket: Box<ActiveUnixSocket>,
-        pending_capability: agentos_runtime::capability::PendingCapability,
+        pending_capability: agentos_runtime_tokio::capability::PendingCapability,
         remote_path: String,
         remote_abstract_path_hex: Option<String>,
     },
@@ -3459,7 +3467,7 @@ pub(crate) struct ProcNetEntry {
 #[cfg(test)]
 mod async_completion_tests {
     use super::*;
-    use agentos_runtime::accounting::ResourceLimit;
+    use agentos_runtime_tokio::accounting::ResourceLimit;
 
     fn completion_runtime(
         maximum: usize,
@@ -3473,10 +3481,11 @@ mod async_completion_tests {
         byte_maximum: usize,
         generation: u64,
     ) -> (RuntimeContext, Arc<ResourceLedger>) {
-        let process =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("test process runtime")
-                .context();
+        let process = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("test process runtime")
+        .context();
         let resources = Arc::new(ResourceLedger::child(
             format!("completion-test-vm-{generation}"),
             [
@@ -3693,7 +3702,7 @@ mod socket_readiness_registry_tests {
     use super::*;
     use agentos_execution::backend::{ExecutionWakeError, ExecutionWakeTarget};
     use agentos_execution::v8_host::V8RuntimeHost;
-    use agentos_runtime::accounting::ResourceLimit;
+    use agentos_runtime_tokio::accounting::ResourceLimit;
 
     #[derive(Default)]
     struct RecordingWakeTarget {
@@ -3705,7 +3714,7 @@ mod socket_readiness_registry_tests {
             &self,
             _capability_id: u64,
             _capability_generation: u64,
-            _flags: agentos_runtime::readiness::ReadyFlags,
+            _flags: agentos_runtime_tokio::readiness::ReadyFlags,
         ) -> Result<(), ExecutionWakeError> {
             self.readiness_publishes.fetch_add(1, Ordering::AcqRel);
             Ok(())
@@ -3831,7 +3840,7 @@ mod socket_readiness_registry_tests {
             Some(session),
             Some((1, 1)),
             Arc::new(Notify::new()),
-            agentos_runtime::readiness::ReadyFlags::READABLE,
+            agentos_runtime_tokio::readiness::ReadyFlags::READABLE,
         );
         assert_eq!(wake_target.readiness_publishes.load(Ordering::Acquire), 1);
 
@@ -3840,7 +3849,7 @@ mod socket_readiness_registry_tests {
         let late_transport_target = subscribers.targets().pop().expect("registered target");
         registration.retire();
         assert!(!late_transport_target
-            .publish_readiness(agentos_runtime::readiness::ReadyFlags::END)
+            .publish_readiness(agentos_runtime_tokio::readiness::ReadyFlags::END)
             .expect("retired readiness publish must be ignored"));
         assert_eq!(wake_target.readiness_publishes.load(Ordering::Acquire), 1);
         assert!(subscribers.targets().is_empty());
@@ -3873,22 +3882,23 @@ mod socket_readiness_registry_tests {
             None,
             Some((1, 1)),
             Arc::clone(&owner_notify),
-            agentos_runtime::readiness::ReadyFlags::READABLE,
+            agentos_runtime_tokio::readiness::ReadyFlags::READABLE,
         );
 
         assert!(take_notify_permit(&owner_notify));
         let target = subscribers.targets().pop().expect("registered target");
         assert!(target
-            .publish_readiness(agentos_runtime::readiness::ReadyFlags::READABLE)
+            .publish_readiness(agentos_runtime_tokio::readiness::ReadyFlags::READABLE)
             .expect("runtime-neutral readiness publish"));
         assert!(take_notify_permit(&owner_notify));
     }
 
     #[test]
     fn native_alias_registration_is_raii_and_read_interest_is_aggregate_or() {
-        let process_runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create subscriber test runtime");
+        let process_runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create subscriber test runtime");
         let resources = ResourceLedger::root(
             "socket-subscriber-test",
             [(
@@ -3918,7 +3928,7 @@ mod socket_readiness_registry_tests {
             Some(session.clone()),
             Some((1, 1)),
             Arc::new(Notify::new()),
-            agentos_runtime::readiness::ReadyFlags::READABLE,
+            agentos_runtime_tokio::readiness::ReadyFlags::READABLE,
         );
 
         let child = SocketReadinessRegistration::new(
@@ -3930,7 +3940,7 @@ mod socket_readiness_registry_tests {
             Some(session),
             Some((2, 1)),
             Arc::new(Notify::new()),
-            agentos_runtime::readiness::ReadyFlags::READABLE,
+            agentos_runtime_tokio::readiness::ReadyFlags::READABLE,
         );
         assert_eq!(subscribers.targets().len(), 2);
 

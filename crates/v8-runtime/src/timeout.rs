@@ -22,7 +22,7 @@
 // and when both are set whichever fires first terminates execution.
 
 use agentos_bridge::queue_tracker::{register_limit, TrackedLimit};
-use agentos_runtime::{RuntimeContext, TaskClass, TaskOwner};
+use agentos_runtime_tokio::{RuntimeContext, TaskClass, TaskOwner};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -388,7 +388,7 @@ fn spawn_timer<F>(
     runtime: &RuntimeContext,
     owner: Option<TaskOwner>,
     future: F,
-) -> Result<tokio::task::JoinHandle<()>, agentos_runtime::TaskSpawnError>
+) -> Result<tokio::task::JoinHandle<()>, agentos_runtime_tokio::TaskSpawnError>
 where
     F: Future<Output = ()> + Send + 'static,
 {

@@ -70,7 +70,7 @@ use agentos_native_sidecar_core::{
     validate_authenticate_versions, vm_lifecycle_event as shared_vm_lifecycle_event,
     AuthenticateVersionError, RequestRoute,
 };
-use agentos_runtime::metrics::ResourceMetricClass;
+use agentos_runtime_tokio::metrics::ResourceMetricClass;
 use agentos_vm_config::{FsPermissionScope, PermissionMode, PermissionsPolicy};
 // root_fs types moved to crate::vm
 use agentos_kernel::vfs::VfsError;
@@ -100,19 +100,19 @@ const INTERNAL_PYTHON_ENTRYPOINT_ENV_PREFIXES: &[&str] = &["AGENTOS_PYTHON_"];
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) const MAX_PROCESS_EVENT_QUEUE: usize =
-    agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS;
+    agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS;
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) const MAX_PENDING_SIDECAR_RESPONSES: usize =
-    agentos_runtime::DEFAULT_PROTOCOL_MAX_PENDING_RESPONSES;
+    agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PENDING_RESPONSES;
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) const MAX_OUTBOUND_SIDECAR_REQUESTS: usize =
-    agentos_runtime::DEFAULT_PROTOCOL_MAX_OUTBOUND_REQUESTS;
+    agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_OUTBOUND_REQUESTS;
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) const MAX_COMPLETED_SIDECAR_RESPONSES: usize =
-    agentos_runtime::DEFAULT_PROTOCOL_MAX_COMPLETED_RESPONSES;
+    agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_COMPLETED_RESPONSES;
 pub(crate) fn process_event_queue_overflow_error(limit: usize) -> SidecarError {
     SidecarError::host("ERR_AGENTOS_PROCESS_EVENT_LIMIT", format!("process event queue exceeded {limit} pending events; raise runtime.protocol.maxProcessEvents"
     ))
@@ -784,7 +784,7 @@ impl SocketPathContext {
 
 pub struct NativeSidecar<B> {
     pub(crate) config: NativeSidecarConfig,
-    pub(crate) runtime_context: Option<agentos_runtime::RuntimeContext>,
+    pub(crate) runtime_context: Option<agentos_runtime_tokio::RuntimeContext>,
     pub(crate) dns_resolver: agentos_kernel::dns::SharedDnsResolver,
     pub(crate) bridge: SharedBridge<B>,
     pub(crate) mount_plugins: FileSystemPluginRegistry<MountPluginContext<B>>,
@@ -849,7 +849,9 @@ struct GuestLimitDiagnostic {
     message: String,
 }
 
-fn guest_limit_diagnostic(limit: &agentos_runtime::accounting::LimitError) -> GuestLimitDiagnostic {
+fn guest_limit_diagnostic(
+    limit: &agentos_runtime_tokio::accounting::LimitError,
+) -> GuestLimitDiagnostic {
     if limit.scope.starts_with("vm=") {
         return GuestLimitDiagnostic {
             scope: "vm",
@@ -896,7 +898,7 @@ where
     }
 
     pub fn with_config(bridge: B, config: NativeSidecarConfig) -> Result<Self, SidecarError> {
-        let runtime_context = agentos_runtime::SidecarRuntime::process(&config.runtime)
+        let runtime_context = agentos_runtime_tokio::SidecarRuntime::process(&config.runtime)
             .map_err(|error| SidecarError::InvalidState(error.to_string()))?
             .context();
         Self::with_runtime_context(bridge, config, runtime_context)
@@ -905,7 +907,7 @@ where
     fn with_runtime_context(
         bridge: B,
         config: NativeSidecarConfig,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
     ) -> Result<Self, SidecarError> {
         if matches!(config.expected_auth_token.as_deref(), Some("")) {
             return Err(SidecarError::InvalidState(String::from(
@@ -1017,7 +1019,7 @@ where
         bridge: B,
         config: NativeSidecarConfig,
         extensions: Vec<Box<dyn Extension>>,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
     ) -> Result<Self, SidecarError> {
         let mut sidecar = Self::with_runtime_context(bridge, config, runtime_context)?;
         for extension in extensions {
@@ -2375,7 +2377,7 @@ where
         let envelope_vm_id = vm_id.to_owned();
         let envelope_process_id = process_id.to_owned();
         let wake_task = runtime
-            .spawn(agentos_runtime::TaskClass::Vm, async move {
+            .spawn(agentos_runtime_tokio::TaskClass::Vm, async move {
             // Wake on any kernel poll-state change or the deadline; either way
             // requeue exactly once. The handler re-probes and either replies or
             // re-parks without dedicating an OS thread to this wait.
@@ -3284,7 +3286,7 @@ where
         let SidecarError::ResourceLimit(limit) = error else {
             return self.reject(request, error_code(error), &error.to_string());
         };
-        use agentos_runtime::accounting::ResourceClass;
+        use agentos_runtime_tokio::accounting::ResourceClass;
 
         // A child VM ledger can fail because its process parent is full. Do not
         // return that parent ledger's exact occupancy to an untrusted guest:
@@ -4530,7 +4532,7 @@ mod structured_event_frame_tests {
 #[cfg(test)]
 mod guest_limit_diagnostic_tests {
     use super::guest_limit_diagnostic;
-    use agentos_runtime::accounting::{LimitError, ResourceClass};
+    use agentos_runtime_tokio::accounting::{LimitError, ResourceClass};
 
     fn limit(scope: &str, used: usize) -> LimitError {
         LimitError {

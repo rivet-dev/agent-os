@@ -9,7 +9,7 @@ use super::super::StartWasmExecutionRequest;
 use super::lifecycle::Control;
 use crate::backend::{HostCallReply, HostServiceError};
 use crate::host::{HostOperation, HostProcessContext, ProcessOperation, SignalOperation};
-use agentos_runtime::{RuntimeConfig, SidecarRuntime};
+use agentos_runtime_tokio::{RuntimeConfig, SidecarRuntime};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;

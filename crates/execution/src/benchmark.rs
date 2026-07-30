@@ -2,7 +2,7 @@ use crate::{
     CreateJavascriptContextRequest, JavascriptExecutionEngine, JavascriptExecutionError,
     StartJavascriptExecutionRequest,
 };
-use agentos_runtime::RuntimeContext;
+use agentos_runtime_tokio::RuntimeContext;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;

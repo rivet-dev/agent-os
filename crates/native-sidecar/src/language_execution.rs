@@ -1207,7 +1207,7 @@ where
                 .runtime_context
                 .clone();
             let task = runtime
-                .spawn(agentos_runtime::TaskClass::Timer, async move {
+                .spawn(agentos_runtime_tokio::TaskClass::Timer, async move {
                     tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)).await;
                     notify.notify_one();
                 })
@@ -1627,7 +1627,7 @@ where
                     .runtime_context
                     .clone();
                 let task = runtime
-                    .spawn(agentos_runtime::TaskClass::Timer, async move {
+                    .spawn(agentos_runtime_tokio::TaskClass::Timer, async move {
                         tokio::time::sleep(std::time::Duration::from_millis(
                             EXECUTION_CANCEL_GRACE_MS,
                         ))
@@ -1973,7 +1973,7 @@ where
         let delay_ms = deadline.saturating_sub(now);
         match vm
             .runtime_context
-            .spawn(agentos_runtime::TaskClass::Timer, async move {
+            .spawn(agentos_runtime_tokio::TaskClass::Timer, async move {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 notify.notify_one();
             }) {

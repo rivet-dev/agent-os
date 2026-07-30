@@ -22,8 +22,8 @@ const HISTORY_COMPLEXITY_LIMIT: usize = 2_048;
 const SESSION_LIST_WIRE_BYTE_LIMIT: usize = 8 * 1024 * 1024;
 const APPEND_WIRE_BYTE_LIMIT: usize = 64 * 1024;
 
-fn runtime() -> &'static agentos_runtime::SidecarRuntime {
-    agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+fn runtime() -> &'static agentos_runtime_tokio::SidecarRuntime {
+    agentos_runtime_tokio::SidecarRuntime::process(&agentos_runtime_tokio::RuntimeConfig::default())
         .expect("runtime")
 }
 

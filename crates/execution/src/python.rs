@@ -22,8 +22,8 @@ use crate::runtime_support::{
 };
 use crate::v8_runtime;
 use agentos_bridge::queue_tracker::{register_queue, QueueGauge, TrackedLimit};
-use agentos_runtime::accounting::ResourceClass;
-use agentos_runtime::RuntimeContext;
+use agentos_runtime_tokio::accounting::ResourceClass;
+use agentos_runtime_tokio::RuntimeContext;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -2244,9 +2244,9 @@ impl Default for PythonExecutionEngine {
 
 #[cfg(test)]
 fn default_python_test_runtime_context() -> Option<RuntimeContext> {
-    agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+    agentos_runtime_tokio::SidecarRuntime::process(&agentos_runtime_tokio::RuntimeConfig::default())
         .ok()
-        .map(agentos_runtime::SidecarRuntime::context)
+        .map(agentos_runtime_tokio::SidecarRuntime::context)
 }
 
 #[cfg(not(test))]
@@ -3046,7 +3046,7 @@ fn spawn_python_vfs_rpc_timeout(
     let cancellation = runtime.clone();
     let pending_for_task = Arc::clone(&pending);
     let handle = runtime
-        .spawn(agentos_runtime::TaskClass::Timer, async move {
+        .spawn(agentos_runtime_tokio::TaskClass::Timer, async move {
             tokio::select! {
                 _ = tokio::time::sleep(timeout) => {}
                 _ = cancellation.admission_closed() => {

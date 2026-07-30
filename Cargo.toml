@@ -16,7 +16,7 @@ members = [
     "crates/native-sidecar-browser",
     "crates/native-sidecar-core",
     "crates/resource",
-    "crates/runtime",
+    "crates/runtime-tokio",
     "crates/sidecar-client",
     "crates/sidecar-protocol",
     "crates/v8-runtime",
@@ -40,7 +40,7 @@ default-members = [
     "crates/native-sidecar",
     "crates/native-sidecar-core",
     "crates/resource",
-    "crates/runtime",
+    "crates/runtime-tokio",
     "crates/sidecar-client",
     "crates/sidecar-protocol",
     "crates/v8-runtime",
@@ -69,7 +69,7 @@ agentos-native-sidecar = { path = "crates/native-sidecar", version = "0.0.1" }
 agentos-native-sidecar-browser = { path = "crates/native-sidecar-browser", version = "0.0.1" }
 agentos-native-sidecar-core = { path = "crates/native-sidecar-core", version = "0.0.1" }
 agentos-resource = { path = "crates/resource", version = "0.0.1" }
-agentos-runtime = { path = "crates/runtime", version = "0.0.1" }
+agentos-runtime-tokio = { path = "crates/runtime-tokio", version = "0.0.1" }
 agentos-protocol = { path = "crates/agentos-protocol", version = "0.0.1" }
 agentos-sidecar-client = { path = "crates/sidecar-client", version = "0.0.1" }
 agentos-sidecar = { path = "crates/agentos-sidecar", version = "0.0.1" }

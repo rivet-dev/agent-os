@@ -2319,9 +2319,11 @@ mod tests {
     use agentos_native_sidecar::vm_sqlite::resolve_vm_sqlite;
     use agentos_vm_config::VmSqliteDescriptor;
 
-    fn runtime() -> &'static agentos_runtime::SidecarRuntime {
-        agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-            .expect("runtime")
+    fn runtime() -> &'static agentos_runtime_tokio::SidecarRuntime {
+        agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("runtime")
     }
 
     #[test]

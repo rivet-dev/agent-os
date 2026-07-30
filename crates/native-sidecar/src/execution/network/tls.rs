@@ -1119,7 +1119,7 @@ async fn run_native_tls_transport<S>(
     _read_buffer_reservation: Reservation,
     _tls_read_buffer_reservation: Reservation,
     limits: ReactorIoLimits,
-    runtime_context: agentos_runtime::RuntimeContext,
+    runtime_context: agentos_runtime_tokio::RuntimeContext,
     fairness_identity: (u64, u64),
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -1415,7 +1415,7 @@ type TlsTransportRegistration = Result<
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::execution) fn spawn_native_tls_transport(
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     stream: TcpStream,
     role: NativeTlsRole,
     tls_state: Arc<Mutex<Option<ActiveTlsState>>>,
@@ -1438,7 +1438,7 @@ pub(in crate::execution) fn spawn_native_tls_transport(
         reserve_tls_read_buffer(&resources, limits)?;
     let transport_runtime = runtime.clone();
     runtime
-        .spawn(agentos_runtime::TaskClass::Tls, async move {
+        .spawn(agentos_runtime_tokio::TaskClass::Tls, async move {
             while plain_reader_running.load(Ordering::Acquire) {
                 let stopped = plain_reader_stopped.notified();
                 if !plain_reader_running.load(Ordering::Acquire) {
@@ -1676,7 +1676,7 @@ pub(in crate::execution) fn spawn_native_tls_transport(
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::execution) fn spawn_loopback_tls_transport(
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     endpoint: crate::state::LoopbackTlsEndpoint,
     role: NativeTlsRole,
     tls_state: Arc<Mutex<Option<ActiveTlsState>>>,
@@ -1697,7 +1697,7 @@ pub(in crate::execution) fn spawn_loopback_tls_transport(
         reserve_tls_read_buffer(&resources, limits)?;
     let transport_runtime = runtime.clone();
     runtime
-        .spawn(agentos_runtime::TaskClass::Tls, async move {
+        .spawn(agentos_runtime_tokio::TaskClass::Tls, async move {
             match role {
                 NativeTlsRole::Client {
                     config,
@@ -1887,7 +1887,7 @@ mod loopback_tls_registry_tests {
         native_tls_role, tls_transport_is_already_closed, NativeTlsRole,
     };
     use crate::state::TlsBridgeOptions;
-    use agentos_runtime::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
+    use agentos_runtime_tokio::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
     use std::sync::Arc;
 
     fn resources() -> Arc<ResourceLedger> {

@@ -152,7 +152,7 @@ pub(super) fn typed_kernel_poll_response(
 /// optional absolute deadline.
 pub(in crate::execution) fn service_deferred_kernel_poll(
     generation: u64,
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     wait_handle: agentos_kernel::poll::PollWaitHandle,
     notify: Arc<tokio::sync::Notify>,
     kernel: &mut SidecarKernel,
@@ -244,7 +244,7 @@ pub(in crate::execution) fn service_deferred_kernel_poll(
     }
 
     let deadline = poll.deadline;
-    let wake_task = runtime.spawn(agentos_runtime::TaskClass::Vm, async move {
+    let wake_task = runtime.spawn(agentos_runtime_tokio::TaskClass::Vm, async move {
         match deadline {
             Some(deadline) => {
                 let delay = deadline.saturating_duration_since(Instant::now());

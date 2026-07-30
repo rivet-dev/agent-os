@@ -96,7 +96,7 @@ where
 /// has been claimed; the task retains only notifier/deadline state.
 pub(in crate::execution) fn service_deferred_kernel_read(
     generation: u64,
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     wait_handle: agentos_kernel::poll::PollWaitHandle,
     notify: Arc<tokio::sync::Notify>,
     kernel: &mut SidecarKernel,
@@ -127,7 +127,7 @@ pub(in crate::execution) fn service_deferred_kernel_read(
 /// response shape and bounded owner-side refill semantics as a root process.
 pub(in crate::execution) fn service_deferred_kernel_stdin_read(
     generation: u64,
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     wait_handle: agentos_kernel::poll::PollWaitHandle,
     notify: Arc<tokio::sync::Notify>,
     kernel: &mut SidecarKernel,
@@ -156,7 +156,7 @@ pub(in crate::execution) fn service_deferred_kernel_stdin_read(
 
 fn service_deferred_kernel_read_with_response(
     generation: u64,
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     wait_handle: agentos_kernel::poll::PollWaitHandle,
     notify: Arc<tokio::sync::Notify>,
     kernel: &mut SidecarKernel,
@@ -313,7 +313,7 @@ fn service_deferred_kernel_read_with_response(
     }
 
     let deadline = read.deadline;
-    let wake_task = runtime.spawn(agentos_runtime::TaskClass::Vm, async move {
+    let wake_task = runtime.spawn(agentos_runtime_tokio::TaskClass::Vm, async move {
         let delay = deadline.saturating_duration_since(Instant::now());
         tokio::select! {
             _ = wait_handle.wait_for_change_async(observed) => {}
@@ -2471,10 +2471,12 @@ mod tests {
         }
     }
 
-    fn test_runtime_context() -> agentos_runtime::RuntimeContext {
-        agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-            .expect("create test runtime")
-            .context()
+    fn test_runtime_context() -> agentos_runtime_tokio::RuntimeContext {
+        agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create test runtime")
+        .context()
     }
 
     fn direct_reply(
@@ -2798,7 +2800,7 @@ mod tests {
             handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             GuestRuntimeKind::WebAssembly,
             ActiveExecution::Binding(BindingExecution::default()),
         )
@@ -3181,7 +3183,7 @@ mod tests {
             kernel_handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             GuestRuntimeKind::WebAssembly,
             ActiveExecution::Binding(BindingExecution::default()),
         )
@@ -3299,7 +3301,7 @@ mod tests {
             parent_handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             GuestRuntimeKind::WebAssembly,
             ActiveExecution::Binding(BindingExecution::default()),
         );

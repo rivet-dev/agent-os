@@ -4,7 +4,7 @@ use agentos_execution::{
     GuestRuntimeConfig, JavascriptExecutionEngine, PythonExecutionEngine,
     StartWasmExecutionRequest, WasmExecutionEngine, WasmExecutionLimits, WasmPermissionTier,
 };
-use agentos_runtime::metrics::BufferMetricClass;
+use agentos_runtime_tokio::metrics::BufferMetricClass;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tempfile::tempdir;

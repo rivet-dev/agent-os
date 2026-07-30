@@ -7,7 +7,7 @@ use agentos_execution::host::{
 const SYNTHETIC_V8_TERMINATION_STDERR: &[u8] = b"Error: Execution terminated\n";
 
 fn child_executor_capacity_error(
-    snapshot: agentos_runtime::VmExecutorAdmissionSnapshot,
+    snapshot: agentos_runtime_tokio::VmExecutorAdmissionSnapshot,
 ) -> Option<SidecarError> {
     (snapshot.active >= snapshot.maximum).then(|| {
         SidecarError::Host(
@@ -34,11 +34,12 @@ mod child_executor_capacity_tests {
 
     #[test]
     fn saturated_child_spawn_reports_eagain_with_actionable_limit_details() {
-        let error = child_executor_capacity_error(agentos_runtime::VmExecutorAdmissionSnapshot {
-            active: 6,
-            maximum: 6,
-        })
-        .expect("saturated executor admission must reject a child");
+        let error =
+            child_executor_capacity_error(agentos_runtime_tokio::VmExecutorAdmissionSnapshot {
+                active: 6,
+                maximum: 6,
+            })
+            .expect("saturated executor admission must reject a child");
 
         assert_eq!(error.code(), Some("EAGAIN"));
         assert!(error
@@ -53,13 +54,13 @@ mod child_executor_capacity_tests {
 
     #[test]
     fn available_child_spawn_executor_capacity_is_admitted() {
-        assert!(
-            child_executor_capacity_error(agentos_runtime::VmExecutorAdmissionSnapshot {
+        assert!(child_executor_capacity_error(
+            agentos_runtime_tokio::VmExecutorAdmissionSnapshot {
                 active: 5,
                 maximum: 6,
-            },)
-            .is_none()
-        );
+            },
+        )
+        .is_none());
     }
 }
 
@@ -1393,8 +1394,8 @@ pub(super) fn transferred_hostnet_value(
     metadata: TransferredHostNetMetadata,
     id: Option<(&str, String)>,
     capability_identity: Option<(
-        agentos_runtime::capability::CapabilityId,
-        agentos_runtime::capability::CapabilityGeneration,
+        agentos_runtime_tokio::capability::CapabilityId,
+        agentos_runtime_tokio::capability::CapabilityGeneration,
     )>,
     local: Option<SocketAddr>,
     remote: Option<SocketAddr>,
@@ -3870,7 +3871,7 @@ fn record_child_sync_rollback_for_test(
 }
 
 fn admit_child_process_sync_timer(
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     notify: Arc<tokio::sync::Notify>,
     deadline: Instant,
     vm_id: &str,
@@ -3889,7 +3890,7 @@ fn admit_child_process_sync_timer(
     }
     let delay = deadline.saturating_duration_since(Instant::now());
     runtime
-        .spawn(agentos_runtime::TaskClass::Timer, async move {
+        .spawn(agentos_runtime_tokio::TaskClass::Timer, async move {
             tokio::time::sleep(delay).await;
             notify.notify_one();
         })
@@ -4439,7 +4440,7 @@ where
                 .runtime_context
                 .clone();
             runtime
-                .spawn(agentos_runtime::TaskClass::Timer, async move {
+                .spawn(agentos_runtime_tokio::TaskClass::Timer, async move {
                     tokio::time::sleep(Duration::from_millis(2)).await;
                     notify.notify_one();
                 })
@@ -6787,7 +6788,7 @@ where
         Ok(HostServiceResponse::Deferred {
             receiver,
             timeout: None,
-            task_class: agentos_runtime::TaskClass::Vm,
+            task_class: agentos_runtime_tokio::TaskClass::Vm,
         })
     }
 
@@ -8742,7 +8743,7 @@ where
         Ok(HostServiceResponse::Deferred {
             receiver,
             timeout: None,
-            task_class: agentos_runtime::TaskClass::Vm,
+            task_class: agentos_runtime_tokio::TaskClass::Vm,
         })
     }
 
@@ -8772,7 +8773,7 @@ where
         vm_id: &str,
         root_process_id: &str,
         caller_process_path: &[&str],
-        runtime: agentos_runtime::RuntimeContext,
+        runtime: agentos_runtime_tokio::RuntimeContext,
         reply: DirectHostReplyHandle,
         operation: &str,
         response: Result<HostServiceResponse, SidecarError>,
@@ -9112,7 +9113,7 @@ where
             operation,
         );
         let task_reply = reply.clone();
-        if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Dns, async move {
+        if let Err(error) = runtime.spawn(agentos_runtime_tokio::TaskClass::Dns, async move {
             let settled = match response.await {
                 Ok(response) => task_reply.succeed(response),
                 Err(error) => task_reply.fail(error),
@@ -9785,22 +9786,23 @@ where
                         };
                         child.clear_deferred_kernel_wait_rpc();
                         child.deferred_kernel_wait_rpc = Some((request.clone(), Some(deadline)));
-                        let timer = runtime.spawn(agentos_runtime::TaskClass::Timer, async move {
-                            let mut deadline =
-                                crate::execution::OperationDeadlineTracker::from_deadline(
-                                    deadline, limit, false,
-                                );
-                            tokio::time::sleep(deadline.remaining_until_next_edge()).await;
-                            deadline.observe(operation);
-                            event_notify.notify_one();
-                            tokio::time::sleep(deadline.remaining_until_deadline()).await;
-                            event_notify.notify_one();
-                        });
+                        let timer =
+                            runtime.spawn(agentos_runtime_tokio::TaskClass::Timer, async move {
+                                let mut deadline =
+                                    crate::execution::OperationDeadlineTracker::from_deadline(
+                                        deadline, limit, false,
+                                    );
+                                tokio::time::sleep(deadline.remaining_until_next_edge()).await;
+                                deadline.observe(operation);
+                                event_notify.notify_one();
+                                tokio::time::sleep(deadline.remaining_until_deadline()).await;
+                                event_notify.notify_one();
+                            });
                         match timer {
                             Ok(timer) => {
                                 child.deferred_child_write_timer = Some(timer);
                             }
-                            Err(agentos_runtime::TaskSpawnError::ResourceLimit(limit)) => {
+                            Err(agentos_runtime_tokio::TaskSpawnError::ResourceLimit(limit)) => {
                                 child.clear_deferred_kernel_wait_rpc();
                                 let error = SidecarError::ResourceLimit(limit);
                                 request
@@ -9809,7 +9811,9 @@ where
                                     .map_err(|error| SidecarError::Execution(error.to_string()))?;
                             }
                             Err(
-                                error @ agentos_runtime::TaskSpawnError::AdmissionClosed { .. },
+                                error @ agentos_runtime_tokio::TaskSpawnError::AdmissionClosed {
+                                    ..
+                                },
                             ) => {
                                 child.clear_deferred_kernel_wait_rpc();
                                 request

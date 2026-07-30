@@ -2703,7 +2703,7 @@ where
 
 pub(super) fn service_deferred_guest_wait(
     generation: u64,
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     wait_handle: agentos_kernel::process_table::ProcessWaitHandle,
     notify: Arc<tokio::sync::Notify>,
     kernel: &mut SidecarKernel,
@@ -2825,9 +2825,9 @@ pub(super) fn service_deferred_guest_wait(
         (None, timer) => timer,
     };
     let task_class = if wait.kind == DeferredGuestWaitKind::Sleep {
-        agentos_runtime::TaskClass::Timer
+        agentos_runtime_tokio::TaskClass::Timer
     } else {
-        agentos_runtime::TaskClass::Vm
+        agentos_runtime_tokio::TaskClass::Vm
     };
     let wake_task = runtime.spawn(task_class, async move {
         match wake_deadline {
@@ -2955,7 +2955,7 @@ where
         operation,
     );
     let task_reply = reply.clone();
-    if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Dns, async move {
+    if let Err(error) = runtime.spawn(agentos_runtime_tokio::TaskClass::Dns, async move {
         let settled = match response.await {
             Ok(response) => task_reply.succeed(response),
             Err(error) => task_reply.fail(error),
@@ -3124,7 +3124,7 @@ where
     };
     let task_reply = reply.clone();
     let task_runtime = runtime.clone();
-    if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Socket, async move {
+    if let Err(error) = runtime.spawn(agentos_runtime_tokio::TaskClass::Socket, async move {
         let result = task_runtime
             .blocking()
             .run(reserved_bytes, move || issue_bounded_http_request(request))

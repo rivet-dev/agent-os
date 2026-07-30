@@ -21,7 +21,7 @@ use crate::v8_runtime;
 use agentos_bridge::queue_tracker::{
     register_limit, warn_limit_exhausted, QueueGauge, TrackedLimit,
 };
-use agentos_runtime::RuntimeContext;
+use agentos_runtime_tokio::RuntimeContext;
 use base64::Engine as _;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -2063,9 +2063,9 @@ impl Default for WasmExecutionEngine {
 
 #[cfg(test)]
 fn default_wasm_test_runtime_context() -> Option<RuntimeContext> {
-    agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+    agentos_runtime_tokio::SidecarRuntime::process(&agentos_runtime_tokio::RuntimeConfig::default())
         .ok()
-        .map(agentos_runtime::SidecarRuntime::context)
+        .map(agentos_runtime_tokio::SidecarRuntime::context)
 }
 
 #[cfg(not(test))]

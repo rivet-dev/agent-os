@@ -55,8 +55,8 @@ use agentos_native_sidecar_core::{
     snapshot_exported_response, snapshot_imported_response, vm_configured_response,
     vm_created_response, vm_disposed_response, VmLayerStore,
 };
-use agentos_runtime::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
-use agentos_runtime::capability::CapabilityRegistry;
+use agentos_runtime_tokio::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
+use agentos_runtime_tokio::capability::CapabilityRegistry;
 use agentos_vm_config as vm_config;
 use openssl::rand::rand_bytes;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -168,13 +168,13 @@ fn send_kernel_socket_readiness_event(
     }
     let flags = match (target.event, readiness.kind) {
         (KernelSocketReadinessEvent::Accept, SocketReadinessKind::Accept) => {
-            agentos_runtime::readiness::ReadyFlags::ACCEPT
+            agentos_runtime_tokio::readiness::ReadyFlags::ACCEPT
         }
         (KernelSocketReadinessEvent::Data, SocketReadinessKind::Data) => {
-            agentos_runtime::readiness::ReadyFlags::READABLE
+            agentos_runtime_tokio::readiness::ReadyFlags::READABLE
         }
         (KernelSocketReadinessEvent::Datagram, SocketReadinessKind::Data) => {
-            agentos_runtime::readiness::ReadyFlags::DATAGRAM
+            agentos_runtime_tokio::readiness::ReadyFlags::DATAGRAM
         }
         _ => return,
     };
@@ -1511,7 +1511,7 @@ fn record_vm_teardown_error(
 
 fn vm_reconciliation_snapshot(
     resources: &ResourceLedger,
-    runtime_context: &agentos_runtime::RuntimeContext,
+    runtime_context: &agentos_runtime_tokio::RuntimeContext,
     capabilities: &CapabilityRegistry,
 ) -> VmReconciliationSnapshot {
     VmReconciliationSnapshot {
@@ -1523,7 +1523,7 @@ fn vm_reconciliation_snapshot(
 }
 
 fn close_vm_admission(
-    runtime_context: &agentos_runtime::RuntimeContext,
+    runtime_context: &agentos_runtime_tokio::RuntimeContext,
     capabilities: &CapabilityRegistry,
 ) -> Result<(), String> {
     let capability_result = capabilities
@@ -1534,7 +1534,7 @@ fn close_vm_admission(
 }
 
 fn retire_vm_fairness(
-    runtime_context: &agentos_runtime::RuntimeContext,
+    runtime_context: &agentos_runtime_tokio::RuntimeContext,
     vm_generation: u64,
 ) -> Result<(), SidecarError> {
     runtime_context
@@ -1574,7 +1574,7 @@ fn vm_quarantine_reason(
 
 async fn wait_for_vm_reconciliation(
     resources: &ResourceLedger,
-    runtime_context: &agentos_runtime::RuntimeContext,
+    runtime_context: &agentos_runtime_tokio::RuntimeContext,
     capabilities: &CapabilityRegistry,
     deadline: Duration,
 ) -> (VmReconciliationSnapshot, bool) {
@@ -2927,11 +2927,11 @@ mod tests {
     use agentos_kernel::mount_table::{MountOptions, MountTable};
     use agentos_kernel::permissions::Permissions;
     use agentos_kernel::vfs::VirtualFileSystem;
-    use agentos_runtime::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
-    use agentos_runtime::capability::{CapabilityKind, CapabilityRegistry};
-    use agentos_runtime::fairness::FairBudget;
-    use agentos_runtime::metrics::ResourceMetricClass;
-    use agentos_runtime::{RuntimeContext, SidecarRuntime, TaskClass};
+    use agentos_runtime_tokio::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
+    use agentos_runtime_tokio::capability::{CapabilityKind, CapabilityRegistry};
+    use agentos_runtime_tokio::fairness::FairBudget;
+    use agentos_runtime_tokio::metrics::ResourceMetricClass;
+    use agentos_runtime_tokio::{RuntimeContext, SidecarRuntime, TaskClass};
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -2942,7 +2942,7 @@ mod tests {
     fn reconciliation_handles(
         generation: u64,
     ) -> (Arc<ResourceLedger>, RuntimeContext, CapabilityRegistry) {
-        let process = SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+        let process = SidecarRuntime::process(&agentos_runtime_tokio::RuntimeConfig::default())
             .expect("initialize process runtime")
             .context();
         let resources = Arc::new(ResourceLedger::child(
@@ -3034,7 +3034,7 @@ mod tests {
 
     #[test]
     fn vm_runtime_bounds_every_resource_class_by_default() {
-        let process = SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+        let process = SidecarRuntime::process(&agentos_runtime_tokio::RuntimeConfig::default())
             .expect("initialize process runtime")
             .context();
         let ledger = vm_resource_ledger(
@@ -3112,7 +3112,7 @@ mod tests {
 
     #[test]
     fn teardown_fairness_retirement_survives_generation_churn_past_max_vms() {
-        let process = SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+        let process = SidecarRuntime::process(&agentos_runtime_tokio::RuntimeConfig::default())
             .expect("initialize process runtime")
             .context();
 

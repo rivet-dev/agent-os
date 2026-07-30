@@ -1,4 +1,4 @@
-use agentos_runtime::{RuntimeConfig, SidecarRuntime};
+use agentos_runtime_tokio::{RuntimeConfig, SidecarRuntime};
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use vfs::posix::{
 };
 use vfs::posix::{MountOptions, MountTable, MountedFileSystem};
 
-fn test_runtime_context() -> agentos_runtime::RuntimeContext {
+fn test_runtime_context() -> agentos_runtime_tokio::RuntimeContext {
     SidecarRuntime::process(&RuntimeConfig::default())
         .expect("create test runtime")
         .context()

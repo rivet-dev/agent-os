@@ -1,7 +1,7 @@
 use agentos_execution::benchmark::{
     run_javascript_benchmarks_with_recovery, JavascriptBenchmarkConfig,
 };
-use agentos_runtime::{RuntimeConfig, SidecarRuntime};
+use agentos_runtime_tokio::{RuntimeConfig, SidecarRuntime};
 use std::path::PathBuf;
 
 struct CliConfig {

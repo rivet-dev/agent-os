@@ -90,7 +90,7 @@ pub(in crate::execution) struct ActiveTcpConnectRequest<'a, B> {
     pub(in crate::execution) local_reservation: Option<(SocketFamily, u16)>,
     pub(in crate::execution) context: &'a SocketPathContext,
     pub(in crate::execution) resources: Arc<ResourceLedger>,
-    pub(in crate::execution) runtime_context: agentos_runtime::RuntimeContext,
+    pub(in crate::execution) runtime_context: agentos_runtime_tokio::RuntimeContext,
     pub(in crate::execution) reactor_limits: ReactorIoLimits,
 }
 
@@ -176,7 +176,7 @@ impl ActiveTcpSocket {
         local_reservation: Option<(SocketFamily, u16)>,
         context: &SocketPathContext,
         resources: Arc<ResourceLedger>,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
         debug_assert!(resolved.use_kernel_loopback);
@@ -264,7 +264,7 @@ impl ActiveTcpSocket {
         guest_local_addr: SocketAddr,
         guest_remote_addr: SocketAddr,
         resources: Arc<ResourceLedger>,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
         let read_stream = stream.try_clone().map_err(sidecar_net_error)?;
@@ -349,7 +349,7 @@ impl ActiveTcpSocket {
         guest_local_addr: SocketAddr,
         guest_remote_addr: SocketAddr,
         resources: Arc<ResourceLedger>,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Self {
         let (sender, events) = async_completion_channel(
@@ -460,7 +460,7 @@ impl ActiveTcpSocket {
 
     pub(in crate::execution) fn retain_description_lease(
         &self,
-        lease: Arc<agentos_runtime::capability::CapabilityLease>,
+        lease: Arc<agentos_runtime_tokio::capability::CapabilityLease>,
     ) {
         self.description_lease.retain(lease);
     }
@@ -469,8 +469,8 @@ impl ActiveTcpSocket {
         &self,
         session: Option<ExecutionWakeHandle>,
         identity: Option<(
-            agentos_runtime::capability::CapabilityId,
-            agentos_runtime::capability::CapabilityGeneration,
+            agentos_runtime_tokio::capability::CapabilityId,
+            agentos_runtime_tokio::capability::CapabilityGeneration,
         )>,
         owner_notify: Arc<tokio::sync::Notify>,
     ) {
@@ -478,7 +478,7 @@ impl ActiveTcpSocket {
             session,
             identity,
             owner_notify,
-            agentos_runtime::readiness::ReadyFlags::READABLE,
+            agentos_runtime_tokio::readiness::ReadyFlags::READABLE,
         );
     }
 
@@ -912,7 +912,7 @@ impl ActiveTcpSocket {
             fairness_identity,
         )?;
         self.runtime_context
-            .spawn(agentos_runtime::TaskClass::Tls, async move {
+            .spawn(agentos_runtime_tokio::TaskClass::Tls, async move {
                 match handshake.await {
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => eprintln!(
@@ -1429,8 +1429,8 @@ pub(in crate::execution) fn register_kernel_readiness_target(
     session: Option<ExecutionWakeHandle>,
     notify: Option<Arc<tokio::sync::Notify>>,
     capability: Option<(
-        agentos_runtime::capability::CapabilityId,
-        agentos_runtime::capability::CapabilityGeneration,
+        agentos_runtime_tokio::capability::CapabilityId,
+        agentos_runtime_tokio::capability::CapabilityGeneration,
     )>,
     target_id: String,
     event: KernelSocketReadinessEvent,
@@ -1470,11 +1470,15 @@ pub(in crate::execution) fn register_kernel_readiness_target(
             return;
         };
         let flags = match target.event {
-            KernelSocketReadinessEvent::Data => agentos_runtime::readiness::ReadyFlags::READABLE,
-            KernelSocketReadinessEvent::Datagram => {
-                agentos_runtime::readiness::ReadyFlags::DATAGRAM
+            KernelSocketReadinessEvent::Data => {
+                agentos_runtime_tokio::readiness::ReadyFlags::READABLE
             }
-            KernelSocketReadinessEvent::Accept => agentos_runtime::readiness::ReadyFlags::ACCEPT,
+            KernelSocketReadinessEvent::Datagram => {
+                agentos_runtime_tokio::readiness::ReadyFlags::DATAGRAM
+            }
+            KernelSocketReadinessEvent::Accept => {
+                agentos_runtime_tokio::readiness::ReadyFlags::ACCEPT
+            }
         };
         if let Err(error) =
             session.publish_readiness(target.capability_id, target.capability_generation, flags)
@@ -1491,8 +1495,8 @@ pub(in crate::execution) fn unregister_kernel_readiness_target(
     registry: &KernelSocketReadinessRegistry,
     kernel_socket_id: Option<SocketId>,
     capability: Option<(
-        agentos_runtime::capability::CapabilityId,
-        agentos_runtime::capability::CapabilityGeneration,
+        agentos_runtime_tokio::capability::CapabilityId,
+        agentos_runtime_tokio::capability::CapabilityGeneration,
     )>,
 ) {
     let (Some(kernel_socket_id), Some(capability)) = (kernel_socket_id, capability) else {
@@ -1610,7 +1614,7 @@ pub(in crate::execution) fn defer_native_tcp_connect(
         .pending_net_connects
         .insert(request_id, Arc::clone(&connected));
     let (respond_to, receiver) = tokio::sync::oneshot::channel();
-    let spawn = runtime.spawn(agentos_runtime::TaskClass::Socket, async move {
+    let spawn = runtime.spawn(agentos_runtime_tokio::TaskClass::Socket, async move {
         let result = match crate::execution::operation_deadline_timeout(
             "TCP connect",
             limits.operation_deadline,
@@ -1675,7 +1679,7 @@ pub(in crate::execution) fn defer_native_tcp_connect(
     Ok(HostServiceResponse::Deferred {
         receiver,
         timeout: None,
-        task_class: agentos_runtime::TaskClass::Socket,
+        task_class: agentos_runtime_tokio::TaskClass::Socket,
     })
 }
 
@@ -1985,7 +1989,7 @@ impl ActiveTcpListener {
 
     pub(in crate::execution) fn retain_description_lease(
         &self,
-        lease: Arc<agentos_runtime::capability::CapabilityLease>,
+        lease: Arc<agentos_runtime_tokio::capability::CapabilityLease>,
     ) {
         self.description_lease.retain(lease);
     }
@@ -2466,7 +2470,7 @@ pub(in crate::execution) async fn committed_socket_fairness_identity(
 }
 
 pub(in crate::execution) async fn acquire_plain_socket_fair_turn(
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     limits: ReactorIoLimits,
     identity: &OnceLock<(u64, u64)>,
     committed: &tokio::sync::Notify,
@@ -2485,7 +2489,7 @@ pub(in crate::execution) async fn acquire_plain_socket_fair_turn(
 }
 
 async fn run_plain_socket_fair_step<F>(
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     limits: ReactorIoLimits,
     identity: &OnceLock<(u64, u64)>,
     committed: &tokio::sync::Notify,
@@ -2507,7 +2511,7 @@ where
 pub(in crate::execution) async fn run_plain_socket_transport(
     stream: PlainSocketWriteStream,
     mut commands: TokioReceiver<NativePlainSocketCommand>,
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     limits: ReactorIoLimits,
     fairness_identity: Arc<OnceLock<(u64, u64)>>,
     fairness_identity_committed: Arc<tokio::sync::Notify>,
@@ -2649,7 +2653,7 @@ pub(in crate::execution) fn plain_socket_command_capacity(
 }
 
 fn spawn_tcp_plain_socket_transport(
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     stream: TcpStream,
     resources: &Arc<ResourceLedger>,
     limits: ReactorIoLimits,
@@ -2660,7 +2664,7 @@ fn spawn_tcp_plain_socket_transport(
     let (commands, receiver) = tokio_channel(plain_socket_command_capacity(resources)?);
     let cancellation = runtime.clone();
     runtime
-        .spawn(agentos_runtime::TaskClass::Socket, async move {
+        .spawn(agentos_runtime_tokio::TaskClass::Socket, async move {
             let transport_runtime = cancellation.clone();
             let transport = async move {
                 match tokio::net::TcpStream::from_std(stream) {
@@ -3120,7 +3124,7 @@ impl Drop for PlainTcpReaderLease {
     reason = "the reader task receives explicit shared lifecycle flags owned by its socket"
 )]
 fn spawn_tcp_socket_reader(
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     stream: TcpStream,
     sender: AsyncCompletionSender<TcpSocketEvent>,
     read_event_notify: Arc<tokio::sync::Notify>,
@@ -3142,7 +3146,7 @@ fn spawn_tcp_socket_reader(
         reserve_socket_read_buffer(&resources, limits.byte_quantum)?;
     let cancellation = runtime.clone();
     runtime
-        .spawn(agentos_runtime::TaskClass::Socket, async move {
+        .spawn(agentos_runtime_tokio::TaskClass::Socket, async move {
             let _lease = PlainTcpReaderLease {
                 running: plain_reader_running,
                 stopped: plain_reader_stopped,
@@ -3609,9 +3613,10 @@ mod plain_socket_fairness_tests {
 
     #[test]
     fn transferred_description_retires_transport_identity_after_last_alias() {
-        let process_runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create transferred socket fairness test runtime");
+        let process_runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create transferred socket fairness test runtime");
         let runtime = process_runtime.context();
         let vm_generation = runtime
             .allocate_vm_generation()
@@ -3651,7 +3656,7 @@ mod plain_socket_fairness_tests {
                 .expect_err("last alias drop must retire the transport identity");
             assert!(matches!(
                 error,
-                agentos_runtime::fairness::FairnessError::CapabilityRetired {
+                agentos_runtime_tokio::fairness::FairnessError::CapabilityRetired {
                     vm_generation: retired_generation,
                     capability_id: 92_010,
                 } if retired_generation == vm_generation
@@ -3661,9 +3666,10 @@ mod plain_socket_fairness_tests {
 
     #[test]
     fn shutdown_step_releases_the_process_fairness_turn_before_follow_up_waits() {
-        let process_runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create plain socket fairness test runtime");
+        let process_runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create plain socket fairness test runtime");
         let runtime = process_runtime.context();
         let first_generation = runtime
             .allocate_vm_generation()
@@ -3723,9 +3729,10 @@ mod transferred_alias_transport_tests {
     use super::*;
 
     fn exercise_surviving_tcp_alias(close_sender: bool) {
-        let process_runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create transferred TCP test runtime");
+        let process_runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create transferred TCP test runtime");
         let process_context = process_runtime.context();
         let generation = process_context
             .allocate_vm_generation()

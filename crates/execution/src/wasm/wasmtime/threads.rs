@@ -9,7 +9,7 @@ use super::engine::{WasmtimeEngineHandle, WasmtimeEngineProfile};
 use super::linker;
 use super::store::{self, WasmtimeHostClient};
 use crate::backend::HostServiceError;
-use agentos_runtime::RuntimeContext;
+use agentos_runtime_tokio::RuntimeContext;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use wasmtime::{ExternType, Module, SharedMemory};

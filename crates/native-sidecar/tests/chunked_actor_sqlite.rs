@@ -12,7 +12,7 @@ use vbare::OwnedVersionedData;
 // integration test independent from the full native-sidecar service graph.
 mod bridge {
     pub struct MountPluginContext<B> {
-        pub runtime_context: agentos_runtime::RuntimeContext,
+        pub runtime_context: agentos_runtime_tokio::RuntimeContext,
         pub database: Option<crate::vm_sqlite::SharedVmSqliteDatabase>,
         pub marker: std::marker::PhantomData<B>,
     }
@@ -258,9 +258,10 @@ async fn metadata_and_blocks_persist_directly_over_actor_sqlite_uds() {
         }
     });
 
-    let runtime =
-        agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-            .unwrap();
+    let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+        &agentos_runtime_tokio::RuntimeConfig::default(),
+    )
+    .unwrap();
     let client = vm_sqlite::resolve_vm_sqlite(
         &agentos_vm_config::VmSqliteDescriptor::ActorUds {
             path: path.display().to_string(),
@@ -306,9 +307,10 @@ async fn migrations_are_independent_strict_and_atomic_over_actor_sqlite_uds() {
         }
     });
 
-    let runtime =
-        agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-            .unwrap();
+    let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+        &agentos_runtime_tokio::RuntimeConfig::default(),
+    )
+    .unwrap();
     let client = vm_sqlite::resolve_vm_sqlite(
         &agentos_vm_config::VmSqliteDescriptor::ActorUds {
             path: path.display().to_string(),

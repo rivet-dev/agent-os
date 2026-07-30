@@ -1539,8 +1539,8 @@ fn vm_run_script_in_context<'s>(
     context: v8::Local<'s, v8::Context>,
     code: &str,
     options: &VmRunOptions,
-    runtime: Option<&agentos_runtime::RuntimeContext>,
-    task_owner: Option<agentos_runtime::TaskOwner>,
+    runtime: Option<&agentos_runtime_tokio::RuntimeContext>,
+    task_owner: Option<agentos_runtime_tokio::TaskOwner>,
 ) -> Result<v8::Local<'s, v8::Value>, String> {
     let mut timeout_guard = match options.timeout_ms {
         Some(timeout_ms) => {

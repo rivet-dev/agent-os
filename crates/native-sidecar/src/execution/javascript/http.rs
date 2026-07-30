@@ -498,7 +498,7 @@ pub(in crate::execution) struct KernelHttpFetch {
     url: String,
     deadline: Instant,
     max_fetch_response_bytes: usize,
-    _capability: agentos_runtime::capability::CapabilityLease,
+    _capability: agentos_runtime_tokio::capability::CapabilityLease,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -677,7 +677,7 @@ pub(in crate::execution) struct PendingKernelHttpFetchStream {
     target_process_id: String,
     kernel_pid: u32,
     socket_id: SocketId,
-    capability: agentos_runtime::capability::CapabilityLease,
+    capability: agentos_runtime_tokio::capability::CapabilityLease,
     response_buffer: Vec<u8>,
     peer_closed: bool,
     deadline: Instant,
@@ -1214,7 +1214,7 @@ pub(crate) fn dispatch_loopback_http_request_deferred(
     Ok(HostServiceResponse::Deferred {
         receiver,
         timeout: Some(http_loopback_request_timeout()),
-        task_class: agentos_runtime::TaskClass::Listener,
+        task_class: agentos_runtime_tokio::TaskClass::Listener,
     })
 }
 

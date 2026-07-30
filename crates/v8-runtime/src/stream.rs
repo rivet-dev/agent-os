@@ -143,7 +143,7 @@ pub fn dispatch_readiness(
     scope: &mut v8::HandleScope,
     capability_id: u64,
     capability_generation: u64,
-    flags: agentos_runtime::readiness::ReadyFlags,
+    flags: agentos_runtime_tokio::readiness::ReadyFlags,
 ) -> ReadinessDispatch {
     let context = scope.get_current_context();
     let global = context.global(scope);

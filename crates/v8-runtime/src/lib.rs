@@ -12,7 +12,7 @@ pub mod stream;
 pub mod timeout;
 
 #[cfg(test)]
-pub(crate) fn test_runtime_context() -> agentos_runtime::RuntimeContext {
+pub(crate) fn test_runtime_context() -> agentos_runtime_tokio::RuntimeContext {
     // Rust runs this crate's unit tests in parallel, while `SidecarRuntime::process`
     // deliberately shares one process-wide executor admission counter. Give the
     // ordinary unit-test process enough aggregate capacity that unrelated test
@@ -20,11 +20,11 @@ pub(crate) fn test_runtime_context() -> agentos_runtime::RuntimeContext {
     // cross-manager saturation use isolated subprocesses with explicit small
     // limits and must not call this helper.
     const TEST_PROCESS_VM_EXECUTOR_LIMIT: usize = 64;
-    let config = agentos_runtime::RuntimeConfig {
+    let config = agentos_runtime_tokio::RuntimeConfig {
         max_active_vm_executors: TEST_PROCESS_VM_EXECUTOR_LIMIT,
-        ..agentos_runtime::RuntimeConfig::default()
+        ..agentos_runtime_tokio::RuntimeConfig::default()
     };
-    let runtime = agentos_runtime::SidecarRuntime::process(&config)
+    let runtime = agentos_runtime_tokio::SidecarRuntime::process(&config)
         .expect("test process runtime")
         .context();
     assert_eq!(

@@ -301,7 +301,7 @@ cargo test --workspace \
   --no-fail-fast -- --test-threads=1
 
 # Explicit ignored churn gates
-cargo test -p agentos-runtime \
+cargo test -p agentos-runtime-tokio \
   multi_vm_generation_soak_has_no_accounting_or_scheduler_drift \
   --lib -- --ignored --test-threads=1
 cargo test -p agentos-native-sidecar --test service \

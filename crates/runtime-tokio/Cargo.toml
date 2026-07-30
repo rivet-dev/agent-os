@@ -1,5 +1,5 @@
 [package]
-name = "agentos-runtime"
+name = "agentos-runtime-tokio"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

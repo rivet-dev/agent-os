@@ -432,8 +432,8 @@ mod service {
         use agentos_kernel::vfs::{
             MemoryFileSystem, VirtualDirEntry, VirtualFileSystem, VirtualStat,
         };
-        use agentos_runtime::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
-        use agentos_runtime::capability::{CapabilityRegistry, CapabilitySnapshot};
+        use agentos_runtime_tokio::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
+        use agentos_runtime_tokio::capability::{CapabilityRegistry, CapabilitySnapshot};
         use base64::Engine;
         use bridge_support::RecordingBridge;
         use hickory_resolver::proto::op::{Message, Query};
@@ -579,10 +579,10 @@ ykAheWCsAteSEWVc0w==\n\
         }
 
         fn create_test_sidecar_with_protocol_limits(
-            protocol: agentos_runtime::RuntimeProtocolConfig,
+            protocol: agentos_runtime_tokio::RuntimeProtocolConfig,
         ) -> NativeSidecar<RecordingBridge> {
-            let runtime_context = agentos_runtime::SidecarRuntime::process(
-                &agentos_runtime::RuntimeConfig::default(),
+            let runtime_context = agentos_runtime_tokio::SidecarRuntime::process(
+                &agentos_runtime_tokio::RuntimeConfig::default(),
             )
             .expect("initialize default process runtime")
             .context();
@@ -821,12 +821,12 @@ ykAheWCsAteSEWVc0w==\n\
         }
 
         fn configured_protocol_queue_limits_drive_admission_and_gauges() {
-            let protocol = agentos_runtime::RuntimeProtocolConfig {
+            let protocol = agentos_runtime_tokio::RuntimeProtocolConfig {
                 max_process_events: 2,
                 max_outbound_requests: 2,
                 max_pending_responses: 2,
                 max_completed_responses: 1,
-                ..agentos_runtime::RuntimeProtocolConfig::default()
+                ..agentos_runtime_tokio::RuntimeProtocolConfig::default()
             };
             let mut sidecar = create_test_sidecar_with_protocol_limits(protocol);
 
@@ -2023,8 +2023,8 @@ ykAheWCsAteSEWVc0w==\n\
                 GuestRuntimeKind::Python => ExecutionAdapterPolicy::DIRECT_PYTHON_RUNTIME,
                 GuestRuntimeKind::WebAssembly => ExecutionAdapterPolicy::KERNEL_HOST_CALL_POSIX,
             };
-            let runtime_context = agentos_runtime::SidecarRuntime::process(
-                &agentos_runtime::RuntimeConfig::default(),
+            let runtime_context = agentos_runtime_tokio::SidecarRuntime::process(
+                &agentos_runtime_tokio::RuntimeConfig::default(),
             )
             .expect("initialize process runtime")
             .context();
@@ -2033,7 +2033,7 @@ ykAheWCsAteSEWVc0w==\n\
                 kernel_handle,
                 runtime_context,
                 crate::limits::VmLimits::default(),
-                agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+                agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
                 runtime,
                 execution,
             )
@@ -2043,7 +2043,7 @@ ykAheWCsAteSEWVc0w==\n\
         fn active_process_for_vm_tests(
             kernel_pid: u32,
             kernel_handle: agentos_kernel::kernel::KernelProcessHandle,
-            runtime_context: agentos_runtime::RuntimeContext,
+            runtime_context: agentos_runtime_tokio::RuntimeContext,
             limits: crate::limits::VmLimits,
             runtime: GuestRuntimeKind,
             execution: ActiveExecution,
@@ -2058,7 +2058,7 @@ ykAheWCsAteSEWVc0w==\n\
                 kernel_handle,
                 runtime_context,
                 limits,
-                agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+                agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
                 runtime,
                 execution,
             )
@@ -2792,7 +2792,7 @@ ykAheWCsAteSEWVc0w==\n\
             vm_id: String,
             process_id: String,
             resources: Arc<ResourceLedger>,
-            runtime_context: agentos_runtime::RuntimeContext,
+            runtime_context: agentos_runtime_tokio::RuntimeContext,
             capabilities: CapabilityRegistry,
         }
 
@@ -5947,8 +5947,8 @@ console.log(JSON.stringify({ status: "ok", summary }));
             assert_eq!(udp_resources.usage(ResourceClass::Datagrams).used, 1);
             assert_eq!(udp_resources.usage(ResourceClass::UdpBytes).used, 3);
             assert_eq!(udp_resources.usage(ResourceClass::UdpDatagrams).used, 1);
-            let runtime_context = agentos_runtime::SidecarRuntime::process(
-                &agentos_runtime::RuntimeConfig::default(),
+            let runtime_context = agentos_runtime_tokio::SidecarRuntime::process(
+                &agentos_runtime_tokio::RuntimeConfig::default(),
             )
             .expect("initialize shared runtime for fairness test")
             .context();
@@ -5959,13 +5959,16 @@ console.log(JSON.stringify({ status: "ok", summary }));
                 .block_on(runtime_context.fairness().acquire(
                     vm_generation,
                     capability_id,
-                    agentos_runtime::fairness::FairBudget::new(2, 4),
+                    agentos_runtime_tokio::fairness::FairBudget::new(2, 4),
                 ))
                 .expect("acquire protocol fairness turn");
             assert!(turn.allowance().operations >= 1);
             assert!(turn.allowance().bytes >= 3);
-            turn.complete(agentos_runtime::fairness::FairBudget::new(1, 3), false)
-                .expect("complete protocol fairness turn with actual work");
+            turn.complete(
+                agentos_runtime_tokio::fairness::FairBudget::new(1, 3),
+                false,
+            )
+            .expect("complete protocol fairness turn with actual work");
             assert!(runtime_context
                 .fairness()
                 .retire_capability(vm_generation, capability_id)

@@ -229,13 +229,13 @@ use agentos_native_sidecar_core::{
     SharedProcessSnapshotEntry, SharedProcessSnapshotStatus, SidecarCoreError,
     VM_FETCH_BUFFER_LIMIT_BYTES,
 };
-use agentos_runtime::accounting::{
+use agentos_runtime_tokio::accounting::{
     LimitError, Reservation, ResourceClass, ResourceLedger, ResourceLimit, SharedReservation,
 };
-use agentos_runtime::capability::{
+use agentos_runtime_tokio::capability::{
     CapabilityBackend, CapabilityKind, CapabilityRegistry, PendingCapability,
 };
-use agentos_runtime::fairness::{FairBudget, FairWorkTurn};
+use agentos_runtime_tokio::fairness::{FairBudget, FairWorkTurn};
 use rusqlite::types::ValueRef as SqliteValueRef;
 use rusqlite::{
     backup::Backup as SqliteBackup, Connection as SqliteConnection, OpenFlags as SqliteOpenFlags,

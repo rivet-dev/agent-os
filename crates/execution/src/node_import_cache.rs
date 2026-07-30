@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use agentos_runtime::RuntimeContext;
+use agentos_runtime_tokio::RuntimeContext;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time;
 
@@ -2603,7 +2603,7 @@ impl NodeImportCache {
         let result = result.map_err(|error| {
             cancelled.store(true, Ordering::Release);
             match error {
-                agentos_runtime::BlockingJobError::TimedOut { .. } => io::Error::new(
+                agentos_runtime_tokio::BlockingJobError::TimedOut { .. } => io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
                         "timed out materializing node import cache after {} ms",
@@ -2663,10 +2663,11 @@ impl NodeImportCache {
 
     #[cfg(test)]
     pub(crate) fn ensure_materialized(&self) -> Result<(), io::Error> {
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .map(agentos_runtime::SidecarRuntime::context)
-                .map_err(|error| io::Error::other(error.to_string()))?;
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .map(agentos_runtime_tokio::SidecarRuntime::context)
+        .map_err(|error| io::Error::other(error.to_string()))?;
         self.ensure_materialized_with_runtime(&runtime)
     }
 
@@ -2675,10 +2676,11 @@ impl NodeImportCache {
         &self,
         timeout: Duration,
     ) -> Result<(), io::Error> {
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .map(agentos_runtime::SidecarRuntime::context)
-                .map_err(|error| io::Error::other(error.to_string()))?;
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .map(agentos_runtime_tokio::SidecarRuntime::context)
+        .map_err(|error| io::Error::other(error.to_string()))?;
         self.ensure_materialized_with_timeout_and_runtime(&runtime, timeout)
     }
 

@@ -16,8 +16,8 @@ use crate::host::{
     BoundedString, BoundedUsize, ExecutableImageSource, FilesystemOperation, HostOperation,
     ProcessHostCapabilitySet, ProcessOperation,
 };
-use agentos_runtime::accounting::{Reservation, ResourceClass, ResourceLedger};
-use agentos_runtime::RuntimeContext;
+use agentos_runtime_tokio::accounting::{Reservation, ResourceClass, ResourceLedger};
+use agentos_runtime_tokio::RuntimeContext;
 use base64::Engine as _;
 use flume::{Receiver, Sender};
 use serde_json::Value;
@@ -1304,8 +1304,8 @@ mod tests {
     use super::*;
     use crate::backend::{bounded_execution_event_channel, ExecutionEvent};
     use crate::wasm::{GuestRuntimeConfig, WasmExecutionLimits, WasmPermissionTier};
-    use agentos_runtime::accounting::{ResourceLedger, ResourceLimit};
-    use agentos_runtime::{RuntimeConfig, SidecarRuntime};
+    use agentos_runtime_tokio::accounting::{ResourceLedger, ResourceLimit};
+    use agentos_runtime_tokio::{RuntimeConfig, SidecarRuntime};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 

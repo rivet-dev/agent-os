@@ -1,4 +1,4 @@
-use agentos_runtime::readiness::ReadyFlags;
+use agentos_runtime_tokio::readiness::ReadyFlags;
 use serde_json::Value;
 use std::error::Error;
 use std::fmt;

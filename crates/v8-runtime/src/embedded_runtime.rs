@@ -22,7 +22,7 @@ use crate::session::{
 };
 use crate::snapshot::SnapshotCache;
 use crate::{bridge, isolate};
-use agentos_runtime::accounting::ResourceClass;
+use agentos_runtime_tokio::accounting::ResourceClass;
 
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
@@ -34,7 +34,7 @@ pub struct EmbeddedV8Runtime {
     snapshot_cache: Arc<SnapshotCache>,
     alive: Arc<AtomicBool>,
     next_output_generation: AtomicU64,
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     executor_teardown_timeout: Duration,
 }
 
@@ -53,7 +53,7 @@ pub struct EmbeddedV8SessionOutputRegistration {
 impl EmbeddedV8Runtime {
     pub fn new(
         max_concurrency: Option<usize>,
-        runtime: agentos_runtime::RuntimeContext,
+        runtime: agentos_runtime_tokio::RuntimeContext,
     ) -> io::Result<Self> {
         bridge::init_codec();
         bridge::acquire_embedded_cbor_codec();
@@ -130,7 +130,7 @@ impl EmbeddedV8Runtime {
     pub fn register_session_with_runtime(
         &self,
         session_id: &str,
-        runtime: &agentos_runtime::RuntimeContext,
+        runtime: &agentos_runtime_tokio::RuntimeContext,
     ) -> io::Result<(
         RuntimeEventOutputReceiver,
         EmbeddedV8SessionOutputRegistration,
@@ -149,7 +149,7 @@ impl EmbeddedV8Runtime {
         &self,
         session_id: &str,
         capacity: usize,
-        resources: Arc<agentos_runtime::accounting::ResourceLedger>,
+        resources: Arc<agentos_runtime_tokio::accounting::ResourceLedger>,
     ) -> io::Result<(
         RuntimeEventOutputReceiver,
         EmbeddedV8SessionOutputRegistration,
@@ -303,7 +303,7 @@ impl EmbeddedV8Runtime {
     pub fn dispatch_create_session_with_runtime(
         &self,
         command: RuntimeCommand,
-        session_runtime: agentos_runtime::RuntimeContext,
+        session_runtime: agentos_runtime_tokio::RuntimeContext,
         ready_batch_handle_limit: usize,
         bridge_call_timeout: std::time::Duration,
     ) -> io::Result<()> {
@@ -480,7 +480,7 @@ impl EmbeddedV8SessionHandle {
         &self,
         capability_id: u64,
         capability_generation: u64,
-        flags: agentos_runtime::readiness::ReadyFlags,
+        flags: agentos_runtime_tokio::readiness::ReadyFlags,
     ) -> io::Result<()> {
         self.runtime.dispatch(RuntimeCommand::PublishReadiness {
             session_id: self.session_id.clone(),
@@ -616,7 +616,7 @@ impl Clone for EmbeddedV8SessionHandle {
 }
 
 pub fn shared_embedded_runtime(
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
 ) -> io::Result<Arc<EmbeddedV8Runtime>> {
     static SHARED_RUNTIME: OnceLock<Mutex<Weak<EmbeddedV8Runtime>>> = OnceLock::new();
 
@@ -712,7 +712,7 @@ fn join_embedded_runtime_thread(handle: thread::JoinHandle<()>, context: &str) {
 
 pub fn spawn_embedded_runtime_ipc(
     max_concurrency: Option<usize>,
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
 ) -> io::Result<(UnixStream, EmbeddedRuntimeHandle)> {
     bridge::init_codec();
     bridge::acquire_embedded_cbor_codec();
@@ -747,7 +747,7 @@ pub fn spawn_embedded_runtime_ipc(
 fn run_embedded_runtime(
     stream: UnixStream,
     max_concurrency: usize,
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
 ) {
     // Keep bridge-only, agent-SDK, and wasm-runner userland variants warm
     // without immediately evicting each other.
@@ -1144,7 +1144,7 @@ mod tests {
         false
     }
 
-    fn test_runtime_context() -> agentos_runtime::RuntimeContext {
+    fn test_runtime_context() -> agentos_runtime_tokio::RuntimeContext {
         crate::test_runtime_context()
     }
 
@@ -1165,7 +1165,7 @@ mod tests {
 
     #[test]
     fn session_outputs_share_one_vm_completion_limit() {
-        use agentos_runtime::accounting::{ResourceLedger, ResourceLimit};
+        use agentos_runtime_tokio::accounting::{ResourceLedger, ResourceLimit};
 
         let resources = Arc::new(ResourceLedger::root(
             "v8-output-test-vm",
@@ -1226,13 +1226,13 @@ mod tests {
         let _codec_guard = EMBEDDED_RUNTIME_CODEC_TEST_LOCK
             .lock()
             .expect("embedded runtime codec test lock poisoned");
-        let mut config = agentos_runtime::RuntimeConfig {
+        let mut config = agentos_runtime_tokio::RuntimeConfig {
             max_active_vm_executors: 2,
             vm_executor_teardown_timeout_ms: 31,
-            ..agentos_runtime::RuntimeConfig::default()
+            ..agentos_runtime_tokio::RuntimeConfig::default()
         };
         config.resources.max_async_completions = 3;
-        let runtime_context = agentos_runtime::SidecarRuntime::process(&config)
+        let runtime_context = agentos_runtime_tokio::SidecarRuntime::process(&config)
             .expect("configured process runtime")
             .context();
         let runtime = EmbeddedV8Runtime::new(None, runtime_context.clone())
@@ -1324,33 +1324,33 @@ mod tests {
             .lock()
             .expect("embedded runtime codec test lock poisoned");
         let process = test_runtime_context();
-        let vm_resources = Arc::new(agentos_runtime::accounting::ResourceLedger::child(
+        let vm_resources = Arc::new(agentos_runtime_tokio::accounting::ResourceLedger::child(
             "embedded-runtime-vm",
             [
                 (
-                    agentos_runtime::accounting::ResourceClass::BridgeCalls,
-                    agentos_runtime::accounting::ResourceLimit::new(
+                    agentos_runtime_tokio::accounting::ResourceClass::BridgeCalls,
+                    agentos_runtime_tokio::accounting::ResourceLimit::new(
                         1,
                         "limits.reactor.maxBridgeCalls",
                     ),
                 ),
                 (
-                    agentos_runtime::accounting::ResourceClass::HandleCommands,
-                    agentos_runtime::accounting::ResourceLimit::new(
+                    agentos_runtime_tokio::accounting::ResourceClass::HandleCommands,
+                    agentos_runtime_tokio::accounting::ResourceLimit::new(
                         2,
                         "limits.reactor.maxHandleCommands",
                     ),
                 ),
                 (
-                    agentos_runtime::accounting::ResourceClass::ReadyHandles,
-                    agentos_runtime::accounting::ResourceLimit::new(
+                    agentos_runtime_tokio::accounting::ResourceClass::ReadyHandles,
+                    agentos_runtime_tokio::accounting::ResourceLimit::new(
                         2,
                         "limits.reactor.maxReadyHandles",
                     ),
                 ),
                 (
-                    agentos_runtime::accounting::ResourceClass::Timers,
-                    agentos_runtime::accounting::ResourceLimit::new(
+                    agentos_runtime_tokio::accounting::ResourceClass::Timers,
+                    agentos_runtime_tokio::accounting::ResourceLimit::new(
                         2,
                         "limits.jsRuntime.maxTimers",
                     ),

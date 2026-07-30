@@ -2743,10 +2743,12 @@ mod kernel_poll_sync_rpc_tests {
     use std::task::{Context, Poll, Waker};
     use tokio::sync::Notify;
 
-    fn test_runtime_context() -> agentos_runtime::RuntimeContext {
-        agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-            .expect("create test runtime")
-            .context()
+    fn test_runtime_context() -> agentos_runtime_tokio::RuntimeContext {
+        agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create test runtime")
+        .context()
     }
 
     #[test]
@@ -2811,7 +2813,7 @@ mod kernel_poll_sync_rpc_tests {
             kernel_handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             super::GuestRuntimeKind::JavaScript,
             ActiveExecution::Binding(BindingExecution::default()),
         );
@@ -2892,7 +2894,7 @@ mod kernel_poll_sync_rpc_tests {
             kernel_handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             super::GuestRuntimeKind::JavaScript,
             ActiveExecution::Binding(BindingExecution::default()),
         )

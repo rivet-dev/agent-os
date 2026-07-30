@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use crate::ipc_binary::{self, BinaryFrame};
 use crate::runtime_protocol::{BridgeResponse, RuntimeEvent};
 use crate::session::RuntimeEventEnvelope;
-use agentos_runtime::accounting::{Reservation, ResourceClass};
-use agentos_runtime::RuntimeContext;
+use agentos_runtime_tokio::accounting::{Reservation, ResourceClass};
+use agentos_runtime_tokio::RuntimeContext;
 
 // ── Sync bridge-call round-trip latency (opt-in via AGENTOS_SYNCRPC_LAT=1) ──
 // Measures the guest-observed cost of one host_call round trip (send + block on
@@ -211,7 +211,7 @@ pub trait BridgeResponseReceiver: Send {
 pub struct SyncBridgeCallResponse {
     pub status: u8,
     pub payload: Vec<u8>,
-    pub reservation: Option<agentos_runtime::accounting::SharedReservation>,
+    pub reservation: Option<agentos_runtime_tokio::accounting::SharedReservation>,
 }
 
 /// ResponseReceiver that reads frames from a byte buffer via ipc_binary::read_frame.
@@ -284,7 +284,7 @@ struct BridgeCallTarget {
     sender: crossbeam_channel::Sender<BridgeResponse>,
     _call_reservation: Reservation,
     _request_reservation: Reservation,
-    response_resources: Arc<agentos_runtime::accounting::ResourceLedger>,
+    response_resources: Arc<agentos_runtime_tokio::accounting::ResourceLedger>,
     response_reservation: Reservation,
     max_response_bytes: usize,
     deadline: Option<Instant>,
@@ -317,7 +317,7 @@ fn grow_response_reservation(
 fn transfer_response_reservation(
     mut reservation: Reservation,
     payload_bytes: usize,
-) -> agentos_runtime::accounting::SharedReservation {
+) -> agentos_runtime_tokio::accounting::SharedReservation {
     let unused = reservation
         .amount()
         .checked_sub(payload_bytes)
@@ -329,7 +329,7 @@ fn transfer_response_reservation(
                 .expect("unused response capacity must remain transferable"),
         );
     }
-    agentos_runtime::accounting::SharedReservation::new(reservation)
+    agentos_runtime_tokio::accounting::SharedReservation::new(reservation)
 }
 
 fn encode_terminal_error_payload(code: &str, message: &str, maximum_bytes: usize) -> Vec<u8> {
@@ -1304,7 +1304,7 @@ pub struct BridgeCallContext {
     /// Session-injected process scheduler used by local bridge operations such
     /// as `node:vm` timeouts. Snapshot/test-only contexts may omit it when they
     /// never arm runtime work.
-    runtime: Option<agentos_runtime::RuntimeContext>,
+    runtime: Option<agentos_runtime_tokio::RuntimeContext>,
     bridge_call_timeout: Duration,
 }
 
@@ -1427,7 +1427,7 @@ impl BridgeCallContext {
         shared_call_id: SharedCallIdCounter,
         async_response_tx: crossbeam_channel::Sender<BridgeResponse>,
         abort_rx: crossbeam_channel::Receiver<()>,
-        runtime: agentos_runtime::RuntimeContext,
+        runtime: agentos_runtime_tokio::RuntimeContext,
         pause_control: Arc<crate::session::SessionPauseControl>,
         bridge_call_timeout: Duration,
     ) -> Self {
@@ -1448,13 +1448,13 @@ impl BridgeCallContext {
         }
     }
 
-    pub(crate) fn runtime_context(&self) -> Option<&agentos_runtime::RuntimeContext> {
+    pub(crate) fn runtime_context(&self) -> Option<&agentos_runtime_tokio::RuntimeContext> {
         self.runtime.as_ref()
     }
 
-    pub(crate) fn timer_task_owner(&self) -> Option<agentos_runtime::TaskOwner> {
+    pub(crate) fn timer_task_owner(&self) -> Option<agentos_runtime_tokio::TaskOwner> {
         self.session_generation
-            .map(|generation| agentos_runtime::TaskOwner::Vm { generation })
+            .map(|generation| agentos_runtime_tokio::TaskOwner::Vm { generation })
     }
 
     /// Perform a sync-blocking bridge call.
@@ -1741,16 +1741,18 @@ impl BridgeCallContext {
                 )?;
                 let deadline_registry = Arc::clone(registry);
                 let timeout = self.bridge_call_timeout;
-                if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Timer, async move {
-                    if tokio::time::timeout(timeout, &mut deadline_cancelled)
-                        .await
-                        .is_err()
-                    {
-                        if let Err(error) = deadline_registry.timeout(call_id) {
-                            eprintln!("{error}");
+                if let Err(error) =
+                    runtime.spawn(agentos_runtime_tokio::TaskClass::Timer, async move {
+                        if tokio::time::timeout(timeout, &mut deadline_cancelled)
+                            .await
+                            .is_err()
+                        {
+                            if let Err(error) = deadline_registry.timeout(call_id) {
+                                eprintln!("{error}");
+                            }
                         }
-                    }
-                }) {
+                    })
+                {
                     // Registration already owns call/request/response capacity.
                     // If supervision rejects the timer, retract the unpublished
                     // route before returning so admission cannot leak permanently.
@@ -1906,29 +1908,29 @@ mod tests {
         max_response_bytes: usize,
     ) -> (
         RuntimeContext,
-        Arc<agentos_runtime::accounting::ResourceLedger>,
+        Arc<agentos_runtime_tokio::accounting::ResourceLedger>,
     ) {
         let process = test_runtime_context();
-        let resources = Arc::new(agentos_runtime::accounting::ResourceLedger::child(
+        let resources = Arc::new(agentos_runtime_tokio::accounting::ResourceLedger::child(
             "bridge-test-vm",
             [
                 (
                     ResourceClass::BridgeCalls,
-                    agentos_runtime::accounting::ResourceLimit::new(
+                    agentos_runtime_tokio::accounting::ResourceLimit::new(
                         max_calls,
                         "limits.reactor.maxBridgeCalls",
                     ),
                 ),
                 (
                     ResourceClass::BridgeRequestBytes,
-                    agentos_runtime::accounting::ResourceLimit::new(
+                    agentos_runtime_tokio::accounting::ResourceLimit::new(
                         max_request_bytes,
                         "limits.reactor.maxBridgeRequestBytes",
                     ),
                 ),
                 (
                     ResourceClass::BridgeResponseBytes,
-                    agentos_runtime::accounting::ResourceLimit::new(
+                    agentos_runtime_tokio::accounting::ResourceLimit::new(
                         max_response_bytes,
                         "limits.reactor.maxBridgeResponseBytes",
                     ),
@@ -1939,7 +1941,9 @@ mod tests {
         (process.scoped_for_vm(Arc::clone(&resources), 7), resources)
     }
 
-    fn assert_ledger_settles_to_zero(resources: &agentos_runtime::accounting::ResourceLedger) {
+    fn assert_ledger_settles_to_zero(
+        resources: &agentos_runtime_tokio::accounting::ResourceLedger,
+    ) {
         let deadline = Instant::now() + Duration::from_secs(1);
         while !resources.is_zero() && Instant::now() < deadline {
             std::thread::yield_now();
@@ -2973,12 +2977,14 @@ mod tests {
 
         let metrics = runtime.metrics().snapshot();
         assert!(
-            metrics.resources[agentos_runtime::metrics::ResourceMetricClass::BridgeCalls.index()]
-                .high_water
+            metrics.resources
+                [agentos_runtime_tokio::metrics::ResourceMetricClass::BridgeCalls.index()]
+            .high_water
                 >= 1
         );
         assert!(
-            metrics.buffers[agentos_runtime::metrics::BufferMetricClass::Bridge.index()].high_water
+            metrics.buffers[agentos_runtime_tokio::metrics::BufferMetricClass::Bridge.index()]
+                .high_water
                 >= 4
         );
     }
@@ -3052,7 +3058,7 @@ mod tests {
                     call_id: 77,
                     status: 0,
                     payload: vec![0xA7; 2],
-                    reservation: Some(agentos_runtime::accounting::SharedReservation::new(
+                    reservation: Some(agentos_runtime_tokio::accounting::SharedReservation::new(
                         producer_reservation,
                     )),
                 },

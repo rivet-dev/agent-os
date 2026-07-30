@@ -573,7 +573,7 @@ pub(crate) enum HostServiceResponse {
     Deferred {
         receiver: tokio::sync::oneshot::Receiver<Result<Value, crate::state::DeferredRpcError>>,
         timeout: Option<Duration>,
-        task_class: agentos_runtime::TaskClass,
+        task_class: agentos_runtime_tokio::TaskClass,
     },
     Raw(Vec<u8>),
     SourceBackedJson {
@@ -3440,7 +3440,7 @@ fn service_javascript_tls_deferred_rpc(
     let deferred = |receiver| HostServiceResponse::Deferred {
         receiver,
         timeout: Some(operation_deadline),
-        task_class: agentos_runtime::TaskClass::Tls,
+        task_class: agentos_runtime_tokio::TaskClass::Tls,
     };
     match request.method.as_str() {
         "net.socket_upgrade_tls" => {
@@ -3520,7 +3520,7 @@ fn service_javascript_plain_socket_deferred_rpc(
     let deferred = |receiver| HostServiceResponse::Deferred {
         receiver,
         timeout: None,
-        task_class: agentos_runtime::TaskClass::Socket,
+        task_class: agentos_runtime_tokio::TaskClass::Socket,
     };
     match request.method.as_str() {
         "net.write" => {
@@ -3639,7 +3639,7 @@ where
         request
             .process
             .runtime_context
-            .spawn(agentos_runtime::TaskClass::Listener, async move {
+            .spawn(agentos_runtime_tokio::TaskClass::Listener, async move {
                 let result = match crate::execution::operation_deadline_timeout(
                     "JavaScript Unix listener close",
                     operation_deadline,
@@ -3674,7 +3674,7 @@ where
         return Ok(HostServiceResponse::Deferred {
             receiver,
             timeout: None,
-            task_class: agentos_runtime::TaskClass::Listener,
+            task_class: agentos_runtime_tokio::TaskClass::Listener,
         });
     }
     if request.sync_request.method == "net.connect" {
@@ -3865,7 +3865,7 @@ where
         request
             .process
             .runtime_context
-            .spawn(agentos_runtime::TaskClass::Listener, async move {
+            .spawn(agentos_runtime_tokio::TaskClass::Listener, async move {
                 let notified = close_notify.notified();
                 if !closed.load(Ordering::Acquire) {
                     notified.await;
@@ -3879,7 +3879,7 @@ where
         return Ok(HostServiceResponse::Deferred {
             receiver,
             timeout: None,
-            task_class: agentos_runtime::TaskClass::Listener,
+            task_class: agentos_runtime_tokio::TaskClass::Listener,
         });
     }
     if request.sync_request.method == "net.poll" {
@@ -6251,7 +6251,7 @@ mod error_code_tests {
         javascript_sync_rpc_arg_u64, process_resource_limit_kind, SidecarError,
     };
     use agentos_kernel::kernel::ProcessResourceLimitKind;
-    use agentos_runtime::accounting::{LimitError, ResourceClass};
+    use agentos_runtime_tokio::accounting::{LimitError, ResourceClass};
     use serde_json::json;
 
     #[test]

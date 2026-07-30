@@ -57,7 +57,7 @@ pub enum VmSqliteError {
     #[error("local SQLite failed: {0}")]
     Local(#[from] rusqlite::Error),
     #[error("local SQLite blocking executor failed: {0}")]
-    Blocking(#[from] agentos_runtime::BlockingJobError),
+    Blocking(#[from] agentos_runtime_tokio::BlockingJobError),
     #[error("invalid SQLite result: {0}")]
     InvalidResult(String),
     #[error(
@@ -110,7 +110,7 @@ pub type SharedVmSqliteDatabase = Arc<dyn VmSqliteDatabase>;
 
 pub async fn resolve_vm_sqlite(
     descriptor: &VmSqliteDescriptor,
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     max_result_bytes: usize,
 ) -> Result<SharedVmSqliteDatabase, VmSqliteError> {
     match descriptor {
@@ -213,14 +213,14 @@ impl VmSqliteDatabase for ActorUdsVmSqliteDatabase {
 
 struct LocalVmSqliteDatabase {
     connection: Arc<Mutex<rusqlite::Connection>>,
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     max_result_bytes: usize,
 }
 
 impl LocalVmSqliteDatabase {
     async fn open(
         path: PathBuf,
-        runtime: agentos_runtime::RuntimeContext,
+        runtime: agentos_runtime_tokio::RuntimeContext,
         max_result_bytes: usize,
     ) -> Result<Self, VmSqliteError> {
         let connection = runtime
@@ -578,9 +578,11 @@ pub async fn migrate_schema(
 mod tests {
     use super::*;
 
-    fn runtime() -> &'static agentos_runtime::SidecarRuntime {
-        agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-            .expect("runtime")
+    fn runtime() -> &'static agentos_runtime_tokio::SidecarRuntime {
+        agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("runtime")
     }
 
     #[test]

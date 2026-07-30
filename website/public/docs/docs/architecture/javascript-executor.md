@@ -258,7 +258,7 @@ preserve Node behavior across that security boundary.
 
 The main pieces are:
 
-- `crates/runtime/src/readiness.rs`: revisioned `ReadyState`, wake epochs, and
+- `crates/runtime-tokio/src/readiness.rs`: revisioned `ReadyState`, wake epochs, and
   interest gating.
 - `crates/v8-runtime/src/session.rs`: the executor's bounded selector,
   readiness batching, dispatch, acknowledgement, and executor admission.

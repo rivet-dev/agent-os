@@ -135,7 +135,7 @@ pub(super) fn settle_host_call_completion_for_process(
 }
 
 pub(super) struct BindingProcessEventRequest {
-    pub(super) runtime_context: agentos_runtime::RuntimeContext,
+    pub(super) runtime_context: agentos_runtime_tokio::RuntimeContext,
     pub(super) sidecar_requests: SharedSidecarRequestClient,
     pub(super) connection_id: String,
     pub(super) session_id: String,
@@ -158,12 +158,12 @@ pub(in crate::execution) fn enqueue_deferred_host_service_completion<B>(
     sidecar: &NativeSidecar<B>,
     vm_id: &str,
     process_id: &str,
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     reply: DirectHostReplyHandle,
     operation: &str,
     receiver: tokio::sync::oneshot::Receiver<Result<Value, DeferredRpcError>>,
     timeout: Option<Duration>,
-    task_class: agentos_runtime::TaskClass,
+    task_class: agentos_runtime_tokio::TaskClass,
 ) -> Result<(), SidecarError>
 where
     B: NativeSidecarBridge + Send + 'static,
@@ -376,7 +376,7 @@ pub(super) fn spawn_binding_process_events(request: BindingProcessEventRequest) 
         let cancelled = Arc::clone(&request.cancelled);
         let failure_reason = Arc::clone(&request.event_overflow_reason);
         let failure_notify = Arc::clone(&request.event_notify);
-        if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Vm, async move {
+        if let Err(error) = runtime.spawn(agentos_runtime_tokio::TaskClass::Vm, async move {
             loop {
                 let notified = pause_notify.notified();
                 if cancelled.load(Ordering::Acquire) {
@@ -1182,7 +1182,7 @@ where
         let delay = next_deadline.saturating_duration_since(Instant::now());
         self.kernel_reaper_task = Some(
             runtime
-                .spawn(agentos_runtime::TaskClass::Timer, async move {
+                .spawn(agentos_runtime_tokio::TaskClass::Timer, async move {
                     tokio::time::sleep(delay).await;
                     notify.notify_one();
                 })

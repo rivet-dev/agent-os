@@ -473,7 +473,7 @@ fn fail_deferred_posix_poll(
 #[allow(clippy::type_complexity)]
 pub(in crate::execution) fn service_deferred_posix_poll(
     generation: u64,
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     wait_handle: agentos_kernel::poll::PollWaitHandle,
     notify: Arc<tokio::sync::Notify>,
     socket_paths: &SocketPathContext,
@@ -675,7 +675,7 @@ pub(in crate::execution) fn service_deferred_posix_poll(
     };
     let task_notify = Arc::clone(&notify);
     let task_wake_lane = wake_lane.clone();
-    let wake_task = runtime.spawn(agentos_runtime::TaskClass::Vm, async move {
+    let wake_task = runtime.spawn(agentos_runtime_tokio::TaskClass::Vm, async move {
         let native_listener_ready = std::future::poll_fn(|cx| {
             if native_listener_waiters.is_empty() {
                 return std::task::Poll::Pending;
@@ -1954,7 +1954,7 @@ where
     let vm_id_owned = vm_id.to_owned();
     let root_process_id_owned = root_process_id.to_owned();
     let task_reply = pending.reply.clone();
-    let spawn = runtime.spawn(agentos_runtime::TaskClass::Socket, async move {
+    let spawn = runtime.spawn(agentos_runtime_tokio::TaskClass::Socket, async move {
         let remaining = pending.deadline.saturating_duration_since(Instant::now());
         if !remaining.is_zero() {
             tokio::select! {
@@ -3672,7 +3672,7 @@ fn settle_managed_network_response<B>(
     sidecar: &NativeSidecar<B>,
     vm_id: &str,
     process_id: &str,
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     reply: DirectHostReplyHandle,
     operation: &str,
     response: Result<HostServiceResponse, SidecarError>,
@@ -4115,7 +4115,7 @@ where
     let vm_id = vm_id.to_owned();
     let process_id = process_id.to_owned();
     let failure_reply = pending.reply.clone();
-    if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Udp, async move {
+    if let Err(error) = runtime.spawn(agentos_runtime_tokio::TaskClass::Udp, async move {
         let mut pending = pending;
         match poll_handle.acquire_fair_turn().await {
             Ok(turn) => pending.fair_turn = Some(turn),
@@ -4166,7 +4166,7 @@ where
     let vm_id = vm_id.to_owned();
     let process_id = process_id.to_owned();
     let failure_reply = pending.reply.clone();
-    if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Udp, async move {
+    if let Err(error) = runtime.spawn(agentos_runtime_tokio::TaskClass::Udp, async move {
         let mut pending = pending;
         // Register readiness before the native owner probe so an event arriving
         // in the gap remains observable after an empty completion.
@@ -4260,7 +4260,7 @@ where
 fn udp_reentry_context<B>(
     sidecar: &NativeSidecar<B>,
     vm_id: &str,
-) -> Result<(agentos_runtime::RuntimeContext, String, String), SidecarError> {
+) -> Result<(agentos_runtime_tokio::RuntimeContext, String, String), SidecarError> {
     let vm = sidecar
         .vms
         .get(vm_id)
@@ -5072,9 +5072,10 @@ mod managed_tests {
 
     #[test]
     fn closed_udp_reentry_lane_cancels_the_claimed_reply() {
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create UDP re-entry test runtime");
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create UDP re-entry test runtime");
         let target = Arc::new(ReplyTarget::default());
         let reply = DirectHostReplyHandle::new(
             HostCallIdentity {
@@ -5123,9 +5124,10 @@ mod managed_tests {
 
     #[test]
     fn deferred_posix_poll_wake_is_durable_with_a_competing_broker_waiter() {
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create POSIX-poll wake test runtime");
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create POSIX-poll wake test runtime");
         let notify = Arc::new(tokio::sync::Notify::new());
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         let lane = DeferredPosixPollWakeLane {
@@ -5204,9 +5206,10 @@ mod managed_tests {
 
     #[test]
     fn managed_posix_poll_waits_on_socket_readiness_after_broker_wake_is_consumed() {
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create managed POSIX-poll readiness test runtime");
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create managed POSIX-poll readiness test runtime");
         runtime.context().handle().block_on(async {
             let broker_notify = Arc::new(tokio::sync::Notify::new());
             let socket_notify = Arc::new(tokio::sync::Notify::new());
@@ -5259,9 +5262,10 @@ mod managed_tests {
 
     #[test]
     fn descendant_udp_reentry_preserves_root_lane_and_process_path() {
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create UDP re-entry test runtime");
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create UDP re-entry test runtime");
         let target = Arc::new(ReplyTarget::default());
         let reply = DirectHostReplyHandle::new(
             HostCallIdentity {

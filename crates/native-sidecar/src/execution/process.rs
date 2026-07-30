@@ -150,7 +150,7 @@ impl ActiveProcess {
     pub(crate) fn new(
         kernel_pid: u32,
         kernel_handle: KernelProcessHandle,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
         limits: crate::limits::VmLimits,
         process_event_capacity: usize,
         runtime: GuestRuntimeKind,
@@ -179,7 +179,7 @@ impl ActiveProcess {
     pub(crate) fn new_with_attached_runtime_control(
         kernel_pid: u32,
         kernel_handle: KernelProcessHandle,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
         limits: crate::limits::VmLimits,
         process_event_capacity: usize,
         runtime: GuestRuntimeKind,
@@ -1217,7 +1217,7 @@ impl ActiveProcess {
     fn track_capability(
         &mut self,
         key: NativeCapabilityKey,
-        lease: agentos_runtime::capability::CapabilityLease,
+        lease: agentos_runtime_tokio::capability::CapabilityLease,
     ) -> Result<(), SidecarError> {
         match self.capability_leases.entry(key.clone()) {
             std::collections::btree_map::Entry::Vacant(entry) => {
@@ -1234,7 +1234,7 @@ impl ActiveProcess {
     pub(super) fn shared_capability_lease(
         &self,
         key: &NativeCapabilityKey,
-    ) -> Option<Arc<agentos_runtime::capability::CapabilityLease>> {
+    ) -> Option<Arc<agentos_runtime_tokio::capability::CapabilityLease>> {
         self.capability_leases.get(key).map(Arc::clone)
     }
 
@@ -1333,8 +1333,8 @@ impl ActiveProcess {
         &self,
         key: &NativeCapabilityKey,
     ) -> Option<(
-        agentos_runtime::capability::CapabilityId,
-        agentos_runtime::capability::CapabilityGeneration,
+        agentos_runtime_tokio::capability::CapabilityId,
+        agentos_runtime_tokio::capability::CapabilityGeneration,
     )> {
         self.capability_leases
             .get(key)
@@ -1345,8 +1345,8 @@ impl ActiveProcess {
         &self,
         key: &NativeCapabilityKey,
     ) -> Option<(
-        agentos_runtime::capability::CapabilityId,
-        agentos_runtime::capability::SessionGeneration,
+        agentos_runtime_tokio::capability::CapabilityId,
+        agentos_runtime_tokio::capability::SessionGeneration,
     )> {
         self.capability_leases.get(key).and_then(|lease| {
             self.runtime_context
@@ -1408,10 +1408,12 @@ mod pending_event_reservation_tests {
     use std::future::Future as _;
     use std::task::{Context, Poll, Waker};
 
-    fn test_runtime_context() -> agentos_runtime::RuntimeContext {
-        agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-            .expect("create test runtime")
-            .context()
+    fn test_runtime_context() -> agentos_runtime_tokio::RuntimeContext {
+        agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create test runtime")
+        .context()
     }
 
     fn take_notify_permit(notify: &tokio::sync::Notify) -> bool {
@@ -1457,7 +1459,7 @@ mod pending_event_reservation_tests {
             kernel_handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             super::GuestRuntimeKind::WebAssembly,
             ActiveExecution::Binding(BindingExecution::default()),
             runtime_control,
@@ -1524,7 +1526,7 @@ mod pending_event_reservation_tests {
             handle,
             runtime,
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             GuestRuntimeKind::WebAssembly,
             ActiveExecution::Binding(BindingExecution::default()),
         );
@@ -1622,7 +1624,7 @@ mod pending_event_reservation_tests {
             handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             GuestRuntimeKind::WebAssembly,
             ActiveExecution::Binding(BindingExecution::default()),
         )
@@ -1736,7 +1738,7 @@ mod pending_event_reservation_tests {
             source_handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             GuestRuntimeKind::WebAssembly,
             ActiveExecution::Binding(BindingExecution::default()),
         )
@@ -1752,7 +1754,7 @@ mod pending_event_reservation_tests {
             target_handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             GuestRuntimeKind::WebAssembly,
             ActiveExecution::Binding(BindingExecution::default()),
         )
@@ -1907,7 +1909,7 @@ mod pending_event_reservation_tests {
             handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             GuestRuntimeKind::WebAssembly,
             ActiveExecution::Binding(BindingExecution::default()),
         );
@@ -1980,7 +1982,7 @@ mod pending_event_reservation_tests {
             handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             GuestRuntimeKind::JavaScript,
             ActiveExecution::Binding(BindingExecution::default()),
         );
@@ -2026,7 +2028,7 @@ mod pending_event_reservation_tests {
             handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             GuestRuntimeKind::JavaScript,
             ActiveExecution::Binding(BindingExecution::default()),
         );
@@ -2155,7 +2157,7 @@ mod pending_event_reservation_tests {
             handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             GuestRuntimeKind::JavaScript,
             ActiveExecution::Binding(binding),
         );
@@ -2274,7 +2276,7 @@ mod pending_event_reservation_tests {
             handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             GuestRuntimeKind::WebAssembly,
             ActiveExecution::Binding(BindingExecution::default()),
         );
@@ -3367,9 +3369,9 @@ mod typed_direct_error_tests {
     #[test]
     fn direct_settlement_preserves_limit_details_and_typed_errno() {
         let target = Arc::new(RecordingTarget::default());
-        let limit = SidecarError::ResourceLimit(agentos_runtime::accounting::LimitError {
+        let limit = SidecarError::ResourceLimit(agentos_runtime_tokio::accounting::LimitError {
             scope: String::from("vm=vm-typed-errors"),
-            resource: agentos_runtime::accounting::ResourceClass::BridgeResponseBytes,
+            resource: agentos_runtime_tokio::accounting::ResourceClass::BridgeResponseBytes,
             used: 60,
             requested: 8,
             limit: 64,
@@ -4270,8 +4272,8 @@ pub(super) fn commit_process_capability(
     kernel_socket_id: Option<SocketId>,
 ) -> Result<
     (
-        agentos_runtime::capability::CapabilityId,
-        agentos_runtime::capability::CapabilityGeneration,
+        agentos_runtime_tokio::capability::CapabilityId,
+        agentos_runtime_tokio::capability::CapabilityGeneration,
     ),
     SidecarError,
 > {

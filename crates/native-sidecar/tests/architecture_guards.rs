@@ -2591,7 +2591,7 @@ fn generic_runtime_layers_do_not_depend_on_product_or_acp_layers() {
     let root = repo_root();
     let lower_layers = [
         "resource",
-        "runtime",
+        "runtime-tokio",
         "kernel",
         "vfs",
         "vfs-store",
@@ -2637,7 +2637,7 @@ fn kernel_dns_contract_has_no_native_resolver_or_runtime_dependency() {
     let kernel_dns = std::fs::read_to_string(root.join("crates/kernel/src/dns.rs"))
         .expect("read kernel DNS contract");
     for forbidden in [
-        "agentos_runtime",
+        "agentos_runtime_tokio",
         "BlockingJobError",
         "RuntimeContext",
         "hickory_resolver",
@@ -2672,14 +2672,14 @@ fn kernel_dns_contract_has_no_native_resolver_or_runtime_dependency() {
 fn kernel_resource_accounting_has_no_runtime_or_tokio_dependency_cycle() {
     let root = repo_root();
     let kernel_dependencies = dependency_keys(&root.join("crates/kernel/Cargo.toml"));
-    for forbidden in ["agentos-runtime", "tokio"] {
+    for forbidden in ["agentos-runtime-tokio", "tokio"] {
         assert!(
             !kernel_dependencies.contains(forbidden),
             "kernel resource authority must not depend on {forbidden}"
         );
     }
 
-    let runtime_dependencies = dependency_keys(&root.join("crates/runtime/Cargo.toml"));
+    let runtime_dependencies = dependency_keys(&root.join("crates/runtime-tokio/Cargo.toml"));
     assert!(
         !runtime_dependencies.contains("agentos-kernel"),
         "process runtime must not create a runtime -> kernel -> VFS -> runtime cycle"
@@ -2702,7 +2702,7 @@ fn kernel_resource_accounting_has_no_runtime_or_tokio_dependency_cycle() {
         "crates/kernel/src/socket_table.rs",
     ] {
         let source = std::fs::read_to_string(root.join(path)).expect("read kernel resource owner");
-        for forbidden in ["agentos_runtime", "tokio::"] {
+        for forbidden in ["agentos_runtime_tokio", "tokio::"] {
             assert!(
                 !source.contains(forbidden),
                 "{path} contains concrete runtime symbol {forbidden}"
@@ -2812,7 +2812,7 @@ fn native_reactor_source_files(root: &Path) -> Vec<PathBuf> {
                 "crates/kernel/",
                 "crates/native-sidecar/",
                 "crates/native-sidecar-core/",
-                "crates/runtime/",
+                "crates/runtime-tokio/",
                 "crates/sidecar-protocol/",
                 "crates/v8-runtime/",
                 "crates/vfs/",
@@ -3083,7 +3083,7 @@ fn native_sidecar_dependency_closure_has_one_tokio_runtime_builder() {
         builders.join("\n")
     );
     assert!(
-        builders[0].starts_with("crates/runtime/src/lib.rs:"),
+        builders[0].starts_with("crates/runtime-tokio/src/lib.rs:"),
         "the one runtime builder must be process-owned: {}",
         builders[0]
     );
@@ -3094,7 +3094,7 @@ fn production_subsystems_use_injected_runtime_contexts() {
     let root = repo_root();
     let files = native_reactor_source_files(&root)
         .into_iter()
-        .filter(|path| path != Path::new("crates/runtime/src/lib.rs"))
+        .filter(|path| path != Path::new("crates/runtime-tokio/src/lib.rs"))
         .collect::<Vec<_>>();
     let violations = production_matches(&root, &files, &["SidecarRuntime::process_context("]);
     assert!(
@@ -3373,7 +3373,7 @@ fn native_reactor_tasks_enter_through_task_supervision() {
         .into_iter()
         // This is the sole implementation of the supervised spawn API. Its
         // Handle::spawn calls run only after TaskSupervisor admission.
-        .filter(|path| path != Path::new("crates/runtime/src/lib.rs"))
+        .filter(|path| path != Path::new("crates/runtime-tokio/src/lib.rs"))
         .collect::<Vec<_>>();
     let violations = production_matches(
         &root,
@@ -3434,7 +3434,10 @@ fn canonical_wasm_exceptions_use_one_finalized_artifact_on_both_engines() {
 #[test]
 fn production_threads_match_the_reviewed_topology_manifest() {
     const MANIFEST: &[(&str, &str)] = &[
-        ("blocking-executor-worker", "crates/runtime/src/lib.rs"),
+        (
+            "blocking-executor-worker",
+            "crates/runtime-tokio/src/lib.rs",
+        ),
         (
             "constant-v8-platform-owner",
             "crates/v8-runtime/src/isolate.rs",

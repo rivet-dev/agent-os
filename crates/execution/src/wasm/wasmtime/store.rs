@@ -11,8 +11,8 @@ use crate::backend::{
     direct_host_reply_channel, HostCallIdentity, HostCallReply, HostServiceError,
 };
 use crate::host::{HostOperation, HostProcessContext, ProcessHostCapabilitySet};
-use agentos_runtime::accounting::{Reservation, ResourceClass, ResourceLedger};
-use agentos_runtime::RuntimeContext;
+use agentos_runtime_tokio::accounting::{Reservation, ResourceClass, ResourceLedger};
+use agentos_runtime_tokio::RuntimeContext;
 use flume::Sender;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -679,8 +679,8 @@ mod tests {
     use super::*;
     use crate::backend::{bounded_execution_event_channel, PayloadLimit};
     use crate::wasm::{GuestRuntimeConfig, WasmExecutionLimits, WasmPermissionTier};
-    use agentos_runtime::accounting::{ResourceLedger, ResourceLimit};
-    use agentos_runtime::{RuntimeConfig, SidecarRuntime};
+    use agentos_runtime_tokio::accounting::{ResourceLedger, ResourceLimit};
+    use agentos_runtime_tokio::{RuntimeConfig, SidecarRuntime};
     use std::path::PathBuf;
 
     #[test]

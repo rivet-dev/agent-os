@@ -799,7 +799,7 @@ impl Wake for Http2ReadyWake {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_client_http2_fair_turn(
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     vm_generation: u64,
     capability_id: u64,
     streams: &mut BTreeMap<u64, ClientHttp2StreamState>,
@@ -853,7 +853,7 @@ async fn run_client_http2_fair_turn(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_server_http2_fair_turn(
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     vm_generation: u64,
     capability_id: u64,
     streams: &mut BTreeMap<u64, ServerHttp2StreamState>,
@@ -1101,8 +1101,8 @@ fn push_http2_data_event(
 fn push_http2_retain_wake(
     session: Option<ExecutionWakeHandle>,
     identity: Option<(
-        agentos_runtime::capability::CapabilityId,
-        agentos_runtime::capability::CapabilityGeneration,
+        agentos_runtime_tokio::capability::CapabilityId,
+        agentos_runtime_tokio::capability::CapabilityGeneration,
     )>,
 ) {
     let (Some(session), Some((capability_id, capability_generation))) = (session, identity) else {
@@ -1111,7 +1111,7 @@ fn push_http2_retain_wake(
     if let Err(error) = session.publish_readiness(
         capability_id,
         capability_generation,
-        agentos_runtime::readiness::ReadyFlags::READABLE,
+        agentos_runtime_tokio::readiness::ReadyFlags::READABLE,
     ) {
         eprintln!("ERR_AGENTOS_HTTP2_WAKE: failed to queue HTTP/2 wake: {error}");
     }
@@ -1308,7 +1308,7 @@ fn defer_http2_poll(
     let (respond_to, receiver) = tokio::sync::oneshot::channel();
     process
         .runtime_context
-        .spawn(agentos_runtime::TaskClass::Http2, async move {
+        .spawn(agentos_runtime_tokio::TaskClass::Http2, async move {
             let wait_result = if warn_operation_deadline {
                 crate::execution::operation_deadline_timeout(
                     "HTTP/2 event poll",
@@ -1336,7 +1336,7 @@ fn defer_http2_poll(
     Ok(HostServiceResponse::Deferred {
         receiver,
         timeout: None,
-        task_class: agentos_runtime::TaskClass::Http2,
+        task_class: agentos_runtime_tokio::TaskClass::Http2,
     })
 }
 
@@ -1355,7 +1355,7 @@ fn defer_http2_wait(
     let (respond_to, receiver) = tokio::sync::oneshot::channel();
     process
         .runtime_context
-        .spawn(agentos_runtime::TaskClass::Http2, async move {
+        .spawn(agentos_runtime_tokio::TaskClass::Http2, async move {
             let result = loop {
                 let event = match await_http2_event(&shared, id, is_server).await {
                     Ok(Some(event)) => event,
@@ -1402,7 +1402,7 @@ fn defer_http2_wait(
     Ok(HostServiceResponse::Deferred {
         receiver,
         timeout: None,
-        task_class: agentos_runtime::TaskClass::Http2,
+        task_class: agentos_runtime_tokio::TaskClass::Http2,
     })
 }
 
@@ -1592,8 +1592,8 @@ fn commit_http2_capability(
     local_id: String,
 ) -> Result<
     (
-        agentos_runtime::capability::CapabilityId,
-        agentos_runtime::capability::CapabilityGeneration,
+        agentos_runtime_tokio::capability::CapabilityId,
+        agentos_runtime_tokio::capability::CapabilityGeneration,
     ),
     SidecarError,
 > {
@@ -1611,7 +1611,7 @@ fn commit_http2_capability(
 fn track_http2_capability(
     state: &mut crate::state::Http2SharedState,
     key: NativeCapabilityKey,
-    lease: agentos_runtime::capability::CapabilityLease,
+    lease: agentos_runtime_tokio::capability::CapabilityLease,
 ) -> Result<(), SidecarError> {
     match state.capability_leases.entry(key.clone()) {
         std::collections::btree_map::Entry::Vacant(entry) => {
@@ -1669,13 +1669,13 @@ fn admit_http2_session(
     shared: &Arc<Mutex<crate::state::Http2SharedState>>,
     pending: PendingCapability,
     command_tx: TokioSender<QueuedHttp2Command>,
-    fairness: agentos_runtime::fairness::FairWorkBroker,
+    fairness: agentos_runtime_tokio::fairness::FairWorkBroker,
     reservations: Vec<Reservation>,
 ) -> Result<
     (
         u64,
-        agentos_runtime::capability::CapabilityId,
-        agentos_runtime::capability::CapabilityGeneration,
+        agentos_runtime_tokio::capability::CapabilityId,
+        agentos_runtime_tokio::capability::CapabilityGeneration,
     ),
     SidecarError,
 > {
@@ -1872,7 +1872,7 @@ pub(in crate::execution) fn terminate_http2_process_state(
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_http2_client_session(
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     shared: Arc<Mutex<crate::state::Http2SharedState>>,
     session_id: u64,
     remote_addr: SocketAddr,
@@ -1892,7 +1892,7 @@ fn spawn_http2_client_session(
     };
     let vm_generation = shared.lock().map(|state| state.vm_generation).unwrap_or(0);
     let fair_runtime = runtime.clone();
-    if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Http2, async move {
+    if let Err(error) = runtime.spawn(agentos_runtime_tokio::TaskClass::Http2, async move {
             let stream = match tokio::net::TcpStream::connect(remote_addr).await {
                 Ok(stream) => stream,
                 Err(error) => {
@@ -2323,7 +2323,7 @@ fn spawn_http2_client_session(
 
 #[allow(clippy::too_many_arguments)] // one admitted HTTP/2 session's owned reactor state
 fn spawn_http2_server_session(
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     shared: Arc<Mutex<crate::state::Http2SharedState>>,
     server_id: u64,
     session_id: u64,
@@ -2344,7 +2344,7 @@ fn spawn_http2_server_session(
     };
     let vm_generation = shared.lock().map(|state| state.vm_generation).unwrap_or(0);
     let fair_runtime = runtime.clone();
-    if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Http2, async move {
+    if let Err(error) = runtime.spawn(agentos_runtime_tokio::TaskClass::Http2, async move {
             let local_addr = match stream.local_addr() {
                 Ok(addr) => addr,
                 Err(error) => {
@@ -3018,7 +3018,7 @@ fn spawn_http2_server_session(
 }
 
 fn spawn_http2_server_accept_loop(
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     shared: Arc<Mutex<crate::state::Http2SharedState>>,
     server_id: u64,
     listener: TcpListener,
@@ -3053,7 +3053,7 @@ fn spawn_http2_server_accept_loop(
     };
     let task_error_shared = Arc::clone(&shared);
     let child_runtime = runtime.clone();
-    if let Err(error) = runtime.spawn(agentos_runtime::TaskClass::Listener, async move {
+    if let Err(error) = runtime.spawn(agentos_runtime_tokio::TaskClass::Listener, async move {
         let listener = match tokio::net::TcpListener::from_std(listener) {
             Ok(listener) => listener,
             Err(error) => {
@@ -3274,7 +3274,7 @@ fn send_http2_command(
     Ok(HostServiceResponse::Deferred {
         receiver: response_rx,
         timeout: Some(session.command_timeout),
-        task_class: agentos_runtime::TaskClass::Http2,
+        task_class: agentos_runtime_tokio::TaskClass::Http2,
     })
 }
 
@@ -4230,10 +4230,11 @@ mod http2_reactor_tests {
             )],
         ));
         let (command_tx, _command_rx) = tokio_channel(1);
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("runtime")
-                .context();
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("runtime")
+        .context();
         let session = ActiveHttp2Session {
             command_tx,
             capability_id: 1,
@@ -4269,10 +4270,11 @@ mod http2_reactor_tests {
             )],
         ));
         let (command_tx, mut command_rx) = tokio_channel(1);
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("runtime")
-                .context();
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("runtime")
+        .context();
         let session = ActiveHttp2Session {
             command_tx,
             capability_id: 1,
@@ -4327,10 +4329,11 @@ mod http2_reactor_tests {
             )],
         ));
         let (command_tx, mut command_rx) = tokio_channel(1);
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("runtime")
-                .context();
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("runtime")
+        .context();
         let session = ActiveHttp2Session {
             command_tx,
             capability_id: 1,
@@ -4372,10 +4375,11 @@ mod http2_reactor_tests {
             )],
         ));
         let (command_tx, mut command_rx) = tokio_channel(1);
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("runtime")
-                .context();
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("runtime")
+        .context();
         let session = ActiveHttp2Session {
             command_tx,
             capability_id: 1,
@@ -4448,10 +4452,11 @@ mod http2_reactor_tests {
 
     #[test]
     fn http2_fair_turn_reports_actual_usage_before_next_capability_runs() {
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("runtime")
-                .context();
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("runtime")
+        .context();
         let first_generation = runtime
             .allocate_vm_generation()
             .expect("allocate first HTTP/2 fairness generation");
@@ -4539,10 +4544,11 @@ mod http2_reactor_tests {
 
     #[test]
     fn repeated_process_teardown_retires_http2_fairness_within_one_vm() {
-        let runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("runtime")
-                .context();
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("runtime")
+        .context();
         let vm_generation = runtime
             .allocate_vm_generation()
             .expect("allocate repeated teardown HTTP/2 generation");
@@ -4593,7 +4599,7 @@ mod http2_reactor_tests {
                         .fairness()
                         .acquire(vm_generation, capability_id, FairBudget::new(1, 128))
                         .await,
-                    Err(agentos_runtime::fairness::FairnessError::CapabilityRetired {
+                    Err(agentos_runtime_tokio::fairness::FairnessError::CapabilityRetired {
                         vm_generation: retired_generation,
                         capability_id: retired,
                     }) if retired_generation == vm_generation && retired == capability_id

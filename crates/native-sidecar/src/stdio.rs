@@ -70,7 +70,7 @@ struct ProtocolBudgetConfig {
     frame_path: &'static str,
     byte_path: &'static str,
     label: &'static str,
-    metric: agentos_runtime::metrics::ChannelMetricClass,
+    metric: agentos_runtime_tokio::metrics::ChannelMetricClass,
 }
 
 #[derive(Debug, Default)]
@@ -85,7 +85,7 @@ struct ProtocolBudget {
     config: ProtocolBudgetConfig,
     state: Arc<Mutex<ProtocolBudgetState>>,
     changed: Arc<Condvar>,
-    metrics: agentos_runtime::metrics::RuntimeMetrics,
+    metrics: agentos_runtime_tokio::metrics::RuntimeMetrics,
 }
 
 #[derive(Clone, Debug)]
@@ -151,7 +151,7 @@ impl ProtocolReservation {
 impl ProtocolBudget {
     fn new(
         config: ProtocolBudgetConfig,
-        metrics: agentos_runtime::metrics::RuntimeMetrics,
+        metrics: agentos_runtime_tokio::metrics::RuntimeMetrics,
     ) -> Self {
         Self {
             config,
@@ -637,7 +637,7 @@ impl ProtocolFrameWriter {
 }
 
 fn validate_protocol_transport_config(
-    protocol: &agentos_runtime::RuntimeProtocolConfig,
+    protocol: &agentos_runtime_tokio::RuntimeProtocolConfig,
     max_frame_bytes: usize,
 ) -> Result<(), io::Error> {
     for (path, bytes) in [
@@ -751,7 +751,7 @@ fn run_with_optional_control(
         compile_cache_root: Some(default_compile_cache_root()),
         ..NativeSidecarConfig::default()
     };
-    let runtime = agentos_runtime::SidecarRuntime::process(&config.runtime)?;
+    let runtime = agentos_runtime_tokio::SidecarRuntime::process(&config.runtime)?;
     let runtime_context = runtime.context();
     // Initialize the embedded V8 runtime + platform now, on the long-lived main
     // thread, so it is never first-initialized on a transient worker thread (e.g. a
@@ -766,7 +766,7 @@ fn run_with_optional_control(
 async fn run_async(
     extensions: Vec<Box<dyn Extension>>,
     config: NativeSidecarConfig,
-    runtime_context: agentos_runtime::RuntimeContext,
+    runtime_context: agentos_runtime_tokio::RuntimeContext,
     control_fd: Option<OwnedFd>,
 ) -> Result<(), Box<dyn Error>> {
     let callback_limits = FrameSidecarRequestLimits::from_config(&config);
@@ -790,7 +790,7 @@ async fn run_async(
             frame_path: "runtime.protocol.maxIngressFrames",
             byte_path: "runtime.protocol.maxIngressBytes",
             label: "stdio ordinary ingress",
-            metric: agentos_runtime::metrics::ChannelMetricClass::StdioIngress,
+            metric: agentos_runtime_tokio::metrics::ChannelMetricClass::StdioIngress,
         },
         metrics.clone(),
     );
@@ -801,7 +801,7 @@ async fn run_async(
             frame_path: "runtime.protocol.maxControlFrames",
             byte_path: "runtime.protocol.maxControlBytes",
             label: "stdio response/control ingress",
-            metric: agentos_runtime::metrics::ChannelMetricClass::StdioIngress,
+            metric: agentos_runtime_tokio::metrics::ChannelMetricClass::StdioIngress,
         },
         metrics,
     );
@@ -830,7 +830,7 @@ async fn run_async(
             frame_path: "runtime.protocol.maxEgressFrames",
             byte_path: "runtime.protocol.maxEgressBytes",
             label: "stdio ordinary egress",
-            metric: agentos_runtime::metrics::ChannelMetricClass::StdioEgress,
+            metric: agentos_runtime_tokio::metrics::ChannelMetricClass::StdioEgress,
         },
         runtime_context.metrics().clone(),
     );
@@ -841,7 +841,7 @@ async fn run_async(
             frame_path: "runtime.protocol.maxControlFrames",
             byte_path: "runtime.protocol.maxControlBytes",
             label: "stdio response/control egress",
-            metric: agentos_runtime::metrics::ChannelMetricClass::StdioEgress,
+            metric: agentos_runtime_tokio::metrics::ChannelMetricClass::StdioEgress,
         },
         runtime_context.metrics().clone(),
     );
@@ -916,7 +916,7 @@ async fn run_async(
     if let Some(mut control_writer) = control_writer.take() {
         let control_output_queue = Arc::clone(&frame_writer.output);
         let control_write_error_tx = write_error_tx.clone();
-        runtime_context.spawn(agentos_runtime::TaskClass::Runtime, async move {
+        runtime_context.spawn(agentos_runtime_tokio::TaskClass::Runtime, async move {
             while let Some(frame) = control_output_queue.recv_control().await {
                 let result = async {
                     control_writer.write_all(&frame.bytes).await?;
@@ -975,7 +975,7 @@ async fn run_async(
         let control_reader_codec = codec.clone();
         let control_reader_transport = callback_transport.clone();
         let control_read_error_tx = write_error_tx.clone();
-        runtime_context.spawn(agentos_runtime::TaskClass::Runtime, async move {
+        runtime_context.spawn(agentos_runtime_tokio::TaskClass::Runtime, async move {
             loop {
                 let frame = match read_frame_async(&control_reader_codec, &mut control_reader).await
                 {
@@ -1938,9 +1938,9 @@ mod tests {
                 frame_path: "runtime.protocol.maxIngressFrames",
                 byte_path: "runtime.protocol.maxIngressBytes",
                 label,
-                metric: agentos_runtime::metrics::ChannelMetricClass::StdioIngress,
+                metric: agentos_runtime_tokio::metrics::ChannelMetricClass::StdioIngress,
             },
-            agentos_runtime::metrics::RuntimeMetrics::new(),
+            agentos_runtime_tokio::metrics::RuntimeMetrics::new(),
         )
     }
 
@@ -2093,7 +2093,7 @@ mod tests {
 
     #[test]
     fn stdio_work_queues_are_bounded() {
-        let capacity = agentos_runtime::DEFAULT_PROTOCOL_MAX_INGRESS_FRAMES;
+        let capacity = agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_INGRESS_FRAMES;
         let (stdin_tx, _stdin_rx) =
             channel::<Result<Option<AccountedProtocolFrame>, String>>(capacity);
         for _ in 0..capacity {

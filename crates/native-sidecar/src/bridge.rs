@@ -1016,7 +1016,7 @@ where
 #[derive(Clone)]
 pub(crate) struct MountPluginContext<B> {
     pub(crate) bridge: SharedBridge<B>,
-    pub(crate) runtime_context: agentos_runtime::RuntimeContext,
+    pub(crate) runtime_context: agentos_runtime_tokio::RuntimeContext,
     pub(crate) connection_id: String,
     pub(crate) session_id: String,
     pub(crate) vm_id: String,

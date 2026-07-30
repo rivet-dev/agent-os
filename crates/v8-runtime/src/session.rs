@@ -12,12 +12,12 @@ use std::time::{Duration, Instant};
 use agentos_bridge::queue_tracker::warn_limit_exhausted;
 use agentos_bridge::queue_tracker::{register_queue, QueueGauge, TrackedLimit};
 use agentos_bridge::{bridge_contract, BridgeCallConvention};
-use agentos_runtime::accounting::{Reservation, ResourceClass, ResourceLedger};
-use agentos_runtime::readiness::{
+use agentos_runtime_tokio::accounting::{Reservation, ResourceClass, ResourceLedger};
+use agentos_runtime_tokio::readiness::{
     ReadyAcknowledgement, ReadyBatch as RuntimeReadyBatch, ReadyFlags, ReadyObservation, ReadyWake,
     SessionReadyBroker as RuntimeSessionReadyBroker,
 };
-use agentos_runtime::{RuntimeContext, VmExecutorPermit};
+use agentos_runtime_tokio::{RuntimeContext, VmExecutorPermit};
 use crossbeam_channel::{Receiver, Select, Sender};
 
 use crate::execution;
@@ -204,7 +204,7 @@ impl SessionReadiness {
     fn drain_signals(
         &self,
         batch: &RuntimeReadyBatch,
-    ) -> Result<Vec<agentos_runtime::readiness::SignalObservation>, String> {
+    ) -> Result<Vec<agentos_runtime_tokio::readiness::SignalObservation>, String> {
         self.broker
             .drain_signals(batch.generation, batch.epoch, self.max_batch_handles)
             .map_err(|error| error.to_string())
@@ -1136,7 +1136,7 @@ struct SessionEntry {
     /// Durable socket readiness and its dedicated capacity-one wake lane.
     ready_broker: Arc<SessionReadiness>,
     #[cfg(test)]
-    session_resources: Arc<agentos_runtime::accounting::ResourceLedger>,
+    session_resources: Arc<agentos_runtime_tokio::accounting::ResourceLedger>,
 }
 
 /// Deferred shutdown work for a session that has already been removed from
@@ -2112,7 +2112,7 @@ impl SessionManager {
     pub fn session_resources(
         &self,
         session_id: &str,
-    ) -> Option<Arc<agentos_runtime::accounting::ResourceLedger>> {
+    ) -> Option<Arc<agentos_runtime_tokio::accounting::ResourceLedger>> {
         self.sessions
             .get(session_id)
             .map(|entry| Arc::clone(&entry.session_resources))
@@ -2341,7 +2341,7 @@ fn session_thread(
     } = assignment;
     #[cfg(not(test))]
     let execution_task_owner =
-        output_generation.map(|generation| agentos_runtime::TaskOwner::Vm { generation });
+        output_generation.map(|generation| agentos_runtime_tokio::TaskOwner::Vm { generation });
     #[cfg(test)]
     let _ = (
         heap_limit_mb,
@@ -4106,13 +4106,13 @@ mod tests {
             );
             return;
         }
-        let mut config = agentos_runtime::RuntimeConfig {
+        let mut config = agentos_runtime_tokio::RuntimeConfig {
             max_active_vm_executors: 3,
             vm_executor_teardown_timeout_ms: 23,
-            ..agentos_runtime::RuntimeConfig::default()
+            ..agentos_runtime_tokio::RuntimeConfig::default()
         };
         config.resources.max_handle_commands = 7;
-        let runtime = agentos_runtime::SidecarRuntime::process(&config)
+        let runtime = agentos_runtime_tokio::SidecarRuntime::process(&config)
             .expect("configured process runtime")
             .context();
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
@@ -4655,7 +4655,7 @@ mod tests {
         assert!(batch.signals_ready);
         assert_eq!(
             broker.drain_signals(&batch).expect("drain signal"),
-            vec![agentos_runtime::readiness::SignalObservation {
+            vec![agentos_runtime_tokio::readiness::SignalObservation {
                 signal: 15,
                 delivery_token: 29,
             }]

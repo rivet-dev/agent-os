@@ -21,7 +21,7 @@ serde_bare = "0.5"
 base64 = "0.22"
 sha2 = "0.10"
 agentos-native-sidecar = { workspace = true }
-agentos-runtime = { workspace = true }
+agentos-runtime-tokio = { workspace = true }
 chrono = { version = "0.4", features = ["clock"] }
 nix = { version = "0.29", features = ["fs"] }
 tokio = { version = "1", features = ["sync", "time", "macros"] }

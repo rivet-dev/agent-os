@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use agentos_execution::{JavascriptExecutionEngine, PythonExecutionEngine, WasmExecutionEngine};
-use agentos_runtime::{RuntimeConfig, RuntimeContext, SidecarRuntime};
+use agentos_runtime_tokio::{RuntimeConfig, RuntimeContext, SidecarRuntime};
 
 pub fn runtime_context() -> RuntimeContext {
     SidecarRuntime::process(&RuntimeConfig::default())

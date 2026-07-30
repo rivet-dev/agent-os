@@ -135,7 +135,7 @@ version = "0.0.1"
 dependencies = [
  "agentos-bridge",
  "agentos-build-support",
- "agentos-runtime",
+ "agentos-runtime-tokio",
  "agentos-v8-runtime",
  "agentos-wasm-abi-generator",
  "base64",
@@ -186,7 +186,7 @@ dependencies = [
  "agentos-execution",
  "agentos-kernel",
  "agentos-native-sidecar-core",
- "agentos-runtime",
+ "agentos-runtime-tokio",
  "agentos-sidecar-protocol",
  "agentos-vfs",
  "agentos-vfs-core",
@@ -294,7 +294,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentos-runtime"
+name = "agentos-runtime-tokio"
 version = "0.0.1"
 dependencies = [
  "agentos-resource",
@@ -310,7 +310,7 @@ dependencies = [
  "agentos-bridge",
  "agentos-native-sidecar",
  "agentos-protocol",
- "agentos-runtime",
+ "agentos-runtime-tokio",
  "agentos-vm-config",
  "async-trait",
  "base64",
@@ -386,7 +386,7 @@ version = "0.0.1"
 dependencies = [
  "agentos-bridge",
  "agentos-build-support",
- "agentos-runtime",
+ "agentos-runtime-tokio",
  "cc",
  "ciborium",
  "crossbeam-channel",
@@ -403,7 +403,7 @@ dependencies = [
 name = "agentos-vfs"
 version = "0.0.1"
 dependencies = [
- "agentos-runtime",
+ "agentos-runtime-tokio",
  "agentos-vfs-core",
  "async-trait",
  "aws-config",
@@ -421,7 +421,7 @@ dependencies = [
 name = "agentos-vfs-core"
 version = "0.0.1"
 dependencies = [
- "agentos-runtime",
+ "agentos-runtime-tokio",
  "anyhow",
  "async-trait",
  "base64",

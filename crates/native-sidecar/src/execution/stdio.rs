@@ -1055,10 +1055,12 @@ mod tests {
     use agentos_kernel::permissions::Permissions;
     use agentos_kernel::vfs::MemoryFileSystem;
 
-    fn test_runtime_context() -> agentos_runtime::RuntimeContext {
-        agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-            .expect("create test runtime")
-            .context()
+    fn test_runtime_context() -> agentos_runtime_tokio::RuntimeContext {
+        agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create test runtime")
+        .context()
     }
 
     #[test]
@@ -1121,7 +1123,7 @@ mod tests {
             kernel_handle,
             test_runtime_context(),
             crate::limits::VmLimits::default(),
-            agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
+            agentos_runtime_tokio::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
             GuestRuntimeKind::WebAssembly,
             ActiveExecution::Binding(BindingExecution::default()),
         )

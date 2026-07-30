@@ -116,7 +116,7 @@ const UDP_MAX_DATAGRAM_BYTES: usize = 64 * 1024;
 pub(in crate::execution) struct ActiveUdpPollHandle {
     pub(in crate::execution) native_commands: Option<TokioSender<NativeUdpCommand>>,
     resources: Arc<ResourceLedger>,
-    runtime_context: agentos_runtime::RuntimeContext,
+    runtime_context: agentos_runtime_tokio::RuntimeContext,
     reactor_limits: ReactorIoLimits,
     fairness_identity: Arc<OnceLock<(u64, u64)>>,
     fairness_identity_committed: Arc<tokio::sync::Notify>,
@@ -237,7 +237,7 @@ pub(in crate::execution) enum ActiveUdpValueResult {
 
 fn udp_value_service_response(
     result: ActiveUdpValueResult,
-    task_class: agentos_runtime::TaskClass,
+    task_class: agentos_runtime_tokio::TaskClass,
 ) -> HostServiceResponse {
     match result {
         ActiveUdpValueResult::Immediate(value) => HostServiceResponse::Json(value),
@@ -263,7 +263,7 @@ fn udp_send_service_response(result: ActiveUdpSendResult) -> HostServiceResponse
         ActiveUdpSendResult::Deferred { receiver } => HostServiceResponse::Deferred {
             receiver,
             timeout: None,
-            task_class: agentos_runtime::TaskClass::Udp,
+            task_class: agentos_runtime_tokio::TaskClass::Udp,
         },
     }
 }
@@ -505,7 +505,7 @@ fn apply_native_udp_option(
 }
 
 async fn acquire_native_udp_fair_turn(
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     limits: ReactorIoLimits,
     fairness_identity: &OnceLock<(u64, u64)>,
     fairness_identity_committed: &tokio::sync::Notify,
@@ -527,7 +527,7 @@ async fn acquire_native_udp_fair_turn(
 }
 
 async fn run_native_udp_send_fair_step<F>(
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     limits: ReactorIoLimits,
     fairness_identity: &OnceLock<(u64, u64)>,
     fairness_identity_committed: &tokio::sync::Notify,
@@ -564,7 +564,7 @@ where
 
 async fn send_native_udp_datagram_fair(
     socket: &tokio::net::UdpSocket,
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     limits: ReactorIoLimits,
     fairness_identity: &OnceLock<(u64, u64)>,
     fairness_identity_committed: &tokio::sync::Notify,
@@ -595,7 +595,7 @@ async fn send_native_udp_datagram_fair(
 }
 
 async fn run_native_udp_connect_fair_step<F>(
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     limits: ReactorIoLimits,
     fairness_identity: &OnceLock<(u64, u64)>,
     fairness_identity_committed: &tokio::sync::Notify,
@@ -622,7 +622,7 @@ where
 
 async fn connect_native_udp_socket_fair(
     socket: &tokio::net::UdpSocket,
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     limits: ReactorIoLimits,
     fairness_identity: &OnceLock<(u64, u64)>,
     fairness_identity_committed: &tokio::sync::Notify,
@@ -666,7 +666,7 @@ struct NativeUdpOwnerRegistration {
 struct NativeUdpOwnerTask {
     socket: tokio::net::UdpSocket,
     commands: TokioReceiver<NativeUdpCommand>,
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     registration: NativeUdpOwnerRegistration,
 }
 
@@ -1088,7 +1088,7 @@ async fn run_native_udp_owner(task: NativeUdpOwnerTask) {
 }
 
 fn spawn_native_udp_owner(
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     socket: UdpSocket,
     registration: NativeUdpOwnerRegistration,
 ) -> Result<TokioSender<NativeUdpCommand>, SidecarError> {
@@ -1098,7 +1098,7 @@ fn spawn_native_udp_owner(
     let (commands, receiver) = tokio_channel(capacity);
     let task_runtime = runtime.clone();
     runtime
-        .spawn(agentos_runtime::TaskClass::Udp, async move {
+        .spawn(agentos_runtime_tokio::TaskClass::Udp, async move {
             run_native_udp_owner(NativeUdpOwnerTask {
                 socket,
                 commands: receiver,
@@ -1233,8 +1233,8 @@ impl ActiveUdpSocket {
         &self,
         session: Option<ExecutionWakeHandle>,
         identity: Option<(
-            agentos_runtime::capability::CapabilityId,
-            agentos_runtime::capability::CapabilityGeneration,
+            agentos_runtime_tokio::capability::CapabilityId,
+            agentos_runtime_tokio::capability::CapabilityGeneration,
         )>,
         owner_notify: Arc<tokio::sync::Notify>,
     ) {
@@ -1242,7 +1242,7 @@ impl ActiveUdpSocket {
             session,
             identity,
             owner_notify,
-            agentos_runtime::readiness::ReadyFlags::DATAGRAM,
+            agentos_runtime_tokio::readiness::ReadyFlags::DATAGRAM,
         );
     }
 
@@ -1261,7 +1261,7 @@ impl ActiveUdpSocket {
         kernel_pid: u32,
         family: UdpFamily,
         resources: Arc<ResourceLedger>,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
         let spec = match family {
@@ -1338,7 +1338,7 @@ impl ActiveUdpSocket {
 
     pub(in crate::execution) fn retain_description_lease(
         &self,
-        lease: Arc<agentos_runtime::capability::CapabilityLease>,
+        lease: Arc<agentos_runtime_tokio::capability::CapabilityLease>,
     ) {
         self.description_lease.retain(lease);
     }
@@ -2378,7 +2378,7 @@ where
             })?;
             Ok(udp_value_service_response(
                 result,
-                agentos_runtime::TaskClass::Udp,
+                agentos_runtime_tokio::TaskClass::Udp,
             ))
         }
         DgramOperation::Disconnect { socket_id } => {
@@ -2388,7 +2388,7 @@ where
             let result = socket.disconnect(kernel, process.kernel_pid)?;
             Ok(udp_value_service_response(
                 result,
-                agentos_runtime::TaskClass::Udp,
+                agentos_runtime_tokio::TaskClass::Udp,
             ))
         }
         DgramOperation::RemoteAddress { socket_id } => {
@@ -2398,7 +2398,7 @@ where
             let result = socket.remote_address()?;
             Ok(udp_value_service_response(
                 result,
-                agentos_runtime::TaskClass::Udp,
+                agentos_runtime_tokio::TaskClass::Udp,
             ))
         }
         DgramOperation::Close { socket_id } => {
@@ -2437,7 +2437,7 @@ where
             let result = socket.set_option(kernel, process.kernel_pid, socket_paths, option)?;
             Ok(udp_value_service_response(
                 result,
-                agentos_runtime::TaskClass::Udp,
+                agentos_runtime_tokio::TaskClass::Udp,
             ))
         }
         DgramOperation::SetBufferSize {
@@ -2451,7 +2451,7 @@ where
             let result = socket.set_buffer_size(&which, size)?;
             Ok(udp_value_service_response(
                 result,
-                agentos_runtime::TaskClass::Udp,
+                agentos_runtime_tokio::TaskClass::Udp,
             ))
         }
         DgramOperation::GetBufferSize { socket_id, which } => {
@@ -2461,7 +2461,7 @@ where
             let result = socket.get_buffer_size(&which)?;
             Ok(udp_value_service_response(
                 result,
-                agentos_runtime::TaskClass::Udp,
+                agentos_runtime_tokio::TaskClass::Udp,
             ))
         }
     }
@@ -2470,13 +2470,14 @@ where
 #[cfg(test)]
 mod native_udp_owner_tests {
     use super::*;
-    use agentos_runtime::accounting::ResourceLimit;
+    use agentos_runtime_tokio::accounting::ResourceLimit;
 
     #[test]
     fn would_block_udp_step_releases_the_process_fairness_turn() {
-        let process_runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create UDP fairness test runtime");
+        let process_runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create UDP fairness test runtime");
         let runtime = process_runtime.context();
         let first_generation = runtime
             .allocate_vm_generation()
@@ -2539,9 +2540,10 @@ mod native_udp_owner_tests {
 
     #[test]
     fn fair_udp_connect_and_send_use_real_nonblocking_socket_steps() {
-        let process_runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create UDP socket-step test runtime");
+        let process_runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create UDP socket-step test runtime");
         let runtime = process_runtime.context();
         let generation = runtime
             .allocate_vm_generation()
@@ -2640,9 +2642,10 @@ mod native_udp_owner_tests {
 
     #[test]
     fn receive_admission_pauses_before_recv_and_resumes_with_one_coalesced_wake() {
-        let process_runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create UDP owner test runtime");
+        let process_runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create UDP owner test runtime");
         let resources = Arc::new(ResourceLedger::child(
             "udp-owner-test",
             [

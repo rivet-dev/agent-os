@@ -21,7 +21,7 @@ use agentos_native_sidecar::{
 };
 use agentos_protocol::generated::v1::*;
 use agentos_protocol::ACP_EXTENSION_NAMESPACE;
-use agentos_runtime::accounting::{LimitError, ResourceClass};
+use agentos_runtime_tokio::accounting::{LimitError, ResourceClass};
 use base64::Engine as _;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};

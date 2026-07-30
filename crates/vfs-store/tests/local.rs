@@ -1,4 +1,4 @@
-use agentos_runtime::{RuntimeConfig, SidecarRuntime};
+use agentos_runtime_tokio::{RuntimeConfig, SidecarRuntime};
 use agentos_vfs::{FileBlockStore, SqliteMetadataStore};
 use rusqlite::Connection;
 use vfs::adapter::MountedEngineFileSystem;
@@ -8,7 +8,7 @@ use vfs::engine::{BlockKey, BlockStore, VirtualFileSystem, S_IFBLK, S_IFCHR, S_I
 use vfs::posix::MountedFileSystem;
 use vfs::posix::{MemoryFileSystem, MountOptions, MountTable};
 
-fn test_runtime_context() -> agentos_runtime::RuntimeContext {
+fn test_runtime_context() -> agentos_runtime_tokio::RuntimeContext {
     SidecarRuntime::process(&RuntimeConfig::default())
         .expect("create test runtime")
         .context()

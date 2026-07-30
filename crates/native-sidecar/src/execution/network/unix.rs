@@ -508,7 +508,7 @@ impl ActiveUnixSocket {
         host_path: &Path,
         guest_path: &str,
         resources: Arc<ResourceLedger>,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
         let stream = UnixStream::connect(host_path).map_err(sidecar_net_error)?;
@@ -529,7 +529,7 @@ impl ActiveUnixSocket {
         local_path: Option<String>,
         remote_path: Option<String>,
         resources: Arc<ResourceLedger>,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
         Self::from_stream_with_metadata(
@@ -558,7 +558,7 @@ impl ActiveUnixSocket {
         local_registry_binding_id: Option<String>,
         private_host_path: Option<PathBuf>,
         resources: Arc<ResourceLedger>,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
         let read_stream = stream.try_clone().map_err(sidecar_net_error)?;
@@ -690,7 +690,7 @@ impl ActiveUnixSocket {
 
     pub(in crate::execution) fn retain_description_lease(
         &self,
-        lease: Arc<agentos_runtime::capability::CapabilityLease>,
+        lease: Arc<agentos_runtime_tokio::capability::CapabilityLease>,
     ) {
         self.description_lease.retain(lease);
     }
@@ -699,8 +699,8 @@ impl ActiveUnixSocket {
         &self,
         session: Option<ExecutionWakeHandle>,
         identity: Option<(
-            agentos_runtime::capability::CapabilityId,
-            agentos_runtime::capability::CapabilityGeneration,
+            agentos_runtime_tokio::capability::CapabilityId,
+            agentos_runtime_tokio::capability::CapabilityGeneration,
         )>,
         owner_notify: Arc<tokio::sync::Notify>,
     ) {
@@ -708,7 +708,7 @@ impl ActiveUnixSocket {
             session,
             identity,
             owner_notify,
-            agentos_runtime::readiness::ReadyFlags::READABLE,
+            agentos_runtime_tokio::readiness::ReadyFlags::READABLE,
         );
     }
 
@@ -1132,7 +1132,7 @@ pub(in crate::execution) fn defer_native_unix_connect(
         .pending_net_connects
         .insert(request_id, Arc::clone(&connected));
     let (respond_to, receiver) = tokio::sync::oneshot::channel();
-    let spawn = runtime.spawn(agentos_runtime::TaskClass::Socket, async move {
+    let spawn = runtime.spawn(agentos_runtime_tokio::TaskClass::Socket, async move {
         let result = match crate::execution::operation_deadline_timeout(
             "Unix socket connect",
             limits.operation_deadline,
@@ -1198,7 +1198,7 @@ pub(in crate::execution) fn defer_native_unix_connect(
     Ok(HostServiceResponse::Deferred {
         receiver,
         timeout: None,
-        task_class: agentos_runtime::TaskClass::Socket,
+        task_class: agentos_runtime_tokio::TaskClass::Socket,
     })
 }
 
@@ -1213,7 +1213,7 @@ impl ActiveUnixListener {
         registry_binding_id: String,
         private_host_path: Option<PathBuf>,
         guest_node_path: Option<String>,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
         backlog: Option<u32>,
     ) -> Self {
         let event_pusher = SocketReadinessSubscribers::new(runtime_context.resources());
@@ -1250,7 +1250,7 @@ impl ActiveUnixListener {
         host_path: &Path,
         guest_path: &str,
         registry_binding_id: String,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
     ) -> Result<Self, SidecarError> {
         if let Some(parent) = host_path.parent() {
             fs::create_dir_all(parent).map_err(sidecar_net_error)?;
@@ -1276,7 +1276,7 @@ impl ActiveUnixListener {
         host_name: &[u8],
         guest_name: &[u8],
         registry_binding_id: String,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
     ) -> Result<Self, SidecarError> {
         let socket = Socket::new(Domain::UNIX, Type::STREAM, None).map_err(sidecar_net_error)?;
         let address = UnixAddr::new_abstract(host_name)
@@ -1300,7 +1300,7 @@ impl ActiveUnixListener {
         _host_name: &[u8],
         _guest_name: &[u8],
         _registry_binding_id: String,
-        _runtime_context: agentos_runtime::RuntimeContext,
+        _runtime_context: agentos_runtime_tokio::RuntimeContext,
     ) -> Result<Self, SidecarError> {
         Err(abstract_unix_unsupported())
     }
@@ -1311,7 +1311,7 @@ impl ActiveUnixListener {
         context: SocketPathContext,
         backlog: Option<u32>,
         capabilities: CapabilityRegistry,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
         set_guest_unix_pending_connection_limit(
@@ -1383,7 +1383,7 @@ impl ActiveUnixListener {
         context: SocketPathContext,
         backlog: Option<u32>,
         capabilities: CapabilityRegistry,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
         if let Some(parent) = host_path.parent() {
@@ -1415,7 +1415,7 @@ impl ActiveUnixListener {
         context: SocketPathContext,
         backlog: Option<u32>,
         capabilities: CapabilityRegistry,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
         let socket = Socket::new(Domain::UNIX, Type::STREAM, None).map_err(sidecar_net_error)?;
@@ -1451,7 +1451,7 @@ impl ActiveUnixListener {
         _context: SocketPathContext,
         _backlog: Option<u32>,
         _capabilities: CapabilityRegistry,
-        _runtime_context: agentos_runtime::RuntimeContext,
+        _runtime_context: agentos_runtime_tokio::RuntimeContext,
         _reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
         Err(abstract_unix_unsupported())
@@ -1468,7 +1468,7 @@ impl ActiveUnixListener {
         context: SocketPathContext,
         backlog: Option<u32>,
         capabilities: CapabilityRegistry,
-        runtime_context: agentos_runtime::RuntimeContext,
+        runtime_context: agentos_runtime_tokio::RuntimeContext,
         reactor_limits: ReactorIoLimits,
     ) -> Result<Self, SidecarError> {
         let accept_capacity = listener_accept_capacity(backlog, reactor_limits);
@@ -1566,8 +1566,8 @@ impl ActiveUnixListener {
         &self,
         session: Option<ExecutionWakeHandle>,
         identity: Option<(
-            agentos_runtime::capability::CapabilityId,
-            agentos_runtime::capability::CapabilityGeneration,
+            agentos_runtime_tokio::capability::CapabilityId,
+            agentos_runtime_tokio::capability::CapabilityGeneration,
         )>,
         owner_notify: Arc<tokio::sync::Notify>,
     ) {
@@ -1575,7 +1575,7 @@ impl ActiveUnixListener {
             session,
             identity,
             owner_notify,
-            agentos_runtime::readiness::ReadyFlags::ACCEPT,
+            agentos_runtime_tokio::readiness::ReadyFlags::ACCEPT,
         );
     }
 
@@ -1674,7 +1674,7 @@ impl ActiveUnixListener {
 
     pub(in crate::execution) fn retain_description_lease(
         &self,
-        lease: Arc<agentos_runtime::capability::CapabilityLease>,
+        lease: Arc<agentos_runtime_tokio::capability::CapabilityLease>,
     ) {
         self.description_lease.retain(lease);
     }
@@ -1885,9 +1885,10 @@ mod transferred_unix_alias_transport_tests {
     use super::*;
 
     fn exercise_surviving_unix_alias(close_sender: bool) {
-        let process_runtime =
-            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
-                .expect("create transferred Unix test runtime");
+        let process_runtime = agentos_runtime_tokio::SidecarRuntime::process(
+            &agentos_runtime_tokio::RuntimeConfig::default(),
+        )
+        .expect("create transferred Unix test runtime");
         let process_context = process_runtime.context();
         let generation = process_context
             .allocate_vm_generation()
@@ -1985,7 +1986,7 @@ mod transferred_unix_alias_transport_tests {
 }
 
 fn spawn_unix_plain_socket_transport(
-    runtime: &agentos_runtime::RuntimeContext,
+    runtime: &agentos_runtime_tokio::RuntimeContext,
     stream: UnixStream,
     resources: &Arc<ResourceLedger>,
     limits: ReactorIoLimits,
@@ -1996,7 +1997,7 @@ fn spawn_unix_plain_socket_transport(
     let (commands, receiver) = tokio_channel(plain_socket_command_capacity(resources)?);
     let cancellation = runtime.clone();
     runtime
-        .spawn(agentos_runtime::TaskClass::Socket, async move {
+        .spawn(agentos_runtime_tokio::TaskClass::Socket, async move {
             let transport_runtime = cancellation.clone();
             let transport = async move {
                 match tokio::net::UnixStream::from_std(stream) {
@@ -2025,7 +2026,7 @@ fn spawn_unix_plain_socket_transport(
 
 #[allow(clippy::too_many_arguments)] // one admitted listener's owned reactor state
 fn spawn_unix_listener_acceptor(
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     listener: UnixListener,
     guest_path: String,
     local_abstract_path_hex: Option<String>,
@@ -2045,7 +2046,7 @@ fn spawn_unix_listener_acceptor(
     );
     let completion = UnixListenerTaskCompletion(Some(close_complete));
     runtime
-        .spawn(agentos_runtime::TaskClass::Listener, async move {
+        .spawn(agentos_runtime_tokio::TaskClass::Listener, async move {
             let _completion = completion;
             let listener = match tokio::io::unix::AsyncFd::new(listener) {
                 Ok(listener) => listener,
@@ -2185,7 +2186,8 @@ impl Drop for UnixListenerTaskCompletion {
 
 fn push_listener_event(event_pusher: &Arc<SocketReadinessSubscribers>) {
     for target in event_pusher.targets() {
-        if let Err(error) = target.publish_readiness(agentos_runtime::readiness::ReadyFlags::ACCEPT)
+        if let Err(error) =
+            target.publish_readiness(agentos_runtime_tokio::readiness::ReadyFlags::ACCEPT)
         {
             eprintln!("ERR_AGENTOS_NET_LISTENER_WAKE: failed to queue listener wake: {error}");
         }
@@ -2207,10 +2209,10 @@ pub(in crate::execution) fn push_socket_event(
         return;
     }
     let flags = match event {
-        "data" => agentos_runtime::readiness::ReadyFlags::READABLE,
-        "end" => agentos_runtime::readiness::ReadyFlags::END,
-        "error" => agentos_runtime::readiness::ReadyFlags::ERROR,
-        "close" => agentos_runtime::readiness::ReadyFlags::CLOSE,
+        "data" => agentos_runtime_tokio::readiness::ReadyFlags::READABLE,
+        "end" => agentos_runtime_tokio::readiness::ReadyFlags::END,
+        "error" => agentos_runtime_tokio::readiness::ReadyFlags::ERROR,
+        "close" => agentos_runtime_tokio::readiness::ReadyFlags::CLOSE,
         _ => {
             NET_TCP_TRACE_COUNTERS
                 .socket_read_push_errors
@@ -2245,7 +2247,7 @@ pub(in crate::execution) fn push_socket_event(
     reason = "the reader task receives explicit shared lifecycle flags owned by its socket"
 )]
 fn spawn_unix_socket_reader(
-    runtime: agentos_runtime::RuntimeContext,
+    runtime: agentos_runtime_tokio::RuntimeContext,
     stream: UnixStream,
     sender: AsyncCompletionSender<TcpSocketEvent>,
     event_pusher: Arc<SocketReadinessSubscribers>,
@@ -2264,7 +2266,7 @@ fn spawn_unix_socket_reader(
         reserve_socket_read_buffer(&resources, limits.byte_quantum)?;
     let cancellation = runtime.clone();
     runtime
-        .spawn(agentos_runtime::TaskClass::Socket, async move {
+        .spawn(agentos_runtime_tokio::TaskClass::Socket, async move {
             let reader_runtime = cancellation.clone();
             let reader = async move {
                 if let Err(error) = stream.set_nonblocking(true) {
