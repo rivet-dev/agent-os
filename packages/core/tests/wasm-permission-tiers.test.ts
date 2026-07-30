@@ -6,12 +6,12 @@ import type { KernelSpawnOptions } from "../src/runtime-compat.js";
 import type {
 	AuthenticatedSession,
 	CreatedVm,
-	NativeSidecarProcessClient,
+	SidecarProcess,
 } from "../src/sidecar/rpc-client.js";
-import { NativeSidecarKernelProxy } from "../src/sidecar/rpc-client.js";
+import { SidecarKernelProxy } from "../src/sidecar/rpc-client.js";
 
 describe("WASM command permission tiers", () => {
-	let proxy: NativeSidecarKernelProxy | null = null;
+	let proxy: SidecarKernelProxy | null = null;
 	let fixtureRoot: string | null = null;
 
 	afterEach(async () => {
@@ -42,7 +42,7 @@ describe("WASM command permission tiers", () => {
 			dispose: vi.fn(async () => {
 				stopped = true;
 			}),
-		} as unknown as NativeSidecarProcessClient;
+		} as unknown as SidecarProcess;
 
 		return { client, execute };
 	}
@@ -51,7 +51,7 @@ describe("WASM command permission tiers", () => {
 		fixtureRoot = mkdtempSync(join(tmpdir(), "agentos-wasm-tiers-"));
 		const { client, execute } = createMockClient();
 
-		proxy = new NativeSidecarKernelProxy({
+		proxy = new SidecarKernelProxy({
 			client,
 			session: {
 				connectionId: "conn-1",
@@ -83,7 +83,7 @@ describe("WASM command permission tiers", () => {
 		fixtureRoot = mkdtempSync(join(tmpdir(), "agentos-wasm-tiers-"));
 		const { client } = createMockClient();
 
-		proxy = new NativeSidecarKernelProxy({
+		proxy = new SidecarKernelProxy({
 			client,
 			session: {
 				connectionId: "conn-1",

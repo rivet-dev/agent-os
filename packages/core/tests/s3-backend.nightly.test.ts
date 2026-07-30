@@ -1,4 +1,4 @@
-import { chunkedS3MountPlugin } from "@rivet-dev/agentos-runtime-core/descriptors";
+import { chunkedS3MountPlugin } from "@rivet-dev/agentos-core/descriptors";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/index.js";
 import type { MockS3Request, MockS3ServerHandle } from "./helpers/mock-s3.js";

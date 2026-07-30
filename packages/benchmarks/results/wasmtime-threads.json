@@ -1,0 +1,1025 @@
+{
+  "metadata": {
+    "startedAt": "2026-07-24T12:02:00.118Z",
+    "hostname": "nathan-dev",
+    "platform": "linux",
+    "arch": "x64",
+    "cpuModel": "12th Gen Intel(R) Core(TM) i7-12700KF",
+    "logicalCpus": 20,
+    "totalMemoryBytes": 67170398208,
+    "node": "v24.18.0",
+    "sidecar": {
+      "path": "/tmp/agentos-wasmtime-validation.OpTF6J/release/agentos-vm",
+      "profile": "release",
+      "mtimeMs": 1784894193003.0815,
+      "mtimeIso": "2026-07-24T04:56:33.003-07:00",
+      "sizeBytes": 147510200
+    },
+    "fixture": {
+      "path": "/home/nathan/.herdr/workspaces/agent-os/wasmtime-executor/toolchain/c/build/pthread_benchmark.wasm",
+      "sizeBytes": 17082,
+      "sha256": "f9dc5046b1e9d0316e0ea82796b391adf332fde05a50cd041772656a53406a6b"
+    },
+    "startupSamples": 5,
+    "throughputSamples": 20,
+    "memorySamples": 3,
+    "threadCounts": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "concurrencyLevels": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "concurrentWorkerThreadsPerGroup": 2,
+    "concurrentThreadsPerGroup": 3,
+    "maxThreadsPerGroup": 9,
+    "maxConcurrentThreads": 24,
+    "backend": "wasmtime-threads",
+    "aot": false,
+    "pooling": false,
+    "wizer": false,
+    "liveSnapshots": false
+  },
+  "startup": [
+    {
+      "index": 0,
+      "vmSetupMs": 587.585173,
+      "readyMs": 46.766485999999986,
+      "totalMs": 59.00767099999996,
+      "exitCode": 0,
+      "stdout": "ready:4\ndone:4\n",
+      "stderr": "",
+      "baseline": {
+        "rssBytes": 31240192,
+        "peakRssBytes": 31240192,
+        "pssBytes": 31395840,
+        "virtualBytes": 1324572672,
+        "minorFaults": 2484,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 17,
+        "pids": [
+          1349139
+        ]
+      },
+      "retained": {
+        "rssBytes": 35844096,
+        "peakRssBytes": 35844096,
+        "pssBytes": 35987456,
+        "virtualBytes": 1393946624,
+        "minorFaults": 2619,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349139
+        ]
+      },
+      "drainMs": 0.5032750000000306,
+      "passed": true
+    },
+    {
+      "index": 1,
+      "vmSetupMs": 550.755749,
+      "readyMs": 41.91546399999993,
+      "totalMs": 53.89832300000012,
+      "exitCode": 0,
+      "stdout": "ready:4\ndone:4\n",
+      "stderr": "",
+      "baseline": {
+        "rssBytes": 31260672,
+        "peakRssBytes": 31260672,
+        "pssBytes": 31558656,
+        "virtualBytes": 1324568576,
+        "minorFaults": 2488,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 17,
+        "pids": [
+          1349313
+        ]
+      },
+      "retained": {
+        "rssBytes": 35643392,
+        "peakRssBytes": 35643392,
+        "pssBytes": 35692544,
+        "virtualBytes": 1393950720,
+        "minorFaults": 2619,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349313
+        ]
+      },
+      "drainMs": 0.3918410000001131,
+      "passed": true
+    },
+    {
+      "index": 2,
+      "vmSetupMs": 547.3569,
+      "readyMs": 39.07387800000015,
+      "totalMs": 51.024339000000055,
+      "exitCode": 0,
+      "stdout": "ready:4\ndone:4\n",
+      "stderr": "",
+      "baseline": {
+        "rssBytes": 31399936,
+        "peakRssBytes": 31399936,
+        "pssBytes": 31548416,
+        "virtualBytes": 1324568576,
+        "minorFaults": 2488,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 17,
+        "pids": [
+          1349471
+        ]
+      },
+      "retained": {
+        "rssBytes": 35647488,
+        "peakRssBytes": 35647488,
+        "pssBytes": 35686400,
+        "virtualBytes": 1393938432,
+        "minorFaults": 2617,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349471
+        ]
+      },
+      "drainMs": 0.5224240000002283,
+      "passed": true
+    },
+    {
+      "index": 3,
+      "vmSetupMs": 538.5855139999999,
+      "readyMs": 37.114206000000195,
+      "totalMs": 49.395412999999735,
+      "exitCode": 0,
+      "stdout": "ready:4\ndone:4\n",
+      "stderr": "",
+      "baseline": {
+        "rssBytes": 29020160,
+        "peakRssBytes": 29020160,
+        "pssBytes": 28893184,
+        "virtualBytes": 1324568576,
+        "minorFaults": 2485,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 17,
+        "pids": [
+          1349556
+        ]
+      },
+      "retained": {
+        "rssBytes": 33988608,
+        "peakRssBytes": 33988608,
+        "pssBytes": 33817600,
+        "virtualBytes": 1393946624,
+        "minorFaults": 2627,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349556
+        ]
+      },
+      "drainMs": 0.7181679999998778,
+      "passed": true
+    },
+    {
+      "index": 4,
+      "vmSetupMs": 538.2035410000003,
+      "readyMs": 37.17755699999998,
+      "totalMs": 48.443255000000136,
+      "exitCode": 0,
+      "stdout": "ready:4\ndone:4\n",
+      "stderr": "",
+      "baseline": {
+        "rssBytes": 31399936,
+        "peakRssBytes": 31399936,
+        "pssBytes": 31548416,
+        "virtualBytes": 1324572672,
+        "minorFaults": 2490,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 17,
+        "pids": [
+          1349674
+        ]
+      },
+      "retained": {
+        "rssBytes": 35647488,
+        "peakRssBytes": 35647488,
+        "pssBytes": 35682304,
+        "virtualBytes": 1393946624,
+        "minorFaults": 2618,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349674
+        ]
+      },
+      "drainMs": 0.6373389999998835,
+      "passed": true
+    }
+  ],
+  "throughput": {
+    "workerThreadsPerExecution": 4,
+    "totalGuestThreadsPerExecution": 5,
+    "durationsMs": [
+      50.49886199999992,
+      47.57139500000039,
+      58.89748899999995,
+      48.702485000000706,
+      52.55653600000005,
+      59.32679300000018,
+      53.054433999999674,
+      47.60851400000047,
+      49.29085499999928,
+      66.33966400000008,
+      49.45060100000046,
+      56.42351899999994,
+      65.78655000000072,
+      59.055771999999706,
+      54.99610799999937,
+      50.241649999999936,
+      49.4222749999999,
+      45.90660000000025,
+      53.57452000000012,
+      56.84272599999986
+    ],
+    "p50Ms": 52.55653600000005,
+    "p95Ms": 65.78655000000072,
+    "executionsPerSecond": 18.59518322200352,
+    "passed": true
+  },
+  "memory": [
+    {
+      "threadCount": 1,
+      "sample": 0,
+      "baseline": {
+        "rssBytes": 35717120,
+        "peakRssBytes": 35778560,
+        "pssBytes": 36096000,
+        "virtualBytes": 1468370944,
+        "minorFaults": 2982,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349805
+        ]
+      },
+      "live": {
+        "rssBytes": 62398464,
+        "peakRssBytes": 62402560,
+        "pssBytes": 53777408,
+        "virtualBytes": 6790393856,
+        "minorFaults": 5304,
+        "majorFaults": 0,
+        "processCount": 2,
+        "threadCount": 32,
+        "pids": [
+          1349805,
+          1350528
+        ]
+      },
+      "delta": {
+        "rssBytes": 26681344,
+        "pssBytes": 17681408,
+        "virtualBytes": 5322022912,
+        "minorFaults": 2322,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 14
+      },
+      "exitCode": 143,
+      "terminationMs": 11.570229999999356,
+      "drainMs": 0.1898510000000897,
+      "passed": true
+    },
+    {
+      "threadCount": 1,
+      "sample": 1,
+      "baseline": {
+        "rssBytes": 35717120,
+        "peakRssBytes": 35778560,
+        "pssBytes": 36161536,
+        "virtualBytes": 1468370944,
+        "minorFaults": 2998,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349805
+        ]
+      },
+      "live": {
+        "rssBytes": 62664704,
+        "peakRssBytes": 62668800,
+        "pssBytes": 54068224,
+        "virtualBytes": 6795649024,
+        "minorFaults": 5332,
+        "majorFaults": 0,
+        "processCount": 2,
+        "threadCount": 32,
+        "pids": [
+          1349805,
+          1350542
+        ]
+      },
+      "delta": {
+        "rssBytes": 26947584,
+        "pssBytes": 17906688,
+        "virtualBytes": 5327278080,
+        "minorFaults": 2334,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 14
+      },
+      "exitCode": 143,
+      "terminationMs": 11.928562000000056,
+      "drainMs": 0.2788490000002639,
+      "passed": true
+    },
+    {
+      "threadCount": 1,
+      "sample": 2,
+      "baseline": {
+        "rssBytes": 35717120,
+        "peakRssBytes": 35778560,
+        "pssBytes": 36185088,
+        "virtualBytes": 1473622016,
+        "minorFaults": 3019,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349805
+        ]
+      },
+      "live": {
+        "rssBytes": 60665856,
+        "peakRssBytes": 60669952,
+        "pssBytes": 52023296,
+        "virtualBytes": 6795649024,
+        "minorFaults": 5350,
+        "majorFaults": 0,
+        "processCount": 2,
+        "threadCount": 32,
+        "pids": [
+          1349805,
+          1350589
+        ]
+      },
+      "delta": {
+        "rssBytes": 24948736,
+        "pssBytes": 15838208,
+        "virtualBytes": 5322027008,
+        "minorFaults": 2331,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 14
+      },
+      "exitCode": 143,
+      "terminationMs": 11.397789999999986,
+      "drainMs": 0.29617400000006455,
+      "passed": true
+    },
+    {
+      "threadCount": 2,
+      "sample": 0,
+      "baseline": {
+        "rssBytes": 35717120,
+        "peakRssBytes": 35778560,
+        "pssBytes": 36186112,
+        "virtualBytes": 1473622016,
+        "minorFaults": 3034,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349805
+        ]
+      },
+      "live": {
+        "rssBytes": 62504960,
+        "peakRssBytes": 62509056,
+        "pssBytes": 54118400,
+        "virtualBytes": 6867243008,
+        "minorFaults": 5407,
+        "majorFaults": 0,
+        "processCount": 2,
+        "threadCount": 33,
+        "pids": [
+          1349805,
+          1350637
+        ]
+      },
+      "delta": {
+        "rssBytes": 26787840,
+        "pssBytes": 17932288,
+        "virtualBytes": 5393620992,
+        "minorFaults": 2373,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 15
+      },
+      "exitCode": 143,
+      "terminationMs": 10.45850900000005,
+      "drainMs": 0.3515370000004623,
+      "passed": true
+    },
+    {
+      "threadCount": 2,
+      "sample": 1,
+      "baseline": {
+        "rssBytes": 35717120,
+        "peakRssBytes": 35778560,
+        "pssBytes": 36190208,
+        "virtualBytes": 1473622016,
+        "minorFaults": 3050,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349805
+        ]
+      },
+      "live": {
+        "rssBytes": 62566400,
+        "peakRssBytes": 62570496,
+        "pssBytes": 53856256,
+        "virtualBytes": 6867243008,
+        "minorFaults": 5422,
+        "majorFaults": 0,
+        "processCount": 2,
+        "threadCount": 33,
+        "pids": [
+          1349805,
+          1350652
+        ]
+      },
+      "delta": {
+        "rssBytes": 26849280,
+        "pssBytes": 17666048,
+        "virtualBytes": 5393620992,
+        "minorFaults": 2372,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 15
+      },
+      "exitCode": 143,
+      "terminationMs": 11.879237000000103,
+      "drainMs": 0.22115299999950366,
+      "passed": true
+    },
+    {
+      "threadCount": 2,
+      "sample": 2,
+      "baseline": {
+        "rssBytes": 35717120,
+        "peakRssBytes": 35778560,
+        "pssBytes": 36190208,
+        "virtualBytes": 1473622016,
+        "minorFaults": 3065,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349805
+        ]
+      },
+      "live": {
+        "rssBytes": 62554112,
+        "peakRssBytes": 62558208,
+        "pssBytes": 54170624,
+        "virtualBytes": 6867238912,
+        "minorFaults": 5436,
+        "majorFaults": 0,
+        "processCount": 2,
+        "threadCount": 33,
+        "pids": [
+          1349805,
+          1350667
+        ]
+      },
+      "delta": {
+        "rssBytes": 26836992,
+        "pssBytes": 17980416,
+        "virtualBytes": 5393616896,
+        "minorFaults": 2371,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 15
+      },
+      "exitCode": 143,
+      "terminationMs": 12.461632999999892,
+      "drainMs": 1.2244590000000244,
+      "passed": true
+    },
+    {
+      "threadCount": 4,
+      "sample": 0,
+      "baseline": {
+        "rssBytes": 35717120,
+        "peakRssBytes": 35778560,
+        "pssBytes": 36193280,
+        "virtualBytes": 1473622016,
+        "minorFaults": 3081,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349805
+        ]
+      },
+      "live": {
+        "rssBytes": 60526592,
+        "peakRssBytes": 60530688,
+        "pssBytes": 52490240,
+        "virtualBytes": 7010422784,
+        "minorFaults": 5543,
+        "majorFaults": 0,
+        "processCount": 2,
+        "threadCount": 35,
+        "pids": [
+          1349805,
+          1350693
+        ]
+      },
+      "delta": {
+        "rssBytes": 24809472,
+        "pssBytes": 16296960,
+        "virtualBytes": 5536800768,
+        "minorFaults": 2462,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 17
+      },
+      "exitCode": 143,
+      "terminationMs": 10.463956999999937,
+      "drainMs": 0.25260699999944336,
+      "passed": true
+    },
+    {
+      "threadCount": 4,
+      "sample": 1,
+      "baseline": {
+        "rssBytes": 35717120,
+        "peakRssBytes": 35778560,
+        "pssBytes": 36213760,
+        "virtualBytes": 1473622016,
+        "minorFaults": 3101,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349805
+        ]
+      },
+      "live": {
+        "rssBytes": 62808064,
+        "peakRssBytes": 62812160,
+        "pssBytes": 54670336,
+        "virtualBytes": 7010418688,
+        "minorFaults": 5561,
+        "majorFaults": 0,
+        "processCount": 2,
+        "threadCount": 35,
+        "pids": [
+          1349805,
+          1350755
+        ]
+      },
+      "delta": {
+        "rssBytes": 27090944,
+        "pssBytes": 18456576,
+        "virtualBytes": 5536796672,
+        "minorFaults": 2460,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 17
+      },
+      "exitCode": 143,
+      "terminationMs": 11.459383000000344,
+      "drainMs": 0.7389789999997447,
+      "passed": true
+    },
+    {
+      "threadCount": 4,
+      "sample": 2,
+      "baseline": {
+        "rssBytes": 35717120,
+        "peakRssBytes": 35778560,
+        "pssBytes": 36214784,
+        "virtualBytes": 1473622016,
+        "minorFaults": 3116,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349805
+        ]
+      },
+      "live": {
+        "rssBytes": 60264448,
+        "peakRssBytes": 60268544,
+        "pssBytes": 52335616,
+        "virtualBytes": 7010414592,
+        "minorFaults": 5569,
+        "majorFaults": 0,
+        "processCount": 2,
+        "threadCount": 35,
+        "pids": [
+          1349805,
+          1350783
+        ]
+      },
+      "delta": {
+        "rssBytes": 24547328,
+        "pssBytes": 16120832,
+        "virtualBytes": 5536792576,
+        "minorFaults": 2453,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 17
+      },
+      "exitCode": 143,
+      "terminationMs": 11.21377400000074,
+      "drainMs": 0.4433020000005854,
+      "passed": true
+    },
+    {
+      "threadCount": 8,
+      "sample": 0,
+      "baseline": {
+        "rssBytes": 35717120,
+        "peakRssBytes": 35778560,
+        "pssBytes": 36214784,
+        "virtualBytes": 1473622016,
+        "minorFaults": 3131,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349805
+        ]
+      },
+      "live": {
+        "rssBytes": 62664704,
+        "peakRssBytes": 62668800,
+        "pssBytes": 55322624,
+        "virtualBytes": 7296778240,
+        "minorFaults": 5758,
+        "majorFaults": 0,
+        "processCount": 2,
+        "threadCount": 39,
+        "pids": [
+          1349805,
+          1350800
+        ]
+      },
+      "delta": {
+        "rssBytes": 26947584,
+        "pssBytes": 19107840,
+        "virtualBytes": 5823156224,
+        "minorFaults": 2627,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21
+      },
+      "exitCode": 143,
+      "terminationMs": 11.40972899999997,
+      "drainMs": 0.707683000000543,
+      "passed": true
+    },
+    {
+      "threadCount": 8,
+      "sample": 1,
+      "baseline": {
+        "rssBytes": 35717120,
+        "peakRssBytes": 35778560,
+        "pssBytes": 36214784,
+        "virtualBytes": 1473622016,
+        "minorFaults": 3146,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349805
+        ]
+      },
+      "live": {
+        "rssBytes": 62754816,
+        "peakRssBytes": 62754816,
+        "pssBytes": 55112704,
+        "virtualBytes": 7296782336,
+        "minorFaults": 5778,
+        "majorFaults": 0,
+        "processCount": 2,
+        "threadCount": 39,
+        "pids": [
+          1349805,
+          1350839
+        ]
+      },
+      "delta": {
+        "rssBytes": 27037696,
+        "pssBytes": 18897920,
+        "virtualBytes": 5823160320,
+        "minorFaults": 2632,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21
+      },
+      "exitCode": 143,
+      "terminationMs": 11.229991000000155,
+      "drainMs": 0.25908199999958015,
+      "passed": true
+    },
+    {
+      "threadCount": 8,
+      "sample": 2,
+      "baseline": {
+        "rssBytes": 35725312,
+        "peakRssBytes": 35786752,
+        "pssBytes": 36221952,
+        "virtualBytes": 1473622016,
+        "minorFaults": 3163,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1349805
+        ]
+      },
+      "live": {
+        "rssBytes": 62652416,
+        "peakRssBytes": 62656512,
+        "pssBytes": 54947840,
+        "virtualBytes": 7296778240,
+        "minorFaults": 5792,
+        "majorFaults": 0,
+        "processCount": 2,
+        "threadCount": 39,
+        "pids": [
+          1349805,
+          1350916
+        ]
+      },
+      "delta": {
+        "rssBytes": 26927104,
+        "pssBytes": 18725888,
+        "virtualBytes": 5823156224,
+        "minorFaults": 2629,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 21
+      },
+      "exitCode": 143,
+      "terminationMs": 10.583403999999973,
+      "drainMs": 0.2680689999997412,
+      "passed": true
+    }
+  ],
+  "concurrency": [
+    {
+      "groupCount": 1,
+      "workerThreadsPerGroup": 2,
+      "totalGuestThreads": 3,
+      "readyMs": 43.459726999999475,
+      "baseline": {
+        "rssBytes": 37912576,
+        "peakRssBytes": 37912576,
+        "pssBytes": 37965824,
+        "virtualBytes": 1393946624,
+        "minorFaults": 2616,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1350947
+        ]
+      },
+      "live": {
+        "rssBytes": 62955520,
+        "peakRssBytes": 62955520,
+        "pssBytes": 54226944,
+        "virtualBytes": 6862000128,
+        "minorFaults": 5034,
+        "majorFaults": 0,
+        "processCount": 2,
+        "threadCount": 33,
+        "pids": [
+          1350947,
+          1351106
+        ]
+      },
+      "delta": {
+        "rssBytes": 25042944,
+        "pssBytes": 16261120,
+        "virtualBytes": 5468053504,
+        "minorFaults": 2418,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 15
+      },
+      "exitCodes": [
+        143
+      ],
+      "terminationMs": 12.485185999999885,
+      "drainMs": 0.2837099999997008,
+      "passed": true
+    },
+    {
+      "groupCount": 2,
+      "workerThreadsPerGroup": 2,
+      "totalGuestThreads": 6,
+      "readyMs": 42.82921999999962,
+      "baseline": {
+        "rssBytes": 37969920,
+        "peakRssBytes": 38031360,
+        "pssBytes": 38390784,
+        "virtualBytes": 1468383232,
+        "minorFaults": 2675,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1350947
+        ]
+      },
+      "live": {
+        "rssBytes": 87998464,
+        "peakRssBytes": 87998464,
+        "pssBytes": 61963264,
+        "virtualBytes": 12330057728,
+        "minorFaults": 7463,
+        "majorFaults": 0,
+        "processCount": 3,
+        "threadCount": 48,
+        "pids": [
+          1350947,
+          1351134,
+          1351147
+        ]
+      },
+      "delta": {
+        "rssBytes": 50028544,
+        "pssBytes": 23572480,
+        "virtualBytes": 10861674496,
+        "minorFaults": 4788,
+        "majorFaults": 0,
+        "processCount": 2,
+        "threadCount": 30
+      },
+      "exitCodes": [
+        143,
+        143
+      ],
+      "terminationMs": 11.279136999999537,
+      "drainMs": 0.2290819999998348,
+      "passed": true
+    },
+    {
+      "groupCount": 4,
+      "workerThreadsPerGroup": 2,
+      "totalGuestThreads": 12,
+      "readyMs": 102.08778600000005,
+      "baseline": {
+        "rssBytes": 38039552,
+        "peakRssBytes": 38158336,
+        "pssBytes": 38562816,
+        "virtualBytes": 1542819840,
+        "minorFaults": 2747,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1350947
+        ]
+      },
+      "live": {
+        "rssBytes": 140447744,
+        "peakRssBytes": 140447744,
+        "pssBytes": 80498688,
+        "virtualBytes": 23266172928,
+        "minorFaults": 12332,
+        "majorFaults": 0,
+        "processCount": 5,
+        "threadCount": 78,
+        "pids": [
+          1350947,
+          1351209,
+          1351222,
+          1351235,
+          1351263
+        ]
+      },
+      "delta": {
+        "rssBytes": 102408192,
+        "pssBytes": 41935872,
+        "virtualBytes": 21723353088,
+        "minorFaults": 9585,
+        "majorFaults": 0,
+        "processCount": 4,
+        "threadCount": 60
+      },
+      "exitCodes": [
+        143,
+        143,
+        143,
+        143
+      ],
+      "terminationMs": 11.550612000000001,
+      "drainMs": 14.131797000000006,
+      "passed": true
+    },
+    {
+      "groupCount": 8,
+      "workerThreadsPerGroup": 2,
+      "totalGuestThreads": 24,
+      "readyMs": 432.2022740000002,
+      "baseline": {
+        "rssBytes": 38739968,
+        "peakRssBytes": 38973440,
+        "pssBytes": 38932480,
+        "virtualBytes": 1691701248,
+        "minorFaults": 2897,
+        "majorFaults": 0,
+        "processCount": 1,
+        "threadCount": 18,
+        "pids": [
+          1350947
+        ]
+      },
+      "live": {
+        "rssBytes": 246476800,
+        "peakRssBytes": 246476800,
+        "pssBytes": 118110208,
+        "virtualBytes": 45138419712,
+        "minorFaults": 22047,
+        "majorFaults": 0,
+        "processCount": 9,
+        "threadCount": 138,
+        "pids": [
+          1350947,
+          1351292,
+          1351305,
+          1351318,
+          1351335,
+          1351352,
+          1351367,
+          1351393,
+          1351419
+        ]
+      },
+      "delta": {
+        "rssBytes": 207736832,
+        "pssBytes": 79177728,
+        "virtualBytes": 43446718464,
+        "minorFaults": 19150,
+        "majorFaults": 0,
+        "processCount": 8,
+        "threadCount": 120
+      },
+      "exitCodes": [
+        143,
+        143,
+        143,
+        143,
+        143,
+        143,
+        143,
+        143
+      ],
+      "terminationMs": 44.16280800000004,
+      "drainMs": 70.92651699999988,
+      "passed": true
+    }
+  ],
+  "status": "complete",
+  "summary": {
+    "coldReadyP50Ms": 39.07387800000015,
+    "coldReadyP95Ms": 46.766485999999986,
+    "warmThroughputPerSecond": 18.59518322200352,
+    "oneThreadGroupPssDeltaBytes": 17681408,
+    "maxThreadGroupPssDeltaBytes": 18897920,
+    "perAdditionalThreadPssBytes": 173787.42857142858,
+    "maxTerminationMs": 44.16280800000004,
+    "maxConcurrentGroupsMeasured": 8,
+    "maxConcurrentGuestThreadsMeasured": 24,
+    "passed": true
+  },
+  "completedAt": "2026-07-24T12:02:07.953Z"
+}

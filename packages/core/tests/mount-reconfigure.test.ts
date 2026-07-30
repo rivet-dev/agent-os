@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { NativeSidecarKernelProxy } from "../src/sidecar/rpc-client.js";
+import { SidecarKernelProxy } from "../src/sidecar/rpc-client.js";
 import { createInMemoryFileSystem } from "../src/test/runtime.js";
 
-// Regression coverage for post-boot mountFs delivery to the native sidecar:
+// Regression coverage for post-boot mountFs delivery to the sidecar:
 //   1. Rust `configure_vm` rebuilds the whole VM configuration from each
 //      payload, so a runtime mount reconfigure that omits the boot `packages` /
 //      `packagesMountAt` / `bindingShimCommands` strips the `/opt/agentos`
@@ -78,8 +78,8 @@ function createProxy(client: unknown) {
 		commandGuestPaths: new Map<string, string>(),
 		ownsClient: true,
 	};
-	return new NativeSidecarKernelProxy(
-		options as ConstructorParameters<typeof NativeSidecarKernelProxy>[0],
+	return new SidecarKernelProxy(
+		options as ConstructorParameters<typeof SidecarKernelProxy>[0],
 	);
 }
 

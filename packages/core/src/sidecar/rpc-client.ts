@@ -6,7 +6,7 @@ import type {
 	RootFilesystemConfig as VmConfigRootFilesystemConfig,
 	RootFilesystemEntry as VmConfigRootFilesystemEntry,
 	RootFilesystemLowerDescriptor as VmConfigRootFilesystemLowerDescriptor,
-} from "@rivet-dev/agentos-runtime-core/vm-config";
+} from "../vm-config.js";
 import type {
 	NativeMountConfig,
 	PlainMountConfig,
@@ -37,7 +37,7 @@ import type {
 	SidecarProcessSnapshotEntry,
 	SidecarSignalHandlerRegistration,
 	SidecarSocketStateEntry,
-} from "./native-process-client.js";
+} from "./process-client.js";
 
 const SYNTHETIC_PID_BASE = 1_000_000;
 const MISSING_EXIT_EVENT_GRACE_MS = 500;
@@ -85,7 +85,7 @@ function logStructuredSidecarEvent(
 }
 
 async function drainTrailingProcessOutputTurn(delayMs = 0): Promise<void> {
-	// Native-sidecar `process_output` events can lag one macrotask behind the
+	// Sidecar `process_output` events can lag one macrotask behind the
 	// terminal `process_exited` notification for very short-lived processes, and
 	// under suite load the sidecar event pump can need a little extra time to
 	// flush delayed output through its listener callbacks.
@@ -328,7 +328,7 @@ interface TrackedProcessEntry {
 	outputGeneration: number;
 }
 
-interface NativeSidecarKernelProxyOptions {
+interface SidecarKernelProxyOptions {
 	client: SidecarProcess;
 	session: AuthenticatedSession;
 	vm: CreatedVm;
@@ -366,7 +366,7 @@ interface NativeSidecarKernelProxyOptions {
 	ownsClient?: boolean;
 }
 
-export class NativeSidecarKernelProxy {
+export class SidecarKernelProxy {
 	readonly env: Record<string, string>;
 	readonly cwd: string;
 	readonly commands: ReadonlyMap<string, string>;
@@ -421,7 +421,7 @@ export class NativeSidecarKernelProxy {
 	private readonly eventPumpAbortController = new AbortController();
 	private readonly eventPump: Promise<void>;
 
-	constructor(options: NativeSidecarKernelProxyOptions) {
+	constructor(options: SidecarKernelProxyOptions) {
 		this.client = options.client;
 		this.session = options.session;
 		this.vm = options.vm;
@@ -571,7 +571,7 @@ export class NativeSidecarKernelProxy {
 	): Promise<KernelExecResult> {
 		if (!this.commands.has("sh")) {
 			throw new Error(
-				`native sidecar exec requires guest shell command 'sh': ${command}`,
+				`sidecar exec requires guest shell command 'sh': ${command}`,
 			);
 		}
 
@@ -749,7 +749,7 @@ export class NativeSidecarKernelProxy {
 			// grammar belongs to the guest shell, so the bridge never parses it.
 			if (!this.commands.has("sh")) {
 				throw new Error(
-					`native sidecar shell-mode spawn requires guest shell command 'sh': ${command}`,
+					`sidecar shell-mode spawn requires guest shell command 'sh': ${command}`,
 				);
 			}
 			spawnCommand = "sh";
@@ -2814,14 +2814,13 @@ export type {
 	SidecarSignalHandlerRegistration,
 	SidecarSocketStateEntry,
 	SidecarSpawnOptions,
-} from "./native-process-client.js";
+} from "./process-client.js";
 export {
-	NativeSidecarProcessClient,
 	SidecarEventBufferOverflow,
 	SidecarProcess,
 	SidecarProcessError,
 	SidecarProcessExited,
-} from "./native-process-client.js";
+} from "./process-client.js";
 
 export type AgentOsSidecarPlacement =
 	| { kind: "shared"; pool?: string }

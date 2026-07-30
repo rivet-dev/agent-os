@@ -37,5 +37,5 @@ export {
 	SOCK_STREAM,
 	WASMVM_COMMANDS,
 } from "../runtime-compat.js";
-export { createInMemoryFileSystem } from "@rivet-dev/agentos-runtime-core/test-runtime";
+export { createInMemoryFileSystem } from "../test-runtime.js";
 export { TerminalHarness } from "./terminal-harness.js";

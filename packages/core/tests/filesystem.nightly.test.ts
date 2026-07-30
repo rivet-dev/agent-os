@@ -69,7 +69,7 @@ describe("filesystem operations", () => {
 	});
 
 	// Regression guard: `mkdir(path, { recursive: true })` must NOT probe each
-	// ancestor with a read-side `exists()`. On the native sidecar every read-side op
+	// ancestor with a read-side `exists()`. On the sidecar every read-side op
 	// triggers a full shadow-tree walk, so a per-component exists() loop made
 	// `mkdir -p` cost O(components * tree) -- a major source of session-creation
 	// latency on populated VMs. The recursive kernel mkdir is sufficient on its own.

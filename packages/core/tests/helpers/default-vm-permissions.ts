@@ -50,7 +50,7 @@ if (!globalState.__agentOsDefaultPermissionsPatched) {
 
 // Vitest forks a worker per file. Each worker holds the process-global
 // `sharedSidecars` map, so we must dispose the shared sidecar on file teardown
-// or the underlying native sidecar subprocess keeps its piped stdio open and
+// or the underlying sidecar subprocess keeps its piped stdio open and
 // blocks the worker (and therefore `pnpm test`) from exiting.
 afterAll(async () => {
 	await __disposeAllSharedSidecarsForTesting();

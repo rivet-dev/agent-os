@@ -1,0 +1,29 @@
+{
+	"name": "@rivet-dev/agentos-sidecar-darwin-x64",
+	"version": "0.0.1",
+	"description": "agentOS sidecar binary for macOS x64",
+	"license": "Apache-2.0",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/rivet-dev/agentos.git",
+		"directory": "packages/sidecar/npm/darwin-x64"
+	},
+	"os": [
+		"darwin"
+	],
+	"cpu": [
+		"x64"
+	],
+	"files": [
+		"agentos-sidecar"
+	],
+	"bin": {
+		"agentos-sidecar": "./agentos-sidecar"
+	},
+	"engines": {
+		"node": ">=20"
+	},
+	"scripts": {
+		"check-types": "exit 0"
+	}
+}

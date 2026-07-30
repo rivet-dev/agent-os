@@ -159,7 +159,7 @@ describe("full openSession({ agent: 'pi' }) inside the VM", () => {
 		}
 	}, 90_000);
 
-	test("openSession({ agent: 'pi' }) initializes over the default native sidecar transport", async () => {
+	test("openSession({ agent: 'pi' }) initializes over the default sidecar transport", async () => {
 		const { mock, url } = await startLlmock([]);
 		const vm = await createPiVm(url);
 

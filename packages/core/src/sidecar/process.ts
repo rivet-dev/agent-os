@@ -1,7 +1,7 @@
 import {
 	SidecarProcess,
 	type SidecarSpawnOptions,
-} from "./native-process-client.js";
+} from "./process-client.js";
 
 export interface AgentOsSidecarProcessHandle {
 	client: SidecarProcess;

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import type {
 	CreateVmConfig,
 	RootFilesystemEntry as VmConfigRootFilesystemEntry,
-} from "@rivet-dev/agentos-runtime-core/vm-config";
+} from "./vm-config.js";
 import type { NodeModulesMountConfig } from "./host-dir-mount.js";
 import { resolvePublishedSidecarBinary } from "./sidecar/binary.js";
 import { findCargoBinary, resolveCargoBinary } from "./sidecar/cargo.js";
@@ -16,7 +16,7 @@ import {
 	type AuthenticatedSession,
 	type CreatedVm,
 	type LocalCompatMount,
-	NativeSidecarKernelProxy,
+	SidecarKernelProxy,
 	type RootFilesystemEntry,
 	type SidecarMountDescriptor,
 	SidecarProcess,
@@ -82,28 +82,28 @@ const SIDECAR_BINARY = path.join(REPO_ROOT, "target/debug/agentos-sidecar");
 const SIDECAR_BUILD_INPUTS = [
 	path.join(REPO_ROOT, "Cargo.toml"),
 	path.join(REPO_ROOT, "Cargo.lock"),
-	path.join(REPO_ROOT, "crates/bridge"),
-	path.join(REPO_ROOT, "crates/build-support"),
+	path.join(REPO_ROOT, "crates/vm-host-interface"),
+	path.join(REPO_ROOT, "crates/executor-v8-runtime"),
 	path.join(REPO_ROOT, "crates/executor-contract"),
 	path.join(REPO_ROOT, "crates/executor-node-v8"),
 	path.join(REPO_ROOT, "crates/executor-python-v8-pyodide"),
 	path.join(REPO_ROOT, "crates/executor-wasm-v8"),
 	path.join(REPO_ROOT, "crates/executor-wasm-wasmtime"),
-	path.join(REPO_ROOT, "crates/kernel"),
-	path.join(REPO_ROOT, "crates/agentos-protocol"),
-	path.join(REPO_ROOT, "crates/agentos-sidecar"),
-	path.join(REPO_ROOT, "crates/native-sidecar"),
-	path.join(REPO_ROOT, "crates/native-sidecar-core"),
+	path.join(REPO_ROOT, "crates/vm-kernel"),
+	path.join(REPO_ROOT, "crates/acp-protocol"),
+	path.join(REPO_ROOT, "crates/sidecar"),
+	path.join(REPO_ROOT, "crates/vm"),
+	path.join(REPO_ROOT, "crates/vm/src/core"),
 	path.join(REPO_ROOT, "crates/sidecar-protocol"),
-	path.join(REPO_ROOT, "crates/v8-runtime"),
-	path.join(REPO_ROOT, "crates/wasm-common"),
-	path.join(REPO_ROOT, "crates/vfs"),
+	path.join(REPO_ROOT, "crates/executor-v8-runtime"),
+	path.join(REPO_ROOT, "crates/executor-wasm-abi"),
+	path.join(REPO_ROOT, "crates/vfs-core"),
 	path.join(REPO_ROOT, "crates/vm-config"),
 	path.join(REPO_ROOT, "packages/build-tools/bridge-src"),
 	path.join(REPO_ROOT, "packages/build-tools/package.json"),
 	path.join(REPO_ROOT, "packages/build-tools/scripts/build-v8-bridge.mjs"),
 	path.join(REPO_ROOT, "packages/core/fixtures/base-filesystem.json"),
-	path.join(REPO_ROOT, "packages/runtime-core/fixtures/base-filesystem.json"),
+	path.join(REPO_ROOT, "packages/core/fixtures/base-filesystem.json"),
 	path.join(REPO_ROOT, "pnpm-lock.yaml"),
 ] as const;
 let ensuredSidecarBinary: string | null = null;
@@ -1425,7 +1425,7 @@ function sidecarBinaryNeedsBuild(): boolean {
 	);
 }
 
-function ensureNativeSidecarBinary(): string {
+function ensureSidecarBinary(): string {
 	// A published install has no in-repo Cargo workspace to build from: resolve
 	// the prebuilt platform binary (or the AGENTOS_SIDECAR_BIN override).
 	if (
@@ -2117,7 +2117,7 @@ class NativeKernel implements Kernel {
 	private client: SidecarProcess | null = null;
 	private session: AuthenticatedSession | null = null;
 	private vm: CreatedVm | null = null;
-	private proxy: NativeSidecarKernelProxy | null = null;
+	private proxy: SidecarKernelProxy | null = null;
 	private rootFilesystem: VirtualFileSystem | null = null;
 	private readyPromise: Promise<void> | null = null;
 	private readonly liveFilesystemBinding: LiveFilesystemBinding;
@@ -2541,7 +2541,7 @@ class NativeKernel implements Kernel {
 
 		const client = SidecarProcess.spawn({
 			cwd: REPO_ROOT,
-			command: ensureNativeSidecarBinary(),
+			command: ensureSidecarBinary(),
 			args: [],
 		});
 		const session = await client.authenticateAndOpenSession();
@@ -2611,7 +2611,7 @@ class NativeKernel implements Kernel {
 			serializeLocalCompatMountForSidecar(mount),
 		);
 
-		const proxy = new NativeSidecarKernelProxy({
+		const proxy = new SidecarKernelProxy({
 			client,
 			session,
 			vm,

@@ -11,13 +11,13 @@ import type {
 	MountConfigJsonObject,
 	MountConfigJsonValue,
 	NativeMountPluginDescriptor,
-} from "@rivet-dev/agentos-runtime-core/descriptors";
-import * as executionProtocol from "@rivet-dev/agentos-runtime-core/protocol";
-import { SidecarRejectedError } from "@rivet-dev/agentos-runtime-core/sidecar-errors";
+} from "./descriptors.js";
+import * as executionProtocol from "./generated-protocol.js";
+import { SidecarRejectedError } from "./sidecar-errors.js";
 import type {
 	CreateVmConfig,
 	VmUserConfig,
-} from "@rivet-dev/agentos-runtime-core/vm-config";
+} from "./vm-config.js";
 import { type Binding, type Bindings, validateBindings } from "./bindings.js";
 import { zodToJsonSchema } from "./bindings-zod.js";
 import type {
@@ -102,7 +102,7 @@ export type {
 	MountConfigJsonPrimitive,
 	MountConfigJsonValue,
 	NativeMountPluginDescriptor,
-} from "@rivet-dev/agentos-runtime-core/descriptors";
+} from "./descriptors.js";
 export type { ConnectTerminalOptions } from "./runtime-compat.js";
 export type * from "./session-api.js";
 
@@ -446,7 +446,7 @@ import {
 	decodeAcpResponse,
 	encodeAcpCallbackResponse,
 	encodeAcpRequest,
-} from "./sidecar/agentos-protocol.js";
+} from "./sidecar/agentos-acp-protocol.js";
 import { serializePermissionsForSidecar } from "./sidecar/permissions.js";
 import {
 	type AgentOsSidecarClient,
@@ -459,7 +459,7 @@ import {
 	type AuthenticatedSession,
 	type CreatedVm,
 	createAgentOsSidecarClient,
-	NativeSidecarKernelProxy,
+	SidecarKernelProxy,
 	type RootFilesystemEntry,
 	type SidecarMountDescriptor,
 	type SidecarPermissionsPolicy,
@@ -616,7 +616,7 @@ export type MountConfig =
  * Operator-tunable runtime limits for a VM. Every field is optional; unset fields fall back to
  * built-in defaults that match the runtime's historical hardcoded constants, so behavior is
  * unchanged unless a value is overridden. All values are JSON-serializable integers and are
- * forwarded to the native sidecar in the typed create-VM JSON config. Unknown, negative, or
+ * forwarded to the sidecar in the typed create-VM JSON config. Unknown, negative, or
  * non-integer values are rejected by the sidecar before VM construction.
  */
 export interface AgentOsLimits {
@@ -828,7 +828,7 @@ export interface AgentOsOptions {
 	loopbackExemptPorts?: number[];
 	/**
 	 * Allowed Node.js builtins for guest Node processes.
-	 * Defaults to the hardened builtin set used by the native sidecar bridge.
+	 * Defaults to the hardened builtin set used by the sidecar bridge.
 	 */
 	allowedNodeBuiltins?: string[];
 	/** VM-wide default for standalone WASM commands. JavaScript remains on V8. */
@@ -1323,28 +1323,28 @@ const SIDECAR_BINARY = join(REPO_ROOT, "target/debug/agentos-sidecar");
 const SIDECAR_BUILD_INPUTS = [
 	join(REPO_ROOT, "Cargo.toml"),
 	join(REPO_ROOT, "Cargo.lock"),
-	join(REPO_ROOT, "crates/bridge"),
-	join(REPO_ROOT, "crates/build-support"),
+	join(REPO_ROOT, "crates/vm-host-interface"),
+	join(REPO_ROOT, "crates/executor-v8-runtime"),
 	join(REPO_ROOT, "crates/executor-contract"),
 	join(REPO_ROOT, "crates/executor-node-v8"),
 	join(REPO_ROOT, "crates/executor-python-v8-pyodide"),
 	join(REPO_ROOT, "crates/executor-wasm-v8"),
 	join(REPO_ROOT, "crates/executor-wasm-wasmtime"),
-	join(REPO_ROOT, "crates/kernel"),
-	join(REPO_ROOT, "crates/agentos-protocol"),
-	join(REPO_ROOT, "crates/agentos-sidecar"),
-	join(REPO_ROOT, "crates/native-sidecar"),
-	join(REPO_ROOT, "crates/native-sidecar-core"),
+	join(REPO_ROOT, "crates/vm-kernel"),
+	join(REPO_ROOT, "crates/acp-protocol"),
+	join(REPO_ROOT, "crates/sidecar"),
+	join(REPO_ROOT, "crates/vm"),
+	join(REPO_ROOT, "crates/vm/src/core"),
 	join(REPO_ROOT, "crates/sidecar-protocol"),
-	join(REPO_ROOT, "crates/v8-runtime"),
-	join(REPO_ROOT, "crates/wasm-common"),
-	join(REPO_ROOT, "crates/vfs"),
+	join(REPO_ROOT, "crates/executor-v8-runtime"),
+	join(REPO_ROOT, "crates/executor-wasm-abi"),
+	join(REPO_ROOT, "crates/vfs-core"),
 	join(REPO_ROOT, "crates/vm-config"),
 	join(REPO_ROOT, "packages/build-tools/bridge-src"),
 	join(REPO_ROOT, "packages/build-tools/package.json"),
 	join(REPO_ROOT, "packages/build-tools/scripts/build-v8-bridge.mjs"),
 	join(REPO_ROOT, "packages/core/fixtures/base-filesystem.json"),
-	join(REPO_ROOT, "packages/runtime-core/fixtures/base-filesystem.json"),
+	join(REPO_ROOT, "packages/core/fixtures/base-filesystem.json"),
 	join(REPO_ROOT, "pnpm-lock.yaml"),
 ] as const;
 let ensuredSidecarBinary: string | null = null;
@@ -1535,7 +1535,7 @@ function convertSidecarRootSnapshotEntries(
 	});
 }
 
-function ensureNativeSidecarBinary(): string {
+function ensureSidecarBinary(): string {
 	// A published install has no in-repo Cargo workspace to build from: resolve
 	// the prebuilt platform binary (or the AGENTOS_SIDECAR_BIN override).
 	if (
@@ -3256,7 +3256,7 @@ export class AgentOs {
 				options?.rootFilesystem,
 			);
 			let bindingReference = "";
-			let rootBridge: NativeSidecarKernelProxy | null = null;
+			let rootBridge: SidecarKernelProxy | null = null;
 			let kernel: Kernel | null = null;
 			let client: SidecarProcess | null = null;
 			let createdNativeVm: CreatedVm | null = null;
@@ -3393,7 +3393,7 @@ export class AgentOs {
 					}
 				}
 
-				rootBridge = new NativeSidecarKernelProxy({
+				rootBridge = new SidecarKernelProxy({
 					client,
 					session,
 					vm: nativeVm,
@@ -4673,10 +4673,7 @@ export class AgentOs {
 	}
 
 	/** @deprecated Use `process.writeStdin()`. */
-	writeProcessStdin(
-		pid: number,
-		data: string | Uint8Array,
-	): Promise<void> {
+	writeProcessStdin(pid: number, data: string | Uint8Array): Promise<void> {
 		return this._writeProcessStdin(pid, data);
 	}
 
@@ -4880,9 +4877,9 @@ export class AgentOs {
 	private async _mkdirp(path: string): Promise<void> {
 		this._assertWritableAbsolutePath(path);
 		// `kernel.mkdir` is already recursive (it defaults to recursive=true on both
-		// the native sidecar and compat kernels) and creating an existing directory is
+		// the sidecar and compat kernels) and creating an existing directory is
 		// a no-op, so a single call is sufficient. Do NOT probe each ancestor with
-		// `exists()` first: on the native sidecar every read-side op
+		// `exists()` first: on the sidecar every read-side op
 		// (exists/stat/readFile) triggers a full shadow-tree walk, so a per-component
 		// exists() loop makes `mkdir -p` cost O(components * tree).
 		await this.#kernel.mkdir(path);
@@ -4988,14 +4985,14 @@ export class AgentOs {
 
 	/**
 	 * Mount a filesystem into the running VM. Resolves once the mount has been
-	 * delivered to the native sidecar, so guest code can use it immediately
+	 * delivered to the sidecar, so guest code can use it immediately
 	 * after the returned promise settles; a delivery failure rejects instead of
 	 * leaving the mount silently host-only.
 	 */
 	private async _mountFs(descriptor: DynamicMountDescriptor): Promise<void> {
 		this._assertSafeAbsolutePath(descriptor.path);
-		if (!(this.#kernel instanceof NativeSidecarKernelProxy)) {
-			throw new Error("portable dynamic mounts require the native sidecar");
+		if (!(this.#kernel instanceof SidecarKernelProxy)) {
+			throw new Error("portable dynamic mounts require the sidecar");
 		}
 		await this.#kernel.mountDescriptor({
 			guestPath: descriptor.path,
@@ -5009,14 +5006,14 @@ export class AgentOs {
 
 	private async _unmountFs(path: string): Promise<void> {
 		this._assertSafeAbsolutePath(path);
-		if (!(this.#kernel instanceof NativeSidecarKernelProxy)) {
-			throw new Error("portable dynamic mounts require the native sidecar");
+		if (!(this.#kernel instanceof SidecarKernelProxy)) {
+			throw new Error("portable dynamic mounts require the sidecar");
 		}
 		await this.#kernel.unmountDescriptor(path);
 	}
 
 	private async _listMounts(): Promise<MountInfo[]> {
-		if (!(this.#kernel instanceof NativeSidecarKernelProxy)) return [];
+		if (!(this.#kernel instanceof SidecarKernelProxy)) return [];
 		return this.#kernel.listMounts();
 	}
 
@@ -5496,7 +5493,7 @@ export class AgentOs {
 
 	/** Returns all kernel processes across all active runtimes (WASM and Node). */
 	private _listAllProcesses(): KernelProcessInfo[] {
-		if (this.#kernel instanceof NativeSidecarKernelProxy) {
+		if (this.#kernel instanceof SidecarKernelProxy) {
 			return this.#kernel.snapshotProcesses();
 		}
 		return [...this.#kernel.processes.values()];
@@ -6034,7 +6031,7 @@ export class AgentOs {
 			this._sidecarVm,
 			normalized,
 		);
-		if (this.#kernel instanceof NativeSidecarKernelProxy) {
+		if (this.#kernel instanceof SidecarKernelProxy) {
 			this.#kernel.registerCommandGuestPaths(
 				new Map(
 					commands.projectedCommands.map((command) => [
@@ -7066,7 +7063,7 @@ interface AgentOsSidecarState {
 	activeLeases: Set<AgentOsSidecarLeaseRecord>;
 	sharedPool?: string;
 	/**
-	 * The single native sidecar process shared by every VM leased from this
+	 * The single sidecar process shared by every VM leased from this
 	 * handle. Spawned lazily on first VM creation and reused thereafter so VMs
 	 * are cheap incremental tenants of one process rather than one-process-each.
 	 */
@@ -7215,7 +7212,7 @@ function ensureSharedSidecarNativeProcess(
 		state.nativeProcess = (async () => {
 			const client = SidecarProcess.spawn({
 				cwd: REPO_ROOT,
-				command: ensureNativeSidecarBinary(),
+				command: ensureSidecarBinary(),
 				args: [],
 			});
 			// Track the child immediately — BEFORE the handshake await — so a
@@ -7223,14 +7220,14 @@ function ensureSharedSidecarNativeProcess(
 			// the spawned child is untracked, unreapable, and pins the loop).
 			state.sharedChild = sidecarChildHandle(client);
 			if (!state.sharedChild) {
-				// We reached into @rivet-dev/agentos-runtime-core internals to get the child for
+				// We reached into @rivet-dev/agentos-core internals to get the child for
 				// idle-unref. If that shape ever changes this returns undefined and
 				// the optimization silently stops working (one-shot scripts would
 				// hang again). Make it loud rather than a silent regression.
 				console.warn(
 					"[agentos] could not resolve the shared sidecar child handle; " +
 						"standalone scripts may not exit cleanly after dispose(). " +
-						"This usually means @rivet-dev/agentos-runtime-core internals changed.",
+						"This usually means @rivet-dev/agentos-core internals changed.",
 				);
 			}
 			// Apply the current hold state to the just-spawned child.

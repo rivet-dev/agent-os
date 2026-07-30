@@ -165,7 +165,7 @@ describe("AgentOs base filesystem", () => {
 		}
 	});
 
-	test("native sidecar filesystem exposes realpath, hard links, truncate, and utimes", async () => {
+	test("sidecar filesystem exposes realpath, hard links, truncate, and utimes", async () => {
 		const vfs = getKernelVfs(vm);
 		await vm.writeFile("/tmp/original.txt", "hello world");
 		await vfs.link("/tmp/original.txt", "/tmp/linked.txt");

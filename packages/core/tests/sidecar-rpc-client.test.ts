@@ -3,8 +3,8 @@ import { AgentOs } from "../src/agent-os.js";
 import {
 	decodeAcpCallbackResponse,
 	encodeAcpCallback,
-} from "../src/sidecar/agentos-protocol.js";
-import { NativeSidecarProcessClient } from "../src/sidecar/rpc-client.js";
+} from "../src/sidecar/agentos-acp-protocol.js";
+import { SidecarProcess } from "../src/sidecar/rpc-client.js";
 
 const ACP_TEST_PERMISSIONS = {
 	fs: "allow",
@@ -28,7 +28,7 @@ async function dispatchAcpRequest(
 	},
 ) {
 	const runtime = agent as unknown as {
-		_sidecarClient: NativeSidecarProcessClient;
+		_sidecarClient: SidecarProcess;
 		_sidecarSession: { connectionId: string; sessionId: string };
 		_sidecarVm: { vmId: string };
 	};
@@ -65,7 +65,7 @@ async function dispatchAcpRequest(
 	try {
 		await client.dispatchSidecarRequest({
 			frame_type: "sidecar_request",
-			schema: { name: "agentos-native-sidecar", version: 8 },
+			schema: { name: "agentos-sidecar", version: 8 },
 			request_id: -101,
 			ownership: {
 				scope: "vm",

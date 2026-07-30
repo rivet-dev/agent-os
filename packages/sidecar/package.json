@@ -1,0 +1,26 @@
+{
+	"name": "@rivet-dev/agentos-sidecar",
+	"version": "0.0.1",
+	"description": "Platform-specific resolver for the agentOS native sidecar binary",
+	"license": "Apache-2.0",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/rivet-dev/agentos.git",
+		"directory": "packages/sidecar"
+	},
+	"main": "./index.js",
+	"types": "./index.d.ts",
+	"files": [
+		"index.js",
+		"index.d.ts",
+		"README.md"
+	],
+	"engines": {
+		"node": ">=20"
+	},
+	"scripts": {
+		"build": "node scripts/build.mjs",
+		"build:release": "node scripts/build.mjs --release",
+		"check-types": "exit 0"
+	}
+}

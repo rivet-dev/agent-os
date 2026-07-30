@@ -1,0 +1,41 @@
+{
+  "name": "@rivet-dev/agentos-test-harness",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./agent-os-conformance": {
+      "types": "./dist/agent-os-conformance.d.ts",
+      "import": "./dist/agent-os-conformance.js"
+    },
+    "./agent-os-conformance-fixture": {
+      "types": "./dist/agent-os-conformance-fixture.d.ts",
+      "import": "./dist/agent-os-conformance-fixture.js"
+    },
+    "./projected-agent-package": {
+      "types": "./dist/projected-agent-package.d.ts",
+      "import": "./dist/projected-agent-package.js"
+    },
+    "./vm": {
+      "types": "./dist/vm-harness.d.ts",
+      "import": "./dist/vm-harness.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "check-types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@rivet-dev/agentos-core": "workspace:*",
+    "@xterm/headless": "^6.0.0",
+    "vitest": "^2.1.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.9.2"
+  }
+}

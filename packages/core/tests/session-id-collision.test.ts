@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { AgentOs } from "../src/index.js";
-import { encodeAcpEvent } from "../src/sidecar/agentos-protocol.js";
+import { encodeAcpEvent } from "../src/sidecar/agentos-acp-protocol.js";
 
 const ACP_EXTENSION_NAMESPACE = "dev.rivet.agent-os.acp";
 

@@ -617,7 +617,7 @@ const CASES: Case[] = [
 	},
 	{
 		// SIGWINCH / live window size: after the host resizes the PTY, the probe
-		// re-queries and must see the NEW size. The native sidecar forwards the
+		// re-queries and must see the NEW size. The sidecar forwards the
 		// kernel resize as SIGWINCH to embedded V8 so js-node re-queries it.
 		id: "resize-sigwinch",
 		knownBroken: false,

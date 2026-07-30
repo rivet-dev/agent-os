@@ -127,7 +127,7 @@ describe("agentos package projection (VM)", () => {
 			},
 		});
 		const code = await vm.waitProcess(pid);
-		// Native-sidecar process_output events can arrive a few turns after the
+		// Sidecar process_output events can arrive a few turns after the
 		// exit notification; poll briefly until output lands (tiny stdout is the
 		// first thing to get lost if snapshotted immediately).
 		for (let i = 0; i < 20 && out === "" && err === ""; i++) {

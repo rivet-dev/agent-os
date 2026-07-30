@@ -13,7 +13,7 @@ import pi from "@agentos-software/pi";
 import piCli from "@agentos-software/pi-cli";
 import { describe, expect, test } from "vitest";
 import { AgentOs } from "../src/agent-os.js";
-import { NativeSidecarKernelProxy } from "../src/sidecar/rpc-client.js";
+import { SidecarKernelProxy } from "../src/sidecar/rpc-client.js";
 import { getAgentOsKernel } from "../src/test/runtime.js";
 import {
 	createAnthropicFixture,
@@ -287,7 +287,7 @@ function collectProcessTree(rows: HostProcessRow[], rootPid: number): number[] {
 }
 
 async function readKernelProcesses(vm: AgentOs): Promise<HostProcessRow[]> {
-	if (!(getAgentOsKernel(vm) instanceof NativeSidecarKernelProxy)) {
+	if (!(getAgentOsKernel(vm) instanceof SidecarKernelProxy)) {
 		return vm.allProcesses().map(({ pid, ppid }) => ({ pid, ppid }));
 	}
 
@@ -303,7 +303,7 @@ async function readKernelProcesses(vm: AgentOs): Promise<HostProcessRow[]> {
 }
 
 async function readKernelProcessDetails(vm: AgentOs): Promise<unknown> {
-	if (!(getAgentOsKernel(vm) instanceof NativeSidecarKernelProxy)) {
+	if (!(getAgentOsKernel(vm) instanceof SidecarKernelProxy)) {
 		return vm.allProcesses();
 	}
 
@@ -332,7 +332,7 @@ async function collectSessionProcessTree(
 	const kernelPids = await collectKernelProcessTree(vm, rootPid);
 	if (
 		kernelPids.length > 0 ||
-		getAgentOsKernel(vm) instanceof NativeSidecarKernelProxy
+		getAgentOsKernel(vm) instanceof SidecarKernelProxy
 	) {
 		return { kind: "kernel", pids: kernelPids };
 	}
@@ -399,7 +399,7 @@ async function snapshotVmResources(vm: AgentOs): Promise<{
 }
 
 async function zombieTimerCount(vm: AgentOs): Promise<number> {
-	if (!(getAgentOsKernel(vm) instanceof NativeSidecarKernelProxy)) {
+	if (!(getAgentOsKernel(vm) instanceof SidecarKernelProxy)) {
 		return getAgentOsKernel(vm).zombieTimerCount;
 	}
 

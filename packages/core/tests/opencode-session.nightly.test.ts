@@ -37,7 +37,7 @@ const ACP_TRACE_PATH = join(ACP_TRACE_DIR, "acp.jsonl");
 const PREVIOUS_ACP_TRACE_PATH = process.env.AGENT_OS_ACP_TRACE_PATH;
 
 beforeAll(() => {
-	// The native sidecar is shared across VMs, so its process environment must
+	// The sidecar is shared across VMs, so its process environment must
 	// be configured before this file creates the first VM.
 	process.env.AGENT_OS_ACP_TRACE_PATH = ACP_TRACE_PATH;
 });

@@ -58,7 +58,7 @@ const BUILD_INSTRUCTIONS =
 	"  just software-build    # stage bin/ + pack every dist/package.aospkg\n" +
 	"See software/README.md.";
 
-/** `.aospkg` container magic (crates/vfs/package-format/v1.bare). */
+/** `.aospkg` container magic (crates/vfs-core/package-format/v1.bare). */
 const AOSPKG_MAGIC = Buffer.from([0x89, 0x41, 0x4f, 0x53]);
 
 /** True when the path is a plausible packed `.aospkg` (magic + header size). */

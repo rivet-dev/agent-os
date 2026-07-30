@@ -38,7 +38,7 @@ async function runCommand(vm: AgentOs, command: string, args: string[]) {
 	};
 }
 
-describe("native sidecar binding dispatch", () => {
+describe("sidecar binding dispatch", () => {
 	let vm: AgentOs;
 
 	beforeEach(async () => {

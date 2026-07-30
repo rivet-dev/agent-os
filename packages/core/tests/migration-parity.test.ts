@@ -138,7 +138,7 @@ const mathBindings = bindings({
 	},
 });
 
-function assertNativeSidecar(vm: AgentOs): void {
+function assertSidecar(vm: AgentOs): void {
 	expect(vm.sidecar.describe()).toMatchObject({
 		state: "ready",
 	});
@@ -160,7 +160,7 @@ function getRequestPath(req: IncomingMessage): string {
 	return req.url ?? "/";
 }
 
-describe("native sidecar migration parity gate", () => {
+describe("sidecar migration parity gate", () => {
 	const cleanups = new Set<() => Promise<void>>();
 
 	afterEach(async () => {
@@ -181,7 +181,7 @@ describe("native sidecar migration parity gate", () => {
 		cleanups.add(async () => {
 			await vm.dispose();
 		});
-		assertNativeSidecar(vm);
+		assertSidecar(vm);
 
 		await vm.mkdir("/workspace", { recursive: true });
 		await vm.writeFile("/workspace/source.txt", "filesystem-ok");
@@ -222,7 +222,7 @@ describe("native sidecar migration parity gate", () => {
 		cleanups.add(async () => {
 			await clonedVm.dispose();
 		});
-		assertNativeSidecar(clonedVm);
+		assertSidecar(clonedVm);
 
 		expect(
 			textDecoder.decode(await clonedVm.readFile("/workspace/process.txt")),
@@ -245,7 +245,7 @@ describe("native sidecar migration parity gate", () => {
 		cleanups.add(async () => {
 			await vm.dispose();
 		});
-		assertNativeSidecar(vm);
+		assertSidecar(vm);
 
 		const listed = await runSpawnedProcess(vm, "agentos", ["list-bindings"]);
 		expect(listed.exitCode).toBe(0);
@@ -319,7 +319,7 @@ describe("native sidecar migration parity gate", () => {
 		cleanups.add(async () => {
 			await vm.dispose();
 		});
-		assertNativeSidecar(vm);
+		assertSidecar(vm);
 
 		const result = await runSpawnedProcess(vm, "node", [
 			"-e",
@@ -366,7 +366,7 @@ describe("native sidecar migration parity gate", () => {
 		cleanups.add(async () => {
 			await vm.dispose();
 		});
-		assertNativeSidecar(vm);
+		assertSidecar(vm);
 
 		const sessionId = "migration-parity";
 		await vm.openSession({ sessionId, agent: "migration-parity" });
