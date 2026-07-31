@@ -64,16 +64,28 @@ async function requestBody(input, init) {
 	return Buffer.alloc(0);
 }
 
-function parseBoundResponse(value) {
+function bindingResult(value) {
 	const parsed = typeof value === "string" ? JSON.parse(value) : value;
-	const response = parsed?.result ?? parsed;
+	return parsed?.result ?? parsed;
+}
+
+function parseBoundStart(value) {
+	const response = bindingResult(value);
 	if (
 		!Number.isInteger(response?.status)
-		|| typeof response?.bodyBase64 !== "string"
+		|| typeof response?.requestId !== "string"
 		|| !response?.headers
 		|| typeof response.headers !== "object"
-	) throw new Error("Codex request binding returned an invalid response");
+	) throw new Error("Codex request binding returned invalid start metadata");
 	return response;
+}
+
+function parseBoundChunk(value) {
+	const chunk = bindingResult(value);
+	if (typeof chunk?.done !== "boolean" || typeof chunk?.chunkBase64 !== "string") {
+		throw new Error("Codex request binding returned an invalid stream chunk");
+	}
+	return chunk;
 }
 
 export function createBoundCodexFetch(invokeBinding, upstreamFetch = globalThis.fetch) {
@@ -83,13 +95,49 @@ export function createBoundCodexFetch(invokeBinding, upstreamFetch = globalThis.
 		const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
 		headers.delete("authorization");
 		headers.delete("chatgpt-account-id");
-		const response = parseBoundResponse(await invokeBinding({
+		const response = parseBoundStart(await invokeBinding("start", {
 			target: url,
 			method: init?.method ?? (input instanceof Request ? input.method : "GET"),
 			headers: Object.fromEntries(headers),
 			bodyBase64: (await requestBody(input, init)).toString("base64"),
 		}));
-		return new Response(Buffer.from(response.bodyBase64, "base64"), {
+		let closed = false;
+		const cancel = async () => {
+			if (closed) return;
+			closed = true;
+			await invokeBinding("cancel", { requestId: response.requestId }).catch(() => undefined);
+		};
+		const stream = new ReadableStream({
+			start(controller) {
+				if (!init?.signal) return;
+				if (init.signal.aborted) {
+					void cancel();
+					controller.error(init.signal.reason);
+					return;
+				}
+				init.signal.addEventListener("abort", () => {
+					void cancel();
+					controller.error(init.signal.reason);
+				}, { once: true });
+			},
+			async pull(controller) {
+				if (closed) return;
+				try {
+					const chunk = parseBoundChunk(await invokeBinding("read", { requestId: response.requestId }));
+					if (closed) return;
+					if (chunk.chunkBase64) controller.enqueue(Buffer.from(chunk.chunkBase64, "base64"));
+					if (chunk.done) {
+						closed = true;
+						controller.close();
+					}
+				} catch (error) {
+					closed = true;
+					controller.error(error);
+				}
+			},
+			cancel,
+		});
+		return new Response(stream, {
 			status: response.status,
 			statusText: typeof response.statusText === "string" ? response.statusText : "",
 			headers: response.headers,
@@ -108,18 +156,26 @@ function commandExists(command) {
 	return false;
 }
 
-async function invokeBoundRequest(request) {
-	const path = `/tmp/agentos-codex-request-${process.pid}-${randomUUID()}.json`;
-	try {
-		await writeFile(path, JSON.stringify(request), { mode: 0o600 });
-		const { stdout } = await execFileAsync(CREDENTIAL_COMMAND, ["request", "--json-file", path], {
-			timeout: 120_000,
-			maxBuffer: 64 * 1024 * 1024,
-		});
-		return parseBoundResponse(stdout);
-	} finally {
-		await rm(path, { force: true });
+async function invokeBoundCommand(command, input) {
+	if (command === "start") {
+		const path = `/tmp/agentos-codex-request-${process.pid}-${randomUUID()}.json`;
+		try {
+			await writeFile(path, JSON.stringify(input), { mode: 0o600 });
+			const { stdout } = await execFileAsync(CREDENTIAL_COMMAND, ["start", "--json-file", path], {
+				timeout: 120_000,
+				maxBuffer: 1024 * 1024,
+			});
+			return bindingResult(stdout);
+		} finally {
+			await rm(path, { force: true });
+		}
 	}
+	const { stdout } = await execFileAsync(
+		CREDENTIAL_COMMAND,
+		[command, "--request-id", input.requestId],
+		{ timeout: command === "read" ? 10 * 60_000 : 10_000, maxBuffer: 8 * 1024 * 1024 },
+	);
+	return bindingResult(stdout);
 }
 
 function createCodexProviderConfig(createFetch) {
@@ -138,8 +194,14 @@ function createCodexProviderConfig(createFetch) {
 export default function codexAuthExtension(pi) {
 	const accessToken = process.env.OPENAI_CODEX_ACCESS_TOKEN?.trim();
 	const accountId = process.env.OPENAI_CODEX_ACCOUNT_ID?.trim();
-	const staticCredential = accessToken && accountId ? { accessToken, accountId } : null;
-	if (!staticCredential && !commandExists(CREDENTIAL_COMMAND)) return;
+	const bound = commandExists(CREDENTIAL_COMMAND);
+	const staticCredential = !bound
+		&& process.env.AGENTOS_CODEX_ALLOW_ENV_AUTH === "1"
+		&& accessToken
+		&& accountId
+		? { accessToken, accountId }
+		: null;
+	if (!staticCredential && !bound) return;
 
 	process.env[SYNTHETIC_TOKEN_ENV] = createAccountToken(staticCredential?.accountId ?? "agentos-bound-account");
 	pi.registerProvider(
@@ -147,7 +209,7 @@ export default function codexAuthExtension(pi) {
 		createCodexProviderConfig(
 			staticCredential
 				? (upstreamFetch) => createDynamicCodexFetch(async () => staticCredential, upstreamFetch)
-				: (upstreamFetch) => createBoundCodexFetch(invokeBoundRequest, upstreamFetch),
+				: (upstreamFetch) => createBoundCodexFetch(invokeBoundCommand, upstreamFetch),
 		),
 	);
 }

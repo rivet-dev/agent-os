@@ -68,7 +68,7 @@ child.once("error", (error) => {
 	process.stderr.write(`${error.stack ?? error}\n`);
 	finish(1);
 });
-child.once("exit", (code, signal) => {
+child.once("close", (code, signal) => {
 	finish(code ?? 1, signal);
 });
 

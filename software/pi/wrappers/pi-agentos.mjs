@@ -17,9 +17,14 @@ import {
 process.title = "pi-agentos-rpc";
 process.env.PI_CODING_AGENT = "true";
 
-const configuredCwd = process.env.AGENTOS_PI_CWD_FILE
-	? readFileSync(process.env.AGENTOS_PI_CWD_FILE, "utf8").trim()
-	: "";
+let configuredCwd = "";
+if (process.env.AGENTOS_PI_CWD_FILE) {
+	try {
+		configuredCwd = readFileSync(process.env.AGENTOS_PI_CWD_FILE, "utf8").trim();
+	} catch (error) {
+		if (error?.code !== "ENOENT") throw error;
+	}
+}
 const launchCwd = isAbsolute(configuredCwd) ? configuredCwd : process.cwd();
 process.chdir(launchCwd);
 process.env.PWD = launchCwd;

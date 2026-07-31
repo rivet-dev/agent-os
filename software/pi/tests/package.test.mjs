@@ -133,6 +133,7 @@ test("Pi packages an AgentOS-owned external Codex auth extension", async (t) => 
 	const extension = await import(extensionUrl);
 	const originalToken = process.env.OPENAI_CODEX_ACCESS_TOKEN;
 	const originalAccountId = process.env.OPENAI_CODEX_ACCOUNT_ID;
+	const originalAllowEnvAuth = process.env.AGENTOS_CODEX_ALLOW_ENV_AUTH;
 	const accessToken = "external-codex-access-token";
 	const accountId = "external-codex-account-id";
 	let request;
@@ -143,11 +144,14 @@ test("Pi packages an AgentOS-owned external Codex auth extension", async (t) => 
 	};
 	process.env.OPENAI_CODEX_ACCESS_TOKEN = accessToken;
 	process.env.OPENAI_CODEX_ACCOUNT_ID = accountId;
+	process.env.AGENTOS_CODEX_ALLOW_ENV_AUTH = "1";
 	t.after(() => {
 		if (originalToken === undefined) delete process.env.OPENAI_CODEX_ACCESS_TOKEN;
 		else process.env.OPENAI_CODEX_ACCESS_TOKEN = originalToken;
 		if (originalAccountId === undefined) delete process.env.OPENAI_CODEX_ACCOUNT_ID;
 		else process.env.OPENAI_CODEX_ACCOUNT_ID = originalAccountId;
+		if (originalAllowEnvAuth === undefined) delete process.env.AGENTOS_CODEX_ALLOW_ENV_AUTH;
+		else process.env.AGENTOS_CODEX_ALLOW_ENV_AUTH = originalAllowEnvAuth;
 		delete process.env.AGENTOS_CODEX_ACCOUNT_TOKEN;
 	});
 
@@ -236,19 +240,29 @@ test("Codex auth brokers bound requests without exposing the bearer token", asyn
 		)
 	);
 	let request;
+	let reads = 0;
 	const proxyFetch = extension.createBoundCodexFetch(
-		async (input) => {
-			request = input;
+		async (command, input) => {
+			if (command === "start") {
+				request = input;
+				return {
+					requestId: "00000000-0000-4000-8000-000000000001",
+					status: 200,
+					statusText: "OK",
+					headers: { "content-type": "text/event-stream" },
+				};
+			}
+			if (command === "cancel") return { cancelled: true };
+			reads++;
 			return {
-				status: 200,
-				statusText: "OK",
-				headers: { "content-type": "text/event-stream" },
-				bodyBase64: Buffer.from("data: done\\n\\n").toString("base64"),
+				done: reads > 1,
+				chunkBase64: reads === 1 ? Buffer.from("data: done\\n\\n").toString("base64") : "",
 			};
 		},
+		async () => new Response(null, { status: 204 }),
 	);
 
-	await proxyFetch("https://chatgpt.com/backend-api/codex/responses", {
+	const response = await proxyFetch("https://chatgpt.com/backend-api/codex/responses", {
 		method: "POST",
 		headers: { authorization: "Bearer synthetic", "content-type": "application/json" },
 		body: "{}",
@@ -258,6 +272,9 @@ test("Codex auth brokers bound requests without exposing the bearer token", asyn
 	assert.equal(request.headers.authorization, undefined);
 	assert.equal(request.headers["chatgpt-account-id"], undefined);
 	assert.equal(Buffer.from(request.bodyBase64, "base64").toString(), "{}");
+	assert.equal(await response.text(), "data: done\\n\\n");
+	assert.equal(reads, 2);
+	assert.equal((await proxyFetch("https://example.com")).status, 204);
 });
 
 test("packaged pinned Pi adapter initializes with persistent session capabilities", async (t) => {
