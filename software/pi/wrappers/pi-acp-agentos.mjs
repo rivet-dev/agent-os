@@ -11,7 +11,8 @@ const child = spawn(process.execPath, [upstreamEntrypoint, ...process.argv.slice
 	stdio: ["pipe", "pipe", "inherit"],
 });
 
-process.stdin.pipe(child.stdin);
+process.stdin.on("data", (chunk) => child.stdin.write(chunk));
+process.stdin.on("end", () => child.stdin.end());
 const output = createInterface({ input: child.stdout, crlfDelay: Infinity });
 output.on("line", (line) => process.stdout.write(`${normalizeAcpResponse(line)}\n`));
 
