@@ -36,16 +36,41 @@ export function parseCodexCredential(value) {
 	const credential = parsed?.result ?? parsed;
 	const accessToken = credential?.accessToken?.trim();
 	const accountId = credential?.accountId?.trim();
-	if (!accessToken || !accountId) {
-		throw new Error("Codex credential binding returned an invalid credential");
+	if (accessToken && accountId) return { accessToken, accountId };
+
+	const proxyUrl = credential?.proxyUrl?.trim();
+	const proxyToken = credential?.proxyToken?.trim();
+	if (proxyUrl && proxyToken && accountId) {
+		const parsedUrl = new URL(proxyUrl);
+		if (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:") {
+			return { proxyUrl: parsedUrl.toString(), proxyToken, accountId };
+		}
 	}
-	return { accessToken, accountId };
+	throw new Error("Codex credential binding returned an invalid credential");
 }
 
 export function createDynamicCodexFetch(resolveCredential, upstreamFetch = globalThis.fetch) {
 	return async (input, init) => {
-		const { accessToken, accountId } = parseCodexCredential(await resolveCredential());
-		return createCodexFetch(accessToken, accountId, upstreamFetch)(input, init);
+		const url = input instanceof Request ? input.url : String(input);
+		if (url !== CODEX_BASE_URL && !url.startsWith(`${CODEX_BASE_URL}/`)) return upstreamFetch(input, init);
+
+		const credential = parseCodexCredential(await resolveCredential());
+		if (credential.accessToken) {
+			return createCodexFetch(credential.accessToken, credential.accountId, upstreamFetch)(input, init);
+		}
+
+		const proxyUrl = new URL(credential.proxyUrl);
+		proxyUrl.searchParams.set("target", url);
+		const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+		headers.set("authorization", `Bearer ${credential.proxyToken}`);
+		headers.delete("chatgpt-account-id");
+		return upstreamFetch(proxyUrl, {
+			...(input instanceof Request
+				? { method: input.method, body: input.body }
+				: {}),
+			...init,
+			headers,
+		});
 	};
 }
 

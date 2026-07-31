@@ -103,6 +103,7 @@ test("AgentOS ACP shim normalizes only missing native Pi sessions", async () => 
 	assert.equal(normalizeAcpResponse(unrelated), unrelated);
 	assert.equal(normalizeAcpResponse("not-json"), "not-json");
 	assert.equal(acpRequestCwd('{"method":"session/new","params":{"cwd":"/workspace"}}'), "/workspace");
+	assert.equal(acpRequestCwd('{"method":"session/prompt","params":{"cwd":"/other"}}'), null);
 	assert.equal(acpRequestCwd('{"method":"session/new","params":{"cwd":"relative"}}'), null);
 });
 
@@ -225,6 +226,40 @@ test("Codex auth resolves a fresh bound credential for every request", async () 
 		() => extension.parseCodexCredential('{"accessToken":"missing-account"}'),
 		/invalid credential/,
 	);
+});
+
+test("Codex auth sends bound requests through an opaque proxy ticket", async () => {
+	const extension = await import(
+		new URL(
+			"../dist/package/node_modules/@agentos-software/pi/dist/extensions/codex-auth.mjs",
+			import.meta.url,
+		)
+	);
+	let request;
+	const proxyFetch = extension.createDynamicCodexFetch(
+		async () => ({
+			proxyUrl: "http://gateway.internal/api/internal/codex-proxy",
+			proxyToken: "one-use-ticket",
+			accountId: "bound-account",
+		}),
+		async (input, init) => {
+			request = { input: String(input), init };
+			return new Response(null, { status: 204 });
+		},
+	);
+
+	await proxyFetch("https://chatgpt.com/backend-api/codex/responses", {
+		method: "POST",
+		headers: { authorization: "Bearer synthetic", "content-type": "application/json" },
+		body: "{}",
+	});
+	const url = new URL(request.input);
+	const headers = new Headers(request.init.headers);
+	assert.equal(url.origin, "http://gateway.internal");
+	assert.equal(url.pathname, "/api/internal/codex-proxy");
+	assert.equal(url.searchParams.get("target"), "https://chatgpt.com/backend-api/codex/responses");
+	assert.equal(headers.get("authorization"), "Bearer one-use-ticket");
+	assert.equal(headers.get("chatgpt-account-id"), null);
 });
 
 test("packaged pinned Pi adapter initializes with persistent session capabilities", async (t) => {

@@ -24,6 +24,7 @@ export function normalizeAcpResponse(line) {
 export function acpRequestCwd(line) {
 	try {
 		const message = JSON.parse(line);
+		if (!["session/new", "session/load", "session/resume"].includes(message?.method)) return null;
 		const cwd = message?.params?.cwd;
 		return typeof cwd === "string" && cwd.startsWith("/") ? cwd : null;
 	} catch {
