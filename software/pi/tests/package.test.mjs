@@ -228,7 +228,7 @@ test("Codex auth resolves a fresh bound credential for every request", async () 
 	);
 });
 
-test("Codex auth sends bound requests through an opaque proxy ticket", async () => {
+test("Codex auth brokers bound requests without exposing the bearer token", async () => {
 	const extension = await import(
 		new URL(
 			"../dist/package/node_modules/@agentos-software/pi/dist/extensions/codex-auth.mjs",
@@ -236,15 +236,15 @@ test("Codex auth sends bound requests through an opaque proxy ticket", async () 
 		)
 	);
 	let request;
-	const proxyFetch = extension.createDynamicCodexFetch(
-		async () => ({
-			proxyUrl: "http://gateway.internal/api/internal/codex-proxy",
-			proxyToken: "one-use-ticket",
-			accountId: "bound-account",
-		}),
-		async (input, init) => {
-			request = { input: String(input), init };
-			return new Response(null, { status: 204 });
+	const proxyFetch = extension.createBoundCodexFetch(
+		async (input) => {
+			request = input;
+			return {
+				status: 200,
+				statusText: "OK",
+				headers: { "content-type": "text/event-stream" },
+				bodyBase64: Buffer.from("data: done\\n\\n").toString("base64"),
+			};
 		},
 	);
 
@@ -253,13 +253,11 @@ test("Codex auth sends bound requests through an opaque proxy ticket", async () 
 		headers: { authorization: "Bearer synthetic", "content-type": "application/json" },
 		body: "{}",
 	});
-	const url = new URL(request.input);
-	const headers = new Headers(request.init.headers);
-	assert.equal(url.origin, "http://gateway.internal");
-	assert.equal(url.pathname, "/api/internal/codex-proxy");
-	assert.equal(url.searchParams.get("target"), "https://chatgpt.com/backend-api/codex/responses");
-	assert.equal(headers.get("authorization"), "Bearer one-use-ticket");
-	assert.equal(headers.get("chatgpt-account-id"), null);
+	assert.equal(request.target, "https://chatgpt.com/backend-api/codex/responses");
+	assert.equal(request.method, "POST");
+	assert.equal(request.headers.authorization, undefined);
+	assert.equal(request.headers["chatgpt-account-id"], undefined);
+	assert.equal(Buffer.from(request.bodyBase64, "base64").toString(), "{}");
 });
 
 test("packaged pinned Pi adapter initializes with persistent session capabilities", async (t) => {

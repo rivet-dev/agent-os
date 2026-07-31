@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
 import { accessSync, constants } from "node:fs";
+import { rm, writeFile } from "node:fs/promises";
 import { delimiter, resolve } from "node:path";
 import { promisify } from "node:util";
+import { randomUUID } from "node:crypto";
 
 import { stream as streamOpenAICodexResponses } from "@earendil-works/pi-ai/api/openai-codex-responses";
 
@@ -37,15 +39,6 @@ export function parseCodexCredential(value) {
 	const accessToken = credential?.accessToken?.trim();
 	const accountId = credential?.accountId?.trim();
 	if (accessToken && accountId) return { accessToken, accountId };
-
-	const proxyUrl = credential?.proxyUrl?.trim();
-	const proxyToken = credential?.proxyToken?.trim();
-	if (proxyUrl && proxyToken && accountId) {
-		const parsedUrl = new URL(proxyUrl);
-		if (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:") {
-			return { proxyUrl: parsedUrl.toString(), proxyToken, accountId };
-		}
-	}
 	throw new Error("Codex credential binding returned an invalid credential");
 }
 
@@ -54,22 +47,52 @@ export function createDynamicCodexFetch(resolveCredential, upstreamFetch = globa
 		const url = input instanceof Request ? input.url : String(input);
 		if (url !== CODEX_BASE_URL && !url.startsWith(`${CODEX_BASE_URL}/`)) return upstreamFetch(input, init);
 
-		const credential = parseCodexCredential(await resolveCredential());
-		if (credential.accessToken) {
-			return createCodexFetch(credential.accessToken, credential.accountId, upstreamFetch)(input, init);
-		}
+		const { accessToken, accountId } = parseCodexCredential(await resolveCredential());
+		return createCodexFetch(accessToken, accountId, upstreamFetch)(input, init);
+	};
+}
 
-		const proxyUrl = new URL(credential.proxyUrl);
-		proxyUrl.searchParams.set("target", url);
+async function requestBody(input, init) {
+	const body = init?.body;
+	if (typeof body === "string") return Buffer.from(body);
+	if (body instanceof URLSearchParams) return Buffer.from(body.toString());
+	if (body instanceof ArrayBuffer) return Buffer.from(body);
+	if (ArrayBuffer.isView(body)) return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+	if (body instanceof Blob) return Buffer.from(await body.arrayBuffer());
+	if (body) return Buffer.from(await new Response(body).arrayBuffer());
+	if (input instanceof Request && input.body) return Buffer.from(await input.clone().arrayBuffer());
+	return Buffer.alloc(0);
+}
+
+function parseBoundResponse(value) {
+	const parsed = typeof value === "string" ? JSON.parse(value) : value;
+	const response = parsed?.result ?? parsed;
+	if (
+		!Number.isInteger(response?.status)
+		|| typeof response?.bodyBase64 !== "string"
+		|| !response?.headers
+		|| typeof response.headers !== "object"
+	) throw new Error("Codex request binding returned an invalid response");
+	return response;
+}
+
+export function createBoundCodexFetch(invokeBinding, upstreamFetch = globalThis.fetch) {
+	return async (input, init) => {
+		const url = input instanceof Request ? input.url : String(input);
+		if (url !== CODEX_BASE_URL && !url.startsWith(`${CODEX_BASE_URL}/`)) return upstreamFetch(input, init);
 		const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
-		headers.set("authorization", `Bearer ${credential.proxyToken}`);
+		headers.delete("authorization");
 		headers.delete("chatgpt-account-id");
-		return upstreamFetch(proxyUrl, {
-			...(input instanceof Request
-				? { method: input.method, body: input.body }
-				: {}),
-			...init,
-			headers,
+		const response = parseBoundResponse(await invokeBinding({
+			target: url,
+			method: init?.method ?? (input instanceof Request ? input.method : "GET"),
+			headers: Object.fromEntries(headers),
+			bodyBase64: (await requestBody(input, init)).toString("base64"),
+		}));
+		return new Response(Buffer.from(response.bodyBase64, "base64"), {
+			status: response.status,
+			statusText: typeof response.statusText === "string" ? response.statusText : "",
+			headers: response.headers,
 		});
 	};
 }
@@ -85,22 +108,28 @@ function commandExists(command) {
 	return false;
 }
 
-async function loadBoundCredential() {
-	const { stdout } = await execFileAsync(CREDENTIAL_COMMAND, ["get"], {
-		timeout: 10_000,
-		maxBuffer: 1024 * 1024,
-	});
-	return parseCodexCredential(stdout);
+async function invokeBoundRequest(request) {
+	const path = `/tmp/agentos-codex-request-${process.pid}-${randomUUID()}.json`;
+	try {
+		await writeFile(path, JSON.stringify(request), { mode: 0o600 });
+		const { stdout } = await execFileAsync(CREDENTIAL_COMMAND, ["request", "--json-file", path], {
+			timeout: 120_000,
+			maxBuffer: 64 * 1024 * 1024,
+		});
+		return parseBoundResponse(stdout);
+	} finally {
+		await rm(path, { force: true });
+	}
 }
 
-function createCodexProviderConfig(resolveCredential) {
+function createCodexProviderConfig(createFetch) {
 	return {
 		api: "openai-codex-responses",
 		apiKey: `$${SYNTHETIC_TOKEN_ENV}`,
 		streamSimple: (model, context, options) =>
 			streamOpenAICodexResponses(model, context, {
 				...options,
-				fetch: createDynamicCodexFetch(resolveCredential, options?.fetch ?? globalThis.fetch),
+				fetch: createFetch(options?.fetch ?? globalThis.fetch),
 				transport: "sse",
 			}),
 	};
@@ -115,6 +144,10 @@ export default function codexAuthExtension(pi) {
 	process.env[SYNTHETIC_TOKEN_ENV] = createAccountToken(staticCredential?.accountId ?? "agentos-bound-account");
 	pi.registerProvider(
 		"openai-codex",
-		createCodexProviderConfig(staticCredential ? async () => staticCredential : loadBoundCredential),
+		createCodexProviderConfig(
+			staticCredential
+				? (upstreamFetch) => createDynamicCodexFetch(async () => staticCredential, upstreamFetch)
+				: (upstreamFetch) => createBoundCodexFetch(invokeBoundRequest, upstreamFetch),
+		),
 	);
 }
