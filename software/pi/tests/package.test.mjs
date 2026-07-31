@@ -37,7 +37,7 @@ test("Pi packages the commit-pinned rivet-dev ACP adapter and runtime closure", 
 	assert.equal(manifest.agent.env.PI_ACP_PI_COMMAND, "/opt/agentos/bin/pi-agentos");
 	assert.equal(manifest.agent.env.PI_ACP_PI_ENTRYPOINT, undefined);
 	assert.equal(manifest.agent.env.PI_ACP_PI_EXTENSION, undefined);
-	assert.equal(packageJson.bin["pi-acp"], "./dist/pi-acp/index.js");
+	assert.equal(packageJson.bin["pi-acp"], "./dist/pi-acp-agentos.mjs");
 	assert.equal(packageJson.bin["pi-agentos"], "./dist/pi-agentos.mjs");
 	assert.equal(
 		packageJson.bin.pi,
@@ -66,6 +66,32 @@ test("Pi packages the commit-pinned rivet-dev ACP adapter and runtime closure", 
 	assert.equal(adapterPackageJson.version, "0.0.31");
 	assert.match(packagedMcpConfig, /export function loadMcpConfig/);
 	assert.equal(packageJson.dependencies["@mariozechner/pi-coding-agent"], undefined);
+});
+
+test("AgentOS ACP shim normalizes only missing native Pi sessions", async () => {
+	const { normalizeAcpResponse } = await import(
+		new URL(
+			"../dist/package/node_modules/@agentos-software/pi/dist/acp-errors.mjs",
+			import.meta.url,
+		)
+	);
+	const missing = JSON.stringify({
+		jsonrpc: "2.0",
+		id: 7,
+		error: { code: -32602, message: "Invalid params: Unknown sessionId: old-id", data: {} },
+	});
+	assert.deepEqual(JSON.parse(normalizeAcpResponse(missing)), {
+		jsonrpc: "2.0",
+		id: 7,
+		error: { code: -32002, message: "Resource not found", data: { kind: "unknown_session" } },
+	});
+	const unrelated = JSON.stringify({
+		jsonrpc: "2.0",
+		id: 8,
+		error: { code: -32602, message: "Invalid params: bad model", data: {} },
+	});
+	assert.equal(normalizeAcpResponse(unrelated), unrelated);
+	assert.equal(normalizeAcpResponse("not-json"), "not-json");
 });
 
 test("Pi packages an AgentOS-owned external Codex auth extension", async (t) => {

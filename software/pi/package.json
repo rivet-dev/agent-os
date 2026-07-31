@@ -8,7 +8,7 @@
 	"bin": {
 		"pi": "./node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
 		"pi-agentos": "./dist/pi-agentos.mjs",
-		"pi-acp": "./dist/pi-acp/index.js"
+		"pi-acp": "./dist/pi-acp-agentos.mjs"
 	},
 	"exports": {
 		".": {
