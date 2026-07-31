@@ -95,30 +95,44 @@ export function createBoundCodexFetch(invokeBinding, upstreamFetch = globalThis.
 		const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
 		headers.delete("authorization");
 		headers.delete("chatgpt-account-id");
-		const response = parseBoundStart(await invokeBinding("start", {
-			target: url,
-			method: init?.method ?? (input instanceof Request ? input.method : "GET"),
-			headers: Object.fromEntries(headers),
-			bodyBase64: (await requestBody(input, init)).toString("base64"),
-		}));
+		const requestId = randomUUID();
 		let closed = false;
+		let streamController;
 		const cancel = async () => {
 			if (closed) return;
 			closed = true;
-			await invokeBinding("cancel", { requestId: response.requestId }).catch(() => undefined);
+			await invokeBinding("cancel", { requestId }).catch(() => undefined);
 		};
+		const onAbort = () => {
+			void cancel();
+			streamController?.error(init?.signal?.reason);
+		};
+		if (init?.signal?.aborted) {
+			await cancel();
+			throw init.signal.reason;
+		}
+		init?.signal?.addEventListener("abort", onAbort, { once: true });
+		let response;
+		try {
+			response = parseBoundStart(await invokeBinding("start", {
+				requestId,
+				target: url,
+				method: init?.method ?? (input instanceof Request ? input.method : "GET"),
+				headers: Object.fromEntries(headers),
+				bodyBase64: (await requestBody(input, init)).toString("base64"),
+			}));
+		} catch (error) {
+			await cancel();
+			init?.signal?.removeEventListener("abort", onAbort);
+			throw error;
+		}
+		if (closed) {
+			init?.signal?.removeEventListener("abort", onAbort);
+			throw init?.signal?.reason ?? new Error("Codex request was cancelled");
+		}
 		const stream = new ReadableStream({
 			start(controller) {
-				if (!init?.signal) return;
-				if (init.signal.aborted) {
-					void cancel();
-					controller.error(init.signal.reason);
-					return;
-				}
-				init.signal.addEventListener("abort", () => {
-					void cancel();
-					controller.error(init.signal.reason);
-				}, { once: true });
+				streamController = controller;
 			},
 			async pull(controller) {
 				if (closed) return;
@@ -128,10 +142,12 @@ export function createBoundCodexFetch(invokeBinding, upstreamFetch = globalThis.
 					if (chunk.chunkBase64) controller.enqueue(Buffer.from(chunk.chunkBase64, "base64"));
 					if (chunk.done) {
 						closed = true;
+						init?.signal?.removeEventListener("abort", onAbort);
 						controller.close();
 					}
 				} catch (error) {
-					closed = true;
+					await cancel();
+					init?.signal?.removeEventListener("abort", onAbort);
 					controller.error(error);
 				}
 			},

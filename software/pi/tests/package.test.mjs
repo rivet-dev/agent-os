@@ -246,7 +246,7 @@ test("Codex auth brokers bound requests without exposing the bearer token", asyn
 			if (command === "start") {
 				request = input;
 				return {
-					requestId: "00000000-0000-4000-8000-000000000001",
+					requestId: input.requestId,
 					status: 200,
 					statusText: "OK",
 					headers: { "content-type": "text/event-stream" },

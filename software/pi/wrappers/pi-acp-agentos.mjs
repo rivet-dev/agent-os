@@ -79,6 +79,5 @@ function finish(code, signal) {
 	process.stdin.removeAllListeners?.("end");
 	output.close();
 	rmSync(cwdPath, { force: true });
-	if (signal) process.kill(process.pid, signal);
-	else process.exit(code);
+	process.exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : code;
 }
