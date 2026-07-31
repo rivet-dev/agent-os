@@ -69,7 +69,7 @@ test("Pi packages the commit-pinned rivet-dev ACP adapter and runtime closure", 
 });
 
 test("AgentOS ACP shim normalizes only missing native Pi sessions", async () => {
-	const { normalizeAcpResponse } = await import(
+	const { acpRequestCwd, normalizeAcpResponse } = await import(
 		new URL(
 			"../dist/package/node_modules/@agentos-software/pi/dist/acp-errors.mjs",
 			import.meta.url,
@@ -85,6 +85,16 @@ test("AgentOS ACP shim normalizes only missing native Pi sessions", async () => 
 		id: 7,
 		error: { code: -32002, message: "Resource not found", data: { kind: "unknown_session" } },
 	});
+	const wrongCwd = JSON.stringify({
+		jsonrpc: "2.0",
+		id: 9,
+		error: {
+			code: -32602,
+			message: "Invalid params: cwd does not match persisted session: expected /, received /workspace",
+			data: {},
+		},
+	});
+	assert.equal(JSON.parse(normalizeAcpResponse(wrongCwd)).error.code, -32002);
 	const unrelated = JSON.stringify({
 		jsonrpc: "2.0",
 		id: 8,
@@ -92,6 +102,8 @@ test("AgentOS ACP shim normalizes only missing native Pi sessions", async () => 
 	});
 	assert.equal(normalizeAcpResponse(unrelated), unrelated);
 	assert.equal(normalizeAcpResponse("not-json"), "not-json");
+	assert.equal(acpRequestCwd('{"method":"session/new","params":{"cwd":"/workspace"}}'), "/workspace");
+	assert.equal(acpRequestCwd('{"method":"session/new","params":{"cwd":"relative"}}'), null);
 });
 
 test("AgentOS Pi command answers the guest-safe version probe", async () => {

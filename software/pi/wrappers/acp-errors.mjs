@@ -5,10 +5,10 @@ export function normalizeAcpResponse(line) {
 	} catch {
 		return line;
 	}
-	if (
-		message?.error?.code !== -32602
-		|| !/unknown sessionid:/i.test(message.error.message ?? "")
-	) return line;
+	const invalidSession = /unknown sessionid:|cwd does not match persisted session:/i.test(
+		message?.error?.message ?? "",
+	);
+	if (message?.error?.code !== -32602 || !invalidSession) return line;
 
 	return JSON.stringify({
 		...message,
@@ -19,4 +19,14 @@ export function normalizeAcpResponse(line) {
 			data: { kind: "unknown_session" },
 		},
 	});
+}
+
+export function acpRequestCwd(line) {
+	try {
+		const message = JSON.parse(line);
+		const cwd = message?.params?.cwd;
+		return typeof cwd === "string" && cwd.startsWith("/") ? cwd : null;
+	} catch {
+		return null;
+	}
 }

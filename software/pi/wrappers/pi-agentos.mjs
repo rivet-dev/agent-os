@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import {
 	createAgentSessionFromServices,
@@ -16,7 +17,12 @@ import {
 process.title = "pi-agentos-rpc";
 process.env.PI_CODING_AGENT = "true";
 
-const launchCwd = process.cwd();
+const configuredCwd = process.env.AGENTOS_PI_CWD_FILE
+	? readFileSync(process.env.AGENTOS_PI_CWD_FILE, "utf8").trim()
+	: "";
+const launchCwd = isAbsolute(configuredCwd) ? configuredCwd : process.cwd();
+process.chdir(launchCwd);
+process.env.PWD = launchCwd;
 const agentDir = getAgentDir();
 const parsed = parseArgs(process.argv.slice(2));
 const errors = parsed.diagnostics.filter((diagnostic) => diagnostic.type === "error");
