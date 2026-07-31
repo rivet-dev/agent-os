@@ -1,7 +1,16 @@
 diff --git a/src/pi-rpc/process.ts b/src/pi-rpc/process.ts
-index 035e591..4c784ad 100644
+index 035e591..b59e591 100644
 --- a/src/pi-rpc/process.ts
 +++ b/src/pi-rpc/process.ts
+@@ -173,6 +173,8 @@ export class PiRpcProcess {
+       ...(mcpLaunch?.args ?? []),
+       ...(permissionGateLaunch?.args ?? [])
+     ]
++    const piExtension = process.env.PI_ACP_PI_EXTENSION?.trim()
++    if (piExtension) piArgs.push('--extension', piExtension)
+     if (params.sessionPath) piArgs.push('--session', params.sessionPath)
+     const args = params.piEntrypoint
+       ? [
 @@ -178,6 +178,7 @@ export class PiRpcProcess {
        ? [
            '-e',

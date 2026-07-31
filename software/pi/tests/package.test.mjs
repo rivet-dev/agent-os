@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("Pi packages the commit-pinned rivet-dev ACP adapter and runtime closure", async () => {
@@ -41,6 +39,10 @@ test("Pi packages the commit-pinned rivet-dev ACP adapter and runtime closure", 
 		manifest.agent.env.PI_ACP_PI_ENTRYPOINT,
 		"/opt/agentos/pkgs/pi/0.0.1/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
 	);
+	assert.equal(
+		manifest.agent.env.PI_ACP_PI_EXTENSION,
+		"/opt/agentos/pkgs/pi/0.0.1/extensions/codex-auth.mjs",
+	);
 	assert.equal(packageJson.bin["pi-acp"], "./dist/pi-acp/index.js");
 	assert.equal(
 		packageJson.bin.pi,
@@ -70,38 +72,23 @@ test("Pi packages the commit-pinned rivet-dev ACP adapter and runtime closure", 
 	assert.equal(packageJson.dependencies["@mariozechner/pi-coding-agent"], undefined);
 });
 
-test("Pi accepts external Codex auth without persisting it", async (t) => {
-	const { ModelRuntime } = await import(
-		new URL(
-			"../dist/package/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
-			import.meta.url,
-		)
-	);
-	const directory = await mkdtemp(join(tmpdir(), "agentos-pi-codex-"));
-	const authPath = join(directory, "auth.json");
-	const token = "external-codex-access-token";
-	const accountId = "external-codex-account-id";
-	t.after(() => rm(directory, { recursive: true, force: true }));
-
-	const runtime = await ModelRuntime.create({
-		authPath,
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
-	const auth = await runtime.getAuth("openai-codex", {
-		env: {
-			OPENAI_CODEX_ACCESS_TOKEN: token,
-			OPENAI_CODEX_ACCOUNT_ID: accountId,
+test("Pi packages an AgentOS-owned external Codex auth extension", async () => {
+	const extensionUrl = new URL("../dist/package/extensions/codex-auth.mjs", import.meta.url);
+	const extension = await import(extensionUrl);
+	let registration;
+	extension.default({
+		registerProvider(provider, config) {
+			registration = { provider, config };
 		},
 	});
 
-	assert.equal(auth?.auth.apiKey, token);
-	assert.deepEqual(auth?.auth.headers, { "chatgpt-account-id": accountId });
-	assert.equal(auth?.source, "OPENAI_CODEX_ACCESS_TOKEN");
-	assert.equal(runtime.isUsingOAuth("openai-codex"), false);
-	assert.ok(runtime.getModel("openai-codex", "gpt-5.6-terra"));
-	assert.doesNotMatch(await readFile(authPath, "utf8"), /external-codex-access-token/);
-	assert.doesNotMatch(await readFile(authPath, "utf8"), /external-codex-account-id/);
+	assert.deepEqual(registration, {
+		provider: "openai-codex",
+		config: {
+			apiKey: "$OPENAI_CODEX_ACCESS_TOKEN",
+			headers: { "chatgpt-account-id": "$OPENAI_CODEX_ACCOUNT_ID" },
+		},
+	});
 	assert.match(
 		await readFile(
 			new URL(
@@ -119,6 +106,10 @@ test("packaged pinned Pi adapter initializes with persistent session capabilitie
 		"../dist/package/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
 		import.meta.url,
 	).pathname;
+	const piExtension = new URL(
+		"../dist/package/extensions/codex-auth.mjs",
+		import.meta.url,
+	).pathname;
 	const child = spawn(
 		new URL("../dist/package/bin/pi-acp", import.meta.url).pathname,
 		[],
@@ -127,6 +118,7 @@ test("packaged pinned Pi adapter initializes with persistent session capabilitie
 			env: {
 				...process.env,
 				PI_ACP_PI_ENTRYPOINT: piEntrypoint,
+				PI_ACP_PI_EXTENSION: piExtension,
 				OPENAI_CODEX_ACCESS_TOKEN: "external-codex-access-token",
 				OPENAI_CODEX_ACCOUNT_ID: "external-codex-account-id",
 			},

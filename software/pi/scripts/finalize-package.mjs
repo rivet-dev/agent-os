@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { cpSync, realpathSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,22 +16,9 @@ const codingAgentDir = resolve(
 const piAiDir = realpathSync(
 	resolve(dirname(realpathSync(codingAgentDir)), "pi-ai"),
 );
+const codexExtension = resolve(packageDir, "extensions", "codex-auth.mjs");
 
 const patchedRuntimeFiles = [
-	{
-		source: resolve(piAiDir, "dist", "env-api-keys.js"),
-		targets: [
-			"@earendil-works/pi-ai/dist/env-api-keys.js",
-			"@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/env-api-keys.js",
-		],
-	},
-	{
-		source: resolve(piAiDir, "dist", "providers", "openai-codex.js"),
-		targets: [
-			"@earendil-works/pi-ai/dist/providers/openai-codex.js",
-			"@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/providers/openai-codex.js",
-		],
-	},
 	{
 		source: resolve(piAiDir, "dist", "api", "openai-codex-responses.js"),
 		targets: [
@@ -49,6 +36,10 @@ for (const file of patchedRuntimeFiles) {
 		cpSync(file.source, resolve(stagedPackageDir, "node_modules", target));
 	}
 }
+
+const stagedExtension = resolve(stagedPackageDir, "extensions", "codex-auth.mjs");
+mkdirSync(dirname(stagedExtension), { recursive: true });
+cpSync(codexExtension, stagedExtension);
 
 function run(command, args) {
 	const result = spawnSync(command, args, { stdio: "inherit" });

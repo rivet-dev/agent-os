@@ -23,7 +23,7 @@ pnpmfileChecksum: sha256-SEnUwm6AFeob5DIJB/q7nwJGPinO5RVveyVjDzNYuIM=
 
 patchedDependencies:
   '@earendil-works/pi-ai@0.83.0':
-    hash: 775223cba59ad571af7d7fc5285a0750bdfc995e05180c4405bbc7d6959210b2
+    hash: fddc05466df25c2f701127a5d630c1c6a64cd2157328e6a0616dac0ca6522f08
     path: patches/@earendil-works__pi-ai@0.83.0.patch
   '@earendil-works/pi-coding-agent@0.83.0':
     hash: 1d0a53322f46342d8f5e41228721849abb7b6babd98a6c2d1627d22bf2523366
@@ -16746,7 +16746,7 @@ snapshots:
 
   '@earendil-works/pi-agent-core@0.83.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)':
     dependencies:
-      '@earendil-works/pi-ai': 0.83.0(patch_hash=775223cba59ad571af7d7fc5285a0750bdfc995e05180c4405bbc7d6959210b2)(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)
+      '@earendil-works/pi-ai': 0.83.0(patch_hash=fddc05466df25c2f701127a5d630c1c6a64cd2157328e6a0616dac0ca6522f08)(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)
       diff: 8.0.4
       ignore: 7.0.5
       typebox: 1.3.7
@@ -16821,7 +16821,7 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-ai@0.83.0(patch_hash=775223cba59ad571af7d7fc5285a0750bdfc995e05180c4405bbc7d6959210b2)(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)':
+  '@earendil-works/pi-ai@0.83.0(patch_hash=fddc05466df25c2f701127a5d630c1c6a64cd2157328e6a0616dac0ca6522f08)(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)':
     dependencies:
       '@anthropic-ai/sdk': 0.91.1(zod@3.25.76)
       '@aws-sdk/client-bedrock-runtime': 3.1048.0
@@ -16845,7 +16845,7 @@ snapshots:
   '@earendil-works/pi-coding-agent@0.83.0(patch_hash=1d0a53322f46342d8f5e41228721849abb7b6babd98a6c2d1627d22bf2523366)(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)':
     dependencies:
       '@earendil-works/pi-agent-core': 0.83.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)
-      '@earendil-works/pi-ai': 0.83.0(patch_hash=775223cba59ad571af7d7fc5285a0750bdfc995e05180c4405bbc7d6959210b2)(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)
+      '@earendil-works/pi-ai': 0.83.0(patch_hash=fddc05466df25c2f701127a5d630c1c6a64cd2157328e6a0616dac0ca6522f08)(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)
       '@earendil-works/pi-tui': 0.83.0
       '@silvia-odwyer/photon-node': 0.3.4
       chalk: 5.6.2
