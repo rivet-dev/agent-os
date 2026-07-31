@@ -33,8 +33,9 @@ export function createCodexFetch(accessToken, accountId, upstreamFetch = globalT
 
 export function parseCodexCredential(value) {
 	const parsed = typeof value === "string" ? JSON.parse(value) : value;
-	const accessToken = parsed?.accessToken?.trim();
-	const accountId = parsed?.accountId?.trim();
+	const credential = parsed?.result ?? parsed;
+	const accessToken = credential?.accessToken?.trim();
+	const accountId = credential?.accountId?.trim();
 	if (!accessToken || !accountId) {
 		throw new Error("Codex credential binding returned an invalid credential");
 	}

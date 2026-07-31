@@ -158,6 +158,13 @@ test("Codex auth resolves a fresh bound credential for every request", async () 
 	assert.equal(headers.get("authorization"), "Bearer access-token-2");
 	assert.equal(headers.get("chatgpt-account-id"), "account-2");
 	assert.equal(resolution, 2);
+	assert.deepEqual(
+		extension.parseCodexCredential({
+			ok: true,
+			result: { accessToken: "bound-token", accountId: "bound-account" },
+		}),
+		{ accessToken: "bound-token", accountId: "bound-account" },
+	);
 	assert.throws(
 		() => extension.parseCodexCredential('{"accessToken":"missing-account"}'),
 		/invalid credential/,
