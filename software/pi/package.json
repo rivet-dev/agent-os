@@ -6,7 +6,7 @@
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"bin": {
-		"pi": "./node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+		"pi": "./dist/pi-command.mjs",
 		"pi-agentos": "./dist/pi-agentos.mjs",
 		"pi-acp": "./dist/pi-acp-agentos.mjs"
 	},

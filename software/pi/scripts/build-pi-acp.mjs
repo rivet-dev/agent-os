@@ -29,6 +29,7 @@ const manifestPath = resolve(packageDir, "dist", "pi-acp-upstream.json");
 const wrapperPath = resolve(packageDir, "wrappers", "pi-agentos.mjs");
 const acpWrapperPath = resolve(packageDir, "wrappers", "pi-acp-agentos.mjs");
 const acpErrorsPath = resolve(packageDir, "wrappers", "acp-errors.mjs");
+const piCommandPath = resolve(packageDir, "wrappers", "pi-command.mjs");
 const extensionPath = resolve(packageDir, "extensions", "codex-auth.mjs");
 
 function sha256(path) {
@@ -117,6 +118,7 @@ if (existsSync(sourceMap)) cpSync(sourceMap, resolve(outputDir, "index.js.map"))
 cpSync(wrapperPath, resolve(packageDir, "dist", "pi-agentos.mjs"));
 cpSync(acpWrapperPath, resolve(packageDir, "dist", "pi-acp-agentos.mjs"));
 cpSync(acpErrorsPath, resolve(packageDir, "dist", "acp-errors.mjs"));
+cpSync(piCommandPath, resolve(packageDir, "dist", "pi-command.mjs"));
 mkdirSync(resolve(packageDir, "dist", "extensions"), { recursive: true });
 cpSync(extensionPath, resolve(packageDir, "dist", "extensions", "codex-auth.mjs"));
 

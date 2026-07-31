@@ -41,7 +41,7 @@ test("Pi packages the commit-pinned rivet-dev ACP adapter and runtime closure", 
 	assert.equal(packageJson.bin["pi-agentos"], "./dist/pi-agentos.mjs");
 	assert.equal(
 		packageJson.bin.pi,
-		"./node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+		"./dist/pi-command.mjs",
 	);
 	assert.equal(
 		packageJson.dependencies["@earendil-works/pi-coding-agent"],
@@ -92,6 +92,24 @@ test("AgentOS ACP shim normalizes only missing native Pi sessions", async () => 
 	});
 	assert.equal(normalizeAcpResponse(unrelated), unrelated);
 	assert.equal(normalizeAcpResponse("not-json"), "not-json");
+});
+
+test("AgentOS Pi command answers the guest-safe version probe", async () => {
+	const command = new URL("../dist/package/bin/pi", import.meta.url).pathname;
+	const child = spawn(command, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+	let stdout = "";
+	let stderr = "";
+	child.stdout.setEncoding("utf8");
+	child.stderr.setEncoding("utf8");
+	child.stdout.on("data", (chunk) => { stdout += chunk; });
+	child.stderr.on("data", (chunk) => { stderr += chunk; });
+	const code = await new Promise((resolve, reject) => {
+		child.once("error", reject);
+		child.once("exit", resolve);
+	});
+	assert.equal(code, 0);
+	assert.equal(stdout.trim(), "0.83.0");
+	assert.equal(stderr, "");
 });
 
 test("Pi packages an AgentOS-owned external Codex auth extension", async (t) => {
