@@ -1,7 +1,14 @@
+import { execFile } from "node:child_process";
+import { accessSync, constants } from "node:fs";
+import { delimiter, resolve } from "node:path";
+import { promisify } from "node:util";
+
 import { stream as streamOpenAICodexResponses } from "@earendil-works/pi-ai/api/openai-codex-responses";
 
 const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const SYNTHETIC_TOKEN_ENV = "AGENTOS_CODEX_ACCOUNT_TOKEN";
+const CREDENTIAL_COMMAND = "agentos-codex-auth";
+const execFileAsync = promisify(execFile);
 
 export function createAccountToken(accountId) {
 	const payload = Buffer.from(
@@ -24,14 +31,50 @@ export function createCodexFetch(accessToken, accountId, upstreamFetch = globalT
 	};
 }
 
-function createCodexProviderConfig(accessToken, accountId) {
+export function parseCodexCredential(value) {
+	const parsed = typeof value === "string" ? JSON.parse(value) : value;
+	const accessToken = parsed?.accessToken?.trim();
+	const accountId = parsed?.accountId?.trim();
+	if (!accessToken || !accountId) {
+		throw new Error("Codex credential binding returned an invalid credential");
+	}
+	return { accessToken, accountId };
+}
+
+export function createDynamicCodexFetch(resolveCredential, upstreamFetch = globalThis.fetch) {
+	return async (input, init) => {
+		const { accessToken, accountId } = parseCodexCredential(await resolveCredential());
+		return createCodexFetch(accessToken, accountId, upstreamFetch)(input, init);
+	};
+}
+
+function commandExists(command) {
+	for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+		if (!directory) continue;
+		try {
+			accessSync(resolve(directory, command), constants.X_OK);
+			return true;
+		} catch {}
+	}
+	return false;
+}
+
+async function loadBoundCredential() {
+	const { stdout } = await execFileAsync(CREDENTIAL_COMMAND, ["get"], {
+		timeout: 10_000,
+		maxBuffer: 1024 * 1024,
+	});
+	return parseCodexCredential(stdout);
+}
+
+function createCodexProviderConfig(resolveCredential) {
 	return {
 		api: "openai-codex-responses",
 		apiKey: `$${SYNTHETIC_TOKEN_ENV}`,
 		streamSimple: (model, context, options) =>
 			streamOpenAICodexResponses(model, context, {
 				...options,
-				fetch: createCodexFetch(accessToken, accountId, options?.fetch ?? globalThis.fetch),
+				fetch: createDynamicCodexFetch(resolveCredential, options?.fetch ?? globalThis.fetch),
 				transport: "sse",
 			}),
 	};
@@ -40,8 +83,12 @@ function createCodexProviderConfig(accessToken, accountId) {
 export default function codexAuthExtension(pi) {
 	const accessToken = process.env.OPENAI_CODEX_ACCESS_TOKEN?.trim();
 	const accountId = process.env.OPENAI_CODEX_ACCOUNT_ID?.trim();
-	if (!accessToken || !accountId) return;
+	const staticCredential = accessToken && accountId ? { accessToken, accountId } : null;
+	if (!staticCredential && !commandExists(CREDENTIAL_COMMAND)) return;
 
-	process.env[SYNTHETIC_TOKEN_ENV] = createAccountToken(accountId);
-	pi.registerProvider("openai-codex", createCodexProviderConfig(accessToken, accountId));
+	process.env[SYNTHETIC_TOKEN_ENV] = createAccountToken(staticCredential?.accountId ?? "agentos-bound-account");
+	pi.registerProvider(
+		"openai-codex",
+		createCodexProviderConfig(staticCredential ? async () => staticCredential : loadBoundCredential),
+	);
 }

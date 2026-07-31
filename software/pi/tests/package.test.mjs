@@ -128,6 +128,42 @@ test("Pi packages an AgentOS-owned external Codex auth extension", async (t) => 
 	);
 });
 
+test("Codex auth resolves a fresh bound credential for every request", async () => {
+	const extension = await import(
+		new URL(
+			"../dist/package/node_modules/@agentos-software/pi/dist/extensions/codex-auth.mjs",
+			import.meta.url,
+		)
+	);
+	let request;
+	let resolution = 0;
+	const dynamicFetch = extension.createDynamicCodexFetch(
+		async () => ({
+			accessToken: `access-token-${++resolution}`,
+			accountId: `account-${resolution}`,
+		}),
+		async (input, init) => {
+			request = { input, init };
+			return new Response(null, { status: 204 });
+		},
+	);
+
+	await dynamicFetch("https://chatgpt.com/backend-api/codex/responses");
+	let headers = new Headers(request.init.headers);
+	assert.equal(headers.get("authorization"), "Bearer access-token-1");
+	assert.equal(headers.get("chatgpt-account-id"), "account-1");
+
+	await dynamicFetch("https://chatgpt.com/backend-api/codex/responses");
+	headers = new Headers(request.init.headers);
+	assert.equal(headers.get("authorization"), "Bearer access-token-2");
+	assert.equal(headers.get("chatgpt-account-id"), "account-2");
+	assert.equal(resolution, 2);
+	assert.throws(
+		() => extension.parseCodexCredential('{"accessToken":"missing-account"}'),
+		/invalid credential/,
+	);
+});
+
 test("packaged pinned Pi adapter initializes with persistent session capabilities", async (t) => {
 	const piCommand = new URL("../dist/package/bin/pi-agentos", import.meta.url).pathname;
 	const child = spawn(
