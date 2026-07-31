@@ -173,7 +173,7 @@ async function invokeBoundCommand(command, input) {
 	const { stdout } = await execFileAsync(
 		CREDENTIAL_COMMAND,
 		[command, "--request-id", input.requestId],
-		{ timeout: command === "read" ? 10 * 60_000 : 10_000, maxBuffer: 8 * 1024 * 1024 },
+		{ timeout: command === "read" ? 5 * 60_000 : 10_000, maxBuffer: 8 * 1024 * 1024 },
 	);
 	return bindingResult(stdout);
 }
