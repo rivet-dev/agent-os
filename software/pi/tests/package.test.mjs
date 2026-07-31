@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 test("Pi packages the commit-pinned rivet-dev ACP adapter and runtime closure", async () => {
@@ -46,7 +48,7 @@ test("Pi packages the commit-pinned rivet-dev ACP adapter and runtime closure", 
 	);
 	assert.equal(
 		packageJson.dependencies["@earendil-works/pi-coding-agent"],
-		"0.80.6",
+		"0.83.0",
 	);
 	assert.equal(packageJson.dependencies["pi-acp"], undefined);
 	assert.equal(packageJson.dependencies["pi-mcp-adapter"], "2.11.0");
@@ -68,7 +70,55 @@ test("Pi packages the commit-pinned rivet-dev ACP adapter and runtime closure", 
 	assert.equal(packageJson.dependencies["@mariozechner/pi-coding-agent"], undefined);
 });
 
+test("Pi accepts external Codex auth without persisting it", async (t) => {
+	const { ModelRuntime } = await import(
+		new URL(
+			"../dist/package/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
+			import.meta.url,
+		)
+	);
+	const directory = await mkdtemp(join(tmpdir(), "agentos-pi-codex-"));
+	const authPath = join(directory, "auth.json");
+	const token = "external-codex-access-token";
+	const accountId = "external-codex-account-id";
+	t.after(() => rm(directory, { recursive: true, force: true }));
+
+	const runtime = await ModelRuntime.create({
+		authPath,
+		modelsPath: null,
+		allowModelNetwork: false,
+	});
+	const auth = await runtime.getAuth("openai-codex", {
+		env: {
+			OPENAI_CODEX_ACCESS_TOKEN: token,
+			OPENAI_CODEX_ACCOUNT_ID: accountId,
+		},
+	});
+
+	assert.equal(auth?.auth.apiKey, token);
+	assert.deepEqual(auth?.auth.headers, { "chatgpt-account-id": accountId });
+	assert.equal(auth?.source, "OPENAI_CODEX_ACCESS_TOKEN");
+	assert.equal(runtime.isUsingOAuth("openai-codex"), false);
+	assert.ok(runtime.getModel("openai-codex", "gpt-5.6-terra"));
+	assert.doesNotMatch(await readFile(authPath, "utf8"), /external-codex-access-token/);
+	assert.doesNotMatch(await readFile(authPath, "utf8"), /external-codex-account-id/);
+	assert.match(
+		await readFile(
+			new URL(
+				"../dist/package/node_modules/@earendil-works/pi-coding-agent/dist/core/http-dispatcher.js",
+				import.meta.url,
+			),
+			"utf8",
+		),
+		/canInstallUndiciGlobals/,
+	);
+});
+
 test("packaged pinned Pi adapter initializes with persistent session capabilities", async (t) => {
+	const piEntrypoint = new URL(
+		"../dist/package/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+		import.meta.url,
+	).pathname;
 	const child = spawn(
 		new URL("../dist/package/bin/pi-acp", import.meta.url).pathname,
 		[],
@@ -76,7 +126,9 @@ test("packaged pinned Pi adapter initializes with persistent session capabilitie
 			stdio: ["pipe", "pipe", "pipe"],
 			env: {
 				...process.env,
-				PI_ACP_PI_COMMAND: "/opt/agentos/bin/pi",
+				PI_ACP_PI_ENTRYPOINT: piEntrypoint,
+				OPENAI_CODEX_ACCESS_TOKEN: "external-codex-access-token",
+				OPENAI_CODEX_ACCOUNT_ID: "external-codex-account-id",
 			},
 		},
 	);
@@ -134,5 +186,41 @@ test("packaged pinned Pi adapter initializes with persistent session capabilitie
 	assert.deepEqual(
 		response.result.agentCapabilities.sessionCapabilities.close,
 		{},
+	);
+
+	const session = await new Promise((resolve, reject) => {
+		const timeout = setTimeout(
+			() => reject(new Error(`session/new timed out: ${stderr}`)),
+			10_000,
+		);
+		let buffer = "";
+		child.stdout.on("data", (chunk) => {
+			buffer += chunk;
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				const message = JSON.parse(line);
+				if (message.id !== 2) continue;
+				clearTimeout(timeout);
+				resolve(message);
+			}
+		});
+		child.stdin.write(
+			`${JSON.stringify({
+				jsonrpc: "2.0",
+				id: 2,
+				method: "session/new",
+				params: { cwd: new URL("..", import.meta.url).pathname, mcpServers: [] },
+			})}\n`,
+		);
+	});
+
+	assert.equal(session.error, undefined);
+	assert.equal(typeof session.result.sessionId, "string");
+	assert.ok(
+		session.result.models.availableModels.some(
+			(model) => model.modelId === "openai-codex/gpt-5.6-terra",
+		),
 	);
 });

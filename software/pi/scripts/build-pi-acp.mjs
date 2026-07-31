@@ -26,6 +26,11 @@ const tarballPath = resolve(cacheDir, `pi-acp-${SOURCE_COMMIT}.tar.gz`);
 const sourceRoot = resolve(cacheDir, `pi-acp-${SOURCE_COMMIT}`);
 const outputDir = resolve(packageDir, "dist", "pi-acp");
 const manifestPath = resolve(packageDir, "dist", "pi-acp-upstream.json");
+const compatibilityPatchPath = resolve(
+	packageDir,
+	"patches",
+	"pi-acp-node-options.patch",
+);
 
 function sha256(path) {
 	return createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -94,6 +99,7 @@ for (const [name, version] of Object.entries(expectedDependencies)) {
 }
 
 run("npm", ["ci"], { cwd: sourceRoot });
+run("patch", ["-p1", "-i", compatibilityPatchPath], { cwd: sourceRoot });
 run("npm", ["run", "build"], { cwd: sourceRoot });
 
 const sourceEntrypoint = resolve(sourceRoot, "dist", "index.js");
@@ -120,6 +126,12 @@ writeFileSync(
 			sourceCommit: SOURCE_COMMIT,
 			sourceTarballSha256: SOURCE_TARBALL_SHA256,
 			sourcePackageVersion: sourcePackage.version,
+			compatibilityPatches: [
+				{
+					path: "patches/pi-acp-node-options.patch",
+					sha256: sha256(compatibilityPatchPath),
+				},
+			],
 			buildCommands: ["npm ci", "npm run build"],
 			entrypoint: "./pi-acp/index.js",
 			entrypointSha256: sha256(sourceEntrypoint),

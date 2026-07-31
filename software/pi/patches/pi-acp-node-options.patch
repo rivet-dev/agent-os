@@ -1,0 +1,30 @@
+diff --git a/src/pi-rpc/process.ts b/src/pi-rpc/process.ts
+index 035e591..4c784ad 100644
+--- a/src/pi-rpc/process.ts
++++ b/src/pi-rpc/process.ts
+@@ -178,6 +178,7 @@ export class PiRpcProcess {
+       ? [
+           '-e',
+-          `process.chdir(${JSON.stringify(params.cwd)}); process.argv.splice(1, 0, ${JSON.stringify(params.piEntrypoint)}); globalThis.__piAcpMain = import(${JSON.stringify(params.piEntrypoint)}).catch(error => { console.error(error); process.exitCode = 1; });`,
++          `process.chdir(${JSON.stringify(params.cwd)}); if (process.argv[1] === '--') process.argv.splice(1, 1); process.argv.splice(1, 0, ${JSON.stringify(params.piEntrypoint)}); globalThis.__piAcpMain = import(${JSON.stringify(params.piEntrypoint)}).catch(error => { console.error(error); process.exitCode = 1; });`,
++          '--',
+           ...piArgs
+         ]
+       : piArgs
+@@ -189,6 +190,7 @@ export class PiRpcProcess {
+       shell: shouldUseShellForPiCommand(cmd),
+       signal: params.signal
+     })
++    const proc = new PiRpcProcess(child, cleanupLaunchResources)
+ 
+     // Ensure spawn failures (e.g. ENOENT when pi isn't installed) are surfaced as a
+     // deterministic error instead of later EPIPE/internal-error noise.
+@@ -233,8 +235,6 @@ export class PiRpcProcess {
+       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e })
+     }
+ 
+-    const proc = new PiRpcProcess(child, cleanupLaunchResources)
+-
+     // Best-effort handshake.
+     // Important: pi may emit a get_state response pointing at a sessionFile in a directory
+     // that is created lazily. Create the parent dir up-front to avoid later parse errors
