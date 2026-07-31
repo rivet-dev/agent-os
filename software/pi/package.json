@@ -31,7 +31,6 @@
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "1.2.1",
-		"@earendil-works/pi-ai": "0.83.0",
 		"@earendil-works/pi-coding-agent": "0.83.0",
 		"pi-mcp-adapter": "2.11.0",
 		"zod": "3.25.76"

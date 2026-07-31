@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import {
@@ -36,8 +35,7 @@ if (parsed.mode && parsed.mode !== "rpc") {
 }
 if (errors.length > 0) throw new Error(errors.map((diagnostic) => diagnostic.message).join("\n"));
 
-const extensionPath = fileURLToPath(new URL("./extensions/codex-auth.mjs", import.meta.url));
-const extensionPaths = [extensionPath, ...(parsed.extensions ?? [])].map((path) =>
+const extensionPaths = (parsed.extensions ?? []).map((path) =>
 	isAbsolute(path) ? path : resolve(launchCwd, path),
 );
 const startupSettings = SettingsManager.create(launchCwd, agentDir, { projectTrusted: false });
