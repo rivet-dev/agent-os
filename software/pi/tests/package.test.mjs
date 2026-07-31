@@ -34,16 +34,11 @@ test("Pi packages the commit-pinned rivet-dev ACP adapter and runtime closure", 
 	assert.equal(manifest.agent.acpEntrypoint, "pi-acp");
 	assert.equal(manifest.agent.runtime, undefined);
 	assert.equal(manifest.agent.snapshot, undefined);
-	assert.equal(manifest.agent.env.PI_ACP_PI_COMMAND, "/opt/agentos/bin/pi");
-	assert.equal(
-		manifest.agent.env.PI_ACP_PI_ENTRYPOINT,
-		"/opt/agentos/pkgs/pi/0.0.1/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
-	);
-	assert.equal(
-		manifest.agent.env.PI_ACP_PI_EXTENSION,
-		"/opt/agentos/pkgs/pi/0.0.1/extensions/codex-auth.mjs",
-	);
+	assert.equal(manifest.agent.env.PI_ACP_PI_COMMAND, "/opt/agentos/bin/pi-agentos");
+	assert.equal(manifest.agent.env.PI_ACP_PI_ENTRYPOINT, undefined);
+	assert.equal(manifest.agent.env.PI_ACP_PI_EXTENSION, undefined);
 	assert.equal(packageJson.bin["pi-acp"], "./dist/pi-acp/index.js");
+	assert.equal(packageJson.bin["pi-agentos"], "./dist/pi-agentos.mjs");
 	assert.equal(
 		packageJson.bin.pi,
 		"./node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
@@ -64,6 +59,7 @@ test("Pi packages the commit-pinned rivet-dev ACP adapter and runtime closure", 
 		"85bc7e133d28e9d870ecad7aa3de9e6a17ffea142443a177d618597a56c72cd7",
 	);
 	assert.equal(upstreamManifest.sourcePackageVersion, "0.0.31");
+	assert.equal(upstreamManifest.compatibilityPatches, undefined);
 	assert.deepEqual(upstreamManifest.buildCommands, ["npm ci", "npm run build"]);
 	assert.ok(adapterEntrypoint.startsWith("#!/usr/bin/env node"));
 	assert.equal(adapterPackageJson.name, "pi-acp");
@@ -72,24 +68,55 @@ test("Pi packages the commit-pinned rivet-dev ACP adapter and runtime closure", 
 	assert.equal(packageJson.dependencies["@mariozechner/pi-coding-agent"], undefined);
 });
 
-test("Pi packages an AgentOS-owned external Codex auth extension", async () => {
-	const extensionUrl = new URL("../dist/package/extensions/codex-auth.mjs", import.meta.url);
+test("Pi packages an AgentOS-owned external Codex auth extension", async (t) => {
+	const extensionUrl = new URL(
+		"../dist/package/node_modules/@agentos-software/pi/dist/extensions/codex-auth.mjs",
+		import.meta.url,
+	);
 	const extension = await import(extensionUrl);
+	const originalToken = process.env.OPENAI_CODEX_ACCESS_TOKEN;
+	const originalAccountId = process.env.OPENAI_CODEX_ACCOUNT_ID;
+	const accessToken = "external-codex-access-token";
+	const accountId = "external-codex-account-id";
+	let request;
 	let registration;
+	const captureFetch = async (input, init) => {
+		request = { input, init };
+		return new Response(null, { status: 204 });
+	};
+	process.env.OPENAI_CODEX_ACCESS_TOKEN = accessToken;
+	process.env.OPENAI_CODEX_ACCOUNT_ID = accountId;
+	t.after(() => {
+		if (originalToken === undefined) delete process.env.OPENAI_CODEX_ACCESS_TOKEN;
+		else process.env.OPENAI_CODEX_ACCESS_TOKEN = originalToken;
+		if (originalAccountId === undefined) delete process.env.OPENAI_CODEX_ACCOUNT_ID;
+		else process.env.OPENAI_CODEX_ACCOUNT_ID = originalAccountId;
+		delete process.env.AGENTOS_CODEX_ACCOUNT_TOKEN;
+	});
+
 	extension.default({
 		registerProvider(provider, config) {
 			registration = { provider, config };
 		},
 	});
 
-	assert.deepEqual(registration, {
-		provider: "openai-codex",
-		config: {
-			apiKey: "$OPENAI_CODEX_ACCESS_TOKEN",
-			headers: { "chatgpt-account-id": "$OPENAI_CODEX_ACCOUNT_ID" },
+	assert.equal(registration.provider, "openai-codex");
+	assert.equal(registration.config.api, "openai-codex-responses");
+	assert.equal(registration.config.apiKey, "$AGENTOS_CODEX_ACCOUNT_TOKEN");
+	assert.equal(typeof registration.config.streamSimple, "function");
+	assert.equal(process.env.AGENTOS_CODEX_ACCOUNT_TOKEN, extension.createAccountToken(accountId));
+	assert.doesNotMatch(process.env.AGENTOS_CODEX_ACCOUNT_TOKEN, /external-codex-access-token/);
+
+	await extension.createCodexFetch(accessToken, accountId, captureFetch)(
+		"https://chatgpt.com/backend-api/codex/responses",
+		{
+			headers: { authorization: "Bearer synthetic" },
 		},
-	});
-	assert.match(
+	);
+	const headers = new Headers(request.init.headers);
+	assert.equal(headers.get("authorization"), `Bearer ${accessToken}`);
+	assert.equal(headers.get("chatgpt-account-id"), accountId);
+	assert.doesNotMatch(
 		await readFile(
 			new URL(
 				"../dist/package/node_modules/@earendil-works/pi-coding-agent/dist/core/http-dispatcher.js",
@@ -102,14 +129,7 @@ test("Pi packages an AgentOS-owned external Codex auth extension", async () => {
 });
 
 test("packaged pinned Pi adapter initializes with persistent session capabilities", async (t) => {
-	const piEntrypoint = new URL(
-		"../dist/package/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
-		import.meta.url,
-	).pathname;
-	const piExtension = new URL(
-		"../dist/package/extensions/codex-auth.mjs",
-		import.meta.url,
-	).pathname;
+	const piCommand = new URL("../dist/package/bin/pi-agentos", import.meta.url).pathname;
 	const child = spawn(
 		new URL("../dist/package/bin/pi-acp", import.meta.url).pathname,
 		[],
@@ -117,8 +137,7 @@ test("packaged pinned Pi adapter initializes with persistent session capabilitie
 			stdio: ["pipe", "pipe", "pipe"],
 			env: {
 				...process.env,
-				PI_ACP_PI_ENTRYPOINT: piEntrypoint,
-				PI_ACP_PI_EXTENSION: piExtension,
+				PI_ACP_PI_COMMAND: piCommand,
 				OPENAI_CODEX_ACCESS_TOKEN: "external-codex-access-token",
 				OPENAI_CODEX_ACCOUNT_ID: "external-codex-account-id",
 			},

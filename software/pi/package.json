@@ -7,6 +7,7 @@
 	"types": "./dist/index.d.ts",
 	"bin": {
 		"pi": "./node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+		"pi-agentos": "./dist/pi-agentos.mjs",
 		"pi-acp": "./dist/pi-acp/index.js"
 	},
 	"exports": {
@@ -24,12 +25,13 @@
 		"agentos-package.json"
 	],
 	"scripts": {
-		"build": "rm -rf dist && node scripts/build-pi-acp.mjs && tsc && agentos-toolchain pack . --out dist/package --agent pi-acp --prune-native --omit-optional && node scripts/finalize-package.mjs",
+		"build": "rm -rf dist && node scripts/build-pi-acp.mjs && tsc && agentos-toolchain pack . --out dist/package --agent pi-acp --prune-native --omit-optional && agentos-toolchain pack-aospkg dist/package.tar dist/package.aospkg",
 		"check-types": "tsc --noEmit",
 		"test": "pnpm build && node --test --test-force-exit tests/*.test.mjs"
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "1.2.1",
+		"@earendil-works/pi-ai": "0.83.0",
 		"@earendil-works/pi-coding-agent": "0.83.0",
 		"pi-mcp-adapter": "2.11.0",
 		"zod": "3.25.76"
