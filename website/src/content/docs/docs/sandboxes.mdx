@@ -46,9 +46,9 @@ npm install @rivet-dev/agentos-sandbox sandbox-agent
 
 - `createSandboxFs`, `createSandboxBindings` — from `@rivet-dev/agentos-sandbox`.
 - `SandboxAgent` + provider helpers (e.g. `docker`) — from `sandbox-agent`.
-- Pass a provider as `sandbox: { provider: docker() }`. agentOS starts the
-  client, mounts it at `/mnt/sandbox`, registers process bindings, and disposes
-  it with the VM.
+- Pass a provider as `sandbox: { provider: docker() }`. agentOS mounts it at
+  `/mnt/sandbox`, registers process bindings, starts the sandbox on first use,
+  and disposes it with the VM.
 - In RivetKit actors, pass the provider to `agentOS(...)` — a fresh client per
   actor VM.
 
@@ -68,6 +68,15 @@ accepts these options alongside `provider` or `client`:
 | `readOnly` | Prevents the VM from modifying files through the mount. Defaults to `false`. |
 | `timeoutMs` | Sets the per-request timeout for Sandbox Agent filesystem calls. |
 | `maxFullReadBytes` | Bounds files buffered by full-read and truncate fallbacks. |
+| `idleTimeoutMs` | Stops an inactive provider sandbox so the next operation starts a fresh one. Defaults to five minutes; set to `0` to disable. |
+| `startupTimeoutMs` | Bounds provider startup. Defaults to 20 seconds; set to `0` to disable. |
+| `maxRelayRequests` | Bounds concurrent filesystem requests through the per-VM relay. Defaults to 64. |
+
+The native mount talks to a stable, authenticated loopback endpoint owned by
+that agentOS VM. When an idle sandbox is recreated or resumed with a different
+provider URL or token, the mount and process bindings switch to the current
+client without remounting or rebooting the VM. Concurrent first operations
+share one provider startup.
 
 The server example above changes `mountPath` to
 `/home/agentos/sandbox`. Paths used inside the external sandbox remain relative
@@ -120,8 +129,12 @@ additional provider SDK.
 
 For another backend, adapt any [Sandbox Agent](https://sandboxagent.dev)
 provider with `sandboxAgentProvider` from `@rivet-dev/agentos-sandbox`. Provider
-mode is the preferred lifecycle: each VM gets a fresh sandbox, and disposal of
-the VM destroys it.
+mode is the preferred lifecycle: each VM gets a fresh sandbox on first use,
+inactive sandboxes are replaced transparently, and disposal of the VM destroys
+the current sandbox. A process ID belongs to the sandbox generation that
+created it and is not valid after a destroy-and-recreate cycle. Providers that
+pause and reconnect may preserve their provider sandbox ID, but callers must
+not assume that the network address or credentials remain unchanged.
 
 ## Advanced: mount an existing client
 
@@ -129,7 +142,9 @@ Standalone `AgentOs.create()` can mount an already-connected,
 Sandbox-Agent-compatible client. Install `sandbox-agent` directly for this
 manual path. The caller owns the client by default; set `dispose` to `true` when
 the client implements disposal, or provide a callback to transfer lifecycle
-ownership to the VM.
+ownership to the VM. A custom compatible client must expose either a
+serializable `baseUrl` plus its current token/headers or an authenticated
+`request(path, init)` transport so the native mount relay can reach it.
 
 <CodeSnippet file="examples/sandbox/existing-client.ts" />
 

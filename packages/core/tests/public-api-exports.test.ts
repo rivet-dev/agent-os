@@ -40,6 +40,7 @@ import {
 	type PromptResult,
 	parseAgentOsOptions,
 	rootFilesystemConfigSchema,
+	SandboxStartupError,
 	type SessionCapabilities,
 	type SessionInfo,
 	type SessionStreamEntry,
@@ -105,6 +106,7 @@ describe("root public API exports", () => {
 			defaultSoftware: false,
 		});
 		expect(KernelError).toBeTypeOf("function");
+		expect(SandboxStartupError).toBeTypeOf("function");
 		expect(createSnapshotExport).toBeTypeOf("function");
 		// Package dirs are the public software descriptor.
 		expect(defineSoftware("/opt/pkg")).toBe("/opt/pkg");

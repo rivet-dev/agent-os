@@ -53,5 +53,6 @@ export {
 	createSandboxFs,
 	getSandboxDisposeHooks,
 	resolveSandboxOptions,
+	SandboxStartupError,
 } from "./sandbox.js";
 export type * from "./types.js";

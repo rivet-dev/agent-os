@@ -5,6 +5,13 @@ import type {
 	NativeMountPluginDescriptor,
 } from "./agent-os.js";
 import type { Binding, Bindings } from "./bindings.js";
+import {
+	createSandboxRelay,
+	type SandboxRelayClientController,
+} from "./sandbox-relay.js";
+
+const DEFAULT_SANDBOX_IDLE_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_SANDBOX_STARTUP_TIMEOUT_MS = 20_000;
 
 export interface AgentOsSandboxProcessResult {
 	stdout?: string;
@@ -34,6 +41,12 @@ export interface AgentOsSandboxProcessLogs {
 
 export interface AgentOsSandboxClient {
 	dispose?(): Promise<void> | void;
+	/**
+	 * Optional authenticated raw transport used by the native filesystem relay.
+	 * The path always starts with `/v1/` and includes its query string. Return the
+	 * upstream Response unchanged, including non-success HTTP statuses.
+	 */
+	request?(path: string, init?: RequestInit): Promise<Response>;
 	runProcess(options: {
 		command: string;
 		args?: string[];
@@ -73,6 +86,15 @@ export interface AgentOsSandboxCommonOptions {
 	timeoutMs?: number;
 	/** Maximum file size allowed for buffered pread/truncate fallbacks. */
 	maxFullReadBytes?: number;
+	/**
+	 * Shut down an inactive provider sandbox after this duration. The next
+	 * operation starts a new sandbox. Set to 0 to disable. Defaults to 5 minutes.
+	 */
+	idleTimeoutMs?: number;
+	/** Maximum time to wait for a provider start. Set to 0 to disable. Defaults to 20 seconds. */
+	startupTimeoutMs?: number;
+	/** Maximum concurrent native filesystem relay requests. Defaults to 64. */
+	maxRelayRequests?: number;
 	/** Marks the VM mount read-only. Defaults to false. */
 	readOnly?: boolean;
 }
@@ -113,6 +135,245 @@ export type AgentOsSandboxExpandedOptions = {
 type ResolvedSandboxOptions = AgentOsSandboxCommonOptions & {
 	client: AgentOsSandboxClient;
 };
+
+export class SandboxStartupError extends Error {
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "SandboxStartupError";
+	}
+}
+
+class SandboxClientController implements SandboxRelayClientController {
+	readonly #provider?: AgentOsSandboxProvider;
+	readonly #startupTimeoutMs: number;
+	readonly #idleTimeoutMs: number;
+	readonly #disposeClient?: SandboxDisposeHook;
+	#current?: AgentOsSandboxClient;
+	#startPromise?: Promise<AgentOsSandboxClient>;
+	#stopPromise?: Promise<void>;
+	#idleTimer?: NodeJS.Timeout;
+	#activeOperations = 0;
+	#disposed = false;
+
+	constructor(options: {
+		provider?: AgentOsSandboxProvider;
+		client?: AgentOsSandboxClient;
+		disposeClient?: SandboxDisposeHook;
+		startupTimeoutMs?: number;
+		idleTimeoutMs?: number;
+	}) {
+		this.#provider = options.provider;
+		this.#current = options.client;
+		this.#disposeClient = options.disposeClient;
+		this.#startupTimeoutMs =
+			options.startupTimeoutMs ?? DEFAULT_SANDBOX_STARTUP_TIMEOUT_MS;
+		this.#idleTimeoutMs =
+			options.idleTimeoutMs ?? DEFAULT_SANDBOX_IDLE_TIMEOUT_MS;
+		for (const [name, value] of [
+			["sandbox.startupTimeoutMs", this.#startupTimeoutMs],
+			["sandbox.idleTimeoutMs", this.#idleTimeoutMs],
+		] as const) {
+			if (!Number.isSafeInteger(value) || value < 0) {
+				throw new Error(`${name} must be a non-negative safe integer`);
+			}
+		}
+	}
+
+	async withClient<T>(
+		operation: (client: AgentOsSandboxClient) => Promise<T>,
+	): Promise<T> {
+		if (this.#disposed) {
+			throw new Error("agentOS VM sandbox has been disposed");
+		}
+		this.#clearIdleTimer();
+		this.#activeOperations += 1;
+		try {
+			return await operation(await this.#getClient());
+		} finally {
+			this.#activeOperations -= 1;
+			this.#scheduleIdleStop();
+		}
+	}
+
+	async #getClient(): Promise<AgentOsSandboxClient> {
+		if (this.#disposed) {
+			throw new Error("agentOS VM sandbox has been disposed");
+		}
+		if (this.#current) return this.#current;
+		if (!this.#provider) {
+			throw new Error("Sandbox client is not available");
+		}
+		if (this.#stopPromise) await this.#stopPromise;
+		if (this.#current) return this.#current;
+		if (this.#startPromise) return await this.#startPromise;
+
+		const startPromise = this.#startProvider();
+		this.#startPromise = startPromise;
+		try {
+			return await startPromise;
+		} finally {
+			if (this.#startPromise === startPromise) this.#startPromise = undefined;
+		}
+	}
+
+	async #startProvider(): Promise<AgentOsSandboxClient> {
+		const provider = this.#provider;
+		if (!provider) throw new Error("Sandbox provider is not configured");
+
+		let abandoned = false;
+		let timeout: NodeJS.Timeout | undefined;
+		let providerResult: Promise<AgentOsSandboxClient>;
+		try {
+			providerResult = Promise.resolve(provider.start());
+		} catch (error) {
+			providerResult = Promise.reject(error);
+		}
+		const providerStart = providerResult.then(async (client) => {
+			if (!client || typeof client !== "object") {
+				throw new Error("sandbox.provider.start() did not return a client");
+			}
+			if (!abandoned && !this.#disposed) return client;
+			try {
+				await client.dispose?.();
+			} catch (error) {
+				console.error("agentOS late sandbox startup cleanup failed", error);
+			}
+			throw new SandboxStartupError(
+				"Sandbox provider completed after its startup was cancelled",
+			);
+		});
+		const timeoutPromise = new Promise<never>((_, reject) => {
+			if (this.#startupTimeoutMs === 0) return;
+			timeout = setTimeout(() => {
+				abandoned = true;
+				reject(
+					new SandboxStartupError(
+						`Sandbox provider startup exceeded sandbox.startupTimeoutMs=${this.#startupTimeoutMs}; raise sandbox.startupTimeoutMs to allow a longer startup`,
+					),
+				);
+			}, this.#startupTimeoutMs);
+		});
+		try {
+			const client = await Promise.race([providerStart, timeoutPromise]);
+			if (this.#disposed) {
+				abandoned = true;
+				await client.dispose?.();
+				throw new SandboxStartupError(
+					"Sandbox provider completed after the agentOS VM was disposed",
+				);
+			}
+			this.#current = client;
+			return client;
+		} catch (error) {
+			abandoned = true;
+			if (error instanceof SandboxStartupError) throw error;
+			throw new SandboxStartupError(
+				`Sandbox provider startup failed: ${error instanceof Error ? error.message : String(error)}`,
+				{ cause: error },
+			);
+		} finally {
+			if (timeout) clearTimeout(timeout);
+		}
+	}
+
+	#clearIdleTimer(): void {
+		if (!this.#idleTimer) return;
+		clearTimeout(this.#idleTimer);
+		this.#idleTimer = undefined;
+	}
+
+	#scheduleIdleStop(): void {
+		this.#clearIdleTimer();
+		if (
+			!this.#provider ||
+			this.#disposed ||
+			this.#idleTimeoutMs === 0 ||
+			this.#activeOperations !== 0 ||
+			!this.#current
+		) {
+			return;
+		}
+		this.#idleTimer = setTimeout(() => {
+			this.#idleTimer = undefined;
+			void this.#stopIdleClient().catch((error) => {
+				console.error("agentOS idle sandbox shutdown failed", error);
+			});
+		}, this.#idleTimeoutMs);
+		this.#idleTimer.unref();
+	}
+
+	async #stopIdleClient(): Promise<void> {
+		if (
+			this.#disposed ||
+			this.#activeOperations !== 0 ||
+			!this.#current ||
+			this.#stopPromise
+		) {
+			return;
+		}
+		const client = this.#current;
+		this.#current = undefined;
+		const stopPromise = Promise.resolve(client.dispose?.()).then(() => undefined);
+		this.#stopPromise = stopPromise;
+		try {
+			await stopPromise;
+		} finally {
+			if (this.#stopPromise === stopPromise) this.#stopPromise = undefined;
+		}
+	}
+
+	async dispose(): Promise<void> {
+		if (this.#disposed) return;
+		this.#disposed = true;
+		this.#clearIdleTimer();
+		const errors: unknown[] = [];
+		try {
+			await this.#startPromise;
+		} catch (error) {
+			errors.push(error);
+		}
+		try {
+			await this.#stopPromise;
+		} catch (error) {
+			errors.push(error);
+		}
+		const client = this.#current;
+		this.#current = undefined;
+		if (client) {
+			try {
+				if (this.#provider) await client.dispose?.();
+				else await this.#disposeClient?.();
+			} catch (error) {
+				errors.push(error);
+			}
+		}
+		if (errors.length === 1) throw errors[0];
+		if (errors.length > 1) {
+			throw new AggregateError(errors, "agentOS sandbox disposal failed");
+		}
+	}
+}
+
+function createControllerClient(
+	controller: SandboxClientController,
+): AgentOsSandboxClient {
+	return {
+		runProcess: (options) =>
+			controller.withClient((client) => client.runProcess(options)),
+		createProcess: (options) =>
+			controller.withClient((client) => client.createProcess(options)),
+		listProcesses: () =>
+			controller.withClient((client) => client.listProcesses()),
+		stopProcess: (id) =>
+			controller.withClient((client) => client.stopProcess(id)),
+		killProcess: (id) =>
+			controller.withClient((client) => client.killProcess(id)),
+		getProcessLogs: (id, options) =>
+			controller.withClient((client) => client.getProcessLogs(id, options)),
+		sendProcessInput: (id, input) =>
+			controller.withClient((client) => client.sendProcessInput(id, input)),
+	};
+}
 
 export type SandboxMountPluginConfig = MountConfigJsonObject & {
 	baseUrl: string;
@@ -367,36 +628,40 @@ function assertNoLegacySandboxOptions(input: AgentOsSandboxInput): void {
 	}
 }
 
-async function normalizeSandboxInput(input: AgentOsSandboxInput): Promise<{
-	options: ResolvedSandboxOptions;
-	dispose?: SandboxDisposeHook;
-}> {
+function createSandboxController(
+	input: AgentOsSandboxInput,
+): SandboxClientController {
 	assertNoLegacySandboxOptions(input);
 	if (isProviderOptions(input)) {
 		if (typeof input.provider?.start !== "function") {
 			throw new Error("sandbox.provider must expose a start() function.");
 		}
-		const client = await input.provider.start();
-		return {
-			options: { ...input, client },
-			dispose: () => client.dispose?.(),
-		};
+		return new SandboxClientController({
+			provider: input.provider,
+			idleTimeoutMs: input.idleTimeoutMs,
+			startupTimeoutMs: input.startupTimeoutMs,
+		});
 	}
 	if (!isClientOptions(input)) {
 		throw new Error(
 			"sandbox must be configured with either { provider } or { client }.",
 		);
 	}
-	const dispose =
+	if (!input.client || typeof input.client !== "object") {
+		throw new Error("sandbox.client must be an object.");
+	}
+	const disposeClient =
 		typeof input.dispose === "function"
 			? input.dispose
 			: input.dispose === true
 				? () => input.client.dispose?.()
 				: undefined;
-	return {
-		options: input,
-		dispose,
-	};
+	return new SandboxClientController({
+		client: input.client,
+		disposeClient,
+		idleTimeoutMs: input.idleTimeoutMs ?? 0,
+		startupTimeoutMs: input.startupTimeoutMs,
+	});
 }
 
 function attachSandboxDisposeHooks<T extends object>(
@@ -438,25 +703,44 @@ export async function resolveSandboxOptions<
 		return rest;
 	}
 
-	const normalizedSandbox = await normalizeSandboxInput(sandbox);
+	const controller = createSandboxController(sandbox);
+	let relay: Awaited<ReturnType<typeof createSandboxRelay>> | undefined;
 	try {
-		const sandboxOptions = normalizedSandbox.options;
+		relay = await createSandboxRelay({
+			controller,
+			maxConcurrentRequests: sandbox.maxRelayRequests,
+		});
 		const expanded = rest as Omit<T, "sandbox"> & {
 			mounts?: MountConfig[];
 			bindings?: Bindings[];
 		};
-		const mountPath = sandboxOptions.mountPath ?? "/mnt/sandbox";
+		const mountPath = sandbox.mountPath ?? "/mnt/sandbox";
+		const plugin: NativeMountPluginDescriptor<SandboxMountPluginConfig> = {
+			id: "sandbox_agent",
+			config: {
+				baseUrl: relay.baseUrl,
+				token: relay.token,
+				...(sandbox.sandboxRoot ? { basePath: sandbox.sandboxRoot } : {}),
+				...(sandbox.timeoutMs != null ? { timeoutMs: sandbox.timeoutMs } : {}),
+				...(sandbox.maxFullReadBytes != null
+					? { maxFullReadBytes: sandbox.maxFullReadBytes }
+					: {}),
+			},
+		};
 		const mounts = [
 			...(expanded.mounts ?? []),
 			{
 				path: mountPath,
-				plugin: createSandboxFs(sandboxOptions),
-				readOnly: sandboxOptions.readOnly,
+				plugin,
+				readOnly: sandbox.readOnly,
 			},
 		];
 		const bindings = [
 			...(expanded.bindings ?? []),
-			createSandboxBindings(sandboxOptions),
+			createSandboxBindings({
+				...sandbox,
+				client: createControllerClient(controller),
+			}),
 		];
 
 		return attachSandboxDisposeHooks(
@@ -465,15 +749,36 @@ export async function resolveSandboxOptions<
 				mounts,
 				bindings,
 			},
-			normalizedSandbox.dispose ? [normalizedSandbox.dispose] : [],
+			[
+				async () => {
+					const results = await Promise.allSettled([
+						relay?.dispose(),
+						controller.dispose(),
+					]);
+					const errors = results.flatMap((result) =>
+						result.status === "rejected" ? [result.reason] : [],
+					);
+					if (errors.length === 1) throw errors[0];
+					if (errors.length > 1) {
+						throw new AggregateError(
+							errors,
+							"agentOS sandbox relay cleanup failed",
+						);
+					}
+				},
+			],
 		);
 	} catch (error) {
-		if (!normalizedSandbox.dispose) throw error;
-		try {
-			await normalizedSandbox.dispose();
-		} catch (disposeError) {
+		const cleanupResults = await Promise.allSettled([
+			relay?.dispose(),
+			controller.dispose(),
+		]);
+		const cleanupErrors = cleanupResults.flatMap((result) =>
+			result.status === "rejected" ? [result.reason] : [],
+		);
+		if (cleanupErrors.length > 0) {
 			throw new AggregateError(
-				[error, disposeError],
+				[error, ...cleanupErrors],
 				"Sandbox configuration and cleanup failed",
 			);
 		}

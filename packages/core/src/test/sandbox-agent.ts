@@ -35,6 +35,10 @@ interface ManagedProcess {
 	tty: boolean;
 }
 
+export interface MockSandboxAgentOptions {
+	token?: string;
+}
+
 export interface MockSandboxAgentHandle {
 	baseUrl: string;
 	client: SandboxAgent;
@@ -231,12 +235,21 @@ async function runCommand(request: {
 	});
 }
 
-export async function startMockSandboxAgent(): Promise<MockSandboxAgentHandle> {
+export async function startMockSandboxAgent(
+	options: MockSandboxAgentOptions = {},
+): Promise<MockSandboxAgentHandle> {
 	const rootDir = await mkdtemp(resolve(tmpdir(), "agentos-sandbox-agent-"));
 	const processes = new Map<string, ManagedProcess>();
 
 	const server = createServer(async (request, response) => {
 		try {
+			if (
+				options.token &&
+				request.headers.authorization !== `Bearer ${options.token}`
+			) {
+				problem(response, 401, "Invalid sandbox token");
+				return;
+			}
 			const url = new URL(request.url ?? "/", "http://127.0.0.1");
 			const method = request.method ?? "GET";
 
@@ -503,6 +516,7 @@ export async function startMockSandboxAgent(): Promise<MockSandboxAgentHandle> {
 	const { SandboxAgent } = await import("sandbox-agent");
 	const client = await SandboxAgent.connect({
 		baseUrl,
+		...(options.token ? { token: options.token } : {}),
 		waitForHealth: { timeoutMs: 5_000 },
 	});
 
