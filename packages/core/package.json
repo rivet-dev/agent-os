@@ -57,7 +57,7 @@
 		"build:protocols": "pnpm run build:agentos-protocol",
 		"test": "vitest run --exclude '**/*.nightly.test.ts' --reporter=verbose",
 		"test:unit": "vitest run tests/agent-exit-event.test.ts tests/agentos-package.test.ts tests/agentos-protocol.test.ts tests/allowed-node-builtins.test.ts tests/bindings-zod.test.ts tests/bindings.test.ts tests/cron-manager.test.ts tests/cron-timer-driver.test.ts tests/generated-protocol.test.ts tests/leak-agent-os-processes.test.ts tests/leak-rpc-client.test.ts tests/mount-descriptors.test.ts tests/mount-reconfigure.test.ts tests/options-schema.test.ts tests/public-api-exports.test.ts tests/root-filesystem-descriptors.test.ts tests/runtime-compat-mount.test.ts tests/session-event-ordering.test.ts tests/session-permission-surface.test.ts tests/sidecar-client.test.ts tests/sidecar-permission-descriptors.test.ts tests/wasm-permission-tiers.test.ts --fileParallelism=false",
-		"test:pr": "pnpm test:unit && vitest run tests/migration-parity.test.ts --fileParallelism=false --reporter=verbose",
+		"test:pr": "pnpm test:unit && vitest run tests/migration-parity.test.ts tests/acp-reactor-regression.test.ts --fileParallelism=false --reporter=verbose",
 		"test:nightly": "vitest run tests/*.nightly.test.ts --reporter=verbose --passWithNoTests"
 	},
 	"dependencies": {

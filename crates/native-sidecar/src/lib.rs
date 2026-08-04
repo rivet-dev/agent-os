@@ -29,8 +29,8 @@ pub mod vm_sqlite;
 pub use agentos_sidecar_protocol::{generated_protocol, protocol, wire};
 
 pub use extension::{
-    Extension, ExtensionContext, ExtensionFuture, ExtensionInterruptRequest,
-    ExtensionInterruptResponse, ExtensionOrderingPolicy, ExtensionRequestClass, ExtensionResponse,
+    Extension, ExtensionContext, ExtensionFuture, ExtensionOrderingPolicy, ExtensionRequestClass,
+    ExtensionResponse,
 };
 pub use service::{DispatchResult, NativeSidecar, NativeSidecarConfig, SidecarError};
 pub use state::EventSinkTransport;

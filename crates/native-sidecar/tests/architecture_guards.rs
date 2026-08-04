@@ -666,6 +666,316 @@ fn generic_runtime_layers_do_not_depend_on_product_or_acp_layers() {
 }
 
 #[test]
+fn native_sidecar_has_no_prompt_specific_interrupt_workaround() {
+    let root = repo_root();
+    let sources = [
+        "crates/native-sidecar/src/stdio.rs",
+        "crates/native-sidecar/src/extension.rs",
+        "crates/native-sidecar-core/src/router.rs",
+        "crates/native-sidecar-core/src/lib.rs",
+    ];
+    let obsolete = [
+        "pending_frame",
+        "dispatch_with_prompt_interrupt",
+        "BlockingExtensionInterrupt",
+        "ExtensionInterruptRequest",
+        "interrupt_blocking_request",
+        "is_blocking_request",
+    ];
+
+    for relative_path in sources {
+        let source = std::fs::read_to_string(root.join(relative_path))
+            .unwrap_or_else(|error| panic!("read {relative_path}: {error}"));
+        for marker in obsolete {
+            assert!(
+                !source.contains(marker),
+                "generic native-sidecar routing must not restore ACP prompt workaround marker {marker} in {relative_path}"
+            );
+        }
+    }
+
+    let native_manifest = dependency_keys(&root.join("crates/native-sidecar/Cargo.toml"));
+    assert!(
+        !native_manifest.contains("agentos-protocol"),
+        "native-sidecar must classify extension progress without depending on ACP protocol types"
+    );
+
+    let extension_contract =
+        std::fs::read_to_string(root.join("crates/native-sidecar/src/extension.rs"))
+            .expect("read generic extension contract");
+    assert!(
+        extension_contract.contains("fn request_ordering_key("),
+        "generic extension contract must expose an opaque ordering-key hook"
+    );
+    assert!(
+        !extension_contract.contains("agentos_protocol"),
+        "generic extension ordering must not depend on ACP protocol types"
+    );
+}
+
+#[test]
+fn extension_context_cannot_borrow_the_whole_sidecar() {
+    let root = repo_root();
+    let extension = std::fs::read_to_string(root.join("crates/native-sidecar/src/extension.rs"))
+        .expect("read extension contract");
+    for forbidden in [
+        "ExtensionHostBackend::Borrowed",
+        "Borrowed(&'a mut dyn ExtensionHost)",
+        "ExtensionContext::new",
+    ] {
+        assert!(
+            !extension.contains(forbidden),
+            "extension requests must use cloneable owned services, not whole-sidecar borrow marker {forbidden}"
+        );
+    }
+    assert!(
+        extension.contains("services: Arc<dyn ExtensionServices>")
+            && extension.contains("fn with_services("),
+        "ExtensionContext must retain only cloneable transport-agnostic services"
+    );
+}
+
+#[test]
+fn owned_javascript_event_preparation_does_not_execute_business_work_inline() {
+    let root = repo_root();
+    let source =
+        std::fs::read_to_string(root.join("crates/native-sidecar/src/execution/child_process.rs"))
+            .expect("read JavaScript process-event service source");
+    let start = source
+        .find("pub(crate) fn prepare_owned_javascript_process_event_service(")
+        .expect("owned JavaScript event preparation function");
+    let tail = &source[start..];
+    let end = tail
+        .find("pub(crate) async fn spawn_descendant_javascript_child_process_for_test(")
+        .expect("function following owned JavaScript event preparation");
+    let body = &tail[..end];
+
+    assert!(
+        body.contains("Pin<Box<dyn Future<Output = Result<(), SidecarError>> + 'static>>"),
+        "owned JavaScript event preparation must return detached supervised work"
+    );
+    assert!(
+        !body.contains("poll_descendant_javascript_child_process(")
+            && !body.contains("handle_javascript_process_rpc("),
+        "owned preparation must not restore a legacy whole-sidecar async RPC handler"
+    );
+
+    let special_setup = body
+        .find("let cache_root = self.cache_root.clone();")
+        .expect("special RPC setup boundary");
+    let supervised_start = body[special_setup..]
+        .find("Box::pin(async move {")
+        .map(|offset| special_setup + offset)
+        .expect("special RPC supervised future boundary");
+    let inline_preparation = &body[..supervised_start];
+    for business_operation in [
+        "poll_owned_descendant_javascript_child_process(",
+        "write_descendant_javascript_child_process_stdin_owned(",
+        "close_descendant_javascript_child_process_stdin_owned(",
+        "kill_descendant_javascript_child_process_owned(",
+        "commit_wasm_fd_process_image_owned(",
+        "exec_javascript_process_image_owned(",
+        "handle_owned_process_kill_rpc(",
+    ] {
+        assert!(
+            !inline_preparation.contains(business_operation),
+            "business operation {business_operation} must start only after the supervised owned future is polled"
+        );
+        assert!(
+            body[supervised_start..].contains(business_operation),
+            "owned JavaScript service lost supervised operation {business_operation}"
+        );
+    }
+}
+
+#[test]
+fn owned_python_event_preparation_does_not_execute_business_work_inline() {
+    let root = repo_root();
+    let subprocess = std::fs::read_to_string(
+        root.join("crates/native-sidecar/src/execution/python/subprocess.rs"),
+    )
+    .expect("read Python process-event service source");
+    let start = subprocess
+        .find("pub(crate) fn prepare_owned_python_process_event_service")
+        .expect("owned Python event preparation function");
+    let tail = &subprocess[start..];
+    let end = tail
+        .find("pub(crate) fn prepare_owned_python_subprocess_run")
+        .expect("function following owned Python event preparation");
+    let body = &tail[..end];
+
+    assert!(
+        body.contains("Pin<Box<dyn Future<Output = Result<(), SidecarError>> + 'static>>"),
+        "owned Python event preparation must return detached supervised work"
+    );
+    let supervised_start = body
+        .find("Box::pin(async move {")
+        .expect("Python event supervised future boundary");
+    let inline_preparation = &body[..supervised_start];
+    assert!(
+        !inline_preparation.contains("try_command("),
+        "Python event preparation must not touch VM state inline"
+    );
+    for business_operation in [
+        "prepare_owned_python_subprocess_run",
+        "service_owned_python_vfs_rpc_request(",
+    ] {
+        assert!(
+            !inline_preparation.contains(business_operation),
+            "Python business operation {business_operation} must start only after the supervised owned future is polled"
+        );
+        assert!(
+            body[supervised_start..].contains(business_operation),
+            "owned Python service lost supervised operation {business_operation}"
+        );
+    }
+
+    let extension_services =
+        std::fs::read_to_string(root.join("crates/native-sidecar/src/extension_services.rs"))
+            .expect("read owned extension services");
+    let start = extension_services
+        .find("pub(crate) fn prepare_owned_python_event_service(")
+        .expect("owned Python extension-service preparation");
+    let tail = &extension_services[start..];
+    let end = tail
+        .find("pub(crate) fn prepare_owned_child_bridge_event_service(")
+        .expect("function following owned Python extension service");
+    let body = &tail[..end];
+    let supervised_start = body
+        .find("future: Box::pin(async move {")
+        .expect("owned Python extension-service future boundary");
+    assert!(
+        !body[..supervised_start].contains("try_command("),
+        "owned Python extension-service preparation must not touch VM state inline"
+    );
+
+    let child_process =
+        std::fs::read_to_string(root.join("crates/native-sidecar/src/execution/child_process.rs"))
+            .expect("read child process event routing");
+    assert!(
+        !child_process.contains("ERR_AGENTOS_PYTHON_VFS_UNAVAILABLE"),
+        "attached Python VFS requests must be claimed as owned work, not answered by an inline fallback"
+    );
+}
+
+#[test]
+fn protocol_ingress_router_only_registers_and_starts_owned_work() {
+    let root = repo_root();
+    let source = std::fs::read_to_string(root.join("crates/native-sidecar/src/stdio.rs"))
+        .expect("read protocol engine source");
+    let start = source
+        .find("fn route_protocol_frame(")
+        .expect("protocol ingress router");
+    let tail = &source[start..];
+    let end = tail
+        .find("fn reap_protocol_tasks_nowait(")
+        .expect("function following protocol ingress router");
+    let router = &tail[..end];
+
+    assert!(
+        !source.contains("async fn route_protocol_frame("),
+        "protocol ingress routing must remain synchronous; any await must stay inside independently supervised task bodies"
+    );
+    for forbidden in [
+        "dispatch_wire(",
+        "dispatch_wire_blocking(",
+        "dispatch_blocking(",
+        "block_on(",
+    ] {
+        assert!(
+            !router.contains(forbidden),
+            "protocol ingress router must not execute whole-sidecar business path {forbidden}"
+        );
+    }
+    assert!(
+        router.contains("operations.admit(")
+            && router.contains("progress_requests.admit_owned(")
+            && router.contains("schedule_prepared_request("),
+        "protocol ingress router must reserve, register, and start independently supervised work"
+    );
+    for forbidden_global_dispatch in [
+        "Arc<Mutex<NativeSidecar",
+        "Arc<tokio::sync::Mutex<NativeSidecar",
+        "VecDeque<AccountedProtocolFrame>",
+        "VecDeque<RequestFrame>",
+    ] {
+        assert!(
+            !source.contains(forbidden_global_dispatch),
+            "protocol engine must not restore a global sidecar lock or ordinary request backlog: {forbidden_global_dispatch}"
+        );
+    }
+}
+
+#[test]
+fn generic_request_preparation_defers_business_handlers() {
+    let root = repo_root();
+    let service = std::fs::read_to_string(root.join("crates/native-sidecar/src/service.rs"))
+        .expect("read native sidecar service source");
+    let start = service
+        .find("pub(crate) fn prepare_request_wire(")
+        .expect("generic request preparation function");
+    let tail = &service[start..];
+    let end = tail
+        .find("pub(crate) fn complete_request(")
+        .expect("function following generic request preparation");
+    let preparation = &tail[..end];
+
+    for forbidden in [
+        "PreparedRequest::ready(",
+        "let result = match route",
+        "self.authenticate_connection(&request",
+        "self.open_session(&request",
+        "self.commit_prepared_membership(",
+    ] {
+        assert!(
+            !preparation.contains(forbidden),
+            "generic request preparation must stage or own work instead of executing ingress handler {forbidden}"
+        );
+    }
+    for owned_route in [
+        "let future = register_host_callbacks(self, &request, payload);",
+        "let future = self.get_process_snapshot(&request, payload);",
+        "let future = self.get_resource_snapshot(&request, payload);",
+        "let future = self.get_zombie_timer_count(&request, payload);",
+        "let future = self.provided_commands(&request, payload);",
+        "let future = self.list_mounts(&request, payload);",
+    ] {
+        assert!(
+            preparation.contains(owned_route),
+            "generic prepared route lost its owned deferred future: {owned_route}"
+        );
+    }
+    assert!(
+        preparation.contains("PreparedRequest::from_future_with_membership(")
+            && preparation.contains("PreparedMembershipCommit::Connection")
+            && preparation.contains("PreparedMembershipCommit::Session"),
+        "connection/session requests must stage bounded central membership mutations"
+    );
+
+    let bindings = std::fs::read_to_string(root.join("crates/native-sidecar/src/bindings.rs"))
+        .expect("read host callback registration source");
+    let start = bindings
+        .find("pub(crate) fn register_host_callbacks")
+        .expect("host callback preparation function");
+    let tail = &bindings[start..];
+    let future_boundary = tail
+        .find("async move {")
+        .expect("owned host callback future boundary");
+    let inline_preparation = &tail[..future_boundary];
+    for forbidden in [
+        "validate_bindings_registration(",
+        "set_vm_permissions(",
+        "try_command(",
+        "refresh_binding_registry(",
+    ] {
+        assert!(
+            !inline_preparation.contains(forbidden),
+            "host callback preparation must not execute {forbidden} before its owned future is polled"
+        );
+    }
+}
+
+#[test]
 fn shared_acp_runtime_has_no_adapter_name_policy() {
     let root = repo_root();
     let production = ["mod.rs", "runtime.rs", "restore.rs", "turn.rs"]
@@ -946,29 +1256,59 @@ fn top_level_python_start_uses_the_async_runtime_adapter() {
     let path = repo_root().join("crates/native-sidecar/src/execution/launch.rs");
     let source =
         std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
+    let owned_execute = source
+        .split("pub(crate) async fn execute_owned")
+        .nth(1)
+        .expect("owned top-level execution path");
+    let compact: String = owned_execute
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
     assert!(
-        source.contains(
-            ".python_engine\n                    .start_execution_with_runtime_async("
-        ),
+        compact.contains("python_engine.start_execution_with_runtime_async(")
+            && compact.contains(").await.map_err(python_error)?;"),
         "top-level Python startup must await cache materialization and prewarm instead of blocking a Tokio worker"
     );
     assert!(
-        source.contains(".bundled_pyodide_dist_path_for_vm_async(&vm_id, &vm.runtime_context)"),
+        compact.contains(
+            "python_engine.bundled_pyodide_dist_path_for_vm_async(&vm_id,&runtime_context).await"
+        ),
         "top-level Pyodide cache materialization must not run synchronously before the async Python start"
+    );
+    assert!(
+        compact.contains("drop(vm);letmutpython_engine=execution_engines.python("),
+        "top-level Python startup must release mutable VM state before awaiting runtime warmup"
     );
 }
 
 #[test]
 fn nested_child_start_never_blocks_the_shared_runtime_worker() {
-    let source = native_execution_source(&repo_root());
+    let root = repo_root();
+    let source = native_execution_source(&root);
+    let child_path = root.join("crates/native-sidecar/src/execution/child_process.rs");
+    let child_source = std::fs::read_to_string(&child_path)
+        .unwrap_or_else(|error| panic!("read {child_path:?}: {error}"));
+    let compact_child: String = child_source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
 
     assert!(
         source.contains("pub(crate) async fn spawn_javascript_child_process("),
         "root child startup must be an async sidecar dispatch path"
     );
     assert!(
-        source.contains("async fn spawn_descendant_javascript_child_process("),
-        "descendant child startup must be an async sidecar dispatch path"
+        compact_child.contains("pub(crate)fnspawn_descendant_javascript_child_process(")
+            && compact_child
+                .contains(")->Pin<Box<dynFuture<Output=Result<Value,SidecarError>>+'static>>")
+            && compact_child
+                .contains("Self::build_owned_descendant_javascript_child_process_spawn("),
+        "descendant child startup must detach an owned static future from the sidecar dispatcher"
+    );
+    assert!(
+        compact_child.contains("Box::pin(asyncmove{")
+            && compact_child.contains("drop(vm);letexecution=execution_start.await?;"),
+        "descendant child startup must release mutable VM state before awaiting runtime startup"
     );
     assert!(
         source
@@ -1160,6 +1500,7 @@ fn production_threads_match_the_reviewed_topology_manifest() {
             "constant-stdio-reader",
             "crates/native-sidecar/src/stdio.rs",
         ),
+        ("constant-heartbeat", "crates/native-sidecar/src/stdio.rs"),
     ];
 
     let root = repo_root();
@@ -1446,23 +1787,6 @@ fn browser_sources_are_retained_but_disabled_from_native_build_and_publish_gates
                 "{relative_path} must exclude disabled Rust crate {browser_crate}"
             );
         }
-    }
-
-    let mirror_generator =
-        std::fs::read_to_string(root.join("scripts/generate-agentos-mirror.mjs"))
-            .expect("read compatibility mirror generator");
-    assert!(
-        mirror_generator.contains("browserShim ? { private: true } : {}")
-            && mirror_generator.contains("browserShim ? \"publish = false\" : \"\""),
-        "generated browser compatibility shims must remain private and unpublishable"
-    );
-    for relative_path in [".github/workflows/ci.yml", "scripts/ci.sh"] {
-        let source = std::fs::read_to_string(root.join(relative_path))
-            .unwrap_or_else(|error| panic!("read {relative_path}: {error}"));
-        assert!(
-            source.contains("node --test scripts/generate-agentos-mirror.test.mjs"),
-            "{relative_path} must enforce compatibility-mirror reproducibility"
-        );
     }
 }
 

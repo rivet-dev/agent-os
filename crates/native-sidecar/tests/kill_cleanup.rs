@@ -275,6 +275,8 @@ fn collect_kill_cleanup_process_output(
                 | EventPayload::ProcessExitedEvent(_)
                 | EventPayload::VmLifecycleEvent(_)
                 | EventPayload::StructuredEvent(_)
+                | EventPayload::ExecutionOutputEvent(_)
+                | EventPayload::ExecutionCompletedEvent(_)
                 | EventPayload::ExtEnvelope(_) => {}
             }
         }

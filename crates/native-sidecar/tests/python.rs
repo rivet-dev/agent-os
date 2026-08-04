@@ -151,6 +151,8 @@ fn collect_process_output_with_timeout(
                 EventPayload::ProcessExitedEvent(_)
                 | EventPayload::VmLifecycleEvent(_)
                 | EventPayload::StructuredEvent(_)
+                | EventPayload::ExecutionOutputEvent(_)
+                | EventPayload::ExecutionCompletedEvent(_)
                 | EventPayload::ExtEnvelope(_) => {}
             }
         }
@@ -920,6 +922,8 @@ fn wait_for_stdout_chunk(
             EventPayload::ProcessExitedEvent(_)
             | EventPayload::VmLifecycleEvent(_)
             | EventPayload::StructuredEvent(_)
+            | EventPayload::ExecutionOutputEvent(_)
+            | EventPayload::ExecutionCompletedEvent(_)
             | EventPayload::ExtEnvelope(_) => {}
         }
     }
@@ -1253,6 +1257,8 @@ fn concurrent_python_processes_stay_isolated_across_vms() {
             }
             EventPayload::VmLifecycleEvent(_)
             | EventPayload::StructuredEvent(_)
+            | EventPayload::ExecutionOutputEvent(_)
+            | EventPayload::ExecutionCompletedEvent(_)
             | EventPayload::ExtEnvelope(_) => {}
         }
     }
