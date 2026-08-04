@@ -3,7 +3,7 @@ use super::*;
 impl AcpExtension {
     pub(super) async fn prompt_durable_session(
         &self,
-        ctx: &mut ExtensionContext<'_>,
+        ctx: &mut ExtensionContext,
         request: AcpPromptRequest,
     ) -> AcpHandlerOutput {
         let session_id = match default_session_id(request.session_id) {
@@ -98,6 +98,12 @@ impl AcpExtension {
                 "session_restore_failed: session {session_id} has no private ACP id"
             ))));
         }
+        let cancellation_key = durable_route_key(ctx.ownership(), &session_id);
+        let (_prompt_route_guard, mut cancellation_receiver) =
+            match self.begin_route_prompt(ctx.ownership(), &cancellation_key) {
+                Ok(prompt) => prompt,
+                Err(error) => return AcpHandlerOutput::response(Err(error)),
+            };
         let prompt_id = uuid::Uuid::new_v4().to_string();
         let user_message_id = uuid::Uuid::new_v4().to_string();
         let user_updates = content
@@ -121,6 +127,11 @@ impl AcpExtension {
             .await
         {
             Ok(events) => events,
+            Err(agentos_native_sidecar::vm_sqlite::VmSqliteError::UnexpectedChanges { .. }) => {
+                return AcpHandlerOutput::response(Err(route_busy_error(&format!(
+                    "session {session_id} already has an active prompt"
+                ))));
+            }
             Err(error) => return AcpHandlerOutput::response(Err(session_store_error(error))),
         };
         let mut events = Vec::new();
@@ -185,27 +196,6 @@ impl AcpExtension {
                 };
             }
         };
-        let cancellation_key = durable_route_key(ctx.ownership(), &session_id);
-        let (cancellation_sender, mut cancellation_receiver) = tokio::sync::watch::channel(false);
-        if let Ok(mut cancellations) = self.prompt_cancellations.lock() {
-            cancellations.insert(cancellation_key.clone(), cancellation_sender);
-        } else {
-            let error = finish_prompt_failure(
-                &store,
-                &session_id,
-                &prompt_id,
-                sink.last_output_sequence,
-                "prompt_cancellation_registry_failed",
-                SidecarError::InvalidState(String::from(
-                    "prompt cancellation registry is poisoned",
-                )),
-            )
-            .await;
-            return AcpHandlerOutput {
-                response: Err(error),
-                events,
-            };
-        }
         let raw = self
             .send_runtime_request_with_sink(
                 ctx,
@@ -218,13 +208,6 @@ impl AcpExtension {
                 Some(&mut cancellation_receiver),
             )
             .await;
-        if let Ok(mut cancellations) = self.prompt_cancellations.lock() {
-            cancellations.remove(&cancellation_key);
-        } else {
-            eprintln!(
-                "ERR_AGENTOS_PROMPT_CANCELLATION_REGISTRY: failed to remove completed prompt {session_id}"
-            );
-        }
         events.extend(raw.events);
         let rpc = match raw.response {
             Ok(AcpResponse::AcpSessionRpcResponse(response)) => response,
@@ -435,21 +418,59 @@ impl AcpExtension {
 
     pub(super) async fn cancel_durable_prompt(
         &self,
-        _ctx: &mut ExtensionContext<'_>,
-        _request: AcpCancelPromptRequest,
+        ctx: &mut ExtensionContext,
+        request: AcpCancelPromptRequest,
     ) -> AcpHandlerOutput {
+        let session_id = match default_session_id(request.session_id) {
+            Ok(session_id) => session_id,
+            Err(error) => return AcpHandlerOutput::response(Err(error)),
+        };
+        let route_key = durable_route_key(ctx.ownership(), &session_id);
+        let signalled = self.signal_prompt_cancellation(&route_key);
+        self.cancel_pending_permissions(&route_key, "prompt_cancelled");
+        if signalled {
+            let target = self
+                .sessions
+                .lock()
+                .await
+                .get(&route_key)
+                .map(|runtime| (runtime.process_id.clone(), runtime.acp_session_id.clone()));
+            let Some((process_id, acp_session_id)) = target else {
+                return AcpHandlerOutput::response(Err(SidecarError::InvalidState(format!(
+                    "prompt_cancellation_target_missing: active prompt {session_id} has no live adapter runtime"
+                ))));
+            };
+            if let Err(error) =
+                write_session_cancel_notification(ctx, &process_id, &acp_session_id).await
+            {
+                return AcpHandlerOutput::response(Err(error));
+            }
+        }
         AcpHandlerOutput::response(Ok(AcpResponse::AcpCancelPromptResponse(
             AcpCancelPromptResponse {
-                status: String::from("no_active_prompt"),
+                status: if signalled {
+                    String::from("cancelled")
+                } else {
+                    String::from("no_active_prompt")
+                },
             },
         )))
     }
 
     pub(super) async fn respond_durable_permission(
         &self,
-        ctx: &mut ExtensionContext<'_>,
+        ctx: &mut ExtensionContext,
         request: AcpRespondPermissionRequest,
     ) -> AcpHandlerOutput {
+        match self.deliver_live_permission_response(ctx.ownership(), &request) {
+            Ok(Some(response)) => {
+                return AcpHandlerOutput::response(Ok(AcpResponse::AcpRespondPermissionResponse(
+                    response,
+                )));
+            }
+            Ok(None) => {}
+            Err(error) => return AcpHandlerOutput::response(Err(error)),
+        }
         let store = match self.session_store(ctx).await {
             Ok(store) => store,
             Err(error) => return AcpHandlerOutput::response(Err(error)),
@@ -467,7 +488,7 @@ impl AcpExtension {
 
     pub(super) async fn set_durable_config(
         &self,
-        ctx: &mut ExtensionContext<'_>,
+        ctx: &mut ExtensionContext,
         request: AcpSetSessionConfigOptionRequest,
     ) -> AcpHandlerOutput {
         let session_id = match default_session_id(request.session_id) {
@@ -509,6 +530,12 @@ impl AcpExtension {
                 "session_restore_failed: missing private ACP id",
             ))));
         }
+        let route_key = durable_route_key(ctx.ownership(), &session_id);
+        let _adapter_rpc_guard =
+            match self.begin_route_adapter_rpc(ctx.ownership(), &route_key, "set configuration") {
+                Ok(guard) => guard,
+                Err(error) => return AcpHandlerOutput::response(Err(error)),
+            };
         let mut params = Map::from_iter([
             (String::from("configId"), Value::String(request.config_id)),
             (String::from("value"), value.clone()),
@@ -542,7 +569,7 @@ impl AcpExtension {
             .send_runtime_request_with_sink(
                 ctx,
                 AcpSessionRequest {
-                    session_id: durable_route_key(ctx.ownership(), &session_id),
+                    session_id: route_key.clone(),
                     method: String::from("session/set_config_option"),
                     params: Some(params),
                 },
@@ -589,7 +616,6 @@ impl AcpExtension {
                 events: output.events,
             };
         }
-        let route_key = durable_route_key(ctx.ownership(), &session_id);
         let runtime = match self.sessions.lock().await.get(&route_key).cloned() {
             Some(runtime) => runtime,
             None => {
@@ -631,18 +657,73 @@ impl AcpExtension {
     }
 
     pub(super) fn signal_prompt_cancellation(&self, route_key: &str) -> bool {
-        match self.prompt_cancellations.lock() {
-            Ok(cancellations) => cancellations
-                .get(route_key)
-                .cloned()
-                .is_some_and(|sender| sender.send(true).is_ok()),
+        let route = match self.routes.lock() {
+            Ok(routes) => routes.get(route_key).cloned(),
             Err(_) => {
-                eprintln!(
-                    "ERR_AGENTOS_PROMPT_CANCELLATION_REGISTRY: cancellation registry is poisoned"
-                );
-                false
+                eprintln!("ERR_AGENTOS_PROMPT_CANCELLATION_REGISTRY: route registry is poisoned");
+                return false;
             }
+        };
+        match route {
+            Some(route) => match route.signal_prompt_cancellation() {
+                Ok(signalled) => signalled,
+                Err(error) => {
+                    eprintln!(
+                        "ERR_AGENTOS_PROMPT_CANCELLATION_REGISTRY: failed to signal {route_key}: {error}"
+                    );
+                    false
+                }
+            },
+            None => false,
         }
+    }
+
+    pub(super) fn deliver_live_permission_response(
+        &self,
+        ownership: &OwnershipScope,
+        response: &AcpRespondPermissionRequest,
+    ) -> Result<Option<AcpRespondPermissionResponse>, SidecarError> {
+        let key = format!(
+            "{}:{}",
+            durable_route_key(ownership, &response.session_id),
+            response.request_id
+        );
+        let selected_option_id = response.option_id.clone();
+        let pending = {
+            let mut pending = self.pending_permission_responses.lock().map_err(|_| {
+                SidecarError::InvalidState(String::from("permission response registry is poisoned"))
+            })?;
+            let Some(entry) = pending.get(&key) else {
+                return Ok(None);
+            };
+            if !entry.offered_option_ids.contains(&response.option_id) {
+                let valid_options = entry
+                    .offered_option_ids
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(SidecarError::InvalidState(format!(
+                    "invalid_permission_option: request {} does not offer {}; valid option IDs: {}",
+                    response.request_id, response.option_id, valid_options
+                )));
+            }
+            pending.remove(&key)
+        };
+        let accepted = pending.is_some_and(|entry| {
+            entry
+                .sender
+                .send(PendingPermissionSignal::Selected(selected_option_id))
+                .is_ok()
+        });
+        Ok(Some(AcpRespondPermissionResponse {
+            status: if accepted {
+                String::from("accepted")
+            } else {
+                String::from("not_pending")
+            },
+            reason: (!accepted).then(|| String::from("already_resolved")),
+        }))
     }
 
     pub(super) fn cancel_pending_permissions(&self, route_key: &str, reason: &str) {
@@ -756,9 +837,8 @@ impl DurableUpdateSink {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn handle_permission_request(
         &mut self,
-        ctx: &mut ExtensionContext<'_>,
+        ctx: &mut ExtensionContext,
         process_id: &str,
-        acp_session_id: &str,
         rpc_id: Option<&Value>,
         params: &Value,
         events: &mut Vec<agentos_native_sidecar::wire::EventFrame>,
@@ -882,7 +962,6 @@ impl DurableUpdateSink {
                 {
                     self.emit_stored(ctx, events, std::slice::from_ref(&event))?;
                 }
-                write_session_cancel_notification(ctx, process_id, acp_session_id).await?;
                 return Ok(json!({ "outcome": { "outcome": "cancelled" } }));
             }
         };
@@ -921,7 +1000,7 @@ impl DurableUpdateSink {
 
     pub(super) async fn handle_notification(
         &mut self,
-        ctx: &ExtensionContext<'_>,
+        ctx: &ExtensionContext,
         notification: &Value,
         events: &mut Vec<agentos_native_sidecar::wire::EventFrame>,
     ) -> Result<bool, SidecarError> {
@@ -1036,7 +1115,7 @@ impl DurableUpdateSink {
 
     pub(super) async fn flush(
         &mut self,
-        ctx: &ExtensionContext<'_>,
+        ctx: &ExtensionContext,
         events: &mut Vec<agentos_native_sidecar::wire::EventFrame>,
     ) -> Result<(), SidecarError> {
         if self.buffered.is_empty() {
@@ -1056,7 +1135,7 @@ impl DurableUpdateSink {
 
     pub(super) async fn persist(
         &mut self,
-        ctx: &ExtensionContext<'_>,
+        ctx: &ExtensionContext,
         events: &mut Vec<agentos_native_sidecar::wire::EventFrame>,
         updates: Vec<Value>,
     ) -> Result<(), SidecarError> {
@@ -1079,7 +1158,7 @@ impl DurableUpdateSink {
 
     pub(super) fn emit_stored(
         &self,
-        ctx: &ExtensionContext<'_>,
+        ctx: &ExtensionContext,
         events: &mut Vec<agentos_native_sidecar::wire::EventFrame>,
         stored: &[StoredEvent],
     ) -> Result<(), SidecarError> {
@@ -1189,7 +1268,7 @@ pub(super) fn decode_durable_event(event_json: &str) -> Result<AcpDurableEvent, 
 
 #[allow(clippy::too_many_arguments)]
 async fn wait_for_permission_signal(
-    ctx: &mut ExtensionContext<'_>,
+    ctx: &mut ExtensionContext,
     process_id: &str,
     request_id: &str,
     key: &str,
@@ -1230,7 +1309,10 @@ async fn wait_for_permission_signal(
                 "prompt_cancelled",
             )));
         }
-        let polled = async { ctx.poll_event_wire(Duration::from_secs(1)).await };
+        let polled = async {
+            ctx.poll_process_event_wire(process_id, Duration::from_secs(1))
+                .await
+        };
         let signal = if let Some(cancellation) = cancellation.as_deref_mut() {
             tokio::select! {
                 biased;
@@ -1271,7 +1353,7 @@ async fn wait_for_permission_signal(
 }
 
 fn handle_permission_wait_event(
-    ctx: &ExtensionContext<'_>,
+    ctx: &ExtensionContext,
     process_id: &str,
     key: &str,
     pending: &Arc<StdMutex<BTreeMap<String, PendingPermissionResponse>>>,
@@ -1302,7 +1384,7 @@ fn handle_permission_wait_event(
 }
 
 pub(super) async fn write_session_cancel_notification(
-    ctx: &mut ExtensionContext<'_>,
+    ctx: &mut ExtensionContext,
     process_id: &str,
     session_id: &str,
 ) -> Result<(), SidecarError> {
@@ -1341,42 +1423,6 @@ pub(super) fn cancel_notification_fallback_response(id: Value) -> Value {
             "via": "notification-fallback",
         },
     })
-}
-
-pub(super) fn encode_durable_interrupted_prompt(session_id: &str) -> Option<Vec<u8>> {
-    encode_response(AcpResponse::AcpPromptResponse(AcpPromptResponse {
-        session_id: session_id.to_owned(),
-        message: None,
-        stop_reason: String::from("cancelled"),
-    }))
-    .ok()
-}
-
-pub(super) fn encode_durable_cancel_response(signalled: bool) -> Option<Vec<u8>> {
-    encode_response(AcpResponse::AcpCancelPromptResponse(
-        AcpCancelPromptResponse {
-            status: if signalled {
-                String::from("cancelled")
-            } else {
-                String::from("no_active_prompt")
-            },
-        },
-    ))
-    .ok()
-}
-
-pub(super) fn encode_durable_permission_response(accepted: bool) -> Option<Vec<u8>> {
-    encode_response(AcpResponse::AcpRespondPermissionResponse(
-        AcpRespondPermissionResponse {
-            status: if accepted {
-                String::from("accepted")
-            } else {
-                String::from("not_pending")
-            },
-            reason: (!accepted).then(|| String::from("already_resolved")),
-        },
-    ))
-    .ok()
 }
 
 pub(super) fn synthetic_mode_update(mode_id: &str) -> Value {

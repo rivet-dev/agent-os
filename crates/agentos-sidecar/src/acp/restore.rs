@@ -3,14 +3,26 @@ use super::*;
 impl AcpExtension {
     pub(super) async fn ensure_durable_runtime(
         &self,
-        ctx: &mut ExtensionContext<'_>,
+        ctx: &mut ExtensionContext,
         store: &SessionStore,
-        session: StoredSession,
+        mut session: StoredSession,
     ) -> Result<StoredSession, SidecarError> {
         let route_key = durable_route_key(ctx.ownership(), &session.session_id);
-        if self.sessions.lock().await.contains_key(&route_key) {
-            return Ok(session);
-        }
+        let _start_guard = loop {
+            if self.sessions.lock().await.contains_key(&route_key) {
+                return Ok(session);
+            }
+            match self.begin_route_start(ctx.ownership(), &route_key)? {
+                AcpRouteStart::Leader(guard) => break guard,
+                AcpRouteStart::Wait(receiver) => {
+                    AcpRouteEntry::wait_until_not_starting(receiver).await?;
+                    if self.sessions.lock().await.contains_key(&route_key) {
+                        return required_stored_session(store, &session.session_id).await;
+                    }
+                    session = required_stored_session(store, &session.session_id).await?;
+                }
+            }
+        };
         let env = serde_json::from_str::<HashMap<String, String>>(&session.env_json)
             .map_err(|error| SidecarError::InvalidState(format!("invalid stored env: {error}")))?;
         let additional_directories = serde_json::from_str::<Vec<PathBuf>>(
@@ -119,7 +131,7 @@ impl AcpExtension {
 
     pub(super) async fn reapply_stored_config(
         &self,
-        ctx: &mut ExtensionContext<'_>,
+        ctx: &mut ExtensionContext,
         route_key: &str,
         config_options_json: &str,
     ) -> Result<(), SidecarError> {
@@ -174,7 +186,7 @@ impl AcpExtension {
 
     pub(super) async fn restore_acp_runtime(
         &self,
-        ctx: &mut ExtensionContext<'_>,
+        ctx: &mut ExtensionContext,
         request: RestoreRuntimeRequest,
         user_session_id: &str,
         route_key: &str,
@@ -318,7 +330,7 @@ impl AcpExtension {
     /// bootstrap state plus the chosen `mode` and any armed preamble.
     pub(super) async fn restore_acp_runtime_inner(
         &self,
-        ctx: &mut ExtensionContext<'_>,
+        ctx: &mut ExtensionContext,
         request: &RestoreRuntimeRequest,
         create_like: &AcpCreateSessionRequest,
         process_id: &str,
