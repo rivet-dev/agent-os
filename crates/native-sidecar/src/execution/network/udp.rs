@@ -1418,8 +1418,7 @@ impl ActiveUdpSocket {
         wait: Duration,
     ) -> Result<Option<JavascriptUdpSocketEvent>, SidecarError> {
         let wait = wait.min(self.reactor_limits.operation_deadline);
-        let receive_capacity = udp_receive_capacity(&self.resources, self.reactor_limits);
-        if let Some(socket_id) = self.kernel_socket_id {
+        if self.kernel_socket_id.is_some() {
             // A hybrid socket may be readable through either the VM-local
             // kernel socket or its native external socket. Never block on one
             // source while the other can already make progress.
@@ -1428,88 +1427,127 @@ impl ActiveUdpSocket {
             } else {
                 wait
             };
-            let result = kernel
-                .poll_targets(
-                    EXECUTION_DRIVER_NAME,
-                    kernel_pid,
-                    vec![PollTargetEntry::socket(socket_id, POLLIN)],
-                    i32::try_from(kernel_wait.as_millis()).unwrap_or(i32::MAX),
-                )
-                .map_err(kernel_error)?;
-            let revents = result
-                .targets
-                .first()
-                .map(|entry| entry.revents)
-                .unwrap_or_else(PollEvents::empty);
-            if revents.is_empty() && self.native_commands.is_none() {
+            let ready = self.poll_kernel_ready(kernel, kernel_pid, kernel_wait)?;
+            if !ready && self.native_commands.is_none() {
                 return Ok(None);
             }
-            if !revents.is_empty() {
-                let turn = self.acquire_fair_turn().await?;
-                let receive_capacity = receive_capacity.min(turn.allowance().bytes).max(1);
-                let (event, used_bytes) = match kernel.socket_recv_datagram_charged(
-                    EXECUTION_DRIVER_NAME,
-                    kernel_pid,
-                    socket_id,
-                    receive_capacity,
-                ) {
-                    Ok(Some(datagram)) => {
-                        let (source_address, payload, reservations) = datagram.into_parts();
-                        let used_bytes = payload.len();
-                        let (
-                        byte_reservation,
-                        datagram_reservation,
-                        udp_byte_reservation,
-                        udp_datagram_reservation,
-                    ) = reservations.ok_or_else(|| {
-                        SidecarError::Execution(String::from(
-                            "ERR_AGENTOS_RESOURCE_ACCOUNTING_INVARIANT: kernel UDP handoff did not transfer its queue reservations",
-                        ))
-                    })?;
-                        let remote_addr = source_address
-                            .map(|source| {
-                                resolve_udp_bind_addr(source.host(), source.port(), self.family)
-                            })
-                            .transpose()?
-                            .unwrap_or_else(|| match self.family {
-                                JavascriptUdpFamily::Ipv4 => {
-                                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
-                                }
-                                JavascriptUdpFamily::Ipv6 => {
-                                    SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)
-                                }
-                            });
-                        (
-                            Some(JavascriptUdpSocketEvent::Message {
-                                data: payload,
-                                remote_addr,
-                                _byte_reservation: SharedReservation::new(byte_reservation),
-                                _datagram_reservation: SharedReservation::new(datagram_reservation),
-                                _udp_byte_reservation: SharedReservation::new(udp_byte_reservation),
-                                _udp_datagram_reservation: SharedReservation::new(
-                                    udp_datagram_reservation,
-                                ),
-                            }),
-                            used_bytes,
-                        )
-                    }
-                    Ok(None) => (None, 0),
-                    Err(error) if error.code() == "EAGAIN" => (None, 0),
-                    Err(error) => (
-                        Some(JavascriptUdpSocketEvent::Error {
-                            code: Some(error.code().to_string()),
-                            message: error.to_string(),
-                        }),
-                        0,
-                    ),
-                };
-                turn.complete(FairBudget::new(1, used_bytes), false)
-                    .map_err(|error| SidecarError::Execution(error.to_string()))?;
+            if ready {
+                let turn = self.acquire_poll_fair_turn().await?;
+                let event = self.consume_ready_kernel_datagram(kernel, kernel_pid, turn)?;
                 if event.is_some() {
                     return Ok(event);
                 }
             }
         }
+        self.poll_native(wait).await
+    }
+
+    pub(in crate::execution) fn poll_kernel_ready(
+        &self,
+        kernel: &mut SidecarKernel,
+        kernel_pid: u32,
+        wait: Duration,
+    ) -> Result<bool, SidecarError> {
+        let Some(socket_id) = self.kernel_socket_id else {
+            return Ok(false);
+        };
+        let result = kernel
+            .poll_targets(
+                EXECUTION_DRIVER_NAME,
+                kernel_pid,
+                vec![PollTargetEntry::socket(socket_id, POLLIN)],
+                i32::try_from(wait.as_millis()).unwrap_or(i32::MAX),
+            )
+            .map_err(kernel_error)?;
+        Ok(!result
+            .targets
+            .first()
+            .map(|entry| entry.revents)
+            .unwrap_or_else(PollEvents::empty)
+            .is_empty())
+    }
+
+    pub(in crate::execution) async fn acquire_poll_fair_turn(
+        &self,
+    ) -> Result<FairWorkTurn, SidecarError> {
+        self.acquire_fair_turn().await
+    }
+
+    pub(in crate::execution) fn consume_ready_kernel_datagram(
+        &self,
+        kernel: &mut SidecarKernel,
+        kernel_pid: u32,
+        turn: FairWorkTurn,
+    ) -> Result<Option<JavascriptUdpSocketEvent>, SidecarError> {
+        let socket_id = self.kernel_socket_id.ok_or_else(|| {
+            SidecarError::InvalidState(String::from(
+                "ERR_AGENTOS_UDP_KERNEL_SOCKET_MISSING: ready kernel UDP poll lost its socket",
+            ))
+        })?;
+        let receive_capacity = udp_receive_capacity(&self.resources, self.reactor_limits)
+            .min(turn.allowance().bytes)
+            .max(1);
+        let (event, used_bytes) = match kernel.socket_recv_datagram_charged(
+            EXECUTION_DRIVER_NAME,
+            kernel_pid,
+            socket_id,
+            receive_capacity,
+        ) {
+            Ok(Some(datagram)) => {
+                let (source_address, payload, reservations) = datagram.into_parts();
+                let used_bytes = payload.len();
+                let (
+                    byte_reservation,
+                    datagram_reservation,
+                    udp_byte_reservation,
+                    udp_datagram_reservation,
+                ) = reservations.ok_or_else(|| {
+                    SidecarError::Execution(String::from(
+                        "ERR_AGENTOS_RESOURCE_ACCOUNTING_INVARIANT: kernel UDP handoff did not transfer its queue reservations",
+                    ))
+                })?;
+                let remote_addr = source_address
+                    .map(|source| resolve_udp_bind_addr(source.host(), source.port(), self.family))
+                    .transpose()?
+                    .unwrap_or_else(|| match self.family {
+                        JavascriptUdpFamily::Ipv4 => {
+                            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+                        }
+                        JavascriptUdpFamily::Ipv6 => {
+                            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)
+                        }
+                    });
+                (
+                    Some(JavascriptUdpSocketEvent::Message {
+                        data: payload,
+                        remote_addr,
+                        _byte_reservation: SharedReservation::new(byte_reservation),
+                        _datagram_reservation: SharedReservation::new(datagram_reservation),
+                        _udp_byte_reservation: SharedReservation::new(udp_byte_reservation),
+                        _udp_datagram_reservation: SharedReservation::new(udp_datagram_reservation),
+                    }),
+                    used_bytes,
+                )
+            }
+            Ok(None) => (None, 0),
+            Err(error) if error.code() == "EAGAIN" => (None, 0),
+            Err(error) => (
+                Some(JavascriptUdpSocketEvent::Error {
+                    code: Some(error.code().to_string()),
+                    message: error.to_string(),
+                }),
+                0,
+            ),
+        };
+        turn.complete(FairBudget::new(1, used_bytes), false)
+            .map_err(|error| SidecarError::Execution(error.to_string()))?;
+        Ok(event)
+    }
+
+    pub(in crate::execution) async fn poll_native(
+        &self,
+        wait: Duration,
+    ) -> Result<Option<JavascriptUdpSocketEvent>, SidecarError> {
         let Some(commands) = self.native_commands.as_ref() else {
             return Ok(None);
         };

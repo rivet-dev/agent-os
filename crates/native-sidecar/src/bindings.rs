@@ -3,7 +3,7 @@ use crate::protocol::{
     RequestFrame, ResponsePayload,
 };
 use crate::service::{kernel_error, normalize_path, DispatchResult};
-use crate::state::{BridgeError, VmState, BINDING_DRIVER_NAME};
+use crate::state::{BridgeError, SharedBridge, VmHandle, VmState, BINDING_DRIVER_NAME};
 use crate::{NativeSidecar, NativeSidecarBridge, SidecarError};
 use agentos_kernel::command_registry::CommandDriver;
 use agentos_native_sidecar_core::bindings::{
@@ -24,6 +24,7 @@ pub(crate) use agentos_native_sidecar_core::bindings::{
 use agentos_native_sidecar_core::permissions::{
     allow_all_policy, deny_all_policy, evaluate_permissions_policy,
 };
+use agentos_native_sidecar_core::respond as shared_respond;
 use agentos_vm_config::PermissionMode;
 use serde_json::{json, Map, Number, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -52,73 +53,135 @@ pub(crate) fn register_host_callbacks<B>(
     sidecar: &mut NativeSidecar<B>,
     request: &RequestFrame,
     payload: RegisterHostCallbacksRequest,
-) -> Result<DispatchResult, SidecarError>
+) -> impl std::future::Future<Output = Result<DispatchResult, SidecarError>> + 'static
 where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    let (connection_id, session_id, vm_id) = sidecar.vm_scope_for(&request.ownership)?;
-    sidecar.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+    let input = sidecar.prepare_owned_vm_route(request);
+    let bridge = sidecar.bridge.clone();
+    async move {
+        let input = input?;
+        validate_bindings_registration(&payload)?;
 
-    validate_bindings_registration(&payload)?;
-
-    let registered_name = payload.name.clone();
-    let (original_permissions, original_bindings, original_command_guest_paths) = {
-        let vm = sidecar.vms.get(&vm_id).expect("owned VM should exist");
-        (
-            vm.configuration.permissions.clone(),
-            vm.bindings.clone(),
-            vm.command_guest_paths.clone(),
-        )
-    };
-    sidecar
-        .bridge
-        .set_vm_permissions(&vm_id, &allow_all_policy())?;
-    let registration_result = (|| -> Result<_, SidecarError> {
-        let vm = sidecar.vms.get_mut(&vm_id).expect("owned VM should exist");
-        ensure_collection_name_available(&vm.bindings, &registered_name)?;
-        ensure_command_aliases_available(&vm.bindings, &payload)?;
-        ensure_binding_registry_capacity(&vm.bindings, &payload)?;
-        vm.bindings.insert(registered_name.clone(), payload);
-        refresh_binding_registry(vm)?;
-        Ok::<_, SidecarError>(binding_command_names(vm).len() as u32)
-    })();
-    let command_count = match registration_result {
-        Ok(result) => {
-            sidecar
-                .bridge
-                .set_vm_permissions(&vm_id, &original_permissions)?;
-            result
-        }
-        Err(error) => {
-            let vm = sidecar.vms.get_mut(&vm_id).expect("owned VM should exist");
-            vm.bindings = original_bindings;
-            vm.command_guest_paths = original_command_guest_paths;
-            match sidecar.bridge.restore_vm_permissions_fail_closed(
-                &vm_id,
-                &original_permissions,
-                "binding collection registration rollback",
-                &error,
-            ) {
-                Ok(()) => return Err(error),
-                Err(rollback_error) => {
-                    vm.configuration.permissions = deny_all_policy();
-                    return Err(rollback_error);
+        let registered_name = payload.name.clone();
+        let (original_permissions, original_bindings, original_command_guest_paths) = input
+            .vm
+            .try_read("snapshot host callback registration", |vm| {
+                (
+                    vm.configuration.permissions.clone(),
+                    vm.bindings.clone(),
+                    vm.command_guest_paths.clone(),
+                )
+            })?;
+        bridge.set_vm_permissions(&input.vm_id, &allow_all_policy())?;
+        let registration_result = input.vm.try_command("register host callbacks", |vm| {
+            ensure_collection_name_available(&vm.bindings, &registered_name)?;
+            ensure_command_aliases_available(&vm.bindings, &payload)?;
+            ensure_binding_registry_capacity(&vm.bindings, &payload)?;
+            vm.bindings.insert(registered_name.clone(), payload);
+            refresh_binding_registry(vm)?;
+            Ok(binding_command_names(vm).len() as u32)
+        });
+        let command_count = match registration_result {
+            Ok(result) => {
+                if let Err(restore_error) =
+                    bridge.set_vm_permissions(&input.vm_id, &original_permissions)
+                {
+                    if let Err(rollback_error) = rollback_host_callback_registration(
+                        &input.vm,
+                        &bridge,
+                        &input.vm_id,
+                        &original_permissions,
+                        original_bindings,
+                        original_command_guest_paths,
+                        &restore_error,
+                    ) {
+                        return Err(rollback_error);
+                    }
+                    return Err(restore_error);
+                }
+                result
+            }
+            Err(error) => {
+                match rollback_host_callback_registration(
+                    &input.vm,
+                    &bridge,
+                    &input.vm_id,
+                    &original_permissions,
+                    original_bindings,
+                    original_command_guest_paths,
+                    &error,
+                ) {
+                    Ok(()) => return Err(error),
+                    Err(rollback_error) => return Err(rollback_error),
                 }
             }
-        }
-    };
+        };
 
-    Ok(DispatchResult {
-        response: sidecar.respond(
-            request,
-            ResponsePayload::HostCallbacksRegistered(HostCallbacksRegisteredResponse {
-                registration: registered_name,
-                command_count,
-            }),
-        ),
-        events: Vec::new(),
-    })
+        Ok(DispatchResult {
+            response: shared_respond(
+                &input.request,
+                ResponsePayload::HostCallbacksRegistered(HostCallbacksRegisteredResponse {
+                    registration: registered_name,
+                    command_count,
+                }),
+            ),
+            events: Vec::new(),
+        })
+    }
+}
+
+fn rollback_host_callback_registration<B>(
+    vm: &VmHandle,
+    bridge: &SharedBridge<B>,
+    vm_id: &str,
+    original_permissions: &agentos_vm_config::PermissionsPolicy,
+    original_bindings: BTreeMap<String, RegisterHostCallbacksRequest>,
+    original_command_guest_paths: BTreeMap<String, String>,
+    operation_error: &SidecarError,
+) -> Result<(), SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    // These two rollback legs are independent. In particular, a failed VM
+    // registry refresh must never skip restoring (or fail-closing) the trusted
+    // bridge permission policy.
+    let state_rollback = vm.try_command("rollback host callback registration", |vm| {
+        vm.bindings = original_bindings;
+        vm.command_guest_paths = original_command_guest_paths;
+        refresh_binding_registry(vm)
+    });
+    let permission_rollback = bridge.restore_vm_permissions_fail_closed(
+        vm_id,
+        original_permissions,
+        "binding collection registration rollback",
+        operation_error,
+    );
+
+    match (state_rollback, permission_rollback) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(state_error), Ok(())) => Err(SidecarError::InvalidState(format!(
+            "binding collection registration state rollback failed after {operation_error}: {state_error}; original permissions were restored"
+        ))),
+        (Ok(()), Err(permission_error)) => {
+            vm.try_command("record fail-closed binding permissions", |vm| {
+                vm.configuration.permissions = deny_all_policy();
+                Ok(())
+            })?;
+            Err(permission_error)
+        }
+        (Err(state_error), Err(permission_error)) => {
+            let fail_closed_state = vm.try_command("record fail-closed binding permissions", |vm| {
+                vm.configuration.permissions = deny_all_policy();
+                Ok(())
+            });
+            Err(SidecarError::InvalidState(format!(
+                "binding collection registration rollback failed after {operation_error}: state rollback: {state_error}; permission rollback: {permission_error}; fail-closed VM state: {fail_closed_state:?}"
+            )))
+        }
+    }
 }
 
 fn refresh_binding_registry(vm: &mut VmState) -> Result<(), SidecarError> {

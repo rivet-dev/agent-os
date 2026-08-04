@@ -9,14 +9,18 @@ pub(crate) mod bindings;
 pub(crate) mod crypto_cipher;
 pub(crate) mod execution;
 pub mod extension;
+pub(crate) mod extension_services;
 pub(crate) mod filesystem;
 #[allow(dead_code)]
 pub(crate) mod json_rpc;
 pub(crate) mod language_execution;
 pub mod limits;
 pub(crate) mod metadata;
+pub(crate) mod ownership_coordinator;
 pub mod package_projection;
 pub(crate) mod plugins;
+pub(crate) mod process_event_broker;
+pub(crate) mod request_operations;
 pub mod service;
 pub(crate) mod state;
 pub mod stdio;
@@ -26,7 +30,7 @@ pub use agentos_sidecar_protocol::{generated_protocol, protocol, wire};
 
 pub use extension::{
     Extension, ExtensionContext, ExtensionFuture, ExtensionInterruptRequest,
-    ExtensionInterruptResponse, ExtensionResponse,
+    ExtensionInterruptResponse, ExtensionOrderingPolicy, ExtensionRequestClass, ExtensionResponse,
 };
 pub use service::{DispatchResult, NativeSidecar, NativeSidecarConfig, SidecarError};
 pub use state::EventSinkTransport;

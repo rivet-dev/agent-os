@@ -13,7 +13,8 @@ pub(crate) use self::rpc::{
     javascript_sync_rpc_arg_u64_optional, javascript_sync_rpc_bytes_arg,
     javascript_sync_rpc_bytes_value, javascript_sync_rpc_encoding, javascript_sync_rpc_error_code,
     javascript_sync_rpc_option_bool, javascript_sync_rpc_option_u32, service_javascript_sync_rpc,
-    JavascriptSyncRpcServiceRequest, JavascriptSyncRpcServiceResponse, KernelPollFdRequest,
+    settle_javascript_sync_rpc_completion, JavascriptSyncRpcServiceRequest,
+    JavascriptSyncRpcServiceResponse, KernelPollFdRequest,
 };
 mod crypto;
 pub(crate) use self::crypto::service_javascript_crypto_sync_rpc;
@@ -23,5 +24,6 @@ mod http;
 pub(in crate::execution) use self::http::*;
 pub(crate) use self::http::{
     dispatch_loopback_http_request, dispatch_loopback_http_request_deferred,
-    ensure_vm_fetch_response_frame_within_limit, LoopbackHttpDispatchRequest,
+    ensure_vm_fetch_response_frame_within_limit, service_owned_javascript_sync_rpc_request,
+    settle_owned_fetch_sync_rpc, LoopbackHttpDispatchRequest,
 };

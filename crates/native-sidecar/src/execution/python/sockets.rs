@@ -288,13 +288,157 @@ fn respond_python_socket_async(
     }
 }
 
+trait PythonSocketConnectResponder {
+    fn respond(
+        &self,
+        request_id: u64,
+        response: Result<PythonVfsRpcResponsePayload, SidecarError>,
+    ) -> Result<(), SidecarError>;
+}
+
+impl PythonSocketConnectResponder for PythonVfsRpcResponder {
+    fn respond(
+        &self,
+        request_id: u64,
+        response: Result<PythonVfsRpcResponsePayload, SidecarError>,
+    ) -> Result<(), SidecarError> {
+        respond_owned_python_rpc(self, request_id, response)
+    }
+}
+
+fn respond_python_socket_connect_result<R: PythonSocketConnectResponder>(
+    responder: &R,
+    request_id: u64,
+    response: Result<PythonVfsRpcResponsePayload, SidecarError>,
+) -> Result<(), SidecarError> {
+    responder.respond(request_id, response)
+}
+
 fn python_socket_kind_error(op: &str, expected: &str) -> SidecarError {
     SidecarError::Execution(format!(
         "EOPNOTSUPP: python socket {op} requires a {expected} socket"
     ))
 }
 
-impl<B> NativeSidecar<B>
+struct OwnedPythonVmRegistry {
+    vm_id: String,
+    vm: VmHandle,
+}
+
+impl OwnedPythonVmRegistry {
+    fn contains_key(&self, vm_id: &str) -> bool {
+        self.vm_id == vm_id
+    }
+
+    fn get(&self, vm_id: &str) -> Option<std::cell::Ref<'_, VmState>> {
+        self.contains_key(vm_id).then(|| self.vm.borrow())
+    }
+
+    fn get_mut(&self, vm_id: &str) -> Option<std::cell::RefMut<'_, VmState>> {
+        self.contains_key(vm_id).then(|| self.vm.borrow_mut())
+    }
+
+    fn handle(&self, vm_id: &str) -> Option<VmHandle> {
+        self.contains_key(vm_id).then(|| self.vm.clone())
+    }
+}
+
+struct OwnedPythonSocketService<B> {
+    bridge: SharedBridge<B>,
+    vms: OwnedPythonVmRegistry,
+    process_event_sender: tokio::sync::mpsc::Sender<ProcessEventEnvelope>,
+    process_event_notify: Arc<tokio::sync::Notify>,
+    target: PythonProcessTarget,
+    responder: PythonVfsRpcResponder,
+}
+
+#[derive(Clone, Debug)]
+struct PythonProcessTarget {
+    root_process_id: String,
+    child_path: Vec<String>,
+}
+
+impl PythonProcessTarget {
+    fn process<'a>(&self, vm: &'a VmState) -> Option<&'a ActiveProcess> {
+        self.process_in_roots(&vm.active_processes)
+    }
+
+    fn process_in_roots<'a>(
+        &self,
+        roots: &'a BTreeMap<String, ActiveProcess>,
+    ) -> Option<&'a ActiveProcess> {
+        let mut process = roots.get(&self.root_process_id)?;
+        for child_id in &self.child_path {
+            process = process.child_processes.get(child_id)?;
+        }
+        Some(process)
+    }
+
+    fn process_mut<'a>(&self, vm: &'a mut VmState) -> Option<&'a mut ActiveProcess> {
+        self.process_in_roots_mut(&mut vm.active_processes)
+    }
+
+    fn process_in_roots_mut<'a>(
+        &self,
+        roots: &'a mut BTreeMap<String, ActiveProcess>,
+    ) -> Option<&'a mut ActiveProcess> {
+        let mut process = roots.get_mut(&self.root_process_id)?;
+        for child_id in &self.child_path {
+            process = process.child_processes.get_mut(child_id)?;
+        }
+        Some(process)
+    }
+
+    fn label(&self) -> String {
+        if self.child_path.is_empty() {
+            return self.root_process_id.clone();
+        }
+        format!("{}:{}", self.root_process_id, self.child_path.join(":"))
+    }
+}
+
+struct DetachedPythonUdpSocket {
+    vm: VmHandle,
+    target: PythonProcessTarget,
+    native_socket_id: String,
+    socket: Option<ActiveUdpSocket>,
+}
+
+impl DetachedPythonUdpSocket {
+    fn socket(&self) -> &ActiveUdpSocket {
+        self.socket
+            .as_ref()
+            .expect("detached Python UDP socket remains owned until guard drop")
+    }
+}
+
+impl Drop for DetachedPythonUdpSocket {
+    fn drop(&mut self) {
+        let Some(socket) = self.socket.take() else {
+            return;
+        };
+        let native_socket_id = self.native_socket_id.clone();
+        let target = self.target.clone();
+        if let Err(error) = self.vm.try_command("restore detached Python UDP socket", |vm| {
+            let Some(process) = target.process_mut(vm) else {
+                return Ok(());
+            };
+            if process.udp_sockets.contains_key(&native_socket_id) {
+                return Err(SidecarError::InvalidState(format!(
+                    "ERR_AGENTOS_PYTHON_SOCKET_RESTORE_CONFLICT: UDP socket {native_socket_id} was replaced while an owned receive was pending"
+                )));
+            }
+            process.udp_sockets.insert(native_socket_id, socket);
+            Ok(())
+        }) {
+            eprintln!(
+                "ERR_AGENTOS_PYTHON_SOCKET_RESTORE: failed to restore detached UDP socket: {error}"
+            );
+        }
+    }
+}
+
+impl<B> OwnedPythonSocketService<B>
 where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
@@ -302,31 +446,30 @@ where
     pub(in crate::execution) async fn handle_python_socket_rpc_request(
         &mut self,
         vm_id: &str,
-        process_id: &str,
         request: PythonVfsRpcRequest,
     ) -> Result<(), SidecarError> {
         if !self.vms.contains_key(vm_id) {
             return Ok(());
         }
-        match self.python_socket_op(vm_id, process_id, &request).await {
+        match self.python_socket_op(vm_id, &request).await {
             Ok(PythonSocketOp::Immediate(response)) => {
-                self.respond_python_rpc(vm_id, process_id, request.id, Ok(response))
+                self.respond_python_rpc(request.id, Ok(response))
             }
             Ok(PythonSocketOp::Charged(response)) => {
-                self.respond_python_rpc(vm_id, process_id, request.id, Ok(response.payload))
+                self.respond_python_rpc(request.id, Ok(response.payload))
             }
             Ok(PythonSocketOp::Deferred) => Ok(()),
             Ok(PythonSocketOp::Wait(wait)) => {
-                self.schedule_python_socket_wait(vm_id, process_id, request, wait)
+                self.schedule_python_socket_wait(vm_id, request, wait)
             }
-            Err(error) => self.respond_python_rpc(vm_id, process_id, request.id, Err(error)),
+            Err(error) => self.respond_python_rpc(request.id, Err(error)),
         }
     }
 
+    #[deny(clippy::await_holding_refcell_ref)]
     async fn python_socket_op(
         &mut self,
         vm_id: &str,
-        process_id: &str,
         request: &PythonVfsRpcRequest,
     ) -> Result<PythonSocketOp, SidecarError> {
         match request.method {
@@ -338,9 +481,10 @@ where
                     NetworkOperation::Http,
                     format_tcp_resource(&host, port),
                 )?;
-                let socket_paths = build_javascript_socket_path_context(
-                    self.vms.get(vm_id).ok_or_else(|| missing_vm_error(vm_id))?,
-                )?;
+                let socket_paths = {
+                    let vm = self.vms.get(vm_id).ok_or_else(|| missing_vm_error(vm_id))?;
+                    build_javascript_socket_path_context(&vm)?
+                };
                 let resolved = {
                     let vm = self.vms.get(vm_id).ok_or_else(|| missing_vm_error(vm_id))?;
                     resolve_tcp_connect_addr(
@@ -355,28 +499,35 @@ where
                     )?
                 };
                 if !resolved.use_kernel_loopback {
-                    return self
-                        .defer_python_native_tcp_connect(vm_id, process_id, request.id, resolved);
+                    return self.defer_python_native_tcp_connect(vm_id, request.id, resolved);
                 }
-                let vm = self
+                let mut vm = self
                     .vms
                     .get_mut(vm_id)
                     .ok_or_else(|| missing_vm_error(vm_id))?;
                 let pending = reserve_capability(&vm.capabilities, CapabilityKind::TcpSocket)?;
-                let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
-                    SidecarError::InvalidState(String::from(
-                        "python socket op for reaped vm/process",
-                    ))
-                })?;
+                let resources = vm.capabilities.resources();
+                let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
+                let vm = &mut *vm;
+                let (kernel, active_processes) = (&mut vm.kernel, &mut vm.active_processes);
+                let process = self
+                    .target
+                    .process_in_roots_mut(active_processes)
+                    .ok_or_else(|| {
+                        SidecarError::InvalidState(format!(
+                            "python socket op for reaped process {}",
+                            self.target.label()
+                        ))
+                    })?;
                 let socket = ActiveTcpSocket::connect_kernel_loopback(
-                    &mut vm.kernel,
+                    kernel,
                     process.kernel_pid,
                     resolved,
                     None,
                     None,
                     None,
                     &socket_paths,
-                    vm.capabilities.resources(),
+                    resources,
                     process.runtime_context.clone(),
                     reactor_io_limits(&process.limits),
                 )?;
@@ -391,7 +542,7 @@ where
                 ) {
                     Ok(identity) => identity,
                     Err(error) => {
-                        if let Err(close_error) = socket.close(&mut vm.kernel, process.kernel_pid) {
+                        if let Err(close_error) = socket.close(kernel, process.kernel_pid) {
                             eprintln!(
                                 "ERR_AGENTOS_PYTHON_SOCKET_CLOSE: TCP connect rollback failed: {close_error}"
                             );
@@ -407,7 +558,7 @@ where
                         .expect("committed Python TCP capability lease"),
                 );
                 register_kernel_readiness_target(
-                    &vm.kernel_socket_readiness,
+                    &kernel_readiness,
                     socket.kernel_socket_id,
                     None,
                     Some(Arc::clone(&socket.read_event_notify)),
@@ -435,15 +586,21 @@ where
             }
             PythonVfsRpcMethod::SocketSend => {
                 let python_socket_id = python_socket_id(request)?;
-                let vm = self
+                let mut vm = self
                     .vms
                     .get_mut(vm_id)
                     .ok_or_else(|| missing_vm_error(vm_id))?;
-                let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
-                    SidecarError::InvalidState(String::from(
-                        "python socket op for reaped vm/process",
-                    ))
-                })?;
+                let vm = &mut *vm;
+                let (kernel, active_processes) = (&mut vm.kernel, &mut vm.active_processes);
+                let process = self
+                    .target
+                    .process_in_roots_mut(active_processes)
+                    .ok_or_else(|| {
+                        SidecarError::InvalidState(format!(
+                            "python socket op for reaped process {}",
+                            self.target.label()
+                        ))
+                    })?;
                 let data = python_socket_payload(request, process.runtime_context.resources())?;
                 let native_socket_id = match process.python_sockets.get(&python_socket_id) {
                     Some(PythonHostSocket::Tcp { socket_id, .. }) => socket_id.clone(),
@@ -461,14 +618,13 @@ where
                     .get(&native_socket_id)
                     .ok_or_else(|| python_socket_backend_missing_error(python_socket_id))?;
                 if socket.kernel_socket_id.is_some() {
-                    let bytes_sent =
-                        socket.write_all(&mut vm.kernel, process.kernel_pid, &data.bytes)?;
+                    let bytes_sent = socket.write_all(kernel, process.kernel_pid, &data.bytes)?;
                     return Ok(PythonSocketOp::Immediate(
                         PythonVfsRpcResponsePayload::SocketSent { bytes_sent },
                     ));
                 }
                 let response = socket.begin_plain_write(&data.bytes)?;
-                let (runtime, responder) = self.python_socket_async_context(vm_id, process_id)?;
+                let (runtime, responder) = self.python_socket_async_context(vm_id)?;
                 let request_id = request.id;
                 runtime
                     .spawn(agentos_runtime::TaskClass::Socket, async move {
@@ -498,15 +654,21 @@ where
             PythonVfsRpcMethod::SocketRecv => {
                 let max = python_socket_recv_len(request);
                 let python_socket_id = python_socket_id(request)?;
-                let vm = self
+                let mut vm = self
                     .vms
                     .get_mut(vm_id)
                     .ok_or_else(|| missing_vm_error(vm_id))?;
-                let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
-                    SidecarError::InvalidState(String::from(
-                        "python socket op for reaped vm/process",
-                    ))
-                })?;
+                let vm = &mut *vm;
+                let (kernel, active_processes) = (&mut vm.kernel, &mut vm.active_processes);
+                let process = self
+                    .target
+                    .process_in_roots_mut(active_processes)
+                    .ok_or_else(|| {
+                        SidecarError::InvalidState(format!(
+                            "python socket op for reaped process {}",
+                            self.target.label()
+                        ))
+                    })?;
                 let resources = Arc::clone(process.runtime_context.resources());
                 let mut handle = process
                     .python_sockets
@@ -534,8 +696,7 @@ where
                         .get_mut(socket_id)
                         .ok_or_else(|| python_socket_backend_missing_error(python_socket_id))?;
                     socket.set_application_read_interest(true)?;
-                    let event =
-                        socket.poll(&mut vm.kernel, process.kernel_pid, Duration::ZERO, false)?;
+                    let event = socket.poll(kernel, process.kernel_pid, Duration::ZERO, false)?;
                     let wait_timeout = python_socket_wait_timeout(request, socket.reactor_limits);
                     if event.is_none() && !wait_timeout.is_zero() {
                         return Ok(PythonSocketOp::Wait(PythonSocketWait {
@@ -561,25 +722,27 @@ where
                 result
             }
             PythonVfsRpcMethod::SocketClose => {
-                self.remove_python_socket(vm_id, process_id, request)?;
+                self.remove_python_socket(vm_id, request)?;
                 Ok(PythonSocketOp::Immediate(
                     PythonVfsRpcResponsePayload::Empty,
                 ))
             }
             PythonVfsRpcMethod::UdpCreate => {
-                let vm = self
+                let mut vm = self
                     .vms
                     .get_mut(vm_id)
                     .ok_or_else(|| missing_vm_error(vm_id))?;
                 let pending = reserve_capability(&vm.capabilities, CapabilityKind::UdpSocket)?;
-                let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
-                    SidecarError::InvalidState(String::from(
-                        "python socket op for reaped vm/process",
+                let resources = vm.capabilities.resources();
+                let process = self.target.process_mut(&mut vm).ok_or_else(|| {
+                    SidecarError::InvalidState(format!(
+                        "python socket op for reaped process {}",
+                        self.target.label()
                     ))
                 })?;
                 let mut socket = ActiveUdpSocket::new_native(
                     JavascriptUdpFamily::Ipv4,
-                    vm.capabilities.resources(),
+                    resources,
                     process.runtime_context.clone(),
                     reactor_io_limits(&process.limits),
                 )?;
@@ -621,46 +784,56 @@ where
                     NetworkOperation::Http,
                     format_tcp_resource(&host, port),
                 )?;
-                let socket_paths = build_javascript_socket_path_context(
-                    self.vms.get(vm_id).ok_or_else(|| missing_vm_error(vm_id))?,
-                )?;
-                let python_socket_id = python_socket_id(request)?;
-                let vm = self
-                    .vms
-                    .get_mut(vm_id)
-                    .ok_or_else(|| missing_vm_error(vm_id))?;
-                let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
-                    SidecarError::InvalidState(String::from(
-                        "python socket op for reaped vm/process",
-                    ))
-                })?;
-                let data = python_socket_payload(request, process.runtime_context.resources())?;
-                let native_socket_id = match process.python_sockets.get(&python_socket_id) {
-                    Some(PythonHostSocket::Udp { socket_id }) => socket_id.clone(),
-                    Some(PythonHostSocket::Tcp { .. }) => {
-                        return Err(python_socket_kind_error("sendto", "UDP"));
-                    }
-                    None => return Err(python_socket_missing_error(python_socket_id)),
+                let socket_paths = {
+                    let vm = self.vms.get(vm_id).ok_or_else(|| missing_vm_error(vm_id))?;
+                    build_javascript_socket_path_context(&vm)?
                 };
-                process.validate_capability_alias(
-                    &NativeCapabilityKey::UdpSocket(native_socket_id.clone()),
-                    CapabilityKind::UdpSocket,
-                )?;
-                let socket = process
-                    .udp_sockets
-                    .get_mut(&native_socket_id)
-                    .ok_or_else(|| python_socket_backend_missing_error(python_socket_id))?;
-                let send = socket.send_to(ActiveUdpSendToRequest {
-                    bridge: &self.bridge,
-                    kernel: &mut vm.kernel,
-                    kernel_pid: process.kernel_pid,
-                    vm_id,
-                    dns: &vm.dns,
-                    host: &host,
-                    port,
-                    context: &socket_paths,
-                    contents: &data.bytes,
-                })?;
+                let python_socket_id = python_socket_id(request)?;
+                let send = {
+                    let mut vm = self
+                        .vms
+                        .get_mut(vm_id)
+                        .ok_or_else(|| missing_vm_error(vm_id))?;
+                    let vm = &mut *vm;
+                    let (kernel, dns, active_processes) =
+                        (&mut vm.kernel, &vm.dns, &mut vm.active_processes);
+                    let process = self
+                        .target
+                        .process_in_roots_mut(active_processes)
+                        .ok_or_else(|| {
+                            SidecarError::InvalidState(format!(
+                                "python socket op for reaped process {}",
+                                self.target.label()
+                            ))
+                        })?;
+                    let data = python_socket_payload(request, process.runtime_context.resources())?;
+                    let native_socket_id = match process.python_sockets.get(&python_socket_id) {
+                        Some(PythonHostSocket::Udp { socket_id }) => socket_id.clone(),
+                        Some(PythonHostSocket::Tcp { .. }) => {
+                            return Err(python_socket_kind_error("sendto", "UDP"));
+                        }
+                        None => return Err(python_socket_missing_error(python_socket_id)),
+                    };
+                    process.validate_capability_alias(
+                        &NativeCapabilityKey::UdpSocket(native_socket_id.clone()),
+                        CapabilityKind::UdpSocket,
+                    )?;
+                    let socket = process
+                        .udp_sockets
+                        .get_mut(&native_socket_id)
+                        .ok_or_else(|| python_socket_backend_missing_error(python_socket_id))?;
+                    socket.send_to(ActiveUdpSendToRequest {
+                        bridge: &self.bridge,
+                        kernel,
+                        kernel_pid: process.kernel_pid,
+                        vm_id,
+                        dns,
+                        host: &host,
+                        port,
+                        context: &socket_paths,
+                        contents: &data.bytes,
+                    })?
+                };
                 let bytes_sent = await_udp_send_result(send).await?;
                 Ok(PythonSocketOp::Immediate(
                     PythonVfsRpcResponsePayload::SocketSent { bytes_sent },
@@ -669,39 +842,79 @@ where
             PythonVfsRpcMethod::UdpRecvfrom => {
                 let max = python_socket_recv_len(request);
                 let python_socket_id = python_socket_id(request)?;
-                let vm = self
+                let vm_handle = self
                     .vms
-                    .get_mut(vm_id)
+                    .handle(vm_id)
                     .ok_or_else(|| missing_vm_error(vm_id))?;
-                let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
-                    SidecarError::InvalidState(String::from(
-                        "python socket op for reaped vm/process",
-                    ))
-                })?;
-                let resources = Arc::clone(process.runtime_context.resources());
-                let native_socket_id = match process.python_sockets.get(&python_socket_id) {
-                    Some(PythonHostSocket::Udp { socket_id }) => socket_id.clone(),
-                    Some(PythonHostSocket::Tcp { .. }) => {
-                        return Err(python_socket_kind_error("recvfrom", "UDP"));
-                    }
-                    None => return Err(python_socket_missing_error(python_socket_id)),
+                let (resources, kernel_pid, native_socket_id, active_socket) = {
+                    let mut vm = self
+                        .vms
+                        .get_mut(vm_id)
+                        .ok_or_else(|| missing_vm_error(vm_id))?;
+                    let process = self.target.process_mut(&mut vm).ok_or_else(|| {
+                        SidecarError::InvalidState(format!(
+                            "python socket op for reaped process {}",
+                            self.target.label()
+                        ))
+                    })?;
+                    let resources = Arc::clone(process.runtime_context.resources());
+                    let native_socket_id = match process.python_sockets.get(&python_socket_id) {
+                        Some(PythonHostSocket::Udp { socket_id }) => socket_id.clone(),
+                        Some(PythonHostSocket::Tcp { .. }) => {
+                            return Err(python_socket_kind_error("recvfrom", "UDP"));
+                        }
+                        None => return Err(python_socket_missing_error(python_socket_id)),
+                    };
+                    process.validate_capability_alias(
+                        &NativeCapabilityKey::UdpSocket(native_socket_id.clone()),
+                        CapabilityKind::UdpSocket,
+                    )?;
+                    let active_socket = process
+                        .udp_sockets
+                        .remove(&native_socket_id)
+                        .ok_or_else(|| python_socket_backend_missing_error(python_socket_id))?;
+                    (
+                        resources,
+                        process.kernel_pid,
+                        native_socket_id,
+                        active_socket,
+                    )
                 };
-                process.validate_capability_alias(
-                    &NativeCapabilityKey::UdpSocket(native_socket_id.clone()),
-                    CapabilityKind::UdpSocket,
-                )?;
-                let socket = process
-                    .udp_sockets
-                    .get(&native_socket_id)
-                    .ok_or_else(|| python_socket_backend_missing_error(python_socket_id))?;
-                let event = socket
-                    .poll(&mut vm.kernel, process.kernel_pid, Duration::ZERO)
-                    .await?;
-                let wait_timeout = python_socket_wait_timeout(request, socket.reactor_limits);
+                let socket = DetachedPythonUdpSocket {
+                    vm: vm_handle,
+                    target: self.target.clone(),
+                    native_socket_id,
+                    socket: Some(active_socket),
+                };
+                let kernel_ready = {
+                    let mut vm = self
+                        .vms
+                        .get_mut(vm_id)
+                        .ok_or_else(|| missing_vm_error(vm_id))?;
+                    socket
+                        .socket()
+                        .poll_kernel_ready(&mut vm.kernel, kernel_pid, Duration::ZERO)?
+                };
+                let event = if kernel_ready {
+                    let turn = socket.socket().acquire_poll_fair_turn().await?;
+                    let mut vm = self
+                        .vms
+                        .get_mut(vm_id)
+                        .ok_or_else(|| missing_vm_error(vm_id))?;
+                    socket.socket().consume_ready_kernel_datagram(
+                        &mut vm.kernel,
+                        kernel_pid,
+                        turn,
+                    )?
+                } else {
+                    socket.socket().poll_native(Duration::ZERO).await?
+                };
+                let wait_timeout =
+                    python_socket_wait_timeout(request, socket.socket().reactor_limits);
                 if event.is_none() && !wait_timeout.is_zero() {
                     return Ok(PythonSocketOp::Wait(PythonSocketWait {
                         source: PythonSocketWaitSource::Notify(Arc::clone(
-                            &socket.read_event_notify,
+                            &socket.socket().read_event_notify,
                         )),
                         timeout: wait_timeout,
                         task_class: agentos_runtime::TaskClass::Udp,
@@ -723,40 +936,30 @@ where
     fn defer_python_native_tcp_connect(
         &mut self,
         vm_id: &str,
-        process_id: &str,
         request_id: u64,
         resolved: ResolvedTcpConnectAddr,
     ) -> Result<PythonSocketOp, SidecarError> {
         debug_assert!(!resolved.use_kernel_loopback);
-        let (
-            connection_id,
-            session_id,
-            runtime,
-            resources,
-            limits,
-            pending_capability,
-            native_socket_id,
-            python_socket_id,
-        ) = {
-            let vm = self
+        let (runtime, resources, limits, pending_capability, native_socket_id, python_socket_id) = {
+            let mut vm = self
                 .vms
                 .get_mut(vm_id)
                 .ok_or_else(|| missing_vm_error(vm_id))?;
             let pending_capability =
                 reserve_capability(&vm.capabilities, CapabilityKind::TcpSocket)?;
-            let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
-                SidecarError::InvalidState(String::from(
-                    "python socket connect for reaped vm/process",
+            let resources = vm.capabilities.resources();
+            let process = self.target.process_mut(&mut vm).ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "python socket connect for reaped process {}",
+                    self.target.label()
                 ))
             })?;
             let native_socket_id = process.allocate_tcp_socket_id();
             let python_socket_id = process.next_python_socket_id;
             process.next_python_socket_id = process.next_python_socket_id.wrapping_add(1);
             (
-                vm.connection_id.clone(),
-                vm.session_id.clone(),
                 process.runtime_context.clone(),
-                vm.capabilities.resources(),
+                resources,
                 reactor_io_limits(&process.limits),
                 pending_capability,
                 native_socket_id,
@@ -764,10 +967,15 @@ where
             )
         };
         let task_runtime = runtime.clone();
-        let sender = self.process_event_sender.clone();
-        let event_notify = Arc::clone(&self.process_event_notify);
+        let vm = self.vms.get(vm_id).ok_or_else(|| missing_vm_error(vm_id))?;
+        let connection_id = vm.connection_id.clone();
+        let session_id = vm.session_id.clone();
         let vm_id = vm_id.to_owned();
-        let process_id = process_id.to_owned();
+        let process_id = self.target.root_process_id.clone();
+        let child_path = self.target.child_path.clone();
+        let sender = self.process_event_sender.clone();
+        let responder = self.responder.clone();
+        let event_notify = Arc::clone(&self.process_event_notify);
         runtime
             .spawn(agentos_runtime::TaskClass::Socket, async move {
                 let result = match tokio::time::timeout(
@@ -815,21 +1023,23 @@ where
                         ),
                     }),
                 };
-                if sender
-                    .send(ProcessEventEnvelope {
-                        connection_id,
-                        session_id,
-                        vm_id,
-                        process_id,
-                        event: ActiveExecutionEvent::PythonSocketConnectCompletion(
-                            Box::new(PythonSocketConnectCompletion { request_id, result }),
-                        ),
-                    })
-                    .await
-                    .is_err()
-                {
-                    eprintln!(
-                        "ERR_AGENTOS_PROCESS_EVENT_CHANNEL_CLOSED: Python TCP connect completion could not be delivered"
+                let envelope = ProcessEventEnvelope {
+                    connection_id,
+                    session_id,
+                    vm_id,
+                    child_path,
+                    process_id,
+                    event: ActiveExecutionEvent::PythonSocketConnectCompletion(Box::new(
+                        PythonSocketConnectCompletion { request_id, result },
+                    )),
+                };
+                if sender.send(envelope).await.is_err() {
+                    respond_python_socket_async(
+                        &responder,
+                        request_id,
+                        Err(SidecarError::InvalidState(String::from(
+                            "ERR_AGENTOS_PROCESS_EVENT_CHANNEL_CLOSED: Python TCP connect completion could not be delivered",
+                        ))),
                     );
                 } else {
                     event_notify.notify_one();
@@ -842,11 +1052,13 @@ where
     fn python_socket_async_context(
         &self,
         vm_id: &str,
-        process_id: &str,
     ) -> Result<(agentos_runtime::RuntimeContext, PythonVfsRpcResponder), SidecarError> {
         let vm = self.vms.get(vm_id).ok_or_else(|| missing_vm_error(vm_id))?;
-        let process = vm.active_processes.get(process_id).ok_or_else(|| {
-            SidecarError::InvalidState(String::from("python socket op for reaped vm/process"))
+        let process = self.target.process(&vm).ok_or_else(|| {
+            SidecarError::InvalidState(format!(
+                "python socket op for reaped process {}",
+                self.target.label()
+            ))
         })?;
         Ok((
             vm.runtime_context.clone(),
@@ -857,19 +1069,29 @@ where
     fn schedule_python_socket_wait(
         &self,
         vm_id: &str,
-        process_id: &str,
         mut request: PythonVfsRpcRequest,
         wait: PythonSocketWait,
     ) -> Result<(), SidecarError> {
         let vm = self.vms.get(vm_id).ok_or_else(|| missing_vm_error(vm_id))?;
-        let runtime = vm.runtime_context.clone();
+        let process = self.target.process(&vm).ok_or_else(|| {
+            SidecarError::InvalidState(format!(
+                "python socket wait for reaped process {}",
+                self.target.label()
+            ))
+        })?;
+        let runtime = process.runtime_context.clone();
+        drop(vm);
+        let vm = self.vms.get(vm_id).ok_or_else(|| missing_vm_error(vm_id))?;
         let connection_id = vm.connection_id.clone();
         let session_id = vm.session_id.clone();
         let vm_id = vm_id.to_owned();
-        let process_id = process_id.to_owned();
+        let process_id = self.target.root_process_id.clone();
+        let child_path = self.target.child_path.clone();
         let sender = self.process_event_sender.clone();
+        let responder = self.responder.clone();
         let event_notify = Arc::clone(&self.process_event_notify);
         request.timeout_ms = Some(0);
+        let request_id = request.id;
         let cancellation = runtime.clone();
         runtime
             .spawn(wait.task_class, async move {
@@ -887,19 +1109,21 @@ where
                 if !cancellation.admission_is_open() {
                     return;
                 }
-                if sender
-                    .send(ProcessEventEnvelope {
-                        connection_id,
-                        session_id,
-                        vm_id,
-                        process_id,
-                        event: ActiveExecutionEvent::PythonVfsRpcRequest(Box::new(request)),
-                    })
-                    .await
-                    .is_err()
-                {
-                    eprintln!(
-                        "ERR_AGENTOS_PROCESS_EVENT_CHANNEL_CLOSED: Python socket readiness completion could not be delivered"
+                let envelope = ProcessEventEnvelope {
+                    connection_id,
+                    session_id,
+                    vm_id,
+                    child_path,
+                    process_id,
+                    event: ActiveExecutionEvent::PythonVfsRpcRequest(Box::new(request)),
+                };
+                if sender.send(envelope).await.is_err() {
+                    respond_python_socket_async(
+                        &responder,
+                        request_id,
+                        Err(SidecarError::InvalidState(String::from(
+                            "ERR_AGENTOS_PROCESS_EVENT_CHANNEL_CLOSED: Python socket readiness retry could not be delivered",
+                        ))),
                     );
                 } else {
                     event_notify.notify_one();
@@ -912,17 +1136,18 @@ where
     fn remove_python_socket(
         &mut self,
         vm_id: &str,
-        process_id: &str,
         request: &PythonVfsRpcRequest,
     ) -> Result<(), SidecarError> {
         let Some(socket_id) = request.socket_id else {
             return Ok(());
         };
-        let Some(vm) = self.vms.get_mut(vm_id) else {
+        let Some(mut vm) = self.vms.get_mut(vm_id) else {
             return Ok(());
         };
         let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-        let Some(process) = vm.active_processes.get_mut(process_id) else {
+        let vm = &mut *vm;
+        let (kernel, active_processes) = (&mut vm.kernel, &mut vm.active_processes);
+        let Some(process) = self.target.process_in_roots_mut(active_processes) else {
             return Ok(());
         };
         let Some(socket) = process.python_sockets.get(&socket_id) else {
@@ -952,7 +1177,7 @@ where
                         process,
                         &native_socket_id,
                         socket,
-                        &mut vm.kernel,
+                        kernel,
                         &kernel_readiness,
                     );
                 }
@@ -965,7 +1190,7 @@ where
                         process,
                         &native_socket_id,
                         socket,
-                        &mut vm.kernel,
+                        kernel,
                         &kernel_readiness,
                     )?;
                 }
@@ -976,12 +1201,196 @@ where
 
     pub(in crate::execution) fn respond_python_rpc(
         &mut self,
+        request_id: u64,
+        response: Result<PythonVfsRpcResponsePayload, SidecarError>,
+    ) -> Result<(), SidecarError> {
+        respond_owned_python_rpc(&self.responder, request_id, response)
+    }
+}
+
+pub(in crate::execution) async fn service_owned_python_socket_rpc_request<B>(
+    bridge: SharedBridge<B>,
+    vm: VmHandle,
+    vm_id: String,
+    process_id: String,
+    child_path: Vec<String>,
+    responder: PythonVfsRpcResponder,
+    request: PythonVfsRpcRequest,
+    process_event_sender: tokio::sync::mpsc::Sender<ProcessEventEnvelope>,
+    process_event_notify: Arc<tokio::sync::Notify>,
+) -> Result<(), SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let mut service = OwnedPythonSocketService {
+        bridge,
+        vms: OwnedPythonVmRegistry {
+            vm_id: vm_id.clone(),
+            vm,
+        },
+        process_event_sender,
+        process_event_notify,
+        target: PythonProcessTarget {
+            root_process_id: process_id,
+            child_path,
+        },
+        responder,
+    };
+    service
+        .handle_python_socket_rpc_request(&vm_id, request)
+        .await
+}
+
+pub(crate) async fn service_owned_python_socket_connect_completion(
+    vm: VmHandle,
+    vm_id: String,
+    process_id: String,
+    child_path: Vec<String>,
+    responder: PythonVfsRpcResponder,
+    completion: PythonSocketConnectCompletion,
+) -> Result<(), SidecarError> {
+    let request_id = completion.request_id;
+    let connected = match completion.result {
+        Ok(connected) => connected,
+        Err(error) => {
+            return respond_python_socket_connect_result(
+                &responder,
+                request_id,
+                Err(SidecarError::Execution(format!(
+                    "{}: {}",
+                    error.code, error.message
+                ))),
+            );
+        }
+    };
+    let target = PythonProcessTarget {
+        root_process_id: process_id,
+        child_path,
+    };
+    let result = vm.try_command("complete owned Python TCP connect", move |state| {
+        let kernel_readiness = Arc::clone(&state.kernel_socket_readiness);
+        let state = &mut *state;
+        let (kernel, active_processes) = (&mut state.kernel, &mut state.active_processes);
+        let process = target
+            .process_in_roots_mut(active_processes)
+            .ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "ERR_AGENTOS_STALE_PROCESS_EVENT: Python TCP completion targeted reaped process {} in VM {vm_id}",
+                    target.label()
+                ))
+            })?;
+        let PendingPythonTcpConnect {
+            native_socket_id,
+            python_socket_id,
+            socket,
+            pending_capability,
+        } = connected;
+        let capability_key = NativeCapabilityKey::TcpSocket(native_socket_id.clone());
+        if let Err(error) = commit_process_capability(
+            process,
+            pending_capability,
+            capability_key.clone(),
+            native_socket_id.clone(),
+            socket.kernel_socket_id,
+        ) {
+            if let Err(close_error) = socket.close(kernel, process.kernel_pid) {
+                eprintln!(
+                    "ERR_AGENTOS_PYTHON_SOCKET_CLOSE: deferred TCP connect rollback failed: {close_error}"
+                );
+            }
+            return Err(error);
+        }
+        if let Err(error) =
+            socket.set_fairness_identity(process.capability_fairness_identity(&capability_key))
+        {
+            if let Err(release_error) = process.release_capability(&capability_key) {
+                eprintln!(
+                    "ERR_AGENTOS_CAPABILITY_RELEASE: deferred Python TCP rollback failed: {release_error}"
+                );
+            }
+            if let Err(close_error) = socket.close(kernel, process.kernel_pid) {
+                eprintln!(
+                    "ERR_AGENTOS_PYTHON_SOCKET_CLOSE: deferred TCP fairness rollback failed: {close_error}"
+                );
+            }
+            return Err(error);
+        }
+        socket.retain_description_lease(
+            process
+                .shared_capability_lease(&capability_key)
+                .expect("committed deferred Python TCP capability lease"),
+        );
+        register_kernel_readiness_target(
+            &kernel_readiness,
+            socket.kernel_socket_id,
+            None,
+            Some(Arc::clone(&socket.read_event_notify)),
+            process.capability_readiness_identity(&capability_key),
+            native_socket_id.clone(),
+            KernelSocketReadinessEvent::Data,
+        );
+        process.tcp_sockets.insert(native_socket_id.clone(), socket);
+        process.python_sockets.insert(
+            python_socket_id,
+            PythonHostSocket::Tcp {
+                socket_id: native_socket_id,
+                pending_read: None,
+            },
+        );
+        debug_assert!(process.capability_leases.contains_key(&capability_key));
+        Ok(PythonVfsRpcResponsePayload::SocketCreated {
+            socket_id: python_socket_id,
+        })
+    });
+    respond_python_socket_connect_result(&responder, request_id, result)
+}
+
+impl<B> NativeSidecar<B>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    pub(in crate::execution) async fn handle_python_socket_rpc_request(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        request: PythonVfsRpcRequest,
+    ) -> Result<(), SidecarError> {
+        let Some(vm) = self.vms.handle(vm_id) else {
+            return Ok(());
+        };
+        let responder = vm.try_read("prepare Python socket RPC", |state| {
+            state
+                .active_processes
+                .get(process_id)
+                .map(|process| process.execution.python_vfs_rpc_responder())
+        })?;
+        let Some(responder) = responder else {
+            return Ok(());
+        };
+        service_owned_python_socket_rpc_request(
+            self.bridge.clone(),
+            vm,
+            vm_id.to_owned(),
+            process_id.to_owned(),
+            Vec::new(),
+            responder?,
+            request,
+            self.process_event_sender.clone(),
+            Arc::clone(&self.process_event_notify),
+        )
+        .await
+    }
+
+    pub(in crate::execution) fn respond_python_rpc(
+        &mut self,
         vm_id: &str,
         process_id: &str,
         request_id: u64,
         response: Result<PythonVfsRpcResponsePayload, SidecarError>,
     ) -> Result<(), SidecarError> {
-        let Some(vm) = self.vms.get_mut(vm_id) else {
+        let Some(mut vm) = self.vms.get_mut(vm_id) else {
             return Ok(());
         };
         let Some(process) = vm.active_processes.get_mut(process_id) else {
@@ -1009,10 +1418,98 @@ where
 mod python_socket_accounting_tests {
     use super::{
         decode_python_socket_payload, encode_python_socket_bytes,
-        reserve_plain_socket_write_payload,
+        reserve_plain_socket_write_payload, respond_python_socket_connect_result,
+        PythonSocketConnectResponder, PythonVfsRpcResponsePayload, SidecarError,
     };
     use agentos_runtime::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
+    use std::cell::RefCell;
     use std::sync::Arc;
+
+    #[derive(Default)]
+    struct CapturingConnectResponder {
+        response: RefCell<Option<(u64, Result<PythonVfsRpcResponsePayload, SidecarError>)>>,
+    }
+
+    impl PythonSocketConnectResponder for CapturingConnectResponder {
+        fn respond(
+            &self,
+            request_id: u64,
+            response: Result<PythonVfsRpcResponsePayload, SidecarError>,
+        ) -> Result<(), SidecarError> {
+            *self.response.borrow_mut() = Some((request_id, response));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn root_socket_connect_success_replies_with_the_created_socket_id() {
+        let responder = CapturingConnectResponder::default();
+        respond_python_socket_connect_result(
+            &responder,
+            41,
+            Ok(PythonVfsRpcResponsePayload::SocketCreated { socket_id: 73 }),
+        )
+        .expect("deliver root Python socket success");
+        let (request_id, response) = responder
+            .response
+            .borrow_mut()
+            .take()
+            .expect("captured root Python socket response");
+        assert_eq!(request_id, 41);
+        match response.expect("successful root Python socket response") {
+            PythonVfsRpcResponsePayload::SocketCreated { socket_id } => {
+                assert_eq!(socket_id, 73);
+            }
+            other => panic!("expected SocketCreated response, received {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deferred_socket_events_preserve_explicit_process_paths() {
+        let source = include_str!("sockets.rs");
+        let connect = source
+            .split("fn defer_python_native_tcp_connect")
+            .nth(1)
+            .and_then(|source| source.split("fn python_socket_async_context").next())
+            .expect("deferred TCP connect source");
+        let readiness = source
+            .split("fn schedule_python_socket_wait")
+            .nth(1)
+            .and_then(|source| source.split("fn remove_python_socket").next())
+            .expect("socket readiness source");
+        for path in [connect, readiness] {
+            assert!(path.contains("process_id = self.target.root_process_id.clone()"));
+            assert!(path.contains("child_path = self.target.child_path.clone()"));
+            assert!(path.contains("ProcessEventEnvelope"));
+        }
+    }
+
+    #[test]
+    fn root_socket_completion_is_owned_supervised_work() {
+        let process_events = include_str!("../process_events.rs");
+        let root_turn = process_events
+            .split("pub(crate) fn pump_process_events_nowait")
+            .nth(1)
+            .and_then(|source| {
+                source
+                    .split("pub(crate) fn handle_public_execution_event_nowait")
+                    .next()
+            })
+            .expect("root process-event turn source");
+        assert!(root_turn.contains("OwnedPythonSocketCompletionService::new"));
+        assert!(root_turn.contains("python_socket_completions.push"));
+        assert!(!root_turn.contains("handle_python_socket_connect_completion("));
+
+        let extension_services = include_str!("../../extension_services.rs");
+        let supervised = extension_services
+            .split("fn prepare_owned_python_socket_completion_service")
+            .nth(1)
+            .and_then(|source| source.split("pub(crate) fn prepare_owned_child").next())
+            .expect("owned Python completion supervisor source");
+        assert!(supervised.contains("with_internal_vm_event_admission"));
+        assert!(supervised.contains("panic_responder.respond_error"));
+        assert!(supervised.contains("completion_responder.respond_error"));
+    }
 
     #[test]
     fn adapter_copies_are_charged_before_decode_encode_and_plain_write() {

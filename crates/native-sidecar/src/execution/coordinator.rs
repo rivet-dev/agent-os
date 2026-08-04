@@ -121,10 +121,288 @@ pub(super) fn missing_process_error(vm_id: &str, process_id: &str) -> SidecarErr
     ))
 }
 
+pub(crate) type OwnedVmRouteFuture =
+    Pin<Box<dyn Future<Output = Result<DispatchResult, SidecarError>> + 'static>>;
+
+/// Everything an independently supervised VM-owned route needs after the
+/// process coordinator has completed ownership validation. The request and VM
+/// handle are owned so the returned future never retains `&mut NativeSidecar`.
+#[derive(Clone)]
+pub(crate) struct OwnedVmRouteInput {
+    pub(crate) request: RequestFrame,
+    pub(crate) vm_id: String,
+    pub(crate) vm: crate::state::VmHandle,
+}
+
+fn drain_root_signal_state_events_owned(
+    vm: &crate::state::VmHandle,
+    process_id: &str,
+) -> Result<(), SidecarError> {
+    let mut deferred = VecDeque::new();
+    loop {
+        let event = vm.try_command("drain root signal state", |vm| {
+            let Some(process) = vm.active_processes.get_mut(process_id) else {
+                return Ok(None);
+            };
+            if let Some(event) = process.lease_pending_execution_event() {
+                return Ok(Some(event));
+            }
+            match process.try_poll_execution_event() {
+                Ok(event) => Ok(event),
+                Err(SidecarError::Execution(message))
+                    if (process.runtime == GuestRuntimeKind::JavaScript
+                        && closed_javascript_event_channel(&message))
+                        || (process.runtime == GuestRuntimeKind::Python
+                            && closed_python_event_channel(&message))
+                        || (process.runtime == GuestRuntimeKind::WebAssembly
+                            && closed_wasm_event_channel(&message)) =>
+                {
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            }
+        })?;
+        let Some(event) = event else { break };
+        match event.event() {
+            ActiveExecutionEvent::SignalState {
+                signal,
+                registration,
+            } => {
+                let signal = *signal;
+                let registration = registration.clone();
+                drop(event);
+                vm.try_command("apply root signal state", |vm| {
+                    apply_process_signal_state_update(
+                        &mut vm.signal_states,
+                        process_id,
+                        signal,
+                        registration,
+                    );
+                    Ok(())
+                })?;
+            }
+            _ => deferred.push_back(event),
+        }
+    }
+
+    vm.try_command("restore deferred root process events", |vm| {
+        if let Some(process) = vm.active_processes.get_mut(process_id) {
+            for event in deferred.into_iter().rev() {
+                process.requeue_pending_execution_event(event)?;
+            }
+        }
+        Ok(())
+    })
+}
+
+pub(crate) async fn resize_pty_owned<B>(
+    bridge: SharedBridge<B>,
+    input: OwnedVmRouteInput,
+    payload: ResizePtyRequest,
+) -> Result<DispatchResult, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    // Signal registrations are execution events. Consume them before the
+    // resize so a handler installed immediately before the host request is
+    // visible when the kernel-generated SIGWINCH is delivered below.
+    drain_root_signal_state_events_owned(&input.vm, &payload.process_id)?;
+    let foreground_pgid = input.vm.try_command("resize process PTY", |vm| {
+        let process = vm
+            .active_processes
+            .get(&payload.process_id)
+            .ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "VM {} has no active process {}",
+                    input.vm_id, payload.process_id
+                ))
+            })?;
+        let Some(writer_fd) = process.kernel_stdin_writer_fd else {
+            return Err(SidecarError::InvalidState(format!(
+                "process {} does not have a PTY",
+                payload.process_id
+            )));
+        };
+        let kernel_pid = process.kernel_pid;
+        let foreground_pgid = vm
+            .kernel
+            .tcgetpgrp(EXECUTION_DRIVER_NAME, kernel_pid, writer_fd)
+            .map_err(kernel_error)?;
+        vm.kernel
+            .pty_resize(
+                EXECUTION_DRIVER_NAME,
+                kernel_pid,
+                writer_fd,
+                payload.cols,
+                payload.rows,
+            )
+            .map_err(kernel_error)?;
+        Ok(foreground_pgid)
+    })?;
+    deliver_kernel_process_group_signal_to_tracked_runtimes_owned(
+        &bridge,
+        &input.vm,
+        &input.vm_id,
+        foreground_pgid,
+        "SIGWINCH",
+    )?;
+
+    Ok(DispatchResult {
+        response: agentos_native_sidecar_core::respond(
+            &input.request,
+            ResponsePayload::PtyResized(PtyResizedResponse {
+                process_id: payload.process_id,
+                cols: payload.cols,
+                rows: payload.rows,
+            }),
+        ),
+        events: Vec::new(),
+    })
+}
+
+pub(crate) async fn write_stdin_owned(
+    input: OwnedVmRouteInput,
+    payload: WriteStdinRequest,
+) -> Result<DispatchResult, SidecarError> {
+    input.vm.try_command("write process stdin", |vm| {
+        let VmState {
+            kernel,
+            active_processes,
+            ..
+        } = vm;
+        let process = active_processes
+            .get_mut(&payload.process_id)
+            .ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "VM {} has no active process {}",
+                    input.vm_id, payload.process_id
+                ))
+            })?;
+        let tty_js =
+            process.runtime == GuestRuntimeKind::JavaScript && process.tty_master_fd.is_some();
+        if !tty_js {
+            process.execution.write_stdin(&payload.chunk)?;
+        }
+        write_kernel_process_stdin(kernel, process, &payload.chunk)
+    })?;
+
+    Ok(DispatchResult {
+        response: stdin_written_response(
+            &input.request,
+            payload.process_id,
+            payload.chunk.len() as u64,
+        ),
+        events: Vec::new(),
+    })
+}
+
+pub(crate) async fn close_stdin_owned(
+    input: OwnedVmRouteInput,
+    payload: CloseStdinRequest,
+) -> Result<DispatchResult, SidecarError> {
+    input.vm.try_command("close process stdin", |vm| {
+        let VmState {
+            kernel,
+            active_processes,
+            ..
+        } = vm;
+        let process = active_processes
+            .get_mut(&payload.process_id)
+            .ok_or_else(|| {
+                SidecarError::InvalidState(format!(
+                    "VM {} has no active process {}",
+                    input.vm_id, payload.process_id
+                ))
+            })?;
+        process.execution.close_stdin()?;
+        close_kernel_process_stdin(kernel, process)
+    })?;
+
+    Ok(DispatchResult {
+        response: stdin_closed_response(&input.request, payload.process_id),
+        events: Vec::new(),
+    })
+}
+
+pub(crate) async fn find_listener_owned<B>(
+    bridge: SharedBridge<B>,
+    input: OwnedVmRouteInput,
+    payload: FindListenerRequest,
+) -> Result<DispatchResult, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    require_vm_inspection_permission(
+        &bridge,
+        &input.vm_id,
+        "network.inspect",
+        "network",
+        &socket_query_resource(SocketQueryKind::TcpListener, &payload),
+    )?;
+    let listener = input.vm.try_read("find TCP listener", |vm| {
+        find_socket_state_entry(Some(vm), SocketQueryKind::TcpListener, &payload)
+    })??;
+    Ok(DispatchResult {
+        response: listener_snapshot_response(&input.request, listener),
+        events: Vec::new(),
+    })
+}
+
+pub(crate) async fn find_bound_udp_owned<B>(
+    bridge: SharedBridge<B>,
+    input: OwnedVmRouteInput,
+    payload: FindBoundUdpRequest,
+) -> Result<DispatchResult, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let lookup_request = FindListenerRequest {
+        host: payload.host,
+        port: payload.port,
+        path: None,
+    };
+    require_vm_inspection_permission(
+        &bridge,
+        &input.vm_id,
+        "network.inspect",
+        "network",
+        &socket_query_resource(SocketQueryKind::UdpBound, &lookup_request),
+    )?;
+    let socket = input.vm.try_read("find bound UDP socket", |vm| {
+        find_socket_state_entry(Some(vm), SocketQueryKind::UdpBound, &lookup_request)
+    })??;
+    Ok(DispatchResult {
+        response: bound_udp_snapshot_response(&input.request, socket),
+        events: Vec::new(),
+    })
+}
+
+pub(crate) async fn get_signal_state_owned(
+    input: OwnedVmRouteInput,
+    payload: GetSignalStateRequest,
+) -> Result<DispatchResult, SidecarError> {
+    drain_root_signal_state_events_owned(&input.vm, &payload.process_id)?;
+    let handlers = input.vm.try_read("read process signal state", |vm| {
+        vm.signal_states
+            .get(&payload.process_id)
+            .cloned()
+            .unwrap_or_default()
+    })?;
+    Ok(DispatchResult {
+        response: signal_state_response(&input.request, payload.process_id, handlers),
+        events: Vec::new(),
+    })
+}
+
 /// Map a shared guest-kernel-call dispatcher error into a sidecar error,
 /// preserving POSIX errno codes (`ECODE: message`) as kernel errors so guest
 /// callers observe Linux-faithful failures, mirroring the filesystem path.
-fn guest_kernel_core_error(error: agentos_native_sidecar_core::SidecarCoreError) -> SidecarError {
+pub(crate) fn guest_kernel_core_error(
+    error: agentos_native_sidecar_core::SidecarCoreError,
+) -> SidecarError {
     let message = error.to_string();
     let is_errno = message.split_once(':').is_some_and(|(code, _)| {
         code.len() >= 2
@@ -217,267 +495,85 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    pub(crate) async fn resize_pty(
+    pub(crate) fn prepare_owned_vm_route(
+        &self,
+        request: &RequestFrame,
+    ) -> Result<OwnedVmRouteInput, SidecarError> {
+        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
+        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+        let vm = self
+            .vms
+            .handle(&vm_id)
+            .ok_or_else(|| missing_vm_error(&vm_id))?;
+        Ok(OwnedVmRouteInput {
+            request: request.clone(),
+            vm_id,
+            vm,
+        })
+    }
+
+    pub(crate) fn resize_pty(
         &mut self,
         request: &RequestFrame,
         payload: ResizePtyRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        // Signal registrations are execution events. Consume them before the
-        // resize so a handler installed immediately before the host request is
-        // visible when the kernel-generated SIGWINCH is delivered below.
-        self.drain_root_signal_state_events(&vm_id, &payload.process_id)?;
-
-        let foreground_pgid = {
-            let vm = self
-                .vms
-                .get_mut(&vm_id)
-                .ok_or_else(|| missing_vm_error(&vm_id))?;
-            let process = vm
-                .active_processes
-                .get_mut(&payload.process_id)
-                .ok_or_else(|| {
-                    SidecarError::InvalidState(format!(
-                        "VM {vm_id} has no active process {}",
-                        payload.process_id
-                    ))
-                })?;
-            let Some(writer_fd) = process.kernel_stdin_writer_fd else {
-                return Err(SidecarError::InvalidState(format!(
-                    "process {} does not have a PTY",
-                    payload.process_id
-                )));
-            };
-            let foreground_pgid = vm
-                .kernel
-                .tcgetpgrp(EXECUTION_DRIVER_NAME, process.kernel_pid, writer_fd)
-                .map_err(kernel_error)?;
-            vm.kernel
-                .pty_resize(
-                    EXECUTION_DRIVER_NAME,
-                    process.kernel_pid,
-                    writer_fd,
-                    payload.cols,
-                    payload.rows,
-                )
-                .map_err(kernel_error)?;
-            foreground_pgid
-        };
-
-        self.deliver_kernel_process_group_signal_to_tracked_runtimes(
-            &vm_id,
-            foreground_pgid,
-            "SIGWINCH",
-        )?;
-
-        Ok(DispatchResult {
-            response: self.respond(
-                request,
-                ResponsePayload::PtyResized(PtyResizedResponse {
-                    process_id: payload.process_id,
-                    cols: payload.cols,
-                    rows: payload.rows,
-                }),
-            ),
-            events: Vec::new(),
-        })
+    ) -> OwnedVmRouteFuture {
+        let input = self.prepare_owned_vm_route(request);
+        let bridge = self.bridge.clone();
+        Box::pin(async move { resize_pty_owned(bridge, input?, payload).await })
     }
 
-    fn drain_root_signal_state_events(
-        &mut self,
-        vm_id: &str,
-        process_id: &str,
-    ) -> Result<(), SidecarError> {
-        let mut deferred = VecDeque::new();
-        loop {
-            let event = {
-                let Some(vm) = self.vms.get_mut(vm_id) else {
-                    break;
-                };
-                let Some(process) = vm.active_processes.get_mut(process_id) else {
-                    break;
-                };
-                if let Some(event) = process.lease_pending_execution_event() {
-                    Some(event)
-                } else {
-                    match process.try_poll_execution_event() {
-                        Ok(event) => event,
-                        Err(SidecarError::Execution(message))
-                            if (process.runtime == GuestRuntimeKind::JavaScript
-                                && closed_javascript_event_channel(&message))
-                                || (process.runtime == GuestRuntimeKind::Python
-                                    && closed_python_event_channel(&message))
-                                || (process.runtime == GuestRuntimeKind::WebAssembly
-                                    && closed_wasm_event_channel(&message)) =>
-                        {
-                            None
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-            };
-            let Some(event) = event else {
-                break;
-            };
-            match event.event() {
-                ActiveExecutionEvent::SignalState {
-                    signal,
-                    registration,
-                } => {
-                    let signal = *signal;
-                    let registration = registration.clone();
-                    drop(event);
-                    if let Some(vm) = self.vms.get_mut(vm_id) {
-                        apply_process_signal_state_update(
-                            &mut vm.signal_states,
-                            process_id,
-                            signal,
-                            registration,
-                        );
-                    }
-                }
-                _ => deferred.push_back(event),
-            }
-        }
-
-        if let Some(process) = self
-            .vms
-            .get_mut(vm_id)
-            .and_then(|vm| vm.active_processes.get_mut(process_id))
-        {
-            for event in deferred.into_iter().rev() {
-                process.requeue_pending_execution_event(event)?;
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn write_stdin(
+    pub(crate) fn write_stdin(
         &mut self,
         request: &RequestFrame,
         payload: WriteStdinRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let vm = self
-            .vms
-            .get_mut(&vm_id)
-            .ok_or_else(|| missing_vm_error(&vm_id))?;
-        let process = vm
-            .active_processes
-            .get_mut(&payload.process_id)
-            .ok_or_else(|| {
-                SidecarError::InvalidState(format!(
-                    "VM {vm_id} has no active process {}",
-                    payload.process_id
-                ))
-            })?;
-        // For a TTY JavaScript process, host stdin must go ONLY to the kernel PTY
-        // master (so line discipline + echo apply); feeding the in-process local
-        // stdin bridge as well would double-deliver the input. Non-TTY JS (piped
-        // stdin) still uses the local bridge; wasm/python always take the
-        // streaming/no-op `write_stdin` path plus the kernel master write below.
-        let tty_js =
-            process.runtime == GuestRuntimeKind::JavaScript && process.tty_master_fd.is_some();
-        if !tty_js {
-            process.execution.write_stdin(&payload.chunk)?;
-        }
-        write_kernel_process_stdin(&mut vm.kernel, process, &payload.chunk)?;
-
-        Ok(DispatchResult {
-            response: stdin_written_response(
-                request,
-                payload.process_id,
-                payload.chunk.len() as u64,
-            ),
-            events: Vec::new(),
-        })
+    ) -> OwnedVmRouteFuture {
+        let input = self.prepare_owned_vm_route(request);
+        Box::pin(async move { write_stdin_owned(input?, payload).await })
     }
 
-    pub(crate) async fn close_stdin(
+    pub(crate) fn close_stdin(
         &mut self,
         request: &RequestFrame,
         payload: CloseStdinRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let vm = self
-            .vms
-            .get_mut(&vm_id)
-            .ok_or_else(|| missing_vm_error(&vm_id))?;
-        let process = vm
-            .active_processes
-            .get_mut(&payload.process_id)
-            .ok_or_else(|| {
-                SidecarError::InvalidState(format!(
-                    "VM {vm_id} has no active process {}",
-                    payload.process_id
-                ))
-            })?;
-        process.execution.close_stdin()?;
-        close_kernel_process_stdin(&mut vm.kernel, process)?;
-
-        Ok(DispatchResult {
-            response: stdin_closed_response(request, payload.process_id),
-            events: Vec::new(),
-        })
+    ) -> OwnedVmRouteFuture {
+        let input = self.prepare_owned_vm_route(request);
+        Box::pin(async move { close_stdin_owned(input?, payload).await })
     }
 
-    pub(crate) async fn find_listener(
+    pub(crate) fn find_listener(
         &mut self,
         request: &RequestFrame,
         payload: FindListenerRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-        require_vm_inspection_permission(
-            &self.bridge,
-            &vm_id,
-            "network.inspect",
-            "network",
-            &socket_query_resource(SocketQueryKind::TcpListener, &payload),
-        )?;
-
-        let listener =
-            find_socket_state_entry(self.vms.get(&vm_id), SocketQueryKind::TcpListener, &payload)?;
-
-        Ok(DispatchResult {
-            response: listener_snapshot_response(request, listener),
-            events: Vec::new(),
-        })
+    ) -> OwnedVmRouteFuture {
+        let input = self.prepare_owned_vm_route(request);
+        let bridge = self.bridge.clone();
+        Box::pin(async move { find_listener_owned(bridge, input?, payload).await })
     }
 
-    pub(crate) async fn get_process_snapshot(
+    pub(crate) fn get_process_snapshot(
         &mut self,
         request: &RequestFrame,
         _payload: GetProcessSnapshotRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-        require_vm_inspection_permission(
-            &self.bridge,
-            &vm_id,
-            "process.inspect",
-            "process",
-            "process://snapshot",
-        )?;
-
-        let processes = self
-            .vms
-            .get_mut(&vm_id)
-            .map(|vm| {
+    ) -> OwnedVmRouteFuture {
+        let input = self.prepare_owned_vm_route(request);
+        let bridge = self.bridge.clone();
+        Box::pin(async move {
+            let input = input?;
+            require_vm_inspection_permission(
+                &bridge,
+                &input.vm_id,
+                "process.inspect",
+                "process",
+                "process://snapshot",
+            )?;
+            let processes = input.vm.try_command("get process snapshot", |vm| {
                 prune_exited_process_snapshots(vm);
-                snapshot_vm_processes(vm)
+                Ok(snapshot_vm_processes(vm))
+            })?;
+            Ok(DispatchResult {
+                response: process_snapshot_response(&input.request, processes),
+                events: Vec::new(),
             })
-            .unwrap_or_default();
-
-        Ok(DispatchResult {
-            response: process_snapshot_response(request, processes),
-            events: Vec::new(),
         })
     }
 
@@ -489,7 +585,7 @@ where
         let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
         self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
 
-        let vm = self.vms.get_mut(&vm_id).ok_or_else(|| {
+        let mut vm = self.vms.get_mut(&vm_id).ok_or_else(|| {
             SidecarError::InvalidState(format!("VM {vm_id} no longer exists for guest kernel call"))
         })?;
         let kernel_pid = vm
@@ -521,96 +617,99 @@ where
         })
     }
 
-    pub(crate) async fn get_resource_snapshot(
+    pub(crate) fn get_resource_snapshot(
         &mut self,
         request: &RequestFrame,
         _payload: GetResourceSnapshotRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-        require_vm_inspection_permission(
-            &self.bridge,
-            &vm_id,
-            "process.inspect",
-            "process",
-            "process://resources",
-        )?;
+    ) -> OwnedVmRouteFuture {
+        let input = self.prepare_owned_vm_route(request);
+        let bridge = self.bridge.clone();
+        Box::pin(async move {
+            let input = input?;
+            require_vm_inspection_permission(
+                &bridge,
+                &input.vm_id,
+                "process.inspect",
+                "process",
+                "process://resources",
+            )?;
+            let snapshot = input
+                .vm
+                .try_read("get resource snapshot", |vm| vm.kernel.resource_snapshot())?;
+            let queue_snapshots = queue_tracker::queue_snapshot()
+                .into_iter()
+                .map(|queue| QueueSnapshotEntry {
+                    name: queue.name.as_str().to_owned(),
+                    category: queue.category.as_str().to_owned(),
+                    depth: queue.depth as u64,
+                    high_water: queue.high_water as u64,
+                    capacity: queue.capacity as u64,
+                    fill_percent: queue.fill_percent as u64,
+                })
+                .collect();
 
-        let snapshot = self
-            .vms
-            .get(&vm_id)
-            .map(|vm| vm.kernel.resource_snapshot())
-            .unwrap_or_default();
-        let queue_snapshots = queue_tracker::queue_snapshot()
-            .into_iter()
-            .map(|queue| QueueSnapshotEntry {
-                name: queue.name.as_str().to_owned(),
-                category: queue.category.as_str().to_owned(),
-                depth: queue.depth as u64,
-                high_water: queue.high_water as u64,
-                capacity: queue.capacity as u64,
-                fill_percent: queue.fill_percent as u64,
+            Ok(DispatchResult {
+                response: agentos_native_sidecar_core::respond(
+                    &input.request,
+                    ResponsePayload::ResourceSnapshot(ResourceSnapshotResponse {
+                        running_processes: snapshot.running_processes as u64,
+                        exited_processes: snapshot.exited_processes as u64,
+                        fd_tables: snapshot.fd_tables as u64,
+                        open_fds: snapshot.open_fds as u64,
+                        pipes: snapshot.pipes as u64,
+                        pipe_buffered_bytes: snapshot.pipe_buffered_bytes as u64,
+                        ptys: snapshot.ptys as u64,
+                        pty_buffered_input_bytes: snapshot.pty_buffered_input_bytes as u64,
+                        pty_buffered_output_bytes: snapshot.pty_buffered_output_bytes as u64,
+                        sockets: snapshot.sockets as u64,
+                        socket_listeners: snapshot.socket_listeners as u64,
+                        socket_connections: snapshot.socket_connections as u64,
+                        socket_buffered_bytes: snapshot.socket_buffered_bytes as u64,
+                        socket_datagram_queue_len: snapshot.socket_datagram_queue_len as u64,
+                        queue_snapshots,
+                    }),
+                ),
+                events: Vec::new(),
             })
-            .collect();
-
-        Ok(DispatchResult {
-            response: self.respond(
-                request,
-                ResponsePayload::ResourceSnapshot(ResourceSnapshotResponse {
-                    running_processes: snapshot.running_processes as u64,
-                    exited_processes: snapshot.exited_processes as u64,
-                    fd_tables: snapshot.fd_tables as u64,
-                    open_fds: snapshot.open_fds as u64,
-                    pipes: snapshot.pipes as u64,
-                    pipe_buffered_bytes: snapshot.pipe_buffered_bytes as u64,
-                    ptys: snapshot.ptys as u64,
-                    pty_buffered_input_bytes: snapshot.pty_buffered_input_bytes as u64,
-                    pty_buffered_output_bytes: snapshot.pty_buffered_output_bytes as u64,
-                    sockets: snapshot.sockets as u64,
-                    socket_listeners: snapshot.socket_listeners as u64,
-                    socket_connections: snapshot.socket_connections as u64,
-                    socket_buffered_bytes: snapshot.socket_buffered_bytes as u64,
-                    socket_datagram_queue_len: snapshot.socket_datagram_queue_len as u64,
-                    queue_snapshots,
-                }),
-            ),
-            events: Vec::new(),
         })
     }
 
-    pub(crate) async fn find_bound_udp(
+    pub(crate) fn find_bound_udp(
         &mut self,
         request: &RequestFrame,
         payload: FindBoundUdpRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+    ) -> OwnedVmRouteFuture {
+        let input = self.prepare_owned_vm_route(request);
+        let bridge = self.bridge.clone();
+        Box::pin(async move { find_bound_udp_owned(bridge, input?, payload).await })
+    }
 
-        let lookup_request = FindListenerRequest {
-            host: payload.host,
-            port: payload.port,
-            path: None,
-        };
-        require_vm_inspection_permission(
-            &self.bridge,
-            &vm_id,
-            "network.inspect",
-            "network",
-            &socket_query_resource(SocketQueryKind::UdpBound, &lookup_request),
-        )?;
-        let socket = find_socket_state_entry(
-            self.vms.get(&vm_id),
-            SocketQueryKind::UdpBound,
-            &lookup_request,
-        )?;
-
-        Ok(DispatchResult {
-            response: bound_udp_snapshot_response(request, socket),
-            events: Vec::new(),
+    pub(crate) fn vm_fetch(
+        &mut self,
+        request: &RequestFrame,
+        payload: VmFetchRequest,
+    ) -> OwnedVmRouteFuture {
+        let input = self.prepare_owned_vm_route(request);
+        let bridge = self.bridge.clone();
+        let max_frame_bytes = self.config.max_frame_bytes;
+        Box::pin(async move {
+            let input = input?;
+            let response_json =
+                dispatch_owned_vm_fetch(bridge, &input.vm_id, input.vm.clone(), payload).await?;
+            let response = agentos_native_sidecar_core::respond(
+                &input.request,
+                ResponsePayload::VmFetchResult(VmFetchResponse { response_json }),
+            );
+            ensure_vm_fetch_response_frame_within_limit(&response, max_frame_bytes)?;
+            Ok(DispatchResult {
+                response,
+                events: Vec::new(),
+            })
         })
     }
 
-    pub(crate) async fn vm_fetch(
+    #[allow(dead_code)]
+    async fn vm_fetch_legacy(
         &mut self,
         request: &RequestFrame,
         payload: VmFetchRequest,
@@ -625,7 +724,7 @@ where
                     "vm.fetch stream read/cancel requires stream_id",
                 ))
             })?;
-            let vm = self
+            let mut vm = self
                 .vms
                 .get_mut(&vm_id)
                 .ok_or_else(|| SidecarError::InvalidState(String::from("unknown sidecar VM")))?;
@@ -633,13 +732,13 @@ where
                 read_kernel_http_fetch_stream(
                     &self.bridge,
                     &vm_id,
-                    vm,
+                    &mut vm,
                     stream_id,
                     payload.max_bytes.unwrap_or(64 * 1024) as usize,
                 )
                 .await?
             } else {
-                cancel_kernel_http_fetch_stream(&self.bridge, &vm_id, vm, stream_id).await?
+                cancel_kernel_http_fetch_stream(&self.bridge, &vm_id, &mut vm, stream_id).await?
             };
             let response = self.respond(
                 request,
@@ -659,7 +758,7 @@ where
             }
         }
 
-        let vm = self
+        let mut vm = self
             .vms
             .get_mut(&vm_id)
             .ok_or_else(|| SidecarError::InvalidState(String::from("unknown sidecar VM")))?;
@@ -704,14 +803,14 @@ where
             reject_unauthorized: None,
         };
         let headers = parse_http_header_collection(&options.headers, "vm.fetch headers")?;
-        let target_process_id = find_kernel_http_listener_process(vm, payload.port);
+        let target_process_id = find_kernel_http_listener_process(&mut vm, payload.port);
         if let Some(target_process_id) = target_process_id {
             let max_fetch_response_bytes = vm.limits.http.max_fetch_response_bytes;
             let fetch_result = if stream_operation.as_deref() == Some("start") {
                 start_kernel_http_fetch_stream(
                     &self.bridge,
                     &vm_id,
-                    vm,
+                    &mut vm,
                     &target_process_id,
                     payload.port,
                     &target_path,
@@ -725,7 +824,7 @@ where
                 dispatch_kernel_http_fetch(
                     &self.bridge,
                     &vm_id,
-                    vm,
+                    &mut vm,
                     &target_process_id,
                     payload.port,
                     &target_path,
@@ -740,7 +839,7 @@ where
                 Ok(response_json) => response_json,
                 Err(error) => {
                     if let Some(exit_code) = kernel_http_fetch_target_exit_code(&error) {
-                        let _ = vm;
+                        drop(vm);
                         self.finish_active_process_exit(&vm_id, &target_process_id, exit_code)?;
                     }
                     return Err(error);
@@ -784,11 +883,16 @@ where
                 "binary vm.fetch bodies require a kernel-backed HTTP listener",
             )));
         }
-        let socket_paths = build_javascript_socket_path_context(vm)?;
+        let socket_paths = build_javascript_socket_path_context(&mut vm)?;
         let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
         let capabilities = vm.capabilities.clone();
-        let process = vm
-            .active_processes
+        let dns = vm.dns.clone();
+        let VmState {
+            kernel,
+            active_processes,
+            ..
+        } = &mut *vm;
+        let process = active_processes
             .get_mut(&target_process_id)
             .ok_or_else(|| {
                 SidecarError::InvalidState(format!(
@@ -799,9 +903,9 @@ where
         let response_json = dispatch_loopback_http_request(LoopbackHttpDispatchRequest {
             bridge: &self.bridge,
             vm_id: &vm_id,
-            dns: &vm.dns,
+            dns: &dns,
             socket_paths: &socket_paths,
-            kernel: &mut vm.kernel,
+            kernel,
             kernel_readiness,
             process,
             server_id,
@@ -822,46 +926,30 @@ where
         })
     }
 
-    pub(crate) async fn get_signal_state(
+    pub(crate) fn get_signal_state(
         &mut self,
         request: &RequestFrame,
         payload: GetSignalStateRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        self.drain_root_signal_state_events(&vm_id, &payload.process_id)?;
-
-        let handlers = self
-            .vms
-            .get(&vm_id)
-            .and_then(|vm| vm.signal_states.get(&payload.process_id))
-            .cloned()
-            .unwrap_or_default();
-
-        Ok(DispatchResult {
-            response: signal_state_response(request, payload.process_id, handlers),
-            events: Vec::new(),
-        })
+    ) -> OwnedVmRouteFuture {
+        let input = self.prepare_owned_vm_route(request);
+        Box::pin(async move { get_signal_state_owned(input?, payload).await })
     }
 
-    pub(crate) async fn get_zombie_timer_count(
+    pub(crate) fn get_zombie_timer_count(
         &mut self,
         request: &RequestFrame,
         _payload: GetZombieTimerCountRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let count = self
-            .vms
-            .get(&vm_id)
-            .map(|vm| vm.kernel.zombie_timer_count() as u64)
-            .unwrap_or_default();
-
-        Ok(DispatchResult {
-            response: zombie_timer_count_response(request, count),
-            events: Vec::new(),
+    ) -> OwnedVmRouteFuture {
+        let input = self.prepare_owned_vm_route(request);
+        Box::pin(async move {
+            let input = input?;
+            let count = input.vm.try_read("get zombie timer count", |vm| {
+                vm.kernel.zombie_timer_count() as u64
+            })?;
+            Ok(DispatchResult {
+                response: zombie_timer_count_response(&input.request, count),
+                events: Vec::new(),
+            })
         })
     }
 }

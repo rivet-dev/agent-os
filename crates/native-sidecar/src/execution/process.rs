@@ -7,7 +7,7 @@ static NEXT_SQLITE_HOST_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 /// capacity check prevents a concurrent producer from consuming the bytes an
 /// already-accepted event needs if that event must be put back.
 #[derive(Debug)]
-pub(super) struct PendingExecutionEventReservation {
+pub(crate) struct PendingExecutionEventReservation {
     budget: Arc<VmPendingByteBudget>,
     bytes: usize,
 }
@@ -124,6 +124,7 @@ impl ActiveProcess {
                 pending_event_bytes_limit,
             ),
             vm_pending_event_bytes_budget,
+            child_bridge_relay_in_flight: Arc::new(AtomicBool::new(false)),
             pending_javascript_net_connects: BTreeMap::new(),
             pending_self_signal_exit: None,
             exit_signal: None,
@@ -253,6 +254,7 @@ impl ActiveProcess {
             connection_id,
             session_id,
             vm_id,
+            child_path,
             process_id,
             event,
         } = envelope;
@@ -264,6 +266,7 @@ impl ActiveProcess {
                         connection_id,
                         session_id,
                         vm_id,
+                        child_path,
                         process_id,
                         event,
                     },
@@ -1357,6 +1360,7 @@ impl ProcessEventEnvelope {
             .len()
             .saturating_add(self.session_id.len())
             .saturating_add(self.vm_id.len())
+            .saturating_add(self.child_path.iter().map(String::len).sum::<usize>())
             .saturating_add(self.process_id.len())
             .saturating_add(self.event.retained_bytes())
     }
@@ -1543,6 +1547,26 @@ impl ActiveExecution {
 
     pub(crate) fn has_exited(&self) -> bool {
         matches!(self, Self::Javascript(execution) if execution.has_exited())
+    }
+
+    pub(crate) fn has_pending_events(&self) -> bool {
+        match self {
+            Self::Javascript(execution) => execution.has_pending_events(),
+            Self::Python(execution) => execution.has_pending_events(),
+            Self::Wasm(execution) => execution.has_pending_events(),
+            Self::Binding(execution) => {
+                !execution
+                    .pending_events
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_empty()
+                    || execution
+                        .event_overflow_reason
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .is_some()
+            }
+        }
     }
 
     pub(crate) fn execute_retained_language(

@@ -5,8 +5,8 @@ use crate::execution::{
     sync_active_process_host_writes_to_kernel,
 };
 use crate::protocol::{
-    GuestFilesystemCallRequest, GuestFilesystemOperation, GuestRuntimeKind, RequestFrame,
-    ResponsePayload,
+    GuestFilesystemCallRequest, GuestFilesystemOperation, GuestFilesystemResultResponse,
+    GuestRuntimeKind, RequestFrame, ResponsePayload,
 };
 use crate::service::{
     javascript_sync_rpc_arg_str, javascript_sync_rpc_arg_u32, javascript_sync_rpc_arg_u32_optional,
@@ -14,10 +14,12 @@ use crate::service::{
     javascript_sync_rpc_bytes_arg, javascript_sync_rpc_bytes_value, javascript_sync_rpc_encoding,
     javascript_sync_rpc_option_bool, javascript_sync_rpc_option_u32, kernel_error,
     log_stale_process_event, normalize_host_path, normalize_path, path_is_within_root,
+    python_error,
 };
 use crate::state::{
     ActiveExecutionEvent, ActiveProcess, BridgeError, ShadowNodeType, ShadowSyncInventoryEntry,
-    SidecarKernel, VmState, EXECUTION_DRIVER_NAME, PYTHON_VFS_RPC_GUEST_ROOT,
+    SharedBridge, SidecarKernel, VmHandle, VmState, EXECUTION_DRIVER_NAME,
+    PYTHON_VFS_RPC_GUEST_ROOT,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -39,8 +41,8 @@ const CHMOD_PATH_ANCHOR: OFlag = OFlag::O_RDONLY;
 const O_TMPFILE_FLAG: OFlag = OFlag::empty();
 use agentos_execution::{
     JavascriptSyncRpcRequest, LocalResolvedModuleFormat, ModuleFsReader, ModuleResolveMode,
-    ModuleResolver, PythonVfsRpcMethod, PythonVfsRpcRequest, PythonVfsRpcResponsePayload,
-    PythonVfsRpcStat,
+    ModuleResolver, PythonVfsRpcMethod, PythonVfsRpcRequest, PythonVfsRpcResponder,
+    PythonVfsRpcResponsePayload, PythonVfsRpcStat,
 };
 use agentos_kernel::kernel::is_internal_unnamed_file_name;
 use agentos_kernel::vfs::{
@@ -482,29 +484,37 @@ where
     let (connection_id, session_id, vm_id) = sidecar.vm_scope_for(&request.ownership)?;
     sidecar.require_owned_vm(&connection_id, &session_id, &vm_id)?;
 
-    let response = {
-        let vm = match sidecar.vms.get_mut(&vm_id) {
-            Some(vm) => vm,
-            None => {
-                return Err(stale_filesystem_request_error(
-                    sidecar,
-                    &vm_id,
-                    None,
-                    "guest filesystem dispatch",
-                ));
-            }
-        };
-        sync_guest_filesystem_shadow_before_call(vm, &payload)?;
-        let response = core_guest_filesystem_call(&mut vm.kernel, payload.clone())
-            .map_err(native_guest_filesystem_core_error)?;
-        mirror_guest_filesystem_shadow_after_call(vm, &payload)?;
-        response
+    let response = match sidecar.vms.get_mut(&vm_id) {
+        Some(mut vm) => guest_filesystem_call_vm(&mut vm, &payload)?,
+        None => {
+            return Err(stale_filesystem_request_error(
+                sidecar,
+                &vm_id,
+                None,
+                "guest filesystem dispatch",
+            ));
+        }
     };
 
     Ok(DispatchResult {
         response: sidecar.respond(request, ResponsePayload::GuestFilesystemResult(response)),
         events: Vec::new(),
     })
+}
+
+/// Execute one filesystem command against an already ownership-validated VM.
+///
+/// This contains no await point and is the short per-VM critical section used
+/// by both coordinated in-process dispatch and detached protocol requests.
+pub(crate) fn guest_filesystem_call_vm(
+    vm: &mut VmState,
+    payload: &GuestFilesystemCallRequest,
+) -> Result<GuestFilesystemResultResponse, SidecarError> {
+    sync_guest_filesystem_shadow_before_call(vm, payload)?;
+    let response = core_guest_filesystem_call(&mut vm.kernel, payload.clone())
+        .map_err(native_guest_filesystem_core_error)?;
+    mirror_guest_filesystem_shadow_after_call(vm, payload)?;
+    Ok(response)
 }
 
 fn native_guest_filesystem_core_error(
@@ -831,21 +841,65 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    let Some(vm) = sidecar.vms.get(vm_id) else {
+    let Some(vm) = sidecar.vms.handle(vm_id) else {
         log_stale_process_event(&sidecar.bridge, vm_id, process_id, "python VFS RPC");
         return Ok(());
     };
-    if !vm.active_processes.contains_key(process_id) {
+    let responder = vm.try_read("prepare Python VFS RPC", |state| {
+        state
+            .active_processes
+            .get(process_id)
+            .map(|process| process.execution.python_vfs_rpc_responder())
+    })?;
+    let Some(responder) = responder else {
         log_stale_process_event(&sidecar.bridge, vm_id, process_id, "python VFS RPC");
+        return Ok(());
+    };
+    service_owned_python_filesystem_rpc_request(
+        &sidecar.bridge,
+        &vm,
+        vm_id,
+        process_id,
+        &[],
+        &responder?,
+        request,
+    )
+}
+
+/// Service one already-claimed Python filesystem RPC against its VM handle.
+///
+/// The caller owns the concrete request and responder, so the runtime event is
+/// consumed exactly once and no whole-sidecar borrow is needed while the work
+/// runs under the bounded process-event supervisor.
+pub(crate) fn service_owned_python_filesystem_rpc_request<B>(
+    bridge: &SharedBridge<B>,
+    vm: &VmHandle,
+    vm_id: &str,
+    process_id: &str,
+    child_path: &[String],
+    responder: &PythonVfsRpcResponder,
+    request: PythonVfsRpcRequest,
+) -> Result<(), SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let process_active = vm.try_read("service Python VFS RPC", |state| {
+        let path = child_path.iter().map(String::as_str).collect::<Vec<_>>();
+        state
+            .active_processes
+            .get(process_id)
+            .and_then(|root| NativeSidecar::<B>::active_process_by_path(root, &path))
+            .is_some()
+    })?;
+    if !process_active {
+        log_stale_process_event(bridge, vm_id, process_id, "python VFS RPC");
         return Ok(());
     }
 
     let response = match normalize_python_vfs_rpc_path(&request.path) {
         Ok(path) => {
-            let Some(vm) = sidecar.vms.get_mut(vm_id) else {
-                log_stale_process_event(&sidecar.bridge, vm_id, process_id, "python VFS RPC");
-                return Ok(());
-            };
+            let mut vm = vm.try_borrow_mut("service Python VFS RPC")?;
             match request.method {
                 PythonVfsRpcMethod::Read => vm
                     .kernel
@@ -916,8 +970,8 @@ where
                 // entry the guest just removed.
                 PythonVfsRpcMethod::Unlink => {
                     match vm.kernel.remove_file(&path).map_err(kernel_error) {
-                        Ok(()) => remove_guest_shadow_path(vm, &path).map(|()| {
-                            forget_shadow_inventory_path(vm, &path);
+                        Ok(()) => remove_guest_shadow_path(&mut vm, &path).map(|()| {
+                            forget_shadow_inventory_path(&mut vm, &path);
                             PythonVfsRpcResponsePayload::Empty
                         }),
                         Err(error) => Err(error),
@@ -925,8 +979,8 @@ where
                 }
                 PythonVfsRpcMethod::Rmdir => {
                     match vm.kernel.remove_dir(&path).map_err(kernel_error) {
-                        Ok(()) => remove_guest_shadow_path(vm, &path).map(|()| {
-                            forget_shadow_inventory_path(vm, &path);
+                        Ok(()) => remove_guest_shadow_path(&mut vm, &path).map(|()| {
+                            forget_shadow_inventory_path(&mut vm, &path);
                             PythonVfsRpcResponsePayload::Empty
                         }),
                         Err(error) => Err(error),
@@ -942,9 +996,9 @@ where
                     let destination = normalize_python_vfs_rpc_path(destination)?;
                     match vm.kernel.rename(&path, &destination).map_err(kernel_error) {
                         Ok(()) => {
-                            rename_guest_shadow_path(vm, &path, &destination).and_then(|()| {
-                                forget_shadow_inventory_path(vm, &path);
-                                refresh_shadow_inventory_path(vm, &destination)?;
+                            rename_guest_shadow_path(&mut vm, &path, &destination).and_then(|()| {
+                                forget_shadow_inventory_path(&mut vm, &path);
+                                refresh_shadow_inventory_path(&mut vm, &destination)?;
                                 Ok(PythonVfsRpcResponsePayload::Empty)
                             })
                         }
@@ -986,7 +1040,7 @@ where
                         if let Some(mode) = request.mode {
                             vm.kernel.chmod(&path, mode).map_err(kernel_error)?;
                             if mirror {
-                                mirror_guest_chmod_to_shadow(vm, &path, mode)?;
+                                mirror_guest_chmod_to_shadow(&mut vm, &path, mode)?;
                             }
                         }
                         // uid/gid apply independently (`os.chown(p, uid, -1)` keeps
@@ -1006,7 +1060,7 @@ where
                                 .map_err(kernel_error)?;
                             if mirror {
                                 mirror_guest_utimes_to_shadow(
-                                    vm,
+                                    &mut vm,
                                     &path,
                                     VirtualUtimeSpec::Set(VirtualTimeSpec::from_millis(atime_ms)),
                                     VirtualUtimeSpec::Set(VirtualTimeSpec::from_millis(mtime_ms)),
@@ -1034,23 +1088,13 @@ where
         Err(error) => Err(error),
     };
 
-    let Some(vm) = sidecar.vms.get_mut(vm_id) else {
-        log_stale_process_event(&sidecar.bridge, vm_id, process_id, "python VFS RPC");
-        return Ok(());
-    };
-    let Some(process) = vm.active_processes.get_mut(process_id) else {
-        log_stale_process_event(&sidecar.bridge, vm_id, process_id, "python VFS RPC");
-        return Ok(());
-    };
     match response {
-        Ok(payload) => process
-            .execution
-            .respond_python_vfs_rpc_success(request.id, payload),
-        Err(error) => process.execution.respond_python_vfs_rpc_error(
-            request.id,
-            "ERR_AGENTOS_PYTHON_VFS_RPC",
-            error.to_string(),
-        ),
+        Ok(payload) => responder
+            .respond_success(request.id, payload)
+            .map_err(python_error),
+        Err(error) => responder
+            .respond_error(request.id, "ERR_AGENTOS_PYTHON_VFS_RPC", error.to_string())
+            .map_err(python_error),
     }
 }
 
