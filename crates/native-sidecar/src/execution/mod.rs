@@ -2,12 +2,19 @@
 
 mod child_process;
 use self::child_process::*;
+pub(crate) use self::child_process::{
+    service_owned_child_bridge_event, OwnedChildBridgeEventService,
+};
 mod coordinator;
 use self::coordinator::*;
+pub(crate) use self::coordinator::{
+    close_stdin_owned, guest_kernel_core_error, resize_pty_owned, write_stdin_owned,
+    OwnedVmRouteFuture, OwnedVmRouteInput,
+};
 mod launch;
 use self::launch::*;
 pub(crate) use self::launch::{
-    host_path_from_runtime_guest_mappings, initial_shadow_sync_inventory,
+    execute_owned, host_path_from_runtime_guest_mappings, initial_shadow_sync_inventory,
     is_protected_agentos_shadow_sync_path,
     sanitize_javascript_child_process_internal_bootstrap_env,
     sync_active_process_host_writes_to_kernel, sync_process_host_writes_to_kernel,
@@ -22,8 +29,10 @@ pub(crate) use self::process_events::send_binding_process_event;
 use self::process_events::*;
 pub(crate) use self::process_events::{
     mark_execute_exit_event_queued, record_execute_exit_event_queue_wait, record_execute_phase,
-    record_execute_response_to_exit_milestone,
+    record_execute_response_to_exit_milestone, OwnedJavascriptEventService,
+    OwnedPythonEventService, OwnedPythonSocketCompletionService,
 };
+pub(crate) use self::signals::kill_process_owned;
 mod signals;
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -72,10 +81,15 @@ pub(crate) use self::javascript::{
     javascript_sync_rpc_may_make_fd_readable, javascript_sync_rpc_may_make_fd_writable,
     javascript_sync_rpc_option_bool, javascript_sync_rpc_option_u32,
     service_javascript_crypto_sync_rpc, service_javascript_sync_rpc,
+    service_owned_javascript_sync_rpc_request, settle_javascript_sync_rpc_completion,
     JavascriptSyncRpcServiceRequest, JavascriptSyncRpcServiceResponse, KernelPollFdRequest,
     LoopbackHttpDispatchRequest,
 };
 mod python;
+pub(crate) use self::python::{
+    prepare_owned_python_process_event_service, respond_owned_python_rpc,
+    service_owned_python_socket_connect_completion, service_owned_python_vfs_rpc_request,
+};
 
 use agentos_vm_config as vm_config;
 
@@ -87,6 +101,7 @@ use crate::filesystem::{
     handle_python_vfs_rpc_request as filesystem_handle_python_vfs_rpc_request,
     service_javascript_fs_read_sync_rpc, service_javascript_fs_readdir_raw_sync_rpc,
     service_javascript_fs_sync_rpc, service_javascript_module_sync_rpc,
+    service_owned_python_filesystem_rpc_request,
 };
 use crate::protocol::{
     CloseStdinRequest, EventFrame, EventPayload, ExecuteRequest, FindBoundUdpRequest,
@@ -137,7 +152,7 @@ use crate::state::{
     ShadowSyncInventoryEntry, SharedBridge, SharedSidecarRequestClient, SidecarKernel,
     SocketDescriptionLease, SocketQueryKind, SocketReadinessRegistration,
     SocketReadinessSubscribers, TlsWritePayload, VmDnsConfig, VmFetchBodyMode, VmFetchStreamState,
-    VmListenPolicy, VmPendingByteBudget, VmState, BINDING_DRIVER_NAME,
+    VmHandle, VmListenPolicy, VmPendingByteBudget, VmState, BINDING_DRIVER_NAME,
     DEFAULT_JAVASCRIPT_NET_BACKLOG, EXECUTION_DRIVER_NAME, EXECUTION_SANDBOX_ROOT_ENV,
     JAVASCRIPT_COMMAND, LOOPBACK_EXEMPT_PORTS_ENV, MAPPED_HOST_FD_START, PYTHON_COMMAND,
     VM_LISTEN_ALLOW_PRIVILEGED_METADATA_KEY, WASM_COMMAND, WASM_EXEC_COMMIT_RPC_ENV,

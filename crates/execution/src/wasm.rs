@@ -503,6 +503,12 @@ impl WasmExecution {
         self.inner.uses_shared_v8_runtime()
     }
 
+    pub fn has_pending_events(&self) -> bool {
+        !self.pending_events.is_empty()
+            || !self.internal_sync_rpc.pending_events.is_empty()
+            || self.inner.has_pending_events()
+    }
+
     pub fn start_prepared(&mut self) -> Result<(), WasmExecutionError> {
         self.inner.start_prepared().map_err(map_javascript_error)?;
         self.execution_started_at = Instant::now();

@@ -15,8 +15,9 @@ use agentos_bridge::{
     BridgeTypes, FilesystemSnapshot,
 };
 use agentos_execution::{
-    v8_host::V8SessionHandle, JavascriptExecution, JavascriptSyncRpcRequest, PythonExecution,
-    PythonVfsRpcRequest, WasmExecution,
+    v8_host::V8SessionHandle, JavascriptExecution, JavascriptExecutionEngine,
+    JavascriptSyncRpcRequest, PythonExecution, PythonExecutionEngine, PythonVfsRpcRequest,
+    PythonVfsRpcResponder, WasmExecution, WasmExecutionEngine,
 };
 use agentos_kernel::fd_table::TransferredFd;
 use agentos_kernel::kernel::{KernelProcessHandle, KernelVm};
@@ -32,13 +33,18 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use socket2::Socket;
+use std::borrow::Borrow as StdBorrow;
+use std::cell::{Ref, RefCell, RefMut};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::fs::File;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -657,6 +663,18 @@ pub trait SidecarRequestTransport: Send + Sync {
         request: SidecarRequestFrame,
         timeout: Duration,
     ) -> Result<SidecarResponseFrame, SidecarError>;
+
+    /// Async callback delivery for extension request tasks. Transports with a
+    /// native async waiter override this so a callback never parks the sidecar
+    /// runtime thread. The default preserves compatibility for in-process test
+    /// transports that only implement the synchronous API.
+    fn send_request_async<'a>(
+        &'a self,
+        request: SidecarRequestFrame,
+        timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<SidecarResponseFrame, SidecarError>> + 'a>> {
+        Box::pin(async move { self.send_request(request, timeout) })
+    }
 }
 
 #[derive(Clone)]
@@ -691,6 +709,32 @@ impl SharedSidecarRequestClient {
         let request_id = self.next_request_id.fetch_sub(1, Ordering::Relaxed);
         let request = SidecarRequestFrame::new(request_id, ownership.clone(), payload);
         let response = transport.send_request(request, timeout)?;
+        if response.request_id != request_id {
+            return Err(SidecarError::InvalidState(format!(
+                "sidecar response {} did not match request {request_id}",
+                response.request_id
+            )));
+        }
+        if response.ownership != ownership {
+            return Err(SidecarError::InvalidState(String::from(
+                "sidecar response ownership did not match request ownership",
+            )));
+        }
+        Ok(response.payload)
+    }
+
+    pub(crate) async fn invoke_async(
+        &self,
+        ownership: crate::protocol::OwnershipScope,
+        payload: SidecarRequestPayload,
+        timeout: Duration,
+    ) -> Result<SidecarResponsePayload, SidecarError> {
+        let transport = self.transport.as_ref().ok_or_else(|| {
+            SidecarError::Unsupported(String::from("sidecar request transport is not configured"))
+        })?;
+        let request_id = self.next_request_id.fetch_sub(1, Ordering::Relaxed);
+        let request = SidecarRequestFrame::new(request_id, ownership.clone(), payload);
+        let response = transport.send_request_async(request, timeout).await?;
         if response.request_id != request_id {
             return Err(SidecarError::InvalidState(format!(
                 "sidecar response {} did not match request {request_id}",
@@ -826,6 +870,92 @@ impl Default for VmConfiguration {
     }
 }
 
+/// VM-local language-engine ownership.
+///
+/// Engine context maps are mutable and must not remain process-global: a long
+/// launch in one VM would otherwise serialize every other VM behind the same
+/// engine owner. A launch clones this owner out through [`VmHandle`], releases
+/// the outer `VmState` borrow, and may then hold only the selected language's
+/// `RefCell` borrow across startup awaits. That deliberately preserves narrow
+/// per-VM/per-runtime ordering while leaving the same VM's kernel, filesystem,
+/// sockets, and other language engines independently accessible.
+#[derive(Clone)]
+pub(crate) struct VmExecutionEngines {
+    inner: Rc<VmExecutionEnginesInner>,
+}
+
+struct VmExecutionEnginesInner {
+    vm_id: String,
+    javascript: RefCell<JavascriptExecutionEngine>,
+    python: RefCell<PythonExecutionEngine>,
+    wasm: RefCell<WasmExecutionEngine>,
+}
+
+impl VmExecutionEngines {
+    pub(crate) fn new(
+        vm_id: String,
+        runtime: agentos_runtime::RuntimeContext,
+        event_notify: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        let mut javascript = JavascriptExecutionEngine::new(runtime.clone());
+        javascript.set_event_notify(Some(Arc::clone(&event_notify)));
+        let mut python = PythonExecutionEngine::new(runtime.clone());
+        python.set_event_notify(Some(Arc::clone(&event_notify)));
+        let mut wasm = WasmExecutionEngine::new(runtime);
+        wasm.set_event_notify(Some(event_notify));
+        Self {
+            inner: Rc::new(VmExecutionEnginesInner {
+                vm_id,
+                javascript: RefCell::new(javascript),
+                python: RefCell::new(python),
+                wasm: RefCell::new(wasm),
+            }),
+        }
+    }
+
+    pub(crate) fn javascript(
+        &self,
+        operation: &'static str,
+    ) -> Result<RefMut<'_, JavascriptExecutionEngine>, SidecarError> {
+        self.inner.javascript.try_borrow_mut().map_err(|_| {
+            execution_engine_conflict_error(&self.inner.vm_id, "JavaScript", operation)
+        })
+    }
+
+    pub(crate) fn python(
+        &self,
+        operation: &'static str,
+    ) -> Result<RefMut<'_, PythonExecutionEngine>, SidecarError> {
+        self.inner
+            .python
+            .try_borrow_mut()
+            .map_err(|_| execution_engine_conflict_error(&self.inner.vm_id, "Python", operation))
+    }
+
+    pub(crate) fn wasm(
+        &self,
+        operation: &'static str,
+    ) -> Result<RefMut<'_, WasmExecutionEngine>, SidecarError> {
+        self.inner.wasm.try_borrow_mut().map_err(|_| {
+            execution_engine_conflict_error(&self.inner.vm_id, "WebAssembly", operation)
+        })
+    }
+}
+
+impl Drop for VmExecutionEnginesInner {
+    fn drop(&mut self) {
+        self.javascript.get_mut().dispose_vm(&self.vm_id);
+        self.python.get_mut().dispose_vm(&self.vm_id);
+        self.wasm.get_mut().dispose_vm(&self.vm_id);
+    }
+}
+
+fn execution_engine_conflict_error(vm_id: &str, runtime: &str, operation: &str) -> SidecarError {
+    SidecarError::InvalidState(format!(
+        "ERR_AGENTOS_VM_EXECUTION_CONFLICT: {runtime} execution state for VM {vm_id} is already in use during {operation}"
+    ))
+}
+
 #[allow(dead_code)]
 pub(crate) struct VmState {
     pub(crate) connection_id: String,
@@ -843,6 +973,8 @@ pub(crate) struct VmState {
     /// VM-scoped admission view over the process's single Tokio runtime and
     /// fixed blocking executor. This owns no runtime or worker of its own.
     pub(crate) runtime_context: agentos_runtime::RuntimeContext,
+    /// Language runtime context maps owned by this VM generation.
+    pub(crate) execution_engines: VmExecutionEngines,
     /// One resolved SQLite transport shared by every durable VM subsystem.
     pub(crate) database: Option<crate::vm_sqlite::SharedVmSqliteDatabase>,
     /// Common lifecycle/identity registry for native and kernel backends.
@@ -915,6 +1047,243 @@ pub(crate) struct VmState {
     pub(crate) shadow_sync_inventory: BTreeMap<String, ShadowSyncInventoryEntry>,
     pub(crate) unix_address_registry: GuestUnixAddressRegistry,
     pub(crate) unix_socket_host_dir: PathBuf,
+}
+
+/// Cloneable, thread-affine access to one VM's mutable state.
+///
+/// Guest execution is deliberately driven by the protocol process's
+/// `LocalSet`, so this is an `Rc` boundary rather than a cross-thread mutex.
+/// Callers must release a borrow before awaiting external work; cloning a
+/// handle never grants access to another VM.
+#[derive(Clone)]
+pub(crate) struct VmHandle {
+    inner: Rc<RefCell<VmState>>,
+}
+
+impl VmHandle {
+    pub(crate) fn new(state: VmState) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(state)),
+        }
+    }
+
+    pub(crate) fn borrow(&self) -> Ref<'_, VmState> {
+        self.inner.as_ref().borrow()
+    }
+
+    pub(crate) fn borrow_mut(&self) -> RefMut<'_, VmState> {
+        self.inner.borrow_mut()
+    }
+
+    pub(crate) fn try_borrow_mut(
+        &self,
+        operation: &'static str,
+    ) -> Result<RefMut<'_, VmState>, SidecarError> {
+        self.inner.try_borrow_mut().map_err(|_| {
+            SidecarError::InvalidState(format!(
+                "ERR_AGENTOS_VM_COORDINATOR_CONFLICT: VM state is already in a critical section during {operation}"
+            ))
+        })
+    }
+
+    pub(crate) fn try_read<T>(
+        &self,
+        operation: &'static str,
+        read: impl FnOnce(&VmState) -> T,
+    ) -> Result<T, SidecarError> {
+        let state = self.inner.try_borrow().map_err(|_| {
+            SidecarError::InvalidState(format!(
+                "ERR_AGENTOS_VM_COORDINATOR_CONFLICT: VM state is already in a mutable critical section during {operation}"
+            ))
+        })?;
+        Ok(read(&state))
+    }
+
+    pub(crate) fn try_command<T>(
+        &self,
+        operation: &'static str,
+        command: impl FnOnce(&mut VmState) -> Result<T, SidecarError>,
+    ) -> Result<T, SidecarError> {
+        let mut state = self.inner.try_borrow_mut().map_err(|_| {
+            SidecarError::InvalidState(format!(
+                "ERR_AGENTOS_VM_COORDINATOR_CONFLICT: VM state is already in a critical section during {operation}"
+            ))
+        })?;
+        command(&mut state)
+    }
+}
+
+impl std::fmt::Debug for VmHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = self.borrow();
+        formatter
+            .debug_struct("VmHandle")
+            .field("connection_id", &state.connection_id)
+            .field("session_id", &state.session_id)
+            .field("generation", &state.generation)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Registry facade that preserves the sidecar's existing short-borrow API
+/// while storing each VM behind an independently cloneable handle.
+#[derive(Debug, Default)]
+pub(crate) struct VmRegistry {
+    vms: BTreeMap<String, VmHandle>,
+}
+
+impl VmRegistry {
+    pub(crate) fn len(&self) -> usize {
+        self.vms.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.vms.is_empty()
+    }
+
+    pub(crate) fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        String: StdBorrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.vms.contains_key(key)
+    }
+
+    pub(crate) fn get<Q>(&self, key: &Q) -> Option<Ref<'_, VmState>>
+    where
+        String: StdBorrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.vms.get(key).map(VmHandle::borrow)
+    }
+
+    pub(crate) fn get_mut<Q>(&self, key: &Q) -> Option<RefMut<'_, VmState>>
+    where
+        String: StdBorrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.vms.get(key).map(VmHandle::borrow_mut)
+    }
+
+    pub(crate) fn handle<Q>(&self, key: &Q) -> Option<VmHandle>
+    where
+        String: StdBorrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.vms.get(key).cloned()
+    }
+
+    pub(crate) fn insert(
+        &mut self,
+        key: String,
+        state: VmState,
+    ) -> Result<Option<VmState>, SidecarError> {
+        let replacement = match self.vms.remove(&key) {
+            Some(handle) => match Rc::try_unwrap(handle.inner) {
+                Ok(state) => Some(state.into_inner()),
+                Err(inner) => {
+                    self.vms.insert(key.clone(), VmHandle { inner });
+                    return Err(vm_handle_conflict_error(&key, "replace"));
+                }
+            },
+            None => None,
+        };
+        self.vms.insert(key, VmHandle::new(state));
+        Ok(replacement)
+    }
+
+    pub(crate) fn try_remove<Q>(
+        &mut self,
+        key: &Q,
+        operation: &'static str,
+    ) -> Result<Option<VmState>, SidecarError>
+    where
+        String: StdBorrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let Some((owned_key, handle)) = self.vms.remove_entry(key) else {
+            return Ok(None);
+        };
+        match Rc::try_unwrap(handle.inner) {
+            Ok(state) => Ok(Some(state.into_inner())),
+            Err(inner) => {
+                self.vms.insert(owned_key.clone(), VmHandle { inner });
+                Err(vm_handle_conflict_error(&owned_key, operation))
+            }
+        }
+    }
+
+    pub(crate) fn clear(&mut self) -> Result<(), SidecarError> {
+        if let Some((key, _)) = self
+            .vms
+            .iter()
+            .find(|(_, handle)| Rc::strong_count(&handle.inner) != 1)
+        {
+            return Err(vm_handle_conflict_error(key, "clear"));
+        }
+        for (key, handle) in std::mem::take(&mut self.vms) {
+            match Rc::try_unwrap(handle.inner) {
+                Ok(state) => drop(state.into_inner()),
+                Err(inner) => {
+                    self.vms.insert(key.clone(), VmHandle { inner });
+                    return Err(vm_handle_conflict_error(&key, "clear"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&String, &mut VmState) -> bool) {
+        self.vms.retain(|key, handle| {
+            match handle.inner.try_borrow_mut() {
+                Ok(mut state) => {
+                    let retained = keep(key, &mut state);
+                    if !retained && Rc::strong_count(&handle.inner) != 1 {
+                        eprintln!(
+                            "ERR_AGENTOS_VM_COORDINATOR_CONFLICT: deferring removal of VM {key} while an owned operation retains its handle"
+                        );
+                        true
+                    } else {
+                        retained
+                    }
+                }
+                Err(_) => {
+                    eprintln!(
+                        "ERR_AGENTOS_VM_COORDINATOR_CONFLICT: deferring retain-filter for VM {key} while a short critical section is active"
+                    );
+                    true
+                }
+            }
+        });
+    }
+
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &String> {
+        self.vms.keys()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&String, Ref<'_, VmState>)> {
+        self.vms.iter().map(|(key, handle)| (key, handle.borrow()))
+    }
+
+    pub(crate) fn values(&self) -> impl Iterator<Item = Ref<'_, VmState>> {
+        self.vms.values().map(VmHandle::borrow)
+    }
+
+    pub(crate) fn values_mut(&self) -> impl Iterator<Item = RefMut<'_, VmState>> {
+        self.vms.values().filter_map(|handle| {
+            handle.inner.try_borrow_mut().map_err(|_| {
+                eprintln!(
+                    "ERR_AGENTOS_VM_COORDINATOR_CONFLICT: deferring mutable VM iteration while a short critical section is active"
+                );
+            }).ok()
+        })
+    }
+}
+
+fn vm_handle_conflict_error(vm_id: &str, operation: &str) -> SidecarError {
+    SidecarError::InvalidState(format!(
+        "ERR_AGENTOS_VM_COORDINATOR_CONFLICT: cannot {operation} VM {vm_id} while an owned operation retains its handle"
+    ))
 }
 
 #[derive(Debug)]
@@ -1249,6 +1618,10 @@ pub(crate) struct ActiveProcess {
     pub(crate) pending_execution_event_count_gauge: Arc<QueueGauge>,
     pub(crate) pending_execution_event_bytes_gauge: Arc<QueueGauge>,
     pub(crate) vm_pending_event_bytes_budget: Arc<VmPendingByteBudget>,
+    /// Serializes push delivery from this child into its parent V8 session.
+    /// Once an event leaves the child queue for bounded retry, later output or
+    /// exit events stay on the source child until that exact relay completes.
+    pub(crate) child_bridge_relay_in_flight: Arc<AtomicBool>,
     pub(crate) pending_javascript_net_connects:
         BTreeMap<u64, Arc<Mutex<PendingJavascriptNetConnectState>>>,
     pub(crate) pending_self_signal_exit: Option<i32>,
@@ -1351,7 +1724,10 @@ pub(crate) struct PendingChildProcessSync {
 
 pub(crate) enum PendingChildProcessSyncCompletion {
     Javascript(tokio::sync::oneshot::Sender<Result<Value, DeferredRpcError>>),
-    Python { request_id: u64 },
+    Python {
+        request_id: u64,
+        responder: PythonVfsRpcResponder,
+    },
 }
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -2760,6 +3136,8 @@ pub(crate) struct ProcessEventEnvelope {
     pub(crate) connection_id: String,
     pub(crate) session_id: String,
     pub(crate) vm_id: String,
+    /// Exact descendant locator relative to `process_id`. Empty targets the root.
+    pub(crate) child_path: Vec<String>,
     pub(crate) process_id: String,
     pub(crate) event: ActiveExecutionEvent,
 }

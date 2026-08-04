@@ -4701,416 +4701,471 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    pub(crate) async fn execute(
+    pub(crate) fn execute(
         &mut self,
         request: &RequestFrame,
         payload: ExecuteRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let execute_total_start = Instant::now();
+    ) -> OwnedVmRouteFuture {
+        let input = self.prepare_owned_vm_route(request);
+        let bridge = self.bridge.clone();
+        let sidecar_requests = self.sidecar_requests.clone();
+        let process_event_notify = Arc::clone(&self.process_event_notify);
+        let cache_root = self.cache_root.clone();
         let process_event_capacity = self.config.runtime.protocol.max_process_events;
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let vm = self
-            .vms
-            .get_mut(&vm_id)
-            .ok_or_else(|| missing_vm_error(&vm_id))?;
-        if vm.active_processes.contains_key(&payload.process_id) {
-            return Err(SidecarError::InvalidState(format!(
-                "VM {vm_id} already has an active process with id {}",
-                payload.process_id
-            )));
-        }
-        let vm_pending_stdin_bytes_budget = Arc::clone(&vm.pending_stdin_bytes_budget);
-        let vm_pending_event_bytes_budget = Arc::clone(&vm.pending_event_bytes_budget);
-
-        if let Some(command) = payload.command.as_deref() {
-            if let Some(binding_resolution) =
-                resolve_binding_command(vm, command, &payload.args, payload.cwd.as_deref())?
-            {
-                let guest_cwd = payload
-                    .cwd
-                    .as_deref()
-                    .map(normalize_path)
-                    .unwrap_or_else(|| vm.guest_cwd.clone());
-                let kernel_handle = vm
-                    .kernel
-                    .create_virtual_process(
-                        EXECUTION_DRIVER_NAME,
-                        BINDING_DRIVER_NAME,
-                        command,
-                        std::iter::once(command.to_owned())
-                            .chain(payload.args.iter().cloned())
-                            .collect(),
-                        VirtualProcessOptions {
-                            env: vm.guest_env.clone(),
-                            cwd: Some(guest_cwd.clone()),
-                            ..VirtualProcessOptions::default()
-                        },
-                    )
-                    .map_err(kernel_error)?;
-                let kernel_pid = kernel_handle.pid();
-                let binding_execution = BindingExecution::with_event_notify(
-                    Arc::clone(&self.process_event_notify),
-                    process_event_capacity,
-                )
-                .with_vm_pending_event_bytes_budget(Arc::clone(&vm_pending_event_bytes_budget));
-                let cancelled = binding_execution.cancelled.clone();
-                let pending_events = binding_execution.pending_events.clone();
-                let event_overflow_reason = binding_execution.event_overflow_reason.clone();
-                let pending_event_bytes = binding_execution.pending_event_bytes.clone();
-                let pending_event_count_limit = binding_execution.pending_event_count_limit.clone();
-                let pending_event_bytes_limit = binding_execution.pending_event_bytes_limit.clone();
-                let binding_vm_pending_event_bytes_budget =
-                    binding_execution.vm_pending_event_bytes_budget.clone();
-                let event_notify = binding_execution.event_notify.clone();
-                vm.active_processes.insert(
-                    payload.process_id.clone(),
-                    ActiveProcess::new(
-                        kernel_pid,
-                        kernel_handle,
-                        vm.runtime_context.clone(),
-                        vm.limits.clone(),
-                        process_event_capacity,
-                        GuestRuntimeKind::JavaScript,
-                        ActiveExecution::Binding(binding_execution),
-                    )
-                    .with_event_notify(Arc::clone(&self.process_event_notify))
-                    .with_vm_pending_byte_budgets(
-                        Arc::clone(&vm_pending_stdin_bytes_budget),
-                        Arc::clone(&vm_pending_event_bytes_budget),
-                    )
-                    .with_guest_cwd(guest_cwd.clone())
-                    .with_shadow_root(normalize_host_path(&vm.cwd))
-                    .with_host_cwd(resolve_vm_guest_path_to_host(vm, &guest_cwd)),
-                );
-                self.bridge.emit_lifecycle(&vm_id, LifecycleState::Busy)?;
-                spawn_binding_process_events(BindingProcessEventRequest {
-                    runtime_context: vm.runtime_context.clone(),
-                    sidecar_requests: self.sidecar_requests.clone(),
-                    connection_id: connection_id.clone(),
-                    session_id: session_id.clone(),
-                    vm_id: vm_id.clone(),
-                    binding_resolution,
-                    cancelled,
-                    pending_events,
-                    event_overflow_reason,
-                    pending_event_bytes,
-                    pending_event_count_limit,
-                    pending_event_bytes_limit,
-                    vm_pending_event_bytes_budget: binding_vm_pending_event_bytes_budget,
-                    event_notify,
-                });
-                return Ok(DispatchResult {
-                    response: process_started_response(
-                        request,
-                        payload.process_id,
-                        Some(kernel_pid),
-                    ),
-                    events: Vec::new(),
-                });
-            }
-        }
-
-        let requested_tty = payload
-            .env
-            .get(EXECUTION_REQUEST_TTY_ENV)
-            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
-        let phase_start = Instant::now();
-        let mut resolved = resolve_execute_request(vm, &payload)?;
-        stage_agentos_package_command(vm, &mut resolved)?;
-        let resolved = resolved;
-        record_execute_phase("resolve_execute_request", phase_start.elapsed());
-        let phase_start = Instant::now();
-        let mut env = resolved.env.clone();
-        env.remove(EXECUTION_REQUEST_TTY_ENV);
-        let sandbox_root = normalize_host_path(&vm.cwd);
-        env.insert(
-            String::from(EXECUTION_SANDBOX_ROOT_ENV),
-            sandbox_root.to_string_lossy().into_owned(),
-        );
-        if resolved.runtime == GuestRuntimeKind::JavaScript {
-            env.insert(String::from("AGENTOS_KEEP_STDIN_OPEN"), String::from("1"));
-            // A TTY guest-node process reads stdin through the kernel PTY: host
-            // input is written to the PTY master (write_kernel_process_stdin),
-            // line discipline runs (echo / VERASE / ICRNL / VEOF), and the
-            // sidecar drains the cooked bytes from the slave and forwards them
-            // to the isolate's stream-stdin dispatch
-            // (forward_tty_slave_input_to_javascript). The in-isolate
-            // `_kernelStdinRead` bridge stays local; no RPC forwarding is
-            // needed because the isolate never reads kernel fd 0 itself.
-        } else if resolved.runtime == GuestRuntimeKind::WebAssembly {
-            env.insert(String::from(WASM_STDIO_SYNC_RPC_ENV), String::from("1"));
-        }
-        let launch_entrypoint = if resolved.runtime == GuestRuntimeKind::JavaScript {
-            resolve_agentos_package_javascript_launch_entrypoint(vm, &mut env)
-                .unwrap_or_else(|| resolved.entrypoint.clone())
-        } else {
-            resolved.entrypoint.clone()
-        };
-        let argv = std::iter::once(launch_entrypoint.clone())
-            .chain(resolved.execution_args.iter().cloned())
-            .collect::<Vec<_>>();
-        record_execute_phase("env_argv_setup", phase_start.elapsed());
-        let phase_start = Instant::now();
-        let kernel_handle = vm
-            .kernel
-            .spawn_process(
-                &resolved.command,
-                argv,
-                SpawnOptions {
-                    requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
-                    cwd: Some(resolved.guest_cwd.clone()),
-                    ..SpawnOptions::default()
-                },
-            )
-            .map_err(kernel_error)?;
-        let kernel_pid = kernel_handle.pid();
-        if let Err(error) = enforce_resolved_wasm_execute_dac(vm, kernel_pid, &resolved) {
-            kernel_handle.finish(126);
-            return Err(error);
-        }
-        record_execute_phase("kernel_spawn_process", phase_start.elapsed());
-        let tty_master_fd = if requested_tty {
-            let (master_fd, slave_fd, _) = vm
-                .kernel
-                .open_pty(EXECUTION_DRIVER_NAME, kernel_pid)
-                .map_err(kernel_error)?;
-            vm.kernel
-                .fd_dup2(EXECUTION_DRIVER_NAME, kernel_pid, slave_fd, 0)
-                .map_err(kernel_error)?;
-            vm.kernel
-                .fd_dup2(EXECUTION_DRIVER_NAME, kernel_pid, slave_fd, 1)
-                .map_err(kernel_error)?;
-            vm.kernel
-                .fd_dup2(EXECUTION_DRIVER_NAME, kernel_pid, slave_fd, 2)
-                .map_err(kernel_error)?;
-            vm.kernel
-                .pty_set_foreground_pgid(EXECUTION_DRIVER_NAME, kernel_pid, master_fd, kernel_pid)
-                .map_err(kernel_error)?;
-            if let Some((cols, rows)) = requested_pty_window_size(&env) {
-                vm.kernel
-                    .pty_resize(EXECUTION_DRIVER_NAME, kernel_pid, master_fd, cols, rows)
-                    .map_err(kernel_error)?;
-            }
-            Some(master_fd)
-        } else {
-            None
-        };
-
-        let (execution, process_env) = match resolved.runtime {
-            GuestRuntimeKind::JavaScript => {
-                let phase_start = Instant::now();
-                let inline_code = load_javascript_entrypoint_source(
-                    vm,
-                    &resolved.host_cwd,
-                    &launch_entrypoint,
-                    &env,
-                );
-                record_execute_phase("js_load_entrypoint_source", phase_start.elapsed());
-                let phase_start = Instant::now();
-                prepare_javascript_shadow(vm, &resolved, &env)?;
-                record_execute_phase("js_prepare_shadow", phase_start.elapsed());
-
-                let phase_start = Instant::now();
-                let context =
-                    self.javascript_engine
-                        .create_context(CreateJavascriptContextRequest {
-                            vm_id: vm_id.clone(),
-                            bootstrap_module: None,
-                            compile_cache_root: Some(self.cache_root.join("node-compile-cache")),
-                        });
-                record_execute_phase("js_create_context", phase_start.elapsed());
-                let phase_start = Instant::now();
-                let built_reader = build_module_reader(vm, &resolved);
-                let guest_reader = built_reader.clone().map(|reader| {
-                    Box::new(crate::plugins::host_dir::SessionModuleReader::new(reader))
-                        as Box<dyn GuestModuleReader>
-                });
-                let module_reader =
-                    built_reader.map(|reader| Box::new(reader) as Box<dyn ModuleFsReader + Send>);
-                record_execute_phase("js_build_module_reader", phase_start.elapsed());
-                let phase_start = Instant::now();
-                let execution = self
-                    .javascript_engine
-                    .start_execution_with_module_reader_and_runtime(
-                        StartJavascriptExecutionRequest {
-                            guest_runtime: guest_runtime_identity(vm, None, None),
-                            vm_id: vm_id.clone(),
-                            context_id: context.context_id,
-                            argv: std::iter::once(launch_entrypoint.clone())
-                                .chain(resolved.execution_args.iter().cloned())
-                                .collect(),
-                            argv0: None,
-                            env: env.clone(),
-                            cwd: resolved.host_cwd.clone(),
-                            limits: javascript_execution_limits(vm),
-                            inline_code,
-                            wasm_module_bytes: None,
-                        },
-                        module_reader,
-                        guest_reader,
-                        vm.runtime_context.clone(),
-                    )
-                    .map_err(javascript_error)?;
-                record_execute_phase("js_start_execution", phase_start.elapsed());
-                (ActiveExecution::Javascript(execution), env.clone())
-            }
-            GuestRuntimeKind::Python => {
-                // The `python` command path (marked by AGENTOS_PYTHON_ARGV) is
-                // explicit about file mode via AGENTOS_PYTHON_FILE, so a `-c` code
-                // string that happens to end in `.py` is never mistaken for a path.
-                // The low-level execute API keeps the `.py`-suffix heuristic.
-                let python_file_path = if resolved.env.contains_key("AGENTOS_PYTHON_ARGV") {
-                    resolved.env.get("AGENTOS_PYTHON_FILE").map(PathBuf::from)
-                } else {
-                    python_file_entrypoint(&resolved.entrypoint)
-                };
-                let pyodide_dist_path = self
-                    .python_engine
-                    .bundled_pyodide_dist_path_for_vm_async(&vm_id, &vm.runtime_context)
-                    .await
-                    .map_err(python_error)?;
-                let pyodide_cache_path = pyodide_dist_path
-                    .parent()
-                    .and_then(Path::parent)
-                    .unwrap_or(pyodide_dist_path.as_path())
-                    .join("pyodide-package-cache");
-                add_runtime_guest_path_mapping(
-                    &mut env,
-                    PYTHON_PYODIDE_GUEST_ROOT,
-                    &pyodide_dist_path,
-                );
-                add_runtime_guest_path_mapping(
-                    &mut env,
-                    PYTHON_PYODIDE_CACHE_GUEST_ROOT,
-                    &pyodide_cache_path,
-                );
-                add_runtime_host_access_path(
-                    &mut env,
-                    "AGENTOS_EXTRA_FS_READ_PATHS",
-                    &pyodide_dist_path,
-                    true,
-                );
-                add_runtime_host_access_path(
-                    &mut env,
-                    "AGENTOS_EXTRA_FS_READ_PATHS",
-                    &pyodide_cache_path,
-                    true,
-                );
-                add_runtime_host_access_path(
-                    &mut env,
-                    "AGENTOS_EXTRA_FS_WRITE_PATHS",
-                    &pyodide_cache_path,
-                    false,
-                );
-                let context = self
-                    .python_engine
-                    .create_context(CreatePythonContextRequest {
-                        vm_id: vm_id.clone(),
-                        pyodide_dist_path,
-                    });
-                let execution = self
-                    .python_engine
-                    .start_execution_with_runtime_async(
-                        StartPythonExecutionRequest {
-                            vm_id: vm_id.clone(),
-                            context_id: context.context_id,
-                            code: resolved.entrypoint.clone(),
-                            file_path: python_file_path,
-                            env: env.clone(),
-                            cwd: resolved.host_cwd.clone(),
-                            limits: python_execution_limits_with_env(vm, &env),
-                            guest_runtime: guest_runtime_identity(vm, None, None),
-                        },
-                        vm.runtime_context.clone(),
-                    )
-                    .await
-                    .map_err(python_error)?;
-                (ActiveExecution::Python(execution), env.clone())
-            }
-            GuestRuntimeKind::WebAssembly => {
-                let wasm_limits = wasm_execution_limits(vm);
-                let wasm_guest_runtime =
-                    guest_runtime_identity(vm, Some(u64::from(kernel_pid)), Some(0));
-                let wasm_permission_tier = resolved.wasm_permission_tier.unwrap_or_else(|| {
-                    resolve_wasm_permission_tier(
-                        vm,
-                        Some(&resolved.command),
-                        None,
-                        &resolved.entrypoint,
-                    )
-                });
-                let context = self.wasm_engine.create_context(CreateWasmContextRequest {
-                    vm_id: vm_id.clone(),
-                    module_path: Some(resolved.entrypoint.clone()),
-                });
-                let execution = self
-                    .wasm_engine
-                    .start_execution_with_runtime_async(
-                        StartWasmExecutionRequest {
-                            vm_id: vm_id.clone(),
-                            context_id: context.context_id,
-                            argv: resolved.process_args.clone(),
-                            env: env.clone(),
-                            cwd: resolved.host_cwd.clone(),
-                            permission_tier: execution_wasm_permission_tier(wasm_permission_tier),
-                            limits: wasm_limits,
-                            guest_runtime: wasm_guest_runtime,
-                        },
-                        vm.runtime_context.clone(),
-                    )
-                    .await
-                    .map_err(wasm_error)?;
-                (ActiveExecution::Wasm(Box::new(execution)), env)
-            }
-        };
-        let child_pid = execution.child_pid();
-        let phase_start = Instant::now();
-        let kernel_stdin_writer_fd = if let Some(master_fd) = tty_master_fd {
-            master_fd
-        } else {
-            install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?
-        };
-        vm.active_processes.insert(
-            payload.process_id.clone(),
-            ActiveProcess::new(
-                kernel_pid,
-                kernel_handle,
-                vm.runtime_context.clone(),
-                vm.limits.clone(),
+        Box::pin(async move {
+            execute_owned(
+                input?,
+                payload,
+                bridge,
+                sidecar_requests,
+                process_event_notify,
+                cache_root,
                 process_event_capacity,
-                resolved.runtime,
-                execution,
             )
-            .with_event_notify(Arc::clone(&self.process_event_notify))
-            .with_vm_pending_byte_budgets(
-                vm_pending_stdin_bytes_budget,
-                vm_pending_event_bytes_budget,
-            )
-            .with_kernel_stdin_writer_fd(kernel_stdin_writer_fd)
-            .with_tty_master_fd(tty_master_fd)
-            .with_guest_cwd(resolved.guest_cwd.clone())
-            .with_env(process_env)
-            .with_shadow_root(sandbox_root)
-            .with_host_cwd(resolved.host_cwd.clone()),
-        );
-        self.bridge.emit_lifecycle(&vm_id, LifecycleState::Busy)?;
-        mark_execute_response_ready(&vm_id, &payload.process_id);
-        record_execute_phase("process_register_and_lifecycle", phase_start.elapsed());
-        record_execute_phase("execute_total", execute_total_start.elapsed());
-
-        Ok(DispatchResult {
-            response: process_started_response(
-                request,
-                payload.process_id,
-                Some(if child_pid == 0 {
-                    kernel_pid
-                } else {
-                    child_pid
-                }),
-            ),
-            events: Vec::new(),
+            .await
         })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_owned<B>(
+    input: OwnedVmRouteInput,
+    payload: ExecuteRequest,
+    bridge: SharedBridge<B>,
+    sidecar_requests: SharedSidecarRequestClient,
+    process_event_notify: Arc<tokio::sync::Notify>,
+    cache_root: PathBuf,
+    process_event_capacity: usize,
+) -> Result<DispatchResult, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let execute_total_start = Instant::now();
+    let request = &input.request;
+    let (connection_id, session_id, vm_id) = match &request.ownership {
+        OwnershipScope::VmOwnership(ownership) => (
+            ownership.connection_id.clone(),
+            ownership.session_id.clone(),
+            input.vm_id.clone(),
+        ),
+        _ => {
+            return Err(SidecarError::InvalidState(String::from(
+                "execute requires VM ownership",
+            )))
+        }
+    };
+    let execution_engines = input.vm.try_read("clone VM execution services", |vm| {
+        vm.execution_engines.clone()
+    })?;
+    let mut vm = input.vm.try_borrow_mut("prepare and start execution")?;
+    if vm.active_processes.contains_key(&payload.process_id) {
+        return Err(SidecarError::InvalidState(format!(
+            "VM {vm_id} already has an active process with id {}",
+            payload.process_id
+        )));
+    }
+    let vm_pending_stdin_bytes_budget = Arc::clone(&vm.pending_stdin_bytes_budget);
+    let vm_pending_event_bytes_budget = Arc::clone(&vm.pending_event_bytes_budget);
+
+    if let Some(command) = payload.command.as_deref() {
+        if let Some(binding_resolution) =
+            resolve_binding_command(&mut vm, command, &payload.args, payload.cwd.as_deref())?
+        {
+            let guest_cwd = payload
+                .cwd
+                .as_deref()
+                .map(normalize_path)
+                .unwrap_or_else(|| vm.guest_cwd.clone());
+            let guest_env = vm.guest_env.clone();
+            let kernel_handle = vm
+                .kernel
+                .create_virtual_process(
+                    EXECUTION_DRIVER_NAME,
+                    BINDING_DRIVER_NAME,
+                    command,
+                    std::iter::once(command.to_owned())
+                        .chain(payload.args.iter().cloned())
+                        .collect(),
+                    VirtualProcessOptions {
+                        env: guest_env,
+                        cwd: Some(guest_cwd.clone()),
+                        ..VirtualProcessOptions::default()
+                    },
+                )
+                .map_err(kernel_error)?;
+            let kernel_pid = kernel_handle.pid();
+            let binding_execution = BindingExecution::with_event_notify(
+                Arc::clone(&process_event_notify),
+                process_event_capacity,
+            )
+            .with_vm_pending_event_bytes_budget(Arc::clone(&vm_pending_event_bytes_budget));
+            let cancelled = binding_execution.cancelled.clone();
+            let pending_events = binding_execution.pending_events.clone();
+            let event_overflow_reason = binding_execution.event_overflow_reason.clone();
+            let pending_event_bytes = binding_execution.pending_event_bytes.clone();
+            let pending_event_count_limit = binding_execution.pending_event_count_limit.clone();
+            let pending_event_bytes_limit = binding_execution.pending_event_bytes_limit.clone();
+            let binding_vm_pending_event_bytes_budget =
+                binding_execution.vm_pending_event_bytes_budget.clone();
+            let event_notify = binding_execution.event_notify.clone();
+            let runtime_context = vm.runtime_context.clone();
+            let limits = vm.limits.clone();
+            let shadow_root = normalize_host_path(&vm.cwd);
+            let host_cwd = resolve_vm_guest_path_to_host(&mut vm, &guest_cwd);
+            vm.active_processes.insert(
+                payload.process_id.clone(),
+                ActiveProcess::new(
+                    kernel_pid,
+                    kernel_handle,
+                    runtime_context.clone(),
+                    limits,
+                    process_event_capacity,
+                    GuestRuntimeKind::JavaScript,
+                    ActiveExecution::Binding(binding_execution),
+                )
+                .with_event_notify(Arc::clone(&process_event_notify))
+                .with_vm_pending_byte_budgets(
+                    Arc::clone(&vm_pending_stdin_bytes_budget),
+                    Arc::clone(&vm_pending_event_bytes_budget),
+                )
+                .with_guest_cwd(guest_cwd.clone())
+                .with_shadow_root(shadow_root)
+                .with_host_cwd(host_cwd),
+            );
+            bridge.emit_lifecycle(&vm_id, LifecycleState::Busy)?;
+            spawn_binding_process_events(BindingProcessEventRequest {
+                runtime_context,
+                sidecar_requests: sidecar_requests.clone(),
+                connection_id: connection_id.clone(),
+                session_id: session_id.clone(),
+                vm_id: vm_id.clone(),
+                binding_resolution,
+                cancelled,
+                pending_events,
+                event_overflow_reason,
+                pending_event_bytes,
+                pending_event_count_limit,
+                pending_event_bytes_limit,
+                vm_pending_event_bytes_budget: binding_vm_pending_event_bytes_budget,
+                event_notify,
+            });
+            return Ok(DispatchResult {
+                response: process_started_response(request, payload.process_id, Some(kernel_pid)),
+                events: Vec::new(),
+            });
+        }
+    }
+
+    let requested_tty = payload
+        .env
+        .get(EXECUTION_REQUEST_TTY_ENV)
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    let phase_start = Instant::now();
+    let mut resolved = resolve_execute_request(&mut vm, &payload)?;
+    stage_agentos_package_command(&mut vm, &mut resolved)?;
+    let resolved = resolved;
+    record_execute_phase("resolve_execute_request", phase_start.elapsed());
+    let phase_start = Instant::now();
+    let mut env = resolved.env.clone();
+    env.remove(EXECUTION_REQUEST_TTY_ENV);
+    let sandbox_root = normalize_host_path(&vm.cwd);
+    env.insert(
+        String::from(EXECUTION_SANDBOX_ROOT_ENV),
+        sandbox_root.to_string_lossy().into_owned(),
+    );
+    if resolved.runtime == GuestRuntimeKind::JavaScript {
+        env.insert(String::from("AGENTOS_KEEP_STDIN_OPEN"), String::from("1"));
+        // A TTY guest-node process reads stdin through the kernel PTY: host
+        // input is written to the PTY master (write_kernel_process_stdin),
+        // line discipline runs (echo / VERASE / ICRNL / VEOF), and the
+        // sidecar drains the cooked bytes from the slave and forwards them
+        // to the isolate's stream-stdin dispatch
+        // (forward_tty_slave_input_to_javascript). The in-isolate
+        // `_kernelStdinRead` bridge stays local; no RPC forwarding is
+        // needed because the isolate never reads kernel fd 0 itself.
+    } else if resolved.runtime == GuestRuntimeKind::WebAssembly {
+        env.insert(String::from(WASM_STDIO_SYNC_RPC_ENV), String::from("1"));
+    }
+    let launch_entrypoint = if resolved.runtime == GuestRuntimeKind::JavaScript {
+        resolve_agentos_package_javascript_launch_entrypoint(&mut vm, &mut env)
+            .unwrap_or_else(|| resolved.entrypoint.clone())
+    } else {
+        resolved.entrypoint.clone()
+    };
+    let argv = std::iter::once(launch_entrypoint.clone())
+        .chain(resolved.execution_args.iter().cloned())
+        .collect::<Vec<_>>();
+    record_execute_phase("env_argv_setup", phase_start.elapsed());
+    let phase_start = Instant::now();
+    let kernel_handle = vm
+        .kernel
+        .spawn_process(
+            &resolved.command,
+            argv,
+            SpawnOptions {
+                requester_driver: Some(String::from(EXECUTION_DRIVER_NAME)),
+                cwd: Some(resolved.guest_cwd.clone()),
+                ..SpawnOptions::default()
+            },
+        )
+        .map_err(kernel_error)?;
+    let kernel_pid = kernel_handle.pid();
+    if let Err(error) = enforce_resolved_wasm_execute_dac(&mut vm, kernel_pid, &resolved) {
+        kernel_handle.finish(126);
+        return Err(error);
+    }
+    record_execute_phase("kernel_spawn_process", phase_start.elapsed());
+    let tty_master_fd = if requested_tty {
+        let (master_fd, slave_fd, _) = vm
+            .kernel
+            .open_pty(EXECUTION_DRIVER_NAME, kernel_pid)
+            .map_err(kernel_error)?;
+        vm.kernel
+            .fd_dup2(EXECUTION_DRIVER_NAME, kernel_pid, slave_fd, 0)
+            .map_err(kernel_error)?;
+        vm.kernel
+            .fd_dup2(EXECUTION_DRIVER_NAME, kernel_pid, slave_fd, 1)
+            .map_err(kernel_error)?;
+        vm.kernel
+            .fd_dup2(EXECUTION_DRIVER_NAME, kernel_pid, slave_fd, 2)
+            .map_err(kernel_error)?;
+        vm.kernel
+            .pty_set_foreground_pgid(EXECUTION_DRIVER_NAME, kernel_pid, master_fd, kernel_pid)
+            .map_err(kernel_error)?;
+        if let Some((cols, rows)) = requested_pty_window_size(&env) {
+            vm.kernel
+                .pty_resize(EXECUTION_DRIVER_NAME, kernel_pid, master_fd, cols, rows)
+                .map_err(kernel_error)?;
+        }
+        Some(master_fd)
+    } else {
+        None
+    };
+
+    let (execution, process_env) = match resolved.runtime {
+        GuestRuntimeKind::JavaScript => {
+            let phase_start = Instant::now();
+            let inline_code = load_javascript_entrypoint_source(
+                &mut vm,
+                &resolved.host_cwd,
+                &launch_entrypoint,
+                &env,
+            );
+            record_execute_phase("js_load_entrypoint_source", phase_start.elapsed());
+            let phase_start = Instant::now();
+            prepare_javascript_shadow(&mut vm, &resolved, &env)?;
+            record_execute_phase("js_prepare_shadow", phase_start.elapsed());
+
+            let phase_start = Instant::now();
+            let mut javascript_engine =
+                execution_engines.javascript("start JavaScript execution")?;
+            let context = javascript_engine.create_context(CreateJavascriptContextRequest {
+                vm_id: vm_id.clone(),
+                bootstrap_module: None,
+                compile_cache_root: Some(cache_root.join("node-compile-cache")),
+            });
+            record_execute_phase("js_create_context", phase_start.elapsed());
+            let phase_start = Instant::now();
+            let built_reader = build_module_reader(&mut vm, &resolved);
+            let guest_reader = built_reader.clone().map(|reader| {
+                Box::new(crate::plugins::host_dir::SessionModuleReader::new(reader))
+                    as Box<dyn GuestModuleReader>
+            });
+            let module_reader =
+                built_reader.map(|reader| Box::new(reader) as Box<dyn ModuleFsReader + Send>);
+            record_execute_phase("js_build_module_reader", phase_start.elapsed());
+            let phase_start = Instant::now();
+            let execution = javascript_engine
+                .start_execution_with_module_reader_and_runtime(
+                    StartJavascriptExecutionRequest {
+                        guest_runtime: guest_runtime_identity(&mut vm, None, None),
+                        vm_id: vm_id.clone(),
+                        context_id: context.context_id,
+                        argv: std::iter::once(launch_entrypoint.clone())
+                            .chain(resolved.execution_args.iter().cloned())
+                            .collect(),
+                        argv0: None,
+                        env: env.clone(),
+                        cwd: resolved.host_cwd.clone(),
+                        limits: javascript_execution_limits(&mut vm),
+                        inline_code,
+                        wasm_module_bytes: None,
+                    },
+                    module_reader,
+                    guest_reader,
+                    vm.runtime_context.clone(),
+                )
+                .map_err(javascript_error)?;
+            record_execute_phase("js_start_execution", phase_start.elapsed());
+            (ActiveExecution::Javascript(execution), env.clone())
+        }
+        GuestRuntimeKind::Python => {
+            // The `python` command path (marked by AGENTOS_PYTHON_ARGV) is
+            // explicit about file mode via AGENTOS_PYTHON_FILE, so a `-c` code
+            // string that happens to end in `.py` is never mistaken for a path.
+            // The low-level execute API keeps the `.py`-suffix heuristic.
+            let python_file_path = if resolved.env.contains_key("AGENTOS_PYTHON_ARGV") {
+                resolved.env.get("AGENTOS_PYTHON_FILE").map(PathBuf::from)
+            } else {
+                python_file_entrypoint(&resolved.entrypoint)
+            };
+            let runtime_context = vm.runtime_context.clone();
+            let python_limits = python_execution_limits_with_env(&mut vm, &env);
+            let python_guest_runtime = guest_runtime_identity(&mut vm, None, None);
+            // Pyodide discovery and runtime warmup can await bounded workers.
+            // They own only the VM-local Python service, not the mutable VM
+            // coordinator, so filesystem/kernel commands can still enter this
+            // VM and operations in other VMs remain independent.
+            drop(vm);
+            let mut python_engine = execution_engines.python("start Python execution")?;
+            let pyodide_dist_path = python_engine
+                .bundled_pyodide_dist_path_for_vm_async(&vm_id, &runtime_context)
+                .await
+                .map_err(python_error)?;
+            let pyodide_cache_path = pyodide_dist_path
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or(pyodide_dist_path.as_path())
+                .join("pyodide-package-cache");
+            add_runtime_guest_path_mapping(&mut env, PYTHON_PYODIDE_GUEST_ROOT, &pyodide_dist_path);
+            add_runtime_guest_path_mapping(
+                &mut env,
+                PYTHON_PYODIDE_CACHE_GUEST_ROOT,
+                &pyodide_cache_path,
+            );
+            add_runtime_host_access_path(
+                &mut env,
+                "AGENTOS_EXTRA_FS_READ_PATHS",
+                &pyodide_dist_path,
+                true,
+            );
+            add_runtime_host_access_path(
+                &mut env,
+                "AGENTOS_EXTRA_FS_READ_PATHS",
+                &pyodide_cache_path,
+                true,
+            );
+            add_runtime_host_access_path(
+                &mut env,
+                "AGENTOS_EXTRA_FS_WRITE_PATHS",
+                &pyodide_cache_path,
+                false,
+            );
+            let context = python_engine.create_context(CreatePythonContextRequest {
+                vm_id: vm_id.clone(),
+                pyodide_dist_path,
+            });
+            let execution = python_engine
+                .start_execution_with_runtime_async(
+                    StartPythonExecutionRequest {
+                        vm_id: vm_id.clone(),
+                        context_id: context.context_id,
+                        code: resolved.entrypoint.clone(),
+                        file_path: python_file_path,
+                        env: env.clone(),
+                        cwd: resolved.host_cwd.clone(),
+                        limits: python_limits,
+                        guest_runtime: python_guest_runtime,
+                    },
+                    runtime_context,
+                )
+                .await
+                .map_err(python_error)?;
+            drop(python_engine);
+            vm = input
+                .vm
+                .try_borrow_mut("register started Python execution")?;
+            (ActiveExecution::Python(execution), env.clone())
+        }
+        GuestRuntimeKind::WebAssembly => {
+            let wasm_limits = wasm_execution_limits(&mut vm);
+            let wasm_guest_runtime =
+                guest_runtime_identity(&mut vm, Some(u64::from(kernel_pid)), Some(0));
+            let wasm_permission_tier = resolved.wasm_permission_tier.unwrap_or_else(|| {
+                resolve_wasm_permission_tier(
+                    &mut vm,
+                    Some(&resolved.command),
+                    None,
+                    &resolved.entrypoint,
+                )
+            });
+            let runtime_context = vm.runtime_context.clone();
+            // WASM import-cache materialization and prewarm are external
+            // waits. Release mutable VM state before entering them.
+            drop(vm);
+            let mut wasm_engine = execution_engines.wasm("start WebAssembly execution")?;
+            let context = wasm_engine.create_context(CreateWasmContextRequest {
+                vm_id: vm_id.clone(),
+                module_path: Some(resolved.entrypoint.clone()),
+            });
+            let execution = wasm_engine
+                .start_execution_with_runtime_async(
+                    StartWasmExecutionRequest {
+                        vm_id: vm_id.clone(),
+                        context_id: context.context_id,
+                        argv: resolved.process_args.clone(),
+                        env: env.clone(),
+                        cwd: resolved.host_cwd.clone(),
+                        permission_tier: execution_wasm_permission_tier(wasm_permission_tier),
+                        limits: wasm_limits,
+                        guest_runtime: wasm_guest_runtime,
+                    },
+                    runtime_context,
+                )
+                .await
+                .map_err(wasm_error)?;
+            drop(wasm_engine);
+            vm = input
+                .vm
+                .try_borrow_mut("register started WebAssembly execution")?;
+            (ActiveExecution::Wasm(Box::new(execution)), env)
+        }
+    };
+    let child_pid = execution.child_pid();
+    let phase_start = Instant::now();
+    let kernel_stdin_writer_fd = if let Some(master_fd) = tty_master_fd {
+        master_fd
+    } else {
+        install_kernel_stdin_pipe(&mut vm.kernel, kernel_pid)?
+    };
+    let runtime_context = vm.runtime_context.clone();
+    let limits = vm.limits.clone();
+    vm.active_processes.insert(
+        payload.process_id.clone(),
+        ActiveProcess::new(
+            kernel_pid,
+            kernel_handle,
+            runtime_context,
+            limits,
+            process_event_capacity,
+            resolved.runtime,
+            execution,
+        )
+        .with_event_notify(Arc::clone(&process_event_notify))
+        .with_vm_pending_byte_budgets(vm_pending_stdin_bytes_budget, vm_pending_event_bytes_budget)
+        .with_kernel_stdin_writer_fd(kernel_stdin_writer_fd)
+        .with_tty_master_fd(tty_master_fd)
+        .with_guest_cwd(resolved.guest_cwd.clone())
+        .with_env(process_env)
+        .with_shadow_root(sandbox_root)
+        .with_host_cwd(resolved.host_cwd.clone()),
+    );
+    bridge.emit_lifecycle(&vm_id, LifecycleState::Busy)?;
+    mark_execute_response_ready(&vm_id, &payload.process_id);
+    record_execute_phase("process_register_and_lifecycle", phase_start.elapsed());
+    record_execute_phase("execute_total", execute_total_start.elapsed());
+
+    Ok(DispatchResult {
+        response: process_started_response(
+            request,
+            payload.process_id,
+            Some(if child_pid == 0 {
+                kernel_pid
+            } else {
+                child_pid
+            }),
+        ),
+        events: Vec::new(),
+    })
 }

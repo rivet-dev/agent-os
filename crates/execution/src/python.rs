@@ -520,6 +520,10 @@ impl PythonExecution {
         self.inner.uses_shared_v8_runtime()
     }
 
+    pub fn has_pending_events(&self) -> bool {
+        self.inner.has_pending_events()
+    }
+
     /// Run another sidecar-managed operation in the retained Pyodide
     /// interpreter owned by this execution.
     pub fn execute_retained(&mut self, source: String) -> Result<(), PythonExecutionError> {

@@ -416,24 +416,185 @@ pub(crate) fn signal_runtime_process(child_pid: u32, signal: i32) -> Result<(), 
     }
 }
 
+pub(crate) async fn kill_process_owned<B>(
+    bridge: SharedBridge<B>,
+    input: OwnedVmRouteInput,
+    payload: KillProcessRequest,
+) -> Result<DispatchResult, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    input.vm.try_command("kill process", |vm| {
+        NativeSidecar::<B>::kill_process_in_vm(
+            &bridge,
+            vm,
+            &input.vm_id,
+            &payload.process_id,
+            &payload.signal,
+        )
+    })?;
+    Ok(DispatchResult {
+        response: process_killed_response(&input.request, payload.process_id),
+        events: Vec::new(),
+    })
+}
+
+pub(crate) fn signal_vm_kernel_pid_owned<B>(
+    bridge: &SharedBridge<B>,
+    vm: &crate::state::VmHandle,
+    vm_id: &str,
+    target_kernel_pid: u32,
+    signal_name: &str,
+) -> Result<(), SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let signal = parse_signal(signal_name)?;
+    let located = vm.try_read("locate signal target", |vm| {
+        let alive = vm
+            .kernel
+            .list_processes()
+            .get(&target_kernel_pid)
+            .is_some_and(|info| info.status != ProcessStatus::Exited);
+        if !alive {
+            return Err(SidecarError::InvalidState(format!(
+                "ESRCH: no such process {target_kernel_pid}"
+            )));
+        }
+        Ok(vm.active_processes.iter().find_map(|(process_id, root)| {
+            NativeSidecar::<B>::active_process_path_by_kernel_pid(root, target_kernel_pid)
+                .map(|path| (process_id.clone(), path))
+        }))
+    })??;
+
+    match located {
+        Some((process_id, path)) if path.is_empty() => {
+            vm.try_command("signal root process", |vm| {
+                NativeSidecar::<B>::kill_process_in_vm(bridge, vm, vm_id, &process_id, signal_name)
+            })
+        }
+        Some((process_id, path)) => {
+            vm.try_command("signal tracked child process", |vm| {
+                let signal_key = path.last().map(String::as_str).unwrap_or(&process_id);
+                let registration = vm
+                    .signal_states
+                    .get(signal_key)
+                    .and_then(|handlers| handlers.get(&(signal as u32)))
+                    .cloned();
+                let VmState {
+                    kernel,
+                    active_processes,
+                    ..
+                } = vm;
+                let Some(root) = active_processes.get_mut(&process_id) else {
+                    return Ok(());
+                };
+                let Some(target) =
+                    NativeSidecar::<B>::active_process_by_owned_path_mut(root, &path)
+                else {
+                    return Err(SidecarError::InvalidState(format!(
+                        "ESRCH: no such process {target_kernel_pid}"
+                    )));
+                };
+                terminate_tracked_child_process_for_signal(
+                    kernel,
+                    target,
+                    signal,
+                    registration.as_ref(),
+                )
+            })?;
+            emit_security_audit_event(
+                bridge,
+                vm_id,
+                "security.process.kill",
+                audit_fields([
+                    (String::from("source"), String::from("guest_process")),
+                    (String::from("target_pid"), target_kernel_pid.to_string()),
+                    (String::from("process_id"), process_id),
+                    (String::from("signal"), signal_name.to_owned()),
+                ]),
+            );
+            Ok(())
+        }
+        None => {
+            let target_pid = i32::try_from(target_kernel_pid).map_err(|_| {
+                SidecarError::InvalidState(format!(
+                    "EINVAL: invalid process pid {target_kernel_pid}"
+                ))
+            })?;
+            vm.try_command("signal untracked kernel process", |vm| {
+                vm.kernel
+                    .signal_process(EXECUTION_DRIVER_NAME, target_pid, signal)
+                    .map_err(kernel_error)
+            })?;
+            emit_security_audit_event(
+                bridge,
+                vm_id,
+                "security.process.kill",
+                audit_fields([
+                    (String::from("source"), String::from("guest_process")),
+                    (String::from("target_pid"), target_kernel_pid.to_string()),
+                    (String::from("signal"), signal_name.to_owned()),
+                ]),
+            );
+            Ok(())
+        }
+    }
+}
+
+pub(crate) fn deliver_kernel_process_group_signal_to_tracked_runtimes_owned<B>(
+    bridge: &SharedBridge<B>,
+    vm: &crate::state::VmHandle,
+    vm_id: &str,
+    pgid: u32,
+    signal_name: &str,
+) -> Result<(), SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    parse_signal(signal_name)?;
+    let tracked_members = vm.try_read("list tracked process-group members", |vm| {
+        vm.kernel
+            .list_processes()
+            .into_iter()
+            .filter(|(_, info)| info.pgid == pgid && info.status != ProcessStatus::Exited)
+            .filter_map(|(kernel_pid, _)| {
+                vm.active_processes
+                    .values()
+                    .any(|root| {
+                        NativeSidecar::<B>::active_process_path_by_kernel_pid(root, kernel_pid)
+                            .is_some()
+                    })
+                    .then_some(kernel_pid)
+            })
+            .collect::<Vec<_>>()
+    })?;
+    for kernel_pid in tracked_members {
+        match signal_vm_kernel_pid_owned(bridge, vm, vm_id, kernel_pid, signal_name) {
+            Ok(()) => {}
+            Err(error) if sidecar_error_is_esrch(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 impl<B> NativeSidecar<B>
 where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    pub(crate) async fn kill_process(
+    pub(crate) fn kill_process(
         &mut self,
         request: &RequestFrame,
         payload: KillProcessRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-        self.kill_process_internal(&vm_id, &payload.process_id, &payload.signal)?;
-
-        Ok(DispatchResult {
-            response: process_killed_response(request, payload.process_id),
-            events: Vec::new(),
-        })
+    ) -> OwnedVmRouteFuture {
+        let input = self.prepare_owned_vm_route(request);
+        let bridge = self.bridge.clone();
+        Box::pin(async move { kill_process_owned(bridge, input?, payload).await })
     }
 
     pub(crate) fn kill_process_internal(
@@ -442,19 +603,34 @@ where
         process_id: &str,
         signal: &str,
     ) -> Result<(), SidecarError> {
-        let signal_name = signal.to_owned();
-        let signal = parse_signal(signal)?;
         let vm = self
             .vms
-            .get_mut(vm_id)
+            .handle(vm_id)
             .ok_or_else(|| SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}")))?;
+        let bridge = self.bridge.clone();
+        vm.try_command("kill process", |vm| {
+            Self::kill_process_in_vm(&bridge, vm, vm_id, process_id, signal)
+        })
+    }
+
+    pub(crate) fn kill_process_in_vm(
+        bridge: &SharedBridge<B>,
+        vm: &mut VmState,
+        vm_id: &str,
+        process_id: &str,
+        signal: &str,
+    ) -> Result<(), SidecarError> {
+        let signal_name = signal.to_owned();
+        let signal = parse_signal(signal)?;
         let signal_action = vm
             .signal_states
             .get(process_id)
             .and_then(|handlers| handlers.get(&(signal as u32)))
             .map(|registration| registration.action.clone())
             .unwrap_or(SignalDispositionAction::Default);
-        let process = vm.active_processes.get_mut(process_id).ok_or_else(|| {
+        let vm = &mut *vm;
+        let (kernel, active_processes) = (&mut vm.kernel, &mut vm.active_processes);
+        let process = active_processes.get_mut(process_id).ok_or_else(|| {
             SidecarError::InvalidState(format!("VM {vm_id} has no active process {process_id}"))
         })?;
         let kernel_pid = process.kernel_pid;
@@ -546,19 +722,19 @@ where
                 }
             }
             KillBehavior::SharedV8StateOnly => {
-                vm.kernel
+                kernel
                     .kill_process(EXECUTION_DRIVER_NAME, kernel_pid, signal)
                     .map_err(kernel_error)?;
             }
             KillBehavior::SharedV8Pause => {
                 process.execution.pause()?;
-                vm.kernel
+                kernel
                     .kill_process(EXECUTION_DRIVER_NAME, kernel_pid, signal)
                     .map_err(kernel_error)?;
             }
             KillBehavior::SharedV8Continue => {
                 process.execution.resume()?;
-                vm.kernel
+                kernel
                     .kill_process(EXECUTION_DRIVER_NAME, kernel_pid, signal)
                     .map_err(kernel_error)?;
                 if matches!(&process.execution, ActiveExecution::Javascript(_)) {
@@ -580,7 +756,7 @@ where
             }
             KillBehavior::SharedV8Terminate => {
                 if signal != 0 && matches!(process.execution, ActiveExecution::Python(_)) {
-                    close_kernel_process_stdin(&mut vm.kernel, process)?;
+                    close_kernel_process_stdin(kernel, process)?;
                 }
                 process.exit_signal = (signal != 0).then_some(signal);
                 process.exit_core_dumped = false;
@@ -644,13 +820,13 @@ where
             KillBehavior::Noop => {}
             KillBehavior::HostPid(pid) => {
                 if signal != 0 && matches!(process.execution, ActiveExecution::Python(_)) {
-                    close_kernel_process_stdin(&mut vm.kernel, process)?;
+                    close_kernel_process_stdin(kernel, process)?;
                 }
                 signal_runtime_process(pid, signal)?;
             }
         }
         emit_security_audit_event(
-            &self.bridge,
+            bridge,
             vm_id,
             "security.process.kill",
             audit_fields([
@@ -707,7 +883,7 @@ where
                 self.kill_process_internal(vm_id, &process_id, signal_name)
             }
             Some((process_id, path)) => {
-                let Some(vm) = self.vms.get_mut(vm_id) else {
+                let Some(mut vm) = self.vms.get_mut(vm_id) else {
                     return Ok(());
                 };
                 let signal_key = path.last().map(String::as_str).unwrap_or(&process_id);
@@ -716,7 +892,9 @@ where
                     .get(signal_key)
                     .and_then(|handlers| handlers.get(&(signal as u32)))
                     .cloned();
-                let Some(root) = vm.active_processes.get_mut(&process_id) else {
+                let vm = &mut *vm;
+                let (kernel, active_processes) = (&mut vm.kernel, &mut vm.active_processes);
+                let Some(root) = active_processes.get_mut(&process_id) else {
                     return Ok(());
                 };
                 let Some(target) = Self::active_process_by_owned_path_mut(root, &path) else {
@@ -725,7 +903,7 @@ where
                     )));
                 };
                 terminate_tracked_child_process_for_signal(
-                    &mut vm.kernel,
+                    kernel,
                     target,
                     signal,
                     registration.as_ref(),

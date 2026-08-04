@@ -2247,6 +2247,48 @@ where
     Ok(response.into())
 }
 
+/// Complete a deferred JavaScript RPC after selecting its exact process.
+///
+/// `net.connect` is a two-phase operation: the socket task leaves its owned
+/// socket in `pending_javascript_net_connects` and resolves the deferred value
+/// to `null`.  Every completion path must commit (or roll back) that pending
+/// state before replying to the guest; otherwise a successful connect is
+/// exposed as an empty socket handle.
+pub(crate) fn settle_javascript_sync_rpc_completion(
+    process: &mut ActiveProcess,
+    kernel_readiness: &KernelSocketReadinessRegistry,
+    request_id: u64,
+    completion: Result<Value, crate::state::DeferredRpcError>,
+) -> Result<(), SidecarError> {
+    let connected = process.pending_javascript_net_connects.remove(&request_id);
+    let completion = match (completion, connected) {
+        (Ok(_), Some(connected)) => {
+            finalize_javascript_net_connect(process, kernel_readiness, connected).map_err(|error| {
+                crate::state::DeferredRpcError {
+                    code: javascript_sync_rpc_error_code(&error),
+                    message: javascript_sync_rpc_error_message(&error),
+                }
+            })
+        }
+        (result @ Err(_), Some(connected)) => {
+            restore_pending_bound_unix_connect(process, &connected)?;
+            result
+        }
+        (result, None) => result,
+    };
+    match completion {
+        Ok(value) => process
+            .execution
+            .respond_javascript_sync_rpc_success(request_id, value),
+        Err(error) => process.execution.respond_javascript_sync_rpc_error(
+            request_id,
+            error.code,
+            error.message,
+        ),
+    }
+    .or_else(ignore_stale_javascript_sync_rpc_response)
+}
+
 fn service_javascript_internal_bridge_sync_rpc(
     process: &ActiveProcess,
     request: &JavascriptSyncRpcRequest,
@@ -2881,6 +2923,13 @@ async fn service_javascript_dgram_poll_response(
         .poll(kernel, process.kernel_pid, Duration::from_millis(wait_ms))
         .await?;
 
+    javascript_dgram_poll_event_response(socket_paths, event)
+}
+
+pub(in crate::execution) fn javascript_dgram_poll_event_response(
+    socket_paths: &JavascriptSocketPathContext,
+    event: Option<JavascriptUdpSocketEvent>,
+) -> Result<JavascriptSyncRpcServiceResponse, SidecarError> {
     match event {
         Some(JavascriptUdpSocketEvent::Message {
             data,

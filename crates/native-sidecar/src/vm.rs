@@ -7,8 +7,10 @@ use crate::bootstrap::{
     apply_root_filesystem_entry, discover_command_guest_paths, root_snapshot_entries,
     root_snapshot_entry, root_snapshot_from_entries,
 };
-use crate::bridge::{bridge_permissions, MountPluginContext};
+use crate::bridge::{bridge_permissions, build_mount_plugin_registry, MountPluginContext};
 use crate::execution::{sync_process_host_writes_to_kernel, terminate_child_process_tree};
+use crate::extension::Extension;
+use crate::process_event_broker::ProcessEventBroker;
 use crate::protocol::{
     AgentosProjectedAgent, ConfigureVmRequest, CreateLayerRequest, CreateOverlayRequest,
     DisposeReason, EventFrame, ExportSnapshotRequest, ImportSnapshotRequest, LinkPackageRequest,
@@ -17,6 +19,7 @@ use crate::protocol::{
     RootFilesystemEntryEncoding, RootFilesystemLowerDescriptor, SealLayerRequest,
     SnapshotRootFilesystemRequest, VmLifecycleState,
 };
+use crate::request_operations::OperationCancellationReason;
 use crate::service::{
     audit_fields, dirname, emit_security_audit_event, emit_structured_event, kernel_error,
     normalize_path, plugin_error, root_filesystem_error, validate_permissions_policy, vfs_error,
@@ -24,9 +27,9 @@ use crate::service::{
 use crate::state::{
     BridgeError, KernelSocketReadinessEvent, KernelSocketReadinessRegistry,
     KernelSocketReadinessTarget, QuarantinedVmGeneration, VmConfiguration, VmDnsConfig,
-    VmListenPolicy, VmPendingByteBudget, VmQuarantineReason, VmReconciliationSnapshot, VmState,
-    DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE, EXECUTION_DRIVER_NAME, JAVASCRIPT_COMMAND,
-    PYTHON_COMMAND, WASM_COMMAND,
+    VmExecutionEngines, VmHandle, VmListenPolicy, VmPendingByteBudget, VmQuarantineReason,
+    VmReconciliationSnapshot, VmState, DISPOSE_VM_SIGKILL_GRACE, DISPOSE_VM_SIGTERM_GRACE,
+    EXECUTION_DRIVER_NAME, JAVASCRIPT_COMMAND, PYTHON_COMMAND, WASM_COMMAND,
 };
 use crate::{DispatchResult, NativeSidecar, NativeSidecarBridge, SidecarError};
 
@@ -56,7 +59,8 @@ use agentos_native_sidecar_core::{
     provided_commands_response, root_filesystem_bootstrapped_response,
     root_filesystem_protocol_descriptor_from_config, root_filesystem_snapshot_response,
     snapshot_exported_response, snapshot_imported_response, vm_configured_response,
-    vm_created_response, vm_disposed_response, VmLayerStore,
+    vm_created_response, vm_disposed_response, vm_lifecycle_event as shared_vm_lifecycle_event,
+    VmLayerStore,
 };
 use agentos_runtime::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
 use agentos_runtime::capability::CapabilityRegistry;
@@ -214,6 +218,130 @@ fn projected_commands_from_guest_paths(
         })
         .collect()
 }
+
+/// Owned request context for work serialized by one VM's lifecycle ordering key.
+///
+/// Preparing this value performs the central ownership lookup once and clones the
+/// per-VM handle. Executing the operation can then happen after the
+/// `NativeSidecar` coordinator borrow has ended.
+#[derive(Clone)]
+pub(crate) struct OwnedVmLifecycleRequest {
+    request: crate::protocol::RequestFrame,
+    connection_id: String,
+    session_id: String,
+    vm_id: String,
+    vm: VmHandle,
+}
+
+/// Cloneable dependencies needed by the owned `ConfigureVm` implementation.
+pub(crate) struct ConfigureVmOwnedInput<B> {
+    lifecycle: OwnedVmLifecycleRequest,
+    bridge: crate::state::SharedBridge<B>,
+    snapshot_runtime_context: agentos_runtime::RuntimeContext,
+    sidecar_requests: crate::state::SharedSidecarRequestClient,
+}
+
+impl<B> Clone for ConfigureVmOwnedInput<B> {
+    fn clone(&self) -> Self {
+        Self {
+            lifecycle: self.lifecycle.clone(),
+            bridge: self.bridge.clone(),
+            snapshot_runtime_context: self.snapshot_runtime_context.clone(),
+            sidecar_requests: self.sidecar_requests.clone(),
+        }
+    }
+}
+
+/// Cloneable dependencies needed by the owned `LinkPackage` implementation.
+pub(crate) struct LinkPackageOwnedInput<B> {
+    lifecycle: OwnedVmLifecycleRequest,
+    bridge: crate::state::SharedBridge<B>,
+    sidecar_requests: crate::state::SharedSidecarRequestClient,
+}
+
+/// Create work detached from the process coordinator.
+///
+/// VM identity and resource admission are reserved during preparation. Database
+/// resolution, schema migration, filesystem bootstrap, and kernel construction
+/// happen when this owned value is executed.
+pub(crate) struct PreparedCreateVm<B> {
+    request: crate::protocol::RequestFrame,
+    payload: crate::protocol::CreateVmRequest,
+    connection_id: String,
+    session_id: String,
+    vm_id: String,
+    vm_generation: u64,
+    create_config: vm_config::CreateVmConfig,
+    root_filesystem: RootFilesystemDescriptor,
+    permissions_policy: agentos_vm_config::PermissionsPolicy,
+    limits: crate::limits::VmLimits,
+    vm_resources: Arc<ResourceLedger>,
+    vm_runtime_context: agentos_runtime::RuntimeContext,
+    dns: VmDnsConfig,
+    listen_policy: VmListenPolicy,
+    create_loopback_exempt_ports: BTreeSet<u16>,
+    bridge: crate::state::SharedBridge<B>,
+    dns_resolver: agentos_kernel::dns::SharedDnsResolver,
+    sidecar_requests: crate::state::SharedSidecarRequestClient,
+    process_event_notify: Arc<tokio::sync::Notify>,
+    extensions: Vec<Arc<dyn Extension>>,
+}
+
+/// Fully constructed VM awaiting a short session/registry publication command.
+pub(crate) struct CompletedCreateVm<B> {
+    request: crate::protocol::RequestFrame,
+    connection_id: String,
+    session_id: String,
+    vm_id: String,
+    vm: VmState,
+    events: Vec<EventFrame>,
+    bridge: crate::state::SharedBridge<B>,
+}
+
+/// Validated dispose intent. The stdio owner begins VM disposal and waits for
+/// operation drain before converting this plan into [`PreparedDisposeVm`].
+pub(crate) struct DisposeVmPlan<B> {
+    request: Option<crate::protocol::RequestFrame>,
+    connection_id: String,
+    session_id: String,
+    vm_id: String,
+    reason: DisposeReason,
+    bridge: crate::state::SharedBridge<B>,
+    sidecar_requests: crate::state::SharedSidecarRequestClient,
+    process_event_broker: ProcessEventBroker,
+}
+
+/// Detached VM teardown payload.
+///
+/// Construction is a short coordinator command performed only after the
+/// ownership coordinator has entered `Closing` and drained VM operations. The
+/// value then owns all state needed for bounded teardown and reconciliation, so
+/// no lifecycle permit or `&mut NativeSidecar` is retained across its awaits.
+pub(crate) struct PreparedDisposeVm<B> {
+    plan: DisposeVmPlan<B>,
+    vm: VmState,
+}
+
+/// Teardown result awaiting short central tracking/quarantine finalization.
+pub(crate) struct CompletedDisposeVm {
+    request: Option<crate::protocol::RequestFrame>,
+    connection_id: String,
+    session_id: String,
+    vm_id: String,
+    events: Vec<EventFrame>,
+    quarantine: Option<QuarantinedVmGeneration>,
+    result: Result<(), SidecarError>,
+}
+
+impl<B> Clone for LinkPackageOwnedInput<B> {
+    fn clone(&self) -> Self {
+        Self {
+            lifecycle: self.lifecycle.clone(),
+            bridge: self.bridge.clone(),
+            sidecar_requests: self.sidecar_requests.clone(),
+        }
+    }
+}
 // ---------------------------------------------------------------------------
 // NativeSidecar VM lifecycle methods
 // ---------------------------------------------------------------------------
@@ -223,6 +351,301 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
+    pub(crate) fn prepare_vm_lifecycle_request(
+        &self,
+        request: &crate::protocol::RequestFrame,
+    ) -> Result<OwnedVmLifecycleRequest, SidecarError> {
+        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
+        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+        let vm = self.vms.handle(&vm_id).ok_or_else(|| {
+            SidecarError::InvalidState(format!(
+                "VM {vm_id} no longer exists while preparing its lifecycle operation"
+            ))
+        })?;
+        Ok(OwnedVmLifecycleRequest {
+            request: request.clone(),
+            connection_id,
+            session_id,
+            vm_id,
+            vm,
+        })
+    }
+
+    pub(crate) fn prepare_configure_vm_request(
+        &self,
+        request: &crate::protocol::RequestFrame,
+    ) -> Result<ConfigureVmOwnedInput<B>, SidecarError> {
+        let lifecycle = self.prepare_vm_lifecycle_request(request)?;
+        let snapshot_runtime_context = self.runtime_context.as_ref().cloned().ok_or_else(|| {
+            SidecarError::InvalidState(String::from(
+                "ERR_AGENTOS_RUNTIME_UNAVAILABLE: snapshot pre-warm requires RuntimeContext",
+            ))
+        })?;
+        Ok(ConfigureVmOwnedInput {
+            lifecycle,
+            bridge: self.bridge.clone(),
+            snapshot_runtime_context,
+            sidecar_requests: self.sidecar_requests.clone(),
+        })
+    }
+
+    pub(crate) fn prepare_link_package_request(
+        &self,
+        request: &crate::protocol::RequestFrame,
+    ) -> Result<LinkPackageOwnedInput<B>, SidecarError> {
+        Ok(LinkPackageOwnedInput {
+            lifecycle: self.prepare_vm_lifecycle_request(request)?,
+            bridge: self.bridge.clone(),
+            sidecar_requests: self.sidecar_requests.clone(),
+        })
+    }
+
+    pub(crate) fn prepare_create_vm(
+        &mut self,
+        request: &crate::protocol::RequestFrame,
+        payload: crate::protocol::CreateVmRequest,
+    ) -> Result<PreparedCreateVm<B>, SidecarError> {
+        let (connection_id, session_id) = self.session_scope_for(&request.ownership)?;
+        self.require_owned_session(&connection_id, &session_id)?;
+        let create_config: vm_config::CreateVmConfig = serde_json::from_str(&payload.config)
+            .map_err(|error| {
+                SidecarError::InvalidState(format!("invalid create VM config JSON: {error}"))
+            })?;
+        create_config
+            .validate(self.config.max_frame_bytes)
+            .map_err(|error| {
+                SidecarError::InvalidState(format!("invalid create VM config: {error}"))
+            })?;
+        let root_filesystem =
+            root_filesystem_protocol_descriptor_from_config(&create_config.root_filesystem);
+        let permissions_policy = create_config
+            .permissions
+            .clone()
+            .unwrap_or_else(deny_all_policy);
+        validate_permissions_policy(&permissions_policy)?;
+        let limits = crate::limits::vm_limits_from_config(
+            create_config.limits.as_ref(),
+            self.config.max_frame_bytes,
+        )?;
+        let dns = vm_dns_config_from_config(create_config.dns.as_ref())?;
+        let listen_policy = vm_listen_policy_from_config(create_config.listen.as_ref())?;
+        let create_loopback_exempt_ports = create_config
+            .loopback_exempt_ports
+            .iter()
+            .copied()
+            .collect();
+        let (vm_id, vm_generation) = self.allocate_vm_identity()?;
+        let process_runtime_context = self.runtime_context.as_ref().cloned().ok_or_else(|| {
+            SidecarError::InvalidState(String::from(
+                "ERR_AGENTOS_RUNTIME_UNAVAILABLE: VM admission requires RuntimeContext",
+            ))
+        })?;
+        let vm_resources = Arc::new(vm_resource_ledger(
+            &vm_id,
+            vm_generation,
+            &limits,
+            Arc::clone(process_runtime_context.resources()),
+        )?);
+        let vm_runtime_context =
+            process_runtime_context.scoped_for_vm(Arc::clone(&vm_resources), vm_generation);
+
+        Ok(PreparedCreateVm {
+            request: request.clone(),
+            payload,
+            connection_id,
+            session_id,
+            vm_id,
+            vm_generation,
+            create_config,
+            root_filesystem,
+            permissions_policy,
+            limits,
+            vm_resources,
+            vm_runtime_context,
+            dns,
+            listen_policy,
+            create_loopback_exempt_ports,
+            bridge: self.bridge.clone(),
+            dns_resolver: Arc::clone(&self.dns_resolver),
+            sidecar_requests: self.sidecar_requests.clone(),
+            process_event_notify: Arc::clone(&self.process_event_notify),
+            extensions: self.extensions.values().cloned().collect(),
+        })
+    }
+
+    pub(crate) fn complete_create_vm(
+        &mut self,
+        completed: CompletedCreateVm<B>,
+    ) -> Result<DispatchResult, SidecarError> {
+        let CompletedCreateVm {
+            request,
+            connection_id,
+            session_id,
+            vm_id,
+            vm,
+            events,
+            bridge,
+        } = completed;
+        if let Err(error) = self.require_owned_session(&connection_id, &session_id) {
+            cleanup_unpublished_vm(&bridge, &vm_id, &vm);
+            return Err(error);
+        }
+        if self.vms.contains_key(&vm_id) {
+            cleanup_unpublished_vm(&bridge, &vm_id, &vm);
+            return Err(SidecarError::InvalidState(format!(
+                "VM {vm_id} already exists during create finalization"
+            )));
+        }
+        let cleanup_cwd = vm.cwd.clone();
+        let cleanup_socket_dir = vm.unix_socket_host_dir.clone();
+        if let Err(error) = self.vms.insert(vm_id.clone(), vm) {
+            cleanup_path(&cleanup_cwd, "unpublished VM shadow root");
+            cleanup_path(&cleanup_socket_dir, "unpublished VM Unix socket namespace");
+            if let Err(cleanup_error) = bridge.clear_vm_permissions(&vm_id) {
+                eprintln!(
+                    "ERR_AGENTOS_VM_CREATE_CLEANUP: vm_id={vm_id} phase=permission_reset error={cleanup_error}"
+                );
+            }
+            return Err(error);
+        }
+        self.sessions
+            .get_mut(&session_id)
+            .expect("owned session should exist during create finalization")
+            .vm_ids
+            .insert(vm_id.clone());
+        self.observe_active_vm_generations();
+        Ok(DispatchResult {
+            response: vm_created_response(&request, vm_id),
+            events,
+        })
+    }
+
+    pub(crate) fn prepare_dispose_vm(
+        &self,
+        request: &crate::protocol::RequestFrame,
+        payload: crate::protocol::DisposeVmRequest,
+    ) -> Result<DisposeVmPlan<B>, SidecarError> {
+        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
+        self.prepare_owned_vm_disposal(
+            connection_id,
+            session_id,
+            vm_id,
+            payload.reason,
+            Some(request.clone()),
+        )
+    }
+
+    /// Prepare teardown for a VM owned by a non-protocol lifecycle source.
+    ///
+    /// Extension session cleanup uses this entry point for its bound VMs. It
+    /// deliberately has no request envelope: callers complete it with
+    /// [`Self::complete_owned_vm_disposal`] and receive only lifecycle events.
+    pub(crate) fn prepare_internal_vm_disposal(
+        &self,
+        connection_id: String,
+        session_id: String,
+        vm_id: String,
+        reason: DisposeReason,
+    ) -> Result<DisposeVmPlan<B>, SidecarError> {
+        self.prepare_owned_vm_disposal(connection_id, session_id, vm_id, reason, None)
+    }
+
+    fn prepare_owned_vm_disposal(
+        &self,
+        connection_id: String,
+        session_id: String,
+        vm_id: String,
+        reason: DisposeReason,
+        request: Option<crate::protocol::RequestFrame>,
+    ) -> Result<DisposeVmPlan<B>, SidecarError> {
+        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+        Ok(DisposeVmPlan {
+            request,
+            connection_id,
+            session_id,
+            vm_id,
+            reason,
+            bridge: self.bridge.clone(),
+            sidecar_requests: self.sidecar_requests.clone(),
+            process_event_broker: self.process_event_broker.clone(),
+        })
+    }
+
+    /// Detach a VM after ownership coordination has entered `Closing` and all
+    /// previously admitted VM operations have drained.
+    pub(crate) fn detach_vm_for_disposal(
+        &mut self,
+        plan: DisposeVmPlan<B>,
+    ) -> Result<PreparedDisposeVm<B>, SidecarError> {
+        self.require_owned_vm(&plan.connection_id, &plan.session_id, &plan.vm_id)?;
+        let cancellation_reason = dispose_cancellation_reason(&plan.reason);
+        if let Err(error) = plan.process_event_broker.dispose_vm(
+            &plan.connection_id,
+            &plan.session_id,
+            &plan.vm_id,
+            cancellation_reason,
+        ) {
+            eprintln!(
+                "ERR_AGENTOS_PROCESS_EVENT_VM_DISPOSAL: connection_id={} session_id={} vm_id={} error={error}",
+                plan.connection_id, plan.session_id, plan.vm_id
+            );
+        }
+        let vm = self
+            .vms
+            .try_remove(&plan.vm_id, "begin owned dispose")?
+            .expect("owned VM should exist during dispose detachment");
+        Ok(PreparedDisposeVm { plan, vm })
+    }
+
+    pub(crate) fn complete_dispose_vm(
+        &mut self,
+        completed: CompletedDisposeVm,
+    ) -> Result<DispatchResult, SidecarError> {
+        let request = completed.request.clone().ok_or_else(|| {
+            SidecarError::InvalidState(String::from(
+                "protocol VM disposal completed without a request envelope",
+            ))
+        })?;
+        let vm_id = completed.vm_id.clone();
+        let events = self.complete_owned_vm_disposal(completed)?;
+        Ok(DispatchResult {
+            response: vm_disposed_response(&request, vm_id),
+            events,
+        })
+    }
+
+    /// Finalize a detached VM teardown without constructing a protocol
+    /// response. This is the short central-state mutation paired with
+    /// [`Self::prepare_internal_vm_disposal`].
+    pub(crate) fn complete_owned_vm_disposal(
+        &mut self,
+        completed: CompletedDisposeVm,
+    ) -> Result<Vec<EventFrame>, SidecarError> {
+        let CompletedDisposeVm {
+            request: _,
+            connection_id,
+            session_id,
+            vm_id,
+            mut events,
+            quarantine,
+            result,
+        } = completed;
+        self.reclaim_vm_tracking(&session_id, &vm_id);
+        if let Some(quarantine) = quarantine {
+            self.retain_quarantined_vm(quarantine)?;
+        } else {
+            self.observe_active_vm_generations();
+        }
+        result?;
+        events.push(shared_vm_lifecycle_event(
+            &connection_id,
+            &session_id,
+            &vm_id,
+            VmLifecycleState::Disposed,
+        ));
+        Ok(events)
+    }
+
     pub(crate) fn allocate_vm_identity(&mut self) -> Result<(String, u64), SidecarError> {
         self.reap_reconciled_quarantined_vms();
         self.ensure_vm_generation_capacity()?;
@@ -246,6 +669,17 @@ where
     }
 
     pub(crate) async fn create_vm(
+        &mut self,
+        request: &crate::protocol::RequestFrame,
+        payload: crate::protocol::CreateVmRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        let prepared = self.prepare_create_vm(request, payload)?;
+        let completed = prepared.execute().await?;
+        self.complete_create_vm(completed)
+    }
+
+    #[allow(dead_code)]
+    async fn create_vm_legacy_impl(
         &mut self,
         request: &crate::protocol::RequestFrame,
         payload: crate::protocol::CreateVmRequest,
@@ -519,6 +953,11 @@ where
                 pending_stdin_bytes_budget,
                 pending_event_bytes_budget,
                 resources: vm_resources,
+                execution_engines: VmExecutionEngines::new(
+                    vm_id.clone(),
+                    vm_runtime_context.clone(),
+                    Arc::clone(&self.process_event_notify),
+                ),
                 runtime_context: vm_runtime_context,
                 database,
                 capabilities,
@@ -566,7 +1005,7 @@ where
                 unix_address_registry: Arc::new(Mutex::new(BTreeMap::new())),
                 unix_socket_host_dir,
             },
-        );
+        )?;
         self.observe_active_vm_generations();
 
         let events = vec![
@@ -591,351 +1030,51 @@ where
         request: &crate::protocol::RequestFrame,
         payload: crate::protocol::DisposeVmRequest,
     ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        let events = self
-            .dispose_vm_internal(&connection_id, &session_id, &vm_id, payload.reason)
-            .await?;
-
-        Ok(DispatchResult {
-            response: vm_disposed_response(request, vm_id),
-            events,
-        })
+        let plan = self.prepare_dispose_vm(request, payload)?;
+        let prepared = self.detach_vm_for_disposal(plan)?;
+        let completed = prepared.execute().await;
+        self.complete_dispose_vm(completed)
     }
 
-    pub(crate) async fn bootstrap_root_filesystem(
+    pub(crate) fn bootstrap_root_filesystem(
         &mut self,
         request: &crate::protocol::RequestFrame,
         entries: Vec<RootFilesystemEntry>,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let root = vm.kernel.root_filesystem_mut().ok_or_else(|| {
-            SidecarError::InvalidState(String::from("VM root filesystem is unavailable"))
-        })?;
-        for entry in &entries {
-            apply_root_filesystem_entry(root, entry)?;
-        }
-
-        Ok(DispatchResult {
-            response: root_filesystem_bootstrapped_response(request, entries.len() as u32),
-            events: Vec::new(),
-        })
+    ) -> impl std::future::Future<Output = Result<DispatchResult, SidecarError>> + 'static {
+        let input = self.prepare_vm_lifecycle_request(request);
+        async move { bootstrap_root_filesystem_owned(input?, entries).await }
     }
 
-    pub(crate) async fn configure_vm(
+    pub(crate) fn configure_vm(
         &mut self,
         request: &crate::protocol::RequestFrame,
         payload: ConfigureVmRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let __t = Instant::now();
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let mount_plugins = &self.mount_plugins;
-        let bridge = self.bridge.clone();
-        let snapshot_runtime_context = self.runtime_context.as_ref().cloned().ok_or_else(|| {
-            SidecarError::InvalidState(String::from(
-                "ERR_AGENTOS_RUNTIME_UNAVAILABLE: snapshot pre-warm requires RuntimeContext",
-            ))
-        })?;
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let max_pread_bytes = vm.kernel.resource_limits().max_pread_bytes;
-        let original_permissions = vm.configuration.permissions.clone();
-        let configured_permissions = payload
-            .permissions
-            .clone()
-            .map(crate::wire::permissions_policy_config_from_wire)
-            .unwrap_or_else(|| original_permissions.clone());
-        validate_permissions_policy(&configured_permissions)?;
-        bridge.set_vm_permissions(&vm_id, &allow_all_policy())?;
-        let mut effective_mounts = payload.mounts.clone();
-        append_module_access_mount(&mut effective_mounts, payload.module_access_cwd.as_ref())?;
-        let package_descriptors = package_descriptors_from_wire(&payload.packages)?;
-        let mut provided_commands: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for descriptor in &package_descriptors {
-            provided_commands.insert(
-                descriptor.name.clone(),
-                descriptor
-                    .commands
-                    .iter()
-                    .map(|target| target.command.clone())
-                    .collect(),
-            );
-        }
-        let snapshot_userland_code = resolve_agent_snapshot_bundle(&package_descriptors)?;
-        let package_mounts =
-            build_packages_projection(&vm_id, &package_descriptors, &payload.packages_mount_at)?;
-        effective_mounts.extend(package_mounts);
-        apply_package_provides_env(&mut vm.guest_env, &package_descriptors);
-        append_package_provides_mounts(&mut effective_mounts, &package_descriptors)?;
-        let reconfigure_result = reconcile_mounts(
-            mount_plugins,
-            vm,
-            &effective_mounts,
-            MountPluginContext {
-                bridge: bridge.clone(),
-                runtime_context: vm.runtime_context.clone(),
-                connection_id: connection_id.clone(),
-                session_id: session_id.clone(),
-                vm_id: vm_id.clone(),
-                sidecar_requests: self.sidecar_requests.clone(),
-                database: vm.database.clone(),
-                max_pread_bytes,
-            },
-        )
-        .and_then(|()| {
-            vm.command_guest_paths = discover_command_guest_paths(&mut vm.kernel);
-            // The `{ packageDir }` projection lands each package's `bin/<cmd>` at
-            // `/opt/agentos/bin/<cmd>` (on `$PATH`) but does NOT populate
-            // `/__agentos/commands`, so `discover_command_guest_paths` alone misses
-            // projected commands and every projected wasm/js command resolves to
-            // ENOEXEC (absolute path) / ENOENT (bare name). Register each projected
-            // command by name -> its `/opt/agentos/bin/<cmd>` entrypoint so both the
-            // kernel command table (via `execution_commands` below) and the sidecar
-            // entrypoint resolver (`resolve_guest_command_entrypoint`) can find it.
-            for commands in provided_commands.values() {
-                for command in commands {
-                    let entrypoint =
-                        format!("{}/{command}", crate::package_projection::OPT_AGENTOS_BIN);
-                    vm.command_guest_paths
-                        .entry(command.clone())
-                        .or_insert(entrypoint);
-                }
-            }
-            refresh_guest_command_path_env(&mut vm.guest_env, &vm.command_guest_paths);
-            let mut execution_commands =
-                vec![String::from(JAVASCRIPT_COMMAND), String::from(WASM_COMMAND)];
-            execution_commands.extend(payload.bootstrap_commands.iter().cloned());
-            execution_commands.extend(payload.binding_shim_commands.iter().cloned());
-            execution_commands.extend(vm.command_guest_paths.keys().cloned());
-            vm.kernel
-                .register_driver(CommandDriver::new(
-                    EXECUTION_DRIVER_NAME,
-                    execution_commands,
-                ))
-                .map_err(kernel_error)?;
-            vm.command_permissions = payload.command_permissions.clone().into_iter().collect();
-            let mut loopback_exempt_ports = vm.create_loopback_exempt_ports.clone();
-            loopback_exempt_ports.extend(payload.loopback_exempt_ports.iter().copied());
-            vm.kernel.set_loopback_exempt_ports(loopback_exempt_ports);
-            vm.configuration = VmConfiguration {
-                mounts: effective_mounts.clone(),
-                software: payload.software.clone(),
-                permissions: configured_permissions.clone(),
-                module_access_cwd: payload.module_access_cwd.clone(),
-                instructions: payload.instructions.clone(),
-                projected_modules: payload.projected_modules.clone(),
-                command_permissions: payload.command_permissions.clone().into_iter().collect(),
-                provided_commands: provided_commands.clone(),
-                // jsRuntime is create-time only; preserve what create_vm stored.
-                js_runtime: vm.configuration.js_runtime.clone(),
-                snapshot_userland_code: snapshot_userland_code.clone(),
-                loopback_exempt_ports: payload.loopback_exempt_ports.clone(),
-            };
-            vm.provided_commands = provided_commands;
-            Ok(())
-        });
-        match reconfigure_result {
-            Ok(()) => {
-                bridge.set_vm_permissions(&vm_id, &configured_permissions)?;
-            }
-            Err(error) => {
-                match bridge.restore_vm_permissions_fail_closed(
-                    &vm_id,
-                    &original_permissions,
-                    "configure_vm rollback",
-                    &error,
-                ) {
-                    Ok(()) => return Err(error),
-                    Err(rollback_error) => {
-                        self.vms
-                            .get_mut(&vm_id)
-                            .expect("owned VM should exist")
-                            .configuration
-                            .permissions = deny_all_policy();
-                        return Err(rollback_error);
-                    }
-                }
-            }
-        }
-
-        let applied_mounts = effective_mounts.len() as u32;
-        let configured_software = payload.software.len() as u32;
-        let projected_commands = projected_commands_from_guest_paths(&vm.command_guest_paths);
-        let agents = projected_agents_from_descriptors(&package_descriptors);
-        vm.projected_agent_launch = projected_agent_launch_from_descriptors(&package_descriptors);
-        let _ = vm;
-        // Pre-warm the agent-SDK snapshot when a configured package opts in with
-        // `agent.snapshot`. The sidecar reads the bundle from the host package dir
-        // it already projects, so the first session is warm without shipping the
-        // source over the client wire.
-        if let Some(userland) = snapshot_userland_code {
-            let requested_bytes = userland.len();
-            let runtime_for_job = snapshot_runtime_context.clone();
-            match snapshot_runtime_context
-                .blocking()
-                .run(requested_bytes, move || {
-                    agentos_execution::v8_host::pre_warm_agent_snapshot(&runtime_for_job, &userland)
-                })
-                .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => eprintln!("agent snapshot pre-warm failed: {error}"),
-                Err(error) => {
-                    eprintln!("agent snapshot pre-warm admission or execution failed: {error}")
-                }
-            }
-        }
-
-        tracing::info!(target: "agentos_native_sidecar::perf", phase = "configure_vm", elapsed_ms = __t.elapsed().as_millis() as u64, applied_mounts = applied_mounts as u64, "vm phase");
-        Ok(DispatchResult {
-            response: vm_configured_response(
-                request,
-                applied_mounts,
-                configured_software,
-                projected_commands,
-                agents,
-            ),
-            events: Vec::new(),
-        })
+    ) -> impl std::future::Future<Output = Result<DispatchResult, SidecarError>> + 'static {
+        let input = self.prepare_configure_vm_request(request);
+        async move { configure_vm_owned(input?, payload) }
     }
 
     /// Runtime dynamic `linkSoftware`: add one package's tar/current/bin leaf
     /// mounts to the live VM so commands appear under `/opt/agentos/bin`
     /// immediately, with no reboot. Returns the linked command names.
-    pub(crate) async fn link_package(
+    pub(crate) fn link_package(
         &mut self,
         request: &crate::protocol::RequestFrame,
         payload: LinkPackageRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let descriptor =
-            crate::package_projection::read_package_manifest_from_path(&payload.package.path)?;
-        let new_mounts = build_packages_projection(
-            &vm_id,
-            std::slice::from_ref(&descriptor),
-            crate::package_projection::OPT_AGENTOS_ROOT,
-        )?;
-        if new_mounts.iter().all(|mount| {
-            vm.configuration
-                .mounts
-                .iter()
-                .any(|existing| existing.guest_path == mount.guest_path)
-        }) {
-            let projected_commands = descriptor
-                .commands
-                .iter()
-                .map(|target| ProjectedCommand {
-                    name: target.command.clone(),
-                    guest_path: projected_command_guest_path(&target.command),
-                })
-                .collect();
-            let agents = projected_agents_from_descriptors(std::slice::from_ref(&descriptor));
-            return Ok(DispatchResult {
-                response: package_linked_response(request, projected_commands, agents),
-                events: Vec::new(),
-            });
-        }
-        for mount in &new_mounts {
-            if vm
-                .configuration
-                .mounts
-                .iter()
-                .any(|existing| existing.guest_path == mount.guest_path)
-            {
-                if let Some(command) = mount
-                    .guest_path
-                    .strip_prefix(crate::package_projection::OPT_AGENTOS_BIN)
-                    .and_then(|path| path.strip_prefix('/'))
-                    .filter(|path| !path.is_empty())
-                {
-                    return Err(SidecarError::InvalidState(format!(
-                        "command {command:?} is already provided by another package"
-                    )));
-                }
-                return Err(SidecarError::InvalidState(format!(
-                    "agentos package mount already exists at {}",
-                    mount.guest_path
-                )));
-            }
-        }
-        let mount_context = MountPluginContext {
-            bridge: self.bridge.clone(),
-            runtime_context: vm.runtime_context.clone(),
-            connection_id: connection_id.clone(),
-            session_id: session_id.clone(),
-            vm_id: vm_id.clone(),
-            sidecar_requests: self.sidecar_requests.clone(),
-            database: vm.database.clone(),
-            max_pread_bytes: vm.kernel.resource_limits().max_pread_bytes,
-        };
-        mount_leaf_descriptors(&self.mount_plugins, vm, &new_mounts, mount_context)?;
-        vm.configuration.mounts.extend(new_mounts);
-
-        let commands = descriptor
-            .commands
-            .iter()
-            .map(|target| target.command.clone())
-            .collect::<Vec<_>>();
-        vm.provided_commands
-            .insert(descriptor.name.clone(), commands.clone());
-        vm.configuration
-            .provided_commands
-            .insert(descriptor.name.clone(), commands.clone());
-        for command in &commands {
-            let entrypoint = projected_command_guest_path(command);
-            vm.command_guest_paths
-                .entry(command.clone())
-                .or_insert(entrypoint);
-        }
-        refresh_guest_command_path_env(&mut vm.guest_env, &vm.command_guest_paths);
-        let mut execution_commands =
-            vec![String::from(JAVASCRIPT_COMMAND), String::from(WASM_COMMAND)];
-        execution_commands.extend(vm.command_guest_paths.keys().cloned());
-        vm.kernel
-            .register_driver(CommandDriver::new(
-                EXECUTION_DRIVER_NAME,
-                execution_commands,
-            ))
-            .map_err(kernel_error)?;
-        let projected_commands = commands
-            .iter()
-            .map(|command| ProjectedCommand {
-                name: command.clone(),
-                guest_path: projected_command_guest_path(command),
-            })
-            .collect();
-        let agents = projected_agents_from_descriptors(std::slice::from_ref(&descriptor));
-        if let Some(vm) = self.vms.get_mut(&vm_id) {
-            vm.projected_agent_launch
-                .extend(projected_agent_launch_from_descriptors(
-                    std::slice::from_ref(&descriptor),
-                ));
-        }
-
-        Ok(DispatchResult {
-            response: package_linked_response(request, projected_commands, agents),
-            events: Vec::new(),
-        })
+    ) -> impl std::future::Future<Output = Result<DispatchResult, SidecarError>> + 'static {
+        let input = self.prepare_link_package_request(request);
+        async move { link_package_owned(input?, payload).await }
     }
 
-    pub(crate) async fn provided_commands(
+    pub(crate) fn provided_commands(
         &mut self,
         request: &crate::protocol::RequestFrame,
         _payload: ProvidedCommandsRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let packages = self
-            .vms
-            .get(&vm_id)
-            .map(|vm| {
+    ) -> impl std::future::Future<Output = Result<DispatchResult, SidecarError>> + 'static {
+        let input = self.prepare_vm_lifecycle_request(request);
+        async move {
+            let input = input?;
+            let packages = input.vm.try_read("list provided commands", |vm| {
                 vm.provided_commands
                     .iter()
                     .map(|(package_name, commands)| PackageCommands {
@@ -943,170 +1082,92 @@ where
                         commands: commands.clone(),
                     })
                     .collect()
+            })?;
+            Ok(DispatchResult {
+                response: provided_commands_response(&input.request, packages),
+                events: Vec::new(),
             })
-            .unwrap_or_default();
-
-        Ok(DispatchResult {
-            response: provided_commands_response(request, packages),
-            events: Vec::new(),
-        })
+        }
     }
 
-    pub(crate) async fn create_layer(
+    pub(crate) fn create_layer(
         &mut self,
         request: &crate::protocol::RequestFrame,
-        _payload: CreateLayerRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let layer_id = vm
-            .layers
-            .create_writable_layer()
-            .map_err(sidecar_core_error)?;
-
-        Ok(DispatchResult {
-            response: layer_created_response(request, layer_id),
-            events: Vec::new(),
-        })
+        payload: CreateLayerRequest,
+    ) -> impl std::future::Future<Output = Result<DispatchResult, SidecarError>> + 'static {
+        let input = self.prepare_vm_lifecycle_request(request);
+        async move { create_layer_owned(input?, payload).await }
     }
 
-    pub(crate) async fn seal_layer(
+    pub(crate) fn seal_layer(
         &mut self,
         request: &crate::protocol::RequestFrame,
         payload: SealLayerRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let layer_id = vm
-            .layers
-            .seal_layer(&payload.layer_id)
-            .map_err(sidecar_core_error)?;
-
-        Ok(DispatchResult {
-            response: layer_sealed_response(request, layer_id),
-            events: Vec::new(),
-        })
+    ) -> impl std::future::Future<Output = Result<DispatchResult, SidecarError>> + 'static {
+        let input = self.prepare_vm_lifecycle_request(request);
+        async move { seal_layer_owned(input?, payload).await }
     }
 
-    pub(crate) async fn import_snapshot(
+    pub(crate) fn import_snapshot(
         &mut self,
         request: &crate::protocol::RequestFrame,
         payload: ImportSnapshotRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let layer_id = vm
-            .layers
-            .import_snapshot(root_snapshot_from_entries(&payload.entries)?)
-            .map_err(sidecar_core_error)?;
-
-        Ok(DispatchResult {
-            response: snapshot_imported_response(request, layer_id),
-            events: Vec::new(),
-        })
+    ) -> impl std::future::Future<Output = Result<DispatchResult, SidecarError>> + 'static {
+        let input = self.prepare_vm_lifecycle_request(request);
+        async move { import_snapshot_owned(input?, payload).await }
     }
 
-    pub(crate) async fn export_snapshot(
+    pub(crate) fn export_snapshot(
         &mut self,
         request: &crate::protocol::RequestFrame,
         payload: ExportSnapshotRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let snapshot = vm
-            .layers
-            .export_snapshot(&payload.layer_id)
-            .map_err(sidecar_core_error)?;
-
-        Ok(DispatchResult {
-            response: snapshot_exported_response(
-                request,
-                payload.layer_id,
-                root_snapshot_entries(&snapshot),
-            ),
-            events: Vec::new(),
-        })
+    ) -> impl std::future::Future<Output = Result<DispatchResult, SidecarError>> + 'static {
+        let input = self.prepare_vm_lifecycle_request(request);
+        async move { export_snapshot_owned(input?, payload).await }
     }
 
-    pub(crate) async fn create_overlay(
+    pub(crate) fn create_overlay(
         &mut self,
         request: &crate::protocol::RequestFrame,
         payload: CreateOverlayRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let layer_id = vm
-            .layers
-            .create_overlay_layer(
-                protocol_root_filesystem_mode(payload.mode),
-                payload.upper_layer_id,
-                payload.lower_layer_ids,
-            )
-            .map_err(sidecar_core_error)?;
-
-        Ok(DispatchResult {
-            response: overlay_created_response(request, layer_id),
-            events: Vec::new(),
-        })
+    ) -> impl std::future::Future<Output = Result<DispatchResult, SidecarError>> + 'static {
+        let input = self.prepare_vm_lifecycle_request(request);
+        async move { create_overlay_owned(input?, payload).await }
     }
 
-    pub(crate) async fn snapshot_root_filesystem(
+    pub(crate) fn snapshot_root_filesystem(
         &mut self,
         request: &crate::protocol::RequestFrame,
         payload: SnapshotRootFilesystemRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
-        let snapshot = vm
-            .kernel
-            .snapshot_root_filesystem_bounded(payload.max_bytes)
-            .map_err(kernel_error)?;
-
-        Ok(DispatchResult {
-            response: root_filesystem_snapshot_response(
-                request,
-                snapshot.entries.iter().map(root_snapshot_entry).collect(),
-            ),
-            events: Vec::new(),
-        })
+    ) -> impl std::future::Future<Output = Result<DispatchResult, SidecarError>> + 'static {
+        let input = self.prepare_vm_lifecycle_request(request);
+        async move { snapshot_root_filesystem_owned(input?, payload).await }
     }
 
-    pub(crate) async fn list_mounts(
+    pub(crate) fn list_mounts(
         &mut self,
         request: &crate::protocol::RequestFrame,
         _payload: ListMountsRequest,
-    ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-
-        let vm = self.vms.get(&vm_id).expect("owned VM should exist");
-        let mounts = vm
-            .kernel
-            .mounted_filesystems()
-            .into_iter()
-            .map(|mount| MountInfo {
-                path: mount.path,
-                kind: mount.plugin_id,
-                read_only: mount.read_only,
+    ) -> impl std::future::Future<Output = Result<DispatchResult, SidecarError>> + 'static {
+        let input = self.prepare_vm_lifecycle_request(request);
+        async move {
+            let input = input?;
+            let mounts = input.vm.try_read("list mounts", |vm| {
+                vm.kernel
+                    .mounted_filesystems()
+                    .into_iter()
+                    .map(|mount| MountInfo {
+                        path: mount.path,
+                        kind: mount.plugin_id,
+                        read_only: mount.read_only,
+                    })
+                    .collect()
+            })?;
+            Ok(DispatchResult {
+                response: mounts_listed_response(&input.request, mounts),
+                events: Vec::new(),
             })
-            .collect();
-
-        Ok(DispatchResult {
-            response: mounts_listed_response(request, mounts),
-            events: Vec::new(),
-        })
+        }
     }
 
     pub(crate) async fn dispose_vm_internal(
@@ -1114,9 +1175,25 @@ where
         connection_id: &str,
         session_id: &str,
         vm_id: &str,
-        _reason: DisposeReason,
+        reason: DisposeReason,
     ) -> Result<Vec<EventFrame>, SidecarError> {
         self.require_owned_vm(connection_id, session_id, vm_id)?;
+
+        let cancellation_reason = match &reason {
+            DisposeReason::Requested => OperationCancellationReason::Explicit,
+            DisposeReason::ConnectionClosed => OperationCancellationReason::ConnectionClosed,
+            DisposeReason::HostShutdown => OperationCancellationReason::Shutdown,
+        };
+        if let Err(error) = self.process_event_broker.dispose_vm(
+            connection_id,
+            session_id,
+            vm_id,
+            cancellation_reason,
+        ) {
+            eprintln!(
+                "ERR_AGENTOS_PROCESS_EVENT_VM_DISPOSAL: connection_id={connection_id} session_id={session_id} vm_id={vm_id} error={error}"
+            );
+        }
 
         let mut events = vec![self.vm_lifecycle_event(
             connection_id,
@@ -1129,7 +1206,7 @@ where
         // down: a process that refuses to die must not strand the VM's tracking
         // entries for the process lifetime.
         let terminate_result = self.terminate_vm_processes(vm_id, &mut events).await;
-        if let Some(vm) = self.vms.get_mut(vm_id) {
+        if let Some(mut vm) = self.vms.get_mut(vm_id) {
             if let Some(task) = vm.execution_retention_wake_task.take() {
                 task.abort();
             }
@@ -1148,22 +1225,23 @@ where
         // mandatory final write fail with ERR_AGENTOS_BLOCKING_EXECUTOR_SHUTDOWN.
         // Dispose requests are serialized by the sidecar, so retire admission
         // after the process drain but before detaching the VM from its registry.
-        let vm_before_disposal = self
+        let (vm_runtime_context, vm_capabilities, vm_generation) = self
             .vms
             .get(vm_id)
+            .map(|vm| {
+                (
+                    vm.runtime_context.clone(),
+                    vm.capabilities.clone(),
+                    vm.generation,
+                )
+            })
             .expect("owned VM should exist before disposal");
-        let capability_admission_error = close_vm_admission(
-            &vm_before_disposal.runtime_context,
-            &vm_before_disposal.capabilities,
-        )
-        .err();
+        let capability_admission_error =
+            close_vm_admission(&vm_runtime_context, &vm_capabilities).err();
         if let Some(error) = capability_admission_error.as_ref() {
             eprintln!("ERR_AGENTOS_VM_CAPABILITY_ADMISSION_CLOSE: vm_id={vm_id} error={error}");
         }
-        let fairness_retirement_result = retire_vm_fairness(
-            &vm_before_disposal.runtime_context,
-            vm_before_disposal.generation,
-        );
+        let fairness_retirement_result = retire_vm_fairness(&vm_runtime_context, vm_generation);
         if let Err(error) = fairness_retirement_result.as_ref() {
             eprintln!("ERR_AGENTOS_VM_FAIRNESS_RETIRE: vm_id={vm_id} error={error}");
         }
@@ -1172,7 +1250,7 @@ where
         // no `?` below can leave the registry entry (or any per-VM map) behind.
         let mut vm = self
             .vms
-            .remove(vm_id)
+            .try_remove(vm_id, "dispose")?
             .expect("owned VM should exist before disposal");
 
         // `continue_on_error = true` => `shutdown_configured_mounts` never returns
@@ -1401,7 +1479,7 @@ where
             // finalize process-owned bridge state before snapshotting the root
             // filesystem; dropping ActiveProcess after the snapshot loses
             // committed host-materialized SQLite/WAL pages.
-            let vm = self
+            let mut vm = self
                 .vms
                 .get_mut(vm_id)
                 .expect("active VM should exist during process teardown");
@@ -1416,7 +1494,7 @@ where
                 let should_sync_host_writes = process.host_write_dirty_recursive()
                     || !process.clean_host_writes_are_observable_recursive();
                 if should_sync_host_writes {
-                    sync_process_host_writes_to_kernel(vm, &process)?;
+                    sync_process_host_writes_to_kernel(&mut vm, &process)?;
                 }
                 terminate_child_process_tree(
                     &mut vm.kernel,
@@ -1451,6 +1529,1099 @@ where
 
         Ok(())
     }
+}
+
+impl<B> PreparedCreateVm<B>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    pub(crate) async fn execute(self) -> Result<CompletedCreateVm<B>, SidecarError> {
+        let __t = Instant::now();
+        let PreparedCreateVm {
+            request,
+            payload,
+            connection_id,
+            session_id,
+            vm_id,
+            vm_generation,
+            create_config,
+            root_filesystem,
+            permissions_policy,
+            limits,
+            vm_resources,
+            vm_runtime_context,
+            dns,
+            listen_policy,
+            create_loopback_exempt_ports,
+            bridge,
+            dns_resolver,
+            sidecar_requests,
+            process_event_notify,
+            extensions,
+        } = self;
+        let cwd = create_vm_shadow_root(&vm_id)?;
+        let cleanup_bridge = bridge.clone();
+        let cleanup_vm_id = vm_id.clone();
+        let cleanup_cwd = cwd.clone();
+        let result = async move {
+            let (guest_cwd, host_cwd) = resolve_vm_cwds(create_config.cwd.as_ref(), &cwd)?;
+            fs::create_dir_all(&host_cwd)
+                .map_err(|error| SidecarError::Io(format!("failed to create VM cwd: {error}")))?;
+            let resource_limits = limits.resources.clone();
+            let database = match create_config.database.as_ref() {
+                Some(descriptor) => {
+                    let database = crate::vm_sqlite::resolve_vm_sqlite(
+                        descriptor,
+                        vm_runtime_context.clone(),
+                        limits.sqlite.max_result_bytes,
+                    )
+                    .await
+                    .map_err(|error| {
+                        SidecarError::InvalidState(format!(
+                            "failed to resolve VM SQLite database: {error}"
+                        ))
+                    })?;
+                    crate::plugins::chunked_actor_sqlite::bootstrap_schema(database.as_ref())
+                        .await
+                        .map_err(|error| {
+                            SidecarError::InvalidState(format!(
+                                "failed to migrate VM SQLite database: {error}"
+                            ))
+                        })?;
+                    for extension in extensions {
+                        extension
+                            .bootstrap_vm_database(database.clone())
+                            .await
+                            .map_err(|error| {
+                                SidecarError::InvalidState(format!(
+                                    "failed to migrate extension VM database schema: {error}"
+                                ))
+                            })?;
+                    }
+                    Some(database)
+                }
+                None => None,
+            };
+            let capabilities = CapabilityRegistry::new(vm_generation, Arc::clone(&vm_resources));
+            bridge.set_vm_permissions(&vm_id, &permissions_policy)?;
+            let permissions = bridge_permissions(bridge.clone(), &vm_id);
+            let mut guest_env = filter_env(&vm_id, &create_config.env, &permissions);
+            // Bootstrap runs under the trusted sidecar policy, then restores the
+            // caller's guest-visible permissions before publication.
+            bridge.set_vm_permissions(&vm_id, &allow_all_policy())?;
+            let native_root = native_root_plugin_from_config(create_config.native_root.as_ref())?;
+            let loaded_snapshot = if native_root.is_some() {
+                None
+            } else {
+                bridge.with_mut(|bridge| {
+                    bridge.load_filesystem_state(LoadFilesystemStateRequest {
+                        vm_id: vm_id.clone(),
+                    })
+                })?
+            };
+            if native_root.is_none() {
+                materialize_shadow_root_snapshot_entries(
+                    &cwd,
+                    &root_filesystem,
+                    loaded_snapshot.as_ref(),
+                    &resource_limits,
+                )?;
+            }
+
+            let mut config = KernelVmConfig::new(vm_id.clone());
+            config.cwd = guest_cwd.clone();
+            config.env = guest_env.clone();
+            if let Some(user) = create_config.user.as_ref() {
+                config.user = agentos_kernel::user::UserConfig {
+                    uid: user.uid,
+                    gid: user.gid,
+                    euid: user.euid,
+                    egid: user.egid,
+                    username: user.username.clone(),
+                    homedir: user.homedir.clone(),
+                    shell: user.shell.clone(),
+                    gecos: user.gecos.clone(),
+                    group_name: user.group_name.clone(),
+                    supplementary_gids: user.supplementary_gids.clone().unwrap_or_default(),
+                    accounts: user
+                        .accounts
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|account| agentos_kernel::user::UserAccount {
+                            uid: account.uid,
+                            gid: account.gid,
+                            username: account.username.clone(),
+                            homedir: account.homedir.clone(),
+                            shell: account.shell.clone(),
+                            gecos: account.gecos.clone().unwrap_or_default(),
+                            supplementary_gids: account.supplementary_gids.clone(),
+                        })
+                        .collect(),
+                    groups: user
+                        .groups
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|group| agentos_kernel::user::GroupRecord {
+                            gid: group.gid,
+                            name: group.name.clone(),
+                            members: group.members.clone(),
+                        })
+                        .collect(),
+                };
+            }
+            config.permissions = permissions;
+            config.dns = agentos_kernel::dns::DnsConfig {
+                name_servers: dns.name_servers.clone(),
+                overrides: dns.overrides.clone(),
+            };
+            config.dns_resolver = dns_resolver;
+            config.loopback_exempt_ports = create_loopback_exempt_ports.clone();
+            let mount_plugins = build_mount_plugin_registry::<B>()?;
+            let root_mount_table = if let Some(native_root) = native_root.as_ref() {
+                build_native_root_mount_table(
+                    &mount_plugins,
+                    native_root,
+                    &root_filesystem,
+                    MountPluginContext {
+                        bridge: bridge.clone(),
+                        runtime_context: vm_runtime_context.clone(),
+                        connection_id: connection_id.clone(),
+                        session_id: session_id.clone(),
+                        vm_id: vm_id.clone(),
+                        sidecar_requests,
+                        database: database.clone(),
+                        max_pread_bytes: resource_limits.max_pread_bytes,
+                    },
+                )?
+            } else {
+                agentos_native_sidecar_core::build_root_mount_table_with_loaded_snapshot(
+                    &create_config.root_filesystem,
+                    loaded_snapshot.as_ref(),
+                    &resource_limits,
+                )
+                .map_err(|error| SidecarError::InvalidState(error.to_string()))?
+            };
+            config.resources = resource_limits;
+            let mut kernel = KernelVm::new(root_mount_table, config);
+            kernel
+                .set_socket_resource_ledger(Arc::clone(&vm_resources))
+                .map_err(kernel_error)?;
+            let kernel_socket_readiness: KernelSocketReadinessRegistry = Arc::new(
+                crate::state::KernelSocketReadinessRegistryState::new(
+                    limits.reactor.max_capabilities,
+                ),
+            );
+            let readiness_targets = Arc::clone(&kernel_socket_readiness);
+            kernel.set_socket_readiness_sink(Some(move |readiness: SocketReadiness| {
+                for target in readiness_targets.targets(readiness.socket_id) {
+                    send_kernel_socket_readiness_event(target, readiness);
+                }
+            }));
+            let command_guest_paths = discover_command_guest_paths(&mut kernel);
+            refresh_guest_command_path_env(&mut guest_env, &command_guest_paths);
+            let mut execution_commands = vec![
+                String::from(JAVASCRIPT_COMMAND),
+                String::from(PYTHON_COMMAND),
+                String::from("python3"),
+                String::from(WASM_COMMAND),
+            ];
+            if let Some(bootstrap_commands) = &create_config.bootstrap_commands {
+                execution_commands.extend(bootstrap_commands.iter().cloned());
+            }
+            execution_commands.extend(command_guest_paths.keys().cloned());
+            kernel
+                .register_driver(CommandDriver::new(
+                    EXECUTION_DRIVER_NAME,
+                    execution_commands,
+                ))
+                .map_err(kernel_error)?;
+            if let Some(root) = kernel.root_filesystem_mut() {
+                root.finish_bootstrap();
+            }
+            bridge.set_vm_permissions(&vm_id, &permissions_policy)?;
+            bridge.emit_lifecycle(&vm_id, LifecycleState::Starting)?;
+            bridge.emit_lifecycle(&vm_id, LifecycleState::Ready)?;
+            bridge.emit_log(
+                &vm_id,
+                format!("created VM {vm_id} for session {session_id}"),
+            )?;
+
+            let shadow_sync_inventory = crate::execution::initial_shadow_sync_inventory(&cwd)?;
+            let unix_socket_host_dir = create_vm_unix_socket_host_dir()?;
+            let pending_stdin_bytes_budget = VmPendingByteBudget::new(
+                limits.process.pending_stdin_bytes,
+                agentos_bridge::queue_tracker::TrackedLimit::PendingKernelStdinBytes,
+            );
+            let pending_event_bytes_budget = VmPendingByteBudget::new(
+                limits.process.pending_event_bytes,
+                agentos_bridge::queue_tracker::TrackedLimit::PendingExecutionEventBytes,
+            );
+            let events = vec![
+                shared_vm_lifecycle_event(
+                    &connection_id,
+                    &session_id,
+                    &vm_id,
+                    VmLifecycleState::Creating,
+                ),
+                shared_vm_lifecycle_event(
+                    &connection_id,
+                    &session_id,
+                    &vm_id,
+                    VmLifecycleState::Ready,
+                ),
+            ];
+            let vm = VmState {
+                connection_id: connection_id.clone(),
+                session_id: session_id.clone(),
+                generation: vm_generation,
+                limits,
+                pending_stdin_bytes_budget,
+                pending_event_bytes_budget,
+                resources: vm_resources,
+                execution_engines: VmExecutionEngines::new(
+                    vm_id.clone(),
+                    vm_runtime_context.clone(),
+                    process_event_notify,
+                ),
+                runtime_context: vm_runtime_context,
+                database,
+                capabilities,
+                dns,
+                listen_policy,
+                create_loopback_exempt_ports,
+                guest_env,
+                requested_runtime: payload.runtime,
+                root_filesystem_mode: protocol_root_filesystem_mode(root_filesystem.mode),
+                guest_cwd,
+                cwd,
+                host_cwd,
+                kernel,
+                kernel_socket_readiness,
+                host_net_transfer_descriptions: Arc::new(Mutex::new(BTreeMap::new())),
+                loaded_snapshot,
+                configuration: VmConfiguration {
+                    permissions: permissions_policy,
+                    js_runtime: create_config.js_runtime.clone(),
+                    ..VmConfiguration::default()
+                },
+                layers: VmLayerStore::default(),
+                command_guest_paths,
+                provided_commands: BTreeMap::new(),
+                command_permissions: BTreeMap::new(),
+                bindings: BTreeMap::new(),
+                active_processes: BTreeMap::new(),
+                vm_fetch_streams: BTreeMap::new(),
+                next_vm_fetch_stream_id: 0,
+                executions: BTreeMap::new(),
+                execution_processes: BTreeMap::new(),
+                next_public_execution_id: 0,
+                execution_retention_wake_deadline_ms: None,
+                execution_retention_wake_task: None,
+                package_mutation_execution_id: None,
+                typescript_compiler_staged: false,
+                exited_process_snapshots: VecDeque::new(),
+                detached_child_processes: BTreeSet::new(),
+                attached_child_event_cursor: 0,
+                detached_child_event_cursor: 0,
+                signal_states: BTreeMap::new(),
+                packages_staging_root: None,
+                projected_agent_launch: BTreeMap::new(),
+                shadow_sync_inventory,
+                unix_address_registry: Arc::new(Mutex::new(BTreeMap::new())),
+                unix_socket_host_dir,
+            };
+            tracing::info!(target: "agentos_native_sidecar::perf", phase = "create_vm", elapsed_ms = __t.elapsed().as_millis() as u64, "vm phase");
+            Ok(CompletedCreateVm {
+                request,
+                connection_id,
+                session_id,
+                vm_id,
+                vm,
+                events,
+                bridge,
+            })
+        }
+        .await;
+        if result.is_err() {
+            cleanup_path(&cleanup_cwd, "failed VM create shadow root");
+            if let Err(error) = cleanup_bridge.clear_vm_permissions(&cleanup_vm_id) {
+                eprintln!(
+                    "ERR_AGENTOS_VM_CREATE_CLEANUP: vm_id={cleanup_vm_id} phase=permission_reset error={error}"
+                );
+            }
+        }
+        result
+    }
+}
+
+impl<B> PreparedDisposeVm<B>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    pub(crate) async fn execute(mut self) -> CompletedDisposeVm {
+        let DisposeVmPlan {
+            request,
+            connection_id,
+            session_id,
+            vm_id,
+            reason: _,
+            bridge,
+            sidecar_requests,
+            process_event_broker: _,
+        } = self.plan;
+        let mut events = vec![shared_vm_lifecycle_event(
+            &connection_id,
+            &session_id,
+            &vm_id,
+            VmLifecycleState::Disposing,
+        )];
+
+        let terminate_result =
+            terminate_detached_vm_processes::<B>(&bridge, &vm_id, &mut self.vm).await;
+        if let Some(task) = self.vm.execution_retention_wake_task.take() {
+            task.abort();
+        }
+        self.vm.execution_retention_wake_deadline_ms = None;
+        for execution in self.vm.executions.values_mut() {
+            if let Some(task) = execution.deadline_task.take() {
+                task.abort();
+            }
+        }
+
+        let capability_admission_error =
+            close_vm_admission(&self.vm.runtime_context, &self.vm.capabilities).err();
+        if let Some(error) = capability_admission_error.as_ref() {
+            eprintln!("ERR_AGENTOS_VM_CAPABILITY_ADMISSION_CLOSE: vm_id={vm_id} error={error}");
+        }
+        let fairness_retirement_result =
+            retire_vm_fairness(&self.vm.runtime_context, self.vm.generation);
+        if let Err(error) = fairness_retirement_result.as_ref() {
+            eprintln!("ERR_AGENTOS_VM_FAIRNESS_RETIRE: vm_id={vm_id} error={error}");
+        }
+
+        let mount_context = MountPluginContext {
+            bridge: bridge.clone(),
+            runtime_context: self.vm.runtime_context.clone(),
+            connection_id: connection_id.clone(),
+            session_id: session_id.clone(),
+            vm_id: vm_id.clone(),
+            sidecar_requests,
+            database: self.vm.database.clone(),
+            max_pread_bytes: self.vm.kernel.resource_limits().max_pread_bytes,
+        };
+        if let Err(error) =
+            shutdown_configured_mounts(&mut self.vm, &mount_context, "dispose_vm", true)
+        {
+            eprintln!(
+                "ERR_AGENTOS_VM_TEARDOWN_CLEANUP: vm_id={vm_id} phase=mount_shutdown error={error}"
+            );
+        }
+        let teardown_result = finish_vm_teardown_owned(&bridge, &vm_id, &mut self.vm);
+
+        cleanup_path(&self.vm.cwd, "disposed VM shadow root");
+        if let Some(staging_root) = self.vm.packages_staging_root.take() {
+            cleanup_path(&staging_root, "disposed VM package staging root");
+        }
+        cleanup_path(
+            &self.vm.unix_socket_host_dir,
+            "disposed VM Unix socket namespace",
+        );
+
+        let shutdown_deadline = Duration::from_millis(self.vm.limits.reactor.shutdown_deadline_ms);
+        let (reconciliation, deadline_expired) = wait_for_vm_reconciliation(
+            self.vm.resources.as_ref(),
+            &self.vm.runtime_context,
+            &self.vm.capabilities,
+            shutdown_deadline,
+        )
+        .await;
+        let quarantine_reason = vm_quarantine_reason(
+            capability_admission_error.is_some(),
+            fairness_retirement_result.is_err(),
+            reconciliation,
+            deadline_expired,
+        );
+
+        let (quarantine, result) = if let Some(reason) = quarantine_reason {
+            let diagnostic = quarantine_diagnostic(
+                &vm_id,
+                &self.vm,
+                reconciliation,
+                reason.clone(),
+                capability_admission_error.as_deref(),
+                fairness_retirement_result.as_ref().err(),
+            );
+            eprintln!("{diagnostic}");
+            if let Err(error) = terminate_result.as_ref() {
+                eprintln!(
+                    "ERR_AGENTOS_VM_TEARDOWN_CLEANUP: vm_id={vm_id} phase=processes error={error}"
+                );
+            }
+            if let Err(error) = teardown_result.as_ref() {
+                eprintln!(
+                    "ERR_AGENTOS_VM_TEARDOWN_CLEANUP: vm_id={vm_id} phase=kernel_or_bridge error={error}"
+                );
+            }
+            (
+                Some(QuarantinedVmGeneration {
+                    connection_id: connection_id.clone(),
+                    session_id: session_id.clone(),
+                    vm_id: vm_id.clone(),
+                    generation: self.vm.generation,
+                    resources: Arc::clone(&self.vm.resources),
+                    runtime_context: self.vm.runtime_context.clone(),
+                    capabilities: self.vm.capabilities.clone(),
+                    reason,
+                }),
+                Err(SidecarError::Execution(diagnostic)),
+            )
+        } else {
+            let result = fairness_retirement_result
+                .and(terminate_result)
+                .and(teardown_result);
+            (None, result)
+        };
+
+        CompletedDisposeVm {
+            request,
+            connection_id,
+            session_id,
+            vm_id,
+            events: std::mem::take(&mut events),
+            quarantine,
+            result,
+        }
+    }
+}
+
+async fn terminate_detached_vm_processes<B>(
+    bridge: &crate::state::SharedBridge<B>,
+    vm_id: &str,
+    vm: &mut VmState,
+) -> Result<(), SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let mut first_error = None;
+    let process_ids = vm.active_processes.keys().cloned().collect::<Vec<_>>();
+    for process_id in &process_ids {
+        if let Err(error) =
+            NativeSidecar::<B>::kill_process_in_vm(bridge, vm, vm_id, process_id, "SIGTERM")
+        {
+            record_vm_teardown_error(vm_id, "sigterm", error, &mut first_error);
+        }
+    }
+    if !process_ids.is_empty() {
+        tokio::time::sleep(DISPOSE_VM_SIGTERM_GRACE).await;
+    }
+    for process_id in &process_ids {
+        if let Err(error) =
+            NativeSidecar::<B>::kill_process_in_vm(bridge, vm, vm_id, process_id, "SIGKILL")
+        {
+            record_vm_teardown_error(vm_id, "sigkill", error, &mut first_error);
+        }
+    }
+    if !process_ids.is_empty() {
+        tokio::time::sleep(DISPOSE_VM_SIGKILL_GRACE).await;
+    }
+
+    let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
+    let unix_address_registry = Arc::clone(&vm.unix_address_registry);
+    let remaining = std::mem::take(&mut vm.active_processes);
+    if !remaining.is_empty() {
+        eprintln!(
+            "ERR_AGENTOS_VM_FORCED_PROCESS_FINALIZE: vm_id={vm_id} process_count={}",
+            remaining.len()
+        );
+    }
+    for (process_id, mut process) in remaining {
+        let should_sync_host_writes = process.host_write_dirty_recursive()
+            || !process.clean_host_writes_are_observable_recursive();
+        if should_sync_host_writes {
+            if let Err(error) = sync_process_host_writes_to_kernel(vm, &process) {
+                record_vm_teardown_error(vm_id, "process_host_write_sync", error, &mut first_error);
+            }
+        }
+        terminate_child_process_tree(
+            &mut vm.kernel,
+            &mut process,
+            &kernel_readiness,
+            &unix_address_registry,
+        );
+        process.kernel_handle.finish(137);
+        if let Err(error) = vm.kernel.wait_and_reap(process.kernel_pid) {
+            record_vm_teardown_error(vm_id, "process_reap", kernel_error(error), &mut first_error);
+        }
+        vm.signal_states.remove(&process_id);
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+fn finish_vm_teardown_owned<B>(
+    bridge: &crate::state::SharedBridge<B>,
+    vm_id: &str,
+    vm: &mut VmState,
+) -> Result<(), SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let mut first_error = None;
+    let snapshot = if vm.kernel.root_filesystem_mut().is_some() {
+        match vm
+            .kernel
+            .snapshot_root_filesystem()
+            .map_err(kernel_error)
+            .and_then(|snapshot| encode_root_snapshot(&snapshot).map_err(root_filesystem_error))
+        {
+            Ok(bytes) => Some(FilesystemSnapshot {
+                format: String::from(ROOT_FILESYSTEM_SNAPSHOT_FORMAT),
+                bytes,
+            }),
+            Err(error) => {
+                record_vm_teardown_error(vm_id, "snapshot", error, &mut first_error);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Err(error) = bridge.emit_lifecycle(vm_id, LifecycleState::Terminated) {
+        record_vm_teardown_error(vm_id, "lifecycle", error, &mut first_error);
+    }
+    if let Err(error) = vm.kernel.dispose().map_err(kernel_error) {
+        record_vm_teardown_error(vm_id, "kernel", error, &mut first_error);
+    }
+    if let Some(snapshot) = snapshot {
+        if let Err(error) = bridge.with_mut(|bridge| {
+            bridge.flush_filesystem_state(FlushFilesystemStateRequest {
+                vm_id: vm_id.to_owned(),
+                snapshot,
+            })
+        }) {
+            record_vm_teardown_error(vm_id, "filesystem_flush", error, &mut first_error);
+        }
+    }
+    if let Err(error) = bridge.clear_vm_permissions(vm_id) {
+        record_vm_teardown_error(vm_id, "permission_reset", error, &mut first_error);
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+fn quarantine_diagnostic(
+    vm_id: &str,
+    vm: &VmState,
+    reconciliation: VmReconciliationSnapshot,
+    reason: VmQuarantineReason,
+    capability_admission_error: Option<&str>,
+    fairness_retirement_error: Option<&SidecarError>,
+) -> String {
+    match reason {
+        VmQuarantineReason::TeardownDeadline => format!(
+            "ERR_AGENTOS_VM_TEARDOWN_DEADLINE: vm_id={vm_id} generation={} active_tasks={} outstanding_capabilities={} ledger_zero={} deadline_ms={}; raise limits.reactor.shutdownDeadlineMs",
+            vm.generation,
+            reconciliation.active_tasks,
+            reconciliation.outstanding_capabilities,
+            reconciliation.ledger_zero,
+            vm.limits.reactor.shutdown_deadline_ms
+        ),
+        VmQuarantineReason::ResourceIntegrity => format!(
+            "ERR_AGENTOS_VM_RESOURCE_INTEGRITY: vm_id={vm_id} generation={} accounting integrity failed; generation cannot be reaped",
+            vm.generation
+        ),
+        VmQuarantineReason::CapabilityRegistryIntegrity => format!(
+            "ERR_AGENTOS_VM_CAPABILITY_INTEGRITY: vm_id={vm_id} generation={} capability admission could not be closed; generation cannot be reaped; error={}",
+            vm.generation,
+            capability_admission_error.unwrap_or("unknown")
+        ),
+        VmQuarantineReason::FairnessIntegrity => format!(
+            "ERR_AGENTOS_VM_FAIRNESS_INTEGRITY: vm_id={vm_id} generation={} fairness membership could not be retired; generation cannot be reaped; error={}",
+            vm.generation,
+            fairness_retirement_error
+                .map(ToString::to_string)
+                .unwrap_or_else(|| String::from("unknown"))
+        ),
+    }
+}
+
+fn dispose_cancellation_reason(reason: &DisposeReason) -> OperationCancellationReason {
+    match reason {
+        DisposeReason::Requested => OperationCancellationReason::Explicit,
+        DisposeReason::ConnectionClosed => OperationCancellationReason::ConnectionClosed,
+        DisposeReason::HostShutdown => OperationCancellationReason::Shutdown,
+    }
+}
+
+fn cleanup_unpublished_vm<B>(bridge: &crate::state::SharedBridge<B>, vm_id: &str, vm: &VmState)
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    cleanup_path(&vm.cwd, "unpublished VM shadow root");
+    cleanup_path(
+        &vm.unix_socket_host_dir,
+        "unpublished VM Unix socket namespace",
+    );
+    if let Err(error) = bridge.clear_vm_permissions(vm_id) {
+        eprintln!(
+            "ERR_AGENTOS_VM_CREATE_CLEANUP: vm_id={vm_id} phase=permission_reset error={error}"
+        );
+    }
+}
+
+fn cleanup_path(path: &Path, label: &str) {
+    if let Err(error) = fs::remove_dir_all(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            eprintln!(
+                "ERR_AGENTOS_VM_PATH_CLEANUP: label={label:?} path={} error={error}",
+                path.display()
+            );
+        }
+    }
+}
+
+pub(crate) async fn bootstrap_root_filesystem_owned(
+    input: OwnedVmLifecycleRequest,
+    entries: Vec<RootFilesystemEntry>,
+) -> Result<DispatchResult, SidecarError> {
+    input.vm.try_command("bootstrap root filesystem", |vm| {
+        let root = vm.kernel.root_filesystem_mut().ok_or_else(|| {
+            SidecarError::InvalidState(String::from("VM root filesystem is unavailable"))
+        })?;
+        for entry in &entries {
+            apply_root_filesystem_entry(root, entry)?;
+        }
+        Ok(())
+    })?;
+
+    Ok(DispatchResult {
+        response: root_filesystem_bootstrapped_response(&input.request, entries.len() as u32),
+        events: Vec::new(),
+    })
+}
+
+pub(crate) fn configure_vm_owned<B>(
+    input: ConfigureVmOwnedInput<B>,
+    payload: ConfigureVmRequest,
+) -> Result<DispatchResult, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let __t = Instant::now();
+    let ConfigureVmOwnedInput {
+        lifecycle,
+        bridge,
+        snapshot_runtime_context,
+        sidecar_requests,
+    } = input;
+    let OwnedVmLifecycleRequest {
+        request,
+        connection_id,
+        session_id,
+        vm_id,
+        vm,
+    } = lifecycle;
+
+    let original_permissions = vm.try_read("read configure VM permissions", |vm| {
+        vm.configuration.permissions.clone()
+    })?;
+    let configured_permissions = payload
+        .permissions
+        .clone()
+        .map(crate::wire::permissions_policy_config_from_wire)
+        .unwrap_or_else(|| original_permissions.clone());
+    validate_permissions_policy(&configured_permissions)?;
+
+    let mut effective_mounts = payload.mounts.clone();
+    append_module_access_mount(&mut effective_mounts, payload.module_access_cwd.as_ref())?;
+    let package_descriptors = package_descriptors_from_wire(&payload.packages)?;
+    let mut provided_commands: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for descriptor in &package_descriptors {
+        provided_commands.insert(
+            descriptor.name.clone(),
+            descriptor
+                .commands
+                .iter()
+                .map(|target| target.command.clone())
+                .collect(),
+        );
+    }
+    let snapshot_userland_code = resolve_agent_snapshot_bundle(&package_descriptors)?;
+    let package_mounts =
+        build_packages_projection(&vm_id, &package_descriptors, &payload.packages_mount_at)?;
+    effective_mounts.extend(package_mounts);
+    append_package_provides_mounts(&mut effective_mounts, &package_descriptors)?;
+    let mount_plugins = build_mount_plugin_registry::<B>()?;
+
+    bridge.set_vm_permissions(&vm_id, &allow_all_policy())?;
+    let reconfigure_result = vm.try_command("configure VM", |vm| {
+        apply_package_provides_env(&mut vm.guest_env, &package_descriptors);
+        let mount_context = MountPluginContext {
+            bridge: bridge.clone(),
+            runtime_context: vm.runtime_context.clone(),
+            connection_id: connection_id.clone(),
+            session_id: session_id.clone(),
+            vm_id: vm_id.clone(),
+            sidecar_requests,
+            database: vm.database.clone(),
+            max_pread_bytes: vm.kernel.resource_limits().max_pread_bytes,
+        };
+        reconcile_mounts(&mount_plugins, vm, &effective_mounts, mount_context)?;
+
+        vm.command_guest_paths = discover_command_guest_paths(&mut vm.kernel);
+        // Package command leaves live under `/opt/agentos/bin`, outside the
+        // legacy discovery tree. Register them explicitly for both absolute
+        // and PATH-based execution.
+        for commands in provided_commands.values() {
+            for command in commands {
+                vm.command_guest_paths
+                    .entry(command.clone())
+                    .or_insert_with(|| projected_command_guest_path(command));
+            }
+        }
+        let command_guest_paths = vm.command_guest_paths.clone();
+        refresh_guest_command_path_env(&mut vm.guest_env, &command_guest_paths);
+        let mut execution_commands =
+            vec![String::from(JAVASCRIPT_COMMAND), String::from(WASM_COMMAND)];
+        execution_commands.extend(payload.bootstrap_commands.iter().cloned());
+        execution_commands.extend(payload.binding_shim_commands.iter().cloned());
+        execution_commands.extend(vm.command_guest_paths.keys().cloned());
+        vm.kernel
+            .register_driver(CommandDriver::new(
+                EXECUTION_DRIVER_NAME,
+                execution_commands,
+            ))
+            .map_err(kernel_error)?;
+        vm.command_permissions = payload.command_permissions.clone().into_iter().collect();
+        let mut loopback_exempt_ports = vm.create_loopback_exempt_ports.clone();
+        loopback_exempt_ports.extend(payload.loopback_exempt_ports.iter().copied());
+        vm.kernel.set_loopback_exempt_ports(loopback_exempt_ports);
+        vm.configuration = VmConfiguration {
+            mounts: effective_mounts.clone(),
+            software: payload.software.clone(),
+            permissions: configured_permissions.clone(),
+            module_access_cwd: payload.module_access_cwd.clone(),
+            instructions: payload.instructions.clone(),
+            projected_modules: payload.projected_modules.clone(),
+            command_permissions: payload.command_permissions.clone().into_iter().collect(),
+            provided_commands: provided_commands.clone(),
+            // jsRuntime is create-time only; preserve what create_vm stored.
+            js_runtime: vm.configuration.js_runtime.clone(),
+            snapshot_userland_code: snapshot_userland_code.clone(),
+            loopback_exempt_ports: payload.loopback_exempt_ports.clone(),
+        };
+        vm.provided_commands = provided_commands.clone();
+        let projected_commands = projected_commands_from_guest_paths(&vm.command_guest_paths);
+        vm.projected_agent_launch = projected_agent_launch_from_descriptors(&package_descriptors);
+        Ok(projected_commands)
+    });
+
+    let projected_commands = match reconfigure_result {
+        Ok(projected_commands) => {
+            bridge.set_vm_permissions(&vm_id, &configured_permissions)?;
+            projected_commands
+        }
+        Err(error) => {
+            match bridge.restore_vm_permissions_fail_closed(
+                &vm_id,
+                &original_permissions,
+                "configure_vm rollback",
+                &error,
+            ) {
+                Ok(()) => return Err(error),
+                Err(rollback_error) => {
+                    vm.try_command("configure VM fail-closed rollback", |vm| {
+                        vm.configuration.permissions = deny_all_policy();
+                        Ok(())
+                    })?;
+                    return Err(rollback_error);
+                }
+            }
+        }
+    };
+
+    let applied_mounts = effective_mounts.len() as u32;
+    let configured_software = payload.software.len() as u32;
+    let agents = projected_agents_from_descriptors(&package_descriptors);
+
+    // No VM state borrow survives this point. Pre-warm continues as a
+    // supervised runtime task so lifecycle ordering is released immediately;
+    // its own bounded blocking admission and result remain fully observable.
+    if let Some(userland) = snapshot_userland_code {
+        let requested_bytes = userland.len();
+        let runtime_for_task = snapshot_runtime_context.clone();
+        if let Err(error) = snapshot_runtime_context.spawn(
+            agentos_runtime::TaskClass::Runtime,
+            async move {
+                let runtime_for_job = runtime_for_task.clone();
+                match runtime_for_task
+                    .blocking()
+                    .run(requested_bytes, move || {
+                        agentos_execution::v8_host::pre_warm_agent_snapshot(
+                            &runtime_for_job,
+                            &userland,
+                        )
+                    })
+                    .await
+                {
+                    Ok(Ok(())) => tracing::debug!(
+                        target: "agentos_native_sidecar::vm",
+                        "agent snapshot pre-warm completed"
+                    ),
+                    Ok(Err(error)) => eprintln!(
+                        "ERR_AGENTOS_SNAPSHOT_PREWARM: snapshot build failed: {error}"
+                    ),
+                    Err(error) => eprintln!(
+                        "ERR_AGENTOS_SNAPSHOT_PREWARM_ADMISSION: blocking admission or execution failed: {error}"
+                    ),
+                }
+            },
+        ) {
+            eprintln!(
+                "ERR_AGENTOS_SNAPSHOT_PREWARM_TASK_ADMISSION: supervised task admission failed: {error}"
+            );
+        }
+    }
+
+    tracing::info!(target: "agentos_native_sidecar::perf", phase = "configure_vm", elapsed_ms = __t.elapsed().as_millis() as u64, applied_mounts = applied_mounts as u64, "vm phase");
+    Ok(DispatchResult {
+        response: vm_configured_response(
+            &request,
+            applied_mounts,
+            configured_software,
+            projected_commands,
+            agents,
+        ),
+        events: Vec::new(),
+    })
+}
+
+pub(crate) async fn link_package_owned<B>(
+    input: LinkPackageOwnedInput<B>,
+    payload: LinkPackageRequest,
+) -> Result<DispatchResult, SidecarError>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    let LinkPackageOwnedInput {
+        lifecycle,
+        bridge,
+        sidecar_requests,
+    } = input;
+    let OwnedVmLifecycleRequest {
+        request,
+        connection_id,
+        session_id,
+        vm_id,
+        vm,
+    } = lifecycle;
+    let descriptor =
+        crate::package_projection::read_package_manifest_from_path(&payload.package.path)?;
+    let new_mounts = build_packages_projection(
+        &vm_id,
+        std::slice::from_ref(&descriptor),
+        crate::package_projection::OPT_AGENTOS_ROOT,
+    )?;
+    let commands = descriptor
+        .commands
+        .iter()
+        .map(|target| target.command.clone())
+        .collect::<Vec<_>>();
+    let mount_plugins = build_mount_plugin_registry::<B>()?;
+
+    vm.try_command("link VM package", |vm| {
+        if new_mounts.iter().all(|mount| {
+            vm.configuration
+                .mounts
+                .iter()
+                .any(|existing| existing.guest_path == mount.guest_path)
+        }) {
+            return Ok(());
+        }
+        for mount in &new_mounts {
+            if vm
+                .configuration
+                .mounts
+                .iter()
+                .any(|existing| existing.guest_path == mount.guest_path)
+            {
+                if let Some(command) = mount
+                    .guest_path
+                    .strip_prefix(crate::package_projection::OPT_AGENTOS_BIN)
+                    .and_then(|path| path.strip_prefix('/'))
+                    .filter(|path| !path.is_empty())
+                {
+                    return Err(SidecarError::InvalidState(format!(
+                        "command {command:?} is already provided by another package"
+                    )));
+                }
+                return Err(SidecarError::InvalidState(format!(
+                    "agentos package mount already exists at {}",
+                    mount.guest_path
+                )));
+            }
+        }
+        let mount_context = MountPluginContext {
+            bridge,
+            runtime_context: vm.runtime_context.clone(),
+            connection_id,
+            session_id,
+            vm_id: vm_id.clone(),
+            sidecar_requests,
+            database: vm.database.clone(),
+            max_pread_bytes: vm.kernel.resource_limits().max_pread_bytes,
+        };
+        mount_leaf_descriptors(&mount_plugins, vm, &new_mounts, mount_context)?;
+        vm.configuration.mounts.extend(new_mounts);
+        vm.provided_commands
+            .insert(descriptor.name.clone(), commands.clone());
+        vm.configuration
+            .provided_commands
+            .insert(descriptor.name.clone(), commands.clone());
+        for command in &commands {
+            vm.command_guest_paths
+                .entry(command.clone())
+                .or_insert_with(|| projected_command_guest_path(command));
+        }
+        let command_guest_paths = vm.command_guest_paths.clone();
+        refresh_guest_command_path_env(&mut vm.guest_env, &command_guest_paths);
+        let mut execution_commands =
+            vec![String::from(JAVASCRIPT_COMMAND), String::from(WASM_COMMAND)];
+        execution_commands.extend(vm.command_guest_paths.keys().cloned());
+        vm.kernel
+            .register_driver(CommandDriver::new(
+                EXECUTION_DRIVER_NAME,
+                execution_commands,
+            ))
+            .map_err(kernel_error)?;
+        vm.projected_agent_launch
+            .extend(projected_agent_launch_from_descriptors(
+                std::slice::from_ref(&descriptor),
+            ));
+        Ok(())
+    })?;
+
+    let projected_commands = commands
+        .iter()
+        .map(|command| ProjectedCommand {
+            name: command.clone(),
+            guest_path: projected_command_guest_path(command),
+        })
+        .collect();
+    let agents = projected_agents_from_descriptors(std::slice::from_ref(&descriptor));
+    Ok(DispatchResult {
+        response: package_linked_response(&request, projected_commands, agents),
+        events: Vec::new(),
+    })
+}
+
+pub(crate) async fn create_layer_owned(
+    input: OwnedVmLifecycleRequest,
+    _payload: CreateLayerRequest,
+) -> Result<DispatchResult, SidecarError> {
+    let layer_id = input.vm.try_command("create VM layer", |vm| {
+        vm.layers
+            .create_writable_layer()
+            .map_err(sidecar_core_error)
+    })?;
+    Ok(DispatchResult {
+        response: layer_created_response(&input.request, layer_id),
+        events: Vec::new(),
+    })
+}
+
+pub(crate) async fn seal_layer_owned(
+    input: OwnedVmLifecycleRequest,
+    payload: SealLayerRequest,
+) -> Result<DispatchResult, SidecarError> {
+    let layer_id = input.vm.try_command("seal VM layer", |vm| {
+        vm.layers
+            .seal_layer(&payload.layer_id)
+            .map_err(sidecar_core_error)
+    })?;
+    Ok(DispatchResult {
+        response: layer_sealed_response(&input.request, layer_id),
+        events: Vec::new(),
+    })
+}
+
+pub(crate) async fn import_snapshot_owned(
+    input: OwnedVmLifecycleRequest,
+    payload: ImportSnapshotRequest,
+) -> Result<DispatchResult, SidecarError> {
+    let snapshot = root_snapshot_from_entries(&payload.entries)?;
+    let layer_id = input.vm.try_command("import VM snapshot", |vm| {
+        vm.layers
+            .import_snapshot(snapshot)
+            .map_err(sidecar_core_error)
+    })?;
+    Ok(DispatchResult {
+        response: snapshot_imported_response(&input.request, layer_id),
+        events: Vec::new(),
+    })
+}
+
+pub(crate) async fn export_snapshot_owned(
+    input: OwnedVmLifecycleRequest,
+    payload: ExportSnapshotRequest,
+) -> Result<DispatchResult, SidecarError> {
+    let snapshot = input.vm.try_command("export VM snapshot", |vm| {
+        vm.layers
+            .export_snapshot(&payload.layer_id)
+            .map_err(sidecar_core_error)
+    })?;
+    Ok(DispatchResult {
+        response: snapshot_exported_response(
+            &input.request,
+            payload.layer_id,
+            root_snapshot_entries(&snapshot),
+        ),
+        events: Vec::new(),
+    })
+}
+
+pub(crate) async fn create_overlay_owned(
+    input: OwnedVmLifecycleRequest,
+    payload: CreateOverlayRequest,
+) -> Result<DispatchResult, SidecarError> {
+    let layer_id = input.vm.try_command("create VM overlay", |vm| {
+        vm.layers
+            .create_overlay_layer(
+                protocol_root_filesystem_mode(payload.mode),
+                payload.upper_layer_id,
+                payload.lower_layer_ids,
+            )
+            .map_err(sidecar_core_error)
+    })?;
+    Ok(DispatchResult {
+        response: overlay_created_response(&input.request, layer_id),
+        events: Vec::new(),
+    })
+}
+
+pub(crate) async fn snapshot_root_filesystem_owned(
+    input: OwnedVmLifecycleRequest,
+    payload: SnapshotRootFilesystemRequest,
+) -> Result<DispatchResult, SidecarError> {
+    let snapshot = input.vm.try_command("snapshot VM root filesystem", |vm| {
+        vm.kernel
+            .snapshot_root_filesystem_bounded(payload.max_bytes)
+            .map_err(kernel_error)
+    })?;
+    Ok(DispatchResult {
+        response: root_filesystem_snapshot_response(
+            &input.request,
+            snapshot.entries.iter().map(root_snapshot_entry).collect(),
+        ),
+        events: Vec::new(),
+    })
 }
 
 fn record_vm_teardown_error(
@@ -3190,8 +4361,9 @@ mod tests {
     use crate::bridge::MountPluginContext;
     use crate::plugins::chunked_local::ChunkedLocalMountPlugin;
     use crate::protocol::{
-        RootFilesystemDescriptor, RootFilesystemEntry, RootFilesystemEntryKind,
-        RootFilesystemLowerDescriptor,
+        ConfigureVmRequest, CreateLayerRequest, CreateVmRequest, DisposeReason, DisposeVmRequest,
+        GuestRuntimeKind, OwnershipScope, RequestFrame, RequestPayload, RootFilesystemDescriptor,
+        RootFilesystemEntry, RootFilesystemEntryKind, RootFilesystemLowerDescriptor,
     };
     use crate::service::NativeSidecar;
     use crate::state::{
@@ -3279,6 +4451,138 @@ mod tests {
             .build()
             .expect("teardown test runtime")
             .block_on(future)
+    }
+
+    #[test]
+    fn vm_lifecycle_wrappers_return_static_futures_without_borrowing_the_sidecar() {
+        fn assert_static<F: std::future::Future + 'static>(_: &F) {}
+
+        let mut sidecar = NativeSidecar::new(LocalBridge::default()).expect("test sidecar");
+        let request = RequestFrame::new(
+            1,
+            OwnershipScope::vm("connection-missing", "session-missing", "vm-missing"),
+            RequestPayload::CreateLayer(CreateLayerRequest {}),
+        );
+        let operation = sidecar.create_layer(&request, CreateLayerRequest {});
+        assert_static(&operation);
+
+        // This mutation is a compile-time assertion that `operation` did not
+        // retain the method receiver's `&mut NativeSidecar` borrow.
+        sidecar.next_vm_id = 41;
+        let result = block_on(operation);
+        assert!(matches!(result, Err(crate::SidecarError::InvalidState(_))));
+        assert_eq!(sidecar.next_vm_id, 41);
+
+        let configure_payload = ConfigureVmRequest {
+            mounts: Vec::new(),
+            software: Vec::new(),
+            permissions: None,
+            module_access_cwd: None,
+            instructions: Vec::new(),
+            projected_modules: Vec::new(),
+            command_permissions: std::collections::HashMap::new(),
+            loopback_exempt_ports: Vec::new(),
+            packages: Vec::new(),
+            packages_mount_at: String::new(),
+            bootstrap_commands: Vec::new(),
+            binding_shim_commands: Vec::new(),
+        };
+        let configure_request = RequestFrame::new(
+            2,
+            OwnershipScope::vm("connection-missing", "session-missing", "vm-missing"),
+            RequestPayload::ConfigureVm(configure_payload.clone()),
+        );
+        let configure_operation = sidecar.configure_vm(&configure_request, configure_payload);
+        assert_static(&configure_operation);
+        sidecar.next_vm_id = 42;
+        let result = block_on(configure_operation);
+        assert!(matches!(result, Err(crate::SidecarError::InvalidState(_))));
+        assert_eq!(sidecar.next_vm_id, 42);
+    }
+
+    #[test]
+    fn create_and_dispose_release_central_state_during_owned_work() {
+        let mut sidecar = NativeSidecar::new(LocalBridge::default()).expect("test sidecar");
+        let connection_id = String::from("connection-owned-lifecycle");
+        let session_id = String::from("session-owned-lifecycle");
+        sidecar.connections.insert(
+            connection_id.clone(),
+            ConnectionState {
+                auth_token: String::new(),
+                sessions: BTreeSet::from([session_id.clone()]),
+            },
+        );
+        sidecar.sessions.insert(
+            session_id.clone(),
+            SessionState {
+                connection_id: connection_id.clone(),
+                placement: crate::protocol::SidecarPlacement::SidecarPlacementShared(
+                    crate::protocol::SidecarPlacementShared { pool: None },
+                ),
+                metadata: BTreeMap::new(),
+                vm_ids: BTreeSet::new(),
+            },
+        );
+
+        let create_payload = CreateVmRequest::legacy_test_config(
+            GuestRuntimeKind::JavaScript,
+            Default::default(),
+            Default::default(),
+            None,
+        );
+        let create_request = RequestFrame::new(
+            100,
+            OwnershipScope::session(&connection_id, &session_id),
+            RequestPayload::CreateVm(create_payload.clone()),
+        );
+        let prepared = sidecar
+            .prepare_create_vm(&create_request, create_payload)
+            .expect("prepare owned VM create");
+        assert!(sidecar.vms.is_empty());
+        sidecar.next_sidecar_request_id = -41;
+        let completed = block_on(prepared.execute()).expect("execute owned VM create");
+        assert!(sidecar.vms.is_empty());
+        assert_eq!(sidecar.next_sidecar_request_id, -41);
+        sidecar
+            .complete_create_vm(completed)
+            .expect("publish completed VM create");
+        let vm_id = sidecar
+            .sessions
+            .get(&session_id)
+            .and_then(|session| session.vm_ids.iter().next())
+            .cloned()
+            .expect("created VM session membership");
+        assert!(sidecar.vms.contains_key(&vm_id));
+
+        let dispose_payload = DisposeVmRequest {
+            reason: DisposeReason::Requested,
+        };
+        let dispose_request = RequestFrame::new(
+            101,
+            OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::DisposeVm(dispose_payload.clone()),
+        );
+        let plan = sidecar
+            .prepare_dispose_vm(&dispose_request, dispose_payload)
+            .expect("prepare owned VM dispose");
+        let prepared = sidecar
+            .detach_vm_for_disposal(plan)
+            .expect("detach VM after operation drain");
+        assert!(!sidecar.vms.contains_key(&vm_id));
+        assert!(sidecar
+            .sessions
+            .get(&session_id)
+            .is_some_and(|session| session.vm_ids.contains(&vm_id)));
+        sidecar.next_sidecar_request_id = -42;
+        let completed = block_on(prepared.execute());
+        assert_eq!(sidecar.next_sidecar_request_id, -42);
+        sidecar
+            .complete_dispose_vm(completed)
+            .expect("finalize completed VM dispose");
+        assert!(sidecar
+            .sessions
+            .get(&session_id)
+            .is_some_and(|session| !session.vm_ids.contains(&vm_id)));
     }
 
     fn active_vm_metric(sidecar: &NativeSidecar<LocalBridge>) -> usize {

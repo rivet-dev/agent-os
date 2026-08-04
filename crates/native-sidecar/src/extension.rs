@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::protocol::{
@@ -24,6 +25,12 @@ pub struct ProjectedAgentLaunchEntry {
 }
 
 pub trait ExtensionHost {
+    /// Grace allowed for an active ACP prompt to commit its terminal durable
+    /// state after teardown signals cancellation, before adapter escalation.
+    fn acp_termination_grace<'a>(&'a mut self) -> ExtensionFuture<'a, Duration> {
+        Box::pin(async { Ok(Duration::from_secs(3)) })
+    }
+
     /// Return the VM-scoped ACP/session limits. Test hosts that do not own a VM
     /// use the same generous defaults as a normal sidecar.
     fn vm_acp_limits<'a>(
@@ -75,6 +82,13 @@ pub trait ExtensionHost {
         timeout: Duration,
     ) -> ExtensionFuture<'a, Option<EventFrame>>;
 
+    fn poll_process_event<'a>(
+        &'a mut self,
+        ownership: OwnershipScope,
+        process_id: String,
+        timeout: Duration,
+    ) -> ExtensionFuture<'a, Option<EventFrame>>;
+
     fn guest_filesystem_call<'a>(
         &'a mut self,
         ownership: OwnershipScope,
@@ -117,6 +131,112 @@ pub trait ExtensionHost {
         process_id: String,
         timeout: Duration,
     ) -> ExtensionFuture<'a, ExtensionBufferedProcessOutput>;
+}
+
+/// Cloneable host services used by independently executing extension requests.
+///
+/// The mutable [`ExtensionHost`] backend exists for the direct, in-process
+/// `NativeSidecar::dispatch` API. Transports that supervise more than one
+/// request at a time provide this owned backend instead, so an extension never
+/// retains the sidecar coordinator's mutable borrow while it waits on an agent,
+/// a permission decision, process output, or cancellation.
+pub trait ExtensionServices: Send + Sync {
+    fn acp_termination_grace(&self) -> ExtensionFuture<'static, Duration>;
+
+    fn vm_acp_limits(
+        &self,
+        ownership: OwnershipScope,
+    ) -> ExtensionFuture<'static, agentos_native_sidecar_core::limits::AcpLimits>;
+
+    fn vm_database(
+        &self,
+        ownership: OwnershipScope,
+    ) -> ExtensionFuture<'static, Option<crate::vm_sqlite::SharedVmSqliteDatabase>>;
+
+    fn projected_agents(
+        &self,
+        ownership: OwnershipScope,
+    ) -> ExtensionFuture<'static, Vec<ProjectedAgentLaunchEntry>>;
+
+    fn spawn_process(
+        &self,
+        ownership: OwnershipScope,
+        request: ExecuteRequest,
+    ) -> ExtensionFuture<'static, ProcessStartedResponse>;
+
+    fn write_stdin(
+        &self,
+        ownership: OwnershipScope,
+        request: WriteStdinRequest,
+    ) -> ExtensionFuture<'static, StdinWrittenResponse>;
+
+    fn close_stdin(
+        &self,
+        ownership: OwnershipScope,
+        request: CloseStdinRequest,
+    ) -> ExtensionFuture<'static, StdinClosedResponse>;
+
+    fn kill_process(
+        &self,
+        ownership: OwnershipScope,
+        request: KillProcessRequest,
+    ) -> ExtensionFuture<'static, ProcessKilledResponse>;
+
+    fn poll_event(
+        &self,
+        ownership: OwnershipScope,
+        timeout: Duration,
+    ) -> ExtensionFuture<'static, Option<EventFrame>>;
+
+    fn poll_process_event(
+        &self,
+        ownership: OwnershipScope,
+        process_id: String,
+        timeout: Duration,
+    ) -> ExtensionFuture<'static, Option<EventFrame>>;
+
+    fn guest_filesystem_call(
+        &self,
+        ownership: OwnershipScope,
+        request: GuestFilesystemCallRequest,
+    ) -> ExtensionFuture<'static, GuestFilesystemResultResponse>;
+
+    fn bind_process_to_session(
+        &self,
+        ownership: OwnershipScope,
+        namespace: String,
+        ext_session_id: String,
+        process_id: String,
+    ) -> ExtensionFuture<'static, ()>;
+
+    fn bind_vm_to_session(
+        &self,
+        ownership: OwnershipScope,
+        namespace: String,
+        ext_session_id: String,
+    ) -> ExtensionFuture<'static, ()>;
+
+    fn dispose_session_resources(
+        &self,
+        ownership: OwnershipScope,
+        namespace: String,
+        ext_session_id: String,
+    ) -> ExtensionFuture<'static, Vec<EventFrame>>;
+
+    fn start_buffering_process_output(
+        &self,
+        ownership: OwnershipScope,
+        process_id: String,
+    ) -> ExtensionFuture<'static, ()>;
+
+    fn handoff_buffered_process_output(
+        &self,
+        ownership: OwnershipScope,
+        namespace: String,
+        ext_session_id: String,
+        process_id: String,
+        timeout: Duration,
+    ) -> ExtensionFuture<'static, ExtensionBufferedProcessOutput>;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -186,9 +306,9 @@ pub struct ExtensionSnapshot {
     event_sink: SharedEventSink,
 }
 
-pub struct ExtensionContext<'a> {
+pub struct ExtensionContext {
     snapshot: ExtensionSnapshot,
-    host: &'a mut dyn ExtensionHost,
+    services: Arc<dyn ExtensionServices>,
 }
 
 impl ExtensionSnapshot {
@@ -268,11 +388,33 @@ impl ExtensionSnapshot {
         )?;
         extension_callback_response_payload(&self.namespace, response)
     }
+
+    pub async fn invoke_callback_async(
+        &self,
+        payload: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, SidecarError> {
+        let response = self
+            .sidecar_requests
+            .invoke_async(
+                self.ownership.clone(),
+                SidecarRequestPayload::Ext(ExtEnvelope {
+                    namespace: self.namespace.clone(),
+                    payload,
+                }),
+                timeout,
+            )
+            .await?;
+        extension_callback_response_payload(&self.namespace, response)
+    }
 }
 
-impl<'a> ExtensionContext<'a> {
-    pub(crate) fn new(snapshot: ExtensionSnapshot, host: &'a mut dyn ExtensionHost) -> Self {
-        Self { snapshot, host }
+impl ExtensionContext {
+    pub(crate) fn with_services(
+        snapshot: ExtensionSnapshot,
+        services: Arc<dyn ExtensionServices>,
+    ) -> Self {
+        ExtensionContext { snapshot, services }
     }
 
     pub fn snapshot(&self) -> ExtensionSnapshot {
@@ -324,16 +466,30 @@ impl<'a> ExtensionContext<'a> {
         self.snapshot.invoke_callback(payload, timeout)
     }
 
+    pub async fn invoke_callback_async(
+        &self,
+        payload: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, SidecarError> {
+        self.snapshot.invoke_callback_async(payload, timeout).await
+    }
+
     pub async fn vm_database(
         &mut self,
     ) -> Result<Option<crate::vm_sqlite::SharedVmSqliteDatabase>, SidecarError> {
-        self.host.vm_database(self.snapshot.ownership.clone()).await
+        self.services
+            .vm_database(self.snapshot.ownership.clone())
+            .await
+    }
+
+    pub async fn acp_termination_grace(&mut self) -> Result<Duration, SidecarError> {
+        self.services.acp_termination_grace().await
     }
 
     pub async fn vm_acp_limits(
         &mut self,
     ) -> Result<agentos_native_sidecar_core::limits::AcpLimits, SidecarError> {
-        self.host
+        self.services
             .vm_acp_limits(self.snapshot.ownership.clone())
             .await
     }
@@ -342,7 +498,7 @@ impl<'a> ExtensionContext<'a> {
         &mut self,
         request: ExecuteRequest,
     ) -> Result<ProcessStartedResponse, SidecarError> {
-        self.host
+        self.services
             .spawn_process(self.snapshot.ownership.clone(), request)
             .await
     }
@@ -375,7 +531,7 @@ impl<'a> ExtensionContext<'a> {
         &mut self,
         request: WriteStdinRequest,
     ) -> Result<StdinWrittenResponse, SidecarError> {
-        self.host
+        self.services
             .write_stdin(self.snapshot.ownership.clone(), request)
             .await
     }
@@ -408,7 +564,7 @@ impl<'a> ExtensionContext<'a> {
         &mut self,
         request: CloseStdinRequest,
     ) -> Result<StdinClosedResponse, SidecarError> {
-        self.host
+        self.services
             .close_stdin(self.snapshot.ownership.clone(), request)
             .await
     }
@@ -441,7 +597,7 @@ impl<'a> ExtensionContext<'a> {
         &mut self,
         request: KillProcessRequest,
     ) -> Result<ProcessKilledResponse, SidecarError> {
-        self.host
+        self.services
             .kill_process(self.snapshot.ownership.clone(), request)
             .await
     }
@@ -474,7 +630,7 @@ impl<'a> ExtensionContext<'a> {
         &mut self,
         timeout: Duration,
     ) -> Result<Option<EventFrame>, SidecarError> {
-        self.host
+        self.services
             .poll_event(self.snapshot.ownership.clone(), timeout)
             .await
     }
@@ -490,11 +646,32 @@ impl<'a> ExtensionContext<'a> {
             .map_err(wire_protocol_error)
     }
 
+    /// Await one event from exactly `process_id` through the ownership-aware
+    /// event broker without retaining VM or whole-sidecar state.
+    pub async fn poll_process_event_wire(
+        &mut self,
+        process_id: &str,
+        timeout: Duration,
+    ) -> Result<Option<crate::wire::EventFrame>, SidecarError> {
+        let event = self
+            .services
+            .poll_process_event(
+                self.snapshot.ownership.clone(),
+                process_id.to_owned(),
+                timeout,
+            )
+            .await?;
+        event
+            .map(crate::wire::event_frame_from_compat)
+            .transpose()
+            .map_err(wire_protocol_error)
+    }
+
     pub async fn guest_filesystem_call(
         &mut self,
         request: GuestFilesystemCallRequest,
     ) -> Result<GuestFilesystemResultResponse, SidecarError> {
-        self.host
+        self.services
             .guest_filesystem_call(self.snapshot.ownership.clone(), request)
             .await
     }
@@ -506,7 +683,7 @@ impl<'a> ExtensionContext<'a> {
         &mut self,
     ) -> Result<Vec<ProjectedAgentLaunchEntry>, SidecarError> {
         let ownership = self.snapshot.ownership().clone();
-        self.host.projected_agents(ownership).await
+        self.services.projected_agents(ownership).await
     }
 
     pub async fn guest_filesystem_call_wire(
@@ -538,13 +715,12 @@ impl<'a> ExtensionContext<'a> {
         ext_session_id: impl Into<String>,
         process_id: impl Into<String>,
     ) -> Result<(), SidecarError> {
-        self.host
-            .bind_process_to_session(
-                self.snapshot.ownership.clone(),
-                self.snapshot.namespace.clone(),
-                ext_session_id.into(),
-                process_id.into(),
-            )
+        let ownership = self.snapshot.ownership.clone();
+        let namespace = self.snapshot.namespace.clone();
+        let ext_session_id = ext_session_id.into();
+        let process_id = process_id.into();
+        self.services
+            .bind_process_to_session(ownership, namespace, ext_session_id, process_id)
             .await
     }
 
@@ -552,12 +728,11 @@ impl<'a> ExtensionContext<'a> {
         &mut self,
         ext_session_id: impl Into<String>,
     ) -> Result<(), SidecarError> {
-        self.host
-            .bind_vm_to_session(
-                self.snapshot.ownership.clone(),
-                self.snapshot.namespace.clone(),
-                ext_session_id.into(),
-            )
+        let ownership = self.snapshot.ownership.clone();
+        let namespace = self.snapshot.namespace.clone();
+        let ext_session_id = ext_session_id.into();
+        self.services
+            .bind_vm_to_session(ownership, namespace, ext_session_id)
             .await
     }
 
@@ -565,12 +740,11 @@ impl<'a> ExtensionContext<'a> {
         &mut self,
         ext_session_id: impl Into<String>,
     ) -> Result<Vec<EventFrame>, SidecarError> {
-        self.host
-            .dispose_session_resources(
-                self.snapshot.ownership.clone(),
-                self.snapshot.namespace.clone(),
-                ext_session_id.into(),
-            )
+        let ownership = self.snapshot.ownership.clone();
+        let namespace = self.snapshot.namespace.clone();
+        let ext_session_id = ext_session_id.into();
+        self.services
+            .dispose_session_resources(ownership, namespace, ext_session_id)
             .await
     }
 
@@ -590,8 +764,10 @@ impl<'a> ExtensionContext<'a> {
         &mut self,
         process_id: impl Into<String>,
     ) -> Result<(), SidecarError> {
-        self.host
-            .start_buffering_process_output(self.snapshot.ownership.clone(), process_id.into())
+        let ownership = self.snapshot.ownership.clone();
+        let process_id = process_id.into();
+        self.services
+            .start_buffering_process_output(ownership, process_id)
             .await
     }
 
@@ -601,12 +777,16 @@ impl<'a> ExtensionContext<'a> {
         process_id: impl Into<String>,
         timeout: Duration,
     ) -> Result<ExtensionBufferedProcessOutput, SidecarError> {
-        self.host
+        let ownership = self.snapshot.ownership.clone();
+        let namespace = self.snapshot.namespace.clone();
+        let ext_session_id = ext_session_id.into();
+        let process_id = process_id.into();
+        self.services
             .handoff_buffered_process_output(
-                self.snapshot.ownership.clone(),
-                self.snapshot.namespace.clone(),
-                ext_session_id.into(),
-                process_id.into(),
+                ownership,
+                namespace,
+                ext_session_id,
+                process_id,
                 timeout,
             )
             .await
@@ -648,6 +828,31 @@ fn extension_callback_response_payload(
     }
 }
 
+/// Admission class chosen by the extension after decoding its own opaque
+/// payload. Progress requests receive reserved routing admission because they
+/// unblock an already-active operation; core never interprets their payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionRequestClass {
+    Ordinary,
+    Progress,
+}
+
+/// Who enforces exclusivity for an extension-provided opaque ordering key.
+///
+/// Core-exclusive keys receive a bounded, typed conflict rejection before the
+/// second request starts. An extension may retain enforcement when it needs to
+/// preserve a richer protocol-specific rejection (ACP's `session_busy` is the
+/// motivating case); core still scopes and validates the opaque key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionOrderingPolicy {
+    CoreExclusive,
+    ExtensionManaged,
+}
+
+/// Compatibility input for the legacy blocking-extension stdio path. The
+/// routed protocol engine no longer uses this hook; it remains present only in
+/// the lower ownership-partition revision until that caller is removed later
+/// in the stack.
 pub enum ExtensionInterruptRequest<'a> {
     ExtensionPayload {
         payload: &'a [u8],
@@ -658,9 +863,6 @@ pub enum ExtensionInterruptRequest<'a> {
 
 #[derive(Debug, Clone)]
 pub struct ExtensionInterruptResponse {
-    /// Whether the active request future should be dropped and replaced by the
-    /// synthetic response. Cooperative interrupts can signal the active future
-    /// and leave this false so it commits its own terminal state.
     pub interrupt_active: bool,
     pub interrupted_response_payload: Vec<u8>,
     pub interrupting_response_payload: Option<Vec<u8>>,
@@ -669,9 +871,37 @@ pub struct ExtensionInterruptResponse {
 pub trait Extension: Send + Sync {
     fn namespace(&self) -> &str;
 
+    /// Return the extension-owned conflict key for an ordinary request.
+    ///
+    /// Core treats this value as opaque and combines it with the extension
+    /// namespace and connection ownership when it builds request-operation
+    /// metadata. Extensions whose identities are scoped more narrowly than a
+    /// connection (for example, to one VM) must include that ownership in the
+    /// returned key. `None` means the request has no extension-specific
+    /// ordering boundary.
+    fn request_ordering_key(
+        &self,
+        _ownership: &OwnershipScope,
+        _payload: &[u8],
+    ) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn request_ordering_policy(
+        &self,
+        _ownership: &OwnershipScope,
+        _payload: &[u8],
+    ) -> ExtensionOrderingPolicy {
+        ExtensionOrderingPolicy::CoreExclusive
+    }
+
+    fn request_class(&self, _payload: &[u8]) -> ExtensionRequestClass {
+        ExtensionRequestClass::Ordinary
+    }
+
     fn handle_request<'a>(
         &'a self,
-        ctx: ExtensionContext<'a>,
+        ctx: ExtensionContext,
         payload: Vec<u8>,
     ) -> ExtensionFuture<'a, ExtensionResponse>;
 

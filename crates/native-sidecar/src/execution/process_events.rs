@@ -1,6 +1,144 @@
 use super::*;
 use crate::protocol::ExecutionStreamChannel;
 
+pub(crate) struct ProcessEventPumpTurn {
+    pub(crate) emitted_any: bool,
+    pub(crate) javascript_services: Vec<OwnedJavascriptEventService>,
+    pub(crate) python_services: Vec<OwnedPythonEventService>,
+    pub(crate) python_socket_completions: Vec<OwnedPythonSocketCompletionService>,
+    pub(crate) child_bridge_services: Vec<OwnedChildBridgeEventService>,
+}
+
+pub(crate) struct OwnedJavascriptEventService {
+    pub(crate) ownership: OwnershipScope,
+    pub(crate) vm_id: String,
+    pub(crate) process_id: String,
+    /// Descendant path below `process_id`; empty for a root process.
+    pub(crate) child_path: Vec<String>,
+    pub(crate) vm: crate::state::VmHandle,
+    pub(crate) request: JavascriptSyncRpcRequest,
+    _reservation: Option<PendingExecutionEventReservation>,
+}
+
+pub(crate) struct OwnedPythonEventService {
+    pub(crate) ownership: OwnershipScope,
+    pub(crate) vm_id: String,
+    pub(crate) process_id: String,
+    /// Descendant path below `process_id`; empty for a root process.
+    pub(crate) child_path: Vec<String>,
+    pub(crate) vm: crate::state::VmHandle,
+    pub(crate) responder: PythonVfsRpcResponder,
+    pub(crate) request: PythonVfsRpcRequest,
+    _reservation: Option<PendingExecutionEventReservation>,
+}
+
+pub(crate) struct OwnedPythonSocketCompletionService {
+    pub(crate) ownership: OwnershipScope,
+    pub(crate) vm_id: String,
+    pub(crate) process_id: String,
+    pub(crate) child_path: Vec<String>,
+    pub(crate) vm: crate::state::VmHandle,
+    pub(crate) responder: PythonVfsRpcResponder,
+    pub(crate) completion: PythonSocketConnectCompletion,
+    _reservation: Option<PendingExecutionEventReservation>,
+}
+
+impl OwnedJavascriptEventService {
+    pub(super) fn new(
+        ownership: OwnershipScope,
+        vm_id: String,
+        process_id: String,
+        child_path: Vec<String>,
+        vm: crate::state::VmHandle,
+        request: JavascriptSyncRpcRequest,
+        reservation: Option<PendingExecutionEventReservation>,
+    ) -> Self {
+        Self {
+            ownership,
+            vm_id,
+            process_id,
+            child_path,
+            vm,
+            request,
+            _reservation: reservation,
+        }
+    }
+}
+
+impl OwnedPythonEventService {
+    pub(super) fn new(
+        ownership: OwnershipScope,
+        vm_id: String,
+        process_id: String,
+        child_path: Vec<String>,
+        vm: crate::state::VmHandle,
+        responder: PythonVfsRpcResponder,
+        request: PythonVfsRpcRequest,
+        reservation: Option<PendingExecutionEventReservation>,
+    ) -> Self {
+        Self {
+            ownership,
+            vm_id,
+            process_id,
+            child_path,
+            vm,
+            responder,
+            request,
+            _reservation: reservation,
+        }
+    }
+}
+
+impl OwnedPythonSocketCompletionService {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        ownership: OwnershipScope,
+        vm_id: String,
+        process_id: String,
+        child_path: Vec<String>,
+        vm: crate::state::VmHandle,
+        responder: PythonVfsRpcResponder,
+        completion: PythonSocketConnectCompletion,
+        reservation: Option<PendingExecutionEventReservation>,
+    ) -> Self {
+        Self {
+            ownership,
+            vm_id,
+            process_id,
+            child_path,
+            vm,
+            responder,
+            completion,
+            _reservation: reservation,
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        OwnershipScope,
+        String,
+        String,
+        Vec<String>,
+        crate::state::VmHandle,
+        PythonVfsRpcResponder,
+        PythonSocketConnectCompletion,
+        Option<PendingExecutionEventReservation>,
+    ) {
+        (
+            self.ownership,
+            self.vm_id,
+            self.process_id,
+            self.child_path,
+            self.vm,
+            self.responder,
+            self.completion,
+            self._reservation,
+        )
+    }
+}
+
 pub(super) struct BindingProcessEventRequest {
     pub(super) runtime_context: agentos_runtime::RuntimeContext,
     pub(super) sidecar_requests: SharedSidecarRequestClient,
@@ -402,6 +540,531 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
+    /// Move a thread-safe runtime completion back into the exact LocalSet-owned
+    /// process queue. Public stdout/stderr/exit envelopes continue to the
+    /// broker unchanged.
+    fn route_received_internal_process_event(
+        &mut self,
+        envelope: ProcessEventEnvelope,
+    ) -> Result<Option<ProcessEventEnvelope>, SidecarError> {
+        if !Self::internal_execution_event(&envelope.event) {
+            return Ok(Some(envelope));
+        }
+        self.validate_process_event_envelope_locator(&envelope)?;
+        let target_label = if envelope.child_path.is_empty() {
+            envelope.process_id.clone()
+        } else {
+            format!("{}/{}", envelope.process_id, envelope.child_path.join("/"))
+        };
+        let Some(mut vm) = self.vms.get_mut(&envelope.vm_id) else {
+            tracing::debug!(
+                vm_id = envelope.vm_id,
+                process_id = target_label,
+                "ERR_AGENTOS_STALE_PROCESS_EVENT: runtime completion targeted a disposed VM"
+            );
+            return Ok(None);
+        };
+        if vm.connection_id != envelope.connection_id || vm.session_id != envelope.session_id {
+            return Err(SidecarError::InvalidState(format!(
+                "ERR_AGENTOS_PROCESS_EVENT_SCOPE_MISMATCH: runtime completion for VM {} carried connection/session {}/{}, expected {}/{}",
+                envelope.vm_id,
+                envelope.connection_id,
+                envelope.session_id,
+                vm.connection_id,
+                vm.session_id
+            )));
+        }
+        let Some(root) = vm.active_processes.get_mut(&envelope.process_id) else {
+            tracing::debug!(
+                vm_id = envelope.vm_id,
+                process_id = target_label,
+                "ERR_AGENTOS_STALE_PROCESS_EVENT: runtime completion targeted a reaped root process"
+            );
+            return Ok(None);
+        };
+        let Some(process) = Self::active_process_by_owned_path_mut(root, &envelope.child_path)
+        else {
+            tracing::debug!(
+                vm_id = envelope.vm_id,
+                process_id = target_label,
+                "ERR_AGENTOS_STALE_PROCESS_EVENT: runtime completion targeted a reaped descendant"
+            );
+            return Ok(None);
+        };
+        let python_failure = match &envelope.event {
+            ActiveExecutionEvent::PythonVfsRpcRequest(request) => {
+                Some((request.id, process.execution.python_vfs_rpc_responder()?))
+            }
+            ActiveExecutionEvent::PythonSocketConnectCompletion(completion) => Some((
+                completion.request_id,
+                process.execution.python_vfs_rpc_responder()?,
+            )),
+            _ => None,
+        };
+        match process.try_queue_pending_execution_envelope(envelope) {
+            Ok(()) => Ok(None),
+            Err((error, _envelope)) => {
+                if let Some((request_id, responder)) = python_failure {
+                    if let Err(reply_error) = respond_owned_python_rpc(
+                        &responder,
+                        request_id,
+                        Err(SidecarError::InvalidState(error.to_string())),
+                    ) {
+                        tracing::debug!(
+                            request_id,
+                            %reply_error,
+                            "Python runtime completion failure reply was no longer pending"
+                        );
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Transfer channel events one at a time so an admission error cannot drop
+    /// later envelopes that were already removed from the bounded channel.
+    fn drain_runtime_process_event_channel_nowait(&mut self) -> Result<bool, SidecarError> {
+        let transfer_limit = self.config.runtime.protocol.max_process_events.max(1);
+        let mut transferred = 0usize;
+        while transferred < transfer_limit {
+            let envelope = if let Some(envelope) = self.deferred_process_event_envelope.take() {
+                self.observe_pending_process_event_depth();
+                envelope
+            } else {
+                if self.pending_process_event_capacity() == 0 {
+                    break;
+                }
+                let next = {
+                    let receiver = self.process_event_receiver.as_mut().ok_or_else(|| {
+                        SidecarError::InvalidState(String::from(
+                            "process event receiver unavailable",
+                        ))
+                    })?;
+                    receiver.try_recv()
+                };
+                match next {
+                    Ok(envelope) => envelope,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                }
+            };
+            transferred = transferred.saturating_add(1);
+            if let Some(envelope) = self.route_received_internal_process_event(envelope)? {
+                self.validate_process_event_envelope_locator(&envelope)?;
+                let event_byte_limit = self
+                    .vms
+                    .get(&envelope.vm_id)
+                    .map(|vm| vm.limits.process.pending_event_bytes)
+                    .unwrap_or(
+                        agentos_native_sidecar_core::limits::DEFAULT_PROCESS_PENDING_EVENT_BYTES,
+                    );
+                if envelope.retained_bytes() > event_byte_limit {
+                    return Err(SidecarError::InvalidState(format!(
+                        "ERR_AGENTOS_PROCESS_EVENT_BYTES_LIMIT: process event for VM {} retains {} bytes, exceeding limits.process.pendingEventBytes ({event_byte_limit}); raise limits.process.pendingEventBytes",
+                        envelope.vm_id,
+                        envelope.retained_bytes()
+                    )));
+                }
+                if let Err((error, envelope)) = self.try_queue_pending_process_event(envelope) {
+                    debug_assert!(self.deferred_process_event_envelope.is_none());
+                    self.deferred_process_event_envelope = Some(envelope);
+                    self.observe_pending_process_event_depth();
+                    tracing::debug!(
+                        %error,
+                        "process-event receiver paused at temporary public-queue capacity"
+                    );
+                    break;
+                }
+            }
+        }
+        let has_more = self
+            .process_event_receiver
+            .as_ref()
+            .is_some_and(|receiver| !receiver.is_empty());
+        if has_more && self.deferred_process_event_envelope.is_none() {
+            self.process_event_notify.notify_one();
+        }
+        Ok(transferred > 0)
+    }
+
+    /// Perform one bounded, non-suspending process-event turn. Runtime-owned
+    /// queues remain durable; this command only transfers events that are
+    /// already ready and never waits for a producer.
+    pub(crate) fn pump_process_events_nowait(
+        &mut self,
+        ownership: &OwnershipScope,
+        max_service_claims: usize,
+    ) -> Result<ProcessEventPumpTurn, SidecarError> {
+        let mut emitted_any = false;
+        let mut javascript_services = Vec::new();
+        let mut python_services = Vec::new();
+        let mut python_socket_completions = Vec::new();
+        let mut child_bridge_services = Vec::new();
+        let mut root_source_remains = false;
+        self.expire_public_execution_deadlines()?;
+
+        if self.drain_runtime_process_event_channel_nowait()? {
+            emitted_any = true;
+        }
+
+        for vm_id in self.vm_ids_for_scope(ownership)? {
+            let work_limit = self.config.runtime.fairness.vm_quantum_operations;
+            let Some((connection_id, session_id, process_ids)) = self.vms.get(&vm_id).map(|vm| {
+                vm.kernel.reap_due_zombies();
+                (
+                    vm.connection_id.clone(),
+                    vm.session_id.clone(),
+                    vm.active_processes.keys().cloned().collect::<Vec<_>>(),
+                )
+            }) else {
+                continue;
+            };
+            let mut work = 0usize;
+            for process_id in process_ids {
+                if javascript_services
+                    .len()
+                    .saturating_add(python_services.len())
+                    .saturating_add(python_socket_completions.len())
+                    .saturating_add(child_bridge_services.len())
+                    >= max_service_claims
+                {
+                    self.process_event_notify.notify_one();
+                    break;
+                }
+                if work >= work_limit {
+                    self.process_event_notify.notify_one();
+                    break;
+                }
+                if self
+                    .vms
+                    .get(&vm_id)
+                    .is_some_and(|vm| vm.detached_child_processes.contains(&process_id))
+                {
+                    continue;
+                }
+                enum PollResult {
+                    Event(Option<PolledExecutionEvent>),
+                    RecoverClosed,
+                }
+                let polled = {
+                    let Some(mut vm) = self.vms.get_mut(&vm_id) else {
+                        continue;
+                    };
+                    let Some(process) = vm.active_processes.get_mut(&process_id) else {
+                        continue;
+                    };
+                    if let Some(event) = process.lease_pending_execution_event() {
+                        PollResult::Event(Some(event))
+                    } else {
+                        match process.try_poll_execution_event() {
+                            Ok(event) => PollResult::Event(event),
+                            Err(SidecarError::Execution(message))
+                                if (process.runtime == GuestRuntimeKind::JavaScript
+                                    && closed_javascript_event_channel(&message))
+                                    || (process.runtime == GuestRuntimeKind::Python
+                                        && closed_python_event_channel(&message))
+                                    || (process.runtime == GuestRuntimeKind::WebAssembly
+                                        && closed_wasm_event_channel(&message)) =>
+                            {
+                                PollResult::RecoverClosed
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                };
+                let event = match polled {
+                    PollResult::Event(event) => event,
+                    PollResult::RecoverClosed => self
+                        .recover_closed_root_runtime_process_event(&vm_id, &process_id)?
+                        .map(PolledExecutionEvent::unreserved),
+                };
+                let Some(event) = event else { continue };
+                root_source_remains |= self.vms.get(&vm_id).is_some_and(|vm| {
+                    vm.active_processes.get(&process_id).is_some_and(|process| {
+                        !process.pending_execution_events.is_empty()
+                            || process.execution.has_pending_events()
+                    })
+                });
+                if Self::internal_execution_event(event.event()) {
+                    let PolledExecutionEvent { event, reservation } = event;
+                    match event {
+                        ActiveExecutionEvent::JavascriptSyncRpcRequest(request) => {
+                            if let Some(vm) = self.vms.handle(&vm_id) {
+                                javascript_services.push(OwnedJavascriptEventService::new(
+                                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                                    vm_id.clone(),
+                                    process_id,
+                                    Vec::new(),
+                                    vm,
+                                    request,
+                                    reservation,
+                                ));
+                            }
+                        }
+                        ActiveExecutionEvent::JavascriptSyncRpcCompletion(completion) => {
+                            self.handle_javascript_sync_rpc_completion(
+                                &vm_id,
+                                &process_id,
+                                completion,
+                            )?;
+                            drop(reservation);
+                        }
+                        ActiveExecutionEvent::PythonSocketConnectCompletion(completion) => {
+                            let Some(vm) = self.vms.handle(&vm_id) else {
+                                continue;
+                            };
+                            let responder =
+                                vm.try_read("claim Python socket completion service", |state| {
+                                    state
+                                        .active_processes
+                                        .get(&process_id)
+                                        .map(|process| process.execution.python_vfs_rpc_responder())
+                                })?;
+                            let Some(responder) = responder else {
+                                continue;
+                            };
+                            python_socket_completions.push(
+                                OwnedPythonSocketCompletionService::new(
+                                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                                    vm_id.clone(),
+                                    process_id,
+                                    Vec::new(),
+                                    vm,
+                                    responder?,
+                                    *completion,
+                                    reservation,
+                                ),
+                            );
+                        }
+                        ActiveExecutionEvent::SignalState {
+                            signal,
+                            registration,
+                        } => {
+                            if let Some(mut vm) = self.vms.get_mut(&vm_id) {
+                                vm.signal_states
+                                    .entry(process_id)
+                                    .or_default()
+                                    .insert(signal, registration);
+                            }
+                            drop(reservation);
+                        }
+                        ActiveExecutionEvent::PythonVfsRpcRequest(request) => {
+                            let Some(vm) = self.vms.handle(&vm_id) else {
+                                continue;
+                            };
+                            let responder =
+                                vm.try_read("claim Python process-event service", |state| {
+                                    state
+                                        .active_processes
+                                        .get(&process_id)
+                                        .map(|process| process.execution.python_vfs_rpc_responder())
+                                })?;
+                            let Some(responder) = responder else {
+                                continue;
+                            };
+                            python_services.push(OwnedPythonEventService::new(
+                                OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                                vm_id.clone(),
+                                process_id,
+                                Vec::new(),
+                                vm,
+                                responder?,
+                                *request,
+                                reservation,
+                            ));
+                        }
+                        _ => unreachable!("internal event classification changed"),
+                    }
+                    emitted_any = true;
+                    work = work.saturating_add(1);
+                    continue;
+                }
+                let PolledExecutionEvent { event, reservation } = event;
+                let envelope = ProcessEventEnvelope {
+                    connection_id: connection_id.clone(),
+                    session_id: session_id.clone(),
+                    vm_id: vm_id.clone(),
+                    child_path: Vec::new(),
+                    process_id,
+                    event,
+                };
+                if let Err(error) = self.check_pending_process_event_capacity(&envelope) {
+                    let Some(mut vm) = self.vms.get_mut(&vm_id) else {
+                        return Err(error);
+                    };
+                    if let Some(process) = vm.active_processes.get_mut(&envelope.process_id) {
+                        process.requeue_pending_execution_event(PolledExecutionEvent {
+                            event: envelope.event,
+                            reservation,
+                        })?;
+                    }
+                    return Err(error);
+                }
+                self.queue_pending_process_event(envelope)?;
+                drop(reservation);
+                emitted_any = true;
+                work = work.saturating_add(1);
+            }
+            if self.pump_child_process_events_nowait(
+                &vm_id,
+                &mut javascript_services,
+                &mut python_services,
+                &mut python_socket_completions,
+                &mut child_bridge_services,
+                max_service_claims,
+            )? {
+                emitted_any = true;
+            }
+            if self.pump_detached_child_process_events_nowait(
+                &vm_id,
+                &mut javascript_services,
+                &mut python_services,
+                &mut python_socket_completions,
+                &mut child_bridge_services,
+                max_service_claims,
+            )? {
+                emitted_any = true;
+            }
+        }
+        if self.route_claimed_pending_process_events()? > 0 {
+            emitted_any = true;
+        }
+        let service_claims = javascript_services
+            .len()
+            .saturating_add(python_services.len())
+            .saturating_add(python_socket_completions.len())
+            .saturating_add(child_bridge_services.len());
+        if max_service_claims > 0 && service_claims >= max_service_claims {
+            // `Notify` coalesces producer edges. If this turn consumes the one
+            // stored permit while filling the owned-service staging capacity,
+            // source queues may still contain work but no producer will emit a
+            // second edge. Preserve one continuation permit; an empty follow-up
+            // turn does not rearm and therefore cannot hot-spin.
+            self.process_event_notify.notify_one();
+        }
+        if root_source_remains {
+            // A root process is probed once per bounded coordinator turn. Its
+            // runtime producer uses a coalesced Notify, so one producer edge
+            // can represent an arbitrary number of already-durable stdout,
+            // stderr, exit, or internal events. Preserve one continuation
+            // edge whenever the non-consuming post-claim probe still observes
+            // source work. An exactly drained turn does not rearm and therefore
+            // cannot hot-spin.
+            self.process_event_notify.notify_one();
+        }
+        self.rearm_kernel_reaper_task()?;
+        Ok(ProcessEventPumpTurn {
+            emitted_any,
+            javascript_services,
+            python_services,
+            python_socket_completions,
+            child_bridge_services,
+        })
+    }
+
+    /// Apply one already-polled public process event without suspending the
+    /// protocol coordinator. Internal RPC events are never valid broker
+    /// payloads; they stay on the owned VM event-service path.
+    pub(crate) fn handle_public_execution_event_nowait(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        event: ActiveExecutionEvent,
+    ) -> Result<Option<EventFrame>, SidecarError> {
+        let Some((connection_id, session_id, active)) = self.vms.get(vm_id).map(|vm| {
+            (
+                vm.connection_id.clone(),
+                vm.session_id.clone(),
+                vm.active_processes.contains_key(process_id),
+            )
+        }) else {
+            log_stale_process_event(&self.bridge, vm_id, process_id, "public event dispatch");
+            return Ok(None);
+        };
+        if !active {
+            log_stale_process_event(&self.bridge, vm_id, process_id, "public event dispatch");
+            return Ok(None);
+        }
+        let ownership = OwnershipScope::vm(&connection_id, &session_id, vm_id);
+        let public_execution = self.is_public_execution_process(vm_id, process_id);
+
+        if self.capture_extension_process_output_event(vm_id, process_id, &event) {
+            return Ok(None);
+        }
+
+        match event {
+            ActiveExecutionEvent::Stdout(chunk) if public_execution => Ok(self
+                .record_public_execution_output(
+                    vm_id,
+                    process_id,
+                    ExecutionStreamChannel::Stdout,
+                    chunk,
+                )
+                .map(|payload| EventFrame::new(ownership, payload))),
+            ActiveExecutionEvent::Stderr(chunk) if public_execution => Ok(self
+                .record_public_execution_output(
+                    vm_id,
+                    process_id,
+                    ExecutionStreamChannel::Stderr,
+                    chunk,
+                )
+                .map(|payload| EventFrame::new(ownership, payload))),
+            ActiveExecutionEvent::Stdout(chunk) => Ok(Some(EventFrame::new(
+                ownership,
+                EventPayload::ProcessOutput(ProcessOutputEvent {
+                    process_id: process_id.to_owned(),
+                    channel: StreamChannel::Stdout,
+                    chunk,
+                }),
+            ))),
+            ActiveExecutionEvent::Stderr(chunk) => Ok(Some(EventFrame::new(
+                ownership,
+                EventPayload::ProcessOutput(ProcessOutputEvent {
+                    process_id: process_id.to_owned(),
+                    channel: StreamChannel::Stderr,
+                    chunk,
+                }),
+            ))),
+            ActiveExecutionEvent::Exited(exit_code) => {
+                record_execute_response_to_exit_milestone(
+                    "execute_response_to_exit_event_handle",
+                    vm_id,
+                    process_id,
+                );
+                record_execute_response_to_exit(vm_id, process_id);
+                let park_resident = public_execution
+                    && self.should_park_public_execution_process(vm_id, process_id);
+                let became_idle = if park_resident {
+                    false
+                } else {
+                    self.finish_active_process_exit(vm_id, process_id, exit_code)?
+                        .unwrap_or(false)
+                };
+                if became_idle || (park_resident && !self.has_running_nonresident_processes(vm_id))
+                {
+                    self.bridge.emit_lifecycle(vm_id, LifecycleState::Ready)?;
+                }
+                if public_execution {
+                    Ok(self
+                        .complete_public_execution(vm_id, process_id, exit_code)
+                        .map(|payload| EventFrame::new(ownership, payload)))
+                } else {
+                    Ok(Some(EventFrame::new(
+                        ownership,
+                        EventPayload::ProcessExited(ProcessExitedEvent {
+                            process_id: process_id.to_owned(),
+                            exit_code,
+                        }),
+                    )))
+                }
+            }
+            other => Err(SidecarError::InvalidState(format!(
+                "ERR_AGENTOS_INTERNAL_EVENT_ON_PUBLIC_BROKER: process {process_id} produced internal event {other:?}"
+            ))),
+        }
+    }
+
     pub async fn pump_process_events(
         &mut self,
         ownership: &OwnershipScope,
@@ -409,33 +1072,8 @@ where
         let mut emitted_any = false;
         self.expire_public_execution_deadlines()?;
 
-        let mut queued_envelopes = Vec::new();
-        {
-            let pending_capacity = self.pending_process_event_capacity();
-            let receiver = self.process_event_receiver.as_mut().ok_or_else(|| {
-                SidecarError::InvalidState(String::from("process event receiver unavailable"))
-            })?;
-            loop {
-                if queued_envelopes.len() >= pending_capacity {
-                    if receiver.is_empty() {
-                        break;
-                    }
-                    return Err(process_event_queue_overflow_error(
-                        self.config.runtime.protocol.max_process_events,
-                    ));
-                }
-                match receiver.try_recv() {
-                    Ok(envelope) => {
-                        queued_envelopes.push(envelope);
-                        emitted_any = true;
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-                }
-            }
-        }
-        for envelope in queued_envelopes {
-            self.queue_pending_process_event(envelope)?;
+        if self.drain_runtime_process_event_channel_nowait()? {
+            emitted_any = true;
         }
 
         let vm_ids = self.vm_ids_for_scope(ownership)?;
@@ -445,14 +1083,18 @@ where
             if let Some(vm) = self.vms.get(&vm_id) {
                 vm.kernel.reap_due_zombies();
             }
-            'vm_event_turn: while let Some(vm) = self.vms.get(&vm_id) {
-                let connection_id = vm.connection_id.clone();
-                let session_id = vm.session_id.clone();
-                let process_ids = self
-                    .vms
-                    .get(&vm_id)
-                    .map(|vm| vm.active_processes.keys().cloned().collect::<Vec<_>>())
-                    .unwrap_or_default();
+            'vm_event_turn: while self.vms.contains_key(&vm_id) {
+                let Some((connection_id, session_id, process_ids)) =
+                    self.vms.get(&vm_id).map(|vm| {
+                        (
+                            vm.connection_id.clone(),
+                            vm.session_id.clone(),
+                            vm.active_processes.keys().cloned().collect::<Vec<_>>(),
+                        )
+                    })
+                else {
+                    break;
+                };
                 let mut emitted_this_pass = false;
 
                 for process_id in process_ids {
@@ -472,7 +1114,7 @@ where
                         RecoverClosedChannel,
                     }
                     let poll_result = {
-                        let Some(vm) = self.vms.get_mut(&vm_id) else {
+                        let Some(mut vm) = self.vms.get_mut(&vm_id) else {
                             continue;
                         };
                         let Some(process) = vm.active_processes.get_mut(&process_id) else {
@@ -528,19 +1170,20 @@ where
                             connection_id: connection_id.clone(),
                             session_id: session_id.clone(),
                             vm_id: vm_id.clone(),
+                            child_path: Vec::new(),
                             process_id: process_id.clone(),
                             event,
                         };
                         if let Err(error) = self.check_pending_process_event_capacity(&envelope) {
-                            if let Some(process) = self
-                                .vms
-                                .get_mut(&vm_id)
-                                .and_then(|vm| vm.active_processes.get_mut(&process_id))
-                            {
-                                process.requeue_pending_execution_event(PolledExecutionEvent {
-                                    event: envelope.event,
-                                    reservation,
-                                })?;
+                            if let Some(mut vm) = self.vms.get_mut(&vm_id) {
+                                if let Some(process) = vm.active_processes.get_mut(&process_id) {
+                                    process.requeue_pending_execution_event(
+                                        PolledExecutionEvent {
+                                            event: envelope.event,
+                                            reservation,
+                                        },
+                                    )?;
+                                }
                             }
                             return Err(error);
                         }
@@ -565,6 +1208,9 @@ where
             }
         }
 
+        if self.route_claimed_pending_process_events()? > 0 {
+            emitted_any = true;
+        }
         self.rearm_kernel_reaper_task()?;
         Ok(emitted_any)
     }
@@ -626,6 +1272,7 @@ where
         matches!(
             event,
             ActiveExecutionEvent::JavascriptSyncRpcRequest(_)
+                | ActiveExecutionEvent::JavascriptSyncRpcCompletion(_)
                 | ActiveExecutionEvent::PythonVfsRpcRequest(_)
                 | ActiveExecutionEvent::PythonSocketConnectCompletion(_)
                 | ActiveExecutionEvent::SignalState { .. }
@@ -637,7 +1284,7 @@ where
         vm_id: &str,
         process_id: &str,
     ) -> Result<Option<ActiveExecutionEvent>, SidecarError> {
-        let Some(vm) = self.vms.get_mut(vm_id) else {
+        let Some(mut vm) = self.vms.get_mut(vm_id) else {
             return Ok(None);
         };
         let Some(process) = vm.active_processes.get_mut(process_id) else {
@@ -669,7 +1316,7 @@ where
         }
     }
 
-    pub(super) fn active_process_by_path<'a>(
+    pub(crate) fn active_process_by_path<'a>(
         process: &'a ActiveProcess,
         child_path: &[&str],
     ) -> Option<&'a ActiveProcess> {
@@ -680,7 +1327,7 @@ where
         Some(current)
     }
 
-    pub(super) fn active_process_by_path_mut<'a>(
+    pub(crate) fn active_process_by_path_mut<'a>(
         process: &'a mut ActiveProcess,
         child_path: &[&str],
     ) -> Option<&'a mut ActiveProcess> {
@@ -838,15 +1485,20 @@ where
         process_id: &str,
         event: ActiveExecutionEvent,
     ) -> Result<Option<EventFrame>, SidecarError> {
-        let Some(vm) = self.vms.get(vm_id) else {
+        let Some((connection_id, session_id, active)) = self.vms.get(vm_id).map(|vm| {
+            (
+                vm.connection_id.clone(),
+                vm.session_id.clone(),
+                vm.active_processes.contains_key(process_id),
+            )
+        }) else {
             log_stale_process_event(&self.bridge, vm_id, process_id, "execution event dispatch");
             return Ok(None);
         };
-        if !vm.active_processes.contains_key(process_id) {
+        if !active {
             log_stale_process_event(&self.bridge, vm_id, process_id, "execution event dispatch");
             return Ok(None);
         }
-        let (connection_id, session_id) = { (vm.connection_id.clone(), vm.session_id.clone()) };
         let ownership = OwnershipScope::vm(&connection_id, &session_id, vm_id);
         let public_execution = self.is_public_execution_process(vm_id, process_id);
 
@@ -909,7 +1561,7 @@ where
                 signal,
                 registration,
             } => {
-                let Some(vm) = self.vms.get_mut(vm_id) else {
+                let Some(mut vm) = self.vms.get_mut(vm_id) else {
                     return Ok(None);
                 };
                 if !vm.active_processes.contains_key(process_id) {
@@ -969,42 +1621,19 @@ where
         process_id: &str,
         completion: crate::state::JavascriptSyncRpcCompletion,
     ) -> Result<(), SidecarError> {
-        let Some(vm) = self.vms.get_mut(vm_id) else {
+        let Some(mut vm) = self.vms.get_mut(vm_id) else {
             return Ok(());
         };
         let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
         let Some(process) = vm.active_processes.get_mut(process_id) else {
             return Ok(());
         };
-        let connected = process
-            .pending_javascript_net_connects
-            .remove(&completion.request_id);
-        let completion_result = match (completion.result, connected) {
-            (Ok(_), Some(connected)) => {
-                finalize_javascript_net_connect(process, &kernel_readiness, connected).map_err(
-                    |error| crate::state::DeferredRpcError {
-                        code: javascript_sync_rpc_error_code(&error),
-                        message: javascript_sync_rpc_error_message(&error),
-                    },
-                )
-            }
-            (result @ Err(_), Some(connected)) => {
-                restore_pending_bound_unix_connect(process, &connected)?;
-                result
-            }
-            (result, None) => result,
-        };
-        let result = match completion_result {
-            Ok(value) => process
-                .execution
-                .respond_javascript_sync_rpc_success(completion.request_id, value),
-            Err(error) => process.execution.respond_javascript_sync_rpc_error(
-                completion.request_id,
-                error.code,
-                error.message,
-            ),
-        };
-        result.or_else(ignore_stale_javascript_sync_rpc_response)
+        settle_javascript_sync_rpc_completion(
+            process,
+            &kernel_readiness,
+            completion.request_id,
+            completion.result,
+        )
     }
 
     pub(super) fn handle_python_socket_connect_completion(
@@ -1028,99 +1657,96 @@ where
                 );
             }
         };
-        let Some(vm) = self.vms.get_mut(vm_id) else {
-            return Ok(());
+        let result = {
+            let Some(mut vm) = self.vms.get_mut(vm_id) else {
+                return Ok(());
+            };
+            let vm = &mut *vm;
+            let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
+            let Some(process) = vm.active_processes.get_mut(process_id) else {
+                return Ok(());
+            };
+            let PendingPythonTcpConnect {
+                native_socket_id,
+                python_socket_id,
+                socket,
+                pending_capability,
+            } = connected;
+            let capability_key = NativeCapabilityKey::TcpSocket(native_socket_id.clone());
+            if let Err(error) = commit_process_capability(
+                process,
+                pending_capability,
+                capability_key.clone(),
+                native_socket_id.clone(),
+                socket.kernel_socket_id,
+            ) {
+                if let Err(close_error) = socket.close(&mut vm.kernel, process.kernel_pid) {
+                    eprintln!(
+                        "ERR_AGENTOS_PYTHON_SOCKET_CLOSE: deferred TCP connect rollback failed: {close_error}"
+                    );
+                }
+                Err(error)
+            } else if let Err(error) =
+                socket.set_fairness_identity(process.capability_fairness_identity(&capability_key))
+            {
+                if let Err(release_error) = process.release_capability(&capability_key) {
+                    eprintln!(
+                        "ERR_AGENTOS_CAPABILITY_RELEASE: deferred Python TCP rollback failed: {release_error}"
+                    );
+                }
+                if let Err(close_error) = socket.close(&mut vm.kernel, process.kernel_pid) {
+                    eprintln!(
+                        "ERR_AGENTOS_PYTHON_SOCKET_CLOSE: deferred TCP fairness rollback failed: {close_error}"
+                    );
+                }
+                Err(error)
+            } else {
+                socket.retain_description_lease(
+                    process
+                        .shared_capability_lease(&capability_key)
+                        .expect("committed deferred Python TCP capability lease"),
+                );
+                register_kernel_readiness_target(
+                    &kernel_readiness,
+                    socket.kernel_socket_id,
+                    None,
+                    Some(Arc::clone(&socket.read_event_notify)),
+                    process.capability_readiness_identity(&capability_key),
+                    native_socket_id.clone(),
+                    KernelSocketReadinessEvent::Data,
+                );
+                process.tcp_sockets.insert(native_socket_id.clone(), socket);
+                process.python_sockets.insert(
+                    python_socket_id,
+                    PythonHostSocket::Tcp {
+                        socket_id: native_socket_id,
+                        pending_read: None,
+                    },
+                );
+                debug_assert!(process.capability_leases.contains_key(&capability_key));
+                Ok(PythonVfsRpcResponsePayload::SocketCreated {
+                    socket_id: python_socket_id,
+                })
+            }
         };
-        let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-        let Some(process) = vm.active_processes.get_mut(process_id) else {
-            return Ok(());
-        };
-        let PendingPythonTcpConnect {
-            native_socket_id,
-            python_socket_id,
-            socket,
-            pending_capability,
-        } = connected;
-        let capability_key = NativeCapabilityKey::TcpSocket(native_socket_id.clone());
-        if let Err(error) = commit_process_capability(
-            process,
-            pending_capability,
-            capability_key.clone(),
-            native_socket_id.clone(),
-            socket.kernel_socket_id,
-        ) {
-            if let Err(close_error) = socket.close(&mut vm.kernel, process.kernel_pid) {
-                eprintln!(
-                    "ERR_AGENTOS_PYTHON_SOCKET_CLOSE: deferred TCP connect rollback failed: {close_error}"
-                );
-            }
-            return self.respond_python_rpc(vm_id, process_id, request_id, Err(error));
-        }
-        if let Err(error) =
-            socket.set_fairness_identity(process.capability_fairness_identity(&capability_key))
-        {
-            if let Err(release_error) = process.release_capability(&capability_key) {
-                eprintln!(
-                    "ERR_AGENTOS_CAPABILITY_RELEASE: deferred Python TCP rollback failed: {release_error}"
-                );
-            }
-            if let Err(close_error) = socket.close(&mut vm.kernel, process.kernel_pid) {
-                eprintln!(
-                    "ERR_AGENTOS_PYTHON_SOCKET_CLOSE: deferred TCP fairness rollback failed: {close_error}"
-                );
-            }
-            return self.respond_python_rpc(vm_id, process_id, request_id, Err(error));
-        }
-        socket.retain_description_lease(
-            process
-                .shared_capability_lease(&capability_key)
-                .expect("committed deferred Python TCP capability lease"),
-        );
-        register_kernel_readiness_target(
-            &kernel_readiness,
-            socket.kernel_socket_id,
-            None,
-            Some(Arc::clone(&socket.read_event_notify)),
-            process.capability_readiness_identity(&capability_key),
-            native_socket_id.clone(),
-            KernelSocketReadinessEvent::Data,
-        );
-        process.tcp_sockets.insert(native_socket_id.clone(), socket);
-        process.python_sockets.insert(
-            python_socket_id,
-            PythonHostSocket::Tcp {
-                socket_id: native_socket_id,
-                pending_read: None,
-            },
-        );
-        debug_assert!(process.capability_leases.contains_key(&capability_key));
-        self.respond_python_rpc(
-            vm_id,
-            process_id,
-            request_id,
-            Ok(PythonVfsRpcResponsePayload::SocketCreated {
-                socket_id: python_socket_id,
-            }),
-        )
+        self.respond_python_rpc(vm_id, process_id, request_id, result)
     }
 
-    pub(crate) fn finish_active_process_exit(
-        &mut self,
+    pub(crate) fn finish_active_process_exit_owned(
+        bridge: &SharedBridge<B>,
+        vm_handle: &crate::state::VmHandle,
         vm_id: &str,
         process_id: &str,
         exit_code: i32,
-    ) -> Result<Option<bool>, SidecarError> {
-        let Some(vm) = self.vms.get_mut(vm_id) else {
-            log_stale_process_event(&self.bridge, vm_id, process_id, "process exit cleanup");
-            return Ok(None);
-        };
+    ) -> Result<Option<FinishedActiveProcessExit>, SidecarError> {
+        let mut vm = vm_handle.try_borrow_mut("finish active process exit")?;
         if !vm.active_processes.contains_key(process_id) {
-            log_stale_process_event(&self.bridge, vm_id, process_id, "process exit cleanup");
+            log_stale_process_event(bridge, vm_id, process_id, "process exit cleanup");
             return Ok(None);
         }
 
         let phase_start = Instant::now();
-        prune_exited_process_snapshots(vm);
+        prune_exited_process_snapshots(&mut vm);
         record_execute_phase(
             "process_exit_cleanup_prune_snapshots",
             phase_start.elapsed(),
@@ -1154,7 +1780,7 @@ where
         let should_sync_host_writes = process.host_write_dirty_recursive()
             || !process.clean_host_writes_are_observable_recursive();
         let host_sync_result = if should_sync_host_writes {
-            sync_process_host_writes_to_kernel(vm, &process)
+            sync_process_host_writes_to_kernel(&mut vm, &process)
         } else {
             record_execute_phase(
                 "process_exit_cleanup_sync_host_writes_clean_skip",
@@ -1206,9 +1832,7 @@ where
         let phase_start = Instant::now();
         let became_idle = vm.active_processes.is_empty();
         record_execute_phase("process_exit_cleanup_became_idle", phase_start.elapsed());
-        let phase_start = Instant::now();
-        self.prune_extension_process_resource(process_id);
-        record_execute_phase("process_exit_cleanup_prune_resource", phase_start.elapsed());
+        drop(vm);
 
         // The process was removed from active_processes before the fallible
         // host/raw-mode cleanup. Surface those errors only after all process-
@@ -1216,6 +1840,227 @@ where
         // been copied back and finalized.
         host_sync_result?;
         raw_mode_result?;
-        Ok(Some(became_idle))
+        Ok(Some(FinishedActiveProcessExit {
+            became_idle,
+            process_id: process_id.to_owned(),
+        }))
+    }
+
+    pub(crate) fn finish_active_process_exit(
+        &mut self,
+        vm_id: &str,
+        process_id: &str,
+        exit_code: i32,
+    ) -> Result<Option<bool>, SidecarError> {
+        let Some(vm_handle) = self.vms.handle(vm_id) else {
+            log_stale_process_event(&self.bridge, vm_id, process_id, "process exit cleanup");
+            return Ok(None);
+        };
+        let finished = Self::finish_active_process_exit_owned(
+            &self.bridge,
+            &vm_handle,
+            vm_id,
+            process_id,
+            exit_code,
+        )?;
+        if let Some(finished) = finished {
+            let phase_start = Instant::now();
+            self.prune_extension_process_resource(&finished.process_id);
+            record_execute_phase("process_exit_cleanup_prune_resource", phase_start.elapsed());
+            return Ok(Some(finished.became_idle));
+        }
+        Ok(None)
+    }
+}
+
+pub(crate) struct FinishedActiveProcessExit {
+    pub(crate) became_idle: bool,
+    pub(crate) process_id: String,
+}
+
+#[cfg(test)]
+mod process_event_channel_tests {
+    use super::*;
+    use crate::stdio::LocalBridge;
+    use crate::NativeSidecarConfig;
+    use std::future::Future as _;
+    use std::task::{Context, Poll, Waker};
+
+    #[test]
+    fn receiver_admission_failure_does_not_drop_later_envelopes() {
+        let config = NativeSidecarConfig::default();
+        let runtime = agentos_runtime::SidecarRuntime::process(&config.runtime)
+            .expect("process-event channel test runtime");
+        let mut sidecar = NativeSidecar::with_config_extensions_and_runtime(
+            LocalBridge::default(),
+            config,
+            Vec::new(),
+            runtime.context(),
+        )
+        .expect("process-event channel test sidecar");
+        sidecar.config.runtime.protocol.max_process_events = 2;
+        let envelope = |child_path, byte| ProcessEventEnvelope {
+            connection_id: String::from("connection"),
+            session_id: String::from("session"),
+            vm_id: String::from("vm"),
+            child_path,
+            process_id: String::from("process"),
+            event: ActiveExecutionEvent::Stdout(vec![byte]),
+        };
+        sidecar
+            .process_event_sender
+            .try_send(envelope(
+                vec![String::from("a"), String::from("b"), String::from("c")],
+                1,
+            ))
+            .expect("queue invalid first envelope");
+        sidecar
+            .process_event_sender
+            .try_send(envelope(Vec::new(), 2))
+            .expect("queue valid later envelope");
+
+        let error = sidecar
+            .drain_runtime_process_event_channel_nowait()
+            .expect_err("invalid locator must fail admission");
+        assert!(error
+            .to_string()
+            .contains("ERR_AGENTOS_PROCESS_EVENT_PATH_LIMIT"));
+        assert_eq!(
+            sidecar
+                .process_event_receiver
+                .as_ref()
+                .expect("process event receiver")
+                .len(),
+            1,
+            "the later envelope must remain in the bounded channel"
+        );
+    }
+
+    #[test]
+    fn deferred_current_envelope_retries_before_later_channel_envelopes() {
+        let config = NativeSidecarConfig::default();
+        let runtime = agentos_runtime::SidecarRuntime::process(&config.runtime)
+            .expect("process-event retry-order test runtime");
+        let mut sidecar = NativeSidecar::with_config_extensions_and_runtime(
+            LocalBridge::default(),
+            config,
+            Vec::new(),
+            runtime.context(),
+        )
+        .expect("process-event retry-order test sidecar");
+        let envelope = |byte| ProcessEventEnvelope {
+            connection_id: String::from("connection"),
+            session_id: String::from("session"),
+            vm_id: String::from("vm"),
+            child_path: Vec::new(),
+            process_id: String::from("process"),
+            event: ActiveExecutionEvent::Stdout(vec![byte]),
+        };
+        sidecar.deferred_process_event_envelope = Some(envelope(1));
+        sidecar
+            .process_event_sender
+            .try_send(envelope(2))
+            .expect("queue later envelope");
+
+        assert!(sidecar
+            .drain_runtime_process_event_channel_nowait()
+            .expect("retry staged and later envelopes"));
+        let bytes = sidecar
+            .pending_process_events
+            .drain(..)
+            .map(|envelope| match envelope.event {
+                ActiveExecutionEvent::Stdout(bytes) => bytes[0],
+                other => panic!("expected stdout, received {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(bytes, vec![1, 2]);
+        assert!(sidecar.deferred_process_event_envelope.is_none());
+        assert!(sidecar
+            .process_event_receiver
+            .as_ref()
+            .expect("process event receiver")
+            .is_empty());
+    }
+
+    #[test]
+    fn temporary_rejection_stays_open_and_rearms_only_after_capacity_release() {
+        let config = NativeSidecarConfig::default();
+        let runtime = agentos_runtime::SidecarRuntime::process(&config.runtime)
+            .expect("process-event no-spin test runtime");
+        let mut sidecar = NativeSidecar::with_config_extensions_and_runtime(
+            LocalBridge::default(),
+            config,
+            Vec::new(),
+            runtime.context(),
+        )
+        .expect("process-event no-spin test sidecar");
+        sidecar.config.runtime.protocol.max_process_events = 2;
+        let envelope = |byte| ProcessEventEnvelope {
+            connection_id: String::from("connection"),
+            session_id: String::from("session"),
+            vm_id: String::from("vm"),
+            child_path: Vec::new(),
+            process_id: String::from("process"),
+            event: ActiveExecutionEvent::Stdout(vec![byte]),
+        };
+        sidecar.pending_process_events.push_back(envelope(8));
+        sidecar.pending_process_events.push_back(envelope(9));
+        sidecar.deferred_process_event_envelope = Some(envelope(1));
+        sidecar
+            .process_event_sender
+            .try_send(envelope(2))
+            .expect("queue later envelope");
+
+        assert!(sidecar
+            .drain_runtime_process_event_channel_nowait()
+            .expect("temporary saturation must not close the protocol"));
+        assert!(sidecar.deferred_process_event_envelope.is_some());
+        assert_eq!(sidecar.pending_process_events.len(), 2);
+        assert_eq!(
+            sidecar
+                .process_event_receiver
+                .as_ref()
+                .expect("process event receiver")
+                .len(),
+            1
+        );
+
+        let mut notified = Box::pin(sidecar.process_event_notify.notified());
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            notified.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+
+        sidecar.pending_process_events.pop_front();
+        sidecar.observe_pending_process_event_depth();
+        sidecar.rearm_deferred_process_event_after_capacity_release();
+        assert!(matches!(
+            notified.as_mut().poll(&mut context),
+            Poll::Ready(())
+        ));
+        drop(notified);
+
+        sidecar
+            .drain_runtime_process_event_channel_nowait()
+            .expect("retry staged current envelope");
+        let queued = sidecar
+            .pending_process_events
+            .iter()
+            .map(|envelope| match &envelope.event {
+                ActiveExecutionEvent::Stdout(bytes) => bytes[0],
+                other => panic!("expected stdout, received {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(queued, vec![9, 1]);
+        assert_eq!(
+            sidecar
+                .process_event_receiver
+                .as_ref()
+                .expect("process event receiver")
+                .len(),
+            1,
+            "later envelope remains behind the retried current envelope"
+        );
     }
 }

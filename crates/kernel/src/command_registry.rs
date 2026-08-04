@@ -53,6 +53,13 @@ impl CommandRegistry {
     pub fn register(&mut self, driver: CommandDriver) -> VfsResult<()> {
         driver.validate_commands()?;
 
+        // Registering one logical driver is replacement, not an append. This is
+        // required for transactional registries (for example host callbacks):
+        // rolling a driver back to its previous command set must make aliases
+        // introduced by the failed update unresolvable.
+        self.commands
+            .retain(|_, existing| existing.name() != driver.name());
+
         for command in &driver.commands {
             if let Some(existing) = self.commands.get(command) {
                 self.warnings.push(format!(
@@ -141,4 +148,29 @@ fn validate_command_name(command: &str) -> VfsResult<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registering_same_driver_replaces_its_command_set() {
+        let mut registry = CommandRegistry::new();
+        registry
+            .register(CommandDriver::new("bindings", ["old", "temporary"]))
+            .expect("register initial driver");
+        registry
+            .register(CommandDriver::new("bindings", ["old"]))
+            .expect("replace driver commands");
+
+        assert_eq!(
+            registry.resolve("old").map(CommandDriver::name),
+            Some("bindings")
+        );
+        assert!(
+            registry.resolve("temporary").is_none(),
+            "aliases removed by a driver refresh must not remain executable"
+        );
+    }
 }

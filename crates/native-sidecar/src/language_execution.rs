@@ -5,8 +5,13 @@
 //! engines; clients never construct runtime or package-manager commands.
 
 use crate::protocol::*;
-use crate::service::{normalize_path, DispatchResult, NativeSidecar, SidecarError};
-use crate::state::{BridgeError, ExecutionValueKind, ManagedLanguageExecution};
+use crate::service::{
+    normalize_path, DispatchResult, NativeSidecar, RequestCompletionEffects, SidecarError,
+};
+use crate::state::{
+    BridgeError, ExecutionValueKind, ManagedLanguageExecution, SharedBridge,
+    SharedSidecarRequestClient, VmHandle, VmState,
+};
 use crate::NativeSidecarBridge;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{ImportDeclarationSpecifier, Statement};
@@ -827,7 +832,393 @@ where
     B: NativeSidecarBridge + Send + 'static,
     BridgeError<B>: fmt::Debug + Send + Sync + 'static,
 {
-    pub(crate) async fn execute_language_operation(
+    pub(crate) fn execute_language_operation(
+        &mut self,
+        request: &RequestFrame,
+        payload: RequestPayload,
+        completion_effects: RequestCompletionEffects,
+    ) -> crate::execution::OwnedVmRouteFuture {
+        let input = self.prepare_owned_vm_route(request);
+        let bridge = self.bridge.clone();
+        let sidecar_requests = self.sidecar_requests.clone();
+        let process_event_notify = Arc::clone(&self.process_event_notify);
+        let cache_root = self.cache_root.clone();
+        let max_process_events = self.config.runtime.protocol.max_process_events;
+        Box::pin(async move {
+            let input = input?;
+            let request = input.request.clone();
+            let mut service = OwnedLanguageSidecar {
+                request: request.clone(),
+                vms: OwnedLanguageVmRegistry {
+                    vm_id: input.vm_id.clone(),
+                    vm: input.vm,
+                },
+                bridge,
+                sidecar_requests,
+                process_event_notify,
+                cache_root,
+                max_process_events,
+                completion_effects,
+            };
+            service
+                .execute_language_operation_owned(&request, payload)
+                .await
+        })
+    }
+}
+
+struct OwnedLanguageVmRegistry {
+    vm_id: String,
+    vm: VmHandle,
+}
+
+impl OwnedLanguageVmRegistry {
+    fn get(&self, vm_id: &str) -> Option<std::cell::Ref<'_, VmState>> {
+        (vm_id == self.vm_id).then(|| self.vm.borrow())
+    }
+
+    fn get_mut(&self, vm_id: &str) -> Option<std::cell::RefMut<'_, VmState>> {
+        (vm_id == self.vm_id).then(|| self.vm.borrow_mut())
+    }
+}
+
+struct OwnedLanguageSidecar<B> {
+    request: RequestFrame,
+    vms: OwnedLanguageVmRegistry,
+    bridge: SharedBridge<B>,
+    sidecar_requests: SharedSidecarRequestClient,
+    process_event_notify: Arc<tokio::sync::Notify>,
+    cache_root: std::path::PathBuf,
+    max_process_events: usize,
+    completion_effects: RequestCompletionEffects,
+}
+
+impl<B> OwnedLanguageSidecar<B>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    fn vm_input(&self, request: &RequestFrame) -> crate::execution::OwnedVmRouteInput {
+        crate::execution::OwnedVmRouteInput {
+            request: request.clone(),
+            vm_id: self.vms.vm_id.clone(),
+            vm: self.vms.vm.clone(),
+        }
+    }
+
+    async fn execute(
+        &self,
+        request: &RequestFrame,
+        payload: ExecuteRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        crate::execution::execute_owned(
+            self.vm_input(request),
+            payload,
+            self.bridge.clone(),
+            self.sidecar_requests.clone(),
+            Arc::clone(&self.process_event_notify),
+            self.cache_root.clone(),
+            self.max_process_events,
+        )
+        .await
+    }
+
+    async fn write_stdin(
+        &self,
+        request: &RequestFrame,
+        payload: WriteStdinRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        crate::execution::write_stdin_owned(self.vm_input(request), payload).await
+    }
+
+    async fn close_stdin(
+        &self,
+        request: &RequestFrame,
+        payload: CloseStdinRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        crate::execution::close_stdin_owned(self.vm_input(request), payload).await
+    }
+
+    async fn resize_pty(
+        &self,
+        request: &RequestFrame,
+        payload: ResizePtyRequest,
+    ) -> Result<DispatchResult, SidecarError> {
+        crate::execution::resize_pty_owned(self.bridge.clone(), self.vm_input(request), payload)
+            .await
+    }
+
+    fn active_process_id(
+        &self,
+        vm_id: &str,
+        execution_id: &str,
+    ) -> Result<String, (&'static str, String)> {
+        let Some((state, process_id)) = self.vms.get(vm_id).and_then(|vm| {
+            vm.executions.get(execution_id).map(|execution| {
+                (
+                    execution.descriptor.state.clone(),
+                    execution.descriptor.process_id.clone(),
+                )
+            })
+        }) else {
+            return Err((
+                "execution_not_found",
+                format!("execution {execution_id} does not exist"),
+            ));
+        };
+        if state != ExecutionState::Running {
+            return Err((
+                "execution_not_running",
+                format!("execution {execution_id} is not running"),
+            ));
+        }
+        process_id.ok_or_else(|| {
+            (
+                "execution_not_running",
+                format!("execution {execution_id} has no active process"),
+            )
+        })
+    }
+
+    async fn kill_process_internal(
+        &self,
+        process_id: &str,
+        signal: &str,
+    ) -> Result<(), SidecarError> {
+        crate::execution::kill_process_owned(
+            self.bridge.clone(),
+            self.vm_input(&self.request),
+            KillProcessRequest {
+                process_id: process_id.to_owned(),
+                signal: signal.to_owned(),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    fn finish_active_process_exit(
+        &self,
+        vm_id: &str,
+        process_id: &str,
+        exit_code: i32,
+    ) -> Result<Option<bool>, SidecarError> {
+        let finished = NativeSidecar::<B>::finish_active_process_exit_owned(
+            &self.bridge,
+            &self.vms.vm,
+            vm_id,
+            process_id,
+            exit_code,
+        )?;
+        finished
+            .map(|finished| {
+                self.completion_effects
+                    .record_exited_process(&finished.process_id)?;
+                Ok(finished.became_idle)
+            })
+            .transpose()
+    }
+
+    fn schedule_execution_retention_wake(&self, vm_id: &str) {
+        let now = now_ms();
+        let next_deadline = self.vms.get(vm_id).and_then(|vm| {
+            let completed_count = vm
+                .executions
+                .values()
+                .filter(|execution| {
+                    execution.public
+                        && !execution.context
+                        && execution.descriptor.state != ExecutionState::Running
+                        && execution.result.is_some()
+                })
+                .count();
+            if completed_count > vm.limits.execution.max_completed_executions {
+                return Some(now);
+            }
+            vm.executions
+                .values()
+                .filter_map(|execution| execution.expires_at_ms)
+                .min()
+        });
+        let Some(mut vm) = self.vms.get_mut(vm_id) else {
+            return;
+        };
+        if vm.execution_retention_wake_deadline_ms == next_deadline
+            && vm
+                .execution_retention_wake_task
+                .as_ref()
+                .is_some_and(|task| !task.is_finished())
+        {
+            return;
+        }
+        if let Some(task) = vm.execution_retention_wake_task.take() {
+            task.abort();
+        }
+        vm.execution_retention_wake_deadline_ms = next_deadline;
+        let Some(deadline) = next_deadline else {
+            return;
+        };
+        let notify = Arc::clone(&self.process_event_notify);
+        let delay_ms = deadline.saturating_sub(now);
+        match vm
+            .runtime_context
+            .spawn(agentos_runtime::TaskClass::Timer, async move {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                notify.notify_one();
+            }) {
+            Ok(task) => vm.execution_retention_wake_task = Some(task),
+            Err(error) => {
+                eprintln!("agentos VM {vm_id} failed to schedule execution retention wake: {error}")
+            }
+        }
+    }
+
+    async fn expire_public_execution_deadlines(
+        &self,
+        request_effect_reserve: usize,
+    ) -> Result<(), SidecarError> {
+        let vm_id = self.vms.vm_id.clone();
+        let now = now_ms();
+        if let Some(mut vm) = self.vms.get_mut(&vm_id) {
+            if vm
+                .execution_retention_wake_task
+                .as_ref()
+                .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                vm.execution_retention_wake_task = None;
+                vm.execution_retention_wake_deadline_ms = None;
+            }
+        }
+
+        let expired_budget = self
+            .completion_effects
+            .remaining_exited_process_capacity(request_effect_reserve)
+            .min(64);
+        let expired = self
+            .vms
+            .get(&vm_id)
+            .map(|vm| {
+                vm.executions
+                    .iter()
+                    .filter_map(|(execution_id, execution)| {
+                        (execution.public
+                            && !execution.context
+                            && execution.descriptor.state != ExecutionState::Running
+                            && execution
+                                .expires_at_ms
+                                .is_some_and(|expires_at| now >= expires_at))
+                        .then(|| (execution_id.clone(), execution.resident_process_id.clone()))
+                    })
+                    .take(expired_budget)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (execution_id, resident_process_id) in expired {
+            if let Some(process_id) = resident_process_id {
+                self.finish_active_process_exit(&vm_id, &process_id, 0)?;
+                if let Some(mut vm) = self.vms.get_mut(&vm_id) {
+                    vm.execution_processes.remove(&process_id);
+                }
+            }
+            if let Some(mut vm) = self.vms.get_mut(&vm_id) {
+                vm.executions.remove(&execution_id);
+                if vm.package_mutation_execution_id.as_deref() == Some(&execution_id) {
+                    vm.package_mutation_execution_id = None;
+                }
+            }
+        }
+
+        let over_limit_budget = self
+            .completion_effects
+            .remaining_exited_process_capacity(request_effect_reserve)
+            .min(64);
+        let over_limit = self
+            .vms
+            .get(&vm_id)
+            .map(|vm| {
+                let mut completed = vm
+                    .executions
+                    .iter()
+                    .filter(|(_, execution)| {
+                        execution.public
+                            && !execution.context
+                            && execution.descriptor.state != ExecutionState::Running
+                            && execution.result.is_some()
+                    })
+                    .map(|(execution_id, execution)| {
+                        (
+                            execution_id.clone(),
+                            execution.descriptor.last_completed_at_ms.unwrap_or(0),
+                            execution.resident_process_id.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                completed.sort_by_key(|(_, completed_at, _)| *completed_at);
+                let excess = completed
+                    .len()
+                    .saturating_sub(vm.limits.execution.max_completed_executions);
+                completed.into_iter().take(excess).collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (execution_id, _, resident_process_id) in over_limit.into_iter().take(over_limit_budget)
+        {
+            eprintln!(
+                "agentos VM {vm_id} evicted completed execution {execution_id} to enforce limits.execution.maxCompletedExecutions"
+            );
+            if let Some(process_id) = resident_process_id {
+                self.finish_active_process_exit(&vm_id, &process_id, 0)?;
+                if let Some(mut vm) = self.vms.get_mut(&vm_id) {
+                    vm.execution_processes.remove(&process_id);
+                }
+            }
+            if let Some(mut vm) = self.vms.get_mut(&vm_id) {
+                vm.executions.remove(&execution_id);
+            }
+        }
+
+        let due = self
+            .vms
+            .get(&vm_id)
+            .map(|vm| {
+                vm.executions
+                    .values()
+                    .filter_map(|execution| {
+                        (execution.descriptor.state == ExecutionState::Running
+                            && execution
+                                .deadline_ms
+                                .is_some_and(|deadline| now >= deadline))
+                        .then(|| execution.descriptor.process_id.clone())
+                        .flatten()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for process_id in due {
+            let execution_id = self
+                .vms
+                .get(&vm_id)
+                .and_then(|vm| vm.execution_processes.get(&process_id).cloned());
+            if let Some(execution_id) = execution_id {
+                if let Some(mut vm) = self.vms.get_mut(&vm_id) {
+                    if let Some(execution) = vm.executions.get_mut(&execution_id) {
+                        if execution.pending_outcome != Some(ExecutionOutcome::Cancelled) {
+                            execution.pending_outcome = Some(ExecutionOutcome::TimedOut);
+                        }
+                        execution.deadline_ms = None;
+                    }
+                }
+                self.kill_process_internal(&process_id, "SIGKILL").await?;
+            }
+        }
+        self.schedule_execution_retention_wake(&vm_id);
+        Ok(())
+    }
+
+    fn respond(&self, request: &RequestFrame, payload: ResponsePayload) -> ResponseFrame {
+        agentos_native_sidecar_core::respond(request, payload)
+    }
+
+    async fn execute_language_operation_owned(
         &mut self,
         request: &RequestFrame,
         payload: RequestPayload,
@@ -846,8 +1237,7 @@ where
                 ));
             }
         };
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
+        let vm_id = self.vms.vm_id.clone();
         let context_execution = operation.identity.context_id.is_some();
         if operation.background && context_execution {
             return Ok(typed_rejection(
@@ -895,7 +1285,7 @@ where
                     "executeTypeScriptFile requires a file path",
                 ))
             })?;
-            let vm = self
+            let mut vm = self
                 .vms
                 .get_mut(&vm_id)
                 .ok_or_else(|| SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}")))?;
@@ -936,7 +1326,7 @@ where
         {
             const COMPILER_ROOT: &str = "/.agentos/runtime/typescript";
             const COMPILER_PATH: &str = "/.agentos/runtime/typescript/typescript.js";
-            let vm = self
+            let mut vm = self
                 .vms
                 .get_mut(&vm_id)
                 .ok_or_else(|| SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}")))?;
@@ -995,7 +1385,7 @@ where
             }
         };
         let execution_id = {
-            let vm = self
+            let mut vm = self
                 .vms
                 .get_mut(&vm_id)
                 .ok_or_else(|| SidecarError::InvalidState(format!("unknown sidecar VM {vm_id}")))?;
@@ -1103,7 +1493,8 @@ where
         }
 
         let (process_id, generation, descriptor, reused_resident) = {
-            let vm = self.vms.get_mut(&vm_id).expect("owned VM checked above");
+            let mut vm = self.vms.get_mut(&vm_id).expect("owned VM checked above");
+            let vm = &mut *vm;
             let resident_process_id = operation
                 .retained_source
                 .as_ref()
@@ -1151,7 +1542,7 @@ where
                         .clone()
                         .unwrap_or(ExecutionOutputCapture::None),
                     retain_events: operation.output.retain_events.unwrap_or(false),
-                    event_limit: self.config.runtime.protocol.max_process_events.max(1),
+                    event_limit: self.max_process_events.max(1),
                     event_bytes_limit: EXECUTION_EVENT_BYTES_LIMIT,
                     uses_pty: false,
                     value_kind: ExecutionValueKind::None,
@@ -1236,9 +1627,9 @@ where
                     notify.notify_one();
                 })
                 .map_err(|error| SidecarError::Execution(error.to_string()))?;
-            self.vms
-                .get_mut(&vm_id)
-                .and_then(|vm| vm.executions.get_mut(&execution_id))
+            let mut vm = self.vms.get_mut(&vm_id).expect("owned VM checked above");
+            vm.executions
+                .get_mut(&execution_id)
                 .expect("admitted execution exists")
                 .deadline_task = Some(task);
         }
@@ -1302,7 +1693,7 @@ where
                 .retained_file_path
                 .clone()
                 .unwrap_or_else(|| String::from("/[agentos-retained]"));
-            let vm = self.vms.get_mut(&vm_id).expect("owned VM checked above");
+            let mut vm = self.vms.get_mut(&vm_id).expect("owned VM checked above");
             let process = vm.active_processes.get_mut(&process_id).ok_or_else(|| {
                 SidecarError::InvalidState(format!(
                     "resident process {process_id} disappeared before execution"
@@ -1319,9 +1710,18 @@ where
             Ok(result) => result,
             Err(error) => {
                 if reused_resident {
-                    let _ = self.finish_active_process_exit(&vm_id, &process_id, 1);
+                    if let Err(cleanup_error) =
+                        self.finish_active_process_exit(&vm_id, &process_id, 1)
+                    {
+                        tracing::error!(
+                            vm_id,
+                            process_id,
+                            %cleanup_error,
+                            "failed to finish reused resident process after launch failure"
+                        );
+                    }
                 }
-                if let Some(vm) = self.vms.get_mut(&vm_id) {
+                if let Some(mut vm) = self.vms.get_mut(&vm_id) {
                     let completed_ttl_ms = vm.limits.execution.completed_ttl_ms;
                     vm.execution_processes.remove(&process_id);
                     if vm.package_mutation_execution_id.as_deref() == Some(&execution_id) {
@@ -1350,8 +1750,11 @@ where
                 let result = self
                     .vms
                     .get(&vm_id)
-                    .and_then(|vm| vm.executions.get(&execution_id))
-                    .and_then(|execution| execution.result.clone())
+                    .and_then(|vm| {
+                        vm.executions
+                            .get(&execution_id)
+                            .and_then(|execution| execution.result.clone())
+                    })
                     .expect("admitted start failure stores a result");
                 self.schedule_execution_retention_wake(&vm_id);
                 return Ok(DispatchResult {
@@ -1378,12 +1781,10 @@ where
 
         if let Some(launch) = &launch {
             if let ResponsePayload::ProcessStarted(started) = &launch.response.payload {
-                if let Some(execution) = self
-                    .vms
-                    .get_mut(&vm_id)
-                    .and_then(|vm| vm.executions.get_mut(&execution_id))
-                {
-                    execution.descriptor.pid = started.pid;
+                if let Some(mut vm) = self.vms.get_mut(&vm_id) {
+                    if let Some(execution) = vm.executions.get_mut(&execution_id) {
+                        execution.descriptor.pid = started.pid;
+                    }
                 }
             }
         }
@@ -1402,8 +1803,11 @@ where
         let descriptor = self
             .vms
             .get(&vm_id)
-            .and_then(|vm| vm.executions.get(&execution_id))
-            .map(|execution| execution.descriptor.clone())
+            .and_then(|vm| {
+                vm.executions
+                    .get(&execution_id)
+                    .map(|execution| execution.descriptor.clone())
+            })
             .unwrap_or(descriptor);
         debug_assert_eq!(descriptor.generation, generation);
         Ok(DispatchResult {
@@ -1417,15 +1821,65 @@ where
             events: launch.map_or_else(Vec::new, |launch| launch.events),
         })
     }
+}
 
-    pub(crate) async fn handle_execution_lifecycle(
+impl<B> NativeSidecar<B>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    pub(crate) fn handle_execution_lifecycle(
+        &mut self,
+        request: &RequestFrame,
+        payload: RequestPayload,
+        completion_effects: RequestCompletionEffects,
+    ) -> crate::execution::OwnedVmRouteFuture {
+        let input = self.prepare_owned_vm_route(request);
+        let bridge = self.bridge.clone();
+        let sidecar_requests = self.sidecar_requests.clone();
+        let process_event_notify = Arc::clone(&self.process_event_notify);
+        let cache_root = self.cache_root.clone();
+        let max_process_events = self.config.runtime.protocol.max_process_events;
+        Box::pin(async move {
+            let input = input?;
+            let request = input.request.clone();
+            let mut service = OwnedLanguageSidecar {
+                request: request.clone(),
+                vms: OwnedLanguageVmRegistry {
+                    vm_id: input.vm_id.clone(),
+                    vm: input.vm,
+                },
+                bridge,
+                sidecar_requests,
+                process_event_notify,
+                cache_root,
+                max_process_events,
+                completion_effects,
+            };
+            service
+                .handle_execution_lifecycle_owned(&request, payload)
+                .await
+        })
+    }
+}
+
+impl<B> OwnedLanguageSidecar<B>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
+    async fn handle_execution_lifecycle_owned(
         &mut self,
         request: &RequestFrame,
         payload: RequestPayload,
     ) -> Result<DispatchResult, SidecarError> {
-        let (connection_id, session_id, vm_id) = self.vm_scope_for(&request.ownership)?;
-        self.require_owned_vm(&connection_id, &session_id, &vm_id)?;
-        self.expire_public_execution_deadlines()?;
+        let vm_id = self.vms.vm_id.clone();
+        let request_effect_reserve = usize::from(matches!(
+            &payload,
+            RequestPayload::ResetExecution(_) | RequestPayload::DeleteExecution(_)
+        ));
+        self.expire_public_execution_deadlines(request_effect_reserve)
+            .await?;
 
         let response = match payload {
             RequestPayload::CreateContext(payload) => {
@@ -1436,21 +1890,30 @@ where
                         "contextId must not be empty",
                     ));
                 }
-                let vm = self.vms.get(&vm_id).expect("owned VM checked above");
-                if vm.executions.contains_key(&payload.context_id) {
+                let (exists, context_count, max_contexts, warning_threshold) = self
+                    .vms
+                    .get(&vm_id)
+                    .map(|vm| {
+                        (
+                            vm.executions.contains_key(&payload.context_id),
+                            vm.executions
+                                .values()
+                                .filter(|execution| execution.context)
+                                .count(),
+                            vm.limits.execution.max_completed_executions,
+                            vm.limits.execution.live_execution_warning_threshold,
+                        )
+                    })
+                    .expect("owned VM checked above");
+                if exists {
                     return Ok(typed_rejection(
                         request,
                         "context_conflict",
                         format!("context {} already exists", payload.context_id),
                     ));
                 }
-                let context_count = vm
-                    .executions
-                    .values()
-                    .filter(|execution| execution.context)
-                    .count();
-                if context_count >= vm.limits.execution.max_completed_executions {
-                    let configured_limit = vm.limits.execution.max_completed_executions;
+                if context_count >= max_contexts {
+                    let configured_limit = max_contexts;
                     return Ok(DispatchResult {
                         response: self.respond(
                             request,
@@ -1485,16 +1948,14 @@ where
                         events: Vec::new(),
                     });
                 }
-                if context_count.saturating_add(1)
-                    == vm.limits.execution.live_execution_warning_threshold
-                {
+                if context_count.saturating_add(1) == warning_threshold {
                     eprintln!(
                         "agentos VM {vm_id} reached limits.execution.liveExecutionWarningThreshold ({}) with {} contexts",
-                        vm.limits.execution.live_execution_warning_threshold,
+                        warning_threshold,
                         context_count.saturating_add(1)
                     );
                 }
-                let vm = self.vms.get_mut(&vm_id).expect("owned VM checked above");
+                let mut vm = self.vms.get_mut(&vm_id).expect("owned VM checked above");
                 let now = now_ms();
                 let context_id = payload.context_id;
                 let descriptor = ExecutionDescriptor {
@@ -1529,7 +1990,7 @@ where
                         output_limit_setting: "limits.execution.maxCompletedExecutions",
                         capture: ExecutionOutputCapture::None,
                         retain_events: false,
-                        event_limit: self.config.runtime.protocol.max_process_events.max(1),
+                        event_limit: self.max_process_events.max(1),
                         event_bytes_limit: EXECUTION_EVENT_BYTES_LIMIT,
                         uses_pty: false,
                         value_kind: ExecutionValueKind::None,
@@ -1546,21 +2007,19 @@ where
                 })
             }
             RequestPayload::GetExecution(payload) => {
-                let Some(execution) = self
-                    .vms
-                    .get(&vm_id)
-                    .and_then(|vm| vm.executions.get(&payload.execution_id))
-                    .filter(|execution| execution.context)
-                else {
+                let Some(execution) = self.vms.get(&vm_id).and_then(|vm| {
+                    vm.executions
+                        .get(&payload.execution_id)
+                        .filter(|execution| execution.context)
+                        .map(|execution| execution.descriptor.clone())
+                }) else {
                     return Ok(typed_rejection(
                         request,
                         "context_not_found",
                         format!("context {} does not exist", payload.execution_id),
                     ));
                 };
-                ResponsePayload::ExecutionDescriptor(ExecutionDescriptorResponse {
-                    execution: execution.descriptor.clone(),
-                })
+                ResponsePayload::ExecutionDescriptor(ExecutionDescriptorResponse { execution })
             }
             RequestPayload::ListExecutions(_) => {
                 let executions = self
@@ -1577,29 +2036,27 @@ where
                 ResponsePayload::ExecutionList(ExecutionListResponse { executions })
             }
             RequestPayload::WaitExecution(payload) => {
-                let Some((result, ephemeral)) = self
-                    .vms
-                    .get(&vm_id)
-                    .and_then(|vm| vm.executions.get(&payload.execution_id))
-                    .and_then(|execution| {
-                        (execution.descriptor.state != ExecutionState::Running)
-                            .then(|| {
-                                execution
-                                    .result
-                                    .clone()
-                                    .map(|result| (result, !execution.public))
-                            })
-                            .flatten()
-                    })
-                else {
-                    if self
-                        .vms
-                        .get(&vm_id)
-                        .and_then(|vm| vm.executions.get(&payload.execution_id))
-                        .is_some_and(|execution| {
-                            execution.descriptor.state == ExecutionState::Running
+                let Some((result, ephemeral)) = self.vms.get(&vm_id).and_then(|vm| {
+                    vm.executions
+                        .get(&payload.execution_id)
+                        .and_then(|execution| {
+                            (execution.descriptor.state != ExecutionState::Running)
+                                .then(|| {
+                                    execution
+                                        .result
+                                        .clone()
+                                        .map(|result| (result, !execution.public))
+                                })
+                                .flatten()
                         })
-                    {
+                }) else {
+                    if self.vms.get(&vm_id).is_some_and(|vm| {
+                        vm.executions
+                            .get(&payload.execution_id)
+                            .is_some_and(|execution| {
+                                execution.descriptor.state == ExecutionState::Running
+                            })
+                    }) {
                         return Ok(typed_rejection(
                             request,
                             "execution_busy",
@@ -1625,23 +2082,21 @@ where
                 ResponsePayload::ExecutionCompleted(result)
             }
             RequestPayload::CancelExecution(payload) => {
-                let process_id = match active_process_id(self, &vm_id, &payload.execution_id) {
+                let process_id = match self.active_process_id(&vm_id, &payload.execution_id) {
                     Ok(process_id) => process_id,
                     Err((code, message)) => return Ok(typed_rejection(request, code, message)),
                 };
-                if let Some(execution) = self
-                    .vms
-                    .get_mut(&vm_id)
-                    .and_then(|vm| vm.executions.get_mut(&payload.execution_id))
-                {
-                    execution.pending_outcome = Some(ExecutionOutcome::Cancelled);
-                    execution.deadline_ms =
-                        Some(now_ms().saturating_add(EXECUTION_CANCEL_GRACE_MS));
-                    if let Some(task) = execution.deadline_task.take() {
-                        task.abort();
+                if let Some(mut vm) = self.vms.get_mut(&vm_id) {
+                    if let Some(execution) = vm.executions.get_mut(&payload.execution_id) {
+                        execution.pending_outcome = Some(ExecutionOutcome::Cancelled);
+                        execution.deadline_ms =
+                            Some(now_ms().saturating_add(EXECUTION_CANCEL_GRACE_MS));
+                        if let Some(task) = execution.deadline_task.take() {
+                            task.abort();
+                        }
                     }
                 }
-                self.kill_process_internal(&vm_id, &process_id, "SIGTERM")?;
+                self.kill_process_internal(&process_id, "SIGTERM").await?;
                 let notify = Arc::clone(&self.process_event_notify);
                 let runtime = self
                     .vms
@@ -1658,44 +2113,54 @@ where
                         notify.notify_one();
                     })
                     .map_err(|error| SidecarError::Execution(error.to_string()))?;
-                self.vms
-                    .get_mut(&vm_id)
-                    .and_then(|vm| vm.executions.get_mut(&payload.execution_id))
+                let mut vm = self.vms.get_mut(&vm_id).expect("execution VM exists");
+                vm.executions
+                    .get_mut(&payload.execution_id)
                     .expect("execution checked above")
                     .deadline_task = Some(task);
                 let descriptor = self
                     .vms
                     .get(&vm_id)
-                    .and_then(|vm| vm.executions.get(&payload.execution_id))
-                    .expect("execution checked above")
-                    .descriptor
-                    .clone();
+                    .and_then(|vm| {
+                        vm.executions
+                            .get(&payload.execution_id)
+                            .map(|execution| execution.descriptor.clone())
+                    })
+                    .expect("execution checked above");
                 ResponsePayload::ExecutionDescriptor(ExecutionDescriptorResponse {
                     execution: descriptor,
                 })
             }
             RequestPayload::SignalExecution(payload) => {
-                let process_id = match active_process_id(self, &vm_id, &payload.execution_id) {
+                let process_id = match self.active_process_id(&vm_id, &payload.execution_id) {
                     Ok(process_id) => process_id,
                     Err((code, message)) => return Ok(typed_rejection(request, code, message)),
                 };
-                self.kill_process_internal(&vm_id, &process_id, &payload.signal)?;
+                self.kill_process_internal(&process_id, &payload.signal)
+                    .await?;
                 let descriptor = self
                     .vms
                     .get(&vm_id)
-                    .and_then(|vm| vm.executions.get(&payload.execution_id))
-                    .expect("execution checked above")
-                    .descriptor
-                    .clone();
+                    .and_then(|vm| {
+                        vm.executions
+                            .get(&payload.execution_id)
+                            .map(|execution| execution.descriptor.clone())
+                    })
+                    .expect("execution checked above");
                 ResponsePayload::ExecutionDescriptor(ExecutionDescriptorResponse {
                     execution: descriptor,
                 })
             }
             RequestPayload::ResetExecution(payload) => {
-                let Some(existing) = self
-                    .vms
-                    .get(&vm_id)
-                    .and_then(|vm| vm.executions.get(&payload.execution_id))
+                let Some((existing_state, resident_process_id)) =
+                    self.vms.get(&vm_id).and_then(|vm| {
+                        vm.executions.get(&payload.execution_id).map(|execution| {
+                            (
+                                execution.descriptor.state.clone(),
+                                execution.resident_process_id.clone(),
+                            )
+                        })
+                    })
                 else {
                     return Ok(typed_rejection(
                         request,
@@ -1703,17 +2168,16 @@ where
                         format!("context {} does not exist", payload.execution_id),
                     ));
                 };
-                if existing.descriptor.state == ExecutionState::Running {
+                if existing_state == ExecutionState::Running {
                     return Ok(typed_rejection(
                         request,
                         "execution_busy",
                         format!("execution {} is running", payload.execution_id),
                     ));
                 }
-                let resident_process_id = existing.resident_process_id.clone();
                 if let Some(process_id) = resident_process_id {
                     self.finish_active_process_exit(&vm_id, &process_id, 0)?;
-                    if let Some(vm) = self.vms.get_mut(&vm_id) {
+                    if let Some(mut vm) = self.vms.get_mut(&vm_id) {
                         vm.execution_processes.remove(&process_id);
                     }
                 }
@@ -1724,10 +2188,10 @@ where
                     .limits
                     .execution
                     .completed_ttl_ms;
-                let execution = self
-                    .vms
-                    .get_mut(&vm_id)
-                    .and_then(|vm| vm.executions.get_mut(&payload.execution_id))
+                let mut vm = self.vms.get_mut(&vm_id).expect("owned VM checked above");
+                let execution = vm
+                    .executions
+                    .get_mut(&payload.execution_id)
                     .expect("execution checked above");
                 execution.descriptor.state = ExecutionState::Resetting;
                 execution.descriptor.generation = execution.descriptor.generation.saturating_add(1);
@@ -1758,10 +2222,15 @@ where
                 })
             }
             RequestPayload::DeleteExecution(payload) => {
-                let Some(execution) = self
-                    .vms
-                    .get(&vm_id)
-                    .and_then(|vm| vm.executions.get(&payload.execution_id))
+                let Some((execution_state, resident_process_id)) =
+                    self.vms.get(&vm_id).and_then(|vm| {
+                        vm.executions.get(&payload.execution_id).map(|execution| {
+                            (
+                                execution.descriptor.state.clone(),
+                                execution.resident_process_id.clone(),
+                            )
+                        })
+                    })
                 else {
                     return Ok(typed_rejection(
                         request,
@@ -1769,17 +2238,16 @@ where
                         format!("context {} does not exist", payload.execution_id),
                     ));
                 };
-                if execution.descriptor.state == ExecutionState::Running {
+                if execution_state == ExecutionState::Running {
                     return Ok(typed_rejection(
                         request,
                         "execution_busy",
                         format!("execution {} is running", payload.execution_id),
                     ));
                 }
-                let resident_process_id = execution.resident_process_id.clone();
                 if let Some(process_id) = resident_process_id {
                     self.finish_active_process_exit(&vm_id, &process_id, 0)?;
-                    if let Some(vm) = self.vms.get_mut(&vm_id) {
+                    if let Some(mut vm) = self.vms.get_mut(&vm_id) {
                         vm.execution_processes.remove(&process_id);
                     }
                 }
@@ -1793,7 +2261,7 @@ where
                 })
             }
             RequestPayload::WriteExecutionStdin(payload) => {
-                let process_id = match active_process_id(self, &vm_id, &payload.execution_id) {
+                let process_id = match self.active_process_id(&vm_id, &payload.execution_id) {
                     Ok(process_id) => process_id,
                     Err((code, message)) => return Ok(typed_rejection(request, code, message)),
                 };
@@ -1812,7 +2280,7 @@ where
                 })
             }
             RequestPayload::CloseExecutionStdin(payload) => {
-                let process_id = match active_process_id(self, &vm_id, &payload.execution_id) {
+                let process_id = match self.active_process_id(&vm_id, &payload.execution_id) {
                     Ok(process_id) => process_id,
                     Err((code, message)) => return Ok(typed_rejection(request, code, message)),
                 };
@@ -1824,7 +2292,7 @@ where
                 })
             }
             RequestPayload::ResizeExecutionPty(payload) => {
-                let process_id = match active_process_id(self, &vm_id, &payload.execution_id) {
+                let process_id = match self.active_process_id(&vm_id, &payload.execution_id) {
                     Ok(process_id) => process_id,
                     Err((code, message)) => return Ok(typed_rejection(request, code, message)),
                 };
@@ -1843,10 +2311,17 @@ where
                 })
             }
             RequestPayload::ReadExecutionOutput(payload) => {
-                let Some(execution) = self
-                    .vms
-                    .get(&vm_id)
-                    .and_then(|vm| vm.executions.get(&payload.execution_id))
+                let Some((retain_events, generation, retained_events, output_truncated)) =
+                    self.vms.get(&vm_id).and_then(|vm| {
+                        vm.executions.get(&payload.execution_id).map(|execution| {
+                            (
+                                execution.retain_events,
+                                execution.descriptor.generation,
+                                execution.events.clone(),
+                                execution.output_truncated,
+                            )
+                        })
+                    })
                 else {
                     return Ok(typed_rejection(
                         request,
@@ -1854,7 +2329,7 @@ where
                         format!("execution {} does not exist", payload.execution_id),
                     ));
                 };
-                if !execution.retain_events {
+                if !retain_events {
                     return Ok(typed_rejection(
                         request,
                         "execution_output_not_retained",
@@ -1864,8 +2339,7 @@ where
                 let start = match payload.cursor.as_deref() {
                     None => 0,
                     Some(cursor) => {
-                        let Some(start) = parse_cursor(cursor, execution.descriptor.generation)
-                        else {
+                        let Some(start) = parse_cursor(cursor, generation) else {
                             return Ok(typed_rejection(
                                 request,
                                 "execution_output_cursor_expired",
@@ -1880,8 +2354,7 @@ where
                     .unwrap_or(DEFAULT_EXECUTION_OUTPUT_PAGE_EVENTS)
                     .clamp(1, MAX_EXECUTION_OUTPUT_PAGE_EVENTS)
                     as usize;
-                let events: Vec<_> = execution
-                    .events
+                let events: Vec<_> = retained_events
                     .iter()
                     .filter(|event| event.sequence >= start)
                     .take(limit)
@@ -1890,17 +2363,16 @@ where
                 let next_sequence = events
                     .last()
                     .map_or(start, |event| event.sequence.saturating_add(1));
-                let has_more = execution
-                    .events
+                let has_more = retained_events
                     .iter()
                     .any(|event| event.sequence >= next_sequence);
                 ResponsePayload::ExecutionOutputPage(ExecutionOutputPageResponse {
                     execution_id: payload.execution_id,
-                    generation: execution.descriptor.generation,
+                    generation,
                     events,
-                    next_cursor: format!("{}:{next_sequence}", execution.descriptor.generation),
+                    next_cursor: format!("{generation}:{next_sequence}"),
                     has_more,
-                    truncated: execution.output_truncated,
+                    truncated: output_truncated,
                 })
             }
             _ => {
@@ -1915,7 +2387,13 @@ where
             events: Vec::new(),
         })
     }
+}
 
+impl<B> NativeSidecar<B>
+where
+    B: NativeSidecarBridge + Send + 'static,
+    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
+{
     pub(crate) fn is_public_execution_process(&self, vm_id: &str, process_id: &str) -> bool {
         self.vms
             .get(vm_id)
@@ -1927,19 +2405,18 @@ where
         vm_id: &str,
         process_id: &str,
     ) -> bool {
-        self.vms
-            .get(vm_id)
-            .and_then(|vm| {
-                let execution_id = vm.execution_processes.get(process_id)?;
-                vm.executions.get(execution_id)
-            })
-            .is_some_and(|execution| {
+        self.vms.get(vm_id).is_some_and(|vm| {
+            let Some(execution_id) = vm.execution_processes.get(process_id) else {
+                return false;
+            };
+            vm.executions.get(execution_id).is_some_and(|execution| {
                 execution.resident_process_id.as_deref() == Some(process_id)
                     && execution.pending_outcome.is_none()
                     && !execution
                         .deadline_ms
                         .is_some_and(|deadline| now_ms() >= deadline)
             })
+        })
     }
 
     pub(crate) fn has_running_nonresident_processes(&self, vm_id: &str) -> bool {
@@ -1974,7 +2451,7 @@ where
                 .filter_map(|execution| execution.expires_at_ms)
                 .min()
         });
-        let Some(vm) = self.vms.get_mut(vm_id) else {
+        let Some(mut vm) = self.vms.get_mut(vm_id) else {
             return;
         };
         if vm.execution_retention_wake_deadline_ms == next_deadline
@@ -2009,7 +2486,7 @@ where
 
     pub(crate) fn expire_public_execution_deadlines(&mut self) -> Result<(), SidecarError> {
         let now = now_ms();
-        for vm in self.vms.values_mut() {
+        for mut vm in self.vms.values_mut() {
             if vm
                 .execution_retention_wake_task
                 .as_ref()
@@ -2042,17 +2519,18 @@ where
                             )
                         })
                     })
+                    .collect::<Vec<_>>()
             })
             .take(64)
             .collect::<Vec<_>>();
         for (vm_id, execution_id, resident_process_id) in expired {
             if let Some(process_id) = resident_process_id {
                 self.finish_active_process_exit(&vm_id, &process_id, 0)?;
-                if let Some(vm) = self.vms.get_mut(&vm_id) {
+                if let Some(mut vm) = self.vms.get_mut(&vm_id) {
                     vm.execution_processes.remove(&process_id);
                 }
             }
-            if let Some(vm) = self.vms.get_mut(&vm_id) {
+            if let Some(mut vm) = self.vms.get_mut(&vm_id) {
                 vm.executions.remove(&execution_id);
                 if vm.package_mutation_execution_id.as_deref() == Some(&execution_id) {
                     vm.package_mutation_execution_id = None;
@@ -2088,6 +2566,7 @@ where
                     .into_iter()
                     .take(excess)
                     .map(move |(execution_id, _, resident)| (vm_id.clone(), execution_id, resident))
+                    .collect::<Vec<_>>()
             })
             .take(64)
             .collect::<Vec<_>>();
@@ -2097,11 +2576,11 @@ where
             );
             if let Some(process_id) = resident_process_id {
                 self.finish_active_process_exit(&vm_id, &process_id, 0)?;
-                if let Some(vm) = self.vms.get_mut(&vm_id) {
+                if let Some(mut vm) = self.vms.get_mut(&vm_id) {
                     vm.execution_processes.remove(&process_id);
                 }
             }
-            if let Some(vm) = self.vms.get_mut(&vm_id) {
+            if let Some(mut vm) = self.vms.get_mut(&vm_id) {
                 vm.executions.remove(&execution_id);
             }
         }
@@ -2109,38 +2588,38 @@ where
             .vms
             .iter()
             .flat_map(|(vm_id, vm)| {
-                vm.executions.iter().filter_map(move |(_, execution)| {
-                    (execution.descriptor.state == ExecutionState::Running
-                        && execution
-                            .deadline_ms
-                            .is_some_and(|deadline| now >= deadline))
-                    .then(|| {
-                        execution
-                            .descriptor
-                            .process_id
-                            .as_ref()
-                            .map(|process_id| (vm_id.clone(), process_id.clone()))
+                vm.executions
+                    .iter()
+                    .filter_map(move |(_, execution)| {
+                        (execution.descriptor.state == ExecutionState::Running
+                            && execution
+                                .deadline_ms
+                                .is_some_and(|deadline| now >= deadline))
+                        .then(|| {
+                            execution
+                                .descriptor
+                                .process_id
+                                .as_ref()
+                                .map(|process_id| (vm_id.clone(), process_id.clone()))
+                        })
+                        .flatten()
                     })
-                    .flatten()
-                })
+                    .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
         for (vm_id, process_id) in due {
             if let Some(execution_id) = self
                 .vms
                 .get(&vm_id)
-                .and_then(|vm| vm.execution_processes.get(&process_id))
-                .cloned()
+                .and_then(|vm| vm.execution_processes.get(&process_id).cloned())
             {
-                if let Some(execution) = self
-                    .vms
-                    .get_mut(&vm_id)
-                    .and_then(|vm| vm.executions.get_mut(&execution_id))
-                {
-                    if execution.pending_outcome != Some(ExecutionOutcome::Cancelled) {
-                        execution.pending_outcome = Some(ExecutionOutcome::TimedOut);
+                if let Some(mut vm) = self.vms.get_mut(&vm_id) {
+                    if let Some(execution) = vm.executions.get_mut(&execution_id) {
+                        if execution.pending_outcome != Some(ExecutionOutcome::Cancelled) {
+                            execution.pending_outcome = Some(ExecutionOutcome::TimedOut);
+                        }
+                        execution.deadline_ms = None;
                     }
-                    execution.deadline_ms = None;
                 }
                 // A deadline is already terminal. Force the process tree so a
                 // CPU-bound guest cannot defer timeout handling indefinitely.
@@ -2161,7 +2640,8 @@ where
         channel: ExecutionStreamChannel,
         chunk: Vec<u8>,
     ) -> Option<EventPayload> {
-        let vm = self.vms.get_mut(vm_id)?;
+        let mut vm = self.vms.get_mut(vm_id)?;
+        let vm = &mut *vm;
         let execution_id = vm.execution_processes.get(process_id)?.clone();
         let execution = vm.executions.get_mut(&execution_id)?;
         if vm.package_mutation_execution_id.as_deref() == Some(&execution_id) {
@@ -2253,12 +2733,15 @@ where
         process_id: &str,
         exit_code: i32,
     ) -> Option<EventPayload> {
-        let vm = self.vms.get_mut(vm_id)?;
+        let mut vm_guard = self.vms.get_mut(vm_id)?;
+        let vm = &mut *vm_guard;
         let execution_id = vm.execution_processes.get(process_id)?.clone();
-        let semantic_result = vm
+        let semantic_result_path = vm
             .executions
             .get(&execution_id)
-            .and_then(|execution| execution.semantic_result_path.as_deref())
+            .and_then(|execution| execution.semantic_result_path.clone());
+        let semantic_result = semantic_result_path
+            .as_deref()
             .map(|path| {
                 let result = vm
                     .kernel
@@ -2390,6 +2873,7 @@ where
             exit_code: Some(exit_code),
             error,
         });
+        drop(vm_guard);
         self.schedule_execution_retention_wake(vm_id);
         Some(event)
     }
@@ -2464,35 +2948,6 @@ fn extract_semantic_result(
             .map_err(|error| format!("failed to serialize TypeScript check result: {error}")),
         ExecutionValueKind::None => Ok(ExecutionSemanticResult::None),
     }
-}
-
-fn active_process_id<B: NativeSidecarBridge>(
-    sidecar: &NativeSidecar<B>,
-    vm_id: &str,
-    execution_id: &str,
-) -> Result<String, (&'static str, String)> {
-    let Some(execution) = sidecar
-        .vms
-        .get(vm_id)
-        .and_then(|vm| vm.executions.get(execution_id))
-    else {
-        return Err((
-            "execution_not_found",
-            format!("execution {execution_id} does not exist"),
-        ));
-    };
-    if execution.descriptor.state != ExecutionState::Running {
-        return Err((
-            "execution_not_running",
-            format!("execution {execution_id} is not running"),
-        ));
-    }
-    execution.descriptor.process_id.clone().ok_or_else(|| {
-        (
-            "execution_not_running",
-            format!("execution {execution_id} has no active process"),
-        )
-    })
 }
 
 fn parse_cursor(cursor: &str, generation: u64) -> Option<u64> {

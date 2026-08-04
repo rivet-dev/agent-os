@@ -1856,6 +1856,13 @@ impl JavascriptExecution {
         self.exited.load(Ordering::Acquire)
     }
 
+    /// Whether the runtime event bridge has already made another event
+    /// durable for this execution. This is a non-consuming readiness probe;
+    /// callers still own bounded draining and ordering.
+    pub fn has_pending_events(&self) -> bool {
+        !self.events.is_empty()
+    }
+
     /// Run another sidecar-managed operation in this execution's retained V8
     /// context. Public clients submit semantic language requests; only the
     /// sidecar calls this executor primitive.
