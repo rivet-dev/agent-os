@@ -614,7 +614,7 @@ impl SessionStore {
             .map(|event| event.payload_bytes)
             .sum::<i64>();
         let mut statements = vec![SqlStatement::new(
-            "UPDATE agentos_core_sessions SET state = ?, state_prompt_id = CASE WHEN ? = 'idle' THEN NULL ELSE state_prompt_id END, state_started_at_ms = CASE WHEN ? = 'idle' THEN NULL ELSE state_started_at_ms END, latest_sequence = latest_sequence + ?, retained_event_count = retained_event_count + ?, retained_event_bytes = retained_event_bytes + ?, updated_at_ms = ? WHERE session_id = ? AND state_prompt_id = ? AND latest_sequence <= ?",
+            "UPDATE agentos_core_sessions SET state = ?, state_prompt_id = CASE WHEN ? = 'idle' THEN NULL ELSE state_prompt_id END, state_started_at_ms = CASE WHEN ? = 'idle' THEN NULL ELSE state_started_at_ms END, latest_sequence = latest_sequence + ?, retained_event_count = retained_event_count + ?, retained_event_bytes = retained_event_bytes + ?, updated_at_ms = ? WHERE session_id = ? AND state_prompt_id = ? AND latest_sequence <= ? AND EXISTS (SELECT 1 FROM agentos_core_prompts WHERE session_id = ? AND prompt_id = ? AND state = 'accepted')",
             vec![
                 text(state),
                 text(state),
@@ -626,6 +626,8 @@ impl SessionStore {
                 text(session_id),
                 text(prompt_id),
                 SqlValue::SqlInteger(MAX_SAFE_SEQUENCE - count),
+                text(session_id),
+                text(prompt_id),
             ],
         )
         .expect_changes(1)];
@@ -647,7 +649,7 @@ impl SessionStore {
             ));
         }
         statements.push(SqlStatement::new(
-            "UPDATE agentos_core_prompts SET state = ?, result_json = ?, error_json = ?, last_output_sequence = COALESCE(?, CASE WHEN ? = 0 THEN last_output_sequence ELSE (SELECT latest_sequence FROM agentos_core_sessions WHERE session_id = ?) END), updated_at_ms = ? WHERE session_id = ? AND prompt_id = ?",
+            "UPDATE agentos_core_prompts SET state = ?, result_json = ?, error_json = ?, last_output_sequence = COALESCE(?, CASE WHEN ? = 0 THEN last_output_sequence ELSE (SELECT latest_sequence FROM agentos_core_sessions WHERE session_id = ?) END), updated_at_ms = ? WHERE session_id = ? AND prompt_id = ? AND state = 'accepted'",
             vec![
                 text(prompt_state),
                 optional_text(result_json),

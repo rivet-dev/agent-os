@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 
 use agentos_protocol::generated::v1::{
     AcpCloseSessionRequest, AcpCreateSessionRequest, AcpDeliverAgentOutputRequest,
-    AcpGetSessionStateRequest, AcpPendingResponse, AcpRequest, AcpResponse, AcpRuntimeKind,
-    AcpResumeSessionRequest, AcpSessionClosedResponse, AcpSessionRequest,
+    AcpGetSessionStateRequest, AcpPendingResponse, AcpRequest, AcpResponse,
+    AcpResumeSessionRequest, AcpRuntimeKind, AcpSessionClosedResponse, AcpSessionRequest,
     AcpSessionResumedResponse, AcpSessionRpcResponse,
 };
 use serde_json::{json, Map, Value};

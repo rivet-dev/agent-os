@@ -3,7 +3,7 @@ use super::*;
 impl AcpExtension {
     pub(super) async fn start_acp_runtime(
         &self,
-        ctx: &mut ExtensionContext<'_>,
+        ctx: &mut ExtensionContext,
         request: AcpCreateSessionRequest,
         user_session_id: &str,
         route_key: &str,
@@ -127,7 +127,7 @@ impl AcpExtension {
     /// whose manifest carries a non-empty `agent.acpEntrypoint` is an agent. The
     /// client parses no manifests — the sidecar owns agent enumeration too. Sorted
     /// by id.
-    pub(super) async fn list_agents(&self, mut ctx: ExtensionContext<'_>) -> AcpHandlerOutput {
+    pub(super) async fn list_agents(&self, mut ctx: ExtensionContext) -> AcpHandlerOutput {
         // The sidecar-owned projected-agent state is the SOURCE OF TRUTH for
         // installed agents (it reflects `ConfigureVm` and live `linkSoftware`
         // updates). Packed `.aospkg` packages ship no `agentos-package.json` in
@@ -151,7 +151,7 @@ impl AcpExtension {
 
     pub(super) async fn start_acp_runtime_inner(
         &self,
-        ctx: &mut ExtensionContext<'_>,
+        ctx: &mut ExtensionContext,
         request: &AcpCreateSessionRequest,
         process_id: &str,
         additional_directories: Vec<PathBuf>,
@@ -266,7 +266,7 @@ impl AcpExtension {
 
     pub(super) async fn stop_acp_runtime(
         &self,
-        ctx: &mut ExtensionContext<'_>,
+        ctx: &mut ExtensionContext,
         route_key: &str,
     ) -> Result<(), SidecarError> {
         // Enforce per-connection ownership before tearing anything down: only the
@@ -410,10 +410,47 @@ impl AcpExtension {
         Ok(())
     }
 
+    /// Escalate a stopping route without starting another adapter response
+    /// loop. The active prompt remains the sole stdout/event consumer and
+    /// observes `ProcessExited`, so it can commit its real durable terminal
+    /// result before unload/delete continues.
+    pub(super) async fn force_kill_acp_runtime(
+        &self,
+        ctx: &mut ExtensionContext,
+        route_key: &str,
+    ) -> Result<bool, SidecarError> {
+        let caller_connection_id = ownership_connection_id(ctx.ownership());
+        let process_id = {
+            let sessions = self.sessions.lock().await;
+            let Some(session) = sessions.get(route_key) else {
+                return Ok(false);
+            };
+            if session.owner_connection_id != caller_connection_id {
+                return Err(SidecarError::InvalidState(format!(
+                    "unknown ACP session {route_key}"
+                )));
+            }
+            session.process_id.clone()
+        };
+        match ctx
+            .kill_process_wire(KillProcessRequest {
+                process_id: process_id.clone(),
+                signal: String::from("SIGKILL"),
+            })
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(error) if is_process_already_gone_error(&error) => Ok(false),
+            Err(error) => Err(SidecarError::InvalidState(format!(
+                "ACP adapter {process_id} could not be killed during bounded teardown: {error}"
+            ))),
+        }
+    }
+
     #[allow(clippy::needless_option_as_deref)]
     pub(super) async fn send_runtime_request_with_sink(
         &self,
-        ctx: &mut ExtensionContext<'_>,
+        ctx: &mut ExtensionContext,
         request: AcpSessionRequest,
         mut durable_sink: Option<&mut DurableUpdateSink>,
         cancellation: Option<&mut tokio::sync::watch::Receiver<bool>>,
@@ -687,7 +724,7 @@ impl AcpExtension {
     /// caller retry cannot accidentally target the dead process.
     pub(super) async fn handle_adapter_exit(
         &self,
-        ctx: &mut ExtensionContext<'_>,
+        ctx: &mut ExtensionContext,
         session_id: &str,
         exit_code: Option<i32>,
         error: SidecarError,
@@ -710,6 +747,11 @@ impl AcpExtension {
             exit_code = ?exit_code,
             "ACP adapter process exited unexpectedly; live session route evicted",
         );
+        if let Err(dispose_error) = ctx.dispose_session_resources_wire(session_id).await {
+            eprintln!(
+                "ERR_AGENTOS_ACP_EXIT_CLEANUP: failed to dispose resources for exited ACP route {session_id}: {dispose_error}"
+            );
+        }
 
         let frame = encode_event(AcpEvent::AcpAgentExitedEvent(AcpAgentExitedEvent {
             session_id: session
@@ -896,7 +938,7 @@ impl LiveAcpRuntime {
 /// is what makes `session/update`s arrive mid-turn instead of all arriving at
 /// once when the `session/prompt` dispatch finally resolves.
 pub(super) fn deliver_event(
-    ctx: &ExtensionContext<'_>,
+    ctx: &ExtensionContext,
     events: &mut Vec<agentos_native_sidecar::wire::EventFrame>,
     frame: agentos_native_sidecar::wire::EventFrame,
 ) -> Result<(), SidecarError> {
@@ -906,9 +948,59 @@ pub(super) fn deliver_event(
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PromptCancellationRace<T> {
+    Cancelled,
+    Completed(T),
+}
+
+/// Race one prompt-owned operation against its cancellation token.
+///
+/// The current token value is checked before polling `operation`, and a
+/// simultaneously-ready cancellation notification wins. This closes the two
+/// narrow windows where cancellation could otherwise arrive after a caller's
+/// manual check but before an adapter write or while its output wait was
+/// parked.
+pub(super) async fn race_prompt_cancellation<T>(
+    cancellation: &mut tokio::sync::watch::Receiver<bool>,
+    operation: impl std::future::Future<Output = T>,
+) -> PromptCancellationRace<T> {
+    if *cancellation.borrow() {
+        return PromptCancellationRace::Cancelled;
+    }
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            biased;
+            changed = cancellation.changed() => match changed {
+                Ok(()) if *cancellation.borrow() => {
+                    return PromptCancellationRace::Cancelled;
+                }
+                Ok(()) => continue,
+                Err(_) => {
+                    return PromptCancellationRace::Completed(operation.await);
+                }
+            },
+            result = &mut operation => return PromptCancellationRace::Completed(result),
+        }
+    }
+}
+
+fn cancelled_prompt_exchange(response_id: i64) -> JsonRpcExchange {
+    JsonRpcExchange {
+        response: json!({
+            "jsonrpc": "2.0",
+            "id": response_id,
+            "result": { "stopReason": "cancelled" },
+        }),
+        events: Vec::new(),
+        notifications: Vec::new(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_json_rpc_request(
-    ctx: &mut ExtensionContext<'_>,
+    ctx: &mut ExtensionContext,
     process_id: &str,
     agent_type: &str,
     request: Value,
@@ -920,24 +1012,41 @@ pub(super) async fn send_json_rpc_request(
     mut cancellation: Option<&mut tokio::sync::watch::Receiver<bool>>,
 ) -> Result<JsonRpcExchange, SidecarError> {
     let max_read_line_bytes = ctx.vm_acp_limits().await?.max_read_line_bytes;
-    let mut line = serde_json::to_vec(&request).map_err(|error| {
-        SidecarError::InvalidState(format!("failed to serialize ACP request: {error}"))
-    })?;
-    line.push(b'\n');
-    ctx.write_stdin_wire(WriteStdinRequest {
-        process_id: process_id.to_string(),
-        chunk: line,
-    })
-    .await?;
-
-    let deadline = timeout.map(|timeout| Instant::now() + timeout);
-    let mut events = Vec::new();
-    let mut notifications = Vec::new();
     let method = request
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
+    if cancellation
+        .as_ref()
+        .is_some_and(|receiver| *receiver.borrow())
+    {
+        return Ok(cancelled_prompt_exchange(response_id));
+    }
+    let mut line = serde_json::to_vec(&request).map_err(|error| {
+        SidecarError::InvalidState(format!("failed to serialize ACP request: {error}"))
+    })?;
+    line.push(b'\n');
+    let write = ctx.write_stdin_wire(WriteStdinRequest {
+        process_id: process_id.to_string(),
+        chunk: line,
+    });
+    if let Some(receiver) = cancellation.as_deref_mut() {
+        match race_prompt_cancellation(receiver, write).await {
+            PromptCancellationRace::Cancelled => {
+                return Ok(cancelled_prompt_exchange(response_id));
+            }
+            PromptCancellationRace::Completed(result) => {
+                result?;
+            }
+        }
+    } else {
+        write.await?;
+    }
+
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
+    let mut events = Vec::new();
+    let mut notifications = Vec::new();
     let mut recent_activity = Vec::new();
     let mut adapter_stderr = String::new();
     record_recent_activity(
@@ -1021,26 +1130,10 @@ pub(super) async fn send_json_rpc_request(
         if let Some(inactivity) = inactivity.as_ref() {
             remaining = remaining.min(inactivity.wait_duration(now));
         }
-        // `poll_event_wire` already waits on the execution event receiver. Use
-        // the real request deadline so output/exit wakes this task directly;
+        // The process-targeted broker wait is durable and ownership checked.
+        // Use the real request deadline so output/exit wakes this task directly;
         // a sub-millisecond timeout loop only burns runtime turns while idle.
-        let event = if let Some(receiver) = cancellation.as_deref_mut() {
-            tokio::select! {
-                biased;
-                changed = receiver.changed() => {
-                    if changed.is_ok() && *receiver.borrow() {
-                        if let Some(session_id) = event_session_id {
-                            write_session_cancel_notification(ctx, process_id, session_id).await?;
-                        }
-                    }
-                    cancellation = None;
-                    continue;
-                }
-                event = ctx.poll_event_wire(remaining) => event?,
-            }
-        } else {
-            ctx.poll_event_wire(remaining).await?
-        };
+        let event = ctx.poll_process_event_wire(process_id, remaining).await?;
         let Some(event) = event else {
             if response_drain_deadline.is_some() {
                 return Ok(JsonRpcExchange {
@@ -1051,6 +1144,26 @@ pub(super) async fn send_json_rpc_request(
             }
             continue;
         };
+
+        if let Some((exit_code, error)) = matching_adapter_exit_error(
+            &event.payload,
+            process_id,
+            response_id,
+            &recent_activity,
+            &adapter_stderr,
+        ) {
+            let stderr_tail = adapter_stderr_tail(&adapter_stderr);
+            tracing::warn!(
+                target: "agentos_sidecar::acp_extension",
+                process_id,
+                agent_type,
+                session_id = ?event_session_id,
+                exit_code,
+                stderr_tail = %stderr_tail,
+                "ACP adapter process exited before answering request id={response_id}",
+            );
+            return Err(error);
+        }
 
         match event.payload {
             EventPayload::ProcessOutputEvent(output)
@@ -1201,32 +1314,6 @@ pub(super) async fn send_json_rpc_request(
                     events.push(frame);
                 }
             }
-            EventPayload::ProcessExitedEvent(exited) if exited.process_id == process_id => {
-                // Embed ADAPTER_EXITED_ERROR_MARKER directly so is_adapter_exited_error()
-                // stays coupled to this producer: changing the wording can't silently
-                // disable session eviction (the H4 leak fix) without touching the const.
-                let stderr_tail: String = adapter_stderr
-                    .chars()
-                    .rev()
-                    .take(4000)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect();
-                tracing::warn!(
-                    target: "agentos_sidecar::acp_extension",
-                    process_id,
-                    agent_type,
-                    session_id = ?event_session_id,
-                    exit_code = exited.exit_code,
-                    stderr_tail = %stderr_tail,
-                    "ACP adapter process exited before answering request id={response_id}",
-                );
-                return Err(SidecarError::InvalidState(format!(
-                    "ACP adapter process {process_id} {ADAPTER_EXITED_ERROR_MARKER} {} before response id={response_id}; recent_activity={:?}; adapter_stderr={:?}",
-                    exited.exit_code, recent_activity, stderr_tail
-                )));
-            }
             EventPayload::ProcessOutputEvent(_)
             | EventPayload::ProcessExitedEvent(_)
             | EventPayload::ExecutionOutputEvent(_)
@@ -1236,6 +1323,43 @@ pub(super) async fn send_json_rpc_request(
             | EventPayload::ExtEnvelope(_) => {}
         }
     }
+}
+
+pub(super) fn matching_adapter_exit_error(
+    payload: &EventPayload,
+    process_id: &str,
+    response_id: i64,
+    recent_activity: &[String],
+    adapter_stderr: &str,
+) -> Option<(i32, SidecarError)> {
+    let EventPayload::ProcessExitedEvent(exited) = payload else {
+        return None;
+    };
+    if exited.process_id != process_id {
+        return None;
+    }
+    let stderr_tail = adapter_stderr_tail(adapter_stderr);
+    // Embed ADAPTER_EXITED_ERROR_MARKER directly so is_adapter_exited_error()
+    // stays coupled to this producer: changing the wording cannot silently
+    // disable session eviction without updating its regression coverage.
+    Some((
+        exited.exit_code,
+        SidecarError::InvalidState(format!(
+            "ACP adapter process {process_id} {ADAPTER_EXITED_ERROR_MARKER} {} before response id={response_id}; recent_activity={recent_activity:?}; adapter_stderr={stderr_tail:?}",
+            exited.exit_code
+        )),
+    ))
+}
+
+fn adapter_stderr_tail(adapter_stderr: &str) -> String {
+    adapter_stderr
+        .chars()
+        .rev()
+        .take(4000)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
 }
 
 pub(super) fn record_recent_activity(recent_activity: &mut Vec<String>, entry: String) {
@@ -1309,7 +1433,7 @@ pub(super) fn timeout_error_message(
 }
 
 pub(super) async fn wait_for_process_exit(
-    ctx: &mut ExtensionContext<'_>,
+    ctx: &mut ExtensionContext,
     process_id: &str,
     timeout: Duration,
 ) -> bool {
@@ -1320,7 +1444,7 @@ pub(super) async fn wait_for_process_exit(
             return false;
         }
         let Ok(event) = ctx
-            .poll_event_wire(deadline.saturating_duration_since(now))
+            .poll_process_event_wire(process_id, deadline.saturating_duration_since(now))
             .await
         else {
             return false;
@@ -1337,13 +1461,13 @@ pub(super) async fn wait_for_process_exit(
 }
 
 pub(super) async fn handle_inbound_request(
-    ctx: &mut ExtensionContext<'_>,
+    ctx: &mut ExtensionContext,
     process_id: &str,
     session_id: &str,
     message: &Value,
     events: &mut Vec<agentos_native_sidecar::wire::EventFrame>,
     durable_sink: Option<&mut DurableUpdateSink>,
-    cancellation: Option<&mut tokio::sync::watch::Receiver<bool>>,
+    mut cancellation: Option<&mut tokio::sync::watch::Receiver<bool>>,
 ) -> Result<(), SidecarError> {
     let id = message.get("id").cloned().ok_or_else(|| {
         SidecarError::InvalidState(String::from("ACP inbound request missing id"))
@@ -1359,11 +1483,10 @@ pub(super) async fn handle_inbound_request(
                     .handle_permission_request(
                         ctx,
                         process_id,
-                        session_id,
                         message.get("id"),
                         &params,
                         events,
-                        cancellation,
+                        cancellation.as_deref_mut(),
                     )
                     .await?;
                 json!({
@@ -1382,7 +1505,17 @@ pub(super) async fn handle_inbound_request(
                 })
             }
         }
-        _ => forward_inbound_host_request(ctx, session_id, message, &id, method)?,
+        _ => {
+            forward_inbound_host_request(
+                ctx,
+                session_id,
+                message,
+                &id,
+                method,
+                cancellation.as_deref_mut(),
+            )
+            .await?
+        }
     };
     let mut line = serde_json::to_vec(&response).map_err(|error| {
         SidecarError::InvalidState(format!("failed to serialize ACP inbound response: {error}"))
@@ -1396,12 +1529,13 @@ pub(super) async fn handle_inbound_request(
     Ok(())
 }
 
-pub(super) fn forward_inbound_host_request(
-    ctx: &ExtensionContext<'_>,
+pub(super) async fn forward_inbound_host_request(
+    ctx: &ExtensionContext,
     session_id: &str,
     message: &Value,
     id: &Value,
     method: &str,
+    mut cancellation: Option<&mut tokio::sync::watch::Receiver<bool>>,
 ) -> Result<Value, SidecarError> {
     let callback = AcpCallback::AcpHostRequestCallback(AcpHostRequestCallback {
         session_id: session_id.to_string(),
@@ -1412,10 +1546,30 @@ pub(super) fn forward_inbound_host_request(
     // This path contains only noninteractive filesystem/terminal/internal host
     // RPCs. Human permission requests are handled durably above and deliberately
     // have no deadline.
-    let response = ctx.invoke_callback(
+    let callback = ctx.invoke_callback_async(
         encode_callback(callback)?,
         ACP_MACHINE_HOST_CALLBACK_TIMEOUT,
-    )?;
+    );
+    tokio::pin!(callback);
+    let response = if let Some(cancellation) = cancellation.as_deref_mut() {
+        if *cancellation.borrow() {
+            return Ok(callback_cancelled_response(id.clone(), method));
+        }
+        tokio::select! {
+            biased;
+            changed = cancellation.changed() => {
+                if changed.is_err() || *cancellation.borrow() {
+                    return Ok(callback_cancelled_response(id.clone(), method));
+                }
+                return Err(SidecarError::InvalidState(format!(
+                    "ACP host request {method} cancellation channel changed without cancellation"
+                )));
+            }
+            response = &mut callback => response?,
+        }
+    } else {
+        callback.await?
+    };
     let response: AcpCallbackResponse = serde_bare::from_slice(&response).map_err(|error| {
         SidecarError::InvalidState(format!("invalid ACP host request response: {error}"))
     })?;
@@ -1432,6 +1586,17 @@ pub(super) fn forward_inbound_host_request(
         )));
     }
     Ok(response)
+}
+
+fn callback_cancelled_response(id: Value, method: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32800,
+            "message": format!("request cancelled: {method}"),
+        },
+    })
 }
 
 pub(super) fn method_not_found_response(id: Value, method: &str) -> Value {
@@ -1540,7 +1705,7 @@ pub(super) struct AgentPackageAgentBlock {
 /// packages ship no `agentos-package.json` in the guest filesystem). A package
 /// without an agent block yields `None`.
 pub(super) async fn read_projected_agent_block(
-    ctx: &mut ExtensionContext<'_>,
+    ctx: &mut ExtensionContext,
     agent_type: &str,
 ) -> Option<AgentPackageAgentBlock> {
     let launches = ctx.projected_agents().await.ok()?;
@@ -1561,7 +1726,7 @@ pub(super) async fn read_projected_agent_block(
 /// missing file, a missing `agent` block, or an empty `agent.acpEntrypoint` all map
 /// to a single typed "unknown agent" error naming the agent and how to fix it.
 pub(super) async fn resolve_agent(
-    ctx: &mut ExtensionContext<'_>,
+    ctx: &mut ExtensionContext,
     agent_type: &str,
 ) -> Result<ResolvedAgent, SidecarError> {
     match read_projected_agent_block(ctx, agent_type).await {
@@ -1704,7 +1869,7 @@ pub(super) fn prepend_prompt_preamble(params: &mut Map<String, Value>, preamble:
     }
 }
 
-pub(super) async fn kill_process_best_effort(ctx: &mut ExtensionContext<'_>, process_id: &str) {
+pub(super) async fn kill_process_best_effort(ctx: &mut ExtensionContext, process_id: &str) {
     if let Err(error) = ctx
         .kill_process_wire(KillProcessRequest {
             process_id: process_id.to_owned(),
