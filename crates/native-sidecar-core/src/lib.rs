@@ -84,10 +84,9 @@ pub use root_fs::{
     root_snapshot_from_entries, SidecarCoreError,
 };
 pub use router::{
-    connection_id_of, generated_wire_blocking_extension_interrupt, request_dispatch_mode,
-    request_is_unsupported_host_callback_direction, route_request_payload, session_scope_of,
-    unsupported_host_callback_direction_dispatch, vm_id_of, BlockingExtensionInterrupt,
-    RequestDispatchMode, RequestRoute, UNSUPPORTED_HOST_CALLBACK_DIRECTION_CODE,
+    connection_id_of, request_dispatch_mode, request_is_unsupported_host_callback_direction,
+    route_request_payload, session_scope_of, unsupported_host_callback_direction_dispatch,
+    vm_id_of, RequestDispatchMode, RequestRoute, UNSUPPORTED_HOST_CALLBACK_DIRECTION_CODE,
     UNSUPPORTED_HOST_CALLBACK_DIRECTION_MESSAGE,
 };
 pub use signals::{

@@ -849,25 +849,6 @@ pub enum ExtensionOrderingPolicy {
     ExtensionManaged,
 }
 
-/// Compatibility input for the legacy blocking-extension stdio path. The
-/// routed protocol engine no longer uses this hook; it remains present only in
-/// the lower ownership-partition revision until that caller is removed later
-/// in the stack.
-pub enum ExtensionInterruptRequest<'a> {
-    ExtensionPayload {
-        payload: &'a [u8],
-        ownership: &'a OwnershipScope,
-    },
-    KillProcess,
-}
-
-#[derive(Debug, Clone)]
-pub struct ExtensionInterruptResponse {
-    pub interrupt_active: bool,
-    pub interrupted_response_payload: Vec<u8>,
-    pub interrupting_response_payload: Option<Vec<u8>>,
-}
-
 pub trait Extension: Send + Sync {
     fn namespace(&self) -> &str;
 
@@ -928,18 +909,6 @@ pub trait Extension: Send + Sync {
     /// process lifetime.
     fn on_session_disposed<'a>(&'a self, _ctx: ExtensionSnapshot) -> ExtensionFuture<'a, ()> {
         Box::pin(async { Ok(()) })
-    }
-
-    fn is_blocking_request(&self, _payload: &[u8]) -> bool {
-        false
-    }
-
-    fn interrupt_blocking_request(
-        &self,
-        _blocking_payload: &[u8],
-        _interrupt: ExtensionInterruptRequest<'_>,
-    ) -> Option<ExtensionInterruptResponse> {
-        None
     }
 
     fn on_dispose<'a>(&'a self) -> ExtensionFuture<'a, ()> {

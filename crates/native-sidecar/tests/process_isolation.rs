@@ -118,6 +118,8 @@ fn concurrent_vm_processes_stay_isolated_with_vm_scoped_events() {
             }
             EventPayload::VmLifecycleEvent(_)
             | EventPayload::StructuredEvent(_)
+            | EventPayload::ExecutionOutputEvent(_)
+            | EventPayload::ExecutionCompletedEvent(_)
             | EventPayload::ExtEnvelope(_) => {}
         }
     }

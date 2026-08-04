@@ -142,6 +142,8 @@ fn collect_process_output_bounded(
                 | EventPayload::ProcessExitedEvent(_)
                 | EventPayload::VmLifecycleEvent(_)
                 | EventPayload::StructuredEvent(_)
+                | EventPayload::ExecutionOutputEvent(_)
+                | EventPayload::ExecutionCompletedEvent(_)
                 | EventPayload::ExtEnvelope(_) => {}
             }
         }
