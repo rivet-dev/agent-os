@@ -1631,6 +1631,20 @@
 		"wired": "RuntimeConfig.protocol.max_ingress_frames"
 	},
 	{
+		"name": "DEFAULT_PROTOCOL_MAX_IN_FLIGHT_REQUEST_BYTES",
+		"path": "crates/runtime/src/lib.rs",
+		"class": "policy",
+		"rationale": "Default for the configured process-wide protocol request admission bound.",
+		"wired": "RuntimeConfig.protocol.max_in_flight_request_bytes"
+	},
+	{
+		"name": "DEFAULT_PROTOCOL_MAX_IN_FLIGHT_REQUESTS",
+		"path": "crates/runtime/src/lib.rs",
+		"class": "policy",
+		"rationale": "Default for the configured process-wide protocol request admission bound.",
+		"wired": "RuntimeConfig.protocol.max_in_flight_requests"
+	},
+	{
 		"name": "DEFAULT_PROTOCOL_MAX_OUTBOUND_REQUESTS",
 		"path": "crates/runtime/src/lib.rs",
 		"class": "policy",
@@ -1652,11 +1666,67 @@
 		"wired": "RuntimeConfig.protocol.max_pending_responses"
 	},
 	{
+		"name": "DEFAULT_PROTOCOL_MAX_PROGRESS_BYTES",
+		"path": "crates/runtime/src/lib.rs",
+		"class": "policy",
+		"rationale": "Default for the configured process-wide protocol progress output reserve.",
+		"wired": "RuntimeConfig.protocol.max_progress_bytes"
+	},
+	{
+		"name": "DEFAULT_PROTOCOL_MAX_PROGRESS_FRAMES",
+		"path": "crates/runtime/src/lib.rs",
+		"class": "policy",
+		"rationale": "Default for the configured process-wide protocol progress output reserve.",
+		"wired": "RuntimeConfig.protocol.max_progress_frames"
+	},
+	{
 		"name": "DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS",
 		"path": "crates/runtime/src/lib.rs",
 		"class": "policy",
 		"rationale": "Default for the configured process-wide protocol queue bound.",
 		"wired": "RuntimeConfig.protocol.max_process_events"
+	},
+	{
+		"name": "DEFAULT_PROTOCOL_MAX_REJECTION_BYTES",
+		"path": "crates/runtime/src/lib.rs",
+		"class": "policy",
+		"rationale": "Default for the configured process-wide protocol rejection output reserve.",
+		"wired": "RuntimeConfig.protocol.max_rejection_bytes"
+	},
+	{
+		"name": "DEFAULT_PROTOCOL_MAX_REJECTION_FRAMES",
+		"path": "crates/runtime/src/lib.rs",
+		"class": "policy",
+		"rationale": "Default for the configured process-wide protocol rejection output reserve.",
+		"wired": "RuntimeConfig.protocol.max_rejection_frames"
+	},
+	{
+		"name": "DEFAULT_PROTOCOL_MAX_TERMINAL_BYTES",
+		"path": "crates/runtime/src/lib.rs",
+		"class": "policy",
+		"rationale": "Default for the configured process-wide protocol terminal output reserve.",
+		"wired": "RuntimeConfig.protocol.max_terminal_bytes"
+	},
+	{
+		"name": "DEFAULT_PROTOCOL_MAX_TERMINAL_FRAMES",
+		"path": "crates/runtime/src/lib.rs",
+		"class": "policy",
+		"rationale": "Default for the configured process-wide protocol terminal output reserve.",
+		"wired": "RuntimeConfig.protocol.max_terminal_frames"
+	},
+	{
+		"name": "DEFAULT_PROTOCOL_TERMINAL_FALLBACK_BYTES",
+		"path": "crates/runtime/src/lib.rs",
+		"class": "policy",
+		"rationale": "Default for the configured per-request protocol terminal fallback reservation.",
+		"wired": "RuntimeConfig.protocol.terminal_fallback_bytes"
+	},
+	{
+		"name": "DEFAULT_PROTOCOL_SHUTDOWN_GRACE_TIMEOUT_MS",
+		"path": "crates/runtime/src/lib.rs",
+		"class": "policy",
+		"rationale": "Default finite deadline for draining already-admitted protocol work during shutdown.",
+		"wired": "RuntimeConfig.protocol.shutdown_grace_ms"
 	},
 	{
 		"name": "DEFAULT_VM_EXECUTOR_TEARDOWN_TIMEOUT_MS",

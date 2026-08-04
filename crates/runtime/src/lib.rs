@@ -75,6 +75,16 @@ pub const DEFAULT_PROTOCOL_MAX_CONTROL_FRAMES: usize = 1_024;
 pub const DEFAULT_PROTOCOL_MAX_CONTROL_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_PROTOCOL_MAX_EGRESS_FRAMES: usize = 4_096;
 pub const DEFAULT_PROTOCOL_MAX_EGRESS_BYTES: usize = 256 * 1024 * 1024;
+pub const DEFAULT_PROTOCOL_MAX_IN_FLIGHT_REQUESTS: usize = 128;
+pub const DEFAULT_PROTOCOL_MAX_IN_FLIGHT_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_PROTOCOL_MAX_TERMINAL_FRAMES: usize = 128;
+pub const DEFAULT_PROTOCOL_MAX_TERMINAL_BYTES: usize = 8 * 1024 * 1024;
+pub const DEFAULT_PROTOCOL_TERMINAL_FALLBACK_BYTES: usize = 16 * 1024;
+pub const DEFAULT_PROTOCOL_MAX_PROGRESS_FRAMES: usize = 256;
+pub const DEFAULT_PROTOCOL_MAX_PROGRESS_BYTES: usize = 32 * 1024 * 1024;
+pub const DEFAULT_PROTOCOL_MAX_REJECTION_FRAMES: usize = 128;
+pub const DEFAULT_PROTOCOL_MAX_REJECTION_BYTES: usize = 4 * 1024 * 1024;
+pub const DEFAULT_PROTOCOL_SHUTDOWN_GRACE_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_PROTOCOL_MAX_PENDING_RESPONSES: usize = 10_000;
 pub const DEFAULT_PROTOCOL_MAX_PENDING_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS: usize = 10_000;
@@ -114,6 +124,24 @@ pub struct RuntimeProtocolConfig {
     pub max_control_bytes: usize,
     pub max_egress_frames: usize,
     pub max_egress_bytes: usize,
+    /// Requests admitted for independent execution. The ingress channel is the
+    /// only pre-admission backlog; there is no ordinary request FIFO after it.
+    pub max_in_flight_requests: usize,
+    pub max_in_flight_request_bytes: usize,
+    /// Capacity reserved for exactly one terminal response per admitted
+    /// request. `terminal_fallback_bytes` is charged at request admission.
+    pub max_terminal_frames: usize,
+    pub max_terminal_bytes: usize,
+    pub terminal_fallback_bytes: usize,
+    /// Physically control-lane output that must be able to unblock active work.
+    pub max_progress_frames: usize,
+    pub max_progress_bytes: usize,
+    /// Typed responses for requests rejected before ordinary admission.
+    pub max_rejection_frames: usize,
+    pub max_rejection_bytes: usize,
+    /// Finite deadline for draining already-admitted work after ordinary
+    /// request admission has closed during protocol shutdown.
+    pub shutdown_grace_ms: u64,
     pub max_pending_responses: usize,
     pub max_pending_response_bytes: usize,
     pub max_process_events: usize,
@@ -130,6 +158,16 @@ impl Default for RuntimeProtocolConfig {
             max_control_bytes: DEFAULT_PROTOCOL_MAX_CONTROL_BYTES,
             max_egress_frames: DEFAULT_PROTOCOL_MAX_EGRESS_FRAMES,
             max_egress_bytes: DEFAULT_PROTOCOL_MAX_EGRESS_BYTES,
+            max_in_flight_requests: DEFAULT_PROTOCOL_MAX_IN_FLIGHT_REQUESTS,
+            max_in_flight_request_bytes: DEFAULT_PROTOCOL_MAX_IN_FLIGHT_REQUEST_BYTES,
+            max_terminal_frames: DEFAULT_PROTOCOL_MAX_TERMINAL_FRAMES,
+            max_terminal_bytes: DEFAULT_PROTOCOL_MAX_TERMINAL_BYTES,
+            terminal_fallback_bytes: DEFAULT_PROTOCOL_TERMINAL_FALLBACK_BYTES,
+            max_progress_frames: DEFAULT_PROTOCOL_MAX_PROGRESS_FRAMES,
+            max_progress_bytes: DEFAULT_PROTOCOL_MAX_PROGRESS_BYTES,
+            max_rejection_frames: DEFAULT_PROTOCOL_MAX_REJECTION_FRAMES,
+            max_rejection_bytes: DEFAULT_PROTOCOL_MAX_REJECTION_BYTES,
+            shutdown_grace_ms: DEFAULT_PROTOCOL_SHUTDOWN_GRACE_TIMEOUT_MS,
             max_pending_responses: DEFAULT_PROTOCOL_MAX_PENDING_RESPONSES,
             max_pending_response_bytes: DEFAULT_PROTOCOL_MAX_PENDING_RESPONSE_BYTES,
             max_process_events: DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS,
@@ -504,6 +542,42 @@ impl RuntimeConfig {
                 self.protocol.max_egress_bytes,
             ),
             (
+                "runtime.protocol.maxInFlightRequests",
+                self.protocol.max_in_flight_requests,
+            ),
+            (
+                "runtime.protocol.maxInFlightRequestBytes",
+                self.protocol.max_in_flight_request_bytes,
+            ),
+            (
+                "runtime.protocol.maxTerminalFrames",
+                self.protocol.max_terminal_frames,
+            ),
+            (
+                "runtime.protocol.maxTerminalBytes",
+                self.protocol.max_terminal_bytes,
+            ),
+            (
+                "runtime.protocol.terminalFallbackBytes",
+                self.protocol.terminal_fallback_bytes,
+            ),
+            (
+                "runtime.protocol.maxProgressFrames",
+                self.protocol.max_progress_frames,
+            ),
+            (
+                "runtime.protocol.maxProgressBytes",
+                self.protocol.max_progress_bytes,
+            ),
+            (
+                "runtime.protocol.maxRejectionFrames",
+                self.protocol.max_rejection_frames,
+            ),
+            (
+                "runtime.protocol.maxRejectionBytes",
+                self.protocol.max_rejection_bytes,
+            ),
+            (
                 "runtime.protocol.maxPendingResponses",
                 self.protocol.max_pending_responses,
             ),
@@ -642,6 +716,64 @@ impl RuntimeConfig {
         if self.blocking_job_timeout_ms == 0 {
             return Err(RuntimeBuildError(String::from(
                 "ERR_AGENTOS_RUNTIME_CONFIG: runtime.blocking.jobTimeoutMs must be greater than zero",
+            )));
+        }
+        if self.protocol.shutdown_grace_ms == 0 {
+            return Err(RuntimeBuildError(String::from(
+                "ERR_AGENTOS_RUNTIME_CONFIG: runtime.protocol.shutdownGraceMs must be greater than zero",
+            )));
+        }
+        if self.protocol.max_terminal_frames < self.protocol.max_in_flight_requests {
+            return Err(RuntimeBuildError(format!(
+                "ERR_AGENTOS_RUNTIME_CONFIG: runtime.protocol.maxTerminalFrames ({}) must be >= runtime.protocol.maxInFlightRequests ({}); raise runtime.protocol.maxTerminalFrames",
+                self.protocol.max_terminal_frames, self.protocol.max_in_flight_requests
+            )));
+        }
+        let required_terminal_bytes = self
+            .protocol
+            .max_in_flight_requests
+            .checked_mul(self.protocol.terminal_fallback_bytes)
+            .ok_or_else(|| {
+                RuntimeBuildError(String::from(
+                    "ERR_AGENTOS_RUNTIME_CONFIG: runtime.protocol.maxInFlightRequests * runtime.protocol.terminalFallbackBytes overflows usize; lower either value",
+                ))
+            })?;
+        if self.protocol.max_terminal_bytes < required_terminal_bytes {
+            return Err(RuntimeBuildError(format!(
+                "ERR_AGENTOS_RUNTIME_CONFIG: runtime.protocol.maxTerminalBytes ({}) must be >= runtime.protocol.maxInFlightRequests * runtime.protocol.terminalFallbackBytes ({}); raise runtime.protocol.maxTerminalBytes",
+                self.protocol.max_terminal_bytes, required_terminal_bytes
+            )));
+        }
+        let logical_control_frames = self
+            .protocol
+            .max_terminal_frames
+            .checked_add(self.protocol.max_progress_frames)
+            .and_then(|value| value.checked_add(self.protocol.max_rejection_frames))
+            .ok_or_else(|| {
+                RuntimeBuildError(String::from(
+                    "ERR_AGENTOS_RUNTIME_CONFIG: protocol logical control frame capacities overflow usize; lower runtime.protocol.maxTerminalFrames, maxProgressFrames, or maxRejectionFrames",
+                ))
+            })?;
+        if logical_control_frames > self.protocol.max_control_frames {
+            return Err(RuntimeBuildError(format!(
+                "ERR_AGENTOS_RUNTIME_CONFIG: protocol logical control frames ({logical_control_frames}) exceed runtime.protocol.maxControlFrames ({}); raise runtime.protocol.maxControlFrames or lower the logical lane limits",
+                self.protocol.max_control_frames
+            )));
+        }
+        let logical_control_bytes = self
+            .protocol
+            .max_terminal_bytes
+            .checked_add(self.protocol.max_progress_bytes)
+            .and_then(|value| value.checked_add(self.protocol.max_rejection_bytes))
+            .ok_or_else(|| {
+                RuntimeBuildError(String::from(
+                    "ERR_AGENTOS_RUNTIME_CONFIG: protocol logical control byte capacities overflow usize; lower runtime.protocol.maxTerminalBytes, maxProgressBytes, or maxRejectionBytes",
+                ))
+            })?;
+        if logical_control_bytes > self.protocol.max_control_bytes {
+            return Err(RuntimeBuildError(format!(
+                "ERR_AGENTOS_RUNTIME_CONFIG: protocol logical control bytes ({logical_control_bytes}) exceed runtime.protocol.maxControlBytes ({}); raise runtime.protocol.maxControlBytes or lower the logical lane limits",
+                self.protocol.max_control_bytes
             )));
         }
         for (field, value) in [
@@ -1687,6 +1819,99 @@ mod tests {
         assert!(error
             .to_string()
             .contains("runtime.protocol.maxIngressBytes"));
+    }
+
+    #[test]
+    fn validates_request_and_output_protocol_capacities() {
+        assert_eq!(
+            RuntimeProtocolConfig::default().shutdown_grace_ms,
+            DEFAULT_PROTOCOL_SHUTDOWN_GRACE_TIMEOUT_MS
+        );
+
+        macro_rules! assert_zero_rejected {
+            ($field:ident, $path:literal) => {{
+                let mut config = RuntimeConfig::default();
+                config.protocol.$field = 0;
+                let error = config
+                    .validate()
+                    .expect_err(concat!(stringify!($field), " must be positive"));
+                assert!(
+                    error.to_string().contains($path),
+                    "unexpected validation error for {}: {error}",
+                    stringify!($field)
+                );
+            }};
+        }
+
+        assert_zero_rejected!(max_in_flight_requests, "maxInFlightRequests");
+        assert_zero_rejected!(max_in_flight_request_bytes, "maxInFlightRequestBytes");
+        assert_zero_rejected!(max_terminal_frames, "maxTerminalFrames");
+        assert_zero_rejected!(max_terminal_bytes, "maxTerminalBytes");
+        assert_zero_rejected!(terminal_fallback_bytes, "terminalFallbackBytes");
+        assert_zero_rejected!(max_progress_frames, "maxProgressFrames");
+        assert_zero_rejected!(max_progress_bytes, "maxProgressBytes");
+        assert_zero_rejected!(max_rejection_frames, "maxRejectionFrames");
+        assert_zero_rejected!(max_rejection_bytes, "maxRejectionBytes");
+
+        let mut config = RuntimeConfig::default();
+        config.protocol.shutdown_grace_ms = 0;
+        let error = config
+            .validate()
+            .expect_err("shutdown grace must be positive");
+        assert!(
+            error
+                .to_string()
+                .contains("runtime.protocol.shutdownGraceMs"),
+            "unexpected validation error for shutdown_grace_ms: {error}"
+        );
+
+        RuntimeConfig::default()
+            .validate()
+            .expect("default protocol capacities must be internally consistent");
+    }
+
+    #[test]
+    fn validates_terminal_reservations_and_logical_control_capacity() {
+        let mut terminal_frames = RuntimeConfig::default();
+        terminal_frames.protocol.max_terminal_frames =
+            terminal_frames.protocol.max_in_flight_requests - 1;
+        let error = terminal_frames
+            .validate()
+            .expect_err("every admitted request needs a terminal frame");
+        assert!(error.to_string().contains("maxTerminalFrames"));
+        assert!(error.to_string().contains("maxInFlightRequests"));
+        assert!(error.to_string().contains("raise"));
+
+        let mut terminal_bytes = RuntimeConfig::default();
+        let required = terminal_bytes.protocol.max_in_flight_requests
+            * terminal_bytes.protocol.terminal_fallback_bytes;
+        terminal_bytes.protocol.max_terminal_bytes = required - 1;
+        let error = terminal_bytes
+            .validate()
+            .expect_err("every admitted request needs fallback terminal bytes");
+        assert!(error.to_string().contains("maxTerminalBytes"));
+        assert!(error.to_string().contains("terminalFallbackBytes"));
+        assert!(error.to_string().contains("raise"));
+
+        let mut control_frames = RuntimeConfig::default();
+        control_frames.protocol.max_control_frames = control_frames.protocol.max_terminal_frames
+            + control_frames.protocol.max_progress_frames
+            + control_frames.protocol.max_rejection_frames
+            - 1;
+        let error = control_frames
+            .validate()
+            .expect_err("logical frame lanes must fit physical control capacity");
+        assert!(error.to_string().contains("maxControlFrames"));
+
+        let mut control_bytes = RuntimeConfig::default();
+        control_bytes.protocol.max_control_bytes = control_bytes.protocol.max_terminal_bytes
+            + control_bytes.protocol.max_progress_bytes
+            + control_bytes.protocol.max_rejection_bytes
+            - 1;
+        let error = control_bytes
+            .validate()
+            .expect_err("logical byte lanes must fit physical control capacity");
+        assert!(error.to_string().contains("maxControlBytes"));
     }
 
     #[test]
