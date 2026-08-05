@@ -341,3 +341,65 @@ test-bounded cmd='pnpm test':
 
 test-risky-probe *tests:
 	./.agent/scripts/run-risky-test-probe.sh "$@"
+
+# --- Dev container (docker/dev) ---
+#
+# agentOS runs Linux-only, so on macOS the engine, sidecar, and VMs live in a
+# container while the working tree stays on the host. The repo is bind-mounted
+# at /build; node_modules, cargo target, and the toolchain build trees are
+# container-owned volumes, so host edits are visible instantly without dragging
+# darwin-native binaries into Linux.
+#
+# First run: `just dev-up && just dev-bootstrap` (the bootstrap is slow — it
+# builds the WASM command set and the sidecar from source). After that,
+# `just dev-terminal-example` and edit TypeScript with hot reload.
+
+dev-compose := "docker compose -f docker/dev/compose.yaml"
+
+# Build the image and start the container.
+dev-up:
+	{{dev-compose}} up -d --build
+
+dev-down:
+	{{dev-compose}} down
+
+# Drop into a shell inside the dev container.
+dev-shell:
+	{{dev-compose}} exec dev bash
+
+# Run any command inside the dev container: `just dev-exec 'cargo check --workspace'`
+dev-exec cmd:
+	{{dev-compose}} exec dev bash -lc "{{cmd}}"
+
+# One-time (slow) build of everything the engine needs from source.
+dev-bootstrap:
+	{{dev-compose}} exec dev bash -lc '\
+		set -euo pipefail; \
+		echo "==> pnpm install"; \
+		pnpm install --frozen-lockfile; \
+		echo "==> WASM command set (long)"; \
+		just toolchain-build; \
+		just toolchain-copy-commands; \
+		echo "==> software packages"; \
+		pnpm --filter "@agentos-software/*" \
+			--filter "!@agentos-software/codex" \
+			--filter "!@agentos-software/codex-cli" \
+			--filter "!@agentos-software/everything" build; \
+		echo "==> agentos-sidecar (debug)"; \
+		cargo build -p agentos-sidecar; \
+		echo "==> workspace TypeScript + inspector tab bundle"; \
+		pnpm --filter @rivet-dev/agentos-core --filter @rivet-dev/agentos-runtime-core build; \
+		pnpm --filter @rivet-dev/agentos build; \
+		echo "==> done"'
+
+# Serve examples/browser-terminal: engine on :6420, Vite on :5173.
+dev-terminal-example:
+	{{dev-compose}} exec dev bash -lc '\
+		cd examples/browser-terminal && \
+		pnpm concurrently -k -n server,web -c blue,magenta \
+			"tsx server.ts" \
+			"vite --host 0.0.0.0"'
+
+# Rebuild the inspector custom-tab bundle (run after editing src/inspector-tabs).
+dev-build-tabs:
+	{{dev-compose}} exec dev bash -lc 'pnpm --filter @rivet-dev/agentos build:tabs'

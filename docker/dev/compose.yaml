@@ -1,0 +1,62 @@
+name: agentos-dev
+
+services:
+  dev:
+    build:
+      context: ../..
+      dockerfile: docker/dev/Dockerfile
+    working_dir: /build
+    # Keep the container resident; drive it with `just dev-shell` / `docker compose exec`.
+    command: ["sleep", "infinity"]
+    stdin_open: true
+    tty: true
+    ports:
+      # RivetKit engine: actor gateway + /inspector/* + custom-tab assets. The
+      # hosted dashboard runs in the host browser and points at this port.
+      - "6420:6420"
+      # Vite dev server for examples/browser-terminal.
+      - "5173:5173"
+    # Docker Desktop's embedded resolver (192.168.65.7) intermittently stops
+    # answering, which surfaces as EAI_AGAIN storms during `pnpm install`.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    environment:
+      # Unambiguous sidecar resolution; `just dev-bootstrap` builds this path.
+      AGENTOS_SIDECAR_BIN: /build/target/debug/agentos-sidecar
+      RUST_BACKTRACE: "1"
+      # Vite/RivetKit must listen on all interfaces to be reachable from the host.
+      HOST: 0.0.0.0
+      # RivetKit binds the engine it spawns to loopback, which a published port
+      # cannot reach. This is the supported override for that bind address
+      # (rivetkit's `engineHost`); setting RIVET__GUARD__HOST does not work,
+      # because RivetKit passes its own value to the engine process.
+      RIVET_RUN_ENGINE_HOST: 0.0.0.0
+    volumes:
+      - ../..:/build:cached
+
+      # Host node_modules are darwin-native — mask every bind-mounted tree that
+      # holds platform binaries or build output with a container-owned volume.
+      - node_modules:/build/node_modules
+      - cargo_target:/build/target
+      - toolchain_target:/build/toolchain/target
+
+      # Only `toolchain/c/vendor` is safe to mount: it holds the large wasi-sdk
+      # and llvm-project downloads and nothing deletes it. `sysroot`, `libs`,
+      # `.cache`, and `toolchain/vendor` are `rm -rf`'d wholesale by the build,
+      # which fails with EBUSY on a mount point — leave them on the bind mount.
+      - toolchain_c_vendor:/build/toolchain/c/vendor
+
+      # Caches outside the working tree.
+      - cargo_registry:/usr/local/cargo/registry
+      - cargo_git:/usr/local/cargo/git
+      - pnpm_store:/root/.local/share/pnpm/store
+
+volumes:
+  node_modules:
+  cargo_target:
+  cargo_registry:
+  cargo_git:
+  pnpm_store:
+  toolchain_target:
+  toolchain_c_vendor:
