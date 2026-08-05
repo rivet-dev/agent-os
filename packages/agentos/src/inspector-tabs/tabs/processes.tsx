@@ -31,8 +31,10 @@ function flattenTree(nodes: ProcessTreeNode[], depth = 0, out: ProcessRow[] = []
 	);
 	for (const node of sorted) {
 		const { children, ...info } = node;
-		out.push({ ...info, depth });
-		flattenTree(children, depth + 1, out);
+		// Kernel rows omit `args` for processes with no argv (and older runtimes
+		// omit it entirely); normalize once here so every consumer can index it.
+		out.push({ ...info, args: info.args ?? [], depth });
+		flattenTree(children ?? [], depth + 1, out);
 	}
 	return out;
 }

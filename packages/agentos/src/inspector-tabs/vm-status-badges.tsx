@@ -8,7 +8,8 @@
 // nothing, preserving stock behavior.
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { CopyButton, relativeTime } from "./common";
+import { CopyButton, relativeTime, StatusDot } from "./common";
+import { cn } from "./lib/cn";
 import { isMissingHealthAction } from "./lib/health";
 import { useAgentOsActor } from "./lib/rivet";
 import { healthQueryOptions } from "./lib/source";
@@ -83,7 +84,17 @@ export function VmStatusBadges({
 	return (
 		<span className="inline-flex shrink-0 items-center gap-1.5 text-xs">
 			{chip ? (
-				<span className={chip.tone === "red" ? "text-red-500" : "text-muted-foreground/70"}>
+				// Pill, matching the warnings button beside it — bare text next to a
+				// bordered control reads as a rendering fault, not a status.
+				<span
+					className={cn(
+						"inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-[11px]",
+						chip.tone === "red"
+							? "border-destructive/40 text-destructive"
+							: "border-foreground/15 text-muted-foreground",
+					)}
+				>
+					<StatusDot color={chip.tone === "red" ? "red" : "muted"} />
 					{chip.label}
 				</span>
 			) : null}
