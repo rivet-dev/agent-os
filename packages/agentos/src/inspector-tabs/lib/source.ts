@@ -2,13 +2,14 @@
 // action via the gateway (actor-client) and transforms the result into the
 // display type the component expects. The actor actions are thin wrappers over
 // the core `AgentOs` API, so core types are the wire types (see lib/types.ts).
-import { keepPreviousData, queryOptions } from "@tanstack/react-query";
+
 import type {
 	HistoryPage,
 	PermissionResponseResult,
 	PromptResult,
 	SessionPage,
 } from "@rivet-dev/agentos-core";
+import { keepPreviousData, queryOptions } from "@tanstack/react-query";
 import { callAction, isInspectorActionError } from "./actor-client";
 import type {
 	FileContent,
@@ -21,6 +22,9 @@ import type {
 	RuntimeHealth,
 	SessionInfo,
 	SessionStreamEntry,
+	ShellInfo,
+	ShellReplayMode,
+	ShellSnapshot,
 	SignedPreviewUrl,
 	SoftwareBundle,
 	SoftwareInfo,
@@ -29,7 +33,11 @@ import type {
 } from "./types";
 import { sessionIsLive } from "./types";
 
-const k = (actorId: string, ...rest: string[]) => ["agent-os", actorId, ...rest];
+const k = (actorId: string, ...rest: string[]) => [
+	"agent-os",
+	actorId,
+	...rest,
+];
 
 // ── Software ──────────────────────────────────────────────────────────
 function softwareInfoToBundle(info: SoftwareInfo): SoftwareBundle {
@@ -62,7 +70,11 @@ export function decodeActionBytes(output: unknown): Uint8Array {
 	// rivetkit's json decoder may already hand back a real Uint8Array.
 	if (output instanceof Uint8Array) return output;
 	// JSON encoding wraps Uint8Array as ["$Uint8Array", base64].
-	if (Array.isArray(output) && output[0] === "$Uint8Array" && typeof output[1] === "string") {
+	if (
+		Array.isArray(output) &&
+		output[0] === "$Uint8Array" &&
+		typeof output[1] === "string"
+	) {
 		const bin = atob(output[1]);
 		const bytes = new Uint8Array(bin.length);
 		for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -113,7 +125,10 @@ export function mapSessionEvent(entry: SessionStreamEntry): TranscriptEvent {
 		case "agent_message_chunk":
 		case "agent_thought_chunk": {
 			const content = e.content as { type?: string; text?: string } | undefined;
-			const text = content?.type === "text" && typeof content.text === "string" ? content.text : "";
+			const text =
+				content?.type === "text" && typeof content.text === "string"
+					? content.text
+					: "";
 			return {
 				kind:
 					entry.type === "user_message_chunk"
@@ -134,7 +149,9 @@ export function mapSessionEvent(entry: SessionStreamEntry): TranscriptEvent {
 				for (const c of e.content as Record<string, unknown>[]) {
 					if (!c || typeof c !== "object") continue;
 					if (c.type === "content") {
-						const inner = c.content as { type?: string; text?: string } | undefined;
+						const inner = c.content as
+							| { type?: string; text?: string }
+							| undefined;
 						if (inner?.type === "text" && typeof inner.text === "string") {
 							outputParts.push(inner.text);
 						}
@@ -163,7 +180,9 @@ export function mapSessionEvent(entry: SessionStreamEntry): TranscriptEvent {
 			const entries = Array.isArray(e.entries)
 				? (e.entries as Record<string, unknown>[]).map((p) => ({
 						content:
-							typeof p?.content === "string" ? p.content : JSON.stringify(p?.content ?? ""),
+							typeof p?.content === "string"
+								? p.content
+								: JSON.stringify(p?.content ?? ""),
 						status: typeof p?.status === "string" ? p.status : undefined,
 					}))
 				: [];
@@ -176,7 +195,9 @@ export function mapSessionEvent(entry: SessionStreamEntry): TranscriptEvent {
 				text: `Mode changed to ${String(e.currentModeId ?? "unknown")}`,
 			};
 		case "available_commands_update": {
-			const count = Array.isArray(e.availableCommands) ? e.availableCommands.length : 0;
+			const count = Array.isArray(e.availableCommands)
+				? e.availableCommands.length
+				: 0;
 			return {
 				kind: "notice",
 				seq,
@@ -208,10 +229,15 @@ export function mapSessionEvent(entry: SessionStreamEntry): TranscriptEvent {
 /** Flatten `listSessions` into the pending-permission backfill: every request
  * a "waiting" session is blocked on. Durable, so requests raised while no
  * inspector was open still surface. */
-export function pendingPermissionsOf(sessions: SessionInfo[]): PendingPermissionDisplay[] {
+export function pendingPermissionsOf(
+	sessions: SessionInfo[],
+): PendingPermissionDisplay[] {
 	return sessions.flatMap((session) =>
 		session.state.status === "waiting"
-			? session.state.requests.map((request) => ({ ...request, sessionId: session.sessionId }))
+			? session.state.requests.map((request) => ({
+					...request,
+					sessionId: session.sessionId,
+				}))
 			: [],
 	);
 }
@@ -222,7 +248,9 @@ export const agentOsSource = {
 		queryOptions({
 			queryKey: k(actorId, "software"),
 			queryFn: async () =>
-				(await callAction<SoftwareInfo[]>("listSoftware", [])).map(softwareInfoToBundle),
+				(await callAction<SoftwareInfo[]>("listSoftware", [])).map(
+					softwareInfoToBundle,
+				),
 		}),
 
 	processesQueryOptions: (actorId: string) =>
@@ -238,7 +266,8 @@ export const agentOsSource = {
 	processTreeQueryOptions: (actorId: string) =>
 		queryOptions({
 			queryKey: k(actorId, "process-tree"),
-			queryFn: () => callAction<ProcessTreeNode[]>("processTree", [], { timeoutMs: 10_000 }),
+			queryFn: () =>
+				callAction<ProcessTreeNode[]>("processTree", [], { timeoutMs: 10_000 }),
 			refetchInterval: 5_000,
 		}),
 
@@ -254,9 +283,13 @@ export const agentOsSource = {
 			// directory (does not exist / is a file); surface that as `null` so
 			// callers can show "not found", distinct from `[]` (empty dir).
 			queryFn: async (): Promise<FsEntry[] | null> => {
-				const raw = await callAction<ReaddirEntry[] | null>("readdirEntries", [path], {
-					timeoutMs: 10_000,
-				});
+				const raw = await callAction<ReaddirEntry[] | null>(
+					"readdirEntries",
+					[path],
+					{
+						timeoutMs: 10_000,
+					},
+				);
 				if (raw === null) return null;
 				const entries = raw
 					.filter((e) => e.name !== "." && e.name !== "..")
@@ -273,12 +306,17 @@ export const agentOsSource = {
 						};
 					});
 				return entries.sort(
-					(a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name),
+					(a, b) =>
+						Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name),
 				);
 			},
 		}),
 
-	fileContentQueryOptions: (actorId: string, path: string | null, force = false) =>
+	fileContentQueryOptions: (
+		actorId: string,
+		path: string | null,
+		force = false,
+	) =>
 		queryOptions({
 			queryKey: k(actorId, "file", path ?? "", force ? "force" : "guarded"),
 			enabled: !!path,
@@ -399,6 +437,39 @@ export const agentOsSource = {
 	killProcess: (pid: number) => callAction("killProcess", [pid]),
 	stopProcess: (pid: number) => callAction("stopProcess", [pid]),
 
+	// ── Terminal (terminal tab) ────────────────────────────────────────────
+	// PTY output arrives on the `shellData` broadcast, not from these calls.
+	openShell: (cols: number, rows: number) =>
+		callAction<{ shellId: string }>("openShell", [{ cols, rows }], {
+			timeoutMs: 30_000,
+		}),
+	writeShell: (shellId: string, data: string) =>
+		callAction("writeShell", [shellId, data]),
+	resizeShell: (shellId: string, cols: number, rows: number) =>
+		callAction("resizeShell", [shellId, cols, rows]),
+	closeShell: (shellId: string) => callAction("closeShell", [shellId]),
+	/** Server-rendered repaint for a shell that is already running. `null` when
+	 * the runtime predates the action or the shell has no emulator, which the
+	 * caller reads as "attach live, repaint nothing". */
+	shellSnapshot: async (
+		shellId: string,
+		mode: ShellReplayMode = "screen",
+	): Promise<ShellSnapshot | null> => {
+		try {
+			return await callAction<ShellSnapshot | null>(
+				"shellSnapshot",
+				[shellId, mode],
+				{
+					timeoutMs: 8_000,
+				},
+			);
+		} catch (error) {
+			if (isInspectorActionError(error) && error.layer === "contract")
+				return null;
+			throw error;
+		}
+	},
+
 	// ── Filesystem mutations (filesystem tab) ──────────────────────────────
 	writeFile: (path: string, content: Uint8Array | string) =>
 		callAction("writeFile", [path, content], { timeoutMs: 30_000 }),
@@ -409,12 +480,14 @@ export const agentOsSource = {
 
 	// ── Session management (transcript tab) ────────────────────────────────
 	// Close ends the live agent process; the persisted transcript stays.
-	closeSession: (sessionId: string) => callAction("unloadSession", [{ sessionId }]),
+	closeSession: (sessionId: string) =>
+		callAction("unloadSession", [{ sessionId }]),
 
 	// ── Signed preview URLs (system tab) ───────────────────────────────────
 	createSignedPreviewUrl: (port: number, ttlSeconds: number) =>
 		callAction<SignedPreviewUrl>("createPreviewUrl", [port, ttlSeconds]),
-	expireSignedPreviewUrl: (token: string) => callAction("expirePreviewUrl", [token]),
+	expireSignedPreviewUrl: (token: string) =>
+		callAction("expirePreviewUrl", [token]),
 };
 
 // ── Runtime health (observe-only actions) ─────────────────────────────
@@ -424,10 +497,35 @@ export const agentOsSource = {
 // (see lib/health.ts's isMissingHealthAction) — the status badges hide
 // themselves and the composer disables its Stop button.
 
+/** Shells currently open on the actor. Observe-only: never boots the VM, and a
+ * sleeping VM correctly reports none. This is the source of truth for the
+ * terminal tab's shell strip — the tab must not remember ids itself, or a
+ * shell that outlives its page becomes unreachable while still holding the VM
+ * awake. Feature-detected like `health` so vendored bundles running against an
+ * older runtime degrade instead of erroring. */
+export const shellsQueryOptions = (actorId: string) =>
+	queryOptions({
+		queryKey: k(actorId, "shells"),
+		queryFn: async (): Promise<ShellInfo[] | null> => {
+			try {
+				return await callAction<ShellInfo[]>("listShells", [], {
+					timeoutMs: 8_000,
+				});
+			} catch (error) {
+				if (isInspectorActionError(error) && error.layer === "contract")
+					return null;
+				throw error;
+			}
+		},
+		refetchInterval: 10_000,
+		retry: false,
+	});
+
 export const healthQueryOptions = (actorId: string) =>
 	queryOptions({
 		queryKey: k(actorId, "runtime-health"),
-		queryFn: () => callAction<RuntimeHealth>("health", [], { timeoutMs: 8_000 }),
+		queryFn: () =>
+			callAction<RuntimeHealth>("health", [], { timeoutMs: 8_000 }),
 		refetchInterval: 5_000,
 		// Contract-missing is permanent for this actor: never retry, and stop
 		// polling (react-query keeps refetching errored queries otherwise).
@@ -448,7 +546,8 @@ export const pendingPermissionsQueryOptions = (actorId: string) =>
 				const page = await callAction<SessionPage>("listSessions", []);
 				return pendingPermissionsOf(page.sessions);
 			} catch (error) {
-				if (isInspectorActionError(error) && error.layer === "contract") return null;
+				if (isInspectorActionError(error) && error.layer === "contract")
+					return null;
 				throw error;
 			}
 		},
@@ -467,7 +566,8 @@ export async function cancelPrompt(sessionId: string): Promise<boolean> {
 		await callAction("cancelPrompt", [{ sessionId }]);
 		return true;
 	} catch (error) {
-		if (isInspectorActionError(error) && error.layer === "contract") return false;
+		if (isInspectorActionError(error) && error.layer === "contract")
+			return false;
 		throw error;
 	}
 }

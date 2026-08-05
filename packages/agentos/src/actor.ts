@@ -26,6 +26,7 @@ import {
 } from "rivetkit";
 import { type DatabaseProvider, db, type RawAccess } from "rivetkit/db";
 import { migrations } from "rivetkit/unstable/migrations";
+import { ShellReplayStore } from "./shell-replay.js";
 import type {
 	ActorData,
 	ActorInlineExecutionOptions,
@@ -48,6 +49,9 @@ import type {
 	SerializableCronJobOptions,
 	ShellDataPayload,
 	ShellExitPayload,
+	ShellInfo,
+	ShellReplayMode,
+	ShellSnapshot,
 	VmBootedPayload,
 	VmShutdownPayload,
 } from "./types.js";
@@ -69,6 +73,8 @@ const ACTOR_SQLITE_INLINE_THRESHOLD = 64 * 1024;
 const ROOT_NAMESPACE = "agentos-root";
 const PREVIEW_PATH_PATTERN = /^\/fetch\/([a-f0-9]{48})(\/.*)?$/;
 const MAX_SQLITE_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
+// Each open shell holds the VM awake, so this bounds an unbounded wake-lock.
+const MAX_OPEN_SHELLS = 32;
 
 interface ActorSqliteMigration {
 	readonly version: number;
@@ -122,6 +128,19 @@ type AnyContext = ActorContext<any, any, any, any, any, ActorDb, any, any>;
 
 interface RuntimeState {
 	vm: Promise<AgentOs> | null;
+	/** Set once `vm` resolves, cleared when it stops. Observe-only callers must
+	 * read this instead of sampling `vm`: any `.then`/`.catch` on a settled
+	 * promise still needs a microtask, so racing one against an immediate value
+	 * always loses and reports a booted VM as not booted. */
+	bootedVm: AgentOs | null;
+	/** Shells opened through this actor, in open order. Enumeration is
+	 * server-owned: a client that lost its page (or never had one) must be able
+	 * to find shells it is still keeping the VM awake for. Entries die with the
+	 * VM, so this is deliberately in-memory. */
+	openShells: Map<string, { openedAt: number }>;
+	/** Headless emulator per live shell, fed the same chunks this actor
+	 * broadcasts, so a reattaching client can be repainted. */
+	shellReplay: ShellReplayStore;
 	subscribedSessions: Map<string, readonly (() => void)[]>;
 	onVmStop?: (
 		c: AnyContext,
@@ -191,6 +210,9 @@ function runtimeFor(c: AnyContext): RuntimeState {
 	if (!runtime) {
 		runtime = {
 			vm: null,
+			bootedVm: null,
+			openShells: new Map(),
+			shellReplay: new ShellReplayStore(),
 			subscribedSessions: new Map(),
 			vmCleanupRan: false,
 			fetchStreamHolds: new Map(),
@@ -363,6 +385,7 @@ async function ensureVm(
 			}
 		}
 		vm.onCronEvent((cronEvent) => c.broadcast("cronEvent", cronEvent));
+		runtime.bootedVm = vm;
 		c.broadcast("vmBooted", {});
 		c.log.info({
 			msg: "agent-os vm booted",
@@ -375,6 +398,7 @@ async function ensureVm(
 		return await runtime.vm;
 	} catch (error) {
 		runtime.vm = null;
+		runtime.bootedVm = null;
 		c.log.error({
 			msg: "agent-os vm bootstrap failed",
 			actorId: c.actorId,
@@ -392,6 +416,7 @@ async function disposeVm(c: AnyContext, reason: "sleep" | "destroy" | "error") {
 	const runtime = runtimes.get(c.actorId);
 	if (!runtime) return;
 	const vm = runtime.vm;
+	runtime.bootedVm = null;
 	runtimes.delete(c.actorId);
 	for (const unsubscribers of runtime.subscribedSessions.values()) {
 		for (const unsubscribe of unsubscribers) unsubscribe();
@@ -1296,12 +1321,29 @@ export function createAgentOsActions(
 			...args: Parameters<AgentOs["terminal"]["open"]>
 		) => {
 			const vm = await ensureVm(c, options);
+			const runtime = runtimeFor(c);
+			if (runtime.openShells.size >= MAX_OPEN_SHELLS) {
+				throw new Error(
+					`agent-os shell limit reached (${MAX_OPEN_SHELLS} open); close a shell or raise MAX_OPEN_SHELLS`,
+				);
+			}
+			// Warm the emulator module before the PTY exists: from `terminal.open`
+			// to the subscription below, nothing may await, or the output produced
+			// in that window is lost to every consumer.
+			await runtime.shellReplay.warm();
 			const shell = vm.terminal.open(...args);
+			runtime.openShells.set(shell.shellId, { openedAt: Date.now() });
+			runtime.shellReplay.open(shell.shellId, args[0]?.cols, args[0]?.rows);
 			const unsubscribeData = vm.onShellData(shell.shellId, (event) =>
-				c.broadcast("shellData", event),
+				c.broadcast("shellData", {
+					...event,
+					seq: runtime.shellReplay.feed(event.shellId, event.data),
+				}),
 			);
 			const unsubscribeStderr = vm.onShellStderr(shell.shellId, (event) =>
-				c.broadcast("shellStderr", event),
+				// A diagnostic tap carrying bytes `shellData` already delivered, so
+				// it is never folded into replay and carries no sequence.
+				c.broadcast("shellStderr", { ...event, seq: 0 }),
 			);
 			const unsubscribeExit = vm.onShellExit(shell.shellId, (event) =>
 				c.broadcast("shellExit", event),
@@ -1309,6 +1351,8 @@ export function createAgentOsActions(
 			void c
 				.keepAwake(
 					vm.terminal.wait(shell.shellId).finally(() => {
+						runtime.openShells.delete(shell.shellId);
+						runtime.shellReplay.close(shell.shellId);
 						unsubscribeData();
 						unsubscribeStderr();
 						unsubscribeExit();
@@ -1323,6 +1367,17 @@ export function createAgentOsActions(
 				);
 			return shell;
 		},
+		// Observe-only: enumerates shells this actor opened without booting a
+		// sleeping VM (a sleeping VM has none). Clients must not track shell ids
+		// themselves — a shell outlives the page that opened it and keeps the VM
+		// awake, so it has to stay discoverable.
+		listShells: async (c: AnyContext): Promise<ShellInfo[]> => {
+			const runtime = runtimes.get(c.actorId);
+			if (!runtime?.bootedVm) return [];
+			return [...runtime.openShells.entries()]
+				.map(([shellId, entry]) => ({ shellId, openedAt: entry.openedAt }))
+				.sort((a, b) => a.openedAt - b.openedAt);
+		},
 		writeShell: async (
 			c: AnyContext,
 			...args: Parameters<AgentOs["terminal"]["write"]>
@@ -1330,7 +1385,23 @@ export function createAgentOsActions(
 		resizeShell: async (
 			c: AnyContext,
 			...args: Parameters<AgentOs["terminal"]["resize"]>
-		) => (await ensureVm(c, options)).terminal.resize(...args),
+		) => {
+			const result = (await ensureVm(c, options)).terminal.resize(...args);
+			runtimeFor(c).shellReplay.resize(args[0], args[1], args[2]);
+			return result;
+		},
+		// Observe-only, like `listShells`: repainting a shell must never boot a
+		// VM, and a sleeping VM has no live shells to repaint. Returns `null`
+		// for an unknown shell so a client falls back to no replay.
+		shellSnapshot: async (
+			c: AnyContext,
+			shellId: string,
+			mode: ShellReplayMode = "screen",
+		): Promise<ShellSnapshot | null> => {
+			const runtime = runtimes.get(c.actorId);
+			if (!runtime?.bootedVm) return null;
+			return runtime.shellReplay.snapshot(shellId, mode);
+		},
 		closeShell: async (
 			c: AnyContext,
 			...args: Parameters<AgentOs["terminal"]["close"]>
@@ -1452,23 +1523,18 @@ export function createAgentOsActions(
 			let booted = false;
 			let sessions: number | null = null;
 			let sidecar: RuntimeHealth["sidecar"] = null;
-			if (runtime?.vm) {
-				// Sample the boot promise without waiting on it: a VM still
-				// booting (or one whose boot failed) reports not-booted rather
-				// than blocking the observe-only action.
-				const vm = await Promise.race([
-					runtime.vm.catch(() => null),
-					Promise.resolve(null),
-				]);
-				if (vm) {
-					booted = true;
-					sessions = runtime.subscribedSessions.size;
-					const description = vm.sidecar.describe();
-					sidecar = {
-						state: description.state,
-						activeVmCount: description.activeVmCount,
-					};
-				}
+			// Read the settled VM synchronously: a VM still booting (or one whose
+			// boot failed) reports not-booted rather than blocking the
+			// observe-only action.
+			const vm = runtime?.bootedVm;
+			if (runtime && vm) {
+				booted = true;
+				sessions = runtime.subscribedSessions.size;
+				const description = vm.sidecar.describe();
+				sidecar = {
+					state: description.state,
+					activeVmCount: description.activeVmCount,
+				};
 			}
 			return {
 				booted,
@@ -1811,6 +1877,8 @@ export function createAgentOsActions(
 		},
 		terminal: {
 			open: flat.openShell,
+			list: flat.listShells,
+			snapshot: flat.shellSnapshot,
 			write: flat.writeShell,
 			resize: flat.resizeShell,
 			wait: flat.waitShell,
@@ -1900,6 +1968,8 @@ export function createAgentOsActions(
 		writeProcessStdin: nested.process.writeStdin,
 		closeProcessStdin: nested.process.closeStdin,
 		openShell: nested.terminal.open,
+		listShells: nested.terminal.list,
+		shellSnapshot: nested.terminal.snapshot,
 		writeShell: nested.terminal.write,
 		resizeShell: nested.terminal.resize,
 		closeShell: nested.terminal.close,
@@ -2142,6 +2212,12 @@ const AGENTOS_INSPECTOR_CONFIG = {
 			label: "Filesystem",
 			source: INSPECTOR_TABS_ASSET_DIR,
 			icon: "folder-tree",
+		},
+		{
+			id: "terminal",
+			label: "Terminal",
+			source: INSPECTOR_TABS_ASSET_DIR,
+			icon: "terminal",
 		},
 		{
 			id: "system",

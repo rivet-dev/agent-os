@@ -183,6 +183,7 @@ describe("agentOS actor", () => {
 		expect(tabs?.filter((tab) => !tab.hidden).map((tab) => tab.id)).toEqual([
 			"transcript",
 			"filesystem",
+			"terminal",
 			"system",
 		]);
 		expect(tabs?.filter((tab) => tab.hidden).map((tab) => tab.id)).toEqual([

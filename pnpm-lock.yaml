@@ -2770,6 +2770,9 @@ importers:
       '@rivetkit/react':
         specifier: catalog:rivetkit
         version: 2.3.9(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
+      ghostty-web:
+        specifier: ^0.4.0
+        version: 0.4.0
       rivetkit:
         specifier: catalog:rivetkit
         version: 2.3.9(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
@@ -11310,6 +11313,9 @@ packages:
   get-uri@6.0.5:
     resolution: {integrity: sha512-b1O07XYq8eRuVzBNgJLstU6FYc1tS6wnMtF1I1D9lE8LxZSOGZ7LhxN54yPP6mGw5f2CkXY2BQUL9Fx41qvcIg==}
     engines: {node: '>= 14'}
+
+  ghostty-web@0.4.0:
+    resolution: {integrity: sha512-0puDBik2qapbD/QQBW9o5ZHfXnZBqZWx/ctBiVtKZ6ZLds4NYb+wZuw1cRLXZk9zYovIQ908z3rvFhexAvc5Hg==}
 
   github-from-package@0.0.0:
     resolution: {integrity: sha512-SyHy3T1v2NUXn29OsWdxmK6RwHD+vkj3v8en8AOBZ1wBQ/hCAQ5bAQTD02kW4W9tUp/3Qh6J8r9EvntiyCmOOw==}
@@ -23443,6 +23449,8 @@ snapshots:
       debug: 4.4.3(supports-color@8.1.1)
     transitivePeerDependencies:
       - supports-color
+
+  ghostty-web@0.4.0: {}
 
   github-from-package@0.0.0: {}
 

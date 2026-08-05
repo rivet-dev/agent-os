@@ -83,6 +83,22 @@ export interface ProcessExitPayload {
 	pid: number;
 	exitCode: number;
 }
+/** Live `shellData` broadcast payload mirror — ordered PTY output for one
+ * shell. `data` is encoding-dependent; normalize with `decodeActionBytes`.
+ * `shellStderr` carries the same shape but is a diagnostic tap: rendering it
+ * alongside `shellData` double-prints every stderr byte. */
+export interface ShellDataPayload {
+	shellId: string;
+	data: unknown;
+	/** Orders this chunk against `ShellSnapshot.seq`; 0 when the runtime has no
+	 * replay for the shell. */
+	seq?: number;
+}
+/** Live `shellExit` broadcast payload mirror. */
+export interface ShellExitPayload {
+	shellId: string;
+	exitCode: number;
+}
 
 /** Raw `createPreviewUrl` result. `path` is relative to the gateway
  * origin serving this iframe. */
@@ -200,4 +216,24 @@ export function sessionIsLive(session: SessionInfo): boolean {
 /** Live `vmShutdown` broadcast payload mirror. */
 export interface VmShutdownPayload {
 	reason?: "sleep" | "destroy" | "error" | string;
+}
+
+/** One live shell from the observe-only `listShells` action. */
+export interface ShellInfo {
+	shellId: string;
+	openedAt: number;
+}
+
+/** How much history a `shellSnapshot` repaints. */
+export type ShellReplayMode = "none" | "screen" | "scrollback";
+
+/** Server-rendered repaint for a running shell; `data` is ANSI to write
+ * verbatim into a fresh terminal. */
+export interface ShellSnapshot {
+	shellId: string;
+	mode: ShellReplayMode;
+	seq: number;
+	cols: number;
+	rows: number;
+	data: string;
 }

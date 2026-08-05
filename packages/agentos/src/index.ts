@@ -54,6 +54,7 @@ export type {
 	SerializableCronJobOptions,
 	ShellDataPayload,
 	ShellExitPayload,
+	ShellInfo,
 	VmBootedPayload,
 	VmShutdownPayload,
 } from "./types.js";

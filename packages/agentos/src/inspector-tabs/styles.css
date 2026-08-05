@@ -62,3 +62,11 @@ body {
 	font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
 	-webkit-font-smoothing: antialiased;
 }
+
+/* ghostty-web keeps a 1x1 transparent textarea to receive keystrokes and IME
+   composition. `opacity: 0` does not suppress the browser's own caret, which
+   paints at the pane's top-left corner and reads as a second cursor beside the
+   canvas-drawn one. */
+.agentos-terminal-pane textarea {
+	caret-color: transparent;
+}

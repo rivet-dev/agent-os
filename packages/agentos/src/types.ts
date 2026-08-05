@@ -28,7 +28,9 @@ export interface VmShutdownPayload {
 
 export type ProcessOutputPayload = ProcessOutput;
 export type ProcessExitPayload = ProcessExit;
-export type ShellDataPayload = ShellData;
+/** `seq` orders this chunk against `ShellSnapshot.seq`; it is 0 when the shell
+ * has no server-side emulator and therefore no replay. */
+export type ShellDataPayload = ShellData & { seq: number };
 export type ShellExitPayload = ShellExit;
 export type SerializableCronEvent = CronEvent;
 export type ActorData =
@@ -151,6 +153,44 @@ export interface RuntimeHealth {
 	warnings: RuntimeLimitWarning[];
 	agentExits: RuntimeAgentExit[];
 	stderrTail: RuntimeStderrLine[];
+}
+
+/**
+ * One live shell from the observe-only `listShells` action. A shell outlives
+ * the page that opened it and keeps the VM awake until closed, so enumeration
+ * is server-owned rather than tracked per client.
+ */
+export interface ShellInfo {
+	shellId: string;
+	/** Epoch ms when the shell was opened through this actor. */
+	openedAt: number;
+}
+
+/**
+ * How much of a shell's history a snapshot repaints.
+ *
+ * - `none` — sequence number only; the caller repaints nothing.
+ * - `screen` — the visible viewport, cursor, and terminal modes.
+ * - `scrollback` — the retained scrollback above the viewport, then `screen`.
+ */
+export type ShellReplayMode = "none" | "screen" | "scrollback";
+
+/**
+ * Server-rendered repaint for a shell that is already running. `data` is an
+ * ANSI stream to write verbatim into a fresh terminal.
+ */
+export interface ShellSnapshot {
+	shellId: string;
+	mode: ShellReplayMode;
+	/**
+	 * Sequence of the last `shellData` chunk folded into this snapshot.
+	 * Broadcasts carry the same counter, so a client applies the snapshot and
+	 * then only the chunks whose `seq` is greater — no gap, no double-render.
+	 */
+	seq: number;
+	cols: number;
+	rows: number;
+	data: string;
 }
 
 // --- Serializable cron action (excludes callback type) ---
