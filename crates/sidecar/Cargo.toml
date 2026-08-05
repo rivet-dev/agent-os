@@ -1,0 +1,94 @@
+[package]
+name = "agentos-sidecar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "agentOS sidecar composition root and executable"
+
+[features]
+default = ["all-executors"]
+node-v8 = ["dep:agentos-executor-node-v8", "agentos-vm/node-v8"]
+python-v8-pyodide = [
+    "dep:agentos-executor-python-v8-pyodide",
+    "agentos-vm/python-v8-pyodide",
+]
+wasm-v8 = ["dep:agentos-executor-wasm-v8", "agentos-vm/wasm-v8"]
+wasm-wasmtime = [
+    "agentos-vm/wasm-wasmtime",
+    "dep:agentos-executor-wasm-wasmtime",
+]
+wasm-wasmtime-threads = [
+    "wasm-wasmtime",
+    "agentos-vm/wasm-wasmtime-threads",
+    "agentos-executor-wasm-wasmtime/threads",
+]
+all-executors = [
+    "node-v8",
+    "python-v8-pyodide",
+    "wasm-v8",
+    "wasm-wasmtime",
+    "wasm-wasmtime-threads",
+]
+
+[lib]
+name = "agentos_sidecar"
+
+[[bin]]
+name = "agentos-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+agent-client-protocol-schema = { workspace = true }
+agentos-acp-protocol = { workspace = true }
+serde_json = "1.0"
+serde_bare = "0.5"
+base64 = "0.22"
+sha2 = "0.10"
+agentos-vm = { workspace = true, default-features = false, features = ["runtime"] }
+agentos-executor-node-v8 = { workspace = true, optional = true }
+agentos-executor-python-v8-pyodide = { workspace = true, optional = true }
+agentos-executor-wasm-v8 = { workspace = true, optional = true }
+agentos-executor-wasm-wasmtime = { workspace = true, optional = true }
+agentos-driver-tokio = { workspace = true }
+agentos-resource-accounting = { workspace = true }
+agentos-sidecar-protocol = { workspace = true }
+agentos-vm-host-interface = { workspace = true }
+chrono = { version = "0.4", features = ["clock"] }
+nix = { version = "0.29", features = ["fs"] }
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-logfmt = { version = "0.3", features = ["ansi_logs"] }
+tracing-appender = "0.2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+agentos-rivetkit-ars-client = { workspace = true }
+agentos-vm-host-interface = { workspace = true }
+agentos-vm-kernel = { workspace = true }
+agentos-vm-config = { workspace = true }
+async-trait = "0.1"
+aws-config = "1"
+aws-credential-types = "1"
+aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
+command-fds = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+tempfile = "3"
+tokio = { version = "1", features = ["io-util", "net"] }
+url = "2"
+vbare.workspace = true
+wat = "1.0"
+
+[[test]]
+name = "acp_adapter_stderr"
+required-features = ["node-v8"]
+
+[[test]]
+name = "stdio_binary"
+required-features = ["node-v8"]
+
+[[test]]
+name = "wasmtime_safety"
+required-features = ["wasm-wasmtime-threads"]

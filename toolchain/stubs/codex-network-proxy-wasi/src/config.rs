@@ -160,7 +160,7 @@ pub(crate) fn clamp_bind_addrs(
     )
 }
 
-pub struct RuntimeConfig {
+pub struct DriverConfig {
     pub http_addr: SocketAddr,
     pub socks_addr: SocketAddr,
 }
@@ -205,7 +205,7 @@ pub(crate) fn validate_unix_socket_allowlist_paths(cfg: &NetworkProxyConfig) -> 
     Ok(())
 }
 
-pub fn resolve_runtime(cfg: &NetworkProxyConfig) -> Result<RuntimeConfig> {
+pub fn resolve_runtime(cfg: &NetworkProxyConfig) -> Result<DriverConfig> {
     validate_unix_socket_allowlist_paths(cfg)?;
 
     let http_addr = resolve_addr(&cfg.network.proxy_url, /*default_port*/ 3128)
@@ -214,7 +214,7 @@ pub fn resolve_runtime(cfg: &NetworkProxyConfig) -> Result<RuntimeConfig> {
         .with_context(|| format!("invalid network.socks_url: {}", cfg.network.socks_url))?;
     let (http_addr, socks_addr) = clamp_bind_addrs(http_addr, socks_addr, &cfg.network);
 
-    Ok(RuntimeConfig {
+    Ok(DriverConfig {
         http_addr,
         socks_addr,
     })

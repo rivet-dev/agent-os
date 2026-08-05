@@ -4,13 +4,13 @@ import type { registry } from "./server";
 const client = createClient<typeof registry>({ endpoint: "http://localhost:6420" });
 const agent = client.vm.getOrCreate("my-agent");
 
-const processStatus = (process: { running: boolean; exitCode?: number | null }) =>
-  process.running ? "running" : `exited ${process.exitCode ?? ""}`.trim();
+const processStatus = (process: { state: "running" | "exited" }) =>
+  process.state;
 
 // All processes spawned in the VM
 const all = await agent.process.list();
 for (const p of all) {
-  console.log(p.pid, p.command, p.args.join(" "), processStatus(p));
+  console.log(p.pid, p.command ?? "", processStatus(p));
 }
 
 // Inspect a single process by pid

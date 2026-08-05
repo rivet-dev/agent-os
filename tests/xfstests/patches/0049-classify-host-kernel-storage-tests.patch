@@ -1,0 +1,28 @@
+diff --git a/tests/generic/460 b/tests/generic/460
+index 6e615027..d21a5f58 100755
+--- a/tests/generic/460
++++ b/tests/generic/460
+@@ -54,6 +54,9 @@ _cleanup()
+ # Import common functions.
+ . ./common/filter
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS does not expose host VM dirty-ratio controls"
++
+ # test with scratch device, because test is known to corrupt fs, we don't want
+ # the corruption affect subsequent tests
+ _require_scratch
+diff --git a/tests/generic/466 b/tests/generic/466
+index fde35af7..af91d774 100755
+--- a/tests/generic/466
++++ b/tests/generic/466
+@@ -14,6 +14,9 @@ _begin_fstest auto quick rw
+ # Import common functions.
+ . ./common/filter
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS does not expose a guest block device or variable mkfs block sizes"
++
+ _require_scratch_nocheck
+ _require_block_device $SCRATCH_DEV
+ 

@@ -9,15 +9,13 @@ import { createTerm, diffGrids } from "./helpers/term-diff.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "../../..");
-const VIM_PACKAGE_BIN = resolve(
-	REPO_ROOT,
-	"../agentos/software/vim/dist/package/bin/vim",
-);
+const VIM_PACKAGE_BIN = resolve(REPO_ROOT, "software/vim/dist/package/bin/vim");
 const NATIVE_VIM = "/usr/bin/vim";
 const REF_SCRIPT = join(HERE, "helpers", "native-vim-ref.py");
 
 const COLS = 80;
 const ROWS = 24;
+const PTY_OWNER_READY_TIMEOUT_MS = 90_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Shared, ordered key sequence driven identically against native + wasm vim.
@@ -88,8 +86,10 @@ describe.skipIf(!canRun)("vim wasm vs native — 1:1 PTY parity", () => {
 		// Reference: native vim over a real PTY.
 		const native = nativeSnaps(`/tmp/${BASENAME}`);
 
-		// Under test: wasm vim as a CHILD of the brush shell (the `just shell`
-		// path), so this exercises PTY-slave inheritance too.
+		// Under test: wasm vim as a CHILD of the interactive brush shell (the
+		// `just shell` path), so this exercises PTY-slave inheritance too. Wait for
+		// each terminal-owner transition explicitly: shell prompt first, then Vim's
+		// initial render, and only then send scripted Vim keys.
 		vm = await AgentOs.create({ software: [common, vimPkg] });
 		await vm.mkdir("/work", { recursive: true });
 		const { shellId } = vm.openShell({
@@ -98,34 +98,59 @@ describe.skipIf(!canRun)("vim wasm vs native — 1:1 PTY parity", () => {
 			cols: COLS,
 			rows: ROWS,
 			cwd: "/work",
-			env: { TERM: "xterm", LANG: "C.UTF-8", PS1: "$ " },
+			env: { TERM: "xterm", LANG: "C.UTF-8", PS1: "AOS$ " },
 		});
 		let cumulative = Buffer.alloc(0);
+		const readinessTerm = createTerm(COLS, ROWS);
 		let writes = Promise.resolve();
-		vm.onShellData(shellId, (data) => {
-			const b = Buffer.from(data);
+		vm.onShellData(shellId, (event) => {
+			const b = Buffer.from(event.data);
 			cumulative = Buffer.concat([cumulative, b]);
-			writes = writes.then(() => {});
+			writes = writes.then(() => readinessTerm.write(new Uint8Array(b)));
 		});
 		const settle = async (ms: number) => {
 			await sleep(ms);
 			await writes;
 		};
-		await settle(3000);
+		const waitForScreen = async (
+			label: string,
+			ready: (rows: string[]) => boolean,
+		) => {
+			const deadline = Date.now() + PTY_OWNER_READY_TIMEOUT_MS;
+			while (Date.now() < deadline) {
+				await settle(25);
+				const rows = readinessTerm.grid().rows;
+				if (ready(rows)) {
+					await settle(250);
+					return;
+				}
+			}
+			throw new Error(
+				`timed out waiting for ${label}:\n${readinessTerm
+					.grid()
+					.rows.map((row, index) => `${index}: ${JSON.stringify(row)}`)
+					.join(
+						"\n",
+					)}\nprocesses:\n${JSON.stringify(vm?.allProcesses(), null, 2)}`,
+			);
+		};
+		// The initial prompt may have been emitted before onShellData attached.
+		// An empty line forces a fresh prompt and makes the handshake observable.
+		await vm.writeShell(shellId, "\r");
+		await waitForScreen("shell prompt", (rows) =>
+			rows.some((row) => row.includes("AOS$")),
+		);
 		await vm.writeShell(
 			shellId,
 			`vim -N -u NONE -i NONE -n -c 'set ruler noshowcmd' /work/${BASENAME}\r`,
 		);
-		await settle(2500);
-		// Snapshot the region since vim launched (strip the shell prompt + command
-		// echo that precede vim's own output).
-		const markerIdx = cumulative.lastIndexOf(Buffer.from("\x1b[", "utf8"));
-		void markerIdx;
-		const vimStart = cumulative.length;
+		await waitForScreen(
+			"vim readiness",
+			(rows) =>
+				rows.some((row) => row.includes(BASENAME)) &&
+				rows.some((row) => row === "~"),
+		);
 		const wasmSnaps: Snap[] = [];
-		// Re-capture from a clean emulator per step: feed all bytes from vim start.
-		let base = cumulative.subarray(0, vimStart);
-		void base;
 		const capture = (label: string) => {
 			wasmSnaps.push({ label, raw: new Uint8Array(cumulative) });
 		};
@@ -163,5 +188,5 @@ describe.skipIf(!canRun)("vim wasm vs native — 1:1 PTY parity", () => {
 			throw new Error(`vim wasm/native parity mismatch:\n${report.join("\n")}`);
 		}
 		expect(allEqual).toBe(true);
-	}, 120_000);
+	}, 240_000);
 });

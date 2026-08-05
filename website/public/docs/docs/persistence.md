@@ -19,7 +19,7 @@ agentOS persists the `/home/agentos` filesystem, durable session catalog, and co
 | Active shells | VM kernel | No |
 | In-memory mounts | VM memory | No |
 
-The native sidecar reads and writes filesystem chunks directly through the actor's authenticated SQLite Unix socket. File contents do not pass through the TypeScript or JavaScript actor layer. VM creation supplies one SQLite descriptor, which the sidecar resolves once and shares with filesystem metadata, filesystem blocks, and core session persistence; plugins do not open additional UDS or file connections.
+The sidecar reads and writes filesystem chunks directly through the actor's authenticated SQLite Unix socket. File contents do not pass through the TypeScript or JavaScript actor layer. VM creation supplies one SQLite descriptor, which the sidecar resolves once and shares with filesystem metadata, filesystem blocks, and core session persistence; plugins do not open additional UDS or file connections.
 
 ## Sleep and active turns
 

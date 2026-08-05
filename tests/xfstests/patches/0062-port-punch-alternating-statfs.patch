@@ -1,0 +1,12 @@
+diff --git a/src/punch-alternating.c b/src/punch-alternating.c
+index 07813050..00000001 100644
+--- a/src/punch-alternating.c
++++ b/src/punch-alternating.c
+@@ -5,6 +5,7 @@
+ #include <stdio.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#include <sys/statfs.h>
+ #include <unistd.h>
+ #include <fcntl.h>
+ #include <stdlib.h>

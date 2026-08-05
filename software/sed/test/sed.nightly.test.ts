@@ -9,12 +9,14 @@ import {
 	createKernel,
 	createWasmVmRuntime,
 	describeIf,
+	wasmBackendTestTimeout,
 } from "@rivet-dev/agentos-test-harness";
 import type { Kernel } from "@rivet-dev/agentos-test-harness";
 import { afterEach, expect, it } from "vitest";
 
 const SED_COMMAND_DIR = fileURLToPath(new URL("../bin", import.meta.url));
 const hasSedPackageBinary = existsSync(join(SED_COMMAND_DIR, "sed"));
+const SED_TEST_TIMEOUT_MS = wasmBackendTestTimeout(10_000, 30_000);
 
 let tempRoot: string | undefined;
 
@@ -47,7 +49,11 @@ function lines(stdout: string): string[] {
 	return stdout.split("\n").filter((line) => line.length > 0);
 }
 
-describeIf(hasSedPackageBinary, "sed command", { timeout: 10_000 }, () => {
+describeIf(
+	hasSedPackageBinary,
+	"sed command",
+	{ timeout: SED_TEST_TIMEOUT_MS },
+	() => {
 	let kernel: Kernel | undefined;
 
 	afterEach(async () => {
@@ -140,4 +146,5 @@ describeIf(hasSedPackageBinary, "sed command", { timeout: 10_000 }, () => {
 		expect(result.exitCode).not.toBe(0);
 		expect(result.stderr).toContain("/project/missing.txt");
 	});
-});
+	},
+);

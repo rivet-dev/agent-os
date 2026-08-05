@@ -12,7 +12,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { createWasmVmRuntime } from '@rivet-dev/agentos-test-harness';
-import { C_BUILD_DIR, COMMANDS_DIR, createKernel, describeIf, hasCWasmBinaries } from '@rivet-dev/agentos-test-harness';
+import { C_BUILD_DIR, COMMANDS_DIR, createKernel, describeIf, wasmBackendTestTimeout, hasCWasmBinaries } from '@rivet-dev/agentos-test-harness';
 import type { Kernel } from '@rivet-dev/agentos-test-harness';
 
 // Minimal in-memory VFS for kernel tests
@@ -103,7 +103,7 @@ class SimpleVFS {
   }
 }
 
-describeIf(hasCWasmBinaries('envsubst'), 'envsubst command', () => {
+describeIf(hasCWasmBinaries('envsubst'), 'envsubst command', { timeout: wasmBackendTestTimeout(10_000, 30_000) }, () => {
   let kernel: Kernel;
 
   afterEach(async () => {

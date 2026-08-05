@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Runtime <runtime@agentos.invalid>
+Date: Wed, 22 Jul 2026 15:10:00 -0700
+Subject: [PATCH] Port t_dir_offset2 getdents calls to agentOS
+
+WASI has no variadic Linux syscall entry point. Route the helper's two raw
+getdents64 calls through the xfstests compatibility layer, which translates
+the kernel-backed WASI fd_readdir stream into Linux dirent64 records while
+preserving seekable directory cookies.
+
+--- a/src/t_dir_offset2.c
++++ b/src/t_dir_offset2.c
+@@ -16,7 +16,6 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/stat.h>
+-#include <sys/syscall.h>
+ 
+ struct linux_dirent64 {
+ 	uint64_t	d_ino;
+@@ -91,6 +90,6 @@ int main(int argc, char *argv[])
+ 	total = 0;
+ 	for ( ; ; ) {
+-		nread = syscall(SYS_getdents64, fd, buf, bufsize);
++		nread = agentos_getdents64(fd, buf, bufsize);
+ 		if (nread == -1) {
+ 			perror("getdents");
+ 			exit(EXIT_FAILURE);
+@@ -198,6 +197,6 @@ int main(int argc, char *argv[])
+ 			exit(EXIT_FAILURE);
+ 		}
+ 
+-		nread = syscall(SYS_getdents64, fd, buf, bufsize);
++		nread = agentos_getdents64(fd, buf, bufsize);
+ 		if (nread == -1) {
+ 			perror("getdents");
+ 			exit(EXIT_FAILURE);
+-- 
+2.47.2

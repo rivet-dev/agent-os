@@ -5,24 +5,16 @@ packages:
   - packages/agentos-toolchain
   - packages/eve
   - packages/flue
-  - packages/browser
   - packages/build-tools
   - packages/core
   - packages/manifest
   - packages/node-pty
-  - packages/playground
-  - packages/posix
-  - packages/runtime-benchmarks
-  - packages/runtime-browser
-  - packages/runtime-core
-  - packages/runtime-sidecar
-  - packages/runtime-sidecar/npm/*
-  - packages/vm-test-harness
-  - packages/typescript
+  - packages/benchmarks
+  - packages/test-harness
   - packages/shell
-  - packages/sidecar-binary
+  - packages/sidecar
+  - packages/sidecar/npm/*
   - software/*
-  - test-harness
   - examples/*
   - benchmarks/agentos-apps
   - tests/e2e/agentos-apps

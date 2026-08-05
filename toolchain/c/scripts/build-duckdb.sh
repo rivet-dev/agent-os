@@ -106,4 +106,22 @@ cmake \
   -DOVERRIDE_GIT_DESCRIBE="$DUCKDB_GIT_DESCRIBE"
 
 cmake --build "$DUCKDB_BUILD_DIR" --target shell -j"$(nproc 2>/dev/null || echo 4)"
-cp "$DUCKDB_BUILD_DIR/duckdb" "$DUCKDB_OUTPUT"
+
+# LLVM 19 emits the Phase-3 exception encoding for -fwasm-exceptions, while
+# Wasmtime supports the finalized exnref form. Binaryen is already a required
+# AgentOS toolchain dependency; translate at the sysroot/toolchain boundary so
+# both V8 and Wasmtime execute one canonical artifact.
+WASM_OPT="${WASM_OPT:-wasm-opt}"
+if ! command -v "$WASM_OPT" >/dev/null 2>&1; then
+  echo "pinned wasm-opt is required to finalize DuckDB exception instructions" >&2
+  exit 1
+fi
+if ! "$WASM_OPT" --version | grep -Fq "version 128"; then
+  echo "Binaryen 128 is required to finalize DuckDB exception instructions" >&2
+  exit 1
+fi
+"$WASM_OPT" \
+  --enable-exception-handling \
+  --translate-to-exnref \
+  "$DUCKDB_BUILD_DIR/duckdb" \
+  -o "$DUCKDB_OUTPUT"

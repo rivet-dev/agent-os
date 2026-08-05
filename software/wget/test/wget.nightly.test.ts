@@ -40,6 +40,7 @@ import {
 	createKernel,
 	describeIf,
 	itIf,
+	wasmBackendTestTimeout,
 } from "@rivet-dev/agentos-test-harness";
 import type { Kernel } from "@rivet-dev/agentos-test-harness";
 
@@ -49,7 +50,12 @@ const WGET_COMMAND_DIRS = [C_BUILD_DIR, COMMANDS_DIR].filter((dir) =>
 const hasWgetBinary = WGET_COMMAND_DIRS.some((dir) =>
 	existsSync(resolve(dir, "wget")),
 );
-const WGET_EXEC_TIMEOUT_MS = 10_000;
+// This is a harness fail-safe, not Wget's protocol timeout. Keep it well above
+// the explicit one-second timeout assertions so a loaded host cannot turn a
+// correct functional test into an unrelated SIGKILL.
+const WGET_EXEC_TIMEOUT_MS = 30_000;
+const WGET_TEST_TIMEOUT_MS = wasmBackendTestTimeout(15_000, 30_000);
+const WGET_FTPS_TEST_TIMEOUT_MS = wasmBackendTestTimeout(40_000, 60_000);
 
 let hasOpenssl = false;
 try {
@@ -198,6 +204,7 @@ describeIf(hasWgetBinary, "wget command", () => {
 	let clientCertPem = "";
 	let mutualCaPem = "";
 	let ftpsDataSessionReused = false;
+	const ftpsCommands: string[] = [];
 
 	beforeAll(async () => {
 		server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -280,7 +287,7 @@ describeIf(hasWgetBinary, "wget command", () => {
 
 			// Leaf chaining to a CA seeded into the guest's bundle -> verifies
 			// with no --no-check-certificate / --ca-certificate.
-			const trusted = makeCaSignedCert("AgentOS Wget Test Root CA");
+			const trusted = makeCaSignedCert("agentOS Wget Test Root CA");
 			seededCaPem = trusted.caPem;
 			validHttpsServer = createHttpsServer(
 				{
@@ -308,7 +315,10 @@ describeIf(hasWgetBinary, "wget command", () => {
 					socket.write(
 						"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\npartial",
 					);
-					setTimeout(() => socket.destroy(), 3_000);
+					// Keep the peer-side cleanup well beyond wget's one-second
+					// deadline so host scheduler contention cannot make a correct
+					// timeout race a synthetic clean EOF.
+					setTimeout(() => socket.destroy(), 10_000);
 				},
 			);
 			await new Promise<void>((resolveListen) =>
@@ -319,7 +329,7 @@ describeIf(hasWgetBinary, "wget command", () => {
 			).port;
 
 			// Leaf whose CA is provided ONLY via --ca-certificate (not in bundle).
-			const caOnly = makeCaSignedCert("AgentOS Wget Cacert-Only CA");
+			const caOnly = makeCaSignedCert("agentOS Wget Cacert-Only CA");
 			caOnlyPem = caOnly.caPem;
 			caHttpsServer = createHttpsServer(
 				{
@@ -339,7 +349,7 @@ describeIf(hasWgetBinary, "wget command", () => {
 				caHttpsServer.address() as import("node:net").AddressInfo
 			).port;
 
-			const mutual = makeMutualTlsCerts("AgentOS Wget Mutual TLS CA");
+			const mutual = makeMutualTlsCerts("agentOS Wget Mutual TLS CA");
 			mutualCaPem = mutual.caPem;
 			clientKeyPem = mutual.clientKey;
 			clientCertPem = mutual.clientCert;
@@ -393,7 +403,7 @@ describeIf(hasWgetBinary, "wget command", () => {
 
 			ftpsControlServer = createTlsServer(ftpsTlsOptions, (socket) => {
 				let buffered = "";
-				socket.write("220 AgentOS FTPS ready\r\n");
+				socket.write("220 agentOS FTPS ready\r\n");
 				socket.on("data", (chunk) => {
 					buffered += chunk.toString("utf8");
 					for (;;) {
@@ -401,6 +411,7 @@ describeIf(hasWgetBinary, "wget command", () => {
 						if (newline < 0) break;
 						const line = buffered.slice(0, newline).trim();
 						buffered = buffered.slice(newline + 1);
+						ftpsCommands.push(line);
 						const [command = "", ...args] = line.split(/\s+/);
 						const argument = args.join(" ");
 						switch (command.toUpperCase()) {
@@ -503,36 +514,36 @@ describeIf(hasWgetBinary, "wget command", () => {
 		expect(await filesystem.readTextFile("/workspace/file.txt")).toBe(
 			"downloaded content",
 		);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	it("-O saves to the requested output path", async () => {
 		const filesystem = await mountKernel();
 
 		const result = await kernel.exec(
-			`wget -O /tmp/output.txt http://127.0.0.1:${port}/data.json`,
+			`wget -O /workspace/output.txt http://127.0.0.1:${port}/data.json`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
-		expect(await filesystem.readTextFile("/tmp/output.txt")).toContain(
+		expect(await filesystem.readTextFile("/workspace/output.txt")).toContain(
 			'"status":"ok"',
 		);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	it("-q suppresses progress output", async () => {
 		const filesystem = await mountKernel();
 
 		const result = await kernel.exec(
-			`wget -q -O /tmp/quiet.txt http://127.0.0.1:${port}/file.txt`,
+			`wget -q -O /workspace/quiet.txt http://127.0.0.1:${port}/file.txt`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
 		expect(result.stderr).toBe("");
-		expect(await filesystem.readTextFile("/tmp/quiet.txt")).toBe(
+		expect(await filesystem.readTextFile("/workspace/quiet.txt")).toBe(
 			"downloaded content",
 		);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	it("reports failure for a 404 URL", async () => {
 		await mountKernel();
@@ -544,21 +555,21 @@ describeIf(hasWgetBinary, "wget command", () => {
 
 		expect(result.exitCode).not.toBe(0);
 		expect(result.stderr).toMatch(/404|not found|error/i);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	it("follows redirects by default", async () => {
 		const filesystem = await mountKernel();
 
 		const result = await kernel.exec(
-			`wget -O /tmp/redirected.txt http://127.0.0.1:${port}/redirect`,
+			`wget -O /workspace/redirected.txt http://127.0.0.1:${port}/redirect`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
-		expect(await filesystem.readTextFile("/tmp/redirected.txt")).toBe(
+		expect(await filesystem.readTextFile("/workspace/redirected.txt")).toBe(
 			"arrived after redirect",
 		);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	it("--version reports the mbedTLS HTTPS backend", async () => {
 		await mountKernel();
@@ -572,33 +583,33 @@ describeIf(hasWgetBinary, "wget command", () => {
 		// Real in-guest TLS: HTTPS is compiled in and the backend is mbedTLS.
 		expect(result.stdout).toMatch(/\+https/);
 		expect(result.stdout).toMatch(/ssl\/mbedtls/i);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	it("--compression=auto inflates a gzip response body", async () => {
 		const filesystem = await mountKernel();
 
 		const result = await kernel.exec(
-			`wget --compression=auto -O /tmp/gz.txt http://127.0.0.1:${port}/gzip`,
+			`wget --compression=auto -O /workspace/gz.txt http://127.0.0.1:${port}/gzip`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
-		expect(await filesystem.readTextFile("/tmp/gz.txt")).toBe(
+		expect(await filesystem.readTextFile("/workspace/gz.txt")).toBe(
 			COMPRESSION_PAYLOAD,
 		);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	it("times out a stalled TLS handshake instead of hanging", async () => {
 		await mountKernel();
 
 		const result = await kernel.exec(
-			`wget --tries=1 --connect-timeout=1 --read-timeout=1 --no-check-certificate -O /tmp/handshake-timeout.txt https://127.0.0.1:${handshakeStallPort}/`,
+			`wget --tries=1 --connect-timeout=1 --read-timeout=1 --no-check-certificate -O /workspace/handshake-timeout.txt https://127.0.0.1:${handshakeStallPort}/`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode).not.toBe(0);
 		expect(result.stderr).toMatch(/timed out|timeout/i);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	itIf(
 		hasOpenssl,
@@ -607,14 +618,14 @@ describeIf(hasWgetBinary, "wget command", () => {
 			await mountKernel();
 
 			const result = await kernel.exec(
-				`wget --tries=1 --read-timeout=1 -O /tmp/truncated.txt https://127.0.0.1:${readStallPort}/`,
+				`wget --tries=1 --read-timeout=1 -O /workspace/truncated.txt https://127.0.0.1:${readStallPort}/`,
 				{ timeout: WGET_EXEC_TIMEOUT_MS },
 			);
 
 			expect(result.exitCode).not.toBe(0);
 			expect(result.stderr).toMatch(/timed out|timeout/i);
 		},
-		15_000,
+		WGET_TEST_TIMEOUT_MS,
 	);
 
 	itIf(hasOpenssl, "downloads over HTTPS verifying against the seeded CA bundle", async () => {
@@ -623,42 +634,42 @@ describeIf(hasWgetBinary, "wget command", () => {
 		// No --no-check-certificate, no --ca-certificate: trust comes solely
 		// from the seeded /etc/ssl/certs/ca-certificates.crt, like Debian wget.
 		const result = await kernel.exec(
-			`wget -O /tmp/secure.txt https://127.0.0.1:${validHttpsPort}/file`,
+			`wget -O /workspace/secure.txt https://127.0.0.1:${validHttpsPort}/file`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
-		expect(await filesystem.readTextFile("/tmp/secure.txt")).toBe(
+		expect(await filesystem.readTextFile("/workspace/secure.txt")).toBe(
 			"verified https content",
 		);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	itIf(hasOpenssl, "fails with a real cert error on an untrusted (self-signed) server", async () => {
 		await mountKernel();
 
 		const result = await kernel.exec(
-			`wget -O /tmp/nope.txt https://127.0.0.1:${selfSignedPort}/file`,
+			`wget -O /workspace/nope.txt https://127.0.0.1:${selfSignedPort}/file`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		// VERIFCERTERR -> WGET_EXIT_SSL_AUTH_FAIL == 5, the native taxonomy.
 		expect(result.exitCode).toBe(5);
 		expect(result.stderr).toMatch(/cannot verify|certificate|not trusted/i);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	itIf(hasOpenssl, "--no-check-certificate accepts a self-signed server", async () => {
 		const filesystem = await mountKernel();
 
 		const result = await kernel.exec(
-			`wget --no-check-certificate -O /tmp/insecure.txt https://127.0.0.1:${selfSignedPort}/file`,
+			`wget --no-check-certificate -O /workspace/insecure.txt https://127.0.0.1:${selfSignedPort}/file`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
-		expect(await filesystem.readTextFile("/tmp/insecure.txt")).toBe(
+		expect(await filesystem.readTextFile("/workspace/insecure.txt")).toBe(
 			"self-signed secure content",
 		);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	itIf(hasOpenssl, "--ca-certificate trusts a server signed by that CA", async () => {
 		const filesystem = await mountKernel();
@@ -667,15 +678,15 @@ describeIf(hasWgetBinary, "wget command", () => {
 		// --ca-certificate is honored (real file read + chain build in-guest).
 		await kernel.writeFile("/tmp/cacert-only.pem", caOnlyPem);
 		const result = await kernel.exec(
-			`wget --ca-certificate=/tmp/cacert-only.pem -O /tmp/cacert.txt https://127.0.0.1:${caHttpsPort}/file`,
+			`wget --ca-certificate=/tmp/cacert-only.pem -O /workspace/cacert.txt https://127.0.0.1:${caHttpsPort}/file`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
-		expect(await filesystem.readTextFile("/tmp/cacert.txt")).toBe(
+		expect(await filesystem.readTextFile("/workspace/cacert.txt")).toBe(
 			"cacert https content",
 		);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	itIf(hasOpenssl, "--ca-certificate augments rather than replaces system trust", async () => {
 		const filesystem = await mountKernel();
@@ -685,15 +696,15 @@ describeIf(hasWgetBinary, "wget command", () => {
 		// fail verification.
 		await kernel.writeFile("/tmp/additional-ca.pem", caOnlyPem);
 		const result = await kernel.exec(
-			`wget --ca-certificate=/tmp/additional-ca.pem -O /tmp/system-trust.txt https://127.0.0.1:${validHttpsPort}/file`,
+			`wget --ca-certificate=/tmp/additional-ca.pem -O /workspace/system-trust.txt https://127.0.0.1:${validHttpsPort}/file`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
-		expect(await filesystem.readTextFile("/tmp/system-trust.txt")).toBe(
+		expect(await filesystem.readTextFile("/workspace/system-trust.txt")).toBe(
 			"verified https content",
 		);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	itIf(hasOpenssl, "--ca-certificate with the wrong CA still fails verification", async () => {
 		await mountKernel();
@@ -702,90 +713,90 @@ describeIf(hasWgetBinary, "wget command", () => {
 		// caHttpsServer's leaf.
 		await kernel.writeFile("/tmp/wrong-ca.pem", seededCaPem);
 		const result = await kernel.exec(
-			`wget --ca-certificate=/tmp/wrong-ca.pem -O /tmp/wrong.txt https://127.0.0.1:${caHttpsPort}/file`,
+			`wget --ca-certificate=/tmp/wrong-ca.pem -O /workspace/wrong.txt https://127.0.0.1:${caHttpsPort}/file`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode).toBe(5);
 		expect(result.stderr).toMatch(/cannot verify|certificate|not trusted/i);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	itIf(hasOpenssl, "--secure-protocol=TLSv1_2 remains a minimum and permits TLS 1.3", async () => {
 		const filesystem = await mountKernel();
 		const result = await kernel.exec(
-			`wget --secure-protocol=TLSv1_2 -O /tmp/tls13.txt https://127.0.0.1:${validHttpsPort}/file`,
+			`wget --secure-protocol=TLSv1_2 -O /workspace/tls13.txt https://127.0.0.1:${validHttpsPort}/file`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
-		expect(await filesystem.readTextFile("/tmp/tls13.txt")).toBe(
+		expect(await filesystem.readTextFile("/workspace/tls13.txt")).toBe(
 			"verified https content",
 		);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	itIf(hasOpenssl, "rejects unavailable SSLv3 instead of silently upgrading to TLS", async () => {
 		await mountKernel();
 		const result = await kernel.exec(
-			`wget --secure-protocol=SSLv3 -O /tmp/old.txt https://127.0.0.1:${validHttpsPort}/file`,
+			`wget --secure-protocol=SSLv3 -O /workspace/old.txt https://127.0.0.1:${validHttpsPort}/file`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode).not.toBe(0);
 		expect(result.stderr).toMatch(/does not support requested protocol|SSLv3/i);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	itIf(hasOpenssl, "honors common OpenSSL HIGH/exclusion cipher policy syntax", async () => {
 		const filesystem = await mountKernel();
 		const result = await kernel.exec(
-			`wget --ciphers='HIGH:!aNULL:!RC4:!MD5:!SRP:!PSK' -O /tmp/cipher.txt https://127.0.0.1:${validHttpsPort}/file`,
+			`wget --ciphers='HIGH:!aNULL:!RC4:!MD5:!SRP:!PSK' -O /workspace/cipher.txt https://127.0.0.1:${validHttpsPort}/file`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
-		expect(await filesystem.readTextFile("/tmp/cipher.txt")).toBe(
+		expect(await filesystem.readTextFile("/workspace/cipher.txt")).toBe(
 			"verified https content",
 		);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	itIf(hasOpenssl, "translates an explicit OpenSSL TLS 1.2 cipher name", async () => {
 		const filesystem = await mountKernel();
 		await kernel.writeFile("/tmp/cipher-ca.pem", caOnlyPem);
 		const result = await kernel.exec(
 			`wget --ciphers=ECDHE-RSA-AES128-GCM-SHA256 --ca-certificate=/tmp/cipher-ca.pem ` +
-				`-O /tmp/explicit-cipher.txt https://127.0.0.1:${caHttpsPort}/file`,
+				`-O /workspace/explicit-cipher.txt https://127.0.0.1:${caHttpsPort}/file`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
-		expect(await filesystem.readTextFile("/tmp/explicit-cipher.txt")).toBe(
+		expect(await filesystem.readTextFile("/workspace/explicit-cipher.txt")).toBe(
 			"cacert https content",
 		);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	itIf(hasOpenssl, "leaves TLS 1.3 enabled when --ciphers names a TLS 1.2 suite", async () => {
 		const filesystem = await mountKernel();
 		const result = await kernel.exec(
-			`wget --ciphers=ECDHE-RSA-AES128-GCM-SHA256 -O /tmp/tls13-cipher.txt ` +
+			`wget --ciphers=ECDHE-RSA-AES128-GCM-SHA256 -O /workspace/tls13-cipher.txt ` +
 				`https://127.0.0.1:${validHttpsPort}/file`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
-		expect(await filesystem.readTextFile("/tmp/tls13-cipher.txt")).toBe(
+		expect(await filesystem.readTextFile("/workspace/tls13-cipher.txt")).toBe(
 			"verified https content",
 		);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	itIf(hasOpenssl, "fails explicitly for an unsupported cipher policy token", async () => {
 		await mountKernel();
 		const result = await kernel.exec(
-			`wget --ciphers=NOT-A-CIPHER -O /tmp/bad-cipher.txt https://127.0.0.1:${validHttpsPort}/file`,
+			`wget --ciphers=NOT-A-CIPHER -O /workspace/bad-cipher.txt https://127.0.0.1:${validHttpsPort}/file`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode).not.toBe(0);
 		expect(result.stderr).toMatch(/unsupported.*cipher policy token|NOT-A-CIPHER/i);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	itIf(hasOpenssl, "presents --certificate and --private-key to a mutual-TLS server", async () => {
 		const filesystem = await mountKernel();
@@ -794,27 +805,30 @@ describeIf(hasWgetBinary, "wget command", () => {
 		await kernel.writeFile("/tmp/client.key", clientKeyPem);
 		const result = await kernel.exec(
 			`wget --ca-certificate=/tmp/mutual-ca.pem --certificate=/tmp/client.crt ` +
-				`--private-key=/tmp/client.key -O /tmp/mutual.txt https://127.0.0.1:${mutualTlsPort}/file`,
+				`--private-key=/tmp/client.key -O /workspace/mutual.txt https://127.0.0.1:${mutualTlsPort}/file`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
 		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
-		expect(await filesystem.readTextFile("/tmp/mutual.txt")).toBe(
+		expect(await filesystem.readTextFile("/workspace/mutual.txt")).toBe(
 			"mutual tls content",
 		);
-	}, 15_000);
+	}, WGET_TEST_TIMEOUT_MS);
 
 	itIf(hasOpenssl, "resumes the FTPS control session on the protected data channel", async () => {
 		const filesystem = await mountKernel();
 		const result = await kernel.exec(
-			`wget --ftps-implicit -O /tmp/ftps.txt ftps://127.0.0.1:${ftpsControlPort}/file.txt`,
+			`wget --ftps-implicit -O /workspace/ftps.txt ftps://127.0.0.1:${ftpsControlPort}/file.txt`,
 			{ timeout: WGET_EXEC_TIMEOUT_MS },
 		);
 
-		expect(result.exitCode, result.stderr || result.stdout).toBe(0);
-		expect(await filesystem.readTextFile("/tmp/ftps.txt")).toBe(
+		expect(
+			result.exitCode,
+			`${result.stderr || result.stdout}\nFTPS commands: ${ftpsCommands.join(", ")}`,
+		).toBe(0);
+		expect(await filesystem.readTextFile("/workspace/ftps.txt")).toBe(
 			"resumed ftps content\n",
 		);
 		expect(ftpsDataSessionReused).toBe(true);
-	}, 20_000);
+	}, WGET_FTPS_TEST_TIMEOUT_MS);
 });

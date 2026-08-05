@@ -2,11 +2,13 @@
 
 use std::collections::HashSet;
 use std::ffi::OsString;
-use std::fs;
-use std::io::{self, Write};
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
 use similar::{ChangeTag, TextDiff};
+
+const BRIEF_COMPARE_CHUNK_BYTES: usize = 64 * 1024;
 
 struct Options {
     unified: bool,
@@ -248,6 +250,18 @@ fn preprocess(text: &str, opts: &Options) -> String {
 }
 
 fn diff_files(path_a: &Path, path_b: &Path, opts: &Options) -> Result<bool, String> {
+    if opts.brief && path_a.to_str() != Some("-") && path_b.to_str() != Some("-") {
+        if brief_files_equal(path_a, path_b)? {
+            return Ok(false);
+        }
+        print_stdout_line(format_args!(
+            "Files {} and {} differ",
+            path_a.display(),
+            path_b.display()
+        ))?;
+        return Ok(true);
+    }
+
     let bytes_a = read_file(path_a)?;
     let bytes_b = read_file(path_b)?;
 
@@ -462,6 +476,42 @@ fn diff_files(path_a: &Path, path_b: &Path, opts: &Options) -> Result<bool, Stri
     Ok(true)
 }
 
+fn brief_files_equal(path_a: &Path, path_b: &Path) -> Result<bool, String> {
+    let length_a = fs::metadata(path_a)
+        .map_err(|error| format!("{}: {error}", path_a.display()))?
+        .len();
+    let length_b = fs::metadata(path_b)
+        .map_err(|error| format!("{}: {error}", path_b.display()))?
+        .len();
+    if length_a != length_b {
+        return Ok(false);
+    }
+    let file_a = File::open(path_a).map_err(|error| format!("{}: {error}", path_a.display()))?;
+    let file_b = File::open(path_b).map_err(|error| format!("{}: {error}", path_b.display()))?;
+    readers_equal_bounded(file_a, file_b, length_a).map_err(|error| error.to_string())
+}
+
+fn readers_equal_bounded(
+    mut reader_a: impl Read,
+    mut reader_b: impl Read,
+    length: u64,
+) -> io::Result<bool> {
+    let mut buffer_a = vec![0_u8; BRIEF_COMPARE_CHUNK_BYTES];
+    let mut buffer_b = vec![0_u8; BRIEF_COMPARE_CHUNK_BYTES];
+    let mut remaining = length;
+    while remaining != 0 {
+        let chunk = usize::try_from(remaining.min(BRIEF_COMPARE_CHUNK_BYTES as u64))
+            .expect("bounded brief comparison chunk fits usize");
+        reader_a.read_exact(&mut buffer_a[..chunk])?;
+        reader_b.read_exact(&mut buffer_b[..chunk])?;
+        if buffer_a[..chunk] != buffer_b[..chunk] {
+            return Ok(false);
+        }
+        remaining -= chunk as u64;
+    }
+    Ok(true)
+}
+
 fn print_stdout_line(args: std::fmt::Arguments<'_>) -> Result<(), String> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -497,12 +547,31 @@ fn format_range(start: usize, len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_binary;
+    use std::io::Cursor;
+
+    use super::{is_binary, readers_equal_bounded, BRIEF_COMPARE_CHUNK_BYTES};
 
     #[test]
     fn binary_detection_covers_nul_and_invalid_utf8() {
         assert!(!is_binary(b"ordinary text\n"));
         assert!(is_binary(b"contains\0nul"));
         assert!(is_binary(&[0xff, 0xfe, b'\n']));
+    }
+
+    #[test]
+    fn brief_comparison_is_bounded_and_detects_cross_chunk_changes() {
+        let mut left = vec![0x5a; BRIEF_COMPARE_CHUNK_BYTES + 17];
+        let mut right = left.clone();
+        assert!(
+            readers_equal_bounded(Cursor::new(&left), Cursor::new(&right), left.len() as u64)
+                .expect("compare equal readers")
+        );
+
+        right[BRIEF_COMPARE_CHUNK_BYTES + 1] = 0xa5;
+        assert!(
+            !readers_equal_bounded(Cursor::new(&left), Cursor::new(&right), left.len() as u64)
+                .expect("compare differing readers")
+        );
+        left.clear();
     }
 }

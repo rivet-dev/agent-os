@@ -1,0 +1,21 @@
+diff --git a/src/splice-test.c b/src/splice-test.c
+index 8e7c55e4..00000001 100644
+--- a/src/splice-test.c
++++ b/src/splice-test.c
+@@ -17,6 +17,7 @@
+ #include <stdio.h>
+ #include <stdbool.h>
+ #include <string.h>
++#include <libgen.h>
+ #include <errno.h>
+ #include <malloc.h>
+ 
+@@ -108,7 +109,7 @@ void do_splice2(int fd, const char *filename, size_t size)
+ 	}
+ }
+ 
+-void usage(const char *argv0)
++void usage(char *argv0)
+ {
+ 	fprintf(stderr, "USAGE: %s [-rd] [-s sectorsize] {filename}\n", basename(argv0));
+ 	exit(2);

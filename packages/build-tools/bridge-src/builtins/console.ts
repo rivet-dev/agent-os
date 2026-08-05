@@ -449,7 +449,7 @@ function installBuiltinUtilFormatWithOptions(builtinUtilModule) {
     };
   }
   if (typeof builtinUtilModule.parseEnv !== "function") {
-    const envLinePattern = /(?:^|\n)\s*(?:export\s+)?([\w.-]+)\s*=\s*(?:'((?:\\'|[^'])*)'|"((?:\\"|[^\"])*)"|`((?:\\`|[^`])*)`|([^#\r\n]*?))\s*(?:#[^\r\n]*)?(?=\r?\n|$)/g;
+    const envLinePattern = /(?:^|\n)[\t ]*(?:export[\t ]+)?([\w.-]+)[\t ]*=[\t ]*(?:'((?:\\'|[^'])*)'|"((?:\\"|[^\"])*)"|`((?:\\`|[^`])*)`|([^#\r\n]*?))[\t ]*(?:#[^\r\n]*)?(?=\r?\n|$)/g;
     builtinUtilModule.parseEnv = function parseEnv(content) {
       if (typeof content !== "string") {
         const received = content === null ? "null" : `type ${typeof content} (${String(content)})`;

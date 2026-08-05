@@ -30,27 +30,26 @@ test("ignores generated package caches", () => {
 	const root = mkdtempSync(join(tmpdir(), "fixed-versions-"));
 	try {
 		writeFileSync(join(root, "Cargo.toml"), '[workspace.package]\nversion = "0.0.1"\n');
-		mkdirSync(join(root, "packages", "runtime", ".cache", "fixture"), {
-			recursive: true,
-		});
-		writeFileSync(
-			join(root, "packages", "runtime", ".cache", "fixture", "package.json"),
-			JSON.stringify({ name: "third-party-fixture", version: "9.9.9" }),
+		for (const generatedDir of [".cache", ".eve", ".output", "dist", "node_modules"]) {
+			const packageDir = join(root, "packages", "runtime", generatedDir, "fixture");
+			mkdirSync(packageDir, { recursive: true });
+			writeFileSync(
+				join(packageDir, "package.json"),
+				JSON.stringify({ name: "third-party-fixture", version: "9.9.9" }),
+			);
+		}
+		const nestedOutput = join(
+			root,
+			"examples",
+			"app",
+			".output",
+			"server",
+			"node_modules",
+			"dependency",
 		);
-		mkdirSync(join(root, "examples", "app", ".output", "server", "node_modules", "dependency"), {
-			recursive: true,
-		});
+		mkdirSync(nestedOutput, { recursive: true });
 		writeFileSync(
-			join(
-				root,
-				"examples",
-				"app",
-				".output",
-				"server",
-				"node_modules",
-				"dependency",
-				"package.json",
-			),
+			join(nestedOutput, "package.json"),
 			JSON.stringify({ name: "third-party-output", version: "9.9.9" }),
 		);
 		runGate(root);
@@ -96,8 +95,8 @@ test("fails when an internal crate dep requirement drifts off 0.0.1", () => {
 		writeFileSync(
 			join(root, "Cargo.toml"),
 			'[workspace.package]\nversion = "0.0.1"\n\n[workspace.dependencies]\n' +
-				'agentos-protocol = { path = "crates/agentos-protocol", version = "0.2.0-rc.3" }\n' +
-				'agentos-kernel = { path = "crates/kernel", version = "0.3.4-rc.1" }\n',
+				'agentos-acp-protocol = { path = "crates/acp-protocol", version = "0.2.0-rc.3" }\n' +
+				'agentos-vm-kernel = { path = "crates/vm-kernel", version = "0.3.4-rc.1" }\n',
 		);
 		const exitCode = gateExitCode(root);
 		if (exitCode !== 1) {

@@ -8,7 +8,7 @@ import {
 	NodeFileSystem,
 	createKernel,
 	createWasmVmRuntime,
-	describeIf,
+	describeIf, wasmBackendTestTimeout,
 } from "@rivet-dev/agentos-test-harness";
 import type { Kernel } from "@rivet-dev/agentos-test-harness";
 import { afterEach, expect, it } from "vitest";
@@ -51,7 +51,7 @@ function lines(stdout: string): string[] {
 	return stdout.split("\n").filter((line) => line.length > 0);
 }
 
-describeIf(hasAwkPackageBinary, "awk command", { timeout: 10_000 }, () => {
+describeIf(hasAwkPackageBinary, "awk command", { timeout: wasmBackendTestTimeout(10_000, 30_000) }, () => {
 	let kernel: Kernel | undefined;
 
 	afterEach(async () => {

@@ -1,6 +1,6 @@
 a/src/commands.rs	2006-07-23 18:21:28.000000000 -0700
 +++ b/src/commands.rs	2026-03-16 12:24:49.697003581 -0700
-@@ -554,24 +554,31 @@
+@@ -554,24 +554,34 @@
      let (reader, writer) = std::io::pipe()?;
      params.set_fd(OpenFiles::STDOUT_FD, writer.into());
  
@@ -22,7 +22,10 @@ a/src/commands.rs	2006-07-23 18:21:28.000000000 -0700
 +    let (cmd_result, output_str) = {
 +        let run_result = run_substitution_command(subshell, params, s).await;
 +        let cmd_result = run_result?;
-+        let output_str = std::io::read_to_string(reader)?;
++        let mut reader = reader;
++        let mut output = Vec::new();
++        std::io::Read::read_to_end(&mut reader, &mut output)?;
++        let output_str = String::from_utf8_lossy(&output).into_owned();
 +        (cmd_result, output_str)
 +    };
  

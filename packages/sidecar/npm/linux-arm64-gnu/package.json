@@ -1,0 +1,32 @@
+{
+	"name": "@rivet-dev/agentos-sidecar-linux-arm64-gnu",
+	"version": "0.0.1",
+	"description": "agentOS sidecar binary for Linux arm64 (glibc)",
+	"license": "Apache-2.0",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/rivet-dev/agent-os.git",
+		"directory": "packages/sidecar/npm/linux-arm64-gnu"
+	},
+	"os": [
+		"linux"
+	],
+	"cpu": [
+		"arm64"
+	],
+	"libc": [
+		"glibc"
+	],
+	"files": [
+		"agentos-sidecar"
+	],
+	"bin": {
+		"agentos-sidecar": "./agentos-sidecar"
+	},
+	"engines": {
+		"node": ">=20"
+	},
+	"scripts": {
+		"check-types": "exit 0"
+	}
+}

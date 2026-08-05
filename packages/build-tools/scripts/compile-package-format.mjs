@@ -6,7 +6,7 @@ import { transform } from "@bare-ts/tools";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const buildToolsPackageDir = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(buildToolsPackageDir, "../..");
-const schemaPath = path.join(repoRoot, "crates/vfs/package-format/v1.bare");
+const schemaPath = path.join(repoRoot, "crates/vfs-core/package-format/v1.bare");
 const outputPath = path.join(
 	repoRoot,
 	"packages/agentos-toolchain/src/generated-package-format.ts",

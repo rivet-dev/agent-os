@@ -26,16 +26,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: wasm32-wasip1
-      - run: pnpm install --frozen-lockfile --filter '@rivet-dev/agentos-runtime-benchmarks...' --filter '@rivet-dev/agentos-runtime-core...' --filter '@rivet-dev/agentos-build-tools'
-      - run: cargo build --release -p agentos-native-sidecar
-      - run: cargo build --release -p agentos-native-baseline
-      - run: cargo build --release --target wasm32-wasip1 -p agentos-native-baseline
+      - run: pnpm install --frozen-lockfile --filter '@rivet-dev/agentos-benchmarks...' --filter '@rivet-dev/agentos-core...' --filter '@rivet-dev/agentos-build-tools'
+      - run: cargo build --release -p agentos-sidecar
+      - run: cargo build --release -p agentos-benchmark-baseline
+      - run: cargo build --release --target wasm32-wasip1 -p agentos-benchmark-baseline
       - run: make -C toolchain pr-commands
-      - run: node packages/runtime-core/scripts/copy-wasm-commands.mjs --require-coreutils
-      - run: pnpm --dir packages/runtime-core build
-      - run: pnpm --dir packages/runtime-benchmarks bench:check
-      - run: pnpm --dir packages/runtime-benchmarks bench:gate
+      - run: node packages/core/scripts/copy-wasm-commands.mjs --require-coreutils
+      - run: pnpm --dir packages/core build
+      - run: pnpm --dir packages/benchmarks bench:check
+      - run: pnpm --dir packages/benchmarks bench:gate
         env:
-          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/release/agentos-native-sidecar
-          NATIVE_BASELINE_BIN: ${{ github.workspace }}/target/release/agentos-native-baseline
-          NATIVE_BASELINE_WASM: ${{ github.workspace }}/target/wasm32-wasip1/release/agentos-native-baseline.wasm
+          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/release/agentos-sidecar
+          NATIVE_BASELINE_BIN: ${{ github.workspace }}/target/release/agentos-benchmark-baseline
+          NATIVE_BASELINE_WASM: ${{ github.workspace }}/target/wasm32-wasip1/release/agentos-benchmark-baseline.wasm

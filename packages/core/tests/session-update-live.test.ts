@@ -111,6 +111,7 @@ describe("REPRO: Pi session/update live delivery", () => {
 		});
 
 		let sessionId: string | undefined;
+		let sessionOpened = false;
 		try {
 			const homeDir = "/home/agentos";
 			await vm.mkdir(`${homeDir}/.pi/agent`, { recursive: true });
@@ -134,6 +135,7 @@ describe("REPRO: Pi session/update live delivery", () => {
 					ANTHROPIC_BASE_URL: url,
 				},
 			});
+			sessionOpened = true;
 
 			const unsubscribe = vm.onSessionEvent(sessionId, (event) => {
 				events.push({
@@ -184,7 +186,7 @@ describe("REPRO: Pi session/update live delivery", () => {
 				"BUG: first update arrived at ~the same time as resolution — events are batched, not streamed",
 			).toBeGreaterThan(RESPONSE_LATENCY_MS * 0.5);
 		} finally {
-			if (sessionId) await vm.unloadSession({ sessionId });
+			if (sessionOpened && sessionId) await vm.unloadSession({ sessionId });
 			await vm.dispose();
 			await stopLlmock(mock);
 		}

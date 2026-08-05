@@ -24,7 +24,12 @@ import {
 } from '@rivet-dev/agentos-test-harness';
 import type { Kernel } from '@rivet-dev/agentos-test-harness';
 
-vi.setConfig({ testTimeout: 30_000 });
+// Several integration cases intentionally sequence multiple fresh WASM Git
+// executions, so their aggregate harness budget must cover all cold starts.
+const integrationTestTimeoutMs = Number(
+  process.env.AGENTOS_GIT_TEST_TIMEOUT_MS ?? 120_000,
+);
+vi.setConfig({ testTimeout: integrationTestTimeoutMs });
 
 /** Check git binary exists in addition to base WASM binaries */
 const hasGit = hasWasmBinaries && existsSync(resolve(COMMANDS_DIR, 'git'));
@@ -801,7 +806,9 @@ describeIf(hasGit, 'git command', () => {
 
       const fsck = await kernel.exec(git('-C /tmp/clone fsck --full'));
       expect(fsck.exitCode, fsck.stderr).toBe(0);
-    }, Number(process.env.AGENTOS_GIT_FETCH_TIMEOUT_MS ?? 60_000));
+    }, Number(
+      process.env.AGENTOS_GIT_FETCH_TIMEOUT_MS ?? integrationTestTimeoutMs,
+    ));
 
     it('push sends a small commit over HTTPS smart-HTTP', async () => {
       ({ kernel, vfs, dispose } = await createGitKernelWithNet([trustedPort], trustedCaPem));
@@ -884,7 +891,9 @@ describeIf(hasGit, 'git command', () => {
       await run(kernel, git(`clone --branch large-push ${trustedUrl()} /tmp/large-clone`));
       const clonedBig = await kernel.readFile('/tmp/large-clone/big.bin');
       expect(Buffer.from(clonedBig).equals(big)).toBe(true);
-    }, Number(process.env.AGENTOS_GIT_PUSH_TIMEOUT_MS ?? 60_000));
+    }, Number(
+      process.env.AGENTOS_GIT_PUSH_TIMEOUT_MS ?? integrationTestTimeoutMs,
+    ));
 
     it('pack-objects failure reports the same smart-HTTP transport failure as native Git', async () => {
       const trustedCaPath = join(repoRoot, 'trusted-ca.pem');

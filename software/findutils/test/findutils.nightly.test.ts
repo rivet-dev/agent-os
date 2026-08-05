@@ -12,7 +12,11 @@ import {
 	describeIf,
 	hasWasmBinaries,
 	type Kernel,
+	wasmBackendTestTimeout,
 } from "@rivet-dev/agentos-test-harness";
+
+const FINDUTILS_TEST_TIMEOUT_MS = wasmBackendTestTimeout(10_000, 30_000);
+const FINDUTILS_SPAWN_TEST_TIMEOUT_MS = wasmBackendTestTimeout(10_000, 60_000);
 
 function parseLines(stdout: string): string[] {
 	return stdout
@@ -22,7 +26,11 @@ function parseLines(stdout: string): string[] {
 		.sort();
 }
 
-describeIf(hasWasmBinaries, "findutils commands", { timeout: 10_000 }, () => {
+describeIf(
+	hasWasmBinaries,
+	"findutils commands",
+	{ timeout: FINDUTILS_TEST_TIMEOUT_MS },
+	() => {
 	let kernel: Kernel;
 
 	afterEach(async () => {
@@ -78,29 +86,38 @@ describeIf(hasWasmBinaries, "findutils commands", { timeout: 10_000 }, () => {
 		expect(parseLines(result.stdout)).toEqual(["/project/src/main.js"]);
 	});
 
-	it("xargs passes stdin arguments to a command", async () => {
-		const vfs = createInMemoryFileSystem();
-		await vfs.writeFile("/args.txt", "alpha\nbeta\n");
+	it(
+		"xargs passes stdin arguments to a command",
+		async () => {
+			const vfs = createInMemoryFileSystem();
+			await vfs.writeFile("/args.txt", "alpha\nbeta\n");
 
-		kernel = createKernel({ filesystem: vfs });
-		await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+			kernel = createKernel({ filesystem: vfs });
+			await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
 
-		const result = await kernel.exec("xargs echo < /args.txt");
-		expect(result.stdout.trim()).toBe("alpha beta");
-	});
+			const result = await kernel.exec("xargs echo < /args.txt");
+			expect(result.stdout.trim()).toBe("alpha beta");
+		},
+		FINDUTILS_SPAWN_TEST_TIMEOUT_MS,
+	);
 
-	it("xargs batches arguments across spawned commands", async () => {
-		const vfs = createInMemoryFileSystem();
-		await vfs.writeFile("/args.txt", "one two three four five\n");
+	it(
+		"xargs batches arguments across spawned commands",
+		async () => {
+			const vfs = createInMemoryFileSystem();
+			await vfs.writeFile("/args.txt", "one two three four five\n");
 
-		kernel = createKernel({ filesystem: vfs });
-		await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+			kernel = createKernel({ filesystem: vfs });
+			await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
 
-		const result = await kernel.exec("xargs -n 2 echo < /args.txt");
-		expect(result.stdout.trim().split("\n")).toEqual([
-			"one two",
-			"three four",
-			"five",
-		]);
-	});
-});
+			const result = await kernel.exec("xargs -n 2 echo < /args.txt");
+			expect(result.stdout.trim().split("\n")).toEqual([
+				"one two",
+				"three four",
+				"five",
+			]);
+		},
+		FINDUTILS_SPAWN_TEST_TIMEOUT_MS,
+	);
+	},
+);

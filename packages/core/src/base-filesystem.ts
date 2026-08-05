@@ -25,7 +25,7 @@ export interface BaseFilesystemSnapshot {
  * The base VM environment, baked in as a constant (verbatim from the single
  * `base-filesystem.json` the sidecar embeds). The host no longer reads that JSON
  * — the sidecar owns the base filesystem, and there is exactly one committed copy
- * of it (`agentos/crates/vfs/assets/base-filesystem.json`). Regenerate both
+ * of it (`agentos/crates/vfs-core/assets/base-filesystem.json`). Regenerate both
  * this constant and that file together with the build-tools snapshot script.
  */
 const BASE_ENVIRONMENT: Readonly<Record<string, string>> = Object.freeze({

@@ -1,4 +1,5 @@
 import common, { coreutils } from "@agentos-software/common";
+import pi from "@agentos-software/pi";
 import { afterEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/agent-os.js";
 
@@ -27,9 +28,9 @@ describe("software projection on the sidecar path", () => {
 		vm = undefined;
 	});
 
-	test("preserves projected package roots without cwd node_modules", async () => {
+	test("projects package roots under /opt/agentos without cwd node_modules", async () => {
 		vm = await AgentOs.create({
-			software: [],
+			software: [pi],
 		});
 
 		let stdout = "";
@@ -40,11 +41,11 @@ describe("software projection on the sidecar path", () => {
 				"-e",
 				[
 					"const fs = require('node:fs');",
-					"console.log('node_modules', fs.existsSync('/root/node_modules'));",
-					"console.log('scope', fs.readdirSync('/root/node_modules/@rivet-dev').includes('agentos-pi'));",
-					"console.log('adapter', fs.existsSync('/root/node_modules/@agentos-software/pi/package.json'));",
-					"console.log('adapterResolved', Boolean(require.resolve('@agentos-software/pi')));",
-					"console.log('agent', fs.existsSync('/root/node_modules/@mariozechner/pi-coding-agent/package.json'));",
+					"console.log('root', fs.existsSync('/opt/agentos/pkgs/pi/current'));",
+					"console.log('adapter', fs.existsSync('/opt/agentos/pkgs/pi/current/node_modules/@agentos-software/pi/package.json'));",
+					"console.log('agent', fs.existsSync('/opt/agentos/pkgs/pi/current/node_modules/@earendil-works/pi-coding-agent/package.json'));",
+					"console.log('pi', fs.existsSync('/opt/agentos/bin/pi'));",
+					"console.log('pi-acp', fs.existsSync('/opt/agentos/bin/pi-acp'));",
 				].join(" "),
 			],
 			{
@@ -59,16 +60,16 @@ describe("software projection on the sidecar path", () => {
 
 		const exitCode = await waitForExit(vm, pid);
 		expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-		expect(stdout).toContain("node_modules true");
-		expect(stdout).toContain("scope true");
+		expect(stdout).toContain("root true");
 		expect(stdout).toContain("adapter true");
-		expect(stdout).toContain("adapterResolved true");
 		expect(stdout).toContain("agent true");
+		expect(stdout).toContain("pi true");
+		expect(stdout).toContain("pi-acp true");
 	});
 
 	test("keeps projected package roots read-only on the sidecar path", async () => {
 		vm = await AgentOs.create({
-			software: [],
+			software: [pi],
 		});
 
 		let stdout = "";
@@ -80,7 +81,7 @@ describe("software projection on the sidecar path", () => {
 				[
 					"const fs = require('node:fs');",
 					"try {",
-					"  fs.appendFileSync('/root/node_modules/@agentos-software/pi/package.json', '\\nblocked');",
+					"  fs.appendFileSync('/opt/agentos/pkgs/pi/current/agentos-package.json', '\\nblocked');",
 					"  console.log('write:unexpected-success');",
 					"} catch (error) {",
 					"  console.log('writeError', error && error.code);",
@@ -104,11 +105,11 @@ describe("software projection on the sidecar path", () => {
 	});
 
 	test("preserves registry meta-package command injection on the sidecar path", async () => {
-			vm = await AgentOs.create({
-				software: [common],
-			});
+		vm = await AgentOs.create({
+			software: [common],
+		});
 
-			expect(await vm.exists("/bin/cat")).toBe(true);
-			expect(await vm.exists("/bin/grep")).toBe(true);
+		expect(await vm.exists("/bin/cat")).toBe(true);
+		expect(await vm.exists("/bin/grep")).toBe(true);
 	});
 });

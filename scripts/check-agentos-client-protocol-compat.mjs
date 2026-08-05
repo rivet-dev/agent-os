@@ -67,8 +67,8 @@ export function checkAgentOsClientProtocolCompat(options = {}) {
 		join(root, "crates/client/tests"),
 	];
 	const agentOsSidecarRoots = [
-		join(root, "crates/agentos-sidecar/src"),
-		join(root, "crates/agentos-sidecar/tests"),
+		join(root, "crates/sidecar/src"),
+		join(root, "crates/sidecar/tests"),
 	];
 	const errors = [];
 	for (const filePath of clientRoots.flatMap((scanRoot) =>

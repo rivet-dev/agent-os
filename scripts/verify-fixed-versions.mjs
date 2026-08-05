@@ -39,9 +39,16 @@ function isExcluded(relPath) {
 		.split("/")
 		.some(
 			(part) =>
+				part === ".astro" ||
 				part === ".cache" ||
+				part === ".codex-build" ||
+				part === ".eve" ||
 				part === ".output" ||
+				part === ".turbo" ||
+				part === "dist" ||
 				part === "fixtures" ||
+				part === "node_modules" ||
+				part === "target" ||
 				part === "vendor" ||
 				part === "tests",
 		);

@@ -1,10 +1,9 @@
-Keep Rust std's pathname metadata lookup outside the guest fd namespace.
+Resolve Rust std's supplemental pathname metadata from the process cwd.
 
-Rust std supplements WASI filestat with AgentOS' host_fs.path_mode import.
-That lookup is part of ordinary pathname resolution, but it passed raw fd 3,
-allowing close(3)/dup2(..., 3) to redirect subsequent stat metadata queries.
-Use the same private preopen tag as the patched libc; explicit descriptor APIs
-continue to pass their exact guest descriptor.
+Rust std supplements WASI filestat with AgentOS' host_fs.path_mode import. That
+extension receives the application's original absolute or cwd-relative path,
+not wasi-libc's capability-relative path. Use AgentOS' cwd sentinel so fd 3
+cannot redirect the lookup and relative paths keep normal POSIX semantics.
 
 --- a/library/std/src/sys/fs/unix.rs
 +++ b/library/std/src/sys/fs/unix.rs
@@ -13,7 +12,7 @@ continue to pass their exact guest descriptor.
  }
  
 +#[cfg(target_os = "wasi")]
-+const AGENTOS_HIDDEN_PREOPEN_FD: u32 = 0x40000003;
++const AGENTOS_CWD_FD: u32 = u32::MAX;
  #[cfg(target_os = "wasi")]
  use crate::os::wasi::prelude::*;
  use crate::path::{Path, PathBuf};
@@ -23,7 +22,7 @@ continue to pass their exact guest descriptor.
          let bytes = p.to_bytes();
 -        let mode = unsafe { host_fs::path_mode(3, bytes.as_ptr(), bytes.len() as u32, 1) };
 +        let mode = unsafe {
-+            host_fs::path_mode(AGENTOS_HIDDEN_PREOPEN_FD, bytes.as_ptr(), bytes.len() as u32, 1)
++            host_fs::path_mode(AGENTOS_CWD_FD, bytes.as_ptr(), bytes.len() as u32, 1)
 +        };
          if mode != 0 { stat.st_mode = mode as libc::mode_t; }
      }
@@ -34,7 +33,7 @@ continue to pass their exact guest descriptor.
          let bytes = p.to_bytes();
 -        let mode = unsafe { host_fs::path_mode(3, bytes.as_ptr(), bytes.len() as u32, 0) };
 +        let mode = unsafe {
-+            host_fs::path_mode(AGENTOS_HIDDEN_PREOPEN_FD, bytes.as_ptr(), bytes.len() as u32, 0)
++            host_fs::path_mode(AGENTOS_CWD_FD, bytes.as_ptr(), bytes.len() as u32, 0)
 +        };
          if mode != 0 { stat.st_mode = mode as libc::mode_t; }
      }

@@ -1,0 +1,19 @@
+diff --git a/tests/generic/469 b/tests/generic/469
+index 8af37bbd..ce537f3a 100755
+--- a/tests/generic/469
++++ b/tests/generic/469
+@@ -49,10 +49,12 @@ run_fsx()
+ # run fsx with and without fsync(2) after write to get more coverage
+ test_fsx()
+ {
+-	echo "fsx --replay-ops ${1#*.}" | tee -a $seqres.full
++	replay=${1##*/}
++	replay=${replay#*.}
++	echo "fsx --replay-ops $replay" | tee -a $seqres.full
+ 	run_fsx $1
+ 
+-	echo "fsx -y --replay-ops ${1#*.}" | tee -a $seqres.full
++	echo "fsx -y --replay-ops $replay" | tee -a $seqres.full
+ 	run_fsx $1 -y
+ }
+ 

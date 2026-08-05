@@ -29,8 +29,8 @@ describe("flat shell API", () => {
 		});
 
 		const chunks: string[] = [];
-		vm.onShellData(shellId, (data) => {
-			chunks.push(new TextDecoder().decode(data));
+		vm.onShellData(shellId, (event) => {
+			chunks.push(new TextDecoder().decode(event.data));
 		});
 
 		vm.writeShell(shellId, "hello-flat-shell\n");
@@ -48,8 +48,8 @@ describe("flat shell API", () => {
 		const { shellId } = vm.openShell();
 
 		const chunks: string[] = [];
-		vm.onShellData(shellId, (data) => {
-			chunks.push(new TextDecoder().decode(data));
+		vm.onShellData(shellId, (event) => {
+			chunks.push(new TextDecoder().decode(event.data));
 		});
 
 		await sleep(100);

@@ -29,6 +29,34 @@ Exec is the JavaScript, TypeScript, and Python execution surface of agentOS.
   builds, CI, publication, or behavioral-parity requirements without a
   separately approved design.
 
+## VM, Driver, And Executor Crate Boundaries
+
+- The locked native packages are `agentos-vm`, `agentos-driver-tokio`,
+  `agentos-executor-contract`, and one feature-gated crate per concrete
+  execution engine.
+- Keep the kernel and executor contract independent of Tokio and concrete
+  engines. Keep each engine in a separate feature-gated crate.
+- The sidecar is the native composition root: it constructs the Tokio driver,
+  registers enabled executors, creates the VM manager, and owns transport and
+  ACP extensions. `agentos-vm` is also supported as an embedded Rust library
+  with no sidecar, client, or executors.
+- `agentos-vm` with default features disabled must retain only the kernel and
+  in-memory VFS composition. Persistent filesystems/SQLite/S3, package/tar
+  filesystems and schema generation, Tokio, protocol adapters, ARS, JavaScript
+  tooling, crypto/TLS, WASM ABI support, and concrete executors must be optional
+  and absent from that dependency graph.
+- Keep capability dependencies attached to their owning features:
+  `javascript-tooling` is selected by `node-v8`, and `wasm-api` is selected
+  only by `wasm-v8` or `wasm-wasmtime`. Persistent VFS backends and crypto must
+  never become unconditional dependencies of the embedded VM.
+- New `agentos-vm` dependencies are optional unless the executor-free kernel
+  directly requires them. Validate changes with
+  `node scripts/check-embedded-vm-dependencies.mjs` and keep the checked
+  `agentos-example-embedded-vm` binary under the configured size ceiling.
+- Browser implementation remains out of scope. See
+  [Package Architecture](website/src/content/docs/docs/architecture/package-structure.mdx)
+  for the package graph, responsibilities, and rationale.
+
 ## Security Model
 
 Trust model:
@@ -92,11 +120,11 @@ add compatibility views, aliases, legacy adoption paths, or dual writes.
   "no shell", "no subprocess spawning", "no process model") — those hold for raw
   WASI Preview 1, not for agentOS. See
   `website/public/docs/docs/architecture/processes.md` and
-  `posix-syscalls.md`, and `crates/kernel/CLAUDE.md`.
+  `posix-syscalls.md`, and `crates/vm-kernel/CLAUDE.md`.
 - The projected `/opt/agentos` filesystem is the source of truth for software
   and agent resolution. Read it live; do not cache package lists captured at VM
   configuration time.
-- Packages are packed `.aospkg` files (`crates/vfs/package-format/v1.bare`:
+- Packages are packed `.aospkg` files (`crates/vfs-core/package-format/v1.bare`:
   header + vbare manifest + mount index + mount tar) projected under
   `/opt/agentos/pkgs/<name>/<version>`; commands are linked under
   `/opt/agentos/bin/`. The vbare chunk1 manifest is the only runtime manifest —
@@ -125,7 +153,7 @@ add compatibility views, aliases, legacy adoption paths, or dual writes.
   `software/pi/scripts/build-pi-acp.mjs`; do not work around fork bugs in the
   agentOS package wrapper or resolve `pi-acp` from npm.
 - WASM command binaries and every toolchain build output are generated
-  artifacts. Never commit `packages/runtime-core/commands/`, `software/*/bin/`,
+  artifacts. Never commit `packages/core/commands/`, `software/*/bin/`,
   `toolchain/vendor/`, `toolchain/c/{build,vendor,libs,sysroot,.cache}/`, or
   `toolchain/std-patches/wasi-libc-overrides/*.o`. A fresh checkout intentionally
   contains source and patches only. Rebuild and stage the complete default tool
@@ -223,9 +251,8 @@ custom host-syscall imports. Treat that target as **native POSIX**;
 - Publishable npm packages and Rust crates are agentOS-owned. agentOS language
   execution is exposed through `@rivet-dev/agentos`; do not publish separate
   language packages, compatibility artifacts, or language subpaths.
-- The release workflow must build and stage the native sidecar binaries,
-  runtime-sidecar binaries, registry WASM commands, and pyodide assets before
-  publish.
+- The release workflow must build and stage the single `agentos-sidecar`
+  binary family, registry WASM commands, and pyodide assets before publish.
 - `scripts/verify-fixed-versions.mjs` must pass in the committed tree.
 
 ## Docs

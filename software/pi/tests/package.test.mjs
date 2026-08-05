@@ -46,7 +46,7 @@ test("Pi packages the commit-pinned rivet-dev ACP adapter and runtime closure", 
 	);
 	assert.equal(
 		packageJson.dependencies["@earendil-works/pi-coding-agent"],
-		"0.80.6",
+		"0.80.10",
 	);
 	assert.equal(packageJson.dependencies["pi-acp"], undefined);
 	assert.equal(packageJson.dependencies["pi-mcp-adapter"], "2.11.0");

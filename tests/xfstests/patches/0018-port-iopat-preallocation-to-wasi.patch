@@ -1,17 +1,17 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: AgentOS Tests <tests@agentos.invalid>
+From: agentOS Tests <tests@agentos.invalid>
 Date: Fri, 10 Jul 2026 20:25:00 -0700
 Subject: [PATCH] fstests: port iopat allocation and buffers to WASI
 
 ---
- src/iopat.c | 53 ++++++++++++++++++++++++++++++++++++++++++++++++-----
- 1 file changed, 48 insertions(+), 5 deletions(-)
+ src/iopat.c | 69 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 64 insertions(+), 5 deletions(-)
 
 diff --git a/src/iopat.c b/src/iopat.c
-index a107a9a0..e17e4573 100644
+index a107a9a0..6e2e5973 100644
 --- a/src/iopat.c
 +++ b/src/iopat.c
-@@ -4,47 +4,90 @@
+@@ -4,47 +4,106 @@
   * All Rights Reserved.
   */
  
@@ -75,21 +75,37 @@ index a107a9a0..e17e4573 100644
        x[i] = i;
     }
 -   write(fd, &x, 1048576);
-+   if (write(fd, x, 1048576) != 1048576) {
-+      perror("write");
-+      free(x);
-+      close(fd);
-+      return 1;
++   {
++      size_t written = 0;
++      while (written < 1048576) {
++         ssize_t result = write(fd, (char *)x + written, 1048576 - written);
++         if (result <= 0) {
++            if (result == 0) errno = EIO;
++            perror("write");
++            free(x);
++            close(fd);
++            return 1;
++         }
++         written += (size_t)result;
++      }
 +   }
  #endif
  
  #ifdef READ
 -   read(fd, &x, 1048576);
-+   if (read(fd, x, 1048576) != 1048576) {
-+      perror("read");
-+      free(x);
-+      close(fd);
-+      return 1;
++   {
++      size_t consumed = 0;
++      while (consumed < 1048576) {
++         ssize_t result = read(fd, (char *)x + consumed, 1048576 - consumed);
++         if (result <= 0) {
++            if (result == 0) errno = EIO;
++            perror("read");
++            free(x);
++            close(fd);
++            return 1;
++         }
++         consumed += (size_t)result;
++      }
 +   }
     for (i = 0; i < 131072; i++) {
        if (x[i] != i) {

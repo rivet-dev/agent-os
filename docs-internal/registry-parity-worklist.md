@@ -200,7 +200,7 @@ works (`wasi-spawn` broker), so `xargs` is not a blocker.
   `2026-07-08T11-28-00-0700-git-clean-rebuild-after-high-synthetic-fd.log`;
   package build stages 6 commands in
   `2026-07-08T11-33-00-0700-git-package-build-clean-binary-after-install.log`;
-  native sidecar rebuild passes in
+  sidecar rebuild passes in
   `2026-07-08T11-34-00-0700-sidecar-rebuild-after-git-clean-package.log`;
   full Git e2e passes 18/18 in
   `2026-07-08T11-51-00-0700-git-full-e2e-high-synthetic-fd-clean-binary-after-test-fix.log`.
@@ -210,7 +210,7 @@ works (`wasi-spawn` broker), so `xargs` is not a blocker.
   `shell.c` from the same fetched zip as `sqlite3`. The local 558-line
   `sqlite3_cli.c` reimplementation is deleted, `toolchain/c/build/sqlite3` is the
   primary C output, `sqlite3_cli` remains only as a compatibility alias, and the
-  tracked runtime-core fallback command is refreshed to the same official shell.
+  tracked core fallback command is refreshed to the same official shell.
   Proof: official shell build passes in
   `2026-07-08T05-04-47-0700-sqlite3-official-shell-build-command-name.log`;
   package-focused e2e passes 16/16, including real `.tables`, `.schema`, and
@@ -219,8 +219,8 @@ works (`wasi-spawn` broker), so `xargs` is not a blocker.
   package build/check-types pass in
   `2026-07-08T05-07-52-0700-sqlite3-package-build-official-shell-final.log` and
   `2026-07-08T05-07-52-0700-sqlite3-check-types-official-shell-final.log`;
-  runtime-core fallback command path passes `.tables` in
-  `2026-07-08T05-09-12-0700-sqlite3-runtime-core-command-fallback-test.log`;
+  core fallback command path passes `.tables` in
+  `2026-07-08T05-09-12-0700-sqlite3-core-command-fallback-test.log`;
   aggregate C `programs` builds 57 commands in
   `2026-07-08T05-09-53-0700-sqlite3-make-programs-final.log`.
   Rev: `typytnkk` — `fix(sqlite3): build official SQLite shell`.
@@ -247,7 +247,7 @@ works (`wasi-spawn` broker), so `xargs` is not a blocker.
 - **tree — DONE.** Replaced the custom Rust `agentos-tree`/`cmd-tree` crates
   with upstream Steve Baker `tree` 2.3.2 from `OldManProgrammer/unix-tree`.
   It builds as a C toolchain command from pinned source, stages into
-  `@agentos-software/tree`, and refreshes the tracked runtime-core fallback
+  `@agentos-software/tree`, and refreshes the tracked core fallback
   command. Sysroot fixes live one layer down: install `<grp.h>` and provide
   deterministic missing-group lookup stubs so upstream `-g` support links
   without a tree-source WASI branch. Proof: upstream source inspection in
@@ -327,7 +327,7 @@ works (`wasi-spawn` broker), so `xargs` is not a blocker.
   `system`/`popen`/`pclose` compatibility in patched wasi-libc; overlay rename
   over destination whiteouts; and WASI host-passthrough read/write offset
   tracking after `fd_seek`. Proof: wasi-libc patch check passes in
-  `2026-07-08T08-34-29-0700-wasi-libc-patch-check-final.log`; native sidecar
+  `2026-07-08T08-34-29-0700-wasi-libc-patch-check-final.log`; sidecar
   build passes in `2026-07-08T08-34-07-0700-sidecar-build-final-runner-format.log`;
   VFS rename regression passes in
   `2026-07-08T08-34-29-0700-vfs-core-rename-whiteout-final.log`; final Zip e2e
@@ -348,7 +348,7 @@ works (`wasi-spawn` broker), so `xargs` is not a blocker.
   package build passes in
   `2026-07-08T12-51-00-0700-findutils-package-build-after-install.log`; sidecar
   validation build passes in
-  `2026-07-08T12-35-00-0700-native-sidecar-build-after-forced-pnpm.log`; final
+  `2026-07-08T12-35-00-0700-sidecar-build-after-forced-pnpm.log`; final
   package e2e passes 5/5, including `xargs -n 2 echo` spawn batching, in
   `2026-07-08T12-44-00-0700-findutils-vitest-uutils-after-depth-test-fix.log`.
   Rev: `msknmmps`.
@@ -383,7 +383,7 @@ so a reader sees the whole board at a glance.
 - **Objective:** `>>` opens `O_WRONLY|O_APPEND` against the kernel VFS and appends,
   identical to bash on Linux.
 - **Proof:** `bridge-child-process.test.ts` append redirection tests pass
-  un-skipped; direct kernel append and native sidecar append regressions pass.
+  un-skipped; direct kernel append and sidecar append regressions pass.
 - **rev:** `ouxrzutq` — `fix(runtime): honor >> append mode in guest shell VFS redirection`
 
 ### 2. brush-shell `cat < file` stdin redirection fails (exit 1) — DONE
@@ -415,8 +415,8 @@ so a reader sees the whole board at a glance.
 - **Proof:** sqlite3 "file-based DB persists across separate exec calls" passes
   in `2026-07-07T23-18-45-0700-item4-sqlite3-file-db-pwrite-pass.txt`; direct
   mounted JS VFS `pwrite` test passes in
-  `2026-07-07T23-18-45-0700-item4-runtime-core-custom-vfs-pwrite-pass.txt`.
-  Type/build checks pass in `2026-07-07T23-19-11-0700-item4-runtime-core-build.txt`
+  `2026-07-07T23-18-45-0700-item4-core-custom-vfs-pwrite-pass.txt`.
+  Type/build checks pass in `2026-07-07T23-19-11-0700-item4-core-build.txt`
   and `2026-07-07T23-19-11-0700-item4-sqlite3-check-types.txt`.
 - **rev:** `klrzzkro` — `fix(vfs): expose positioned writes in test kernel`
 
@@ -428,9 +428,9 @@ so a reader sees the whole board at a glance.
   reproduces, fix the socket-table wiring / link error.
 - **Proof:** net-server/net-udp/net-unix/signal-handler suites pass together in
   `2026-07-08T00-23-43-0700-item5-four-suites-take-signal-bridge.txt`.
-  Runtime and native sidecar builds pass in
-  `2026-07-08T00-24-02-0700-item5-final-runtime-core-build.txt` and
-  `2026-07-08T00-24-02-0700-item5-final-native-sidecar-build.txt`; native
+  Runtime and sidecar builds pass in
+  `2026-07-08T00-24-02-0700-item5-final-core-build.txt` and
+  `2026-07-08T00-24-02-0700-item5-final-sidecar-build.txt`; native
   embedded signal coverage passes in
   `2026-07-08T00-24-02-0700-item5-final-native-embedded-runtime-signal-suite.txt`.
 - **rev:** `zvyxkkyv` — `fix(runtime): repair Wasm socket and signal integration`
@@ -451,7 +451,7 @@ so a reader sees the whole board at a glance.
 - **Proof:** `software/curl/test/` passes un-weakened: 25 passed, 5 skipped in
   `2026-07-08T00-41-57-0700-item6-curl-test-after-tls-flags.txt`. Runtime runner
   build/protocol checks pass in
-  `2026-07-08T00-41-51-0700-item6-runtime-core-build-tls-flags.txt`.
+  `2026-07-08T00-41-51-0700-item6-core-build-tls-flags.txt`.
 - **rev:** `oxoqrwvk` — `fix(curl): build the real curl CLI for WASI`
 - **Note (how well it works):** it *is* the real curl CLI (`src/tool_main.c`) plus a
   custom `vtls/wasi_tls.c` backend (`USE_WASI_TLS`) — HTTPS runs through the host
@@ -476,7 +476,7 @@ so a reader sees the whole board at a glance.
   and `pclose` surfaces; VFS overlay rename-over-whiteout cleanup; and
   host-passthrough `fd_seek` offset tracking in the WASI runner.
 - **Proof:** wasi-libc patch check passes in
-  `2026-07-08T08-34-29-0700-wasi-libc-patch-check-final.log`; native sidecar
+  `2026-07-08T08-34-29-0700-wasi-libc-patch-check-final.log`; sidecar
   build passes in `2026-07-08T08-34-07-0700-sidecar-build-final-runner-format.log`;
   VFS rename regression passes in
   `2026-07-08T08-34-29-0700-vfs-core-rename-whiteout-final.log`; `software/zip`
@@ -708,7 +708,7 @@ real e2e tests that prove Linux-parity behavior — not smoke tests.
     Rev: `slnmvuqz`.
   - **pi — DONE.** Enabled the existing real `openSession({ sessionId: 'main', agent: 'pi' })` headless
     suite in default core Vitest coverage and unskipped the upstream Pi SDK bash
-    tool path. The suite proves initialization over the native sidecar
+    tool path. The suite proves initialization over the sidecar
     transport plus real ACP write-tool and bash-tool flows inside the VM. Proof:
     `2026-07-08T14-37-00-0700-item12-cc-cache-restored-target-files.log`;
     `2026-07-08T14-37-00-0700-item12-sidecar-build-after-manual-cc-restore.log`;
@@ -869,7 +869,7 @@ above).
 
 **⚙️ Runtime prerequisite — implement `/proc` (process-table-backed):** procps
 reads `/proc/<pid>/{stat,cmdline,status,comm}` and enumerates `/proc/<pid>/`. The
-**kernel already owns the process table** (`crates/kernel/src/process_table.rs`),
+**kernel already owns the process table** (`crates/vm-kernel/src/process_table.rs`),
 so expose a read-only procfs view of it to the guest (per-PID stat/cmdline/status
 + directory enumeration). Scope it minimal — just the fields procps parses, backed
 by the existing process table, not a full Linux procfs. Unlocks the whole

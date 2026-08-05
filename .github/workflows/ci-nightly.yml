@@ -6,6 +6,130 @@ on:
     - cron: "41 10 * * *"
 
 jobs:
+  xfstests:
+    name: "xfstests (${{ matrix.wasm_backend }}, ${{ matrix.storage_backend }})"
+    runs-on: [self-hosted, agentos-builder]
+    timeout-minutes: 420
+    strategy:
+      fail-fast: false
+      matrix:
+        wasm_backend: [v8, wasmtime]
+        storage_backend: [chunked_local, memory, chunked_s3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: Materialize the pinned docs theme
+        run: |
+          rm -rf /tmp/docs-theme
+          git clone https://github.com/rivet-dev/docs-theme.git /tmp/docs-theme
+          git -C /tmp/docs-theme checkout 450c498555135098c6a927adfdf13458be9be22a
+          rm -rf website/vendor/theme && mkdir -p website/vendor
+          cp -r /tmp/docs-theme/packages/theme website/vendor/theme
+      - run: pnpm install --frozen-lockfile
+      - name: Run the pinned filesystem conformance corpus
+        run: make -C tests/xfstests run
+        env:
+          XFSTESTS_WASM_BACKENDS: ${{ matrix.wasm_backend }}
+          XFSTESTS_BACKENDS: ${{ matrix.storage_backend }}
+          XFSTESTS_CONCURRENCY: '2'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xfstests-${{ matrix.wasm_backend }}-${{ matrix.storage_backend }}
+          path: tests/xfstests/report
+          if-no-files-found: warn
+
+  xfstests-endurance:
+    name: "xfstests endurance (${{ matrix.wasm_backend }})"
+    runs-on: [self-hosted, agentos-builder]
+    timeout-minutes: 480
+    strategy:
+      fail-fast: false
+      matrix:
+        wasm_backend: [v8, wasmtime]
+    env:
+      AGENTOS_TEST_WASM_BACKEND: ${{ matrix.wasm_backend }}
+      XFSTESTS_ROOT: ${{ github.workspace }}/tests/xfstests/.work/xfstests
+      XFSTESTS_TEST_TIMEOUT_SECONDS: '3600'
+      AGENTOS_V8_BRIDGE_PREBUILT_DIR: ${{ github.workspace }}/tests/xfstests/.cache/v8-bridge
+      CARGO_TARGET_DIR: ${{ github.workspace }}/tests/xfstests/.cache/cargo-target
+      CARGO_BUILD_JOBS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: Materialize the pinned docs theme
+        run: |
+          rm -rf /tmp/docs-theme
+          git clone https://github.com/rivet-dev/docs-theme.git /tmp/docs-theme
+          git -C /tmp/docs-theme checkout 450c498555135098c6a927adfdf13458be9be22a
+          rm -rf website/vendor/theme && mkdir -p website/vendor
+          cp -r /tmp/docs-theme/packages/theme website/vendor/theme
+      - run: pnpm install --frozen-lockfile
+      - name: Stage the pinned corpus and helper binaries
+        run: env -u CARGO_TARGET_DIR make -C tests/xfstests helpers
+      - name: Build the V8 bridge used by the shared harness
+        run: node packages/build-tools/scripts/build-v8-bridge.mjs --out-dir tests/xfstests/.cache/v8-bridge
+      - name: Run the 1,000-file multi-process directory stress gate
+        run: |
+          cargo test --release -p agentos-vm --features all-executors \
+            --test xfstests_correctness \
+            xfstests_wasi_dirstress_process_matrix -- \
+            --ignored --exact --nocapture --test-threads=1
+      - name: Run the full parallel ENOSPC race
+        run: |
+          cargo test --release -p agentos-vm --features all-executors \
+            --test xfstests_correctness \
+            xfstests_wasi_parallel_enospc_endurance_probe -- \
+            --ignored --exact --nocapture --test-threads=1
+      - name: Run the full insert-range reproduction workload
+        run: |
+          cargo test --release -p agentos-vm --features all-executors \
+            --test xfstests_correctness \
+            xfstests_wasi_insert_range_endurance_probe -- \
+            --ignored --exact --nocapture --test-threads=1
+      - name: Run the full 162,000-iteration looptest workload
+        run: |
+          cargo test --release -p agentos-vm --features all-executors \
+            --test xfstests_correctness \
+            xfstests_wasi_looptest_endurance_probe -- \
+            --ignored --exact --nocapture --test-threads=1
+      - name: Run the full 10,000-file rewinddir workload
+        run: |
+          cargo test --release -p agentos-vm --features all-executors \
+            --test xfstests_correctness \
+            xfstests_wasi_rewinddir_endurance_probe -- \
+            --ignored --exact --nocapture --test-threads=1
+      - name: Run the full 10,000-file open-unlink workload
+        run: |
+          cargo test --release -p agentos-vm --features all-executors \
+            --test xfstests_correctness \
+            xfstests_wasi_open_unlink_endurance_probe -- \
+            --ignored --exact --nocapture --test-threads=1
+      - name: Run the full 4,000-file seekdir/getdents workload
+        run: |
+          cargo test --release -p agentos-vm --features all-executors \
+            --test xfstests_correctness \
+            xfstests_wasi_seekdir_endurance_probe -- \
+            --ignored --exact --nocapture --test-threads=1
+      - name: Run the full 5,000-file readdir/rename workload
+        run: |
+          cargo test --release -p agentos-vm --features all-executors \
+            --test xfstests_correctness \
+            xfstests_wasi_readdir_rename_endurance_probe -- \
+            --ignored --exact --nocapture --test-threads=1
+
   nightly:
     name: Nightly runtime validation
     runs-on: [self-hosted, agentos-builder]
@@ -13,6 +137,7 @@ jobs:
       # Cargo validation and the shared sidecar build are explicit below.
       # Do not let TypeScript dependency builds compile a second Rust copy.
       AGENTOS_SKIP_NATIVE_META_BUILD: '1'
+      XFSTESTS_ROOT: ${{ github.workspace }}/tests/xfstests/.work/xfstests
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -39,58 +164,81 @@ jobs:
             sudo apt-get update
             sudo apt-get install --yes cmake
           fi
+      - name: Materialize the pinned docs theme
+        run: |
+          rm -rf /tmp/docs-theme
+          git clone https://github.com/rivet-dev/docs-theme.git /tmp/docs-theme
+          git -C /tmp/docs-theme checkout 450c498555135098c6a927adfdf13458be9be22a
+          rm -rf website/vendor/theme && mkdir -p website/vendor
+          cp -r /tmp/docs-theme/packages/theme website/vendor/theme
       - run: pnpm install --frozen-lockfile
       - run: make -C toolchain commands
-      - run: make -C toolchain cmd/duckdb
+      - run: make -C toolchain cmd/duckdb cmd/vim
       - run: make -C toolchain codex
-      - run: node packages/runtime-core/scripts/copy-wasm-commands.mjs --require
+      - run: make -C toolchain/c pthread-conformance-wasm pthread-benchmark-wasm
+      - run: node packages/core/scripts/copy-wasm-commands.mjs --require
+      - name: Stage pinned xfstests and its WASM helper corpus
+        run: make -C tests/xfstests helpers XFSTESTS_BUILD_NATIVE_COMMANDS=0
       - name: Use stable Rust for repository validation
         run: echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
-      # Browser support is retained in-tree but disabled during the unified
-      # native sidecar reactor migration, so it must not gate native CI.
-      - run: cargo check --workspace --exclude agentos-sidecar-browser --exclude agentos-native-sidecar-browser
-      - run: cargo clippy --workspace --exclude agentos-sidecar-browser --exclude agentos-native-sidecar-browser --all-targets -- -D warnings
+      - run: cargo check --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build JavaScript workspace dependencies
+        run: |
+          pnpm exec turbo build \
+            --only \
+            --concurrency=4 \
+            --filter='!@rivet-dev/agentos-website' \
+            --filter='!@agentos-software/codex'
       - run: pnpm check-types
       - name: Build sidecars once for all TypeScript runtime suites
-        run: cargo build -p agentos-sidecar -p agentos-native-sidecar
+        run: cargo build -p agentos-sidecar
       - run: pnpm test
         env:
           AGENTOS_E2E_NETWORK: '1'
           AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-sidecar
-          AGENTOS_NATIVE_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-native-sidecar
       - run: pnpm test:nightly
         env:
           AGENTOS_E2E_NETWORK: '1'
           AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-sidecar
-          AGENTOS_NATIVE_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-native-sidecar
       # These opt-in gates cold-install pinned ecosystem fixtures and exercise
       # package-manager workflows inside the VM, so keep them off the cheap PR path.
-      - run: pnpm --dir packages/runtime-core test:ecosystem
+      - run: pnpm --dir packages/core test:ecosystem
         env:
           AGENTOS_ECOSYSTEM_E2E: '1'
-          AGENTOS_NATIVE_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-native-sidecar
-      - run: pnpm --dir packages/runtime-core test:ecosystem:full
+          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-sidecar
+      - run: pnpm --dir packages/core test:ecosystem:full
         env:
-          AGENTOS_NATIVE_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-native-sidecar
-      - run: pnpm --dir packages/runtime-core test:npm-workflows
+          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-sidecar
+      - run: pnpm --dir packages/core test:npm-workflows
         env:
-          AGENTOS_NATIVE_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-native-sidecar
-      - run: cargo test --workspace --exclude agentos-sidecar-browser --exclude agentos-native-sidecar-browser -- --test-threads=1
+          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/debug/agentos-sidecar
+      - run: cargo test --workspace -- --test-threads=1
       - name: Explicit ignored runtime churn gate
-        run: cargo test -p agentos-runtime multi_vm_generation_soak_has_no_accounting_or_scheduler_drift --lib -- --ignored --test-threads=1
+        run: cargo test -p agentos-driver-tokio multi_vm_generation_soak_has_no_accounting_or_scheduler_drift --lib -- --ignored --test-threads=1
       - name: Explicit ignored multi-VM protocol soak gate
-        run: cargo test -p agentos-native-sidecar --test service multi_vm_protocol_faults_reconcile_shared_runtime_soak -- --ignored --test-threads=1
-      - run: cargo build --release -p agentos-native-sidecar
-      - run: cargo build --release -p agentos-native-baseline
-      - run: cargo build --release --target wasm32-wasip1 -p agentos-native-baseline
-      - run: pnpm --dir packages/runtime-benchmarks bench:matrix
+        run: cargo test -p agentos-vm --features all-executors --test service multi_vm_protocol_faults_reconcile_shared_runtime_soak -- --ignored --test-threads=1
+      - run: cargo build --release -p agentos-sidecar
+      - run: cargo build --release -p agentos-benchmark-baseline
+      - run: cargo build --release --target wasm32-wasip1 -p agentos-benchmark-baseline
+      - name: Long mixed V8-JavaScript and Wasmtime leak/plateau gate
+        run: pnpm --dir packages/benchmarks test:wasm-mixed-soak
         env:
-          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/release/agentos-native-sidecar
-          NATIVE_BASELINE_BIN: ${{ github.workspace }}/target/release/agentos-native-baseline
-          NATIVE_BASELINE_WASM: ${{ github.workspace }}/target/wasm32-wasip1/release/agentos-native-baseline.wasm
+          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/release/agentos-sidecar
+          AGENTOS_WASMTIME_WORKER_PATH: ${{ github.workspace }}/target/release/agentos-sidecar
+      - name: Wasmtime Threads startup, throughput, memory, concurrency, and termination
+        run: pnpm --dir packages/benchmarks bench:wasm-threads
+        env:
+          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/release/agentos-sidecar
+          AGENTOS_WASMTIME_WORKER_PATH: ${{ github.workspace }}/target/release/agentos-sidecar
+      - run: pnpm --dir packages/benchmarks bench:matrix
+        env:
+          AGENTOS_SIDECAR_BIN: ${{ github.workspace }}/target/release/agentos-sidecar
+          NATIVE_BASELINE_BIN: ${{ github.workspace }}/target/release/agentos-benchmark-baseline
+          NATIVE_BASELINE_WASM: ${{ github.workspace }}/target/wasm32-wasip1/release/agentos-benchmark-baseline.wasm
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: nightly-benchmark-results
-          path: packages/runtime-benchmarks/results
+          path: packages/benchmarks/results
           if-no-files-found: warn

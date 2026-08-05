@@ -21,7 +21,9 @@ env:
   R2_BUCKET: rivet-releases
   R2_ENDPOINT: https://2a94c6a0ced8d35ea63cddc86c2681e7.r2.cloudflarestorage.com
   SIDECAR_PLATFORMS: "linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64"
-  RUST_TOOLCHAIN: "1.91.1"
+  # Wasmtime 46's reviewed MSRV. Keep the Docker defaults in sync so release
+  # artifacts cannot accidentally build with an older unsupported compiler.
+  RUST_TOOLCHAIN: "1.94.0"
   LINUX_GNU_LLVM_VERSION: "22"
   LINUX_GNU_SYSROOT_TAG: "sysroot-20250207"
 
@@ -69,13 +71,26 @@ jobs:
           workspaces: toolchain -> toolchain/target
           cache-workspace-crates: true
           key: wasm-commands-${{ hashFiles('toolchain/Cargo.lock') }}
-      - run: pnpm install --frozen-lockfile --filter '@rivet-dev/agentos-runtime-core...'
+      - run: pnpm install --frozen-lockfile --filter '@rivet-dev/agentos-core...'
       - run: make -C toolchain commands
-      - run: node packages/runtime-core/scripts/copy-wasm-commands.mjs --require
+      # These real upstream commands are intentionally outside the fast default
+      # toolchain target, but are part of the published and parity-tested corpus.
+      - name: Build required heavy release commands
+        run: make -C toolchain cmd/duckdb cmd/vim
+      - run: make -C toolchain/c pthread-conformance-wasm
+      - run: make -C toolchain/c build/exec_variants
+      - run: node packages/core/scripts/copy-wasm-commands.mjs --require
       - uses: actions/upload-artifact@v4
         with:
           name: wasm-commands
-          path: packages/runtime-core/commands
+          path: packages/core/commands
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-thread-fixtures
+          path: |
+            toolchain/c/build/pthread_conformance.wasm
+            toolchain/c/build/exec_variants
           if-no-files-found: error
 
   codex-wasm:
@@ -100,6 +115,33 @@ jobs:
           name: codex-wasm
           path: software/codex/wasm
           if-no-files-found: error
+
+  wasmtime-darwin-smoke:
+    needs: [context]
+    name: "Wasmtime smoke (${{ matrix.platform }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-x64
+            runner: macos-15-intel
+            architecture: x86_64
+          - platform: darwin-arm64
+            runner: macos-15
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasmtime-${{ matrix.platform }}
+      - name: Verify native runner architecture
+        run: test "$(uname -m)" = "${{ matrix.architecture }}"
+      - name: Compile and execute Wasmtime embedding smoke tests
+        run: cargo test -p agentos-executor-wasm-wasmtime --features threads --lib
 
   build-sidecar:
     needs: [context]
@@ -152,21 +194,17 @@ jobs:
           mkdir -p "$sidecar_out"
           cid=$(docker create agentos-linux-${{ matrix.platform }})
           docker cp "$cid:/artifacts/agentos-sidecar" "$sidecar_out/agentos-sidecar"
-          docker cp "$cid:/artifacts/agentos-native-sidecar" "$sidecar_out/agentos-native-sidecar"
           docker rm "$cid"
           test -f "$sidecar_out/agentos-sidecar"
-          test -f "$sidecar_out/agentos-native-sidecar"
           echo "sidecar_dir=$sidecar_out" >> "$GITHUB_OUTPUT"
       - name: Check glibc floor
         run: |
           scripts/ci/check-linux-glibc-floor.sh \
-            "${{ steps.extract.outputs.sidecar_dir }}/agentos-sidecar" \
-            "${{ steps.extract.outputs.sidecar_dir }}/agentos-native-sidecar"
+            "${{ steps.extract.outputs.sidecar_dir }}/agentos-sidecar"
       - name: Smoke-run binaries in old Linux containers
         run: |
           scripts/ci/smoke-linux-artifacts.sh binary \
-            "${{ steps.extract.outputs.sidecar_dir }}/agentos-sidecar" \
-            "${{ steps.extract.outputs.sidecar_dir }}/agentos-native-sidecar"
+            "${{ steps.extract.outputs.sidecar_dir }}/agentos-sidecar"
       - uses: actions/upload-artifact@v4
         with:
           name: sidecar-${{ matrix.platform }}
@@ -226,27 +264,77 @@ jobs:
           mkdir -p "$sidecar_out"
           cid=$(docker create agentos-darwin-${{ matrix.platform }})
           docker cp "$cid:/artifacts/agentos-sidecar" "$sidecar_out/agentos-sidecar"
-          docker cp "$cid:/artifacts/agentos-native-sidecar" "$sidecar_out/agentos-native-sidecar"
           docker rm "$cid"
           test -f "$sidecar_out/agentos-sidecar"
-          test -f "$sidecar_out/agentos-native-sidecar"
           case "${{ matrix.platform }}" in
             darwin-x64) expected_arch="x86_64" ;;
             darwin-arm64) expected_arch="arm64" ;;
             *) echo "unknown darwin platform: ${{ matrix.platform }}" >&2; exit 2 ;;
           esac
           file "$sidecar_out/agentos-sidecar" | grep -F "$expected_arch"
-          file "$sidecar_out/agentos-native-sidecar" | grep -F "$expected_arch"
       - uses: actions/upload-artifact@v4
         with:
           name: sidecar-${{ matrix.platform }}
           path: target/sidecar-artifacts/${{ matrix.platform }}
           if-no-files-found: error
 
+  smoke-sidecar-artifacts:
+    needs: [wasm-commands, build-sidecar, build-sidecar-darwin]
+    name: "Packaged WASM backends (${{ matrix.platform }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64-gnu
+            runner: [self-hosted, agentos-builder]
+          - platform: linux-arm64-gnu
+            runner: [self-hosted, agentos-builder-arm64]
+          - platform: darwin-x64
+            runner: macos-15-intel
+          - platform: darwin-arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - run: pnpm install --frozen-lockfile --filter '@rivet-dev/agentos-core...'
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-commands
+          path: packages/core/commands
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-thread-fixtures
+          path: target/wasm-thread-fixtures
+      - uses: actions/download-artifact@v4
+        with:
+          name: sidecar-${{ matrix.platform }}
+          path: target/smoke-sidecar
+      - name: Stage the actual release binary in its npm platform package
+        run: |
+          set -euo pipefail
+          package_dir="packages/sidecar/npm/${{ matrix.platform }}"
+          cp target/smoke-sidecar/agentos-sidecar "$package_dir/agentos-sidecar"
+          chmod +x "$package_dir/agentos-sidecar"
+      - run: pnpm --filter @rivet-dev/agentos-core build
+      - name: Install tarballs and exercise every shipped WASM selector
+        run: |
+          node scripts/ci/smoke-packed-wasm-backends.mjs \
+            --platform-package "packages/sidecar/npm/${{ matrix.platform }}" \
+            --thread-fixture target/wasm-thread-fixtures/pthread_conformance.wasm
+
   publish-npm:
-    needs: [context, wasm-commands, codex-wasm, build-sidecar, build-sidecar-darwin]
+    needs: [context, wasm-commands, codex-wasm, wasmtime-darwin-smoke, build-sidecar, build-sidecar-darwin, smoke-sidecar-artifacts]
     name: Publish npm
-    if: ${{ !cancelled() && needs.wasm-commands.result == 'success' && needs.codex-wasm.result == 'success' && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' }}
+    if: ${{ !cancelled() && needs.wasm-commands.result == 'success' && needs.codex-wasm.result == 'success' && needs.wasmtime-darwin-smoke.result == 'success' && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' && needs.smoke-sidecar-artifacts.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -261,13 +349,13 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: wasm-commands
-          path: packages/runtime-core/commands
+          path: packages/core/commands
       - name: Restore canonical WASM command staging
         run: |
           set -euo pipefail
           commands_dir="toolchain/target/wasm32-wasip1/release/commands"
           mkdir -p "$commands_dir"
-          cp -a packages/runtime-core/commands/. "$commands_dir/"
+          cp -a packages/core/commands/. "$commands_dir/"
           test -s "$commands_dir/sh"
       - uses: actions/download-artifact@v4
         with:
@@ -282,35 +370,25 @@ jobs:
           set -euo pipefail
           for p in $SIDECAR_PLATFORMS; do
             agent_bin="artifacts/sidecar-${p}/agentos-sidecar"
-            runtime_bin="artifacts/sidecar-${p}/agentos-native-sidecar"
-            agent_dest="packages/sidecar-binary/npm/${p}"
-            runtime_dest="packages/runtime-sidecar/npm/${p}"
+            agent_dest="packages/sidecar/npm/${p}"
             test -f "$agent_bin"
-            test -f "$runtime_bin"
             test -d "$agent_dest"
-            test -d "$runtime_dest"
             cp "$agent_bin" "${agent_dest}/agentos-sidecar"
             chmod +x "${agent_dest}/agentos-sidecar"
-            cp "$runtime_bin" "${runtime_dest}/agentos-native-sidecar"
-            chmod +x "${runtime_dest}/agentos-native-sidecar"
           done
       - name: Bump package versions for build
         run: |
           pnpm --filter=publish exec tsx src/ci/bin.ts bump-versions \
             --version ${{ needs.context.outputs.version }} \
             --version-only
-      - run: node packages/runtime-core/scripts/copy-wasm-commands.mjs --require
+      - run: node packages/core/scripts/copy-wasm-commands.mjs --require
       - name: Build TypeScript packages
         env:
           AGENTOS_SKIP_NATIVE_META_BUILD: "1"
         run: |
-          # Browser support is retained in-tree but intentionally disabled until
-          # it has a reactor/security design independent of the native sidecar.
+          # Browser reference sources are archived outside the active workspace.
           npx turbo build \
             --filter='!@rivet-dev/agentos-website' \
-            --filter='!@rivet-dev/agentos-browser' \
-            --filter='!@rivet-dev/agentos-runtime-browser' \
-            --filter='!@rivet-dev/agentos-playground' \
             --filter='!./examples/*' \
             --filter='!./examples/quickstart/*'
       - name: Finalize package versions for publish
@@ -328,9 +406,9 @@ jobs:
             ${{ needs.context.outputs.trigger == 'release' && '--release-mode' || '' }}
 
   release-assets:
-    needs: [context, build-sidecar, build-sidecar-darwin]
+    needs: [context, wasmtime-darwin-smoke, build-sidecar, build-sidecar-darwin, smoke-sidecar-artifacts]
     name: Release assets
-    if: ${{ !cancelled() && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' }}
+    if: ${{ !cancelled() && needs.wasmtime-darwin-smoke.result == 'success' && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' && needs.smoke-sidecar-artifacts.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -364,12 +442,11 @@ jobs:
           for p in $SIDECAR_PLATFORMS; do
             target="${PLATFORM_TARGET[$p]}"
             cp "artifacts/sidecar-${p}/agentos-sidecar" "release-assets/agentos-sidecar-${target}"
-            cp "artifacts/sidecar-${p}/agentos-native-sidecar" "release-assets/agentos-native-sidecar-${target}"
           done
-          chmod +x release-assets/agentos-sidecar-* release-assets/agentos-native-sidecar-*
-          if [ -d crates/execution/assets/pyodide ]; then
+          chmod +x release-assets/agentos-sidecar-*
+          if [ -d crates/executor-v8-runtime/assets/pyodide ]; then
             mkdir -p release-assets/pyodide
-            cp -R crates/execution/assets/pyodide/. release-assets/pyodide/
+            cp -R crates/executor-v8-runtime/assets/pyodide/. release-assets/pyodide/
           fi
       - name: Create GitHub release and upload assets
         if: ${{ needs.context.outputs.trigger == 'release' }}
@@ -442,21 +519,19 @@ jobs:
       - name: Stage vendored V8 bridge bundles and base filesystem
         run: |
           set -euo pipefail
-          # crates/{execution,v8-runtime}/assets/generated is gitignored; the
-          # published crates fall back to the vendored bundle (build-support
-          # copy_vendored_bundle) and panic if it is absent. Stage it here.
-          for crate in execution v8-runtime; do
-            out="crates/${crate}/assets/generated"
-            mkdir -p "$out"
-            node packages/build-tools/scripts/build-v8-bridge.mjs --out-dir "$out"
-          done
-          git add -f crates/execution/assets/generated crates/v8-runtime/assets/generated
+          # crates/executor-v8-runtime/assets/generated is gitignored; the
+          # published crates fall back to the v8-runtime build helper's
+          # vendored bundle and panic if it is absent. Stage it here.
+          out="crates/executor-v8-runtime/assets/generated"
+          mkdir -p "$out"
+          node packages/build-tools/scripts/build-v8-bridge.mjs --out-dir "$out"
+          git add -f crates/executor-v8-runtime/assets/generated
           # The single committed base filesystem lives in the vfs crate; the
-          # kernel and native-sidecar crates vendor a copy for isolated publish
+          # kernel and sidecar crates vendor a copy for isolated publish
           # builds (their build.rs falls back to assets/base-filesystem.json).
-          mkdir -p crates/kernel/assets crates/native-sidecar/assets
-          cp crates/vfs/assets/base-filesystem.json crates/kernel/assets/base-filesystem.json
-          cp crates/vfs/assets/base-filesystem.json crates/native-sidecar/assets/base-filesystem.json
+          mkdir -p crates/vm-kernel/assets crates/vm/assets
+          cp crates/vfs-core/assets/base-filesystem.json crates/vm-kernel/assets/base-filesystem.json
+          cp crates/vfs-core/assets/base-filesystem.json crates/vm/assets/base-filesystem.json
       - name: Dry-run crate publish
         if: ${{ needs.context.outputs.trigger != 'release' }}
         run: |

@@ -1,18 +1,26 @@
 #define _GNU_SOURCE
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
 #include <netdb.h>
 #include <pwd.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/statfs.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <syslog.h>
 #include <unistd.h>
+
+_Static_assert(AT_EACCESS != 0,
+    "AT_EACCESS must select effective rather than real credentials");
 
 static int report(const char *name, int ok) {
     printf("%s=%s\n", name, ok ? "yes" : "no");
@@ -64,6 +72,60 @@ static int setrlimit_hard_raise_is_denied(void) {
     requested.rlim_max++;
     errno = 0;
     return setrlimit(RLIMIT_NOFILE, &requested) == -1 && errno == EPERM;
+}
+
+static int stat_block_metadata_is_linux_compatible(void) {
+    struct stat metadata;
+    int fd = open("/etc/passwd", O_RDONLY);
+    int ok = fd >= 0 && fstat(fd, &metadata) == 0 &&
+        metadata.st_blksize > 0 &&
+        (metadata.st_blksize & (metadata.st_blksize - 1)) == 0 &&
+        metadata.st_blocks >= 0;
+    if (fd >= 0)
+        close(fd);
+    return ok;
+}
+
+static int statvfs_metadata_is_linux_compatible(void) {
+    struct statvfs path_metadata, fd_metadata;
+    struct statfs path_linux_metadata, fd_linux_metadata;
+    int fd = open("/etc/passwd", O_RDONLY);
+    int ok = fd >= 0 && statvfs("/etc/passwd", &path_metadata) == 0 &&
+        fstatvfs(fd, &fd_metadata) == 0 &&
+        statfs("/etc/passwd", &path_linux_metadata) == 0 &&
+        fstatfs(fd, &fd_linux_metadata) == 0 &&
+        path_metadata.f_bsize > 0 && fd_metadata.f_bsize > 0 &&
+        path_metadata.f_blocks >= path_metadata.f_bavail &&
+        fd_metadata.f_blocks >= fd_metadata.f_bavail &&
+        path_linux_metadata.f_bsize > 0 && fd_linux_metadata.f_bsize > 0 &&
+        path_linux_metadata.f_blocks >= path_linux_metadata.f_bavail &&
+        fd_linux_metadata.f_blocks >= fd_linux_metadata.f_bavail;
+    if (fd >= 0)
+        close(fd);
+    return ok;
+}
+
+static int dirent_metadata_is_linux_compatible(void) {
+    DIR *directory = opendir("/etc");
+    struct dirent *entry;
+    long cookie;
+    size_t minimum_length;
+    int ok;
+
+    if (directory == NULL)
+        return 0;
+    errno = 0;
+    entry = readdir(directory);
+    if (entry == NULL) {
+        closedir(directory);
+        return 0;
+    }
+    cookie = telldir(directory);
+    minimum_length = offsetof(struct dirent, d_name) + strlen(entry->d_name) + 1;
+    ok = cookie >= 0 && entry->d_off == (off_t)cookie &&
+        entry->d_reclen >= minimum_length;
+    closedir(directory);
+    return ok;
 }
 
 int main(int argc, char **argv) {
@@ -142,6 +204,12 @@ int main(int argc, char **argv) {
     ok &= report("setrlimit_truthful", setrlimit_is_truthful());
     ok &= report("setrlimit_hard_raise_denied",
         setrlimit_hard_raise_is_denied());
+    ok &= report("stat_block_metadata",
+        stat_block_metadata_is_linux_compatible());
+    ok &= report("statvfs_metadata",
+        statvfs_metadata_is_linux_compatible());
+    ok &= report("dirent_metadata",
+        dirent_metadata_is_linux_compatible());
 
     errno = 0;
     pipe = popen("true", "x");

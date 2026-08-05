@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import type {
 	CreateVmConfig,
 	RootFilesystemEntry as VmConfigRootFilesystemEntry,
-} from "@rivet-dev/agentos-runtime-core/vm-config";
+} from "./vm-config.js";
 import type { NodeModulesMountConfig } from "./host-dir-mount.js";
 import { resolvePublishedSidecarBinary } from "./sidecar/binary.js";
 import { findCargoBinary, resolveCargoBinary } from "./sidecar/cargo.js";
@@ -16,7 +16,7 @@ import {
 	type AuthenticatedSession,
 	type CreatedVm,
 	type LocalCompatMount,
-	NativeSidecarKernelProxy,
+	SidecarKernelProxy,
 	type RootFilesystemEntry,
 	type SidecarMountDescriptor,
 	SidecarProcess,
@@ -82,23 +82,28 @@ const SIDECAR_BINARY = path.join(REPO_ROOT, "target/debug/agentos-sidecar");
 const SIDECAR_BUILD_INPUTS = [
 	path.join(REPO_ROOT, "Cargo.toml"),
 	path.join(REPO_ROOT, "Cargo.lock"),
-	path.join(REPO_ROOT, "crates/bridge"),
-	path.join(REPO_ROOT, "crates/build-support"),
-	path.join(REPO_ROOT, "crates/execution"),
-	path.join(REPO_ROOT, "crates/kernel"),
-	path.join(REPO_ROOT, "crates/agentos-protocol"),
-	path.join(REPO_ROOT, "crates/agentos-sidecar"),
-	path.join(REPO_ROOT, "crates/native-sidecar"),
-	path.join(REPO_ROOT, "crates/native-sidecar-core"),
+	path.join(REPO_ROOT, "crates/vm-host-interface"),
+	path.join(REPO_ROOT, "crates/executor-v8-runtime"),
+	path.join(REPO_ROOT, "crates/executor-contract"),
+	path.join(REPO_ROOT, "crates/executor-node-v8"),
+	path.join(REPO_ROOT, "crates/executor-python-v8-pyodide"),
+	path.join(REPO_ROOT, "crates/executor-wasm-v8"),
+	path.join(REPO_ROOT, "crates/executor-wasm-wasmtime"),
+	path.join(REPO_ROOT, "crates/vm-kernel"),
+	path.join(REPO_ROOT, "crates/acp-protocol"),
+	path.join(REPO_ROOT, "crates/sidecar"),
+	path.join(REPO_ROOT, "crates/vm"),
+	path.join(REPO_ROOT, "crates/vm/src/core"),
 	path.join(REPO_ROOT, "crates/sidecar-protocol"),
-	path.join(REPO_ROOT, "crates/v8-runtime"),
-	path.join(REPO_ROOT, "crates/vfs"),
+	path.join(REPO_ROOT, "crates/executor-v8-runtime"),
+	path.join(REPO_ROOT, "crates/executor-wasm-abi"),
+	path.join(REPO_ROOT, "crates/vfs-core"),
 	path.join(REPO_ROOT, "crates/vm-config"),
 	path.join(REPO_ROOT, "packages/build-tools/bridge-src"),
 	path.join(REPO_ROOT, "packages/build-tools/package.json"),
 	path.join(REPO_ROOT, "packages/build-tools/scripts/build-v8-bridge.mjs"),
 	path.join(REPO_ROOT, "packages/core/fixtures/base-filesystem.json"),
-	path.join(REPO_ROOT, "packages/runtime-core/fixtures/base-filesystem.json"),
+	path.join(REPO_ROOT, "packages/core/fixtures/base-filesystem.json"),
 	path.join(REPO_ROOT, "pnpm-lock.yaml"),
 ] as const;
 let ensuredSidecarBinary: string | null = null;
@@ -248,6 +253,8 @@ export interface OpenShellOptions {
 	cwd?: string;
 	cols?: number;
 	rows?: number;
+	/** Engine affinity inherited by standalone WASM commands launched by the shell. */
+	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 	/** Optional stderr-only diagnostic tap; do not render it alongside `onData`. */
 	onStderr?: (data: Uint8Array) => void;
 }
@@ -267,6 +274,8 @@ export interface ExecOptions {
 	filePath?: string;
 	cpuTimeLimitMs?: number;
 	timingMitigation?: TimingMitigation;
+	/** Selects standalone WASM commands only; JavaScript remains on V8. */
+	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 }
 
 export interface ExecResult {
@@ -1416,7 +1425,7 @@ function sidecarBinaryNeedsBuild(): boolean {
 	);
 }
 
-function ensureNativeSidecarBinary(): string {
+function ensureSidecarBinary(): string {
 	// A published install has no in-repo Cargo workspace to build from: resolve
 	// the prebuilt platform binary (or the AGENTOS_SIDECAR_BIN override).
 	if (
@@ -1795,7 +1804,10 @@ type BoundVirtualFileSystemMethods = Partial<
 >;
 
 interface LiveFilesystemBinding {
-	syncFromLive(paths: readonly string[]): Promise<void>;
+	syncFromLive(
+		paths: readonly string[],
+		excludedPaths: readonly string[],
+	): Promise<void>;
 	restore(): void;
 }
 
@@ -1858,10 +1870,12 @@ async function syncLiveFilesystemToBoundMethods(
 	live: VirtualFileSystem,
 	methods: BoundVirtualFileSystemMethods,
 	paths: readonly string[],
+	excludedPaths: readonly string[],
 	maxBytes: number,
 ): Promise<void> {
 	const snapshot: LiveFilesystemSnapshotEntry[] = [];
 	const usage = { bytes: 0 };
+	const normalizedExcludedPaths = excludedPaths.map(normalizePath);
 	for (const targetPath of [...new Set(paths.map(normalizePath))].sort(
 		(left, right) => left.localeCompare(right),
 	)) {
@@ -1874,6 +1888,7 @@ async function syncLiveFilesystemToBoundMethods(
 			snapshot,
 			usage,
 			maxBytes,
+			normalizedExcludedPaths,
 		);
 	}
 	if (usage.bytes >= maxBytes * 0.8) {
@@ -1894,8 +1909,19 @@ async function snapshotLiveFilesystemPath(
 	snapshot: LiveFilesystemSnapshotEntry[],
 	usage: { bytes: number },
 	maxBytes: number,
+	excludedPaths: readonly string[],
 	knownEntry?: Pick<VirtualDirEntry, "isDirectory" | "isSymbolicLink">,
 ): Promise<void> {
+	const normalizedTargetPath = normalizePath(targetPath);
+	if (
+		excludedPaths.some(
+			(excludedPath) =>
+				normalizedTargetPath === excludedPath ||
+				normalizedTargetPath.startsWith(`${excludedPath}/`),
+		)
+	) {
+		return;
+	}
 	const stat =
 		knownEntry ??
 		(targetPath === "/"
@@ -1923,6 +1949,7 @@ async function snapshotLiveFilesystemPath(
 				snapshot,
 				usage,
 				maxBytes,
+				excludedPaths,
 				child,
 			);
 		}
@@ -2014,7 +2041,10 @@ function bindLiveFilesystem(
 	}
 
 	return {
-		async syncFromLive(paths: readonly string[]): Promise<void> {
+		async syncFromLive(
+			paths: readonly string[],
+			excludedPaths: readonly string[],
+		): Promise<void> {
 			const filesystem = getFilesystem();
 			if (!filesystem) {
 				return;
@@ -2023,6 +2053,7 @@ function bindLiveFilesystem(
 				filesystem,
 				fallback,
 				paths,
+				excludedPaths,
 				maxBytes,
 			);
 		},
@@ -2086,7 +2117,7 @@ class NativeKernel implements Kernel {
 	private client: SidecarProcess | null = null;
 	private session: AuthenticatedSession | null = null;
 	private vm: CreatedVm | null = null;
-	private proxy: NativeSidecarKernelProxy | null = null;
+	private proxy: SidecarKernelProxy | null = null;
 	private rootFilesystem: VirtualFileSystem | null = null;
 	private readyPromise: Promise<void> | null = null;
 	private readonly liveFilesystemBinding: LiveFilesystemBinding;
@@ -2102,6 +2133,9 @@ class NativeKernel implements Kernel {
 			permissions?: Permissions;
 			env?: Record<string, string>;
 			cwd?: string;
+			user?: CreateVmConfig["user"];
+			limits?: CreateVmConfig["limits"];
+			wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 			hostNetworkAdapter?: unknown;
 			loopbackExemptPorts?: number[];
 			mounts?: Array<{
@@ -2240,6 +2274,7 @@ class NativeKernel implements Kernel {
 			try {
 				await this.liveFilesystemBinding.syncFromLive(
 					this.liveFilesystemSyncRoots,
+					this.pendingLocalMounts.map((mount) => mount.path),
 				);
 			} catch (error) {
 				syncError = error;
@@ -2506,12 +2541,15 @@ class NativeKernel implements Kernel {
 
 		const client = SidecarProcess.spawn({
 			cwd: REPO_ROOT,
-			command: ensureNativeSidecarBinary(),
+			command: ensureSidecarBinary(),
 			args: [],
 		});
 		const session = await client.authenticateAndOpenSession();
 		const createVmConfig: CreateVmConfig = {
 			env: createVmEnv,
+			user: this.options.user,
+			limits: this.options.limits,
+			wasmBackend: this.options.wasmBackend,
 			rootFilesystem,
 			permissions: bootstrapPermissions
 				? serializePermissionsForSidecar(bootstrapPermissions)
@@ -2573,7 +2611,7 @@ class NativeKernel implements Kernel {
 			serializeLocalCompatMountForSidecar(mount),
 		);
 
-		const proxy = new NativeSidecarKernelProxy({
+		const proxy = new SidecarKernelProxy({
 			client,
 			session,
 			vm,
@@ -2603,6 +2641,9 @@ export function createKernel(options: {
 	permissions?: Permissions;
 	env?: Record<string, string>;
 	cwd?: string;
+	user?: CreateVmConfig["user"];
+	limits?: CreateVmConfig["limits"];
+	wasmBackend?: "v8" | "wasmtime" | "wasmtime-threads";
 	maxProcesses?: number;
 	hostNetworkAdapter?: unknown;
 	loopbackExemptPorts?: number[];

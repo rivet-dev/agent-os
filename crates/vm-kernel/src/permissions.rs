@@ -1,0 +1,874 @@
+use crate::vfs::{
+    validate_path, FileExtent, VfsError, VfsResult, VirtualDirEntry, VirtualFileSystem,
+    VirtualStat, VirtualUtimeSpec,
+};
+use std::collections::{BTreeMap, HashMap};
+use std::error::Error;
+use std::fmt;
+use std::path::Path;
+use std::sync::Arc;
+
+const IMMUTABLE_XATTR: &str = "user.agentos.immutable";
+
+pub type FsPermissionCheck = Arc<dyn Fn(&FsAccessRequest) -> PermissionDecision + Send + Sync>;
+pub type NetworkPermissionCheck =
+    Arc<dyn Fn(&NetworkAccessRequest) -> PermissionDecision + Send + Sync>;
+pub type CommandPermissionCheck =
+    Arc<dyn Fn(&CommandAccessRequest) -> PermissionDecision + Send + Sync>;
+pub type EnvironmentPermissionCheck =
+    Arc<dyn Fn(&EnvAccessRequest) -> PermissionDecision + Send + Sync>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionDecision {
+    pub allow: bool,
+    pub reason: Option<String>,
+}
+
+impl PermissionDecision {
+    pub fn allow() -> Self {
+        Self {
+            allow: true,
+            reason: None,
+        }
+    }
+
+    pub fn deny(reason: impl Into<String>) -> Self {
+        Self {
+            allow: false,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionError {
+    code: &'static str,
+    message: String,
+}
+
+impl PermissionError {
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    fn access_denied(subject: impl Into<String>, reason: Option<&str>) -> Self {
+        let subject = subject.into();
+        let message = match reason {
+            Some(reason) => format!("permission denied, {subject}: {reason}"),
+            None => format!("permission denied, {subject}"),
+        };
+
+        Self {
+            code: "EACCES",
+            message,
+        }
+    }
+}
+
+impl fmt::Display for PermissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl Error for PermissionError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsOperation {
+    Read,
+    Write,
+    Mkdir,
+    CreateDir,
+    ReadDir,
+    Stat,
+    Remove,
+    Rename,
+    Exists,
+    Symlink,
+    ReadLink,
+    Link,
+    Chmod,
+    Chown,
+    Utimes,
+    Truncate,
+    MountSensitive,
+}
+
+impl FsOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Mkdir => "mkdir",
+            Self::CreateDir => "createDir",
+            Self::ReadDir => "readdir",
+            Self::Stat => "stat",
+            Self::Remove => "rm",
+            Self::Rename => "rename",
+            Self::Exists => "exists",
+            Self::Symlink => "symlink",
+            Self::ReadLink => "readlink",
+            Self::Link => "link",
+            Self::Chmod => "chmod",
+            Self::Chown => "chown",
+            Self::Utimes => "utimes",
+            Self::Truncate => "truncate",
+            Self::MountSensitive => "mount",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FsAccessRequest {
+    pub vm_id: String,
+    pub op: FsOperation,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkOperation {
+    Fetch,
+    Http,
+    Dns,
+    Listen,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkAccessRequest {
+    pub vm_id: String,
+    pub op: NetworkOperation,
+    pub resource: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandAccessRequest {
+    pub vm_id: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvironmentOperation {
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvAccessRequest {
+    pub vm_id: String,
+    pub op: EnvironmentOperation,
+    pub key: String,
+    pub value: Option<String>,
+}
+
+#[derive(Clone, Default)]
+pub struct Permissions {
+    pub filesystem: Option<FsPermissionCheck>,
+    /// Whether filesystem permission checks are unconditionally permissive.
+    ///
+    /// This avoids resolving every path solely to evaluate an already-known
+    /// allow decision. Rule-based policies must leave this disabled so their
+    /// checks continue to receive symlink-resolved paths.
+    pub filesystem_unrestricted: bool,
+    pub network: Option<NetworkPermissionCheck>,
+    pub child_process: Option<CommandPermissionCheck>,
+    pub environment: Option<EnvironmentPermissionCheck>,
+}
+
+impl Permissions {
+    pub fn allow_all() -> Self {
+        Self {
+            filesystem: Some(Arc::new(|_: &FsAccessRequest| PermissionDecision::allow())),
+            filesystem_unrestricted: true,
+            network: Some(Arc::new(|_: &NetworkAccessRequest| {
+                PermissionDecision::allow()
+            })),
+            child_process: Some(Arc::new(|_: &CommandAccessRequest| {
+                PermissionDecision::allow()
+            })),
+            environment: Some(Arc::new(|_: &EnvAccessRequest| PermissionDecision::allow())),
+        }
+    }
+}
+
+pub fn permission_glob_matches(pattern: &str, value: &str) -> bool {
+    fn matches(
+        pattern: &[u8],
+        value: &[u8],
+        pattern_index: usize,
+        value_index: usize,
+        memo: &mut HashMap<(usize, usize), bool>,
+    ) -> bool {
+        if let Some(result) = memo.get(&(pattern_index, value_index)) {
+            return *result;
+        }
+
+        let result = if pattern_index == pattern.len() {
+            value_index == value.len()
+        } else {
+            match pattern[pattern_index] {
+                b'?' => {
+                    value_index < value.len()
+                        && value[value_index] != b'/'
+                        && matches(pattern, value, pattern_index + 1, value_index + 1, memo)
+                }
+                b'*' => {
+                    let mut next_pattern_index = pattern_index;
+                    while next_pattern_index < pattern.len() && pattern[next_pattern_index] == b'*'
+                    {
+                        next_pattern_index += 1;
+                    }
+
+                    if matches(pattern, value, next_pattern_index, value_index, memo) {
+                        true
+                    } else {
+                        let crosses_separators = next_pattern_index - pattern_index > 1;
+                        let mut next_value_index = value_index;
+                        while next_value_index < value.len()
+                            && (crosses_separators || value[next_value_index] != b'/')
+                        {
+                            next_value_index += 1;
+                            if matches(pattern, value, next_pattern_index, next_value_index, memo) {
+                                return true;
+                            }
+                        }
+                        false
+                    }
+                }
+                expected => {
+                    value_index < value.len()
+                        && expected == value[value_index]
+                        && matches(pattern, value, pattern_index + 1, value_index + 1, memo)
+                }
+            }
+        };
+
+        memo.insert((pattern_index, value_index), result);
+        result
+    }
+
+    matches(
+        pattern.as_bytes(),
+        value.as_bytes(),
+        0,
+        0,
+        &mut HashMap::new(),
+    )
+}
+
+pub fn filter_env(
+    vm_id: &str,
+    env: &BTreeMap<String, String>,
+    permissions: &Permissions,
+) -> BTreeMap<String, String> {
+    let Some(check) = permissions.environment.as_ref() else {
+        return BTreeMap::new();
+    };
+
+    env.iter()
+        .filter_map(|(key, value)| {
+            let request = EnvAccessRequest {
+                vm_id: vm_id.to_owned(),
+                op: EnvironmentOperation::Read,
+                key: key.clone(),
+                value: Some(value.clone()),
+            };
+            let decision = check(&request);
+            decision.allow.then(|| (key.clone(), value.clone()))
+        })
+        .collect()
+}
+
+pub fn check_command_execution(
+    vm_id: &str,
+    permissions: &Permissions,
+    command: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> Result<(), PermissionError> {
+    let Some(check) = permissions.child_process.as_ref() else {
+        return Err(PermissionError::access_denied(
+            format!("spawn '{command}'"),
+            None,
+        ));
+    };
+
+    let request = CommandAccessRequest {
+        vm_id: vm_id.to_owned(),
+        command: command.to_owned(),
+        args: args.to_vec(),
+        cwd: cwd.map(ToOwned::to_owned),
+        env: env.clone(),
+    };
+    let decision = check(&request);
+    if decision.allow {
+        Ok(())
+    } else {
+        Err(PermissionError::access_denied(
+            format!("spawn '{command}'"),
+            decision.reason.as_deref(),
+        ))
+    }
+}
+
+pub fn check_network_access(
+    vm_id: &str,
+    permissions: &Permissions,
+    op: NetworkOperation,
+    resource: &str,
+) -> Result<(), PermissionError> {
+    let Some(check) = permissions.network.as_ref() else {
+        return Err(PermissionError::access_denied(resource, None));
+    };
+
+    let request = NetworkAccessRequest {
+        vm_id: vm_id.to_owned(),
+        op,
+        resource: resource.to_owned(),
+    };
+    let decision = check(&request);
+    if decision.allow {
+        Ok(())
+    } else {
+        Err(PermissionError::access_denied(
+            resource,
+            decision.reason.as_deref(),
+        ))
+    }
+}
+
+#[derive(Clone)]
+pub struct PermissionedFileSystem<F> {
+    inner: F,
+    vm_id: String,
+    permissions: Permissions,
+}
+
+impl<F> PermissionedFileSystem<F> {
+    pub fn new(inner: F, vm_id: impl Into<String>, permissions: Permissions) -> Self {
+        Self {
+            inner,
+            vm_id: vm_id.into(),
+            permissions,
+        }
+    }
+
+    pub fn into_inner(self) -> F {
+        self.inner
+    }
+
+    pub fn inner(&self) -> &F {
+        &self.inner
+    }
+
+    pub fn inner_mut(&mut self) -> &mut F {
+        &mut self.inner
+    }
+
+    pub fn set_permissions(&mut self, permissions: Permissions) {
+        self.permissions = permissions;
+    }
+
+    fn check(&self, op: FsOperation, path: &str) -> VfsResult<()> {
+        validate_path(path)?;
+        // Standard emulated character devices (/dev/null, /dev/zero, /dev/urandom,
+        // /dev/std{in,out,err}) are world-accessible on Linux and have no host
+        // backing; the device layer enforces their fixed semantics. Exempt them from
+        // the VM file-permission policy so guest fs ops on them (readFileSync /
+        // existsSync / redirects) behave like native Linux regardless of policy.
+        if crate::device_layer::is_standard_device_path(path) {
+            return Ok(());
+        }
+        let Some(check) = self.permissions.filesystem.as_ref() else {
+            return Err(VfsError::access_denied(op.as_str(), path, None));
+        };
+
+        let request = FsAccessRequest {
+            vm_id: self.vm_id.clone(),
+            op,
+            path: path.to_owned(),
+        };
+        let decision = check(&request);
+        if decision.allow {
+            Ok(())
+        } else {
+            Err(VfsError::access_denied(
+                op.as_str(),
+                path,
+                decision.reason.as_deref(),
+            ))
+        }
+    }
+}
+
+impl<F: VirtualFileSystem> PermissionedFileSystem<F> {
+    fn check_not_immutable(&mut self, path: &str, op: &'static str) -> VfsResult<()> {
+        self.check_not_immutable_with_follow(path, op, true)
+    }
+
+    fn check_entry_not_immutable(&mut self, path: &str, op: &'static str) -> VfsResult<()> {
+        self.check_not_immutable_with_follow(path, op, false)
+    }
+
+    fn check_not_immutable_with_follow(
+        &mut self,
+        path: &str,
+        op: &'static str,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        match self.inner.get_xattr(path, IMMUTABLE_XATTR, follow_symlinks) {
+            Ok(value) if value == b"1" => Err(VfsError::permission_denied(op, path)),
+            Ok(_) => Ok(()),
+            Err(error)
+                if matches!(
+                    error.code(),
+                    "ENODATA" | "ENOATTR" | "ENOENT" | "EOPNOTSUPP"
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn resolved_existing_path(&self, path: &str) -> VfsResult<String> {
+        if self.permissions.filesystem_unrestricted {
+            validate_path(path)?;
+            return Ok(crate::vfs::normalize_path(path));
+        }
+        self.inner.realpath(path)
+    }
+
+    fn resolved_destination_path(&self, path: &str) -> VfsResult<String> {
+        if self.permissions.filesystem_unrestricted {
+            validate_path(path)?;
+            return Ok(crate::vfs::normalize_path(path));
+        }
+        let normalized = crate::vfs::normalize_path(path);
+        if normalized == "/" {
+            return Ok(normalized);
+        }
+
+        let parent = Path::new(&normalized)
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_string_lossy()
+            .into_owned();
+        let basename = Path::new(&normalized)
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let mut candidate = parent;
+        let mut unresolved_segments = Vec::new();
+
+        let resolved_parent = loop {
+            match self.inner.realpath(&candidate) {
+                Ok(resolved) => break resolved,
+                Err(error) if matches!(error.code(), "ENOENT" | "ENOTDIR") => {
+                    if candidate == "/" {
+                        break String::from("/");
+                    }
+                    let candidate_path = Path::new(&candidate);
+                    if let Some(segment) = candidate_path.file_name() {
+                        unresolved_segments.push(segment.to_string_lossy().into_owned());
+                    }
+                    candidate = candidate_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("/"))
+                        .to_string_lossy()
+                        .into_owned();
+                }
+                Err(error) => return Err(error),
+            }
+        };
+
+        let mut resolved = resolved_parent;
+        for segment in unresolved_segments.iter().rev() {
+            if resolved == "/" {
+                resolved = format!("/{segment}");
+            } else {
+                resolved = format!("{resolved}/{segment}");
+            }
+        }
+
+        if resolved == "/" {
+            Ok(format!("/{basename}"))
+        } else {
+            Ok(format!("{resolved}/{basename}"))
+        }
+    }
+
+    fn permission_subject(&self, op: FsOperation, path: &str) -> VfsResult<String> {
+        validate_path(path)?;
+        match op {
+            FsOperation::Read
+            | FsOperation::ReadDir
+            | FsOperation::Stat
+            | FsOperation::ReadLink
+            | FsOperation::Chmod
+            | FsOperation::Chown
+            | FsOperation::Utimes
+            | FsOperation::Truncate => self.resolved_existing_path(path),
+            FsOperation::Exists | FsOperation::Write => self
+                .resolved_existing_path(path)
+                .or_else(|_| self.resolved_destination_path(path)),
+            FsOperation::Mkdir
+            | FsOperation::CreateDir
+            | FsOperation::Rename
+            | FsOperation::Symlink
+            | FsOperation::Link
+            | FsOperation::MountSensitive
+            | FsOperation::Remove => self.resolved_destination_path(path),
+        }
+    }
+
+    fn check_subject(&self, op: FsOperation, path: &str) -> VfsResult<()> {
+        let subject = self.permission_subject(op, path)?;
+        self.check(op, &subject)
+    }
+
+    fn check_existing_subject(&self, op: FsOperation, path: &str) -> VfsResult<()> {
+        validate_path(path)?;
+        let subject = self.resolved_existing_path(path)?;
+        self.check(op, &subject)
+    }
+
+    fn check_destination_subject(&self, op: FsOperation, path: &str) -> VfsResult<()> {
+        validate_path(path)?;
+        let subject = self.resolved_destination_path(path)?;
+        self.check(op, &subject)
+    }
+
+    pub fn check_path(&self, op: FsOperation, path: &str) -> VfsResult<()> {
+        self.check_subject(op, path)
+    }
+
+    pub fn check_virtual_path(&self, op: FsOperation, path: &str) -> VfsResult<()> {
+        self.check(op, path)
+    }
+
+    pub fn exists(&self, path: &str) -> VfsResult<bool> {
+        if let Err(error) = self.check_subject(FsOperation::Exists, path) {
+            if matches!(error.code(), "EACCES" | "ENOENT" | "ENOTDIR" | "ELOOP") {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        Ok(self.inner.exists(path))
+    }
+}
+
+impl<F: VirtualFileSystem> VirtualFileSystem for PermissionedFileSystem<F> {
+    fn read_file(&mut self, path: &str) -> VfsResult<Vec<u8>> {
+        self.check_subject(FsOperation::Read, path)?;
+        self.inner.read_file(path)
+    }
+
+    fn read_dir(&mut self, path: &str) -> VfsResult<Vec<String>> {
+        self.check_subject(FsOperation::ReadDir, path)?;
+        self.inner.read_dir(path)
+    }
+
+    fn read_dir_limited(&mut self, path: &str, max_entries: usize) -> VfsResult<Vec<String>> {
+        self.check_subject(FsOperation::ReadDir, path)?;
+        self.inner.read_dir_limited(path, max_entries)
+    }
+
+    fn read_dir_with_types(&mut self, path: &str) -> VfsResult<Vec<VirtualDirEntry>> {
+        self.check_subject(FsOperation::ReadDir, path)?;
+        self.inner.read_dir_with_types(path)
+    }
+
+    fn write_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
+        self.check_subject(FsOperation::Write, path)?;
+        self.check_not_immutable(path, "write")?;
+        self.inner.write_file(path, content)
+    }
+
+    fn create_file_exclusive(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<()> {
+        self.check_subject(FsOperation::Write, path)?;
+        self.inner.create_file_exclusive(path, content)
+    }
+
+    fn append_file(&mut self, path: &str, content: impl Into<Vec<u8>>) -> VfsResult<u64> {
+        self.check_subject(FsOperation::Write, path)?;
+        self.check_not_immutable(path, "write")?;
+        self.inner.append_file(path, content)
+    }
+
+    fn create_dir(&mut self, path: &str) -> VfsResult<()> {
+        self.check_subject(FsOperation::CreateDir, path)?;
+        self.inner.create_dir(path)
+    }
+
+    fn mkdir(&mut self, path: &str, recursive: bool) -> VfsResult<()> {
+        self.check_subject(FsOperation::Mkdir, path)?;
+        self.inner.mkdir(path, recursive)
+    }
+
+    fn mknod(&mut self, path: &str, mode: u32, rdev: u64) -> VfsResult<()> {
+        self.check_subject(FsOperation::Write, path)?;
+        self.inner.mknod(path, mode, rdev)
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        PermissionedFileSystem::exists(self, path).unwrap_or(false)
+    }
+
+    fn stat(&mut self, path: &str) -> VfsResult<VirtualStat> {
+        self.check_subject(FsOperation::Stat, path)
+            .map_err(|error| {
+                VfsError::new(
+                    error.code(),
+                    format!("permission path resolution for stat '{path}' failed: {error}"),
+                )
+            })?;
+        self.inner.stat(path).map_err(|error| {
+            VfsError::new(
+                error.code(),
+                format!("storage stat for '{path}' failed: {error}"),
+            )
+        })
+    }
+
+    fn remove_file(&mut self, path: &str) -> VfsResult<()> {
+        self.check_subject(FsOperation::Remove, path)?;
+        self.check_entry_not_immutable(path, "unlink")?;
+        self.inner.remove_file(path)
+    }
+
+    fn remove_dir(&mut self, path: &str) -> VfsResult<()> {
+        self.check_subject(FsOperation::Remove, path)?;
+        self.check_entry_not_immutable(path, "rmdir")?;
+        self.inner.remove_dir(path)
+    }
+
+    fn rename(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
+        self.check_subject(FsOperation::Rename, old_path)?;
+        self.check_subject(FsOperation::Rename, new_path)?;
+        self.check_entry_not_immutable(old_path, "rename")?;
+        self.check_entry_not_immutable(new_path, "rename")?;
+        self.inner.rename(old_path, new_path)
+    }
+
+    fn realpath(&self, path: &str) -> VfsResult<String> {
+        self.check_subject(FsOperation::Read, path)?;
+        self.inner.realpath(path)
+    }
+
+    fn symlink(&mut self, target: &str, link_path: &str) -> VfsResult<()> {
+        self.check_subject(FsOperation::Symlink, link_path)?;
+        self.inner.symlink(target, link_path)
+    }
+
+    fn read_link(&self, path: &str) -> VfsResult<String> {
+        // Authorize the parent-symlink-resolved path (without following the
+        // final component, matching `lstat`/`readlink` semantics). A lexical
+        // check would let a symlink whose parent resolves into a denied prefix
+        // disclose link targets of permission-denied paths.
+        validate_path(path)?;
+        let subject = self.resolved_destination_path(path)?;
+        self.check(FsOperation::ReadLink, &subject)?;
+        self.inner.read_link(path)
+    }
+
+    fn lstat(&self, path: &str) -> VfsResult<VirtualStat> {
+        // Authorize the parent-symlink-resolved path (see `read_link`); a
+        // lexical check would leak metadata (size/mode/mtime/inode) of files
+        // under a permission-denied prefix reached via a symlinked parent.
+        validate_path(path)?;
+        let subject = self.resolved_destination_path(path)?;
+        self.check(FsOperation::Stat, &subject)?;
+        self.inner.lstat(path)
+    }
+
+    fn link(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
+        self.check_existing_subject(FsOperation::Link, old_path)?;
+        self.check_destination_subject(FsOperation::Link, new_path)?;
+        self.check_not_immutable(old_path, "link")?;
+        self.inner.link(old_path, new_path)
+    }
+
+    fn chmod(&mut self, path: &str, mode: u32) -> VfsResult<()> {
+        self.check_subject(FsOperation::Chmod, path)?;
+        self.check_not_immutable(path, "chmod")?;
+        self.inner.chmod(path, mode)
+    }
+
+    fn chown(&mut self, path: &str, uid: u32, gid: u32) -> VfsResult<()> {
+        self.check_subject(FsOperation::Chown, path)?;
+        self.check_not_immutable(path, "chown")?;
+        self.inner.chown(path, uid, gid)
+    }
+
+    fn chown_spec(
+        &mut self,
+        path: &str,
+        uid: u32,
+        gid: u32,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        if follow_symlinks {
+            self.check_subject(FsOperation::Chown, path)?;
+        } else {
+            validate_path(path)?;
+            let subject = self.resolved_destination_path(path)?;
+            self.check(FsOperation::Chown, &subject)?;
+        }
+        self.inner.chown_spec(path, uid, gid, follow_symlinks)
+    }
+
+    fn lchown(&mut self, path: &str, uid: u32, gid: u32) -> VfsResult<()> {
+        self.chown_spec(path, uid, gid, false)
+    }
+
+    fn get_xattr(&mut self, path: &str, name: &str, follow_symlinks: bool) -> VfsResult<Vec<u8>> {
+        if follow_symlinks {
+            self.check_subject(FsOperation::Read, path)?;
+        } else {
+            validate_path(path)?;
+            let subject = self.resolved_destination_path(path)?;
+            self.check(FsOperation::Read, &subject)?;
+        }
+        self.inner.get_xattr(path, name, follow_symlinks)
+    }
+
+    fn list_xattrs(&mut self, path: &str, follow_symlinks: bool) -> VfsResult<Vec<String>> {
+        if follow_symlinks {
+            self.check_subject(FsOperation::Read, path)?;
+        } else {
+            validate_path(path)?;
+            let subject = self.resolved_destination_path(path)?;
+            self.check(FsOperation::Read, &subject)?;
+        }
+        self.inner.list_xattrs(path, follow_symlinks)
+    }
+
+    fn set_xattr(
+        &mut self,
+        path: &str,
+        name: &str,
+        value: Vec<u8>,
+        flags: u32,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        if follow_symlinks {
+            self.check_subject(FsOperation::Write, path)?;
+        } else {
+            validate_path(path)?;
+            let subject = self.resolved_destination_path(path)?;
+            self.check(FsOperation::Write, &subject)?;
+        }
+        self.check_not_immutable(path, "setxattr")?;
+        self.inner
+            .set_xattr(path, name, value, flags, follow_symlinks)
+    }
+
+    fn remove_xattr(&mut self, path: &str, name: &str, follow_symlinks: bool) -> VfsResult<()> {
+        if follow_symlinks {
+            self.check_subject(FsOperation::Write, path)?;
+        } else {
+            validate_path(path)?;
+            let subject = self.resolved_destination_path(path)?;
+            self.check(FsOperation::Write, &subject)?;
+        }
+        if name != IMMUTABLE_XATTR {
+            self.check_not_immutable(path, "removexattr")?;
+        }
+        self.inner.remove_xattr(path, name, follow_symlinks)
+    }
+
+    fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> VfsResult<()> {
+        self.check_subject(FsOperation::Utimes, path)?;
+        self.check_not_immutable(path, "utimes")?;
+        self.inner.utimes(path, atime_ms, mtime_ms)
+    }
+
+    fn utimes_spec(
+        &mut self,
+        path: &str,
+        atime: VirtualUtimeSpec,
+        mtime: VirtualUtimeSpec,
+        follow_symlinks: bool,
+    ) -> VfsResult<()> {
+        self.check_subject(FsOperation::Utimes, path)?;
+        self.check_not_immutable(path, "utimes")?;
+        self.inner.utimes_spec(path, atime, mtime, follow_symlinks)
+    }
+
+    fn truncate(&mut self, path: &str, length: u64) -> VfsResult<()> {
+        self.check_subject(FsOperation::Truncate, path)?;
+        self.check_not_immutable(path, "truncate")?;
+        self.inner.truncate(path, length)
+    }
+
+    fn sync(&mut self, path: &str) -> VfsResult<()> {
+        self.inner.sync(path)
+    }
+
+    fn allocate(&mut self, path: &str, offset: u64, length: u64) -> VfsResult<()> {
+        self.check_subject(FsOperation::Write, path)?;
+        self.check_not_immutable(path, "fallocate")?;
+        self.inner.allocate(path, offset, length)
+    }
+
+    fn insert_range(&mut self, path: &str, offset: u64, length: u64) -> VfsResult<()> {
+        self.check_subject(FsOperation::Write, path)?;
+        self.check_not_immutable(path, "fallocate")?;
+        self.inner.insert_range(path, offset, length)
+    }
+
+    fn collapse_range(&mut self, path: &str, offset: u64, length: u64) -> VfsResult<()> {
+        self.check_subject(FsOperation::Write, path)?;
+        self.check_not_immutable(path, "fallocate")?;
+        self.inner.collapse_range(path, offset, length)
+    }
+
+    fn zero_range(
+        &mut self,
+        path: &str,
+        offset: u64,
+        length: u64,
+        keep_size: bool,
+    ) -> VfsResult<()> {
+        self.check_subject(FsOperation::Write, path)?;
+        self.check_not_immutable(path, "fallocate")?;
+        self.inner.zero_range(path, offset, length, keep_size)
+    }
+
+    fn punch_hole(&mut self, path: &str, offset: u64, length: u64) -> VfsResult<()> {
+        self.check_subject(FsOperation::Write, path)?;
+        self.check_not_immutable(path, "fallocate")?;
+        self.inner.punch_hole(path, offset, length)
+    }
+
+    fn allocated_ranges(&mut self, path: &str) -> VfsResult<Vec<(u64, u64)>> {
+        self.check_subject(FsOperation::Read, path)?;
+        self.inner.allocated_ranges(path)
+    }
+
+    fn unwritten_ranges(&mut self, path: &str) -> VfsResult<Vec<(u64, u64)>> {
+        self.check_subject(FsOperation::Read, path)?;
+        self.inner.unwritten_ranges(path)
+    }
+
+    fn extent_at(&mut self, path: &str, index: usize) -> VfsResult<Option<FileExtent>> {
+        self.check_subject(FsOperation::Read, path)?;
+        self.inner.extent_at(path, index)
+    }
+
+    fn pread(&mut self, path: &str, offset: u64, length: usize) -> VfsResult<Vec<u8>> {
+        self.check_subject(FsOperation::Read, path)?;
+        self.inner.pread(path, offset, length)
+    }
+
+    fn pwrite(&mut self, path: &str, content: impl Into<Vec<u8>>, offset: u64) -> VfsResult<()> {
+        self.check_subject(FsOperation::Write, path)?;
+        self.check_not_immutable(path, "write")?;
+        self.inner.pwrite(path, content, offset)
+    }
+}

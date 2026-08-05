@@ -6,7 +6,7 @@
 	"scripts": {
 		"load": "node --import tsx src/load.ts",
 		"check-types": "tsc --noEmit",
-		"test": "node --import tsx --test src/load.test.ts"
+		"test": "node --import tsx --test tests/load.test.ts"
 	},
 	"devDependencies": {
 		"@types/node": "^22.19.15",

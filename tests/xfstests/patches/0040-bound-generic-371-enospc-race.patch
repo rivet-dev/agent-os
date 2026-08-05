@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Wed, 22 Jul 2026 22:45:00 -0700
+Subject: [PATCH] generic/371: accept exact quick-matrix iteration reduction
+
+Keep upstream's 100-iteration default for the dedicated nightly gate.  The
+agentOS quick matrix supplies a smaller value only for an exact reviewed
+test/backend reduction record; both concurrent pwrite and fallocate loops and
+their ENOSPC assertions remain active.
+
+diff --git a/tests/generic/371 b/tests/generic/371
+index 6fa038f3..579e018d 100755
+--- a/tests/generic/371
++++ b/tests/generic/371
+@@ -31,13 +31,23 @@ testfile1=$SCRATCH_MNT/testfile1
+ testfile2=$SCRATCH_MNT/testfile2
+ 
++iterations=${XFSTESTS_GENERIC_371_ITERATIONS:-100}
++case "$iterations" in
++	''|*[!0-9]*)
++		_fail "invalid generic/371 iteration count: $iterations"
++		;;
++esac
++if [ "$iterations" -lt 1 ] || [ "$iterations" -gt 100 ]; then
++	_fail "generic/371 iteration count must be in 1..100: $iterations"
++fi
++
+ echo "Silence is golden"
+-for ((i=0; i<100; i++)); do
++for ((i=0; i<iterations; i++)); do
+ 	$XFS_IO_PROG -fc "pwrite 0 80M" $testfile1 >/dev/null
+ 	rm -f $testfile1
+ done &
+ pids=$!
+ 
+-for ((i=0; i<100; i++)); do
++for ((i=0; i<iterations; i++)); do
+ 	$XFS_IO_PROG -fc "falloc 0 80M" $testfile2 >/dev/null
+ 	rm -f $testfile2
+ done &

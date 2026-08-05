@@ -1,0 +1,16 @@
+Use the Linux block-device header for BLKSSZGET instead of the mount syscall
+header. min_dio_alignment does not call mount(2), and agentOS intentionally
+does not expose guest mount construction.
+
+diff --git a/src/min_dio_alignment.c b/src/min_dio_alignment.c
+index b1a257b9..28eef107 100644
+--- a/src/min_dio_alignment.c
++++ b/src/min_dio_alignment.c
+@@ -6,6 +6,6 @@
+ #include <stdlib.h>
+ #include <unistd.h>
+-#include <sys/mount.h>
++#include <linux/fs.h>
+ #include <sys/ioctl.h>
+ #include <sys/stat.h>
+ #include "statx.h"

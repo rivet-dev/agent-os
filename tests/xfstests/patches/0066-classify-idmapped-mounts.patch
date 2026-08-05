@@ -1,0 +1,26 @@
+diff --git a/common/rc b/common/rc
+index ac00a2ca..00000001 100644
+--- a/common/rc
++++ b/common/rc
+@@ -2771,6 +2771,9 @@ _require_mount_setattr()
+ # test whether idmapped mounts are supported
+ _require_idmapped_mounts()
+ {
++        [ "$FSTYP" = "agentos" ] && \
++                _notrun "agentOS does not expose idmapped mounts"
++
+         IDMAPPED_MOUNTS_TEST=$here/src/vfs/vfstest
+         [ -x $IDMAPPED_MOUNTS_TEST ] || _notrun "vfstest utilities required"
+ 
+diff --git a/tests/generic/633 b/tests/generic/633
+index 1625302e..00000002 100755
+--- a/tests/generic/633
++++ b/tests/generic/633
+@@ -13,6 +13,7 @@ _begin_fstest auto quick atime attr cap idmapped io_uring mount perms rw unlink
+ . ./common/filter
+ 
+ _require_test
++_require_idmapped_mounts
+ _require_chown
+ 
+ echo "Silence is golden"

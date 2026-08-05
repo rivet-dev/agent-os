@@ -1,0 +1,38 @@
+From: agentOS Runtime <runtime@agentos.invalid>
+Subject: [PATCH] brush-core: preserve PID for expanded background paths
+
+A simple command whose source word contains a path separator is necessarily an
+external command even when the path contains variable expansion. Spawn it
+directly instead of wrapping it in `sh -c`; otherwise `$!` names the wrapper
+shell while the executable observes a different `getpid()`.
+
+diff --git a/src/interp.rs b/src/interp.rs
+--- a/src/interp.rs
++++ b/src/interp.rs
+@@ -280,6 +280,13 @@ fn pipeline_commands_are_external(pipeline: &ast::Pipeline, shell: &mut Shell) -
+         };
+         let command_name = command_word.value.as_str();
+ 
++        // A slash makes this a pathname command after expansion; it cannot
++        // resolve to a builtin, alias, or function. Keep the executable as the
++        // direct background child so `$!` equals the program's `getpid()`.
++        if command_name.contains(std::path::MAIN_SEPARATOR) {
++            return true;
++        }
++
+         // Quotes, escapes, and expansions require the normal shell expansion
+         // path before their command type is knowable. Treat them as ambiguous.
+         if command_name
+@@ -299,9 +305,6 @@ fn pipeline_commands_are_external(pipeline: &ast::Pipeline, shell: &mut Shell) -
+             return false;
+         }
+ 
+-        command_name.contains(std::path::MAIN_SEPARATOR)
+-            || shell
+-                .find_first_executable_in_path_using_cache(command_name)
+-                .is_some()
++        shell.find_first_executable_in_path_using_cache(command_name).is_some()
+     })
+ }
+-- 
+2.47.2

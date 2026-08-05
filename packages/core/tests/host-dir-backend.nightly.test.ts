@@ -4,9 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentOs, createHostDirBackend } from "../src/index.js";
-import {
-	REGISTRY_SOFTWARE,
-} from "./helpers/registry-commands.js";
+import { REGISTRY_SOFTWARE } from "./helpers/registry-commands.js";
 
 describe("host_dir native mount integration", () => {
 	let vm: AgentOs;
@@ -14,6 +12,7 @@ describe("host_dir native mount integration", () => {
 
 	beforeEach(() => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "host-dir-test-"));
+		fs.chmodSync(tmpDir, 0o755);
 		fs.writeFileSync(path.join(tmpDir, "hello.txt"), "hello from host");
 		fs.mkdirSync(path.join(tmpDir, "subdir"));
 		fs.writeFileSync(
@@ -55,18 +54,18 @@ describe("host_dir native mount integration", () => {
 	});
 
 	test("mounted host directory is readable from guest exec", async () => {
-			vm = await AgentOs.create({
-				software: REGISTRY_SOFTWARE,
-				mounts: [
-					{
-						path: "/hostmnt",
-						plugin: createHostDirBackend({ hostPath: tmpDir }),
-					},
-				],
-			});
-			const result = await vm.exec("cat /hostmnt/hello.txt");
-			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toContain("hello from host");
+		vm = await AgentOs.create({
+			software: REGISTRY_SOFTWARE,
+			mounts: [
+				{
+					path: "/hostmnt",
+					plugin: createHostDirBackend({ hostPath: tmpDir }),
+				},
+			],
+		});
+		const result = await vm.exec("cat /hostmnt/hello.txt");
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toContain("hello from host");
 	});
 
 	test("symlink escape attempt is blocked", async () => {

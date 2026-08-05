@@ -3,7 +3,7 @@
 // A package is listed iff its agentos-package.json has a `registry` block with
 // both `title` and `description` — no fallbacks. Everything else is derived:
 // slug from the directory name (overridable via `registry.slug`), type from
-// manifest `kind` (agent/software), npm package name from package.json, and
+// the manifest's `agent` descriptor, npm package name from package.json, and
 // for agents the agent id from the manifest `name` plus docs status when
 // `registry.docsHref` is set. `featured` is deliberately not part of the
 // block — the website hardcodes featured slugs in src/data/registry.ts.
@@ -40,13 +40,13 @@ for (const dir of readdirSync(softwareRoot, { withFileTypes: true })) {
 	const meta = manifest.registry;
 	if (!meta?.title || !meta?.description) continue;
 
-	const type = manifest.kind === "agent" ? "agent" : "software";
+	const type = manifest.agent ? "agent" : "software";
 	const pkg = readJson(join(pkgDir, "package.json"));
 	const entry = {
 		slug: meta.slug ?? dir.name,
 		title: meta.title,
 		description: meta.description,
-		// A package's section defaults to manifest kind; `types` overrides it
+		// A package's section defaults to its agent descriptor; `types` overrides it
 		// (e.g. browserbase is a software package listed under Browsers).
 		types: meta.types ?? [type],
 		category: meta.category,

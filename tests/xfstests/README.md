@@ -1,7 +1,7 @@
-# AgentOS xfstests correctness suite
+# agentOS xfstests correctness suite
 
 `make -C tests/xfstests run` is the only entrypoint. It stages the pinned
-upstream xfstests revision, applies the tracked AgentOS-only harness patches,
+upstream xfstests revision, applies the tracked agentOS-only harness patches,
 generates exact exclusions, and invokes the ignored Rust integration runner.
 The run is strict: every selected test must execute and pass unless its exact
 test/backend outcome has a reviewed record in `exceptions.toml`.
@@ -17,8 +17,9 @@ An upstream `notrun` is a coverage hole and fails by default. `excluded` is
 reserved for tests whose subject is mount construction or mkfs administration;
 correctness-relevant existing-mount policy such as read-only and atime behavior
 must execute. `allowed-notrun` is reserved for an exact test/backend absence of
-a named non-POSIX filesystem feature whose architecture does not apply to that
-backend; its literal upstream reason must match or the run fails closed.
+a named filesystem or guest-runtime feature that either does not apply to that
+backend or is outside the current V8 feature-parity baseline; its literal
+upstream reason must match or the run fails closed.
 `deferred` is real remount/crash/fault coverage awaiting a named host hook.
 `expected-failure` tests still execute and must match their normalized output
 digest; an unexpected pass or changed failure is an error. `reduced` is reserved
@@ -27,9 +28,11 @@ reduced counts plus focused semantic coverage; the reduced test still executes
 and any non-pass outcome fails. Wildcards,
 auto-blessing, unused records, duplicate records, and stale records are errors.
 
-Reports are written to `report/results.md`, `report/agentos-gaps.md`, and
-`report/surface-audit.md`, with driver-specific summaries under
-`report/backends/<backend>/results.md`. `XFSTESTS_BACKENDS` defaults to the
+Each WASM engine writes reports under `report/<wasm-backend>/`: the main files
+are `results.md`, `agentos-gaps.md`, and `surface-audit.md`, with
+driver-specific summaries under `backends/<storage-backend>/results.md`.
+`XFSTESTS_WASM_BACKENDS` defaults to the required `v8 wasmtime` executor
+matrix. `XFSTESTS_BACKENDS` defaults to the
 `chunked_local,memory,chunked_s3` supported writable-engine matrix and rejects
 unknown or duplicate entries. The dormant `object_s3` harness paths are retained
 for focused return-to-service validation, but the plugin is intentionally not
@@ -44,6 +47,28 @@ external cancellation. `XFSTESTS_CONCURRENCY` bounds simultaneous VMs;
 per-test watchdog is 3,600 seconds, calibrated from the pinned helper workloads
 with byte-for-byte verification enabled;
 a timeout remains a strict harness failure.
+The quick corpus runs `generic/011` with a reviewed 20-file reduction on every
+storage backend. Nightly CI also runs the ignored full 1,000-file `dirstress`
+process matrix once per WASM engine on `chunked_local`; it covers the
+one-process, five-process shared, and five-process/five-directory layouts
+without multiplying the saturation workload across every storage-plugin leg.
+The quick corpus likewise keeps `generic/371`'s parallel `pwrite`/`fallocate`
+ENOSPC race active for five iterations on every storage backend. Nightly CI
+runs the upstream 100-iteration workload once per WASM engine on
+`chunked_local`, separating race-endurance volume from the daily correctness
+matrix without removing either concurrent operation.
+The quick corpus runs `generic/404` through 20 uniquely patterned insert-range
+steps and verifies the entire file after each insertion. Nightly CI runs the
+upstream 500-block reproduction-probability workload once per WASM engine on
+`chunked_local`; this preserves the quadratic endurance gate without putting
+roughly one thousand fresh command executions in every daily storage leg.
+The quick corpus runs `generic/129` for 1,620 aggregate iterations while
+preserving the upstream 1000:100:500:20 ratio across its four read/write,
+truncate, small-block, and open/close modes. A separate nightly endurance job
+runs all 162,000 upstream iterations once per WASM engine on `chunked_local`.
+The endurance job also owns the other full-volume probes, so the six
+storage/backend corpus jobs cannot exhaust their timeout by serially appending
+hours of unrelated stress work.
 
 ## Correctness constraints
 

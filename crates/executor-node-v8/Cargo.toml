@@ -1,0 +1,18 @@
+[package]
+name = "agentos-executor-node-v8"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Node.js-compatible JavaScript executor hosted by the agentOS V8 runtime"
+
+[lib]
+doctest = false
+
+[dependencies]
+agentos-executor-contract = { workspace = true }
+agentos-executor-v8-runtime = { workspace = true }
+
+[dev-dependencies]
+agentos-driver-tokio = { workspace = true }
+tempfile = "3"

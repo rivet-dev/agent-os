@@ -19,6 +19,7 @@ export const setup: typeof rivetkitSetup = ((
 	} as Parameters<typeof rivetkitSetup>[0])) as typeof rivetkitSetup;
 
 export * from "@rivet-dev/agentos-core";
+export { AgentOs, AgentOsSidecar } from "@rivet-dev/agentos-core";
 export type {
 	AgentOsActorConfigInput as AgentOSActorConfigInput,
 	AgentOsActorConfigInput as AgentOSConfigInput,

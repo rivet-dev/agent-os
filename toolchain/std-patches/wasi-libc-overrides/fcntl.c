@@ -28,6 +28,11 @@
 #define F_DUPFD_CLOEXEC 1030
 #endif
 
+/* Spare Preview 1 fdflags bit reserved by the agentOS ABI. wasi-libc's
+ * O_DIRECT value is an open(2)-only side-channel flag and does not fit in the
+ * 16-bit WASI fdflags field, so translate it explicitly for F_GETFL/F_SETFL. */
+#define AGENTOS_WASI_FDFLAG_DIRECT 0x20
+
 /* Host import for dup with minimum fd (F_DUPFD semantics) */
 __attribute__((import_module("host_process"), import_name("fd_dup_min")))
 int __host_fd_dup_min(int fd, int min_fd, int *ret_new_fd);
@@ -273,6 +278,8 @@ int fcntl(int fd, int cmd, ...) {
             result = -1;
         } else {
             int flags = stat.fs_flags;
+            if ((flags & AGENTOS_WASI_FDFLAG_DIRECT) != 0)
+                flags = (flags & ~AGENTOS_WASI_FDFLAG_DIRECT) | O_DIRECT;
             /* Derive read/write mode from rights */
             __wasi_rights_t r = stat.fs_rights_base;
             int can_read  = (r & __WASI_RIGHTS_FD_READ) != 0;
@@ -290,9 +297,10 @@ int fcntl(int fd, int cmd, ...) {
 
     case F_SETFL: {
         int arg = va_arg(ap, int);
-        __wasi_errno_t err = __wasi_fd_fdstat_set_flags(
-            (__wasi_fd_t)fd,
-            (__wasi_fdflags_t)(arg & 0xfff));
+        __wasi_fdflags_t flags = (__wasi_fdflags_t)(arg & 0x1f);
+        if ((arg & O_DIRECT) != 0)
+            flags |= AGENTOS_WASI_FDFLAG_DIRECT;
+        __wasi_errno_t err = __wasi_fd_fdstat_set_flags((__wasi_fd_t)fd, flags);
         if (err != 0) {
             errno = err;
             result = -1;

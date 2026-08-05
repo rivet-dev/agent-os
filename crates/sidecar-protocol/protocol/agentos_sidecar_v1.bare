@@ -216,9 +216,15 @@ type WasmPermissionTier enum {
   ISOLATED
 }
 
+type StandaloneWasmBackend enum {
+  V8
+  WASMTIME
+  WASMTIME_THREADS
+}
+
 # agentOS package descriptor. `path` is the trusted host path of the package:
 # normally the packed `.aospkg` file (header + vbare manifest + mount index +
-# mount tar; see crates/vfs/package-format/v1.bare). The sidecar reads the
+# mount tar; see crates/vfs-core/package-format/v1.bare). The sidecar reads the
 # vbare chunk1 manifest, projects the package read-only under
 # `<packagesMountAt>/pkgs/<name>/<version>`, and links its `bin/` commands onto
 # $PATH. A directory path is accepted only for local transition fixtures and is
@@ -382,6 +388,7 @@ type ExecuteRequest struct {
   env: map<str><str>
   cwd: optional<str>
   wasmPermissionTier: optional<WasmPermissionTier>
+  wasmBackend: optional<StandaloneWasmBackend>
 }
 
 # First-class execution lifecycle. The legacy process request above remains an
@@ -962,6 +969,7 @@ type QueueSnapshotEntry struct {
 
 type ResourceSnapshotResponse struct {
   runningProcesses: u64
+  stoppedProcesses: u64
   exitedProcesses: u64
   fdTables: u64
   openFds: u64
@@ -975,6 +983,16 @@ type ResourceSnapshotResponse struct {
   socketConnections: u64
   socketBufferedBytes: u64
   socketDatagramQueueLen: u64
+  wasmReservedMemoryBytes: u64
+  wasmtimeEngineProfiles: u64
+  wasmtimeModuleEntries: u64
+  wasmtimeModuleCacheHits: u64
+  wasmtimeModuleCacheMisses: u64
+  wasmtimeModuleCacheEvictions: u64
+  wasmtimeCompiledSourceBytes: u64
+  wasmtimeChargedModuleBytes: u64
+  wasmtimeCompileTimeMicros: u64
+  wasmtimeProcessRetainedRssBytes: optional<u64>
   queueSnapshots: list<QueueSnapshotEntry>
 }
 

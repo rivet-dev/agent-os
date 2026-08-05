@@ -1,0 +1,15 @@
+Populate POSIX stat block-size metadata for the agentOS logical VFS.
+
+WASI Preview 1 has no st_blksize field. agentOS presents a 4 KiB logical
+filesystem block to Linux userspace, so leaving this field at zero causes
+otherwise portable programs to divide by zero while aligning extent ranges.
+
+--- a/libc-bottom-half/cloudlibc/src/libc/sys/stat/stat_impl.h
++++ b/libc-bottom-half/cloudlibc/src/libc/sys/stat/stat_impl.h
+@@ -89,4 +89,6 @@ static inline void apply_host_stat_metadata(struct stat *out,
+   if (host_blocks != UINT64_MAX) {
+     out->st_blocks = (blkcnt_t)host_blocks;
+   }
++  /* agentOS storage exposes a 4 KiB logical block to guest userspace. */
++  out->st_blksize = 4096;
+ }

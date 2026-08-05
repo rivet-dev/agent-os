@@ -1,0 +1,28 @@
+diff --git a/tests/generic/472 b/tests/generic/472
+index 960f7e87..ba76000c 100755
+--- a/tests/generic/472
++++ b/tests/generic/472
+@@ -13,6 +13,9 @@ _begin_fstest auto quick swap
+ # Import common functions.
+ . ./common/filter
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS does not expose guest swap activation"
++
+ _require_scratch_swapfile
+ _require_test_program mkswap
+ _require_test_program swapon
+diff --git a/tests/generic/478 b/tests/generic/478
+index bd8747ea..f9ec6dc5 100755
+--- a/tests/generic/478
++++ b/tests/generic/478
+@@ -85,6 +85,9 @@ _begin_fstest auto quick
+ # Import common functions.
+ . ./common/filter
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS does not expose System V semaphore IPC"
++
+ # Modify as appropriate.
+ _require_test
+ _require_ofd_locks

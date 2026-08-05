@@ -1,0 +1,42 @@
+diff --git a/tests/generic/569 b/tests/generic/569
+index 45d963e2..00000001 100755
+--- a/tests/generic/569
++++ b/tests/generic/569
+@@ -7,6 +7,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick rw swap prealloc mmap
+ 
++[ "$FSTYP" = "agentos" ] && \
++        _notrun "agentOS does not expose guest swap activation"
++
+ # Override the default cleanup function.
+ _cleanup()
+ {
+diff --git a/tests/generic/570 b/tests/generic/570
+index 52e20d45..00000002 100755
+--- a/tests/generic/570
++++ b/tests/generic/570
+@@ -7,6 +7,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick rw swap mmap
+ 
++[ "$FSTYP" = "agentos" ] && \
++        _notrun "agentOS does not expose guest block-device swap activation"
++
+ # Override the default cleanup function.
+ _cleanup()
+ {
+diff --git a/tests/generic/571 b/tests/generic/571
+index 69e61c71..00000003 100755
+--- a/tests/generic/571
++++ b/tests/generic/571
+@@ -8,6 +8,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick
+ 
++[ "$FSTYP" = "agentos" ] && \
++        _notrun "agentOS does not expose Linux file leases and SIGIO ownership"
++
+ # Import common functions.
+ . ./common/filter
+ . ./common/locktest

@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Low-level Rust client transport for the AgentOS language execution native sidecar.
+//! Low-level Rust client transport for the AgentOS language execution sidecar.
 //!
 //! This crate owns the framed stdio transport and exposes the generated AgentOS language execution wire protocol.
 //! Higher level products layer their own authentication, extension payloads, and

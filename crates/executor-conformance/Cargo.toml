@@ -1,0 +1,39 @@
+[package]
+name = "agentos-executor-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cross-executor conformance tests for agentOS"
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+agentos-vm-host-interface = { workspace = true }
+agentos-executor-contract = { workspace = true }
+agentos-executor-node-v8 = { workspace = true }
+agentos-executor-python-v8-pyodide = { workspace = true }
+agentos-executor-wasm-v8 = { workspace = true }
+agentos-executor-wasm-wasmtime = { workspace = true }
+agentos-vm = { workspace = true, features = ["all-executors"] }
+agentos-driver-tokio = { workspace = true }
+agentos-executor-v8-runtime = { workspace = true }
+agentos-executor-wasm-abi = { workspace = true }
+base64 = "0.22"
+ciborium = "0.2"
+getrandom = "0.2"
+flume = "0.11"
+nix = { version = "0.29", features = ["fs", "process", "signal", "time"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["io-util", "process", "rt", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+agentos-executor-wasm-abi-generator = { path = "../executor-wasm-abi-generator" }
+tempfile = "3"
+wat = "1"

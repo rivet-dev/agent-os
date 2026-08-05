@@ -11,8 +11,8 @@ function isExpectedTeardownError(message: string): boolean {
 	return (
 		normalized.includes("unknown sidecar vm") ||
 		normalized.includes("already been disposed") ||
-		normalized.includes("native sidecar disposed") ||
-		normalized.includes("cannot dispatch request on closed native sidecar process")
+		normalized.includes("sidecar disposed") ||
+		normalized.includes("cannot dispatch request on closed sidecar process")
 	);
 }
 

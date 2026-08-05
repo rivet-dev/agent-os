@@ -61,7 +61,7 @@ Many subsystems span more than one file, and some very large files contain multi
     - Host-call bridge injection and value serialization
     - Binary IPC protocol and client/server schema mirror
     - Snapshot creation and snapshot cache
-  - Native sidecar
+  - Sidecar
     - Sidecar composition layer
     - Transport, protocol, ownership, and callback state machine
     - Dispatch hub and ownership/permission routing
@@ -94,8 +94,8 @@ Many subsystems span more than one file, and some very large files contain multi
 This is the typed boundary between the host bridge, kernel-adjacent services, and execution engines.
 
 Relevant files:
-- `crates/bridge/src/lib.rs`
-- `crates/bridge/bridge-contract.json`
+- `crates/vm-host-interface/src/lib.rs`
+- `crates/vm-host-interface/vm-host-interface.json`
 
 What lives here:
 - Filesystem bridge traits and request types.
@@ -110,7 +110,7 @@ What lives here:
 This is the top-level VM object that composes the filesystem, process table, FD tables, pipes, PTYs, permissions, and resources into a POSIX-like kernel.
 
 Relevant files:
-- `crates/kernel/src/kernel.rs`
+- `crates/vm-kernel/src/kernel.rs`
 
 What lives here:
 - `KernelVm`, `KernelVmConfig`, spawn/exec/open-shell APIs, and process handles.
@@ -124,13 +124,13 @@ What lives here:
 This is the baseline filesystem layer that everything else builds on.
 
 Relevant files:
-- `crates/kernel/src/vfs.rs`
-- `crates/kernel/src/root_fs.rs`
+- `crates/vm-kernel/src/vfs.rs`
+- `crates/vm-kernel/src/root_fs.rs`
 - `packages/agentos-core/fixtures/base-filesystem.json`
-- `crates/kernel/src/device_layer.rs`
-- `crates/kernel/src/overlay_fs.rs`
-- `crates/kernel/src/mount_table.rs`
-- `crates/kernel/src/mount_plugin.rs`
+- `crates/vm-kernel/src/device_layer.rs`
+- `crates/vm-kernel/src/overlay_fs.rs`
+- `crates/vm-kernel/src/mount_table.rs`
+- `crates/vm-kernel/src/mount_plugin.rs`
 
 What lives here:
 - `VirtualFileSystem`, `VirtualStat`, path validation, and the in-memory filesystem in `vfs.rs`.
@@ -144,8 +144,8 @@ What lives here:
 These are guest-visible filesystem subsystems, but they do not live in their own top-level crate.
 
 Relevant files:
-- `crates/kernel/src/device_layer.rs`
-- `crates/kernel/src/kernel.rs`
+- `crates/vm-kernel/src/device_layer.rs`
+- `crates/vm-kernel/src/kernel.rs`
 
 What lives here:
 - Synthetic `/dev` device nodes such as `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/std*`, `/dev/fd`, and `/dev/pts` in `device_layer.rs`.
@@ -156,12 +156,12 @@ What lives here:
 This is the kernel’s process and I/O core.
 
 Relevant files:
-- `crates/kernel/src/process_table.rs`
-- `crates/kernel/src/fd_table.rs`
-- `crates/kernel/src/pipe_manager.rs`
-- `crates/kernel/src/pty.rs`
-- `crates/kernel/src/poll.rs`
-- `crates/kernel/src/command_registry.rs`
+- `crates/vm-kernel/src/process_table.rs`
+- `crates/vm-kernel/src/fd_table.rs`
+- `crates/vm-kernel/src/pipe_manager.rs`
+- `crates/vm-kernel/src/pty.rs`
+- `crates/vm-kernel/src/poll.rs`
+- `crates/vm-kernel/src/command_registry.rs`
 
 What lives here:
 - Process entries, parent/child relationships, process groups, sessions, wait queues, signal state, and zombie reaping.
@@ -178,26 +178,26 @@ What lives here:
 These subsystems enforce policy and kernel-visible identity.
 
 Relevant files:
-- `crates/kernel/src/permissions.rs`
-- `crates/kernel/src/resource_accounting.rs`
-- `crates/kernel/src/user.rs`
+- `crates/vm-kernel/src/permissions.rs`
+- `crates/vm-kernel/src/resource_accounting.rs`
+- `crates/vm-kernel/src/user.rs`
 
 What lives here:
 - Filesystem, network, command, and environment permission decisions plus the permissioned VFS wrapper.
 - Resource limits for process counts, FDs, pipes, PTYs, sockets, filesystem bytes/inodes, read/write sizes, readdir batches, and WASM limits.
 - The default VM user model, passwd rendering, home directory, shell, and UID/GID defaults.
 
-### Execution crate runtime common layer
+### Executor contract and shared runtime layer
 
 This is the shared scaffolding around the runtime-specific implementations.
 
 Relevant files:
-- `crates/execution/src/lib.rs`
-- `crates/execution/src/common.rs`
-- `crates/execution/src/runtime_support.rs`
+- `crates/executor-contract/src/lib.rs`
+- `crates/executor-v8-runtime/src/adapter_common.rs`
+- `crates/executor-v8-runtime/src/adapter_support.rs`
 
 What lives here:
-- Runtime exports and type surface for JavaScript, Python, and WASM execution engines.
+- Runtime-neutral lifecycle/host contracts plus reusable V8 adapter support.
 - Shared JSON/string encoding helpers and stable hashing.
 - Compile-cache setup, import-cache roots, warmup marker paths, sandbox root calculation, and execution-path helpers.
 
@@ -206,8 +206,8 @@ What lives here:
 This is the current Rust-side JavaScript execution manager.
 
 Relevant files:
-- `crates/execution/src/javascript.rs`
-- `crates/execution/src/node_process.rs`
+- `crates/executor-v8-runtime/src/javascript.rs`
+- `crates/executor-v8-runtime/src/host_node.rs`
 
 What lives here:
 - JavaScript execution lifecycle and event stream handling.
@@ -222,10 +222,10 @@ What lives here:
 This subsystem is the loader and asset materialization layer behind the JavaScript and Python runtimes.
 
 Relevant files:
-- `crates/execution/src/node_import_cache.rs`
-- `crates/execution/src/runtime_support.rs`
-- `crates/execution/src/node_process.rs`
-- `crates/execution/assets/runners/python-runner.mjs`
+- `crates/executor-v8-runtime/src/asset_cache.rs`
+- `crates/executor-v8-runtime/src/adapter_support.rs`
+- `crates/executor-v8-runtime/src/host_node.rs`
+- `crates/executor-v8-runtime/assets/runners/python-runner.mjs`
 
 What lives here:
 - Node loader templates for builtin interception and builtin deny/allow behavior.
@@ -240,10 +240,10 @@ What lives here:
 These files are checked-in guest assets that support the runtime surface but are not Rust modules.
 
 Relevant files:
-- `crates/execution/assets/v8-bridge.source.js`
-- `crates/execution/assets/polyfill-registry.json`
-- `crates/execution/assets/undici-shims/*`
-- `crates/build-support/v8_bridge_build.rs`
+- `crates/executor-v8-runtime/assets/v8-bridge.source.js`
+- `crates/executor-v8-runtime/assets/polyfill-registry.json`
+- `crates/executor-v8-runtime/assets/undici-shims/*`
+- `crates/executor-v8-runtime/v8_bridge_build.rs`
 
 What lives here:
 - The bridge source and shim inputs used to generate the bundled guest bridge into Cargo `OUT_DIR`.
@@ -255,9 +255,9 @@ What lives here:
 This subsystem owns Python guest execution.
 
 Relevant files:
-- `crates/execution/src/python.rs`
-- `crates/execution/assets/runners/python-runner.mjs`
-- `crates/execution/assets/pyodide/*`
+- `crates/executor-python-v8-pyodide/src/lib.rs`
+- `crates/executor-v8-runtime/assets/runners/python-runner.mjs`
+- `crates/executor-v8-runtime/assets/pyodide/*`
 
 What lives here:
 - Python execution lifecycle, stdout/stderr collection, timeout handling, and warmup flow.
@@ -270,7 +270,7 @@ What lives here:
 This subsystem owns WASM guest execution.
 
 Relevant files:
-- `crates/execution/src/wasm.rs`
+- `crates/executor-wasm-v8/src/lib.rs`
 
 What lives here:
 - WASM execution lifecycle and warmup flow.
@@ -284,9 +284,9 @@ What lives here:
 These files are the client-side bridge from the execution crate into the separate V8 daemon.
 
 Relevant files:
-- `crates/execution/src/v8_host.rs`
-- `crates/execution/src/v8_ipc.rs`
-- `crates/execution/src/v8_runtime.rs`
+- `crates/executor-v8-runtime/src/adapter_host.rs`
+- `crates/executor-v8-runtime/src/adapter_ipc.rs`
+- `crates/executor-v8-runtime/src/adapter_runtime.rs`
 
 What lives here:
 - Spawning and authenticating the `agentos-v8` process.
@@ -298,18 +298,18 @@ What lives here:
 This is the separate process that actually owns the V8 isolates.
 
 Relevant files:
-- `crates/v8-runtime/src/main.rs`
-- `crates/v8-runtime/build.rs`
-- `crates/v8-runtime/src/isolate.rs`
-- `crates/v8-runtime/src/session.rs`
-- `crates/v8-runtime/src/execution.rs`
-- `crates/v8-runtime/src/bridge.rs`
-- `crates/v8-runtime/src/host_call.rs`
-- `crates/v8-runtime/src/ipc_binary.rs`
-- `crates/v8-runtime/src/ipc.rs`
-- `crates/v8-runtime/src/snapshot.rs`
-- `crates/v8-runtime/src/stream.rs`
-- `crates/v8-runtime/src/timeout.rs`
+- `crates/executor-v8-runtime/src/main.rs`
+- `crates/executor-v8-runtime/build.rs`
+- `crates/executor-v8-runtime/src/isolate.rs`
+- `crates/executor-v8-runtime/src/session.rs`
+- `crates/executor-v8-runtime/src/execution.rs`
+- `crates/executor-v8-runtime/src/bridge.rs`
+- `crates/executor-v8-runtime/src/host_call.rs`
+- `crates/executor-v8-runtime/src/ipc_binary.rs`
+- `crates/executor-v8-runtime/src/ipc.rs`
+- `crates/executor-v8-runtime/src/snapshot.rs`
+- `crates/executor-v8-runtime/src/stream.rs`
+- `crates/executor-v8-runtime/src/timeout.rs`
 
 What lives here:
 - The daemon entrypoint, Unix-domain-socket listener, authentication, and connection loop in `main.rs`.
@@ -323,9 +323,9 @@ What lives here:
 - Async stream-event dispatch back into V8 in `stream.rs`.
 - Wall-clock timeout enforcement via `terminate_execution()` in `timeout.rs`.
 
-### Native sidecar transport, protocol, ownership, and callback state machine
+### Sidecar transport, protocol, ownership, and callback state machine
 
-This is the framed control-plane state machine around the native sidecar.
+This is the framed control-plane state machine around the sidecar.
 
 Relevant files:
 - `crates/sidecar/src/lib.rs`
@@ -340,7 +340,7 @@ What lives here:
 - The long-lived in-memory state model for VMs, contexts, processes, listeners, sockets, sidecar callbacks, and binding executions in `state.rs`.
 - The framed stdio host transport, callback routing, and event pump in `stdio.rs`.
 
-### Native sidecar dispatch hub
+### Sidecar dispatch hub
 
 This is the service-layer router that sits on top of the transport/state machine.
 
@@ -354,7 +354,7 @@ What lives here:
 - Security audit/log/event emission.
 - ACP orchestration paths that live in the service rather than in `acp/*`.
 
-### Native sidecar VM lifecycle, rootfs bootstrap, and layering
+### Sidecar VM lifecycle, rootfs bootstrap, and layering
 
 This is the sidecar-owned VM construction and snapshot layer.
 
@@ -370,7 +370,7 @@ What lives here:
 - Mount reconciliation, module-access mount insertion, and command-path refresh.
 - Snapshot import/export helpers and root-filesystem entry conversion.
 
-### Native sidecar guest filesystem API
+### Sidecar guest filesystem API
 
 This is the direct guest filesystem API surface exposed by the sidecar.
 
@@ -381,7 +381,7 @@ What lives here:
 - Guest filesystem request handling for read/write/mkdir/stat/readdir/etc.
 - Content encoding/decoding between bytes and protocol payloads.
 
-### Native sidecar shadow-root reconciliation
+### Sidecar shadow-root reconciliation
 
 This subsystem keeps the kernel VFS and the sidecar’s host shadow tree aligned.
 
@@ -397,13 +397,13 @@ What lives here:
 - Host-directory, host-file, and host-symlink reconciliation into the kernel tree.
 - Process-exit writeback and shadow-root bootstrap behavior that affects guest-visible state.
 
-### Native sidecar binding virtualization
+### Sidecar binding virtualization
 
 This is the subsystem that makes registered binding collections show up as VM commands.
 
 Relevant files:
-- `crates/native-sidecar/src/bindings.rs`
-- `crates/native-sidecar/src/execution.rs`
+- `crates/vm/src/bindings.rs`
+- `crates/vm/src/execution.rs`
 - `crates/sidecar-protocol/`
 
 What lives here:
@@ -412,7 +412,7 @@ What lives here:
 - CLI-style flag parsing from JSON Schema.
 - Resolution of `agentos`, collection commands, and binding invocations into sidecar-dispatched virtual processes.
 
-### Native sidecar process/runtime dispatch
+### Sidecar process/runtime dispatch
 
 This is the execution core that launches guest runtimes and sidecar-owned virtual processes.
 
@@ -424,7 +424,7 @@ What lives here:
 - Runtime env assembly, entrypoint resolution, guest/host path mapping, and shadow materialization.
 - JS child-process RPC handling and nested process management.
 
-### Native sidecar networking policy and socket transports
+### Sidecar networking policy and socket transports
 
 This is the network policy and transport layer that sits on top of the runtime execution core.
 
@@ -438,7 +438,7 @@ What lives here:
 - TCP, UDP, and Unix socket listen/connect/bind flows plus their state machines.
 - Listener discovery, socket snapshots, and resource accounting for network objects.
 
-### Native sidecar TLS, HTTP, and HTTP/2 planes
+### Sidecar TLS, HTTP, and HTTP/2 planes
 
 These are distinct guest-visible subsystems even though they share `execution.rs` and `state.rs`.
 
@@ -451,7 +451,7 @@ What lives here:
 - HTTP/1 loopback and outbound request bridging.
 - HTTP/2 server/session/stream state, TLS handoff, event queues, and flow-control snapshots.
 
-### Native sidecar builtin service RPCs
+### Sidecar builtin service RPCs
 
 This is the sidecar-owned service surface behind some guest runtime builtin APIs.
 
@@ -482,8 +482,8 @@ What lives here:
 This is the Agent OS extension-owned session-management surface for agent adapters that speak ACP over stdio.
 
 Relevant files:
-- `crates/agentos-sidecar/src/acp_extension.rs`
-- `crates/agentos-protocol/protocol/agentos_acp_v1.bare`
+- `crates/sidecar/src/acp_extension.rs`
+- `crates/acp-protocol/protocol/agentos_acp_v1.bare`
 - `crates/sidecar/src/extension.rs`
 - `crates/sidecar/src/stdio.rs`
 
@@ -496,7 +496,7 @@ What lives here:
 
 ### First-party mount plugins
 
-These are the mounted filesystems that the native sidecar can open through the kernel mount-plugin interface.
+These are the mounted filesystems that the sidecar can open through the kernel mount-plugin interface.
 
 Relevant files:
 - `crates/sidecar/src/plugins/mod.rs`
@@ -510,7 +510,7 @@ Relevant files:
 - `registry/file-system/google-drive/src/index.ts`
 
 What lives here:
-- `mod.rs`: plugin registration order for the native sidecar.
+- `mod.rs`: plugin registration order for the sidecar.
 - `host_dir.rs` and `module_access.rs`: the host-backed mount family, with `module_access` as a read-only policy wrapper around projected `node_modules`.
 - `js_bridge.rs` and `sandbox_agent.rs`: callback-driven and remote-process-backed mounted filesystems.
 - `s3.rs` and `google_drive.rs`: the object-store-backed persisted filesystem family, both with manifest/chunk storage over a `MemoryFileSystem` working tree.
@@ -521,8 +521,8 @@ What lives here:
 This is the alternate sidecar wrapper for browser-hosted execution.
 
 Relevant files:
-- `crates/sidecar-browser/src/lib.rs`
-- `crates/sidecar-browser/src/service.rs`
+- `archive/browser/crates/sidecar-browser/src/lib.rs`
+- `archive/browser/crates/sidecar-browser/src/service.rs`
 
 What lives here:
 - Browser-side bridge traits for worker creation and termination.
@@ -532,12 +532,12 @@ What lives here:
 
 These files are single physical modules but contain multiple logical subsystems and should usually be split mentally when navigating the code:
 
-- `crates/kernel/src/kernel.rs`
+- `crates/vm-kernel/src/kernel.rs`
   - VM facade and syscall surface.
   - procfs synthesis.
   - command/shebang resolution.
   - mount and driver integration.
-- `crates/execution/src/node_import_cache.rs`
+- `crates/executor-v8-runtime/src/asset_cache.rs`
   - Node loader templates.
   - builtin/polyfill asset materialization.
   - guest path scrubbing.
@@ -565,6 +565,6 @@ If this map is used as a refactor guide, the most obvious “too many systems in
 
 - `crates/sidecar/src/execution.rs`
 - `crates/sidecar/src/service.rs`
-- `crates/execution/src/node_import_cache.rs`
-- `crates/execution/src/javascript.rs`
-- `crates/kernel/src/kernel.rs`
+- `crates/executor-v8-runtime/src/asset_cache.rs`
+- `crates/executor-v8-runtime/src/javascript.rs`
+- `crates/vm-kernel/src/kernel.rs`

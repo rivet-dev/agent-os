@@ -1,0 +1,12 @@
+diff --git a/tests/generic/676 b/tests/generic/676
+--- a/tests/generic/676
++++ b/tests/generic/676
+@@ -26,7 +26,7 @@ _cleanup()
+ _require_test
+ _require_test_program "t_readdir_3"
+ 
+-files=4000
++files=${XFSTESTS_GENERIC_676_FILES:-4000}
+ seed=$RANDOM
+ 
+ mkdir $dir

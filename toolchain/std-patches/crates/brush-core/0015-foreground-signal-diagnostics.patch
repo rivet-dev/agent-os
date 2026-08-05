@@ -1,0 +1,146 @@
+From: agentOS Runtime <runtime@agentos.invalid>
+Subject: [PATCH] brush-core: report foreground signal terminations
+
+Brush preserved the 128+signal exit status for a terminated external command,
+but discarded the signal identity before the foreground pipeline wait could
+report it. Bash reports these terminations using the platform signal text; in
+particular, xfstests expects RLIMIT_FSIZE's default SIGXFSZ action to print
+"File size limit exceeded". Preserve the signal on ExecutionResult and emit
+Linux-compatible foreground diagnostics while keeping routine SIGINT/SIGPIPE
+terminations quiet.
+
+diff --git a/src/interp.rs b/src/interp.rs
+--- a/src/interp.rs
++++ b/src/interp.rs
+@@ -35,8 +35,7 @@ impl From<std::process::Output> for results::ExecutionResult {
+         }
+ 
+         if let Some(signal) = output.status.signal() {
+-            #[expect(clippy::cast_sign_loss)]
+-            return Self::new((signal & 0xFF) as u8 + 128);
++            return Self::signaled(signal);
+         }
+ 
+         tracing::error!("unhandled process exit");
+@@ -659,6 +658,13 @@ async fn wait_for_pipeline_processes_and_update_status(
+     while let Some(child) = process_spawn_results.pop_front() {
++        let report_external_signal = matches!(&child, ExecutionSpawnResult::StartedProcess(_));
+         match child.wait(!stopped_children.is_empty()).await? {
+-            ExecutionWaitResult::Completed(current_result) => {
++            ExecutionWaitResult::Completed(mut current_result) => {
++                if report_external_signal
++                    && let Some(signal) = current_result.take_termination_signal()
++                    && let Some(description) = foreground_signal_description(signal)
++                {
++                    writeln!(params.stderr(shell), "{description}")?;
++                }
+                 result = current_result;
+                 *shell.last_exit_status_mut() = result.exit_code.into();
+                 shell.last_pipeline_statuses.push(result.exit_code.into());
+@@ -692,6 +698,45 @@ async fn wait_for_pipeline_processes_and_update_status(
+     Ok(result)
+ }
+ 
++fn foreground_signal_description(signal: i32) -> Option<&'static str> {
++    // Bash keeps SIGINT quiet and suppresses the routine SIGPIPE produced by
++    // a pipeline consumer exiting early. Other foreground child terminations
++    // are reported with the Linux strsignal text.
++    match signal {
++        1 => Some("Hangup"),
++        2 | 13 => None,
++        3 => Some("Quit"),
++        4 => Some("Illegal instruction"),
++        5 => Some("Trace/breakpoint trap"),
++        6 => Some("Aborted"),
++        7 => Some("Bus error"),
++        8 => Some("Floating point exception"),
++        9 => Some("Killed"),
++        10 => Some("User defined signal 1"),
++        11 => Some("Segmentation fault"),
++        12 => Some("User defined signal 2"),
++        14 => Some("Alarm clock"),
++        15 => Some("Terminated"),
++        16 => Some("Stack fault"),
++        17 => Some("Child exited"),
++        18 => Some("Continued"),
++        19 => Some("Stopped (signal)"),
++        20 => Some("Stopped"),
++        21 => Some("Stopped (tty input)"),
++        22 => Some("Stopped (tty output)"),
++        23 => Some("Urgent I/O condition"),
++        24 => Some("CPU time limit exceeded"),
++        25 => Some("File size limit exceeded"),
++        26 => Some("Virtual timer expired"),
++        27 => Some("Profiling timer expired"),
++        28 => Some("Window changed"),
++        29 => Some("I/O possible"),
++        30 => Some("Power failure"),
++        31 => Some("Bad system call"),
++        _ => None,
++    }
++}
++
+ #[async_trait::async_trait]
+ impl ExecuteInPipeline for ast::Command {
+     async fn execute_in_pipeline(
+diff --git a/src/results.rs b/src/results.rs
+--- a/src/results.rs
++++ b/src/results.rs
+@@ -9,6 +9,8 @@ pub struct ExecutionResult {
+     pub next_control_flow: ExecutionControlFlow,
+     /// The exit code resulting from execution.
+     pub exit_code: ExecutionExitCode,
++    /// The signal that terminated an external process, when applicable.
++    termination_signal: Option<i32>,
+ }
+ 
+ impl ExecutionResult {
+@@ -25,6 +27,22 @@ impl ExecutionResult {
+         }
+     }
+ 
++    /// Returns a result for an external process terminated by a signal.
++    pub fn signaled(signal: i32) -> Self {
++        #[expect(clippy::cast_sign_loss)]
++        let exit_code = ((signal & 0xFF) as u8).saturating_add(128);
++        Self {
++            exit_code: exit_code.into(),
++            termination_signal: Some(signal),
++            ..Self::default()
++        }
++    }
++
++    /// Takes the signal that terminated the external process, if any.
++    pub fn take_termination_signal(&mut self) -> Option<i32> {
++        self.termination_signal.take()
++    }
++
+     /// Returns a new `ExecutionResult` reflecting a process that was stopped.
+     pub fn stopped() -> Self {
+         // TODO: Decide how to sort this out in a platform-independent way.
+@@ -39,6 +57,7 @@ impl ExecutionResult {
+         Self {
+             next_control_flow: ExecutionControlFlow::Normal,
+             exit_code: ExecutionExitCode::Success,
++            termination_signal: None,
+         }
+     }
+ 
+@@ -48,6 +67,7 @@ impl ExecutionResult {
+         Self {
+             next_control_flow: ExecutionControlFlow::Normal,
+             exit_code: ExecutionExitCode::GeneralError,
++            termination_signal: None,
+         }
+     }
+ 
+@@ -92,6 +112,7 @@ impl From<ExecutionExitCode> for ExecutionResult {
+         Self {
+             next_control_flow: ExecutionControlFlow::Normal,
+             exit_code,
++            termination_signal: None,
+         }
+     }
+ }
+-- 
+2.43.0

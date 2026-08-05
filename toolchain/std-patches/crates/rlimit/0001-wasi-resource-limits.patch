@@ -1,0 +1,145 @@
+Expose agentOS's owned libc resource-limit surface to Rust WASI commands.
+
+The wasm32-wasip1 target is not cfg(unix), but agentOS supplies Linux resource
+limits through its patched libc and host_process ABI. Keep the upstream API so
+shell builtins and other Rust software use the same kernel-owned limits.
+
+diff --git a/src/lib.rs b/src/lib.rs
+index f414d84..ae870b2 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -109,6 +109,14 @@ group! {
+     pub use self::resource::Resource;
+ }
+ 
++#[cfg(target_arch = "wasm32")]
++group! {
++    mod wasi;
++
++    #[doc(inline)]
++    pub use self::wasi::*;
++}
++
+ #[cfg(any(doc, target_os = "linux", target_os = "android"))]
+ group! {
+     mod proc_limits;
+diff --git a/src/tools.rs b/src/tools.rs
+index 4a9466c..763d823 100644
+--- a/src/tools.rs
++++ b/src/tools.rs
+@@ -40,7 +40,7 @@ fn get_kern_max_files_per_proc() -> io::Result<u64> {
+ /// # Errors
+ /// Returns an error if any syscall failed.
+ pub fn increase_nofile_limit(lim: u64) -> io::Result<u64> {
+-    #[cfg(unix)]
++    #[cfg(any(unix, target_arch = "wasm32"))]
+     {
+         use crate::Resource;
+ 
+diff --git a/src/wasi.rs b/src/wasi.rs
+new file mode 100644
+index 0000000..5944223
+--- /dev/null
++++ b/src/wasi.rs
+@@ -0,0 +1,101 @@
++use std::io;
++
++/// A value indicating no limit.
++pub const INFINITY: u64 = u64::MAX;
++
++const UNSUPPORTED: u32 = u32::MAX;
++
++#[repr(C)]
++struct RawLimit {
++    soft: u64,
++    hard: u64,
++}
++
++unsafe extern "C" {
++    #[link_name = "getrlimit"]
++    fn libc_getrlimit(resource: i32, limit: *mut RawLimit) -> i32;
++    #[link_name = "setrlimit"]
++    fn libc_setrlimit(resource: i32, limit: *const RawLimit) -> i32;
++}
++
++/// A Linux resource-limit kind exposed by the agentOS-owned WASI libc.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
++pub struct Resource(u32);
++
++impl Resource {
++    pub const CPU: Self = Self(0);
++    pub const FSIZE: Self = Self(1);
++    pub const DATA: Self = Self(2);
++    pub const STACK: Self = Self(3);
++    pub const CORE: Self = Self(4);
++    pub const RSS: Self = Self(5);
++    pub const NPROC: Self = Self(6);
++    pub const NOFILE: Self = Self(7);
++    pub const MEMLOCK: Self = Self(8);
++    pub const AS: Self = Self(9);
++    pub const VMEM: Self = Self::AS;
++
++    pub const SBSIZE: Self = Self(UNSUPPORTED);
++    pub const KQUEUES: Self = Self(UNSUPPORTED);
++    pub const LOCKS: Self = Self(UNSUPPORTED);
++    pub const MSGQUEUE: Self = Self(UNSUPPORTED);
++    pub const NICE: Self = Self(UNSUPPORTED);
++    pub const NOVMON: Self = Self(UNSUPPORTED);
++    pub const NPTS: Self = Self(UNSUPPORTED);
++    pub const NTHR: Self = Self(UNSUPPORTED);
++    pub const POSIXLOCKS: Self = Self(UNSUPPORTED);
++    pub const RTPRIO: Self = Self(UNSUPPORTED);
++    pub const RTTIME: Self = Self(UNSUPPORTED);
++    pub const SIGPENDING: Self = Self(UNSUPPORTED);
++    pub const SWAP: Self = Self(UNSUPPORTED);
++    pub const THREADS: Self = Self(UNSUPPORTED);
++    pub const UMTXP: Self = Self(UNSUPPORTED);
++
++    #[must_use]
++    pub const fn is_supported(self) -> bool {
++        self.0 != UNSUPPORTED
++    }
++
++    pub fn get(self) -> io::Result<(u64, u64)> {
++        getrlimit(self)
++    }
++
++    pub fn set(self, soft: u64, hard: u64) -> io::Result<()> {
++        setrlimit(self, soft, hard)
++    }
++}
++
++fn check_supported(resource: Resource) -> io::Result<i32> {
++    if resource.is_supported() {
++        Ok(resource.0 as i32)
++    } else {
++        Err(io::Error::new(
++            io::ErrorKind::Unsupported,
++            "unsupported resource",
++        ))
++    }
++}
++
++pub fn getrlimit(resource: Resource) -> io::Result<(u64, u64)> {
++    let resource = check_supported(resource)?;
++    let mut limit = RawLimit { soft: 0, hard: 0 };
++    // The owned wasi-libc validates the resource and writes this local value.
++    let result = unsafe { libc_getrlimit(resource, &mut limit) };
++    if result == 0 {
++        Ok((limit.soft, limit.hard))
++    } else {
++        Err(io::Error::last_os_error())
++    }
++}
++
++pub fn setrlimit(resource: Resource, soft: u64, hard: u64) -> io::Result<()> {
++    let resource = check_supported(resource)?;
++    let limit = RawLimit { soft, hard };
++    // The owned wasi-libc copies the input before forwarding to agentOS.
++    let result = unsafe { libc_setrlimit(resource, &limit) };
++    if result == 0 {
++        Ok(())
++    } else {
++        Err(io::Error::last_os_error())
++    }
++}

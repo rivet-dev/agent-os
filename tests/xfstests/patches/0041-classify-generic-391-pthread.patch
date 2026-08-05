@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Wed, 22 Jul 2026 23:50:00 -0700
+Subject: [PATCH] fstests: classify generic 391 pthread requirement
+
+generic/391 performs non-overlapping direct I/O from two shared-memory
+pthreads. The maintained V8-WASM baseline cannot instantiate that module;
+dedicated Wasmtime thread tests own real pthread and shared-memory coverage.
+
+diff --git a/tests/generic/391 b/tests/generic/391
+index 272fcf6e..03523bc2 100755
+--- a/tests/generic/391
++++ b/tests/generic/391
+@@ -11,4 +11,8 @@ _begin_fstest auto quick rw prealloc
+ 
++if [ "$FSTYP" = "agentos" ]; then
++	_notrun "This test requires shared-memory pthread support."
++fi
++
+ # Override the default cleanup function.
+ _cleanup()
+ {

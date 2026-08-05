@@ -158,7 +158,7 @@ pub struct TypeScriptCheckResult {
 
 #[derive(Debug, Clone)]
 enum ExecutionSubmission {
-    Completed(CodeExecutionResult),
+    Completed(Box<CodeExecutionResult>),
     Background(wire::ExecutionDescriptor),
 }
 
@@ -376,9 +376,9 @@ impl AgentOs {
             ));
         }
         wait_for_completion_event(&mut events, &accepted.operation_id).await?;
-        Ok(ExecutionSubmission::Completed(
+        Ok(ExecutionSubmission::Completed(Box::new(
             self.wait_execution(&accepted.operation_id).await?,
-        ))
+        )))
     }
 
     pub async fn exec(
@@ -1170,6 +1170,7 @@ fn evaluation_result(submission: ExecutionSubmission) -> ClientResult<CodeEvalua
             "evaluation unexpectedly returned a background process",
         )));
     };
+    let result = *result;
     let value = result
         .evaluation_value
         .as_deref()
@@ -1282,7 +1283,7 @@ fn typescript_check_result(result: CodeExecutionResult) -> ClientResult<TypeScri
 
 fn completed_submission(submission: ExecutionSubmission) -> ClientResult<CodeExecutionResult> {
     match submission {
-        ExecutionSubmission::Completed(result) => Ok(result),
+        ExecutionSubmission::Completed(result) => Ok(*result),
         ExecutionSubmission::Background(_) => Err(ClientError::Sidecar(String::from(
             "attached operation unexpectedly returned a background process",
         ))),

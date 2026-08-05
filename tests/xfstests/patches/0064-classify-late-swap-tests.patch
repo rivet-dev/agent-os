@@ -1,0 +1,28 @@
+diff --git a/tests/generic/636 b/tests/generic/636
+index e8171e93..00000001 100755
+--- a/tests/generic/636
++++ b/tests/generic/636
+@@ -10,6 +10,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick swap
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS does not expose guest swap activation"
++
+ # Import common functions.
+ . ./common/filter
+ 
+diff --git a/tests/generic/641 b/tests/generic/641
+index 541e838a..00000002 100755
+--- a/tests/generic/641
++++ b/tests/generic/641
+@@ -12,6 +12,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick swap collapse
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS does not expose guest swap activation"
++
+ # Import common functions
+ . ./common/filter
+ 

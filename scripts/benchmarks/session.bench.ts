@@ -150,7 +150,7 @@ function collectMetadata(opts: {
 		deps: {
 			"@rivet-dev/agentos-core": pkgVersion("@rivet-dev/agentos-core"),
 			"@rivet-dev/agentos-sidecar": pkgVersion("@rivet-dev/agentos-sidecar"),
-			"@rivet-dev/agentos-runtime-core": pkgVersion("@rivet-dev/agentos-runtime-core"),
+			"@rivet-dev/agentos-core": pkgVersion("@rivet-dev/agentos-core"),
 			"@agentos-software/pi": pkgVersion("@agentos-software/pi"),
 			"@mariozechner/pi-coding-agent": pkgVersion(
 				"@mariozechner/pi-coding-agent",

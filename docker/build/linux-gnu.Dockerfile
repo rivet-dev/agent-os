@@ -5,7 +5,7 @@
 # Cargo caches can be persisted with BuildKit/GHA like the Darwin build.
 FROM ubuntu:24.04
 
-ARG RUST_TOOLCHAIN=1.91.1
+ARG RUST_TOOLCHAIN=1.94.0
 ARG TARGET=x86_64-unknown-linux-gnu
 ARG BUILD_PROFILE=debug
 ARG CACHE_PLATFORM=linux-x64-gnu
@@ -98,11 +98,11 @@ RUN --mount=type=cache,id=cargo-registry-agentos-${CACHE_PLATFORM},target=/usr/l
       -C link-arg=/tmp/agentos_gettid_shim.o \
       -C link-arg=/tmp/agentos_renameat2_shim.o \
       ${RUSTFLAGS:-}"; \
+    cargo test -p agentos-executor-wasm-wasmtime --features threads --lib --target "$TARGET"; \
     if [ "$BUILD_PROFILE" = "release" ]; then FLAG="--release"; PROF=release; else FLAG=""; PROF=debug; fi; \
-    cargo build $FLAG -p agentos-sidecar -p agentos-native-sidecar --target "$TARGET"; \
+    cargo build $FLAG -p agentos-sidecar --target "$TARGET"; \
     mkdir -p /artifacts; \
     cp "target/$TARGET/$PROF/agentos-sidecar" /artifacts/agentos-sidecar; \
-    cp "target/$TARGET/$PROF/agentos-native-sidecar" /artifacts/agentos-native-sidecar; \
     (sccache --show-stats 2>/dev/null || true)
 
 CMD ["ls", "-la", "/artifacts"]

@@ -24,19 +24,18 @@
 	},
 	"dependencies": {
 		"@agentos-software/coreutils": "workspace:*",
-		"@agentos-software/sed": "workspace:*",
-		"@agentos-software/grep": "workspace:*",
-		"@agentos-software/gawk": "workspace:*",
-		"@agentos-software/findutils": "workspace:*",
 		"@agentos-software/diffutils": "workspace:*",
-		"@agentos-software/tar": "workspace:*",
-		"@agentos-software/gzip": "workspace:*"
+		"@agentos-software/findutils": "workspace:*",
+		"@agentos-software/gawk": "workspace:*",
+		"@agentos-software/grep": "workspace:*",
+		"@agentos-software/gzip": "workspace:*",
+		"@agentos-software/sed": "workspace:*",
+		"@agentos-software/tar": "workspace:*"
 	},
 	"devDependencies": {
 		"@agentos-software/manifest": "workspace:*",
 		"@types/node": "^22.10.2",
 		"typescript": "^5.9.2",
-		"@rivet-dev/agentos-test-harness": "workspace:*",
 		"vitest": "^2.1.9"
 	}
 }

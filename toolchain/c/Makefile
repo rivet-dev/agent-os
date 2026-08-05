@@ -51,9 +51,14 @@ c_source = $(firstword $(foreach dir,$(C_SOURCE_DIRS),$(wildcard $(dir)/$(1).c))
 # Toolchain
 CC           := $(WASI_SDK_DIR)/bin/clang
 NATIVE_CC    := $(shell command -v cc 2>/dev/null || command -v gcc 2>/dev/null || command -v clang 2>/dev/null)
+BINARYEN_VERSION := 128
+WASM_OPT ?= $(abspath ../.cache/binaryen-version_$(BINARYEN_VERSION)/bin/wasm-opt)
+export WASM_OPT
+export PATH := $(dir $(WASM_OPT)):$(PATH)
 
 # Sysroot: use patched sysroot if built, otherwise use wasi-sdk's vanilla sysroot
 PATCHED_SYSROOT := sysroot
+THREADED_SYSROOT := sysroot-threads
 ifeq ($(wildcard $(PATCHED_SYSROOT)/lib/wasm32-wasi/libc.a),)
   SYSROOT := $(WASI_SDK_DIR)/share/wasi-sysroot
 else
@@ -62,7 +67,7 @@ endif
 
 # Compile flags
 WASM_CFLAGS  := --target=wasm32-wasip1 --sysroot=$(SYSROOT) -O2 -flto -I include/
-NATIVE_CFLAGS := -O0 -g -D_LARGEFILE64_SOURCE -I include/
+NATIVE_CFLAGS := -O0 -g -D_GNU_SOURCE -D_LARGEFILE64_SOURCE -I include/
 
 # COMMANDS_DIR for install target (configurable, matches Rust binary output)
 COMMANDS_DIR ?= ../target/wasm32-wasip1/release/commands
@@ -70,7 +75,7 @@ COMMANDS_DIR ?= ../target/wasm32-wasip1/release/commands
 # Fast real commands installed by the default software gate. Slow/heavy commands
 # (duckdb, vim) remain available through explicit parent `make cmd/<name>`.
 COMMANDS := zip unzip envsubst sqlite3 curl wget grep git git-remote-http tree ssh ssh-keysign ssh-sk-helper \
-	acl_tools xattr_tools xfs_io mknod
+	acl_tools xattr_tools xfs_io mknod getconf
 
 # Public command names emitted by multi-call filesystem helper binaries.
 COMMAND_ALIASES := chacl:acl_tools getfacl:acl_tools setfacl:acl_tools \
@@ -78,11 +83,14 @@ COMMAND_ALIASES := chacl:acl_tools getfacl:acl_tools setfacl:acl_tools \
 	mkfifo:mknod
 
 # Programs requiring patched sysroot (Tier 2+ custom host imports)
-PATCHED_PROGRAMS := http_get_test isatty_test getpid_test getppid_test getppid_verify userinfo pipe_test dup_test closefrom_test spawn_child spawn_contract spawn_exit_code exec_edge exec_variants pipeline itimer_contract kill_child waitpid_return waitpid_edge syscall_coverage getpwuid_test libc_compat_contract libc_bounds_contract chown_contract signal_tests sigaction_self sigaction_behavior delayed_tcp_echo delayed_kill pipe_edge select_edge socket_flags socketpair_rights ssh_proxy_helper ssh_sk_helper_contract tcp_accept_spawn tcp_echo tcp_server http_server udp_echo unix_socket signal_handler dns_lookup getaddrinfo_connect getnameinfo_contract ppoll_contract open_flags record_lock mlock_contract sqlite3 sqlite3_mem curl wget grep tree zip unzip fs_probe acl_tools xattr_tools xfs_io mknod credentials_test fifo_test flock_test mmap_test openat_test pwritev_test self_stop_status sync_test waitpid_status xattr_test
+PATCHED_PROGRAMS := http_get_test isatty_test getpid_test getppid_test getppid_verify userinfo pipe_test dup_test closefrom_test spawn_child spawn_contract spawn_exit_code exec_edge exec_variants pipeline itimer_contract kill_child waitpid_return waitpid_edge syscall_coverage getpwuid_test libc_compat_contract libc_bounds_contract getgrouplist_bounds chown_contract signal_tests sigaction_self sigaction_behavior delayed_tcp_echo delayed_kill pipe_edge select_edge socket_flags socketpair_rights ssh_proxy_helper ssh_sk_helper_contract tcp_accept_spawn tcp_echo tcp_server http_server udp_echo unix_socket signal_handler dns_lookup getaddrinfo_connect getnameinfo_contract ppoll_contract open_flags record_lock mlock_contract sqlite3 sqlite3_mem curl wget grep tree zip unzip fs_probe acl_tools xattr_tools xfs_io mknod credentials_test fifo_test flock_test mmap_test openat_test pwritev_test self_stop_status sync_test waitpid_status xattr_test
 
 # Discover all package command and test-program C source files.
 ALL_SOURCES := $(foreach dir,$(C_SOURCE_DIRS),$(wildcard $(dir)/*.c))
-SKIPPED_BULK_PROGRAMS :=
+# Threaded fixtures require the dedicated wasm32-wasip1-threads sysroot and
+# linker contract below. Never let the generic single-thread discovery rule
+# compile them against the ordinary wasm32-wasip1 sysroot.
+SKIPPED_BULK_PROGRAMS := pthread_benchmark pthread_conformance
 
 # Exclude patched-sysroot programs when only vanilla sysroot is available
 ifeq ($(wildcard $(PATCHED_SYSROOT)/lib/wasm32-wasi/libc.a),)
@@ -112,9 +120,9 @@ NATIVE_OUTPUTS := $(addprefix $(NATIVE_DIR)/,$(NATIVE_PROG_NAMES)) $(NATIVE_DIR)
 
 .SECONDEXPANSION:
 
-.PHONY: all wasi-sdk programs sysroot install native clean wasm-opt-check os-test os-test-native
+.PHONY: all wasi-sdk programs sysroot sysroot-threads pthread-benchmark-wasm pthread-conformance-wasm install native conformance-artifacts clean wasm-opt-check os-test os-test-native
 
-HAS_WASM_OPT := $(shell command -v wasm-opt >/dev/null 2>&1 && echo 1 || echo 0)
+HAS_WASM_OPT = $(shell test -x "$(WASM_OPT)" && echo 1 || echo 0)
 
 all: programs
 
@@ -485,6 +493,27 @@ $(PATCHED_SYSROOT)/lib/wasm32-wasi/libc.a: $(WASI_SDK_DIR)/bin/clang ../scripts/
 
 sysroot: $(PATCHED_SYSROOT)/lib/wasm32-wasi/libc.a
 
+$(THREADED_SYSROOT)/lib/wasm32-wasi-threads/libc.a: $(WASI_SDK_DIR)/bin/clang ../scripts/patch-wasi-libc.sh scripts/build-llvm-runtimes.sh $(WASI_LIBC_PATCHES) $(WASI_LIBC_OVERRIDES) $(LLVM_RUNTIME_PATCHES)
+	../scripts/patch-wasi-libc.sh --threads
+
+sysroot-threads: $(THREADED_SYSROOT)/lib/wasm32-wasi-threads/libc.a
+
+build/pthread_conformance.wasm: ../test-programs/pthread_conformance.c $(THREADED_SYSROOT)/lib/wasm32-wasi-threads/libc.a
+	@mkdir -p $(dir $@)
+	$(CC) --target=wasm32-wasip1-threads --sysroot=$(THREADED_SYSROOT) -O2 -pthread \
+		-Wl,--import-memory -Wl,--export-memory -Wl,--max-memory=134217728 \
+		-Wl,--export=wasi_thread_start -o $@ $<
+
+pthread-conformance-wasm: build/pthread_conformance.wasm
+
+build/pthread_benchmark.wasm: ../test-programs/pthread_benchmark.c $(THREADED_SYSROOT)/lib/wasm32-wasi-threads/libc.a
+	@mkdir -p $(dir $@)
+	$(CC) --target=wasm32-wasip1-threads --sysroot=$(THREADED_SYSROOT) -O2 -pthread \
+		-Wl,--import-memory -Wl,--export-memory -Wl,--max-memory=134217728 \
+		-Wl,--export=wasi_thread_start -o $@ $<
+
+pthread-benchmark-wasm: build/pthread_benchmark.wasm
+
 # Patched fixtures must relink whenever the owned libc changes. Without this
 # edge, make can leave an older host-import ABI embedded in an otherwise
 # up-to-date test binary after a sysroot rebuild.
@@ -496,11 +525,7 @@ $(BUILD_DIR)/select_edge: WASM_CFLAGS += -DFD_SETSIZE=8192
 # --- wasm-opt check ---
 
 wasm-opt-check:
-	@if [ "$(HAS_WASM_OPT)" = "1" ]; then \
-		echo "wasm-opt found: $$(wasm-opt --version | head -1)"; \
-	else \
-		echo "Warning: wasm-opt (binaryen) is not installed; skipping WASM optimization."; \
-	fi
+	@../scripts/ensure-wasm-opt.sh "$(WASM_OPT)"
 
 # --- Compile all C programs to WASM ---
 
@@ -894,7 +919,7 @@ $(BUILD_DIR)/grep: scripts/build-grep-upstream.sh $(PATCHED_SYSROOT)/lib/wasm32-
 		--output "$(abspath $@)"
 
 # duckdb: upstream DuckDB CLI built from source with our patched WASI/POSIX sysroot
-$(BUILD_DIR)/duckdb: libs/duckdb/CMakeLists.txt $(PATCHED_SYSROOT)/lib/wasm32-wasi/libc.a $(WASI_SDK_DIR)/bin/clang $(WASI_SDK_DIR)/bin/clang++ cmake/FindThreads.cmake scripts/build-duckdb.sh include/fcntl.h include/ifaddrs.h include/net/if.h include/sys/ioctl.h
+$(BUILD_DIR)/duckdb: libs/duckdb/CMakeLists.txt $(PATCHED_SYSROOT)/lib/wasm32-wasi/libc.a $(WASI_SDK_DIR)/bin/clang $(WASI_SDK_DIR)/bin/clang++ cmake/FindThreads.cmake scripts/build-duckdb.sh include/fcntl.h include/ifaddrs.h include/net/if.h include/sys/ioctl.h wasm-opt-check
 	@mkdir -p $(BUILD_DIR)
 	DUCKDB_SRC_DIR="$(abspath $(LIBS_DIR)/duckdb)" \
 	DUCKDB_BUILD_DIR="$(abspath $(BUILD_DIR)/duckdb-cmake)" \
@@ -915,6 +940,23 @@ native: $(NATIVE_OUTPUTS)
 	@echo "Programs: $(words $(NATIVE_REPORT_NAMES)) compiled"
 	@echo "Output:   $(NATIVE_DIR)/"
 	@echo "=== Build complete ==="
+
+# Stage only the runnable C parity corpus. The build directory also contains
+# downloaded libraries and intermediate objects that must not enter CI
+# artifacts or shipped command packages.
+CONFORMANCE_STAGE := $(BUILD_DIR)/conformance
+conformance-artifacts: programs native
+	rm -rf "$(CONFORMANCE_STAGE)"
+	mkdir -p "$(CONFORMANCE_STAGE)/native"
+	@set -e; \
+	for name in $(PROGRAM_REPORT_NAMES); do \
+		test -f "$(BUILD_DIR)/$$name" || { echo "missing WASM conformance fixture: $$name" >&2; exit 1; }; \
+		cp -p "$(BUILD_DIR)/$$name" "$(CONFORMANCE_STAGE)/$$name"; \
+	done; \
+	for name in $(NATIVE_REPORT_NAMES); do \
+		test -f "$(NATIVE_DIR)/$$name" || { echo "missing native conformance fixture: $$name" >&2; exit 1; }; \
+		cp -p "$(NATIVE_DIR)/$$name" "$(CONFORMANCE_STAGE)/native/$$name"; \
+	done
 
 $(NATIVE_DIR)/%: $$(call c_source,$$*)
 	@mkdir -p $(NATIVE_DIR)

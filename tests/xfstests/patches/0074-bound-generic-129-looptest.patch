@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Sat, 25 Jul 2026 18:30:00 -0700
+Subject: [PATCH] generic/129: accept exact quick-matrix loop reduction
+
+Keep upstream's 162,000 aggregate looptest iterations for the dedicated
+nightly endurance gate. The agentOS quick matrix supplies a smaller aggregate
+count only for an exact reviewed test/backend reduction record. Requiring a
+multiple of 162 preserves the upstream ratio across the four read/write,
+truncate, small-block, and open/close workloads.
+---
+ tests/generic/129 | 25 +++++++++++++++++++++----
+ 1 file changed, 21 insertions(+), 4 deletions(-)
+
+diff --git a/tests/generic/129 b/tests/generic/129
+--- a/tests/generic/129
++++ b/tests/generic/129
+@@ -26,11 +26,28 @@ _scratch_mkfs >/dev/null 2>&1
+ _scratch_mount "-o nosuid"
+ 
+ mkdir $SCRATCH_MNT/looptest
+ 
+-$here/src/looptest -i 100000 -r -w -b 8192 -s $SCRATCH_MNT/looptest/looptest1.tst
+-$here/src/looptest -i 10000 -t -r -w -s -b 102400 $SCRATCH_MNT/looptest/looptest2.tst
+-$here/src/looptest -i 50000 -r -w -b 256 -s $SCRATCH_MNT/looptest/looptest3.tst
+-$here/src/looptest -i 2000 -o -r -w -b 8192 -s $SCRATCH_MNT/looptest/looptest4.tst
++loop_iterations=${XFSTESTS_GENERIC_129_ITERATIONS:-162000}
++case "$loop_iterations" in
++	''|*[!0-9]*) _fail "invalid generic/129 aggregate iteration count: $loop_iterations" ;;
++esac
++if [ "$loop_iterations" -lt 162 ] || [ "$loop_iterations" -gt 162000 ]; then
++	_fail "generic/129 aggregate iteration count must be in 162..162000: $loop_iterations"
++fi
++if [ $((loop_iterations % 162)) -ne 0 ]; then
++	_fail "generic/129 aggregate iteration count must be a multiple of 162: $loop_iterations"
++fi
++
++loop_factor=$((loop_iterations / 162))
++loop1_iterations=$((loop_factor * 100))
++loop2_iterations=$((loop_factor * 10))
++loop3_iterations=$((loop_factor * 50))
++loop4_iterations=$((loop_factor * 2))
++
++$here/src/looptest -i "$loop1_iterations" -r -w -b 8192 -s $SCRATCH_MNT/looptest/looptest1.tst
++$here/src/looptest -i "$loop2_iterations" -t -r -w -s -b 102400 $SCRATCH_MNT/looptest/looptest2.tst
++$here/src/looptest -i "$loop3_iterations" -r -w -b 256 -s $SCRATCH_MNT/looptest/looptest3.tst
++$here/src/looptest -i "$loop4_iterations" -o -r -w -b 8192 -s $SCRATCH_MNT/looptest/looptest4.tst
+ 
+ status=0
+ exit
+-- 
+2.47.2

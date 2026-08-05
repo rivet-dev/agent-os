@@ -1,0 +1,26 @@
+[package]
+name = "agentos-executor-wasm-v8"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WebAssembly executor hosted by the agentOS V8 runtime"
+
+[lib]
+doctest = false
+
+[dependencies]
+agentos-vm-host-interface = { workspace = true }
+agentos-executor-contract = { workspace = true }
+agentos-resource-accounting = { workspace = true }
+agentos-driver-tokio = { workspace = true }
+agentos-executor-v8-runtime = { workspace = true }
+agentos-executor-wasm-abi = { workspace = true }
+base64 = "0.22"
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+wat = "1"

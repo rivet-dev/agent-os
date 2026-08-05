@@ -12,7 +12,7 @@ async function writeJson(root: string, rel: string, value: unknown) {
 	await writeFile(path, `${JSON.stringify(value, null, "\t")}\n`);
 }
 
-test("bumpCargoVersions bumps [workspace.package] and AgentOS path deps", async () => {
+test("bumpCargoVersions bumps [workspace.package] and agentOS path deps", async () => {
 	const repoRoot = await mkdtemp(join(tmpdir(), "agentos-version-test-"));
 	try {
 		await writeFile(
@@ -21,8 +21,8 @@ test("bumpCargoVersions bumps [workspace.package] and AgentOS path deps", async 
 version = "0.2.0"
 
 [workspace.dependencies]
-agentos-protocol = { path = "crates/agentos-protocol", version = "0.2.0-rc.3" }
-agentos-kernel = { path = "crates/kernel", version = "0.2.0-rc.3" }
+agentos-acp-protocol = { path = "crates/acp-protocol", version = "0.2.0-rc.3" }
+agentos-vm-kernel = { path = "crates/vm-kernel", version = "0.2.0-rc.3" }
 serde = "1"
 `,
 		);
@@ -34,7 +34,7 @@ name = "agentos-excluded-core"
 version = "0.2.0"
 
 [dependencies]
-agentos-protocol = { path = "../agentos-protocol", version = "0.2.0" }
+agentos-acp-protocol = { path = "../acp-protocol", version = "0.2.0" }
 `,
 		);
 
@@ -43,14 +43,14 @@ agentos-protocol = { path = "../agentos-protocol", version = "0.2.0" }
 		const cargoToml = await readFile(join(repoRoot, "Cargo.toml"), "utf8");
 		// a6 workspace version bumped...
 		assert.match(cargoToml, /\[workspace\.package\]\nversion = "0\.3\.0"/);
-		// ...AgentOS-owned crate deps (path = "crates/...") bumped...
+		// ...agentOS-owned crate deps (path = "crates/...") bumped...
 		assert.match(
 			cargoToml,
-			/agentos-protocol = \{ path = "crates\/agentos-protocol", version = "0\.3\.0" \}/,
+			/agentos-acp-protocol = \{ path = "crates\/acp-protocol", version = "0\.3\.0" \}/,
 		);
 		assert.match(
 			cargoToml,
-			/agentos-kernel = \{ path = "crates\/kernel", version = "0\.3\.0" \}/,
+			/agentos-vm-kernel = \{ path = "crates\/vm-kernel", version = "0\.3\.0" \}/,
 		);
 		assert.match(cargoToml, /serde = "1"/);
 		const excludedCargoToml = await readFile(
@@ -60,7 +60,7 @@ agentos-protocol = { path = "../agentos-protocol", version = "0.2.0" }
 		assert.match(excludedCargoToml, /version = "0\.3\.0"/);
 		assert.match(
 			excludedCargoToml,
-			/agentos-protocol = \{ path = "\.\.\/agentos-protocol", version = "0\.3\.0" \}/,
+			/agentos-acp-protocol = \{ path = "\.\.\/acp-protocol", version = "0\.3\.0" \}/,
 		);
 	} finally {
 		await rm(repoRoot, { recursive: true, force: true });
@@ -80,23 +80,17 @@ test("bumpPackageJsons injects sidecar platform optional dependencies", async ()
 			[
 				"packages:",
 				"  - packages/*",
-				"  - packages/sidecar-binary/npm/*",
-				"  - packages/runtime-sidecar/npm/*",
+				"  - packages/sidecar/npm/*",
 				"",
 			].join("\n"),
 		);
 		for (const [rel, name] of [
 			["packages/agentos", "@rivet-dev/agentos"],
 			["packages/core", "@rivet-dev/agentos-core"],
-			["packages/sidecar-binary", "@rivet-dev/agentos-sidecar"],
-			["packages/runtime-sidecar", "@rivet-dev/agentos-runtime-sidecar"],
+			["packages/sidecar", "@rivet-dev/agentos-sidecar"],
 			...DEFAULT_SIDECAR_PLATFORMS.map((platform) => [
-				`packages/sidecar-binary/npm/${platform}`,
+				`packages/sidecar/npm/${platform}`,
 				`@rivet-dev/agentos-sidecar-${platform}`,
-			]),
-			...DEFAULT_SIDECAR_PLATFORMS.map((platform) => [
-				`packages/runtime-sidecar/npm/${platform}`,
-				`@rivet-dev/agentos-runtime-sidecar-${platform}`,
 			]),
 		]) {
 			await writeJson(repoRoot, join(rel, "package.json"), {
@@ -109,7 +103,7 @@ test("bumpPackageJsons injects sidecar platform optional dependencies", async ()
 
 		const sidecarManifest = JSON.parse(
 			await readFile(
-				join(repoRoot, "packages/sidecar-binary/package.json"),
+				join(repoRoot, "packages/sidecar/package.json"),
 				"utf8",
 			),
 		);
@@ -118,22 +112,6 @@ test("bumpPackageJsons injects sidecar platform optional dependencies", async ()
 			Object.fromEntries(
 				DEFAULT_SIDECAR_PLATFORMS.map((platform) => [
 					`@rivet-dev/agentos-sidecar-${platform}`,
-					"0.3.0",
-				]).sort(),
-			),
-		);
-
-		const runtimeSidecarManifest = JSON.parse(
-			await readFile(
-				join(repoRoot, "packages/runtime-sidecar/package.json"),
-				"utf8",
-			),
-		);
-		assert.deepEqual(
-			runtimeSidecarManifest.optionalDependencies,
-			Object.fromEntries(
-				DEFAULT_SIDECAR_PLATFORMS.map((platform) => [
-					`@rivet-dev/agentos-runtime-sidecar-${platform}`,
 					"0.3.0",
 				]).sort(),
 			),

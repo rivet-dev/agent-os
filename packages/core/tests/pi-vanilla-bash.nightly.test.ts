@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import common from "@agentos-software/common";
 import pi from "@agentos-software/pi";
-import type { Fixture, ToolCall } from "@copilotkit/llmock";
+import type { ToolCall } from "@copilotkit/llmock";
 import { describe, expect, test } from "vitest";
 import { AgentOs } from "../src/agent-os.js";
 import {
@@ -108,6 +108,50 @@ function captureSessionEventText(
 
 function textPrompt(vm: AgentOs, sessionId: string, text: string) {
 	return vm.prompt({ sessionId, content: [{ type: "text", text }] });
+}
+
+function withTimeout<T>(
+	promise: Promise<T>,
+	timeoutMs: number,
+	label: string,
+): Promise<T> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	const timeoutPromise = new Promise<never>((_resolve, reject) => {
+		timeout = setTimeout(
+			() => reject(new Error(`timed out waiting for ${label}`)),
+			timeoutMs,
+		);
+		timeout.unref?.();
+	});
+	return Promise.race([promise, timeoutPromise]).finally(() => {
+		if (timeout) clearTimeout(timeout);
+	});
+}
+
+function processRunsCommand(
+	process: ReturnType<AgentOs["allProcesses"]>[number],
+	command: string,
+): boolean {
+	return (
+		process.status === "running" &&
+		(process.command.includes(command) ||
+			process.args.some((arg) => arg.includes(command)))
+	);
+}
+
+async function waitForMockRequest(
+	mock: { getRequests(): unknown[] },
+	timeoutMs: number,
+	label: string,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (mock.getRequests().length > 0) {
+			return;
+		}
+		await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+	}
+	throw new Error(`timed out waiting for ${label}`);
 }
 
 /**
@@ -300,7 +344,6 @@ describe("vanilla Pi bash tool inside the VM", () => {
 		const vm = await createPiVm(url);
 
 		let sessionId: string | undefined;
-		const startedAt = Date.now();
 		try {
 			const homeDir = await createVmPiHome(vm, url);
 			const workspaceDir = await createVmWorkspace(vm);
@@ -317,6 +360,7 @@ describe("vanilla Pi bash tool inside the VM", () => {
 			});
 
 			const eventText = captureSessionEventText(vm, sessionId);
+			const startedAt = Date.now();
 			const result = await textPrompt(
 				vm,
 				sessionId,
@@ -335,18 +379,19 @@ describe("vanilla Pi bash tool inside the VM", () => {
 			await vm.dispose();
 			await stopLlmock(mock);
 		}
-	}, 60_000);
+	}, 120_000);
 
 	test("aborts an in-flight bash command on session cancel", async () => {
-		const fixtures: Fixture[] = [
-			createAnthropicFixture(
-				{
-					predicate: (req) =>
-						!JSON.stringify(getRequestBody(req)).includes('"role":"tool"'),
-				},
-				{ toolCalls: [bashToolCall({ command: "sleep 60", timeout: 120 })] },
-			),
-		];
+		const heartbeatPath = "/tmp/pi-cancel-heartbeat";
+		const fixtures = createBashFixtures(
+			bashToolCall({
+				command:
+					`printf 'tick\\n' >> ${heartbeatPath}; printf 'started\\n'; ` +
+					`while :; do printf 'tick\\n' >> ${heartbeatPath}; sleep 1; done`,
+				timeout: 120,
+			}),
+			"the command should have been cancelled.",
+		);
 		const { mock, url } = await startLlmock(fixtures);
 		const vm = await createPiVm(url);
 
@@ -354,9 +399,9 @@ describe("vanilla Pi bash tool inside the VM", () => {
 		try {
 			const homeDir = await createVmPiHome(vm, url);
 			const workspaceDir = await createVmWorkspace(vm);
-			sessionId = "main";
+			const requestedSessionId = "main";
 			await vm.openSession({
-				sessionId,
+				sessionId: requestedSessionId,
 				agent: "pi",
 				cwd: workspaceDir,
 				env: {
@@ -365,41 +410,49 @@ describe("vanilla Pi bash tool inside the VM", () => {
 					ANTHROPIC_BASE_URL: url,
 				},
 			});
+			sessionId = requestedSessionId;
 
 			const activeSessionId = sessionId;
-			const sawInProgress = new Promise<void>((resolveInProgress) => {
-				const unsubscribe = vm.onSessionEvent(activeSessionId, (event) => {
-					const serialized = JSON.stringify(event);
-					if (
-						serialized.includes('"in_progress"') &&
-						serialized.includes("bash")
-					) {
-						unsubscribe();
-						resolveInProgress();
-					}
-				});
-			});
-
-			const promptPromise = textPrompt(
+			const promptOutcome = textPrompt(
 				vm,
 				activeSessionId,
 				"Run sleep 60 in bash.",
+			).then(
+				(result) => ({ status: "resolved" as const, result }),
+				(error: unknown) => ({ status: "rejected" as const, error }),
 			);
 
-			await sawInProgress;
-			await vm.cancelPrompt({ sessionId: activeSessionId });
+			// Pi does not publish its tool-call progress event until this
+			// long-running command returns. The mock request is independent of
+			// the occupied session lane and proves the tool fixture was delivered.
+			await waitForMockRequest(mock, 30_000, "Pi model request");
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
+			const cancelResponse = await withTimeout(
+				vm.cancelPrompt({ sessionId: activeSessionId }),
+				15_000,
+				"Pi cancel response",
+			);
+			expect(cancelResponse.status).toBe("cancelled");
 
-			const result = await promptPromise;
+			const outcome = await withTimeout(
+				promptOutcome,
+				15_000,
+				"Pi prompt cancellation",
+			);
+			if (outcome.status === "rejected") {
+				throw outcome.error;
+			}
+			const result = outcome.result;
 			expect(result.stopReason).toBe("cancelled");
+
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_200));
+			const heartbeatAfterCancel = await vm.readFile(heartbeatPath);
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_200));
+			expect(await vm.readFile(heartbeatPath)).toEqual(heartbeatAfterCancel);
 
 			const lingering = vm
 				.allProcesses()
-				.filter(
-					(proc) =>
-						proc.status === "running" &&
-						(proc.command.includes("sleep") ||
-							proc.args.some((arg) => arg.includes("sleep"))),
-				);
+				.filter((process) => processRunsCommand(process, "sleep"));
 			expect(lingering).toEqual([]);
 		} finally {
 			if (sessionId) {
@@ -408,5 +461,5 @@ describe("vanilla Pi bash tool inside the VM", () => {
 			await vm.dispose();
 			await stopLlmock(mock);
 		}
-	}, 60_000);
+	}, 120_000);
 });

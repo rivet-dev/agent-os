@@ -1,0 +1,57 @@
+--- a/libc-top-half/musl/src/misc/uname.c
++++ b/libc-top-half/musl/src/misc/uname.c
+@@ -1,32 +1,40 @@
+ #include <sys/utsname.h>
+ #ifdef __wasilibc_unmodified_upstream // Implement uname with placeholders
+ #include "syscall.h"
+ #else
++#include <errno.h>
++#include <stdint.h>
+ #include <string.h>
++
++#define WASM_IMPORT(mod, fn) \
++    __attribute__((__import_module__(mod), __import_name__(fn)))
++WASM_IMPORT("host_system", "get_identity")
++uint32_t __host_system_get_identity(uint32_t field, char *buffer, uint32_t length);
+ #endif
+ 
+ int uname(struct utsname *uts)
+ {
+ #ifdef __wasilibc_unmodified_upstream // Implement uname with placeholders
+ 	return syscall(SYS_uname, uts);
+ #else
+-	// Just fill in the fields with placeholder values.
+-	strcpy(uts->sysname, "wasi");
+-	strcpy(uts->nodename, "(none)");
+-	strcpy(uts->release, "0.0.0");
+-	strcpy(uts->version, "0.0.0");
+-#if defined(__wasm32__)
+-	strcpy(uts->machine, "wasm32");
+-#elif defined(__wasm64__)
+-	strcpy(uts->machine, "wasm64");
+-#else
+-	strcpy(uts->machine, "unknown");
+-#endif
++	if (uts == NULL) {
++		errno = EFAULT;
++		return -1;
++	}
++	uint32_t err = __host_system_get_identity(1, uts->sysname, sizeof(uts->sysname));
++	if (err == 0) err = __host_system_get_identity(0, uts->nodename, sizeof(uts->nodename));
++	if (err == 0) err = __host_system_get_identity(2, uts->release, sizeof(uts->release));
++	if (err == 0) err = __host_system_get_identity(3, uts->version, sizeof(uts->version));
++	if (err == 0) err = __host_system_get_identity(4, uts->machine, sizeof(uts->machine));
+ #ifdef _GNU_SOURCE
+-	strcpy(uts->domainname, "(none)");
++	if (err == 0) err = __host_system_get_identity(5, uts->domainname, sizeof(uts->domainname));
+ #else
+-	strcpy(uts->__domainname, "(none)");
++	if (err == 0) err = __host_system_get_identity(5, uts->__domainname, sizeof(uts->__domainname));
+ #endif
++	if (err != 0) {
++		errno = (int)err;
++		return -1;
++	}
+ 	return 0;
+ #endif
+ }

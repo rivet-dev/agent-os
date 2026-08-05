@@ -15,7 +15,8 @@ var NODE_CUSTOM_GLOBAL_INVENTORY = [
 	{
 		name: "__agentOsRequireEsmSync",
 		classification: "hardened",
-		rationale: "V8-owned synchronous ESM loader used by Node-compatible require().",
+		rationale:
+			"V8-owned synchronous ESM loader used by Node-compatible require().",
 	},
 	{
 		name: "process.cpuUsage",
@@ -298,6 +299,11 @@ var NODE_CUSTOM_GLOBAL_INVENTORY = [
 		rationale: "Host process signal-listener state bridge reference.",
 	},
 	{
+		name: "_processSignalEnd",
+		classification: "hardened",
+		rationale: "Host process signal-delivery completion bridge reference.",
+	},
+	{
 		name: "_processTakeSignal",
 		classification: "hardened",
 		rationale: "Host process pending-signal drain bridge reference.",
@@ -340,6 +346,12 @@ var NODE_CUSTOM_GLOBAL_INVENTORY = [
 		name: "_getActiveHandles",
 		classification: "hardened",
 		rationale: "Bridge debug hook should not be replaced by sandbox code.",
+	},
+	{
+		name: "_processExitRequested",
+		classification: "hardened",
+		rationale:
+			"Process-exit state controls runtime completion and must not be replaced by guest code.",
 	},
 	{
 		name: "_childProcessDispatch",
@@ -1212,7 +1224,8 @@ var NODE_CUSTOM_GLOBAL_INVENTORY = [
 	{
 		name: "_netSocketWriteSyncRaw",
 		classification: "hardened",
-		rationale: "Host synchronous net socket write bridge reference for WASM guests.",
+		rationale:
+			"Host synchronous net socket write bridge reference for WASM guests.",
 	},
 	{
 		name: "_netSocketEndRaw",
@@ -1653,7 +1666,7 @@ function exposeInstallCompatibleHardenedGlobal(name, value) {
 	Object.defineProperty(globalThis, name, {
 		get: () => value,
 		// Some Node packages install web globals by assignment. Accept the write
-		// without replacing AgentOS's policy-enforcing implementation.
+		// without replacing agentOS's policy-enforcing implementation.
 		set: () => {},
 		configurable: true,
 		enumerable: true,

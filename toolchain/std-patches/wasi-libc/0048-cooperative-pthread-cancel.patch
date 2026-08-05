@@ -1,0 +1,121 @@
+diff --git a/libc-top-half/musl/include/pthread.h b/libc-top-half/musl/include/pthread.h
+index a0fc84f..f14f137 100644
+--- a/libc-top-half/musl/include/pthread.h
++++ b/libc-top-half/musl/include/pthread.h
+@@ -82,11 +82,12 @@ int pthread_create(pthread_t *__restrict, const pthread_attr_t *__restrict, void
+ int pthread_detach(pthread_t);
+ _Noreturn void pthread_exit(void *);
+ int pthread_join(pthread_t, void **);
+ #else
+ #if defined(_WASI_EMULATED_PTHREAD) || defined(_REENTRANT)
+ int pthread_create(pthread_t *__restrict, const pthread_attr_t *__restrict, void *(*)(void *), void *__restrict);
+ int pthread_detach(pthread_t);
++_Noreturn void pthread_exit(void *);
+ int pthread_join(pthread_t, void **);
+ #else
+ #include <assert.h>
+ #define pthread_create(...) ({ _Static_assert(0, "This mode of WASI does not have threads enabled; \
+@@ -114,9 +114,7 @@ int pthread_equal(pthread_t, pthread_t);
+ int pthread_setcancelstate(int, int *);
+ int pthread_setcanceltype(int, int *);
+ void pthread_testcancel(void);
+-#ifdef __wasilibc_unmodified_upstream /* WASI has no cancellation support. */
+ int pthread_cancel(pthread_t);
+-#endif
+ 
+ #ifdef __wasilibc_unmodified_upstream /* WASI has no CPU scheduling support. */
+ int pthread_getschedparam(pthread_t, int *__restrict, struct sched_param *__restrict);
+diff --git a/libc-top-half/musl/src/thread/pthread_cancel.c b/libc-top-half/musl/src/thread/pthread_cancel.c
+index 8e1f6c6..1df3abf 100644
+--- a/libc-top-half/musl/src/thread/pthread_cancel.c
++++ b/libc-top-half/musl/src/thread/pthread_cancel.c
+@@ -87,8 +87,25 @@ int pthread_cancel(pthread_t t)
+ 	return pthread_kill(t, SIGCANCEL);
+ }
+ #else
++_Noreturn void pthread_exit(void *);
++
++void __testcancel()
++{
++	pthread_t self = __pthread_self();
++	if (self->cancel && !self->canceldisable)
++		pthread_exit(PTHREAD_CANCELED);
++}
++
+ int pthread_cancel(pthread_t t)
+ {
+-	return ENOTSUP;
++	a_store(&t->cancel, 1);
++	if (t == pthread_self()) {
++		if (t->canceldisable == PTHREAD_CANCEL_ENABLE && t->cancelasync)
++			pthread_exit(PTHREAD_CANCELED);
++		return 0;
++	}
++	/* AgentOS cancellation is cooperative: the target observes this shared
++	 * flag at pthread_testcancel or another libc cancellation point. */
++	return 0;
+ }
+ #endif
+diff --git a/libc-top-half/musl/src/thread/pthread_create.c b/libc-top-half/musl/src/thread/pthread_create.c
+index 7e21bb1..415c4c5 100644
+--- a/libc-top-half/musl/src/thread/pthread_create.c
++++ b/libc-top-half/musl/src/thread/pthread_create.c
+@@ -233,6 +233,18 @@ static void __pthread_exit(void *result)
+ #endif
+ }
+ 
++#ifndef __wasilibc_unmodified_upstream
++/* Complete the assembly-only unlock used by wasi_thread_start before
++ * terminating this Store. Keeping the final unlock out of C prevents a
++ * concurrent joiner from freeing the current stack while C still uses it. */
++_Noreturn void __wasi_pthread_exit(void);
++_Noreturn void pthread_exit(void *result)
++{
++	__pthread_exit(result);
++	__wasi_pthread_exit();
++}
++#endif
++
+ void __do_cleanup_push(struct __ptcb *cb)
+ {
+ 	struct pthread *self = __pthread_self();
+diff --git a/libc-top-half/musl/src/thread/wasm32/wasi_thread_start.s b/libc-top-half/musl/src/thread/wasm32/wasi_thread_start.s
+index 9af7b6a..9961101 100644
+--- a/libc-top-half/musl/src/thread/wasm32/wasi_thread_start.s
++++ b/libc-top-half/musl/src/thread/wasm32/wasi_thread_start.s
+@@ -5,6 +5,7 @@
+ 	.globaltype	__stack_pointer, i32
+ 	.globaltype	__tls_base, i32
+ 	.functype	__wasi_thread_start_C (i32, i32) -> ()
++	.functype	__wasi_proc_exit (i32) -> ()
+ 
+ 	.hidden	wasi_thread_start
+ 	.globl	wasi_thread_start
+@@ -46,3 +47,27 @@ wasi_thread_start:
+ 	drop
+ 
+ 	end_function
++
++	.hidden	__wasi_pthread_exit
++	.globl	__wasi_pthread_exit
++	.type	__wasi_pthread_exit,@function
++
++__wasi_pthread_exit:
++	.functype	__wasi_pthread_exit () -> ()
++
++	# Mirror the final assembly-only thread-list unlock above. The current
++	# pthread stack may be reclaimed immediately after the notify, so no C
++	# code or stack access is permitted beyond this point.
++	i32.const	__thread_list_lock
++	i32.const	0
++	i32.atomic.store 0
++	i32.const	__thread_list_lock
++	i32.const	1
++	memory.atomic.notify 0
++	drop
++
++	i32.const	0
++	call	__wasi_proc_exit
++	unreachable
++
++	end_function

@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Thu, 23 Jul 2026 02:20:00 -0700
+Subject: [PATCH] generic/410-411: classify mount propagation
+
+These tests exercise shared-subtree state transitions and a Linux vfsmount
+peer-group crash regression.  agentOS logical mounts do not expose a guest
+mount namespace, so use the same exact capability boundary as generic/409.
+
+diff --git a/tests/generic/410 b/tests/generic/410
+--- a/tests/generic/410
++++ b/tests/generic/410
+@@ -45,6 +45,10 @@ _cleanup()
+ # Import common functions.
+ . ./common/filter
+ 
++if [ "$FSTYP" = "agentos" ]; then
++	_notrun "agentOS does not support Linux shared-subtree mount propagation"
++fi
++
+ _require_test
+ _require_scratch
+ _require_local_device $SCRATCH_DEV
+diff --git a/tests/generic/411 b/tests/generic/411
+--- a/tests/generic/411
++++ b/tests/generic/411
+@@ -27,6 +27,10 @@ _cleanup()
+ # Import common functions.
+ . ./common/filter
+ 
++if [ "$FSTYP" = "agentos" ]; then
++	_notrun "agentOS does not support Linux shared-subtree mount propagation"
++fi
++
+ _require_test
+ _require_scratch
+ _require_local_device $SCRATCH_DEV
+-- 
+2.47.3

@@ -11,6 +11,10 @@ release-preview REF:
 # --- @agentos-software/* software packages (independent, PER-PACKAGE versions) ---
 toolchain-build:
 	make -C toolchain commands
+	make -C toolchain cmd/duckdb cmd/vim
+
+toolchain-codex:
+	make -C toolchain codex-required
 
 toolchain-cmd name:
 	make -C toolchain cmd/{{ name }}
@@ -30,17 +34,27 @@ toolchain-preflight:
 	make programs
 
 toolchain-copy-commands:
-	node packages/runtime-core/scripts/copy-wasm-commands.mjs
+	node packages/core/scripts/copy-wasm-commands.mjs --require
+
+toolchain-check-abi:
+	node scripts/generate-wasm-abi-manifest.mjs
+
+toolchain-audit-imports:
+	just toolchain-check-abi
+	node scripts/audit-wasm-imports.mjs
 
 software-build:
+	pnpm --filter @rivet-dev/agentos-toolchain build
 	pnpm --filter '@agentos-software/*' build
 
 # Rebuild and stage the complete default WASM tool set from source. All outputs
 # land in ignored build/bin/commands directories and must not be committed.
 tools-rebuild:
 	just toolchain-build
+	just toolchain-codex
 	just toolchain-copy-commands
 	just software-build
+	just toolchain-audit-imports
 
 install-shell:
 	#!/usr/bin/env bash
@@ -113,10 +127,10 @@ shell *args:
 	if [[ ! -e software/common/dist/index.js ]]; then
 		pnpm --filter @agentos-software/common build
 	fi
-	if [[ ! -e packages/runtime-core/dist/index.js \
+	if [[ ! -e packages/core/dist/index.js \
 		|| ! -e packages/core/dist/index.js \
 		|| ! -e packages/agentos/dist/index.js ]]; then
-		pnpm --filter @rivet-dev/agentos-runtime-core build
+		pnpm --filter @rivet-dev/agentos-core build
 		pnpm --filter @rivet-dev/agentos-core build
 		pnpm --filter @rivet-dev/agentos build
 	fi

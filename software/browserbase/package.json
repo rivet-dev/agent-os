@@ -34,7 +34,6 @@
 		"@rivet-dev/agentos-toolchain": "workspace:*",
 		"@types/node": "^22.10.2",
 		"typescript": "^5.7.2",
-		"@rivet-dev/agentos-test-harness": "workspace:*",
 		"vitest": "^2.1.9"
 	}
 }

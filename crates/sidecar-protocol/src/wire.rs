@@ -17,6 +17,7 @@ pub use crate::generated_protocol::v1::*;
 impl Copy for crate::generated_protocol::v1::GuestFilesystemOperation {}
 impl Copy for crate::generated_protocol::v1::RootFilesystemMode {}
 impl Copy for crate::generated_protocol::v1::WasmPermissionTier {}
+impl Copy for crate::generated_protocol::v1::StandaloneWasmBackend {}
 
 // `derive(Default)` cannot be added: these are foreign generated types, so the
 // `Default` impl must be written by hand here (orphan rule).
@@ -440,7 +441,6 @@ fn legacy_limits_config(
         max_readdir_entries: legacy_u64(metadata, "resource.max_readdir_entries"),
         max_recursive_fs_depth: legacy_u64(metadata, "resource.max_recursive_fs_depth"),
         max_recursive_fs_entries: legacy_u64(metadata, "resource.max_recursive_fs_entries"),
-        max_wasm_fuel: legacy_u64(metadata, "resource.max_wasm_fuel"),
         max_wasm_memory_bytes: legacy_u64(metadata, "resource.max_wasm_memory_bytes"),
         max_wasm_stack_bytes: legacy_u64(metadata, "resource.max_wasm_stack_bytes"),
     };
@@ -562,7 +562,11 @@ fn legacy_limits_config(
         sync_read_limit_bytes: legacy_u64(metadata, "limits.wasm.sync_read_limit_bytes"),
         prewarm_timeout_ms: legacy_u64(metadata, "limits.wasm.prewarm_timeout_ms"),
         runner_heap_limit_mb: legacy_u64(metadata, "limits.wasm.runner_heap_limit_mb"),
-        runner_cpu_time_limit_ms: legacy_u64(metadata, "limits.wasm.runner_cpu_time_limit_ms"),
+        active_cpu_time_limit_ms: legacy_u64(metadata, "limits.wasm.active_cpu_time_limit_ms"),
+        wall_clock_limit_ms: legacy_u64(metadata, "limits.wasm.wall_clock_limit_ms"),
+        deterministic_fuel: legacy_u64(metadata, "limits.wasm.deterministic_fuel"),
+        max_threads: legacy_u64(metadata, "limits.wasm.max_threads"),
+        max_concurrent_threads: legacy_u64(metadata, "limits.wasm.max_concurrent_threads"),
     };
     let execution = agentos_vm_config::ExecutionLimitsConfig {
         completed_ttl_ms: legacy_u64(metadata, "limits.execution.completed_ttl_ms"),
@@ -583,6 +587,14 @@ fn legacy_limits_config(
         pending_stdin_bytes: legacy_u64(metadata, "limits.process.pending_stdin_bytes"),
         pending_event_count: legacy_u64(metadata, "limits.process.pending_event_count"),
         pending_event_bytes: legacy_u64(metadata, "limits.process.pending_event_bytes"),
+        max_pending_child_sync_count: legacy_u64(
+            metadata,
+            "limits.process.max_pending_child_sync_count",
+        ),
+        max_pending_child_sync_bytes: legacy_u64(
+            metadata,
+            "limits.process.max_pending_child_sync_bytes",
+        ),
     };
 
     let config = agentos_vm_config::VmLimitsConfig {
@@ -650,7 +662,6 @@ fn legacy_has_resource_limits(config: &agentos_vm_config::ResourceLimitsConfig) 
         || config.max_process_argv_bytes.is_some()
         || config.max_process_env_bytes.is_some()
         || config.max_readdir_entries.is_some()
-        || config.max_wasm_fuel.is_some()
         || config.max_wasm_memory_bytes.is_some()
         || config.max_wasm_stack_bytes.is_some()
 }
@@ -718,7 +729,11 @@ fn legacy_has_wasm_limits(config: &agentos_vm_config::WasmLimitsConfig) -> bool 
         || config.sync_read_limit_bytes.is_some()
         || config.prewarm_timeout_ms.is_some()
         || config.runner_heap_limit_mb.is_some()
-        || config.runner_cpu_time_limit_ms.is_some()
+        || config.active_cpu_time_limit_ms.is_some()
+        || config.wall_clock_limit_ms.is_some()
+        || config.deterministic_fuel.is_some()
+        || config.max_threads.is_some()
+        || config.max_concurrent_threads.is_some()
 }
 
 fn legacy_has_process_limits(config: &agentos_vm_config::ProcessLimitsConfig) -> bool {
@@ -727,6 +742,8 @@ fn legacy_has_process_limits(config: &agentos_vm_config::ProcessLimitsConfig) ->
         || config.pending_stdin_bytes.is_some()
         || config.pending_event_count.is_some()
         || config.pending_event_bytes.is_some()
+        || config.max_pending_child_sync_count.is_some()
+        || config.max_pending_child_sync_bytes.is_some()
 }
 
 // Ownership-scope constructor ergonomics. The generated BARE union exposes only the
@@ -761,7 +778,7 @@ impl crate::generated_protocol::v1::OwnershipScope {
     }
 }
 
-pub const PROTOCOL_NAME: &str = "agentos-native-sidecar";
+pub const PROTOCOL_NAME: &str = "agentos-sidecar";
 pub const PROTOCOL_VERSION: u16 = 8;
 // 16 MiB: large enough to carry a trusted-client CreateVm config that inlines an
 // entire base-filesystem snapshot, while still bounding a single frame.
@@ -1335,16 +1352,28 @@ mod tests {
     }
 
     #[test]
-    fn legacy_metadata_preserves_wasm_runner_cpu_limit_as_only_new_field() {
-        let metadata = BTreeMap::from([(
-            String::from("limits.wasm.runner_cpu_time_limit_ms"),
-            String::from("987"),
-        )]);
+    fn legacy_metadata_preserves_wasm_cpu_fields() {
+        let metadata = BTreeMap::from([
+            (
+                String::from("limits.wasm.active_cpu_time_limit_ms"),
+                String::from("987"),
+            ),
+            (
+                String::from("limits.wasm.wall_clock_limit_ms"),
+                String::from("654"),
+            ),
+            (
+                String::from("limits.wasm.deterministic_fuel"),
+                String::from("321"),
+            ),
+        ]);
 
         let config = legacy_limits_config(&metadata).expect("limits config");
         let wasm = config.wasm.expect("wasm limits");
 
-        assert_eq!(wasm.runner_cpu_time_limit_ms, Some(987));
+        assert_eq!(wasm.active_cpu_time_limit_ms, Some(987));
+        assert_eq!(wasm.wall_clock_limit_ms, Some(654));
+        assert_eq!(wasm.deterministic_fuel, Some(321));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 /**
  * `.aospkg` packer — the toolchain half of the canonical packer in
- * `crates/vfs/src/package_format/pack.rs` (both encode the schema in
- * `crates/vfs/package-format/v1.bare`; the TS codecs are generated from it by
+ * `crates/vfs-core/src/package_format/pack.rs` (both encode the schema in
+ * `crates/vfs-core/package-format/v1.bare`; the TS codecs are generated from it by
  * `pnpm --dir packages/build-tools build:package-format`).
  *
  * Container layout: `16-byte header + vbare PackageManifest + vbare MountIndex

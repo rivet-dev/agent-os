@@ -1,51 +1,33 @@
 [workspace]
 resolver = "2"
-exclude = ["software", "crates/agentos-sidecar-core"]
+exclude = ["software"]
 members = [
-    "crates/actor-uds-client",
-    "crates/agentos-protocol",
-    "crates/agentos-sidecar",
-    "crates/agentos-sidecar-browser",
+    "crates/rivetkit-ars-client",
+    "crates/acp-protocol",
+    "crates/sidecar",
     "crates/client",
-    "crates/bridge",
-    "crates/build-support",
-    "crates/execution",
-    "crates/kernel",
-    "crates/native-baseline",
-    "crates/native-sidecar",
-    "crates/native-sidecar-browser",
-    "crates/native-sidecar-core",
-    "crates/runtime",
+    "crates/vm-host-interface",
+    "crates/executor-conformance",
+    "crates/executor-contract",
+    "crates/executor-node-v8",
+    "crates/executor-python-v8-pyodide",
+    "crates/executor-wasm-abi",
+    "crates/executor-wasm-v8",
+    "crates/executor-wasm-wasmtime",
+    "crates/vm-kernel",
+    "crates/benchmark-baseline",
+    "crates/vm",
+    "crates/resource-accounting",
+    "crates/driver-tokio",
     "crates/sidecar-client",
     "crates/sidecar-protocol",
-    "crates/v8-runtime",
-    "crates/vfs",
-    "crates/vfs-store",
+    "crates/executor-v8-runtime",
+    "crates/vfs-core",
+    "crates/vfs-storage",
     "crates/vm-config",
+    "crates/executor-wasm-abi-generator",
+    "examples/embedded-vm",
 ]
-# Browser support is intentionally retained in-tree but disabled while the
-# unified native sidecar reactor lands. Keep these two crates out of ordinary
-# workspace commands so dormant browser code cannot block native CI.
-default-members = [
-    "crates/agentos-protocol",
-    "crates/agentos-sidecar",
-    "crates/client",
-    "crates/bridge",
-    "crates/build-support",
-    "crates/execution",
-    "crates/kernel",
-    "crates/native-baseline",
-    "crates/native-sidecar",
-    "crates/native-sidecar-core",
-    "crates/runtime",
-    "crates/sidecar-client",
-    "crates/sidecar-protocol",
-    "crates/v8-runtime",
-    "crates/vfs",
-    "crates/vfs-store",
-    "crates/vm-config",
-]
-
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
@@ -56,24 +38,47 @@ repository = "https://github.com/rivet-dev/agent-os"
 # this workspace.
 [workspace.dependencies]
 agent-client-protocol-schema = "1.4.0"
-agentos-actor-uds-client = { path = "crates/actor-uds-client", version = "0.0.1" }
-agentos-bridge = { path = "crates/bridge", version = "0.0.1" }
-agentos-build-support = { path = "crates/build-support", version = "0.0.1" }
-agentos-execution = { path = "crates/execution", version = "0.0.1" }
-agentos-kernel = { path = "crates/kernel", version = "0.0.1" }
-agentos-native-baseline = { path = "crates/native-baseline", version = "0.0.1" }
-agentos-native-sidecar = { path = "crates/native-sidecar", version = "0.0.1" }
-agentos-native-sidecar-browser = { path = "crates/native-sidecar-browser", version = "0.0.1" }
-agentos-native-sidecar-core = { path = "crates/native-sidecar-core", version = "0.0.1" }
-agentos-runtime = { path = "crates/runtime", version = "0.0.1" }
-agentos-protocol = { path = "crates/agentos-protocol", version = "0.0.1" }
+agentos-rivetkit-ars-client = { path = "crates/rivetkit-ars-client", version = "0.0.1" }
+agentos-vm-host-interface = { path = "crates/vm-host-interface", version = "0.0.1" }
+agentos-executor-contract = { path = "crates/executor-contract", version = "0.0.1" }
+agentos-executor-node-v8 = { path = "crates/executor-node-v8", version = "0.0.1" }
+agentos-executor-python-v8-pyodide = { path = "crates/executor-python-v8-pyodide", version = "0.0.1" }
+agentos-executor-wasm-abi = { path = "crates/executor-wasm-abi", version = "0.0.1" }
+agentos-executor-wasm-v8 = { path = "crates/executor-wasm-v8", version = "0.0.1" }
+agentos-executor-wasm-wasmtime = { path = "crates/executor-wasm-wasmtime", version = "0.0.1" }
+agentos-vm-kernel = { path = "crates/vm-kernel", version = "0.0.1" }
+agentos-benchmark-baseline = { path = "crates/benchmark-baseline", version = "0.0.1" }
+agentos-vm = { path = "crates/vm", version = "0.0.1", default-features = false }
+agentos-resource-accounting = { path = "crates/resource-accounting", version = "0.0.1" }
+agentos-driver-tokio = { path = "crates/driver-tokio", version = "0.0.1" }
+agentos-acp-protocol = { path = "crates/acp-protocol", version = "0.0.1" }
 agentos-sidecar-client = { path = "crates/sidecar-client", version = "0.0.1" }
-agentos-sidecar = { path = "crates/agentos-sidecar", version = "0.0.1" }
-agentos-sidecar-browser = { path = "crates/agentos-sidecar-browser", version = "0.0.1" }
+agentos-sidecar = { path = "crates/sidecar", version = "0.0.1" }
 agentos-sidecar-protocol = { path = "crates/sidecar-protocol", version = "0.0.1" }
-agentos-v8-runtime = { path = "crates/v8-runtime", version = "0.0.1" }
-agentos-vfs = { path = "crates/vfs-store", version = "0.0.1" }
+agentos-executor-v8-runtime = { path = "crates/executor-v8-runtime", version = "0.0.1" }
+agentos-vfs-core = { path = "crates/vfs-core", version = "0.0.1", default-features = false }
+agentos-vfs-storage = { path = "crates/vfs-storage", version = "0.0.1", default-features = false }
 agentos-vm-config = { path = "crates/vm-config", version = "0.0.1" }
-vfs = { package = "agentos-vfs-core", path = "crates/vfs", version = "0.0.1" }
 vbare = "0.0.4"
 vbare-compiler = { package = "rivet-vbare-compiler", version = "0.0.5" }
+
+# Keep parallel-compilation disabled: Wasmtime implements it with Rayon's
+# host-sized global pool, outside AgentOS's fixed reviewed thread census.
+wasmtime = { version = "=46.0.0", default-features = false, features = [
+    "async",
+    "cranelift",
+    "gc",
+    "gc-drc",
+    "runtime",
+    "std",
+    "threads",
+] }
+wasmparser = "=0.251.0"
+
+[profile.embedded]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

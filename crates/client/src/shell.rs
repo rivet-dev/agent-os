@@ -50,6 +50,8 @@ pub struct OpenShellOptions {
     pub cwd: Option<String>,
     pub cols: Option<u16>,
     pub rows: Option<u16>,
+    /// Engine affinity inherited by standalone WASM commands launched by the shell.
+    pub wasm_backend: Option<crate::process::StandaloneWasmBackend>,
 }
 
 /// Options for `connect_terminal` (extends [`OpenShellOptions`]).
@@ -289,6 +291,7 @@ impl AgentOs {
             env: options.env.clone().into_iter().collect(),
             cwd: options.cwd.clone(),
             wasm_permission_tier: None,
+            wasm_backend: options.wasm_backend.map(Into::into),
         };
 
         // Background: subscribe to events first (so no output is missed), issue the spawn, fan
@@ -371,7 +374,7 @@ impl AgentOs {
                                     retained.pop_front();
                                 }
                             }
-                            let _ = exit_tx.send(Some(exited.exit_code));
+                            let _ = exit_tx.send_replace(Some(exited.exit_code));
                             break;
                         }
                     }
@@ -442,6 +445,7 @@ impl AgentOs {
             env: options.env.clone().into_iter().collect(),
             cwd: options.cwd.clone(),
             wasm_permission_tier: None,
+            wasm_backend: options.wasm_backend.map(Into::into),
         };
 
         let agent = self.clone();
@@ -466,7 +470,7 @@ impl AgentOs {
                     tracing::warn!(?error, shell_id = %exit_shell_id, "acp_open_terminal spawn failed");
                     agent.inner().shells.remove(&exit_shell_id);
                     agent.inner().pending_shell_exits.remove(&exit_key);
-                    let _ = exit_tx.send(Some(1));
+                    let _ = exit_tx.send_replace(Some(1));
                     return;
                 }
             };
@@ -525,7 +529,7 @@ impl AgentOs {
             agent.inner().shells.remove_if(&exit_shell_id, |existing| {
                 existing.process_id == route_process_id
             });
-            let _ = exit_tx.send(Some(exit_code));
+            let _ = exit_tx.send_replace(Some(exit_code));
         });
 
         // The fan-out/exit task is tracked in `pending_shell_exits` (drained by `dispose`), exactly
@@ -600,6 +604,7 @@ impl AgentOs {
             env: base.env.clone().into_iter().collect(),
             cwd: base.cwd.clone(),
             wasm_permission_tier: None,
+            wasm_backend: base.wasm_backend.map(Into::into),
         };
 
         // Subscribe before issuing the spawn so no output is missed.

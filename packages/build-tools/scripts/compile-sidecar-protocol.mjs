@@ -6,7 +6,7 @@ import { transform } from "@bare-ts/tools";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const buildToolsPackageDir = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(buildToolsPackageDir, "../..");
-const corePackageDir = path.join(repoRoot, "packages", "runtime-core");
+const corePackageDir = path.join(repoRoot, "packages", "core");
 const schemaPath = path.join(
 	repoRoot,
 	"crates/sidecar-protocol/protocol/agentos_sidecar_v1.bare",

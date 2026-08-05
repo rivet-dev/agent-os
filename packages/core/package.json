@@ -6,7 +6,9 @@
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [
-		"dist"
+		"dist",
+		"commands",
+		"README.md"
 	],
 	"exports": {
 		".": {
@@ -23,6 +25,51 @@
 			"types": "./dist/code-execution.d.ts",
 			"import": "./dist/code-execution.js",
 			"default": "./dist/code-execution.js"
+		},
+		"./internal/typescript-tools": {
+			"types": "./dist/internal/typescript-tools.d.ts",
+			"import": "./dist/internal/typescript-tools.js",
+			"default": "./dist/internal/typescript-tools.js"
+		},
+		"./protocol": {
+			"types": "./dist/generated-protocol.d.ts",
+			"import": "./dist/generated-protocol.js",
+			"default": "./dist/generated-protocol.js"
+		},
+		"./protocol-frames": {
+			"types": "./dist/protocol-frames.d.ts",
+			"import": "./dist/protocol-frames.js",
+			"default": "./dist/protocol-frames.js"
+		},
+		"./vm-config": {
+			"types": "./dist/vm-config.d.ts",
+			"import": "./dist/vm-config.js",
+			"default": "./dist/vm-config.js"
+		},
+		"./descriptors": {
+			"types": "./dist/descriptors.d.ts",
+			"import": "./dist/descriptors.js",
+			"default": "./dist/descriptors.js"
+		},
+		"./sidecar-client": {
+			"types": "./dist/sidecar-process.d.ts",
+			"import": "./dist/sidecar-process.js",
+			"default": "./dist/sidecar-process.js"
+		},
+		"./sidecar-errors": {
+			"types": "./dist/sidecar-errors.d.ts",
+			"import": "./dist/sidecar-errors.js",
+			"default": "./dist/sidecar-errors.js"
+		},
+		"./stdio-client": {
+			"types": "./dist/stdio-client.d.ts",
+			"import": "./dist/stdio-client.js",
+			"default": "./dist/stdio-client.js"
+		},
+		"./test-runtime": {
+			"types": "./dist/test-runtime.d.ts",
+			"import": "./dist/test-runtime.js",
+			"default": "./dist/test-runtime.js"
 		},
 		"./test/file-system": {
 			"types": "./dist/test/file-system.d.ts",
@@ -52,13 +99,20 @@
 	},
 	"scripts": {
 		"check-types": "pnpm run build:protocols && tsc --noEmit && tsc -p tsconfig.type-tests.json",
-		"build": "pnpm run build:protocols && tsc",
-		"build:agentos-protocol": "node ./scripts/compile-agentos-protocol.mjs",
-		"build:protocols": "pnpm run build:agentos-protocol",
+		"build": "pnpm run build:protocols && tsc && pnpm run copy-commands",
+		"build:agentos-acp-protocol": "node ./scripts/compile-agentos-acp-protocol.mjs",
+		"build:sidecar-protocol": "pnpm --dir ../build-tools build:protocol",
+		"generate:vm-config": "cargo test -p agentos-vm-config --quiet",
+		"build:protocols": "pnpm run build:agentos-acp-protocol && pnpm run build:sidecar-protocol && pnpm run generate:vm-config",
+		"copy-commands": "node scripts/copy-wasm-commands.mjs",
+		"prepack": "node scripts/copy-wasm-commands.mjs --require",
 		"test": "vitest run --exclude '**/*.nightly.test.ts' --reporter=verbose",
-		"test:unit": "vitest run tests/agent-exit-event.test.ts tests/agentos-package.test.ts tests/agentos-protocol.test.ts tests/allowed-node-builtins.test.ts tests/bindings-zod.test.ts tests/bindings.test.ts tests/cron-manager.test.ts tests/cron-timer-driver.test.ts tests/generated-protocol.test.ts tests/leak-agent-os-processes.test.ts tests/leak-rpc-client.test.ts tests/mount-descriptors.test.ts tests/mount-reconfigure.test.ts tests/options-schema.test.ts tests/public-api-exports.test.ts tests/root-filesystem-descriptors.test.ts tests/runtime-compat-mount.test.ts tests/session-event-ordering.test.ts tests/session-permission-surface.test.ts tests/sidecar-client.test.ts tests/sidecar-permission-descriptors.test.ts tests/wasm-permission-tiers.test.ts --fileParallelism=false",
+		"test:unit": "vitest run tests/agent-exit-event.test.ts tests/agentos-package.test.ts tests/agentos-acp-protocol.test.ts tests/allowed-node-builtins.test.ts tests/bindings-zod.test.ts tests/bindings.test.ts tests/cron-manager.test.ts tests/cron-timer-driver.test.ts tests/generated-protocol.test.ts tests/leak-agent-os-processes.test.ts tests/leak-rpc-client.test.ts tests/mount-descriptors.test.ts tests/mount-reconfigure.test.ts tests/options-schema.test.ts tests/public-api-exports.test.ts tests/root-filesystem-descriptors.test.ts tests/runtime-compat-mount.test.ts tests/session-event-ordering.test.ts tests/session-permission-surface.test.ts tests/sidecar-client.test.ts tests/sidecar-permission-descriptors.test.ts tests/wasm-permission-tiers.test.ts --fileParallelism=false",
 		"test:pr": "pnpm test:unit && vitest run tests/migration-parity.test.ts --fileParallelism=false --reporter=verbose",
-		"test:nightly": "vitest run tests/*.nightly.test.ts --reporter=verbose --passWithNoTests"
+		"test:nightly": "vitest run tests/*.nightly.test.ts tests/integration/*.nightly.test.ts --reporter=verbose --passWithNoTests",
+		"test:ecosystem": "AGENTOS_ECOSYSTEM_E2E=1 vitest run tests/integration/e2e-project-matrix.nightly.test.ts -t 'required Node ecosystem reactor matrix' --reporter=verbose",
+		"test:ecosystem:full": "AGENTOS_ECOSYSTEM_FULL_E2E=1 vitest run tests/integration/e2e-project-matrix.nightly.test.ts -t 'full Node ecosystem matrix through kernel' --reporter=verbose",
+		"test:npm-workflows": "AGENTOS_NPM_WORKFLOWS_E2E=1 vitest run tests/integration/e2e-npm-*.nightly.test.ts tests/integration/e2e-npx-and-pipes.nightly.test.ts tests/integration/e2e-concurrently.nightly.test.ts tests/integration/e2e-nextjs-build.nightly.test.ts --reporter=verbose"
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "0.16.1",
@@ -71,7 +125,6 @@
 		"@aws-sdk/client-s3": "^3.1019.0",
 		"@rivet-dev/agentos-sidecar": "workspace:*",
 		"@rivetkit/bare-ts": "^0.6.2",
-		"@rivet-dev/agentos-runtime-core": "workspace:*",
 		"@xterm/headless": "^6.0.0",
 		"better-sqlite3": "^12.8.0",
 		"croner": "^10.0.1",
@@ -99,6 +152,7 @@
 		"@agentos-software/jq": "workspace:*",
 		"@agentos-software/opencode": "workspace:*",
 		"@agentos-software/pi": "workspace:*",
+		"@agentos-software/pi-cli": "workspace:*",
 		"@agentos-software/ripgrep": "workspace:*",
 		"@agentos-software/sed": "workspace:*",
 		"@agentos-software/tar": "workspace:*",
@@ -106,7 +160,6 @@
 		"@agentos-software/vim": "workspace:*",
 		"@agentos-software/wget": "workspace:*",
 		"@agentos-software/yq": "workspace:*",
-		"@rivet-dev/agentos-test-harness": "workspace:*",
 		"@anthropic-ai/claude-agent-sdk": "^0.2.87",
 		"@anthropic-ai/claude-code": "^2.1.86",
 		"@bare-ts/tools": "0.15.0",

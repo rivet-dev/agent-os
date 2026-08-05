@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 import { AgentOs } from "../src/index.js";
+import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
 
@@ -33,8 +33,8 @@ const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
 
 console.log("pkg:" + pkg.name);
 console.log("bundle:" + fs.existsSync(bundlePath));
-console.log("sourceRepo:" + manifest.source.repository);
-console.log("sourceVersion:" + manifest.source.version);
+console.log("sourceRepo:" + manifest.sourceRepository);
+console.log("sourceVersion:" + manifest.sourceVersion);
 console.log("legacyWrapper:" + fs.existsSync("/root/node_modules/opencode-ai/package.json"));
 `;
 		await vm.writeFile("/tmp/check-opencode-package.mjs", script);
@@ -57,7 +57,7 @@ console.log("legacyWrapper:" + fs.existsSync("/root/node_modules/opencode-ai/pac
 		expect(stdout).toContain("pkg:@agentos-software/opencode");
 		expect(stdout).toContain("bundle:true");
 		expect(stdout).toContain("sourceRepo:anomalyco/opencode");
-		expect(stdout).toContain("sourceVersion:1.3.13");
+		expect(stdout).toContain("sourceVersion:1.17.20");
 		expect(stdout).toContain("legacyWrapper:false");
 	}, 30_000);
 

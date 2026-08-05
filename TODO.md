@@ -9,7 +9,7 @@ restoration, and the shared SQLite layer belong to that follow-up revision.
 
 **Status:** complete.
 
-`crates/agentos-sidecar/src/acp_extension.rs` is the only product ACP
+`crates/sidecar/src/acp/` is the only product ACP
 orchestrator. The older `agentos-sidecar-core` implementation is retained only
 as dormant browser reference source: it is excluded from the workspace,
 default builds, and publication. Browser entrypoints remain disabled.
@@ -73,7 +73,7 @@ runtime compatibility API now requires a caller-owned filesystem rather than
 creating a default.
 
 One implementation remains at the explicit
-`@rivet-dev/agentos-runtime-core/test-runtime` test surface for repository test
+`@rivet-dev/agentos-core/test-runtime` test surface for repository test
 fixtures and benchmarks that exercise host VFS callbacks. Disabled browser
 sources remain dormant reference code, not a supported production VFS.
 

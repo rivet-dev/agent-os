@@ -11,6 +11,7 @@
     }
   },
   "registry": {
+    "category": "agents",
     "title": "OpenCode",
     "description": "Run OpenCode, an open-source coding agent, inside agentOS.",
     "docsHref": "/docs/agents/opencode",

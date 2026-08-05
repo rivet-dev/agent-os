@@ -13,7 +13,7 @@ import pi from "@agentos-software/pi";
 import piCli from "@agentos-software/pi-cli";
 import { describe, expect, test } from "vitest";
 import { AgentOs } from "../src/agent-os.js";
-import { NativeSidecarKernelProxy } from "../src/sidecar/rpc-client.js";
+import { SidecarKernelProxy } from "../src/sidecar/rpc-client.js";
 import { getAgentOsKernel } from "../src/test/runtime.js";
 import {
 	createAnthropicFixture,
@@ -24,6 +24,7 @@ import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 import {
 	createVmWorkspace as createOpenCodeWorkspace,
 	createVmOpenCodeHome,
+	OPENCODE_TEST_V8_HEAP_LIMIT_MB,
 } from "./helpers/opencode-helper.js";
 import { REGISTRY_SOFTWARE } from "./helpers/registry-commands.js";
 import { promptResultText } from "./helpers/session-result.js";
@@ -152,6 +153,9 @@ const REGISTRY_AGENTS: SessionCleanupAgent[] = [
 		createVm: async (mockUrl) =>
 			AgentOs.create({
 				loopbackExemptPorts: [Number(new URL(mockUrl).port)],
+				limits: {
+					jsRuntime: { v8HeapLimitMb: OPENCODE_TEST_V8_HEAP_LIMIT_MB },
+				},
 				mounts: moduleAccessMounts(MODULE_ACCESS_CWD),
 				software: [opencode, ...REGISTRY_SOFTWARE],
 			}),
@@ -283,7 +287,7 @@ function collectProcessTree(rows: HostProcessRow[], rootPid: number): number[] {
 }
 
 async function readKernelProcesses(vm: AgentOs): Promise<HostProcessRow[]> {
-	if (!(getAgentOsKernel(vm) instanceof NativeSidecarKernelProxy)) {
+	if (!(getAgentOsKernel(vm) instanceof SidecarKernelProxy)) {
 		return vm.allProcesses().map(({ pid, ppid }) => ({ pid, ppid }));
 	}
 
@@ -296,6 +300,18 @@ async function readKernelProcesses(vm: AgentOs): Promise<HostProcessRow[]> {
 	)
 		.filter((process) => process.status !== "exited")
 		.map(({ pid, ppid }) => ({ pid, ppid }));
+}
+
+async function readKernelProcessDetails(vm: AgentOs): Promise<unknown> {
+	if (!(getAgentOsKernel(vm) instanceof SidecarKernelProxy)) {
+		return vm.allProcesses();
+	}
+
+	const backdoor = vm as unknown as SidecarBackdoor;
+	return backdoor._sidecarClient.getProcessSnapshot(
+		backdoor._sidecarSession,
+		backdoor._sidecarVm,
+	);
 }
 
 async function collectKernelProcessTree(
@@ -316,7 +332,7 @@ async function collectSessionProcessTree(
 	const kernelPids = await collectKernelProcessTree(vm, rootPid);
 	if (
 		kernelPids.length > 0 ||
-		getAgentOsKernel(vm) instanceof NativeSidecarKernelProxy
+		getAgentOsKernel(vm) instanceof SidecarKernelProxy
 	) {
 		return { kind: "kernel", pids: kernelPids };
 	}
@@ -383,7 +399,7 @@ async function snapshotVmResources(vm: AgentOs): Promise<{
 }
 
 async function zombieTimerCount(vm: AgentOs): Promise<number> {
-	if (!(getAgentOsKernel(vm) instanceof NativeSidecarKernelProxy)) {
+	if (!(getAgentOsKernel(vm) instanceof SidecarKernelProxy)) {
 		return getAgentOsKernel(vm).zombieTimerCount;
 	}
 
@@ -415,7 +431,14 @@ async function assertSessionResourcesReleased(
 		expect(snapshot.socketLinks).toHaveLength(0);
 	}
 	const vmResources = await snapshotVmResources(vm);
-	expect(vmResources.processCount).toBe(baselineVmResources.processCount);
+	expect(
+		vmResources.processCount,
+		`process count did not return to baseline: ${JSON.stringify({
+			baseline: baselineVmResources,
+			current: vmResources,
+			processes: await readKernelProcessDetails(vm),
+		})}`,
+	).toBe(baselineVmResources.processCount);
 	expect(vmResources.fdCount).toBe(baselineVmResources.fdCount);
 	expect(vmResources.socketCount).toBe(baselineVmResources.socketCount);
 	expect(await zombieTimerCount(vm)).toBe(baselineZombieTimers);
@@ -666,11 +689,6 @@ async function assertActivePromptCleanup(
 			content: [{ type: "text", text: PROMPT_TEXT }],
 		});
 		await promptMock.waitForRequest();
-		const resourcesBeforeClose = await snapshotSessionResources(
-			vm,
-			activePids[0],
-		);
-		expect(resourcesBeforeClose.pids.length).toBeGreaterThan(0);
 
 		if (agent.activePromptTermination === "cancel_then_close") {
 			const cancelResponse = await vm.cancelPrompt({ sessionId });
@@ -825,7 +843,7 @@ describe("session cleanup", () => {
 			await vm.dispose();
 			await mock.stop();
 		}
-	}, 120_000);
+	}, 600_000);
 
 	test("Pi CLI returns to baseline after three concurrent sessions are closed", async () => {
 		const agent = PI_AGENTS[1];

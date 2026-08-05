@@ -25,7 +25,7 @@ pub use agent_client_protocol_schema::v1::{
     ToolCall, ToolCallUpdate, UsageUpdate,
 };
 
-use agentos_protocol::generated::v1::{
+use agentos_acp_protocol::generated::v1::{
     AcpCancelPromptRequest, AcpDeleteSessionRequest, AcpDurableEvent, AcpDurableHistoryEntry,
     AcpDurableSessionInfo, AcpGetDurableSessionRequest, AcpGetSessionAgentInfoRequest,
     AcpGetSessionCapabilitiesRequest, AcpGetSessionConfigRequest, AcpListAgentsRequest,
@@ -33,7 +33,7 @@ use agentos_protocol::generated::v1::{
     AcpRequest, AcpRespondPermissionRequest, AcpResponse, AcpSetSessionConfigOptionRequest,
     AcpUnloadSessionRequest,
 };
-use agentos_protocol::ACP_EXTENSION_NAMESPACE;
+use agentos_acp_protocol::ACP_EXTENSION_NAMESPACE;
 use agentos_sidecar_client::wire;
 
 use crate::agent_os::AgentOs;
@@ -551,7 +551,9 @@ fn normalize_session_capabilities(value: Value) -> Result<SessionCapabilities> {
     })
 }
 
-fn acp_operation_error(error: agentos_protocol::generated::v1::AcpErrorResponse) -> ClientError {
+fn acp_operation_error(
+    error: agentos_acp_protocol::generated::v1::AcpErrorResponse,
+) -> ClientError {
     ClientError::AcpOperation {
         code: error.code,
         message: error.message,

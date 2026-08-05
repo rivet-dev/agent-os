@@ -525,22 +525,20 @@ describe("full openSession({ agent: 'claude' })", () => {
 
 			const agentInfo = await vm.getSessionAgentInfo({ sessionId });
 			expect(agentInfo).toMatchObject({
-				name: "claude-sdk-acp",
-				title: "Claude Agent SDK ACP adapter",
-				version: "0.1.0",
+				name: "@agentclientprotocol/claude-agent-acp",
+				title: "Claude Agent",
+				version: "0.29.2",
 			});
 
 			const capabilities = await vm.getSessionCapabilities({ sessionId });
 			expect(capabilities?.prompt?.image).toBe(true);
 			expect(capabilities?.prompt?.audio).toBeUndefined();
-			expect(capabilities?.prompt?.embeddedContext).toBeUndefined();
+			expect(capabilities?.prompt?.embeddedContext).toBe(true);
 
 			const config = await vm.getSessionConfig({ sessionId });
 			expect(config.revision).toBe(0);
 			expect(config.options).toEqual(expect.any(Array));
-			// Claude currently advertises legacy ACP `modes`, not native
-			// `configOptions`; AgentOS deliberately does not invent a mapping.
-			expect(config.options.some((option) => option.id === "mode")).toBe(false);
+			expect(config.options.some((option) => option.id === "mode")).toBe(true);
 
 			const closedSessionId = sessionId;
 			await vm.unloadSession({ sessionId: closedSessionId });
@@ -584,7 +582,7 @@ describe("full openSession({ agent: 'claude' })", () => {
 		);
 	}, 120_000);
 
-	test("Claude sessions surface unsupported native ACP configuration changes", async () => {
+	test("Claude sessions apply native ACP configuration changes", async () => {
 		let sessionId: string | undefined;
 
 		try {
@@ -600,14 +598,19 @@ describe("full openSession({ agent: 'claude' })", () => {
 			});
 			const initialConfig = await vm.getSessionConfig({ sessionId });
 
-			await expect(
-				vm.setSessionConfigOption({
-					sessionId,
-					configId: "mode",
-					value: "plan",
-				}),
-			).rejects.toThrow(/session\/set_config_option.*method not found/i);
-			expect(await vm.getSessionConfig({ sessionId })).toEqual(initialConfig);
+			const updatedConfig = await vm.setSessionConfigOption({
+				sessionId,
+				configId: "mode",
+				value: "plan",
+			});
+			expect(updatedConfig.revision).toBe(initialConfig.revision + 1);
+			expect(
+				updatedConfig.options.find((option) => option.id === "mode"),
+			).toMatchObject({
+				type: "select",
+				currentValue: "plan",
+			});
+			expect(await vm.getSessionConfig({ sessionId })).toEqual(updatedConfig);
 		} finally {
 			if (sessionId) {
 				await vm.unloadSession({ sessionId });

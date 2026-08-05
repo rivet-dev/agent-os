@@ -40,6 +40,8 @@ pub struct AgentOsConfig {
     pub loopback_exempt_ports: Vec<u16>,
     /// Allowed Node.js builtins. Default: the hardened native-bridge set.
     pub allowed_node_builtins: Option<Vec<String>>,
+    /// VM-wide default for standalone WASM commands. JavaScript remains on V8.
+    pub wasm_backend: Option<crate::process::StandaloneWasmBackend>,
     /// Root filesystem configuration. Default: overlay + bundled base snapshot.
     pub root_filesystem: RootFilesystemConfig,
     /// Additional mounts.
@@ -98,6 +100,11 @@ impl AgentOsConfigBuilder {
 
     pub fn allowed_node_builtins(mut self, builtins: Vec<String>) -> Self {
         self.config.allowed_node_builtins = Some(builtins);
+        self
+    }
+
+    pub fn wasm_backend(mut self, backend: crate::process::StandaloneWasmBackend) -> Self {
+        self.config.wasm_backend = Some(backend);
         self
     }
 
@@ -376,12 +383,6 @@ pub struct ResourceLimits {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_readdir_entries: Option<u64>,
-    #[serde(
-        default,
-        rename = "maxWasmFuel",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub max_wasm_fuel: Option<u64>,
     #[serde(
         default,
         rename = "maxWasmMemoryBytes",
@@ -716,10 +717,34 @@ pub struct WasmLimits {
     pub runner_heap_limit_mb: Option<u64>,
     #[serde(
         default,
-        rename = "runnerCpuTimeLimitMs",
+        rename = "activeCpuTimeLimitMs",
         skip_serializing_if = "Option::is_none"
     )]
-    pub runner_cpu_time_limit_ms: Option<u64>,
+    pub active_cpu_time_limit_ms: Option<u64>,
+    #[serde(
+        default,
+        rename = "wallClockLimitMs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub wall_clock_limit_ms: Option<u64>,
+    #[serde(
+        default,
+        rename = "deterministicFuel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub deterministic_fuel: Option<u64>,
+    #[serde(
+        default,
+        rename = "maxThreads",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_threads: Option<u64>,
+    #[serde(
+        default,
+        rename = "maxConcurrentThreads",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_concurrent_threads: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -754,6 +779,18 @@ pub struct ProcessLimits {
         skip_serializing_if = "Option::is_none"
     )]
     pub pending_event_bytes: Option<u64>,
+    #[serde(
+        default,
+        rename = "maxPendingChildSyncCount",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_pending_child_sync_count: Option<u64>,
+    #[serde(
+        default,
+        rename = "maxPendingChildSyncBytes",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_pending_child_sync_bytes: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,14 @@
+diff --git a/tests/generic/504 b/tests/generic/504
+index ea6014c3..00000001 100755
+--- a/tests/generic/504
++++ b/tests/generic/504
+@@ -13,6 +13,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick locks
+ 
++[ "$FSTYP" = "agentos" ] && \
++        _notrun "agentOS does not expose flock(1) and /proc/locks"
++
+ # Override the default cleanup function.
+ _cleanup()
+ {

@@ -258,18 +258,18 @@ preserve Node behavior across that security boundary.
 
 The main pieces are:
 
-- `crates/runtime/src/readiness.rs`: revisioned `ReadyState`, wake epochs, and
+- `crates/driver-tokio/src/readiness.rs`: revisioned `ReadyState`, wake epochs, and
   interest gating.
-- `crates/v8-runtime/src/session.rs`: the executor's bounded selector,
+- `crates/executor-v8-runtime/src/session.rs`: the executor's bounded selector,
   readiness batching, dispatch, acknowledgement, and executor admission.
-- `crates/v8-runtime/src/stream.rs`: the Rust-to-V8
+- `crates/executor-v8-runtime/src/stream.rs`: the Rust-to-V8
   `_agentOSReadyDispatch()` call.
 - `packages/build-tools/bridge-src/builtins/readiness.ts`: the guest capability
   target map.
 - `packages/build-tools/bridge-src/builtins/net.ts`: `NetSocket`, the
   readiness-driven read pump, `Duplex` backpressure, liveness, and ordered
   writes.
-- `crates/native-sidecar/src/execution/network/`: sidecar-owned network tasks,
+- `crates/vm/src/execution/network/`: sidecar-owned network tasks,
   bounded completion state, and transport operations.
 
 ## See also

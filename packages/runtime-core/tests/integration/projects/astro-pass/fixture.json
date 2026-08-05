@@ -1,8 +1,0 @@
-{
-	"entry": "src/index.js",
-	"expectation": "fail",
-	"fail": {
-		"code": 1,
-		"stderrIncludes": "Astro React build did not settle"
-	}
-}

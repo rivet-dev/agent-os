@@ -7,7 +7,7 @@ import {
 	COMMANDS_DIR,
 	NodeFileSystem,
 	createKernel,
-	describeIf,
+	describeIf, wasmBackendTestTimeout,
 	hasWasmBinaries,
 } from "@rivet-dev/agentos-test-harness";
 import type { Kernel } from "@rivet-dev/agentos-test-harness";
@@ -49,7 +49,7 @@ function lines(stdout: string): string[] {
 		.sort();
 }
 
-describeIf(hasWasmBinaries, "ripgrep command", { timeout: 10_000 }, () => {
+describeIf(hasWasmBinaries, "ripgrep command", { timeout: wasmBackendTestTimeout(10_000, 30_000) }, () => {
 	let kernel: Kernel;
 
 	afterEach(async () => {

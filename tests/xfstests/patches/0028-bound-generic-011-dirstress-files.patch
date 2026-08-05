@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Wed, 22 Jul 2026 01:00:00 -0700
+Subject: [PATCH] generic/011: accept exact quick-matrix file reduction
+
+Keep the upstream 1,000-file default for the dedicated nightly process-stress
+gate. The agentOS quick-matrix runner supplies a smaller value only for an
+exact reviewed test/backend reduction record.
+---
+ tests/generic/011 | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/tests/generic/011 b/tests/generic/011
+index 8b45f458..9665908a 100755
+--- a/tests/generic/011
++++ b/tests/generic/011
+@@ -46,7 +46,15 @@ then
+     exit
+ fi
+ 
+-count=1000
++count=${XFSTESTS_GENERIC_011_FILES:-1000}
++case "$count" in
++    ''|*[!0-9]*)
++        _fail "invalid generic/011 file count: $count"
++        ;;
++esac
++if [ "$count" -lt 1 ] || [ "$count" -gt 1000 ]; then
++    _fail "generic/011 file count must be in 1..1000: $count"
++fi
+ _test 1 "-p 1 -n 1" $count
+ _test 2 "-p 5 -n 1" $count
+ _test 3 "-p 5 -n 5" $count
+-- 
+2.47.2

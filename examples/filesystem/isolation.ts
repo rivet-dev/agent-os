@@ -19,7 +19,7 @@ const result = await agent.process.exec(`node -e '
   console.log("guest read seed:", JSON.stringify(seed));
   console.log("guest read note:", note);
 '`);
-console.log("guest stdout:", result.stdout.trim());
+console.log("guest stdout:", result.stdout?.trim() ?? "");
 
 // Read a guest-written file back on the host.
 const bytes = await agent.filesystem.readFile("/home/agentos/seed.json");

@@ -1,6 +1,6 @@
 --- a/src/chmod.rs
 +++ b/src/chmod.rs
-@@ -8,16 +8,87 @@
+@@ -8,16 +8,93 @@
  use clap::{Arg, ArgAction, Command};
  use std::ffi::OsString;
  use std::fs;
@@ -18,11 +18,13 @@
  use uucore::mode;
  use uucore::perms::{TraverseSymlinks, configure_symlink_and_recursion};
  
-+// wasmVM: WASI compatibility — MetadataExt lacks mode(), Permissions lacks from_mode()
++// AgentOS WASM compatibility: MetadataExt lacks mode(), Permissions lacks from_mode().
 +#[cfg(target_os = "wasi")]
 +mod wasi_compat {
 +    use std::fs;
 +    use std::path::Path;
++
++    const AGENTOS_CWD_FD: u32 = u32::MAX;
 +
 +    mod host_fs {
 +        #[link(wasm_import_module = "host_fs")]
@@ -53,7 +55,7 @@
 +        };
 +        let mode = unsafe {
 +            host_fs::path_mode(
-+                3,
++                AGENTOS_CWD_FD,
 +                path_str.as_ptr(),
 +                path_str.len() as u32,
 +                if follow_symlinks { 1 } else { 0 },
@@ -66,7 +68,7 @@
 +        }
 +    }
 +
-+    /// Set POSIX-style permissions on a file (best-effort on WASI).
++    /// Set POSIX-style permissions through AgentOS' kernel-owned pathname API.
 +    pub fn set_permissions_from_mode(path: &Path, mode: u32) -> std::io::Result<()> {
 +        use std::io::{Error, ErrorKind};
 +
@@ -74,21 +76,25 @@
 +            .to_str()
 +            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "path is not valid UTF-8"))?
 +            .as_bytes();
-+        let status = unsafe { host_fs::chmod(3, bytes.as_ptr(), bytes.len() as u32, mode) };
++        let status = unsafe {
++            host_fs::chmod(
++                AGENTOS_CWD_FD,
++                bytes.as_ptr(),
++                bytes.len() as u32,
++                mode,
++            )
++        };
 +        if status == 0 {
 +            return Ok(());
 +        }
-+
-+        let mut perms = fs::metadata(path)?.permissions();
-+        perms.set_readonly(mode & 0o222 == 0);
-+        fs::set_permissions(path, perms)
++        Err(Error::from_raw_os_error(status as i32))
 +    }
 +}
 +
  #[cfg(all(unix, not(target_os = "redox")))]
  use uucore::safe_traversal::{DirFd, SymlinkBehavior};
  use uucore::{format_usage, show, show_error};
-@@ -121,7 +192,16 @@
+@@ -121,7 +198,16 @@
      let preserve_root = matches.get_flag(options::PRESERVE_ROOT);
      let fmode = match matches.get_one::<OsString>(options::REFERENCE) {
          Some(fref) => match fs::metadata(fref) {
@@ -106,7 +112,7 @@
              Err(_) => {
                  return Err(ChmodError::CannotStat(fref.into()).into());
              }
-@@ -623,7 +703,16 @@
+@@ -623,7 +709,16 @@
          let metadata = get_metadata(file, dereference);
  
          let fperm = match metadata {
@@ -124,7 +130,7 @@
              Err(err) => {
                  // Handle dangling symlinks or other errors
                  return if file.is_symlink() && !dereference {
-@@ -683,7 +772,12 @@
+@@ -683,7 +778,12 @@
              // Use the helper method for consistent reporting
              self.report_permission_change(file, fperm, mode);
              Ok(())

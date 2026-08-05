@@ -14,7 +14,7 @@
 
 --- /dev/null
 +++ b/library/std/src/sys/process/wasi.rs
-@@ -0,0 +1,829 @@
+@@ -0,0 +1,853 @@
 +// WASI process implementation using wasmVM host_process syscalls.
 +//
 +// Replaces the unsupported() stubs with real process management
@@ -40,7 +40,7 @@
 +
 +#[link(wasm_import_module = "host_process")]
 +unsafe extern "C" {
-+    fn proc_spawn_v3(
++    fn proc_spawn_v4(
 +        exec_path_ptr: *const u8,
 +        exec_path_len: u32,
 +        argv_ptr: *const u8,
@@ -51,12 +51,16 @@
 +        actions_len: u32,
 +        cwd_ptr: *const u8,
 +        cwd_len: u32,
++        search_path_ptr: *const u8,
++        search_path_len: u32,
 +        attr_flags: u32,
 +        sigdefault_lo: u32,
 +        sigdefault_hi: u32,
 +        sigmask_lo: u32,
 +        sigmask_hi: u32,
 +        pgroup: u32,
++        sched_policy: i32,
++        sched_priority: i32,
 +        ret_pid: *mut u32,
 +    ) -> u32;
 +
@@ -416,6 +420,20 @@
 +    ) -> io::Result<(Process, StdioPipes)> {
 +        let argv = self.serialize_argv();
 +        let envp = self.serialize_envp();
++        // Match native Command::spawn: a program without a slash is resolved
++        // through the command environment's PATH. proc_spawn_v4 performs the
++        // lookup once in the staged child state after file actions are applied.
++        let search_path = if self.program.as_bytes().contains(&b'/') {
++            None
++        } else {
++            let environment = self.env.capture();
++            Some(
++                environment
++                    .get(OsStr::new("PATH"))
++                    .map(|value| value.as_bytes().to_vec())
++                    .unwrap_or_else(|| b"/bin:/usr/bin".to_vec()),
++            )
++        };
 +
 +        // Get working directory bytes
 +        let cwd_bytes = match &self.cwd {
@@ -478,7 +496,7 @@
 +        // the call and close them in the parent before this function returns.
 +        let mut pid: u32 = 0;
 +        let errno = unsafe {
-+            proc_spawn_v3(
++            proc_spawn_v4(
 +                self.program.as_bytes().as_ptr(),
 +                self.program.as_bytes().len() as u32,
 +                argv.as_ptr(),
@@ -489,11 +507,17 @@
 +                actions.len() as u32,
 +                cwd_bytes.as_ptr(),
 +                cwd_bytes.len() as u32,
++                search_path
++                    .as_ref()
++                    .map_or(crate::ptr::null(), |path| path.as_ptr()),
++                search_path.as_ref().map_or(0, |path| path.len() as u32),
 +                0,
 +                0,
 +                0,
 +                sigmask_lo,
 +                sigmask_hi,
++                0,
++                0,
 +                0,
 +                &mut pid,
 +            )

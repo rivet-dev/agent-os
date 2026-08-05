@@ -12,7 +12,7 @@ describe("process API", () => {
 		await vm.dispose();
 	});
 
-	test("onProcessStderr captures stderr, onProcessExit fires with exit code", async () => {
+	test("onProcessOutput captures stderr, onProcessExit fires with exit code", async () => {
 		await vm.filesystem.writeFile(
 			"/tmp/stderr-exit.mjs",
 			'process.stderr.write("err-data\\n"); process.exit(42);',

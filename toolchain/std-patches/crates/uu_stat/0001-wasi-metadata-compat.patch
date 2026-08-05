@@ -25,7 +25,7 @@
  use uucore::{entries, format_usage, show_error, show_warning};
  
  use clap::{Arg, ArgAction, ArgMatches, Command};
-@@ -23,10 +29,91 @@
+@@ -23,10 +29,92 @@
  use std::ffi::{OsStr, OsString};
  use std::fs::{FileType, Metadata};
  use std::io::Write;
@@ -61,6 +61,7 @@
 +#[cfg(target_os = "wasi")]
 +mod wasi_host_fs {
 +    use super::{Metadata, MetadataExt, Path};
++    const AGENTOS_CWD_FD: u32 = u32::MAX;
 +
 +    mod host_fs {
 +        #[link(wasm_import_module = "host_fs")]
@@ -86,7 +87,7 @@
 +        };
 +        let mode = unsafe {
 +            host_fs::path_mode(
-+                3,
++                AGENTOS_CWD_FD,
 +                path_str.as_ptr(),
 +                path_str.len() as u32,
 +                if follow_symlinks { 1 } else { 0 },
@@ -105,7 +106,7 @@
 +        };
 +        unsafe {
 +            host_fs::path_rdev(
-+                3,
++                AGENTOS_CWD_FD,
 +                path_str.as_ptr(),
 +                path_str.len() as u32,
 +                if follow_symlinks { 1 } else { 0 },
@@ -117,7 +118,7 @@
  use thiserror::Error;
  use uucore::time::{FormatSystemTimeFallback, format_system_time, system_time_to_sec};
  
-@@ -1032,6 +1119,8 @@
+@@ -1032,6 +1120,8 @@
          display_name: &str,
          file: &OsString,
          file_type: FileType,
@@ -126,7 +127,7 @@
          from_user: bool,
          #[cfg(all(feature = "selinux", any(target_os = "linux", target_os = "android")))]
          follow_symbolic_links: bool,
-@@ -1050,9 +1139,9 @@
+@@ -1050,9 +1140,9 @@
              } => {
                  let output = match format {
                      // access rights in octal
@@ -138,7 +139,7 @@
                      // number of blocks allocated (see %B)
                      'b' => OutputType::Unsigned(meta.blocks()),
  
-@@ -1096,9 +1185,9 @@
+@@ -1096,9 +1186,9 @@
                      // device number in hex
                      'D' => OutputType::UnsignedHex(meta.dev()),
                      // raw mode in hex
@@ -150,7 +151,7 @@
                      // group ID of owner
                      'g' => OutputType::Unsigned(meta.gid() as u64),
                      // group name of owner
-@@ -1130,10 +1219,10 @@
+@@ -1130,10 +1220,10 @@
                      's' => OutputType::Integer(meta.len() as i64),
                      // major device type in hex, for character/block device special
                      // files
@@ -163,7 +164,7 @@
                      // user ID of owner
                      'u' => OutputType::Unsigned(meta.uid() as u64),
                      // user name of owner
-@@ -1176,10 +1265,10 @@
+@@ -1176,10 +1266,10 @@
                              .map_or((0, 0), system_time_to_sec);
                          OutputType::Float(sec as f64 + nsec as f64 / 1_000_000_000.0)
                      }
@@ -178,7 +179,7 @@
                      _ => OutputType::Unknown,
                  };
                  print_it(&output, flag, width, precision);
-@@ -1234,6 +1323,16 @@
+@@ -1234,6 +1324,16 @@
              match result {
                  Ok(meta) => {
                      let file_type = meta.file_type();
@@ -195,7 +196,7 @@
                      let tokens = if self.from_user
                          || !(file_type.is_char_device() || file_type.is_block_device())
                      {
-@@ -1249,6 +1348,8 @@
+@@ -1249,6 +1349,8 @@
                              &display_name,
                              &file,
                              file_type,

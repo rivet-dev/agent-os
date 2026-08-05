@@ -87,16 +87,32 @@ def load_exceptions(path: Path) -> list[dict[str, object]]:
             full_iterations = record.get("full_iterations")
             reduced_iterations = record.get("reduced_iterations")
             focused_coverage = record.get("focused_coverage")
-            if reduction != "truncfile-iterations" or test_id != "generic/014":
+            expected_full_iterations = {
+                ("generic/011", "dirstress-files"): 1000,
+                ("generic/014", "truncfile-iterations"): 10000,
+                ("generic/069", "append-stream-iterations"): 3000000,
+                ("generic/129", "looptest-iterations"): 162000,
+                ("generic/371", "parallel-enospc-iterations"): 100,
+                ("generic/404", "insert-range-blocks"): 500,
+                ("generic/471", "rewinddir-files"): 10000,
+                ("generic/488", "open-unlink-files"): 10000,
+                ("generic/676", "seekdir-files"): 4000,
+                ("generic/736", "readdir-renames-files"): 5000,
+            }.get((test_id, reduction))
+            if expected_full_iterations is None:
                 raise ValueError(
-                    f"exception {index}: truncfile-iterations reduction is exact to generic/014"
+                    f"exception {index}: unsupported exact test/reduction pair "
+                    f"{test_id!r}/{reduction!r}"
                 )
             if (
                 not isinstance(full_iterations, int)
                 or isinstance(full_iterations, bool)
-                or full_iterations != 10000
+                or full_iterations != expected_full_iterations
             ):
-                raise ValueError(f"exception {index}: reduced generic/014 requires full_iterations=10000")
+                raise ValueError(
+                    f"exception {index}: reduced {test_id} requires "
+                    f"full_iterations={expected_full_iterations}"
+                )
             if (
                 not isinstance(reduced_iterations, int)
                 or isinstance(reduced_iterations, bool)

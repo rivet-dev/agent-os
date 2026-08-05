@@ -3,12 +3,12 @@
 	"globalEnv": [
 		"AGENTOS_PLUGIN_BIN",
 		"AGENTOS_SIDECAR_BIN",
-		"AGENTOS_NATIVE_SIDECAR_BIN",
+		"AGENTOS_TEST_WASM_BACKEND",
 		"AGENTOS_SKIP_NATIVE_META_BUILD"
 	],
 	"globalPassThroughEnv": ["CARGO_TARGET_DIR"],
 	"globalDependencies": [
-		"crates/actor-uds-client/protocol/**",
+		"crates/rivetkit-ars-client/protocol/**",
 		"crates/sidecar-protocol/protocol/**",
 		"packages/build-tools/scripts/compile-sidecar-protocol.mjs"
 	],
@@ -59,7 +59,7 @@
 		"@rivet-dev/agentos-sidecar#build": {
 			"cache": false
 		},
-		"@rivet-dev/agentos-runtime-core#build": {
+		"@rivet-dev/agentos-core#build": {
 			"dependsOn": ["^build"],
 			"inputs": [
 				"src/**",

@@ -17,10 +17,10 @@ use serde_json::{Map, Value};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 
-use agentos_protocol::generated::v1::{
+use agentos_acp_protocol::generated::v1::{
     AcpCallback, AcpCallbackResponse, AcpEvent, AcpHostRequestCallbackResponse,
 };
-use agentos_protocol::ACP_EXTENSION_NAMESPACE;
+use agentos_acp_protocol::ACP_EXTENSION_NAMESPACE;
 use agentos_sidecar_client::wire;
 use agentos_vm_config as vm_config;
 
@@ -418,7 +418,7 @@ impl AgentOs {
                     loopback_exempt_ports: config.loopback_exempt_ports.clone(),
                     packages,
                     packages_mount_at: config.packages_mount_at.clone().unwrap_or_default(),
-                    bootstrap_commands: Vec::new(),
+                    bootstrap_commands: runtime_bootstrap_commands(),
                     binding_shim_commands: Vec::new(),
                 }),
             )
@@ -1072,6 +1072,15 @@ fn serialize_create_vm_config_for_sidecar(
         database: config.database.clone(),
         cwd: None,
         env: BTreeMap::new(),
+        wasm_backend: config.wasm_backend.map(|backend| match backend {
+            crate::process::StandaloneWasmBackend::V8 => vm_config::StandaloneWasmBackend::V8,
+            crate::process::StandaloneWasmBackend::Wasmtime => {
+                vm_config::StandaloneWasmBackend::Wasmtime
+            }
+            crate::process::StandaloneWasmBackend::WasmtimeThreads => {
+                vm_config::StandaloneWasmBackend::WasmtimeThreads
+            }
+        }),
         user: config.user.clone(),
         root_filesystem,
         permissions: Some(permissions_policy_config(config)),
@@ -1093,14 +1102,15 @@ fn serialize_create_vm_config_for_sidecar(
                 high_resolution_time: None,
             }
         }),
-        bootstrap_commands: Some(vec![
-            String::from("node"),
-            String::from("npm"),
-            String::from("npx"),
-            String::from("python"),
-            String::from("python3"),
-        ]),
+        bootstrap_commands: Some(runtime_bootstrap_commands()),
     })
+}
+
+pub(crate) fn runtime_bootstrap_commands() -> Vec<String> {
+    ["node", "npm", "npx", "python", "python3"]
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 fn serialize_root_filesystem_config_for_sidecar(
@@ -3789,6 +3799,7 @@ mod tests {
         DirEntryType, FilesystemEntry, FilesystemEntryEncoding, FilesystemSnapshotEntries,
         FilesystemSnapshotExport, RootSnapshotExport, SnapshotExportKind,
     };
+    use crate::process::StandaloneWasmBackend;
     use agentos_sidecar_client::wire::{
         FsPermissionScope, PatternPermissionScope, PermissionMode as WirePermissionMode,
     };
@@ -4050,6 +4061,31 @@ mod tests {
     }
 
     #[test]
+    fn create_vm_config_preserves_standalone_wasm_backend() {
+        for (client_backend, config_backend) in [
+            (
+                StandaloneWasmBackend::V8,
+                agentos_vm_config::StandaloneWasmBackend::V8,
+            ),
+            (
+                StandaloneWasmBackend::Wasmtime,
+                agentos_vm_config::StandaloneWasmBackend::Wasmtime,
+            ),
+            (
+                StandaloneWasmBackend::WasmtimeThreads,
+                agentos_vm_config::StandaloneWasmBackend::WasmtimeThreads,
+            ),
+        ] {
+            let config = serialize_create_vm_config_for_sidecar(&AgentOsConfig {
+                wasm_backend: Some(client_backend),
+                ..Default::default()
+            })
+            .expect("serialize create VM config");
+            assert_eq!(config.wasm_backend, Some(config_backend));
+        }
+    }
+
+    #[test]
     fn create_vm_config_preserves_typed_limits() {
         let config = serialize_create_vm_config_for_sidecar(&AgentOsConfig {
             limits: Some(AgentOsLimits {
@@ -4081,7 +4117,9 @@ mod tests {
                 wasm: Some(WasmLimits {
                     prewarm_timeout_ms: Some(30_000),
                     runner_heap_limit_mb: Some(2_048),
-                    runner_cpu_time_limit_ms: Some(60_000),
+                    active_cpu_time_limit_ms: Some(60_000),
+                    wall_clock_limit_ms: Some(120_000),
+                    deterministic_fuel: Some(1_000_000),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -4133,6 +4171,8 @@ mod tests {
         let wasm = limits.wasm.expect("wasm limits");
         assert_eq!(wasm.prewarm_timeout_ms, Some(30_000));
         assert_eq!(wasm.runner_heap_limit_mb, Some(2_048));
-        assert_eq!(wasm.runner_cpu_time_limit_ms, Some(60_000));
+        assert_eq!(wasm.active_cpu_time_limit_ms, Some(60_000));
+        assert_eq!(wasm.wall_clock_limit_ms, Some(120_000));
+        assert_eq!(wasm.deterministic_fuel, Some(1_000_000));
     }
 }

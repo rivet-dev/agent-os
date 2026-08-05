@@ -10,7 +10,7 @@ import {
 	createInMemoryFileSystem,
 	createKernel,
 	createWasmVmRuntime,
-	describeIf,
+	describeIf, wasmBackendTestTimeout,
 	hasCWasmBinaries,
 	type Kernel,
 } from "@rivet-dev/agentos-test-harness";
@@ -68,7 +68,7 @@ function buildFallbackArchive(
 describeIf(
 	hasCWasmBinaries("zip", "unzip"),
 	"unzip command",
-	{ timeout: 10_000 },
+	{ timeout: wasmBackendTestTimeout(10_000, 30_000) },
 	() => {
 		let kernel: Kernel;
 
@@ -85,12 +85,16 @@ describeIf(
 				createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
 			);
 
-			const zipResult = await kernel.exec("zip /archive.zip /hello.txt");
+			const zipResult = await kernel.exec(
+				"zip /workspace/archive.zip /hello.txt",
+			);
 			expect(zipResult.exitCode, zipResult.stderr).toBe(0);
 
-			const unzipResult = await kernel.exec("unzip -d /extracted /archive.zip");
+			const unzipResult = await kernel.exec(
+				"unzip -d /workspace/extracted /workspace/archive.zip",
+			);
 			expect(unzipResult.exitCode, unzipResult.stderr).toBe(0);
-			expect(await vfs.readTextFile("/extracted/hello.txt")).toBe(
+			expect(await vfs.readTextFile("/workspace/extracted/hello.txt")).toBe(
 				"Hello, World!\n",
 			);
 		});
@@ -104,10 +108,14 @@ describeIf(
 				createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
 			);
 
-			const zipResult = await kernel.exec("zip /list-test.zip /data.txt");
+			const zipResult = await kernel.exec(
+				"zip /workspace/list-test.zip /data.txt",
+			);
 			expect(zipResult.exitCode, zipResult.stderr).toBe(0);
 
-			const listResult = await kernel.exec("unzip -l /list-test.zip");
+			const listResult = await kernel.exec(
+				"unzip -l /workspace/list-test.zip",
+			);
 			expect(listResult.exitCode, listResult.stderr).toBe(0);
 			expect(listResult.stdout).toContain("data.txt");
 			expect(listResult.stdout).toContain("18");
@@ -125,13 +133,17 @@ describeIf(
 				createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
 			);
 
-			const zipResult = await kernel.exec("zip /roundtrip.zip /binary.bin");
+			const zipResult = await kernel.exec(
+				"zip /workspace/roundtrip.zip /binary.bin",
+			);
 			expect(zipResult.exitCode, zipResult.stderr).toBe(0);
 
-			const unzipResult = await kernel.exec("unzip -d /rt-out /roundtrip.zip");
+			const unzipResult = await kernel.exec(
+				"unzip -d /workspace/rt-out /workspace/roundtrip.zip",
+			);
 			expect(unzipResult.exitCode, unzipResult.stderr).toBe(0);
 
-			const extracted = await vfs.readFile("/rt-out/binary.bin");
+			const extracted = await vfs.readFile("/workspace/rt-out/binary.bin");
 			expect(extracted.length).toBe(256);
 			for (let i = 0; i < 256; i++) {
 				expect(extracted[i]).toBe(i);
@@ -156,10 +168,12 @@ describeIf(
 				createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
 			);
 
-			const result = await kernel.exec("unzip -d /out /evil.zip");
+			const result = await kernel.exec(
+				"unzip -d /workspace/out /evil.zip",
+			);
 			expect(result.exitCode, result.stderr).not.toBe(0);
 			expect(result.stderr).toMatch(/error/);
-			expect(await vfs.exists("/out/evil.txt")).toBe(false);
+			expect(await vfs.exists("/workspace/out/evil.txt")).toBe(false);
 		});
 
 		it("rejects an entry whose normalized name is empty", async () => {
@@ -210,10 +224,12 @@ describeIf(
 				createWasmVmRuntime({ commandDirs: [C_BUILD_DIR, COMMANDS_DIR] }),
 			);
 
-			const result = await kernel.exec("unzip -d /cap-out /big.zip");
+			const result = await kernel.exec(
+				"unzip -d /workspace/cap-out /big.zip",
+			);
 			expect(result.exitCode, result.stderr).not.toBe(0);
 			expect(result.stderr).toMatch(/error/);
-			expect(await vfs.exists("/cap-out/big.bin")).toBe(false);
+			expect(await vfs.exists("/workspace/cap-out/big.bin")).toBe(false);
 		});
 	},
 );

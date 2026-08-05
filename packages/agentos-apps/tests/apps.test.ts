@@ -1168,17 +1168,24 @@ describe("replica artifact lifecycle", () => {
 		let mountedPath: string | undefined;
 		let existedDuringDispose = false;
 		let loopbackExemptPorts: number[] | undefined;
+		const spawn = vi.fn(() => ({ pid: 7 }));
+		const readVmFile = vi.fn(async () => new Uint8Array([9]));
 		const vm = {
 			onCronEvent: vi.fn(),
-			spawn: vi.fn(() => ({ pid: 7 })),
-			waitProcess: vi.fn(async () => 0),
-			stopProcess: vi.fn(),
+			filesystem: {
+				readFile: readVmFile,
+			},
+			process: {
+				spawn,
+				wait: vi.fn(async () => ({ exitCode: 0 })),
+				signal: vi.fn(async () => undefined),
+				writeStdin: vi.fn(async () => undefined),
+			},
 			dispose: vi.fn(async () => {
 				if (mountedPath) {
 					existedDuringDispose = (await stat(mountedPath)).isFile();
 				}
 			}),
-			readFile: vi.fn(async () => new Uint8Array([9])),
 		};
 		vi.spyOn(AgentOs, "create").mockImplementation(async (options) => {
 			loopbackExemptPorts = options?.loopbackExemptPorts;
@@ -1202,7 +1209,7 @@ describe("replica artifact lifecycle", () => {
 		vi.stubEnv("RIVET_TOKEN", "host-management-token");
 		const definitions = createAppsActors();
 		const replicaDefinition = definitions.agentOSAppsReplica;
-		const actions = replicaDefinition.config.actions as Record<
+		const actions = replicaDefinition.config.actions as unknown as Record<
 			string,
 			(...args: any[]) => any
 		>;
@@ -1252,7 +1259,7 @@ describe("replica artifact lifecycle", () => {
 		await expect(actions.readFile!(context, "/app/index.js")).resolves.toEqual(
 			new Uint8Array([9]),
 		);
-		expect(vm.spawn).toHaveBeenCalledWith(
+		expect(spawn).toHaveBeenCalledWith(
 			"node",
 			["/app/main.mjs"],
 			expect.objectContaining({

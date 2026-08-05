@@ -55,15 +55,9 @@ importers:
       '@rivet-dev/agentos-core':
         specifier: workspace:*
         version: link:packages/core
-      '@rivet-dev/agentos-runtime-core':
-        specifier: workspace:*
-        version: link:packages/runtime-core
       '@rivet-dev/agentos-test-harness':
         specifier: workspace:*
-        version: link:test-harness
-      '@rivet-dev/agentos-vm-test-harness':
-        specifier: workspace:*
-        version: link:packages/vm-test-harness
+        version: link:packages/test-harness
       '@types/node':
         specifier: ^22.19.15
         version: 22.19.15
@@ -2789,9 +2783,6 @@ importers:
       '@radix-ui/react-scroll-area':
         specifier: ^1.2.2
         version: 1.2.12(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@tanstack/react-query':
         specifier: ^5.87.1
         version: 5.101.2(react@19.2.7)
@@ -2931,39 +2922,24 @@ importers:
         specifier: ^2.1.9
         version: 2.1.9(@types/node@22.19.15)(lightningcss@1.33.0)
 
-  packages/browser:
+  packages/benchmarks:
     dependencies:
-      '@rivet-dev/agentos-runtime-browser':
+      '@rivet-dev/agentos':
         specifier: workspace:*
-        version: link:../runtime-browser
-      '@rivet-dev/agentos-runtime-core':
+        version: link:../agentos
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../runtime-core
-      sucrase:
-        specifier: ^3.35.0
-        version: 3.35.1
+        version: link:../core
     devDependencies:
-      '@playwright/test':
-        specifier: ^1.54.2
-        version: 1.59.1
       '@types/node':
         specifier: ^22.10.2
         version: 22.19.15
-      '@xterm/addon-fit':
-        specifier: 0.10.0
-        version: 0.10.0(@xterm/xterm@5.5.0)
-      '@xterm/xterm':
-        specifier: 5.5.0
-        version: 5.5.0
+      tsx:
+        specifier: ^4.19.2
+        version: 4.21.0
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
-      vite:
-        specifier: ^6.4.3
-        version: 6.4.3(@types/node@22.19.15)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.21.0)(yaml@2.9.0)
-      vitest:
-        specifier: ^2.1.8
-        version: 2.1.9(@types/node@22.19.15)(lightningcss@1.33.0)
 
   packages/build-tools:
     dependencies:
@@ -3024,12 +3000,9 @@ importers:
       '@aws-sdk/client-s3':
         specifier: ^3.1019.0
         version: 3.1020.0
-      '@rivet-dev/agentos-runtime-core':
-        specifier: workspace:*
-        version: link:../runtime-core
       '@rivet-dev/agentos-sidecar':
         specifier: workspace:*
-        version: link:../sidecar-binary
+        version: link:../sidecar
       '@rivetkit/bare-ts':
         specifier: ^0.6.2
         version: 0.6.2
@@ -3100,6 +3073,9 @@ importers:
       '@agentos-software/jq':
         specifier: workspace:*
         version: link:../../software/jq
+      '@agentos-software/pi-cli':
+        specifier: workspace:*
+        version: link:../../software/pi-cli
       '@agentos-software/ripgrep':
         specifier: workspace:*
         version: link:../../software/ripgrep
@@ -3142,9 +3118,6 @@ importers:
       '@copilotkit/llmock':
         specifier: ^1.6.0
         version: 1.6.0
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@types/node':
         specifier: ^22.10.2
         version: 22.19.15
@@ -3226,135 +3199,6 @@ importers:
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
-
-  packages/playground:
-    dependencies:
-      '@rivet-dev/agentos-browser':
-        specifier: workspace:*
-        version: link:../browser
-      '@rivet-dev/agentos-core':
-        specifier: workspace:*
-        version: link:../core
-    devDependencies:
-      '@types/node':
-        specifier: ^22.19.15
-        version: 22.19.15
-      esbuild:
-        specifier: ^0.27.1
-        version: 0.27.4
-      monaco-editor:
-        specifier: 0.52.2
-        version: 0.52.2
-      tsx:
-        specifier: ^4.21.0
-        version: 4.21.0
-      typescript:
-        specifier: 5.9.3
-        version: 5.9.3
-      vitest:
-        specifier: ^2.1.8
-        version: 2.1.9(@types/node@22.19.15)(lightningcss@1.33.0)
-
-  packages/posix:
-    dependencies:
-      '@rivet-dev/agentos-runtime-core':
-        specifier: workspace:*
-        version: link:../runtime-core
-    devDependencies:
-      '@types/node':
-        specifier: ^22.10.2
-        version: 22.19.15
-      '@xterm/headless':
-        specifier: ^6.0.0
-        version: 6.0.0
-      minimatch:
-        specifier: ^10.2.4
-        version: 10.2.5
-      typescript:
-        specifier: ^5.7.2
-        version: 5.9.3
-      vitest:
-        specifier: ^2.1.8
-        version: 2.1.9(@types/node@22.19.15)(lightningcss@1.33.0)
-
-  packages/runtime-benchmarks:
-    dependencies:
-      '@rivet-dev/agentos':
-        specifier: workspace:*
-        version: link:../agentos
-      '@rivet-dev/agentos-runtime-core':
-        specifier: workspace:*
-        version: link:../runtime-core
-    devDependencies:
-      '@types/node':
-        specifier: ^22.10.2
-        version: 22.19.15
-      tsx:
-        specifier: ^4.19.2
-        version: 4.21.0
-      typescript:
-        specifier: ^5.7.2
-        version: 5.9.3
-
-  packages/runtime-browser:
-    dependencies:
-      '@noble/ciphers':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@noble/hashes':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@rivet-dev/agentos-runtime-core':
-        specifier: workspace:*
-        version: link:../runtime-core
-      sucrase:
-        specifier: ^3.35.0
-        version: 3.35.1
-    devDependencies:
-      '@playwright/test':
-        specifier: ^1.54.2
-        version: 1.59.1
-      '@types/node':
-        specifier: ^22.10.2
-        version: 22.19.15
-      typescript:
-        specifier: ^5.7.2
-        version: 5.9.3
-      vitest:
-        specifier: ^2.1.8
-        version: 2.1.9(@types/node@22.19.15)(lightningcss@1.33.0)
-
-  packages/runtime-core:
-    dependencies:
-      '@rivet-dev/agentos-runtime-sidecar':
-        specifier: workspace:*
-        version: link:../runtime-sidecar
-      '@rivetkit/bare-ts':
-        specifier: ^0.6.2
-        version: 0.6.2
-      zod:
-        specifier: ^4.1.11
-        version: 4.3.6
-    devDependencies:
-      '@types/node':
-        specifier: ^22.10.2
-        version: 22.19.15
-      typescript:
-        specifier: ^5.7.2
-        version: 5.9.3
-      vitest:
-        specifier: ^2.1.8
-        version: 2.1.9(@types/node@22.19.15)(lightningcss@1.33.0)
-
-  packages/runtime-sidecar: {}
-
-  packages/runtime-sidecar/npm/darwin-arm64: {}
-
-  packages/runtime-sidecar/npm/darwin-x64: {}
-
-  packages/runtime-sidecar/npm/linux-arm64-gnu: {}
-
-  packages/runtime-sidecar/npm/linux-x64-gnu: {}
 
   packages/shell:
     dependencies:
@@ -3453,32 +3297,27 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.15)(lightningcss@1.33.0)
 
-  packages/sidecar-binary: {}
+  packages/sidecar: {}
 
-  packages/typescript:
+  packages/sidecar/npm/darwin-arm64: {}
+
+  packages/sidecar/npm/darwin-x64: {}
+
+  packages/sidecar/npm/linux-arm64-gnu: {}
+
+  packages/sidecar/npm/linux-x64-gnu: {}
+
+  packages/test-harness:
     dependencies:
       '@rivet-dev/agentos-core':
         specifier: workspace:*
         version: link:../core
-      typescript:
-        specifier: ^5.7.2
-        version: 5.9.3
-    devDependencies:
-      '@types/node':
-        specifier: ^22.10.2
-        version: 22.19.15
-      vitest:
-        specifier: ^2.1.8
-        version: 2.1.9(@types/node@22.19.15)(lightningcss@1.33.0)
-
-  packages/vm-test-harness:
-    dependencies:
-      '@rivet-dev/agentos-runtime-core':
-        specifier: workspace:*
-        version: link:../runtime-core
       '@xterm/headless':
         specifier: ^6.0.0
         version: 6.0.0
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.19.15)(lightningcss@1.33.0)
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -3486,9 +3325,6 @@ importers:
       typescript:
         specifier: ^5.9.2
         version: 5.9.3
-      vitest:
-        specifier: ^2.1.9
-        version: 2.1.9(@types/node@22.19.15)(lightningcss@1.33.0)
 
   scripts/publish:
     dependencies:
@@ -3523,9 +3359,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -3566,9 +3399,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -3591,9 +3421,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -3622,9 +3449,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@types/node':
         specifier: ^22.10.2
         version: 22.19.15
@@ -3690,9 +3514,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -3736,9 +3557,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@types/node':
         specifier: ^22.10.2
         version: 22.19.15
@@ -3754,9 +3572,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -3775,9 +3590,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -3796,9 +3608,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -3817,9 +3626,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -3838,9 +3644,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -3932,9 +3735,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@types/node':
         specifier: ^22.10.2
         version: 22.19.15
@@ -3950,9 +3750,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -3971,9 +3768,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -3992,9 +3786,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4013,9 +3804,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4034,9 +3822,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4055,9 +3840,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4076,9 +3858,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4097,9 +3876,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4147,8 +3923,8 @@ importers:
         specifier: 1.2.1
         version: 1.2.1(zod@3.25.76)
       '@earendil-works/pi-coding-agent':
-        specifier: 0.80.6
-        version: 0.80.6(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)
+        specifier: 0.80.10
+        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)
       pi-mcp-adapter:
         specifier: 2.11.0
         version: 2.11.0(@cfworker/json-schema@4.1.1)(@opentelemetry/api@1.9.0)(bufferutil@4.1.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)
@@ -4181,9 +3957,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4202,9 +3975,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4223,9 +3993,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4244,9 +4011,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4265,9 +4029,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4286,9 +4047,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4313,9 +4071,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4334,9 +4089,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4355,9 +4107,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4376,9 +4125,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4397,9 +4143,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4418,9 +4161,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4439,9 +4179,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4460,9 +4197,6 @@ importers:
       '@agentos-software/manifest':
         specifier: workspace:*
         version: link:../../packages/manifest
-      '@rivet-dev/agentos-test-harness':
-        specifier: workspace:*
-        version: link:../../test-harness
       '@rivet-dev/agentos-toolchain':
         specifier: workspace:*
         version: link:../../packages/agentos-toolchain
@@ -4475,22 +4209,6 @@ importers:
       vitest:
         specifier: ^2.1.9
         version: 2.1.9(@types/node@22.19.15)(lightningcss@1.33.0)
-
-  test-harness:
-    dependencies:
-      '@rivet-dev/agentos-vm-test-harness':
-        specifier: workspace:*
-        version: link:../packages/vm-test-harness
-      vitest:
-        specifier: ^2.1.8
-        version: 2.1.9(@types/node@22.19.15)(lightningcss@1.33.0)
-    devDependencies:
-      '@types/node':
-        specifier: ^22.10.2
-        version: 22.19.15
-      typescript:
-        specifier: ^5.9.2
-        version: 5.9.3
 
   tests/e2e/agentos-apps:
     dependencies:
@@ -4542,7 +4260,7 @@ importers:
         version: file:website/vendor/theme/vendor/components(@babel/core@7.29.7)(@babel/runtime@7.29.2)(@babel/template@7.29.7)(@codemirror/language@6.12.4)(@codemirror/search@6.7.1)(@codemirror/theme-one-dark@6.1.3)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(codemirror@6.0.2)(lodash@4.18.1)(posthog-js@1.406.2)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(tailwindcss@3.4.19(tsx@4.21.0)(yaml@2.9.0))
       '@rivet-gg/icons':
         specifier: workspace:*
-        version: link:vendor/theme/vendor/icons
+        version: file:website/vendor/theme/vendor/icons(@fortawesome/fontawesome-svg-core@7.3.1)(@fortawesome/free-brands-svg-icons@7.3.1)(@fortawesome/free-solid-svg-icons@7.3.1)(@fortawesome/react-fontawesome@3.5.0(@fortawesome/fontawesome-svg-core@7.3.1)(react@19.2.7))(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       astro:
         specifier: ^5.18.2
         version: 5.18.2(@types/node@24.13.2)(aws4fetch@1.0.20)(db0@0.3.4(better-sqlite3@12.8.0)(drizzle-orm@0.44.7(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(sql.js@1.14.1)))(jiti@2.7.0)(lightningcss@1.33.0)(rollup@4.60.1)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
@@ -5939,8 +5657,8 @@ packages:
     engines: {node: '>=22.19.0'}
     hasBin: true
 
-  '@earendil-works/pi-coding-agent@0.80.6':
-    resolution: {integrity: sha512-vcfD6tOk402isLl3Cm/qbn2O10TvgroMp1+/fEGM24ZdvETFCdOYv5VZ7m59EI5fPsjfSJh+CpQ5bhBrhfOg7g==}
+  '@earendil-works/pi-coding-agent@0.80.10':
+    resolution: {integrity: sha512-aL4apbupCHiVLSXASXvRzH4Q2vmtfrDa+0s909CJuVu/GgGylbDzr7oyF1mPmip5E+VxYYxKWmph4hV04wUcQg==}
     engines: {node: '>=22.19.0'}
     hasBin: true
 
@@ -7292,10 +7010,6 @@ packages:
       '@emnapi/core': ^1.7.1
       '@emnapi/runtime': ^1.7.1
 
-  '@noble/ciphers@2.2.0':
-    resolution: {integrity: sha512-Z6pjIZ/8IJcCGzb2S/0Px5J81yij85xASuk1teLNeg75bfT07MV3a/O2Mtn1I2se43k3lkVEcFaR10N4cgQcZA==}
-    engines: {node: '>= 20.19.0'}
-
   '@noble/hashes@2.2.0':
     resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
     engines: {node: '>= 20.19.0'}
@@ -7415,11 +7129,6 @@ packages:
   '@pkgr/core@0.1.2':
     resolution: {integrity: sha512-fdDH1LSGfZdTH2sxdpVMw31BanV28K/Gry0cVFxaNP77neJSkd82mM8ErPNYs9e+0O7SdHBLTDzDgwUuy18RnQ==}
     engines: {node: ^12.20.0 || ^14.18.0 || >=16.0.0}
-
-  '@playwright/test@1.59.1':
-    resolution: {integrity: sha512-PG6q63nQg5c9rIi4/Z5lR5IVF7yU5MqmKaPOe0HSc0O2cX1fPi96sUQu5j7eo4gKCkB2AnNGoWt7y4/Xx3Kcqg==}
-    engines: {node: '>=18'}
-    hasBin: true
 
   '@poppinss/colors@4.1.6':
     resolution: {integrity: sha512-H9xkIdFswbS8n1d6vmRd8+c10t2Qe+rZITbbDHHkQixH5+2x1FDGmi/0K+WgWiqQFKPSlIYB7jlH6Kpfn6Fleg==}
@@ -12418,9 +12127,6 @@ packages:
     resolution: {integrity: sha512-t9VmxaqrmANnEOBhpSDI6HD192Ge48k8vmWqQQL7hSFEqHEYwZbbsu49+aKLWZeRvFs3j1pMhXOqqF4kPlvjkQ==}
     engines: {node: '>=18.0.0'}
 
-  monaco-editor@0.52.2:
-    resolution: {integrity: sha512-GEQWEZmfkOGLdd3XK8ryrfWz3AIP8YymVXiPHEdewrUq7mh0qrKrfHLNCXcbB6sTnMLnOZ3ztSiKcciFUkIJwQ==}
-
   motion-dom@11.18.1:
     resolution: {integrity: sha512-g76KvA001z+atjfxczdRtw/RXOM3OMSdd1f4DL77qCTF/+avrRJiawSG4yDibEQ215sr9kpinSlX2pCTJ9zbhw==}
 
@@ -16827,7 +16533,7 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-coding-agent@0.80.6(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)':
+  '@earendil-works/pi-coding-agent@0.80.10(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)':
     dependencies:
       '@earendil-works/pi-agent-core': 0.80.10(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)
       '@earendil-works/pi-ai': 0.80.10(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76))(bufferutil@4.1.0)(ws@8.21.0(bufferutil@4.1.0))(zod@3.25.76)
@@ -18139,9 +17845,8 @@ snapshots:
       '@tybys/wasm-util': 0.10.3
     optional: true
 
-  '@noble/ciphers@2.2.0': {}
-
-  '@noble/hashes@2.2.0': {}
+  '@noble/hashes@2.2.0':
+    optional: true
 
   '@nodable/entities@3.0.0': {}
 
@@ -18242,10 +17947,6 @@ snapshots:
     optional: true
 
   '@pkgr/core@0.1.2': {}
-
-  '@playwright/test@1.59.1':
-    dependencies:
-      playwright: 1.59.1
 
   '@poppinss/colors@4.1.6':
     dependencies:
@@ -24876,8 +24577,6 @@ snapshots:
 
   modern-tar@0.7.7: {}
 
-  monaco-editor@0.52.2: {}
-
   motion-dom@11.18.1:
     dependencies:
       motion-utils: 11.18.1
@@ -27504,22 +27203,6 @@ snapshots:
       '@types/node': 24.13.2
       fsevents: 2.3.3
       lightningcss: 1.33.0
-
-  vite@6.4.3(@types/node@22.19.15)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.21.0)(yaml@2.9.0):
-    dependencies:
-      esbuild: 0.25.12
-      fdir: 6.5.0(picomatch@4.0.4)
-      picomatch: 4.0.4
-      postcss: 8.5.22
-      rollup: 4.60.1
-      tinyglobby: 0.2.15
-    optionalDependencies:
-      '@types/node': 22.19.15
-      fsevents: 2.3.3
-      jiti: 2.7.0
-      lightningcss: 1.33.0
-      tsx: 4.21.0
-      yaml: 2.9.0
 
   vite@6.4.3(@types/node@24.13.2)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.21.0)(yaml@2.9.0):
     dependencies:

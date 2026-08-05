@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentExitEvent } from "../src/agent-os.js";
 import { AgentOs } from "../src/agent-os.js";
-import { encodeAcpEvent } from "../src/sidecar/agentos-protocol.js";
+import { encodeAcpEvent } from "../src/sidecar/agentos-acp-protocol.js";
 
 const SESSION_ID = "session-1";
 const ACP_EXTENSION_NAMESPACE = "dev.rivet.agent-os.acp";

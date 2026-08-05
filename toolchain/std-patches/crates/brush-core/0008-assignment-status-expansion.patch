@@ -10,7 +10,7 @@
  }
 --- a/src/interp.rs
 +++ b/src/interp.rs
-@@ -1024,5 +1024,7 @@ impl ExecuteInPipeline for ast::SimpleCommand {
+@@ -1024,6 +1024,8 @@ impl ExecuteInPipeline for ast::SimpleCommand {
              }
          } else {
 -            // Reset last status.

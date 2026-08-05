@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Wed, 22 Jul 2026 12:00:00 -0700
+Subject: [PATCH] fstests: use the standard long-long printf modifier
+
+The pwrite_mmap_blocked helper uses glibc's legacy `%L` integer modifier.
+musl, and therefore wasi-libc, requires the standard `%ll` modifier and
+otherwise drops the helper's success line. Keep the value types and expected
+output unchanged while making the format portable.
+---
+ src/pwrite_mmap_blocked.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/pwrite_mmap_blocked.c b/src/pwrite_mmap_blocked.c
+index ea3d3939..f8cda1e2 100644
+--- a/src/pwrite_mmap_blocked.c
++++ b/src/pwrite_mmap_blocked.c
+@@ -51,7 +51,7 @@ int main(int argc, char *argv[])
+ 		perror("mmap");
+ 		exit(1);
+ 	}
+-	printf("pwrite %Ld bytes from %Ld to %Ld\n",
++	printf("pwrite %lld bytes from %lld to %lld\n",
+ 		(long long) amount, (long long) from, (long long) to);
+ 
+ 	ret = pwrite(fd, (char *)mapped_mem + from, amount, to);
+-- 
+2.47.0

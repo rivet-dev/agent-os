@@ -1,18 +1,15 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: AgentOS Tests <tests@agentos.invalid>
+From: agentOS Tests <tests@agentos.invalid>
 Date: Thu, 9 Jul 2026 23:05:00 -0700
 Subject: [PATCH 9/9] fstests: port helper process launches to WASI
 
-WASI cannot resume a forked linear-memory continuation and does not expose
-execvp. Preserve permname's disjoint concurrent workers by spawning one copy
-per shard, and preserve runas credential inheritance and exit status by
-spawning its command after applying the requested identity.
+WASI cannot resume a forked linear-memory continuation. Preserve permname's
+disjoint concurrent workers by spawning one copy per shard.
 
 The native paths remain unchanged.
 ---
  src/permname.c | 57 ++++++++++++++++++++++++++++++++++++++++++++++++++++
- src/runas.c    | 23 +++++++++++++++++++++
- 2 files changed, 80 insertions(+)
+ 1 file changed, 57 insertions(+)
 
 diff --git a/src/permname.c b/src/permname.c
 index a5b0246d..fdc067bd 100644
@@ -102,39 +99,6 @@ index a5b0246d..fdc067bd 100644
 +#endif
          
  	return 0;
- }
-diff --git a/src/runas.c b/src/runas.c
-index 879d756a..5fe86d19 100644
---- a/src/runas.c
-+++ b/src/runas.c
-@@ -108,7 +108,28 @@ main(int argc, char **argv)
- 	    }
-         }
- 
-+#ifdef __wasi__
-+	{
-+		pid_t child;
-+		int status;
-+		int error = posix_spawnp(&child, cmd[0], NULL, NULL, cmd, environ);
-+
-+		if (error != 0) {
-+			errno = error;
-+			fprintf(stderr, "%s: %s\n", cmd[0], strerror(errno));
-+			exit(1);
-+		}
-+		if (waitpid(child, &status, 0) < 0) {
-+			fprintf(stderr, "%s: %s\n", cmd[0], strerror(errno));
-+			exit(1);
-+		}
-+		if (WIFEXITED(status))
-+			exit(WEXITSTATUS(status));
-+		exit(128 + WTERMSIG(status));
-+	}
-+#else
- 	execvp(cmd[0], cmd);
- 	fprintf(stderr, "%s: %s\n", cmd[0], strerror(errno));
- 	exit(1);
-+#endif
  }
 -- 
 2.47.3

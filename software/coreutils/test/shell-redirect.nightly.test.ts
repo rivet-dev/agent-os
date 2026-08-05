@@ -9,7 +9,10 @@ import {
 	describeIf,
 	hasWasmBinaries,
 	type Kernel,
+	wasmBackendTestTimeout,
 } from '@rivet-dev/agentos-test-harness';
+
+const SHELL_REDIRECT_TEST_TIMEOUT_MS = wasmBackendTestTimeout(15_000, 30_000);
 
 function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'\\''`)}'`;
@@ -28,7 +31,10 @@ describeIf(hasWasmBinaries, "wasmvm shell redirects", () => {
 		await (vfs as any).chmod("/", 0o1777);
 		await vfs.mkdir("/tmp", { recursive: true });
 		await (vfs as any).chmod("/tmp", 0o1777);
-		kernel = createKernel({ filesystem: vfs, syncFilesystemOnDispose: false });
+		kernel = createKernel({
+			filesystem: vfs,
+			syncFilesystemOnDispose: false,
+		});
 		await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
 
 		const result = await kernel.exec(
@@ -38,7 +44,7 @@ describeIf(hasWasmBinaries, "wasmvm shell redirects", () => {
 		expect(result.exitCode, result.stderr).toBe(0);
 		expect(result.stdout).toBe("hi\n");
 		expect(await vfs.exists("/tmp/r/a.txt")).toBe(true);
-	}, 15_000);
+	}, SHELL_REDIRECT_TEST_TIMEOUT_MS);
 
 	it("keeps Rust path resolution after guest fd 3 is reused", async () => {
 		const vfs = createInMemoryFileSystem();
@@ -55,7 +61,7 @@ describeIf(hasWasmBinaries, "wasmvm shell redirects", () => {
 		expect(result.stdout).toBe("payload\n");
 		expect(Buffer.from(await kernel.readFile("/tmp/rust-path/file")).toString("utf8")).toBe("payload\n");
 		expect(Buffer.from(await kernel.readFile("/tmp/fd3-owned")).toString("utf8")).toBe("descriptor");
-	}, 15_000);
+	}, SHELL_REDIRECT_TEST_TIMEOUT_MS);
 
 	it("preserves bytes written before stdout is closed", async () => {
 		const vfs = createInMemoryFileSystem();
@@ -69,7 +75,7 @@ describeIf(hasWasmBinaries, "wasmvm shell redirects", () => {
 		expect(wasm.exitCode).toBe(native.status);
 		expect(wasm.stdout).toBe(native.stdout);
 		expect(wasm.stderr).toBe(native.stderr);
-	}, 15_000);
+	}, SHELL_REDIRECT_TEST_TIMEOUT_MS);
 
 	it("matches native exec PATH lookup, argv, environment, and replacement", async () => {
 		const vfs = createInMemoryFileSystem();
@@ -87,6 +93,27 @@ describeIf(hasWasmBinaries, "wasmvm shell redirects", () => {
 		expect(wasm.stdout).toBe(native.stdout);
 		expect(wasm.stderr).toBe(native.stderr);
 		expect(wasm.stdout).toBe("custom-zero|custom-one|from-exec\n");
+	}, 30_000);
+
+	it("executes an execute-only WASM image without requiring read permission", async () => {
+		const vfs = createInMemoryFileSystem();
+		await (vfs as any).chmod("/", 0o1777);
+		await vfs.mkdir("/tmp", { recursive: true });
+		await (vfs as any).chmod("/tmp", 0o1777);
+		kernel = createKernel({ filesystem: vfs, syncFilesystemOnDispose: false });
+		await kernel.mount(createWasmVmRuntime({ commandDirs: [COMMANDS_DIR] }));
+
+		const executeOnlyPath = `/tmp/agentos-exec-only-${process.pid}`;
+		await kernel.writeFile(executeOnlyPath, readFileSync(`${COMMANDS_DIR}/sh`));
+		await (vfs as any).chmod(executeOnlyPath, 0o111);
+		const script =
+			`exec ${executeOnlyPath} -c ` +
+			`'printf "execute-only\\n"'`;
+		const wasm = await kernel.exec(`sh -c ${shellQuote(script)}`);
+
+		expect(wasm.exitCode, wasm.stderr).toBe(0);
+		expect(wasm.stdout).toBe("execute-only\n");
+		expect(wasm.stderr).toBe("");
 	}, 30_000);
 
 	it("matches native exec redirections and inherited descriptors", async () => {

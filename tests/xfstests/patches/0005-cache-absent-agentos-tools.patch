@@ -1,9 +1,9 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: AgentOS Tests <tests@agentos.invalid>
+From: agentOS Tests <tests@agentos.invalid>
 Date: Thu, 9 Jul 2026 21:16:00 -0700
 Subject: [PATCH 5/5] fstests: cache absent agentos command lookups
 
-AgentOS resolves guest commands across mounted package directories. Avoid
+agentOS resolves guest commands across mounted package directories. Avoid
 repeating that VFS walk for tools that are deliberately absent from the staged
 image. Returning not-found preserves every per-test require gate.
 
@@ -20,7 +20,7 @@ index 843daf7e..6d84120b 100644
 +	{
 +		if [ "$1" = "-P" ]; then
 +			case "$2" in
-+			accton|attr|bc|blkdiscard|blkzone|btrfs*|capsh|cc|chacl|chattr|checkbashisms|dbench|debugfs|dmsetup|dump|dumpe2fs|duperemove|e2image|e4defrag|filefrag|fio|flock|fscryptctl|fstrim|fsverity|getcap|getfattr|gzip|indent|keyctl|ldd|logger|lsattr|lvm|lz4|man|mkfs|mkfs.*|mkswap|nfs4_getfacl|nfs4_setfacl|openssl|parted|perl|quota|resize2fs|restore|setcap|setfattr|sqlite3|thin_check|ubiupdatevol|udevadm|udevsettle|umount|uuidgen|wipefs|xfs*|xz)
++			accton|attr|blkdiscard|blkzone|btrfs*|capsh|cc|chacl|chattr|checkbashisms|dbench|debugfs|dmsetup|dump|dumpe2fs|duperemove|e2image|e4defrag|filefrag|fio|flock|fscryptctl|fstrim|fsverity|getcap|getfattr|gzip|indent|keyctl|ldd|logger|lsattr|lvm|lz4|man|mkfs|mkfs.*|mkswap|nfs4_getfacl|nfs4_setfacl|openssl|parted|perl|quota|resize2fs|restore|setcap|setfattr|sqlite3|thin_check|ubiupdatevol|udevadm|udevsettle|umount|uuidgen|wipefs|xfs*|xz)
 +				return 1
 +				;;
 +			esac

@@ -9,7 +9,7 @@
      fsext::{MetadataTimeField, metadata_get_time},
      line_ending::LineEnding,
      os_str_as_bytes_lossy,
-@@ -77,6 +77,60 @@
+@@ -77,6 +77,61 @@
      translate,
      version_cmp::version_cmp,
  };
@@ -21,6 +21,7 @@
 +    use std::env;
 +
 +    use super::{Metadata, Path};
++    const AGENTOS_CWD_FD: u32 = u32::MAX;
 +
 +    mod host_fs {
 +        #[link(wasm_import_module = "host_fs")]
@@ -44,7 +45,7 @@
 +        };
 +        unsafe {
 +            host_fs::path_mode(
-+                3,
++                AGENTOS_CWD_FD,
 +                path_str.as_ptr(),
 +                path_str.len() as u32,
 +                if follow_symlinks { 1 } else { 0 },
@@ -70,7 +71,7 @@
  
  mod dired;
  use dired::{DiredOutput, is_dired_arg_present};
-@@ -2982,7 +3036,15 @@
+@@ -2982,7 +3037,15 @@
          let is_acl_set = false;
          #[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
          let is_acl_set = has_acl(item.path());

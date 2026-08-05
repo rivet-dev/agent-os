@@ -26,7 +26,7 @@ software such as curl expects to find in <sys/socket.h> and <poll.h>.
 -#define MSG_PEEK __WASI_RIFLAGS_RECV_PEEK
 -#define MSG_WAITALL __WASI_RIFLAGS_RECV_WAITALL
 -#define MSG_TRUNC __WASI_ROFLAGS_RECV_DATA_TRUNCATED
-+/* AgentOS owns the WASI p1 socket ABI and accepts Linux message flags in
++/* agentOS owns the WASI p1 socket ABI and accepts Linux message flags in
 + * host_net, so expose Linux values rather than raw WASI riflags/roflags. */
 +#define MSG_PEEK 0x0002
 +#define MSG_WAITALL 0x0100
@@ -145,7 +145,7 @@ software such as curl expects to find in <sys/socket.h> and <poll.h>.
 +
 +/* WASI reserves 5/6 for DGRAM/STREAM; use a private non-conflicting value. */
 +#ifndef SOCK_SEQPACKET
-+#define SOCK_SEQPACKET 1
++#define SOCK_SEQPACKET 3
 +#endif
 +
  #define SOCK_DGRAM __WASI_FILETYPE_SOCKET_DGRAM

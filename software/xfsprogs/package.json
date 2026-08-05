@@ -6,7 +6,11 @@
 	"description": "Low-level filesystem inspection commands for AgentOS VMs",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
-	"files": ["dist", "!dist/package", "!dist/package.tar"],
+	"files": [
+		"dist",
+		"!dist/package",
+		"!dist/package.tar"
+	],
 	"exports": {
 		".": {
 			"types": "./dist/index.d.ts",
@@ -16,11 +20,10 @@
 	"scripts": {
 		"build": "agentos-toolchain stage --commands-dir ../../toolchain/target/wasm32-wasip1/release/commands --if-missing skip && tsc && agentos-toolchain build",
 		"check-types": "tsc --noEmit",
-		"test": "vitest run test/ --passWithNoTests"
+		"test": "vitest run test/"
 	},
 	"devDependencies": {
 		"@agentos-software/manifest": "workspace:*",
-		"@rivet-dev/agentos-test-harness": "workspace:*",
 		"@rivet-dev/agentos-toolchain": "workspace:*",
 		"@types/node": "^22.10.2",
 		"typescript": "^5.9.2",

@@ -1,0 +1,300 @@
+diff --git a/tests/generic/711 b/tests/generic/711
+--- a/tests/generic/711
++++ b/tests/generic/711
+@@ -8,4 +8,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick swapext
+ 
++_notrun "agentOS does not expose guest swap devices"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/712 b/tests/generic/712
+--- a/tests/generic/712
++++ b/tests/generic/712
+@@ -9,4 +9,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/713 b/tests/generic/713
+--- a/tests/generic/713
++++ b/tests/generic/713
+@@ -9,4 +9,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/714 b/tests/generic/714
+--- a/tests/generic/714
++++ b/tests/generic/714
+@@ -10,4 +10,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/715 b/tests/generic/715
+--- a/tests/generic/715
++++ b/tests/generic/715
+@@ -9,4 +9,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/716 b/tests/generic/716
+--- a/tests/generic/716
++++ b/tests/generic/716
+@@ -12,4 +12,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/717 b/tests/generic/717
+--- a/tests/generic/717
++++ b/tests/generic/717
+@@ -9,4 +9,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/718 b/tests/generic/718
+--- a/tests/generic/718
++++ b/tests/generic/718
+@@ -9,4 +9,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/719 b/tests/generic/719
+--- a/tests/generic/719
++++ b/tests/generic/719
+@@ -12,4 +12,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/720 b/tests/generic/720
+--- a/tests/generic/720
++++ b/tests/generic/720
+@@ -9,4 +9,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/721 b/tests/generic/721
+--- a/tests/generic/721
++++ b/tests/generic/721
+@@ -10,4 +10,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/722 b/tests/generic/722
+--- a/tests/generic/722
++++ b/tests/generic/722
+@@ -10,4 +10,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Import common functions.
+diff --git a/tests/generic/723 b/tests/generic/723
+--- a/tests/generic/723
++++ b/tests/generic/723
+@@ -9,4 +9,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/724 b/tests/generic/724
+--- a/tests/generic/724
++++ b/tests/generic/724
+@@ -11,4 +11,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/725 b/tests/generic/725
+--- a/tests/generic/725
++++ b/tests/generic/725
+@@ -11,4 +11,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick fiexchange
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/726 b/tests/generic/726
+--- a/tests/generic/726
++++ b/tests/generic/726
+@@ -10,4 +10,6 @@
+ . ./common/preamble
+ _begin_fstest auto fiexchange quick
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/727 b/tests/generic/727
+--- a/tests/generic/727
++++ b/tests/generic/727
+@@ -10,4 +10,6 @@
+ . ./common/preamble
+ _begin_fstest auto fiexchange quick
+ 
++_notrun "agentOS does not support exchange-range ioctls"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/730 b/tests/generic/730
+--- a/tests/generic/730
++++ b/tests/generic/730
+@@ -9,4 +9,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick
+ 
++_notrun "agentOS does not expose SCSI block devices"
++
+ _cleanup()
+diff --git a/tests/generic/731 b/tests/generic/731
+--- a/tests/generic/731
++++ b/tests/generic/731
+@@ -10,4 +10,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick
+ 
++_notrun "agentOS does not expose SCSI block devices"
++
+ _cleanup()
+diff --git a/tests/generic/732 b/tests/generic/732
+--- a/tests/generic/732
++++ b/tests/generic/732
+@@ -12,4 +12,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick rename
+ 
++_notrun "agentOS does not expose Linux multi-mount scratch filesystems"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/734 b/tests/generic/734
+--- a/tests/generic/734
++++ b/tests/generic/734
+@@ -13,4 +13,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick unshare clone
+ 
++_notrun "agentOS does not support reflink copy-on-write"
++
+ _cleanup()
+diff --git a/tests/generic/735 b/tests/generic/735
+--- a/tests/generic/735
++++ b/tests/generic/735
+@@ -14,4 +14,6 @@
+ . ./common/populate
+ _begin_fstest auto quick insert prealloc
+ 
++_notrun "agentOS does not expose Linux block-filesystem logical-block limits"
++
+ if [[ "$FSTYP" =~ ext[0-9]+ ]]; then
+diff --git a/tests/generic/737 b/tests/generic/737
+--- a/tests/generic/737
++++ b/tests/generic/737
+@@ -11,4 +11,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick shutdown aio
+ 
++_notrun "agentOS does not expose block-filesystem shutdown or Linux AIO"
++
+ _require_scratch
+diff --git a/tests/generic/738 b/tests/generic/738
+--- a/tests/generic/738
++++ b/tests/generic/738
+@@ -9,4 +9,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick freeze
+ 
++_notrun "agentOS does not expose filesystem freeze or host page-cache controls"
++
+ _fixed_by_fs_commit xfs ab23a7768739 \
+diff --git a/tests/generic/739 b/tests/generic/739
+--- a/tests/generic/739
++++ b/tests/generic/739
+@@ -12,4 +12,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick encrypt
+ 
++_notrun "agentOS does not support fscrypt"
++
+ . ./common/filter
+diff --git a/tests/generic/740 b/tests/generic/740
+--- a/tests/generic/740
++++ b/tests/generic/740
+@@ -9,4 +9,6 @@
+ . ./common/preamble
+ _begin_fstest mkfs auto quick
+ 
++_notrun "agentOS does not expose guest block devices or mkfs"
++
+ # Import common functions.
+diff --git a/tests/generic/741 b/tests/generic/741
+--- a/tests/generic/741
++++ b/tests/generic/741
+@@ -10,4 +10,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick volume tempfsid
+ 
++_notrun "agentOS does not expose Linux device-mapper fault targets"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/745 b/tests/generic/745
+--- a/tests/generic/745
++++ b/tests/generic/745
+@@ -15,4 +15,6 @@
+ . ./common/preamble
+ _begin_fstest auto metadata quick log
+ 
++_notrun "agentOS does not expose block-filesystem crash replay"
++
+ # Override the default cleanup function.
+diff --git a/tests/generic/748 b/tests/generic/748
+--- a/tests/generic/748
++++ b/tests/generic/748
+@@ -12,4 +12,6 @@
+ . ./common/attr
+ _begin_fstest auto quick log preallocrw dangerous
+ 
++_notrun "agentOS does not run Linux block-filesystem crash regressions"
++
+ _require_scratch
+diff --git a/tests/generic/749 b/tests/generic/749
+--- a/tests/generic/749
++++ b/tests/generic/749
+@@ -17,4 +17,6 @@
+ . ./common/preamble
+ _begin_fstest auto quick prealloc mmap
+ 
++_notrun "agentOS WASM mappings do not expose Linux SIGBUS page-fault semantics"
++
+ # Import common functions.

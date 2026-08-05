@@ -1,0 +1,58 @@
+Enable Brush's existing ulimit builtin on agentOS's Linux-in-WASM target.
+
+The rlimit dependency is patched one layer down to use the owned wasi-libc, so
+the builtin remains ordinary Brush code and both executors share kernel state.
+
+diff --git a/src/factory.rs b/src/factory.rs
+index 3306c31..143085e 100644
+--- a/src/factory.rs
++++ b/src/factory.rs
+@@ -114,7 +114,7 @@ pub fn default_builtins() -> HashMap<String, Box<dyn builtins::Command>> {
+     m.insert("true".into(), builtin::<true_::TrueCommand>());
+     #[cfg(feature = "builtin.type")]
+     m.insert("type".into(), builtin::<type_::TypeCommand>());
+-    #[cfg(all(feature = "builtin.ulimit", unix))]
++    #[cfg(all(feature = "builtin.ulimit", any(unix, target_arch = "wasm32")))]
+     m.insert("ulimit".into(), builtin::<ulimit::ULimitCommand>());
+     #[cfg(all(feature = "builtin.umask", any(unix, target_arch = "wasm32")))]
+     m.insert("umask".into(), builtin::<umask::UmaskCommand>());
+diff --git a/src/lib.rs b/src/lib.rs
+index 174b069..64b9a67 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -96,7 +96,7 @@ mod trap;
+ mod true_;
+ #[cfg(feature = "builtin.type")]
+ mod type_;
+-#[cfg(all(feature = "builtin.ulimit", unix))]
++#[cfg(all(feature = "builtin.ulimit", any(unix, target_arch = "wasm32")))]
+ mod ulimit;
+ #[cfg(all(feature = "builtin.umask", any(unix, target_arch = "wasm32")))]
+ mod umask;
+diff --git a/src/ulimit.rs b/src/ulimit.rs
+index 59f85c9..ebd7986 100644
+--- a/src/ulimit.rs
++++ b/src/ulimit.rs
+@@ -40,6 +40,9 @@ impl Virtual {
+     fn get(self) -> std::io::Result<(u64, u64)> {
+         match self {
+             Self::Pipe => {
++                #[cfg(target_arch = "wasm32")]
++                let lim = 4096;
++                #[cfg(not(target_arch = "wasm32"))]
+                 let lim = nix::unistd::PathconfVar::PIPE_BUF as u64 * 512;
+                 Ok((lim, lim))
+             }
+diff --git a/Cargo.toml b/Cargo.toml
+index b27580a..18a7433 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -240,7 +240,7 @@ features = [
+     "user",
+ ]
+ 
+-[target."cfg(unix)".dependencies.rlimit]
++[target."cfg(any(unix, target_arch = \"wasm32\"))".dependencies.rlimit]
+ version = "0.10.2"
+ 
+ [lints.clippy]

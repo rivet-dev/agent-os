@@ -36,14 +36,15 @@ async fn process_surface_exec_spawn_and_snapshot() {
     );
     assert!(
         matches!(
-            os.write_process_stdin(MISSING_PID, StdinInput::Text("x".to_string())),
+            os.write_process_stdin(MISSING_PID, StdinInput::Text("x".to_string()))
+                .await,
             Err(ClientError::ProcessNotFound(_))
         ),
         "write_process_stdin(unknown) must return ProcessNotFound"
     );
     assert!(
         matches!(
-            os.close_process_stdin(MISSING_PID),
+            os.close_process_stdin(MISSING_PID).await,
             Err(ClientError::ProcessNotFound(_))
         ),
         "close_process_stdin(unknown) must return ProcessNotFound"
@@ -163,7 +164,7 @@ async fn process_surface_exec_spawn_and_snapshot() {
 
     // --- spawn: pid + stdin write + stdout stream + exit wait -------------------------------------
     let handle = os
-        .spawn_process("cat", Vec::new(), SpawnOptions::default())
+        .spawn("cat", Vec::new(), SpawnOptions::default())
         .expect("spawn cat");
     assert!(
         handle.pid >= 1_000_000,
@@ -193,8 +194,11 @@ async fn process_surface_exec_spawn_and_snapshot() {
 
     // Write to stdin, then close it so `cat` sees EOF and exits.
     os.write_process_stdin(handle.pid, StdinInput::Text("spawned-input".to_string()))
+        .await
         .expect("write stdin");
-    os.close_process_stdin(handle.pid).expect("close stdin");
+    os.close_process_stdin(handle.pid)
+        .await
+        .expect("close stdin");
 
     // Collect the expected stdout bytes. The stdout subscription is a live multi-subscriber stream,
     // so process exit is observed through wait_process rather than channel closure.
@@ -217,13 +221,21 @@ async fn process_surface_exec_spawn_and_snapshot() {
     );
 
     // wait_process resolves with the exit code (cat exits 0 on clean EOF).
-    let exit_code = tokio::time::timeout(
+    let exit_code = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
         os.wait_process(handle.pid),
     )
     .await
-    .expect("wait_process timed out")
-    .expect("wait_process");
+    {
+        Ok(result) => result.expect("wait_process"),
+        Err(error) => {
+            let sdk_process = os.get_process(handle.pid);
+            let kernel_processes = os.all_processes().await;
+            panic!(
+                "wait_process timed out: {error}; sdk_process={sdk_process:?}; kernel_processes={kernel_processes:?}"
+            );
+        }
+    };
     assert_eq!(exit_code, 0, "cat should exit 0 after EOF");
 
     // --- kernel snapshot: all_processes / process_tree -------------------------------------------

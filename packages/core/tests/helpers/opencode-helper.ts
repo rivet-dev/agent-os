@@ -3,6 +3,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentOs } from "../../src/agent-os.js";
 
+// Upstream OpenCode's generated provider catalog and server currently peak
+// above the Workers-style 128 MiB default during their first directory load.
+export const OPENCODE_TEST_V8_HEAP_LIMIT_MB = 512;
+
 type OpenCodeProviderConfig = {
 	name?: string;
 	env?: string[];

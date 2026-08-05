@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Thu, 23 Jul 2026 02:00:00 -0700
+Subject: [PATCH] generic/409: classify shared-subtree mount propagation
+
+agentOS exposes kernel-owned logical mounts but not a guest Linux mount
+namespace or shared/slave/private propagation.  Report that exact capability
+boundary instead of executing host mount utilities that cannot model it.
+
+diff --git a/tests/generic/409 b/tests/generic/409
+--- a/tests/generic/409
++++ b/tests/generic/409
+@@ -36,6 +36,10 @@ _cleanup()
+ # Import common functions.
+ . ./common/filter
+ 
++if [ "$FSTYP" = "agentos" ]; then
++	_notrun "agentOS does not support Linux shared-subtree mount propagation"
++fi
++
+ _require_test
+ _require_scratch
+ _require_local_device $SCRATCH_DEV
+-- 
+2.47.3

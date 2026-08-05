@@ -1,0 +1,51 @@
+[package]
+name = "agentos-vfs-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Generic async virtual filesystem primitives"
+
+[features]
+default = ["package-filesystem"]
+package-filesystem = [
+    "dep:memmap2",
+    "dep:tar",
+    "dep:vbare",
+    "dep:vbare-compiler",
+]
+
+[lib]
+name = "agentos_vfs_core"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+blake3 = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_bare = "0.5"
+serde_json = "1.0"
+vbare = { workspace = true, optional = true }
+# Drop-in std::time replacement: re-exports std on native, uses js_sys::Date /
+# performance.now() on wasm32 (where std SystemTime/Instant abort).
+web-time = "1.1"
+
+[build-dependencies]
+vbare-compiler = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+memmap2 = { version = "0.9", optional = true }
+tar = { version = "0.4", optional = true }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[[test]]
+name = "package_format"
+required-features = ["package-filesystem"]
+
+[[test]]
+name = "posix_tar_fs"
+required-features = ["package-filesystem"]

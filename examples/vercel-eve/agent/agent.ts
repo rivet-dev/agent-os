@@ -7,7 +7,7 @@ export default defineAgent({
 			"@rivet-dev/agentos",
 			"@rivet-dev/agentos-core",
 			"@rivet-dev/agentos-eve",
-			"@rivet-dev/agentos-runtime-core",
+			"@rivet-dev/agentos-core",
 			"@rivet-dev/agentos-sidecar",
 			"@rivet-dev/vercel-world",
 			"@rivetkit/engine-cli",

@@ -942,7 +942,7 @@ impl AgentOs {
                     loopback_exempt_ports: config.loopback_exempt_ports.clone(),
                     packages: crate::agent_os::build_package_descriptors(config),
                     packages_mount_at: config.packages_mount_at.clone().unwrap_or_default(),
-                    bootstrap_commands: Vec::new(),
+                    bootstrap_commands: crate::agent_os::runtime_bootstrap_commands(),
                     binding_shim_commands: Vec::new(),
                 }),
             )

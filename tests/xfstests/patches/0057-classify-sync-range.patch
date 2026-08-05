@@ -1,0 +1,14 @@
+diff --git a/tests/generic/524 b/tests/generic/524
+index a12fc1b1..00000001 100755
+--- a/tests/generic/524
++++ b/tests/generic/524
+@@ -14,6 +14,9 @@
+ . ./common/preamble
+ _begin_fstest auto quick
+ 
++[ "$FSTYP" = "agentos" ] && \
++        _notrun "agentOS does not expose xfs_io sync_range"
++
+ # Import common functions.
+ 
+ 

@@ -1,0 +1,14 @@
+diff --git a/tests/generic/437 b/tests/generic/437
+index 40fdde2e..1d5b3a15 100755
+--- a/tests/generic/437
++++ b/tests/generic/437
+@@ -13,6 +13,9 @@ _begin_fstest auto quick dax mmap
+ # Import common functions.
+ . ./common/filter
+ 
++[ "$FSTYP" = "agentos" ] && \
++	_notrun "agentOS does not support DAX mappings"
++
+ # Modify as appropriate.
+ _require_test
+ _require_test_program "t_mmap_cow_race"

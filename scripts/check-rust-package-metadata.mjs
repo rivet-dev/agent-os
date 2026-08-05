@@ -7,13 +7,13 @@ const defaultRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const requiredPackages = [
 	{
-		name: "agentos-protocol",
-		manifestPath: "crates/agentos-protocol/Cargo.toml",
-		targets: [{ kind: "lib", name: "agentos_protocol" }],
+		name: "agentos-acp-protocol",
+		manifestPath: "crates/acp-protocol/Cargo.toml",
+		targets: [{ kind: "lib", name: "agentos_acp_protocol" }],
 	},
 	{
 		name: "agentos-sidecar",
-		manifestPath: "crates/agentos-sidecar/Cargo.toml",
+		manifestPath: "crates/sidecar/Cargo.toml",
 		targets: [{ kind: "bin", name: "agentos-sidecar" }],
 	},
 	{
@@ -82,6 +82,21 @@ function validatePackage(root, metadata, expected, errors) {
 	}
 }
 
+function validateFlatCrateNames(root, metadata, errors) {
+	for (const pkg of metadata.packages) {
+		const manifestPath = relative(root, pkg.manifest_path).split("\\").join("/");
+		const match = manifestPath.match(/^crates\/([^/]+)\/Cargo\.toml$/);
+		if (!match) continue;
+
+		const expectedName = `agentos-${match[1]}`;
+		if (pkg.name !== expectedName) {
+			errors.push(
+				`${manifestPath} package name must be ${expectedName}, found ${pkg.name}`,
+			);
+		}
+	}
+}
+
 export function checkRustPackageMetadata(options = {}) {
 	const root = resolve(options.root ?? defaultRoot);
 	const metadata = options.metadata ?? readCargoMetadata(root);
@@ -90,6 +105,7 @@ export function checkRustPackageMetadata(options = {}) {
 	for (const expected of requiredPackages) {
 		validatePackage(root, metadata, expected, errors);
 	}
+	validateFlatCrateNames(root, metadata, errors);
 
 	return errors;
 }

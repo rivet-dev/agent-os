@@ -40,13 +40,23 @@ pub fn sleep(args: Vec<OsString>) -> i32 {
         return 1;
     }
 
-    let duration = match parse_sleep_duration(&str_args[0]) {
-        Ok(duration) => duration,
-        Err(()) => {
-            eprintln!("sleep: invalid time interval '{}'", str_args[0]);
-            return 1;
-        }
-    };
+    let mut duration = Duration::ZERO;
+    for raw in &str_args {
+        let parsed = match parse_sleep_duration(raw) {
+            Ok(duration) => duration,
+            Err(()) => {
+                eprintln!("sleep: invalid time interval '{raw}'");
+                return 1;
+            }
+        };
+        duration = match duration.checked_add(parsed) {
+            Some(duration) => duration,
+            None => {
+                eprintln!("sleep: invalid time interval '{raw}'");
+                return 1;
+            }
+        };
+    }
 
     if let Err(error) = sleep_for_duration(duration) {
         eprintln!("sleep: failed to sleep: {error}");
@@ -57,7 +67,16 @@ pub fn sleep(args: Vec<OsString>) -> i32 {
 }
 
 fn parse_sleep_duration(raw: &str) -> Result<Duration, ()> {
-    let secs: f64 = raw.parse().map_err(|_| ())?;
+    let (number, multiplier) = match raw.chars().last() {
+        Some('s') => (&raw[..raw.len() - 1], 1.0),
+        Some('m') => (&raw[..raw.len() - 1], 60.0),
+        Some('h') => (&raw[..raw.len() - 1], 60.0 * 60.0),
+        Some('d') => (&raw[..raw.len() - 1], 24.0 * 60.0 * 60.0),
+        Some(last) if last.is_ascii_alphabetic() => return Err(()),
+        Some(_) => (raw, 1.0),
+        None => return Err(()),
+    };
+    let secs: f64 = number.parse::<f64>().map_err(|_| ())? * multiplier;
     if !secs.is_finite() || secs < 0.0 {
         return Err(());
     }
@@ -387,8 +406,11 @@ fn permission_allows(_path: &str, metadata: &Metadata, requested_bit: u32) -> bo
 #[cfg(target_os = "wasi")]
 fn wasi_path_mode(path: &str) -> Option<u32> {
     let bytes = path.as_bytes();
-    // dir_fd 3 = cwd preopen; absolute paths ignore it.
-    let mode = unsafe { host_fs::path_mode(3, bytes.as_ptr(), bytes.len() as u32, 1) };
+    // The host extension uses u32::MAX for a pathname resolved from the
+    // process cwd. Private WASI preopens do not occupy guest-visible fd 3.
+    let mode = unsafe {
+        host_fs::path_mode(u32::MAX, bytes.as_ptr(), bytes.len() as u32, 1)
+    };
     if mode == 0 {
         None
     } else {
@@ -473,6 +495,28 @@ mod tests {
     fn sleep_duration_rounds_submillisecond_intervals_up() {
         let duration = parse_sleep_duration("0.0001").expect("parse tiny sleep");
         assert_eq!(ceil_duration_to_millis(duration), 1);
+    }
+
+    #[test]
+    fn sleep_duration_accepts_gnu_suffixes() {
+        assert_eq!(
+            parse_sleep_duration("0.01s").expect("fractional seconds"),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            parse_sleep_duration("1.5m").expect("fractional minutes"),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            parse_sleep_duration("2h").expect("hours"),
+            Duration::from_secs(7_200)
+        );
+        assert_eq!(
+            parse_sleep_duration("1d").expect("days"),
+            Duration::from_secs(86_400)
+        );
+        assert!(parse_sleep_duration("1w").is_err());
+        assert!(parse_sleep_duration("s").is_err());
     }
 
     #[test]

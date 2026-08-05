@@ -1,6 +1,6 @@
-Expose POSIX spawn and terminal compatibility headers in AgentOS wasi-libc.
+Expose POSIX spawn and terminal compatibility headers in agentOS wasi-libc.
 
-The AgentOS process broker already implements posix_spawn through host_process
+The agentOS process broker already implements posix_spawn through host_process
 imports, but the C sysroot still omitted <spawn.h>. Upstream programs such as
 GNU Wget include standard POSIX headers directly, so install those headers and
 provide terminal/process-group helpers through the shared sysroot rather than
@@ -11,8 +11,8 @@ new file mode 100644
 index 0000000..3b70693
 --- /dev/null
 +++ b/libc-bottom-half/sources/host_terminal_compat.c
-@@ -0,0 +1,217 @@
-+// Terminal/process-group compatibility for AgentOS WASI commands.
+@@ -0,0 +1,379 @@
++// Terminal/process-group compatibility for agentOS WASI commands.
 +//
 +// The kernel owns PTY state and exposes it through host_tty imports. Keep the
 +// POSIX surface here in the sysroot so upstream C programs can use termios and
@@ -29,6 +29,29 @@ index 0000000..3b70693
 +#ifndef TIOCGWINSZ
 +#define TIOCGWINSZ 0x5413
 +#endif
++#define FIBMAP 1
++#define FIGETBSZ 2
++#define FS_IOC_FIEMAP 0xC020660B
++#define FIEMAP_EXTENT_UNWRITTEN 0x00000800
++
++struct agentos_fiemap_extent {
++    uint64_t logical;
++    uint64_t physical;
++    uint64_t length;
++    uint64_t reserved64[2];
++    uint32_t flags;
++    uint32_t reserved[3];
++};
++
++struct agentos_fiemap {
++    uint64_t start;
++    uint64_t length;
++    uint32_t flags;
++    uint32_t mapped_extents;
++    uint32_t extent_count;
++    uint32_t reserved;
++    struct agentos_fiemap_extent extents[];
++};
 +
 +#define WASM_IMPORT(mod, fn) \
 +    __attribute__((__import_module__(mod), __import_name__(fn)))
@@ -42,8 +65,35 @@ index 0000000..3b70693
 +WASM_IMPORT("host_tty", "set_raw_mode")
 +uint32_t __host_tty_set_raw_mode(uint32_t enabled);
 +
-+static struct termios g_shadow;
-+static int g_shadow_valid = 0;
++WASM_IMPORT("host_tty", "set_size")
++uint32_t __host_tty_set_size(uint32_t fd, uint32_t cols, uint32_t rows);
++
++WASM_IMPORT("host_tty", "get_attr")
++uint32_t __host_tty_get_attr(uint32_t fd, uint32_t *flags, uint8_t *cc);
++
++WASM_IMPORT("host_tty", "set_attr")
++uint32_t __host_tty_set_attr(uint32_t fd, uint32_t flags, const uint8_t *cc);
++
++WASM_IMPORT("host_tty", "get_pgrp")
++uint32_t __host_tty_get_pgrp(uint32_t fd, uint32_t *pgrp);
++
++WASM_IMPORT("host_tty", "set_pgrp")
++uint32_t __host_tty_set_pgrp(uint32_t fd, uint32_t pgrp);
++
++WASM_IMPORT("host_tty", "get_sid")
++uint32_t __host_tty_get_sid(uint32_t fd, uint32_t *sid);
++
++WASM_IMPORT("host_fs", "fd_fiemap")
++uint32_t __host_fs_fd_fiemap(uint32_t fd, uint32_t index,
++                             uint64_t *start, uint64_t *end,
++                             uint32_t *flags);
++
++#define HOST_TTY_ICRNL  (1u << 0)
++#define HOST_TTY_OPOST  (1u << 1)
++#define HOST_TTY_ONLCR  (1u << 2)
++#define HOST_TTY_ICANON (1u << 3)
++#define HOST_TTY_ECHO   (1u << 4)
++#define HOST_TTY_ISIG   (1u << 5)
 +
 +static void cooked_defaults(struct termios *t) {
 +    memset(t, 0, sizeof(*t));
@@ -69,13 +119,6 @@ index 0000000..3b70693
 +    t->__c_ospeed = B38400;
 +}
 +
-+static void ensure_shadow(void) {
-+    if (!g_shadow_valid) {
-+        cooked_defaults(&g_shadow);
-+        g_shadow_valid = 1;
-+    }
-+}
-+
 +pid_t fork(void) {
 +    errno = ENOSYS;
 +    return -1;
@@ -91,13 +134,25 @@ index 0000000..3b70693
 +}
 +
 +pid_t tcgetpgrp(int fd) {
-+    (void)fd;
-+    return 1;
++    uint32_t pgrp = 0;
++    uint32_t rc = __host_tty_get_pgrp((uint32_t)fd, &pgrp);
++    if (rc != 0) {
++        errno = (int)rc;
++        return -1;
++    }
++    return (pid_t)pgrp;
 +}
 +
 +int tcsetpgrp(int fd, pid_t pgrp) {
-+    (void)fd;
-+    (void)pgrp;
++    if (pgrp < 0) {
++        errno = EINVAL;
++        return -1;
++    }
++    uint32_t rc = __host_tty_set_pgrp((uint32_t)fd, (uint32_t)pgrp);
++    if (rc != 0) {
++        errno = (int)rc;
++        return -1;
++    }
 +    return 0;
 +}
 +
@@ -106,12 +161,27 @@ index 0000000..3b70693
 +        errno = EFAULT;
 +        return -1;
 +    }
-+    if (!__host_tty_isatty((uint32_t)fd)) {
-+        errno = ENOTTY;
++    uint32_t flags = 0;
++    uint8_t cc[7];
++    uint32_t rc = __host_tty_get_attr((uint32_t)fd, &flags, cc);
++    if (rc != 0) {
++        errno = (int)rc;
 +        return -1;
 +    }
-+    ensure_shadow();
-+    *termios_p = g_shadow;
++    cooked_defaults(termios_p);
++    if (!(flags & HOST_TTY_ICRNL)) termios_p->c_iflag &= ~ICRNL;
++    if (!(flags & HOST_TTY_OPOST)) termios_p->c_oflag &= ~OPOST;
++    if (!(flags & HOST_TTY_ONLCR)) termios_p->c_oflag &= ~ONLCR;
++    if (!(flags & HOST_TTY_ICANON)) termios_p->c_lflag &= ~ICANON;
++    if (!(flags & HOST_TTY_ECHO)) termios_p->c_lflag &= ~ECHO;
++    if (!(flags & HOST_TTY_ISIG)) termios_p->c_lflag &= ~ISIG;
++    termios_p->c_cc[VINTR] = cc[0];
++    termios_p->c_cc[VQUIT] = cc[1];
++    termios_p->c_cc[VSUSP] = cc[2];
++    termios_p->c_cc[VEOF] = cc[3];
++    termios_p->c_cc[VERASE] = cc[4];
++    termios_p->c_cc[VKILL] = cc[5];
++    termios_p->c_cc[VWERASE] = cc[6];
 +    return 0;
 +}
 +
@@ -121,14 +191,25 @@ index 0000000..3b70693
 +        errno = EFAULT;
 +        return -1;
 +    }
-+    if (!__host_tty_isatty((uint32_t)fd)) {
-+        errno = ENOTTY;
++    if (optional_actions != TCSANOW && optional_actions != TCSADRAIN &&
++        optional_actions != TCSAFLUSH) {
++        errno = EINVAL;
 +        return -1;
 +    }
-+    g_shadow = *termios_p;
-+    g_shadow_valid = 1;
-+    uint32_t raw = ((termios_p->c_lflag & ICANON) && (termios_p->c_lflag & ECHO)) ? 0u : 1u;
-+    uint32_t rc = __host_tty_set_raw_mode(raw);
++    uint32_t flags = 0;
++    if (termios_p->c_iflag & ICRNL) flags |= HOST_TTY_ICRNL;
++    if (termios_p->c_oflag & OPOST) flags |= HOST_TTY_OPOST;
++    if (termios_p->c_oflag & ONLCR) flags |= HOST_TTY_ONLCR;
++    if (termios_p->c_lflag & ICANON) flags |= HOST_TTY_ICANON;
++    if (termios_p->c_lflag & ECHO) flags |= HOST_TTY_ECHO;
++    if (termios_p->c_lflag & ISIG) flags |= HOST_TTY_ISIG;
++    uint8_t cc[7] = {
++        termios_p->c_cc[VINTR], termios_p->c_cc[VQUIT],
++        termios_p->c_cc[VSUSP], termios_p->c_cc[VEOF],
++        termios_p->c_cc[VERASE], termios_p->c_cc[VKILL],
++        termios_p->c_cc[VWERASE],
++    };
++    uint32_t rc = __host_tty_set_attr((uint32_t)fd, flags, cc);
 +    if (rc != 0) {
 +        errno = (int)rc;
 +        return -1;
@@ -137,8 +218,13 @@ index 0000000..3b70693
 +}
 +
 +pid_t tcgetsid(int fd) {
-+    (void)fd;
-+    return 1;
++    uint32_t sid = 0;
++    uint32_t rc = __host_tty_get_sid((uint32_t)fd, &sid);
++    if (rc != 0) {
++        errno = (int)rc;
++        return -1;
++    }
++    return (pid_t)sid;
 +}
 +
 +int tcgetwinsize(int fd, struct winsize *ws) {
@@ -161,10 +247,16 @@ index 0000000..3b70693
 +}
 +
 +int tcsetwinsize(int fd, const struct winsize *ws) {
-+    (void)fd;
-+    (void)ws;
-+    errno = ENOSYS;
-+    return -1;
++    if (ws == NULL) {
++        errno = EFAULT;
++        return -1;
++    }
++    uint32_t rc = __host_tty_set_size((uint32_t)fd, ws->ws_col, ws->ws_row);
++    if (rc != 0) {
++        errno = (int)rc;
++        return -1;
++    }
++    return 0;
 +}
 +
 +void cfmakeraw(struct termios *t) {
@@ -212,6 +304,40 @@ index 0000000..3b70693
 +    return 0;
 +}
 +
++static int agentos_fiemap(int fd, struct agentos_fiemap *map) {
++    if (map == NULL) {
++        errno = EFAULT;
++        return -1;
++    }
++    uint64_t query_end = map->start > UINT64_MAX - map->length
++        ? UINT64_MAX : map->start + map->length;
++    uint32_t mapped = 0;
++    for (uint32_t index = 0;; index++) {
++        uint64_t start = 0;
++        uint64_t end = 0;
++        uint32_t flags = 0;
++        uint32_t rc = __host_fs_fd_fiemap((uint32_t)fd, index,
++                                           &start, &end, &flags);
++        if (rc == ENODATA) break;
++        if (rc != 0) {
++            errno = (int)rc;
++            return -1;
++        }
++        start = start < map->start ? map->start : start;
++        end = end > query_end ? query_end : end;
++        if (start >= end) continue;
++        if (mapped >= map->extent_count) break;
++        struct agentos_fiemap_extent *extent = &map->extents[mapped++];
++        memset(extent, 0, sizeof(*extent));
++        extent->logical = start;
++        extent->physical = start;
++        extent->length = end - start;
++        extent->flags = flags & FIEMAP_EXTENT_UNWRITTEN;
++    }
++    map->mapped_extents = mapped;
++    return 0;
++}
++
 +int ioctl(int fd, int request, ...) {
 +    va_list ap;
 +    va_start(ap, request);
@@ -219,6 +345,42 @@ index 0000000..3b70693
 +    va_end(ap);
 +    if (request == TIOCGWINSZ) {
 +        return tcgetwinsize(fd, (struct winsize *)arg);
++    }
++    if (request == FIGETBSZ) {
++        if (arg == NULL) {
++            errno = EFAULT;
++            return -1;
++        }
++        *(int *)arg = 4096;
++        return 0;
++    }
++    if (request == FS_IOC_FIEMAP) {
++        return agentos_fiemap(fd, (struct agentos_fiemap *)arg);
++    }
++    if (request == FIBMAP) {
++        if (arg == NULL || *(int *)arg < 0) {
++            errno = EINVAL;
++            return -1;
++        }
++        uint64_t wanted = (uint64_t)*(int *)arg * 4096;
++        *(int *)arg = 0;
++        for (uint32_t index = 0;; index++) {
++            uint64_t start = 0;
++            uint64_t end = 0;
++            uint32_t flags = 0;
++            uint32_t rc = __host_fs_fd_fiemap((uint32_t)fd, index,
++                                               &start, &end, &flags);
++            if (rc == ENODATA) break;
++            if (rc != 0) {
++                errno = (int)rc;
++                return -1;
++            }
++            if (start <= wanted && wanted < end) {
++                *(int *)arg = (int)(wanted / 4096) + 1;
++                break;
++            }
++        }
++        return 0;
 +    }
 +    errno = ENOTTY;
 +    return -1;

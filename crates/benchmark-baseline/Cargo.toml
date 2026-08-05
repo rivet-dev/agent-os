@@ -1,0 +1,16 @@
+[package]
+name = "agentos-benchmark-baseline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Host floor for the differential benchmark harness. std-only on purpose: this
+# is the glibc fork/posix_spawn + execve baseline that the agentOS emulation tax
+# divides against. No agentOS dependencies: it must measure the host, not the VM.
+
+[[bin]]
+name = "agentos-benchmark-baseline"
+path = "src/main.rs"
+
+[dependencies]

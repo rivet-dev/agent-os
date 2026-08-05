@@ -88,6 +88,22 @@ fn move_path(source: &Path, destination: &Path) -> io::Result<()> {
     match fs::rename(source, destination) {
         Ok(()) => return Ok(()),
         Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            let detail = if error.kind() == io::ErrorKind::DirectoryNotEmpty {
+                "Directory not empty"
+            } else {
+                "File exists"
+            };
+            return Err(io::Error::new(
+                error.kind(),
+                format!("cannot overwrite '{}': {detail}", destination.display()),
+            ));
+        }
         Err(error) => return Err(error),
     }
 

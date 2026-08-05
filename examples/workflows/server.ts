@@ -67,6 +67,9 @@ async function runTests(
 ): Promise<number> {
 	const agent = step.client<typeof registry>().vm.getOrCreate("bug-fixer");
 	const tests = await agent.process.exec("cd /home/agentos/repo && npm test");
+	if (tests.exitCode === undefined) {
+		throw new Error(`test process ended without an exit code (${tests.outcome})`);
+	}
 	return tests.exitCode;
 }
 // docs:end basic

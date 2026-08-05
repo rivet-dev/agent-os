@@ -5,7 +5,7 @@
 // `base-filesystem.json`. Requires Docker. Run this BY HAND when the base needs
 // updating — nothing runs it during a build.
 //
-// There is exactly ONE committed copy: crates/vfs/assets/base-filesystem.json.
+// There is exactly ONE committed copy: crates/vfs-core/assets/base-filesystem.json.
 // The vfs crate embeds it directly via `include_str!`; the sidecar reads it via
 // `vfs::posix::base_filesystem_json()`; the host bakes the env in as a constant
 // (packages/core/src/base-filesystem.ts) and reads no JSON. If you change the env
@@ -20,7 +20,7 @@ const DEFAULT_IMAGE = process.env.ALPINE_IMAGE ?? "alpine:3.22";
 
 // The ONE committed copy — embedded into the vfs crate via include_str!.
 const OUTPUT_PATHS = [
-	fileURLToPath(new URL("../../../crates/vfs/assets/base-filesystem.json", import.meta.url)),
+	fileURLToPath(new URL("../../../crates/vfs-core/assets/base-filesystem.json", import.meta.url)),
 ];
 
 // --- agentos base identity (the transform target) -----------------------
@@ -41,6 +41,7 @@ const EXTRA_DIRECTORIES = [
 
 const TRANSFORMS = [
 	"Normalize HOSTNAME to agentos",
+	"Allow traversal into the agentOS /root/node_modules compatibility projection",
 	"Preserve the captured user-level environment and filesystem layout as the agentos base layer",
 	"Add the non-Alpine /workspace directory (default agent working directory) owned by the base user",
 ];
@@ -247,6 +248,9 @@ function captureAlpineSnapshot() {
 function normalizeEntry(entry) {
 	if (entry.path === "/etc/hostname" && entry.type === "file") {
 		return { ...entry, content: `${BASE_HOSTNAME}\n` };
+	}
+	if (entry.path === "/root" && entry.type === "directory") {
+		return { ...entry, mode: "711" };
 	}
 	return entry;
 }

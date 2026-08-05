@@ -19,6 +19,9 @@ const env = {
 const { stdout } = await agent.process.exec("browse cloud fetch https://example.com", {
 	env,
 });
+if (stdout === undefined) {
+	throw new Error("browse cloud fetch returned no stdout");
+}
 
 const page = JSON.parse(stdout) as { statusCode: number; content: string };
 console.log(`fetched status ${page.statusCode}`);

@@ -3,6 +3,8 @@
 /// Subcommands:
 ///   echo       — spawn "echo hello" and print captured stdout
 ///   tokio-bash — run the exact shell/stdio/cwd shape used by Codex
+///   tokio-large-output — drain a captured Tokio child pipe past capacity
+///   emit-large-output — internal child used by tokio-large-output
 ///   fail       — spawn a command that exits non-zero and print exit code
 ///   kill-test  — spawn "sleep 60", kill it, verify termination
 ///   env-test   — spawn "env" with custom env vars and print captured stdout
@@ -14,6 +16,8 @@ fn main() {
     let code = match subcommand {
         "echo" => test_echo(),
         "tokio-bash" => test_tokio_bash(),
+        "tokio-large-output" => test_tokio_large_output(),
+        "emit-large-output" => emit_large_output(),
         "fail" => test_fail(),
         "kill-test" => test_kill(),
         "env-test" => test_env(),
@@ -26,8 +30,14 @@ fn main() {
     std::process::exit(code);
 }
 
+fn tokio_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(|error| format!("tokio runtime: {error}"))
+}
+
 fn test_tokio_bash() -> i32 {
-    let runtime = match tokio::runtime::Builder::new_current_thread().build() {
+    let runtime = match tokio_runtime() {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("tokio-bash:runtime-error:{error}");
@@ -62,6 +72,78 @@ fn test_tokio_bash() -> i32 {
             }
         }
     })
+}
+
+fn test_tokio_large_output() -> i32 {
+    const OUTPUT_ROWS: usize = 6_000;
+    let runtime = match tokio_runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("tokio-large-output:runtime-error:{error}");
+            return 1;
+        }
+    };
+    runtime.block_on(async {
+        // Spawn this already-loaded helper so the regression measures Tokio
+        // pipe backpressure rather than Wasmtime cold compilation of unrelated
+        // shell and awk modules. Each emitted row is at least 11 bytes, keeping
+        // the captured stream above the 64 KiB kernel pipe capacity.
+        let mut command = tokio::process::Command::new("/opt/agentos/bin/spawn-test-host");
+        command
+            .arg("emit-large-output")
+            .current_dir("/workspace")
+            .env_clear()
+            .env("PATH", "/opt/agentos/bin")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        match command.output().await {
+            Ok(output) => {
+                let rows = output.stdout.iter().filter(|byte| **byte == b'\n').count();
+                if output.status.success()
+                    && output.stdout.len() > 65_536
+                    && rows == OUTPUT_ROWS
+                    && output.stderr.is_empty()
+                {
+                    println!("PASS bytes={} rows={rows}", output.stdout.len());
+                    0
+                } else {
+                    eprintln!(
+                        "tokio-large-output:unexpected-output:{}:bytes={}:rows={rows}:stderr={}",
+                        output.status,
+                        output.stdout.len(),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    1
+                }
+            }
+            Err(error) => {
+                eprintln!("tokio-large-output:output-error:{error}");
+                1
+            }
+        }
+    })
+}
+
+fn emit_large_output() -> i32 {
+    use std::io::Write as _;
+
+    let stdout = std::io::stdout();
+    let mut stdout = std::io::BufWriter::new(stdout.lock());
+    for row in 1..=6_000 {
+        if let Err(error) = writeln!(stdout, "captured:{row}") {
+            eprintln!("emit-large-output:write-error:{error}");
+            return 1;
+        }
+    }
+    match stdout.flush() {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("emit-large-output:flush-error:{error}");
+            1
+        }
+    }
 }
 
 /// Test 1: spawn "echo hello", capture stdout, verify content

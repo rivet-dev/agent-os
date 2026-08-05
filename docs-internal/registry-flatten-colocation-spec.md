@@ -84,7 +84,7 @@ repo-root/
 │   ├── std-patches/              #   rust std patches 0001–0009  (was native/patches/)
 │   ├── scripts/                  #   patch-std.sh  patch-vendor.sh  patch-wasi-libc.sh
 │   ├── test-programs/            #   C test-program fixtures (tcp_server, udp_echo, signal_handler, http_server, …)
-│   │                             #     built here; runtime-core integration tests consume the built binaries
+│   │                             #     built here; core integration tests consume the built binaries
 │   ├── conformance/              #   libc/os-test/c-parity — tests the sysroot, not a package (was native/tests/)
 │   │   ├── c-parity.test.ts  libc-test-conformance.test.ts  os-test-conformance.test.ts  *-exclusions.json
 │   └── target/                   #   shared cargo build output (gitignored)
@@ -94,7 +94,7 @@ repo-root/
 │   └── src/{helpers,terminal-harness}.ts
 │
 └── packages/
-    └── runtime-core/
+    └── core/
         └── tests/integration/    #   VM integration tests (net, npm-e2e, wasi, signal, cross-runtime)
 ```
 
@@ -142,7 +142,7 @@ test-program fixtures stay in `toolchain/test-programs/` (not scattered into
 | `registry/native/crates/{wasi-ext,libs/{shims,builtins,stubs,wasi-http,wasi-pty,wasi-spawn}}` | `toolchain/crates/` |
 | `registry/native/stubs/*` | `toolchain/crates/` |
 | `registry/native/c/programs/<cmd>.c` (a package command) | `software/<owner>/native/c/<cmd>.c` |
-| `registry/native/c/programs/<test-prog>.c` (tcp_server, udp_echo, signal_handler, …) | `toolchain/test-programs/` (built by toolchain; consumed by runtime-core integration tests via the binary path) |
+| `registry/native/c/programs/<test-prog>.c` (tcp_server, udp_echo, signal_handler, …) | `toolchain/test-programs/` (built by toolchain; consumed by core integration tests via the binary path) |
 | `registry/native/c/{include,patches,cmake,scripts,vim overlay}` + wasi-sdk | `toolchain/sysroot/` |
 | `registry/native/patches/` (std) | `toolchain/std-patches/` |
 | `registry/native/scripts/` | `toolchain/scripts/` |
@@ -187,7 +187,7 @@ vitest out of the outer store) **dissolve**. Replacement:
 - Command binaries are resolved from `toolchain/target` (Rust) and the toolchain
   C build dir via `AGENTOS_WASM_COMMANDS_DIR` / `AGENTOS_C_WASM_COMMANDS_DIR`,
   set once in the harness. No relative-path coupling to the build tree.
-- `runtime-core/tests/integration/` and `toolchain/conformance/` import the same
+- `core/tests/integration/` and `toolchain/conformance/` import the same
   `@rivet-dev/agentos-test-harness`.
 
 ## Leftover `registry/` files
@@ -260,7 +260,7 @@ before executing — see [Risks](#risks--decision).
   recipes, docs) in the same pass. If you prefer a single flat prefix over the
   dir-aligned split, use `software-*` for all — but `toolchain-*` reads truer for
   the recipes that build the sysroot/commands rather than the packages.
-- `packages/runtime-core/scripts/copy-wasm-commands.mjs`: SRC path
+- `packages/core/scripts/copy-wasm-commands.mjs`: SRC path
   `registry/native/target/...` → `toolchain/target/...`.
 - CI (`ci.yml`, `ci-nightly.yml`, `bench.yml`): `make -C registry/native`,
   the rust-cache `workspaces:` mapping, and the
@@ -296,7 +296,7 @@ This refactor closes that gap.
    builds. This is the capability that today only `registry/native/Makefile` has.
 2. **`agentos-toolchain test [<packageDir>]`** — boot a throwaway VM, register the
    package, run its `test/` suite (and/or a command smoke-run) via the public
-   `@rivet-dev/agentos-runtime-core/test-runtime`. This is what our
+   `@rivet-dev/agentos-core/test-runtime`. This is what our
    `software/<pkg>/test/` scripts *and* external authors call — one runner.
 3. **`agentos-toolchain validate [<packageDir>]`** — lint `agentos-package.json`:
    declared `commands` map to staged binaries; `registry` block + `category` +
@@ -325,7 +325,7 @@ Repo recipes orchestrate; they must not reimplement what the CLI does:
 | per-package `test` script + external authors | `agentos-toolchain test` |
 
 **Stays repo-specific** (not CLI, not overfit): `copy-wasm-commands` (vendor into
-runtime-core), `verify-fixed-versions` (the 0.0.1 pin), `generate-agentos-mirror`,
+core), `verify-fixed-versions` (the 0.0.1 pin), `generate-agentos-mirror`,
 registry-wide release orchestration, cross-repo dispatch, and the status
 reporter / coverage gate scoped to *our* registry.
 

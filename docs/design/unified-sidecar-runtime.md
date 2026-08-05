@@ -215,7 +215,7 @@ successful result. It does not mean ChannelResponseReceiver had received the
 corresponding BridgeResponse before the event flood exhausted its deferred
 queue.
 
-The reproduction in crates/v8-runtime/tests/embedded_runtime_session.rs proves
+The reproduction in crates/executor-v8-runtime/tests/embedded_runtime_session.rs proves
 the queue failure without ACP or a real network: block a guest in a
 synchronous bridge call, deliberately withhold its response, send 257
 net_socket StreamEvents, and observe the same applySyncPromise error. This
@@ -388,13 +388,13 @@ The implementation is incomplete until all of these are true:
 Sidecar process
 |
 +-- process entrypoint
-|   +-- build SidecarRuntime exactly once
+|   +-- build TokioDriver exactly once
 |   +-- build bounded VM executor
 |   +-- build bounded blocking executor
 |   +-- initialize one process-lifetime V8 platform owner
 |   +-- install shutdown coordinator
 |
-+-- SidecarRuntime: one multi-thread Tokio runtime
++-- TokioDriver: one multi-thread Tokio runtime
 |   |
 |   +-- protocol ingress task
 |   +-- protocol egress task
@@ -450,7 +450,7 @@ the response-behind-events dependency under different names.
 
 ### 9.1 Runtime construction
 
-The sidecar entrypoint constructs SidecarRuntime with:
+The sidecar entrypoint constructs TokioDriver with:
 
 - a fixed worker count selected from sidecar configuration;
 - I/O and time drivers enabled;
@@ -460,18 +460,18 @@ The sidecar entrypoint constructs SidecarRuntime with:
 - one shutdown token rooted at process lifetime.
 
 The runtime is not stored in a lazily initialized subsystem singleton. Tests
-build a RuntimeContext explicitly. Production constructors require a
-RuntimeContext or narrower service dependency, making a hidden runtime builder
+build a DriverHandle explicitly. Production constructors require a
+DriverHandle or narrower service dependency, making a hidden runtime builder
 unrepresentable.
 
-RuntimeContext is created at every AgentOS-owned sidecar process entrypoint and
-passed into the NativeSidecar service, execution engines, plugins, and protocol
+DriverHandle is created at every AgentOS-owned sidecar process entrypoint and
+passed into the VmManager service, execution engines, plugins, and protocol
 backends. Blocking compatibility methods must dispatch onto that context; they
 must not fall back to a static runtime. A Tokio worker must never call
 Runtime::block_on or synchronously wait for a future scheduled on the same
 runtime.
 
-Migration of the currently central mutable NativeSidecar must not replace task
+Migration of the currently central mutable VmManager must not replace task
 ownership with one process-wide mutex. State that participates in async work is
 partitioned into Send owner tasks or short-lived bounded registries. No await
 occurs while a registry lock is held.
@@ -510,7 +510,7 @@ not the admission policy.
 
 Code that cannot yet migrate off blocking APIs must use this executor. Creating
 a local current-thread runtime around an async SDK is prohibited; the SDK
-future must be spawned on SidecarRuntime and bridged back through a typed
+future must be spawned on TokioDriver and bridged back through a typed
 completion.
 
 ## 10. Task ownership and cardinality
@@ -535,11 +535,11 @@ Per-handle Tokio tasks are acceptable because handle creation is already a
 permissioned, quota-controlled operation. Per-packet, per-chunk, per-signal,
 and unconstrained per-HTTP/2-stream tasks are not acceptable.
 
-The protocol frontend uses SidecarRuntime when the host transport can be
+The protocol frontend uses TokioDriver when the host transport can be
 registered for asynchronous readiness. If blocking stdio requires the
 constant process transport-worker exception discussed in section 27, those
 workers only perform bounded transport I/O and handoff; decoding, routing, and
-service work still runs on SidecarRuntime. A permanently occupied transport
+service work still runs on TokioDriver. A permanently occupied transport
 worker must not consume the general blocking executor's finite job capacity.
 This possible exception is constant process topology, not permission for a
 reader thread per session or handle.
@@ -1069,7 +1069,7 @@ has been encoded and all resulting records satisfy the underlying transport
 write contract, not merely that encryption finished. `secureConnect`, TLS
 error, EOF, shutdown, and `close` ordering are compared with Node fixtures.
 
-TLS is a capability backend on SidecarRuntime, not a TLS reader thread.
+TLS is a capability backend on TokioDriver, not a TLS reader thread.
 
 ### 15.4 HTTP/2
 
@@ -1133,7 +1133,7 @@ decision rather than changing the meaning of the existing SignalSet.
 
 ### 15.6 Timers
 
-Networking timeouts use SidecarRuntime's time driver. A timeout changes durable
+Networking timeouts use TokioDriver's time driver. A timeout changes durable
 operation state and wakes the VM once. It does not run guest code on Tokio.
 Timer callbacks that are part of guest JavaScript execute on the VM executor
 and participate in active-handle liveness.
@@ -1302,7 +1302,7 @@ rather than polling with a recurring timer.
 Maps Python socket and asynchronous APIs to the same capability operations.
 It does not own a Tokio runtime or poll native sockets on a Python-specific
 timer. Blocking Python socket calls block only an admitted guest executor, not
-`SidecarRuntime`; they wait on a registered per-operation waiter and remain
+`TokioDriver`; they wait on a registered per-operation waiter and remain
 cancellable by timeout or VM teardown. `asyncio` integrations yield and resume
 from the same readiness/completion state instead of using a second descriptor
 watcher.
@@ -1381,7 +1381,7 @@ error; it must not detach an untrusted live thread.
 The process shutdown coordinator stops new request admission, cancels VMs,
 closes capabilities, settles registered operations, drains bounded
 control/response egress within a deadline, joins bounded executors, and finally
-drops SidecarRuntime. Protocol ingress continues only long enough to route
+drops TokioDriver. Protocol ingress continues only long enough to route
 already-admitted responses and shutdown control; ordinary work is rejected.
 Shutdown reports which VM, task class, or executor missed the deadline and
 exits nonzero rather than presenting a partial drain as success. No subsystem
@@ -1634,7 +1634,7 @@ The implementation must expose canonical fields for:
 - shutdown and operation deadlines.
 
 Exact public field spelling must be reconciled with existing
-NativeSidecarConfig and ResourceLimits during the configuration migration.
+VmManagerConfig and ResourceLimits during the configuration migration.
 There will not be undocumented environment-only escape hatches. Every typed
 limit error reports the final canonical field path.
 
@@ -1710,11 +1710,11 @@ producer amplification and make the fix robust under real socket load.
 
 ### Phase 2: Establish process runtime ownership
 
-- Build one fixed-worker multi-thread SidecarRuntime at process entry.
-- Pass RuntimeContext/Handle to all trusted async subsystems.
+- Build one fixed-worker multi-thread TokioDriver at process entry.
+- Pass DriverHandle/Handle to all trusted async subsystems.
 - Add the bounded blocking executor.
 - Remove the static blocking-dispatch runtime and the S3/plugin setup runtimes;
-  move async SDK/plugin setup to SidecarRuntime and blocking work to the
+  move async SDK/plugin setup to TokioDriver and blocking work to the
   bounded executor.
 - Replace the kernel DNS thread plus owned runtime with an injected
   sidecar-owned async resolver service. Any unavoidable blocking resolver call
@@ -1723,7 +1723,7 @@ producer amplification and make the fix robust under real socket load.
   Phase 7.
 - Route node-import materialization, tool host calls, and other finite blocking
   setup jobs through the bounded executor instead of spawning per request.
-- Move heartbeat and ordinary timeout scheduling to SidecarRuntime. Treat
+- Move heartbeat and ordinary timeout scheduling to TokioDriver. Treat
   V8-thread-sensitive snapshot construction as the accepted bounded
   maintenance-thread exception in section 27.
 - Add a source/build audit rejecting production Tokio runtime construction
@@ -1747,7 +1747,7 @@ Exit gate:
   complete_wake.
 - Add per-VM fairness quanta and async completion batches.
 - Replace the per-execution V8 event-bridge thread, per-sync-RPC timeout thread,
-  and per-deferred-kernel-wait thread with the VM dispatcher, SidecarRuntime
+  and per-deferred-kernel-wait thread with the VM dispatcher, TokioDriver
   timers/readiness, and reserved cancellation state.
 - Supervise every dispatcher and broker task in its VM task set.
 - Unify NetSocket with the guest node:stream singleton.
@@ -2096,16 +2096,16 @@ Decisions 1 through 9 are accepted implementation choices:
    design is proven. It remains in the production thread manifest.
 3. **Canonical configuration names and process memory parent.** Reuse and
    extend existing
-   NativeSidecarConfig/ResourceLimits fields or introduce a nested runtime
+   VmManagerConfig/ResourceLimits fields or introduce a nested runtime
    section in one lockstep protocol change, and what should name the aggregate
    process parent above per-VM socket and bridge limits? Recommendation: one
    nested sidecar-owned schema, with a required process buffered-memory limit
    and compatibility aliases removed before completion.
 4. **stdio threads.** Are the process's blocking stdin/stdout integration
    threads accepted as a narrow architecture exception, or should Unix
-   AsyncFd/Windows equivalents join SidecarRuntime? Recommendation: allow a
+   AsyncFd/Windows equivalents join TokioDriver? Recommendation: allow a
    two-thread, constant process exception initially. Heartbeat, event pumping,
-   warnings, and routing still move to SidecarRuntime and bounded lanes.
+   warnings, and routing still move to TokioDriver and bounded lanes.
 5. **Standalone kernel workers.** May the reusable kernel retain its default
    DNS runtime/thread and per-ProcessTable reaper outside the sidecar build, or
    should all native callers inject and drive those services? Recommendation:
@@ -2147,22 +2147,22 @@ matches.
 
 | Source area | Current production debt or reusable primitive | Destination |
 | --- | --- | --- |
-| crates/native-sidecar/src/stdio.rs | Current-thread sidecar runtime; blocking stdin/stdout and heartbeat threads; event poll timer; unbounded warning/error lanes | Phase 2 runtime/heartbeat/warning migration; Phase 3 broker; only approved stdin/stdout threads remain |
-| crates/native-sidecar/src/service.rs | Static current-thread blocking-dispatch runtime; thread per deferred kernel wait; timer polling loops | Phase 2 runtime/executor; Phase 3 readiness/timer broker |
-| crates/native-sidecar/src/execution/ | Tool invocation workers; TCP/Unix/TLS reader threads; listener/UDP polling; HTTP/2 runtime/thread per session and unbounded commands; thread-per-signal | Phases 2 through 6 by subsystem |
-| crates/native-sidecar/src/state.rs | Socket and HTTP/2 event queues and maps | Phases 3 through 6 bounded capability/broker state |
-| crates/native-sidecar/src/vm.rs | Kernel SocketReadiness converted to per-event StreamEvent with ignored send/fallback paths | Phases 3 and 4 unified ready state and explicit errors |
-| crates/native-sidecar/src/plugins/s3_common.rs and other plugins | S3 creates a thread and Tokio runtime for setup; blocking plugin work has local ownership | Phase 2 shared runtime/bounded executor |
-| crates/v8-runtime/src/session.rs | Bounded VM/warm-worker threads; mixed 256-entry command channel; deferred sync queues; blocking sends and joins | Phase 1 direct waiters; Phase 3 bounded VM executor/dispatcher |
-| crates/v8-runtime/src/embedded_runtime.rs | Constant dispatch thread; bounded runtime-event/output channels that mix event classes | Phases 1 and 3 direct router/session broker |
-| crates/execution/src/javascript.rs | Per-sync-RPC timeout thread; pipe reader/writer threads; per-execution V8 event bridge; polling and guest stream implementation | Phases 2 and 3 executor, timers, dispatcher, and exact Duplex; pipe exceptions must be explicit |
-| crates/execution/src/python.rs | Current-thread runtime in wait; per-VFS-RPC timeout thread; adapter polling | Phase 2 runtime/timer removal; Phase 7 shared capability adapter |
-| crates/execution/src/node_import_cache.rs | Unbounded channel and a newly spawned materialization thread per attempt | Phase 2 deduplicated bounded blocking job |
-| crates/execution/src/v8_host.rs | Fresh joined thread for snapshot pre-warm because of V8 thread-state sensitivity | Phase 2 admitted maintenance path; accepted decision 2 |
-| crates/kernel/src/dns.rs | Per-resolver OS thread, unbounded std MPSC, and owned multi-thread Tokio runtime | Phase 2 injected sidecar resolver and bounded admission |
-| crates/kernel/src/process_table.rs | Per-ProcessTable zombie-reaper thread; reusable signal mask/pending semantics | Phase 6 sidecar-driven timer plus kernel-neutral API |
-| crates/kernel/src/socket_table.rs | Bounded virtual socket data and empty-to-nonempty readiness callbacks | Phases 3 and 4 unified capability readiness |
-| crates/kernel/src/resource_accounting.rs | Kernel socket counts/bytes only | Phases 3 through 7 aggregate process/VM/backend accounting |
+| crates/vm/src/stdio.rs | Current-thread sidecar runtime; blocking stdin/stdout and heartbeat threads; event poll timer; unbounded warning/error lanes | Phase 2 runtime/heartbeat/warning migration; Phase 3 broker; only approved stdin/stdout threads remain |
+| crates/vm/src/service.rs | Static current-thread blocking-dispatch runtime; thread per deferred kernel wait; timer polling loops | Phase 2 runtime/executor; Phase 3 readiness/timer broker |
+| crates/vm/src/execution/ | Tool invocation workers; TCP/Unix/TLS reader threads; listener/UDP polling; HTTP/2 runtime/thread per session and unbounded commands; thread-per-signal | Phases 2 through 6 by subsystem |
+| crates/vm/src/state.rs | Socket and HTTP/2 event queues and maps | Phases 3 through 6 bounded capability/broker state |
+| crates/vm/src/vm.rs | Kernel SocketReadiness converted to per-event StreamEvent with ignored send/fallback paths | Phases 3 and 4 unified ready state and explicit errors |
+| crates/vm/src/plugins/s3_common.rs and other plugins | S3 creates a thread and Tokio runtime for setup; blocking plugin work has local ownership | Phase 2 shared runtime/bounded executor |
+| crates/executor-v8-runtime/src/session.rs | Bounded VM/warm-worker threads; mixed 256-entry command channel; deferred sync queues; blocking sends and joins | Phase 1 direct waiters; Phase 3 bounded VM executor/dispatcher |
+| crates/executor-v8-runtime/src/embedded_runtime.rs | Constant dispatch thread; bounded runtime-event/output channels that mix event classes | Phases 1 and 3 direct router/session broker |
+| crates/executor-v8-runtime/src/javascript.rs | Per-sync-RPC timeout thread; pipe reader/writer threads; per-execution V8 event bridge; polling and guest stream implementation | Phases 2 and 3 executor, timers, dispatcher, and exact Duplex; pipe exceptions must be explicit |
+| crates/executor-python-v8-pyodide/src/lib.rs | Current-thread runtime in wait; per-VFS-RPC timeout thread; adapter polling | Phase 2 runtime/timer removal; Phase 7 shared capability adapter |
+| crates/executor-v8-runtime/src/asset_cache.rs | Unbounded channel and a newly spawned materialization thread per attempt | Phase 2 deduplicated bounded blocking job |
+| crates/executor-v8-runtime/src/adapter_host.rs | Fresh joined thread for snapshot pre-warm because of V8 thread-state sensitivity | Phase 2 admitted maintenance path; accepted decision 2 |
+| crates/vm-kernel/src/dns.rs | Per-resolver OS thread, unbounded std MPSC, and owned multi-thread Tokio runtime | Phase 2 injected sidecar resolver and bounded admission |
+| crates/vm-kernel/src/process_table.rs | Per-ProcessTable zombie-reaper thread; reusable signal mask/pending semantics | Phase 6 sidecar-driven timer plus kernel-neutral API |
+| crates/vm-kernel/src/socket_table.rs | Bounded virtual socket data and empty-to-nonempty readiness callbacks | Phases 3 and 4 unified capability readiness |
+| crates/vm-kernel/src/resource_accounting.rs | Kernel socket counts/bytes only | Phases 3 through 7 aggregate process/VM/backend accounting |
 
 Test-only mock servers, race tests, and fixture runtimes remain permitted when
 their lifecycle is local and joined. `#[cfg(test)]` is not a reason to omit a
@@ -2311,6 +2311,6 @@ hold.
 ### B.2 Audited follow-ups outside the completion gates
 
 - The host-side actor plugin still serializes `ActorJob` values through a Tokio
-  unbounded channel. It is not in the native sidecar/reactor dependency closure
+  unbounded channel. It is not in the sidecar/reactor dependency closure
   and cannot amplify reactor wakes or bridge responses, but it violates the
   repository-wide bounded-queue rule and must be migrated separately.

@@ -8,7 +8,7 @@ import {
 	COMMANDS_DIR,
 	NodeFileSystem,
 	createKernel,
-	describeIf,
+	describeIf, wasmBackendTestTimeout,
 	hasCWasmBinaries,
 	hasWasmBinaries,
 } from "@rivet-dev/agentos-test-harness";
@@ -40,7 +40,7 @@ async function writeFixture(path: string, contents: string): Promise<void> {
 describeIf(
 	hasWasmBinaries && hasCWasmBinaries("grep"),
 	"GNU grep command",
-	{ timeout: 10_000 },
+	{ timeout: wasmBackendTestTimeout(10_000, 30_000) },
 	() => {
 		let kernel: Kernel;
 

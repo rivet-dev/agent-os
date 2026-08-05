@@ -27,7 +27,7 @@ Sockets are **already real** and are not the problem. The patched wasi-libc
 sysroot implements `socket()/connect()/getaddrinfo()/send()/recv()` over
 `host_net` WASM imports (`toolchain/std-patches/wasi-libc/0008-sockets.patch`,
 `0023-host-net-read-write-sockets.patch`; Rust mirror `toolchain/crates/wasi-ext`).
-The runner forwards them to the sidecar socket table (`crates/execution/assets/
+The runner forwards them to the sidecar socket table (`crates/executor-v8-runtime/assets/
 runners/wasm-runner.mjs`). So curl/wget/git already do their own DNS, TCP and HTTP
 byte-for-byte. **Only TLS and decompression are shimmed or missing.**
 
@@ -75,7 +75,7 @@ philosophy the rest of the toolchain follows. Keep the host `net.socket_upgrade_
 path only for the **Node/JS runtime**, which is a separate surface.
 
 > Note: the current sidecar TLS path uses `rustls_native_certs` = the **host
-> machine's** trust store (`crates/native-sidecar/src/execution.rs`). That is a
+> machine's** trust store (`crates/vm/src/execution.rs`). That is a
 > latent hermeticity bug even for the JS runtime — it should read the VM's
 > `/etc/ssl` bundle instead. Tracked here; fix alongside.
 
@@ -85,7 +85,7 @@ path only for the **Node/JS runtime**, which is a separate surface.
   `ca-certificates` produces) at **`/etc/ssl/certs/ca-certificates.crt`**, with the
   conventional `/etc/ssl/cert.pem` symlink. A `ca-certificates` registry package
   owns the payload; VM bootstrap links it into the standard tree (the bootstrap
-  already seeds `/etc` in the shadow root — `crates/native-sidecar/src/vm.rs`).
+  already seeds `/etc` in the shadow root — `crates/vm/src/vm.rs`).
 - This one file at that one path is what makes the **whole class** of TLS tools
   "just work": curl's compile-time `CURL_CA_BUNDLE` default, OpenSSL's `OPENSSLDIR`
   (`/usr/lib/ssl` → `/etc/ssl/certs`), apt, python, wget — all resolve there on

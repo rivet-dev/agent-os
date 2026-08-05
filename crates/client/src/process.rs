@@ -35,6 +35,14 @@ const OBSERVED_PROCESS_TIME_LIMIT: usize = 4096;
 /// Maximum bytes captured by `exec` across stdout and stderr.
 const EXEC_OUTPUT_CAPTURE_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
+/// Snapshot polling interval used to recover a process exit when its terminal event is missed.
+const PROCESS_EXIT_SNAPSHOT_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(50);
+
+/// A started process must remain absent from the authoritative kernel snapshot for this long before
+/// the client treats it as reaped. This matches the TypeScript client fallback.
+const MISSING_PROCESS_EXIT_EVENT_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Default guest working directory for `exec`/`spawn`, matching the TS sidecar client.
 pub(crate) const DEFAULT_EXEC_CWD: &str = "/workspace";
 
@@ -53,6 +61,28 @@ pub enum TimingMitigation {
     #[default]
     Off,
     Freeze,
+}
+
+/// Engine override for standalone WebAssembly commands. JavaScript and its
+/// `WebAssembly.*` APIs always remain on V8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StandaloneWasmBackend {
+    #[serde(rename = "v8")]
+    V8,
+    #[serde(rename = "wasmtime")]
+    Wasmtime,
+    #[serde(rename = "wasmtime-threads")]
+    WasmtimeThreads,
+}
+
+impl From<StandaloneWasmBackend> for wire::StandaloneWasmBackend {
+    fn from(value: StandaloneWasmBackend) -> Self {
+        match value {
+            StandaloneWasmBackend::V8 => Self::V8,
+            StandaloneWasmBackend::Wasmtime => Self::Wasmtime,
+            StandaloneWasmBackend::WasmtimeThreads => Self::WasmtimeThreads,
+        }
+    }
 }
 
 /// `stdin` value: a string or raw bytes.
@@ -82,6 +112,7 @@ pub struct ExecOptions {
     pub file_path: Option<String>,
     pub cpu_time_limit_ms: Option<f64>,
     pub timing_mitigation: Option<TimingMitigation>,
+    pub wasm_backend: Option<StandaloneWasmBackend>,
 }
 
 impl Default for ExecOptions {
@@ -97,6 +128,7 @@ impl Default for ExecOptions {
             file_path: None,
             cpu_time_limit_ms: None,
             timing_mitigation: None,
+            wasm_backend: None,
         }
     }
 }
@@ -119,7 +151,6 @@ pub enum SpawnStdio {
 }
 
 /// Callback-free options for portable `spawn`.
-#[derive(Default)]
 pub struct SpawnOptions {
     pub env: BTreeMap<String, String>,
     pub cwd: Option<String>,
@@ -128,6 +159,22 @@ pub struct SpawnOptions {
     pub stdout_fd: Option<i32>,
     pub stderr_fd: Option<i32>,
     pub stream_stdin: Option<bool>,
+    pub wasm_backend: Option<StandaloneWasmBackend>,
+}
+
+impl Default for SpawnOptions {
+    fn default() -> Self {
+        Self {
+            env: BTreeMap::new(),
+            cwd: Some(DEFAULT_EXEC_CWD.to_string()),
+            stdio: None,
+            stdin_fd: None,
+            stdout_fd: None,
+            stderr_fd: None,
+            stream_stdin: None,
+            wasm_backend: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,6 +298,7 @@ impl AgentOs {
                 resolved_args,
                 options.env.clone(),
                 options.cwd.clone(),
+                options.wasm_backend,
             )
             .await
             .context("exec: Execute request failed")?;
@@ -261,7 +309,7 @@ impl AgentOs {
         if let Some(stdin) = options.stdin.take() {
             let chunk = stdin_to_bytes(stdin);
             let ownership = self.vm_scope();
-            let _ = self
+            let response = self
                 .transport()
                 .request_wire(
                     ownership,
@@ -270,11 +318,15 @@ impl AgentOs {
                         chunk,
                     }),
                 )
-                .await;
+                .await
+                .context("exec: WriteStdin request failed")?;
+            if let wire::ResponsePayload::RejectedResponse(rejected) = response {
+                return Err(ClientError::from_rejection(rejected).into());
+            }
         }
         {
             let ownership = self.vm_scope();
-            let _ = self
+            let response = self
                 .transport()
                 .request_wire(
                     ownership,
@@ -282,7 +334,11 @@ impl AgentOs {
                         process_id: process_id.clone(),
                     }),
                 )
-                .await;
+                .await
+                .context("exec: CloseStdin request failed")?;
+            if let wire::ResponsePayload::RejectedResponse(rejected) = response {
+                return Err(ClientError::from_rejection(rejected).into());
+            }
         }
 
         let mut on_stdout = options.on_stdout.take();
@@ -399,7 +455,7 @@ impl AgentOs {
     /// Spawn a process. SYNC; returns `{ pid }` only. Installs stdout/stderr fan-out over broadcast
     /// channels and wires exit via a background event-pump task. The user-facing `pid` is the
     /// SDK-allocated map key (the wire `process_id` is held inside the [`ProcessEntry`]).
-    pub fn spawn_process(
+    pub fn spawn(
         &self,
         command: &str,
         args: Vec<String>,
@@ -474,47 +530,92 @@ impl AgentOs {
         Ok(SpawnHandle { pid })
     }
 
-    /// Write to a spawned process's stdin. SYNC. Errors with `ProcessNotFound`.
-    pub fn write_process_stdin(
+    /// Write to a spawned process's stdin and await the sidecar acknowledgement. Errors with
+    /// `ProcessNotFound` for an unknown SDK pid and preserves typed sidecar rejections.
+    pub async fn write_process_stdin(
         &self,
         pid: u32,
         data: StdinInput,
     ) -> std::result::Result<(), ClientError> {
-        let process_id = self.lookup_process_id(pid)?;
+        let process_id = self.await_spawn_ready(pid).await?;
         let chunk: Vec<u8> = stdin_to_bytes(data);
-        let this = self.clone();
-        // Fire-and-forget: the TS API is synchronous and does not surface a write error.
-        tokio::spawn(async move {
-            let ownership = this.vm_scope();
-            let _ = this
-                .transport()
-                .request_wire(
-                    ownership,
-                    wire::RequestPayload::WriteStdinRequest(wire::WriteStdinRequest {
-                        process_id,
-                        chunk,
-                    }),
-                )
-                .await;
-        });
-        Ok(())
+        let response = self
+            .transport()
+            .request_wire(
+                self.vm_scope(),
+                wire::RequestPayload::WriteStdinRequest(wire::WriteStdinRequest {
+                    process_id,
+                    chunk,
+                }),
+            )
+            .await?;
+        match response {
+            wire::ResponsePayload::RejectedResponse(rejected) => {
+                Err(ClientError::from_rejection(rejected))
+            }
+            _ => Ok(()),
+        }
     }
 
-    /// Close a spawned process's stdin. SYNC. Errors with `ProcessNotFound`.
-    pub fn close_process_stdin(&self, pid: u32) -> std::result::Result<(), ClientError> {
-        let process_id = self.lookup_process_id(pid)?;
-        let this = self.clone();
-        tokio::spawn(async move {
-            let ownership = this.vm_scope();
-            let _ = this
-                .transport()
-                .request_wire(
-                    ownership,
-                    wire::RequestPayload::CloseStdinRequest(wire::CloseStdinRequest { process_id }),
+    /// Close a spawned process's stdin and await the sidecar acknowledgement. Awaiting a preceding
+    /// [`Self::write_process_stdin`] call preserves write-before-EOF ordering across cold starts.
+    pub async fn close_process_stdin(&self, pid: u32) -> std::result::Result<(), ClientError> {
+        let process_id = self.await_spawn_ready(pid).await?;
+        let response = self
+            .transport()
+            .request_wire(
+                self.vm_scope(),
+                wire::RequestPayload::CloseStdinRequest(wire::CloseStdinRequest { process_id }),
+            )
+            .await?;
+        match response {
+            wire::ResponsePayload::RejectedResponse(rejected) => {
+                Err(ClientError::from_rejection(rejected))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    async fn await_spawn_ready(&self, pid: u32) -> std::result::Result<String, ClientError> {
+        let (process_id, mut kernel_pid, mut exit) = self
+            .inner()
+            .processes
+            .read(&pid, |_, entry| {
+                (
+                    entry.process_id.clone(),
+                    entry.kernel_pid.subscribe(),
+                    entry.exit_tx.subscribe(),
                 )
-                .await;
-        });
-        Ok(())
+            })
+            .ok_or(ClientError::ProcessNotFound(pid))?;
+
+        loop {
+            if kernel_pid.borrow().is_some() {
+                return Ok(process_id);
+            }
+            if let Some(exit_code) = *exit.borrow() {
+                return Err(ClientError::Sidecar(format!(
+                    "process {pid} exited with code {exit_code} before stdin became writable"
+                )));
+            }
+
+            tokio::select! {
+                changed = kernel_pid.changed() => {
+                    if changed.is_err() {
+                        return Err(ClientError::Sidecar(format!(
+                            "process {pid} readiness channel closed before stdin became writable"
+                        )));
+                    }
+                }
+                changed = exit.changed() => {
+                    if changed.is_err() {
+                        return Err(ClientError::Sidecar(format!(
+                            "process {pid} exit channel closed before stdin became writable"
+                        )));
+                    }
+                }
+            }
+        }
     }
 
     /// Subscribe to the unified stdout/stderr event stream for a process.
@@ -619,7 +720,7 @@ impl AgentOs {
         out
     }
 
-    /// List ALL kernel processes (native sidecar process snapshot).
+    /// List ALL kernel processes (sidecar process snapshot).
     ///
     /// The kernel snapshot keys processes by their raw kernel pid. SDK-spawned root processes carry a
     /// synthetic display pid (the `spawn` return value); this remaps each snapshot entry's
@@ -627,24 +728,10 @@ impl AgentOs {
     /// can correlate `spawn()` with `all_processes()`/`process_tree()`. Results are sorted ascending
     /// by display pid (TS `snapshotProcesses` `.sort((l,r) => l.pid - r.pid)`).
     pub async fn all_processes(&self) -> Result<Vec<ProcessInfo>> {
-        let ownership = self.vm_scope();
-        let response = self
-            .transport()
-            .request_wire(ownership, wire::RequestPayload::GetProcessSnapshotRequest)
+        let snapshot = self
+            .fetch_process_snapshot()
             .await
             .context("all_processes: GetProcessSnapshot request failed")?;
-        let snapshot = match response {
-            wire::ResponsePayload::ProcessSnapshotResponse(snapshot) => snapshot,
-            wire::ResponsePayload::RejectedResponse(rejected) => {
-                return Err(ClientError::from_rejection(rejected).into());
-            }
-            other => {
-                return Err(ClientError::Sidecar(format!(
-                    "all_processes: unexpected response {other:?}"
-                ))
-                .into());
-            }
-        };
 
         // Snapshot the SDK process registry, keyed by wire `process_id`, capturing exit code,
         // command, and args. This mirrors the TS `trackedProcessesById` lookup used to build
@@ -881,18 +968,31 @@ impl AgentOs {
         })
     }
 
+    /// Fetch the authoritative kernel process snapshot without overlaying SDK-tracked processes.
+    async fn fetch_process_snapshot(&self) -> Result<wire::ProcessSnapshotResponse> {
+        let response = self
+            .transport()
+            .request_wire(
+                self.vm_scope(),
+                wire::RequestPayload::GetProcessSnapshotRequest,
+            )
+            .await?;
+        match response {
+            wire::ResponsePayload::ProcessSnapshotResponse(snapshot) => Ok(snapshot),
+            wire::ResponsePayload::RejectedResponse(rejected) => {
+                Err(ClientError::from_rejection(rejected).into())
+            }
+            other => Err(ClientError::Sidecar(format!(
+                "GetProcessSnapshot: unexpected response {other:?}"
+            ))
+            .into()),
+        }
+    }
+
     /// Allocate a fresh wire `process_id` (used by `exec`, which does not register in the SDK map).
     fn next_process_id(&self) -> String {
         let n = self.inner().process_counter.fetch_add(1, Ordering::SeqCst);
         format!("proc-{n}-{}", uuid::Uuid::new_v4())
-    }
-
-    /// Resolve the wire `process_id` for an SDK pid, erroring with `ProcessNotFound` if unknown.
-    fn lookup_process_id(&self, pid: u32) -> std::result::Result<String, ClientError> {
-        self.inner()
-            .processes
-            .read(&pid, |_, entry| entry.process_id.clone())
-            .ok_or(ClientError::ProcessNotFound(pid))
     }
 
     /// Send the `Execute` wire request, mapping a rejection into [`ClientError::Kernel`].
@@ -903,6 +1003,7 @@ impl AgentOs {
         args: Vec<String>,
         env: BTreeMap<String, String>,
         cwd: Option<String>,
+        wasm_backend: Option<StandaloneWasmBackend>,
     ) -> std::result::Result<wire::ProcessStartedResponse, ClientError> {
         let ownership = self.vm_scope();
         let response = self
@@ -918,6 +1019,7 @@ impl AgentOs {
                     env: env.into_iter().collect(),
                     cwd,
                     wasm_permission_tier: None,
+                    wasm_backend: wasm_backend.map(Into::into),
                 }),
             )
             .await?;
@@ -940,16 +1042,36 @@ impl AgentOs {
         let this = self.clone();
         tokio::spawn(async move {
             let ownership = this.vm_scope();
-            let _ = this
+            match this
                 .transport()
                 .request_wire(
                     ownership,
                     wire::RequestPayload::KillProcessRequest(wire::KillProcessRequest {
-                        process_id,
-                        signal,
+                        process_id: process_id.clone(),
+                        signal: signal.clone(),
                     }),
                 )
-                .await;
+                .await
+            {
+                Ok(wire::ResponsePayload::RejectedResponse(rejected)) => {
+                    let error = ClientError::from_rejection(rejected);
+                    tracing::error!(
+                        ?error,
+                        %process_id,
+                        %signal,
+                        "exec: asynchronous process kill was rejected"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(
+                        ?error,
+                        %process_id,
+                        %signal,
+                        "exec: asynchronous process kill request failed"
+                    );
+                }
+            }
         });
     }
 
@@ -970,16 +1092,38 @@ impl AgentOs {
         let this = self.clone();
         tokio::spawn(async move {
             let ownership = this.vm_scope();
-            let _ = this
+            match this
                 .transport()
                 .request_wire(
                     ownership,
                     wire::RequestPayload::KillProcessRequest(wire::KillProcessRequest {
-                        process_id,
-                        signal,
+                        process_id: process_id.clone(),
+                        signal: signal.clone(),
                     }),
                 )
-                .await;
+                .await
+            {
+                Ok(wire::ResponsePayload::RejectedResponse(rejected)) => {
+                    let error = ClientError::from_rejection(rejected);
+                    tracing::error!(
+                        ?error,
+                        pid,
+                        %process_id,
+                        %signal,
+                        "process signal was rejected"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(
+                        ?error,
+                        pid,
+                        %process_id,
+                        %signal,
+                        "process signal request failed"
+                    );
+                }
+            }
         });
         Ok(())
     }
@@ -1045,13 +1189,18 @@ impl AgentOs {
         exit_tx: watch::Sender<Option<i32>>,
         kernel_pid_tx: watch::Sender<Option<u32>>,
     ) {
+        let mut env = options.env.clone();
+        if options.stream_stdin == Some(true) {
+            env.insert(String::from("AGENTOS_KEEP_STDIN_OPEN"), String::from("1"));
+        }
         match self
             .send_execute(
                 &process_id,
                 Some(command),
                 args,
-                options.env.clone(),
+                env,
                 options.cwd.clone(),
+                options.wasm_backend,
             )
             .await
         {
@@ -1059,7 +1208,7 @@ impl AgentOs {
                 // Seed the kernel pid so `all_processes`/`process_tree` can remap this process's
                 // kernel-snapshot entry back to its display pid.
                 if let Some(kernel_pid) = started.pid {
-                    let _ = kernel_pid_tx.send(Some(kernel_pid));
+                    let _ = kernel_pid_tx.send_replace(Some(kernel_pid));
                 }
             }
             Err(error) => {
@@ -1075,56 +1224,129 @@ impl AgentOs {
                     data: bytes,
                 });
                 tracing::error!(?error, pid, %process_id, "spawn: Execute request failed");
-                let _ = exit_tx.send(Some(1));
+                let _ = exit_tx.send_replace(Some(1));
                 let _guard = self.inner().process_registry_lock.lock();
                 self.prune_exited_processes_locked(0);
                 return;
             }
         }
 
+        let mut snapshot_poll = tokio::time::interval(PROCESS_EXIT_SNAPSHOT_POLL_INTERVAL);
+        snapshot_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut missing_since: Option<tokio::time::Instant> = None;
+        let mut snapshot_error_reported = false;
+
         loop {
-            let (_, payload) = match events.recv().await {
-                Ok(frame) => frame,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => {
-                    // The event stream closed before an exit event landed. The TS fallback treats a
-                    // process that has fully disappeared from the VM snapshot as reaped with exit
-                    // code 0; mirror that terminal value so waiters resolve instead of hanging.
-                    let _ = exit_tx.send(Some(0));
-                    break;
-                }
-            };
-            match payload {
-                EventPayload::ProcessOutputEvent(output) if output.process_id == process_id => {
-                    let bytes = output.chunk;
-                    let _ = output_tx.send(ProcessOutput {
-                        pid,
-                        stream: match output.channel {
-                            StreamChannel::Stdout => ProcessStream::Stdout,
-                            StreamChannel::Stderr => ProcessStream::Stderr,
-                        },
-                        data: bytes.clone(),
-                    });
-                    match output.channel {
-                        StreamChannel::Stdout => {
-                            let _ = stdout_tx.send(bytes);
+            tokio::select! {
+                biased;
+
+                event = events.recv() => {
+                    let (_, payload) = match event {
+                        Ok(frame) => frame,
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(
+                                pid,
+                                %process_id,
+                                skipped,
+                                "spawn event receiver lagged; recovering from the kernel process snapshot"
+                            );
+                            continue;
                         }
-                        StreamChannel::Stderr => {
-                            let _ = stderr_tx.send(bytes);
+                        Err(broadcast::error::RecvError::Closed) => {
+                            // The event stream closed before an exit event landed. The TS fallback
+                            // treats a process that has fully disappeared from the VM snapshot as
+                            // reaped with exit code 0; mirror that terminal value so waiters resolve.
+                            let _ = exit_tx.send_replace(Some(0));
+                            break;
+                        }
+                    };
+                    match payload {
+                        EventPayload::ProcessOutputEvent(output) if output.process_id == process_id => {
+                            let bytes = output.chunk;
+                            let _ = output_tx.send(ProcessOutput {
+                                pid,
+                                stream: match output.channel {
+                                    StreamChannel::Stdout => ProcessStream::Stdout,
+                                    StreamChannel::Stderr => ProcessStream::Stderr,
+                                },
+                                data: bytes.clone(),
+                            });
+                            match output.channel {
+                                StreamChannel::Stdout => {
+                                    let _ = stdout_tx.send(bytes);
+                                }
+                                StreamChannel::Stderr => {
+                                    let _ = stderr_tx.send(bytes);
+                                }
+                            }
+                        }
+                        EventPayload::ProcessExitedEvent(exited) if exited.process_id == process_id => {
+                            let _ = exit_tx.send_replace(Some(exited.exit_code));
+                            break;
+                        }
+                        EventPayload::ProcessOutputEvent(_)
+                        | EventPayload::ProcessExitedEvent(_)
+                        | EventPayload::ExecutionOutputEvent(_)
+                        | EventPayload::ExecutionCompletedEvent(_)
+                        | EventPayload::VmLifecycleEvent(_)
+                        | EventPayload::StructuredEvent(_)
+                        | EventPayload::ExtEnvelope(_) => {}
+                    }
+                }
+                _ = snapshot_poll.tick() => {
+                    match self.fetch_process_snapshot().await {
+                        Ok(snapshot) => {
+                            if snapshot_error_reported {
+                                tracing::info!(
+                                    pid,
+                                    %process_id,
+                                    "spawn process snapshot polling recovered"
+                                );
+                                snapshot_error_reported = false;
+                            }
+
+                            match snapshot
+                                .processes
+                                .iter()
+                                .find(|entry| entry.process_id == process_id)
+                            {
+                                Some(entry) if entry.status == ProcessSnapshotStatus::Exited => {
+                                    let _ = exit_tx.send_replace(Some(entry.exit_code.unwrap_or(0)));
+                                    break;
+                                }
+                                Some(_) => {
+                                    missing_since = None;
+                                }
+                                None => {
+                                    let now = tokio::time::Instant::now();
+                                    let first_missing = *missing_since.get_or_insert(now);
+                                    if now.duration_since(first_missing)
+                                        >= MISSING_PROCESS_EXIT_EVENT_GRACE
+                                    {
+                                        tracing::warn!(
+                                            pid,
+                                            %process_id,
+                                            "started process disappeared from the kernel snapshot without an exit event; treating it as reaped"
+                                        );
+                                        let _ = exit_tx.send_replace(Some(0));
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            if !snapshot_error_reported {
+                                tracing::warn!(
+                                    ?error,
+                                    pid,
+                                    %process_id,
+                                    "spawn process snapshot query failed; terminal-event tracking remains active"
+                                );
+                                snapshot_error_reported = true;
+                            }
                         }
                     }
                 }
-                EventPayload::ProcessExitedEvent(exited) if exited.process_id == process_id => {
-                    let _ = exit_tx.send(Some(exited.exit_code));
-                    break;
-                }
-                EventPayload::ProcessOutputEvent(_)
-                | EventPayload::ProcessExitedEvent(_)
-                | EventPayload::ExecutionOutputEvent(_)
-                | EventPayload::ExecutionCompletedEvent(_)
-                | EventPayload::VmLifecycleEvent(_)
-                | EventPayload::StructuredEvent(_)
-                | EventPayload::ExtEnvelope(_) => {}
             }
         }
         let _guard = self.inner().process_registry_lock.lock();

@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Wed, 22 Jul 2026 14:00:00 -0700
+Subject: [PATCH] generic/736: accept exact quick-matrix file reduction
+
+Keep the upstream 5,000-file default for the dedicated nightly directory
+endurance gate. The agentOS quick-matrix runner supplies a smaller value only
+for an exact reviewed test/backend reduction record. Every retained entry is
+still created, read, renamed away and back, and checked against the bounded
+directory-iteration invariant.
+---
+ src/readdir-while-renames.c | 27 ++++++++++++++++++++-------
+ 1 file changed, 20 insertions(+), 7 deletions(-)
+
+diff --git a/src/readdir-while-renames.c b/src/readdir-while-renames.c
+--- a/src/readdir-while-renames.c
++++ b/src/readdir-while-renames.c
+@@ -13,11 +13,13 @@
+ /* Number of files we add to the test directory. */
+-#define NUM_FILES 5000
++#define MAX_FILES 5000
+ 
+ int main(int argc, char *argv[])
+ {
+ 	struct dirent *entry;
+ 	DIR *dir = NULL;
+ 	char *dir_path = NULL;
++	const char *configured_files;
++	int num_files = MAX_FILES;
+ 	int dentry_count = 0;
+ 	int ret = 0;
+ 	int i;
+@@ -25,7 +27,20 @@ int main(int argc, char *argv[])
+ 	if (argc != 2) {
+ 		fprintf(stderr, "Usage:  %s <directory>\n", argv[0]);
+ 		ret = 1;
+ 		goto out;
+ 	}
+ 
++	configured_files = getenv("XFSTESTS_GENERIC_736_FILES");
++	if (configured_files != NULL) {
++		char *end;
++		long value = strtol(configured_files, &end, 10);
++
++		if (*configured_files == '\0' || *end != '\0' || value < 1 ||
++		    value > MAX_FILES) {
++			fprintf(stderr, "Invalid file count: %s\n", configured_files);
++			return EINVAL;
++		}
++		num_files = value;
++	}
++
+ 	dir_path = malloc(strlen(argv[1]) + strlen("/testdir") + 1);
+@@ -56,6 +71,6 @@ int main(int argc, char *argv[])
+ 
+ 	/* Now create all files inside the directory. */
+-	for (i = 1; i <= NUM_FILES; i++) {
+-		/* 8 characters is enough for NUM_FILES name plus '\0'. */
++	for (i = 1; i <= num_files; i++) {
++		/* 8 characters is enough for MAX_FILES name plus '\0'. */
+ 		char file_name[8];
+ 		FILE *f;
+@@ -100,7 +115,7 @@ int main(int argc, char *argv[])
+ 		 * the renames may be visible or not while calling readdir(3).
+ 		 * We only want to check we don't enter into an infinite loop,
+-		 * so let the maximum number of dentries be 3 * NUM_FILES, which
++		 * so let the maximum number of dentries be 3 * num_files, which
+ 		 * is very reasonable.
+ 		 */
+-		if (dentry_count > 3 * NUM_FILES) {
++		if (dentry_count > 3 * num_files) {
+ 			fprintf(stderr,
+@@ -139,6 +154,6 @@ int main(int argc, char *argv[])
+-	/* It should return at least NUM_FILES entries +2 (for "." and ".."). */
+-	if (dentry_count < NUM_FILES + 2) {
++	/* It should return at least num_files entries +2 (for "." and ".."). */
++	if (dentry_count < num_files + 2) {
+ 		fprintf(stderr,
+ 			"Found less directory entries than expected (%d but expected %d)\n",
+-			dentry_count, NUM_FILES + 2);
++			dentry_count, num_files + 2);
+ 		ret = 2;
+-- 
+2.47.2

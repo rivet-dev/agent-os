@@ -40,8 +40,8 @@ async function waitForActorReady(
 
 defineAgentOsConformanceSuite({
 	name: RUN_E2E
-		? "AgentOS real Rivet actor conformance"
-		: "AgentOS real Rivet actor conformance (skipped)",
+		? "agentOS real Rivet actor conformance"
+		: "agentOS real Rivet actor conformance (skipped)",
 	skip: !RUN_E2E,
 	async createBackend(): Promise<AgentOsConformanceBackend> {
 		if (!RUN_E2E) {
@@ -59,6 +59,7 @@ defineAgentOsConformanceSuite({
 		const subscriptions = new Set<() => void>();
 		try {
 			await waitForActorReady(handle, runtime);
+			await connection.ready;
 		} catch (error) {
 			connection.dispose?.();
 			await runtime.stop();
@@ -72,13 +73,15 @@ defineAgentOsConformanceSuite({
 				...args: unknown[]
 			): Promise<T> {
 				const path = action.split(".");
-				let owner = handle;
+				let owner = connection;
 				for (const segment of path.slice(0, -1)) owner = owner[segment];
 				const method = owner[path.at(-1)!];
 				if (typeof method !== "function") {
 					throw new Error(`Actor backend does not implement ${action}`);
 				}
-				return (await method.apply(owner, args)) as T;
+				// RivetKit's actor proxy returns an already-bound action function. Supplying the
+				// proxy again as `this` makes it an action argument and fails CBOR serialization.
+				return (await method(...args)) as T;
 			},
 			on(
 				event: AgentOsConformanceEvent,

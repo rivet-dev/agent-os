@@ -34,12 +34,7 @@ export interface DiscoverPackagesOptions {
 export const EXCLUDED = new Set<string>([
 	"@rivet-dev/agentos-workspace",
 	"@rivet-dev/agentos-dev-shell",
-	"@rivet-dev/agentos-playground",
 	"@rivet-dev/agentos-shell",
-	// Browser support stays in-tree as migration source, but it is outside the
-	// unified sidecar reactor/security contract and must not be published.
-	"@rivet-dev/agentos-browser",
-	"@rivet-dev/agentos-runtime-browser",
 	"publish",
 ]);
 
@@ -63,17 +58,9 @@ export const META_PACKAGES: readonly MetaPackageSpec[] = [
 		meta: "@rivet-dev/agentos-sidecar",
 		platformPrefix: "@rivet-dev/agentos-sidecar-",
 	},
-	{
-		meta: "@rivet-dev/agentos-runtime-sidecar",
-		platformPrefix: "@rivet-dev/agentos-runtime-sidecar-",
-	},
 ];
 
-const SIDECAR_BINARY_PACKAGE_DIRS = [
-	"packages/sidecar-binary/npm",
-	"packages/runtime-sidecar/npm",
-	"packages/sidecar/npm",
-] as const;
+const SIDECAR_BINARY_PACKAGE_DIRS = ["packages/sidecar/npm"] as const;
 
 /**
  * Runtime packages consumed directly by lockstep AgentOS packages. Ordinary
@@ -229,7 +216,6 @@ export function assertDiscoverySanity(packages: Package[]): void {
 			"@rivet-dev/agentos",
 			"@rivet-dev/agentos-core",
 			"@rivet-dev/agentos-sidecar",
-			"@rivet-dev/agentos-runtime-sidecar",
 		);
 	}
 	if (byName.has("@rivet-dev/agentos-apps")) {

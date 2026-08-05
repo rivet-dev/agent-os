@@ -27,7 +27,7 @@ async function eventually<T>(
 	return value;
 }
 
-describe.skipIf(!RUN_E2E)("AgentOS real Rivet actor", () => {
+describe.skipIf(!RUN_E2E)("agentOS real Rivet actor", () => {
 	test("enforces onBeforeConnect and emits live VM lifecycle events", async () => {
 		const storagePath = mkdtempSync(join(tmpdir(), "agentos-actor-hooks-e2e-"));
 		const runtime = await startActorRuntime(storagePath);
@@ -111,9 +111,16 @@ describe.skipIf(!RUN_E2E)("AgentOS real Rivet actor", () => {
 					body: "preview-body",
 				},
 			);
-			expect(response.status).toBe(200);
+			const responseBody = await response.text();
+			expect(
+				response.status,
+				JSON.stringify({
+					body: responseBody,
+					headers: Object.fromEntries(response.headers),
+				}),
+			).toBe(200);
 			expect(response.headers.get("access-control-allow-origin")).toBe("*");
-			expect(await response.json()).toEqual({
+			expect(JSON.parse(responseBody)).toEqual({
 				method: "POST",
 				url: "/nested?q=1",
 				body: "preview-body",
@@ -133,13 +140,13 @@ describe.skipIf(!RUN_E2E)("AgentOS real Rivet actor", () => {
 			for (let index = 0; index < 8; index += 1) {
 				active.push(await connection.createPreviewUrl(port, 60));
 			}
-			await expect(
-				connection.createPreviewUrl(port, 60),
-			).rejects.toMatchObject({
-				code: "agentos_preview_token_limit",
-				message:
-					"preview token limit 8 reached; raise preview.maxActiveTokens to allow more",
-			});
+			await expect(connection.createPreviewUrl(port, 60)).rejects.toMatchObject(
+				{
+					code: "agentos_preview_token_limit",
+					message:
+						"preview token limit 8 reached; raise preview.maxActiveTokens to allow more",
+				},
+			);
 			await connection.expirePreviewUrl(active[0].token);
 			const replacement = await connection.createPreviewUrl(port, 60);
 			active.push(replacement);
@@ -260,7 +267,9 @@ describe.skipIf(!RUN_E2E)("AgentOS real Rivet actor", () => {
 				sessionId,
 				content: [{ type: "text", text: "before-sleep" }],
 			});
-			expect(JSON.stringify(firstPrompt.message)).toContain("echo:before-sleep");
+			expect(JSON.stringify(firstPrompt.message)).toContain(
+				"echo:before-sleep",
+			);
 
 			const beforeList = await connection.listSessions();
 			const beforeSession = beforeList.sessions.find(
@@ -319,7 +328,9 @@ describe.skipIf(!RUN_E2E)("AgentOS real Rivet actor", () => {
 				sessionId,
 				content: [{ type: "text", text: "after-sleep" }],
 			});
-			expect(JSON.stringify(restoredPrompt.message)).toContain("echo:after-sleep");
+			expect(JSON.stringify(restoredPrompt.message)).toContain(
+				"echo:after-sleep",
+			);
 			const trace = readFileSync(tracePath, "utf8")
 				.trim()
 				.split("\n")

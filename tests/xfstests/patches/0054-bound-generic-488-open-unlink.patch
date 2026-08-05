@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agentOS Tests <tests@agentos.invalid>
+Date: Wed, 22 Jul 2026 13:00:00 -0700
+Subject: [PATCH] generic/488: accept exact quick-matrix file reduction
+
+Keep the upstream 10,000-open-file default for the dedicated nightly fd
+endurance gate. The quick matrix supplies a smaller count only through an
+exact reviewed test/backend reduction record; every retained file is still
+opened, unlinked, held by its descriptor, and closed at process exit.
+---
+ tests/generic/488 | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/tests/generic/488 b/tests/generic/488
+index c1d93988..4571f0dc 100755
+--- a/tests/generic/488
++++ b/tests/generic/488
+@@ -21,9 +21,17 @@ _scratch_mount
+ 
+ test_file="$SCRATCH_MNT/$seq"
+ 
++file_count=${XFSTESTS_GENERIC_488_FILES:-10000}
++case "$file_count" in
++	''|*[!0-9]*) _fail "invalid generic/488 file count: $file_count" ;;
++esac
++if [ "$file_count" -lt 1 ] || [ "$file_count" -gt 10000 ]; then
++	_fail "generic/488 file count must be in 1..10000: $file_count"
++fi
++
+ ulimit -n $((16 * 1024))
+ # ~10000 files on a 1 GB filesystem should be no problem.
+-$here/src/multi_open_unlink -f $SCRATCH_MNT/$seq -n 10000 -s 0
++$here/src/multi_open_unlink -f $SCRATCH_MNT/$seq -n "$file_count" -s 0
+ 
+ echo "Silence is golden"
+ 
+-- 
+2.47.2

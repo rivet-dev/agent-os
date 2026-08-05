@@ -25,6 +25,7 @@ const ignoredDirs = new Set([
 	"dist",
 	"build",
 	"vendor",
+	".codex-build",
 	".turbo",
 ]);
 
@@ -33,7 +34,9 @@ const walk = (dir, visit) => {
 		const path = join(dir, entry.name);
 		if (
 			entry.isDirectory() &&
-			(ignoredDirs.has(entry.name) || rel(path) === ".claude/worktrees")
+			(ignoredDirs.has(entry.name) ||
+				rel(path) === ".claude/worktrees" ||
+				rel(path) === "archive/browser")
 		) {
 			continue;
 		}
@@ -49,6 +52,7 @@ const allowedTestHomes = [
 	/^software\/[^/]+\/test\/.+\.test\.ts$/,
 	/^toolchain\/conformance\/.+\.test\.ts$/,
 	/^packages\/[^/]+\/tests\/.+\.test\.ts$/,
+	/^benchmarks\/[^/]+\/tests\/.+\.test\.ts$/,
 	/^experiments\/[^/]+\/.+\.test\.ts$/,
 	/^scripts\/.+\.test\.ts$/,
 ];

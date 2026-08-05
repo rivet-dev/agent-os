@@ -190,17 +190,14 @@ async function caseLineBuffering() {
 
 async function caseSigint() {
 	out("#MODE want=cooked rc=0\r\n");
-	// Register the handler that SHOULD fire on ^C. On guest-node it never does
-	// (no SIGINT delivery) — kept so a fixed runtime passes the same probe and so
-	// the absence of #SIG is observable, not faked.
+	// A caught SIGINT must run this handler without leaking ^C into stdin.
 	process.on("SIGINT", () => {
 		out("#SIG name=SIGINT\r\n");
 		finish("sigint");
 	});
 	out("#READY tag=sigint\r\n");
-	// On guest-node ^C arrives as a raw 0x03 DATA byte (no signal). Report the
-	// first chunk we receive (mirrors the contract's first-data semantics) so the
-	// broken delivery is observable; a working runtime fires the handler instead.
+	// Report any incorrectly leaked data byte; a working runtime fires the
+	// handler instead.
 	const buf = await readByte();
 	if (buf.length === 0) {
 		out("#EOF tag=sigint n=0\r\n");

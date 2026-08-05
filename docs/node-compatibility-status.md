@@ -32,8 +32,8 @@ Browser runtimes: intentionally excluded
 | Surface | Result | Status | Notes |
 | --- | ---: | --- | --- |
 | Workspace build | 54/54 tasks | `passing` | The full non-browser root build, including OpenCode and agent software packaging, passed. |
-| Workspace typecheck | 76 tasks passed before shared-workspace cleanup | `environmental` | The full check was invalidated when another session removed root/package `node_modules` and `target/debug` during execution. Focused runtime-core and core typechecks pass after restoring dependencies; browser packages remain excluded. |
-| Default runtime-core Vitest | 292 passed, 1 failed, 1 skipped | `environmental` | The sole complete-run failure was the WASM abstract Unix-socket test reaching its 30-second outer timeout under shared-runner load. The exact case passed in 4.02s in isolation; all 25 child-process tests and the remaining networking/runtime cases passed in the complete run. |
+| Workspace typecheck | 76 tasks passed before shared-workspace cleanup | `environmental` | The full check was invalidated when another session removed root/package `node_modules` and `target/debug` during execution. Focused core and core typechecks pass after restoring dependencies; browser packages remain excluded. |
+| Default core Vitest | 292 passed, 1 failed, 1 skipped | `environmental` | The sole complete-run failure was the WASM abstract Unix-socket test reaching its 30-second outer timeout under shared-runner load. The exact case passed in 4.02s in isolation; all 25 child-process tests and the remaining networking/runtime cases passed in the complete run. |
 | Full ecosystem catalog | 87 passed, 6 skipped | `passing` | Final clean rerun completed in 773.69s across 92 fixtures plus discovery. All 86 executable fixture contracts are green, including Vitest/Mocha, Vite/Rollup, npm/pnpm/Yarn, TypeScript and developer CLIs, WebSockets, Vercel and agent SDKs, Prisma, Supabase, Browse CLI, Astro, Next.js, and explicit native-failure contracts. |
 | npm workflows | 27/27 passed | `passing` | Final clean rerun completed in 395.41s. npm install/list/init/scripts/lifecycle, npx package execution, pipes, concurrently, and a clean Next production build all pass. |
 | Secure WebSocket regression | 1/1 passed | `passing` | A guest `ws` client exchanges a message with a host `wss://` endpoint. Empty SNI on an IP target now uses the connection host as the rustls identity without emitting SNI. |
@@ -42,7 +42,7 @@ Browser runtimes: intentionally excluded
 | Native multi-VM fault soak | 0/1 | `open` | Node import-cache materialization exceeded 30 seconds. |
 | Fixed product versions | pass | `passing` | All 20 checked package/Cargo manifests remain pinned to `0.0.1`. |
 | Nightly workflow YAML parse | pass | `passing` | The nightly workflow parses and includes both opt-in Node matrices. |
-| Post-rebase focused validation | all focused checks | `passing` | On current `main`, real Vitest and `ws` parity, four npm workflow cases, npm-bin realpath behavior, runtime-core typechecking, targeted Cargo checking, Rust formatting, fixed versions, mirror generation, JSON, and nightly YAML all pass. |
+| Post-rebase focused validation | all focused checks | `passing` | On current `main`, real Vitest and `ws` parity, four npm workflow cases, npm-bin realpath behavior, core typechecking, targeted Cargo checking, Rust formatting, fixed versions, mirror generation, JSON, and nightly YAML all pass. |
 
 ## Ecosystem catalog
 
@@ -118,15 +118,15 @@ packages:
 | `typescript-cli-pass` | TypeScript 6 compiler CLI producing JavaScript from a real project |
 | `vercel-ai-pass` | AI SDK core, OpenAI/Anthropic/Gateway providers, React/ReactDOM server rendering, and Workflow |
 | `vercel-platform-pass` | Vercel Blob, Edge Config, Express/Fastify/Hono adapters, current and legacy Flags, Functions, NFT, OG, OIDC, OpenTelemetry, Sandbox, and a representative SDK operation module |
+| `vite-react-esbuild-pass` | Vite React plugin and esbuild-backed production build with exact host-node output parity |
 
 ### Deferred, open, and native-service probes
 
 | Fixture | Status | Latest failure | Next action |
 | --- | --- | --- | --- |
-| `node-test-runner-blocked` | `open` | AgentOS does not currently expose the core `node:test` module. | Implement the Node test-runner builtin; this is a runtime compatibility gap, not a native-addon limitation. |
+| `node-test-runner-blocked` | `open` | The `node:test` module imports and registers tests, but a normal script entrypoint does not automatically execute and report them. | Complete the automatic test lifecycle and reporter behavior; the separate `node --test` compatibility path already drives the current builtin explicitly. |
 | `nextjs-turbopack-blocked` | `blocked-native` | Next 16 Turbopack attempts the platform SWC `.node` addons and then requires `node:worker_threads`; the staged SWC WASM fallback is insufficient for Turbopack. | Retain the exact expected-failure contract. The non-Turbopack Next production build remains passing. |
 | `jest-native-resolver-blocked` | `blocked-native` | Jest 30.4.2 delegates module resolution to `unrs-resolver` 1.12.2, whose supported Node path loads a platform N-API `.node` binding. Host Node runs the real Jest test; AgentOS fails the explicit native-resolver contract. | Retain the expected-failure contract until Jest or `unrs-resolver` offers a usable non-native Node path. |
-| `vite-react-esbuild-blocked` | `deferred` | Vite's React build requires the esbuild native service executable and does not settle in the JavaScript-only VM. | Retain as an explicit expected-failure contract; core Vite/Rollup coverage remains passing in `vite-pass`. |
 | `vitest-default-rolldown-native-blocked` | `blocked-native` | Vitest's current default dependency graph uses Vite 8/Rolldown and loads `rolldown-binding.linux-x64-gnu.node`. | Keep the native failure contract. Supported Vitest uses Vite 7 plus `@rollup/wasm-node` in `vitest-pass`. |
 | `rollup-native-blocked` | `blocked-native` | Rollup's default Linux package loads its platform native binding. | Keep the native contract and use the passing official WASM Rollup path where native code is unavailable. |
 | `tsx-esbuild-native-blocked` | `open` | The public `tsx/esm/api` path first reaches unsupported `module.register()` loader hooks; esbuild's native service is a downstream limitation. | Implement public Node loader-hook behavior before reclassifying the remaining esbuild dependency. |
@@ -288,23 +288,20 @@ packages remain excluded by the repository's Node-only runtime policy.
 ```bash
 # Default TypeScript/runtime surface (browser packages remain excluded)
 pnpm check-types
-AGENTOS_E2E_NETWORK=1 pnpm --dir packages/runtime-core test
+AGENTOS_E2E_NETWORK=1 pnpm --dir packages/core test
 
 # Full package ecosystem and package-manager workflows
-pnpm --dir packages/runtime-core test:ecosystem:full
-pnpm --dir packages/runtime-core test:npm-workflows
+pnpm --dir packages/core test:ecosystem:full
+pnpm --dir packages/core test:npm-workflows
 
-# Complete non-browser Rust surface
-cargo test --workspace \
-  --exclude agentos-sidecar-browser \
-  --exclude agentos-native-sidecar-browser \
-  --no-fail-fast -- --test-threads=1
+# Complete native Rust surface (browser references are outside the workspace)
+cargo test --workspace --no-fail-fast -- --test-threads=1
 
 # Explicit ignored churn gates
-cargo test -p agentos-runtime \
+cargo test -p agentos-driver-tokio \
   multi_vm_generation_soak_has_no_accounting_or_scheduler_drift \
   --lib -- --ignored --test-threads=1
-cargo test -p agentos-native-sidecar --test service \
+cargo test -p agentos-vm --test service \
   multi_vm_protocol_faults_reconcile_shared_runtime_soak \
   -- --ignored --test-threads=1
 ```

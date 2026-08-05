@@ -11,6 +11,7 @@ import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 import {
 	createVmOpenCodeHome,
 	createVmWorkspace,
+	OPENCODE_TEST_V8_HEAP_LIMIT_MB,
 } from "./helpers/opencode-helper.js";
 
 const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
@@ -18,6 +19,9 @@ const MODULE_ACCESS_CWD = resolve(import.meta.dirname, "..");
 async function createOpenCodeVm(mockUrl: string): Promise<AgentOs> {
 	return AgentOs.create({
 		loopbackExemptPorts: [Number(new URL(mockUrl).port)],
+		limits: {
+			jsRuntime: { v8HeapLimitMb: OPENCODE_TEST_V8_HEAP_LIMIT_MB },
+		},
 		mounts: moduleAccessMounts(MODULE_ACCESS_CWD),
 		software: [opencode],
 	});
@@ -54,9 +58,9 @@ describe("real openSession({ agent: 'opencode' })", () => {
 			});
 
 			const config = await vm.getSessionConfig({ sessionId });
-			// OpenCode currently advertises legacy ACP `modes`, not native
-			// `configOptions`; AgentOS deliberately does not invent a mapping.
-			expect(config.options.some((option) => option.id === "mode")).toBe(false);
+			// The current OpenCode ACP adapter advertises its modes through the
+			// native configOptions contract.
+			expect(config.options.some((option) => option.id === "mode")).toBe(true);
 
 			expect((await vm.listSessions()).sessions).toContainEqual(
 				expect.objectContaining({ sessionId, agent: "opencode" }),

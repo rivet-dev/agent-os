@@ -1,8 +1,8 @@
 import { resolve } from "node:path";
 import piCli from "@agentos-software/pi-cli";
-import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentOs } from "../src/agent-os.js";
+import { moduleAccessMounts } from "./helpers/node-modules-mount.js";
 
 const MODULE_ACCESS_CWD = resolve(
 	import.meta.dirname,
@@ -23,10 +23,10 @@ describe("pi-cli software projection", () => {
 		await vm.dispose();
 	});
 
-	test("projects the CLI adapter package and PI agent package into the VM", async () => {
+	test("projects the CLI adapter command and Pi agent package into the VM", async () => {
 		const script = `
 const fs = require("fs");
-console.log("adapter:" + fs.existsSync("/root/node_modules/pi-acp/package.json"));
+console.log("adapter:" + fs.existsSync("/opt/agentos/bin/agentos-pi-acp"));
 console.log("agent:" + fs.existsSync("/root/node_modules/@mariozechner/pi-coding-agent/package.json"));
 `;
 		await vm.writeFile("/tmp/pi-cli-projection.mjs", script);
@@ -95,10 +95,7 @@ console.log("agent:" + fs.existsSync("/root/node_modules/@mariozechner/pi-coding
 	});
 
 	test("guest child_process can run a simple JavaScript child", async () => {
-		await vm.writeFile(
-			"/tmp/child-hello.mjs",
-			`console.log("child-hello");`,
-		);
+		await vm.writeFile("/tmp/child-hello.mjs", `console.log("child-hello");`);
 		await vm.writeFile(
 			"/tmp/parent-hello.mjs",
 			`
