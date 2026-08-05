@@ -2,16 +2,12 @@ import { dehydrate, hydrate, QueryClient, QueryClientProvider } from "@tanstack/
 import { lazy, type ComponentType, StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { isInspectorActionError, tabIdFromUrl } from "./lib/actor-client";
-import { installStreamBodyFetchCompat } from "./lib/fetch-compat";
 import { RivetProvider } from "./lib/rivet";
 import { PermissionPrompts } from "./permission-prompts";
 import { TabBoundary } from "./tab-boundary";
 import React from "react";
 
 import "./styles.css";
-
-// Must run before any rivetkit client is constructed.
-installStreamBodyFetchCompat();
 
 // Tab registry: id → lazy component. Add a tab here + register the same id in
 // actor.ts `inspectorTabs` pointing `source` at this shared asset dir.

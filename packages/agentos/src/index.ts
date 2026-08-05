@@ -55,6 +55,8 @@ export type {
 	ShellDataPayload,
 	ShellExitPayload,
 	ShellInfo,
+	ShellReplayMode,
+	ShellSnapshot,
 	VmBootedPayload,
 	VmShutdownPayload,
 } from "./types.js";
