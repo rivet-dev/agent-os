@@ -84,6 +84,19 @@ AgentOS supports two ways to give agents access to external functionality: **bin
 
 Use bindings when you want to expose your own JavaScript functions to agents. Use MCP servers when you want to connect to existing third-party services. See [Sessions](/docs/sessions#open-a-session) for MCP server configuration.
 
+### Cloudflare Code Mode MCP
+
+Secure Exec can also provide the executor for Cloudflare's Code Mode MCP
+wrappers. The preview [`@secure-exec/mcp`](https://github.com/rivet-dev/cloudflare-agents/tree/agent/secure-exec-executor/packages/secure-exec-mcp)
+package supports both `codeMcpServer` for an existing MCP server and
+`openApiMcpServer` for an OpenAPI description without requiring Cloudflare
+Workers or the Dynamic Worker Loader API.
+
+Generated JavaScript runs in a fresh Secure Exec VM. The MCP tools, API client,
+authentication, and other privileged callbacks remain in the trusted host and
+are exposed to the VM only through schema-validated bindings. The package is
+currently available from the fork and is not yet published to npm.
+
 ## Security
 
 Binding calls from the agent securely invoke your `execute()` functions on the host. Your functions run with full access to the host environment, so you can call databases, APIs, and services directly without proxying credentials into the VM. The agent never sees the credentials, it only sees the binding's input/output contract.
