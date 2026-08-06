@@ -29,7 +29,7 @@ use crate::protocol::{
 };
 use crate::request_operations::{
     OperationCancellation, OperationCancellationReason, RequestOperationMetadata,
-    RequestOrderingKey,
+    VmConcurrencyClass,
 };
 use crate::service::NativeSidecar;
 use crate::state::SidecarError;
@@ -325,7 +325,7 @@ fn with_vm_admission_class(
     ownership: &OwnershipScope,
     class: ExtensionServiceAdmissionClass,
 ) -> PreparedExtensionServiceCommand {
-    let OwnershipScope::VmOwnership(scope) = ownership else {
+    let OwnershipScope::VmOwnership(_) = ownership else {
         return prepared;
     };
     prepared.admission = Some(ExtensionServiceAdmission {
@@ -333,11 +333,7 @@ fn with_vm_admission_class(
         metadata: RequestOperationMetadata::new(
             ownership.clone(),
             prepared.operation,
-            RequestOrderingKey::VmOperation {
-                connection_id: scope.connection_id.clone(),
-                session_id: scope.session_id.clone(),
-                vm_id: scope.vm_id.clone(),
-            },
+            VmConcurrencyClass::SharedVm,
         ),
         cancellation: OperationCancellation::new(),
         pre_admitted: None,
@@ -846,6 +842,7 @@ pub(crate) enum ExtensionServiceCommand {
 #[derive(Clone)]
 pub(crate) struct RoutedExtensionServices {
     commands: mpsc::Sender<ExtensionServiceCommand>,
+    progress_commands: mpsc::Sender<ExtensionServiceCommand>,
     /// Wakes extension-side probes only after the protocol coordinator has
     /// drained the runtime producer queues. Runtime producers use a separate
     /// notification owned exclusively by the central process-event pump, so
@@ -925,11 +922,13 @@ impl CompletedProcessEventStore {
 }
 
 impl RoutedExtensionServices {
+    #[cfg(test)]
     pub(crate) fn new(
         commands: mpsc::Sender<ExtensionServiceCommand>,
         routed_process_event_notify: Arc<Notify>,
     ) -> Self {
         Self {
+            progress_commands: commands.clone(),
             commands,
             routed_process_event_notify,
             process_event_broker: None,
@@ -937,8 +936,9 @@ impl RoutedExtensionServices {
         }
     }
 
-    pub(crate) fn new_with_process_event_broker(
+    pub(crate) fn new_with_process_event_broker_and_progress(
         commands: mpsc::Sender<ExtensionServiceCommand>,
+        progress_commands: mpsc::Sender<ExtensionServiceCommand>,
         routed_process_event_notify: Arc<Notify>,
         process_event_broker: ProcessEventBroker,
     ) -> Self {
@@ -946,6 +946,7 @@ impl RoutedExtensionServices {
             CompletedProcessEventStore::new(process_event_broker.max_events());
         Self {
             commands,
+            progress_commands,
             routed_process_event_notify,
             process_event_broker: Some(process_event_broker),
             completed_process_events,
@@ -957,7 +958,42 @@ impl RoutedExtensionServices {
         T: Send + 'static,
         F: FnOnce(Reply<T>) -> ExtensionServiceCommand + Send + 'static,
     {
-        let commands = self.commands.clone();
+        self.call_on(self.commands.clone(), build)
+    }
+
+    fn call_progress<T, F>(&self, build: F) -> ExtensionFuture<'static, T>
+    where
+        T: Send + 'static,
+        F: FnOnce(Reply<T>) -> ExtensionServiceCommand + Send + 'static,
+    {
+        let commands = self.progress_commands.clone();
+        Box::pin(async move {
+            let (reply, response) = oneshot::channel();
+            commands.try_send(build(reply)).map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => SidecarError::InvalidState(String::from(
+                    "ERR_AGENTOS_PROGRESS_SERVICE_LIMIT: reserved progress service admission is full; raise runtime.protocol.maxProgressFrames",
+                )),
+                mpsc::error::TrySendError::Closed(_) => SidecarError::Io(String::from(
+                    "ERR_AGENTOS_EXTENSION_SERVICE_CLOSED: sidecar coordinator stopped; active extension operation was cancelled",
+                )),
+            })?;
+            response.await.map_err(|_| {
+                SidecarError::Io(String::from(
+                    "ERR_AGENTOS_EXTENSION_SERVICE_REPLY_CLOSED: sidecar coordinator dropped an extension operation without a result",
+                ))
+            })?
+        })
+    }
+
+    fn call_on<T, F>(
+        &self,
+        commands: mpsc::Sender<ExtensionServiceCommand>,
+        build: F,
+    ) -> ExtensionFuture<'static, T>
+    where
+        T: Send + 'static,
+        F: FnOnce(Reply<T>) -> ExtensionServiceCommand + Send + 'static,
+    {
         Box::pin(async move {
             let (reply, response) = oneshot::channel();
             commands.send(build(reply)).await.map_err(|_| {
@@ -1017,7 +1053,7 @@ impl ExtensionServices for RoutedExtensionServices {
         ownership: OwnershipScope,
         request: WriteStdinRequest,
     ) -> ExtensionFuture<'static, StdinWrittenResponse> {
-        self.call(move |reply| ExtensionServiceCommand::WriteStdin {
+        self.call_progress(move |reply| ExtensionServiceCommand::WriteStdin {
             ownership,
             request,
             reply,
@@ -1029,7 +1065,7 @@ impl ExtensionServices for RoutedExtensionServices {
         ownership: OwnershipScope,
         request: CloseStdinRequest,
     ) -> ExtensionFuture<'static, StdinClosedResponse> {
-        self.call(move |reply| ExtensionServiceCommand::CloseStdin {
+        self.call_progress(move |reply| ExtensionServiceCommand::CloseStdin {
             ownership,
             request,
             reply,
@@ -1041,7 +1077,7 @@ impl ExtensionServices for RoutedExtensionServices {
         ownership: OwnershipScope,
         request: KillProcessRequest,
     ) -> ExtensionFuture<'static, ProcessKilledResponse> {
-        self.call(move |reply| ExtensionServiceCommand::KillProcess {
+        self.call_progress(move |reply| ExtensionServiceCommand::KillProcess {
             ownership,
             request,
             reply,
@@ -1327,6 +1363,98 @@ mod internal_event_lifecycle_tests {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn write_stdin_uses_the_reserved_progress_service_lane() {
+        let (ordinary_tx, mut ordinary_rx) = mpsc::channel(1);
+        let (progress_tx, mut progress_rx) = mpsc::channel(1);
+        let services = RoutedExtensionServices {
+            commands: ordinary_tx,
+            progress_commands: progress_tx,
+            routed_process_event_notify: Arc::new(Notify::new()),
+            process_event_broker: None,
+            completed_process_events: CompletedProcessEventStore::new(1),
+        };
+        let ownership = OwnershipScope::vm("connection-a", "session-a", "vm-a");
+        let write = services.write_stdin(
+            ownership.clone(),
+            WriteStdinRequest {
+                process_id: String::from("process-a"),
+                chunk: b"cancel\n".to_vec(),
+            },
+        );
+        let service = async {
+            assert!(matches!(
+                ordinary_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            let command = progress_rx
+                .recv()
+                .await
+                .expect("WriteStdin reaches the progress service lane");
+            let ExtensionServiceCommand::WriteStdin {
+                ownership: actual_ownership,
+                request,
+                reply,
+            } = command
+            else {
+                panic!("progress lane received a different service command");
+            };
+            assert_eq!(actual_ownership, ownership);
+            assert_eq!(request.process_id, "process-a");
+            assert_eq!(request.chunk, b"cancel\n");
+            reply
+                .send(Ok(StdinWrittenResponse {
+                    process_id: request.process_id,
+                    accepted_bytes: request.chunk.len() as u64,
+                }))
+                .expect("WriteStdin caller retains its reply waiter");
+        };
+        let (response, ()) = tokio::join!(write, service);
+        let response = response.expect("WriteStdin response");
+        assert_eq!(response.accepted_bytes, 7);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn saturated_progress_service_lane_returns_a_typed_limit() {
+        let (ordinary_tx, _ordinary_rx) = mpsc::channel(1);
+        let (progress_tx, _progress_rx) = mpsc::channel(1);
+        let services = RoutedExtensionServices {
+            commands: ordinary_tx,
+            progress_commands: progress_tx,
+            routed_process_event_notify: Arc::new(Notify::new()),
+            process_event_broker: None,
+            completed_process_events: CompletedProcessEventStore::new(1),
+        };
+        let ownership = OwnershipScope::vm("connection-a", "session-a", "vm-a");
+        let mut first = services.write_stdin(
+            ownership.clone(),
+            WriteStdinRequest {
+                process_id: String::from("process-a"),
+                chunk: vec![1],
+            },
+        );
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(first.as_mut().poll(&mut context), Poll::Pending));
+
+        let error = services
+            .write_stdin(
+                ownership,
+                WriteStdinRequest {
+                    process_id: String::from("process-a"),
+                    chunk: vec![2],
+                },
+            )
+            .await
+            .expect_err("full progress lane rejects without waiting");
+        assert!(error
+            .to_string()
+            .contains("ERR_AGENTOS_PROGRESS_SERVICE_LIMIT"));
+        assert!(error
+            .to_string()
+            .contains("runtime.protocol.maxProgressFrames"));
     }
 
     fn prepared_internal_event(

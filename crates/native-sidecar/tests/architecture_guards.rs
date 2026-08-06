@@ -704,13 +704,80 @@ fn native_sidecar_has_no_prompt_specific_interrupt_workaround() {
         std::fs::read_to_string(root.join("crates/native-sidecar/src/extension.rs"))
             .expect("read generic extension contract");
     assert!(
-        extension_contract.contains("fn request_ordering_key("),
-        "generic extension contract must expose an opaque ordering-key hook"
+        !extension_contract.contains("request_ordering_key"),
+        "generic extension routing must not recreate a core-owned ordering matrix"
     );
+}
+
+#[test]
+fn vm_concurrency_classification_stays_narrow_and_auditable() {
+    let root = repo_root();
+    let stdio = std::fs::read_to_string(root.join("crates/native-sidecar/src/stdio.rs"))
+        .expect("read native-sidecar stdio source");
+    let classification = stdio
+        .split("fn request_operation_metadata")
+        .nth(1)
+        .and_then(|tail| tail.split("fn ownership_connection_id").next())
+        .expect("locate request VM concurrency classification");
+    for lifecycle_request in [
+        "DisposeVmRequest",
+        "BootstrapRootFilesystemRequest",
+        "ConfigureVmRequest",
+        "CreateLayerRequest",
+        "SealLayerRequest",
+        "ImportSnapshotRequest",
+        "ExportSnapshotRequest",
+        "CreateOverlayRequest",
+        "SnapshotRootFilesystemRequest",
+        "LinkPackageRequest",
+    ] {
+        assert!(
+            classification.contains(lifecycle_request),
+            "VM lifecycle request {lifecycle_request} requires explicit exclusive classification"
+        );
+    }
     assert!(
-        !extension_contract.contains("agentos_protocol"),
-        "generic extension ordering must not depend on ACP protocol types"
+        classification.contains("RequestPayload::ExtEnvelope(_)")
+            && classification.contains("VmConcurrencyClass::OwnershipOnly")
+            && classification.contains("VmConcurrencyClass::SharedVm")
+            && classification.contains("VmConcurrencyClass::ExclusiveVmLifecycle"),
+        "classification must keep extension, ordinary VM, and lifecycle behavior explicit"
     );
+
+    let operations =
+        std::fs::read_to_string(root.join("crates/native-sidecar/src/request_operations.rs"))
+            .expect("read request operation table source");
+    let class = operations
+        .split("enum VmConcurrencyClass")
+        .nth(1)
+        .and_then(|tail| tail.split("/// Complete admission description").next())
+        .expect("locate VM concurrency class");
+    for variant in ["OwnershipOnly", "SharedVm", "ExclusiveVmLifecycle"] {
+        assert!(
+            class.contains(variant),
+            "missing VM concurrency class {variant}"
+        );
+    }
+    assert!(
+        !class.contains("Extension") && !operations.contains("extension_conflicts"),
+        "native-sidecar must not recreate extension-specific conflict domains"
+    );
+
+    let ownership =
+        std::fs::read_to_string(root.join("crates/native-sidecar/src/ownership_coordinator.rs"))
+            .expect("read ownership coordinator source");
+    for rationale in [
+        "This is not a standard-library or Tokio `RwLock`",
+        "forbidden design is a lock held across request execution",
+        "reject",
+        "internal event",
+        "generation",
+    ] {
+        assert!(
+            ownership.contains(rationale),
+            "VM lifecycle gate documentation is missing rationale marker {rationale}"
+        );
+    }
 }
 
 #[test]

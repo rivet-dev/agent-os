@@ -71,6 +71,7 @@ const DEFAULT_MAX_TERMINAL_TASK_REPORTS: usize = 4_096;
 const DEFAULT_VM_EXECUTOR_TEARDOWN_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_PROTOCOL_MAX_INGRESS_FRAMES: usize = 128;
 pub const DEFAULT_PROTOCOL_MAX_INGRESS_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_PROTOCOL_MAX_SESSIONS_PER_CONNECTION: usize = 4_096;
 pub const DEFAULT_PROTOCOL_MAX_CONTROL_FRAMES: usize = 1_024;
 pub const DEFAULT_PROTOCOL_MAX_CONTROL_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_PROTOCOL_MAX_EGRESS_FRAMES: usize = 4_096;
@@ -120,6 +121,8 @@ pub fn is_runtime_worker_thread() -> bool {
 pub struct RuntimeProtocolConfig {
     pub max_ingress_frames: usize,
     pub max_ingress_bytes: usize,
+    /// Live session membership retained for one authenticated connection.
+    pub max_sessions_per_connection: usize,
     pub max_control_frames: usize,
     pub max_control_bytes: usize,
     pub max_egress_frames: usize,
@@ -154,6 +157,7 @@ impl Default for RuntimeProtocolConfig {
         Self {
             max_ingress_frames: DEFAULT_PROTOCOL_MAX_INGRESS_FRAMES,
             max_ingress_bytes: DEFAULT_PROTOCOL_MAX_INGRESS_BYTES,
+            max_sessions_per_connection: DEFAULT_PROTOCOL_MAX_SESSIONS_PER_CONNECTION,
             max_control_frames: DEFAULT_PROTOCOL_MAX_CONTROL_FRAMES,
             max_control_bytes: DEFAULT_PROTOCOL_MAX_CONTROL_BYTES,
             max_egress_frames: DEFAULT_PROTOCOL_MAX_EGRESS_FRAMES,
@@ -580,6 +584,10 @@ impl RuntimeConfig {
             (
                 "runtime.protocol.maxPendingResponses",
                 self.protocol.max_pending_responses,
+            ),
+            (
+                "runtime.protocol.maxSessionsPerConnection",
+                self.protocol.max_sessions_per_connection,
             ),
             (
                 "runtime.protocol.maxPendingResponseBytes",
@@ -1845,6 +1853,7 @@ mod tests {
 
         assert_zero_rejected!(max_in_flight_requests, "maxInFlightRequests");
         assert_zero_rejected!(max_in_flight_request_bytes, "maxInFlightRequestBytes");
+        assert_zero_rejected!(max_sessions_per_connection, "maxSessionsPerConnection");
         assert_zero_rejected!(max_terminal_frames, "maxTerminalFrames");
         assert_zero_rejected!(max_terminal_bytes, "maxTerminalBytes");
         assert_zero_rejected!(terminal_fallback_bytes, "terminalFallbackBytes");

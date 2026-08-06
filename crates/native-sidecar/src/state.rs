@@ -568,6 +568,13 @@ impl Default for NativeSidecarConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidecarError {
     ResourceLimit(agentos_runtime::accounting::LimitError),
+    RequestAdmission {
+        code: &'static str,
+        message: String,
+        configuration_path: Option<&'static str>,
+        retryable: bool,
+        errno: &'static str,
+    },
     InvalidState(String),
     ProtocolVersionMismatch(String),
     BridgeVersionMismatch(String),
@@ -586,6 +593,7 @@ impl fmt::Display for SidecarError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ResourceLimit(error) => error.fmt(f),
+            Self::RequestAdmission { message, .. } => f.write_str(message),
             Self::InvalidState(message)
             | Self::ProtocolVersionMismatch(message)
             | Self::BridgeVersionMismatch(message)
