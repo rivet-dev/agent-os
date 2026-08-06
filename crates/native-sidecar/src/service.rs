@@ -4711,6 +4711,41 @@ where
     }
 
     fn reject_error(&self, request: &RequestFrame, error: &SidecarError) -> ResponseFrame {
+        if let SidecarError::RequestAdmission {
+            code,
+            message,
+            configuration_path,
+            retryable,
+            errno,
+        } = error
+        {
+            let vm_id = match &request.ownership {
+                OwnershipScope::VmOwnership(owner) => Some(owner.vm_id.clone()),
+                OwnershipScope::ConnectionOwnership(_) | OwnershipScope::SessionOwnership(_) => {
+                    None
+                }
+            };
+            return self.respond(
+                request,
+                ResponsePayload::Rejected(RejectedResponse {
+                    code: (*code).to_owned(),
+                    message: message.clone(),
+                    limit_name: None,
+                    configured_limit: None,
+                    current_usage: None,
+                    requested: Some(1),
+                    unit: Some(String::from("requests")),
+                    scope: Some(String::from("vm")),
+                    vm_id,
+                    session_generation: None,
+                    capability_id: None,
+                    operation: Some(String::from("vm.lifecycleAdmission")),
+                    configuration_path: configuration_path.map(str::to_owned),
+                    retryable: Some(*retryable),
+                    errno: Some((*errno).to_owned()),
+                }),
+            );
+        }
         let SidecarError::ResourceLimit(limit) = error else {
             return self.reject(request, error_code(error), &error.to_string());
         };

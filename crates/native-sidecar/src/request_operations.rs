@@ -12,8 +12,6 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::Notify;
 
-use crate::extension::ExtensionOrderingPolicy;
-
 pub(crate) const IN_FLIGHT_REQUEST_COUNT_PATH: &str = "runtime.protocol.maxInFlightRequests";
 pub(crate) const IN_FLIGHT_REQUEST_BYTES_PATH: &str = "runtime.protocol.maxInFlightRequestBytes";
 
@@ -47,64 +45,51 @@ impl RequestOperationKey {
     }
 }
 
-/// Narrow conflict domains carried with an independently executing request.
-/// This is metadata only: entity coordinators enforce the ordering policy.
+/// VM concurrency class for an independently executing request.
+///
+/// Entity identity is deliberately absent: [`RequestOperationMetadata::ownership`]
+/// is the sole source of connection/session/VM ownership. The coordinator uses
+/// ownership for cancellation, disposal, limits, and active-operation tracking,
+/// then applies this class only to the narrow VM exclusion that remains.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RequestOrderingKey {
-    Connection(String),
-    Session {
-        connection_id: String,
-        session_id: String,
-    },
-    VmLifecycle {
-        connection_id: String,
-        session_id: String,
-        vm_id: String,
-    },
-    VmOperation {
-        connection_id: String,
-        session_id: String,
-        vm_id: String,
-    },
-    Extension {
-        namespace: String,
-        connection_id: String,
-        key: Vec<u8>,
-        policy: ExtensionOrderingPolicy,
-    },
-    Unordered,
+pub(crate) enum VmConcurrencyClass {
+    /// Track the operation at its ownership scopes without adding a conflict
+    /// domain. Connection- and session-owned work uses this class and remains
+    /// concurrent with other admitted work at the same scope.
+    OwnershipOnly,
+    /// Ordinary VM work shares the VM with other ordinary operations. Its
+    /// registration is counted by the per-VM lifecycle gate so exclusive work
+    /// can wait for a precise, cancellation-aware drain.
+    SharedVm,
+    /// VM lifecycle work atomically closes ordinary admission, waits for work
+    /// already registered under `SharedVm`, and then runs alone. New shared
+    /// requests are rejected rather than queued while the gate is pending or
+    /// active.
+    ExclusiveVmLifecycle,
 }
 
+/// Complete admission description for one independently executing request.
+/// Ownership says which entity path the operation uses; the VM concurrency
+/// class says whether that work enters the lifecycle gate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RequestOperationMetadata {
     pub(crate) ownership: OwnershipScope,
     pub(crate) operation: String,
-    pub(crate) ordering_key: RequestOrderingKey,
+    pub(crate) vm_concurrency: VmConcurrencyClass,
 }
 
 impl RequestOperationMetadata {
     pub(crate) fn new(
         ownership: OwnershipScope,
         operation: impl Into<String>,
-        ordering_key: RequestOrderingKey,
+        vm_concurrency: VmConcurrencyClass,
     ) -> Self {
         Self {
             ownership,
             operation: operation.into(),
-            ordering_key,
+            vm_concurrency,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RequestOperationState {
-    Admitted,
-    Running,
-    Cancelling,
-    Completing,
-    Failed,
-    Shutdown,
-    Terminal,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,11 +173,11 @@ const PUBLICATION_RETAINED: u8 = 2;
 const PUBLICATION_TAKEN_OVER: u8 = 3;
 
 #[derive(Clone, Debug)]
-pub(crate) struct TerminalResponseGuard {
+pub(crate) struct ResponsePublicationGuard {
     state: Arc<AtomicU8>,
 }
 
-impl TerminalResponseGuard {
+impl ResponsePublicationGuard {
     fn new() -> Self {
         Self {
             state: Arc::new(AtomicU8::new(PUBLICATION_UNCLAIMED)),
@@ -252,13 +237,12 @@ pub(crate) struct RequestOperationSnapshot {
     pub(crate) key: RequestOperationKey,
     pub(crate) metadata: RequestOperationMetadata,
     pub(crate) request_bytes: usize,
-    pub(crate) state: RequestOperationState,
     pub(crate) cancellation_reason: Option<OperationCancellationReason>,
     pub(crate) terminal_claimed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RequestOperationRegistrySnapshot {
+pub(crate) struct OperationTableSnapshot {
     pub(crate) in_flight_requests: usize,
     pub(crate) in_flight_request_bytes: usize,
     pub(crate) closed: Option<OperationCancellationReason>,
@@ -272,38 +256,61 @@ pub(crate) struct ForcedRequestOutcome {
     pub(crate) ownership: OwnershipScope,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperationClass {
+    Ordinary,
+    Progress,
+}
+
 #[derive(Debug)]
 struct OperationRecord {
+    class: OperationClass,
     generation: u64,
     metadata: RequestOperationMetadata,
     request_bytes: usize,
-    state: RequestOperationState,
     cancellation: OperationCancellation,
-    terminal: TerminalResponseGuard,
+    publication: ResponsePublicationGuard,
 }
 
 #[derive(Debug)]
 struct RegistryState {
     operations: BTreeMap<RequestOperationKey, OperationRecord>,
     in_flight_request_bytes: usize,
+    in_flight_progress_bytes: usize,
     next_generation: u64,
     closed: Option<OperationCancellationReason>,
+    progress_closed: Option<OperationCancellationReason>,
     closed_connections: BTreeMap<String, OperationCancellationReason>,
+    closed_scopes: Vec<(OwnershipScope, OperationCancellationReason)>,
 }
 
 #[derive(Debug)]
-struct RequestOperationRegistryInner {
+struct OperationTableInner {
     limits: RequestOperationLimits,
+    progress_limits: ProgressRequestLimits,
     state: Mutex<RegistryState>,
+    changed: Notify,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct RequestOperationRegistry {
-    inner: Arc<RequestOperationRegistryInner>,
+pub(crate) struct OperationTable {
+    inner: Arc<OperationTableInner>,
 }
 
-impl RequestOperationRegistry {
+impl OperationTable {
+    #[cfg(test)]
     pub(crate) fn new(limits: RequestOperationLimits) -> Self {
+        let progress_limits = ProgressRequestLimits {
+            max_requests: limits.max_requests,
+            max_request_bytes: limits.max_request_bytes,
+        };
+        Self::new_with_limits(limits, progress_limits)
+    }
+
+    fn new_with_limits(
+        limits: RequestOperationLimits,
+        progress_limits: ProgressRequestLimits,
+    ) -> Self {
         assert!(
             limits.max_requests > 0,
             "request count limit must be positive"
@@ -312,22 +319,47 @@ impl RequestOperationRegistry {
             limits.max_request_bytes > 0,
             "request byte limit must be positive"
         );
+        assert!(
+            progress_limits.max_requests > 0,
+            "progress request count limit must be positive"
+        );
+        assert!(
+            progress_limits.max_request_bytes > 0,
+            "progress request byte limit must be positive"
+        );
         Self {
-            inner: Arc::new(RequestOperationRegistryInner {
+            inner: Arc::new(OperationTableInner {
                 limits,
+                progress_limits,
                 state: Mutex::new(RegistryState {
                     operations: BTreeMap::new(),
                     in_flight_request_bytes: 0,
+                    in_flight_progress_bytes: 0,
                     next_generation: 1,
                     closed: None,
+                    progress_closed: None,
                     closed_connections: BTreeMap::new(),
+                    closed_scopes: Vec::new(),
                 }),
+                changed: Notify::new(),
             }),
         }
     }
 
     pub(crate) fn from_protocol_config(config: &RuntimeProtocolConfig) -> Self {
-        Self::new(RequestOperationLimits::from(config))
+        Self::new_with_limits(
+            RequestOperationLimits::from(config),
+            ProgressRequestLimits::from(config),
+        )
+    }
+
+    /// Return the progress-admission projection over this exact operation
+    /// table. Both classes share request identity and publication ownership,
+    /// while retaining independently configured count and byte budgets.
+    pub(crate) fn progress_requests(&self) -> ProgressOperationView {
+        ProgressOperationView {
+            inner: Arc::clone(&self.inner),
+        }
     }
 
     pub(crate) fn admit(
@@ -346,17 +378,17 @@ impl RequestOperationRegistry {
         let generation = state.next_generation;
         state.next_generation = state.next_generation.wrapping_add(1).max(1);
         let cancellation = OperationCancellation::new();
-        let terminal = TerminalResponseGuard::new();
+        let publication = ResponsePublicationGuard::new();
         state.in_flight_request_bytes = requested_total;
         state.operations.insert(
             key.clone(),
             OperationRecord {
+                class: OperationClass::Ordinary,
                 generation,
                 metadata: metadata.clone(),
                 request_bytes,
-                state: RequestOperationState::Admitted,
                 cancellation: cancellation.clone(),
-                terminal: terminal.clone(),
+                publication: publication.clone(),
             },
         );
         drop(state);
@@ -368,14 +400,14 @@ impl RequestOperationRegistry {
             metadata,
             request_bytes,
             cancellation,
-            terminal,
+            publication,
             released: false,
         })
     }
 
-    /// Check admission before acquiring a terminal-output reservation. The
-    /// router is the sole admission producer, but [`Self::admit`] repeats this
-    /// check so this preflight can never weaken the registry's bounds.
+    /// Test-only admission probe. Production routing uses [`Self::admit`] once
+    /// and releases the resulting operation if output reservation fails.
+    #[cfg(test)]
     pub(crate) fn check_admission(
         &self,
         key: &RequestOperationKey,
@@ -409,12 +441,27 @@ impl RequestOperationRegistry {
                 reason,
             });
         }
+        if let Some((scope, reason)) = state
+            .closed_scopes
+            .iter()
+            .find(|(scope, _)| scope_contains(scope, &metadata.ownership))
+        {
+            return Err(RequestAdmissionError::OwnershipClosed {
+                scope: ownership_label(scope),
+                reason: *reason,
+            });
+        }
         if state.operations.contains_key(&key) {
             return Err(RequestAdmissionError::DuplicateRequest { key: key.clone() });
         }
-        if state.operations.len() >= self.inner.limits.max_requests {
+        let ordinary_count = state
+            .operations
+            .values()
+            .filter(|record| record.class == OperationClass::Ordinary)
+            .count();
+        if ordinary_count >= self.inner.limits.max_requests {
             return Err(RequestAdmissionError::CountLimit {
-                current: state.operations.len(),
+                current: ordinary_count,
                 requested: 1,
                 limit: self.inner.limits.max_requests,
             });
@@ -437,6 +484,7 @@ impl RequestOperationRegistry {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn cancel(
         &self,
         key: &RequestOperationKey,
@@ -446,12 +494,14 @@ impl RequestOperationRegistry {
         let Some(record) = state.operations.get_mut(key) else {
             return CancelOperationResult::NotFound;
         };
-        if record.state == RequestOperationState::Terminal {
+        if record.class != OperationClass::Ordinary {
+            return CancelOperationResult::NotFound;
+        }
+        if record.publication.is_claimed() {
             return CancelOperationResult::AlreadyTerminal;
         }
         let signalled = record.cancellation.signal(reason);
         if signalled {
-            advance_cancellation_state(record, reason);
             CancelOperationResult::Signalled
         } else {
             CancelOperationResult::AlreadySignalled(
@@ -463,6 +513,7 @@ impl RequestOperationRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn close_connection(
         &self,
         connection_id: &str,
@@ -476,10 +527,10 @@ impl RequestOperationRegistry {
         let mut signalled = 0;
         for (key, record) in &mut state.operations {
             if key.connection_id == connection_id
-                && record.state != RequestOperationState::Terminal
+                && record.class == OperationClass::Ordinary
+                && !record.publication.is_claimed()
                 && record.cancellation.signal(reason)
             {
-                advance_cancellation_state(record, reason);
                 signalled += 1;
             }
         }
@@ -491,13 +542,55 @@ impl RequestOperationRegistry {
         state.closed.get_or_insert(reason);
         let mut signalled = 0;
         for record in state.operations.values_mut() {
-            if record.state != RequestOperationState::Terminal && record.cancellation.signal(reason)
+            if record.class == OperationClass::Ordinary
+                && !record.publication.is_claimed()
+                && record.cancellation.signal(reason)
             {
-                advance_cancellation_state(record, reason);
                 signalled += 1;
             }
         }
         signalled
+    }
+
+    /// Atomically close one ownership subtree and signal every operation in it
+    /// except the lifecycle request performing the close. Admission and scope
+    /// closure use the same short mutex, so no operation can slip between the
+    /// closed marker and the bounded-table scan.
+    pub(crate) fn close_scope(
+        &self,
+        scope: OwnershipScope,
+        reason: OperationCancellationReason,
+        excluded: Option<&RequestOperationKey>,
+    ) -> ScopeOperationDrain {
+        let mut state = self.lock_state();
+        if !state
+            .closed_scopes
+            .iter()
+            .any(|(closed, _)| closed == &scope)
+        {
+            state.closed_scopes.push((scope.clone(), reason));
+        }
+        for (key, record) in &state.operations {
+            if excluded != Some(key) && scope_contains(&scope, &record.metadata.ownership) {
+                record.cancellation.signal(reason);
+            }
+        }
+        drop(state);
+        self.inner.changed.notify_waiters();
+        ScopeOperationDrain {
+            registry: self.clone(),
+            scope,
+            excluded: excluded.cloned(),
+        }
+    }
+
+    /// Reopen an exact textual scope only after its old generation completed
+    /// and membership was explicitly recreated. Ancestor closures still win.
+    pub(crate) fn reopen_scope(&self, scope: &OwnershipScope) {
+        let mut state = self.lock_state();
+        state.closed_scopes.retain(|(closed, _)| closed != scope);
+        drop(state);
+        self.inner.changed.notify_waiters();
     }
 
     /// Claim terminal ownership for every unfinished request and remove all
@@ -511,18 +604,23 @@ impl RequestOperationRegistry {
     ) -> Vec<ForcedRequestOutcome> {
         let mut state = self.lock_state();
         state.closed.get_or_insert(reason);
-        let operations = std::mem::take(&mut state.operations);
+        let keys = state
+            .operations
+            .iter()
+            .filter(|(_, record)| record.class == OperationClass::Ordinary)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
         state.in_flight_request_bytes = 0;
-        operations
+        let outcomes = keys
             .into_iter()
-            .filter_map(|(key, mut record)| {
+            .filter_map(|key| state.operations.remove(&key).map(|record| (key, record)))
+            .filter_map(|(key, record)| {
                 record.cancellation.signal(reason);
-                advance_cancellation_state(&mut record, reason);
                 // A claimed-but-still-registered record may be draining its
                 // finite ordinary event batch. Its terminal response already
                 // exists, so removing accounting must not synthesize a second
                 // terminal during shutdown.
-                if !record.terminal.try_take_over_unretained() {
+                if !record.publication.try_take_over_unretained() {
                     return None;
                 }
                 Some(ForcedRequestOutcome {
@@ -530,98 +628,60 @@ impl RequestOperationRegistry {
                     ownership: record.metadata.ownership,
                 })
             })
-            .collect()
+            .collect::<Vec<_>>();
+        drop(state);
+        self.inner.changed.notify_waiters();
+        outcomes
     }
 
-    pub(crate) fn snapshot(&self) -> RequestOperationRegistrySnapshot {
+    pub(crate) fn snapshot(&self) -> OperationTableSnapshot {
         let state = self.lock_state();
-        RequestOperationRegistrySnapshot {
-            in_flight_requests: state.operations.len(),
+        OperationTableSnapshot {
+            in_flight_requests: state
+                .operations
+                .values()
+                .filter(|record| record.class == OperationClass::Ordinary)
+                .count(),
             in_flight_request_bytes: state.in_flight_request_bytes,
             closed: state.closed,
             closed_connections: state.closed_connections.keys().cloned().collect(),
             operations: state
                 .operations
                 .iter()
+                .filter(|(_, record)| record.class == OperationClass::Ordinary)
                 .map(|(key, record)| RequestOperationSnapshot {
                     key: key.clone(),
                     metadata: record.metadata.clone(),
                     request_bytes: record.request_bytes,
-                    state: record.state,
                     cancellation_reason: record.cancellation.reason(),
-                    terminal_claimed: record.terminal.is_claimed(),
+                    terminal_claimed: record.publication.is_claimed(),
                 })
                 .collect(),
         }
     }
 
-    fn transition(
-        &self,
-        key: &RequestOperationKey,
-        generation: u64,
-        next: RequestOperationState,
-    ) -> Result<(), OperationTransitionError> {
+    fn try_mark_terminal(&self, key: &RequestOperationKey, generation: u64) -> bool {
         let mut state = self.lock_state();
         let Some(record) = state.operations.get_mut(key) else {
-            return Err(OperationTransitionError::NotFound(key.clone()));
+            return false;
         };
+        if record.class != OperationClass::Ordinary {
+            return false;
+        }
         if record.generation != generation {
-            return Err(OperationTransitionError::StaleGeneration(key.clone()));
+            return false;
         }
-        if !valid_transition(record.state, next) {
-            return Err(OperationTransitionError::Invalid {
-                key: key.clone(),
-                current: record.state,
-                next,
-            });
+        if !record.publication.try_claim() {
+            return false;
         }
-        record.state = next;
-        Ok(())
-    }
-
-    fn try_mark_terminal(
-        &self,
-        key: &RequestOperationKey,
-        generation: u64,
-    ) -> Result<bool, OperationTransitionError> {
-        let mut state = self.lock_state();
-        let Some(record) = state.operations.get_mut(key) else {
-            return Err(OperationTransitionError::NotFound(key.clone()));
-        };
-        if record.generation != generation {
-            return Err(OperationTransitionError::StaleGeneration(key.clone()));
-        }
-        if record.state == RequestOperationState::Terminal {
-            debug_assert!(record.terminal.is_claimed());
-            return Ok(false);
-        }
-        if !valid_transition(record.state, RequestOperationState::Terminal) {
-            return Err(OperationTransitionError::Invalid {
-                key: key.clone(),
-                current: record.state,
-                next: RequestOperationState::Terminal,
-            });
-        }
-        if !record.terminal.try_claim() {
-            // All claims go through this method, so a claimed guard and a
-            // terminal state are updated in the same registry critical section.
-            tracing::error!(
-                request_id = key.request_id,
-                connection_id = %key.connection_id,
-                "ERR_AGENTOS_REQUEST_TERMINAL_STATE: terminal response was claimed without a terminal registry state"
-            );
-            return Ok(false);
-        }
-        record.state = RequestOperationState::Terminal;
-        Ok(true)
+        true
     }
 
     fn release(&self, key: &RequestOperationKey, generation: u64, request_bytes: usize) {
         let mut state = self.lock_state();
-        let should_remove = state
-            .operations
-            .get(key)
-            .is_some_and(|record| record.generation == generation);
+        let should_remove = state.operations.get(key).is_some_and(|record| {
+            record.class == OperationClass::Ordinary && record.generation == generation
+        });
         if should_remove {
             state.operations.remove(key);
             state.in_flight_request_bytes = state
@@ -637,6 +697,7 @@ impl RequestOperationRegistry {
                     );
                     0
                 });
+            self.inner.changed.notify_waiters();
         }
     }
 
@@ -650,6 +711,40 @@ impl RequestOperationRegistry {
     }
 }
 
+/// Read-only drain view for one closed ownership subtree. It never retains the
+/// registry lock across `.await`; `Notify` is only a wake hint and every wake
+/// rechecks the bounded authoritative table.
+#[derive(Clone, Debug)]
+pub(crate) struct ScopeOperationDrain {
+    registry: OperationTable,
+    scope: OwnershipScope,
+    excluded: Option<RequestOperationKey>,
+}
+
+impl ScopeOperationDrain {
+    pub(crate) async fn wait_drained(&self) {
+        loop {
+            let changed = self.registry.inner.changed.notified();
+            if self.active_operations() == 0 {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    pub(crate) fn active_operations(&self) -> usize {
+        self.registry
+            .lock_state()
+            .operations
+            .iter()
+            .filter(|(key, record)| {
+                self.excluded.as_ref() != Some(key)
+                    && scope_contains(&self.scope, &record.metadata.ownership)
+            })
+            .count()
+    }
+}
+
 fn ownership_connection_id(ownership: &OwnershipScope) -> &str {
     match ownership {
         OwnershipScope::ConnectionOwnership(scope) => &scope.connection_id,
@@ -658,53 +753,57 @@ fn ownership_connection_id(ownership: &OwnershipScope) -> &str {
     }
 }
 
-fn cancellation_state(reason: OperationCancellationReason) -> RequestOperationState {
-    match reason {
-        OperationCancellationReason::Explicit => RequestOperationState::Cancelling,
-        OperationCancellationReason::ConnectionClosed
-        | OperationCancellationReason::Shutdown
-        | OperationCancellationReason::TransportClosed => RequestOperationState::Shutdown,
-    }
-}
-
-fn advance_cancellation_state(record: &mut OperationRecord, reason: OperationCancellationReason) {
-    let next = cancellation_state(reason);
-    if valid_transition(record.state, next) {
-        record.state = next;
-    }
-}
-
-fn valid_transition(current: RequestOperationState, next: RequestOperationState) -> bool {
-    use RequestOperationState as State;
-    matches!(
-        (current, next),
-        (
-            State::Admitted,
-            State::Running | State::Cancelling | State::Failed | State::Shutdown
-        ) | (
-            State::Running,
-            State::Cancelling | State::Completing | State::Failed | State::Shutdown
-        ) | (
-            State::Cancelling,
-            State::Completing | State::Failed | State::Shutdown
-        ) | (State::Completing, State::Failed | State::Terminal)
-            | (State::Failed, State::Terminal)
-            | (
-                State::Shutdown,
-                State::Completing | State::Failed | State::Terminal
+fn ownership_label(ownership: &OwnershipScope) -> String {
+    match ownership {
+        OwnershipScope::ConnectionOwnership(scope) => scope.connection_id.clone(),
+        OwnershipScope::SessionOwnership(scope) => {
+            format!("{}/{}", scope.connection_id, scope.session_id)
+        }
+        OwnershipScope::VmOwnership(scope) => {
+            format!(
+                "{}/{}/{}",
+                scope.connection_id, scope.session_id, scope.vm_id
             )
-    )
+        }
+    }
+}
+
+fn scope_contains(parent: &OwnershipScope, child: &OwnershipScope) -> bool {
+    match (parent, child) {
+        (
+            OwnershipScope::ConnectionOwnership(parent),
+            OwnershipScope::ConnectionOwnership(child),
+        ) => parent.connection_id == child.connection_id,
+        (OwnershipScope::ConnectionOwnership(parent), OwnershipScope::SessionOwnership(child)) => {
+            parent.connection_id == child.connection_id
+        }
+        (OwnershipScope::ConnectionOwnership(parent), OwnershipScope::VmOwnership(child)) => {
+            parent.connection_id == child.connection_id
+        }
+        (OwnershipScope::SessionOwnership(parent), OwnershipScope::SessionOwnership(child)) => {
+            parent.connection_id == child.connection_id && parent.session_id == child.session_id
+        }
+        (OwnershipScope::SessionOwnership(parent), OwnershipScope::VmOwnership(child)) => {
+            parent.connection_id == child.connection_id && parent.session_id == child.session_id
+        }
+        (OwnershipScope::VmOwnership(parent), OwnershipScope::VmOwnership(child)) => {
+            parent.connection_id == child.connection_id
+                && parent.session_id == child.session_id
+                && parent.vm_id == child.vm_id
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct RequestOperation {
-    registry: RequestOperationRegistry,
+    registry: OperationTable,
     key: RequestOperationKey,
     generation: u64,
     metadata: RequestOperationMetadata,
     request_bytes: usize,
     cancellation: OperationCancellation,
-    terminal: TerminalResponseGuard,
+    publication: ResponsePublicationGuard,
     released: bool,
 }
 
@@ -717,6 +816,7 @@ impl RequestOperation {
         &self.metadata
     }
 
+    #[cfg(test)]
     pub(crate) fn request_bytes(&self) -> usize {
         self.request_bytes
     }
@@ -725,19 +825,16 @@ impl RequestOperation {
         self.cancellation.clone()
     }
 
-    pub(crate) fn transition(
-        &self,
-        next: RequestOperationState,
-    ) -> Result<(), OperationTransitionError> {
-        self.registry.transition(&self.key, self.generation, next)
+    pub(crate) fn reopen_scope(&self, scope: &OwnershipScope) {
+        self.registry.reopen_scope(scope);
     }
 
-    pub(crate) fn try_mark_terminal(&self) -> Result<bool, OperationTransitionError> {
+    pub(crate) fn try_mark_terminal(&self) -> bool {
         self.registry.try_mark_terminal(&self.key, self.generation)
     }
 
     pub(crate) fn mark_terminal_retained(&self) -> bool {
-        self.terminal.mark_retained()
+        self.publication.mark_retained()
     }
 
     pub(crate) fn release(mut self) {
@@ -756,7 +853,7 @@ impl RequestOperation {
 
 impl Drop for RequestOperation {
     fn drop(&mut self) {
-        if !self.terminal.is_claimed() {
+        if !self.publication.is_claimed() {
             tracing::error!(
                 request_id = self.key.request_id,
                 connection_id = %self.key.connection_id,
@@ -768,6 +865,7 @@ impl Drop for RequestOperation {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CancelOperationResult {
     Signalled,
@@ -798,6 +896,10 @@ pub(crate) enum RequestAdmissionError {
         connection_id: String,
         reason: OperationCancellationReason,
     },
+    OwnershipClosed {
+        scope: String,
+        reason: OperationCancellationReason,
+    },
     OwnershipMismatch {
         key_connection_id: String,
         ownership_connection_id: String,
@@ -810,9 +912,9 @@ impl RequestAdmissionError {
             Self::CountLimit { .. } => "ERR_AGENTOS_IN_FLIGHT_REQUEST_LIMIT",
             Self::ByteLimit { .. } => "ERR_AGENTOS_IN_FLIGHT_REQUEST_BYTE_LIMIT",
             Self::DuplicateRequest { .. } => "ERR_AGENTOS_DUPLICATE_REQUEST_ID",
-            Self::RegistryClosed { .. } | Self::ConnectionClosed { .. } => {
-                "ERR_AGENTOS_REQUEST_ADMISSION_CLOSED"
-            }
+            Self::RegistryClosed { .. }
+            | Self::ConnectionClosed { .. }
+            | Self::OwnershipClosed { .. } => "ERR_AGENTOS_REQUEST_ADMISSION_CLOSED",
             Self::OwnershipMismatch { .. } => "ERR_AGENTOS_REQUEST_OWNERSHIP_MISMATCH",
         }
     }
@@ -865,6 +967,11 @@ impl fmt::Display for RequestAdmissionError {
                 "{}: connection {connection_id} is closed ({reason:?})",
                 self.code()
             ),
+            Self::OwnershipClosed { scope, reason } => write!(
+                formatter,
+                "{}: request ownership {scope} is closed ({reason:?})",
+                self.code()
+            ),
             Self::OwnershipMismatch {
                 key_connection_id,
                 ownership_connection_id,
@@ -878,41 +985,6 @@ impl fmt::Display for RequestAdmissionError {
 }
 
 impl std::error::Error for RequestAdmissionError {}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum OperationTransitionError {
-    NotFound(RequestOperationKey),
-    StaleGeneration(RequestOperationKey),
-    Invalid {
-        key: RequestOperationKey,
-        current: RequestOperationState,
-        next: RequestOperationState,
-    },
-}
-
-impl fmt::Display for OperationTransitionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotFound(key) => write!(
-                formatter,
-                "request operation {}:{} is not registered",
-                key.connection_id, key.request_id
-            ),
-            Self::StaleGeneration(key) => write!(
-                formatter,
-                "request operation {}:{} has a stale generation",
-                key.connection_id, key.request_id
-            ),
-            Self::Invalid { key, current, next } => write!(
-                formatter,
-                "invalid request operation transition for {}:{}: {current:?} -> {next:?}",
-                key.connection_id, key.request_id
-            ),
-        }
-    }
-}
-
-impl std::error::Error for OperationTransitionError {}
 
 pub(crate) const PROGRESS_REQUEST_COUNT_PATH: &str = "runtime.protocol.maxProgressFrames";
 pub(crate) const PROGRESS_REQUEST_BYTES_PATH: &str = "runtime.protocol.maxProgressBytes";
@@ -936,66 +1008,6 @@ impl From<&RuntimeProtocolConfig> for ProgressRequestLimits {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct ProgressAcknowledgementGuard {
-    state: Arc<AtomicU8>,
-}
-
-impl ProgressAcknowledgementGuard {
-    fn new() -> Self {
-        Self {
-            state: Arc::new(AtomicU8::new(PUBLICATION_UNCLAIMED)),
-        }
-    }
-
-    fn try_claim(&self) -> bool {
-        self.state
-            .compare_exchange(
-                PUBLICATION_UNCLAIMED,
-                PUBLICATION_PUBLISHING,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-    }
-
-    fn mark_retained(&self) -> bool {
-        self.state
-            .compare_exchange(
-                PUBLICATION_PUBLISHING,
-                PUBLICATION_RETAINED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-    }
-
-    fn try_take_over_unretained(&self) -> bool {
-        loop {
-            let current = self.state.load(Ordering::Acquire);
-            if matches!(current, PUBLICATION_RETAINED | PUBLICATION_TAKEN_OVER) {
-                return false;
-            }
-            if self
-                .state
-                .compare_exchange(
-                    current,
-                    PUBLICATION_TAKEN_OVER,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                return true;
-            }
-        }
-    }
-
-    fn is_claimed(&self) -> bool {
-        self.state.load(Ordering::Acquire) != PUBLICATION_UNCLAIMED
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProgressRequestSnapshot {
     pub(crate) key: RequestOperationKey,
@@ -1006,7 +1018,7 @@ pub(crate) struct ProgressRequestSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ProgressRequestRegistrySnapshot {
+pub(crate) struct ProgressOperationSnapshot {
     pub(crate) in_flight_requests: usize,
     pub(crate) in_flight_request_bytes: usize,
     pub(crate) closed: Option<OperationCancellationReason>,
@@ -1014,65 +1026,35 @@ pub(crate) struct ProgressRequestRegistrySnapshot {
     pub(crate) requests: Vec<ProgressRequestSnapshot>,
 }
 
-#[derive(Debug)]
-struct ProgressRequestRecord {
-    generation: u64,
-    ownership: OwnershipScope,
-    request_bytes: usize,
-    cancellation: OperationCancellation,
-    acknowledgement: ProgressAcknowledgementGuard,
-}
-
-#[derive(Debug)]
-struct ProgressRegistryState {
-    requests: BTreeMap<RequestOperationKey, ProgressRequestRecord>,
-    in_flight_request_bytes: usize,
-    next_generation: u64,
-    closed: Option<OperationCancellationReason>,
-    closed_connections: BTreeMap<String, OperationCancellationReason>,
-}
-
-#[derive(Debug)]
-struct ProgressRequestRegistryInner {
-    limits: ProgressRequestLimits,
-    state: Mutex<ProgressRegistryState>,
-}
-
+/// Progress-facing projection over the shared operation table. This is not an
+/// independent registry: ordinary and progress admission lock the same map.
 #[derive(Clone, Debug)]
-pub(crate) struct ProgressRequestRegistry {
-    inner: Arc<ProgressRequestRegistryInner>,
+pub(crate) struct ProgressOperationView {
+    inner: Arc<OperationTableInner>,
 }
 
-impl ProgressRequestRegistry {
+impl ProgressOperationView {
+    #[cfg(test)]
     pub(crate) fn new(limits: ProgressRequestLimits) -> Self {
-        assert!(
-            limits.max_requests > 0,
-            "progress request count limit must be positive"
-        );
-        assert!(
-            limits.max_request_bytes > 0,
-            "progress request byte limit must be positive"
-        );
-        Self {
-            inner: Arc::new(ProgressRequestRegistryInner {
-                limits,
-                state: Mutex::new(ProgressRegistryState {
-                    requests: BTreeMap::new(),
-                    in_flight_request_bytes: 0,
-                    next_generation: 1,
-                    closed: None,
-                    closed_connections: BTreeMap::new(),
-                }),
-            }),
-        }
+        OperationTable::new_with_limits(
+            RequestOperationLimits {
+                max_requests: limits.max_requests,
+                max_request_bytes: limits.max_request_bytes,
+            },
+            limits,
+        )
+        .progress_requests()
     }
 
+    #[cfg(test)]
     pub(crate) fn from_protocol_config(config: &RuntimeProtocolConfig) -> Self {
-        Self::new(ProgressRequestLimits::from(config))
+        OperationTable::from_protocol_config(config).progress_requests()
     }
 
-    /// Preflight before acquiring progress-output capacity. [`Self::admit`]
-    /// repeats the check and remains authoritative.
+    /// Test-only admission probe. Production routing uses
+    /// [`Self::admit_owned`] once and releases the resulting operation if
+    /// output reservation fails.
+    #[cfg(test)]
     pub(crate) fn check_admission(
         &self,
         key: &RequestOperationKey,
@@ -1082,6 +1064,7 @@ impl ProgressRequestRegistry {
         self.check_admission_locked(&state, key, request_bytes)
     }
 
+    #[cfg(test)]
     pub(crate) fn admit(
         &self,
         key: RequestOperationKey,
@@ -1105,23 +1088,38 @@ impl ProgressRequestRegistry {
         );
         let mut state = self.lock_state();
         self.check_admission_locked(&state, &key, request_bytes)?;
+        if let Some((scope, reason)) = state
+            .closed_scopes
+            .iter()
+            .find(|(scope, _)| scope_contains(scope, &ownership))
+        {
+            return Err(ProgressRequestAdmissionError::OwnershipClosed {
+                scope: ownership_label(scope),
+                reason: *reason,
+            });
+        }
         let requested_total = state
-            .in_flight_request_bytes
+            .in_flight_progress_bytes
             .checked_add(request_bytes)
             .expect("progress admission preflight checked the request byte total");
         let generation = state.next_generation;
         state.next_generation = state.next_generation.wrapping_add(1).max(1);
         let cancellation = OperationCancellation::new();
-        let acknowledgement = ProgressAcknowledgementGuard::new();
-        state.in_flight_request_bytes = requested_total;
-        state.requests.insert(
+        let publication = ResponsePublicationGuard::new();
+        state.in_flight_progress_bytes = requested_total;
+        state.operations.insert(
             key.clone(),
-            ProgressRequestRecord {
+            OperationRecord {
+                class: OperationClass::Progress,
                 generation,
-                ownership,
+                metadata: RequestOperationMetadata::new(
+                    ownership,
+                    "direct progress",
+                    VmConcurrencyClass::OwnershipOnly,
+                ),
                 request_bytes,
                 cancellation: cancellation.clone(),
-                acknowledgement: acknowledgement.clone(),
+                publication: publication.clone(),
             },
         );
         drop(state);
@@ -1131,21 +1129,26 @@ impl ProgressRequestRegistry {
             key,
             generation,
             request_bytes,
+            #[cfg(test)]
             cancellation,
-            acknowledgement,
+            publication,
             released: false,
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn cancel(
         &self,
         key: &RequestOperationKey,
         reason: OperationCancellationReason,
     ) -> ProgressCancelResult {
         let state = self.lock_state();
-        let Some(record) = state.requests.get(key) else {
+        let Some(record) = state.operations.get(key) else {
             return ProgressCancelResult::NotFound;
         };
+        if record.class != OperationClass::Progress {
+            return ProgressCancelResult::NotFound;
+        }
         if record.cancellation.signal(reason) {
             ProgressCancelResult::Signalled
         } else {
@@ -1158,6 +1161,7 @@ impl ProgressRequestRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn close_connection(
         &self,
         connection_id: &str,
@@ -1169,19 +1173,21 @@ impl ProgressRequestRegistry {
             .entry(connection_id.to_owned())
             .or_insert(reason);
         state
-            .requests
+            .operations
             .iter()
             .filter(|(key, _)| key.connection_id == connection_id)
+            .filter(|(_, record)| record.class == OperationClass::Progress)
             .filter(|(_, record)| record.cancellation.signal(reason))
             .count()
     }
 
     pub(crate) fn close(&self, reason: OperationCancellationReason) -> usize {
         let mut state = self.lock_state();
-        state.closed.get_or_insert(reason);
+        state.progress_closed.get_or_insert(reason);
         state
-            .requests
+            .operations
             .values()
+            .filter(|record| record.class == OperationClass::Progress)
             .filter(|record| record.cancellation.signal(reason))
             .count()
     }
@@ -1192,13 +1198,14 @@ impl ProgressRequestRegistry {
     pub(crate) fn signal_all(&self, reason: OperationCancellationReason) -> usize {
         let state = self.lock_state();
         state
-            .requests
+            .operations
             .values()
+            .filter(|record| record.class == OperationClass::Progress)
             .filter(|record| record.cancellation.signal(reason))
             .count()
     }
 
-    /// Exactly-once counterpart to [`RequestOperationRegistry::force_terminalize`]
+    /// Exactly-once counterpart to [`OperationTable::force_terminalize`]
     /// for direct progress requests. Returned descriptors must receive a
     /// synthetic acknowledgement after task-local reservations are released.
     pub(crate) fn force_acknowledge(
@@ -1206,43 +1213,57 @@ impl ProgressRequestRegistry {
         reason: OperationCancellationReason,
     ) -> Vec<ForcedRequestOutcome> {
         let mut state = self.lock_state();
-        state.closed.get_or_insert(reason);
-        let requests = std::mem::take(&mut state.requests);
-        state.in_flight_request_bytes = 0;
-        requests
+        state.progress_closed.get_or_insert(reason);
+        let keys = state
+            .operations
+            .iter()
+            .filter(|(_, record)| record.class == OperationClass::Progress)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        state.in_flight_progress_bytes = 0;
+        let outcomes = keys
             .into_iter()
+            .filter_map(|key| state.operations.remove(&key).map(|record| (key, record)))
             .filter_map(|(key, record)| {
                 record.cancellation.signal(reason);
                 // A claimed acknowledgement may remain registered while its
                 // finite ordinary event batch drains. Remove accounting but
                 // never synthesize a duplicate acknowledgement.
-                if !record.acknowledgement.try_take_over_unretained() {
+                if !record.publication.try_take_over_unretained() {
                     return None;
                 }
                 Some(ForcedRequestOutcome {
                     key,
-                    ownership: record.ownership,
+                    ownership: record.metadata.ownership,
                 })
             })
-            .collect()
+            .collect::<Vec<_>>();
+        drop(state);
+        self.inner.changed.notify_waiters();
+        outcomes
     }
 
-    pub(crate) fn snapshot(&self) -> ProgressRequestRegistrySnapshot {
+    pub(crate) fn snapshot(&self) -> ProgressOperationSnapshot {
         let state = self.lock_state();
-        ProgressRequestRegistrySnapshot {
-            in_flight_requests: state.requests.len(),
-            in_flight_request_bytes: state.in_flight_request_bytes,
-            closed: state.closed,
+        ProgressOperationSnapshot {
+            in_flight_requests: state
+                .operations
+                .values()
+                .filter(|record| record.class == OperationClass::Progress)
+                .count(),
+            in_flight_request_bytes: state.in_flight_progress_bytes,
+            closed: state.progress_closed,
             closed_connections: state.closed_connections.keys().cloned().collect(),
             requests: state
-                .requests
+                .operations
                 .iter()
+                .filter(|(_, record)| record.class == OperationClass::Progress)
                 .map(|(key, record)| ProgressRequestSnapshot {
                     key: key.clone(),
-                    ownership: record.ownership.clone(),
+                    ownership: record.metadata.ownership.clone(),
                     request_bytes: record.request_bytes,
                     cancellation_reason: record.cancellation.reason(),
-                    acknowledgement_claimed: record.acknowledgement.is_claimed(),
+                    acknowledgement_claimed: record.publication.is_claimed(),
                 })
                 .collect(),
         }
@@ -1250,11 +1271,11 @@ impl ProgressRequestRegistry {
 
     fn check_admission_locked(
         &self,
-        state: &ProgressRegistryState,
+        state: &RegistryState,
         key: &RequestOperationKey,
         request_bytes: usize,
     ) -> Result<(), ProgressRequestAdmissionError> {
-        if let Some(reason) = state.closed {
+        if let Some(reason) = state.progress_closed {
             return Err(ProgressRequestAdmissionError::RegistryClosed { reason });
         }
         if let Some(reason) = state.closed_connections.get(&key.connection_id).copied() {
@@ -1263,29 +1284,34 @@ impl ProgressRequestRegistry {
                 reason,
             });
         }
-        if state.requests.contains_key(key) {
+        if state.operations.contains_key(key) {
             return Err(ProgressRequestAdmissionError::DuplicateRequest { key: key.clone() });
         }
-        if state.requests.len() >= self.inner.limits.max_requests {
+        let progress_count = state
+            .operations
+            .values()
+            .filter(|record| record.class == OperationClass::Progress)
+            .count();
+        if progress_count >= self.inner.progress_limits.max_requests {
             return Err(ProgressRequestAdmissionError::CountLimit {
-                current: state.requests.len(),
+                current: progress_count,
                 requested: 1,
-                limit: self.inner.limits.max_requests,
+                limit: self.inner.progress_limits.max_requests,
             });
         }
         let requested_total = state
-            .in_flight_request_bytes
+            .in_flight_progress_bytes
             .checked_add(request_bytes)
             .ok_or(ProgressRequestAdmissionError::ByteLimit {
-                current: state.in_flight_request_bytes,
+                current: state.in_flight_progress_bytes,
                 requested: request_bytes,
-                limit: self.inner.limits.max_request_bytes,
+                limit: self.inner.progress_limits.max_request_bytes,
             })?;
-        if requested_total > self.inner.limits.max_request_bytes {
+        if requested_total > self.inner.progress_limits.max_request_bytes {
             return Err(ProgressRequestAdmissionError::ByteLimit {
-                current: state.in_flight_request_bytes,
+                current: state.in_flight_progress_bytes,
                 requested: request_bytes,
-                limit: self.inner.limits.max_request_bytes,
+                limit: self.inner.progress_limits.max_request_bytes,
             });
         }
         Ok(())
@@ -1293,29 +1319,29 @@ impl ProgressRequestRegistry {
 
     fn release(&self, key: &RequestOperationKey, generation: u64, request_bytes: usize) {
         let mut state = self.lock_state();
-        let should_remove = state
-            .requests
-            .get(key)
-            .is_some_and(|record| record.generation == generation);
+        let should_remove = state.operations.get(key).is_some_and(|record| {
+            record.class == OperationClass::Progress && record.generation == generation
+        });
         if should_remove {
-            state.requests.remove(key);
-            state.in_flight_request_bytes = state
-                .in_flight_request_bytes
+            state.operations.remove(key);
+            state.in_flight_progress_bytes = state
+                .in_flight_progress_bytes
                 .checked_sub(request_bytes)
                 .unwrap_or_else(|| {
                     tracing::error!(
                         request_id = key.request_id,
                         connection_id = %key.connection_id,
                         request_bytes,
-                        retained_bytes = state.in_flight_request_bytes,
+                        retained_bytes = state.in_flight_progress_bytes,
                         "ERR_AGENTOS_PROGRESS_ADMISSION_ACCOUNTING: progress request byte reservation underflow"
                     );
                     0
                 });
+            self.inner.changed.notify_waiters();
         }
     }
 
-    fn lock_state(&self) -> MutexGuard<'_, ProgressRegistryState> {
+    fn lock_state(&self) -> MutexGuard<'_, RegistryState> {
         self.inner.state.lock().unwrap_or_else(|poisoned| {
             tracing::error!(
                 "ERR_AGENTOS_PROGRESS_REGISTRY_POISONED: recovering progress-request registry state"
@@ -1327,34 +1353,38 @@ impl ProgressRequestRegistry {
 
 #[derive(Debug)]
 pub(crate) struct ProgressRequest {
-    registry: ProgressRequestRegistry,
+    registry: ProgressOperationView,
     key: RequestOperationKey,
     generation: u64,
     request_bytes: usize,
+    #[cfg(test)]
     cancellation: OperationCancellation,
-    acknowledgement: ProgressAcknowledgementGuard,
+    publication: ResponsePublicationGuard,
     released: bool,
 }
 
 impl ProgressRequest {
+    #[cfg(test)]
     pub(crate) fn key(&self) -> &RequestOperationKey {
         &self.key
     }
 
+    #[cfg(test)]
     pub(crate) fn request_bytes(&self) -> usize {
         self.request_bytes
     }
 
+    #[cfg(test)]
     pub(crate) fn cancellation(&self) -> OperationCancellation {
         self.cancellation.clone()
     }
 
     pub(crate) fn try_acknowledge(&self) -> bool {
-        self.acknowledgement.try_claim()
+        self.publication.try_claim()
     }
 
     pub(crate) fn mark_acknowledgement_retained(&self) -> bool {
-        self.acknowledgement.mark_retained()
+        self.publication.mark_retained()
     }
 
     pub(crate) fn release(mut self) {
@@ -1373,7 +1403,7 @@ impl ProgressRequest {
 
 impl Drop for ProgressRequest {
     fn drop(&mut self) {
-        if !self.acknowledgement.is_claimed() {
+        if !self.publication.is_claimed() {
             tracing::error!(
                 request_id = self.key.request_id,
                 connection_id = %self.key.connection_id,
@@ -1384,6 +1414,7 @@ impl Drop for ProgressRequest {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ProgressCancelResult {
     Signalled,
@@ -1413,6 +1444,10 @@ pub(crate) enum ProgressRequestAdmissionError {
         connection_id: String,
         reason: OperationCancellationReason,
     },
+    OwnershipClosed {
+        scope: String,
+        reason: OperationCancellationReason,
+    },
 }
 
 impl ProgressRequestAdmissionError {
@@ -1421,9 +1456,9 @@ impl ProgressRequestAdmissionError {
             Self::CountLimit { .. } => "ERR_AGENTOS_PROGRESS_REQUEST_LIMIT",
             Self::ByteLimit { .. } => "ERR_AGENTOS_PROGRESS_REQUEST_BYTE_LIMIT",
             Self::DuplicateRequest { .. } => "ERR_AGENTOS_DUPLICATE_PROGRESS_REQUEST_ID",
-            Self::RegistryClosed { .. } | Self::ConnectionClosed { .. } => {
-                "ERR_AGENTOS_PROGRESS_ADMISSION_CLOSED"
-            }
+            Self::RegistryClosed { .. }
+            | Self::ConnectionClosed { .. }
+            | Self::OwnershipClosed { .. } => "ERR_AGENTOS_PROGRESS_ADMISSION_CLOSED",
         }
     }
 
@@ -1475,6 +1510,11 @@ impl fmt::Display for ProgressRequestAdmissionError {
                 "{}: progress request connection {connection_id} is closed ({reason:?})",
                 self.code()
             ),
+            Self::OwnershipClosed { scope, reason } => write!(
+                formatter,
+                "{}: progress request ownership {scope} is closed ({reason:?})",
+                self.code()
+            ),
         }
     }
 }
@@ -1497,25 +1537,19 @@ mod tests {
         RequestOperationMetadata::new(
             ownership(connection_id),
             "test",
-            RequestOrderingKey::Unordered,
+            VmConcurrencyClass::OwnershipOnly,
         )
     }
 
-    fn registry(max_requests: usize, max_request_bytes: usize) -> RequestOperationRegistry {
-        RequestOperationRegistry::new(RequestOperationLimits {
+    fn registry(max_requests: usize, max_request_bytes: usize) -> OperationTable {
+        OperationTable::new(RequestOperationLimits {
             max_requests,
             max_request_bytes,
         })
     }
 
     fn finish(operation: RequestOperation) {
-        operation
-            .transition(RequestOperationState::Running)
-            .expect("mark running");
-        operation
-            .transition(RequestOperationState::Completing)
-            .expect("mark completing");
-        assert!(operation.try_mark_terminal().expect("mark terminal"));
+        assert!(operation.try_mark_terminal());
         operation.release();
     }
 
@@ -1608,10 +1642,7 @@ mod tests {
             registry.cancel(operation.key(), OperationCancellationReason::Shutdown),
             CancelOperationResult::AlreadySignalled(OperationCancellationReason::Explicit)
         );
-        operation
-            .transition(RequestOperationState::Completing)
-            .expect("cancel completion");
-        assert!(operation.try_mark_terminal().expect("cancel terminal"));
+        assert!(operation.try_mark_terminal());
         operation.release();
     }
 
@@ -1656,8 +1687,8 @@ mod tests {
             RequestAdmissionError::RegistryClosed { .. }
         ));
 
-        assert!(a.try_mark_terminal().expect("connection close terminal"));
-        assert!(b.try_mark_terminal().expect("shutdown terminal"));
+        assert!(a.try_mark_terminal());
+        assert!(b.try_mark_terminal());
         a.release();
         b.release();
     }
@@ -1674,20 +1705,12 @@ mod tests {
                         session_id: String::from("session-a"),
                     }),
                     "gated",
-                    RequestOrderingKey::Unordered,
+                    VmConcurrencyClass::OwnershipOnly,
                 ),
                 17,
             )
             .expect("admit gated request");
-        operation
-            .transition(RequestOperationState::Running)
-            .expect("mark running");
-        operation
-            .transition(RequestOperationState::Completing)
-            .expect("begin completion before output publication");
-        assert!(operation
-            .try_mark_terminal()
-            .expect("claim normal terminal publication"));
+        assert!(operation.try_mark_terminal());
         let cancellation = operation.cancellation();
 
         let forced = registry.force_terminalize(OperationCancellationReason::Shutdown);
@@ -1717,13 +1740,7 @@ mod tests {
         let operation = registry
             .admit(RequestOperationKey::new("a", 10), metadata("a"), 11)
             .expect("admit retained request");
-        operation
-            .transition(RequestOperationState::Running)
-            .expect("mark running");
-        operation
-            .transition(RequestOperationState::Completing)
-            .expect("begin completion");
-        assert!(operation.try_mark_terminal().expect("claim terminal"));
+        assert!(operation.try_mark_terminal());
         assert!(operation.mark_terminal_retained());
 
         assert!(registry
@@ -1735,7 +1752,7 @@ mod tests {
 
     #[test]
     fn terminal_response_guard_is_exactly_once_across_racing_clones() {
-        let guard = TerminalResponseGuard::new();
+        let guard = ResponsePublicationGuard::new();
         let clones = (0..16).map(|_| guard.clone()).collect::<Vec<_>>();
         let winners = clones
             .into_iter()
@@ -1748,60 +1765,27 @@ mod tests {
     }
 
     #[test]
-    fn operation_preserves_metadata_and_state_transitions() {
+    fn operation_preserves_metadata_and_has_one_publication_claim() {
         let registry = registry(1, 100);
         let operation = registry
             .admit(
                 RequestOperationKey::new("a", 1),
                 RequestOperationMetadata::new(
-                    ownership("a"),
+                    OwnershipScope::vm("a", "session", "vm"),
                     "configure_vm",
-                    RequestOrderingKey::VmLifecycle {
-                        connection_id: String::from("a"),
-                        session_id: String::from("session"),
-                        vm_id: String::from("vm"),
-                    },
+                    VmConcurrencyClass::ExclusiveVmLifecycle,
                 ),
                 17,
             )
             .expect("admit operation");
         assert_eq!(operation.request_bytes(), 17);
         assert_eq!(operation.metadata().operation, "configure_vm");
-        operation
-            .transition(RequestOperationState::Running)
-            .expect("running");
-        operation
-            .transition(RequestOperationState::Completing)
-            .expect("completing");
-        assert!(operation.try_mark_terminal().expect("terminal"));
-        assert!(!operation.try_mark_terminal().expect("duplicate terminal"));
         assert_eq!(
-            registry.snapshot().operations[0].state,
-            RequestOperationState::Terminal
+            operation.metadata().vm_concurrency,
+            VmConcurrencyClass::ExclusiveVmLifecycle
         );
-        operation.release();
-    }
-
-    #[test]
-    fn invalid_terminal_transition_does_not_consume_the_terminal_claim() {
-        let registry = registry(1, 100);
-        let operation = registry
-            .admit(RequestOperationKey::new("a", 1), metadata("a"), 10)
-            .expect("admit operation");
-
-        let error = operation
-            .try_mark_terminal()
-            .expect_err("admitted work must not skip completion");
-        assert!(matches!(error, OperationTransitionError::Invalid { .. }));
-        assert!(!registry.snapshot().operations[0].terminal_claimed);
-
-        operation
-            .transition(RequestOperationState::Running)
-            .expect("running");
-        operation
-            .transition(RequestOperationState::Completing)
-            .expect("completing");
-        assert!(operation.try_mark_terminal().expect("terminal"));
+        assert!(operation.try_mark_terminal());
+        assert!(!operation.try_mark_terminal());
         operation.release();
     }
 
@@ -1811,13 +1795,7 @@ mod tests {
         let operation = registry
             .admit(RequestOperationKey::new("a", 1), metadata("a"), 10)
             .expect("admit operation");
-        operation
-            .transition(RequestOperationState::Running)
-            .expect("running");
-        operation
-            .transition(RequestOperationState::Completing)
-            .expect("completing");
-        assert!(operation.try_mark_terminal().expect("terminal"));
+        assert!(operation.try_mark_terminal());
 
         assert_eq!(
             registry.cancel(operation.key(), OperationCancellationReason::Shutdown),
@@ -1825,46 +1803,31 @@ mod tests {
         );
         assert_eq!(registry.close(OperationCancellationReason::Shutdown), 0);
         let snapshot = registry.snapshot();
-        assert_eq!(
-            snapshot.operations[0].state,
-            RequestOperationState::Terminal
-        );
         assert_eq!(snapshot.operations[0].cancellation_reason, None);
         operation.release();
     }
 
     #[test]
-    fn cancellation_during_completion_signals_without_regressing_state() {
+    fn cancellation_before_publication_is_visible_to_the_operation() {
         let registry = registry(1, 100);
         let operation = registry
             .admit(RequestOperationKey::new("a", 1), metadata("a"), 10)
             .expect("admit operation");
-        operation
-            .transition(RequestOperationState::Running)
-            .expect("running");
-        operation
-            .transition(RequestOperationState::Completing)
-            .expect("completing");
-
         assert_eq!(
             registry.cancel(operation.key(), OperationCancellationReason::Explicit),
             CancelOperationResult::Signalled
         );
         let snapshot = registry.snapshot();
         assert_eq!(
-            snapshot.operations[0].state,
-            RequestOperationState::Completing
-        );
-        assert_eq!(
             snapshot.operations[0].cancellation_reason,
             Some(OperationCancellationReason::Explicit)
         );
-        assert!(operation.try_mark_terminal().expect("terminal"));
+        assert!(operation.try_mark_terminal());
         operation.release();
     }
 
-    fn progress_registry(max_requests: usize, max_request_bytes: usize) -> ProgressRequestRegistry {
-        ProgressRequestRegistry::new(ProgressRequestLimits {
+    fn progress_registry(max_requests: usize, max_request_bytes: usize) -> ProgressOperationView {
+        ProgressOperationView::new(ProgressRequestLimits {
             max_requests,
             max_request_bytes,
         })
@@ -1877,8 +1840,8 @@ mod tests {
         protocol.max_in_flight_request_bytes = 1;
         protocol.max_progress_frames = 2;
         protocol.max_progress_bytes = 10;
-        let ordinary_registry = RequestOperationRegistry::from_protocol_config(&protocol);
-        let registry = ProgressRequestRegistry::from_protocol_config(&protocol);
+        let ordinary_registry = OperationTable::from_protocol_config(&protocol);
+        let registry = ordinary_registry.progress_requests();
         let first_key = RequestOperationKey::new("a", 1);
         registry
             .check_admission(&first_key, 5)
@@ -1910,6 +1873,137 @@ mod tests {
         assert!(second.try_acknowledge());
         first.release();
         second.release();
+    }
+
+    #[test]
+    fn request_identity_is_unique_across_ordinary_and_progress_classes() {
+        let ordinary = OperationTable::new_with_limits(
+            RequestOperationLimits {
+                max_requests: 2,
+                max_request_bytes: 16,
+            },
+            ProgressRequestLimits {
+                max_requests: 2,
+                max_request_bytes: 16,
+            },
+        );
+        let progress = ordinary.progress_requests();
+        let key = RequestOperationKey::new("a", 7);
+        let ordinary_request = ordinary
+            .admit(key.clone(), metadata("a"), 1)
+            .expect("ordinary request");
+        assert!(matches!(
+            progress.admit(key.clone(), 1),
+            Err(ProgressRequestAdmissionError::DuplicateRequest { .. })
+        ));
+        assert!(ordinary_request.try_mark_terminal());
+        ordinary_request.release();
+
+        let progress_request = progress
+            .admit(key.clone(), 1)
+            .expect("request id is reusable after release");
+        assert!(matches!(
+            ordinary.admit(key, metadata("a"), 1),
+            Err(RequestAdmissionError::DuplicateRequest { .. })
+        ));
+        assert!(progress_request.try_acknowledge());
+        progress_request.release();
+    }
+
+    #[tokio::test]
+    async fn vm_scope_close_cancels_both_classes_and_excludes_disposer() {
+        let ordinary = OperationTable::new_with_limits(
+            RequestOperationLimits {
+                max_requests: 4,
+                max_request_bytes: 64,
+            },
+            ProgressRequestLimits {
+                max_requests: 4,
+                max_request_bytes: 64,
+            },
+        );
+        let progress = ordinary.progress_requests();
+        let vm = OwnershipScope::vm("a", "session", "vm");
+        let disposer = ordinary
+            .admit(
+                RequestOperationKey::new("a", 1),
+                RequestOperationMetadata::new(
+                    vm.clone(),
+                    "dispose",
+                    VmConcurrencyClass::ExclusiveVmLifecycle,
+                ),
+                1,
+            )
+            .expect("dispose request");
+        let work = ordinary
+            .admit(
+                RequestOperationKey::new("a", 2),
+                RequestOperationMetadata::new(vm.clone(), "read", VmConcurrencyClass::SharedVm),
+                1,
+            )
+            .expect("ordinary VM work");
+        let progress_work = progress
+            .admit_owned(RequestOperationKey::new("a", 3), vm.clone(), 1)
+            .expect("progress VM work");
+        let work_cancel = work.cancellation();
+        let progress_cancel = progress_work.cancellation();
+
+        let drain = ordinary.close_scope(
+            vm.clone(),
+            OperationCancellationReason::Explicit,
+            Some(disposer.key()),
+        );
+        assert_eq!(drain.active_operations(), 2);
+        assert_eq!(
+            work_cancel.reason(),
+            Some(OperationCancellationReason::Explicit)
+        );
+        assert_eq!(
+            progress_cancel.reason(),
+            Some(OperationCancellationReason::Explicit)
+        );
+        assert_eq!(disposer.cancellation().reason(), None);
+        assert!(matches!(
+            ordinary.admit(
+                RequestOperationKey::new("a", 4),
+                RequestOperationMetadata::new(vm.clone(), "late", VmConcurrencyClass::SharedVm),
+                1,
+            ),
+            Err(RequestAdmissionError::OwnershipClosed { .. })
+        ));
+        let other_vm = ordinary
+            .admit(
+                RequestOperationKey::new("a", 5),
+                RequestOperationMetadata::new(
+                    OwnershipScope::vm("a", "session", "other"),
+                    "other VM",
+                    VmConcurrencyClass::SharedVm,
+                ),
+                1,
+            )
+            .expect("other VM remains independent");
+
+        assert!(work.try_mark_terminal());
+        work.release();
+        assert!(progress_work.try_acknowledge());
+        progress_work.release();
+        drain.wait_drained().await;
+        assert_eq!(drain.active_operations(), 0);
+
+        ordinary.reopen_scope(&vm);
+        let reopened = ordinary
+            .admit(
+                RequestOperationKey::new("a", 6),
+                RequestOperationMetadata::new(vm, "reopened", VmConcurrencyClass::SharedVm),
+                1,
+            )
+            .expect("new VM generation reopens exact scope");
+        assert!(reopened.try_mark_terminal());
+        reopened.release();
+        assert!(other_vm.try_mark_terminal());
+        other_vm.release();
+        assert!(disposer.try_mark_terminal());
+        disposer.release();
     }
 
     #[test]

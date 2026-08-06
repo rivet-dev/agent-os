@@ -4979,6 +4979,7 @@ fn format_unix_socket_resource(
 pub(crate) fn error_code(error: &SidecarError) -> &'static str {
     match error {
         SidecarError::ResourceLimit(_) => "ERR_AGENTOS_RESOURCE_LIMIT",
+        SidecarError::RequestAdmission { code, .. } => code,
         SidecarError::InvalidState(_) => "invalid_state",
         SidecarError::ProtocolVersionMismatch(_) => "protocol_version_mismatch",
         SidecarError::BridgeVersionMismatch(_) => "bridge_version_mismatch",

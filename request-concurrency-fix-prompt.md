@@ -114,7 +114,8 @@ a P0 progress test from passing.
       registration remains live so teardown can cancel and drain it; that
       registration is not an exclusive state lease and does not serialize
       ordinary operations.
-- [x] Same-entity conflicts have an explicit ordering key and bounded admission.
+- [x] Same-VM lifecycle conflicts use one bounded per-VM gate; ordinary work is
+      concurrent by default and ACP owns its route-level exclusion.
 - [x] Every admitted request has exactly one terminal response.
 - [x] Terminal responses preserve request ID and ownership and may complete out
       of order.
@@ -198,6 +199,7 @@ Add explicit runtime protocol configuration:
 
 - `runtime.protocol.maxInFlightRequests`
 - `runtime.protocol.maxInFlightRequestBytes`
+- `runtime.protocol.maxSessionsPerConnection`
 - `runtime.protocol.maxTerminalFrames`
 - `runtime.protocol.maxTerminalBytes`
 - `runtime.protocol.terminalFallbackBytes`
@@ -220,17 +222,17 @@ behind an application FIFO.
 
 ### Operation record
 
-Each admitted request has one logical tracked record split across the registry,
-its operation handle, and the task supervisor:
+Each admitted request has one logical tracked record in the shared operation
+table plus an RAII handle retained by the task supervisor:
 
 ```rust
 struct OperationRecord {
     generation: u64,
-    metadata: RequestOperationMetadata, // ownership + ordering
+    class: OperationClass, // Ordinary | Progress
+    metadata: RequestOperationMetadata, // ownership + VM concurrency
     request_bytes: usize,
-    state: RequestOperationState,
     cancellation: CancellationToken,
-    terminal: TerminalResponseGuard,
+    publication: ResponsePublicationGuard,
 }
 
 // RequestOperation carries the registry key/generation and admission
@@ -238,20 +240,11 @@ struct OperationRecord {
 // output reservation remain outside the registry record.
 ```
 
-Required state transitions:
-
-```text
-Admitted -> Running -> Completing -> Terminal
-                    -> Cancelling -> Completing -> Terminal
-Admitted/Running -> Failed -> Terminal
-Admitted/Running -> Shutdown -> Completing -> Terminal
-```
-
-The terminal guard atomically permits exactly one terminal response. A late
-completion after cancellation is recorded and discarded without producing a
-second response. Dropping an unfinished record is a hard logged invariant
-failure and must synthesize a typed terminal error when transport is still
-available.
+The table deliberately does not mirror task-execution states. Its publication
+guard atomically permits exactly one terminal response or progress
+acknowledgement. A late completion after cancellation is discarded without a
+second publication. Dropping an unfinished record is a hard logged invariant
+failure; bounded shutdown may take over an unretained publication right.
 
 Request IDs are unique within a connection, so the registry key is
 `(connection_id, request_id)`. A duplicate in-flight ID receives a typed
@@ -280,8 +273,8 @@ terminal response so disposal cannot remove state underneath an active task.
 
 - [x] Add in-flight request count and byte configuration with validation.
 - [x] Implement count/byte admission reservations.
-- [x] Implement the operation registry and duplicate-ID protection for ordinary
-      admitted work. Progress requests use the separate P0.3 registry.
+- [x] Implement one operation table and duplicate-ID protection across ordinary
+      and progress admitted work, with independent class budgets.
 - [x] Implement tracked task completion and terminal-response guard.
 - [x] Convert ingress request handling from inline await to register-and-start.
 - [x] Preserve request ID and ownership on out-of-order completion.
@@ -325,76 +318,42 @@ recreated the same serialization. Production `ExtensionContext` now owns an
 
 The target separates cloneable service handles from entity-owned mutable state.
 
-### Process and connection state
+### Membership, operation ownership, and VM state
 
-A small connection/session coordinator owns:
+One short-held metadata mutex owns the generation-bearing connection, session,
+and VM membership tree. Entity records are `Open` or `Closing`; creation,
+admission validation, and disposal linearize through this one lock. It never
+protects guest execution, filesystem/network I/O, adapter I/O, output writes,
+or an external wait.
 
-- connection authentication and version state,
-- session membership,
-- VM membership indexes,
-- request-operation ownership indexes,
-- disposal state.
+One bounded operation table is authoritative for every inbound request on a
+connection. Ordinary and progress requests share `(connection_id, request_id)`
+identity and one publication primitive, while retaining separate count and byte
+budgets. Disposal closes a textual ownership scope and scans this bounded table
+to cancel and drain matching work; there are no shadow connection/session/VM
+operation maps.
 
-Its commands must not perform guest execution, filesystem/network I/O, adapter
-I/O, output writes, or unbounded waits. It may mutate indexes and return
-cloneable entity handles.
+Each live VM has one independent lifecycle gate. Ordinary VM service calls take
+nonexclusive permits and run concurrently. Configure, dispose, layer topology
+changes, root snapshot/import/export, overlay creation, and package linking take
+an exclusive lifecycle permit. `Idle -> Pending` immediately rejects later
+ordinary admissions; the lifecycle becomes active only after earlier ordinary
+and bounded internal-settlement permits drain. Internal events may settle while
+pending, but remain durably deferred and cannot mutate the VM while lifecycle
+work is active.
 
-Connection/session disposal changes the entity state to `Closing` before
-signalling owned operations. New requests for a closing entity are rejected.
+Extension envelopes are opaque and take no generic core ordering key. ACP keeps
+its bounded per-route state machine, so a second prompt on one ACP route receives
+the existing typed `session_busy` response while prompts on different routes run
+concurrently. A long prompt holds neither the membership lock nor a VM gate;
+only its short VM service calls enter the gate. This is why same-VM `readFile`
+and `writeFile` continue while the adapter prompt waits.
 
-### VM state
-
-Each live VM has two complementary objects. Cloneable, thread-affine
-`VmHandle(Rc<RefCell<VmState>>)` values provide short `try_read` and
-`try_command` state sections. A `VmCoordinator` owns bounded operation and
-lifecycle admission. Different handles and coordinators make progress
-independently, and no state borrow crosses an external await.
-
-P0 ordering classes:
-
-```rust
-enum RequestOrderingKey {
-    Connection(String),
-    Session { connection_id: String, session_id: String },
-    VmLifecycle { connection_id: String, session_id: String, vm_id: String },
-    VmOperation { connection_id: String, session_id: String, vm_id: String },
-    Extension {
-        namespace: String,
-        connection_id: String,
-        key: Vec<u8>,
-        policy: ExtensionOrderingPolicy,
-    },
-    Unordered,
-}
-```
-
-Ordering semantics:
-
-- Authentication and connection/session membership changes use the relevant
-  connection/session coordinator.
-- VM create is ordered with session disposal and VM membership insertion.
-- Configure, dispose, layer topology changes, root snapshot/import/export, and
-  package linking use `VmLifecycle`.
-- Filesystem, kernel, execution, stdin, process inspection/control, and VM fetch
-  use `VmOperation`.
-- A VM lifecycle-exclusive command excludes VM operations for that VM.
-- Ordinary VM operations are admitted independently but enter the VM
-  coordinator only for their state critical sections.
-- Extension operations use an extension-provided opaque ordering key. Core does
-  not decode the extension payload. Core-exclusive keys reject an overlapping
-  operation with a typed bounded conflict; extensions may explicitly retain
-  conflict enforcement when their protocol requires a richer typed response.
-- ACP uses its durable session ID as an extension-managed ordering key. Its
-  bounded route guard returns the existing typed `session_busy` policy for a
-  second active prompt in the same ACP session; prompts in different ACP
-  sessions run concurrently.
-
-A request-level operation may issue multiple VM commands over its lifetime. It
-must not retain a mutable VM-state borrow or exclusive command guard between
-commands. It does retain its nonexclusive ownership registration until terminal
-completion. This lets teardown find the operation without preventing
-`readFile` from completing while an ACP prompt waits on adapter output in the
-same VM.
+The gate is explicit rather than an `RwLock`: lifecycle-pending work must be
+rejected instead of queued invisibly, internal settlement has a separate bound,
+and disposal needs cancellation generations and visible active counts. The
+gate's mutex protects only non-suspending counter transitions and is released
+before waiting.
 
 ### Event broker
 
@@ -433,11 +392,11 @@ channel and the process-event broker. Service calls return owned `'static`
 futures or immediate results, communicate with coordinators, and never expose
 internal maps or stdio/fd details.
 
-The generic `Extension` contract remains namespace-based and opaque. Its
-implemented hooks are `request_class() -> ExtensionRequestClass::{Ordinary,
-Progress}`, `request_ordering_key()`, and `request_ordering_policy()`.
-Core supplies reserved progress admission; ACP alone decodes its opaque payload
-and signals its keyed route state.
+The generic `Extension` contract remains namespace-based and opaque. Its only
+concurrency hook is
+`request_class() -> ExtensionRequestClass::{Ordinary, Progress}`. Core supplies
+reserved progress admission; ACP alone decodes its opaque payload and enforces
+its per-route state machine.
 
 Native-sidecar must not import or decode `agentos-protocol`.
 
@@ -460,7 +419,8 @@ progress blocker.
 - [x] Retain claimed internal event work durably when service admission is full;
       do not drop, duplicate, or hot-requeue it.
 - [x] Make extension request futures independently tracked and spawnable.
-- [x] Add extension-owned opaque ordering/progress classification.
+- [x] Add extension-owned progress classification while leaving route
+      exclusion inside ACP.
 - [x] Preserve all ownership validation at the coordinator boundary.
 - [x] Preserve explicit same-session ACP `session_busy` behavior.
 - [x] Prevent lifecycle operations from racing conflicting same-VM operations.
@@ -512,16 +472,14 @@ to an unbounded collection.
 ### Generic extension progress routing
 
 ACP cancellation and permission responses remain encoded as opaque extension
-requests. The extension classifies these frames through a generic hook. The
-router uses the returned namespace plus opaque target key to find or signal the
-active extension operation.
+requests. The extension classifies these frames through one generic hook. The
+router gives them reserved progress admission and invokes ACP without decoding
+the payload or owning its route key.
 
 The implemented generic hooks are:
 
 ```rust
 fn request_class(...) -> ExtensionRequestClass; // Ordinary | Progress
-fn request_ordering_key(...) -> Option<Vec<u8>>;
-fn request_ordering_policy(...) -> ExtensionOrderingPolicy;
 ```
 
 Core gives `Progress` independent reserved admission and invokes the opaque
@@ -642,13 +600,14 @@ Tests:
 - [x] ACP test: one adapter has at most one response-loop consumer while
       different routes can have concurrent consumers.
 
-Progress work uses its own reserved-lane-bounded, connection-scoped registry.
-Its handle is retained until broker publication, claims exactly one
-acknowledgement, and rejects a duplicate live request ID without affecting the
-original. Shutdown closes ordinary admission, signals tracked work, continues
-progress/control routing through the grace period, force-terminalizes any
-unfinished operation exactly once, aborts only after takeover, drains control
-output, and reports failed delivery.
+Progress work is a class-specific view over the one operation table. It keeps
+independent count/byte budgets but shares connection-scoped request identity and
+the publication primitive with ordinary work. WriteStdin, CloseStdin, and
+KillProcess use a separate bounded progress service channel so adapter
+cancellation cannot queue behind ordinary extension services. Shutdown closes
+ordinary admission, signals tracked work, continues progress/control routing
+through the grace period, force-terminalizes unfinished work exactly once,
+aborts only after takeover, drains control output, and reports failed delivery.
 
 ## P0.4 — Nonblocking output broker
 

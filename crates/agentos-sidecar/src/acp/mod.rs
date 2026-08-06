@@ -16,8 +16,8 @@ use agentos_native_sidecar::wire::{
     StreamChannel, WriteStdinRequest,
 };
 use agentos_native_sidecar::{
-    Extension, ExtensionContext, ExtensionFuture, ExtensionOrderingPolicy, ExtensionRequestClass,
-    ExtensionResponse, SidecarError,
+    Extension, ExtensionContext, ExtensionFuture, ExtensionRequestClass, ExtensionResponse,
+    SidecarError,
 };
 use agentos_protocol::generated::v1::*;
 use agentos_protocol::ACP_EXTENSION_NAMESPACE;
@@ -1351,22 +1351,6 @@ impl Extension for AcpExtension {
         ACP_EXTENSION_NAMESPACE
     }
 
-    fn request_ordering_key(&self, ownership: &OwnershipScope, payload: &[u8]) -> Option<Vec<u8>> {
-        let request = decode_request(payload).ok()?;
-        let session_id = durable_request_session_id(&request)?;
-        Some(durable_route_key(ownership, session_id).into_bytes())
-    }
-
-    fn request_ordering_policy(
-        &self,
-        _ownership: &OwnershipScope,
-        _payload: &[u8],
-    ) -> ExtensionOrderingPolicy {
-        // AcpRouteEntry performs the same bounded exclusion and must return
-        // ACP's established typed `session_busy` response.
-        ExtensionOrderingPolicy::ExtensionManaged
-    }
-
     fn handle_request<'a>(
         &'a self,
         ctx: ExtensionContext,
@@ -1501,57 +1485,6 @@ fn durable_route_key(ownership: &OwnershipScope, session_id: &str) -> String {
         key.push_str(component);
     }
     key
-}
-
-/// Return the public durable session identity targeted by a native ACP
-/// request. Global queries and legacy browser-only messages have no durable
-/// session conflict domain. Validation remains in the request handler; this
-/// ingress classification hook is deliberately total and side-effect free.
-fn durable_request_session_id(request: &AcpRequest) -> Option<&str> {
-    match request {
-        AcpRequest::AcpOpenSessionRequest(request) => {
-            Some(request.session_id.as_deref().unwrap_or("main"))
-        }
-        AcpRequest::AcpGetDurableSessionRequest(request) => {
-            Some(request.session_id.as_deref().unwrap_or("main"))
-        }
-        AcpRequest::AcpDeleteSessionRequest(request) => {
-            Some(request.session_id.as_deref().unwrap_or("main"))
-        }
-        AcpRequest::AcpUnloadSessionRequest(request) => {
-            Some(request.session_id.as_deref().unwrap_or("main"))
-        }
-        AcpRequest::AcpPromptRequest(request) => {
-            Some(request.session_id.as_deref().unwrap_or("main"))
-        }
-        AcpRequest::AcpCancelPromptRequest(request) => {
-            Some(request.session_id.as_deref().unwrap_or("main"))
-        }
-        AcpRequest::AcpRespondPermissionRequest(request) => Some(&request.session_id),
-        AcpRequest::AcpReadHistoryRequest(request) => {
-            Some(request.session_id.as_deref().unwrap_or("main"))
-        }
-        AcpRequest::AcpGetSessionConfigRequest(request) => {
-            Some(request.session_id.as_deref().unwrap_or("main"))
-        }
-        AcpRequest::AcpSetSessionConfigOptionRequest(request) => {
-            Some(request.session_id.as_deref().unwrap_or("main"))
-        }
-        AcpRequest::AcpGetSessionCapabilitiesRequest(request) => {
-            Some(request.session_id.as_deref().unwrap_or("main"))
-        }
-        AcpRequest::AcpGetSessionAgentInfoRequest(request) => {
-            Some(request.session_id.as_deref().unwrap_or("main"))
-        }
-        AcpRequest::AcpListDurableSessionsRequest(_)
-        | AcpRequest::AcpCreateSessionRequest(_)
-        | AcpRequest::AcpSessionRequest(_)
-        | AcpRequest::AcpGetSessionStateRequest(_)
-        | AcpRequest::AcpCloseSessionRequest(_)
-        | AcpRequest::AcpResumeSessionRequest(_)
-        | AcpRequest::AcpDeliverAgentOutputRequest(_)
-        | AcpRequest::AcpListAgentsRequest(_) => None,
-    }
 }
 
 fn session_store_error(error: agentos_native_sidecar::vm_sqlite::VmSqliteError) -> SidecarError {
@@ -1770,6 +1703,7 @@ fn error_response(error: SidecarError) -> AcpResponse {
 fn error_code(error: &SidecarError) -> String {
     let code = match error {
         SidecarError::ResourceLimit(_) => "resource_limit",
+        SidecarError::RequestAdmission { code, .. } => return (*code).to_owned(),
         SidecarError::InvalidState(message) => message
             .split_once(':')
             .map(|(prefix, _)| prefix)
@@ -1834,91 +1768,6 @@ mod tests {
         assert_eq!(
             extension.request_class(b"not an ACP request"),
             ExtensionRequestClass::Ordinary
-        );
-    }
-
-    #[test]
-    fn durable_acp_requests_expose_an_opaque_owned_session_ordering_key() {
-        use agentos_native_sidecar::wire::VmOwnership;
-
-        let extension = AcpExtension::new();
-        let ownership = OwnershipScope::VmOwnership(VmOwnership {
-            connection_id: String::from("conn-1"),
-            session_id: String::from("owner-session"),
-            vm_id: String::from("vm-1"),
-        });
-        let other_vm = OwnershipScope::VmOwnership(VmOwnership {
-            connection_id: String::from("conn-1"),
-            session_id: String::from("owner-session"),
-            vm_id: String::from("vm-2"),
-        });
-        let default_prompt = serde_bare::to_vec(&AcpRequest::AcpPromptRequest(AcpPromptRequest {
-            session_id: None,
-            idempotency_key: None,
-            content: String::from("[]"),
-        }))
-        .expect("encode default prompt");
-        let explicit_main_cancel = serde_bare::to_vec(&AcpRequest::AcpCancelPromptRequest(
-            AcpCancelPromptRequest {
-                session_id: Some(String::from("main")),
-            },
-        ))
-        .expect("encode explicit main cancellation");
-        let other_prompt = serde_bare::to_vec(&AcpRequest::AcpPromptRequest(AcpPromptRequest {
-            session_id: Some(String::from("other")),
-            idempotency_key: None,
-            content: String::from("[]"),
-        }))
-        .expect("encode other prompt");
-
-        let main_key = durable_route_key(&ownership, "main").into_bytes();
-        assert_eq!(
-            extension.request_ordering_key(&ownership, &default_prompt),
-            Some(main_key.clone()),
-            "omitted durable session IDs must order as main"
-        );
-        assert_eq!(
-            extension.request_ordering_key(&ownership, &explicit_main_cancel),
-            Some(main_key),
-            "progress and ordinary messages for one durable session must expose the same target key"
-        );
-        assert_ne!(
-            extension.request_ordering_key(&ownership, &default_prompt),
-            extension.request_ordering_key(&ownership, &other_prompt),
-            "different durable ACP sessions must remain independent"
-        );
-        assert_ne!(
-            extension.request_ordering_key(&ownership, &default_prompt),
-            extension.request_ordering_key(&other_vm, &default_prompt),
-            "identically named durable sessions in different VMs must remain independent"
-        );
-        assert_eq!(
-            extension.request_ordering_policy(&ownership, &default_prompt),
-            ExtensionOrderingPolicy::ExtensionManaged,
-            "ACP must retain its protocol-specific session_busy rejection"
-        );
-    }
-
-    #[test]
-    fn global_and_invalid_acp_requests_have_no_session_ordering_key() {
-        use agentos_native_sidecar::wire::ConnectionOwnership;
-
-        let extension = AcpExtension::new();
-        let ownership = OwnershipScope::ConnectionOwnership(ConnectionOwnership {
-            connection_id: String::from("conn-1"),
-        });
-        let list = serde_bare::to_vec(&AcpRequest::AcpListDurableSessionsRequest(
-            AcpListDurableSessionsRequest {
-                cursor: None,
-                limit: None,
-            },
-        ))
-        .expect("encode list request");
-
-        assert_eq!(extension.request_ordering_key(&ownership, &list), None);
-        assert_eq!(
-            extension.request_ordering_key(&ownership, b"not an ACP request"),
-            None
         );
     }
 
@@ -3057,6 +2906,16 @@ mod tests {
                 }
             )),
             "sqlite_result_limit"
+        );
+        assert_eq!(
+            error_code(&SidecarError::RequestAdmission {
+                code: "ERR_AGENTOS_VM_LIFECYCLE_CONFLICT",
+                message: String::from("VM lifecycle work is pending"),
+                configuration_path: None,
+                retryable: true,
+                errno: "EBUSY",
+            }),
+            "ERR_AGENTOS_VM_LIFECYCLE_CONFLICT"
         );
     }
 

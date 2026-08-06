@@ -4,12 +4,13 @@ use crate::extension_services::{
     CompletedExtensionServiceCommand, ExtensionServiceCommand, OwnedProcessEventService,
     PreparedExtensionServiceCommand, RoutedExtensionServices, VmEventAdmissionResult,
 };
-use crate::ownership_coordinator::{CoordinatorOperationPermit, OwnershipCoordinator, VmDisposal};
+use crate::ownership_coordinator::{
+    CoordinatorOperationPermit, OwnershipCoordinator, OwnershipCoordinatorError, VmDisposal,
+};
 use crate::request_operations::{
-    ForcedRequestOutcome, OperationCancellationReason, ProgressRequest,
-    ProgressRequestAdmissionError, ProgressRequestRegistry, RequestAdmissionError,
-    RequestOperation, RequestOperationKey, RequestOperationMetadata, RequestOperationRegistry,
-    RequestOperationState, RequestOrderingKey,
+    ForcedRequestOutcome, OperationCancellationReason, OperationTable, ProgressOperationView,
+    ProgressRequest, ProgressRequestAdmissionError, RequestAdmissionError, RequestOperation,
+    RequestOperationKey, RequestOperationMetadata, VmConcurrencyClass,
 };
 use crate::service::CompletedExtensionRequest;
 use crate::service::{CompletedRequest, PreparedMembershipCommit, PreparedRequest};
@@ -449,6 +450,7 @@ struct ProtocolOutputQueueState {
     rejection: VecDeque<EncodedProtocolFrame>,
     terminal: VecDeque<EncodedProtocolFrame>,
     observability: VecDeque<EncodedProtocolFrame>,
+    next_control_class: u8,
     open: bool,
     terminal_error: Option<String>,
 }
@@ -463,11 +465,21 @@ impl ProtocolOutputQueueState {
     }
 
     fn pop_control(&mut self) -> Option<EncodedProtocolFrame> {
-        self.progress
-            .pop_front()
-            .or_else(|| self.rejection.pop_front())
-            .or_else(|| self.terminal.pop_front())
-            .or_else(|| self.observability.pop_front())
+        for offset in 0..4 {
+            let class = (self.next_control_class + offset) % 4;
+            let frame = match class {
+                0 => self.progress.pop_front(),
+                1 => self.rejection.pop_front(),
+                2 => self.terminal.pop_front(),
+                3 => self.observability.pop_front(),
+                _ => unreachable!("control class is reduced modulo four"),
+            };
+            if frame.is_some() {
+                self.next_control_class = (class + 1) % 4;
+                return frame;
+            }
+        }
+        None
     }
 }
 
@@ -492,6 +504,7 @@ impl ProtocolOutputQueue {
                 rejection: VecDeque::new(),
                 terminal: VecDeque::new(),
                 observability: VecDeque::new(),
+                next_control_class: 0,
                 open: true,
                 terminal_error: None,
             }),
@@ -1551,22 +1564,27 @@ async fn run_async(
     // separate from the runtime producer edge makes the protocol coordinator
     // the sole consumer that can drain execution-engine queues.
     let routed_process_event_notify = Arc::new(Notify::new());
-    let request_operations = RequestOperationRegistry::from_protocol_config(&protocol);
-    let progress_requests = ProgressRequestRegistry::from_protocol_config(&protocol);
+    let request_operations = OperationTable::from_protocol_config(&protocol);
+    let progress_requests = request_operations.progress_requests();
     let extension_service_capacity = protocol
         .max_in_flight_requests
         .saturating_add(protocol.max_control_frames)
         .max(1);
     let (extension_service_tx, extension_service_rx) =
         channel::<ExtensionServiceCommand>(extension_service_capacity);
+    let progress_service_capacity = protocol.max_progress_frames.max(1);
+    let (progress_service_tx, progress_service_rx) =
+        channel::<ExtensionServiceCommand>(progress_service_capacity);
     let (extension_service_completion_tx, extension_service_completion_rx) =
         channel::<CompletedExtensionServiceCommand>(extension_service_capacity);
-    let extension_services: Arc<dyn ExtensionServices> =
-        Arc::new(RoutedExtensionServices::new_with_process_event_broker(
+    let extension_services: Arc<dyn ExtensionServices> = Arc::new(
+        RoutedExtensionServices::new_with_process_event_broker_and_progress(
             extension_service_tx,
+            progress_service_tx,
             Arc::clone(&routed_process_event_notify),
             sidecar.process_event_broker(),
-        ));
+        ),
+    );
     sidecar.set_extension_services(Arc::clone(&extension_services));
     let (extension_completion_tx, extension_completion_rx) =
         channel::<DetachedExtensionCompletion>(extension_service_capacity);
@@ -1751,6 +1769,7 @@ async fn run_async(
         stdin_control_rx,
         shutdown_rx,
         extension_service_rx,
+        progress_service_rx,
         extension_service_completion_tx,
         extension_service_completion_rx,
         extension_completion_tx,
@@ -1777,14 +1796,15 @@ struct ProtocolEngine {
     sidecar: NativeSidecar<LocalBridge>,
     extension_services: Arc<dyn ExtensionServices>,
     ownership_coordinator: OwnershipCoordinator,
-    request_operations: RequestOperationRegistry,
-    progress_requests: ProgressRequestRegistry,
+    request_operations: OperationTable,
+    progress_requests: ProgressOperationView,
     callback_transport: Arc<FrameSidecarRequestTransport>,
     frame_writer: ProtocolFrameWriter,
     stdin_rx: Receiver<Result<Option<AccountedProtocolFrame>, String>>,
     stdin_control_rx: Receiver<AccountedProtocolFrame>,
     shutdown_rx: Receiver<wire::ControlFrame>,
     extension_service_rx: Receiver<ExtensionServiceCommand>,
+    progress_service_rx: Receiver<ExtensionServiceCommand>,
     extension_service_completion_tx: Sender<CompletedExtensionServiceCommand>,
     extension_service_completion_rx: Receiver<CompletedExtensionServiceCommand>,
     extension_completion_tx: Sender<DetachedExtensionCompletion>,
@@ -1813,6 +1833,7 @@ async fn run_protocol_engine(engine: ProtocolEngine) -> Result<(), Box<dyn Error
         mut stdin_control_rx,
         mut shutdown_rx,
         mut extension_service_rx,
+        mut progress_service_rx,
         extension_service_completion_tx,
         mut extension_service_completion_rx,
         extension_completion_tx,
@@ -1840,6 +1861,7 @@ async fn run_protocol_engine(engine: ProtocolEngine) -> Result<(), Box<dyn Error
         .collect::<BTreeSet<_>>();
     let mut active_connections = sidecar.connections.keys().cloned().collect::<BTreeSet<_>>();
     let mut extension_service_tasks = JoinSet::<()>::new();
+    let mut progress_service_tasks = JoinSet::<()>::new();
     let mut extension_tasks = JoinSet::<()>::new();
     let mut request_tasks = JoinSet::<()>::new();
     let mut output_tasks = JoinSet::<Result<(), String>>::new();
@@ -1851,6 +1873,7 @@ async fn run_protocol_engine(engine: ProtocolEngine) -> Result<(), Box<dyn Error
         .max_in_flight_requests
         .saturating_add(protocol.max_control_frames)
         .max(1);
+    let progress_service_capacity = protocol.max_progress_frames.max(1);
     let owned_process_event_capacity = extension_service_capacity
         .min(protocol.max_process_events)
         .max(1);
@@ -1924,6 +1947,7 @@ async fn run_protocol_engine(engine: ProtocolEngine) -> Result<(), Box<dyn Error
         // admission behind already-completed tasks.
         if let Err(error) = reap_protocol_tasks_nowait(
             &mut extension_service_tasks,
+            &mut progress_service_tasks,
             &mut extension_tasks,
             &mut request_tasks,
             &mut output_tasks,
@@ -1980,6 +2004,7 @@ async fn run_protocol_engine(engine: ProtocolEngine) -> Result<(), Box<dyn Error
             && request_operations.snapshot().in_flight_requests == 0
             && progress_requests.snapshot().in_flight_requests == 0
             && extension_service_tasks.is_empty()
+            && progress_service_tasks.is_empty()
             && extension_service_completion_rx.is_empty()
             && extension_tasks.is_empty()
             && extension_completion_rx.is_empty()
@@ -1996,6 +2021,7 @@ async fn run_protocol_engine(engine: ProtocolEngine) -> Result<(), Box<dyn Error
         if drain_state.is_none()
             && stdin_closed
             && extension_service_tasks.is_empty()
+            && progress_service_tasks.is_empty()
             && extension_service_completion_rx.is_empty()
             && extension_tasks.is_empty()
             && extension_completion_rx.is_empty()
@@ -2052,6 +2078,40 @@ async fn run_protocol_engine(engine: ProtocolEngine) -> Result<(), Box<dyn Error
                         );
                     }
                 }
+            }
+            // The select is biased so progress service admission must precede
+            // ordinary service work. Separate capacity alone would not help if
+            // a continuously-ready ordinary queue could win every router turn.
+            maybe_progress_service = progress_service_rx.recv(), if progress_service_tasks.len() < progress_service_capacity => {
+                let Some(command) = maybe_progress_service else {
+                    begin_protocol_transport_failure(
+                        String::from("progress extension service command channel closed while router was active"),
+                        &mut drain_state,
+                        shutdown_grace,
+                        &request_operations,
+                        &progress_requests,
+                        &callback_transport,
+                        &frame_writer,
+                        false,
+                        &mut stdin_closed,
+                        &mut control_ingress_closed,
+                        &mut shutdown_ingress_closed,
+                        &mut stdin_rx,
+                        &mut stdin_control_rx,
+                        &mut shutdown_rx,
+                    );
+                    continue 'protocol;
+                };
+                let prepared = prepare_extension_service_command(
+                    &mut sidecar,
+                    &ownership_coordinator,
+                    command,
+                );
+                schedule_extension_service_command(
+                    prepared,
+                    &extension_service_completion_tx,
+                    &mut progress_service_tasks,
+                );
             }
             maybe_service = extension_service_rx.recv(), if extension_service_tasks.len() < extension_service_capacity => {
                 let Some(command) = maybe_service else {
@@ -2566,6 +2626,28 @@ async fn run_protocol_engine(engine: ProtocolEngine) -> Result<(), Box<dyn Error
                     );
                 }
             }
+            maybe_task = progress_service_tasks.join_next(), if !progress_service_tasks.is_empty() => {
+                if let Some(Err(error)) = maybe_task {
+                    begin_protocol_transport_failure(
+                        format!(
+                        "ERR_AGENTOS_PROGRESS_SERVICE_SUPERVISOR_TASK: completion monitor failed: {error}"
+                        ),
+                        &mut drain_state,
+                        shutdown_grace,
+                        &request_operations,
+                        &progress_requests,
+                        &callback_transport,
+                        &frame_writer,
+                        false,
+                        &mut stdin_closed,
+                        &mut control_ingress_closed,
+                        &mut shutdown_ingress_closed,
+                        &mut stdin_rx,
+                        &mut stdin_control_rx,
+                        &mut shutdown_rx,
+                    );
+                }
+            }
             maybe_task = extension_tasks.join_next(), if !extension_tasks.is_empty() => {
                 if let Some(Err(error)) = maybe_task {
                     begin_protocol_transport_failure(
@@ -2728,6 +2810,7 @@ async fn run_protocol_engine(engine: ProtocolEngine) -> Result<(), Box<dyn Error
         &callback_transport,
         &frame_writer,
         &mut extension_service_tasks,
+        &mut progress_service_tasks,
         &mut extension_service_completion_rx,
         &mut extension_tasks,
         &mut extension_completion_rx,
@@ -2761,8 +2844,8 @@ fn begin_protocol_drain(
     reason: OperationCancellationReason,
     grace: Duration,
     terminal_error: Option<String>,
-    operations: &RequestOperationRegistry,
-    progress_requests: &ProgressRequestRegistry,
+    operations: &OperationTable,
+    progress_requests: &ProgressOperationView,
     close_progress_admission: bool,
 ) -> bool {
     if let Some(state) = drain_state {
@@ -2801,8 +2884,8 @@ fn begin_protocol_transport_failure(
     message: String,
     drain_state: &mut Option<ProtocolDrainState>,
     grace: Duration,
-    operations: &RequestOperationRegistry,
-    progress_requests: &ProgressRequestRegistry,
+    operations: &OperationTable,
+    progress_requests: &ProgressOperationView,
     callback_transport: &FrameSidecarRequestTransport,
     writer: &ProtocolFrameWriter,
     output_failed: bool,
@@ -2846,11 +2929,12 @@ async fn finalize_protocol_drain(
     reason: OperationCancellationReason,
     output_grace: Duration,
     terminal_fallback_bytes: usize,
-    operations: &RequestOperationRegistry,
-    progress_requests: &ProgressRequestRegistry,
+    operations: &OperationTable,
+    progress_requests: &ProgressOperationView,
     callback_transport: &FrameSidecarRequestTransport,
     writer: &ProtocolFrameWriter,
     extension_service_tasks: &mut JoinSet<()>,
+    progress_service_tasks: &mut JoinSet<()>,
     extension_service_completion_rx: &mut Receiver<CompletedExtensionServiceCommand>,
     extension_tasks: &mut JoinSet<()>,
     extension_completion_rx: &mut Receiver<DetachedExtensionCompletion>,
@@ -2869,6 +2953,8 @@ async fn finalize_protocol_drain(
 
     extension_service_tasks.abort_all();
     while extension_service_tasks.join_next().await.is_some() {}
+    progress_service_tasks.abort_all();
+    while progress_service_tasks.join_next().await.is_some() {}
     while let Ok(completion) = extension_service_completion_rx.try_recv() {
         drop(completion);
     }
@@ -3056,8 +3142,8 @@ fn route_protocol_frame(
     accounted_frame: AccountedProtocolFrame,
     sidecar: &mut NativeSidecar<LocalBridge>,
     services: &Arc<dyn ExtensionServices>,
-    operations: &RequestOperationRegistry,
-    progress_requests: &ProgressRequestRegistry,
+    operations: &OperationTable,
+    progress_requests: &ProgressOperationView,
     ownership_coordinator: &OwnershipCoordinator,
     completion_tx: &Sender<DetachedExtensionCompletion>,
     request_completion_tx: &Sender<DetachedRequestCompletion>,
@@ -3087,15 +3173,23 @@ fn route_protocol_frame(
                     ownership_connection_id(&request.ownership),
                     request.request_id,
                 );
-                if let Err(error) = progress_requests.check_admission(&key, request_bytes) {
-                    publish_progress_admission_rejection(write_tx, request, &error)?;
-                    return Ok(());
-                }
+                let progress_request = match progress_requests.admit_owned(
+                    key,
+                    request.ownership.clone(),
+                    request_bytes,
+                ) {
+                    Ok(progress_request) => progress_request,
+                    Err(error) => {
+                        publish_progress_admission_rejection(write_tx, request, &error)?;
+                        return Ok(());
+                    }
+                };
                 let progress_fallback_bytes =
                     terminal_fallback_bytes.min(write_tx.progress_budget.config.max_bytes);
                 let reservation = match write_tx.try_reserve_progress(progress_fallback_bytes) {
                     Ok(reservation) => reservation,
                     Err(error) => {
+                        drop(progress_request);
                         publish_request_rejection(
                             write_tx,
                             request,
@@ -3108,29 +3202,26 @@ fn route_protocol_frame(
                         return Ok(());
                     }
                 };
-                match progress_requests.admit_owned(key, request.ownership.clone(), request_bytes) {
-                    Ok(progress_request) => (None, Some(progress_request), reservation),
-                    Err(error) => {
-                        drop(reservation);
-                        publish_progress_admission_rejection(write_tx, request, &error)?;
-                        return Ok(());
-                    }
-                }
+                (None, Some(progress_request), reservation)
             } else {
                 let metadata = request_operation_metadata(&request, &sidecar.extensions);
                 let key = RequestOperationKey::new(
                     ownership_connection_id(&request.ownership),
                     request.request_id,
                 );
-                if let Err(error) = operations.check_admission(&key, &metadata, request_bytes) {
-                    publish_request_admission_rejection(write_tx, request, &error)?;
-                    return Ok(());
-                }
+                let operation = match operations.admit(key, metadata, request_bytes) {
+                    Ok(operation) => operation,
+                    Err(error) => {
+                        publish_request_admission_rejection(write_tx, request, &error)?;
+                        return Ok(());
+                    }
+                };
                 let terminal_reservation = match write_tx
                     .try_reserve_terminal(terminal_fallback_bytes)
                 {
                     Ok(reservation) => reservation,
                     Err(error) => {
+                        drop(operation);
                         publish_request_rejection(
                             write_tx,
                             request,
@@ -3143,19 +3234,8 @@ fn route_protocol_frame(
                         return Ok(());
                     }
                 };
-                match operations.admit(key, metadata, request_bytes) {
-                    Ok(operation) => (Some(operation), None, terminal_reservation),
-                    Err(error) => {
-                        drop(terminal_reservation);
-                        publish_request_admission_rejection(write_tx, request, &error)?;
-                        return Ok(());
-                    }
-                }
+                (Some(operation), None, terminal_reservation)
             };
-
-            if let Some(operation) = &operation {
-                operation.transition(RequestOperationState::Running)?;
-            }
 
             let prepared = match sidecar
                 .prepare_extension_request_wire(request.clone(), Arc::clone(services))
@@ -3201,7 +3281,7 @@ fn route_protocol_frame(
                                 progress_request,
                                 coordinator_permit: None,
                                 output_reservation,
-                                result: Err(SidecarError::InvalidState(error.to_string())),
+                                result: Err(coordinator_admission_error(error)),
                             };
                             if completion_tx.send(completion).await.is_err() {
                                 tracing::error!(
@@ -3326,14 +3406,17 @@ fn route_protocol_frame(
                             return Ok(());
                         }
                     };
-                    let disposal = match ownership_coordinator
-                        .begin_vm_disposal(&request.ownership, cancellation_reason)
-                    {
+                    let disposal = match ownership_coordinator.begin_vm_disposal_with_operations(
+                        &request.ownership,
+                        cancellation_reason,
+                        operations,
+                        operation.key(),
+                    ) {
                         Ok(disposal) => disposal,
                         Err(error) => {
                             let dispatch = sidecar.reject_wire_request_error(
                                 request.clone(),
-                                &SidecarError::InvalidState(error.to_string()),
+                                &coordinator_admission_error(error),
                             )?;
                             schedule_dispatch_output(
                                 dispatch,
@@ -3449,6 +3532,7 @@ fn route_protocol_frame(
 
 fn reap_protocol_tasks_nowait(
     extension_service_tasks: &mut JoinSet<()>,
+    progress_service_tasks: &mut JoinSet<()>,
     extension_tasks: &mut JoinSet<()>,
     request_tasks: &mut JoinSet<()>,
     output_tasks: &mut JoinSet<Result<(), String>>,
@@ -3458,6 +3542,10 @@ fn reap_protocol_tasks_nowait(
     reap_unit_tasks_nowait(
         extension_service_tasks,
         "ERR_AGENTOS_EXTENSION_SERVICE_SUPERVISOR_TASK",
+    )?;
+    reap_unit_tasks_nowait(
+        progress_service_tasks,
+        "ERR_AGENTOS_PROGRESS_SERVICE_SUPERVISOR_TASK",
     )?;
     reap_unit_tasks_nowait(
         extension_tasks,
@@ -3541,8 +3629,8 @@ fn schedule_prepared_request(
                     operation,
                     coordinator_permit: None,
                     output_reservation,
-                    result: DetachedRequestResult::Generic(Err(SidecarError::InvalidState(
-                        error.to_string(),
+                    result: DetachedRequestResult::Generic(Err(coordinator_admission_error(
+                        error,
                     ))),
                 };
                 if request_completion_tx.send(completion).await.is_err() {
@@ -3620,9 +3708,7 @@ fn schedule_prepared_create_vm(
                     operation,
                     coordinator_permit: None,
                     output_reservation,
-                    result: DetachedRequestResult::Create(Err(SidecarError::InvalidState(
-                        error.to_string(),
-                    ))),
+                    result: DetachedRequestResult::Create(Err(coordinator_admission_error(error))),
                 };
                 if request_completion_tx.send(completion).await.is_err() {
                     tracing::error!(
@@ -3904,7 +3990,12 @@ fn finish_request(
         }
     };
     if update_membership {
-        update_ownership_membership(ownership_coordinator, &request, &dispatch.response.payload)?;
+        update_ownership_membership(
+            ownership_coordinator,
+            &operation,
+            &request,
+            &dispatch.response.payload,
+        )?;
     }
     drop(coordinator_permit);
     schedule_dispatch_output(
@@ -3928,7 +4019,7 @@ fn schedule_dispatch_output(
     operation: Option<RequestOperation>,
     progress_request: Option<ProgressRequest>,
     output_reservation: ProtocolReservation,
-    failed: bool,
+    _failed: bool,
     write_tx: &ProtocolFrameWriter,
     output_tasks: &mut JoinSet<Result<(), String>>,
     active_sessions: &mut BTreeSet<SessionScope>,
@@ -3964,17 +4055,7 @@ fn schedule_dispatch_output(
             let operation = operation.as_ref().ok_or_else(|| {
                 String::from("ordinary request completion lost its operation reservation")
             })?;
-            operation
-                .transition(if failed {
-                    RequestOperationState::Failed
-                } else {
-                    RequestOperationState::Completing
-                })
-                .map_err(|error| error.to_string())?;
-            if !operation
-                .try_mark_terminal()
-                .map_err(|error| error.to_string())?
-            {
+            if !operation.try_mark_terminal() {
                 return Err(String::from(
                     "ERR_AGENTOS_DUPLICATE_TERMINAL_RESPONSE: request terminal response was already claimed",
                 ));
@@ -4057,9 +4138,11 @@ fn rearm_event_ready(sender: &Sender<()>) -> Result<(), io::Error> {
 
 fn request_operation_metadata(
     request: &RequestFrame,
-    extensions: &BTreeMap<String, Arc<dyn Extension>>,
+    _extensions: &BTreeMap<String, Arc<dyn Extension>>,
 ) -> RequestOperationMetadata {
-    let connection_id = ownership_connection_id(&request.ownership).to_owned();
+    // Lifecycle requests mutate or require a stable view of VM-wide state, so
+    // they use the exclusive gate. Every other core VM request is shared by
+    // default; this is deliberately not a per-request ordering matrix.
     let vm_lifecycle = matches!(
         &request.payload,
         RequestPayload::DisposeVmRequest(_)
@@ -4073,47 +4156,25 @@ fn request_operation_metadata(
             | RequestPayload::SnapshotRootFilesystemRequest(_)
             | RequestPayload::LinkPackageRequest(_)
     );
-    let ordering_key = match &request.payload {
-        RequestPayload::ExtEnvelope(envelope) => extensions
-            .get(&envelope.namespace)
-            .and_then(|extension| {
-                extension.request_ordering_key(&request.ownership, &envelope.payload)
-            })
-            .map(|key| RequestOrderingKey::Extension {
-                namespace: envelope.namespace.clone(),
-                connection_id: connection_id.clone(),
-                key,
-                policy: extensions
-                    .get(&envelope.namespace)
-                    .expect("extension key came from registered extension")
-                    .request_ordering_policy(&request.ownership, &envelope.payload),
-            })
-            .unwrap_or(RequestOrderingKey::Unordered),
+    let vm_concurrency = match &request.payload {
+        // Extension payloads are opaque to the core. ACP and other extensions
+        // own any protocol-specific conflict state in their route handlers.
+        RequestPayload::ExtEnvelope(_) => VmConcurrencyClass::OwnershipOnly,
         _ => match &request.ownership {
-            OwnershipScope::ConnectionOwnership(_) => {
-                RequestOrderingKey::Connection(connection_id.clone())
+            OwnershipScope::ConnectionOwnership(_) | OwnershipScope::SessionOwnership(_) => {
+                VmConcurrencyClass::OwnershipOnly
             }
-            OwnershipScope::SessionOwnership(scope) => RequestOrderingKey::Session {
-                connection_id: connection_id.clone(),
-                session_id: scope.session_id.clone(),
-            },
-            OwnershipScope::VmOwnership(scope) if vm_lifecycle => RequestOrderingKey::VmLifecycle {
-                connection_id: connection_id.clone(),
-                session_id: scope.session_id.clone(),
-                vm_id: scope.vm_id.clone(),
-            },
-            OwnershipScope::VmOwnership(scope) => RequestOrderingKey::VmOperation {
-                connection_id: connection_id.clone(),
-                session_id: scope.session_id.clone(),
-                vm_id: scope.vm_id.clone(),
-            },
+            OwnershipScope::VmOwnership(_) if vm_lifecycle => {
+                VmConcurrencyClass::ExclusiveVmLifecycle
+            }
+            OwnershipScope::VmOwnership(_) => VmConcurrencyClass::SharedVm,
         },
     };
     let operation = match &request.payload {
         RequestPayload::ExtEnvelope(envelope) => format!("extension:{}", envelope.namespace),
         _ => String::from("sidecar_request"),
     };
-    RequestOperationMetadata::new(request.ownership.clone(), operation, ordering_key)
+    RequestOperationMetadata::new(request.ownership.clone(), operation, vm_concurrency)
 }
 
 fn ownership_connection_id(ownership: &OwnershipScope) -> &str {
@@ -4121,6 +4182,16 @@ fn ownership_connection_id(ownership: &OwnershipScope) -> &str {
         OwnershipScope::ConnectionOwnership(scope) => &scope.connection_id,
         OwnershipScope::SessionOwnership(scope) => &scope.connection_id,
         OwnershipScope::VmOwnership(scope) => &scope.connection_id,
+    }
+}
+
+fn coordinator_admission_error(error: OwnershipCoordinatorError) -> SidecarError {
+    SidecarError::RequestAdmission {
+        code: error.code(),
+        message: error.to_string(),
+        configuration_path: error.configuration_path(),
+        retryable: error.retryable(),
+        errno: error.errno(),
     }
 }
 
@@ -4167,7 +4238,8 @@ fn publish_request_admission_rejection(
                 Some(String::from("EEXIST")),
             ),
             RequestAdmissionError::RegistryClosed { .. }
-            | RequestAdmissionError::ConnectionClosed { .. } => (
+            | RequestAdmissionError::ConnectionClosed { .. }
+            | RequestAdmissionError::OwnershipClosed { .. } => (
                 None,
                 None,
                 None,
@@ -4253,7 +4325,8 @@ fn publish_progress_admission_rejection(
                 Some(String::from("EEXIST")),
             ),
             ProgressRequestAdmissionError::RegistryClosed { .. }
-            | ProgressRequestAdmissionError::ConnectionClosed { .. } => (
+            | ProgressRequestAdmissionError::ConnectionClosed { .. }
+            | ProgressRequestAdmissionError::OwnershipClosed { .. } => (
                 None,
                 None,
                 None,
@@ -4377,24 +4450,39 @@ async fn cleanup_connections(
 
 fn update_ownership_membership(
     coordinator: &OwnershipCoordinator,
+    operation: &RequestOperation,
     request: &RequestFrame,
     response: &ResponsePayload,
 ) -> Result<(), io::Error> {
     let result = match response {
         ResponsePayload::AuthenticatedResponse(response) => {
+            let scope = OwnershipScope::connection(&response.connection_id);
+            operation.reopen_scope(&scope);
             ensure_connection_membership(coordinator, &response.connection_id)
         }
-        ResponsePayload::SessionOpenedResponse(response) => ensure_session_membership(
-            coordinator,
-            &response.owner_connection_id,
-            &response.session_id,
-        ),
+        ResponsePayload::SessionOpenedResponse(response) => {
+            let scope =
+                OwnershipScope::session(&response.owner_connection_id, &response.session_id);
+            operation.reopen_scope(&scope);
+            ensure_session_membership(
+                coordinator,
+                &response.owner_connection_id,
+                &response.session_id,
+            )
+        }
         ResponsePayload::VmCreatedResponse(response) => match &request.ownership {
-            OwnershipScope::SessionOwnership(scope) => coordinator
-                .connection(&scope.connection_id)
-                .and_then(|connection| connection.session(&scope.session_id))
-                .and_then(|session| session.open_vm(response.vm_id.clone()))
-                .map(|_| ()),
+            OwnershipScope::SessionOwnership(scope) => {
+                operation.reopen_scope(&OwnershipScope::vm(
+                    &scope.connection_id,
+                    &scope.session_id,
+                    &response.vm_id,
+                ));
+                coordinator
+                    .connection(&scope.connection_id)
+                    .and_then(|connection| connection.session(&scope.session_id))
+                    .and_then(|session| session.open_vm(response.vm_id.clone()))
+                    .map(|_| ())
+            }
             ownership => Err(
                 crate::ownership_coordinator::OwnershipCoordinatorError::OwnershipMismatch {
                     expected: String::from("session ownership for CreateVmRequest"),
@@ -5160,7 +5248,7 @@ mod tests {
     }
 
     #[test]
-    fn request_metadata_distinguishes_vm_lifecycle_from_vm_operations() {
+    fn request_metadata_maps_ownership_and_vm_concurrency_independently() {
         let extensions = BTreeMap::new();
         let lifecycle = request_frame(
             1,
@@ -5170,12 +5258,8 @@ mod tests {
             }),
         );
         assert!(matches!(
-            request_operation_metadata(&lifecycle, &extensions).ordering_key,
-            RequestOrderingKey::VmLifecycle {
-                connection_id,
-                session_id,
-                vm_id,
-            } if connection_id == "conn" && session_id == "session" && vm_id == "vm"
+            request_operation_metadata(&lifecycle, &extensions).vm_concurrency,
+            VmConcurrencyClass::ExclusiveVmLifecycle
         ));
 
         let operation = request_frame(
@@ -5184,13 +5268,23 @@ mod tests {
             RequestPayload::GetProcessSnapshotRequest,
         );
         assert!(matches!(
-            request_operation_metadata(&operation, &extensions).ordering_key,
-            RequestOrderingKey::VmOperation {
-                connection_id,
-                session_id,
-                vm_id,
-            } if connection_id == "conn" && session_id == "session" && vm_id == "vm"
+            request_operation_metadata(&operation, &extensions).vm_concurrency,
+            VmConcurrencyClass::SharedVm
         ));
+
+        let session = request_frame(
+            3,
+            session_ownership("conn", "session"),
+            RequestPayload::CreateVmRequest(wire::CreateVmRequest::legacy_test_config(
+                wire::GuestRuntimeKind::JavaScript,
+                Default::default(),
+                Default::default(),
+                None,
+            )),
+        );
+        let metadata = request_operation_metadata(&session, &extensions);
+        assert_eq!(metadata.ownership, session_ownership("conn", "session"));
+        assert_eq!(metadata.vm_concurrency, VmConcurrencyClass::OwnershipOnly);
     }
 
     #[test]
@@ -5226,6 +5320,7 @@ mod tests {
                 const WAVES: usize = 32;
 
                 let mut extension_service_tasks = JoinSet::new();
+                let mut progress_service_tasks = JoinSet::new();
                 let mut extension_tasks = JoinSet::new();
                 let mut request_tasks = JoinSet::new();
                 let mut output_tasks = JoinSet::new();
@@ -5308,6 +5403,7 @@ mod tests {
 
                     reap_protocol_tasks_nowait(
                         &mut extension_service_tasks,
+                        &mut progress_service_tasks,
                         &mut extension_tasks,
                         &mut request_tasks,
                         &mut output_tasks,
@@ -5317,6 +5413,7 @@ mod tests {
                     .expect("pre-select reap succeeds");
 
                     assert!(extension_service_tasks.is_empty());
+                    assert!(progress_service_tasks.is_empty());
                     assert!(extension_tasks.is_empty());
                     assert!(request_tasks.is_empty());
                     assert!(output_tasks.is_empty());
@@ -5350,8 +5447,7 @@ mod tests {
                     runtime.context(),
                 )
                 .expect("test sidecar");
-                let operations =
-                    RequestOperationRegistry::from_protocol_config(&config.runtime.protocol);
+                let operations = OperationTable::from_protocol_config(&config.runtime.protocol);
                 let ownership_coordinator =
                     OwnershipCoordinator::from_runtime_config(&config.runtime);
                 ownership_coordinator
@@ -5395,9 +5491,6 @@ mod tests {
                             1,
                         )
                         .expect("admit generic request");
-                    operation
-                        .transition(RequestOperationState::Running)
-                        .expect("mark generic request running");
                     schedule_prepared_request(
                         prepared,
                         request,
@@ -5493,9 +5586,6 @@ mod tests {
                         1,
                     )
                     .expect("admit panicking request");
-                operation
-                    .transition(RequestOperationState::Running)
-                    .expect("mark panicking request running");
                 schedule_prepared_request(
                     prepared,
                     request,
@@ -5630,10 +5720,9 @@ mod tests {
                     .open_vm(vm_id.clone())
                     .expect("test coordinator VM");
 
-                let operations =
-                    RequestOperationRegistry::from_protocol_config(&config.runtime.protocol);
+                let operations = OperationTable::from_protocol_config(&config.runtime.protocol);
                 let progress_requests =
-                    ProgressRequestRegistry::from_protocol_config(&config.runtime.protocol);
+                    ProgressOperationView::from_protocol_config(&config.runtime.protocol);
                 let (writer, output) = test_frame_writer_with_inflight(8, 2);
                 let ingress_budget = test_protocol_budget(4, 4096, "dispose route ingress");
                 let (service_tx, _service_rx) = channel(4);
@@ -5692,9 +5781,6 @@ mod tests {
                         1,
                     )
                     .expect("admit gated VM operation");
-                operation
-                    .transition(RequestOperationState::Running)
-                    .expect("start gated VM operation");
                 let operation_cancellation = operation.cancellation();
                 schedule_prepared_request(
                     prepared_operation,
@@ -5895,10 +5981,9 @@ mod tests {
                 ownership_coordinator
                     .register_connection("conn-independent-service")
                     .expect("register independent connection");
-                let operations =
-                    RequestOperationRegistry::from_protocol_config(&config.runtime.protocol);
+                let operations = OperationTable::from_protocol_config(&config.runtime.protocol);
                 let progress_requests =
-                    ProgressRequestRegistry::from_protocol_config(&config.runtime.protocol);
+                    ProgressOperationView::from_protocol_config(&config.runtime.protocol);
                 let ingress_budget = test_protocol_budget(4, 4096, "test request ingress");
                 let (writer, output) = test_frame_writer_with_inflight(8, 2);
                 let (service_tx, _service_rx) = channel(4);
@@ -6104,11 +6189,7 @@ mod tests {
                         &RequestOperationMetadata::new(
                             crate::protocol::OwnershipScope::vm(connection_id, session_id, &vm_id),
                             "saturate ordinary VM admission",
-                            RequestOrderingKey::VmOperation {
-                                connection_id: connection_id.to_owned(),
-                                session_id: session_id.to_owned(),
-                                vm_id: vm_id.clone(),
-                            },
+                            VmConcurrencyClass::SharedVm,
                         ),
                         crate::request_operations::OperationCancellation::new(),
                     )
@@ -6361,8 +6442,8 @@ export async function loadPyodide() {
                 }
 
                 let protocol = agentos_runtime::RuntimeProtocolConfig::default();
-                let operations = RequestOperationRegistry::from_protocol_config(&protocol);
-                let progress_requests = ProgressRequestRegistry::from_protocol_config(&protocol);
+                let operations = OperationTable::from_protocol_config(&protocol);
+                let progress_requests = ProgressOperationView::from_protocol_config(&protocol);
                 let ingress_budget = test_protocol_budget(4, 4096, "root Python VFS ingress");
                 let (writer, output) = test_frame_writer_with_inflight(8, 2);
                 let (service_tx, _service_rx) = channel(2);
@@ -6820,8 +6901,8 @@ export async function loadPyodide() {
                 )
                 .expect("test sidecar");
                 let protocol = agentos_runtime::RuntimeProtocolConfig::default();
-                let operations = RequestOperationRegistry::from_protocol_config(&protocol);
-                let progress_requests = ProgressRequestRegistry::from_protocol_config(&protocol);
+                let operations = OperationTable::from_protocol_config(&protocol);
+                let progress_requests = ProgressOperationView::from_protocol_config(&protocol);
                 let ownership_coordinator = OwnershipCoordinator::from_runtime_config(
                     &NativeSidecarConfig::default().runtime,
                 );
@@ -6992,8 +7073,8 @@ export async function loadPyodide() {
                 )
                 .expect("test sidecar");
                 let protocol = agentos_runtime::RuntimeProtocolConfig::default();
-                let operations = RequestOperationRegistry::from_protocol_config(&protocol);
-                let progress_requests = ProgressRequestRegistry::from_protocol_config(&protocol);
+                let operations = OperationTable::from_protocol_config(&protocol);
+                let progress_requests = ProgressOperationView::from_protocol_config(&protocol);
                 let ownership_coordinator = OwnershipCoordinator::from_runtime_config(
                     &NativeSidecarConfig::default().runtime,
                 );
@@ -7175,8 +7256,8 @@ export async function loadPyodide() {
                 )
                 .expect("test sidecar");
                 let protocol = agentos_runtime::RuntimeProtocolConfig::default();
-                let operations = RequestOperationRegistry::from_protocol_config(&protocol);
-                let progress_requests = ProgressRequestRegistry::from_protocol_config(&protocol);
+                let operations = OperationTable::from_protocol_config(&protocol);
+                let progress_requests = ProgressOperationView::from_protocol_config(&protocol);
                 let ownership_coordinator = OwnershipCoordinator::from_runtime_config(
                     &NativeSidecarConfig::default().runtime,
                 );
@@ -7393,10 +7474,9 @@ export async function loadPyodide() {
                 let mut count_protocol = agentos_runtime::RuntimeProtocolConfig::default();
                 count_protocol.max_in_flight_requests = 1;
                 count_protocol.max_in_flight_request_bytes = 8;
-                let count_operations =
-                    RequestOperationRegistry::from_protocol_config(&count_protocol);
+                let count_operations = OperationTable::from_protocol_config(&count_protocol);
                 let count_progress_requests =
-                    ProgressRequestRegistry::from_protocol_config(&count_protocol);
+                    ProgressOperationView::from_protocol_config(&count_protocol);
                 for request_id in [30, 31] {
                     let request = ProtocolFrame::RequestFrame(request_frame(
                         request_id,
@@ -7466,10 +7546,9 @@ export async function loadPyodide() {
                 let mut byte_protocol = agentos_runtime::RuntimeProtocolConfig::default();
                 byte_protocol.max_in_flight_requests = 2;
                 byte_protocol.max_in_flight_request_bytes = 1;
-                let byte_operations =
-                    RequestOperationRegistry::from_protocol_config(&byte_protocol);
+                let byte_operations = OperationTable::from_protocol_config(&byte_protocol);
                 let byte_progress_requests =
-                    ProgressRequestRegistry::from_protocol_config(&byte_protocol);
+                    ProgressOperationView::from_protocol_config(&byte_protocol);
                 for request_id in [40, 41] {
                     let request = ProtocolFrame::RequestFrame(request_frame(
                         request_id,
@@ -7550,8 +7629,8 @@ export async function loadPyodide() {
                 )
                 .expect("test sidecar");
                 let protocol = agentos_runtime::RuntimeProtocolConfig::default();
-                let operations = RequestOperationRegistry::from_protocol_config(&protocol);
-                let progress_requests = ProgressRequestRegistry::from_protocol_config(&protocol);
+                let operations = OperationTable::from_protocol_config(&protocol);
+                let progress_requests = ProgressOperationView::from_protocol_config(&protocol);
                 let ownership_coordinator = OwnershipCoordinator::from_runtime_config(
                     &NativeSidecarConfig::default().runtime,
                 );
@@ -8410,8 +8489,8 @@ export async function loadPyodide() {
     async fn shutdown_takeover_before_retention_publishes_one_terminal_and_progress_frame() {
         let (writer, output) = test_frame_writer_with_inflight(8, 1);
         let protocol = agentos_runtime::RuntimeProtocolConfig::default();
-        let operations = RequestOperationRegistry::from_protocol_config(&protocol);
-        let progress_requests = ProgressRequestRegistry::from_protocol_config(&protocol);
+        let operations = OperationTable::from_protocol_config(&protocol);
+        let progress_requests = ProgressOperationView::from_protocol_config(&protocol);
         let ownership = connection_ownership("takeover-before-retention");
 
         let operation = operations
@@ -8420,18 +8499,12 @@ export async function loadPyodide() {
                 RequestOperationMetadata::new(
                     ownership.clone(),
                     "terminal-race",
-                    RequestOrderingKey::Unordered,
+                    VmConcurrencyClass::OwnershipOnly,
                 ),
                 11,
             )
             .expect("admit terminal race");
-        operation
-            .transition(RequestOperationState::Running)
-            .expect("mark terminal race running");
-        operation
-            .transition(RequestOperationState::Completing)
-            .expect("mark terminal race completing");
-        assert!(operation.try_mark_terminal().expect("claim terminal"));
+        assert!(operation.try_mark_terminal());
         let terminal_reservation = writer
             .try_reserve_terminal(writer.terminal_budget.config.max_bytes)
             .expect("reserve original terminal");
@@ -8565,8 +8638,8 @@ export async function loadPyodide() {
     async fn broker_retention_before_shutdown_prevents_terminal_and_progress_takeover() {
         let (writer, output) = test_frame_writer_with_inflight(8, 1);
         let protocol = agentos_runtime::RuntimeProtocolConfig::default();
-        let operations = RequestOperationRegistry::from_protocol_config(&protocol);
-        let progress_requests = ProgressRequestRegistry::from_protocol_config(&protocol);
+        let operations = OperationTable::from_protocol_config(&protocol);
+        let progress_requests = ProgressOperationView::from_protocol_config(&protocol);
         let ownership = connection_ownership("retention-before-takeover");
 
         let operation = operations
@@ -8575,18 +8648,12 @@ export async function loadPyodide() {
                 RequestOperationMetadata::new(
                     ownership.clone(),
                     "terminal-race",
-                    RequestOrderingKey::Unordered,
+                    VmConcurrencyClass::OwnershipOnly,
                 ),
                 11,
             )
             .expect("admit terminal race");
-        operation
-            .transition(RequestOperationState::Running)
-            .expect("mark terminal race running");
-        operation
-            .transition(RequestOperationState::Completing)
-            .expect("mark terminal race completing");
-        assert!(operation.try_mark_terminal().expect("claim terminal"));
+        assert!(operation.try_mark_terminal());
         let terminal_reservation = writer
             .try_reserve_terminal(writer.terminal_budget.config.max_bytes)
             .expect("reserve terminal");
@@ -8656,10 +8723,10 @@ export async function loadPyodide() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (writer, output) = test_frame_writer_with_inflight(8, 1);
-                let operations = RequestOperationRegistry::from_protocol_config(
+                let operations = OperationTable::from_protocol_config(
                     &agentos_runtime::RuntimeProtocolConfig::default(),
                 );
-                let progress_requests = ProgressRequestRegistry::from_protocol_config(
+                let progress_requests = ProgressOperationView::from_protocol_config(
                     &agentos_runtime::RuntimeProtocolConfig::default(),
                 );
                 let ordinary_ownership = session_ownership("shutdown-conn", "session-a");
@@ -8669,14 +8736,11 @@ export async function loadPyodide() {
                         RequestOperationMetadata::new(
                             ordinary_ownership.clone(),
                             "gated-shutdown",
-                            RequestOrderingKey::Unordered,
+                            VmConcurrencyClass::OwnershipOnly,
                         ),
                         17,
                     )
                     .expect("admit gated ordinary request");
-                operation
-                    .transition(RequestOperationState::Running)
-                    .expect("mark gated request running");
                 let cancellation = operation.cancellation();
                 let terminal_reservation = writer
                     .try_reserve_terminal(writer.terminal_budget.config.max_bytes)
@@ -8730,7 +8794,7 @@ export async function loadPyodide() {
                         &RequestOperationMetadata::new(
                             ordinary_ownership.clone(),
                             "late",
-                            RequestOrderingKey::Unordered,
+                            VmConcurrencyClass::OwnershipOnly,
                         ),
                         1,
                     ),
@@ -8765,6 +8829,7 @@ export async function loadPyodide() {
                 let (_completion_tx, mut completion_rx) = channel(2);
                 let (_service_completion_tx, mut service_completion_rx) = channel(2);
                 let mut service_tasks = JoinSet::new();
+                let mut progress_service_tasks = JoinSet::new();
                 let (_request_completion_tx, mut request_completion_rx) = channel(2);
                 let mut request_tasks = JoinSet::new();
                 let mut output_tasks = JoinSet::new();
@@ -8778,6 +8843,7 @@ export async function loadPyodide() {
                     &callback_transport,
                     &writer,
                     &mut service_tasks,
+                    &mut progress_service_tasks,
                     &mut service_completion_rx,
                     &mut extension_tasks,
                     &mut completion_rx,
@@ -8836,10 +8902,10 @@ export async function loadPyodide() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (writer, output) = test_frame_writer_with_inflight(8, 1);
-                let operations = RequestOperationRegistry::from_protocol_config(
+                let operations = OperationTable::from_protocol_config(
                     &agentos_runtime::RuntimeProtocolConfig::default(),
                 );
-                let progress_requests = ProgressRequestRegistry::from_protocol_config(
+                let progress_requests = ProgressOperationView::from_protocol_config(
                     &agentos_runtime::RuntimeProtocolConfig::default(),
                 );
                 let ownership = connection_ownership("disconnect-conn");
@@ -8849,14 +8915,11 @@ export async function loadPyodide() {
                         RequestOperationMetadata::new(
                             ownership.clone(),
                             "gated-disconnect",
-                            RequestOrderingKey::Unordered,
+                            VmConcurrencyClass::OwnershipOnly,
                         ),
                         17,
                     )
                     .expect("admit disconnected ordinary request");
-                operation
-                    .transition(RequestOperationState::Running)
-                    .expect("mark disconnected request running");
                 let terminal_reservation = writer
                     .try_reserve_terminal(writer.terminal_budget.config.max_bytes)
                     .expect("reserve original terminal outcome");
@@ -8915,6 +8978,7 @@ export async function loadPyodide() {
                 let (_completion_tx, mut completion_rx) = channel(2);
                 let (_service_completion_tx, mut service_completion_rx) = channel(2);
                 let mut service_tasks = JoinSet::new();
+                let mut progress_service_tasks = JoinSet::new();
                 let (_request_completion_tx, mut request_completion_rx) = channel(2);
                 let mut request_tasks = JoinSet::new();
                 let mut output_tasks = JoinSet::new();
@@ -8930,6 +8994,7 @@ export async function loadPyodide() {
                         &callback_transport,
                         &writer,
                         &mut service_tasks,
+                        &mut progress_service_tasks,
                         &mut service_completion_rx,
                         &mut extension_tasks,
                         &mut completion_rx,
@@ -9123,6 +9188,37 @@ export async function loadPyodide() {
                 payload: wire::EventPayload::StructuredEvent(wire::StructuredEvent { name, .. }),
                 ..
             }) if name == "heartbeat"
+        ));
+        output.close();
+    }
+
+    #[tokio::test]
+    async fn protocol_output_progress_burst_cannot_starve_terminal_response() {
+        let (writer, output) = test_frame_writer(16);
+        writer
+            .try_send_progress(queue_test_sidecar_request(-1))
+            .expect("queue first progress frame");
+        writer
+            .try_send_progress(queue_test_sidecar_request(-2))
+            .expect("queue second progress frame");
+        writer
+            .try_send(queue_test_response(3))
+            .expect("queue terminal response");
+
+        let first = decode_test_output(output.recv_control().await.expect("first output"));
+        let second = decode_test_output(output.recv_control().await.expect("second output"));
+        let third = decode_test_output(output.recv_control().await.expect("third output"));
+        assert!(matches!(
+            first,
+            ProtocolFrame::SidecarRequestFrame(frame) if frame.request_id == -1
+        ));
+        assert!(matches!(
+            second,
+            ProtocolFrame::ResponseFrame(frame) if frame.request_id == 3
+        ));
+        assert!(matches!(
+            third,
+            ProtocolFrame::SidecarRequestFrame(frame) if frame.request_id == -2
         ));
         output.close();
     }

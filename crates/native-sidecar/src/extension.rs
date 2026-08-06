@@ -837,44 +837,8 @@ pub enum ExtensionRequestClass {
     Progress,
 }
 
-/// Who enforces exclusivity for an extension-provided opaque ordering key.
-///
-/// Core-exclusive keys receive a bounded, typed conflict rejection before the
-/// second request starts. An extension may retain enforcement when it needs to
-/// preserve a richer protocol-specific rejection (ACP's `session_busy` is the
-/// motivating case); core still scopes and validates the opaque key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExtensionOrderingPolicy {
-    CoreExclusive,
-    ExtensionManaged,
-}
-
 pub trait Extension: Send + Sync {
     fn namespace(&self) -> &str;
-
-    /// Return the extension-owned conflict key for an ordinary request.
-    ///
-    /// Core treats this value as opaque and combines it with the extension
-    /// namespace and connection ownership when it builds request-operation
-    /// metadata. Extensions whose identities are scoped more narrowly than a
-    /// connection (for example, to one VM) must include that ownership in the
-    /// returned key. `None` means the request has no extension-specific
-    /// ordering boundary.
-    fn request_ordering_key(
-        &self,
-        _ownership: &OwnershipScope,
-        _payload: &[u8],
-    ) -> Option<Vec<u8>> {
-        None
-    }
-
-    fn request_ordering_policy(
-        &self,
-        _ownership: &OwnershipScope,
-        _payload: &[u8],
-    ) -> ExtensionOrderingPolicy {
-        ExtensionOrderingPolicy::CoreExclusive
-    }
 
     fn request_class(&self, _payload: &[u8]) -> ExtensionRequestClass {
         ExtensionRequestClass::Ordinary

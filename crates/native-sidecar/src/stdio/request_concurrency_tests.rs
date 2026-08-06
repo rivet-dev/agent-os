@@ -89,13 +89,6 @@ impl Extension for GatedExtension {
         }
     }
 
-    fn request_ordering_key(&self, _ownership: &OwnershipScope, payload: &[u8]) -> Option<Vec<u8>> {
-        let command = std::str::from_utf8(payload).ok()?;
-        let keyed = command.strip_prefix("key:")?;
-        let (key, _) = keyed.split_once(':')?;
-        Some(key.as_bytes().to_vec())
-    }
-
     fn handle_request<'a>(
         &'a self,
         _ctx: crate::ExtensionContext,
@@ -173,9 +166,11 @@ struct ProtocolLoopHarness {
     ingress_budget: ProtocolBudget,
     control_budget: ProtocolBudget,
     extension_routes: Arc<BTreeMap<String, Arc<dyn Extension>>>,
+    extension_services: Arc<RoutedExtensionServices>,
+    ordinary_service_capacity: usize,
     ownership_coordinator: OwnershipCoordinator,
-    operations: RequestOperationRegistry,
-    progress_requests: ProgressRequestRegistry,
+    operations: OperationTable,
+    progress_requests: ProgressOperationView,
 }
 
 impl ProtocolLoopHarness {
@@ -234,12 +229,11 @@ impl ProtocolLoopHarness {
             }
         }
 
-        let operations =
-            RequestOperationRegistry::new(crate::request_operations::RequestOperationLimits {
-                max_requests,
-                max_request_bytes,
-            });
-        let progress_requests = ProgressRequestRegistry::from_protocol_config(&protocol);
+        let operations = OperationTable::new(crate::request_operations::RequestOperationLimits {
+            max_requests,
+            max_request_bytes,
+        });
+        let progress_requests = operations.progress_requests();
         let output = Arc::new(ProtocolOutputQueue::new(
             protocol.max_egress_frames,
             protocol.max_control_frames,
@@ -269,12 +263,17 @@ impl ProtocolLoopHarness {
             .saturating_add(protocol.max_control_frames)
             .max(1);
         let (service_tx, service_rx) = channel(service_capacity);
-        let extension_services: Arc<dyn ExtensionServices> =
-            Arc::new(RoutedExtensionServices::new_with_process_event_broker(
+        let (progress_service_tx, progress_service_rx) =
+            channel(protocol.max_progress_frames.max(1));
+        let routed_extension_services = Arc::new(
+            RoutedExtensionServices::new_with_process_event_broker_and_progress(
                 service_tx,
+                progress_service_tx,
                 Arc::clone(&routed_process_event_notify),
                 sidecar.process_event_broker(),
-            ));
+            ),
+        );
+        let extension_services: Arc<dyn ExtensionServices> = routed_extension_services.clone();
         let (extension_completion_tx, extension_completion_rx) = channel(service_capacity);
         let (extension_service_completion_tx, extension_service_completion_rx) =
             channel(service_capacity);
@@ -291,6 +290,8 @@ impl ProtocolLoopHarness {
             ingress_budget,
             control_budget,
             extension_routes,
+            extension_services: routed_extension_services,
+            ordinary_service_capacity: service_capacity,
             ownership_coordinator: ownership_coordinator.clone(),
             operations: operations.clone(),
             progress_requests: progress_requests.clone(),
@@ -308,6 +309,7 @@ impl ProtocolLoopHarness {
             stdin_control_rx: control_rx,
             shutdown_rx,
             extension_service_rx: service_rx,
+            progress_service_rx,
             extension_service_completion_tx,
             extension_service_completion_rx,
             extension_completion_tx,
@@ -427,6 +429,112 @@ fn extension_request(
             namespace: NAMESPACE.to_owned(),
             payload: command.as_bytes().to_vec(),
         }),
+    )
+}
+
+fn guest_filesystem_request(
+    request_id: RequestId,
+    connection_id: &str,
+    session_id: &str,
+    vm_id: &str,
+    operation: wire::GuestFilesystemOperation,
+    path: &str,
+    content: Option<&str>,
+) -> RequestFrame {
+    request_frame(
+        request_id,
+        vm_ownership(connection_id, session_id, vm_id),
+        RequestPayload::GuestFilesystemCallRequest(wire::GuestFilesystemCallRequest {
+            operation,
+            path: path.to_owned(),
+            destination_path: None,
+            target: None,
+            content: content.map(str::to_owned),
+            encoding: None,
+            recursive: false,
+            max_depth: None,
+            mode: None,
+            uid: None,
+            gid: None,
+            atime_ms: None,
+            mtime_ms: None,
+            len: None,
+            offset: None,
+        }),
+    )
+}
+
+async fn start_protocol_loop_with_vm(
+    state: Arc<GatedExtensionState>,
+) -> (
+    ProtocolLoopHarness,
+    tokio::task::JoinHandle<Result<(), Box<dyn Error>>>,
+    String,
+    String,
+    String,
+) {
+    let (harness, engine) = ProtocolLoopHarness::build(state, &[], 8, 16 * 1024);
+    let engine_task = tokio::task::spawn_local(run_protocol_engine(engine));
+    harness.send_request(
+        request_frame(
+            1,
+            connection_ownership("client-hint"),
+            RequestPayload::AuthenticateRequest(wire::AuthenticateRequest {
+                client_name: String::from("VM concurrency regression"),
+                auth_token: String::new(),
+                protocol_version: wire::PROTOCOL_VERSION,
+                bridge_version: agentos_bridge::bridge_contract().version,
+            }),
+        ),
+        1,
+    );
+    let authenticated = harness.response().await;
+    let ResponsePayload::AuthenticatedResponse(authenticated) = authenticated.payload else {
+        panic!("expected authenticated response");
+    };
+    let connection_id = authenticated.connection_id;
+    harness.send_request(
+        request_frame(
+            2,
+            connection_ownership(&connection_id),
+            RequestPayload::OpenSessionRequest(wire::OpenSessionRequest {
+                placement: wire::SidecarPlacement::SidecarPlacementShared(
+                    wire::SidecarPlacementShared { pool: None },
+                ),
+                metadata: Default::default(),
+            }),
+        ),
+        1,
+    );
+    let opened = harness.response().await;
+    let ResponsePayload::SessionOpenedResponse(opened) = opened.payload else {
+        panic!("expected session-opened response");
+    };
+    let session_id = opened.session_id;
+    let vm_config: agentos_vm_config::CreateVmConfig =
+        serde_json::from_value(serde_json::json!({ "permissions": { "fs": "allow" } }))
+            .expect("build filesystem-enabled VM config");
+    harness.send_request(
+        request_frame(
+            3,
+            session_ownership(&connection_id, &session_id),
+            RequestPayload::CreateVmRequest(wire::CreateVmRequest {
+                runtime: wire::GuestRuntimeKind::JavaScript,
+                config: serde_json::to_string(&vm_config).expect("serialize test VM config"),
+            }),
+        ),
+        1,
+    );
+    let created = harness.response().await;
+    let ResponsePayload::VmCreatedResponse(created) = created.payload else {
+        panic!("expected VM-created response");
+    };
+    (
+        harness,
+        engine_task,
+        connection_id,
+        session_id,
+        created.vm_id,
     )
 }
 
@@ -564,6 +672,244 @@ async fn request_concurrency_real_loop_starts_two_blocking_sessions_together() {
                     .collect::<BTreeSet<_>>(),
                 BTreeSet::from([10, 11]),
             );
+            finish_cleanly(&harness, engine_task).await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn request_concurrency_real_loop_same_vm_read_and_write_share_the_gate() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let state = Arc::new(GatedExtensionState::default());
+            let (harness, engine_task, connection_id, session_id, vm_id) =
+                start_protocol_loop_with_vm(state).await;
+
+            harness.send_request(
+                guest_filesystem_request(
+                    4,
+                    &connection_id,
+                    &session_id,
+                    &vm_id,
+                    wire::GuestFilesystemOperation::WriteFile,
+                    "/seed.txt",
+                    Some("seed"),
+                ),
+                1,
+            );
+            assert!(matches!(
+                harness.response().await.payload,
+                ResponsePayload::GuestFilesystemResultResponse(_)
+            ));
+
+            // Retain one real ordinary permit while both protocol requests
+            // run. If the gate serialized ordinary work, neither could finish
+            // until this permit was dropped.
+            let held = harness
+                .ownership_coordinator
+                .admit(
+                    &RequestOperationMetadata::new(
+                        vm_ownership(&connection_id, &session_id, &vm_id),
+                        "held same-VM ordinary operation",
+                        VmConcurrencyClass::SharedVm,
+                    ),
+                    crate::request_operations::OperationCancellation::new(),
+                )
+                .await
+                .expect("hold one ordinary VM permit");
+            harness.send_request(
+                guest_filesystem_request(
+                    5,
+                    &connection_id,
+                    &session_id,
+                    &vm_id,
+                    wire::GuestFilesystemOperation::ReadFile,
+                    "/seed.txt",
+                    None,
+                ),
+                1,
+            );
+            harness.send_request(
+                guest_filesystem_request(
+                    6,
+                    &connection_id,
+                    &session_id,
+                    &vm_id,
+                    wire::GuestFilesystemOperation::WriteFile,
+                    "/parallel.txt",
+                    Some("parallel"),
+                ),
+                1,
+            );
+            let responses = [harness.response().await, harness.response().await];
+            assert_eq!(
+                responses
+                    .iter()
+                    .map(|response| response.request_id)
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([5, 6]),
+            );
+            assert!(responses.iter().all(|response| matches!(
+                response.payload,
+                ResponsePayload::GuestFilesystemResultResponse(_)
+            )));
+            drop(held);
+            finish_cleanly(&harness, engine_task).await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn request_concurrency_real_loop_sleeping_prompt_does_not_hold_same_vm_gate() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let state = Arc::new(GatedExtensionState::default());
+            let (harness, engine_task, connection_id, session_id, vm_id) =
+                start_protocol_loop_with_vm(Arc::clone(&state)).await;
+            harness.send_request(
+                guest_filesystem_request(
+                    4,
+                    &connection_id,
+                    &session_id,
+                    &vm_id,
+                    wire::GuestFilesystemOperation::WriteFile,
+                    "/during-prompt.txt",
+                    Some("readable"),
+                ),
+                1,
+            );
+            assert_eq!(harness.response().await.request_id, 4);
+
+            harness.send_request(
+                extension_request(5, &connection_id, &session_id, "block:prompt-vm"),
+                1,
+            );
+            state.gate("prompt-vm").wait_started().await;
+            harness.send_request(
+                guest_filesystem_request(
+                    6,
+                    &connection_id,
+                    &session_id,
+                    &vm_id,
+                    wire::GuestFilesystemOperation::ReadFile,
+                    "/during-prompt.txt",
+                    None,
+                ),
+                1,
+            );
+            harness.send_request(
+                guest_filesystem_request(
+                    7,
+                    &connection_id,
+                    &session_id,
+                    &vm_id,
+                    wire::GuestFilesystemOperation::WriteFile,
+                    "/also-during-prompt.txt",
+                    Some("writable"),
+                ),
+                1,
+            );
+            let filesystem = [harness.response().await, harness.response().await];
+            assert_eq!(
+                filesystem
+                    .iter()
+                    .map(|response| response.request_id)
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([6, 7]),
+                "same-VM filesystem work must finish before the sleeping prompt",
+            );
+            state.gate("prompt-vm").release();
+            assert_eq!(harness.response().await.request_id, 5);
+            finish_cleanly(&harness, engine_task).await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn request_concurrency_real_loop_configure_waits_and_rejects_new_same_vm_work() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let state = Arc::new(GatedExtensionState::default());
+            let (harness, engine_task, connection_id, session_id, vm_id) =
+                start_protocol_loop_with_vm(state).await;
+            let held = harness
+                .ownership_coordinator
+                .admit(
+                    &RequestOperationMetadata::new(
+                        vm_ownership(&connection_id, &session_id, &vm_id),
+                        "held pre-configure VM operation",
+                        VmConcurrencyClass::SharedVm,
+                    ),
+                    crate::request_operations::OperationCancellation::new(),
+                )
+                .await
+                .expect("hold an earlier ordinary operation");
+            harness.send_request(
+                request_frame(
+                    4,
+                    vm_ownership(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVmRequest(wire::ConfigureVmRequest {
+                        mounts: Vec::new(),
+                        software: Vec::new(),
+                        permissions: None,
+                        module_access_cwd: None,
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: Default::default(),
+                        loopback_exempt_ports: Vec::new(),
+                        packages: Vec::new(),
+                        packages_mount_at: String::new(),
+                        bootstrap_commands: Vec::new(),
+                        binding_shim_commands: Vec::new(),
+                    }),
+                ),
+                1,
+            );
+            let vm = harness
+                .ownership_coordinator
+                .connection(&connection_id)
+                .expect("connection coordinator")
+                .session(&session_id)
+                .expect("session coordinator")
+                .vm(&vm_id)
+                .expect("VM coordinator");
+            tokio::time::timeout(TEST_TIMEOUT, async {
+                while vm.snapshot().lifecycle
+                    != crate::ownership_coordinator::VmLifecyclePhase::Pending
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("configure enters pending lifecycle state");
+
+            harness.send_request(
+                guest_filesystem_request(
+                    5,
+                    &connection_id,
+                    &session_id,
+                    &vm_id,
+                    wire::GuestFilesystemOperation::Stat,
+                    "/",
+                    None,
+                ),
+                1,
+            );
+            let rejected = harness.response().await;
+            assert_eq!(rejected.request_id, 5);
+            let ResponsePayload::RejectedResponse(rejection) = rejected.payload else {
+                panic!("same-VM work must be rejected while configure is pending");
+            };
+            assert_eq!(rejection.code, "ERR_AGENTOS_VM_LIFECYCLE_CONFLICT");
+            assert_eq!(rejection.retryable, Some(true));
+
+            drop(held);
+            let configured = harness.response().await;
+            assert_eq!(configured.request_id, 4);
+            assert!(matches!(
+                configured.payload,
+                ResponsePayload::VmConfiguredResponse(_)
+            ));
             finish_cleanly(&harness, engine_task).await;
         })
         .await;
@@ -780,11 +1126,7 @@ async fn request_concurrency_real_loop_vm_a_disposal_does_not_delay_vm_b_query()
                     &RequestOperationMetadata::new(
                         vm_ownership("conn-1", "session-1", &vm_a),
                         "held VM-A operation",
-                        RequestOrderingKey::VmOperation {
-                            connection_id: String::from("conn-1"),
-                            session_id: String::from("session-1"),
-                            vm_id: vm_a.clone(),
-                        },
+                        VmConcurrencyClass::SharedVm,
                     ),
                     held_cancellation.clone(),
                 )
@@ -826,17 +1168,25 @@ async fn request_concurrency_real_loop_vm_a_disposal_does_not_delay_vm_b_query()
 
             harness.send_request(
                 request_frame(
+                    36,
+                    vm_ownership("conn-1", "session-1", &vm_a),
+                    RequestPayload::GetProcessSnapshotRequest,
+                ),
+                1,
+            );
+            harness.send_request(
+                request_frame(
                     35,
                     vm_ownership("conn-1", "session-1", &vm_b),
                     RequestPayload::GetProcessSnapshotRequest,
                 ),
                 1,
             );
-            let independent = harness.response().await;
-            assert_eq!(
-                independent.request_id, 35,
-                "VM-B generic work must complete while VM-A disposal is gated",
-            );
+            let pending_responses = [harness.response().await, harness.response().await];
+            let independent = pending_responses
+                .iter()
+                .find(|response| response.request_id == 35)
+                .expect("VM-B response completes during VM-A drain");
             assert!(
                 matches!(
                     &independent.payload,
@@ -845,7 +1195,23 @@ async fn request_concurrency_real_loop_vm_a_disposal_does_not_delay_vm_b_query()
                 "unexpected VM-B response: {:?}",
                 independent.payload
             );
-
+            let same_vm = pending_responses
+                .iter()
+                .find(|response| response.request_id == 36)
+                .expect("same-VM request receives a typed conflict");
+            let ResponsePayload::RejectedResponse(rejection) = &same_vm.payload else {
+                panic!("same-VM request must be rejected while disposal is pending");
+            };
+            assert!(
+                matches!(
+                    rejection.code.as_str(),
+                    "ERR_AGENTOS_REQUEST_ADMISSION_CLOSED"
+                        | "ERR_AGENTOS_COORDINATOR_CLOSING"
+                        | "ERR_AGENTOS_VM_LIFECYCLE_CONFLICT"
+                ),
+                "unexpected same-VM lifecycle conflict: {}",
+                rejection.code,
+            );
             drop(held_vm_a);
             let disposed = harness.response().await;
             assert_eq!(disposed.request_id, 34);
@@ -1309,7 +1675,7 @@ async fn targeted_public_waiter_cannot_consume_internal_process_pump_wake() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn request_concurrency_real_loop_enforces_only_matching_opaque_extension_keys() {
+async fn request_concurrency_real_loop_leaves_opaque_route_exclusion_to_extension() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let state = Arc::new(GatedExtensionState::default());
@@ -1336,18 +1702,11 @@ async fn request_concurrency_real_loop_enforces_only_matching_opaque_extension_k
             );
 
             let responses = [harness.response().await, harness.response().await];
-            let conflict = responses
+            let same_key = responses
                 .iter()
                 .find(|response| response.request_id == 16)
-                .expect("same opaque key receives a terminal conflict");
-            let ResponsePayload::RejectedResponse(rejection) = &conflict.payload else {
-                panic!("same opaque key must be rejected");
-            };
-            assert!(
-                rejection.message.contains("ERR_AGENTOS_ORDERING_CONFLICT"),
-                "conflict remains typed: {}",
-                rejection.message
-            );
+                .expect("same opaque key progresses independently");
+            assert_eq!(response_payload(same_key), b"conflict");
             let independent = responses
                 .iter()
                 .find(|response| response.request_id == 17)
@@ -1568,6 +1927,257 @@ async fn request_concurrency_real_loop_cancel_bypasses_saturated_ordinary_admiss
                     .map(|response| response.request_id)
                     .collect::<BTreeSet<_>>(),
                 BTreeSet::from([70, 71]),
+            );
+            finish_cleanly(&harness, engine_task).await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn request_concurrency_real_loop_progress_service_bypasses_full_ordinary_service_queue() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let state = Arc::new(GatedExtensionState::default());
+            let (harness, engine) = ProtocolLoopHarness::build(state, &[], 1, 4096);
+            let mut ordinary = Vec::with_capacity(harness.ordinary_service_capacity);
+            let waker = std::task::Waker::noop();
+            let mut context = std::task::Context::from_waker(waker);
+            for _ in 0..harness.ordinary_service_capacity {
+                let mut request = harness.extension_services.acp_termination_grace();
+                assert!(matches!(
+                    request.as_mut().poll(&mut context),
+                    std::task::Poll::Pending
+                ));
+                ordinary.push(request);
+            }
+
+            // The ordinary service receiver has not started and its physical
+            // queue is full. WriteStdin is the adapter-cancellation path; it
+            // must still acquire the independently bounded progress lane.
+            let mut progress = harness.extension_services.write_stdin(
+                vm_ownership("missing", "missing", "missing"),
+                wire::WriteStdinRequest {
+                    process_id: String::from("missing"),
+                    chunk: b"cancel\n".to_vec(),
+                },
+            );
+            assert!(matches!(
+                progress.as_mut().poll(&mut context),
+                std::task::Poll::Pending
+            ));
+
+            let engine_task = tokio::task::spawn_local(run_protocol_engine(engine));
+            let progress_error = tokio::time::timeout(TEST_TIMEOUT, progress)
+                .await
+                .expect("progress service reaches the running protocol loop")
+                .expect_err("missing VM returns a normal routed service error");
+            assert!(
+                !progress_error
+                    .to_string()
+                    .contains("ERR_AGENTOS_PROGRESS_SERVICE_LIMIT"),
+                "progress was admitted through its reserved service lane: {progress_error}",
+            );
+            for request in ordinary {
+                tokio::time::timeout(TEST_TIMEOUT, request)
+                    .await
+                    .expect("ordinary service request drains")
+                    .expect("termination-grace service succeeds");
+            }
+            finish_cleanly(&harness, engine_task).await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn request_concurrency_bounded_multi_vm_lifecycle_progress_load_finishes_exactly_once() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let state = Arc::new(GatedExtensionState::default());
+            let sessions: &[&str] = &["route-a", "route-b", "route-c", "route-d"];
+            let (harness, engine) = ProtocolLoopHarness::build(
+                Arc::clone(&state),
+                &[("conn", sessions)],
+                64,
+                64 * 1024,
+            );
+            let connection = harness
+                .ownership_coordinator
+                .connection("conn")
+                .expect("load-test connection coordinator");
+            let vm_a = connection
+                .session("route-a")
+                .expect("load-test route A")
+                .open_vm("vm-a")
+                .expect("open load-test VM A");
+            let vm_b = connection
+                .session("route-b")
+                .expect("load-test route B")
+                .open_vm("vm-b")
+                .expect("open load-test VM B");
+            let held_a = harness
+                .ownership_coordinator
+                .admit(
+                    &RequestOperationMetadata::new(
+                        vm_ownership("conn", "route-a", "vm-a"),
+                        "delayed load operation A",
+                        VmConcurrencyClass::SharedVm,
+                    ),
+                    crate::request_operations::OperationCancellation::new(),
+                )
+                .await
+                .expect("delay VM A ordinary completion");
+            let held_b = harness
+                .ownership_coordinator
+                .admit(
+                    &RequestOperationMetadata::new(
+                        vm_ownership("conn", "route-b", "vm-b"),
+                        "delayed load operation B",
+                        VmConcurrencyClass::SharedVm,
+                    ),
+                    crate::request_operations::OperationCancellation::new(),
+                )
+                .await
+                .expect("delay VM B ordinary completion");
+            let lifecycle_a_coordinator = harness.ownership_coordinator.clone();
+            let lifecycle_a = tokio::task::spawn_local(async move {
+                lifecycle_a_coordinator
+                    .admit(
+                        &RequestOperationMetadata::new(
+                            vm_ownership("conn", "route-a", "vm-a"),
+                            "periodic lifecycle A",
+                            VmConcurrencyClass::ExclusiveVmLifecycle,
+                        ),
+                        crate::request_operations::OperationCancellation::new(),
+                    )
+                    .await
+            });
+            let lifecycle_b_coordinator = harness.ownership_coordinator.clone();
+            let lifecycle_b = tokio::task::spawn_local(async move {
+                lifecycle_b_coordinator
+                    .admit(
+                        &RequestOperationMetadata::new(
+                            vm_ownership("conn", "route-b", "vm-b"),
+                            "periodic lifecycle B",
+                            VmConcurrencyClass::ExclusiveVmLifecycle,
+                        ),
+                        crate::request_operations::OperationCancellation::new(),
+                    )
+                    .await
+            });
+            tokio::time::timeout(TEST_TIMEOUT, async {
+                while vm_a.snapshot().lifecycle
+                    != crate::ownership_coordinator::VmLifecyclePhase::Pending
+                    || vm_b.snapshot().lifecycle
+                        != crate::ownership_coordinator::VmLifecyclePhase::Pending
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("both independent VM lifecycle requests become pending");
+            let engine_task = tokio::task::spawn_local(run_protocol_engine(engine));
+
+            for index in 0..8_i64 {
+                let session = sessions[index as usize % sessions.len()];
+                harness.send_request(
+                    extension_request(
+                        1_000 + index,
+                        "conn",
+                        session,
+                        &format!("block:load-{index}"),
+                    ),
+                    1,
+                );
+            }
+            for index in 0..8_i64 {
+                state.gate(&format!("load-{index}")).wait_started().await;
+            }
+            // Deterministic frame-fuzz case: the first ordinary request is
+            // still live when a progress-class frame reuses its connection ID.
+            // The shared table rejects the duplicate without delivering the
+            // cancel payload to the original operation.
+            harness.send_request(
+                extension_request(1_000, "conn", "route-a", "cancel:load-0"),
+                1,
+            );
+            let duplicate = harness.response().await;
+            assert_eq!(duplicate.request_id, 1_000);
+            let ResponsePayload::RejectedResponse(duplicate) = duplicate.payload else {
+                panic!("cross-class duplicate frame must be rejected");
+            };
+            assert_eq!(duplicate.code, "ERR_AGENTOS_DUPLICATE_PROGRESS_REQUEST_ID");
+            for index in 0..16_i64 {
+                let session = sessions[index as usize % sessions.len()];
+                harness.send_request(
+                    extension_request(1_100 + index, "conn", session, &format!("echo-{index}")),
+                    1,
+                );
+            }
+            for index in 0..8_i64 {
+                let session = sessions[index as usize % sessions.len()];
+                harness.send_request(
+                    extension_request(
+                        1_200 + index,
+                        "conn",
+                        session,
+                        &format!("cancel:load-{index}"),
+                    ),
+                    1,
+                );
+            }
+
+            drop(held_a);
+            let lifecycle_a = tokio::time::timeout(TEST_TIMEOUT, lifecycle_a)
+                .await
+                .expect("VM A lifecycle completion deadline")
+                .expect("VM A lifecycle task joined")
+                .expect("VM A lifecycle activates independently");
+            assert_eq!(
+                vm_b.snapshot().lifecycle,
+                crate::ownership_coordinator::VmLifecyclePhase::Pending,
+                "VM A lifecycle completion must not alter VM B",
+            );
+            drop(lifecycle_a);
+            drop(held_b);
+            let lifecycle_b = tokio::time::timeout(TEST_TIMEOUT, lifecycle_b)
+                .await
+                .expect("VM B lifecycle completion deadline")
+                .expect("VM B lifecycle task joined")
+                .expect("VM B lifecycle activates independently");
+            drop(lifecycle_b);
+
+            let responses = tokio::time::timeout(TEST_TIMEOUT, async {
+                let mut ids = BTreeSet::new();
+                for _ in 0..32 {
+                    let response = harness.response().await;
+                    assert!(
+                        ids.insert(response.request_id),
+                        "duplicate terminal response"
+                    );
+                }
+                ids
+            })
+            .await
+            .expect("bounded mixed ordinary/progress load completes");
+            let expected = (1_000..1_008)
+                .chain(1_100..1_116)
+                .chain(1_200..1_208)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(responses, expected);
+            assert_eq!(harness.operations.snapshot().in_flight_requests, 0);
+            assert_eq!(harness.operations.snapshot().in_flight_request_bytes, 0);
+            assert_eq!(harness.progress_requests.snapshot().in_flight_requests, 0);
+            assert_eq!(
+                harness.progress_requests.snapshot().in_flight_request_bytes,
+                0
+            );
+            assert_eq!(
+                vm_a.snapshot().lifecycle,
+                crate::ownership_coordinator::VmLifecyclePhase::Idle,
+            );
+            assert_eq!(
+                vm_b.snapshot().lifecycle,
+                crate::ownership_coordinator::VmLifecyclePhase::Idle,
             );
             finish_cleanly(&harness, engine_task).await;
         })
