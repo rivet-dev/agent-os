@@ -1,0 +1,49 @@
+Expose Tokio's normal evented networking surface on agentOS. Mio remains on its
+WASIp1 poll_oneoff backend, while its socket constructors use the real agentOS
+libc/host_net implementation; therefore the stock-WASI API exclusion is not a
+valid capability test here.
+
+--- a/src/macros/cfg.rs
++++ b/src/macros/cfg.rs
+@@ -374,7 +374,7 @@ macro_rules! cfg_net_unix {
+     ($($item:item)*) => {
+         $(
+-            #[cfg(all(unix, feature = "net"))]
+-            #[cfg_attr(docsrs, doc(cfg(all(unix, feature = "net"))))]
++            #[cfg(all(any(unix, target_os = "wasi"), feature = "net"))]
++            #[cfg_attr(docsrs, doc(cfg(all(any(unix, target_os = "wasi"), feature = "net"))))]
+             $item
+         )*
+     }
+@@ -704,12 +704,7 @@
+ }
+ 
+ macro_rules! cfg_not_wasip1 {
+-    ($($item:item)*) => {
+-        $(
+-            #[cfg(not(all(target_os = "wasi", target_env = "p1")))]
+-            $item
+-        )*
+-    }
++    ($($item:item)*) => { $($item)* }
+ }
+ 
+ macro_rules! cfg_is_wasm_not_wasi {
+--- a/src/runtime/io/registration.rs
++++ b/src/runtime/io/registration.rs
+@@ -119,7 +119,6 @@ impl Registration {
+ 
+     // Uses the poll path, requiring the caller to ensure mutual exclusion for
+     // correctness. Only the last task to call this function is notified.
+-    #[cfg(not(all(target_os = "wasi", target_env = "p1")))]
+     pub(crate) fn poll_read_io<R>(
+         &self,
+         cx: &mut Context<'_>,
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -913,4 +913,4 @@
+-[target.'cfg(any(not(target_family = "wasm"), all(target_os = "wasi", not(target_env = "p1"))))'.dependencies.socket2]
++[target.'cfg(any(not(target_family = "wasm"), target_os = "wasi"))'.dependencies.socket2]
+ version = "0.6.3"
+ features = ["all"]
+ optional = true

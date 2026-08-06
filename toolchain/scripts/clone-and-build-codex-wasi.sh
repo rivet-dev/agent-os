@@ -9,9 +9,10 @@
 #
 #   1. Read the pin from toolchain/codex-ref ("<owner>/<repo>@<sha>").
 #   2. Shallow-clone the fork at that exact SHA into a gitignored scratch dir.
-#   3. Rewrite the clone's [patch.crates-io] to point at the toolchain's reproducible
-#      stubs (toolchain/stubs/{reqwest-shim,portable-pty-wasi,ctrlc}); drop tokio's
-#      machine-path patch so tokio 1.52.3 comes through the vendored+patched tree.
+#   3. Rewrite the clone's existing local development overrides to the
+#      reproducible agentOS adapters, while keeping real AWS authentication and
+#      the Codex network-policy crate. Drop tokio's machine-path patch so the
+#      locked Tokio release comes through the vendored+patched tree.
 #   4. Strip the hardcoded `-L .../self-contained` from the clone's .cargo/config.toml
 #      (that absolute rustup path is machine-specific; it is recomputed and passed via
 #      RUSTFLAGS at build time instead).
@@ -116,24 +117,28 @@ grep -q 'Config::load_default_with_cli_overrides' \
 }
 printf '%s\n' "$EXPECTED_STAMP" > "$STAMP"
 
-# --- 3. rewrite [patch.crates-io] -> reproducible toolchain stubs ------------
-echo "== rewriting [patch.crates-io] -> toolchain/stubs/* =="
+# --- 3. rewrite local fork overrides to reproducible agentOS adapters --------
+echo "== rewriting local Codex overrides -> reproducible agentOS adapters =="
 python3 - "$WORKSPACE/Cargo.toml" "$STUBS" <<'PY'
 import re, sys
 cargo, stubs = sys.argv[1], sys.argv[2]
 lines = open(cargo).read().split('\n')
-# Crates whose patch we own: reqwest/portable-pty/ctrlc get repointed at the
-# reproducible toolchain stubs; tokio's patch is dropped so tokio 1.52.3 resolves
-# through the vendored+patched sources (std-patches/crates/tokio/0001).
+# Remove the fork developer's machine-local paths. reqwest is the trusted
+# sidecar HTTP boundary. portable-pty is a thin adapter over agentOS's real
+# POSIX PTY/process host imports. The stale ctrlc path override is removed;
+# this build does not depend on ctrlc. Tokio resolves through vendored+patched
+# sources.
 OWNED = ('portable-pty', 'reqwest', 'ctrlc', 'tokio')
 owned_re = re.compile(r'^\s*#?\s*(?:%s)\s*=' % '|'.join(map(re.escape, OWNED)))
 inject = [
-    '# [patch.crates-io] injected by clone-and-build-codex-wasi.sh (reproducible stubs)',
+    '# [patch.crates-io] injected by clone-and-build-codex-wasi.sh',
     'portable-pty = {{ path = "{}/portable-pty-wasi" }}'.format(stubs),
     'reqwest = {{ path = "{}/reqwest-shim" }}'.format(stubs),
-    'ctrlc = {{ path = "{}/ctrlc" }}'.format(stubs),
-    '# tokio: vendored+patched tokio 1.52.3 (std-patches/crates/tokio), not a path patch',
+    '# tokio: vendored and patched from the pinned lockfile, not a path patch',
 ]
+injected_comment_re = re.compile(
+    r'^# (?:\[patch\.crates-io\] injected by clone-and-build-codex-wasi\.sh|tokio: vendored)'
+)
 in_patch = False
 injected = False
 out = []
@@ -147,11 +152,22 @@ for ln in lines:
         continue
     if in_patch and owned_re.match(ln):  # drop any prior line for an owned crate
         continue
+    if in_patch and injected_comment_re.match(ln):
+        continue
     out.append(ln)
 if not injected:                         # no [patch.crates-io] in the fork: add one
     out += ['', '[patch.crates-io]'] + inject
 open(cargo, 'w').write('\n'.join(out))
 PY
+grep -Fq 'codex-network-proxy = { path = "network-proxy" }' "$WORKSPACE/Cargo.toml" || {
+	echo "ERROR: Codex must use its pinned network-proxy policy/config crate" >&2
+	exit 1
+}
+grep -Fq "proxy execution and network policy are owned by the trusted agentOS sidecar" \
+	"$WORKSPACE/network-proxy/src/proxy.rs" || {
+	echo "ERROR: Codex's agentOS proxy boundary must fail explicitly" >&2
+	exit 1
+}
 echo "   --- resulting [patch.crates-io] head ---"
 sed -n '/^\[patch.crates-io\]/,/^\[/p' "$WORKSPACE/Cargo.toml" | sed 's/^/   /'
 
@@ -202,19 +218,46 @@ echo "== applying toolchain/std-patches/crates/* to vendored sources =="
 VENDOR_DIR="$WORKSPACE/vendor" "$SCRIPT_DIR/patch-vendor.sh" || \
 	echo "   (patch-vendor reported failures; verifying codex-critical patches below)"
 
+# `cargo vendor --sync` can retain a second libc release for build-std. The
+# generic patcher selects the unversioned application copy, so apply the same
+# agentOS ABI declarations to every versioned libc source Cargo may compile.
+for libc_dir in "$WORKSPACE/vendor"/libc-*; do
+	[ -d "$libc_dir" ] || continue
+	libc_patch="$TOOLCHAIN_DIR/std-patches/crates/libc/0001-wasip1-socket-bindings.patch"
+	if patch --dry-run -p1 -d "$libc_dir" < "$libc_patch" >/dev/null 2>&1; then
+		patch -p1 -d "$libc_dir" < "$libc_patch" >/dev/null
+	elif ! patch --dry-run -R -p1 -d "$libc_dir" < "$libc_patch" >/dev/null 2>&1; then
+		echo "ERROR: agentOS libc socket bindings do not apply to $libc_dir" >&2
+		exit 1
+	fi
+	python3 - "$libc_dir/.cargo-checksum.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as source:
+    checksum = json.load(source)
+checksum["files"] = {}
+with open(path, "w") as output:
+    json.dump(checksum, output)
+PY
+done
+
 echo "== verifying codex-critical crate patches applied =="
 assert_patched() {  # <file> <needle> <label>
-	if grep -q -- "$2" "$1" 2>/dev/null; then
+	if grep -Fq -- "$2" "$1" 2>/dev/null; then
 		echo "   OK: $3"
 	else
 		echo "ERROR: required patch missing: $3 ($1)" >&2
 		exit 1
 	fi
 }
-assert_patched "$WORKSPACE/vendor/path-dedot/src/lib.rs" \
-	'cfg(any(unix, target_family = "wasm"))' 'path-dedot wasi unix-paths'
+if [ -f "$WORKSPACE/vendor/path-dedot/src/lib.rs" ]; then
+	assert_patched "$WORKSPACE/vendor/path-dedot/src/lib.rs" \
+		'cfg(any(unix, target_family = "wasm"))' 'path-dedot wasi unix-paths'
+else
+	echo "   SKIP: path-dedot is not in the pinned Codex dependency graph"
+fi
 assert_patched "$WORKSPACE/vendor/rustls-native-certs/src/lib.rs" \
-	'target_os = "wasi"' 'rustls-native-certs wasi empty-certs'
+	'/etc/ssl/certs/ca-certificates.crt' 'rustls-native-certs loads the agentOS VM trust store'
 assert_patched "$WORKSPACE/vendor/tokio/src/process/mod.rs" \
 	'path = "wasi.rs"' 'tokio wasi-process routing'
 [ -f "$WORKSPACE/vendor/tokio/src/process/wasi.rs" ] || {
@@ -224,6 +267,26 @@ assert_patched "$WORKSPACE/vendor/tokio/src/fs/mod.rs" \
 	'cfg(not(target_os = "wasi"))' 'tokio wasi filesystem operations run inline'
 assert_patched "$WORKSPACE/vendor/tokio/src/runtime/blocking/pool.rs" \
 	'let result = func();' 'tokio wasi spawn_blocking runs inline'
+assert_patched "$WORKSPACE/vendor/gix-fs/src/capabilities.rs" \
+	'executable_bit: true' 'gix-fs probes real executable modes'
+assert_patched "$WORKSPACE/vendor/gix-fs/src/symlink.rs" \
+	'std::os::wasi::fs::symlink_path' 'gix-fs creates real symlinks'
+assert_patched "$WORKSPACE/vendor/mio/src/sys/wasip1/mod.rs" \
+	'libc::socket' 'mio uses agentOS POSIX sockets'
+assert_patched "$WORKSPACE/vendor/mio/src/net/mod.rs" \
+	'cfg(any(unix, target_os = "wasi"))' 'mio exposes agentOS Unix-domain sockets'
+assert_patched "$WORKSPACE/vendor/mio/src/sys/wasip1/mod.rs" \
+	'pub(crate) mod uds;' 'mio routes Unix-domain sockets to agentOS libc'
+assert_patched "$WORKSPACE/vendor/socket2/src/lib.rs" \
+	'pub const UNIX: Domain = Domain(sys::AF_UNIX);' 'socket2 exposes AF_UNIX on agentOS'
+assert_patched "$WORKSPACE/vendor/tokio/src/macros/cfg.rs" \
+	'($($item:item)*) => { $($item)* }' 'tokio exposes evented networking'
+assert_patched "$WORKSPACE/vendor/tokio/src/net/unix/mod.rs" \
+	'pub mod pipe;' 'tokio exposes agentOS Unix sockets and pipes'
+assert_patched "$WORKSPACE/vendor/tokio/src/runtime/io/registration.rs" \
+	'pub(crate) fn poll_read_io<R>' 'tokio exposes readiness-driven socket reads'
+assert_patched "$WORKSPACE/vendor/tokio/Cargo.toml" \
+	'cfg(any(not(target_family = "wasm"), target_os = "wasi"))' 'tokio links socket2 on agentOS'
 
 if [ "$STOP_AFTER" = "vendor" ]; then
 	echo ""
@@ -231,12 +294,13 @@ if [ "$STOP_AFTER" = "vendor" ]; then
 	SELF_CONTAINED="$(rustc "+$TOOLCHAIN" --print sysroot)/lib/rustlib/wasm32-wasip1/lib/self-contained"
 	export CC_wasm32_wasip1="$WASI_SDK_DIR/bin/clang"
 	export AR_wasm32_wasip1="$WASI_SDK_DIR/bin/llvm-ar"
-	export CFLAGS_wasm32_wasip1="--sysroot=$WASI_SDK_DIR/share/wasi-sysroot -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PTHREAD -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_PROCESS_CLOCKS"
-	# Compile-check the crates whose wasi patches this script injects (path-dedot,
-	# rustls-native-certs, tokio) plus their reverse-deps, without the full link.
+	export CFLAGS_wasm32_wasip1="--sysroot=$TOOLCHAIN_DIR/c/sysroot -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PTHREAD -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_PROCESS_CLOCKS"
+	# Compile-check the crates whose WASI patches this script injects plus their
+	# reverse-dependencies, without the full link. path-dedot is no longer in the
+	# pinned Codex dependency graph.
 	RUSTFLAGS="-C link-arg=-L$SELF_CONTAINED --cfg tokio_unstable" \
 		cargo "+$TOOLCHAIN" build --target wasm32-wasip1 -Z build-std \
-		-p path-dedot -p rustls-native-certs -p tokio
+		-p rustls-native-certs -p tokio -p tonic
 	echo "== vendor/patch frontier OK =="
 	exit 0
 fi
@@ -257,6 +321,7 @@ INSTALL=0 \
 TOOLCHAIN="$TOOLCHAIN" \
 KEEP_SYSROOT="${KEEP_SYSROOT:-0}" \
 WASI_SDK_DIR="$WASI_SDK_DIR" \
+AGENTOS_C_SYSROOT="$TOOLCHAIN_DIR/c/sysroot" \
 RUSTFLAGS="-C link-self-contained=no -C link-arg=$AGENTOS_WASI_LIBDIR/crt1-command.o -C link-arg=$AGENTOS_WASI_LIBDIR/libc.a -C link-arg=$AGENTOS_WASI_LIBDIR/libwasi-emulated-pthread.a -C link-arg=-L$AGENTOS_WASI_LIBDIR -C metadata=agentos-libc-$LIBC_DIGEST --cfg tokio_unstable" \
 	"$BUILD_SCRIPT"
 

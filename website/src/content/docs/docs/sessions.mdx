@@ -39,12 +39,26 @@ Input fields: `agent`, `cwd`, `additionalDirectories`, `env`, `mcpServers`,
 - Configure local child-process or remote servers **before** opening the
   session.
 - Config path and transports come from the selected agent adapter (e.g. Pi
-  reads `.mcp.json` from its AgentOS home).
+  reads `.mcp.json` from its agentOS home).
 - Install local MCP server packages before opening the session so first-run
   package-manager output can't corrupt a stdio handshake.
 - See the [agent guide](/docs/agents/pi) for adapter specifics.
 
 <CodeSnippet file="examples/pi/client.ts" region="mcp" />
+
+## Agent Plugins
+
+[Agent Plugins](https://agent-plugins.org/) are portable bundles of skills and
+optional MCP servers described by a root `plugin.json`. agentOS leaves plugin
+loading to the session's agent harness: install the bundle in that client's VM
+location before opening the session. This lets the same bundle work with other
+[compatible clients](https://agent-plugins.org/compatible-clients) without an
+agentOS-specific plugin format.
+
+This example installs and enables a small Agent Plugin for Codex, then invokes
+its namespaced skill:
+
+<CodeSnippet file="examples/codex/client.ts" region="agent-plugins" />
 
 ## Prompt
 

@@ -8,6 +8,7 @@ use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::OsStrExt;
 #[cfg(unix)]
 use std::path::Component;
+#[cfg(unix)]
 use std::path::Path;
 
 /// Used to deal with Windows having case-insensitive environment variables.
@@ -72,6 +73,7 @@ fn get_shell() -> String {
 }
 
 fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
+    #[allow(unused_mut)]
     let mut env: BTreeMap<OsString, EnvEntry> = std::env::vars_os()
         .map(|(key, value)| {
             (
@@ -386,6 +388,18 @@ impl CommandBuilder {
                 let value = value.to_str()?;
                 Some((key, value))
             },
+        )
+    }
+
+    /// Iterate over the complete environment without discarding non-UTF-8
+    /// values. The agentOS process ABI accepts byte strings, just like POSIX.
+    pub(crate) fn iter_full_env(&self) -> impl Iterator<Item = (&OsStr, &OsStr)> {
+        self.envs.values().map(
+            |EnvEntry {
+                 preferred_key,
+                 value,
+                 ..
+             }| (preferred_key.as_os_str(), value.as_os_str()),
         )
     }
 

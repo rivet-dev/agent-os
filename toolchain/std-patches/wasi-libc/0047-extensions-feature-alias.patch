@@ -1,0 +1,16 @@
+Expose the owned POSIX surface to C projects that request the conventional
+__EXTENSIONS__ feature set. AWS-LC uses this spelling with strict C11; treating
+it like musl's _ALL_SOURCE selects declarations for real agentOS operations
+rather than requiring an application-specific source patch.
+
+--- a/libc-top-half/musl/include/features.h
++++ b/libc-top-half/musl/include/features.h
+@@ -1,7 +1,7 @@
+ #ifndef _FEATURES_H
+ #define _FEATURES_H
+ 
+-#if defined(_ALL_SOURCE) && !defined(_GNU_SOURCE)
++#if (defined(_ALL_SOURCE) || defined(__EXTENSIONS__)) && !defined(_GNU_SOURCE)
+ #define _GNU_SOURCE 1
+ #endif
+ 

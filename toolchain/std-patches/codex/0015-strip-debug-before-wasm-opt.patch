@@ -1,0 +1,18 @@
+diff --git a/scripts/build-wasi-codex-exec.sh b/scripts/build-wasi-codex-exec.sh
+--- a/scripts/build-wasi-codex-exec.sh
++++ b/scripts/build-wasi-codex-exec.sh
+@@ -107,7 +107,13 @@ echo "== built: $(stat -c%s "$RAW") bytes =="
+ 
+ OUT="$REPO_DIR/target/wasm32-wasip1/release/codex-exec.opt.wasm"
+ if command -v wasm-opt >/dev/null 2>&1; then
+-	wasm-opt --all-features -O2 "$RAW" -o "$OUT"
++	# Binaryen 128 cannot parse the DWARF line opcodes emitted by this nightly.
++	# Strip debug sections with the matching wasi-sdk LLVM tool before optimizing;
++	# this does not change guest behavior or agentOS capabilities.
++	STRIPPED="${RAW%.wasm}.stripped.wasm"
++	"$WASI_SDK_DIR/bin/llvm-strip" --strip-debug -o "$STRIPPED" "$RAW"
++	wasm-opt --all-features -O2 "$STRIPPED" -o "$OUT"
++	rm -f "$STRIPPED"
+ else
+ 	echo "wasm-opt not found — shipping unoptimized"; cp "$RAW" "$OUT"
+ fi

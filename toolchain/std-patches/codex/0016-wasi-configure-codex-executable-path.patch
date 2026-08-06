@@ -1,0 +1,15 @@
+diff --git a/exec/src/session_turn_wasi.rs b/exec/src/session_turn_wasi.rs
+--- a/exec/src/session_turn_wasi.rs
++++ b/exec/src/session_turn_wasi.rs
+@@ -158,6 +158,11 @@ async fn session_turn() -> anyhow::Result<()> {
+     config.cwd = std::path::PathBuf::from(cwd)
+         .try_into()
+         .context("cwd must be absolute")?;
++    // The native CLI derives this from argv0 dispatch. The agentOS WASM entrypoint
++    // bypasses that CLI, so identify the same executable by its stable projected
++    // package path before constructing upstream's exec-server runtime paths.
++    config.codex_self_exe =
++        Some(std::path::PathBuf::from("/opt/agentos/bin/codex-exec"));
+ 
+     let auth_manager =
+         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ true).await;

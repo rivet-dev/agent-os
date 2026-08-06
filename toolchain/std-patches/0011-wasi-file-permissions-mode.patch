@@ -1,6 +1,9 @@
+Expose the real POSIX mode APIs backed by agentOS's owned filesystem metadata
+and chmod/open-mode host imports.
+
 --- a/library/std/src/sys/fs/unix.rs
 +++ b/library/std/src/sys/fs/unix.rs
-@@ -778,7 +778,6 @@ impl FilePermissions {
+@@ -781,7 +781,6 @@
              self.mode |= 0o222;
          }
      }
@@ -8,3 +11,66 @@
      pub fn mode(&self) -> u32 {
          self.mode as u32
      }
+@@ -1281,7 +1280,6 @@
+     pub fn custom_flags(&mut self, flags: i32) {
+         self.custom_flags = flags;
+     }
+-    #[cfg(not(target_os = "wasi"))]
+     pub fn mode(&mut self, mode: u32) {
+         self.mode = mode as mode_t;
+     }
+--- a/library/std/src/os/wasi/fs.rs
++++ b/library/std/src/os/wasi/fs.rs
+@@ -15,7 +15,7 @@
+ use crate::path::Path;
+ #[cfg(target_env = "p1")]
+ use crate::sys::err2io;
+-use crate::sys::{AsInner, AsInnerMut};
++use crate::sys::{AsInner, AsInnerMut, FromInner};
+ 
+ /// WASI-specific extensions to [`File`].
+ pub trait FileExt {
+@@ -305,11 +305,18 @@
+ 
+ /// WASI-specific extensions to [`OpenOptions`].
+ pub trait OpenOptionsExt {
++    /// Sets the POSIX mode used when a new file is created.
++    fn mode(&mut self, mode: u32) -> &mut Self;
+     /// Pass custom flags to the `flags` argument of `open`.
+     fn custom_flags(&mut self, flags: i32) -> &mut Self;
+ }
+ 
+ impl OpenOptionsExt for OpenOptions {
++    fn mode(&mut self, mode: u32) -> &mut OpenOptions {
++        self.as_inner_mut().mode(mode);
++        self
++    }
++
+     fn custom_flags(&mut self, flags: i32) -> &mut OpenOptions {
+         self.as_inner_mut().custom_flags(flags);
+         self
+@@ -320,12 +327,24 @@
+ pub trait PermissionsExt {
+     /// Returns the underlying POSIX mode bits.
+     fn mode(&self) -> u32;
++    /// Replaces the underlying POSIX mode bits.
++    fn set_mode(&mut self, mode: u32);
++    /// Creates permissions from POSIX mode bits.
++    fn from_mode(mode: u32) -> Self;
+ }
+ 
+ impl PermissionsExt for fs::Permissions {
+     fn mode(&self) -> u32 {
+         self.as_inner().mode()
+     }
++
++    fn set_mode(&mut self, mode: u32) {
++        *self = fs::Permissions::from_inner(crate::sys::FromInner::from_inner(mode));
++    }
++
++    fn from_mode(mode: u32) -> fs::Permissions {
++        fs::Permissions::from_inner(crate::sys::FromInner::from_inner(mode))
++    }
+ }
+ 
+ /// WASI-specific extensions to [`fs::Metadata`].

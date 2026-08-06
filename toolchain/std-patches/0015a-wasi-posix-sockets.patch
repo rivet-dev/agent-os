@@ -1,0 +1,120 @@
+Route wasm32-wasip1 through Rust std's libc-backed socket implementation.
+agentOS supplies the POSIX socket, DNS, option, and poll functions through its
+owned libc and host_net imports, so the stock WASIp1 Unsupported implementation
+is the wrong backend for this sysroot.
+
+--- a/library/std/src/os/mod.rs
++++ b/library/std/src/os/mod.rs
+@@ -85,6 +85,16 @@ pub mod darwin;
+ pub mod unix;
+ 
++// agentOS exposes the supported Unix API names over its WASI/POSIX surface.
++#[cfg(target_os = "wasi")]
++#[stable(feature = "rust1", since = "1.0.0")]
++pub mod unix {
++    #[stable(feature = "rust1", since = "1.0.0")]
++    pub use crate::os::wasi::{ffi, fs, io, net};
++}
++
+ // linux
+ #[cfg(not(all(
+     doc,
+--- a/library/std/src/os/wasi/net/mod.rs
++++ b/library/std/src/os/wasi/net/mod.rs
+@@ -1,6 +1,24 @@
+ //! WASI-specific networking functionality
+ 
+ #![unstable(feature = "wasi_ext", issue = "71213")]
+ 
++#[path = "../../unix/net/addr.rs"]
++mod addr;
++#[path = "../../unix/net/datagram.rs"]
++mod datagram;
++#[path = "../../unix/net/listener.rs"]
++mod listener;
++#[path = "../../unix/net/stream.rs"]
++mod stream;
++
++#[stable(feature = "unix_socket", since = "1.10.0")]
++pub use self::addr::*;
++#[stable(feature = "unix_socket", since = "1.10.0")]
++pub use self::datagram::*;
++#[stable(feature = "unix_socket", since = "1.10.0")]
++pub use self::listener::*;
++#[stable(feature = "unix_socket", since = "1.10.0")]
++pub use self::stream::*;
++
+ use crate::os::fd::AsRawFd;
+ use crate::sys::err2io;
+ use crate::{io, net};
+--- a/library/std/src/os/unix/net/addr.rs
++++ b/library/std/src/os/unix/net/addr.rs
+@@ -9,7 +9,7 @@ use crate::sealed::Sealed;
+ use crate::sys::cvt;
+ use crate::{fmt, io, mem, ptr};
+ 
+-#[cfg(not(unix))]
++#[cfg(not(any(unix, target_os = "wasi")))]
+ #[allow(non_camel_case_types)]
+ mod libc {
+--- a/library/std/src/sys/net/connection/mod.rs
++++ b/library/std/src/sys/net/connection/mod.rs
+@@ -3,8 +3,8 @@ cfg_select! {
+     any(
+         all(target_family = "unix", not(target_os = "l4re")),
+         target_os = "windows",
+         target_os = "hermit",
+-        all(target_os = "wasi", any(target_env = "p2", target_env = "p3")),
++        target_os = "wasi",
+         target_os = "solid_asp3",
+     ) => {
+         mod socket;
+@@ -13,10 +13,6 @@ cfg_select! {
+         mod sgx;
+         pub use sgx::*;
+     }
+-    all(target_os = "wasi", target_env = "p1") => {
+-        mod wasip1;
+-        pub use wasip1::*;
+-    }
+     target_os = "motor" => {
+         mod motor;
+         pub use motor::*;
+--- a/library/std/src/sys/net/connection/socket/unix.rs
++++ b/library/std/src/sys/net/connection/socket/unix.rs
+@@ -7,7 +7,10 @@
+ use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd};
+ use crate::sys::fd::FileDesc;
+ use crate::sys::net::{getsockopt, setsockopt};
+-use crate::sys::pal::IsMinusOne;
++#[cfg(not(target_os = "wasi"))]
++use crate::sys::pal::IsMinusOne;
++#[cfg(target_os = "wasi")]
++use crate::sys::os::IsMinusOne;
+ use crate::sys::{AsInner, FromInner, IntoInner};
+ use crate::time::{Duration, Instant};
+ use crate::{cmp, mem};
+@@ -111,7 +114,6 @@ impl Socket {
+         }
+     }
+ 
+-    #[cfg(not(any(target_os = "vxworks", target_os = "wasi")))]
+     pub fn new_pair(fam: c_int, ty: c_int) -> io::Result<(Socket, Socket)> {
+         unsafe {
+             let mut fds = [0, 0];
+@@ -275,7 +275,6 @@ impl Socket {
+         }
+     }
+ 
+-    #[cfg(not(target_os = "wasi"))]
+     pub fn send_with_flags(&self, buf: &[u8], flags: c_int) -> io::Result<usize> {
+         let len = cmp::min(buf.len(), <wrlen_t>::MAX as usize) as wrlen_t;
+         let ret = cvt(unsafe {
+@@ -363,7 +362,6 @@ impl Socket {
+         self.0.read_vectored(bufs)
+     }
+ 
+-    #[cfg(not(target_os = "wasi"))]
+     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
+         self.0.write(buf)
+     }

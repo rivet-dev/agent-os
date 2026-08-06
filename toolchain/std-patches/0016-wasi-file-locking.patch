@@ -1,0 +1,149 @@
+--- a/library/std/src/sys/fs/unix.rs
++++ b/library/std/src/sys/fs/unix.rs
+@@ -99,6 +99,34 @@ mod host_fs {
+     }
+ }
+ 
++#[cfg(target_os = "wasi")]
++mod host_process {
++    #[link(wasm_import_module = "host_process")]
++    unsafe extern "C" {
++        pub fn fd_flock(fd: u32, operation: u32) -> u32;
++    }
++}
++
++#[cfg(target_os = "wasi")]
++fn agentos_flock(fd: c_int, operation: u32) -> io::Result<()> {
++    // SAFETY: fd_flock accepts a guest fd plus the standard LOCK_* bitmask.
++    let errno = unsafe { host_process::fd_flock(fd as u32, operation) };
++    if errno == 0 {
++        Ok(())
++    } else {
++        Err(io::Error::from_raw_os_error(errno as i32))
++    }
++}
++
++#[cfg(target_os = "wasi")]
++const LOCK_SH: u32 = 1;
++#[cfg(target_os = "wasi")]
++const LOCK_EX: u32 = 2;
++#[cfg(target_os = "wasi")]
++const LOCK_NB: u32 = 4;
++#[cfg(target_os = "wasi")]
++const LOCK_UN: u32 = 8;
++
+ #[cfg(target_os = "wasi")]
+ const AGENTOS_HIDDEN_PREOPEN_FD: u32 = 0x40000003;
+ #[cfg(target_os = "wasi")]
+@@ -1480,6 +1502,11 @@ impl File {
+         return Ok(());
+     }
+ 
++    #[cfg(target_os = "wasi")]
++    pub fn lock(&self) -> io::Result<()> {
++        agentos_flock(self.as_raw_fd(), LOCK_EX)
++    }
++
+     #[cfg(target_os = "solaris")]
+     pub fn lock(&self) -> io::Result<()> {
+         let mut flock: libc::flock = unsafe { mem::zeroed() };
+@@ -1500,6 +1527,7 @@ impl File {
+         target_os = "illumos",
+         target_os = "aix",
+         target_vendor = "apple",
++        target_os = "wasi",
+     )))]
+     pub fn lock(&self) -> io::Result<()> {
+         Err(io::const_error!(io::ErrorKind::Unsupported, "lock() not supported"))
+@@ -1522,6 +1550,11 @@ impl File {
+         return Ok(());
+     }
+ 
++    #[cfg(target_os = "wasi")]
++    pub fn lock_shared(&self) -> io::Result<()> {
++        agentos_flock(self.as_raw_fd(), LOCK_SH)
++    }
++
+     #[cfg(target_os = "solaris")]
+     pub fn lock_shared(&self) -> io::Result<()> {
+         let mut flock: libc::flock = unsafe { mem::zeroed() };
+@@ -1542,6 +1575,7 @@ impl File {
+         target_os = "illumos",
+         target_os = "aix",
+         target_vendor = "apple",
++        target_os = "wasi",
+     )))]
+     pub fn lock_shared(&self) -> io::Result<()> {
+         Err(io::const_error!(io::ErrorKind::Unsupported, "lock_shared() not supported"))
+@@ -1567,6 +1601,17 @@ impl File {
+         }
+     }
+ 
++    #[cfg(target_os = "wasi")]
++    pub fn try_lock(&self) -> Result<(), TryLockError> {
++        match agentos_flock(self.as_raw_fd(), LOCK_EX | LOCK_NB) {
++            Ok(()) => Ok(()),
++            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
++                Err(TryLockError::WouldBlock)
++            }
++            Err(error) => Err(TryLockError::Error(error)),
++        }
++    }
++
+     #[cfg(target_os = "solaris")]
+     pub fn try_lock(&self) -> Result<(), TryLockError> {
+         let mut flock: libc::flock = unsafe { mem::zeroed() };
+@@ -1597,6 +1645,7 @@ impl File {
+         target_os = "illumos",
+         target_os = "aix",
+         target_vendor = "apple",
++        target_os = "wasi",
+     )))]
+     pub fn try_lock(&self) -> Result<(), TryLockError> {
+         Err(TryLockError::Error(io::const_error!(
+@@ -1628,6 +1677,17 @@ impl File {
+         }
+     }
+ 
++    #[cfg(target_os = "wasi")]
++    pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
++        match agentos_flock(self.as_raw_fd(), LOCK_SH | LOCK_NB) {
++            Ok(()) => Ok(()),
++            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
++                Err(TryLockError::WouldBlock)
++            }
++            Err(error) => Err(TryLockError::Error(error)),
++        }
++    }
++
+     #[cfg(target_os = "solaris")]
+     pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
+         let mut flock: libc::flock = unsafe { mem::zeroed() };
+@@ -1658,6 +1721,7 @@ impl File {
+         target_os = "illumos",
+         target_os = "aix",
+         target_vendor = "apple",
++        target_os = "wasi",
+     )))]
+     pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
+         Err(TryLockError::Error(io::const_error!(
+@@ -1683,6 +1747,11 @@ impl File {
+         return Ok(());
+     }
+ 
++    #[cfg(target_os = "wasi")]
++    pub fn unlock(&self) -> io::Result<()> {
++        agentos_flock(self.as_raw_fd(), LOCK_UN)
++    }
++
+     #[cfg(target_os = "solaris")]
+     pub fn unlock(&self) -> io::Result<()> {
+         let mut flock: libc::flock = unsafe { mem::zeroed() };
+@@ -1703,6 +1772,7 @@ impl File {
+         target_os = "illumos",
+         target_os = "aix",
+         target_vendor = "apple",
++        target_os = "wasi",
+     )))]
+     pub fn unlock(&self) -> io::Result<()> {
+         Err(io::const_error!(io::ErrorKind::Unsupported, "unlock() not supported"))

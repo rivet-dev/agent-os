@@ -59,7 +59,9 @@ Write commit messages in the imperative mood and keep the subject under 50 chara
 async function withMcp() {
 	// Pre-install the MCP server so `npx` is silent — first-run install output
 	// would otherwise corrupt the MCP stdio handshake ("Connection closed").
-	await agent.process.exec("npm install -g @modelcontextprotocol/server-filesystem");
+	await agent.process.exec(
+		"npm install -g @modelcontextprotocol/server-filesystem",
+	);
 
 	const config = `[mcp_servers.filesystem]
 command = "npx"
@@ -79,6 +81,62 @@ http_headers = { Authorization = "Bearer my-token" }
 }
 // docs:end mcp
 
+// docs:start agent-plugins
+// ── Agent Plugins ─────────────────────────────────────────────────
+//
+// Install a portable Agent Plugin into Codex's cache before opening the
+// session. Other compatible clients use their own installation locations.
+async function withAgentPlugin() {
+	const pluginRoot =
+		"/home/agentos/.codex/plugins/cache/local/release-workflow/1.0.0";
+	await agent.filesystem.mkdir(`${pluginRoot}/.codex-plugin`);
+	await agent.filesystem.mkdir(`${pluginRoot}/skills/release-notes`);
+
+	await agent.filesystem.writeFile(
+		`${pluginRoot}/.codex-plugin/plugin.json`,
+		JSON.stringify({
+			$schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+			name: "release-workflow",
+			version: "1.0.0",
+			description: "Project release workflow",
+		}),
+	);
+	await agent.filesystem.writeFile(
+		`${pluginRoot}/skills/release-notes/SKILL.md`,
+		`---
+name: release-notes
+description: Write release notes for this project.
+---
+
+Summarize user-visible changes under Added, Changed, and Fixed.
+`,
+	);
+
+	await agent.filesystem.writeFile(
+		"/home/agentos/.codex/config.toml",
+		`[features]
+plugins = true
+
+[plugins."release-workflow@local"]
+enabled = true
+`,
+	);
+
+	await agent.sessions.open({
+		agent: "codex",
+		env: { OPENAI_API_KEY: process.env.OPENAI_API_KEY! },
+	});
+	await agent.sessions.prompt({
+		content: [
+			{
+				type: "text",
+				text: "Use $release-workflow:release-notes for the current changes.",
+			},
+		],
+	});
+}
+// docs:end agent-plugins
+
 // ── Skills + MCP together ─────────────────────────────────────────
 async function withSkillAndMcp() {
 	const skill = `---
@@ -97,7 +155,9 @@ Write commit messages in the imperative mood and keep the subject under 50 chara
 
 	// Pre-install the MCP server so `npx` is silent — first-run install output
 	// would otherwise corrupt the MCP stdio handshake ("Connection closed").
-	await agent.process.exec("npm install -g @modelcontextprotocol/server-filesystem");
+	await agent.process.exec(
+		"npm install -g @modelcontextprotocol/server-filesystem",
+	);
 
 	const config = `[mcp_servers.filesystem]
 command = "npx"
@@ -122,4 +182,4 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/agentos"]
 	console.log(result.message?.content ?? []);
 }
 
-export { quickStart, withSkill, withMcp, withSkillAndMcp };
+export { quickStart, withAgentPlugin, withMcp, withSkill, withSkillAndMcp };

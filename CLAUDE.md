@@ -151,11 +151,35 @@ gawk, real curl/sqlite/duckdb/vim, …) compiled to `wasm32-wasip1` against a
 custom host-syscall imports. Treat that target as **native POSIX**;
 `wasm32-wasip1` is an implementation detail, not a feature ceiling.
 
+### `wasm32-wasip1` capability rule
+
+- **Never use `target_os = "wasi"` as evidence that a POSIX capability is
+  absent.** In agentOS it does not imply missing symlinks, executable modes,
+  TCP/UDP/Unix sockets, processes, signals, polling, or other Linux behavior.
+- When an upstream Rust crate hides a supported API behind `cfg(unix)`, expose
+  the same behavior through the corresponding `std::os::wasi` or libc API. A
+  crate or Codex patch may adapt target-specific API names and cfg routing; it
+  must not replace working behavior with `Unsupported`, a no-op, a dummy
+  capability report, or a Windows fallback.
+- Fix a genuinely missing POSIX operation in this order: Rust std, agentOS
+  libc/sysroot, then the host import and kernel implementation. Do not make an
+  application compile by disabling the operation one layer above the gap.
+- A WASI stub is allowed only for a genuinely host-native architectural
+  boundary, not for a missing syscall. Its source must state which trusted
+  agentOS component owns the behavior and why the guest implementation must not
+  run. For example, guest HTTP uses the sidecar-brokered HTTP transport because
+  the sidecar owns network policy; that does not mean guest TCP sockets are
+  unsupported.
+- Before accepting a new WASI patch or stub, audit every error path and cfg for
+  capability loss. Compilation alone is not validation: add or run a guest
+  behavior test for each POSIX surface the patch exposes.
+
 - **We do not depend on stock WASI / wasi-libc.** The sysroot is ours. A missing
   libc/POSIX API (`getrlimit`/`RLIMIT_NOFILE`, `getgroups`, spawn, fd dup, …) is
-  never a blocker — implement it (real, or a sane stub) in the patched
+  never a blocker — implement the real operation in the patched
   std/libc/host-import layer. "WASI doesn't have X" is not a reason to stop; X is
-  ours to add.
+  ours to add. Do not substitute a success-returning stub, hard-coded value, or
+  target-level omission for a syscall agentOS can implement.
 - **Fix portability one layer down, in the sysroot** — a new std/libc patch or a
   new host import — not with `cfg(target_*)` branches or shims in the tool's own
   source. A WASM-specific branch in application code usually means the fix

@@ -1,0 +1,39 @@
+Expose Tokio's Unix-domain socket API through agentOS's real Unix socket
+implementation. SO_PEERCRED is a Linux-specific extension rather than POSIX,
+so its target-specific API name remains absent until agentOS adds that option.
+
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -19,6 +19,7 @@
+ // Do not show "Available on non-loom only" label
+ #![cfg_attr(docsrs, doc(auto_cfg(hide(loom))))]
+ #![cfg_attr(docsrs, feature(doc_cfg))]
++#![cfg_attr(target_os = "wasi", feature(wasi_ext))]
+ #![cfg_attr(docsrs, allow(unused_attributes))]
+ #![cfg_attr(loom, allow(dead_code, unreachable_pub))]
+ #![cfg_attr(windows, allow(rustdoc::broken_intra_doc_links))]
+--- a/src/net/unix/mod.rs
++++ b/src/net/unix/mod.rs
+@@ -21,7 +21,9 @@
+ pub(crate) mod stream;
+ pub(crate) use stream::UnixStream;
+ 
++#[cfg(not(target_os = "wasi"))]
+ mod ucred;
++#[cfg(not(target_os = "wasi"))]
+ pub use ucred::UCred;
+ 
+ pub mod pipe;
+--- a/src/net/unix/stream.rs
++++ b/src/net/unix/stream.rs
+@@ -4,1 +4,2 @@
++#[cfg(not(target_os = "wasi"))]
+ use crate::net::unix::ucred::{self, UCred};
+@@ -964,6 +965,7 @@
+     }
+ 
+     /// Returns effective credentials of the process which called `connect` or `pair`.
++    #[cfg(not(target_os = "wasi"))]
+     pub fn peer_cred(&self) -> io::Result<UCred> {
+         ucred::get_peer_cred(self)
+     }

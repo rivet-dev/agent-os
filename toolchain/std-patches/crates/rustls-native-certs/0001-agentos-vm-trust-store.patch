@@ -1,0 +1,31 @@
+# rustls-native-certs 0.8.3 selects a per-OS `platform` module (unix/windows/macos)
+# for `load_native_certs()` and has no wasm/wasi arm. agentOS provisions the VM's
+# trust store at the conventional Linux path below, so load that real VFS file.
+# This is a target-specific API alias for existing agentOS POSIX behavior, not a
+# stock-WASI capability fallback.
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -43,6 +43,23 @@
+ #[cfg(target_os = "macos")]
+ use macos as platform;
+ 
++// agentOS provisions its VM trust store at this conventional Linux path.
++// wasm32-wasip1 needs only the target-specific rustls-native-certs adapter;
++// file access and certificate validation remain real guest behavior.
++#[cfg(target_os = "wasi")]
++mod platform {
++    use super::{CertPaths, CertificateResult};
++    use std::path::PathBuf;
++
++    pub fn load_native_certs() -> CertificateResult {
++        CertPaths {
++            file: Some(PathBuf::from("/etc/ssl/certs/ca-certificates.crt")),
++            dirs: Vec::new(),
++        }
++        .load()
++    }
++}
++
+ /// Load root certificates found in the platform's native certificate store.
+ ///
+ /// ## Environment Variables
