@@ -8647,7 +8647,26 @@ const hostProcessImport = {
           }
         },
         pty_open(retMasterFdPtr, retSlaveFdPtr) {
-          return WASI_ERRNO_FAULT;
+          let masterFd = null;
+          let slaveFd = null;
+          try {
+            if (!hasRunnerOpenFdCapacity(2)) return WASI_ERRNO_MFILE;
+            const result = callSyncRpc('process.pty_open');
+            masterFd = registerKernelDelegateFd(result?.masterFd);
+            slaveFd = registerKernelDelegateFd(result?.slaveFd);
+            if (masterFd == null || slaveFd == null) return WASI_ERRNO_FAULT;
+            if (writeGuestUint32(retMasterFdPtr, masterFd) !== WASI_ERRNO_SUCCESS
+              || writeGuestUint32(retSlaveFdPtr, slaveFd) !== WASI_ERRNO_SUCCESS) {
+              wasiImport.fd_close(masterFd);
+              wasiImport.fd_close(slaveFd);
+              return WASI_ERRNO_FAULT;
+            }
+            return WASI_ERRNO_SUCCESS;
+          } catch (error) {
+            if (masterFd != null) wasiImport.fd_close(masterFd);
+            if (slaveFd != null) wasiImport.fd_close(slaveFd);
+            return mapHostProcessError(error);
+          }
         },
         proc_sigaction(signal, action, maskLo, maskHi, flags) {
           if (permissionTier !== 'full') {
@@ -12371,6 +12390,16 @@ const hostTtyImport = {
     view.setUint16(colsPtr >>> 0, size.cols & 0xffff, true);
     view.setUint16(rowsPtr >>> 0, size.rows & 0xffff, true);
     return 0;
+  },
+  // Resize any kernel PTY descriptor and let the kernel deliver SIGWINCH to
+  // its foreground process group.
+  set_size(fd, cols, rows) {
+    try {
+      callSyncRpc('process.pty_resize', [fd >>> 0, cols >>> 0, rows >>> 0]);
+      return 0;
+    } catch (error) {
+      return mapHostProcessError(error);
+    }
   },
   // Toggle terminal raw mode on the guest's PTY. crossterm/pty_probe/vim call this
   // instead of tcsetattr; route it to the kernel so the guest gets raw keystrokes.

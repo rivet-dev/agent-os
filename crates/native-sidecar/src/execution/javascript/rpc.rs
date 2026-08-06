@@ -56,6 +56,8 @@ const ALLOWED_WASM_PROCESS_SYNC_RPCS: &[&str] = &[
     "process.waitpid_transition",
     "process.itimer_real",
     "process.fd_pipe",
+    "process.pty_open",
+    "process.pty_resize",
     "process.fd_open",
     "process.path_open_at",
     "process.path_mkdir_at",
@@ -968,6 +970,31 @@ where
             .open_pipe(EXECUTION_DRIVER_NAME, process.kernel_pid)
             .map(|(read_fd, write_fd)| json!({ "readFd": read_fd, "writeFd": write_fd }))
             .map_err(kernel_error),
+        "process.pty_open" => kernel
+            .open_pty(EXECUTION_DRIVER_NAME, process.kernel_pid)
+            .map(|(master_fd, slave_fd, path)| {
+                json!({ "masterFd": master_fd, "slaveFd": slave_fd, "path": path })
+            })
+            .map_err(kernel_error),
+        "process.pty_resize" => {
+            let fd = javascript_sync_rpc_arg_u32(&request.args, 0, "PTY fd")?;
+            let cols = u16::try_from(javascript_sync_rpc_arg_u32(
+                &request.args,
+                1,
+                "PTY columns",
+            )?)
+            .map_err(|_| SidecarError::InvalidState(String::from("EINVAL: PTY columns exceed u16")))?;
+            let rows = u16::try_from(javascript_sync_rpc_arg_u32(
+                &request.args,
+                2,
+                "PTY rows",
+            )?)
+            .map_err(|_| SidecarError::InvalidState(String::from("EINVAL: PTY rows exceed u16")))?;
+            kernel
+                .pty_resize(EXECUTION_DRIVER_NAME, process.kernel_pid, fd, cols, rows)
+                .map(|_| Value::Null)
+                .map_err(kernel_error)
+        }
         "process.fd_open" => {
             let path = javascript_sync_rpc_arg_str(&request.args, 0, "fd_open path")?;
             let flags = javascript_sync_rpc_arg_u32(&request.args, 1, "fd_open flags")?;

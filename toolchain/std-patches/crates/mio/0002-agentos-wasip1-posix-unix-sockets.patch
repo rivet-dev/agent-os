@@ -1,0 +1,179 @@
+Expose agentOS Unix-domain sockets, pipes, and raw descriptors through Mio's
+existing APIs. The WASIp1 selector remains in use; these modules call the real
+agentOS libc implementations and register their descriptors with poll_oneoff.
+
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -6,6 +6,7 @@
+     dead_code
+ )]
+ #![cfg_attr(docsrs, feature(doc_cfg))]
++#![cfg_attr(target_os = "wasi", feature(wasi_ext))]
+ // Disallow warnings when running tests.
+ #![cfg_attr(test, deny(warnings))]
+ // Disallow warnings in examples.
+@@ -72,8 +73,8 @@
+ #[cfg(not(target_os = "wasi"))]
+ pub use waker::Waker;
+ 
+-#[cfg(all(unix, feature = "os-ext"))]
+-#[cfg_attr(docsrs, doc(cfg(all(unix, feature = "os-ext"))))]
++#[cfg(all(any(unix, target_os = "wasi"), feature = "os-ext"))]
++#[cfg_attr(docsrs, doc(cfg(all(any(unix, target_os = "wasi"), feature = "os-ext"))))]
+ pub mod unix {
+     //! Unix only extensions.
+ 
+--- a/src/net/mod.rs
++++ b/src/net/mod.rs
+@@ -31,7 +31,7 @@
+ mod udp;
+ pub use self::udp::UdpSocket;
+ 
+-#[cfg(unix)]
++#[cfg(any(unix, target_os = "wasi"))]
+ mod uds;
+-#[cfg(unix)]
++#[cfg(any(unix, target_os = "wasi"))]
+ pub use self::uds::{UnixDatagram, UnixListener, UnixStream};
+--- a/src/sys/mod.rs
++++ b/src/sys/mod.rs
+@@ -70,7 +70,7 @@
+ #[cfg(all(target_os = "wasi", target_env = "p1"))]
+ cfg_os_poll! {
+     mod wasip1;
+-    pub(crate) use self::wasip1::*;
++    pub use self::wasip1::*;
+ }
+ 
+ cfg_not_os_poll! {
+--- a/src/sys/wasip1/mod.rs
++++ b/src/sys/wasip1/mod.rs
+@@ -20,10 +20,26 @@
+ use std::sync::{Arc, Mutex};
+ use std::time::Duration;
+ 
++macro_rules! syscall {
++    ($fn: ident ( $($arg: expr),* $(,)* ) ) => {{
++        let res = unsafe { libc::$fn($($arg, )*) };
++        if res < 0 {
++            Err(std::io::Error::last_os_error())
++        } else {
++            Ok(res)
++        }
++    }};
++}
++
+ #[cfg(feature = "net")]
+ use crate::{Interest, Token};
+ 
+ cfg_net! {
++    #[path = "../unix/net.rs"]
++    pub(crate) mod posix_net;
++    #[path = "../unix/uds/mod.rs"]
++    pub(crate) mod uds;
++
+     pub(crate) mod tcp {
+         use std::io;
+         use std::mem::size_of;
+@@ -160,6 +176,16 @@
+     }
+ }
+ 
++#[cfg(feature = "os-ext")]
++#[path = "../unix/pipe.rs"]
++pub(crate) mod pipe;
++
++#[cfg(feature = "os-ext")]
++#[path = "../unix/sourcefd.rs"]
++mod sourcefd;
++#[cfg(feature = "os-ext")]
++pub use sourcefd::SourceFd;
++
+ /// Unique id for use as `SelectorId`.
+ #[cfg(all(debug_assertions, feature = "net"))]
+ static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
+--- a/src/sys/unix/pipe.rs
++++ b/src/sys/unix/pipe.rs
+@@ -22,6 +22,7 @@
+         target_os = "solaris",
+         target_os = "vita",
+         target_os = "cygwin",
++        target_os = "wasi",
+     ))]
+     unsafe {
+         if libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) != 0 {
+--- a/src/sys/unix/sourcefd.rs
++++ b/src/sys/unix/sourcefd.rs
+@@ -109,7 +109,7 @@
+         token: Token,
+         interests: Interest,
+     ) -> io::Result<()> {
+-        registry.selector().register(*self.0, token, interests)
++        registry.selector().register(*self.0 as _, token, interests)
+     }
+ 
+     fn reregister(
+@@ -118,10 +118,10 @@
+         token: Token,
+         interests: Interest,
+     ) -> io::Result<()> {
+-        registry.selector().reregister(*self.0, token, interests)
++        registry.selector().reregister(*self.0 as _, token, interests)
+     }
+ 
+     fn deregister(&mut self, registry: &Registry) -> io::Result<()> {
+-        registry.selector().deregister(*self.0)
++        registry.selector().deregister(*self.0 as _)
+     }
+ }
+--- a/src/sys/unix/uds/datagram.rs
++++ b/src/sys/unix/uds/datagram.rs
+@@ -2,8 +2,14 @@
+ use std::os::fd::{AsRawFd, FromRawFd};
+ use std::os::unix::net::{self, SocketAddr};
+ 
++#[cfg(not(target_os = "wasi"))]
+ use crate::sys::unix::net::new_socket;
++#[cfg(target_os = "wasi")]
++use crate::sys::posix_net::new_socket;
++#[cfg(not(target_os = "wasi"))]
+ use crate::sys::unix::uds::unix_addr;
++#[cfg(target_os = "wasi")]
++use crate::sys::uds::unix_addr;
+ 
+ pub(crate) fn bind_addr(address: &SocketAddr) -> io::Result<net::UnixDatagram> {
+     let socket = unbound()?;
+--- a/src/sys/unix/uds/listener.rs
++++ b/src/sys/unix/uds/listener.rs
+@@ -6,8 +6,14 @@
+ use std::{io, mem};
+ 
+ use crate::net::UnixStream;
++#[cfg(not(target_os = "wasi"))]
+ use crate::sys::unix::net::new_socket;
++#[cfg(target_os = "wasi")]
++use crate::sys::posix_net::new_socket;
++#[cfg(not(target_os = "wasi"))]
+ use crate::sys::unix::uds::{path_offset, unix_addr};
++#[cfg(target_os = "wasi")]
++use crate::sys::uds::{path_offset, unix_addr};
+ 
+ pub(crate) fn bind_addr(address: &SocketAddr) -> io::Result<net::UnixListener> {
+     let fd = new_socket(libc::AF_UNIX, libc::SOCK_STREAM)?;
+--- a/src/sys/unix/uds/stream.rs
++++ b/src/sys/unix/uds/stream.rs
+@@ -2,8 +2,14 @@
+ use std::os::fd::FromRawFd;
+ use std::os::unix::net::{self, SocketAddr};
+ 
++#[cfg(not(target_os = "wasi"))]
+ use crate::sys::unix::net::new_socket;
++#[cfg(target_os = "wasi")]
++use crate::sys::posix_net::new_socket;
++#[cfg(not(target_os = "wasi"))]
+ use crate::sys::unix::uds::unix_addr;
++#[cfg(target_os = "wasi")]
++use crate::sys::uds::unix_addr;
+ 
+ pub(crate) fn connect_addr(address: &SocketAddr) -> io::Result<net::UnixStream> {
+     let fd = new_socket(libc::AF_UNIX, libc::SOCK_STREAM)?;

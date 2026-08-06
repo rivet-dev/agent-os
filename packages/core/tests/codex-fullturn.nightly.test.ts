@@ -10,7 +10,11 @@ import {
 } from "./helpers/openai-responses-mock.js";
 import { REGISTRY_SOFTWARE } from "./helpers/registry-commands.js";
 
-const codexConfig = `[features]
+const codexConfig = (
+	openAiBaseUrl: string,
+) => `openai_base_url = "${openAiBaseUrl}"
+
+[features]
 # Shell snapshots spawn a pre-turn shell subprocess. The real turn coverage
 # below does not need that optional context, and disabling it keeps the WASI VM
 # focused on the codex-core model/tool path under test.
@@ -34,6 +38,7 @@ async function runSessionTurn(
 	fixtures: ResponsesFixture[],
 	start: Record<string, unknown>,
 	stdinTail = "",
+	prepare?: (vm: AgentOs, openAiBaseUrl: string) => Promise<void>,
 ) {
 	const mock = await startResponsesMock(fixtures);
 	const vm = await AgentOs.create({
@@ -53,8 +58,9 @@ async function runSessionTurn(
 		await vm.execArgv("mkdir", ["-p", "/home/agentos/.codex"]);
 		await vm.writeFile(
 			"/home/agentos/.codex/config.toml",
-			new TextEncoder().encode(codexConfig),
+			new TextEncoder().encode(codexConfig(`${mock.url}/v1`)),
 		);
+		await prepare?.(vm, `${mock.url}/v1`);
 		const r = await vm.execArgv("codex-exec", ["--session-turn"], {
 			timeout: 45000,
 			stdin,
@@ -95,6 +101,62 @@ const finalText = (text: string): ResponsesFixture => ({
 describe.skipIf(!hasCodexExecArtifact)(
 	"codex full turn (real codex agent in the VM, mock OpenAI Responses)",
 	() => {
+		test("loads a portable Agent Plugin skill into the model context", async () => {
+			const pluginRoot =
+				"/home/agentos/.codex/plugins/cache/local/release-workflow/1.0.0";
+			const { stdout, stderr, exitCode, requests } = await runSessionTurn(
+				[finalText("used the release notes skill")],
+				{ prompt: "Use $release-workflow:release-notes for these changes." },
+				"",
+				async (vm, openAiBaseUrl) => {
+					await vm.execArgv("mkdir", ["-p", `${pluginRoot}/.codex-plugin`]);
+					await vm.execArgv("mkdir", [
+						"-p",
+						`${pluginRoot}/skills/release-notes`,
+					]);
+					await vm.writeFile(
+						`${pluginRoot}/.codex-plugin/plugin.json`,
+						new TextEncoder().encode(
+							JSON.stringify({
+								$schema:
+									"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+								name: "release-workflow",
+								version: "1.0.0",
+								description: "Project release workflow",
+							}),
+						),
+					);
+					await vm.writeFile(
+						`${pluginRoot}/skills/release-notes/SKILL.md`,
+						new TextEncoder().encode(`---
+name: release-notes
+description: Write release notes for this project.
+---
+
+Summarize user-visible changes under Added, Changed, and Fixed.
+`),
+					);
+					await vm.writeFile(
+						"/home/agentos/.codex/config.toml",
+						new TextEncoder().encode(`${codexConfig(openAiBaseUrl)}
+plugins = true
+
+[plugins."release-workflow@local"]
+enabled = true
+`),
+					);
+				},
+			);
+			expect(
+				requests.length,
+				`codex-exec did not call mock Responses; exitCode=${exitCode}; stderr=${stderr}; stdout=${stdout}`,
+			).toBeGreaterThan(0);
+			const requestBody = JSON.stringify(requests[0]);
+			expect(requestBody).toContain("release-workflow:release-notes");
+			expect(requestBody).toContain("Write release notes for this project.");
+			expect(stdout).toContain('"type":"done"');
+		}, 70000);
+
 		test("codex-exec --session-turn completes a model turn end-to-end", async () => {
 			const { stdout, stderr, exitCode, requests } = await runSessionTurn(
 				[finalText("hello from codex")],

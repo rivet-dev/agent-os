@@ -1,0 +1,198 @@
+diff --git a/exec/Cargo.toml b/exec/Cargo.toml
+--- a/exec/Cargo.toml
++++ b/exec/Cargo.toml
+@@ -31,6 +31,10 @@ anyhow = { workspace = true }
+ # wasm32-wasip1: codex-core compiles here now, so the session-turn engine drives it.
+ [target.'cfg(target_os = "wasi")'.dependencies]
+ codex-core = { workspace = true }
++codex-exec-server = { workspace = true }
++codex-extension-api = { workspace = true }
++codex-home = { workspace = true }
++codex-login = { workspace = true }
+ codex-protocol = { workspace = true }
+ serde_json = { workspace = true }
+ toml = { workspace = true }
+diff --git a/exec/src/session_turn_wasi.rs b/exec/src/session_turn_wasi.rs
+--- a/exec/src/session_turn_wasi.rs
++++ b/exec/src/session_turn_wasi.rs
+@@ -11,11 +11,22 @@
+ //!           {type:"error",message}
+ 
+ use std::io::Write;
++use std::sync::Arc;
+ 
+ use anyhow::Context as _;
+-use codex_core::AuthManager;
++use codex_core::CodexAppsToolsCache;
++use codex_core::StartThreadOptions;
+ use codex_core::ThreadManager;
++use codex_core::build_models_manager;
+ use codex_core::config::Config;
++use codex_core::local_agent_graph_store_from_state_db;
++use codex_core::resolve_installation_id;
++use codex_core::thread_store_from_config;
++use codex_exec_server::EnvironmentManager;
++use codex_exec_server::ExecServerRuntimePaths;
++use codex_extension_api::empty_extension_registry;
++use codex_home::CodexHomeUserInstructionsProvider;
++use codex_login::AuthManager;
+ use codex_protocol::items::AgentMessageContent;
+ use codex_protocol::items::TurnItem;
+ use codex_protocol::models::ContentItem;
+@@ -63,8 +75,8 @@ fn history_from_start(start: &Value) -> Vec<RolloutItem> {
+             id: None,
+             role,
+             content,
+-            end_turn: None,
+             phase: None,
++            internal_chat_message_metadata_passthrough: None,
+         }));
+     }
+     items
+@@ -93,13 +105,10 @@ pub fn run() -> anyhow::Result<()> {
+         )
+         .try_init();
+-    // wasm32-wasip1 is single-threaded with no tokio::net reactor. codex-core drives the agent turn
+-    // on an internally `tokio::spawn`ed submission loop, so the runtime must cooperatively schedule
+-    // background tasks while our event loop awaits. The current-thread runtime does this correctly as
+-    // long as no task blocks the single executor thread (see the shell-snapshot wasi gate). Only the
+-    // time driver is needed; there is no I/O reactor on wasi (network I/O is host-brokered and
+-    // synchronous from the guest's perspective).
++    // agentOS supplies the POSIX network/process surface used by Tokio. Keep the
++    // current-thread executor for the single guest thread, but enable every
++    // available runtime driver instead of treating wasm32-wasip1 as stock WASI.
+     let rt = tokio::runtime::Builder::new_current_thread()
+-        .enable_time()
++        .enable_all()
+         .build()?;
+     rt.block_on(session_turn())
+ }
+@@ -143,51 +152,56 @@ async fn session_turn() -> anyhow::Result<()> {
+     // start from this revision's defaults.
+     let mut config = Config::load_default_with_cli_overrides(overrides)
++        .await
+         .context("load config")?;
+-    config.cwd = std::path::PathBuf::from(cwd);
+-    // wasm32-wasip1 has no tokio::net readiness reactor, so the WebSocket transport
+-    // (tokio-tungstenite → tokio::net::TcpStream) can't connect. Force the HTTP
+-    // Responses transport (host-brokered via wasi-http) by disabling websockets on
+-    // every provider; codex's HTTP path is the supported transport in the VM.
+-    for provider in config.model_providers.values_mut() {
+-        provider.supports_websockets = false;
+-    }
+-
+-    let auth_manager = AuthManager::shared(
+-        config.codex_home.clone(),
+-        /*enable_codex_api_key_env*/ true,
+-        config.cli_auth_credentials_store_mode,
+-    );
+-
+-    let auth_for_resume = AuthManager::shared(
+-        config.codex_home.clone(),
+-        /*enable_codex_api_key_env*/ true,
+-        config.cli_auth_credentials_store_mode,
+-    );
++    config.cwd = std::path::PathBuf::from(cwd)
++        .try_into()
++        .context("cwd must be absolute")?;
++
++    let auth_manager =
++        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ true).await;
++    let runtime_paths = ExecServerRuntimePaths::from_optional_paths(
++        config.codex_self_exe.clone(),
++        config.codex_linux_sandbox_exe.clone(),
++    )?;
++    let environment_manager = Arc::new(
++        EnvironmentManager::from_codex_home(
++            config.codex_home.clone(),
++            Some(runtime_paths),
++            config.http_client_factory(),
++        )
++        .await?,
++    );
++    let thread_store = thread_store_from_config(&config, None);
++    let installation_id = resolve_installation_id(&config.codex_home).await?;
+     let manager = ThreadManager::new(
+         &config,
+-        auth_manager,
++        Arc::clone(&auth_manager),
++        build_models_manager(&config, auth_manager),
++        CodexAppsToolsCache::default(),
+         SessionSource::Exec,
+-        Default::default(),
++        environment_manager,
++        empty_extension_registry(),
++        Arc::new(CodexHomeUserInstructionsProvider::new(
++            config.codex_home.clone(),
++        )),
++        /*analytics_events_client*/ None,
++        Arc::clone(&thread_store),
++        local_agent_graph_store_from_state_db(None),
++        installation_id,
++        /*attestation_provider*/ None,
++        /*external_time_provider*/ None,
+     );
+-    // Replay prior turns when the adapter sends `history`; otherwise start a fresh thread.
++    // Replay prior turns when the adapter sends `history`; otherwise start a
++    // fresh thread through the same current Codex thread-manager API.
+     let history = history_from_start(&start);
+-    let new_thread = if history.is_empty() {
+-        manager
+-            .start_thread(config.clone())
+-            .await
+-            .context("start thread")?
+-    } else {
+-        manager
+-            .resume_thread_with_history(
+-                config.clone(),
+-                InitialHistory::Forked(history),
+-                auth_for_resume,
+-                /*persist_extended_history*/ false,
+-                /*parent_trace*/ None,
+-            )
+-            .await
+-            .context("resume thread with history")?
+-    };
++    let mut options = StartThreadOptions::new(config.clone());
++    if !history.is_empty() {
++        options.initial_history = InitialHistory::Forked(history);
++    }
++    let new_thread = manager
++        .start_thread(options)
++        .await
++        .context("start thread")?;
+     let thread = new_thread.thread;
+ 
+     thread
+@@ -197,6 +216,9 @@ async fn session_turn() -> anyhow::Result<()> {
+                 text_elements: Vec::new(),
+             }],
+             final_output_json_schema: None,
++            responsesapi_client_metadata: None,
++            additional_context: Default::default(),
++            thread_settings: Default::default(),
+         })
+         .await
+         .context("submit prompt")?;
+@@ -355,7 +377,9 @@ async fn session_turn() -> anyhow::Result<()> {
+                     Some("allow") | Some("approve") | Some("allow_always") => {
+                         ReviewDecision::Approved
+                     }
+-                    _ => ReviewDecision::Denied,
++                    _ => ReviewDecision::Denied {
++                        rejection: "denied by user".to_string(),
++                    },
+                 };
+                 let _ = thread
+                     .submit(Op::ExecApproval {
+@@ -382,7 +406,9 @@ async fn session_turn() -> anyhow::Result<()> {
+                     Some("allow") | Some("approve") | Some("allow_always") => {
+                         ReviewDecision::Approved
+                     }
+-                    _ => ReviewDecision::Denied,
++                    _ => ReviewDecision::Denied {
++                        rejection: "denied by user".to_string(),
++                    },
+                 };
+                 let _ = thread
+                     .submit(Op::PatchApproval {

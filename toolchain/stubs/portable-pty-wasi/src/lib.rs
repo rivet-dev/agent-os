@@ -340,6 +340,25 @@ impl ChildKiller for ProcessSignaller {
     }
 }
 
+#[cfg(target_os = "wasi")]
+impl ChildKiller for ProcessSignaller {
+    fn kill(&mut self) -> IoResult<()> {
+        if let Some(pid) = self.pid {
+            wasi_ext::kill(pid, 1).map_err(|errno| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("SIGHUP delivery failed with WASI errno {errno}"),
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+        Box::new(Self { pid: self.pid })
+    }
+}
+
 impl ChildKiller for std::process::Child {
     fn kill(&mut self) -> IoResult<()> {
         #[cfg(unix)]
@@ -401,7 +420,9 @@ impl ChildKiller for std::process::Child {
 
     #[cfg(target_os = "wasi")]
     fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
-        Box::new(crate::wasi::WasiChild)
+        Box::new(ProcessSignaller {
+            pid: self.process_id(),
+        })
     }
 }
 

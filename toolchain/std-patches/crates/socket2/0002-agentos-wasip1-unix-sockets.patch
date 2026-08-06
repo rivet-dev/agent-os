@@ -1,0 +1,118 @@
+Expose socket2's Unix-domain address constructors through agentOS's real
+AF_UNIX and sockaddr_un libc ABI. This removes API-name gates only; no socket
+behavior is emulated in the crate.
+
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -55,6 +55,7 @@
+ #![deny(missing_docs, missing_debug_implementations, rust_2018_idioms)]
+ // Automatically generate required OS/features for docs.rs.
+ #![cfg_attr(docsrs, feature(doc_cfg))]
++#![cfg_attr(target_os = "wasi", feature(wasi_ext))]
+ // Disallow warnings when running tests.
+ #![cfg_attr(test, deny(warnings))]
+ // Disallow warnings in examples.
+@@ -222,7 +223,6 @@
+     pub const IPV6: Domain = Domain(sys::AF_INET6);
+ 
+     /// Domain for Unix socket communication, corresponding to `AF_UNIX`.
+-    #[cfg(not(target_os = "wasi"))]
+     pub const UNIX: Domain = Domain(sys::AF_UNIX);
+ 
+     /// Returns the correct domain for `address`.
+--- a/src/sockaddr.rs
++++ b/src/sockaddr.rs
+@@ -1,14 +1,12 @@
+ use std::hash::Hash;
+ use std::mem::{self, size_of};
+ use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
+-#[cfg(not(target_os = "wasi"))]
+ use std::path::Path;
+ use std::{fmt, io, ptr};
+ 
+ #[cfg(windows)]
+ use windows_sys::Win32::Networking::WinSock::SOCKADDR_IN6_0;
+ 
+-#[cfg(not(target_os = "wasi"))]
+ use crate::sys::AF_UNIX;
+ use crate::sys::{c_int, sockaddr_in, sockaddr_in6, sockaddr_storage, AF_INET, AF_INET6};
+ use crate::Domain;
+@@ -215,7 +213,6 @@
+     /// Constructs a `SockAddr` with the family `AF_UNIX` and the provided path.
+     ///
+     /// Returns an error if the path is longer than `SUN_LEN`.
+-    #[cfg(not(target_os = "wasi"))]
+     pub fn unix<P>(path: P) -> io::Result<SockAddr>
+     where
+         P: AsRef<Path>,
+@@ -273,7 +270,6 @@
+ 
+     /// Returns true if this address is of a unix socket (for local interprocess communication),
+     /// i.e. it is from the `AF_UNIX` family, false otherwise.
+-    #[cfg(not(target_os = "wasi"))]
+     pub fn is_unix(&self) -> bool {
+         self.storage.ss_family == AF_UNIX as sa_family_t
+     }
+--- a/src/sys/unix.rs
++++ b/src/sys/unix.rs
+@@ -7,7 +7,6 @@
+ // except according to those terms.
+ 
+ use std::cmp::min;
+-#[cfg(not(target_os = "wasi"))]
+ use std::ffi::OsStr;
+ #[cfg(not(any(target_os = "redox", target_os = "wasi")))]
+ use std::io::IoSlice;
+@@ -46,11 +45,9 @@
+ ))]
+ use std::num::NonZeroUsize;
+ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+-#[cfg(not(target_os = "wasi"))]
+ use std::os::unix::ffi::OsStrExt;
+ #[cfg(all(feature = "all", unix))]
+ use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
+-#[cfg(not(target_os = "wasi"))]
+ use std::path::Path;
+ use std::ptr;
+ use std::time::{Duration, Instant};
+@@ -67,7 +64,6 @@
+ use libc::ssize_t;
+ use libc::{in6_addr, in_addr};
+ 
+-#[cfg(not(target_os = "wasi"))]
+ use crate::SockAddrStorage;
+ use crate::{Domain, Protocol, SockAddr, TcpKeepalive, Type};
+ #[cfg(not(any(target_os = "redox", target_os = "wasi")))]
+@@ -76,7 +72,6 @@
+ pub(crate) use std::ffi::c_int;
+ 
+ // Used in `Domain`.
+-#[cfg(not(target_os = "wasi"))]
+ pub(crate) use libc::AF_UNIX;
+ pub(crate) use libc::{AF_INET, AF_INET6};
+ // Used in `Type`.
+@@ -673,14 +668,12 @@
+ }
+ 
+ /// Returns the offset of the `sun_path` member of the passed unix socket address.
+-#[cfg(not(target_os = "wasi"))]
+ pub(crate) fn offset_of_path(storage: &libc::sockaddr_un) -> usize {
+     let base = storage as *const _ as usize;
+     let path = ptr::addr_of!(storage.sun_path) as usize;
+     path - base
+ }
+ 
+-#[cfg(not(target_os = "wasi"))]
+ #[allow(unsafe_op_in_unsafe_fn)]
+ pub(crate) fn unix_sockaddr(path: &Path) -> io::Result<SockAddr> {
+     let mut storage = SockAddrStorage::zeroed();
+@@ -800,8 +793,7 @@
+     }
+ }
+ 
+-/// Unix only API (not available on WASI).
+-#[cfg(not(target_os = "wasi"))]
++/// Unix only API.
+ impl SockAddr {
+     /// Returns true if this address is an unnamed address from the `AF_UNIX` family (for local
+     /// interprocess communication), false otherwise.

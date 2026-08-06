@@ -1,0 +1,9 @@
+--- a/scripts/build-wasi-codex-exec.sh
++++ b/scripts/build-wasi-codex-exec.sh
+@@ -51,4 +51,5 @@ export CC_wasm32_wasip1="$WSDK/bin/clang"
+ export AR_wasm32_wasip1="$WSDK/bin/llvm-ar"
+-export CFLAGS_wasm32_wasip1="--sysroot=$WSDK/share/wasi-sysroot -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PTHREAD -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_PROCESS_CLOCKS"
++C_SYSROOT="${AGENTOS_C_SYSROOT:-$WSDK/share/wasi-sysroot}"
++export CFLAGS_wasm32_wasip1="--sysroot=$C_SYSROOT -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PTHREAD -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_PROCESS_CLOCKS"
+ 
+ restore_sysroot() {

@@ -1,0 +1,11 @@
+diff --git a/exec/src/lib.rs b/exec/src/lib.rs
+--- a/exec/src/lib.rs
++++ b/exec/src/lib.rs
+@@ -3,6 +3,7 @@
+ // - In --json mode, stdout must be valid JSONL, one event per line.
+ // For both modes, any other output must be written to stderr.
+ #![cfg_attr(not(target_os = "wasi"), deny(clippy::print_stdout))]
++#![cfg_attr(target_os = "wasi", recursion_limit = "256")]
+ 
+ #[cfg(target_os = "wasi")]
+ mod session_turn_wasi;

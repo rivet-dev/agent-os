@@ -1,10 +1,18 @@
-# socket2 0.6.x excludes wasm32-wasip1 (`not(target_env = "p1")`) → "doesn't support
-# the compile target". Include p1 so it routes to sys/unix.rs (the patched wasi-libc
-# host_net provides the socket fns; codex's HTTP uses wasi-http, so socket2 only needs
-# to COMPILE as a transitive dep of tokio::net/mio/reqwest). Pipeline-only codex port.
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@
+@@ -109,7 +109,7 @@
+     ($from: ty, $for: ty) => {
+         impl From<$from> for $for {
+             fn from(socket: $from) -> $for {
+-                #[cfg(any(unix, all(target_os = "wasi", not(target_env = "p1"))))]
++                #[cfg(any(unix, target_os = "wasi"))]
+                 unsafe {
+                     <$for>::from_raw_fd(socket.into_raw_fd())
+                 }
+@@ -176,14 +176,11 @@
+ mod socket;
+ mod sockref;
+ 
 -#[cfg_attr(
 -    any(unix, all(target_os = "wasi", not(target_env = "p1"))),
 -    path = "sys/unix.rs"
@@ -16,5 +24,157 @@
 -#[cfg(not(any(windows, unix, all(target_os = "wasi", not(target_env = "p1")))))]
 +#[cfg(not(any(windows, unix, target_os = "wasi")))]
  compile_error!("Socket2 doesn't support the compile target");
-# NOTE: verify sys/unix.rs compiles on wasip1 (some fns may need stubbing if wasi-libc
-# lacks them); if so, add a sys/wasi.rs stub instead. socket2 is compile-only for codex.
+ 
+ use sys::c_int;
+@@ -528,7 +525,7 @@
+         target_os = "watchos",
+         target_os = "windows",
+         target_os = "cygwin",
+-        all(target_os = "wasi", not(target_env = "p1")),
++        target_os = "wasi",
+     ))]
+     pub const fn with_interval(self, interval: Duration) -> Self {
+         Self {
+@@ -558,7 +555,7 @@
+             target_os = "watchos",
+             target_os = "cygwin",
+             target_os = "windows",
+-            all(target_os = "wasi", not(target_env = "p1")),
++            target_os = "wasi",
+         )
+     ))]
+     pub const fn with_retries(self, retries: u32) -> Self {
+--- a/src/socket.rs
++++ b/src/socket.rs
+@@ -14,7 +14,7 @@
+ #[cfg(not(target_os = "nto"))]
+ use std::net::Ipv6Addr;
+ use std::net::{self, Ipv4Addr, Shutdown};
+-#[cfg(any(unix, all(target_os = "wasi", not(target_env = "p1"))))]
++#[cfg(any(unix, target_os = "wasi"))]
+ use std::os::fd::{FromRawFd, IntoRawFd};
+ #[cfg(windows)]
+ use std::os::windows::io::{FromRawSocket, IntoRawSocket};
+@@ -220,7 +220,7 @@
+         match res {
+             Ok(()) => return Ok(()),
+             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+-            #[cfg(any(unix, all(target_os = "wasi", not(target_env = "p1"))))]
++            #[cfg(any(unix, target_os = "wasi"))]
+             Err(ref e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
+             Err(e) => return Err(e),
+         }
+@@ -367,7 +367,7 @@
+     /// On Windows it is not possible retrieve the nonblocking mode status.
+     #[cfg(all(
+         feature = "all",
+-        any(unix, all(target_os = "wasi", not(target_env = "p1")))
++        any(unix, target_os = "wasi")
+     ))]
+     pub fn nonblocking(&self) -> io::Result<bool> {
+         sys::nonblocking(self.as_raw())
+@@ -2241,7 +2241,7 @@
+             target_os = "tvos",
+             target_os = "watchos",
+             target_os = "cygwin",
+-            all(target_os = "wasi", not(target_env = "p1")),
++            target_os = "wasi",
+         )
+     ))]
+     pub fn tcp_keepalive_interval(&self) -> io::Result<Duration> {
+@@ -2273,7 +2273,7 @@
+             target_os = "watchos",
+             target_os = "cygwin",
+             target_os = "windows",
+-            all(target_os = "wasi", not(target_env = "p1")),
++            target_os = "wasi",
+         )
+     ))]
+     pub fn tcp_keepalive_retries(&self) -> io::Result<u32> {
+--- a/src/sockaddr.rs
++++ b/src/sockaddr.rs
+@@ -298,7 +298,7 @@
+                 ip,
+                 port,
+                 addr.sin6_flowinfo,
+-                #[cfg(any(unix, all(target_os = "wasi", not(target_env = "p1"))))]
++                #[cfg(any(unix, target_os = "wasi"))]
+                 addr.sin6_scope_id,
+                 #[cfg(windows)]
+                 unsafe {
+@@ -393,7 +393,7 @@
+             storage.sin6_port = addr.port().to_be();
+             storage.sin6_addr = crate::sys::to_in6_addr(addr.ip());
+             storage.sin6_flowinfo = addr.flowinfo();
+-            #[cfg(any(unix, all(target_os = "wasi", not(target_env = "p1"))))]
++            #[cfg(any(unix, target_os = "wasi"))]
+             {
+                 storage.sin6_scope_id = addr.scope_id();
+             }
+--- a/src/sockref.rs
++++ b/src/sockref.rs
+@@ -2,7 +2,7 @@
+ use std::marker::PhantomData;
+ use std::mem::ManuallyDrop;
+ use std::ops::Deref;
+-#[cfg(any(unix, all(target_os = "wasi", not(target_env = "p1"))))]
++#[cfg(any(unix, target_os = "wasi"))]
+ use std::os::fd::{AsFd, AsRawFd, FromRawFd};
+ #[cfg(windows)]
+ use std::os::windows::io::{AsRawSocket, AsSocket, FromRawSocket};
+@@ -77,7 +77,7 @@
+ }
+ 
+ /// On Windows, a corresponding `From<&impl AsSocket>` implementation exists.
+-#[cfg(any(unix, all(target_os = "wasi", not(target_env = "p1"))))]
++#[cfg(any(unix, target_os = "wasi"))]
+ impl<'s, S> From<&'s S> for SockRef<'s>
+ where
+     S: AsFd,
+--- a/src/sys/unix.rs
++++ b/src/sys/unix.rs
+@@ -267,7 +267,7 @@
+     target_os = "solaris",
+     target_os = "tvos",
+     target_os = "watchos",
+-    all(target_os = "wasi", not(target_env = "p1")),
++    target_os = "wasi",
+ ))]
+ pub(crate) use libc::{
+     IPV6_JOIN_GROUP as IPV6_ADD_MEMBERSHIP, IPV6_LEAVE_GROUP as IPV6_DROP_MEMBERSHIP,
+@@ -290,7 +290,7 @@
+         target_os = "tvos",
+         target_os = "watchos",
+         target_os = "cygwin",
+-        all(target_os = "wasi", not(target_env = "p1")),
++        target_os = "wasi",
+     )
+ ))]
+ pub(crate) use libc::{TCP_KEEPCNT, TCP_KEEPINTVL};
+@@ -451,7 +451,7 @@
+             target_os = "netbsd",
+             target_os = "openbsd",
+             target_os = "cygwin",
+-            all(target_os = "wasi", not(target_env = "p1")),
++            target_os = "wasi",
+         )
+     ))]
+     pub const fn nonblocking(self) -> Type {
+@@ -1001,7 +1001,7 @@
+ 
+ #[cfg(all(
+     feature = "all",
+-    any(unix, all(target_os = "wasi", not(target_env = "p1"))),
++    any(unix, target_os = "wasi"),
+     not(target_os = "vita")
+ ))]
+ pub(crate) fn nonblocking(fd: RawSocket) -> io::Result<bool> {
+@@ -1262,7 +1262,7 @@
+         target_os = "tvos",
+         target_os = "watchos",
+         target_os = "cygwin",
+-        all(target_os = "wasi", not(target_env = "p1")),
++        target_os = "wasi",
+     ))]
+     {
+         if let Some(interval) = keepalive.interval {

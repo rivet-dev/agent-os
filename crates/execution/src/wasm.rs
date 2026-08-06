@@ -3475,6 +3475,8 @@ if (typeof globalThis !== "undefined") {{
         case "process.waitpid_transition":
         case "process.itimer_real":
         case "process.fd_pipe":
+        case "process.pty_open":
+        case "process.pty_resize":
         case "process.fd_open":
         case "process.path_open_at":
         case "process.path_mkdir_at":

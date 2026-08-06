@@ -1,0 +1,39 @@
+Use the gethostname(2) implementation supplied by the agentOS libc rather than
+inventing a WASI-specific hostname fallback.
+
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -52,6 +52,24 @@
+         use std::os::unix::ffi::OsStringExt;
+         OsString::from_vec(rustix::system::uname().nodename().to_bytes().to_vec())
+     }
++    #[cfg(target_os = "wasi")]
++    {
++        use std::os::wasi::ffi::OsStringExt;
++
++        let mut buffer = vec![0_u8; 256];
++        let result = unsafe {
++            libc::gethostname(buffer.as_mut_ptr().cast::<libc::c_char>(), buffer.len())
++        };
++        if result != 0 {
++            panic!("gethostname failed: {}", std::io::Error::last_os_error());
++        }
++        let end = buffer
++            .iter()
++            .position(|byte| *byte == 0)
++            .unwrap_or(buffer.len());
++        buffer.truncate(end);
++        OsString::from_vec(buffer)
++    }
+     #[cfg(windows)]
+     {
+         get_computer_physical_dns_hostname()
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -76,3 +76,6 @@
+ 
+ [target."cfg(windows)".dependencies.windows-link]
+ version = "0.2.1"
++
++[target.'cfg(target_os = "wasi")'.dependencies]
++libc = "0.2"

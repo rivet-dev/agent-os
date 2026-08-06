@@ -1,0 +1,199 @@
+Expose agentOS's POSIX TCP and UDP APIs through Mio's WASIp1 backend. The
+backend keeps Mio's poll_oneoff readiness integration, while socket creation and
+address operations call the real libc functions supplied by the agentOS sysroot.
+
+--- a/src/net/mod.rs
++++ b/src/net/mod.rs
+@@ -28,9 +28,7 @@
+ mod tcp;
+ pub use self::tcp::{TcpListener, TcpStream};
+ 
+-#[cfg(not(all(target_os = "wasi", target_env = "p1")))]
+ mod udp;
+-#[cfg(not(all(target_os = "wasi", target_env = "p1")))]
+ pub use self::udp::UdpSocket;
+ 
+ #[cfg(unix)]
+--- a/src/net/tcp/stream.rs
++++ b/src/net/tcp/stream.rs
+@@ -13,7 +13,6 @@
+ };
+ 
+ use crate::io_source::IoSource;
+-#[cfg(not(all(target_os = "wasi", target_env = "p1")))]
+ use crate::sys::tcp::{connect, new_for_addr};
+ use crate::{event, Interest, Registry, Token};
+ 
+@@ -87,7 +86,6 @@
+     /// entries in the routing cache.
+     ///
+     /// [write interest]: Interest::WRITABLE
+-    #[cfg(not(all(target_os = "wasi", target_env = "p1")))]
+     pub fn connect(addr: SocketAddr) -> io::Result<TcpStream> {
+         let socket = new_for_addr(addr)?;
+         #[cfg(any(unix, target_os = "hermit", target_os = "wasi"))]
+--- a/src/net/tcp/listener.rs
++++ b/src/net/tcp/listener.rs
+@@ -13,13 +13,7 @@
+ 
+ use crate::io_source::IoSource;
+ use crate::net::TcpStream;
+-#[cfg(any(
+-    unix,
+-    target_os = "hermit",
+-    all(target_os = "wasi", not(target_env = "p1"))
+-))]
+ use crate::sys::tcp::set_reuseaddr;
+-#[cfg(not(all(target_os = "wasi", target_env = "p1")))]
+ use crate::sys::tcp::{bind, listen, new_for_addr};
+ use crate::{event, sys, Interest, Registry, Token};
+ 
+@@ -63,7 +57,6 @@
+     /// 2. Set the `SO_REUSEADDR` option on the socket on Unix.
+     /// 3. Bind the socket to the specified address.
+     /// 4. Calls `listen` on the socket to prepare it to receive new connections.
+-    #[cfg(not(all(target_os = "wasi", target_env = "p1")))]
+     pub fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
+         let socket = new_for_addr(addr)?;
+         #[cfg(any(unix, target_os = "hermit", target_os = "wasi"))]
+--- a/src/sys/wasip1/mod.rs
++++ b/src/sys/wasip1/mod.rs
+@@ -26,7 +26,99 @@
+ cfg_net! {
+     pub(crate) mod tcp {
+         use std::io;
++        use std::mem::size_of;
+         use std::net::{self, SocketAddr};
++        use std::os::fd::{AsRawFd, FromRawFd};
++
++        #[repr(C)]
++        union SocketAddrCRepr {
++            v4: libc::sockaddr_in,
++            v6: libc::sockaddr_in6,
++        }
++
++        impl SocketAddrCRepr {
++            fn as_ptr(&self) -> *const libc::sockaddr {
++                self as *const _ as *const libc::sockaddr
++            }
++        }
++
++        fn socket_addr(addr: &SocketAddr) -> (SocketAddrCRepr, libc::socklen_t) {
++            match addr {
++                SocketAddr::V4(addr) => (
++                    SocketAddrCRepr {
++                        v4: libc::sockaddr_in {
++                            sin_family: libc::AF_INET as libc::sa_family_t,
++                            sin_port: addr.port().to_be(),
++                            sin_addr: libc::in_addr {
++                                s_addr: u32::from_ne_bytes(addr.ip().octets()),
++                            },
++                        },
++                    },
++                    size_of::<libc::sockaddr_in>() as libc::socklen_t,
++                ),
++                SocketAddr::V6(addr) => (
++                    SocketAddrCRepr {
++                        v6: libc::sockaddr_in6 {
++                            sin6_family: libc::AF_INET6 as libc::sa_family_t,
++                            sin6_port: addr.port().to_be(),
++                            sin6_flowinfo: addr.flowinfo(),
++                            sin6_addr: libc::in6_addr {
++                                s6_addr: addr.ip().octets(),
++                            },
++                            sin6_scope_id: addr.scope_id(),
++                        },
++                    },
++                    size_of::<libc::sockaddr_in6>() as libc::socklen_t,
++                ),
++            }
++        }
++
++        fn cvt(result: libc::c_int) -> io::Result<libc::c_int> {
++            if result < 0 {
++                Err(io::Error::last_os_error())
++            } else {
++                Ok(result)
++            }
++        }
++
++        pub(crate) fn new_for_addr(addr: SocketAddr) -> io::Result<libc::c_int> {
++            let domain = if addr.is_ipv4() { libc::AF_INET } else { libc::AF_INET6 };
++            cvt(unsafe { libc::socket(domain, libc::SOCK_STREAM | libc::SOCK_NONBLOCK, 0) })
++        }
++
++        pub(crate) fn connect(stream: &net::TcpStream, addr: SocketAddr) -> io::Result<()> {
++            let (raw_addr, raw_addr_len) = socket_addr(&addr);
++            let result = unsafe { libc::connect(stream.as_raw_fd(), raw_addr.as_ptr(), raw_addr_len) };
++            match cvt(result) {
++                Err(error) if error.raw_os_error() == Some(libc::EINPROGRESS) => Ok(()),
++                result => result.map(|_| ()),
++            }
++        }
++
++        pub(crate) fn bind(listener: &net::TcpListener, addr: SocketAddr) -> io::Result<()> {
++            let (raw_addr, raw_addr_len) = socket_addr(&addr);
++            cvt(unsafe { libc::bind(listener.as_raw_fd(), raw_addr.as_ptr(), raw_addr_len) })?;
++            Ok(())
++        }
++
++        pub(crate) fn listen(listener: &net::TcpListener, backlog: libc::c_int) -> io::Result<()> {
++            cvt(unsafe { libc::listen(listener.as_raw_fd(), backlog) })?;
++            Ok(())
++        }
++
++        pub(crate) fn set_reuseaddr(listener: &net::TcpListener, reuse: bool) -> io::Result<()> {
++            let value = libc::c_int::from(reuse);
++            cvt(unsafe {
++                libc::setsockopt(
++                    listener.as_raw_fd(),
++                    libc::SOL_SOCKET,
++                    libc::SO_REUSEADDR,
++                    (&raw const value).cast(),
++                    size_of::<libc::c_int>() as libc::socklen_t,
++                )
++            })?;
++            Ok(())
++        }
+ 
+         pub(crate) fn accept(listener: &net::TcpListener) -> io::Result<(net::TcpStream, SocketAddr)> {
+             let (stream, addr) = listener.accept()?;
+@@ -34,6 +126,38 @@
+             Ok((stream, addr))
+         }
+     }
++
++    pub(crate) mod udp {
++        use std::io;
++        use std::mem::size_of;
++        use std::net::{self, SocketAddr};
++        use std::os::fd::AsRawFd;
++
++        pub(crate) fn bind(addr: SocketAddr) -> io::Result<net::UdpSocket> {
++            let socket = net::UdpSocket::bind(addr)?;
++            socket.set_nonblocking(true)?;
++            Ok(socket)
++        }
++
++        pub(crate) fn only_v6(socket: &net::UdpSocket) -> io::Result<bool> {
++            let mut value: libc::c_int = 0;
++            let mut length = size_of::<libc::c_int>() as libc::socklen_t;
++            let result = unsafe {
++                libc::getsockopt(
++                    socket.as_raw_fd(),
++                    libc::IPPROTO_IPV6,
++                    libc::IPV6_V6ONLY,
++                    (&raw mut value).cast(),
++                    &mut length,
++                )
++            };
++            if result < 0 {
++                Err(io::Error::last_os_error())
++            } else {
++                Ok(value != 0)
++            }
++        }
++    }
+ }
+ 
+ /// Unique id for use as `SelectorId`.

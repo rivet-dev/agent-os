@@ -1,0 +1,217 @@
+Expose the agentOS libc socket ABI to Rust crates on wasm32-wasip1. These are
+bindings to the real POSIX implementation in the owned sysroot and host_net
+imports, not stock-WASI capability shims.
+
+--- a/src/wasi/mod.rs
++++ b/src/wasi/mod.rs
+@@ -37,6 +37,10 @@
+ pub type pthread_once_t = c_int;
+ pub type pthread_key_t = c_uint;
+ pub type pthread_spinlock_t = c_int;
++pub type sa_family_t = c_ushort;
++pub type socklen_t = c_uint;
++pub type in_port_t = u16;
++pub type in_addr_t = u32;
+ 
+ s_no_extra_traits! {
+     #[repr(align(16))]
+@@ -149,6 +153,76 @@
+         pub revents: c_short,
+     }
+ 
++    #[repr(C, align(4))]
++    pub struct in_addr {
++        pub s_addr: in_addr_t,
++    }
++
++    #[repr(C, align(4))]
++    pub struct in6_addr {
++        pub s6_addr: [u8; 16],
++    }
++
++    #[repr(C, align(16))]
++    pub struct sockaddr {
++        pub sa_family: sa_family_t,
++        pub sa_data: [c_char; 0],
++    }
++
++    #[repr(C, align(16))]
++    pub struct sockaddr_in {
++        pub sin_family: sa_family_t,
++        pub sin_port: in_port_t,
++        pub sin_addr: in_addr,
++    }
++
++    #[repr(C, align(16))]
++    pub struct sockaddr_in6 {
++        pub sin6_family: sa_family_t,
++        pub sin6_port: in_port_t,
++        pub sin6_flowinfo: c_uint,
++        pub sin6_addr: in6_addr,
++        pub sin6_scope_id: c_uint,
++    }
++
++    #[repr(C, align(16))]
++    pub struct sockaddr_storage {
++        pub ss_family: sa_family_t,
++        pub __ss_data: [c_char; 126],
++    }
++
++    #[repr(C, align(16))]
++    pub struct sockaddr_un {
++        pub sun_family: sa_family_t,
++        pub sun_path: [c_char; 108],
++    }
++
++    pub struct linger {
++        pub l_onoff: c_int,
++        pub l_linger: c_int,
++    }
++
++    pub struct ip_mreq {
++        pub imr_multiaddr: in_addr,
++        pub imr_interface: in_addr,
++    }
++
++    pub struct ipv6_mreq {
++        pub ipv6mr_multiaddr: in6_addr,
++        pub ipv6mr_interface: c_uint,
++    }
++
++    pub struct addrinfo {
++        pub ai_flags: c_int,
++        pub ai_family: c_int,
++        pub ai_socktype: c_int,
++        pub ai_protocol: c_int,
++        pub ai_addrlen: socklen_t,
++        pub ai_addr: *mut sockaddr,
++        pub ai_canonname: *mut c_char,
++        pub ai_next: *mut addrinfo,
++    }
++
+     pub struct rusage {
+         pub ru_utime: timeval,
+         pub ru_stime: timeval,
+@@ -233,6 +307,53 @@
+ pub const STDIN_FILENO: c_int = 0;
+ pub const STDOUT_FILENO: c_int = 1;
+ pub const STDERR_FILENO: c_int = 2;
++pub const AF_UNSPEC: c_int = 0;
++pub const AF_INET: c_int = 1;
++pub const AF_INET6: c_int = 2;
++pub const AF_UNIX: c_int = 3;
++pub const AF_LOCAL: c_int = AF_UNIX;
++pub const SOCK_DGRAM: c_int = 5;
++pub const SOCK_STREAM: c_int = 6;
++pub const SOCK_NONBLOCK: c_int = 0x0000_4000;
++pub const SOCK_CLOEXEC: c_int = 0x0000_2000;
++pub const IPPROTO_IP: c_int = 0;
++pub const IPPROTO_TCP: c_int = 6;
++pub const IPPROTO_UDP: c_int = 17;
++pub const IPPROTO_IPV6: c_int = 41;
++pub const SOL_SOCKET: c_int = 0x7fff_ffff;
++pub const SO_REUSEADDR: c_int = 2;
++pub const SO_TYPE: c_int = 3;
++pub const SO_ERROR: c_int = 4;
++pub const SO_BROADCAST: c_int = 6;
++pub const SO_SNDBUF: c_int = 7;
++pub const SO_RCVBUF: c_int = 8;
++pub const SO_KEEPALIVE: c_int = 9;
++pub const SO_LINGER: c_int = 13;
++pub const SO_RCVTIMEO: c_int = 66;
++pub const SO_SNDTIMEO: c_int = 67;
++pub const IP_TTL: c_int = 2;
++pub const IP_MULTICAST_TTL: c_int = 33;
++pub const IP_MULTICAST_LOOP: c_int = 34;
++pub const IP_ADD_MEMBERSHIP: c_int = 35;
++pub const IP_DROP_MEMBERSHIP: c_int = 36;
++pub const IPV6_UNICAST_HOPS: c_int = 16;
++pub const IPV6_MULTICAST_LOOP: c_int = 19;
++pub const IPV6_JOIN_GROUP: c_int = 20;
++pub const IPV6_LEAVE_GROUP: c_int = 21;
++pub const IPV6_ADD_MEMBERSHIP: c_int = 20;
++pub const IPV6_DROP_MEMBERSHIP: c_int = 21;
++pub const IPV6_V6ONLY: c_int = 26;
++pub const TCP_NODELAY: c_int = 1;
++pub const TCP_KEEPIDLE: c_int = 4;
++pub const TCP_KEEPINTVL: c_int = 5;
++pub const TCP_KEEPCNT: c_int = 6;
++pub const MSG_PEEK: c_int = 2;
++pub const MSG_NOSIGNAL: c_int = 0x4000;
++pub const SOMAXCONN: c_int = 128;
++pub const SHUT_RD: c_int = 1;
++pub const SHUT_WR: c_int = 2;
++pub const SHUT_RDWR: c_int = SHUT_RD | SHUT_WR;
++pub const EAI_SYSTEM: c_int = -11;
+ pub const SEEK_SET: c_int = 0;
+ pub const SEEK_CUR: c_int = 1;
+ pub const SEEK_END: c_int = 2;
+@@ -656,6 +777,59 @@
+     pub fn putchar_unlocked(c: c_int) -> c_int;
+ 
+     pub fn shutdown(socket: c_int, how: c_int) -> c_int;
++    pub fn gethostname(name: *mut c_char, len: size_t) -> c_int;
++    pub fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
++    pub fn socketpair(domain: c_int, ty: c_int, protocol: c_int, sockets: *mut c_int) -> c_int;
++    pub fn bind(socket: c_int, address: *const sockaddr, address_len: socklen_t) -> c_int;
++    pub fn connect(socket: c_int, address: *const sockaddr, address_len: socklen_t) -> c_int;
++    pub fn listen(socket: c_int, backlog: c_int) -> c_int;
++    pub fn accept(socket: c_int, address: *mut sockaddr, address_len: *mut socklen_t) -> c_int;
++    pub fn accept4(
++        socket: c_int,
++        address: *mut sockaddr,
++        address_len: *mut socklen_t,
++        flags: c_int,
++    ) -> c_int;
++    pub fn getsockname(socket: c_int, address: *mut sockaddr, address_len: *mut socklen_t) -> c_int;
++    pub fn getpeername(socket: c_int, address: *mut sockaddr, address_len: *mut socklen_t) -> c_int;
++    pub fn sendto(
++        socket: c_int,
++        buf: *const c_void,
++        len: size_t,
++        flags: c_int,
++        address: *const sockaddr,
++        address_len: socklen_t,
++    ) -> ssize_t;
++    pub fn recvfrom(
++        socket: c_int,
++        buf: *mut c_void,
++        len: size_t,
++        flags: c_int,
++        address: *mut sockaddr,
++        address_len: *mut socklen_t,
++    ) -> ssize_t;
++    pub fn getsockopt(
++        socket: c_int,
++        level: c_int,
++        name: c_int,
++        value: *mut c_void,
++        value_len: *mut socklen_t,
++    ) -> c_int;
++    pub fn setsockopt(
++        socket: c_int,
++        level: c_int,
++        name: c_int,
++        value: *const c_void,
++        value_len: socklen_t,
++    ) -> c_int;
++    pub fn getaddrinfo(
++        node: *const c_char,
++        service: *const c_char,
++        hints: *const addrinfo,
++        result: *mut *mut addrinfo,
++    ) -> c_int;
++    pub fn freeaddrinfo(result: *mut addrinfo);
++    pub fn gai_strerror(error: c_int) -> *const c_char;
+     pub fn fstat(fildes: c_int, buf: *mut stat) -> c_int;
+     pub fn mkdir(path: *const c_char, mode: mode_t) -> c_int;
+     pub fn stat(path: *const c_char, buf: *mut stat) -> c_int;
+@@ -667,6 +841,8 @@
+     pub fn open(path: *const c_char, oflag: c_int, ...) -> c_int;
+     pub fn creat(path: *const c_char, mode: mode_t) -> c_int;
+     pub fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
++    pub fn pipe(fds: *mut c_int) -> c_int;
++    pub fn pipe2(fds: *mut c_int, flags: c_int) -> c_int;
+     pub fn opendir(dirname: *const c_char) -> *mut crate::DIR;
+     pub fn fdopendir(fd: c_int) -> *mut crate::DIR;
+     pub fn readdir(dirp: *mut crate::DIR) -> *mut crate::dirent;

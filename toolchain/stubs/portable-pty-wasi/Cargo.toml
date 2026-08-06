@@ -20,7 +20,7 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Cross platform pty interface"
+description = "portable-pty API backed by agentOS POSIX PTY and process host imports"
 documentation = "https://docs.rs/portable-pty"
 readme = false
 license = "MIT"
@@ -49,6 +49,9 @@ path = "examples/whoami_async.rs"
 
 [dependencies.anyhow]
 version = "1.0"
+
+[dependencies.wasi-ext]
+path = "../../crates/wasi-ext"
 
 [dependencies.downcast-rs]
 version = "1.0"
