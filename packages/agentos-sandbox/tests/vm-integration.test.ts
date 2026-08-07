@@ -47,7 +47,7 @@ describe("VM integration", () => {
 			software: [common],
 			sandbox: {
 				mountPath: "/sandbox",
-				idleTimeoutMs: 25,
+				idleTimeoutMs: 500,
 				provider: {
 					start: async () => {
 						providerStarts += 1;
@@ -119,9 +119,7 @@ describe("VM integration", () => {
 				new TextEncoder().encode("first"),
 			);
 			expect(
-				new TextDecoder().decode(
-					await vm.readFile("/sandbox/generation.txt"),
-				),
+				new TextDecoder().decode(await vm.readFile("/sandbox/generation.txt")),
 			).toBe("first");
 			expect(providerStarts).toBe(1);
 
@@ -130,15 +128,32 @@ describe("VM integration", () => {
 				{ path: "/generation.txt" },
 				new TextEncoder().encode("second"),
 			);
-			for (let attempt = 0; attempt < 50 && providerDisposals === 0; attempt++) {
+			for (
+				let attempt = 0;
+				attempt < 100 && providerDisposals === 0;
+				attempt++
+			) {
 				await new Promise((resolve) => setTimeout(resolve, 10));
 			}
 			expect(providerDisposals).toBe(1);
-			expect(
-				new TextDecoder().decode(
-					await vm.readFile("/sandbox/generation.txt"),
+			const [secondContent, bindingResult] = await Promise.all([
+				vm.readFile("/sandbox/generation.txt"),
+				vm.process.execFile(
+					"agentos-sandbox",
+					["run-command", "--command", "echo", "--args", "second-generation"],
+					{ output: { capture: "all" } },
 				),
-			).toBe("second");
+			]);
+			expect(new TextDecoder().decode(secondContent)).toBe("second");
+			expect(bindingResult.exitCode).toBe(0);
+			expect(JSON.parse(bindingResult.stdout)).toEqual(
+				expect.objectContaining({
+					ok: true,
+					result: expect.objectContaining({
+						stdout: expect.stringContaining("second-generation"),
+					}),
+				}),
+			);
 			expect(providerStarts).toBe(2);
 		} finally {
 			await replacement.stop();

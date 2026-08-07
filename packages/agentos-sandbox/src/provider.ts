@@ -16,7 +16,7 @@ export type SandboxAgentProviderOptions = Omit<
 interface SandboxAgentTransportInternals {
 	baseUrl: string;
 	token?: string;
-	defaultHeaders?: HeadersInit;
+	defaultHeaders?: RequestInit["headers"];
 	fetcher?: typeof globalThis.fetch;
 	awaitHealthy?(signal?: AbortSignal): Promise<void>;
 }
@@ -62,7 +62,9 @@ async function requestThroughSandboxAgent(
 		);
 	}
 	const headers = new Headers(transport.defaultHeaders);
-	new Headers(init.headers).forEach((value, name) => headers.set(name, value));
+	new Headers(init.headers).forEach((value, name) => {
+		headers.set(name, value);
+	});
 	if (transport.token) {
 		headers.set("authorization", `Bearer ${transport.token}`);
 	}

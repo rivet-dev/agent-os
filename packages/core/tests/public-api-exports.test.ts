@@ -106,13 +106,16 @@ describe("root public API exports", () => {
 			defaultSoftware: false,
 		});
 		expect(KernelError).toBeTypeOf("function");
-		expect(SandboxStartupError).toBeTypeOf("function");
 		expect(createSnapshotExport).toBeTypeOf("function");
 		// Package dirs are the public software descriptor.
 		expect(defineSoftware("/opt/pkg")).toBe("/opt/pkg");
 		expect(isPackageDescriptor).toBeTypeOf("function");
 		expect(OPT_AGENTOS_ROOT).toBe("/opt/agentos");
 		expect(OPT_AGENTOS_BIN).toBe("/opt/agentos/bin");
+	});
+
+	test("re-exports sandbox lifecycle errors from the root entrypoint", () => {
+		expect(SandboxStartupError).toBeTypeOf("function");
 	});
 
 	test("re-exports current public SDK types from the root entrypoint", () => {

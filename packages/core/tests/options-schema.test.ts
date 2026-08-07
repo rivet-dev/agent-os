@@ -277,6 +277,107 @@ describe("AgentOsOptions validation", () => {
 		for (const hook of getSandboxDisposeHooks(options)) await hook();
 	});
 
+	test("times out startup, retries, and disposes a client that arrives late", async () => {
+		let started = 0;
+		let releaseFirstStart!: (client: unknown) => void;
+		const firstStart = new Promise<unknown>((resolve) => {
+			releaseFirstStart = resolve;
+		});
+		let lateDisposals = 0;
+		let activeDisposals = 0;
+		const options = await resolveSandboxOptions({
+			sandbox: {
+				startupTimeoutMs: 10,
+				provider: {
+					start: async () => {
+						started += 1;
+						if (started === 1) return await firstStart;
+						return {
+							listProcesses: async () => ({ processes: [] }),
+							dispose: async () => {
+								activeDisposals += 1;
+							},
+						} as never;
+					},
+				},
+			},
+		} as never);
+		const execute = options.bindings?.[0]?.bindings["list-processes"].execute;
+		if (!execute) throw new Error("sandbox list-processes binding is missing");
+
+		await expect(execute({})).rejects.toEqual(
+			expect.objectContaining({
+				name: SandboxStartupError.name,
+				message: expect.stringContaining("sandbox.startupTimeoutMs=10"),
+			}),
+		);
+		await expect(execute({})).resolves.toEqual({ processes: [] });
+		expect(started).toBe(2);
+
+		releaseFirstStart({
+			dispose: async () => {
+				lateDisposals += 1;
+			},
+		});
+		for (let attempt = 0; attempt < 50 && lateDisposals === 0; attempt++) {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+		expect(lateDisposals).toBe(1);
+		for (const hook of getSandboxDisposeHooks(options)) await hook();
+		expect(activeDisposals).toBe(1);
+	});
+
+	test("waits for an idle client shutdown before starting its replacement", async () => {
+		let started = 0;
+		let markIdleDisposalStarted!: () => void;
+		const idleDisposalStarted = new Promise<void>((resolve) => {
+			markIdleDisposalStarted = resolve;
+		});
+		let releaseIdleDisposal!: () => void;
+		const idleDisposalGate = new Promise<void>((resolve) => {
+			releaseIdleDisposal = resolve;
+		});
+		const options = await resolveSandboxOptions({
+			sandbox: {
+				idleTimeoutMs: 10,
+				provider: {
+					start: async () => {
+						started += 1;
+						const generation = started;
+						return {
+							listProcesses: async () => ({
+								processes: [{ id: String(generation) }],
+							}),
+							dispose: async () => {
+								if (generation === 1) {
+									markIdleDisposalStarted();
+									await idleDisposalGate;
+								}
+							},
+						} as never;
+					},
+				},
+			},
+		} as never);
+		const execute = options.bindings?.[0]?.bindings["list-processes"].execute;
+		if (!execute) throw new Error("sandbox list-processes binding is missing");
+
+		await expect(execute({})).resolves.toEqual({
+			processes: [expect.objectContaining({ id: "1" })],
+		});
+		await idleDisposalStarted;
+		const racedOperation = execute({});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(started).toBe(1);
+
+		releaseIdleDisposal();
+		await expect(racedOperation).resolves.toEqual({
+			processes: [expect.objectContaining({ id: "2" })],
+		});
+		expect(started).toBe(2);
+		for (const hook of getSandboxDisposeHooks(options)) await hook();
+	});
+
 	test("restarts an idle provider without changing the mount endpoint", async () => {
 		let started = 0;
 		let disposed = 0;
@@ -329,6 +430,30 @@ describe("AgentOsOptions validation", () => {
 				} as never),
 			).rejects.toThrow(new RegExp(`sandbox\\.${field}`));
 		}
+	});
+
+	test("aggregates sandbox configuration and cleanup failures", async () => {
+		let caught: unknown;
+		try {
+			await resolveSandboxOptions({
+				sandbox: {
+					client: { baseUrl: "http://127.0.0.1:1234" } as never,
+					dispose: async () => {
+						throw new Error("client cleanup failed");
+					},
+					maxRelayRequests: 0,
+				},
+			} as never);
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(AggregateError);
+		const errors = (caught as AggregateError).errors;
+		expect(errors).toHaveLength(2);
+		expect(errors.map((error) => String(error))).toEqual([
+			expect.stringContaining("sandbox.maxRelayRequests"),
+			expect.stringContaining("client cleanup failed"),
+		]);
 	});
 
 	test("does not start a provider when VM option validation fails", async () => {

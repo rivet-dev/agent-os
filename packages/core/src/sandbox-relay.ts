@@ -162,7 +162,9 @@ function mergeUpstreamHeaders(
 	const serializable = client as AgentOsSandboxClient &
 		SerializableSandboxClient;
 	const headers = new Headers(serializable.defaultHeaders);
-	requestHeaders.forEach((value, name) => headers.set(name, value));
+	requestHeaders.forEach((value, name) => {
+		headers.set(name, value);
+	});
 	if (serializable.token) {
 		headers.set("authorization", `Bearer ${serializable.token}`);
 	}
@@ -236,7 +238,10 @@ export async function createSandboxRelay(
 	const token = randomBytes(32).toString("base64url");
 	const maxConcurrentRequests =
 		options.maxConcurrentRequests ?? DEFAULT_MAX_RELAY_REQUESTS;
-	if (!Number.isSafeInteger(maxConcurrentRequests) || maxConcurrentRequests <= 0) {
+	if (
+		!Number.isSafeInteger(maxConcurrentRequests) ||
+		maxConcurrentRequests <= 0
+	) {
 		throw new Error("sandbox.maxRelayRequests must be a positive safe integer");
 	}
 
@@ -283,8 +288,7 @@ export async function createSandboxRelay(
 			activeRequests += 1;
 			if (
 				!warnedNearCapacity &&
-				activeRequests * 100 >=
-					maxConcurrentRequests * RELAY_WARNING_PERCENT
+				activeRequests * 100 >= maxConcurrentRequests * RELAY_WARNING_PERCENT
 			) {
 				warnedNearCapacity = true;
 				console.warn(
@@ -308,7 +312,7 @@ export async function createSandboxRelay(
 							signal: abortController.signal,
 							...(hasBody
 								? {
-										body: Readable.toWeb(request) as unknown as BodyInit,
+										body: Readable.toWeb(request) as never,
 										duplex: "half" as const,
 									}
 								: {}),

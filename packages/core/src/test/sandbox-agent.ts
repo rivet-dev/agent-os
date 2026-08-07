@@ -1,10 +1,23 @@
-import { once } from "node:events";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, relative, resolve } from "node:path";
-import { tmpdir } from "node:os";
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { once } from "node:events";
+import {
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	rename,
+	rm,
+	stat,
+	writeFile,
+} from "node:fs/promises";
+import {
+	createServer,
+	type IncomingMessage,
+	type ServerResponse,
+} from "node:http";
+import { tmpdir } from "node:os";
+import { dirname, relative, resolve } from "node:path";
 import type { SandboxAgent } from "sandbox-agent";
 
 type ProcessState = "running" | "exited";
@@ -56,7 +69,11 @@ function json(response: ServerResponse, status: number, value: unknown): void {
 	response.end(body);
 }
 
-function problem(response: ServerResponse, status: number, detail: string): void {
+function problem(
+	response: ServerResponse,
+	status: number,
+	detail: string,
+): void {
 	json(response, status, {
 		type: "about:blank",
 		title: status === 404 ? "Not Found" : "Bad Request",
@@ -75,7 +92,9 @@ async function readBody(request: IncomingMessage): Promise<Buffer> {
 
 function decodePath(rootDir: string, rawPath: string | null): string {
 	const candidate = rawPath && rawPath.length > 0 ? rawPath : rootDir;
-	const direct = resolve(candidate.startsWith("/") ? candidate : resolve(rootDir, candidate));
+	const direct = resolve(
+		candidate.startsWith("/") ? candidate : resolve(rootDir, candidate),
+	);
 	const directRel = relative(rootDir, direct);
 	if (!(directRel.startsWith("..") || directRel === "..")) {
 		return direct;
@@ -118,7 +137,11 @@ function processInfo(proc: ManagedProcess) {
 	};
 }
 
-function appendLog(proc: ManagedProcess, stream: ProcessStream, chunk: Buffer): void {
+function appendLog(
+	proc: ManagedProcess,
+	stream: ProcessStream,
+	chunk: Buffer,
+): void {
 	proc.sequence += 1;
 	proc.logs.push({
 		data: chunk.toString("base64"),
@@ -129,7 +152,10 @@ function appendLog(proc: ManagedProcess, stream: ProcessStream, chunk: Buffer): 
 	});
 }
 
-async function waitForProcessExit(proc: ManagedProcess, timeoutMs = 2_000): Promise<void> {
+async function waitForProcessExit(
+	proc: ManagedProcess,
+	timeoutMs = 2_000,
+): Promise<void> {
 	if (proc.status === "exited") {
 		return;
 	}
@@ -166,11 +192,14 @@ async function runCommand(request: {
 		let timedOut = false;
 		const child = spawn(
 			request.command,
-			request.args?.map((value) => mapProcessPath(request.rootDir, value)) ?? [],
+			request.args?.map((value) => mapProcessPath(request.rootDir, value)) ??
+				[],
 			{
-			cwd: request.cwd ? mapProcessPath(request.rootDir, request.cwd) : undefined,
-			env: request.env ? { ...process.env, ...request.env } : process.env,
-			stdio: ["ignore", "pipe", "pipe"],
+				cwd: request.cwd
+					? mapProcessPath(request.rootDir, request.cwd)
+					: undefined,
+				env: request.env ? { ...process.env, ...request.env } : process.env,
+				stdio: ["ignore", "pipe", "pipe"],
 			},
 		);
 
@@ -350,7 +379,9 @@ export async function startMockSandboxAgent(
 			}
 
 			if (method === "POST" && url.pathname === "/v1/processes/run") {
-				const requestBody = JSON.parse((await readBody(request)).toString("utf8")) as {
+				const requestBody = JSON.parse(
+					(await readBody(request)).toString("utf8"),
+				) as {
 					args?: string[];
 					command: string;
 					cwd?: string | null;
@@ -370,7 +401,9 @@ export async function startMockSandboxAgent(
 			}
 
 			if (method === "POST" && url.pathname === "/v1/processes") {
-				const requestBody = JSON.parse((await readBody(request)).toString("utf8")) as {
+				const requestBody = JSON.parse(
+					(await readBody(request)).toString("utf8"),
+				) as {
 					args?: string[];
 					command: string;
 					cwd?: string | null;
@@ -380,7 +413,8 @@ export async function startMockSandboxAgent(
 				};
 				const child = spawn(
 					requestBody.command,
-					requestBody.args?.map((value) => mapProcessPath(rootDir, value)) ?? [],
+					requestBody.args?.map((value) => mapProcessPath(rootDir, value)) ??
+						[],
 					{
 						cwd: requestBody.cwd
 							? mapProcessPath(rootDir, requestBody.cwd)
@@ -408,8 +442,12 @@ export async function startMockSandboxAgent(
 					tty: requestBody.tty === true,
 				};
 				processes.set(proc.id, proc);
-				child.stdout.on("data", (chunk: Buffer) => appendLog(proc, "stdout", chunk));
-				child.stderr.on("data", (chunk: Buffer) => appendLog(proc, "stderr", chunk));
+				child.stdout.on("data", (chunk: Buffer) =>
+					appendLog(proc, "stdout", chunk),
+				);
+				child.stderr.on("data", (chunk: Buffer) =>
+					appendLog(proc, "stderr", chunk),
+				);
 				child.on("close", (code) => {
 					proc.status = "exited";
 					proc.exitCode = code;
@@ -432,7 +470,9 @@ export async function startMockSandboxAgent(
 				return;
 			}
 
-			const processMatch = url.pathname.match(/^\/v1\/processes\/([^/]+)(?:\/(stop|kill|logs|input))?$/);
+			const processMatch = url.pathname.match(
+				/^\/v1\/processes\/([^/]+)(?:\/(stop|kill|logs|input))?$/,
+			);
 			if (processMatch) {
 				const [, rawId, action] = processMatch;
 				const proc = processes.get(decodeURIComponent(rawId));
@@ -480,7 +520,9 @@ export async function startMockSandboxAgent(
 				}
 
 				if (method === "POST" && action === "input") {
-					const body = JSON.parse((await readBody(request)).toString("utf8")) as {
+					const body = JSON.parse(
+						(await readBody(request)).toString("utf8"),
+					) as {
 						data: string;
 						encoding?: string;
 					};
@@ -494,7 +536,11 @@ export async function startMockSandboxAgent(
 				}
 			}
 
-			problem(response, 404, `Unhandled mock sandbox-agent route: ${method} ${url.pathname}`);
+			problem(
+				response,
+				404,
+				`Unhandled mock sandbox-agent route: ${method} ${url.pathname}`,
+			);
 		} catch (error) {
 			problem(
 				response,

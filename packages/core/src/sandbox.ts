@@ -203,9 +203,9 @@ class SandboxClientController implements SandboxRelayClientController {
 		if (!this.#provider) {
 			throw new Error("Sandbox client is not available");
 		}
-		if (this.#stopPromise) await this.#stopPromise;
+		if (this.#stopPromise !== undefined) await this.#stopPromise;
 		if (this.#current) return this.#current;
-		if (this.#startPromise) return await this.#startPromise;
+		if (this.#startPromise !== undefined) return await this.#startPromise;
 
 		const startPromise = this.#startProvider();
 		this.#startPromise = startPromise;
@@ -307,13 +307,15 @@ class SandboxClientController implements SandboxRelayClientController {
 			this.#disposed ||
 			this.#activeOperations !== 0 ||
 			!this.#current ||
-			this.#stopPromise
+			this.#stopPromise !== undefined
 		) {
 			return;
 		}
 		const client = this.#current;
 		this.#current = undefined;
-		const stopPromise = Promise.resolve(client.dispose?.()).then(() => undefined);
+		const stopPromise = Promise.resolve(client.dispose?.()).then(
+			() => undefined,
+		);
 		this.#stopPromise = stopPromise;
 		try {
 			await stopPromise;
@@ -416,9 +418,11 @@ function normalizeHeaders(
 	);
 }
 
-function getSerializableClientConfig(
-	client: AgentOsSandboxClient,
-): Pick<SandboxMountPluginConfig, "baseUrl" | "token" | "headers"> {
+function getSerializableClientConfig(client: AgentOsSandboxClient): {
+	baseUrl: string;
+	token?: string;
+	headers?: Record<string, string>;
+} {
 	const serializable = client as unknown as SerializableSandboxClient;
 	const baseUrl = serializable.baseUrl?.trim().replace(/\/+$/, "");
 	if (!baseUrl) {
