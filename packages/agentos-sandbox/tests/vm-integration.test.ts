@@ -14,6 +14,7 @@ import {
 import { createSandboxBindings } from "../src/index.js";
 
 let sandbox: MockSandboxAgentHandle;
+let providerSandbox: MockSandboxAgentHandle;
 
 const SANDBOX_TEST_PERMISSIONS = {
 	fs: "allow",
@@ -24,7 +25,8 @@ const SANDBOX_TEST_PERMISSIONS = {
 } as const;
 
 beforeAll(async () => {
-	sandbox = await startMockSandboxAgent();
+	sandbox = await startMockSandboxAgent({ token: "first-generation-token" });
+	providerSandbox = sandbox;
 }, 150_000);
 
 afterAll(async () => {
@@ -39,15 +41,17 @@ describe("VM integration", () => {
 	beforeEach(async () => {
 		providerStarts = 0;
 		providerDisposals = 0;
+		providerSandbox = sandbox;
 		vm = await AgentOs.create({
 			permissions: SANDBOX_TEST_PERMISSIONS,
 			software: [common],
 			sandbox: {
 				mountPath: "/sandbox",
+				idleTimeoutMs: 500,
 				provider: {
 					start: async () => {
 						providerStarts += 1;
-						return new Proxy(sandbox.client, {
+						return new Proxy(providerSandbox.client, {
 							get(target, property) {
 								if (property === "dispose") {
 									return () => {
@@ -62,12 +66,12 @@ describe("VM integration", () => {
 				},
 			},
 		});
-		expect(providerStarts).toBe(1);
+		expect(providerStarts).toBe(0);
 	}, 150_000);
 
 	afterEach(async () => {
 		if (vm) await vm.dispose();
-		expect(providerDisposals).toBe(1);
+		expect(providerDisposals).toBe(providerStarts);
 	});
 
 	// -- Filesystem mount tests --
@@ -104,6 +108,57 @@ describe("VM integration", () => {
 		const content = await vm.readFile("/sandbox/nested/deep.txt");
 		expect(new TextDecoder().decode(content)).toBe("deep file");
 	});
+
+	it("keeps the mounted path live when the backing sandbox endpoint changes", async () => {
+		const replacement = await startMockSandboxAgent({
+			token: "second-generation-token",
+		});
+		try {
+			await sandbox.client.writeFsFile(
+				{ path: "/generation.txt" },
+				new TextEncoder().encode("first"),
+			);
+			expect(
+				new TextDecoder().decode(await vm.readFile("/sandbox/generation.txt")),
+			).toBe("first");
+			expect(providerStarts).toBe(1);
+
+			providerSandbox = replacement;
+			await replacement.client.writeFsFile(
+				{ path: "/generation.txt" },
+				new TextEncoder().encode("second"),
+			);
+			for (
+				let attempt = 0;
+				attempt < 100 && providerDisposals === 0;
+				attempt++
+			) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			expect(providerDisposals).toBe(1);
+			const [secondContent, bindingResult] = await Promise.all([
+				vm.readFile("/sandbox/generation.txt"),
+				vm.process.execFile(
+					"agentos-sandbox",
+					["run-command", "--command", "echo", "--args", "second-generation"],
+					{ output: { capture: "all" } },
+				),
+			]);
+			expect(new TextDecoder().decode(secondContent)).toBe("second");
+			expect(bindingResult.exitCode).toBe(0);
+			expect(JSON.parse(bindingResult.stdout)).toEqual(
+				expect.objectContaining({
+					ok: true,
+					result: expect.objectContaining({
+						stdout: expect.stringContaining("second-generation"),
+					}),
+				}),
+			);
+			expect(providerStarts).toBe(2);
+		} finally {
+			await replacement.stop();
+		}
+	}, 150_000);
 
 	// -- Bindings direct execution (host RPC, not via CLI shim) --
 

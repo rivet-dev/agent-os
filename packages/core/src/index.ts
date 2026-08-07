@@ -1,7 +1,19 @@
 // @rivet-dev/agentos
 
 export { AgentOs, AgentOsSidecar } from "./agent-os.js";
-export type * from "./language-execution.js";
+export {
+	isPackageDescriptor,
+	OPT_AGENTOS_BIN,
+	OPT_AGENTOS_ROOT,
+	tryReadAgentosPackageManifest,
+} from "./agentos-package.js";
+export type { Binding, BindingExample, Bindings } from "./bindings.js";
+export {
+	binding,
+	bindings,
+	MAX_BINDING_DESCRIPTION_LENGTH,
+	validateBindings,
+} from "./bindings.js";
 export {
 	CronManager,
 	InvalidScheduleError,
@@ -9,18 +21,14 @@ export {
 	TimerScheduleDriver,
 } from "./cron/index.js";
 export { createHostDirBackend, nodeModulesMount } from "./host-dir-mount.js";
-export {
-	binding,
-	MAX_BINDING_DESCRIPTION_LENGTH,
-	bindings,
-	validateBindings,
-} from "./bindings.js";
-export type { Binding, BindingExample, Bindings } from "./bindings.js";
+export type * from "./language-execution.js";
+export { createSnapshotExport } from "./layers.js";
 export {
 	agentOsLimitsSchema,
 	agentOsOptionFieldSchemas,
 	agentOsOptionsSchema,
 	bindingSchema,
+	bindingsSchema,
 	mountConfigSchema,
 	nativeMountConfigSchema,
 	parseAgentOsOptions,
@@ -28,17 +36,8 @@ export {
 	rootFilesystemConfigSchema,
 	sharedSidecarConfigSchema,
 	sidecarConfigSchema,
-	bindingsSchema,
 } from "./options-schema.js";
-export { createSnapshotExport } from "./layers.js";
 export { defineSoftware } from "./packages.js";
-export {
-	isPackageDescriptor,
-	OPT_AGENTOS_BIN,
-	OPT_AGENTOS_ROOT,
-	tryReadAgentosPackageManifest,
-} from "./agentos-package.js";
-export { KernelError } from "./runtime-compat.js";
 export type {
 	ExecOptions,
 	ExecResult,
@@ -48,10 +47,12 @@ export type {
 	VirtualDirEntry,
 	VirtualStat,
 } from "./runtime.js";
+export { KernelError } from "./runtime-compat.js";
 export {
 	createSandboxBindings,
 	createSandboxFs,
 	getSandboxDisposeHooks,
 	resolveSandboxOptions,
+	SandboxStartupError,
 } from "./sandbox.js";
 export type * from "./types.js";

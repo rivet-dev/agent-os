@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { AgentOs, agentOsOptionsSchema } from "../src/index.js";
+import {
+	AgentOs,
+	agentOsOptionsSchema,
+	SandboxStartupError,
+} from "../src/index.js";
 import {
 	getSandboxDisposeHooks,
 	resolveSandboxOptions,
@@ -112,10 +116,12 @@ describe("AgentOsOptions validation", () => {
 			).toBe(false);
 		}
 	});
-	test("provider sandbox starts a client and owns disposal", async () => {
+	test("provider sandbox starts lazily and owns disposal", async () => {
+		let started = 0;
 		let disposed = false;
 		const client = {
 			baseUrl: "http://127.0.0.1:1234",
+			listProcesses: async () => ({ processes: [] }),
 			dispose: () => {
 				disposed = true;
 			},
@@ -124,22 +130,34 @@ describe("AgentOsOptions validation", () => {
 		const options = await resolveSandboxOptions({
 			sandbox: {
 				provider: {
-					start: async () => client,
+					start: async () => {
+						started += 1;
+						return client;
+					},
 				},
 			},
 		} as never);
 		expect(options).not.toHaveProperty("sandbox");
 		expect(options.mounts?.[0]?.path).toBe("/mnt/sandbox");
 		expect(options.bindings?.[0]?.name).toBe("sandbox");
+		expect(started).toBe(0);
 
+		await options.bindings?.[0]?.bindings["list-processes"].execute({});
+		expect(started).toBe(1);
 		for (const hook of getSandboxDisposeHooks(options)) {
 			await hook();
 		}
 		expect(disposed).toBe(true);
 	});
 
-	test("advanced sandbox client leaves disposal manual by default", async () => {
-		const client = { baseUrl: "http://127.0.0.1:1234" } as never;
+	test("advanced sandbox client leaves client disposal manual by default", async () => {
+		let disposed = false;
+		const client = {
+			baseUrl: "http://127.0.0.1:1234",
+			dispose: () => {
+				disposed = true;
+			},
+		} as never;
 		const options = await resolveSandboxOptions({
 			sandbox: {
 				client,
@@ -147,25 +165,295 @@ describe("AgentOsOptions validation", () => {
 			},
 		} as never);
 		expect(options.mounts?.[0]?.path).toBe("/work");
-		expect(getSandboxDisposeHooks(options)).toHaveLength(0);
+		const mount = options.mounts?.[0];
+		if (!mount || !("plugin" in mount)) {
+			throw new Error("sandbox mount config is missing");
+		}
+		expect(mount.plugin.config.baseUrl).not.toBe("http://127.0.0.1:1234");
+		expect(mount.plugin.config.token).toEqual(expect.any(String));
+		expect(getSandboxDisposeHooks(options)).toHaveLength(1);
+		for (const hook of getSandboxDisposeHooks(options)) await hook();
+		expect(disposed).toBe(false);
 	});
 
-	test("disposes a provider client when sandbox expansion fails", async () => {
+	test("advanced sandbox client can transfer disposal ownership", async () => {
 		let disposed = 0;
-		await expect(
-			resolveSandboxOptions({
-				sandbox: {
-					provider: {
-						start: async () => ({
-							dispose: () => {
-								disposed += 1;
-							},
-						}),
+		const options = await resolveSandboxOptions({
+			sandbox: {
+				client: {
+					baseUrl: "http://127.0.0.1:1234",
+					dispose: async () => {
+						disposed += 1;
+					},
+				} as never,
+				dispose: true,
+			},
+		} as never);
+		for (const hook of getSandboxDisposeHooks(options)) await hook();
+		expect(disposed).toBe(1);
+	});
+
+	test("shares one provider startup across mount and binding calls", async () => {
+		let started = 0;
+		let releaseStart!: () => void;
+		const startGate = new Promise<void>((resolve) => {
+			releaseStart = resolve;
+		});
+		const options = await resolveSandboxOptions({
+			sandbox: {
+				provider: {
+					start: async () => {
+						started += 1;
+						await startGate;
+						return {
+							request: async () =>
+								new Response(
+									JSON.stringify({
+										path: "/",
+										entryType: "directory",
+										size: 0,
+									}),
+									{ headers: { "content-type": "application/json" } },
+								),
+							listProcesses: async () => ({ processes: [] }),
+							dispose: async () => {},
+						} as never;
 					},
 				},
-			} as never),
-		).rejects.toThrow(/serializable baseUrl/);
+			},
+		} as never);
+		const execute = options.bindings?.[0]?.bindings["list-processes"].execute;
+		if (!execute) throw new Error("sandbox list-processes binding is missing");
+		const mount = options.mounts?.[0];
+		if (!mount || !("plugin" in mount)) {
+			throw new Error("sandbox mount config is missing");
+		}
+		const mountConfig = mount.plugin.config;
+		const bindingCall = execute({});
+		const mountCall = fetch(
+			`${String(mountConfig.baseUrl)}/v1/fs/stat?path=%2F`,
+			{
+				headers: {
+					authorization: `Bearer ${String(mountConfig.token)}`,
+				},
+			},
+		);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(started).toBe(1);
+		releaseStart();
+		const [, mountResponse] = await Promise.all([bindingCall, mountCall]);
+		expect(mountResponse.status).toBe(200);
+		await mountResponse.arrayBuffer();
+		expect(started).toBe(1);
+		for (const hook of getSandboxDisposeHooks(options)) await hook();
+	});
+
+	test("reports startup failures and retries on the next operation", async () => {
+		let started = 0;
+		const options = await resolveSandboxOptions({
+			sandbox: {
+				provider: {
+					start: async () => {
+						started += 1;
+						if (started === 1) throw new Error("provider unavailable");
+						return {
+							listProcesses: async () => ({ processes: [] }),
+							dispose: async () => {},
+						} as never;
+					},
+				},
+			},
+		} as never);
+		const execute = options.bindings?.[0]?.bindings["list-processes"].execute;
+		if (!execute) throw new Error("sandbox list-processes binding is missing");
+		await expect(execute({})).rejects.toEqual(
+			expect.objectContaining({
+				name: SandboxStartupError.name,
+				message: expect.stringContaining("provider unavailable"),
+			}),
+		);
+		await expect(execute({})).resolves.toEqual({ processes: [] });
+		expect(started).toBe(2);
+		for (const hook of getSandboxDisposeHooks(options)) await hook();
+	});
+
+	test("times out startup, retries, and disposes a client that arrives late", async () => {
+		let started = 0;
+		let releaseFirstStart!: (client: unknown) => void;
+		const firstStart = new Promise<unknown>((resolve) => {
+			releaseFirstStart = resolve;
+		});
+		let lateDisposals = 0;
+		let activeDisposals = 0;
+		const options = await resolveSandboxOptions({
+			sandbox: {
+				startupTimeoutMs: 10,
+				provider: {
+					start: async () => {
+						started += 1;
+						if (started === 1) return await firstStart;
+						return {
+							listProcesses: async () => ({ processes: [] }),
+							dispose: async () => {
+								activeDisposals += 1;
+							},
+						} as never;
+					},
+				},
+			},
+		} as never);
+		const execute = options.bindings?.[0]?.bindings["list-processes"].execute;
+		if (!execute) throw new Error("sandbox list-processes binding is missing");
+
+		await expect(execute({})).rejects.toEqual(
+			expect.objectContaining({
+				name: SandboxStartupError.name,
+				message: expect.stringContaining("sandbox.startupTimeoutMs=10"),
+			}),
+		);
+		await expect(execute({})).resolves.toEqual({ processes: [] });
+		expect(started).toBe(2);
+
+		releaseFirstStart({
+			dispose: async () => {
+				lateDisposals += 1;
+			},
+		});
+		for (let attempt = 0; attempt < 50 && lateDisposals === 0; attempt++) {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+		expect(lateDisposals).toBe(1);
+		for (const hook of getSandboxDisposeHooks(options)) await hook();
+		expect(activeDisposals).toBe(1);
+	});
+
+	test("waits for an idle client shutdown before starting its replacement", async () => {
+		let started = 0;
+		let markIdleDisposalStarted!: () => void;
+		const idleDisposalStarted = new Promise<void>((resolve) => {
+			markIdleDisposalStarted = resolve;
+		});
+		let releaseIdleDisposal!: () => void;
+		const idleDisposalGate = new Promise<void>((resolve) => {
+			releaseIdleDisposal = resolve;
+		});
+		const options = await resolveSandboxOptions({
+			sandbox: {
+				idleTimeoutMs: 10,
+				provider: {
+					start: async () => {
+						started += 1;
+						const generation = started;
+						return {
+							listProcesses: async () => ({
+								processes: [{ id: String(generation) }],
+							}),
+							dispose: async () => {
+								if (generation === 1) {
+									markIdleDisposalStarted();
+									await idleDisposalGate;
+								}
+							},
+						} as never;
+					},
+				},
+			},
+		} as never);
+		const execute = options.bindings?.[0]?.bindings["list-processes"].execute;
+		if (!execute) throw new Error("sandbox list-processes binding is missing");
+
+		await expect(execute({})).resolves.toEqual({
+			processes: [expect.objectContaining({ id: "1" })],
+		});
+		await idleDisposalStarted;
+		const racedOperation = execute({});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(started).toBe(1);
+
+		releaseIdleDisposal();
+		await expect(racedOperation).resolves.toEqual({
+			processes: [expect.objectContaining({ id: "2" })],
+		});
+		expect(started).toBe(2);
+		for (const hook of getSandboxDisposeHooks(options)) await hook();
+	});
+
+	test("restarts an idle provider without changing the mount endpoint", async () => {
+		let started = 0;
+		let disposed = 0;
+		const options = await resolveSandboxOptions({
+			sandbox: {
+				idleTimeoutMs: 10,
+				provider: {
+					start: async () => {
+						started += 1;
+						return {
+							listProcesses: async () => ({ processes: [] }),
+							dispose: async () => {
+								disposed += 1;
+							},
+						} as never;
+					},
+				},
+			},
+		} as never);
+		const mount = options.mounts?.[0];
+		if (!mount || !("plugin" in mount)) {
+			throw new Error("sandbox mount config is missing");
+		}
+		const relayUrl = mount.plugin.config.baseUrl;
+		const execute = options.bindings?.[0]?.bindings["list-processes"].execute;
+		if (!execute) throw new Error("sandbox list-processes binding is missing");
+		await execute({});
+		for (let attempt = 0; attempt < 50 && disposed === 0; attempt++) {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
 		expect(disposed).toBe(1);
+		await execute({});
+		expect(started).toBe(2);
+		expect(mount.plugin.config.baseUrl).toBe(relayUrl);
+		for (const hook of getSandboxDisposeHooks(options)) await hook();
+	});
+
+	test("validates sandbox relay and lifecycle limits", async () => {
+		for (const [field, value] of [
+			["maxRelayRequests", 0],
+			["idleTimeoutMs", -1],
+			["startupTimeoutMs", 1.5],
+		] as const) {
+			await expect(
+				resolveSandboxOptions({
+					sandbox: {
+						client: { baseUrl: "http://127.0.0.1:1234" } as never,
+						[field]: value,
+					},
+				} as never),
+			).rejects.toThrow(new RegExp(`sandbox\\.${field}`));
+		}
+	});
+
+	test("aggregates sandbox configuration and cleanup failures", async () => {
+		let caught: unknown;
+		try {
+			await resolveSandboxOptions({
+				sandbox: {
+					client: { baseUrl: "http://127.0.0.1:1234" } as never,
+					dispose: async () => {
+						throw new Error("client cleanup failed");
+					},
+					maxRelayRequests: 0,
+				},
+			} as never);
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(AggregateError);
+		const errors = (caught as AggregateError).errors;
+		expect(errors).toHaveLength(2);
+		expect(errors.map((error) => String(error))).toEqual([
+			expect.stringContaining("sandbox.maxRelayRequests"),
+			expect.stringContaining("client cleanup failed"),
+		]);
 	});
 
 	test("does not start a provider when VM option validation fails", async () => {

@@ -40,6 +40,7 @@ import {
 	type PromptResult,
 	parseAgentOsOptions,
 	rootFilesystemConfigSchema,
+	SandboxStartupError,
 	type SessionCapabilities,
 	type SessionInfo,
 	type SessionStreamEntry,
@@ -111,6 +112,10 @@ describe("root public API exports", () => {
 		expect(isPackageDescriptor).toBeTypeOf("function");
 		expect(OPT_AGENTOS_ROOT).toBe("/opt/agentos");
 		expect(OPT_AGENTOS_BIN).toBe("/opt/agentos/bin");
+	});
+
+	test("re-exports sandbox lifecycle errors from the root entrypoint", () => {
+		expect(SandboxStartupError).toBeTypeOf("function");
 	});
 
 	test("re-exports current public SDK types from the root entrypoint", () => {
