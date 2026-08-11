@@ -4,7 +4,8 @@ description: "Set up an agentOS actor, create a session, and run your first codi
 skill: true
 ---
 
-import DeployTargets from '@/components/docs/DeployTargets.astro';
+import { Hosting } from "@/components/docs/Hosting";
+
 import { AGENT_PROMPT } from '@/data/agentPrompt';
 
 <div style="border-radius:0.75rem;border:1px solid rgba(27,25,22,0.12);background:rgba(27,25,22,0.035);padding:0.875rem 1.125rem;margin:1.5rem 0;color:#56524a;display:flex;align-items:center;justify-content:space-between;gap:1.25rem;">
@@ -112,9 +113,7 @@ import { AGENT_PROMPT } from '@/data/agentPrompt';
 
    By default, agentOS runs locally with `npx rivetkit dev` — no infrastructure needed. To run in production, deploy to any of these targets:
 
-   <DeployTargets />
-
-   See [Deployment](/agentos/self-host) for managed, self-hosted, and direct VM options.
+   <Hosting product="agentos" />
 
 </Steps>
 
