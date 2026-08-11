@@ -1,0 +1,122 @@
+---
+title: "Flue"
+description: "Use agentOS as the durable sandbox backend for Flue."
+skill: true
+---
+
+import DeployTargets from '@/components/docs/DeployTargets.astro';
+
+{/*
+  Sync policy: examples/flue and examples/vercel-eve in this repository are the
+  source of truth. Before changing either integration, manually compare both
+  agentOS examples and guides with both hardcoded Rivet guides:
+  rivet-dev/rivet/website/src/content/docs/integrations/{flue,vercel-eve}.mdx.
+  Use CodeSnippet for whole example files in agentOS. Update both repositories
+  whenever either example changes.
+*/}
+
+Flue owns the agent runtime and session lifecycle. Rivet maps each agent instance and workflow run to a durable Rivet Actor, while agentOS gives each Flue context an isolated VM with a persistent `/workspace` filesystem.
+
+[View the complete example →](https://github.com/rivet-dev/agentos/tree/main/examples/flue)
+
+## Quickstart
+
+<Steps>
+
+<Step title="Create a Flue project">
+
+```sh
+mkdir my-agent && cd my-agent
+npm init -y
+npm pkg set type=module
+
+# Install the Flue packages
+npm add "@flue/runtime@npm:@rivet-dev/labs-flue-runtime@1.0.0-beta.9-rivet.2"
+npm add --save-dev "@flue/cli@npm:@rivet-dev/labs-flue-cli@1.0.0-beta.9-rivet.2"
+
+# Install the Rivet packages
+npm add @rivet-dev/flue @rivet-dev/agentos @rivet-dev/agentos-flue rivetkit
+
+# Initialize the project
+npx flue init --target node
+```
+
+- `@flue/cli` and `@flue/runtime`: Build and run the Flue project using Rivet's preview Flue packages.
+- `@rivet-dev/flue`: Runs Flue agents and workflows as Rivet Actors.
+- `@rivet-dev/agentos` and `@rivet-dev/agentos-flue`: Provide the agentOS VM and connect Flue's sandbox API to it.
+
+*This uses [Rivet's Flue fork](https://github.com/rivet-dev/flue). We're working to merge its extension APIs upstream so Flue can support actor-model runtimes without a Rivet fork.*
+
+</Step>
+
+<Step title="Register agentOS with the Rivet target">
+
+Create `actors.ts`:
+
+<CodeSnippet file="examples/flue/actors.ts" title="actors.ts" />
+
+Update `flue.config.ts`:
+
+<CodeSnippet file="examples/flue/flue.config.ts" title="flue.config.ts" />
+
+</Step>
+
+<Step title="Use agentOS as the Flue sandbox">
+
+Create `agents/assistant.ts`:
+
+<CodeSnippet file="examples/flue/agents/assistant.ts" title="assistant.ts" />
+
+</Step>
+
+<Step title="Run Flue">
+
+Set the provider key required by your model, such as `ANTHROPIC_API_KEY`, in `.env`.
+
+Run the agent:
+
+```sh
+npx flue run assistant --id local \
+  --input '{"message":"Write hello from Flue to /workspace/hello.txt, run wc -c /workspace/hello.txt, then read the file back."}'
+```
+
+</Step>
+
+<Step title="Deploy">
+
+Deploy to one of the supported platforms:
+
+<DeployTargets />
+
+</Step>
+
+</Steps>
+
+## Runtime model
+
+<Note>
+agentOS does not support Cloudflare Workers yet. It works with Node.js, Bun, or
+Deno on platforms such as Railway, Kubernetes, or Vercel.
+</Note>
+
+## Default filesystem
+
+agentOS persists the VM filesystem, including `/workspace`, to Rivet Actor storage by default. Additional mounts can be configured as needed.
+
+## Configuration
+
+### Virtual machine
+
+See the `agentOS()` [configuration reference](/agentos/docs/core#configuration-reference) to configure the VM.
+
+### Flue sandbox
+
+`agentOSSandbox()` accepts:
+
+| Option | Required | Description |
+| --- | --- | --- |
+| `actor` | Yes | Actor registered with `setup()`, such as `vm`. |
+| `registry` | Yes | The application registry exported from `actors.ts`. |
+| `cwd` | No | Base directory exposed to Flue. Defaults to `/workspace`. |
+| `params` | No | Connection parameters forwarded to the actor's `onBeforeConnect` hook. |
+| `client` | No | An existing client configured for the same registry. |

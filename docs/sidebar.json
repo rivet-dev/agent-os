@@ -1,0 +1,354 @@
+{
+	"docs": [
+		{
+			"title": "General",
+			"pages": [
+				{
+					"title": "Overview",
+					"href": "/agentos/docs",
+					"icon": "faSquareInfo"
+				},
+				{
+					"title": "Quickstart",
+					"href": "/agentos/docs/quickstart",
+					"icon": "faForwardFast"
+				},
+				{
+					"title": "Crash Course",
+					"href": "/agentos/docs/crash-course",
+					"icon": "faLightbulb"
+				},
+				{
+					"title": "Inspector",
+					"href": "/agentos/docs/inspector",
+					"icon": "faMagnifyingGlass"
+				},
+				{
+					"title": "agentOS vs Sandbox",
+					"href": "/agentos/docs/versus-sandbox",
+					"icon": "faScaleBalanced"
+				}
+			]
+		},
+		{
+			"title": "Agent",
+			"pages": [
+				{
+					"title": "Agents",
+					"collapsible": true,
+					"icon": "faRobot",
+					"pages": [
+						{
+							"title": "Pi",
+							"href": "/agentos/docs/agents/pi",
+							"icon": {
+								"src": "/images/registry/pi.svg"
+							}
+						},
+						{
+							"title": "ClaudeCode",
+							"href": "/agentos/docs/agents/claude",
+							"badge": "Beta",
+							"icon": {
+								"src": "/images/registry/claude-code.svg"
+							}
+						},
+						{
+							"title": "Codex",
+							"href": "/agentos/docs/agents/codex",
+							"badge": "Beta",
+							"icon": {
+								"src": "/images/registry/codex.svg"
+							}
+						},
+						{
+							"title": "OpenCode",
+							"href": "/agentos/docs/agents/opencode",
+							"icon": {
+								"src": "/images/registry/opencode.svg"
+							}
+						},
+						{
+							"title": "Custom Agents",
+							"href": "/agentos/docs/agents/custom",
+							"icon": "faWrench"
+						}
+					]
+				},
+				{
+					"title": "Sessions & Transcripts",
+					"href": "/agentos/docs/sessions",
+					"icon": "faMessages"
+				},
+				{
+					"title": "Approvals",
+					"href": "/agentos/docs/approvals",
+					"icon": "faCheck"
+				},
+				{
+					"title": "Models & Credentials",
+					"href": "/agentos/docs/models-and-credentials",
+					"icon": "faKey"
+				}
+			]
+		},
+		{
+			"title": "Execution",
+			"pages": [
+				{
+					"title": "Bash",
+					"href": "/agentos/docs/bash",
+					"icon": "faTerminal"
+				},
+				{
+					"title": "Node.js",
+					"href": "/agentos/docs/javascript",
+					"icon": "faNodeJs"
+				},
+				{
+					"title": "Python",
+					"href": "/agentos/docs/python",
+					"icon": "faPython"
+				}
+			]
+		},
+		{
+			"title": "Orchestration",
+			"pages": [
+				{
+					"title": "Multiplayer",
+					"href": "/agentos/docs/multiplayer",
+					"icon": "faTowerBroadcast"
+				},
+				{
+					"title": "Workflows & Graphs",
+					"href": "/agentos/docs/workflows",
+					"icon": "faDiagramNext"
+				},
+				{
+					"title": "Crons & Loops",
+					"href": "/agentos/docs/cron",
+					"icon": "faClock"
+				},
+				{
+					"title": "Agent-to-Agent",
+					"href": "/agentos/docs/agent-to-agent",
+					"icon": "faArrowsLeftRight"
+				}
+			]
+		},
+		{
+			"title": "Operating System",
+			"pages": [
+				{
+					"title": "Software",
+					"href": "/agentos/docs/software",
+					"icon": "faDownload"
+				},
+				{
+					"title": "Filesystem",
+					"href": "/agentos/docs/filesystem",
+					"icon": "faFloppyDisk"
+				},
+				{
+					"title": "Processes & Shells",
+					"href": "/agentos/docs/processes",
+					"icon": "faTerminal"
+				},
+				{
+					"title": "Networking & Previews",
+					"href": "/agentos/docs/networking",
+					"icon": "faGlobe"
+				},
+				{
+					"title": "Permissions",
+					"href": "/agentos/docs/permissions",
+					"icon": "faKey"
+				},
+				{
+					"title": "Resource Limits",
+					"href": "/agentos/docs/resource-limits",
+					"icon": "faGauge"
+				}
+			]
+		},
+		{
+			"title": "Extensions",
+			"pages": [
+				{
+					"title": "Custom Bindings",
+					"href": "/agentos/docs/bindings",
+					"icon": "faWrench"
+				},
+				{
+					"title": "Browser Automation",
+					"href": "/agentos/docs/browser",
+					"badge": "Beta",
+					"icon": "faWindowMaximize"
+				},
+				{
+					"title": "External Sandboxes",
+					"href": "/agentos/docs/sandboxes",
+					"badge": "Beta",
+					"icon": "faHardDrive"
+				}
+			]
+		},
+		{
+			"title": "Reference",
+			"pages": [
+				{
+					"title": "Authentication",
+					"href": "/agentos/docs/authentication"
+				},
+				{
+					"title": "Custom Software",
+					"collapsible": true,
+					"pages": [
+						{
+							"title": "Definition",
+							"href": "/agentos/docs/custom-software/definition"
+						},
+						{
+							"title": "Building Binaries",
+							"href": "/agentos/docs/custom-software/building-wasm"
+						},
+						{
+							"title": "Request Software",
+							"href": "https://github.com/rivet-dev/agentos/issues/new/choose",
+							"external": true,
+							"target": "_blank"
+						}
+					]
+				},
+				{
+					"title": "Architecture",
+					"collapsible": true,
+					"pages": [
+						{
+							"title": "Overview",
+							"href": "/agentos/docs/architecture"
+						},
+						{
+							"title": "Security Model",
+							"href": "/agentos/docs/security-model"
+						},
+						{
+							"title": "Limitations",
+							"href": "/agentos/docs/limitations"
+						},
+						{
+							"title": "Advanced",
+							"collapsible": true,
+							"pages": [
+								{
+									"title": "Agent Sessions",
+									"href": "/agentos/docs/architecture/agent-sessions"
+								},
+								{
+									"title": "Agent SDK Snapshots",
+									"href": "/agentos/docs/architecture/agent-sdk-snapshots"
+								},
+								{
+									"title": "Sessions & Persistence",
+									"href": "/agentos/docs/architecture/sessions-persistence"
+								},
+								{
+									"title": "Processes",
+									"href": "/agentos/docs/architecture/processes"
+								},
+								{
+									"title": "Filesystem",
+									"href": "/agentos/docs/architecture/filesystem"
+								},
+								{
+									"title": "Networking",
+									"href": "/agentos/docs/architecture/networking"
+								},
+								{
+									"title": "TLS & SSL",
+									"href": "/agentos/docs/architecture/tls-ssl"
+								},
+								{
+									"title": "JavaScript Executor & Reactor",
+									"href": "/agentos/docs/architecture/javascript-executor"
+								},
+								{
+									"title": "POSIX Syscalls",
+									"href": "/agentos/docs/architecture/posix-syscalls"
+								},
+								{
+									"title": "Packages & Command Resolution",
+									"href": "/agentos/docs/architecture/packages-and-command-resolution"
+								},
+								{
+									"title": "Compiler Toolchain",
+									"href": "/agentos/docs/architecture/compiler-toolchain"
+								},
+								{
+									"title": "Limits & Observability",
+									"href": "/agentos/docs/architecture/limits-and-observability"
+								},
+								{
+									"title": "System Prompt",
+									"href": "/agentos/docs/system-prompt"
+								},
+								{
+									"title": "Persistence & Sleep",
+									"href": "/agentos/docs/persistence"
+								}
+							]
+						}
+					]
+				},
+				{
+					"title": "More",
+					"collapsible": true,
+					"pages": [
+						{
+							"title": "Direct VM SDK",
+							"href": "/agentos/docs/core"
+						},
+						{
+							"title": "Debugging",
+							"href": "/agentos/docs/debugging"
+						},
+						{
+							"title": "Performance",
+							"href": "/agentos/docs/performance"
+						}
+					]
+				}
+			]
+		}
+	],
+	"integrations": [
+		{
+			"title": "General",
+			"pages": [
+				{
+					"title": "Overview",
+					"href": "/agentos/integrations",
+					"icon": "faSquareInfo"
+				}
+			]
+		},
+		{
+			"title": "Frameworks",
+			"pages": [
+				{
+					"title": "Flue",
+					"href": "/agentos/integrations/flue"
+				},
+				{
+					"title": "Rivet",
+					"href": "/agentos/integrations/rivet"
+				},
+				{
+					"title": "Vercel Eve",
+					"href": "/agentos/integrations/vercel-eve"
+				}
+			]
+		}
+	]
+}

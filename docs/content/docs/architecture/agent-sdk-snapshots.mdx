@@ -1,0 +1,79 @@
+---
+title: "Agent SDK Snapshots"
+description: "How an agent's SDK is evaluated once per sidecar into a V8 heap snapshot and reused across sessions instead of re-imported on every openSession: the bundle, the userland snapshot, the process-wide cache, pre-warm, per-session restore, isolation, and the snapshot-safety rules an SDK must follow."
+skill: true
+---
+
+<Note>These internal architecture docs are mostly generated and maintained by LLMs, then reviewed by humans. They are intentionally verbose; use your preferred LLM to ask focused questions about the architecture as needed.</Note>
+
+This page is an internals deep-dive on **agent SDK snapshotting** — an optional optimization that loads an agent's SDK *once per sidecar* and reuses it for every session, instead of re-evaluating the whole SDK module graph on each `openSession`. For the agent-author view (how to opt in and the rules your SDK must follow), see [Software Definition → SDK snapshotting & snapshot-safety](/agentos/docs/custom-software/definition). For how sessions work in general, see [Agent Sessions](/agentos/docs/architecture/agent-sessions).
+
+## The problem: per-session SDK re-evaluation
+
+When a session starts, its agent adapter runs inside a fresh [V8 isolate](/agentos/docs/architecture/agent-sessions) and imports the agent SDK (for Pi, `@mariozechner/pi-coding-agent`). Importing a real-world SDK means resolving, loading, compiling, and **evaluating** a large module graph — hundreds of modules running their top-level initialization. That evaluation dominates session-creation latency, and because every session gets a fresh isolate, it is paid *again on every `openSession`*.
+
+The work is identical every time: the same modules, evaluated to the same post-init heap, only to be thrown away when the session ends. Snapshotting captures that post-init heap once and stamps it into every new isolate.
+
+## How V8 heap snapshots work here
+
+agentOS already boots every guest isolate from a **V8 startup snapshot** of the runtime bridge (the polyfill layer that provides `fetch`, node builtins, the kernel-backed module loader, etc.). A startup snapshot is a serialized image of a V8 heap *after* some code has run; restoring it into a fresh isolate reproduces that heap by deserialization rather than re-execution, and each restore produces an independent context.
+
+Agent SDK snapshotting extends that same mechanism: it evaluates the agent SDK **into the same snapshot context, right after the bridge**, so the captured image contains the bridge *and* the fully-initialized SDK. Restoring it gives a fresh isolate where the SDK is already present — no import, no evaluation.
+
+## Where it sits in the component model
+
+The [three components](/agentos/docs/architecture#the-big-picture) are unchanged. Snapshotting only changes *how* the executor's isolate is seeded:
+
+- **Client.** Builds the SDK bundle at package-build time and passes it to the sidecar as trusted VM configuration (`jsRuntime.snapshotUserlandCode`). It decides which agents opt in.
+- **Sidecar.** Owns the snapshot. It builds the snapshot once, caches it process-wide, and seeds each session's isolate from it. The SDK runs inside the isolate under the same [permission policy](/agentos/docs/permissions) as any guest code — snapshotting grants the SDK no extra capability.
+- **Executor.** The agent adapter restores into an isolate where the SDK is already on the global, reads it, and proceeds. It is untrusted guest code as always.
+
+## The pipeline
+
+### 1. Bundle the SDK to one snapshottable unit
+
+The agent SDK and its transitive dependencies are bundled (esbuild, IIFE) into a single file shipped with the agent package (`dist/sdk-snapshot.js`). The bundle evaluates the SDK and publishes its public API on a well-known global (e.g. `globalThis.__PI_SDK_RUNTIME__`). Node builtins stay external (resolved by the bridge's in-snapshot polyfills); heavy provider SDKs that are only reached via dynamic `import()` stay lazy and load post-restore from the VFS.
+
+### 2. Capture the evaluated SDK into the snapshot
+
+The sidecar runs the bridge, then the SDK bundle, in one snapshot-creation context, then serializes the heap. The result is a startup blob containing both. Per-session configuration (cwd, model, API keys) is **not** captured — it is injected after restore, so one blob serves every session.
+
+### 3. Cache it process-wide, keyed by content
+
+The blob is stored in a **sidecar-process-wide cache keyed by `sha256(bridge + bundle)`**. Any change to the bridge or the bundled dependency graph changes the key and triggers exactly one rebuild; an unchanged bundle is a cache hit. This is what makes it **build-once-per-sidecar**: the cache is shared across every VM and session in the process.
+
+### 4. Pre-warm so the first session is warm
+
+Building the snapshot is itself the expensive evaluation, just done once. To keep it off the session-create critical path, the sidecar **pre-warms** at VM creation: when a VM is configured with a snapshot bundle, the sidecar builds the blob into the cache *before* the first session is created. The first session then restores from a warm cache like every session after it.
+
+<Warning>
+**Pre-warm and V8 initialization order**
+The V8 platform must be initialized on a long-lived thread *before* any pre-warm runs. agentOS initializes the embedded runtime on the sidecar's main thread at startup. Initializing V8 lazily on a transient worker thread that then exits corrupts the platform and wedges later isolate creation — so the startup init is load-bearing, not incidental.
+</Warning>
+
+### 5. Restore a fresh isolate per session
+
+On `openSession`, the agent's isolate is created from the cached blob. The SDK is already evaluated in the snapshot's default context, and each session gets a **fresh context cloned from it**. The adapter reads the SDK off the global instead of importing it. If no snapshot is configured — or snapshot creation fails — the adapter transparently falls back to the per-session dynamic-import path, so snapshotting never affects correctness, only latency.
+
+## Isolation
+
+Each session leases a **fresh context** cloned from the snapshot's default context. The captured SDK is shared read-only through the blob, but live state is not: a global, a captured-object mutation, or even a built-in prototype change made in one session is **not** observable in another. This is the same isolation guarantee as a non-snapshot session — a fresh isolate per session — and is covered by dedicated tests (a session that mutates `globalThis`, an SDK object, and `Array.prototype`, with a second session from the same snapshot seeing none of it).
+
+## Snapshot-safety: what an SDK must avoid
+
+A startup snapshot can only capture a pure JS heap. The SDK's **module-initialization** code (everything that runs at import time, before any function is called) must not, at top level:
+
+- Create a **native handle** — load a `.node` addon, instantiate WebAssembly, or produce any V8 *External* object (for example an ICU-backed `Intl.Segmenter` singleton). These cannot be serialized and abort snapshot creation.
+- Open an **fd, socket, timer, or worker**, or leave a **pending promise** at the end of evaluation.
+- Read **non-deterministic or per-session state** (`process.env`, cwd, model, `Date.now()`, `Math.random()`, a random UUID) into a module constant — it would be frozen to the build-time value.
+
+Real-world SDKs frequently break these by accident. agentOS makes such an SDK snapshottable with **build-time transforms in the bundle** that defer the offending work to first use (e.g. wrap a module-level native singleton in a lazy proxy, inline a top-level config-file read, convert eager fire-and-forget imports to synchronous module references). Each transform asserts the source shape it expects, so an upstream SDK change surfaces as a build error rather than a silent regression. The full author-facing rules live in the [Software Definition](/agentos/docs/custom-software/definition) reference.
+
+## Opt-in, per agent
+
+Snapshotting is **opt-in per agent**, via `agent.snapshot: true` on the [agent software descriptor](/agentos/docs/custom-software/definition), and requires the agent package to ship a snapshot-safe `dist/sdk-snapshot.js`. Today only the Pi agent opts in; other agents run the normal per-session import path. An agent qualifies by (1) being snapshot-safe and (2) building the bundle — there is nothing Pi-specific in the runtime mechanism.
+
+<Note>
+**Current trade-off**
+The bundle is currently delivered inline in the (trusted) VM config, which moves bytes onto VM creation. The intended refinement is to ship the bundle as a build-time blob the sidecar loads from the guest VFS by path, keeping the config small. Either way the snapshot is built once per sidecar and reused across sessions.
+</Note>

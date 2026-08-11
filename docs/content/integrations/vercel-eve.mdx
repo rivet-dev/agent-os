@@ -1,0 +1,162 @@
+---
+title: "Vercel Eve"
+description: "Run Vercel Eve with agentOS and Rivet World."
+skill: true
+---
+
+import DeployTargets from '@/components/docs/DeployTargets.astro';
+
+{/*
+  Sync policy: examples/flue and examples/vercel-eve in this repository are the
+  source of truth. Before changing either integration, manually compare both
+  agentOS examples and guides with both hardcoded Rivet guides:
+  rivet-dev/rivet/website/src/content/docs/integrations/{flue,vercel-eve}.mdx.
+  Use CodeSnippet for whole example files in agentOS. Update both repositories
+  whenever either example changes.
+*/}
+
+Eve owns the agent runtime and session lifecycle. agentOS maps every sandbox session to an isolated VM actor with a durable `/workspace` filesystem, while Rivet World runs Eve workflows on Rivet Actors.
+
+[View the complete example →](https://github.com/rivet-dev/agentos/tree/main/examples/vercel-eve)
+
+## Quickstart
+
+<Steps>
+
+<Step title="Create an Eve agent">
+
+```sh
+npx eve@latest init my-agent
+cd my-agent
+```
+
+</Step>
+
+<Step title="Install the integrations">
+
+```sh
+npm add @rivet-dev/agentos @rivet-dev/agentos-eve @rivet-dev/vercel-world
+```
+
+- `@rivet-dev/agentos` and `@rivet-dev/agentos-eve`: Provide the agentOS VM and connect Eve's sandbox API to it.
+- `@rivet-dev/vercel-world`: Runs Eve workflows on [Rivet World](https://workflow-sdk.dev/worlds).
+
+</Step>
+
+<Step title="Set up the Eve agent">
+
+Update `agent/agent.ts`:
+
+<CodeSnippet file="examples/vercel-eve/agent/agent.ts" title="agent/agent.ts" />
+
+</Step>
+
+<Step title="Configure Rivet World">
+
+Rivet World lets you run Eve on top of Rivet.
+
+Add the World module import to `package.json`:
+
+```json title="package.json"
+{
+	"imports": {
+		"#world": "./world.ts"
+	}
+}
+```
+
+Create `world.ts`:
+
+<CodeSnippet file="examples/vercel-eve/world.ts" title="world.ts" />
+
+The first World operation starts this registry and waits for the Rivet envoy to
+be ready.
+
+</Step>
+
+<Step title="Configure agentOS">
+
+Create `actors.ts`:
+
+<CodeSnippet file="examples/vercel-eve/actors.ts" title="actors.ts" />
+
+Create `agent/sandbox.ts`:
+
+<CodeSnippet file="examples/vercel-eve/agent/sandbox.ts" title="agent/sandbox.ts" />
+
+</Step>
+
+<Step title="Run Eve">
+
+Install the Vercel CLI, then link Eve once so it can call your configured model:
+
+```sh
+npm install --global vercel@latest
+npx eve link
+```
+
+Then run the agent:
+
+```sh
+npx eve dev
+```
+
+</Step>
+
+<Step title="Deploy">
+
+By default, agentOS runs locally with `npx rivetkit dev` — no infrastructure needed. To run in production, deploy to any of these targets:
+
+<DeployTargets />
+
+See [Deployment](/agentos/self-host) for managed, self-hosted, and agentOS Core options.
+
+</Step>
+
+</Steps>
+
+## Default Filesystem
+
+agentOS persists the VM filesystem, including `/workspace`, to Rivet Actor storage by default. Additional mounts can be configured as needed.
+
+## Configuration
+
+### Virtual Machine
+
+See the `agentOS()` [configuration reference](/agentos/docs/core#configuration-reference) to configure the VM.
+
+### Eve Sandbox Backend
+
+`agentOSBackend()` accepts:
+
+| Option | Required | Description |
+| --- | --- | --- |
+| `actor` | Yes | Actor registered with `setup()`, such as `vm`. |
+| `registry` | Yes | The application registry containing that actor. It is started lazily and shared by Eve sessions. |
+| `client` | No | An existing client configured for the same registry. |
+
+### Rivet World
+
+Rivet World stores Eve workflow runs in Rivet Actors so they resume instead of restarting.
+
+[Read the Rivet World documentation →](https://rivet.dev/docs/integrations/vercel-workflows)
+
+## Advanced
+
+### agentOS Core Backend
+
+Use `agentOSCoreBackend()` when Eve should create agentOS Core VMs directly without Rivet Actor orchestration. The `create` callback owns the complete VM configuration:
+
+```sh
+pnpm add @rivet-dev/agentos-core
+```
+
+<CodeSnippet file="examples/vercel-eve/core.ts" title="core.ts" />
+
+When using agentOS Core instead of regular agentOS, you lose:
+
+- **Durable filesystem and session history.** Core's root filesystem is ephemeral by default, so you must provide your own persistent mount at `/workspace`.
+- **Stable per-session actor identity.** Core cannot reconnect to the same VM across Eve process restarts.
+- **Automatic sleep and wake.** The VM lives inside Eve's short-lived server process instead staying awake for a given grace period. `shutdown()` disposes it.
+
+Use Core only when your application owns equivalent persistence and lifecycle management.

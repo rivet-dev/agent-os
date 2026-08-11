@@ -1,4 +1,0 @@
-User-agent: *
-Allow: /
-
-Sitemap: https://sandbox-agent.dev/sitemap-index.xml

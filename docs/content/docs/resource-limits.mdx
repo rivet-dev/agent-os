@@ -1,0 +1,109 @@
+---
+title: "Resource Limits"
+description: "Cap per-VM resources, JavaScript CPU/wall-clock time, Python execution, and WASM runtime work so guest code can never exhaust the host."
+skill: true
+---
+
+Every agentOS VM runs with **per-VM resource and runtime caps**. These caps contain runaway or malicious guest work to its VM and give the host an explicit failure instead of silent data loss.
+
+- **Secure defaults**: unset fields fall back to built-in defaults that match the runtime's historical constants. Optional execution budgets such as WASM fuel explicitly document when their default has no additional budget.
+- **Per-VM**: every VM gets its own budget. Limits are not shared across VMs.
+- **Enforced by the sidecar/runtime**: a guest that exceeds a cap fails inside the VM (out-of-memory, `EMFILE`, `EAGAIN`, runtime timeout, etc.) instead of consuming past the configured budget.
+- **Operator-raisable**: the operator (the trusted process that creates the VM) may raise any cap for trusted workloads. Guest code can never raise its own caps.
+
+## Setting limits
+
+Set caps on the `limits` object in the `agentOS` config. Limits are grouped by subsystem (`resources`, `process`, `jsRuntime`, `python`, `wasm`, and more). Omitted limits keep their secure default.
+
+<CodeSnippet file="examples/resource-limits/server.ts" />
+
+## Available caps
+
+| Limit | Controls | Notes |
+|---|---|---|
+| `resources.maxProcesses` | Concurrent processes in the VM process table | Caps fork bombs and runaway spawning. New spawns fail with `EAGAIN`. |
+| `resources.maxOpenFds` | Open file descriptors | Exhausting the table fails with `EMFILE` / `ENFILE`. |
+| `resources.maxSockets` | Open sockets in the socket table | Bounds concurrent connections; excess `connect`/`accept` fail. |
+| `resources.maxFilesystemBytes` | Total bytes stored in the virtual filesystem | Bounds VFS storage; writes past the budget fail with a no-space error. |
+| `resources.maxInodeCount` | Inodes retained by the virtual filesystem | Default is `16384`; creating another file or directory fails with a no-space error. This is the expected upper bound for filesystem-schema sizing and benchmarks. |
+| `resources.maxWasmFuel` | WASM execution budget | Bounds WASM execution work; unset means no explicit fuel budget. |
+| `resources.maxWasmMemoryBytes` | WASM linear memory, in bytes | Default is `128 MiB`. |
+| `resources.maxWasmStackBytes` | Maximum WASM call-stack size, in bytes | Deep recursion fails with a stack overflow instead of crashing the VM. |
+| `resources.maxBlockingReadMs` | AgentOS safety backstop for otherwise-blocking guest operations | Default is `30000`. Socket waits, poll, and contended `F_SETLKW` warn near the limit and fail with `ETIMEDOUT` if it expires; raise it for workloads that intentionally wait longer. Linux has no equivalent global backstop. |
+| `process.pendingStdinBytes` | Stdin accepted by the sidecar but not yet written into kernel pipes | Default is `64 MiB` per process and across the VM. Sibling processes share the same aggregate envelope, so this is a tighter bound for multi-process workloads. A non-draining process rejects further writes with an error naming `limits.process.pendingStdinBytes`. |
+| `process.pendingEventCount` | Event count at each bounded VM/process delivery-queue stage | Default is `10000`. The crossing event is rejected with an error naming `limits.process.pendingEventCount`; it is never silently dropped. |
+| `process.pendingEventBytes` | Retained process-event bytes at each bounded delivery-queue stage | Default is `64 MiB` per process and across all process queues in the VM. Sibling processes share the VM-wide envelope. Large stdout/stderr bursts are rejected with an error naming `limits.process.pendingEventBytes`, independently of event count. |
+| `acp.maxSessionsPerVm` | Durable sessions retained in one VM SQLite database | Default is `10000`. Opening another session fails with a typed error naming this field. |
+| `acp.maxPromptsPerSession` | Prompt and idempotency records retained for one durable session | Default is `100000`; it must not exceed `acp.maxPromptsPerVm`. |
+| `acp.maxPromptsPerVm` | Prompt and idempotency records retained across one VM | Default is `1000000`. |
+| `acp.maxPendingPermissionsPerSession` | Actionable ACP permission requests for one session | Default is `1000`; it must not exceed `acp.maxPendingPermissionsPerVm`. |
+| `acp.maxPendingPermissionsPerVm` | Actionable ACP permission requests across one VM | Default is `10000`. |
+| `acp.maxPermissionOutcomesPerSession` | Terminal ACP permission outcomes retained for one session | Default is `10000`; it must not exceed `acp.maxPermissionOutcomesPerVm`. |
+| `acp.maxPermissionOutcomesPerVm` | Terminal ACP permission outcomes retained across one VM | Default is `100000`. Old outcomes are bounded independently from pending requests. |
+| `jsRuntime.v8HeapLimitMb` | Guest JavaScript V8 heap, in MiB | Default is `128`. |
+| `jsRuntime.cpuTimeLimitMs` | Active JavaScript CPU time | Default is `30000`; `0` disables the CPU watchdog. |
+| `jsRuntime.wallClockLimitMs` | JavaScript elapsed wall-clock backstop | Default is `0`, disabled. Use this for finite commands, not long-lived adapters. |
+| `jsRuntime.importCacheMaterializeTimeoutMs` | Node import-cache materialization timeout | Default is `30000`. |
+| `jsRuntime.syncRpcWaitTimeoutMs` | JavaScript sync host-RPC wait | Unset keeps the engine default, currently `30000`. |
+| `python.executionTimeoutMs` | Python execution wall-clock timeout | Default is `300000`. |
+| `python.maxOldSpaceMb` | Pyodide runner V8 old-space heap, in MiB | Default is `0`, which keeps the engine default. |
+| `wasm.prewarmTimeoutMs` | WASM compile-cache warmup timeout | Default is `30000`. |
+| `wasm.runnerHeapLimitMb` | Trusted WASI/WASM runner V8 heap, in MiB | Default is `2048`; this is not guest linear memory. |
+| `wasm.runnerCpuTimeLimitMs` | Trusted WASI/WASM runner active-CPU budget | Default is `30000`; `0` disables this budget for trusted configurations. |
+| `process.maxSpawnFileActions` | File actions decoded for one `posix_spawn` call | Default is `4096`; excess actions fail with `E2BIG`. |
+| `process.maxSpawnFileActionBytes` | Serialized file-action bytes for one `posix_spawn` call | Default is `1 MiB`; excess input fails with `E2BIG`. |
+
+## Behavior at the limit
+
+- **WASM stack**: deep recursion throws a stack-overflow error in the guest, never a host crash.
+- **JavaScript CPU time**: CPU-bound loops terminate with a CPU-budget error once active JS CPU exceeds `jsRuntime.cpuTimeLimitMs`.
+- **JavaScript wall time**: awaiting or blocked JS terminates only when you set `jsRuntime.wallClockLimitMs`; the default is disabled for long-lived adapters.
+- **Filesystem bytes**: writing past the VFS budget fails with a no-space error to the guest.
+- **Counts (fds / processes / sockets)**: hitting a table cap returns the standard POSIX errno appropriate to that cap (`EMFILE`/`ENFILE`, `EAGAIN`, etc.).
+- **Durable ACP collections**: session, prompt, pending-permission, and terminal-outcome caps fail atomically with typed errors naming the exact `limits.acp.*` field to raise. Per-session caps are validated not to exceed their corresponding per-VM cap.
+
+### WASM memory residency calls
+
+V8 owns the physical backing pages for WASM linear memory, and the runtime
+cannot currently pin those pages against host swapping. Nonempty `mlock()` and
+valid `mlockall()` requests therefore return `ENOTSUP` rather than falsely
+claiming that secrets or other guest memory were pinned. `munlock()` and
+`munlockall()` succeed because no guest lock can be established and the memory
+is already unlocked.
+
+Non-destructive `madvise()` access-pattern calls are accepted as best-effort
+hints, which Linux is also permitted to ignore. Advice that would discard data
+or change fork, core-dump, or host VM mapping policy returns `ENOTSUP` because
+the runtime cannot apply it.
+
+## Sidecar liveness
+
+Separate from the guest caps above, the host detects a dead or wedged sidecar
+process by silence, not by per-request deadlines. The sidecar emits a liveness
+heartbeat every 10 seconds from a dedicated thread — so it keeps beating even
+mid-way through a long turn — and the host treats 30 seconds with no inbound
+frames at all as a dead sidecar: it kills the process and fails in-flight
+requests with a typed `SidecarSilenceTimeout` error.
+
+Because liveness is silence-based, individual requests have no time limit of
+their own: an agent turn may legitimately run for many minutes without being
+torn down. Neither the heartbeat cadence nor the silence window is
+configurable — they are fixed protocol constants.
+
+## Warnings & observability
+
+Limits are observable, not just enforced. Live resource gauges and internal
+bounded queues are tracked in a central limit registry that:
+
+- **Warns before the limit is hit.** As usage crosses ~80% of a cap, the runtime
+  emits a structured warning (once per crossing, re-armed only after it recovers),
+  so a slow consumer or a runaway guest is visible *before* it fails.
+- **Never drops data silently.** Internal queues either apply backpressure or
+  fail with a typed error naming the exhausted limit and the setting used to
+  raise it. A rejected event is not popped and forgotten.
+- **Surfaces through logs.** The agentOS sidecar logs to stderr (stdout is the wire
+  protocol); set `AGENTOS_LOG=warn` (the default) to see near-limit warnings
+  or `AGENTOS_LOG=debug` for live per-limit usage snapshots.
+
+See [Limits & Observability](/agentos/docs/architecture/limits-and-observability) for the
+full architecture.

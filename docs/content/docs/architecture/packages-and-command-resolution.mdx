@@ -1,0 +1,256 @@
+---
+title: "Packages & Command Resolution"
+description: "How software is packaged, linked, resolved, and executed in an agentOS VM: a package is a directory, resolution is a $PATH walk, and a file's header picks its runtime."
+skill: true
+---
+
+<Note>These internal architecture docs are mostly generated and maintained by LLMs, then reviewed by humans. They are intentionally verbose; use your preferred LLM to ask focused questions about the architecture as needed.</Note>
+
+How a command name becomes a running program, and how the software that provides it
+is packaged and linked. Everything is real files under
+[`/opt/agentos`](/agentos/docs/architecture/filesystem) — there is no command registry; the
+filesystem and `$PATH` are the only source of truth. For the host API that produces
+packages, see [Software Definition](/agentos/docs/custom-software/definition).
+
+## Overview
+
+<svg viewBox="0 0 760 470" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="From a command name to a running program: resolve over PATH, dispatch by header, run under the VM policy" style="width:100%;max-width:680px;height:auto;font-family:system-ui,sans-serif">
+  <defs>
+    <marker id="pcr-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect x="280" y="16" width="200" height="42" rx="7" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="380" y="42" text-anchor="middle" font-size="14" fill="#1e1b4b">exec <tspan font-family="ui-monospace,monospace">"pi"</tspan></text>
+  <line x1="380" y1="58" x2="380" y2="84" stroke="#64748b" stroke-width="1.5" marker-end="url(#pcr-ah)"/>
+  <rect x="265" y="86" width="230" height="42" rx="7" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="380" y="112" text-anchor="middle" font-size="13" fill="#0f172a"><tspan font-family="ui-monospace,monospace">$PATH</tspan> walk over the VFS</text>
+  <line x1="380" y1="128" x2="380" y2="154" stroke="#64748b" stroke-width="1.5" marker-end="url(#pcr-ah)"/>
+  <rect x="235" y="156" width="290" height="42" rx="7" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="380" y="176" text-anchor="middle" font-size="12.5" font-family="ui-monospace,monospace" fill="#0f172a">/opt/agentos/bin/pi</text>
+  <text x="380" y="191" text-anchor="middle" font-size="10.5" fill="#64748b">a real symlink in the VFS</text>
+  <line x1="380" y1="198" x2="380" y2="224" stroke="#64748b" stroke-width="1.5" marker-end="url(#pcr-ah)"/>
+  <rect x="275" y="226" width="210" height="42" rx="7" fill="#fef9c3" stroke="#eab308" stroke-width="1.5"/>
+  <text x="380" y="252" text-anchor="middle" font-size="13" fill="#422006">read header (binfmt)</text>
+  <line x1="380" y1="268" x2="102" y2="316" stroke="#64748b" stroke-width="1.3" marker-end="url(#pcr-ah)"/>
+  <line x1="380" y1="268" x2="289" y2="316" stroke="#64748b" stroke-width="1.3" marker-end="url(#pcr-ah)"/>
+  <line x1="380" y1="268" x2="476" y2="316" stroke="#64748b" stroke-width="1.3" marker-end="url(#pcr-ah)"/>
+  <line x1="380" y1="268" x2="660" y2="316" stroke="#ef4444" stroke-width="1.3" marker-end="url(#pcr-ah)"/>
+  <rect x="18" y="318" width="168" height="58" rx="7" fill="#ecfeff" stroke="#06b6d4" stroke-width="1.5"/>
+  <text x="102" y="340" text-anchor="middle" font-size="11" font-family="ui-monospace,monospace" fill="#155e75">#!…node</text>
+  <text x="102" y="360" text-anchor="middle" font-size="12.5" fill="#0e2a33">JavaScript · V8</text>
+  <rect x="205" y="318" width="168" height="58" rx="7" fill="#ecfeff" stroke="#06b6d4" stroke-width="1.5"/>
+  <text x="289" y="340" text-anchor="middle" font-size="11" font-family="ui-monospace,monospace" fill="#155e75">#!…python3</text>
+  <text x="289" y="360" text-anchor="middle" font-size="12.5" fill="#0e2a33">Python · Pyodide</text>
+  <rect x="392" y="318" width="168" height="58" rx="7" fill="#ecfeff" stroke="#06b6d4" stroke-width="1.5"/>
+  <text x="476" y="340" text-anchor="middle" font-size="11" font-family="ui-monospace,monospace" fill="#155e75">{'\\0asm'}</text>
+  <text x="476" y="360" text-anchor="middle" font-size="12.5" fill="#0e2a33">WebAssembly</text>
+  <rect x="579" y="318" width="163" height="58" rx="7" fill="#fee2e2" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="660" y="340" text-anchor="middle" font-size="10.5" font-family="ui-monospace,monospace" fill="#7f1d1d">ELF / Mach-O / PE</text>
+  <text x="660" y="360" text-anchor="middle" font-size="12.5" fill="#7f1d1d">ENOEXEC</text>
+  <line x1="102" y1="376" x2="102" y2="404" stroke="#22c55e" stroke-width="1.3" marker-end="url(#pcr-ah)"/>
+  <line x1="289" y1="376" x2="289" y2="404" stroke="#22c55e" stroke-width="1.3" marker-end="url(#pcr-ah)"/>
+  <line x1="476" y1="376" x2="476" y2="404" stroke="#22c55e" stroke-width="1.3" marker-end="url(#pcr-ah)"/>
+  <rect x="18" y="406" width="542" height="40" rx="7" fill="#f0fdf4" stroke="#22c55e" stroke-width="1.5"/>
+  <text x="289" y="431" text-anchor="middle" font-size="12.5" fill="#14532d">spawn under the VM permission policy</text>
+</svg>
+
+- **Resolve** — a real `$PATH` walk over the VFS; the first executable match wins.
+- **Dispatch** — by the file's *header* (`binfmt`): a `#!` shebang or a magic number. Never the name, never the extension.
+- **Run** — on one of three runtimes: JavaScript (V8), WebAssembly, Python (Pyodide). See [Processes](/agentos/docs/architecture/processes).
+- **Confine** — every process runs under the VM's single [permission policy](/agentos/docs/security-model). No per-command tiers.
+
+## Packages
+
+A package is a directory; its metadata is a normal `package.json` (`name`, `version`,
+and a `bin` command map) plus a small `agentos-package.json` (the agentOS-specific
+`name`/`agent`/`provides`). The shipped package contains **real files** — it's a plain npm
+dependency. The `/opt/agentos/<name>/<version>/` tree below, with its `bin/` symlink farm,
+is what the runtime **projects** from that package when it mounts it:
+
+```
+/opt/agentos/<name>/<version>/
+├── package.json                # name, version, and the "bin" map (command → entry file)
+├── agentos-package.json        # agentOS metadata: name, optional agent block, provides
+├── bin/                        # symlinks the PROJECTION builds from package.json "bin"
+│   ├── ls   → ../libexec/coreutils   # → multicall blob
+│   └── vdir → ../libexec/coreutils   # an "alias" is just another symlink
+├── libexec/coreutils           # helpers run by other programs, never on $PATH
+├── node_modules/ | lib/        # support payload (a JS CLI's flat, self-contained closure)
+└── share/man/man1/ls.1         # man pages and other FHS content
+/opt/agentos/<name>/current → <version>    # version pointer; upgrade re-points it (atomic rename)
+```
+
+| Path | Contents |
+|---|---|
+| `package.json` | `name`, `version`, and a `bin` map (command → entry file). |
+| `agentos-package.json` | agentOS metadata the sidecar reads on mount: `name`, an optional `agent` block, and any `provides` (files/env). Generated for command/WASM packages; carries the `agent` block for agents. |
+| `bin/` | Command symlinks the projection builds from `package.json` `bin`; each basename is the command name. (Not part of the shipped package — npm can't carry symlinks.) |
+| `libexec/` | Helpers invoked by other programs, never on `$PATH` (e.g. a multicall blob). |
+| `node_modules/`, `lib/` | Non-executable payload — bundled deps and assets. |
+| `share/` | FHS data — `share/man/man<n>/*`, etc. |
+| `current` | Symlink `→ <version>`; switching versions is one atomic rename. |
+
+```json
+// package.json — commands come from "bin"; an agent's ACP entrypoint is just one of them
+{ "name": "@agentos-software/pi", "version": "0.0.1", "bin": { "pi-acp": "dist/pi-acp.wasm" } }
+```
+
+A directory is a **valid package** when:
+
+- **Commands come from `package.json` `bin`** (command → a real entry file), and each entry
+  **dispatches by header** — a magic number or `#!` shebang, no `.wasm`/`.js` extension or
+  `runtime`/`type` field; a headerless entry is `ENOEXEC`. The package ships **no symlinks**
+  (npm-safe); the runtime builds the `bin/` farm under `/opt/agentos` itself.
+- **Aliases are symlinks** in the projected `bin/` farm — several names for one program (or a
+  multicall blob); `argv[0]` is the invoked name.
+- **It is self-contained** — every import/require/asset resolves inside the package; nothing
+  comes from a host `node_modules`, pnpm store, or workspace at runtime
+  ([packaging](/agentos/docs/custom-software/definition) flattens/bundles deps in).
+- **Minimal metadata** — `package.json` carries only the command set (`bin`) and `version`; there
+  is no command list beyond `bin`, no permission tiers (the [VM policy](#confinement--trust)
+  governs every command), and no dependency list. A small **`agentos-package.json`** alongside it
+  holds the agentOS-specific fields the sidecar reads when it mounts the package — the `name`, an
+  optional `agent` block, and any `provides` (files/env). The client never carries this on the
+  wire; it forwards only the package directory.
+
+## Linking
+
+Linking is creating the `bin/` symlinks in a `$PATH` directory. agentOS follows Homebrew:
+`/opt/agentos/<name>` is the cellar, and every command is symlinked into one managed prefix,
+**`/opt/agentos/bin`**, which is on `$PATH`. The standard dirs (`/usr/bin`, `/usr/local/bin`,
+`/bin`) stay ordinary writable Linux dirs — agentOS never writes to them.
+
+<svg viewBox="0 0 760 150" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="PATH search order, left to right, first match wins" style="width:100%;max-width:720px;height:auto;font-family:system-ui,sans-serif">
+  <defs>
+    <marker id="pcr-ah2" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+  <text x="16" y="20" font-size="12" fill="#0f172a">Searched left → right — first match wins (left shadows right)</text>
+  <line x1="16" y1="33" x2="744" y2="33" stroke="#cbd5e1" stroke-width="1.2" marker-end="url(#pcr-ah2)"/>
+  <rect x="16"  y="50" width="99" height="44" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.3"/>
+  <text x="65.5"  y="76" text-anchor="middle" font-size="9" font-family="ui-monospace,monospace" fill="#334155">/usr/local/sbin</text>
+  <rect x="121" y="50" width="99" height="44" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.3"/>
+  <text x="170.5" y="76" text-anchor="middle" font-size="9" font-family="ui-monospace,monospace" fill="#334155">/usr/local/bin</text>
+  <rect x="226" y="50" width="99" height="44" rx="6" fill="#eef2ff" stroke="#6366f1" stroke-width="2"/>
+  <text x="275.5" y="76" text-anchor="middle" font-size="9" font-family="ui-monospace,monospace" fill="#3730a3">/opt/agentos/bin</text>
+  <rect x="331" y="50" width="99" height="44" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.3"/>
+  <text x="380.5" y="76" text-anchor="middle" font-size="9" font-family="ui-monospace,monospace" fill="#334155">/usr/sbin</text>
+  <rect x="436" y="50" width="99" height="44" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.3"/>
+  <text x="485.5" y="76" text-anchor="middle" font-size="9" font-family="ui-monospace,monospace" fill="#334155">/usr/bin</text>
+  <rect x="541" y="50" width="99" height="44" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.3"/>
+  <text x="590.5" y="76" text-anchor="middle" font-size="9" font-family="ui-monospace,monospace" fill="#334155">/sbin</text>
+  <rect x="646" y="50" width="99" height="44" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.3"/>
+  <text x="695.5" y="76" text-anchor="middle" font-size="9" font-family="ui-monospace,monospace" fill="#334155">/bin</text>
+  <text x="16" y="130" font-size="11" fill="#475569">agentOS links into <tspan font-family="ui-monospace,monospace" fill="#4338ca">/opt/agentos/bin</tspan>; the rest are ordinary writable Linux dirs — drop a binary in <tspan font-family="ui-monospace,monospace" fill="#4338ca">/usr/local/bin</tspan> to shadow an agentOS tool.</text>
+</svg>
+
+| Software | Stored | Linked into |
+|---|---|---|
+| Base, mounted, and runtime-installed agentOS software | `/opt/agentos/<pkg>/<ver>` (or the mount) | `/opt/agentos/bin` |
+| The user's own files | wherever they put them | `/usr/local/bin`, `/usr/bin`, … (normal) |
+
+- **Base & mounts** link into `/opt/agentos/bin` in a **read-only layer** projected from the
+  host and shared across VMs — the symlinks are real but cost nothing per boot. A mounted host
+  directory is linked the same way, with no copy.
+- **Runtime installs** add symlinks to `/opt/agentos/bin` in the **writable layer** via
+  [`agentos-software link`](#the-agentos-software-cli) — ordinary symlinks, found by the normal walk.
+
+## Persistence
+
+Links and installed files are **filesystem entries**, so they persist exactly when their
+[filesystem](/agentos/docs/architecture/filesystem) layer does — the same rule as VFS-persistent
+`pip`. A snapshotted/persistent volume keeps runtime installs and links across restart; an
+ephemeral one drops them on teardown. There is no package-specific persistence mechanism.
+
+<Warning>
+Persisting a layer an untrusted guest can write to also persists whatever the guest linked
+there. Treat a guest-writable `/usr/local/bin` as guest-controlled on restore (see
+[Confinement & trust](#confinement--trust)).
+</Warning>
+
+## Execution dispatch (binfmt)
+
+A resolved file's leading bytes are read into a fixed buffer and dispatched like the Linux
+kernel's binary-format handlers. The command's **name plays no part** — `python3`, `node`,
+and `pi` are runtimes only by virtue of their files' headers.
+
+| Header | Result |
+|---|---|
+| `#!` at bytes 0–1 (`binfmt_script`) | the interpreter named on the line |
+| `\0asm` (`00 61 73 6d`) | WebAssembly runtime |
+| `\x7fELF` / Mach-O / PE | **`ENOEXEC`** — foreign binary format, no native-arch handler |
+| anything else | `ENOEXEC` (no implicit `/bin/sh` fallback here) |
+
+Shebang handling matches `binfmt_script`:
+
+- The interpreter path is **literal and absolute** — not `$PATH`-searched. `#!/usr/bin/env node`
+  works only because `/usr/bin/env` looks up its argument.
+- At most **one** argument follows, **not** whitespace-split (`#!/usr/bin/env node --flag` passes
+  `node --flag` as a single arg).
+- The header read is bounded to a fixed buffer (`BINPRM_BUF_SIZE`); a longer line truncates.
+  Interpreter chaining is depth-bounded (`ELOOP`); a missing interpreter is **`ENOENT`**, not `ENOEXEC`.
+
+<Note>
+**Shell fallback.** On `ENOEXEC`, a POSIX shell re-runs a headerless script via `/bin/sh`. That
+retry lives in the shell ([agentos-shell](/agentos/docs/architecture/processes)), not the dispatcher,
+which stays strictly `binfmt`-faithful.
+</Note>
+
+### Multicall (busybox-style)
+
+`bin/ls → ../libexec/coreutils` resolves at open to the shared `coreutils` blob. `argv[0]` is
+the caller's value **verbatim** (`"ls"`) — never derived from the symlink — and the blob selects
+its applet with `basename(argv[0])`, like busybox. Always invoke via the `bin/` name; calling the
+blob by its own path yields an `argv[0]` that selects no applet.
+
+## Command resolution
+
+A `$PATH` walk over the [VFS](/agentos/docs/architecture/filesystem), full Linux semantics:
+
+- A name **containing `/`** bypasses `$PATH` and resolves directly (relative to cwd, or absolute).
+- Otherwise each `:`-separated dir is searched in order; the first **executable** regular file
+  wins (execute bit required — a non-executable match yields `EACCES`). Left shadows right.
+- An **empty `$PATH` element** (leading/trailing/`::`) means the **current working directory** —
+  the POSIX footgun, kept for fidelity.
+- Matches are real VFS files/symlinks — `ls -l`-able, `stat`-able, removable, replaceable. The
+  filesystem is authoritative; there is no resolution cache to grow stale.
+
+## The `agentos-software` CLI
+
+```
+agentos-software link <path>
+```
+
+- `<path>` is a package directory or a node module directory (its `package.json` `bin` map is
+  the command list).
+- It brokers a request to the sidecar, which owns the filesystem; the CLI has no privilege of
+  its own.
+- Linked names are validated (no `/`, `..`, control chars, overlong names), and for a
+  guest-supplied package each symlink target must resolve inside the package root.
+
+## Confinement & trust
+
+Every process runs under the VM's single [permission policy](/agentos/docs/security-model) — like a
+Linux process running with its user/namespace/container privileges, not privileges declared by
+the binary. A package cannot grant itself permissions. The [trust boundary](/agentos/docs/security-model)
+is the sidecar (trusted) vs. the guest (untrusted):
+
+- **Linking changes discoverability, not privilege** — the policy is enforced at spawn,
+  regardless of how a command was found.
+- **Shadowing is allowed, Linux-style** — a guest may drop a `node`/`ls` into a writable `$PATH`
+  dir; trusted in-VM components defend by invoking tools via **absolute paths** (or a `$PATH`
+  that excludes guest-writable dirs). The shadowing binary still runs only under the VM policy.
+- **Guest env is sanitized** like a privileged exec — `LD_*`, `DYLD_*`, `NODE_OPTIONS`, `PATH`,
+  `BASH_ENV`, `*PRELOAD` are stripped, as glibc does under `AT_SECURE`.
+- **Trusted vs. guest packages** — symlink-escape checks apply only to guest-writable runtime packages.
+- **Bounded** — the runtime link count is bounded; it warns on approach and fails with a typed
+  error naming the limit (see [Limits & Observability](/agentos/docs/architecture/limits-and-observability)).
+
+## See also
+
+- [Software Definition](/agentos/docs/custom-software/definition) — the host API that produces these packages.
+- [Processes](/agentos/docs/architecture/processes) — the JavaScript, WebAssembly, and Python runtimes.
+- [Filesystem](/agentos/docs/architecture/filesystem) — the VFS, layers, and persistence.
+- [Security Model](/agentos/docs/security-model) — the trust boundary and VM permission policy.

@@ -1,0 +1,74 @@
+---
+title: "Node.js Compatibility"
+description: "Node.js builtins available to JavaScript running inside AgentOS."
+---
+
+Guest JavaScript never touches the host Node.js runtime.
+
+- Every `node:` `import`/`require` resolves to a VM-backed bridge or an
+  in-isolate implementation.
+- Unknown or denied modules fail explicitly with `ERR_ACCESS_DENIED`.
+- The guest reports Node.js `v22.0.0` via `process.version`.
+
+How builtins are backed:
+
+- **VM-backed** — routes through the VM filesystem, sockets, processes, DNS, or
+  entropy.
+- **In-isolate** — pure JavaScript running inside V8; no host access.
+- **Denied** — importing throws `ERR_ACCESS_DENIED`.
+
+<Note>A guest never falls through to a real host builtin. Anything not bridged
+or implemented in the isolate is denied.</Note>
+
+## VM-backed builtins
+
+| Module | Backed by |
+| --- | --- |
+| `fs`, `fs/promises` | VM filesystem: fds, streams, metadata, symlinks, polling watchers. |
+| `child_process` | VM process table. `spawn`, `exec`, `execFile`, sync variants. |
+| `net`, `dgram` | VM TCP, Unix-socket, and UDP tables. |
+| `dns`, `dns/promises` | VM DNS resolver. |
+| `http`, `https`, `http2`, `tls` | VM socket/TLS paths: clients, servers, pooling. |
+| `os` | VM-scoped platform, arch, hostname, CPU, memory, user. |
+| `crypto` | Entropy, hashes, HMAC, ciphers, scrypt, UUIDs, WebCrypto. |
+| `process` | VM env, cwd, signals, timers, stdio, umask. |
+| `module` | `createRequire`, builtin resolution, basic `Module` compat. |
+| `console` | Bounded formatting, guest stdout/stderr. |
+| `readline`, `sqlite`, `tty` | VM-backed compatibility surfaces. |
+| `timers`, `timers/promises` | Timeout, interval, immediate, promise variants. |
+| `stream/web`, `stream/consumers`, `stream/promises` | Web Streams + stream helpers. |
+
+- Network builtins obey the VM [permission policy](/agentos/docs/permissions).
+- Network access is **denied until granted** by the VM creator.
+
+## In-isolate builtins
+
+- Full: `path`, `buffer`, `events`, `stream`, `util`, `assert`, `url`,
+  `querystring`, `string_decoder`, `zlib`, `punycode`, `constants`, `sys`.
+  Default and named ESM imports supported.
+- Feature-detection shims: `async_hooks`, `diagnostics_channel`, `perf_hooks`,
+  `worker_threads`, `vm`, `v8`. `worker_threads` does **not** create real
+  worker threads.
+
+## Denied builtins
+
+`cluster`, `domain`, `inspector`, `repl`, `trace_events`, `wasi`.
+
+## Global APIs
+
+- Modern web globals: `fetch`, `Headers`, `Request`, `Response`,
+  `TextEncoder`/`TextDecoder`, `Buffer`, URL APIs, `Blob`, `File`, `FormData`,
+  abort APIs, `structuredClone`, `performance`, WebAssembly.
+- `fetch()` uses VM sockets and follows the same policy as `http`/`net`.
+
+## Modules and output
+
+- ESM and CommonJS both use the VM filesystem and normal `node_modules`
+  resolution.
+- Console/stream output flows through the bounded process-output path — see
+  [Processes & Shells](/agentos/docs/processes).
+
+<CodeSnippet file="examples/js-runtime-platform/src/index.ts" />
+
+Back to the [JavaScript guide](/agentos/docs/javascript) for TypeScript, packages,
+files, processes, networking, bindings, permissions, and limits.

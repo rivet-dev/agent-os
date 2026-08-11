@@ -1,0 +1,80 @@
+---
+title: "Publishing Packages"
+description: "Build, publish, and consume agentOS packages — locally, from npm, or from your own repo."
+---
+
+agentOS packages — WASM command sets and packed JS agents alike — go through one lifecycle, owned by the **`@rivet-dev/agentos-toolchain`** CLI. This page covers the full flow: building a package, publishing it to npm, and wiring a consumer at either a published version or a local checkout.
+
+## The lifecycle
+
+Every package is an npm package whose default export points at a self-contained runtime dir (`dist/package/`) that the sidecar projects under `/opt/agentos/<name>/<version>`. The toolchain provides four subcommands:
+
+| Command | What it does |
+|---|---|
+| `stage --commands-dir <dir>` | Populate `bin/` from a directory of compiled binaries, per the `commands` / `aliases` / `stubs` lists in the package's `agentos-package.json`. |
+| `build` | Assemble `dist/package/` from `bin/` (+ optional `share/`) and pack it into `dist/package.aospkg` — the runtime artifact with the embedded manifest (the `agentos-package.json` is pack-time input, not shipped). |
+| `pack` | Build a self-contained node-closure package from an npm package or local dir (JS agents; validates headers, rejects native addons). |
+| `publish` | Publish the built package to npm. Dist-tag is **`dev` by default**; the `latest` pointer only moves with an explicit `--latest`. |
+
+## Building
+
+In the AgentOS registry, the `just` recipes drive the toolchain (see [Building Binaries](/agentos/docs/custom-software/building-wasm)):
+
+```bash
+just toolchain-build            # compile the native wasm binaries (once per checkout)
+just software-build             # stage + assemble every software package
+just software-build coreutils   # ... or one package
+```
+
+## Publishing
+
+Registry packages **version independently** — each package carries its own semver in its `package.json`. Bump and commit the version, then:
+
+```bash
+just registry-publish coreutils            # publish under dist-tag `dev`
+just registry-publish coreutils my-branch  # ... under a custom tag
+just registry-publish coreutils latest     # DELIBERATE release: moves `latest`
+just registry-publish-all                  # every built software package, tag `dev`
+```
+
+Consumers installing `@agentos-software/<name>` with no tag resolve `latest`, so `latest` is reserved for deliberate releases — a dev publish can never clobber what users install.
+
+## Consuming published packages
+
+In agent-os, the `@agentos-software/*` packages are pinned **per-package** in the workspace catalog. Manage the pins with the `just` recipes (never hand-edit them):
+
+```bash
+just agentos-pkgs-status                    # current mode + pinned versions
+just agentos-pkgs-set-version coreutils 0.3.1   # pin one package
+just agentos-pkgs-update                    # re-pin all from the `latest` dist-tag
+just agentos-pkgs-update dev                # ... or from another tag
+```
+
+## Local development
+
+AgentOS consumes local registry builds by default because the software packages
+are pnpm workspace members. Build the native commands with `just toolchain-build`
+and assemble packages with `just software-build`; no sibling checkout or
+published package is required while iterating.
+
+Published-version pins exist only in release validation and downstream
+consumers. The AgentOS workspace itself stays self-contained.
+
+## Publishing from your own repo
+
+The toolchain is not registry-specific — any repo can produce and publish agentOS packages with `npx @rivet-dev/agentos-toolchain`:
+
+```bash
+# a package dir with package.json + agentos-package.json + your compiled binaries
+npx @rivet-dev/agentos-toolchain stage --commands-dir ./build/wasm
+npx @rivet-dev/agentos-toolchain build
+npx @rivet-dev/agentos-toolchain publish --tag dev      # or --latest for a release
+```
+
+For a JS agent, `pack` replaces `stage`/`build`:
+
+```bash
+npx @rivet-dev/agentos-toolchain pack . --out dist/package --agent my-acp-entrypoint
+```
+
+The published package is a plain npm dependency — consumers import its descriptor and pass it to `software` exactly like the software packages. See [Software Definition](/agentos/docs/custom-software/definition) for the descriptor shape.

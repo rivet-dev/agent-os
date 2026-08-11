@@ -1,0 +1,33 @@
+---
+title: "Limitations"
+description: "What the agentOS VM does not support, and how to work around it."
+skill: true
+---
+
+agentOS is a Linux environment with a POSIX-compliant virtual kernel. It handles most agent workloads (coding, scripting, file I/O, networking) with near-zero overhead.
+
+## Sandbox mounting
+
+When a workload needs a full Linux OS, agents can escalate to a full sandbox on demand without changing code. The [external sandbox](/agentos/docs/sandboxes) extension mounts the sandbox as a filesystem and lets you execute commands on it, like mounting a hard drive on your own machine. Files written in the VM are available in the sandbox and vice versa.
+
+See [agentOS vs Sandbox](/agentos/docs/versus-sandbox) for a detailed comparison.
+
+## Limitations
+
+### Software registry
+
+agentOS uses its own [software registry](/registry) of popular tools cross-compiled for the runtime. You cannot download and install arbitrary binaries (for example via `curl` or `apt`), and standard Linux package managers (`apt`, `yum`) are not available since agentOS runs a streamlined Linux environment rather than a full distribution. Native binaries that are not yet available in the registry (such as Go, Rust, or C++ toolchains) require a full [external sandbox](/agentos/docs/sandboxes).
+
+See [Software](/agentos/docs/software) for how to install and configure available packages.
+
+### Lightweight Linux kernel
+
+agentOS provides a POSIX-compliant virtual Linux kernel with full filesystem operations, networking, and process management. It implements a focused subset of the kernel surface, so a few Linux-specific features are not available:
+
+- Kernel modules and eBPF
+- Container runtimes (e.g. Docker)
+- File watching (`inotify`, `fs.watch`)
+
+### No hardware access
+
+The VM has no access to GPUs, USB devices, or other hardware.

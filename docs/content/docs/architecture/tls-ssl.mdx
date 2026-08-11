@@ -1,0 +1,60 @@
+---
+title: "TLS & SSL"
+description: "How agentOS uses in-guest mbedTLS plus a VM CA bundle for curl / wget / git, and a hermetic OpenSSL libcrypto build for OpenSSH."
+skill: true
+---
+
+This is the internals view of how TLS works for guest CLI tools (`curl`, `wget`, `git`, `ssh`) that run as `wasm32-wasip1` in the untrusted executor. For how bytes actually move between endpoints, see [Networking](/agentos/docs/architecture/networking); for how the tools are compiled, see [Compiler Toolchain](/agentos/docs/architecture/compiler-toolchain); for the trust boundary this sits inside, see [Security Model](/agentos/docs/security-model).
+
+The governing rule: **verification happens in-guest, against a CA bundle shipped inside the VM.** The sidecar is a dumb ciphertext pipe — the untrusted guest never asks the trusted host to authenticate a server on its behalf.
+
+## Why HTTPS stays on mbedTLS
+
+OpenSSL can be built for agentOS's owned `wasm32-wasip1` sysroot, but it is not the right HTTPS backend for every command:
+
+- **The tools already have smaller TLS integrations.** curl has a maintained mbedTLS backend, git shares curl's libcurl, and wget only needs a compact implementation of its existing SSL abstraction.
+- **The full toolkit is unnecessary there.** OpenSSL includes libssl, libcrypto, providers, engines, applications, modules, and platform assembly. HTTPS in these commands needs portable TLS, X.509 verification, and entropy, not that whole surface.
+- **A scoped libcrypto build is still useful.** OpenSSH needs crypto primitives that its experimental `--without-openssl` mode omits. Its private OpenSSL build disables threads, assembly, dynamic modules, engines, applications, and libssl, and seeds from the owned libc's `getrandom` path.
+
+Sockets, DNS, and TCP were already real (the patched wasi-libc implements them over `host_net`). **Only TLS was the gap** — and before this work every tool shipped crippled: `curl` brokered TLS to the host (non-hermetic, wrong semantics), while `wget` and `git` had no HTTPS at all.
+
+## Replacing OpenSSL with mbedTLS
+
+We use **mbedTLS 3.6 LTS** as the in-guest TLS backend. It fits because it is **pure portable C99, single-threaded, zero platform dependencies**, does TLS 1.2/1.3 with X.509 verification, seeds entropy from a single `getentropy()` call, and — decisively — drops straight into C programs' existing TLS backends (curl already ships a first-class `USE_MBEDTLS` backend).
+
+Two artifacts make the whole class of tools work:
+
+1. **`libmbedtls` / `libmbedx509` / `libmbedcrypto`** built for `wasm32-wasip1` in the toolchain Makefile.
+2. **A CA bundle inside the VM** at the common Linux path `/etc/ssl/certs/ca-certificates.crt`, with `/etc/ssl/cert.pem` pointing to it. Verification then runs in each tool's own code path against a trust store shipped in the VM — hermetic, with correct Linux exit codes and tool-specific trust overrides (`--cacert` / `CURL_CA_BUNDLE` for curl and `--ca-certificate` for wget). AgentOS generates the bundle at build time from an exact-pinned `webpki-root-certs` Mozilla snapshot and installs it directly in native and browser guest roots before the first execution, including read-only and restored roots. Explicit root-filesystem entries at either trust path take precedence.
+
+This provides the conventional file locations and Mozilla public roots, **not a byte-for-byte Debian or Alpine `ca-certificates` installation**. Distribution packages can select a different snapshot, add policy-managed or local roots, generate OpenSSL hash links, and provide tools such as `update-ca-certificates`; AgentOS does not imply those distro-specific files or update behavior. Supply a custom root-filesystem entry or use the tool-specific trust flags when you need a different trust policy.
+
+mbedTLS is **not** a general OpenSSL replacement — it lacks providers/engines, CMS/PKCS#7, the `openssl` CLI, and much of libcrypto's breadth. It **is** a complete replacement for OpenSSL's role as curl/wget/git's TLS backend, which is all an HTTPS client needs.
+
+## Per-tool compatibility
+
+### curl
+
+Uses upstream curl's own `USE_MBEDTLS` backend; the overlay is only WASI build fixes. Full HTTPS with real verification: `--cacert` parses via the VFS, a verify failure returns `CURLE_PEER_FAILED_VERIFICATION` (**exit 60**), and `curl -v` prints the chain. Content encodings `--compressed` (gzip / brotli / zstd) are enabled.
+
+### wget
+
+GNU wget ships **no** mbedTLS backend, so agentOS provides a hand-written one — `wasi_ssl.c` implements wget's four-function SSL abstraction (`ssl_init`, `ssl_cleanup`, `ssl_connect_wget`, `ssl_check_certificate`) over the same mbedTLS + CA bundle. This lights up HTTPS and FTPS (including control-to-data session resumption), `--ca-certificate` / `--ca-directory` / `--no-check-certificate`, client `--certificate` / `--private-key`, HSTS, and gzip. It is the only bespoke TLS backend in the tree.
+
+Wget's `--ciphers` accepts the common OpenSSL list surface: `DEFAULT`, `HIGH`, `ALL`, `!`/`-` exclusions, `+` reordering, standard algorithm classes, explicit IANA names, and names such as `ECDHE-RSA-AES128-GCM-SHA256`. A backend-specific token that cannot be translated (for example an OpenSSL `@SECLEVEL` directive) fails explicitly instead of silently broadening the TLS policy.
+
+### git
+
+git's HTTPS lives in the `git-remote-https` helper, which **links libcurl in-process** — git never shells out to a `curl` binary. agentOS builds a reusable, mbedTLS-linked libcurl and ships `git-remote-http` as a real command. Smart-HTTP **clone / fetch / push** work against GitHub/GitLab, with HTTP Basic auth (tokens, `GIT_ASKPASS`). git reuses curl's TLS entirely — there is no git-specific TLS code.
+
+### ssh
+
+ssh does **not** use mbedTLS. SSH transport crypto is not TLS, so OpenSSH 10.4p1 links a hermetic, static OpenSSL libcrypto built against the same owned sysroot. That restores the standard software algorithm families, including RSA and ECDSA host/user keys, DH and NIST ECDH key exchange, and AES-GCM/AES-CBC/3DES alongside ed25519, curve25519, and chacha20-poly1305. FIDO security-key key types, parsing, verification, agent-backed signing, and the isolated `ssh-sk-helper` protocol are enabled. Local enrollment and signing are unavailable today: the VM has neither a built-in libfido provider nor a `dlopen` bridge for an external provider, so those requests return the normal explicit provider-unavailable error. Direct PKCS#11 provider loading is disabled for the same missing host provider bridge. Host-key verification is fully enforced (fails closed on an unknown or changed key; `known_hosts` and `accept-new` are supported; no `StrictHostKeyChecking=no` default). It powers `git@host:` (git-over-ssh) and direct remote command execution. Kernel-backed `socketpair`, descriptor passing, `closefrom`, and process spawning preserve OpenSSH's `ProxyCommand` and `ProxyUseFdpass` behavior without granting host-process access.
+
+Three backgrounding operations fail explicitly instead of pretending to fork: `ssh -f` after authentication, ControlPersist master detachment, and the interactive `~&` escape. Each would require cloning a live authenticated continuation—WASM/V8 heap state plus the transport, channels, and pending packets—which the VM process model cannot snapshot. Ordinary pre-exec process spawning and helper commands retain Linux semantics.
+
+`VerifyHostKeyDNS` performs real SSHFP lookups and distinguishes NXDOMAIN from an empty RRset. SSHFP answers are treated as unauthenticated unless the resolver supplies authenticated DNSSEC proof; the current host resolver does not, so DNS can assist matching but does not set OpenSSH's secure-DNS flag.
+
+## Summary
+
+One mbedTLS build, one shared libcurl (curl and git), one hand-written wget backend, and a private OpenSSL libcrypto build for OpenSSH. TLS trust moved from "the host authenticates on the guest's behalf against the host's store" to "the guest verifies against a CA bundle shipped inside the VM." OpenSSL is not used by curl, wget, or git.

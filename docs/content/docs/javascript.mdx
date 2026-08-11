@@ -1,0 +1,106 @@
+---
+title: "Node.js"
+description: "Execute JavaScript and TypeScript, install npm dependencies, and manage execution lifecycles in agentOS."
+skill: true
+---
+
+agentOS runs JavaScript and TypeScript on native V8 inside the VM, backed by a
+real Node.js surface: `node:fs`, `node:child_process`, sockets, and npm.
+
+Letting an agent write code instead of chaining one tool call per step is called
+[Code Mode](https://blog.cloudflare.com/code-mode/). It has a few advantages over
+driving [Bash](/agentos/docs/bash):
+
+- **Fewer tokens**: Ten chained operations cost one round trip, not ten.
+- **Type checking**: Validate generated TypeScript before you run it.
+- **Real data processing**: `map` and `filter` instead of `jq` and `awk`.
+- **Parallelism**: `Promise.all` instead of shell job control.
+
+## Evaluate an expression
+
+`evaluate()` returns a JSON-serializable value.
+
+<CodeSnippet file="examples/js-quickstart/src/index.ts" />
+
+Returning `undefined`, a function, a symbol, or a circular value fails with
+`evaluation_serialization_failed` rather than silently losing the value.
+
+## Execute code
+
+`execute()` runs source and captures its output instead of returning a value.
+
+<CodeSnippet file="examples/js-sdk-overview/src/index.ts" />
+
+Executions are ephemeral, so capture stdio only when you want it — `"stderr"` for
+diagnostics, `"all"` for both streams. `onStdout`/`onStderr` stream live and work
+independently of capture.
+
+## Pass data into code
+
+`inputs` hands host values to the guest as real objects, so data never gets
+interpolated into source.
+
+<CodeSnippet file="examples/js-sdk-overview/src/inputs.ts" />
+
+## Keep state between calls
+
+Pass a `contextId` to keep globals, imports, and modules alive across calls in
+one retained V8 isolate.
+
+<CodeSnippet file="examples/js-sdk-overview/src/contexts.ts" />
+
+A context runs one operation at a time — reusing a busy `contextId` fails
+immediately. Files, npm, Bash, and type checks may pass the same id, but they run
+in fresh processes and never touch retained memory.
+
+Contexts live for the VM lifetime. They do not survive actor sleep/wake, because
+the VM is disposed; create them lazily on the first stateful use after wake.
+
+## Type check before running
+
+Executing TypeScript transpiles it without a semantic check, so validate the
+agent's generated code explicitly.
+
+<CodeSnippet file="examples/js-typescript/src/index.ts" />
+
+## Install npm packages
+
+<CodeSnippet file="examples/js-sdk-overview/src/npm.ts" />
+
+Installs modify the VM-wide filesystem, so a package installed once is importable
+by every later execution in that VM, in any language. Only one npm/Python
+mutation runs at a time per VM; a concurrent install fails with `execution_busy`.
+
+## Background processes and web servers
+
+`spawn` starts a long-lived process and returns a `pid`. From there you get
+stdin, output, signals, and waiting.
+
+<CodeSnippet file="examples/js-dev-servers/src/index.ts" />
+
+Spawned processes always start with fresh state, so they take no `contextId`.
+
+## A full Linux environment underneath
+
+There is a real Linux environment behind all of this, shared by every language.
+Files and installed packages are immediately visible to Bash, Python, agents, and
+other executions.
+
+<CodeSnippet file="examples/js-sdk-overview/src/platform.ts" />
+
+See [Filesystem](/agentos/docs/filesystem), [Processes & Shells](/agentos/docs/processes), and
+[Networking & Previews](/agentos/docs/networking).
+
+## Bindings
+
+Guest code invokes [bindings](/agentos/docs/bindings) as ordinary typed commands, so host
+credentials stay outside the VM.
+
+<CodeSnippet file="examples/bindings/exec-javascript.ts" />
+
+## Permissions, limits, and timeouts
+
+Every operation inherits the VM [permission policy](/agentos/docs/permissions) and
+[resource limits](/agentos/docs/resource-limits).
+
+<CodeSnippet file="examples/js-sdk-overview/src/limits.ts" />

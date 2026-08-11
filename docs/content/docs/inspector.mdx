@@ -1,0 +1,58 @@
+---
+title: "Inspector"
+description: "Watch and drive a live VM from the Rivet dashboard: transcript, filesystem, and system tabs."
+---
+
+Every agentOS actor ships a set of tabs for the Rivet dashboard's actor inspector. Open a running VM and you can read the agent's transcript, send it prompts, answer permission requests, browse the filesystem, and watch its processes. Nothing to configure: the tabs register automatically when you use `agentOS()`.
+
+## Open the inspector
+
+Any server with an agentOS actor gets the inspector for free:
+
+<CodeSnippet file="examples/quickstart-app/server.ts" />
+
+Start the server, open the dashboard, and click into the actor:
+
+```bash
+npx tsx server.ts
+# then open http://localhost:6420/ui
+```
+
+The stock rivetkit tabs (state, connections, console) are replaced by the agentOS tabs. The tab assets are served by your server process through the actor gateway, so the same tabs work wherever the dashboard can reach the actor, locally or deployed.
+
+## Transcript
+
+A chat view of every session on the VM: user and agent messages, thinking, tool calls with their inputs and outputs, and the agent's plan. Plumbing events collapse into expandable rows so they never dominate the pane.
+
+The composer at the bottom drives the agent directly: pick an agent type, set per-session env vars (such as an API key, which stays in your browser), and send prompts. This is the same data and the same actions your code uses via `openSession`, `prompt`, and the `sessionEvent` stream. See [Sessions](/agentos/docs/sessions).
+
+## Approvals
+
+When an agent asks for permission, a banner appears above every tab with the request and its reply options. The agent's turn blocks until someone answers, so an unanswered request is the most common reason an agent looks stuck. See [Approvals](/agentos/docs/approvals).
+
+## Filesystem
+
+Browse the VM's filesystem and read files, the same view your code gets through the fs API. Note that the root filesystem is in-memory; files outside persisted mounts do not survive VM restarts. See [Filesystem](/agentos/docs/filesystem).
+
+## System
+
+Everything about the machine itself, in one scroll view. When the VM is asleep, the tab says so instead of waking it.
+
+- **Processes** — the full kernel process tree, refreshed live. Select a process for its details (ppid, cwd, driver, exit code), stop or kill it, and watch a live output tail for processes spawned through the SDK. See [Processes & Shell](/agentos/docs/processes).
+- **Software** — installed software bundles with their commands. See [Software](/agentos/docs/software).
+- **Mounts** — the configured mounts with their access modes. See [Sandbox Mounting](/agentos/docs/sandboxes).
+- **Preview links** — create a signed URL to an HTTP server on a port inside the VM. See [Networking](/agentos/docs/networking).
+
+Actor identity and lifecycle controls (id, key, runner, sleep, destroy) live in the dashboard's own Metadata tab; the System tab covers only what is inside the VM.
+
+## VM status badges
+
+When something needs attention, compact badges appear in each tab's own toolbar: a state note when the VM is asleep, shut down after an error, or the sidecar is unhealthy, and an amber warnings pill (resource-limit warnings and agent crash exits, expandable into a panel). While the VM is simply healthy nothing shows; the live session count sits in the Transcript tab's session list. The health poll behind the badges never wakes a sleeping VM, so leaving the inspector open never boots anything. The warnings are the same data your code receives through `onLimitWarning` and `onAgentExit`; see [Resource Limits](/agentos/docs/resource-limits) and [Debugging](/agentos/docs/debugging).
+
+## Access control
+
+The dashboard holds a single per-actor inspector token, and that token authorizes every action the tabs can perform, including sending prompts, answering permission requests, writing files, and killing processes. There is no per-action scoping: treat dashboard access to an actor as operator access to its VM.
+
+## How it relates to your code
+
+The inspector is a window onto the same actor actions the SDK exposes; nothing it shows is inspector-only state. Every tab maps to an API you can call from your own code, so anything you find while inspecting (a session to resume, a file to read, a process to kill) is one SDK call away.

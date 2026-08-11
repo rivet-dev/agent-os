@@ -1,0 +1,89 @@
+---
+title: "Limits & Observability"
+description: "How agentOS bounds resources, applies backpressure, warns before a limit is hit, and surfaces it all to the host."
+skill: true
+---
+
+<Note>These internal architecture docs are mostly generated and maintained by LLMs, then reviewed by humans. They are intentionally verbose; use your preferred LLM to ask focused questions about the architecture as needed.</Note>
+
+agentOS runs untrusted, AI-generated code inside disposable VMs. Every resource
+that code can consume is **bounded by default**, and every bound is designed to
+**warn before it is hit**, **fail with a clear error when it is**, and stay
+**inspectable** from one place. This page explains how the limits, backpressure,
+logging, and observability pieces fit together across the stack.
+
+## Where limits live
+
+Limits are owned and enforced by the **agentOS kernel and sidecar**. The client
+exposes the typed knobs and surfaces their signals.
+
+| Layer | Responsibility |
+| --- | --- |
+| agentOS kernel | Enforces per-VM resource caps (memory/heap, CPU time, fds, processes, sockets, filesystem bytes, …). |
+| agentOS sidecar | Owns the bounded queues between the guest, the runtime, and the host; applies backpressure or rejects at the documented boundary; tracks usage. |
+| agentOS client | Forwards `limits` config to the VM and surfaces limit signals to the caller. |
+
+## Limit contract
+
+Every bound — a resource cap, a bounded queue, a timeout, a payload size —
+follows the same contract:
+
+1. **Bounded by default.** Nothing is unbounded out of the box. Memory is capped
+   at ~128 MiB per isolate (Cloudflare Workers parity), CPU is bounded, and every
+   queue has a fixed capacity. Operators may *raise* a cap, but never get an
+   unbounded default.
+2. **Warn on approach where usage is measurable.** Resource and queue gauges emit
+   a structured warning as usage crosses a threshold (default **≥80%** of
+   capacity), once per crossing and re-armed only after recovery. Deadline-style
+   limits fail at their configured timeout instead of predicting future usage.
+3. **Clear failure on breach.** Guest kernel resources return the corresponding
+   POSIX errno; host-facing queue and runtime failures name the limit and the
+   config path to raise it. Neither path silently drops data or crashes the host.
+
+## Backpressure, not catastrophe
+
+The path from guest code to the host is a **chain of bounded queues**: the V8
+runtime → a per-session frame channel → the V8→host event channel → the sidecar
+stdout frame queue → the host. Streaming channels apply backpressure where the
+producer can safely wait. Process/runtime delivery queues that cannot block
+reject the crossing event with an error naming `limits.process.pendingEventCount`
+or `limits.process.pendingEventBytes`. Neither path silently drops data or
+crashes the sidecar.
+
+Buffer capacities are sized so that *transient* bursts are absorbed without ever
+engaging backpressure; backpressure is the safety net for a genuinely stuck
+consumer, not a normal-operation event.
+
+## The limit registry
+
+Live resource and queue gauges register with a single in-process **limit
+registry**. Each registered limit tracks its live depth, high-water mark, and
+capacity, and emits the near-capacity warning described above. This gives the
+runtime one place to answer two questions:
+
+- *Is a limit about to be hit?* — the registry fires the approach warning.
+- *What is the current usage of everything?* — a registry snapshot lists every
+  limit's depth / high-water / capacity / fill-percent for debugging.
+
+A CI audit fails the build if any limit-shaped constant is not classified and —
+for operator-tunable ones — wired to a config field, so "is everything bounded
+and config-wired?" is verified mechanically rather than by review.
+
+## Logging & host visibility
+
+The agentOS sidecar logs to **stderr** (never stdout — stdout is the framed wire
+protocol). The default level is `WARN`, tunable with the `AGENTOS_LOG`
+environment variable (`error` to quiet, `debug` for per-limit usage snapshots).
+Near-limit warnings and backpressure events therefore show up in the sidecar's
+stderr stream, which agentOS forwards to the host.
+
+The limit registry also exposes a structured **warning sink**: a callback that
+fires on the same edge as the log, carrying `{ name, category, observed,
+capacity, fillPercent }`. This is the foundation for host-facing limit
+observability — a structured "a limit is approaching capacity" signal rather than
+a parsed log line.
+
+## See also
+
+- [Resource Limits](/agentos/docs/resource-limits) — the full `limits` config surface.
+- [Processes](/agentos/docs/architecture/processes) and [Sessions & Persistence](/agentos/docs/architecture/sessions-persistence) — the layers the queue chain runs through.

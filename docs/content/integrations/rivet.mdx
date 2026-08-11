@@ -1,0 +1,83 @@
+---
+title: "Rivet"
+description: "Run agentOS natively as Rivet Actors."
+skill: true
+---
+
+import DeployTargets from '@/components/docs/DeployTargets.astro';
+
+Rivet is agentOS's native framework. The `agentOS()` function returns an ordinary [Rivet Actor](https://rivet.dev/docs/actors), so each agentOS VM is a directly addressable actor with its own durable filesystem, state, and session history—no adapter layer required.
+
+[View the complete example →](https://github.com/rivet-dev/agentos/tree/main/examples/quickstart-app)
+
+## Quickstart
+
+<Steps>
+
+<Step title="Create a project">
+
+```sh
+mkdir my-agent && cd my-agent
+npm init -y
+npm pkg set type=module
+npm add @rivet-dev/agentos @agentos-software/pi
+npm add --save-dev tsx typescript
+```
+
+</Step>
+
+<Step title="Create an agentOS actor">
+
+Create `server.ts`. The `agentOS()` call returns a normal Rivet Actor definition, and `setup()` registers it with the Rivet runtime:
+
+<CodeSnippet file="examples/quickstart-app/server.ts" title="server.ts" />
+
+</Step>
+
+<Step title="Connect to the actor">
+
+Create `client.ts` to address an actor by name, subscribe to its events, open a session, and send a prompt:
+
+<CodeSnippet file="examples/quickstart-app/client.ts" title="client.ts" />
+
+</Step>
+
+<Step title="Run locally">
+
+Start the actor, then run the client in a second terminal with the provider key required by your model:
+
+```sh
+# Terminal 1
+npx tsx server.ts
+
+# Terminal 2
+ANTHROPIC_API_KEY=... npx tsx client.ts
+```
+
+</Step>
+
+<Step title="Add orchestration">
+
+Because an agentOS VM is a Rivet Actor, you can compose it with Rivet's orchestration primitives:
+
+- **[Durable workflows](/agentos/docs/workflows)** — Run multi-step agent tasks that retry and resume after crashes.
+- **[Multiplayer agents](/agentos/docs/multiplayer)** — Stream agent output to multiple connected clients in real time.
+- **[Agent-to-agent systems](/agentos/docs/agent-to-agent)** — Connect isolated agents through typed bindings and durable pipelines.
+- **[Scheduled agents](/agentos/docs/cron)** — Run commands and agent sessions on timers or cron schedules.
+- **[Human-in-the-loop flows](/agentos/docs/approvals)** — Pause for tool approval and resume from durable event history.
+
+</Step>
+
+<Step title="Deploy">
+
+Deploy to one of the supported platforms:
+
+<DeployTargets />
+
+</Step>
+
+</Steps>
+
+## Learn more
+
+See the [agentOS quickstart](/agentos/docs/quickstart) for VM configuration and the [Rivet Actor documentation](https://rivet.dev/docs/actors) for state, actions, events, queues, workflows, and deployment.

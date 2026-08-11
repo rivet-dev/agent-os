@@ -1,0 +1,138 @@
+---
+title: "External Sandboxes"
+description: "Extend agentOS with full sandboxes for heavy workloads like browsers, desktop automation, and compilation."
+skill: true
+---
+
+Pair agentOS with a full sandbox on demand for heavy workloads. The sandbox
+filesystem mounts into the VM as a native directory, and its process management
+is exposed as [bindings](/agentos/docs/bindings) — provider-agnostic through
+[Sandbox Agent](https://sandboxagent.dev).
+
+- agentOS covers most use cases; a sandbox adds a full Linux environment for
+  special software.
+- Lazily start a sandbox only when a task needs it, then tear it down.
+- One agent session can mix lightweight coding with heavy system work.
+- See [agentOS vs Sandbox](/agentos/docs/versus-sandbox) for the full comparison.
+
+## When to use a sandbox
+
+- **Native binaries** not yet supported in the agentOS runtime.
+- **Browsers / desktop automation** — Playwright, Puppeteer, Selenium, anything
+  needing a display server.
+- **Heavy compilation** — large builds or native toolchains.
+- **GUI apps** — desktop apps, VNC, graphical workloads.
+- **npm packages with native extensions** — `sharp`, `bcrypt`,
+  `better-sqlite3`.
+
+Default to the agentOS VM; spin up a sandbox only when required. Sandboxes bill
+per second of uptime.
+
+## Getting started
+
+Ships as `@rivet-dev/agentos-sandbox`, working through two mechanisms:
+
+- **Filesystem mount** — projects the sandbox into the VM as a native
+  directory. Read/write files through the mount.
+- **Bindings** — exposes sandbox process management as
+  [bindings](/agentos/docs/bindings). Run commands on the sandbox from the VM.
+
+Both powered by [Sandbox Agent](https://sandboxagent.dev); swap providers
+without changing agent code.
+
+```bash
+npm install @rivet-dev/agentos-sandbox sandbox-agent
+```
+
+- `createSandboxFs`, `createSandboxBindings` — from `@rivet-dev/agentos-sandbox`.
+- `SandboxAgent` + provider helpers (e.g. `docker`) — from `sandbox-agent`.
+- Pass a provider as `sandbox: { provider: docker() }`. agentOS starts the
+  client, mounts it at `/mnt/sandbox`, registers process bindings, and disposes
+  it with the VM.
+- In RivetKit actors, pass the provider to `agentOS(...)` — a fresh client per
+  actor VM.
+
+<CodeGroup>
+<CodeSnippet file="examples/sandbox/server.ts" />
+</CodeGroup>
+
+## Configuration
+
+The sandbox is mounted at `/mnt/sandbox` by default. The `sandbox` object also
+accepts these options alongside `provider` or `client`:
+
+| Option | Purpose |
+| --- | --- |
+| `mountPath` | Changes the directory where the external filesystem appears inside the agentOS VM. |
+| `sandboxRoot` | Restricts the mount to a directory inside the external sandbox instead of exposing its root. |
+| `readOnly` | Prevents the VM from modifying files through the mount. Defaults to `false`. |
+| `timeoutMs` | Sets the per-request timeout for Sandbox Agent filesystem calls. |
+| `maxFullReadBytes` | Bounds files buffered by full-read and truncate fallbacks. |
+
+The server example above changes `mountPath` to
+`/home/agentos/sandbox`. Paths used inside the external sandbox remain relative
+to `sandboxRoot`, so a VM file such as `/home/agentos/sandbox/app/index.ts` maps
+to `/app/index.ts` when `sandboxRoot` is `/`.
+
+## Calling the mounted bindings
+
+Write code through the filesystem, run it inside the sandbox. Bindings are a CLI
+command, called through the same `exec`/`spawn` surface as any command.
+
+<CodeSnippet file="examples/sandbox/client.ts" />
+
+## Bindings reference
+
+```bash
+# Run a command synchronously
+agentos-sandbox run-command --command "npm install" --cwd "/app"
+
+# Start a background process
+agentos-sandbox create-process --command "npm" --args "run" --args "dev"
+
+# List running processes
+agentos-sandbox list-processes
+
+# Get process output
+agentos-sandbox get-process-logs --id "proc_abc123"
+
+# Stop or kill a process
+agentos-sandbox stop-process --id "proc_abc123"
+agentos-sandbox kill-process --id "proc_abc123"
+
+# Send input to an interactive process
+agentos-sandbox send-input --id "proc_abc123" --data "yes"
+```
+
+## Sandbox providers
+
+The package provides isolated entrypoints for Docker, local execution, E2B,
+Daytona, Vercel, Cloudflare, Modal, ComputeSDK, and Sprites. Import only the
+provider you use (for example, `@rivet-dev/agentos-sandbox/e2b`) so its optional
+SDK is isolated from the rest of your application. Docker is also exported from
+the package root, as shown above.
+
+Install the provider's SDK when required: `@e2b/code-interpreter` for E2B,
+`@daytonaio/sdk` for Daytona, `@vercel/sandbox` for Vercel,
+`@cloudflare/sandbox` for Cloudflare, `modal` for Modal, `computesdk` for
+ComputeSDK, or `@fly/sprites` for Sprites. Docker and local execution need no
+additional provider SDK.
+
+For another backend, adapt any [Sandbox Agent](https://sandboxagent.dev)
+provider with `sandboxAgentProvider` from `@rivet-dev/agentos-sandbox`. Provider
+mode is the preferred lifecycle: each VM gets a fresh sandbox, and disposal of
+the VM destroys it.
+
+## Advanced: mount an existing client
+
+Standalone `AgentOs.create()` can mount an already-connected,
+Sandbox-Agent-compatible client. Install `sandbox-agent` directly for this
+manual path. The caller owns the client by default; set `dispose` to `true` when
+the client implements disposal, or provide a callback to transfer lifecycle
+ownership to the VM.
+
+<CodeSnippet file="examples/sandbox/existing-client.ts" />
+
+RivetKit `agentOS()` intentionally rejects the `client` form because one client
+cannot be shared safely across actor VMs. Pass a `provider` there so every actor
+VM starts and owns a fresh sandbox.

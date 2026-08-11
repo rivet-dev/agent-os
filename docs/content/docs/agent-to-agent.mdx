@@ -1,0 +1,37 @@
+---
+title: "Agent-to-Agent Communication"
+description: "Use bindings to let agents communicate with each other."
+skill: true
+---
+
+Agents communicate through [bindings](/agentos/docs/bindings). You define a bindings group that lets one agent send work to another, and the agent calls it like any other CLI command.
+
+## Example: code writer + reviewer
+
+This example gives the writer agent a `review` binding. The writer sends the file's full contents (the VMs share no filesystem), and the binding writes them into a separate reviewer VM and sends a review prompt back through the reviewer.
+
+<CodeGroup>
+<CodeSnippet file="examples/agent-to-agent/server.ts" />
+<CodeSnippet file="examples/agent-to-agent/client.ts" />
+</CodeGroup>
+
+The writer agent sees the review binding as a CLI command. Because the VMs share no filesystem, it sends the full file contents, not a path:
+
+```bash
+agentos-review submit --code "$(cat api.ts)"
+```
+
+The binding writes the contents into the reviewer's VM, prompts the reviewer, and returns the review to the writer as JSON.
+
+## Why bindings?
+
+Bindings are the natural communication layer between agents because:
+
+- **The agent doesn't need to know about other agents.** It just calls a binding. You can swap the implementation without changing the agent's behavior.
+- **No credentials in the VM.** The binding executes on the server, so it can access other agents directly without exposing connection details.
+- **Composable.** Chain any number of agents by adding more bindings. Each binding is a self-contained bridge to another agent.
+
+## Recommendations
+
+- Each agent has its own isolated VM and filesystem (they share no filesystem). Pass file contents through the binding input, then use `writeFile` in the binding to land them in the other VM.
+- Use [Workflows](/agentos/docs/workflows) to make multi-agent pipelines durable across restarts.

@@ -1,0 +1,48 @@
+---
+title: "Claude Code"
+description: "Run the Claude Code agent inside a VM with skills, MCP servers, and custom configuration."
+skill: false
+---
+
+## Quick start
+
+<CodeGroup>
+<CodeSnippet file="examples/claude/server.ts" />
+
+<CodeSnippet file="examples/claude/client.ts" title="client.ts" region="quickstart" />
+</CodeGroup>
+
+Read [Sessions](/agentos/docs/sessions) first for session options, streaming events, prompts, and lifecycle management.
+
+## Model & credentials
+
+Set the relevant variable(s) on the session's `env`, sourced from your server's environment:
+
+- `ANTHROPIC_API_KEY` — Anthropic API key (direct API).
+- `ANTHROPIC_AUTH_TOKEN` — bearer token for proxy / OAuth auth.
+- `ANTHROPIC_BASE_URL` — route through a gateway or proxy endpoint.
+- `ANTHROPIC_MODEL` — override the default model.
+- `CLAUDE_CODE_USE_BEDROCK=1` — use Amazon Bedrock (auth via the AWS credential chain: `AWS_REGION`, `AWS_PROFILE`, …).
+- `CLAUDE_CODE_USE_VERTEX=1` — use Google Vertex AI (auth via Google Cloud credentials).
+
+See [Models & Credentials](/agentos/docs/models-and-credentials), and Claude Code's [environment variables](https://code.claude.com/docs/en/env-vars) for the full list.
+
+## Skills
+
+Claude Code discovers [agent skills](https://docs.claude.com/en/docs/claude-code/skills) from `SKILL.md` files under its skills directory. Write the skill into the VM before creating a session and Claude Code loads it automatically.
+
+<CodeSnippet file="examples/claude/client.ts" title="client.ts" region="skill" />
+
+## MCP servers
+
+Expose extra tools to the agent by passing `mcpServers` to `openSession`. Both local child-process servers and remote URLs are supported.
+
+<CodeSnippet file="examples/claude/client.ts" title="client.ts" region="mcp" />
+
+<Note>
+**Pre-install `npx`-launched servers.** A local server started with `npx -y …` writes install progress to **stdout** on its first run, which corrupts the MCP stdio handshake (you'll see `Connection closed`). Pre-install it in the VM so `npx` is silent — `await agent.process.exec("npm install -g @modelcontextprotocol/server-filesystem")` before the session — or pin the package and point `command` at the installed binary.
+</Note>
+
+## Customizing the agent
+
+Claude Code is a built-in agent, but it's just a software package under the hood. To ship your own ACP adapter, swap the underlying agent SDK, or register a tweaked build as a new agent, see [Custom Agents](/agentos/docs/agents/custom).

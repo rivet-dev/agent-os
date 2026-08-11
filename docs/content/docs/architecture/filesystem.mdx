@@ -1,0 +1,96 @@
+---
+title: "Filesystem"
+description: "Internals of the kernel VFS: the overlay/mount/root engines, how guest fs syscalls are routed and confined, WASM preopens, and mount confinement against symlink and .. escapes."
+skill: true
+---
+
+<Note>These internal architecture docs are mostly generated and maintained by LLMs, then reviewed by humans. They are intentionally verbose; use your preferred LLM to ask focused questions about the architecture as needed.</Note>
+
+This page is an internals deep-dive on the **kernel virtual filesystem (VFS)**: how it is layered, how a guest `fs` syscall is routed through it, and how guest I/O is confined to the VM. For the user-facing API (reading, writing, mounting, persistence), see [Filesystem](/agentos/docs/filesystem).
+
+The invariant this whole subsystem exists to uphold: **every guest filesystem operation is serviced by the kernel-owned VFS, never by a real host capability.** There is no host disk reachable from the guest. The VFS presents normal Linux semantics to tools while keeping every byte inside the kernel.
+
+<Note>The security boundary is sidecar to executor. The VFS lives inside the trusted sidecar; the guest in the executor only ever *asks* for a filesystem operation. Confinement is the kernel's job, not the guest's. See the [Security Model](/agentos/docs/security-model) for the full threat model.</Note>
+
+## Where the VFS sits
+
+A guest `fs` call never touches the host. The path is always:
+
+```
+guest fs call (executor)
+  -> kernel syscall (crosses sidecar <-> executor boundary)
+    -> VFS engine resolves the path
+      -> backing store services the operation
+        -> result returns to the executor
+```
+
+- The executor holds **no** filesystem capability of its own. It issues a syscall and blocks for the reply.
+- The kernel checks the applied permission policy for the filesystem scope before servicing the request.
+- The VFS resolves the path against the VM's layered engines, then services the operation against the engine that owns that path.
+
+Because every byte is mediated here, two properties fall out for free: the guest can never reach the real host disk, and one VM's filesystem is never visible to another VM. Isolation is per-VM.
+
+## The VFS engines
+
+The per-VM filesystem is not a single flat store. It is a tree of **engines**, each responsible for a subtree of the namespace. A path is resolved by walking from the root engine down to whichever engine owns the deepest matching prefix, then handing the remainder of the path to that engine.
+
+- **Root engine.** Owns `/` and the base namespace. Every VM boots with a root filesystem bootstrapped from a snapshot, so the guest starts against a populated POSIX tree (the default working directory is `/home/agentos`).
+- **Overlay engine.** Composes layers so writes land in a writable upper layer while reads fall through to a lower layer. This is how a read-mostly base can be presented as writable to the guest without mutating the shared lower layer.
+- **Mount engine.** Grafts a distinct backing store onto a guest path (a mount point). Below the mount point, operations are routed to that mount's backend instead of the parent engine. This is the mechanism behind in-memory, host-directory, S3, and Google Drive mounts.
+
+Resolution is **longest-prefix wins**: if `/mnt/data` is a mount and the guest opens `/mnt/data/file`, the mount engine services it; anything outside `/mnt/data` stays with the parent (root/overlay) engine.
+
+```
+/                       <- root engine (bootstrapped from snapshot)
+|- home/user/...        <- root / overlay
+|- mnt/
+|  |- scratch/...       <- mount engine -> in-memory backend
+|  |- code/...          <- mount engine -> host-directory backend (read-only)
+|  \- data/...          <- mount engine -> S3 backend
+\- ...
+```
+
+The base layer is in-memory and per-VM; the runtime transparently persists it to backing storage so it survives sleep/wake. Mounts are pluggable: any guest path can be backed by the host, a remote, or a cloud store. See [Mounting filesystems](/agentos/docs/filesystem#mounts) for the user-facing config.
+
+## Routing a guest syscall
+
+When the guest calls, say, `readFileSync("/mnt/data/report.csv")`:
+
+1. **Permission check.** The kernel verifies the filesystem scope is granted for that operation. Nothing is bound by default; access is denied until opted in (see [Permissions](/agentos/docs/permissions)).
+2. **Engine resolution.** The VFS walks the namespace and selects the engine owning the longest matching prefix (`/mnt/data` -> the S3 mount engine).
+3. **Path normalization and confinement.** The remainder of the path is normalized within the owning engine's root. `.` and `..` segments are resolved *before* the operation reaches the backend, so the request cannot climb above the engine's root.
+4. **Backend operation.** The owning engine's backend services the read/write/stat/etc. against its store (in-memory pages, the persisted base, a host directory, S3, ...).
+5. **Reply.** The result crosses back to the executor, which unblocks.
+
+Host-side APIs (`agent.writeFile`, `agent.readFile`) enter the *same* VFS from the trusted side, which is why the host can seed and read files the guest sees, without ever exposing the real host disk to the guest.
+
+## Mount confinement
+
+A host-backed mount (host directory, S3, ...) comes from trusted config, so its existence, target, and credentials are not attack surface. What *is* in scope is the guest-driven traffic through it: the guest must not be able to use a mounted path to reach bytes outside the mount root. Confinement is enforced by the kernel, on every operation:
+
+- **`..` traversal.** Path segments are normalized relative to the mount root before the backend sees them. A guest path like `/mnt/code/../../etc/passwd` cannot resolve above the mount root; it is clamped to the mount's own subtree (and, above the mount point, handed back to the parent engine, which is itself the kernel VFS, not the host).
+- **Symlinks.** Symlink resolution (`realpath` following) is performed by the kernel against the *virtual* namespace, not the host's. A symlink inside a host-directory mount cannot be used to escape the mount root onto the wider host filesystem; the resolved target is re-confined to the mount root.
+- **Path aliasing / TOCTOU.** Because resolution and confinement happen inside the kernel on each operation, there is no window where the guest resolves a path and the backend later acts on a different one. The guest sees only the mounted subtree, never the wider host filesystem.
+
+Mounts for host and remote backends are **read-only by default**; a writable mount must be opted into explicitly. The `readOnly` flag is enforced at the engine, so a write syscall to a read-only mount fails inside the kernel rather than reaching the backend.
+
+<Note>"Trusted mount, untrusted traffic": the mount's target is trusted configuration, but the guest drives I/O through it, so confining guest operations to the mount root (`..`, symlink, TOCTOU, path-aliasing) is squarely in scope and enforced by the kernel.</Note>
+
+## WASM preopens
+
+WASI does not grant a WASM guest an ambient filesystem. Instead, the host hands the module a set of **preopened directories**: capability handles to specific subtrees, and the guest can only reach paths reachable from a preopen.
+
+In agentOS these preopens are wired to the **same kernel VFS** rather than to host directories:
+
+- A preopen maps a guest-visible path to a VFS subtree. File descriptors derived from it are serviced by the VFS engines above, with the same confinement rules.
+- The WASM guest therefore sees the virtualized filesystem (root snapshot, overlays, mounts) through standard WASI calls, with no host filesystem handle anywhere in the chain.
+- Confinement composes: a preopen rooted at a mount point inherits that mount's `..`/symlink confinement, because resolution still runs through the kernel VFS.
+
+The result is that WASI filesystem access and the V8/Node `fs` path converge on one virtual filesystem, so both executor flavors get identical isolation and identical Linux semantics.
+
+## Where to go next
+
+- [Filesystem](/agentos/docs/filesystem): the user-facing API for reading, writing, mounting, and persistence.
+- [Architecture](/agentos/docs/architecture): the components, trust boundary, and kernel-owned syscall paths.
+- [Permissions](/agentos/docs/permissions): the filesystem scope the kernel checks on every operation.
+- [Security Model](/agentos/docs/security-model): the full trust model and threat boundary.
