@@ -3275,6 +3275,11 @@ pub struct JavascriptChildProcessSpawnOptions {
     pub cwd: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Whether the caller supplied `options.env`. Node inherits the parent
+    /// environment only when this option is omitted; an explicitly supplied
+    /// map, including an empty one, replaces it.
+    #[serde(rename = "envProvided", default)]
+    pub env_provided: bool,
     #[serde(rename = "internalBootstrapEnv", default)]
     pub internal_bootstrap_env: BTreeMap<String, String>,
     /// POSIX spawn attributes already validated by the WASM host-import

@@ -1,0 +1,13 @@
+{
+  "name": "fx",
+  "agent": {
+    "acpEntrypoint": "agentos-fx-acp"
+  },
+  "registry": {
+    "title": "FX",
+    "description": "Run Vercel Labs FX as a WebAssembly coding agent inside agentOS.",
+    "category": "agents",
+    "priority": 60,
+    "beta": true
+  }
+}

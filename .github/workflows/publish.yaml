@@ -257,6 +257,9 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
           registry-url: https://registry.npmjs.org
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.16.0
       - run: pnpm install --frozen-lockfile --filter='!@rivet-dev/agentos-website'
       - uses: actions/download-artifact@v4
         with:

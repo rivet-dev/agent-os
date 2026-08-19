@@ -68,6 +68,18 @@
 				"package.json"
 			],
 			"outputs": ["dist/**", "commands/**"]
+		},
+		"@agentos-software/fx#build": {
+			"dependsOn": ["^build"],
+			"inputs": [
+				"src/**",
+				"scripts/**",
+				"patches/**",
+				"agentos-package.json",
+				"tsconfig.json",
+				"package.json"
+			],
+			"outputs": ["dist/**"]
 		}
 	}
 }

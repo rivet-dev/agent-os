@@ -28,6 +28,9 @@ jobs:
           node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.16.0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt

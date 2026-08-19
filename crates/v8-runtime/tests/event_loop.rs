@@ -9,6 +9,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const WASM_FORTY_TWO_BYTES: &str = "0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,7,12,1,8,102,111,114,116,121,84,119,111,0,0,10,6,1,4,0,65,42,11";
+const WASM_JSPI_IMPORT_BYTES: &str = "0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,2,19,1,3,101,110,118,11,97,115,121,110,99,95,118,97,108,117,101,0,0,3,2,1,0,7,7,1,3,114,117,110,0,1,10,6,1,4,0,16,0,11";
 const EVENT_LOOP_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(6);
 
 // Timing-sensitive assertions flake under the CPU contention of a parallel test
@@ -250,6 +251,75 @@ fn event_loop_completes_native_async_wasm_instantiate_promises() {
     );
 }
 
+fn event_loop_resumes_jspi_guest_wasm_imports() {
+    isolate::init_v8_platform();
+
+    let mut isolate = isolate::create_isolate(None);
+    let context = isolate::create_context(&mut isolate);
+    let pending = PendingPromises::new();
+    let (_tx, rx) = crossbeam_channel::unbounded::<SessionCommand>();
+    let mut bridge_cache = None;
+
+    let scope = &mut v8::HandleScope::new(&mut isolate);
+    let ctx = v8::Local::new(scope, &context);
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+
+    let source = format!(
+        "globalThis.__jspiResult = null; \
+         (async () => {{ \
+           const module = new WebAssembly.Module(new Uint8Array([{bytes}])); \
+           const asyncValue = new WebAssembly.Suspending(async () => {{ \
+             await WebAssembly.compile(new Uint8Array([0,97,115,109,1,0,0,0])); \
+             return 42; \
+           }}); \
+           const instance = new WebAssembly.Instance(module, {{ env: {{ async_value: asyncValue }} }}); \
+           globalThis.__jspiResult = await WebAssembly.promising(instance.exports.run)(); \
+         }})();",
+        bytes = WASM_JSPI_IMPORT_BYTES
+    );
+
+    let (code, error) = execution::execute_script(scope, "", &source, &mut bridge_cache);
+    assert_eq!(code, 0, "unexpected execute_script exit code");
+    assert!(
+        error.is_none(),
+        "unexpected execute_script error: {error:?}"
+    );
+    assert!(
+        execution::has_pending_script_evaluation(),
+        "expected pending script evaluation for a JSPI-suspended WASM import"
+    );
+
+    let status = run_event_loop_with_watchdog(scope, &rx, &pending);
+    assert_event_loop_watchdog_did_not_fire(&status);
+    assert!(
+        matches!(status, EventLoopStatus::Completed),
+        "unexpected event loop status: {:?}",
+        status
+    );
+
+    if let Some((next_code, next_error)) = execution::finalize_pending_script_evaluation(scope) {
+        assert_eq!(next_code, 0, "unexpected finalize exit code");
+        assert!(
+            next_error.is_none(),
+            "unexpected finalize error: {next_error:?}"
+        );
+    }
+
+    let source = v8::String::new(
+        scope,
+        "typeof WebAssembly.Suspending === 'function' && \
+         typeof WebAssembly.promising === 'function' && \
+         globalThis.__jspiResult === 42",
+    )
+    .unwrap();
+    let script = v8::Script::compile(scope, source, None).unwrap();
+    let result = script.run(scope).unwrap();
+    assert!(
+        result.boolean_value(scope),
+        "expected JSPI to resume WASM after the asynchronous host import"
+    );
+}
+
 fn event_loop_surfaces_native_async_wasm_compile_errors_without_hanging() {
     isolate::init_v8_platform();
 
@@ -406,6 +476,7 @@ fn event_loop_handles_native_async_wasm_paths_without_hanging() {
     fresh_isolate_supports_rgi_emoji_unicode_sets();
     event_loop_pumps_v8_platform_tasks_for_native_wasm_promises();
     event_loop_completes_native_async_wasm_instantiate_promises();
+    event_loop_resumes_jspi_guest_wasm_imports();
     event_loop_surfaces_native_async_wasm_compile_errors_without_hanging();
     event_loop_waits_for_refed_guest_timers_between_interval_ticks();
 }

@@ -17,6 +17,11 @@ runtime, see the [WASM VM](/agentos/docs/architecture/posix-syscalls) page. This
 counterpart: it documents the toolchain that emits binaries carrying both
 [the host-import layer and the WASI shim](/agentos/docs/architecture/posix-syscalls).
 
+Browser-targeted modules embedded inside V8 use a different integration path.
+They call explicit JavaScript host functions and can suspend across promises
+through [Async WebAssembly & JSPI](/agentos/docs/architecture/async-webassembly),
+so they do not need this POSIX sysroot unless their upstream code expects it.
+
 ## Target: `wasm32-wasip1`
 
 Everything in the command suite is compiled to a single target,

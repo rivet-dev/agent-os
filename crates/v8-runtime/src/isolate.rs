@@ -133,6 +133,10 @@ pub fn init_v8_platform() {
             .spawn(move || {
                 v8::icu::set_common_data_74(&ICU_COMMON_DATA.0)
                     .expect("failed to initialize V8 ICU common data");
+                // FX's browser/WebAssembly SDK suspends guest WASM across
+                // asynchronous host fetch and workspace calls through JSPI.
+                // Flags are process-global and must be set before V8 starts.
+                v8::V8::set_flags_from_string("--experimental-wasm-jspi");
                 let platform =
                     v8::new_default_platform(V8_PLATFORM_WORKER_THREADS, false).make_shared();
                 v8::V8::initialize_platform(platform);

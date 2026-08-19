@@ -1310,6 +1310,7 @@ function execSync(command, options) {
     JSON.stringify({
       cwd: effectiveCwd,
       env: opts.env,
+      envProvided: opts.env !== undefined,
       argv0: opts.argv0 == null ? void 0 : String(opts.argv0),
       input: opts.input == null ? null : encodeBridgeBytes(opts.input),
       maxBuffer,
@@ -1401,6 +1402,7 @@ function spawn(command, args, options) {
         JSON.stringify({
           cwd: effectiveCwd,
           env: opts.env,
+          envProvided: opts.env !== undefined,
           argv0: opts.argv0 == null ? void 0 : String(opts.argv0),
           shell: opts.shell === true || typeof opts.shell === "string",
           detached: opts.detached === true,
@@ -1564,6 +1566,7 @@ function spawnSync(command, args, options) {
       JSON.stringify({
         cwd: effectiveCwd,
         env: opts.env,
+        envProvided: opts.env !== undefined,
         argv0: opts.argv0 == null ? void 0 : String(opts.argv0),
         input: opts.input == null ? null : encodeBridgeBytes(opts.input),
         maxBuffer,
