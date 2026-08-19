@@ -4596,6 +4596,7 @@ export class AgentOs {
 			env: options.env,
 			stdin: options.stdin,
 			timeout: options.timeoutMs,
+			streamStdin: true,
 			onStdout: (data) => {
 				recordOutput("stdout", data);
 				options?.onStdout?.(data);
