@@ -537,6 +537,37 @@ fn permission_glob_double_star_still_matches_nested_paths() {
 }
 
 #[test]
+fn network_permission_patterns_match_the_resource_uri_not_a_bare_host() {
+    // Network resources are formatted as URIs (`format_tcp_resource` /
+    // `format_dns_resource`), so a pattern is matched against the whole URI.
+    assert!(permission_glob_matches(
+        "tcp://api.example.com:443",
+        "tcp://api.example.com:443",
+    ));
+    assert!(permission_glob_matches(
+        "tcp://api.example.com:*",
+        "tcp://api.example.com:443",
+    ));
+    assert!(permission_glob_matches(
+        "dns://api.example.com",
+        "dns://api.example.com",
+    ));
+
+    // A bare host or `host:port` never matches, and a single `*` cannot reach
+    // past the `//`, so neither form can be used to allow or deny a host.
+    assert!(!permission_glob_matches(
+        "api.example.com",
+        "tcp://api.example.com:443",
+    ));
+    assert!(!permission_glob_matches(
+        "api.example.com:443",
+        "tcp://api.example.com:443",
+    ));
+    assert!(!permission_glob_matches("*", "tcp://api.example.com:443"));
+    assert!(!permission_glob_matches("*.example.com", "dns://api.example.com"));
+}
+
+#[test]
 fn kernel_vm_config_defaults_to_deny_all_permissions() {
     let mut kernel = KernelVm::new(MemoryFileSystem::new(), KernelVmConfig::new("vm-defaults"));
 

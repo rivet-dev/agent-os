@@ -15,11 +15,18 @@ const denyVault = {
 } satisfies Permissions;
 
 // docs:start allow-one-host
-// Deny the network by default, allow only api.example.com.
+// Deny the network by default, allow only api.example.com (any port).
+// Patterns match the URI form of the connection, so a bare host never matches.
 const allowOneHost = {
 	network: {
 		default: "deny",
-		rules: [{ mode: "allow", operations: ["*"], patterns: ["api.example.com"] }],
+		rules: [
+			{
+				mode: "allow",
+				operations: ["*"],
+				patterns: ["tcp://api.example.com:*", "dns://api.example.com"],
+			},
+		],
 	},
 } satisfies Permissions;
 // docs:end allow-one-host
