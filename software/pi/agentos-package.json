@@ -3,8 +3,7 @@
   "agent": {
     "acpEntrypoint": "pi-acp",
     "env": {
-      "PI_ACP_PI_COMMAND": "/opt/agentos/bin/pi",
-      "PI_ACP_PI_ENTRYPOINT": "/opt/agentos/pkgs/pi/0.0.1/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+      "PI_ACP_PI_COMMAND": "/opt/agentos/bin/pi-agentos"
     }
   },
   "registry": {
