@@ -1659,6 +1659,19 @@
 		"wired": "RuntimeConfig.protocol.max_process_events"
 	},
 	{
+		"name": "DEFAULT_MAX_ACTIVE_GUEST_EXECUTIONS",
+		"path": "crates/runtime/src/lib.rs",
+		"class": "policy",
+		"rationale": "Default process-wide cap on concurrently running guest executions; each slot owns one OS thread and one V8 isolate.",
+		"wired": "RuntimeConfig.max_active_guest_executions"
+	},
+	{
+		"name": "MAX_ACTIVE_GUEST_EXECUTIONS_CEILING",
+		"path": "crates/runtime/src/lib.rs",
+		"class": "invariant",
+		"rationale": "Hard ceiling for the AGENTOS_MAX_ACTIVE_GUEST_EXECUTIONS operator override; admission stays bounded whatever an operator requests."
+	},
+	{
 		"name": "DEFAULT_VM_EXECUTOR_TEARDOWN_TIMEOUT_MS",
 		"path": "crates/runtime/src/lib.rs",
 		"class": "policy",

@@ -76,6 +76,63 @@ hints, which Linux is also permitted to ignore. Advice that would discard data
 or change fork, core-dump, or host VM mapping policy returns `ENOTSUP` because
 the runtime cannot apply it.
 
+## Process-wide guest-execution cap
+
+Separate from the per-VM caps above, one sidecar process admits a bounded
+number of **concurrently running guest executions** across every VM it hosts.
+
+Each running guest process — JavaScript, TypeScript, Python, or a WASM command —
+owns one OS thread and one V8 isolate. Isolates are thread-affine, so they
+cannot be multiplexed onto a shared pool. A slot is held for the **whole
+lifetime** of the guest process, not just while it uses CPU: an agent parked on
+a network read still holds one, and a shell blocked waiting on a child holds one
+while the child holds another.
+
+| Setting | Scope | Default |
+|---|---|---|
+| `AGENTOS_MAX_ACTIVE_GUEST_EXECUTIONS` | The whole sidecar process, shared by every VM | `64` |
+
+Set it in the environment of the process that spawns the sidecar; agentOS
+clients pass their environment to the sidecar they spawn.
+
+```bash
+AGENTOS_MAX_ACTIVE_GUEST_EXECUTIONS=128 node ./my-agent-host.js
+```
+
+Valid values are `1` to `1024`. A value that is missing, non-numeric, zero, or
+above the ceiling fails sidecar startup with a typed error rather than being
+clamped — an operator who asks for a specific ceiling never silently gets a
+different one.
+
+The sidecar logs the effective ceiling at startup, so you can confirm what a
+process actually admitted:
+
+```text
+INFO guest execution admission ceiling max_active_guest_executions=128
+```
+
+This is **process topology, not a per-VM limit**, so it is deliberately not a
+field on the `limits` config: one sidecar process is shared by every VM and
+connection it hosts, and no single tenant may rewrite the ceiling for its
+neighbours. Read it once, before any VM exists.
+
+### Sizing it
+
+Size to **peak concurrent guest processes**, not to VM or agent count. A useful
+rule for agent fleets is two to three times the number of agents you run in
+parallel: each agent holds one slot for its whole session, and every tool call
+that shells out holds another for as long as it runs.
+
+At the limit, the guest execution fails immediately — there is no queue — with
+`ERR_AGENTOS_GUEST_EXECUTION_LIMIT` naming the current ceiling and this
+variable. Raising the ceiling costs one OS thread and one isolate per added
+slot; the isolate's heap stays bounded by `limits.jsRuntime.v8HeapLimitMb`.
+
+Running several agentOS hosts to work around this cap is usually the wrong
+trade: each extra sidecar process duplicates the fixed V8 background pool,
+runtime workers, warm-isolate pool, and snapshot cache, and splits warm-start
+caching across processes. Prefer one host with a higher ceiling.
+
 ## Sidecar liveness
 
 Separate from the guest caps above, the host detects a dead or wedged sidecar

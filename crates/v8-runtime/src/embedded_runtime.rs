@@ -63,7 +63,7 @@ impl EmbeddedV8Runtime {
         // without immediately evicting each other.
         let snapshot_cache = Arc::new(SnapshotCache::new(8));
         let call_id_router: CallIdRouter = Arc::new(BridgeCallRegistry::with_default_limit());
-        let configured_max_concurrency = runtime.max_active_vm_executors();
+        let configured_max_concurrency = runtime.max_active_guest_executions();
         let executor_teardown_timeout = runtime.vm_executor_teardown_timeout();
         let session_mgr = Arc::new(Mutex::new(SessionManager::new(
             max_concurrency.unwrap_or(configured_max_concurrency),
@@ -682,7 +682,7 @@ pub fn spawn_embedded_runtime_ipc(
     let shutdown_stream = host_stream.try_clone()?;
     let alive = Arc::new(AtomicBool::new(true));
     let alive_for_thread = Arc::clone(&alive);
-    let max_concurrency = max_concurrency.unwrap_or_else(|| runtime.max_active_vm_executors());
+    let max_concurrency = max_concurrency.unwrap_or_else(|| runtime.max_active_guest_executions());
 
     // AGENTOS_THREAD_SITE: embedded-v8-dispatch
     let join_handle = thread::Builder::new()
@@ -1175,7 +1175,7 @@ mod tests {
             .lock()
             .expect("embedded runtime codec test lock poisoned");
         let mut config = agentos_runtime::RuntimeConfig {
-            max_active_vm_executors: 2,
+            max_active_guest_executions: 2,
             vm_executor_teardown_timeout_ms: 31,
             ..agentos_runtime::RuntimeConfig::default()
         };
