@@ -4032,13 +4032,11 @@ var fs = {
           const err = e;
           if (err.code === "ELOOP") throw e;
           if (err.code === "ENOENT" || err.code === "ENOTDIR") {
-            const enoent = new Error(`ENOENT: no such file or directory, realpath '${raw}'`);
-            enoent.code = "ENOENT";
-            enoent.syscall = "realpath";
-            enoent.path = raw;
-            throw enoent;
+            throw createFsError("ENOENT", `ENOENT: no such file or directory, realpath '${raw}'`, "realpath", raw);
           }
-          break;
+          // Any other errno must reach the caller: returning here handed back the
+          // partially resolved prefix as if it were the real path.
+          throwNormalizedFsBridgeError(err, "realpath", raw);
         }
       }
       return "/" + resolved.join("/") || "/";
