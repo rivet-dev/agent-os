@@ -248,6 +248,9 @@ jobs:
     name: Publish npm
     if: ${{ !cancelled() && needs.wasm-commands.result == 'success' && needs.codex-wasm.result == 'success' && needs.build-sidecar.result == 'success' && needs.build-sidecar-darwin.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -319,7 +322,7 @@ jobs:
             --version ${{ needs.context.outputs.version }}
       - name: Publish npm packages
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ""
         run: |
           pnpm --filter=publish exec tsx src/ci/bin.ts publish-npm \
             --tag ${{ needs.context.outputs.npm_tag }} \
