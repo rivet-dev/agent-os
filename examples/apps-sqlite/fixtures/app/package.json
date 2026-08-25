@@ -8,6 +8,6 @@
 		"check-types": "node --check src/index.mjs"
 	},
 	"dependencies": {
-		"rivetkit": "2.3.9"
+		"rivetkit": "2.3.10"
 	}
 }

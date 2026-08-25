@@ -16,7 +16,7 @@
 	},
 	"devDependencies": {
 		"@rivet-dev/agentos-toolchain": "workspace:*",
-		"@rivetkit/engine-cli": "2.3.9",
+		"@rivetkit/engine-cli": "2.3.10",
 		"@types/node": "^22.19.15",
 		"get-port": "^7.1.0",
 		"tsx": "^4.20.6",

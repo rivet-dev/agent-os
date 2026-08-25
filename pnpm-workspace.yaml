@@ -59,9 +59,9 @@ onlyBuiltDependencies:
 # pinned once here and referenced everywhere via `catalog:rivetkit`.
 catalogs:
   rivetkit:
-    rivetkit: 2.3.9
-    '@rivetkit/react': 2.3.9
+    rivetkit: 2.3.10
+    '@rivetkit/react': 2.3.10
 
 overrides:
-  '@rivetkit/rivetkit-wasm': 2.3.9
+  '@rivetkit/rivetkit-wasm': 2.3.10
   web-streams-polyfill: 3.3.3

@@ -13,7 +13,7 @@
 		"@rivet-dev/agentos": "workspace:*",
 		"@rivet-dev/agentos-flue": "workspace:*",
 		"@rivet-dev/flue": "2.3.9",
-		"rivetkit": "2.3.9"
+		"rivetkit": "2.3.10"
 	},
 	"devDependencies": {
 		"@types/node": "^24.0.0",
