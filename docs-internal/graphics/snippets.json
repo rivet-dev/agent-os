@@ -2,12 +2,12 @@
 	{
 		"title": "1. Set up the Hono router",
 		"language": "ts",
-		"code": "import { serve } from \"@hono/node-server\";\nimport { appsRouter } from \"@rivet-dev/agentos-apps\";\nimport { Hono } from \"hono\";\n\nconst server = new Hono();\nserver.route(\"/apps\", appsRouter);\n\nserve({ fetch: server.fetch, port: 3000 });"
+		"code": "import { serve } from \"@hono/node-server\";\nimport { appsRouter } from \"@rivet-dev/dynamic-apps\";\nimport { Hono } from \"hono\";\n\nconst server = new Hono();\nserver.route(\"/apps\", appsRouter);\n\nserve({ fetch: server.fetch, port: 3000 });"
 	},
 	{
 		"title": "2. Deploy the app",
 		"language": "ts",
-		"code": "import { deployApp } from \"@rivet-dev/agentos-apps\";\n\nawait deployApp({\n  appId: \"hello-world\",\n  source: new URL(\"./app/\", import.meta.url),\n});"
+		"code": "import { deployApp } from \"@rivet-dev/dynamic-apps\";\n\nawait deployApp({\n  appId: \"hello-world\",\n  source: new URL(\"./app/\", import.meta.url),\n});"
 	},
 	{
 		"title": "3. Fetch your app",

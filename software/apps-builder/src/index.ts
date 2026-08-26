@@ -1,9 +1,18 @@
-import type { SoftwarePackageRef } from "@agentos-software/manifest";
-import packageJson from "../package.json" with { type: "json" };
+export const movedMessage =
+	"The Dynamic Apps builder moved to @rivet-dev/dynamic-apps-builder. Install it and import from \"@rivet-dev/dynamic-apps-builder\".";
 
-const packagePath = new URL("./package.aospkg", import.meta.url).pathname;
+throw new Error(movedMessage);
 
-export const appsBuilderVersion = packageJson.version;
+/** @deprecated Install and import from `@rivet-dev/dynamic-apps-builder`. */
+export interface SoftwarePackageRef {
+	packagePath: string;
+}
+
+/** @deprecated Install and import from `@rivet-dev/dynamic-apps-builder`. */
+export const appsBuilderVersion = "moved";
+
+/** @deprecated Install and import from `@rivet-dev/dynamic-apps-builder`. */
 export const appBundleManifestVersion = 1;
 
-export default { packagePath } satisfies SoftwarePackageRef;
+const packageRef: SoftwarePackageRef = { packagePath: "" };
+export default packageRef;
