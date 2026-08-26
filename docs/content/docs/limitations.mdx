@@ -1,6 +1,6 @@
 ---
 title: "Limitations"
-description: "What the agentOS VM does not support, and how to work around it."
+description: "Understand current agentOS VM limitations, unsupported features, and recommended workarounds before choosing an execution architecture."
 skill: true
 ---
 
@@ -16,7 +16,7 @@ See [agentOS vs Sandbox](/agentos/docs/versus-sandbox) for a detailed comparison
 
 ### Software registry
 
-agentOS uses its own [software registry](/registry) of popular tools cross-compiled for the runtime. You cannot download and install arbitrary binaries (for example via `curl` or `apt`), and standard Linux package managers (`apt`, `yum`) are not available since agentOS runs a streamlined Linux environment rather than a full distribution. Native binaries that are not yet available in the registry (such as Go, Rust, or C++ toolchains) require a full [external sandbox](/agentos/docs/sandboxes).
+agentOS uses its own [software registry](/agentos/registry/) of popular tools cross-compiled for the runtime. You cannot download and install arbitrary binaries (for example via `curl` or `apt`), and standard Linux package managers (`apt`, `yum`) are not available since agentOS runs a streamlined Linux environment rather than a full distribution. Native binaries that are not yet available in the registry (such as Go, Rust, or C++ toolchains) require a full [external sandbox](/agentos/docs/sandboxes/).
 
 See [Software](/agentos/docs/software) for how to install and configure available packages.
 

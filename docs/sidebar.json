@@ -106,6 +106,10 @@
 					"icon": "faNodeJs"
 				},
 				{
+					"title": "Node.js Compatibility",
+					"href": "/agentos/docs/javascript-compatibility"
+				},
+				{
 					"title": "Python",
 					"href": "/agentos/docs/python",
 					"icon": "faPython"
