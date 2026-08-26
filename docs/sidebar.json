@@ -278,6 +278,10 @@
 									"href": "/agentos/docs/architecture/javascript-executor"
 								},
 								{
+									"title": "Async WebAssembly & JSPI",
+									"href": "/agentos/docs/architecture/async-webassembly"
+								},
+								{
 									"title": "POSIX Syscalls",
 									"href": "/agentos/docs/architecture/posix-syscalls"
 								},

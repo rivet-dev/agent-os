@@ -3085,6 +3085,9 @@ importers:
       '@agentos-software/findutils':
         specifier: workspace:*
         version: link:../../software/findutils
+      '@agentos-software/fx':
+        specifier: workspace:*
+        version: link:../../software/fx
       '@agentos-software/gawk':
         specifier: workspace:*
         version: link:../../software/gawk
@@ -3106,6 +3109,9 @@ importers:
       '@agentos-software/sed':
         specifier: workspace:*
         version: link:../../software/sed
+      '@agentos-software/sh':
+        specifier: workspace:*
+        version: link:../../software/sh
       '@agentos-software/tar':
         specifier: workspace:*
         version: link:../../software/tar
@@ -4007,6 +4013,21 @@ importers:
       vitest:
         specifier: ^2.1.9
         version: 2.1.9(@types/node@22.19.15)(lightningcss@1.33.0)
+
+  software/fx:
+    devDependencies:
+      '@agentos-software/manifest':
+        specifier: workspace:*
+        version: link:../../packages/manifest
+      '@rivet-dev/agentos-toolchain':
+        specifier: workspace:*
+        version: link:../../packages/agentos-toolchain
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.19.15
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
 
   software/gawk:
     devDependencies:

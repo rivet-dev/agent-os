@@ -12,7 +12,9 @@ transport.
 
 For socket ownership, loopback, DNS, and network policy, see
 [Networking](/agentos/docs/architecture/networking). For the client-facing JavaScript
-environment, see [JavaScript](/agentos/docs/javascript).
+environment, see [JavaScript](/agentos/docs/javascript). For WebAssembly modules
+that suspend across JavaScript promises inside V8, see
+[Async WebAssembly & JSPI](/agentos/docs/architecture/async-webassembly).
 
 <Note>
 Tokio never invokes guest JavaScript from a runtime worker. A Tokio task stores

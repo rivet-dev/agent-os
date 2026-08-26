@@ -1,0 +1,143 @@
+---
+title: "Async WebAssembly & JSPI"
+description: "How agentOS runs web-targeted WebAssembly inside V8, suspends it across JavaScript promises with JSPI, and preserves the sidecar security boundary."
+skill: true
+---
+
+agentOS supports two distinct WebAssembly execution models. Command modules run
+as processes against the agentOS POSIX and WASI surface. Web-targeted modules
+can instead run inside a JavaScript process and call asynchronous JavaScript
+APIs. The second model uses JavaScript Promise Integration, or JSPI.
+
+FX is an example of the second model. Its Zig core compiles to a browser-style
+WebAssembly module, while a JavaScript adapter supplies model requests,
+workspace commands, and ACP transport. This avoids porting FX to the agentOS
+libc because the web build already defines a JavaScript host interface.
+
+<Note>
+JSPI does not enable WebAssembly and does not add syscalls. V8 already executes
+WebAssembly. JSPI lets a WebAssembly call suspend while an imported JavaScript
+function waits for a promise, then resume with the settled value.
+</Note>
+
+## Two WebAssembly paths
+
+| | Command WebAssembly | Embedded web WebAssembly |
+| --- | --- | --- |
+| Execution unit | A process in the kernel process table | A module inside a V8 JavaScript process |
+| Typical target | `wasm32-wasip1` | Browser or library-specific core WASM |
+| Host interface | WASI, patched libc, and agentOS host imports | Explicit JavaScript functions supplied by an SDK or adapter |
+| Asynchronous work | Blocking POSIX-style calls backed by the sidecar | JavaScript promises bridged through JSPI |
+| Examples | `sh`, coreutils, `curl`, and other Linux software | FX's `fx-core.wasm` |
+
+Use command WebAssembly when upstream software expects files, processes,
+sockets, users, signals, or other Linux APIs. The owned
+[compiler toolchain](/agentos/docs/architecture/compiler-toolchain) and
+[POSIX syscall surface](/agentos/docs/architecture/posix-syscalls) provide that
+environment.
+
+Use embedded web WebAssembly when upstream already publishes a browser or
+JavaScript SDK whose host contract is expressed as functions such as `fetch`
+or `execWorkspace`. In that case, the adapter can implement those functions
+with agentOS JavaScript APIs instead of introducing another libc port.
+
+## Why ordinary WebAssembly calls are not enough
+
+A normal WebAssembly import is synchronous. The caller enters JavaScript and
+expects JavaScript to return a value before control goes back to WebAssembly.
+That works for pure calculations, but model requests and foreground workspace
+commands return promises.
+
+JSPI connects the suspended WebAssembly stack to those promises:
+
+```text
+WebAssembly export
+  -> imported JavaScript function
+  -> Promise is pending
+  -> WebAssembly stack is suspended
+  -> agentOS and V8 continue pumping asynchronous work
+  -> Promise settles
+  -> WebAssembly resumes with the value
+  -> exported call settles for JavaScript
+```
+
+The JavaScript SDK marks an asynchronous import with
+`WebAssembly.Suspending`. It exposes a promise-returning version of the
+WebAssembly export with `WebAssembly.promising`. The Zig code can therefore use
+an ordinary call-shaped interface while the JavaScript implementation remains
+asynchronous.
+
+## V8 initialization
+
+JSPI is enabled once for the process with V8's
+`--experimental-wasm-jspi` flag. The flag is process-global, so agentOS sets it
+on the process-lifetime V8 platform owner before creating the default platform
+or initializing V8. Individual isolates do not toggle it.
+
+The flag only makes the JSPI APIs available. A module uses suspension only when
+its adapter wraps specific imports and exports with those APIs.
+
+No other runtime subsystem is replaced. JavaScript remains on its admitted,
+thread-affine V8 executor. Tokio continues to own trusted asynchronous I/O, and
+the existing event loop continues pumping V8 tasks and microtasks until the
+suspended top-level evaluation settles. See
+[JavaScript Executor & Socket Reactor](/agentos/docs/architecture/javascript-executor)
+for the thread and event-loop topology.
+
+The runtime integration does not require a new Cargo dependency, a kernel
+syscall, a Rust standard-library patch, or a libc change. A focused runtime
+test instantiates a module with an asynchronous import, suspends the module,
+drives the agentOS event loop, and verifies that execution resumes with the
+import's result.
+
+## The FX host boundary
+
+The FX software package contains the pinned `fx-core.wasm`, its JavaScript SDK,
+and an ACP adapter. It does not contain the native FX executable.
+
+The adapter supplies two important host functions:
+
+- **Model transport.** FX calls the adapter's `fetch` implementation. Requests
+  use the VM's normal JavaScript networking path, including the configured
+  network policy and resource limits.
+- **Workspace execution.** FX calls a bounded foreground-command function. The
+  adapter uses the agentOS Node.js child-process surface, so shell and nested
+  Node.js commands enter the kernel-owned process table and operate on the
+  session workspace.
+
+The adapter also connects FX's line-oriented ACP server to stdin and stdout.
+The sidecar can therefore manage FX like any other ACP agent: it creates a
+session, sends prompts, receives updates, handles permissions, and observes
+termination through the existing protocol.
+
+## Security and limits
+
+JSPI grants no capability by itself. A module can call only the JavaScript
+imports supplied when it is instantiated. Those imports remain inside the
+untrusted executor, and access to files, processes, and networking still
+crosses the sidecar enforcement boundary.
+
+For FX, the workspace adapter starts command execution in the session
+workspace, captures a bounded amount of stdout and stderr, propagates
+cancellation with bounded signal escalation, and returns command failures as
+explicit exit codes. Provider credentials are passed only to FX's model
+transport; model-issued workspace commands receive a minimal, non-secret
+environment. A suspended module cannot bypass process permissions, obtain raw
+host descriptors, or access a native host path.
+
+## Choosing an integration strategy
+
+Start from the upstream software's existing boundary:
+
+1. If it is a Linux command that expects libc and POSIX, compile it through the
+   owned `wasm32-wasip1` sysroot. Add missing Linux behavior in the sysroot or
+   host-import layer.
+2. If it already has a web build with explicit JavaScript bindings, embed that
+   build in V8. Use JSPI when any imported binding returns a promise.
+3. Patch upstream application code only when the missing behavior cannot live
+   in the shared runtime, sysroot, or host adapter.
+
+This distinction is why FX does not need the custom Zig syscall port that a
+native-style CLI would require. Its web build supplies a smaller and cleaner
+host contract, while agentOS continues to enforce real process, filesystem,
+and network behavior underneath the JavaScript adapter.

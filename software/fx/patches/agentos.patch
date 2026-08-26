@@ -1,0 +1,310 @@
+diff --git a/sdk/fx-sdk.js b/sdk/fx-sdk.js
+index eb7ac90..458378f 100644
+--- a/sdk/fx-sdk.js
++++ b/sdk/fx-sdk.js
+@@ -660,20 +660,19 @@ function createRuntime(options) {
+     };
+     workspaceExecs.add(state);
+     const timer = setTimeout(() => state.abort(-5), timeoutMs);
+-    const execution = Promise.resolve().then(() => workspace.adapter.exec({
+-      command,
+-      cwd: workspace.info.cwd,
+-      signal: controller.signal,
+-      timeoutMs,
+-      outputLimitBytes: workspaceOutputLimit,
+-    })).then((value) => {
+-      if (state.status !== null) return state.status;
++    const writeResult = (value) => {
+       if (!value || !Number.isInteger(value.exitCode) || value.exitCode < -0x80000000 ||
+         value.exitCode > 0x7fffffff || typeof value.stdout !== "string" ||
+-        typeof value.stderr !== "string") return -1;
++        typeof value.stderr !== "string") throw new TypeError("workspace exec returned an invalid result");
+       const stdout = encoder.encode(value.stdout);
+       const stderr = encoder.encode(value.stderr);
+-      if (stdout.length > 0xffffffff || stderr.length > 0xffffffff) return -1;
++      const stdoutTotal = value.stdoutTotalBytes ?? stdout.length;
++      const stderrTotal = value.stderrTotalBytes ?? stderr.length;
++      if (stdout.length > 0xffffffff || stderr.length > 0xffffffff ||
++        !Number.isInteger(stdoutTotal) || stdoutTotal < stdout.length || stdoutTotal > 0xffffffff ||
++        !Number.isInteger(stderrTotal) || stderrTotal < stderr.length || stderrTotal > 0xffffffff) {
++        throw new RangeError("workspace exec output exceeds the host contract");
++      }
+ 
+       let stdoutCap = stdout.length;
+       let stderrCap = stderr.length;
+@@ -698,14 +697,25 @@ function createRuntime(options) {
+-      view.setUint32(12, stdout.length, true);
++      view.setUint32(12, stdoutTotal, true);
+       view.setUint32(16, stdoutPreview.length, true);
+       view.setUint32(20, stderrPreview.length, true);
+-      view.setUint32(24, stderr.length, true);
+-      view.setUint32(28, copied < stdout.length + stderr.length ? 1 : 0, true);
++      view.setUint32(24, stderrTotal, true);
++      view.setUint32(28, copied < stdoutTotal + stderrTotal ? 1 : 0, true);
+       return 0;
++    };
++    const execution = Promise.resolve().then(() => workspace.adapter.exec({
++      command,
++      cwd: workspace.info.cwd,
++      signal: controller.signal,
++      timeoutMs,
++      outputLimitBytes: workspaceOutputLimit,
++    })).then((value) => {
++      if (state.status !== null) return state.status;
++      return writeResult(value);
+     }).catch((error) => {
+       if (state.status !== null) return state.status;
+       if (error?.name === "TimeoutError") return -5;
+       if (error?.name === "AbortError") return -3;
+-      return -1;
++      const detail = error instanceof Error ? error.message : String(error);
++      return writeResult({ exitCode: 127, stdout: "", stderr: detail });
+     });
+     return Promise.race([execution, aborted]).finally(() => {
+       clearTimeout(timer);
+@@ -843,6 +853,14 @@ async function instantiate(options) {
+   return runtime;
+ }
+ 
++export async function createFxAcpRuntime(options) {
++  return instantiate({
++    ...options,
++    args: ["acp"],
++    sessionStore: options.sessionStore || createMemorySessionStore(),
++  });
++}
++
+ export async function createFxTerminal(options) {
+   if (!options?.terminal) throw new TypeError("terminal is required");
+   const emit = (type, detail = {}) => {
+diff --git a/src/acp/prompt.zig b/src/acp/prompt.zig
+index 8757679..d2703b4 100644
+--- a/src/acp/prompt.zig
++++ b/src/acp/prompt.zig
+@@ -61,6 +61,7 @@ else
+     struct {};
+ const types = @import("../core/shared/types.zig");
+ const worker_runtime = @import("../core/agent/worker_runtime.zig");
++const workspace_access = @import("../core/workspace/workspace_access.zig");
+ 
+ const Allocator = std.mem.Allocator;
+ const ErrorCode = jsonrpc.ErrorCode;
+@@ -204,6 +205,7 @@ const AcpContext = struct {
+ 
+     fn toolContext(self: *AcpContext) tool_runtime.Context {
+         const session = if (self.state.active_session) |*active| active else unreachable;
++        const workspace_root = effectiveWorkspaceRoot(self.state);
+         self.state.web_search_runtime.configure(.{
+             .api_key = session.api_key,
+             .gateway_team = self.state.gateway_team,
+@@ -214,8 +216,8 @@ const AcpContext = struct {
+             .usage_allocator = self.state.alloc,
+         });
+         var tc: tool_runtime.Context = .{
+-            .workspace_root = self.state.workspace_root,
+-            .access_scope = self.state.workspace_access.scope(self.state.workspace_root),
++            .workspace_root = workspace_root,
++            .access_scope = effectiveWorkspaceAccessScope(self.state),
+             .ignored_list_entries = self.state.cfg.ignored_list_entries,
+             .max_list_entries = self.state.cfg.max_list_entries,
+             .max_read_file_bytes = self.state.cfg.max_read_file_bytes,
+@@ -276,6 +278,8 @@ const AcpContext = struct {
+             .web_fetch_artifact_error = session.session_rt.webFetchArtifactError(),
+             .web_search_runtime_ready = false,
+             .web_search_backend = self.state.web_search_runtime.dispatchBackend(),
++            .workspace_executor = self.state.cfg.workspace_executor,
++            .host_sandbox_default = self.state.cfg.host_sandbox_default,
+             .model_capability_resolver = .{
+                 .ctx = @ptrCast(self),
+                 .resolve_fn = resolveModelCapabilities,
+@@ -313,10 +317,23 @@ const AcpContext = struct {
+ };
+ 
+ fn activeToolSet(state: *const server.ServerState) tool_set_contract.ToolSet {
++    if (state.cfg.tool_set_override) |tool_set| return tool_set;
+     if (comptime host_target.is_wasm) return tool_set_contract.empty;
+     return if (state.cfg.allow_native_tools) builtin_tools.advertisement_set else tool_set_contract.empty;
+ }
+ 
++fn effectiveWorkspaceRoot(state: *const server.ServerState) []const u8 {
++    return state.cfg.host_workspace_root orelse state.workspace_root;
++}
++
++fn effectiveWorkspaceAccessScope(state: *const server.ServerState) workspace_access.AccessScope {
++    const workspace_root = effectiveWorkspaceRoot(state);
++    return if (state.cfg.host_workspace_root != null)
++        workspace_access.AccessScope.primaryOnly(workspace_root)
++    else
++        state.workspace_access.scope(workspace_root);
++}
++
+ const AcpElicitationResponderContext = struct {
+     const AcceptedLegacyUrl = struct {
+         acp_id: []u8,
+@@ -702,8 +719,8 @@ fn refreshProjectContext(
+     if (!state.context_enabled) return;
+ 
+     state.context_snapshot = state.cfg.context_registry.gatherDefaultSnapshot(alloc, .{
+-        .workspace_root = state.workspace_root,
+-        .access_scope = state.workspace_access.scope(state.workspace_root),
++        .workspace_root = effectiveWorkspaceRoot(state),
++        .access_scope = effectiveWorkspaceAccessScope(state),
+         .targets = targets,
+         .omissions = omissions,
+         .omission_summary = omission_summary,
+@@ -737,8 +754,8 @@ fn buildAgentConfig(state: *server.ServerState, session: *server.ActiveSessionSt
+         .fast_mode = session.fast_mode,
+         .effort = session.effort,
+         .first_call_tool_choice = session.first_call_tool_choice,
+-        .workspace_root = state.workspace_root,
+-        .access_scope = state.workspace_access.scope(state.workspace_root),
++        .workspace_root = effectiveWorkspaceRoot(state),
++        .access_scope = effectiveWorkspaceAccessScope(state),
+         .origin = if (session.writable) |writable|
+             if (writable.external_prompt_origin == .persistent_child) .subagent else .root
+         else
+@@ -961,7 +978,7 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
+         .describe_tool_action_completed = describeToolActionCompleted,
+         .describe_tool_action_denied = describeToolActionDenied,
+         .permission_target_for_call = permissionTargetForCall,
+-        .execute_tool_call = if (comptime host_target.is_wasm) executeWebToolCall else executeToolCall,
++        .execute_tool_call = executeToolCall,
+         .publish_committed_file_handoff = publishCommittedFileHandoff,
+         .publish_deferred_tool_completion = publishDeferredToolCompletion,
+         .propagate_history_turn = propagateHistoryTurn,
+@@ -1085,8 +1102,8 @@ fn appendRuntimeContext(raw_ctx: *anyopaque, arena: Allocator, messages: *std.Ar
+     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
+     const session = if (ctx.state.active_session) |*active| active else unreachable;
+     try ctx.state.cfg.context_registry.appendDefaultTransient(.{
+-        .workspace_root = ctx.state.workspace_root,
+-        .access_scope = ctx.state.workspace_access.scope(ctx.state.workspace_root),
++        .workspace_root = effectiveWorkspaceRoot(ctx.state),
++        .access_scope = effectiveWorkspaceAccessScope(ctx.state),
+         .interactive = false,
+         .permission_mode = ctx.captured_permission_mode orelse session.permission_mode,
+         .sandbox_backend = ctx.captured_sandbox_backend orelse session.sandbox_backend,
+@@ -1389,13 +1406,6 @@ fn permissionTargetForCall(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall
+     return tool_admission.permissionTargetForCall(tool_ctx.admissionInput(), arena, call);
+ }
+ 
+-fn executeWebToolCall(
+-    _: *anyopaque,
+-    request: agent_runtime.ToolExecutionRequest,
+-) !ToolExecutionResult {
+-    return agent_runtime.unavailableHostToolResult(request.result_allocator);
+-}
+-
+ fn executeToolCall(
+     raw_ctx: *anyopaque,
+     request: agent_runtime.ToolExecutionRequest,
+diff --git a/src/builtins/browser_workspace_tools.zig b/src/builtins/browser_workspace_tools.zig
+index 11143b0..9ae6b85 100644
+--- a/src/builtins/browser_workspace_tools.zig
++++ b/src/builtins/browser_workspace_tools.zig
+@@ -5,7 +5,7 @@ const tool_set = @import("../core/tooling/tool_set.zig");
+ const tool_dispatch = @import("../core/tooling/tool_dispatch.zig");
+ 
+ const terminal_description =
+-    "Run a foreground command inside the browser workspace with action=exec. This clean root-fixed shell is the workspace interface: use commands such as rg, sed, awk, find, jq, mkdir, mv, and redirection to inspect and modify files. Native host paths, git, Node, npm, Python, background processes, durable terminal actions, and operating-system access are unavailable.";
++    "Run a foreground command inside the hosted workspace with action=exec. This clean root-fixed shell is the workspace interface; available commands are supplied by the host. Background processes, durable terminal actions, and direct access to native host paths are unavailable.";
+ 
+ const terminal = buildTerminalSpec();
+ 
+diff --git a/src/core/cli/acp_runner.zig b/src/core/cli/acp_runner.zig
+index 7963c41..ec4423d 100644
+--- a/src/core/cli/acp_runner.zig
++++ b/src/core/cli/acp_runner.zig
+@@ -9,7 +9,10 @@ const host = @import("../hosts/host.zig");
+ const mode_registry = @import("../modes/mode_registry.zig");
+ const permission_auto_classifier = @import("../permissions/auto_classifier.zig");
+ const prompt_policy = @import("../config/prompt_policy.zig");
++const tool_admission = @import("../tooling/tool_admission.zig");
++const tool_set_contract = @import("../tooling/tool_set.zig");
+ const context_contract = @import("../workspace/context_contract.zig");
++const js_host_workspace = @import("../hosts/js_host_workspace.zig");
+ 
+ const Allocator = std.mem.Allocator;
+ 
+@@ -46,6 +49,10 @@ pub const Config = struct {
+     saved_directories_suppressed: bool = false,
+     allow_acp_mcp: bool = true,
+     allow_native_tools: bool = true,
++    tool_set_override: ?tool_set_contract.ToolSet = null,
++    workspace_executor: ?js_host_workspace.Executor = null,
++    host_workspace_root: ?[]const u8 = null,
++    host_sandbox_default: tool_admission.HostSandboxDefault = .none,
+ };
+ 
+ pub const RunFn = *const fn (?*anyopaque, Allocator, Config) anyerror!void;
+diff --git a/src/wasm_core_main.zig b/src/wasm_core_main.zig
+index 225e7f9..82f7fab 100644
+--- a/src/wasm_core_main.zig
++++ b/src/wasm_core_main.zig
+@@ -10,6 +10,7 @@ const host = @import("core/hosts/host.zig");
+ const io_mod = @import("core/shared/io.zig");
+ const model_catalog = @import("core/gateway/model_catalog.zig");
+ const js_host_model_catalog = @import("gateway/js_host_model_catalog.zig");
++const js_host_workspace = @import("core/hosts/js_host_workspace.zig");
+ const oauth_transport = @import("core/auth/oauth_transport.zig");
+ const output_contracts = @import("core/output/output_contracts.zig");
+ const web_search_contract = @import("core/tooling/web_search_contract.zig");
+@@ -18,6 +19,7 @@ const web_search_provider = @import("core/tooling/web_search_provider.zig");
+ const builtin_context = @import("builtins/context.zig");
+ const builtin_gateway = @import("builtins/gateway.zig");
+ const builtin_modes = @import("builtins/modes.zig");
++const browser_workspace_tools = @import("builtins/browser_workspace_tools.zig");
+ 
+ const Allocator = std.mem.Allocator;
+ 
+@@ -32,16 +34,35 @@ pub const panic = @import("core/hosts/wasm_panic.zig").panic;
+ pub fn main(init: std.process.Init) !void {
+     io_mod.setIo(init.io);
+     io_mod.setEnvironMap(init.environ_map);
++
++    var prompt_policy = builtin_context.prompt_policy;
++    const appended_system_prompt = io_mod.getenv("ACP_APPEND_SYSTEM_PROMPT") orelse "";
++    const combined_system_prompt = if (appended_system_prompt.len == 0)
++        null
++    else
++        try std.fmt.allocPrint(
++            std.heap.c_allocator,
++            "{s}\n\n{s}",
++            .{ prompt_policy.system_prompt, appended_system_prompt },
++        );
++    defer if (combined_system_prompt) |value| std.heap.c_allocator.free(value);
++    if (combined_system_prompt) |value| prompt_policy.system_prompt = value;
++
++    var workspace = js_host_workspace.Runtime.init(std.heap.c_allocator) catch |err| switch (err) {
++        error.WorkspaceUnavailable => js_host_workspace.Runtime{},
++        else => return err,
++    };
++    const workspace_info = workspace.info();
+     try acp_server.run(std.heap.c_allocator, .{
+         .default_model = builtin_gateway.default_model,
+         .default_agent_step_limit = 64,
+         .gateway_retry_count = 0,
+-        .gateway_chat_url = builtin_gateway.default_chat_url,
++        .gateway_chat_url = builtin_gateway.defaultChatUrl(),
+         .gateway_models_path = builtin_gateway.models_path,
+         .gateway_provider = js_host_gateway_provider,
+         .background_process_provider = background_process_provider.unavailable_provider,
+         .secret_store = host.unavailable_secret_store,
+-        .prompt_policy = builtin_context.prompt_policy,
++        .prompt_policy = prompt_policy,
+         .ignored_list_entries = &.{},
+         .max_list_entries = 0,
+         .max_read_file_bytes = 0,
+@@ -52,6 +73,13 @@ pub fn main(init: std.process.Init) !void {
+         .max_history_turns = 100,
+         .context_registry = .{ .default_provider = builtin_context.provider },
+         .mode_registry = builtin_modes.registry,
++        .tool_set_override = browser_workspace_tools.selectToolSet(false, workspace_info != null),
++        .workspace_executor = workspace.executor(),
++        .host_workspace_root = if (workspace_info) |info| info.root() else null,
++        .host_sandbox_default = if (workspace_info) |info| switch (info.permission) {
++            .allow_sandboxed => .allow_sandboxed,
++            .prompt => .prompt,
++        } else .none,
+     });
+ }
+ 

@@ -3252,8 +3252,11 @@ where
                     vm.host_cwd.clone()
                 }
             });
-        let mut env = parent_env.clone();
-        env.extend(request.options.env.clone());
+        let mut env = if request.options.env_provided {
+            request.options.env.clone()
+        } else {
+            parent_env.clone()
+        };
         // Child JavaScript executions must resolve their own entrypoint/eval state.
         // Reusing the parent's values makes the sidecar load the wrong source file.
         env.remove("AGENTOS_GUEST_ENTRYPOINT");

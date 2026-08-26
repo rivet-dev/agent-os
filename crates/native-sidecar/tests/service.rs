@@ -11964,6 +11964,62 @@ console.log(JSON.stringify({ status: "ok", summary }));
                 "missing command error should mention the command: {error}"
             );
 
+            let mut parent_env = vm.guest_env.clone();
+            parent_env.insert(
+                String::from("AI_GATEWAY_API_KEY"),
+                String::from("must-not-leak"),
+            );
+            let replacement_env = BTreeMap::from([
+                (
+                    String::from("PATH"),
+                    vm.guest_env
+                        .get("PATH")
+                        .expect("configured PATH should exist")
+                        .clone(),
+                ),
+                (String::from("WORKSPACE_ONLY"), String::from("yes")),
+            ]);
+            let replaced = sidecar
+                .resolve_javascript_child_process_execution(
+                    vm,
+                    &parent_env,
+                    &vm.guest_cwd,
+                    &vm.host_cwd,
+                    &crate::protocol::JavascriptChildProcessSpawnRequest {
+                        command: String::from("echo"),
+                        args: vec![String::from("hello")],
+                        options: crate::protocol::JavascriptChildProcessSpawnOptions {
+                            env: replacement_env,
+                            env_provided: true,
+                            ..Default::default()
+                        },
+                    },
+                )
+                .expect("resolve child with explicit replacement environment");
+            assert_eq!(
+                replaced.env.get("WORKSPACE_ONLY").map(String::as_str),
+                Some("yes")
+            );
+            assert!(!replaced.env.contains_key("AI_GATEWAY_API_KEY"));
+
+            let inherited = sidecar
+                .resolve_javascript_child_process_execution(
+                    vm,
+                    &parent_env,
+                    &vm.guest_cwd,
+                    &vm.host_cwd,
+                    &crate::protocol::JavascriptChildProcessSpawnRequest {
+                        command: String::from("echo"),
+                        args: vec![String::from("hello")],
+                        options: crate::protocol::JavascriptChildProcessSpawnOptions::default(),
+                    },
+                )
+                .expect("resolve child with inherited environment");
+            assert_eq!(
+                inherited.env.get("AI_GATEWAY_API_KEY").map(String::as_str),
+                Some("must-not-leak")
+            );
+
             // execve resolves a literal relative/absolute pathname and must
             // not reuse spawnp's basename fallback. `/workspace/echo` does not
             // exist even though an `echo` command is installed on PATH.
@@ -25623,6 +25679,11 @@ try {
         #[test]
         fn javascript_fs_promises_hot_metadata_ops_use_sync_semantics_regression() {
             run_isolated_service_test("javascript-fs-promises-hot-metadata");
+        }
+
+        #[test]
+        fn javascript_child_process_explicit_env_replaces_parent_regression() {
+            javascript_child_process_searches_path_for_mounted_wasm_commands();
         }
 
         #[test]

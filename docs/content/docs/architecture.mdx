@@ -176,6 +176,7 @@ The executor is the untrusted half of the VM. It runs the guest code and reaches
 
 - **JavaScript Acceleration.** Guest JavaScript runs on a native V8 runtime (the same engine in Chrome and Node.js, with the full JIT compiler) inside an isolate. This is what we call **JavaScript Acceleration**: the guest's JavaScript executes at native speed, not through an interpreter or a translation shim. It is genuinely fast, and it presents normal Node.js semantics. See [JavaScript](/agentos/docs/javascript).
 - **WASM alongside it.** The shell (`sh`) and the coreutils behind process execution ship as WebAssembly modules, and you can run your own WASM too. See [POSIX Syscalls](/agentos/docs/architecture/posix-syscalls) and the [Compiler Toolchain](/agentos/docs/architecture/compiler-toolchain).
+- **Web WASM inside V8.** Browser-targeted modules can run inside a JavaScript process and await JavaScript host functions through JSPI. See [Async WebAssembly & JSPI](/agentos/docs/architecture/async-webassembly).
 - **Native binaries.** Tools mounted into the VM run inside the same boundary as everything else.
 - **No host fallthrough.** The executor holds no capability of its own. For every file read, process spawn, or socket open, it issues a syscall and blocks for the kernel's reply.
 
@@ -359,6 +360,7 @@ This page is the map. Each subsystem has its own detailed page in the Advanced a
 - **[Filesystem](/agentos/docs/architecture/filesystem)**: the per-VM virtual filesystem, overlays, and host-backed mounts.
 - **[Networking](/agentos/docs/architecture/networking)**: the virtual socket table, DNS, the allowlist, and guest `fetch()`.
 - **[JavaScript Executor & Socket Reactor](/agentos/docs/architecture/javascript-executor)**: how the shared Tokio runtime, V8 executor threads, coalesced readiness, bounded channels, and Node stream backpressure fit together.
+- **[Async WebAssembly & JSPI](/agentos/docs/architecture/async-webassembly)**: how web-targeted WASM suspends across JavaScript promises without requiring the POSIX sysroot.
 - **[POSIX Syscalls](/agentos/docs/architecture/posix-syscalls)**: how WebAssembly guests behave like normal POSIX programs on top of the kernel.
 - **[Compiler Toolchain](/agentos/docs/architecture/compiler-toolchain)**: how the shell and coreutils are compiled to WebAssembly and mounted into the VM.
 - **[System Prompt](/agentos/docs/system-prompt)**: the context agentOS injects into every agent session.

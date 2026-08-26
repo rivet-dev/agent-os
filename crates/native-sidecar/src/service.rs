@@ -4095,6 +4095,7 @@ mod legacy_child_spawn_options_tests {
                 "executableFd":11,
                 "cwd":"/work",
                 "env":{"VISIBLE":"yes"},
+                "envProvided":true,
                 "internalBootstrapEnv":{
                     "AGENTOS_WASM_INITIAL_SIGNAL_MASK":"[10]",
                     "AGENTOS_NOT_ALLOWED":"drop-me-too"
@@ -4137,6 +4138,7 @@ mod legacy_child_spawn_options_tests {
         assert_eq!(options.executable_fd, Some(11));
         assert_eq!(options.cwd.as_deref(), Some("/work"));
         assert_eq!(options.env.get("VISIBLE").map(String::as_str), Some("yes"));
+        assert!(options.env_provided);
         assert_eq!(
             options
                 .internal_bootstrap_env

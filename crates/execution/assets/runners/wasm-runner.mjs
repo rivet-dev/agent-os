@@ -6954,6 +6954,7 @@ const hostProcessImport = {
                   argv0,
                   cwd,
                   env,
+                  envProvided: true,
                   internalBootstrapEnv: {
                     ...(activeSpawnCallContext?.internalBootstrapEnv ?? {}),
                     ...inheritedNofileBootstrapEnv(),
